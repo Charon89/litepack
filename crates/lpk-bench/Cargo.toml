@@ -8,8 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# Phase 0 task P0-1 adds: clap (CLI), serde + serde_json (manifests/results), blake3 (hashing),
-# anyhow (errors), walkdir, rayon. Add them as tasks require; keep `cargo deny check` green.
+clap = { version = "4.6.7", features = ["derive"] }
 
 [lints]
 workspace = true

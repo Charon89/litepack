@@ -6,7 +6,7 @@ members = ["crates/lpk-bench"]
 version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/CHANGE-ME/litepack"
+repository = "https://github.com/Charon89/litepack"
 rust-version = "1.90"
 
 [workspace.lints.rust]
