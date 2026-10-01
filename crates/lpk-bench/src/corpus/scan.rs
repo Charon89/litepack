@@ -70,44 +70,104 @@ fn resolve_existing(path: &Path) -> std::io::Result<PathBuf> {
     fs::canonicalize(path).or_else(|_| std::path::absolute(path))
 }
 
-/// Remove `.` and fold `..` without touching the file system.
-fn normalize_lexically(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push(c);
-                }
+/// Append `tail` (names in path order) to `base`, folding `.` and `..` inside the tail only.
+/// The tail does not exist, so no link can make the lexical fold wrong.
+fn append_folded(mut base: PathBuf, tail: &[std::ffi::OsString]) -> PathBuf {
+    let mut added = 0usize;
+    for name in tail {
+        match name.to_str() {
+            Some(".") => {}
+            Some("..") if added > 0 => {
+                base.pop();
+                added -= 1;
             }
-            other => out.push(other),
+            _ => {
+                base.push(name);
+                added += 1;
+            }
         }
     }
-    out
+    base
 }
 
-/// Resolve a path that need not exist: the longest existing ancestor is resolved, the rest is
-/// appended as written.
-fn resolve_maybe_missing(path: &Path) -> std::io::Result<PathBuf> {
-    let abs = normalize_lexically(&std::path::absolute(path)?);
+/// Resolve a path that need not exist. The longest existing prefix of the path *as written*
+/// is canonicalised (so `link/../x` means what the kernel makes of it); `..` is folded only in
+/// the missing tail. A link whose target does not exist is an error, not a missing path.
+fn resolve_maybe_missing(path: &Path) -> Result<PathBuf> {
+    let abs = std::path::absolute(path)?;
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut base = abs.as_path();
+    let mut base = abs.clone();
     loop {
-        if base.exists() {
-            let mut resolved = resolve_existing(base)?;
-            resolved.extend(tail.iter().rev());
-            return Ok(resolved);
-        }
-        match (base.file_name(), base.parent()) {
-            (Some(name), Some(parent)) => {
-                tail.push(name.to_os_string());
-                base = parent;
+        match fs::symlink_metadata(&base) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    if let Err(e) = fs::metadata(&base) {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            bail!(
+                                "output path `{}` is a link whose target does not exist \
+                                 (`{}`); refusing to guess where it would write",
+                                path.display(),
+                                base.display()
+                            );
+                        }
+                        return Err(e).with_context(|| format!("checking `{}`", base.display()));
+                    }
+                }
+                tail.reverse();
+                return Ok(append_folded(resolve_existing(&base)?, &tail));
             }
-            _ => return Ok(abs),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let name = base
+                    .components()
+                    .next_back()
+                    .map(|c| c.as_os_str().to_os_string());
+                match (name, base.parent().map(Path::to_path_buf)) {
+                    (Some(name), Some(parent)) => {
+                        tail.push(name);
+                        base = parent;
+                    }
+                    _ => return Ok(abs),
+                }
+            }
+            Err(e) => return Err(e).with_context(|| format!("checking `{}`", base.display())),
         }
     }
+}
+
+/// A marked output directory may be reused only if it is a previous scan output: nothing but
+/// the marker, `manifest.json` and `build-info.json`, and a manifest whose profile is private.
+fn check_reusable(dir: &Path, shown: &Path) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("listing `{}`", shown.display()))? {
+        let name = entry?.file_name();
+        if ![MARKER, "manifest.json", "build-info.json"]
+            .iter()
+            .any(|n| name == *n)
+        {
+            bail!(
+                "output directory `{}` holds `{}`, so it is not a previous private scan output \
+                 (it looks like a corpus build); refusing to touch it. Use a new or empty \
+                 directory.",
+                shown.display(),
+                name.to_string_lossy()
+            );
+        }
+    }
+    let manifest = dir.join("manifest.json");
+    if manifest.exists() {
+        let profile = fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["profile"].as_str().map(str::to_string));
+        if profile.as_deref() != Some(PRIVATE) {
+            bail!(
+                "output directory `{}` holds a manifest whose profile is {}, not `{PRIVATE}`; \
+                 refusing to overwrite it. Use a new or empty directory.",
+                shown.display(),
+                profile.map_or("missing".to_string(), |p| format!("`{p}`"))
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Component-wise prefix test; case-insensitive on Windows, where paths are.
@@ -127,7 +187,8 @@ fn is_inside_or_equal(path: &Path, base: &Path) -> bool {
 }
 
 /// Refuse an `out` that would write into the scanned folder or into somebody else's files.
-fn check_out(root: &Path, out: &Path) -> Result<()> {
+/// Returns the resolved path, which is the one to create and write through.
+fn check_out(root: &Path, out: &Path) -> Result<PathBuf> {
     let out_resolved = resolve_maybe_missing(out)
         .with_context(|| format!("resolving output directory `{}`", out.display()))?;
     if is_inside_or_equal(&out_resolved, root) {
@@ -148,15 +209,18 @@ fn check_out(root: &Path, out: &Path) -> Result<()> {
             .with_context(|| format!("listing `{}`", out.display()))?
             .next()
             .is_some();
-        if non_empty && !out_resolved.join(MARKER).exists() {
-            bail!(
-                "output directory `{}` is not empty and was not created by lpk-bench (no \
-                 {MARKER} marker); refusing to touch it. Use a new or empty directory.",
-                out.display()
-            );
+        if non_empty {
+            if !out_resolved.join(MARKER).exists() {
+                bail!(
+                    "output directory `{}` is not empty and was not created by lpk-bench (no \
+                     {MARKER} marker); refusing to touch it. Use a new or empty directory.",
+                    out.display()
+                );
+            }
+            check_reusable(&out_resolved, out)?;
         }
     }
-    Ok(())
+    Ok(out_resolved)
 }
 
 /// Scan `root` and write the manifest and build info into `out`.
@@ -178,7 +242,7 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
         .to_str()
         .with_context(|| format!("scan folder `{}` is not valid UTF-8", root_abs.display()))?
         .to_string();
-    check_out(&walk_root, out)?;
+    let out_dir = check_out(&walk_root, out)?;
 
     let mut top = fs::read_dir(&walk_root)
         .with_context(|| format!("cannot list scan folder `{}`", root.display()))?;
@@ -209,8 +273,9 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
     let mut info_text = serde_json::to_string_pretty(&serde_json::to_value(&info)?)?;
     info_text.push('\n');
 
-    fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
-    let marker = out.join(MARKER);
+    // Write through the resolved path, never the one as written.
+    fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out.display()))?;
+    let marker = out_dir.join(MARKER);
     if !marker.exists() {
         fs::write(
             &marker,
@@ -218,10 +283,10 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
         )
         .with_context(|| format!("writing {}", marker.display()))?;
     }
+    fs::write(out_dir.join("manifest.json"), &manifest_text)
+        .with_context(|| format!("writing manifest.json in {}", out.display()))?;
     let manifest_path = out.join("manifest.json");
-    fs::write(&manifest_path, &manifest_text)
-        .with_context(|| format!("writing {}", manifest_path.display()))?;
-    let info_path = out.join("build-info.json");
+    let info_path = out_dir.join("build-info.json");
     fs::write(&info_path, info_text).with_context(|| format!("writing {}", info_path.display()))?;
 
     Ok(ScanReport {
@@ -599,16 +664,22 @@ mod tests {
         assert!(is_inside_or_equal(Path::new("/a/b"), Path::new("/a/b")));
         assert!(!is_inside_or_equal(Path::new("/a/bc"), Path::new("/a/b")));
         assert!(!is_inside_or_equal(Path::new("/a"), Path::new("/a/b")));
+        let tail = |names: &[&str]| -> Vec<std::ffi::OsString> {
+            names.iter().map(std::ffi::OsString::from).collect()
+        };
         assert_eq!(
-            normalize_lexically(Path::new("/a/./b/../c")),
+            append_folded(PathBuf::from("/a"), &tail(&[".", "b", "..", "c"])),
             PathBuf::from("/a/c")
+        );
+        // `..` never climbs out of the existing base: that part was resolved by the OS.
+        assert_eq!(
+            append_folded(PathBuf::from("/a"), &tail(&["..", "c"])),
+            PathBuf::from("/a/../c")
         );
     }
 
     #[test]
-    fn unlistable_root_reports_the_io_error_not_empty() {
-        // A root that vanishes between checks cannot be simulated portably; check the wording
-        // of the empty case stays distinct from the listing failure.
+    fn empty_folder_error_is_not_reported_as_a_listing_error() {
         let tmp = tempfile::tempdir().expect("tmp");
         let empty = tmp.path().join("e");
         fs::create_dir(&empty).expect("mkdir");
@@ -682,6 +753,99 @@ mod tests {
             .values()
             .flat_map(|c| &c.files)
             .any(|f| f.path.contains("linked") || f.path.contains("secret")));
+    }
+
+    #[test]
+    fn marked_out_is_reused_only_if_it_is_a_previous_private_scan() {
+        let (tmp, dir) = fixture();
+        // A public corpus build output: marker, public manifest, class directories.
+        let public = tmp.path().join("corpus-small");
+        write(&public, MARKER, b"marker");
+        write(
+            &public,
+            "manifest.json",
+            b"{\"classes\":{},\"profile\":\"small\"}\n",
+        );
+        write(&public, "build-info.json", b"{}\n");
+        write(&public, "photo-jpeg/a.jpg", b"\xFF\xD8\xFFx");
+        let before = contents(&public);
+        let e = scan(&dir, &public).expect_err("public corpus");
+        assert!(format!("{e:#}").contains("photo-jpeg"), "{e:#}");
+        assert_eq!(before, contents(&public));
+
+        // Only the three scan files, but a public manifest: refused as well.
+        let sneaky = tmp.path().join("sneaky");
+        write(&sneaky, MARKER, b"marker");
+        write(
+            &sneaky,
+            "manifest.json",
+            b"{\"classes\":{},\"profile\":\"full\"}\n",
+        );
+        let before = contents(&sneaky);
+        let e = scan(&dir, &sneaky).expect_err("public manifest");
+        assert!(format!("{e:#}").contains("profile is `full`"), "{e:#}");
+        assert_eq!(before, contents(&sneaky));
+
+        // A previous scan output is reused.
+        let mine = tmp.path().join("mine");
+        scan(&dir, &mine).expect("first");
+        scan(&dir, &mine).expect("reuse");
+        assert_eq!(read_manifest(&mine).profile, "private");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn out_through_a_link_and_dotdot_is_resolved_like_the_kernel_does() {
+        let (tmp, dir) = fixture();
+        // tmp/lnk -> tmp/data/pics, so tmp/lnk/../x is tmp/data/x, inside the scanned folder.
+        let lnk = tmp.path().join("lnk");
+        std::os::unix::fs::symlink(dir.join("pics"), &lnk).expect("symlink");
+        let out = lnk.join("..").join("x");
+        assert_refused_and_untouched(&dir, &out, "inside it");
+        assert!(!dir.join("x").exists());
+        assert!(!tmp.path().join("x").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_out_is_refused_at_once() {
+        let (tmp, dir) = fixture();
+        let lnk = tmp.path().join("dangling");
+        std::os::unix::fs::symlink(tmp.path().join("gone"), &lnk).expect("symlink");
+        let e = scan(&dir, &lnk).expect_err("dangling");
+        assert!(
+            format!("{e:#}").contains("link whose target does not exist"),
+            "{e:#}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_junction_out_is_refused_at_once() {
+        let (tmp, dir) = fixture();
+        let target = tmp.path().join("target");
+        fs::create_dir(&target).expect("mkdir");
+        let junction = tmp.path().join("junction");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .expect("spawn cmd for mklink /J");
+        assert!(made.status.success(), "mklink /J failed");
+        fs::remove_dir(&target).expect("remove target");
+        let e = scan(&dir, &junction).expect_err("dangling junction");
+        assert!(
+            format!("{e:#}").contains("link whose target does not exist"),
+            "{e:#}"
+        );
+        // The same through a missing child of the dangling junction.
+        let e = scan(&dir, &junction.join("child")).expect_err("dangling junction child");
+        assert!(
+            format!("{e:#}").contains("link whose target does not exist"),
+            "{e:#}"
+        );
+        fs::remove_dir(&junction).expect("remove junction");
     }
 
     #[cfg(unix)]
