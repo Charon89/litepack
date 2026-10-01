@@ -13,9 +13,10 @@ Goal: a reproducible corpus + harness that measures every claim in `docs/LitePac
 
 ### P0-1 Repository bootstrap — owner: implementer (sonnet)
 - [x] Cargo workspace with `crates/lpk-bench` (binary, clap CLI), `rust-toolchain.toml` (stable), `deny.toml`, `.gitignore`, `LICENSE-MIT`, `LICENSE-APACHE` (fetch canonical text from https://www.apache.org/licenses/LICENSE-2.0.txt), `README.md`. Evidence: workspace builds; `LICENSE-APACHE` is the canonical 11358-byte text; `cargo deny check` exit 0 ("advisories ok, bans ok, licenses ok, sources ok").
-- [~] CI: `.github/workflows/ci.yml` runs fmt, clippy `-D warnings`, nextest, `cargo deny check` on `ubuntu-24.04` and `windows-2025`. Evidence: workflow updated (permissions, --locked, timeout, deny on both OSes) and every step passes locally under `RUSTFLAGS=-D warnings`; first CI run pending.
+- [x] CI: `.github/workflows/ci.yml` runs fmt, clippy `-D warnings`, nextest, `cargo deny check` on `ubuntu-24.04` and `windows-2025`. Evidence: the first push (`80fc03e`) ran green — every step (fmt, clippy, build, nextest, `cargo deny check`) succeeded on both OSes: https://github.com/Charon89/litepack/actions/runs/36937314839.
 - [x] `cargo run -p lpk-bench -- --help` prints the subcommands `corpus`, `run`, `probe`, `report`. Evidence: `cargo run -p lpk-bench -- --help` lists corpus, run, probe, report; `cargo nextest run --workspace` 7 passed.
-- Acceptance: CI green on both OSes on the first push; `cargo deny check` passes with the allow-list in `deny.toml`. (CI-green half pending: recorded by orchestrator after first push)
+- Acceptance: CI green on both OSes on the first push; `cargo deny check` passes with the allow-list in `deny.toml`. Met 2026-10-01: run 36937314839 (above) was the first push and is green on both OSes, including `cargo deny check` with `deny.toml` unchanged from the starter pack.
+- Parked (LOW, from the P0-1 review): `scripts/setup-windows.ps1` prints its "could not update the Rust toolchain" warning on every run if rustup came from a package manager that disables `rustup self update`; check only the toolchain update, or reword, when the script is next touched.
 
 ### P0-2 Corpus specification and builder — owner: implementer (sonnet); spec review: reviewer (opus)
 - [ ] Implement `docs/CORPUS.md` exactly: `lpk-bench corpus build --profile {small|full} --out <dir>` downloads/derives every class, writes `manifest.json` (per file: relative path, size, BLAKE3, class, source URL/licence) and `corpus.lock` (pinned URLs + hashes).
