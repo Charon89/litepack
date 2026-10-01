@@ -24,7 +24,9 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 # Hardware architecture (12 = ARM64), read from WMI so an x64 PowerShell under emulation is not fooled.
 # The ARM64 path cannot be exercised on x64 machines; it was written but not run.
-$isArm64 = (Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture -eq 12
+try { $isArm64 = (Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture -eq 12 }
+catch { $isArm64 = ($env:PROCESSOR_ARCHITEW6432, $env:PROCESSOR_ARCHITECTURE) -contains 'ARM64' }
+$rustUpdateFailed = $false
 $vcTools = if ($isArm64) { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
 
 function Test-Command([string]$Name) {
@@ -79,9 +81,11 @@ if (Test-Command 'rustup') {
         Write-Host '==> rustup: toolchain from rust-toolchain.toml'
         # `rustup toolchain install` with no arguments needs rustup 1.28+.
         rustup self update
+        if ($LASTEXITCODE -ne 0) { $rustUpdateFailed = $true }
         rustup toolchain install
         # CI always builds with the newest stable; an install from months ago would lint differently.
         rustup update stable
+        if ($LASTEXITCODE -ne 0) { $rustUpdateFailed = $true }
     }
     finally { Pop-Location }
 }
@@ -127,6 +131,11 @@ try {
     }
 }
 finally { Pop-Location }
+
+if ($rustUpdateFailed) {
+    Write-Host ''
+    Write-Host 'Warning: could not update the Rust toolchain (offline?) - this machine may lint differently from CI. Re-run when online.'
+}
 
 if ($missing.Count -gt 0) {
     Write-Host ''
