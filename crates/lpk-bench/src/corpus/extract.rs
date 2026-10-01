@@ -1,8 +1,10 @@
 //! Safe archive extraction with include/exclude globs and a deterministic cap.
 //!
 //! Guarantees: nothing is written outside the target directory; absolute paths, `..`, drive
-//! prefixes (any `:`), symlink/hardlink/device entries and case-insensitive duplicate paths are
-//! errors (checked on *every* entry, selected or not); malformed archives are errors, not panics.
+//! prefixes (any `:`), non-portable names (see [`check_portable_component`]),
+//! symlink/hardlink/device entries and case-insensitive duplicate or file/directory-clashing
+//! paths are errors (checked on *every* entry, selected or not, identically on every OS);
+//! malformed archives are errors, not panics.
 //!
 //! Selection order: validate all entries -> drop dirs -> `strip_components` -> include/exclude
 //! globs -> sort by path bytes -> cap (`max_files`, then `max_bytes` on declared sizes; the
@@ -81,6 +83,37 @@ pub struct Extracted {
     pub blake3: String,
 }
 
+/// Check one path component (a file or directory name) against the portable-name rules, which
+/// are applied on every OS so the same lock behaves identically everywhere: no control
+/// characters, none of `<>:"|?*\`, no trailing `.` or space, no Windows device names
+/// (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with or without an extension).
+pub fn check_portable_component(c: &str) -> Result<()> {
+    ensure!(!c.is_empty(), "empty path component");
+    if let Some(bad) = c.chars().find(|&ch| {
+        (ch as u32) < 0x20
+            || ch == '\u{7f}'
+            || matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\')
+    }) {
+        bail!("character {bad:?} is not allowed in `{c}`");
+    }
+    ensure!(
+        !c.ends_with('.') && !c.ends_with(' '),
+        "`{c}` ends with a dot or space (not portable to Windows)"
+    );
+    let stem = c
+        .split('.')
+        .next()
+        .unwrap_or(c)
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    ensure!(!reserved, "`{c}` is a reserved Windows device name");
+    Ok(())
+}
+
 /// Split an archive entry name into safe components, or explain why it is unsafe.
 /// An empty result means the entry names the archive root (nothing to write).
 pub fn sanitize_path(name: &str) -> Result<Vec<String>> {
@@ -93,9 +126,10 @@ pub fn sanitize_path(name: &str) -> Result<Vec<String>> {
         match comp {
             "" | "." => {}
             ".." => bail!("path traversal `{name}`"),
-            c if c.contains(':') => bail!("drive prefix or stream marker in `{name}`"),
-            c if c.contains(['\0', '\r', '\n']) => bail!("control character in `{name}`"),
-            c => parts.push(c.to_string()),
+            c => {
+                check_portable_component(c).with_context(|| format!("unsafe entry `{name}`"))?;
+                parts.push(c.to_string());
+            }
         }
     }
     Ok(parts)
@@ -115,11 +149,11 @@ pub fn pick(mut cands: Vec<Candidate>, sel: &Selection) -> Vec<Candidate> {
             break;
         }
         if let Some(limit) = sel.max_bytes {
-            if total.saturating_add(c.size) > limit {
+            if total.checked_add(c.size).is_none_or(|t| t > limit) {
                 break;
             }
         }
-        total += c.size;
+        total = total.saturating_add(c.size);
         out.push(c);
     }
     out
@@ -142,11 +176,13 @@ pub fn extract(
     Ok(out)
 }
 
-/// Collects validated entries and rejects case-insensitive duplicates.
+/// Collects validated entries and rejects case-insensitive duplicates, including a file whose
+/// name equals another entry's parent directory (`A` next to `a/x`), which Windows rejects.
 #[derive(Default)]
 struct Lister {
     cands: Vec<Candidate>,
-    seen: BTreeSet<String>,
+    files: BTreeSet<String>,
+    dirs: BTreeSet<String>,
 }
 
 impl Lister {
@@ -155,11 +191,26 @@ impl Lister {
         if comps.len() <= strip {
             return Ok(());
         }
-        let path = comps[strip..].join("/");
+        let comps = &comps[strip..];
+        let path = comps.join("/");
+        let lower = path.to_lowercase();
         ensure!(
-            self.seen.insert(path.to_lowercase()),
+            !self.files.contains(&lower) && !self.dirs.contains(&lower),
             "duplicate (case-insensitive) entry `{path}`"
         );
+        let mut prefix = String::new();
+        for comp in &comps[..comps.len() - 1] {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(&comp.to_lowercase());
+            ensure!(
+                !self.files.contains(&prefix),
+                "entry `{path}` needs a directory that is also a file (case-insensitive clash)"
+            );
+            self.dirs.insert(prefix.clone());
+        }
+        self.files.insert(lower);
         self.cands.push(Candidate {
             path,
             size,
@@ -245,9 +296,11 @@ fn extract_zip(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Ext
     Ok(written)
 }
 
-fn tar_entries(archive: &Path) -> Result<tar::Archive<flate2::read::GzDecoder<BufReader<File>>>> {
+fn tar_entries(
+    archive: &Path,
+) -> Result<tar::Archive<flate2::read::MultiGzDecoder<BufReader<File>>>> {
     let file = File::open(archive)?;
-    Ok(tar::Archive::new(flate2::read::GzDecoder::new(
+    Ok(tar::Archive::new(flate2::read::MultiGzDecoder::new(
         BufReader::new(file),
     )))
 }
@@ -567,5 +620,103 @@ mod tests {
     fn case_insensitive_duplicates_are_rejected() {
         let z = zip_bytes(&[("A.txt", b"1"), ("a.TXT", b"2")]);
         assert!(run(ArchiveFormat::Zip, &z, &Selection::all()).1.is_err());
+    }
+
+    #[test]
+    fn file_and_directory_clashes_fail_in_either_order() {
+        for entries in [
+            [("A", &b"1"[..]), ("a/x", b"2")],
+            [("a/x", b"2"), ("A", b"1")],
+            [("dir/File", b"1"), ("DIR/file/deeper", b"2")],
+        ] {
+            let z = zip_bytes(&entries);
+            assert!(run(ArchiveFormat::Zip, &z, &Selection::all()).1.is_err());
+        }
+        // Same directory, different files is fine.
+        let z = zip_bytes(&[("a/x", b"1"), ("A/y", b"2")]);
+        assert!(run(ArchiveFormat::Zip, &z, &Selection::all()).1.is_ok());
+    }
+
+    #[test]
+    fn non_portable_names_are_rejected_on_every_os() {
+        for bad in [
+            "CON",
+            "nul.txt",
+            "dir/AUX",
+            "com1",
+            "LPT9.log",
+            "a.",
+            "a ",
+            "dir./x",
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+            "tab\there",
+            "bell\u{7}",
+            "del\u{7f}",
+            "COM1.tar.gz",
+        ] {
+            assert!(sanitize_path(bad).is_err(), "{bad:?} must be rejected");
+            let z = zip_bytes(&[(bad, b"x")]);
+            assert!(
+                run(ArchiveFormat::Zip, &z, &Selection::all()).1.is_err(),
+                "{bad:?}"
+            );
+        }
+        for ok in [
+            "COM",
+            "COM10",
+            "console.txt",
+            "nulls",
+            ".gitignore",
+            "a b",
+            "a.b.c",
+            "LPT0",
+        ] {
+            assert!(sanitize_path(ok).is_ok(), "{ok:?} must be accepted");
+        }
+        assert!(check_portable_component("").is_err());
+    }
+
+    #[test]
+    fn huge_declared_sizes_do_not_overflow() {
+        let mk = |p: &str, o: usize| Candidate {
+            path: p.into(),
+            size: u64::MAX,
+            ordinal: o,
+        };
+        let sel = Selection::new(&[], &[], None, None, 0).expect("sel");
+        assert_eq!(pick(vec![mk("a", 0), mk("b", 1)], &sel).len(), 2);
+        let sel = Selection::new(&[], &[], None, Some(u64::MAX), 0).expect("sel");
+        assert_eq!(pick(vec![mk("a", 0), mk("b", 1)], &sel).len(), 1);
+    }
+
+    #[test]
+    fn multi_member_gzip_is_read_completely() {
+        let mut b = tar::Builder::new(Vec::new());
+        for (n, d) in [("one.txt", &b"1111"[..]), ("two.txt", b"2222")] {
+            let mut h = tar::Header::new_gnu();
+            h.set_path(n).expect("path");
+            h.set_size(d.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append(&h, d).expect("append");
+        }
+        let tar_bytes = b.into_inner().expect("tar");
+        // Split after the first entry (header block + one data block) into two gzip members.
+        let gz = |part: &[u8]| {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            e.write_all(part).expect("gz");
+            e.finish().expect("finish")
+        };
+        let mut two_members = gz(&tar_bytes[..1024]);
+        two_members.extend(gz(&tar_bytes[1024..]));
+        let r = run(ArchiveFormat::TarGz, &two_members, &Selection::all())
+            .1
+            .expect("extract");
+        assert_eq!(paths(&r), ["one.txt", "two.txt"]);
     }
 }

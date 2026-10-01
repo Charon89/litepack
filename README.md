@@ -24,6 +24,8 @@ Licence: Apache-2.0 OR MIT (engine, CLI, format, benchmark harness).
 4. Install Claude Code: native installer from https://code.claude.com/docs/en/setup (or `winget install Anthropic.ClaudeCode`). It also runs inside the Claude desktop app and the VS Code / JetBrains extensions.
 5. Run `claude` in the repo. It reads `CLAUDE.md` automatically.
 
+Building on Linux (CI, WSL) additionally needs OpenSSL headers: `sudo apt-get install -y --no-install-recommends libssl-dev pkg-config` (the corpus downloader uses native TLS; Windows needs nothing extra).
+
 Switching computers: `git pull --ff-only` before you start, `git push` when you stop. Everything Claude needs (rules,
 plan, decisions, agents, skills) is in the repo; the benchmark corpus is rebuilt locally from `corpus.lock` (D-13).
 

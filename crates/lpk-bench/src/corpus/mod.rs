@@ -24,7 +24,10 @@
 //! | `licence`  | SPDX id or short statement; copied to every manifest file entry            |
 //! | `origin`   | human description of where the data comes from                             |
 //! | `profiles` | `["small"]`, `["full"]` or both                                             |
-//! | `optional` | `true`: a failed download is listed under `skipped` in `build-info.json`   |
+//! | `optional` | `true`: a failed download is listed under `skipped` in `build-info.json`;   |
+//! |            | lock mismatches and missing pins stay fatal                                |
+//! | `inputs`   | classes this source derives from; each must have a source earlier in the   |
+//! |            | file (see "`--only` and derived classes")                                  |
 //! | `kind`     | selects the kind-specific keys below                                       |
 //!
 //! Differences between profiles are expressed as separate sources (different ids), not as
@@ -35,32 +38,74 @@
 //! * `archive`: `url`, optional `format` (`zip` | `tar.gz`, default guessed from the URL),
 //!   `include`/`exclude` glob lists (matched on the `/`-separated path after
 //!   `strip_components`; `*` stays within a directory, `**` crosses), `max_files`,
-//!   `max_bytes`, `strip_components`. Caps apply in sorted-path order (see [`extract`]).
+//!   `max_bytes`, `strip_components`.
 //!
-//! Output: `<out>/<class>/<source-id>/<path>`, plus `<out>/manifest.json` (deterministic:
-//! sorted keys, `/` paths, no timestamps) and `<out>/build-info.json` (`built_at`, tool
-//! version, host, manifest BLAKE3, `skipped`). `--only` builds just those classes and the
-//! manifest then covers only them.
+//! Archive selection (see [`extract`]): *every* entry is validated first, whether or not a
+//! glob would select it, and any of these fails the whole extraction on every OS: absolute
+//! path, `..`, drive prefix or `:`, symlink/hardlink/device entry, Windows-reserved or
+//! non-portable name (`NUL`, trailing dot or space, `<>"|?*`, control characters),
+//! case-insensitive duplicate, or a file that shares a name with another entry's directory.
+//! The survivors are filtered by the globs, sorted by path bytes and capped: `max_files` keeps
+//! the first N; `max_bytes` keeps files while the running total of *declared* sizes fits and
+//! stops at the first file that would exceed it. The same archive always yields the same
+//! files.
+//!
+//! # Output directory
+//!
+//! Files go to `<out>/<class>/<source-id>/<path>`, plus `manifest.json` (deterministic: sorted
+//! keys, `/` paths, no timestamps) and `build-info.json` (`built_at`, tool version, host,
+//! manifest BLAKE3, `skipped`).
+//! * `<out>` is owned by the tool through a `.lpk-corpus` marker written on first use. A
+//!   non-empty directory without the marker is an error and is never modified. The cache must
+//!   not live inside `<out>`.
+//! * Every build first deletes `manifest*.json` and `build-info*.json`, so a failed build
+//!   never leaves a stale manifest.
+//! * After a successful *full* build, every file below `<out>` that the manifest does not list
+//!   (output of removed or renamed sources and classes) is deleted, empty directories too, and
+//!   the paths are reported.
+//! * `--only a,b` builds just those classes. It is a pinning and debugging aid: it writes
+//!   `manifest.partial.json` / `build-info.partial.json`, never `manifest.json`, and removes
+//!   nothing else. A directory without `manifest.json` is not a usable corpus.
+//!
+//! # `--only` and derived classes
+//!
+//! A source with `inputs` is derived from other classes. `--only <class>` for such a class is
+//! an error naming the missing input classes unless each input is also selected (and so built
+//! earlier in the same run) or `<out>/<input>` already holds files. This is checked before
+//! anything is modified. Derivation steps read their inputs below [`build::Ctx::out`].
 //!
 //! # Lock semantics (`bench/corpus.lock`)
 //!
-//! JSON, committed. Per profile a sorted list of `{blake3, bytes, source, url}` for every
-//! downloaded artifact (the download, not the extracted files). Regenerating without upstream
+//! JSON, committed, format version 2 (version 1 files are still read). Per profile a sorted
+//! list of pins keyed by `(source, url)`; a pin has `bytes` and `blake3` for a download, or
+//! `commit` for a git pin, and optional `path`, `licence`, `attribution` and a free-form
+//! `extra` map for list-type sources (see [`lock::LockEntry`]). Regenerating without upstream
 //! changes gives identical bytes.
-//! * Normal build: every URL must have a lock entry (checked before any network traffic) and
-//!   the downloaded bytes must match it; either failure is a hard error naming the source and
-//!   the `--update-lock` command. A cache file is reused only after re-hashing it against the
-//!   lock; otherwise it is downloaded again.
-//! * `--update-lock`: downloads everything selected (the cache is not trusted), records the
-//!   result and rewrites the entries of those sources; other sources' entries are kept.
+//! * Normal build: every URL of a static source must have a lock entry (checked before any
+//!   network traffic) and the downloaded bytes must match it; either failure is a hard error
+//!   naming the source and the re-pin command. A cache file is reused only after re-hashing
+//!   it against the lock; otherwise it is downloaded again. Pins of built sources that the
+//!   build did not use are reported.
+//! * `--update-lock`: downloads everything selected, ignoring the cache (there is nothing to
+//!   verify it against), records the result and rewrites the entries of those sources; other
+//!   sources' entries are kept. With `--only` it pins just those classes.
+//! * List-type sources (URLs resolved from an API): the lock is the listing. Only
+//!   `--update-lock` may call the API; a normal build makes no API call and builds exactly the
+//!   source's pinned entries ([`build::Ctx::listed_pins`]). Per-file licence and author live
+//!   in the pin; the manifest carries the per-file licence when the pin has one and the
+//!   source-level string otherwise.
 //!
 //! # Downloader
 //!
 //! In-process HTTPS (`reqwest` blocking + native TLS: Schannel on Windows, system OpenSSL on
-//! Linux, so no bundled root store). Strictly sequential, hence one request at a time per
-//! host. 429, 5xx, timeouts and mid-body failures are retried with exponential backoff
-//! (honouring `Retry-After`, capped). Bytes stream into `<cache>/<id>-<urlhash>.part`, are
-//! hashed on the way, and are renamed into place only after verification.
+//! Linux, so no bundled root store; Linux builds need `libssl-dev` and `pkg-config`).
+//! HTTPS only, including redirects. Strictly sequential, hence one request at a time per
+//! host. The 90-second timeout is an idle timeout (headers and each body read). 429, 5xx,
+//! timeouts and mid-body failures are retried with exponential backoff (honouring
+//! `Retry-After`, capped). Bytes stream into `<cache>/<id>-<urlhash>.part` (the cache file
+//! name plus `.part`), are hashed on the way, and are renamed into place only after
+//! verification. A retry after a mid-body failure resumes with a `Range` request when the
+//! server honours it and restarts from zero when it does not.
 //!
 //! # Adding a source kind
 //!
@@ -68,11 +113,12 @@
 //!    `#[serde(deny_unknown_fields)]`; the variant name in kebab-case is the `kind`), extend
 //!    `SourceSpec::static_urls` (URLs known without network; they are pre-flight checked
 //!    against the lock) and the validation in `Registry::validate`.
-//! 2. Add a match arm in [`build::build_source`] that obtains artifacts through
-//!    `Ctx::artifact(source, url)` (this applies lock verification and records pins; call it
-//!    once per URL, including URLs resolved from an API at build time) and writes files into
-//!    the directory it is given, returning one `ManifestFile` per file. Derived kinds read
-//!    `Ctx::produced` (all files of earlier sources, in registry order) instead of downloading.
+//! 2. Add a match arm in [`build::build_source`]. Static kinds obtain artifacts through
+//!    `Ctx::artifact(source, url)` (lock verification, pin recording). List kinds: when
+//!    `Ctx::update_lock()` resolve the API into `ListedFile`s, otherwise take them from
+//!    `Ctx::listed_pins`; fetch each with `Ctx::fetch_listed`. Derived kinds read files below
+//!    `Ctx::out()` (and `Ctx::produced` for this run's files). Write files into the directory
+//!    given and return one `ManifestFile` per file.
 //! 3. New archive formats: add a variant to `registry::ArchiveFormat` (+ `guess`) and a
 //!    branch in `extract::extract` that lists entries through the private `Lister` (which
 //!    applies `sanitize_path` and rejects duplicates; also reject link/special entries),
@@ -121,10 +167,13 @@ pub struct BuildArgs {
     /// Download cache directory
     #[arg(long, default_value = "bench/corpus/.cache")]
     pub cache: PathBuf,
-    /// Only build these classes (comma separated)
+    /// Only build these classes (comma separated). A partial build: writes
+    /// manifest.partial.json (never manifest.json), removes nothing, and a derived class needs
+    /// its input classes selected too or already present in the output directory
     #[arg(long, value_delimiter = ',')]
     pub only: Vec<String>,
-    /// Download, record and rewrite the lock instead of verifying against it
+    /// Re-download the selected sources (the cache is ignored), record their pins and rewrite
+    /// the lock instead of verifying against it; other sources' pins are kept
     #[arg(long)]
     pub update_lock: bool,
     /// Source registry file
@@ -180,6 +229,15 @@ pub fn run(args: CorpusArgs) -> ExitCode {
                     );
                     for s in &r.skipped {
                         println!("skipped {}: {}", s.source, s.reason);
+                    }
+                    for p in &r.removed {
+                        println!("removed unlisted file: {p}");
+                    }
+                    for p in &r.unused_pins {
+                        println!("unused lock pin: {p}");
+                    }
+                    if r.partial {
+                        println!("partial build (--only): not a usable corpus, no manifest.json");
                     }
                     ExitCode::SUCCESS
                 }

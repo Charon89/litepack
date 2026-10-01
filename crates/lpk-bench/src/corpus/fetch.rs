@@ -23,8 +23,17 @@ pub enum FetchError {
 
 /// Source of bytes for a URL. Tests implement this over memory; production uses [`HttpFetcher`].
 pub trait Fetcher: fmt::Debug {
-    /// Open a stream of the response body. Called again from scratch on retry.
-    fn open(&self, url: &str) -> Result<Box<dyn Read>, FetchError>;
+    /// Open a stream of the response body, starting at byte `offset` if the server supports it
+    /// (`offset == 0` for a fresh download). [`Opened::start`] says where the stream really
+    /// starts, so a server that ignores the range simply yields `start == 0`.
+    fn open(&self, url: &str, offset: u64) -> Result<Opened, FetchError>;
+}
+
+/// An open response body.
+pub struct Opened {
+    pub body: Box<dyn Read>,
+    /// Byte offset of the first byte of `body` within the resource.
+    pub start: u64,
 }
 
 /// In-process HTTPS client (no external curl).
@@ -46,17 +55,24 @@ impl HttpFetcher {
         let client = reqwest::blocking::Client::builder()
             .user_agent(user_agent())
             .connect_timeout(Duration::from_secs(30))
-            // Total per-request limit (blocking reqwest has no per-read timeout); generous
-            // because artifacts can be large. A timeout is retried like any transient error.
-            .timeout(Duration::from_secs(2 * 3600))
+            // In blocking reqwest this limit applies to waiting for the headers and to each
+            // body `read()`, i.e. it is an idle timeout, not a limit on the whole download.
+            // A timeout is retried (and resumed) like any transient error.
+            .timeout(Duration::from_secs(90))
+            // Redirects must not downgrade to plain HTTP: pinned bytes come over TLS only.
+            .https_only(true)
             .build()?;
         Ok(HttpFetcher { client })
     }
 }
 
 impl Fetcher for HttpFetcher {
-    fn open(&self, url: &str) -> Result<Box<dyn Read>, FetchError> {
-        let resp = self.client.get(url).send().map_err(|e| {
+    fn open(&self, url: &str, offset: u64) -> Result<Opened, FetchError> {
+        let mut req = self.client.get(url);
+        if offset > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        }
+        let resp = req.send().map_err(|e| {
             if e.is_builder() || e.is_redirect() {
                 FetchError::Permanent(format!("{e}"))
             } else {
@@ -67,8 +83,33 @@ impl Fetcher for HttpFetcher {
             }
         })?;
         let status = resp.status();
+        if status.as_u16() == 206 {
+            let from = resp
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("bytes "))
+                .and_then(|v| v.split('-').next())
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            return match from {
+                Some(start) if start == offset => Ok(Opened {
+                    body: Box::new(resp),
+                    start,
+                }),
+                _ => Err(FetchError::Permanent(
+                    "server sent an unexpected Content-Range".to_string(),
+                )),
+            };
+        }
+        if status.as_u16() == 416 && offset > 0 {
+            // The partial file is not usable for this resource; start over.
+            return self.open(url, 0);
+        }
         if status.is_success() {
-            return Ok(Box::new(resp));
+            return Ok(Opened {
+                body: Box::new(resp),
+                start: 0,
+            });
         }
         if status.as_u16() == 429 || status.is_server_error() {
             let retry_after = resp
@@ -152,6 +193,27 @@ impl fmt::Display for DownloadError {
 
 impl std::error::Error for DownloadError {}
 
+/// How to re-pin: the command to run after reviewing upstream changes.
+pub fn repin_hint(profile: Profile) -> String {
+    format!(
+        "Re-pin with `lpk-bench corpus build --profile {p} --update-lock` and commit \
+         bench/corpus.lock (`--only <class>` pins just that class but writes only \
+         manifest.partial.json).",
+        p = profile.name()
+    )
+}
+
+/// Temporary download file for a cache path: the full file name plus `.part`
+/// (`with_extension` would clobber a `.` inside the name).
+pub fn part_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".part");
+    path.with_file_name(name)
+}
+
 /// Hash a file with BLAKE3: `(bytes, lowercase hex)`.
 pub fn hash_file(path: &Path) -> std::io::Result<(u64, String)> {
     let mut file = File::open(path)?;
@@ -202,10 +264,24 @@ impl<'a> Downloader<'a> {
         std::fs::create_dir_all(&self.cache_dir).map_err(io)?;
         let path = self.cache_path(source, url);
 
-        if let Expect::Pinned(pin) = expect {
+        let pinned = match expect {
+            Expect::Pinned(pin) => match (pin.bytes, pin.blake3.as_deref()) {
+                (Some(b), Some(h)) => Some((b, h)),
+                _ => {
+                    return Err(DownloadError::Mismatch(format!(
+                        "source `{source}`: lock entry for {url} has no bytes/blake3 to verify \
+                         a download against. {}",
+                        repin_hint(self.profile)
+                    )))
+                }
+            },
+            Expect::Unpinned => None,
+        };
+
+        if let Some((pin_bytes, pin_hash)) = pinned {
             if path.is_file() {
                 let (bytes, blake3) = hash_file(&path).map_err(io)?;
-                if bytes == pin.bytes && blake3 == pin.blake3 {
+                if bytes == pin_bytes && blake3 == pin_hash {
                     return Ok(Artifact {
                         path,
                         bytes,
@@ -216,19 +292,16 @@ impl<'a> Downloader<'a> {
             }
         }
 
-        let part = path.with_extension("part");
+        let part = part_path(&path);
         let (bytes, blake3) = self.download(source, url, &part)?;
-        if let Expect::Pinned(pin) = expect {
-            if bytes != pin.bytes || blake3 != pin.blake3 {
+        if let Some((pin_bytes, pin_hash)) = pinned {
+            if bytes != pin_bytes || blake3 != pin_hash {
                 let _ = std::fs::remove_file(&part);
                 return Err(DownloadError::Mismatch(format!(
                     "source `{source}`: {url} does not match bench/corpus.lock \
-                     (locked {} bytes blake3 {}, got {bytes} bytes blake3 {blake3}). \
-                     If upstream legitimately changed, review it and re-pin with \
-                     `lpk-bench corpus build --profile {} --only <class> --update-lock`.",
-                    pin.bytes,
-                    pin.blake3,
-                    self.profile.name()
+                     (locked {pin_bytes} bytes blake3 {pin_hash}, got {bytes} bytes blake3 \
+                     {blake3}). If upstream legitimately changed, review it first. {}",
+                    repin_hint(self.profile)
                 )));
             }
         }
@@ -246,6 +319,9 @@ impl<'a> Downloader<'a> {
         url: &str,
         part: &Path,
     ) -> Result<(u64, String), DownloadError> {
+        // A leftover from an earlier run is never resumed; within this call a failed attempt
+        // keeps its partial file and the next attempt continues from it.
+        let _ = std::fs::remove_file(part);
         let mut attempt = 1;
         loop {
             match self.try_once(url, part) {
@@ -280,11 +356,29 @@ impl<'a> Downloader<'a> {
     }
 
     fn try_once(&self, url: &str, part: &Path) -> Result<(u64, String), AttemptError> {
-        let mut body = self.fetcher.open(url).map_err(AttemptError::Fetch)?;
-        let mut out = File::create(part).map_err(AttemptError::Local)?;
+        let have = std::fs::metadata(part).map_or(0, |m| m.len());
+        let Opened { mut body, start } =
+            self.fetcher.open(url, have).map_err(AttemptError::Fetch)?;
         let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0u8; 1 << 16];
         let mut total = 0u64;
+        let mut out = if have > 0 && start == have {
+            // Resume: re-hash what is already on disk, then append.
+            let mut existing = File::open(part).map_err(AttemptError::Local)?;
+            total = std::io::copy(&mut existing, &mut hasher).map_err(AttemptError::Local)?;
+            if total != have {
+                return Err(AttemptError::Local(std::io::Error::other(
+                    "partial file changed while resuming",
+                )));
+            }
+            File::options()
+                .append(true)
+                .open(part)
+                .map_err(AttemptError::Local)?
+        } else {
+            // Fresh start, or the server ignored the range: restart from zero.
+            File::create(part).map_err(AttemptError::Local)?
+        };
+        let mut buf = vec![0u8; 1 << 16];
         loop {
             let n = match body.read(&mut buf) {
                 Ok(0) => break,
@@ -325,6 +419,27 @@ pub mod fake {
         pub calls: RefCell<Vec<String>>,
         /// Number of initial calls that fail transiently.
         pub fail_first: Cell<u32>,
+        /// If set, the next successful `open` yields only this many bytes and then an I/O error.
+        pub cut_next_after: Cell<Option<usize>>,
+        /// Pretend the server ignores `Range` and always sends the whole body.
+        pub ignore_range: Cell<bool>,
+        /// `offset` argument of every `open` call.
+        pub offsets: RefCell<Vec<u64>>,
+    }
+
+    /// Yields `data`, then fails (a connection dropped mid-body).
+    struct DropAfter(std::io::Cursor<Vec<u8>>);
+
+    impl Read for DropAfter {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.read(buf)? {
+                0 => Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "reset",
+                )),
+                n => Ok(n),
+            }
+        }
     }
 
     impl FakeFetcher {
@@ -339,8 +454,9 @@ pub mod fake {
     }
 
     impl Fetcher for FakeFetcher {
-        fn open(&self, url: &str) -> Result<Box<dyn Read>, FetchError> {
+        fn open(&self, url: &str, offset: u64) -> Result<Opened, FetchError> {
             self.calls.borrow_mut().push(url.to_string());
+            self.offsets.borrow_mut().push(offset);
             if self.fail_first.get() > 0 {
                 self.fail_first.set(self.fail_first.get() - 1);
                 return Err(FetchError::Transient {
@@ -348,10 +464,23 @@ pub mod fake {
                     retry_after: None,
                 });
             }
-            match self.files.borrow().get(url) {
-                Some(b) => Ok(Box::new(std::io::Cursor::new(b.clone()))),
-                None => Err(FetchError::Permanent("HTTP 404".into())),
+            let files = self.files.borrow();
+            let Some(bytes) = files.get(url) else {
+                return Err(FetchError::Permanent("HTTP 404".into()));
+            };
+            let start = if self.ignore_range.get() { 0 } else { offset };
+            let mut data = bytes[start as usize..].to_vec();
+            if let Some(n) = self.cut_next_after.take() {
+                data.truncate(n);
+                return Ok(Opened {
+                    body: Box::new(DropAfter(std::io::Cursor::new(data))),
+                    start,
+                });
             }
+            Ok(Opened {
+                body: Box::new(std::io::Cursor::new(data)),
+                start,
+            })
         }
     }
 
@@ -372,12 +501,12 @@ mod tests {
     const URL: &str = "https://example.org/a.bin";
 
     fn pin(bytes: &[u8]) -> LockEntry {
-        LockEntry {
-            blake3: blake3::hash(bytes).to_hex().to_string(),
-            bytes: bytes.len() as u64,
-            source: "s".into(),
-            url: URL.into(),
-        }
+        LockEntry::artifact(
+            "s",
+            URL,
+            bytes.len() as u64,
+            blake3::hash(bytes).to_hex().to_string(),
+        )
     }
 
     fn dl<'a>(f: &'a FakeFetcher, dir: &Path) -> Downloader<'a> {
@@ -476,6 +605,77 @@ mod tests {
             .expect_err("404");
         assert!(matches!(err, DownloadError::Fetch(_)));
         assert_eq!(f.call_count(), 1);
+    }
+
+    #[test]
+    fn mid_body_failure_resumes_from_the_partial_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let data: Vec<u8> = (0..=255u8).cycle().take(5000).collect();
+        let f = FakeFetcher::with(URL, data.clone());
+        f.cut_next_after.set(Some(1234));
+        let a = dl(&f, dir.path())
+            .obtain("s", URL, Expect::Pinned(&pin(&data)))
+            .expect("obtain");
+        assert_eq!(
+            *f.offsets.borrow(),
+            [0, 1234],
+            "second attempt must ask for a range"
+        );
+        assert_eq!(std::fs::read(&a.path).expect("read"), data);
+        assert_eq!(a.blake3, blake3::hash(&data).to_hex().to_string());
+    }
+
+    #[test]
+    fn server_that_ignores_range_restarts_cleanly() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let data: Vec<u8> = (0..=255u8).cycle().take(3000).collect();
+        let f = FakeFetcher::with(URL, data.clone());
+        f.ignore_range.set(true);
+        f.cut_next_after.set(Some(700));
+        let a = dl(&f, dir.path())
+            .obtain("s", URL, Expect::Pinned(&pin(&data)))
+            .expect("obtain");
+        assert_eq!(*f.offsets.borrow(), [0, 700]);
+        assert_eq!(
+            std::fs::read(&a.path).expect("read"),
+            data,
+            "no duplicated prefix"
+        );
+    }
+
+    #[test]
+    fn part_files_are_per_cache_name_even_with_dots_in_ids() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let f = FakeFetcher::default();
+        let d = dl(&f, dir.path());
+        let (a, b) = (d.cache_path("py.1", URL), d.cache_path("py.2", URL));
+        let (pa, pb) = (part_path(&a), part_path(&b));
+        assert_ne!(pa, pb);
+        assert_eq!(
+            pa.file_name().and_then(|n| n.to_str()).map(str::to_string),
+            Some(format!(
+                "{}.part",
+                a.file_name().and_then(|n| n.to_str()).unwrap_or("")
+            ))
+        );
+    }
+
+    #[test]
+    fn lock_entry_without_a_hash_is_a_hard_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let f = FakeFetcher::with(URL, b"x".to_vec());
+        let mut p = pin(b"x");
+        p.blake3 = None;
+        let err = dl(&f, dir.path())
+            .obtain("s", URL, Expect::Pinned(&p))
+            .expect_err("no hash");
+        assert!(matches!(err, DownloadError::Mismatch(_)));
+        assert_eq!(f.call_count(), 0);
+    }
+
+    #[test]
+    fn http_client_builds_with_https_only_and_idle_timeout() {
+        HttpFetcher::new().expect("client");
     }
 
     #[test]

@@ -9,6 +9,8 @@ use anyhow::{bail, Context, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
+use super::extract::check_portable_component;
+
 /// Corpus profile. `small` is for iteration and CI, `full` is for the Phase 0 report.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, clap::ValueEnum,
@@ -123,6 +125,9 @@ pub struct Source {
     /// If true, a failed download is recorded under `skipped` instead of failing the build.
     /// Lock mismatches are always fatal.
     pub optional: bool,
+    /// Classes this source is derived from (derivation kinds). They must have a source earlier in
+    /// the registry. `--only` requires them to be built in the same run or already present.
+    pub inputs: Vec<String>,
     pub spec: SourceSpec,
 }
 
@@ -136,6 +141,8 @@ struct Common {
     profiles: Vec<Profile>,
     #[serde(default)]
     optional: bool,
+    #[serde(default)]
+    inputs: Vec<String>,
 }
 
 /// All sources, in file order (the build runs them in this order).
@@ -144,7 +151,9 @@ pub struct Registry {
     pub sources: Vec<Source>,
 }
 
-const COMMON_KEYS: [&str; 6] = ["id", "class", "licence", "origin", "profiles", "optional"];
+const COMMON_KEYS: [&str; 7] = [
+    "id", "class", "licence", "origin", "profiles", "optional", "inputs",
+];
 
 fn valid_ident(s: &str) -> bool {
     !s.is_empty()
@@ -199,6 +208,7 @@ impl Registry {
                     origin: common.origin,
                     profiles: common.profiles,
                     optional: common.optional,
+                    inputs: common.inputs,
                     spec,
                 });
             }
@@ -210,6 +220,7 @@ impl Registry {
 
     fn validate(&self) -> Result<()> {
         let mut ids = BTreeSet::new();
+        let mut classes_before: BTreeSet<&str> = BTreeSet::new();
         for s in &self.sources {
             if !valid_ident(&s.id) {
                 bail!(
@@ -233,6 +244,16 @@ impl Registry {
             if s.licence.trim().is_empty() || s.origin.trim().is_empty() {
                 bail!("source `{}` needs a non-empty licence and origin", s.id);
             }
+            for input in &s.inputs {
+                if input == &s.class || !classes_before.contains(input.as_str()) {
+                    bail!(
+                        "source `{}`: input class `{input}` must have a source earlier in the \
+                         registry and differ from the source's own class",
+                        s.id
+                    );
+                }
+            }
+            classes_before.insert(s.class.as_str());
             for url in s.spec.static_urls() {
                 if !url.starts_with("https://") {
                     bail!("source `{}`: URL must be https:// (got `{url}`)", s.id);
@@ -242,9 +263,11 @@ impl Registry {
                 SourceSpec::File(f) => {
                     let name = file_name_for(&f.url, f.filename.as_deref())
                         .with_context(|| format!("source `{}`", s.id))?;
-                    if name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+                    if name.contains('/') || name == "." || name == ".." {
                         bail!("source `{}`: bad filename `{name}`", s.id);
                     }
+                    check_portable_component(&name)
+                        .with_context(|| format!("source `{}`: filename", s.id))?;
                 }
                 SourceSpec::Archive(a) => {
                     if a.format.is_none() && ArchiveFormat::guess(&a.url).is_none() {
@@ -377,6 +400,27 @@ max_files = 3
         );
         assert_eq!(file_name_for("https://h/a/", Some("z")).expect("n"), "z");
         assert!(file_name_for("https://h/a/", None).is_err());
+    }
+
+    #[test]
+    fn inputs_must_name_earlier_classes_and_filenames_must_be_portable() {
+        let derived = |input: &str| {
+            GOOD.replace(
+                "origin = \"elsewhere\"",
+                &format!("origin = \"elsewhere\"\ninputs = [\"{input}\"]"),
+            )
+        };
+        assert!(Registry::parse(&derived("c1")).is_ok());
+        assert!(Registry::parse(&derived("c2")).is_err(), "own class");
+        assert!(Registry::parse(&derived("missing")).is_err());
+        // A source may not depend on a class that only appears later in the file.
+        let later = GOOD.replace(
+            "origin = \"somewhere\"",
+            "origin = \"somewhere\"\ninputs = [\"c2\"]",
+        );
+        assert!(Registry::parse(&later).is_err());
+        let nul = GOOD.replace("kind = \"file\"", "kind = \"file\"\nfilename = \"NUL\"");
+        assert!(Registry::parse(&nul).is_err());
     }
 
     #[test]

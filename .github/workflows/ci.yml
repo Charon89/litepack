@@ -23,6 +23,9 @@ jobs:
         os: [ubuntu-24.04, windows-2025]
     steps:
       - uses: actions/checkout@v7
+      - name: Linux build prerequisites (OpenSSL for native-tls)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
