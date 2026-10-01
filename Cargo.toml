@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/lpk-bench"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/CHANGE-ME/litepack"
+rust-version = "1.90"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

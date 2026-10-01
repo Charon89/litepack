@@ -1,0 +1,11 @@
+/target
+/bench/corpus/
+/bench/tmp/
+/bench/results/**/*.tmp
+*.lpk
+*.log
+.DS_Store
+Thumbs.db
+/.claude/worktrees/
+/.claude/settings.local.json
+CLAUDE.local.md

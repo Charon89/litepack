@@ -1,0 +1,15 @@
+[package]
+name = "lpk-bench"
+description = "LitePack benchmark corpus builder, baseline runner, component probes and report generator (Phase 0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Phase 0 task P0-1 adds: clap (CLI), serde + serde_json (manifests/results), blake3 (hashing),
+# anyhow (errors), walkdir, rayon. Add them as tasks require; keep `cargo deny check` green.
+
+[lints]
+workspace = true
