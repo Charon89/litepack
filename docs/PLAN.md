@@ -19,9 +19,9 @@ Goal: a reproducible corpus + harness that measures every claim in `docs/LitePac
 - Parked (LOW, from the P0-1 review): `scripts/setup-windows.ps1` prints its "could not update the Rust toolchain" warning on every run if rustup came from a package manager that disables `rustup self update`; check only the toolchain update, or reword, when the script is next touched.
 
 ### P0-2 Corpus specification and builder — owner: implementer (sonnet); spec review: reviewer (opus)
-- [ ] Implement `docs/CORPUS.md` exactly: `lpk-bench corpus build --profile {small|full} --out <dir>` downloads/derives every class, writes `manifest.json` (per file: relative path, size, BLAKE3, class, source URL/licence) and `corpus.lock` (pinned URLs + hashes).
-- [ ] `--private <dir>` mode: builds a manifest over the user's own folder with the same class heuristics (by extension + magic), never copies or uploads anything.
-- [ ] Derived classes are generated deterministically (edited-photo versions, backup v1/v2/v3 snapshots, small-file set).
+- [~] Implement `docs/CORPUS.md` exactly: `lpk-bench corpus build --profile {small|full} --out <dir>` downloads/derives every class, writes `manifest.json` (per file: relative path, size, BLAKE3, class, source URL/licence) and `corpus.lock` (pinned URLs + hashes).
+- [~] `--private <dir>` mode: builds a manifest over the user's own folder with the same class heuristics (by extension + magic), never copies or uploads anything.
+- [~] Derived classes are generated deterministically (edited-photo versions, backup v1/v2/v3 snapshots, small-file set).
 - Acceptance: `corpus build --profile small` completes on Windows and Linux from a clean machine (only `curl`/`git`/`ffmpeg` optional); manifest has ≥ 11 classes; second build produces a byte-identical `manifest.json`; total size for `small` is 1–2 GB, `full` 10–20 GB.
 - Note (from the P0-1 review): write `corpus.lock` to a committed path (e.g. `bench/corpus.lock`), not inside the git-ignored corpus directory, so other machines rebuild the same corpus (D-13).
 
