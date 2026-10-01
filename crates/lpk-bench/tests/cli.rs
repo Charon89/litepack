@@ -25,17 +25,37 @@ fn stubs_fail_loudly_naming_the_task() {
 }
 
 #[test]
-fn corpus_scan_is_a_loud_stub() {
-    let out = bin()
-        .args(["corpus", "scan", "--private", "x", "--out", "y"])
+fn corpus_scan_writes_a_private_manifest_and_fails_cleanly_on_a_missing_folder() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let missing = bin()
+        .args(["corpus", "scan", "--private"])
+        .arg(tmp.path().join("nope"))
+        .arg("--out")
+        .arg(tmp.path().join("out"))
         .output()
         .expect("run");
-    assert_eq!(out.status.code(), Some(1));
-    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("does not exist"));
+
+    let dir = tmp.path().join("data");
+    std::fs::create_dir(&dir).expect("mkdir");
+    std::fs::write(dir.join("a.txt"), b"hello").expect("write");
+    let out = tmp.path().join("out");
+    let ok = bin()
+        .args(["corpus", "scan", "--private"])
+        .arg(&dir)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .expect("run");
     assert!(
-        err.contains("P0-2d") && err.contains("not implemented yet"),
-        "{err}"
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
     );
+    let manifest = std::fs::read_to_string(out.join("manifest.json")).expect("manifest");
+    assert!(manifest.contains("\"profile\": \"private\""), "{manifest}");
+    assert!(out.join("build-info.json").exists());
 }
 
 #[test]

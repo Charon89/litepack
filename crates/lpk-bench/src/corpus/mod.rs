@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! lpk-bench corpus build --profile <small|full> [--out DIR] [--cache DIR] [--only a,b] [--update-lock]
-//! lpk-bench corpus scan  --private DIR --out DIR      (stub until sub-task P0-2d)
+//! lpk-bench corpus scan  --private DIR --out DIR      (see [`scan`] and [`classify`])
 //! ```
 //!
 //! Defaults are relative to the working directory, which is expected to be the repository root:
@@ -126,11 +126,13 @@
 //! 4. Tests: serve bytes from `fetch::fake::FakeFetcher`; never hit the network in tests.
 
 pub mod build;
+pub mod classify;
 pub mod extract;
 pub mod fetch;
 pub mod lock;
 pub mod manifest;
 pub mod registry;
+pub mod scan;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -247,13 +249,7 @@ pub fn run(args: CorpusArgs) -> ExitCode {
                 }
             }
         }
-        CorpusCommand::Scan(_) => {
-            eprintln!(
-                "error: `lpk-bench corpus scan` is not implemented yet (PLAN task P0-2d); \
-                 no manifest was written"
-            );
-            ExitCode::FAILURE
-        }
+        CorpusCommand::Scan(s) => scan::run(&s),
     }
 }
 
