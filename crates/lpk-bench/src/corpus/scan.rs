@@ -7,12 +7,16 @@
 //!
 //! Guarantees:
 //! * The scanned folder is only ever opened for reading. Nothing is copied, moved or changed;
-//!   the only writes are the two files in `--out`, created after the walk has finished.
+//!   the only writes are `manifest.json`, `build-info.json` and a `.lpk-corpus` marker in
+//!   `--out`, created after the walk has finished.
+//! * `--out` equal to the scanned folder or anywhere inside it (existing or not yet existing,
+//!   compared after resolving both) is refused before anything is created. A non-empty `--out`
+//!   without the `.lpk-corpus` marker is refused untouched, like a corpus build output.
 //! * This module does not use the fetch or build code, so it cannot reach the network.
-//! * Symlinks, junctions and other reparse points (on Windows also offline or cloud
-//!   placeholders, whose reading would trigger a download) are not followed; they are listed
-//!   in `skipped` of `build-info.json`, as are unreadable files and special files.
-//! * If `--out` lies inside the scanned folder it is excluded from the walk.
+//! * Symlinks, junctions and other reparse points are not followed, and on Windows cloud
+//!   placeholders (offline / recall-on-access files, whose reading would trigger a download)
+//!   are not opened. They are listed in `skipped` of `build-info.json` with distinct reasons,
+//!   as are unreadable files and special files; the summary line prints the skipped count.
 //! * The manifest depends only on the folder's relative paths and contents, so two scans of an
 //!   unchanged folder give identical bytes. `build-info.json` carries the timestamp, `"private":
 //!   true` and `"root"` (the absolute scanned folder, which the runner needs to find the files).
@@ -28,7 +32,6 @@ use serde::Serialize;
 
 use super::classify::{classify, HEAD_LEN};
 use super::manifest::{now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped};
-use super::registry::Profile;
 use super::ScanArgs;
 
 /// Value of `profile`, `source` and `licence` in a private manifest.
@@ -53,11 +56,107 @@ struct PrivateBuildInfo {
     root: String,
 }
 
+/// Name of the file that marks a directory as owned by lpk-bench (same as the corpus build's).
+const MARKER: &str = ".lpk-corpus";
+
 struct Walk {
     files: Vec<(String, ManifestFile)>,
     skipped: Vec<Skipped>,
-    /// Directory entries seen (files, directories, skipped items), `--out` excluded.
-    entries: usize,
+}
+
+/// Canonical form of `path`, falling back to the absolute path where canonicalisation is not
+/// supported (RAM disks, WinFsp/Dokan mounts, some network shares).
+fn resolve_existing(path: &Path) -> std::io::Result<PathBuf> {
+    fs::canonicalize(path).or_else(|_| std::path::absolute(path))
+}
+
+/// Remove `.` and fold `..` without touching the file system.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Resolve a path that need not exist: the longest existing ancestor is resolved, the rest is
+/// appended as written.
+fn resolve_maybe_missing(path: &Path) -> std::io::Result<PathBuf> {
+    let abs = normalize_lexically(&std::path::absolute(path)?);
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut base = abs.as_path();
+    loop {
+        if base.exists() {
+            let mut resolved = resolve_existing(base)?;
+            resolved.extend(tail.iter().rev());
+            return Ok(resolved);
+        }
+        match (base.file_name(), base.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_os_string());
+                base = parent;
+            }
+            _ => return Ok(abs),
+        }
+    }
+}
+
+/// Component-wise prefix test; case-insensitive on Windows, where paths are.
+fn is_inside_or_equal(path: &Path, base: &Path) -> bool {
+    let mut p = path.components();
+    base.components().all(|b| {
+        p.next().is_some_and(|c| {
+            if cfg!(windows) {
+                c.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+            } else {
+                c == b
+            }
+        })
+    })
+}
+
+/// Refuse an `out` that would write into the scanned folder or into somebody else's files.
+fn check_out(root: &Path, out: &Path) -> Result<()> {
+    let out_resolved = resolve_maybe_missing(out)
+        .with_context(|| format!("resolving output directory `{}`", out.display()))?;
+    if is_inside_or_equal(&out_resolved, root) {
+        bail!(
+            "output directory `{}` is the scanned folder or inside it; a scan never writes into \
+             the folder it scans. Choose a directory outside it.",
+            out.display()
+        );
+    }
+    if out_resolved.exists() {
+        if !out_resolved.is_dir() {
+            bail!(
+                "output path `{}` exists and is not a directory",
+                out.display()
+            );
+        }
+        let non_empty = fs::read_dir(&out_resolved)
+            .with_context(|| format!("listing `{}`", out.display()))?
+            .next()
+            .is_some();
+        if non_empty && !out_resolved.join(MARKER).exists() {
+            bail!(
+                "output directory `{}` is not empty and was not created by lpk-bench (no \
+                 {MARKER} marker); refusing to touch it. Use a new or empty directory.",
+                out.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Scan `root` and write the manifest and build info into `out`.
@@ -71,7 +170,7 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
     if !meta.is_dir() {
         bail!("scan folder `{}` is not a directory", root.display());
     }
-    let canonical = fs::canonicalize(root)
+    let walk_root = resolve_existing(root)
         .with_context(|| format!("resolving scan folder `{}`", root.display()))?;
     let root_abs = std::path::absolute(root)
         .with_context(|| format!("making `{}` absolute", root.display()))?;
@@ -79,16 +178,17 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
         .to_str()
         .with_context(|| format!("scan folder `{}` is not valid UTF-8", root_abs.display()))?
         .to_string();
-    // Only an existing `out` can lie inside the folder: nothing is created before the walk.
-    let exclude = fs::canonicalize(out).ok();
+    check_out(&walk_root, out)?;
 
-    let walk = walk(&canonical, exclude.as_deref());
-    if walk.entries == 0 {
+    let mut top = fs::read_dir(&walk_root)
+        .with_context(|| format!("cannot list scan folder `{}`", root.display()))?;
+    if top.next().is_none() {
         bail!("scan folder `{}` is empty: nothing to scan", root.display());
     }
+    drop(top);
 
-    let mut manifest = Manifest::new(Profile::Small, walk.files);
-    manifest.profile = PRIVATE.to_string();
+    let walk = walk(&walk_root);
+    let manifest = Manifest::with_profile_name(PRIVATE, walk.files);
     let manifest_text = manifest.render();
     let manifest_blake3 = blake3::hash(manifest_text.as_bytes()).to_hex().to_string();
     let mut skipped = walk.skipped;
@@ -110,6 +210,14 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
     info_text.push('\n');
 
     fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    let marker = out.join(MARKER);
+    if !marker.exists() {
+        fs::write(
+            &marker,
+            "lpk-bench corpus output (private scan: manifest only, no file contents).\n",
+        )
+        .with_context(|| format!("writing {}", marker.display()))?;
+    }
     let manifest_path = out.join("manifest.json");
     fs::write(&manifest_path, &manifest_text)
         .with_context(|| format!("writing {}", manifest_path.display()))?;
@@ -132,12 +240,11 @@ fn skip(list: &mut Vec<Skipped>, path: &str, reason: impl std::fmt::Display) {
     });
 }
 
-/// Depth-first walk without following links. `root` is the canonical scan folder.
-fn walk(root: &Path, exclude: Option<&Path>) -> Walk {
+/// Depth-first walk without following links. `root` is the resolved scan folder.
+fn walk(root: &Path) -> Walk {
     let mut w = Walk {
         files: Vec::new(),
         skipped: Vec::new(),
-        entries: 0,
     };
     let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, rel)) = stack.pop() {
@@ -158,10 +265,6 @@ fn walk(root: &Path, exclude: Option<&Path>) -> Walk {
                 }
             };
             let path = entry.path();
-            if exclude == Some(path.as_path()) {
-                continue;
-            }
-            w.entries += 1;
             let file_name = entry.file_name();
             let Some(name) = file_name.to_str() else {
                 let lossy = format!("{shown}/{}", file_name.to_string_lossy());
@@ -181,12 +284,8 @@ fn walk(root: &Path, exclude: Option<&Path>) -> Walk {
                 }
             };
             let ft = meta.file_type();
-            if ft.is_symlink() || is_reparse_or_offline(&meta) {
-                skip(
-                    &mut w.skipped,
-                    &rel_path,
-                    "symlink or reparse point, not followed",
-                );
+            if let Some(reason) = link_skip_reason(ft.is_symlink(), file_attributes(&meta)) {
+                skip(&mut w.skipped, &rel_path, reason);
             } else if ft.is_dir() {
                 stack.push((path, rel_path));
             } else if ft.is_file() {
@@ -214,21 +313,39 @@ fn walk(root: &Path, exclude: Option<&Path>) -> Walk {
     w
 }
 
-/// Windows reparse points other than symlinks (cloud placeholders, dedup stubs) and offline
-/// files: reading them can trigger a download, so they are never opened.
+const ATTR_REPARSE_POINT: u32 = 0x400;
+const ATTR_OFFLINE: u32 = 0x1000;
+const ATTR_RECALL_ON_OPEN: u32 = 0x4_0000;
+const ATTR_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+
+pub const REASON_CLOUD: &str = "cloud placeholder, not downloaded";
+pub const REASON_LINK: &str = "symlink or junction, not followed";
+pub const REASON_REPARSE: &str = "other reparse point, not followed";
+
+/// Why an entry must not be opened, from its link flag and Windows file attribute bits
+/// (always 0 elsewhere). Cloud placeholders are reparse points too, so they are checked first;
+/// opening one would make the OS download it.
+fn link_skip_reason(is_symlink: bool, attrs: u32) -> Option<&'static str> {
+    if attrs & (ATTR_OFFLINE | ATTR_RECALL_ON_OPEN | ATTR_RECALL_ON_DATA_ACCESS) != 0 {
+        Some(REASON_CLOUD)
+    } else if is_symlink {
+        Some(REASON_LINK)
+    } else if attrs & ATTR_REPARSE_POINT != 0 {
+        Some(REASON_REPARSE)
+    } else {
+        None
+    }
+}
+
 #[cfg(windows)]
-fn is_reparse_or_offline(meta: &fs::Metadata) -> bool {
+fn file_attributes(meta: &fs::Metadata) -> u32 {
     use std::os::windows::fs::MetadataExt;
-    const REPARSE_POINT: u32 = 0x400;
-    const OFFLINE: u32 = 0x1000;
-    const RECALL_ON_OPEN: u32 = 0x40000;
-    const RECALL_ON_DATA_ACCESS: u32 = 0x400000;
-    meta.file_attributes() & (REPARSE_POINT | OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0
+    meta.file_attributes()
 }
 
 #[cfg(not(windows))]
-fn is_reparse_or_offline(_meta: &fs::Metadata) -> bool {
-    false
+fn file_attributes(_meta: &fs::Metadata) -> u32 {
+    0
 }
 
 /// BLAKE3 (hex), size and the first [`HEAD_LEN`] bytes of a file, read once, read-only.
@@ -266,9 +383,10 @@ pub fn run(args: &ScanArgs) -> ExitCode {
     match scan(&args.private, &args.out) {
         Ok(r) => {
             println!(
-                "{} files, {} bytes; manifest {} (blake3 {})",
+                "{} files, {} bytes, {} skipped; manifest {} (blake3 {})",
                 r.files,
                 r.bytes_total,
+                r.skipped.len(),
                 r.manifest_path.display(),
                 r.manifest_blake3
             );
@@ -389,24 +507,114 @@ mod tests {
         assert!(!before.is_empty());
     }
 
+    /// Full snapshot (paths, sizes, contents) of a folder for "untouched" assertions.
+    fn contents(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        listing(root)
+            .into_keys()
+            .map(|p| {
+                let data = fs::read(&p).ok();
+                (p, data)
+            })
+            .collect()
+    }
+
+    fn assert_refused_and_untouched(dir: &Path, out: &Path, needle: &str) {
+        let (before_list, before_data) = (listing(dir), contents(dir));
+        let e = scan(dir, out).expect_err("must be refused");
+        assert!(format!("{e:#}").contains(needle), "{e:#}");
+        assert_eq!(before_list, listing(dir));
+        assert_eq!(before_data, contents(dir));
+    }
+
     #[test]
-    fn out_inside_the_folder_is_excluded_and_scans_are_byte_identical() {
+    fn out_equal_to_or_inside_the_folder_is_refused_and_nothing_is_written() {
         let (_tmp, dir) = fixture();
-        let out = dir.join("scan-out");
-        scan(&dir, &out).expect("first");
-        let first = fs::read(out.join("manifest.json")).expect("read");
-        // The second scan sees the first scan's output on disk.
-        scan(&dir, &out).expect("second");
-        let second = fs::read(out.join("manifest.json")).expect("read");
-        assert_eq!(first, second);
-        let m = read_manifest(&out);
-        let n: usize = m.classes.values().map(|c| c.files.len()).sum();
-        assert_eq!(n, 6);
-        assert!(!m
-            .classes
-            .values()
-            .flat_map(|c| &c.files)
-            .any(|f| f.path.starts_with("scan-out")));
+        // The folder itself.
+        assert_refused_and_untouched(&dir, &dir, "inside it");
+        // Spelled differently: trailing `.` and a `..` detour.
+        assert_refused_and_untouched(&dir, &dir.join("."), "inside it");
+        assert_refused_and_untouched(&dir, &dir.join("pics").join(".."), "inside it");
+        // An existing subfolder that holds files.
+        assert_refused_and_untouched(&dir, &dir.join("pics"), "inside it");
+        // A subfolder that does not exist yet, also nested.
+        assert_refused_and_untouched(&dir, &dir.join("scan-out"), "inside it");
+        assert_refused_and_untouched(&dir, &dir.join("new").join("deeper"), "inside it");
+        assert!(!dir.join("scan-out").exists() && !dir.join("new").exists());
+    }
+
+    #[test]
+    fn foreign_non_empty_out_is_refused_untouched_and_marked_out_is_reused() {
+        let (tmp, dir) = fixture();
+        let foreign = tmp.path().join("precious");
+        write(&foreign, "keep.txt", b"mine");
+        let before = contents(&foreign);
+        let e = scan(&dir, &foreign).expect_err("foreign");
+        assert!(format!("{e:#}").contains("refusing to touch"), "{e:#}");
+        assert_eq!(before, contents(&foreign));
+        // An empty existing directory is fine and gets the marker; a rescan reuses it.
+        let empty = tmp.path().join("empty-out");
+        fs::create_dir(&empty).expect("mkdir");
+        scan(&dir, &empty).expect("first");
+        assert!(empty.join(MARKER).exists());
+        scan(&dir, &empty).expect("second");
+    }
+
+    #[test]
+    fn marker_name_matches_the_corpus_build() {
+        assert_eq!(MARKER, super::super::build::MARKER);
+    }
+
+    #[test]
+    fn link_skip_reasons_from_attribute_bits() {
+        assert_eq!(link_skip_reason(false, 0), None);
+        assert_eq!(link_skip_reason(false, 0x20), None);
+        assert_eq!(link_skip_reason(true, 0), Some(REASON_LINK));
+        assert_eq!(
+            link_skip_reason(true, ATTR_REPARSE_POINT),
+            Some(REASON_LINK)
+        );
+        assert_eq!(
+            link_skip_reason(false, ATTR_REPARSE_POINT),
+            Some(REASON_REPARSE)
+        );
+        // Cloud placeholders are reparse points as well; they keep their own reason.
+        for bits in [
+            ATTR_OFFLINE,
+            ATTR_RECALL_ON_OPEN,
+            ATTR_RECALL_ON_DATA_ACCESS,
+        ] {
+            assert_eq!(link_skip_reason(false, bits), Some(REASON_CLOUD));
+            assert_eq!(
+                link_skip_reason(false, bits | ATTR_REPARSE_POINT),
+                Some(REASON_CLOUD)
+            );
+        }
+        let reasons = [REASON_CLOUD, REASON_LINK, REASON_REPARSE];
+        assert!(reasons[0] != reasons[1] && reasons[1] != reasons[2] && reasons[0] != reasons[2]);
+    }
+
+    #[test]
+    fn path_comparison_is_component_wise() {
+        assert!(is_inside_or_equal(Path::new("/a/b/c"), Path::new("/a/b")));
+        assert!(is_inside_or_equal(Path::new("/a/b"), Path::new("/a/b")));
+        assert!(!is_inside_or_equal(Path::new("/a/bc"), Path::new("/a/b")));
+        assert!(!is_inside_or_equal(Path::new("/a"), Path::new("/a/b")));
+        assert_eq!(
+            normalize_lexically(Path::new("/a/./b/../c")),
+            PathBuf::from("/a/c")
+        );
+    }
+
+    #[test]
+    fn unlistable_root_reports_the_io_error_not_empty() {
+        // A root that vanishes between checks cannot be simulated portably; check the wording
+        // of the empty case stays distinct from the listing failure.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let empty = tmp.path().join("e");
+        fs::create_dir(&empty).expect("mkdir");
+        let e = scan(&empty, &tmp.path().join("o")).expect_err("empty");
+        assert!(format!("{e:#}").contains("is empty"), "{e:#}");
+        assert!(!format!("{e:#}").contains("cannot list"));
     }
 
     #[test]
@@ -474,6 +682,80 @@ mod tests {
             .values()
             .flat_map(|c| &c.files)
             .any(|f| f.path.contains("linked") || f.path.contains("secret")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unlistable_root_reports_the_os_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, dir) = fixture();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let result = scan(&dir, &tmp.path().join("out"));
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod back");
+        if fs::read_dir(&dir).is_ok() {
+            // Root ignores permissions: the scan then simply succeeds.
+            return;
+        }
+        let e = result.expect_err("unlistable");
+        assert!(
+            format!("{e:#}").contains("cannot list scan folder"),
+            "{e:#}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junctions_are_not_followed() {
+        let (tmp, dir) = fixture();
+        let outside = tmp.path().join("outside");
+        write(&outside, "secret.txt", b"secret");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(dir.join("linked-dir"))
+            .arg(&outside)
+            .output()
+            .expect("spawn cmd for mklink /J");
+        assert!(
+            status.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+        let out = tmp.path().join("out");
+        let r = scan(&dir, &out).expect("scan");
+        assert_eq!(r.files, 6);
+        let skipped: Vec<(&str, &str)> = r
+            .skipped
+            .iter()
+            .map(|s| (s.source.as_str(), s.reason.as_str()))
+            .collect();
+        assert_eq!(skipped, [("linked-dir", REASON_LINK)]);
+        assert!(outside.join("secret.txt").exists());
+        let m = read_manifest(&out);
+        assert!(!m
+            .classes
+            .values()
+            .flat_map(|c| &c.files)
+            .any(|f| f.path.contains("secret")));
+        // Remove the junction itself (not its target) before the temp dir is cleaned up.
+        fs::remove_dir(dir.join("linked-dir")).expect("remove junction");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exclusively_locked_files_are_skipped_not_fatal() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (tmp, dir) = fixture();
+        let locked = dir.join("locked.txt");
+        fs::write(&locked, b"x").expect("write");
+        let _guard = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&locked)
+            .expect("lock");
+        let r = scan(&dir, &tmp.path().join("out")).expect("scan");
+        assert_eq!(r.files, 6);
+        assert!(r.skipped.iter().any(|s| s.source == "locked.txt"));
     }
 
     #[cfg(unix)]

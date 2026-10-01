@@ -10,7 +10,10 @@
 //!    extension, so a `.jpg` that starts with the PNG signature is `photo-raw-png`. A signature
 //!    may refine its default class for particular extensions (a ZIP container is
 //!    `archives-nested`, unless it is a `.docx`).
-//! 3. Otherwise the extension decides. Rows marked `verified` name formats that have a
+//!    ISO base media files (MP4, HEIC, AVIF, CR3) are split by major brand; MPEG-TS is
+//!    recognised by its sync bytes for transport-stream extensions only.
+//! 3. Whole-name rules ([`FILE_NAMES`], e.g. `.gitignore`), then `.obj` (Wavefront text is a
+//!    game asset, anything else a compiler object file), then the extension decides. Rows marked `verified` name formats that have a
 //!    signature above, so a file with such an extension but no matching magic (empty,
 //!    truncated, an HTML error page saved as `.jpg`) is `other`. Other rows are trusted.
 //! 4. Anything else is `other`.
@@ -132,7 +135,28 @@ pub const SIGNATURES: &[Signature] = &[
     sig("flac", &[(0, b"fLaC")], AUDIO),
     sig("mp3-id3", &[(0, b"ID3")], AUDIO),
     sig("ogg", &[(0, b"OggS")], AUDIO).refine(&[(&["ogv"], VIDEO)]),
+    // ISO base media files are told apart by the major brand at offset 8. Lossy non-JPEG
+    // stills (HEIF family, AVIF) have no corpus class: `other`. Canon CR3 is a raw photo.
+    sig("bmff-heic", &[(4, b"ftyp"), (8, b"heic")], OTHER),
+    sig("bmff-heix", &[(4, b"ftyp"), (8, b"heix")], OTHER),
+    sig("bmff-heim", &[(4, b"ftyp"), (8, b"heim")], OTHER),
+    sig("bmff-heis", &[(4, b"ftyp"), (8, b"heis")], OTHER),
+    sig("bmff-hevc", &[(4, b"ftyp"), (8, b"hevc")], OTHER),
+    sig("bmff-hevx", &[(4, b"ftyp"), (8, b"hevx")], OTHER),
+    sig("bmff-hevm", &[(4, b"ftyp"), (8, b"hevm")], OTHER),
+    sig("bmff-hevs", &[(4, b"ftyp"), (8, b"hevs")], OTHER),
+    sig("bmff-mif1", &[(4, b"ftyp"), (8, b"mif1")], OTHER),
+    sig("bmff-msf1", &[(4, b"ftyp"), (8, b"msf1")], OTHER),
+    sig("bmff-avif", &[(4, b"ftyp"), (8, b"avif")], OTHER),
+    sig("bmff-avis", &[(4, b"ftyp"), (8, b"avis")], OTHER),
+    sig("bmff-crx", &[(4, b"ftyp"), (8, b"crx ")], PHOTO_RAW_PNG),
     sig("mp4", &[(4, b"ftyp")], VIDEO).refine(&[(&["m4a", "aac"], AUDIO)]),
+    // MPEG transport stream: sync byte 0x47 every 188 bytes (m2ts: 192-byte packets with a
+    // 4-byte prefix). Extension-gated because a single byte is a weak signature.
+    sig("mpeg-ts", &[(0, b"G"), (188, b"G"), (376, b"G")], VIDEO)
+        .only(&["ts", "tp", "trp", "mts", "m2ts"]),
+    sig("m2ts", &[(4, b"G"), (196, b"G"), (388, b"G")], VIDEO)
+        .only(&["ts", "tp", "trp", "mts", "m2ts"]),
     sig("matroska", &[(0, b"\x1A\x45\xDF\xA3")], VIDEO).refine(&[(&["mka"], AUDIO)]),
     sig("qcow2", &[(0, b"QFI\xFB")], VM_IMAGE),
     sig("vmdk", &[(0, b"KDMV")], VM_IMAGE),
@@ -234,8 +258,8 @@ pub const EXTENSIONS: &[ExtensionRule] = &[
         GAME_ASSETS,
         false,
         &[
-            "pak", "unity3d", "assets", "fbx", "obj", "dds", "tga", "blend", "glb", "gltf", "bsp",
-            "wad", "ktx",
+            "pak", "unity3d", "assets", "fbx", "dds", "tga", "blend", "glb", "gltf", "bsp", "wad",
+            "ktx",
         ],
     ),
     ext(ARCHIVES_NESTED, true, &["zip", "jar", "apk", "epub", "7z"]),
@@ -245,6 +269,31 @@ pub const EXTENSIONS: &[ExtensionRule] = &[
         &["rar", "gz", "tgz", "xz", "zst", "bz2", "tar"],
     ),
 ];
+
+/// Whole-name rules for files without an extension (matched case-insensitively).
+pub const FILE_NAMES: &[(&str, &str)] = &[
+    (".gitignore", SOURCE_GIT),
+    (".gitattributes", SOURCE_GIT),
+    (".gitmodules", SOURCE_GIT),
+];
+
+/// Text that starts like a Wavefront OBJ: ASCII without NUL, and the first line that is neither
+/// blank nor a `#` comment begins with an OBJ statement keyword.
+fn looks_like_wavefront(head: &[u8]) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "v", "vt", "vn", "vp", "f", "l", "p", "o", "g", "s", "mtllib", "usemtl", "cstype", "deg",
+    ];
+    let sample = &head[..head.len().min(1024)];
+    if sample.is_empty() || !sample.iter().all(|b| b.is_ascii() && *b != 0) {
+        return false;
+    }
+    let text = String::from_utf8_lossy(sample);
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .and_then(|l| l.split_whitespace().next())
+        .is_some_and(|k| KEYWORDS.contains(&k))
+}
 
 /// Number of leading bytes [`classify`] may look at (covers every offset in [`SIGNATURES`]).
 pub const HEAD_LEN: usize = 0x8001 + 16;
@@ -268,6 +317,20 @@ pub fn classify(rel_path: &str, head: &[u8]) -> &'static str {
     let ext = extension(name);
     if let Some(s) = SIGNATURES.iter().find(|s| s.matches(head, &ext)) {
         return s.class_for(&ext);
+    }
+    if let Some((_, class)) = FILE_NAMES
+        .iter()
+        .find(|(n, _)| name.eq_ignore_ascii_case(n))
+    {
+        return class;
+    }
+    // `.obj` is a Wavefront model (text) or a compiler object file (binary).
+    if ext == "obj" {
+        return if looks_like_wavefront(head) {
+            GAME_ASSETS
+        } else {
+            SOFTWARE_INSTALLED
+        };
     }
     match EXTENSIONS.iter().find(|r| r.exts.contains(&ext.as_str())) {
         Some(r) if !r.verified => r.class,
@@ -351,7 +414,10 @@ mod tests {
         assert_eq!(classify("proj/.git/pack/p.pack", b"PACK"), SOURCE_GIT);
         assert_eq!(classify("proj/.GIT/x.jpg", JPEG), SOURCE_GIT);
         // Only directories count, and only the exact name.
-        assert_eq!(classify("proj/.gitignore", b"target"), OTHER);
+        assert_eq!(classify("proj/.gitignore", b"target"), SOURCE_GIT);
+        assert_eq!(classify(".gitattributes", b"* text"), SOURCE_GIT);
+        assert_eq!(classify("a/.gitmodules", b"[submodule]"), SOURCE_GIT);
+        assert_eq!(classify("proj/.gitkeep", b""), OTHER);
         assert_eq!(classify("proj/not.git/x.jpg", JPEG), PHOTO_JPEG);
     }
 
@@ -371,6 +437,65 @@ mod tests {
         }
         let mut names = std::collections::HashSet::new();
         assert!(SIGNATURES.iter().all(|s| names.insert(s.name)));
+    }
+
+    fn bmff(brand: &[u8; 4]) -> Vec<u8> {
+        let mut v = b"\0\0\0\x18ftyp".to_vec();
+        v.extend_from_slice(brand);
+        v.extend_from_slice(b"\0\0\0\0");
+        v
+    }
+
+    #[test]
+    fn iso_bmff_files_are_decided_by_brand() {
+        for brand in [
+            b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs", b"mif1",
+            b"msf1", b"avif", b"avis",
+        ] {
+            assert_eq!(classify("IMG_1.heic", &bmff(brand)), OTHER, "{brand:?}");
+            // The extension does not matter: magic wins.
+            assert_eq!(classify("IMG_1.mp4", &bmff(brand)), OTHER, "{brand:?}");
+        }
+        assert_eq!(classify("a.avif", &bmff(b"avif")), OTHER);
+        assert_eq!(classify("IMG_2.cr3", &bmff(b"crx ")), PHOTO_RAW_PNG);
+        for brand in [b"isom", b"mp42", b"M4V ", b"qt  ", b"3gp4", b"dash"] {
+            assert_eq!(classify("v.mp4", &bmff(brand)), VIDEO, "{brand:?}");
+        }
+        assert_eq!(classify("a.m4a", &bmff(b"M4A ")), AUDIO);
+    }
+
+    #[test]
+    fn mpeg_transport_streams_are_video_but_typescript_is_source() {
+        let mut ts = vec![0u8; 188 * 3];
+        for i in 0..3 {
+            ts[i * 188] = 0x47;
+        }
+        assert_eq!(classify("rec.ts", &ts), VIDEO);
+        assert_eq!(classify("rec.m2ts", &ts), VIDEO);
+        let mut m2ts = vec![0u8; 192 * 3];
+        for i in 0..3 {
+            m2ts[4 + i * 192] = 0x47;
+        }
+        assert_eq!(classify("00001.m2ts", &m2ts), VIDEO);
+        assert_eq!(classify("app.ts", b"export const x = 1;\n"), SOURCE_GIT);
+        // A lone sync byte or text starting with `G` is not a transport stream.
+        assert_eq!(classify("g.ts", b"G"), SOURCE_GIT);
+        assert_eq!(classify("g.txt", &ts), TEXT_PROSE);
+    }
+
+    #[test]
+    fn obj_is_a_model_only_when_it_looks_like_wavefront() {
+        assert_eq!(
+            classify("m.obj", b"# Blender\nv 0 0 0\nf 1 1 1\n"),
+            GAME_ASSETS
+        );
+        assert_eq!(classify("m.obj", b"\nmtllib a.mtl\no cube\n"), GAME_ASSETS);
+        assert_eq!(
+            classify("m.obj", b"\x4C\x01\x03\0\x80\0\0\0"),
+            SOFTWARE_INSTALLED
+        );
+        assert_eq!(classify("m.obj", b"hello world"), SOFTWARE_INSTALLED);
+        assert_eq!(classify("m.obj", b""), SOFTWARE_INSTALLED);
     }
 
     #[test]

@@ -35,6 +35,12 @@ pub struct Manifest {
 impl Manifest {
     /// Group `(class, file)` pairs into a manifest; files are sorted bytewise by path.
     pub fn new(profile: Profile, files: Vec<(String, ManifestFile)>) -> Manifest {
+        Manifest::with_profile_name(profile.name(), files)
+    }
+
+    /// Like [`Manifest::new`] for a profile name that is not a public [`Profile`]
+    /// (`"private"` for `corpus scan`).
+    pub fn with_profile_name(profile: &str, files: Vec<(String, ManifestFile)>) -> Manifest {
         let mut classes: BTreeMap<String, ClassEntry> = BTreeMap::new();
         for (class, file) in files {
             let entry = classes.entry(class).or_insert_with(|| ClassEntry {
@@ -51,7 +57,7 @@ impl Manifest {
         }
         Manifest {
             classes,
-            profile: profile.name().to_string(),
+            profile: profile.to_string(),
         }
     }
 
