@@ -1,0 +1,33 @@
+{
+  "profiles": {
+    "full": [
+      {
+        "blake3": "dcddcd38a75062308426ee90537843e37ceec9127070144dda05acdc9199c6a0",
+        "bytes": 36445475,
+        "source": "enwik8",
+        "url": "https://mattmahoney.net/dc/enwik8.zip"
+      },
+      {
+        "blake3": "2f38bb1ba2464b3b42228eb72c4f810c53f5f8c836409f41f6d2dccda61530fe",
+        "bytes": 12601679,
+        "source": "python-embed",
+        "url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip"
+      }
+    ],
+    "small": [
+      {
+        "blake3": "dcddcd38a75062308426ee90537843e37ceec9127070144dda05acdc9199c6a0",
+        "bytes": 36445475,
+        "source": "enwik8",
+        "url": "https://mattmahoney.net/dc/enwik8.zip"
+      },
+      {
+        "blake3": "2f38bb1ba2464b3b42228eb72c4f810c53f5f8c836409f41f6d2dccda61530fe",
+        "bytes": 12601679,
+        "source": "python-embed",
+        "url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip"
+      }
+    ]
+  },
+  "version": 1
+}

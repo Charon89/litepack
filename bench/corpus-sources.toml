@@ -1,0 +1,26 @@
+# LitePack corpus source registry (PLAN P0-2, docs/CORPUS.md).
+#
+# Format, lock semantics and how to add a source kind are documented in
+# crates/lpk-bench/src/corpus/mod.rs. Pins live in bench/corpus.lock; after adding or changing
+# a source run `lpk-bench corpus build --profile <p> --only <class> --update-lock` and commit
+# the lock. Per-profile differences are separate sources with distinct ids.
+
+[[source]]
+id = "enwik8"
+class = "text-prose"
+licence = "CC-BY-SA-3.0"
+origin = "enwik8: first 100 MB of an English Wikipedia XML dump (mattmahoney.net/dc)"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://mattmahoney.net/dc/enwik8.zip"
+format = "zip"
+
+[[source]]
+id = "python-embed"
+class = "software-installed"
+licence = "PSF-2.0"
+origin = "Python embeddable package for Windows x64 (python.org/ftp/python)"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip"
+format = "zip"

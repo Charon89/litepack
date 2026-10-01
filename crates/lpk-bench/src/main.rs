@@ -12,6 +12,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+mod corpus;
+
 #[derive(Debug, Parser)]
 #[command(name = "lpk-bench", version, about = "LitePack Phase 0 benchmark tool")]
 struct Cli {
@@ -29,7 +31,7 @@ struct StubArgs {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Build the public corpus or scan a private folder (PLAN P0-2)
-    Corpus(StubArgs),
+    Corpus(corpus::CorpusArgs),
     /// Run baseline tools over the corpus with round-trip verification (PLAN P0-3)
     Run(StubArgs),
     /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate (PLAN P0-4)
@@ -52,6 +54,9 @@ impl Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Corpus(args) = cli.command {
+        return corpus::run(args);
+    }
     let (name, task) = cli.command.task();
     eprintln!(
         "error: `lpk-bench {name}` is not implemented yet (PLAN task {task}); no measurement was made"
@@ -91,15 +96,36 @@ mod tests {
     }
 
     #[test]
-    fn every_subcommand_parses_and_names_a_task() {
-        for (arg, task) in [
-            ("corpus", "P0-2"),
-            ("run", "P0-3"),
-            ("probe", "P0-4"),
-            ("report", "P0-5"),
-        ] {
+    fn every_stub_subcommand_parses_and_names_a_task() {
+        for (arg, task) in [("run", "P0-3"), ("probe", "P0-4"), ("report", "P0-5")] {
             let cli = Cli::try_parse_from(["lpk-bench", arg]).expect("parse");
             assert_eq!(cli.command.task(), (arg, task));
         }
+    }
+
+    #[test]
+    fn corpus_subcommands_parse() {
+        for args in [
+            &["corpus", "build", "--profile", "small"][..],
+            &[
+                "corpus",
+                "build",
+                "--profile",
+                "full",
+                "--out",
+                "o",
+                "--cache",
+                "c",
+                "--only",
+                "a,b",
+                "--update-lock",
+            ],
+            &["corpus", "scan", "--private", "p", "--out", "o"],
+        ] {
+            let argv = std::iter::once("lpk-bench").chain(args.iter().copied());
+            assert!(Cli::try_parse_from(argv).is_ok(), "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["lpk-bench", "corpus", "build"]).is_err());
+        assert!(Cli::try_parse_from(["lpk-bench", "corpus", "scan", "--out", "o"]).is_err());
     }
 }
