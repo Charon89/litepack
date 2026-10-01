@@ -13,7 +13,7 @@ Goal: a reproducible corpus + harness that measures every claim in `docs/LitePac
 
 ### P0-1 Repository bootstrap — owner: implementer (sonnet)
 - [x] Cargo workspace with `crates/lpk-bench` (binary, clap CLI), `rust-toolchain.toml` (stable), `deny.toml`, `.gitignore`, `LICENSE-MIT`, `LICENSE-APACHE` (fetch canonical text from https://www.apache.org/licenses/LICENSE-2.0.txt), `README.md`. Evidence: workspace builds; `LICENSE-APACHE` is the canonical 11358-byte text; `cargo deny check` exit 0 ("advisories ok, bans ok, licenses ok, sources ok").
-- [x] CI: `.github/workflows/ci.yml` runs fmt, clippy `-D warnings`, nextest, `cargo deny check` on `ubuntu-24.04` and `windows-2025`. Evidence (local only, CI run pending first push): workflow runs all five steps on both OSes incl. `cargo deny check`; every step run locally under `RUSTFLAGS=-D warnings` passes.
+- [~] CI: `.github/workflows/ci.yml` runs fmt, clippy `-D warnings`, nextest, `cargo deny check` on `ubuntu-24.04` and `windows-2025`. Evidence: workflow updated (permissions, --locked, timeout, deny on both OSes) and every step passes locally under `RUSTFLAGS=-D warnings`; first CI run pending.
 - [x] `cargo run -p lpk-bench -- --help` prints the subcommands `corpus`, `run`, `probe`, `report`. Evidence: `cargo run -p lpk-bench -- --help` lists corpus, run, probe, report; `cargo nextest run --workspace` 5 passed.
 - Acceptance: CI green on both OSes on the first push; `cargo deny check` passes with the allow-list in `deny.toml`. (CI-green half pending: recorded by orchestrator after first push)
 
@@ -22,6 +22,7 @@ Goal: a reproducible corpus + harness that measures every claim in `docs/LitePac
 - [ ] `--private <dir>` mode: builds a manifest over the user's own folder with the same class heuristics (by extension + magic), never copies or uploads anything.
 - [ ] Derived classes are generated deterministically (edited-photo versions, backup v1/v2/v3 snapshots, small-file set).
 - Acceptance: `corpus build --profile small` completes on Windows and Linux from a clean machine (only `curl`/`git`/`ffmpeg` optional); manifest has ≥ 11 classes; second build produces a byte-identical `manifest.json`; total size for `small` is 1–2 GB, `full` 10–20 GB.
+- Note (from the P0-1 review): write `corpus.lock` to a committed path (e.g. `bench/corpus.lock`), not inside the git-ignored corpus directory, so other machines rebuild the same corpus (D-13).
 
 ### P0-3 Baseline tool runner — owner: implementer (sonnet)
 - [ ] `lpk-bench run --tools <list|all> --profile small --repeats 3`: for each class × tool × setting: compress, measure wall time, CPU time, peak RSS, output size; extract to temp; verify every file's BLAKE3 against the manifest; delete temp. Median of repeats.

@@ -28,3 +28,18 @@ fn stubs_fail_loudly_naming_the_task() {
         assert!(err.contains(task), "stderr for `{arg}` lacks {task}: {err}");
     }
 }
+
+#[test]
+fn documented_claude_md_commands_reach_the_stub_with_exit_1() {
+    let documented: [&[&str]; 3] = [
+        &["corpus", "build", "--profile", "small"],
+        &["run", "--tools", "all"],
+        &["report"],
+    ];
+    for args in documented {
+        let out = bin().args(args).output().expect("run");
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("not implemented yet"), "{args:?}: {err}");
+    }
+}

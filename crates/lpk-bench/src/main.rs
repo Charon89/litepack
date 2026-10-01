@@ -10,7 +10,7 @@
 
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "lpk-bench", version, about = "LitePack Phase 0 benchmark tool")]
@@ -19,26 +19,33 @@ struct Cli {
     command: Command,
 }
 
+/// Stub arguments: accepted and ignored until the implementing task defines the real ones.
+#[derive(Debug, Args)]
+struct StubArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    _ignored: Vec<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Build the public corpus or scan a private folder (PLAN P0-2)
-    Corpus,
+    Corpus(StubArgs),
     /// Run baseline tools over the corpus with round-trip verification (PLAN P0-3)
-    Run,
+    Run(StubArgs),
     /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate (PLAN P0-4)
-    Probe,
+    Probe(StubArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
-    Report,
+    Report(StubArgs),
 }
 
 impl Command {
     /// Subcommand name and the PLAN task that will implement it.
     fn task(&self) -> (&'static str, &'static str) {
         match self {
-            Command::Corpus => ("corpus", "P0-2"),
-            Command::Run => ("run", "P0-3"),
-            Command::Probe => ("probe", "P0-4"),
-            Command::Report => ("report", "P0-5"),
+            Command::Corpus(_) => ("corpus", "P0-2"),
+            Command::Run(_) => ("run", "P0-3"),
+            Command::Probe(_) => ("probe", "P0-4"),
+            Command::Report(_) => ("report", "P0-5"),
         }
     }
 }
@@ -67,6 +74,19 @@ mod tests {
         let help = Cli::command().render_help().to_string();
         for name in ["corpus", "run", "probe", "report"] {
             assert!(help.contains(name), "help is missing `{name}`:\n{help}");
+        }
+    }
+
+    #[test]
+    fn documented_invocations_reach_the_stub() {
+        let documented: [&[&str]; 3] = [
+            &["corpus", "build", "--profile", "small"],
+            &["run", "--tools", "all"],
+            &["report"],
+        ];
+        for args in documented {
+            let argv = std::iter::once("lpk-bench").chain(args.iter().copied());
+            assert!(Cli::try_parse_from(argv).is_ok(), "{args:?}");
         }
     }
 

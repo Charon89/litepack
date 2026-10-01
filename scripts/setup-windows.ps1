@@ -22,7 +22,10 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$vcTools = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+# Hardware architecture (12 = ARM64), read from WMI so an x64 PowerShell under emulation is not fooled.
+# The ARM64 path cannot be exercised on x64 machines; it was written but not run.
+$isArm64 = (Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture -eq 12
+$vcTools = if ($isArm64) { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
 
 function Test-Command([string]$Name) {
     [bool](Get-Command $Name -ErrorAction SilentlyContinue)
@@ -65,7 +68,7 @@ if (-not (Test-Command 'gh')) { Install-WingetPackage 'GitHub.cli' }
 # First of the slow steps so its UAC prompt appears while someone is still at the keyboard.
 if (-not (Get-MsvcInstallPath)) {
     Write-Host 'Visual Studio Build Tools: installing the C++ workload (several GB) - approve the UAC prompt.'
-    $vsArgs = '--passive --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+    $vsArgs = "--passive --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add $vcTools"
     Install-WingetPackage 'Microsoft.VisualStudio.2022.BuildTools' @('--override', $vsArgs)
 }
 
@@ -74,6 +77,8 @@ if (Test-Command 'rustup') {
     Push-Location $repoRoot
     try {
         Write-Host '==> rustup: toolchain from rust-toolchain.toml'
+        # `rustup toolchain install` with no arguments needs rustup 1.28+.
+        rustup self update
         rustup toolchain install
         # CI always builds with the newest stable; an install from months ago would lint differently.
         rustup update stable
@@ -108,7 +113,15 @@ Push-Location $repoRoot
 try {
     foreach ($name in $checks.Keys) {
         $found = $null
-        try { $found = & $checks[$name] 2>$null | Select-Object -First 1 } catch { }
+        # Windows PowerShell 5.1 turns native stderr text into a terminating error under 'Stop';
+        # run with 'Continue' and drop the error records instead of redirecting to $null.
+        $ErrorActionPreference = 'Continue'
+        try {
+            $found = & $checks[$name] 2>&1 |
+                Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+                Select-Object -First 1
+        } catch { }
+        finally { $ErrorActionPreference = 'Stop' }
         if ($found) { Write-Host ('{0,-16} {1}' -f $name, $found) }
         else { Write-Host ('{0,-16} MISSING' -f $name); $missing += $name }
     }
