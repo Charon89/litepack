@@ -45,6 +45,14 @@ No neural tier in the product (research track only). Full rationale: `docs/LiteP
 - Ask before: adding a dependency with a non-allow-listed licence, changing the corpus spec,
   changing a gate threshold, or touching anything under `docs/LitePack-Method-v2.md`.
 
+## Working across machines (D-13)
+- GitHub (`origin`) is the only shared state. Start a session with `git pull --ff-only`; push `main` when a
+  task is done and reviewed; if you stop mid-task, push the task branch and leave the task `[~]` in PLAN.md.
+- New machine: clone, then `scripts/setup-windows.ps1` (idempotent; re-run it when local and CI disagree).
+- Durable project knowledge goes in this file or `docs/`, never only in Claude's per-machine memory.
+- Nothing machine-specific in git: no absolute paths; `bench/corpus/` is rebuilt from `corpus.lock`;
+  each machine's measurements stay under their own `bench/results/<date>-<host>/`.
+
 ## Windows notes
 - Use PowerShell-safe paths; prefer `std::path` over string concatenation. Long paths: Rust std
   handles `\\?\`; tests must not assume paths < 260 chars.

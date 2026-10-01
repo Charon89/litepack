@@ -14,13 +14,18 @@ Licence: Apache-2.0 OR MIT (engine, CLI, format, benchmark harness).
 
 ## Working with Claude Code (the intended workflow)
 
-### One-time setup (Windows)
-1. Install Rust: https://rustup.rs (pick the MSVC toolchain; let it install Visual Studio Build Tools).
-2. Install Git for Windows (gives Claude Code a Bash tool) and GitHub CLI (`winget install GitHub.cli`).
-3. Install Claude Code: native installer from https://code.claude.com/docs/en/setup (or `winget install Anthropic.ClaudeCode`). It also runs inside the Claude desktop app and the VS Code / JetBrains extensions.
-4. `cargo install cargo-nextest cargo-deny` (optional locally; CI installs them).
-5. Unzip this pack into a folder, `git init`, create the GitHub repo (`gh repo create litepack --public --source . --push`).
-6. `cd` into the repo and run `claude`. It reads `CLAUDE.md` automatically.
+### Setting up a machine (Windows) — the same steps on every computer you work from
+1. Install Git for Windows (gives Claude Code a Bash tool) with `winget install Git.Git`, then
+   `git clone https://github.com/Charon89/litepack` and `cd litepack`.
+2. Run `powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1`. It is idempotent and installs whatever is
+   missing: GitHub CLI, Visual Studio 2022 Build Tools (C++ workload; one UAC prompt), rustup with the toolchain from
+   `rust-toolchain.toml`, `cargo-nextest` and `cargo-deny`. Re-run it whenever local and CI disagree.
+3. `gh auth login` once per machine (needed to push).
+4. Install Claude Code: native installer from https://code.claude.com/docs/en/setup (or `winget install Anthropic.ClaudeCode`). It also runs inside the Claude desktop app and the VS Code / JetBrains extensions.
+5. Run `claude` in the repo. It reads `CLAUDE.md` automatically.
+
+Switching computers: `git pull --ff-only` before you start, `git push` when you stop. Everything Claude needs (rules,
+plan, decisions, agents, skills) is in the repo; the benchmark corpus is rebuilt locally from `corpus.lock` (D-13).
 
 ### The loop
 - `/next-task` — picks the next unchecked task in `docs/PLAN.md`, implements it with the **implementer** subagent (fresh context, own git worktree), reviews it with the **reviewer** subagent, ticks the box with evidence. Run it again for the next task.
@@ -62,6 +67,7 @@ crates/lpk-bench/         Phase 0 tool (corpus, run, probe, report)
 bench/results/            committed JSON measurements (source of truth for every number)
 bench/reports/            generated Markdown reports
 deny.toml                 cargo-deny licence policy
+scripts/setup-windows.ps1 one-shot machine setup (build tools, Rust toolchain, cargo tools)
 .github/workflows/ci.yml  fmt · clippy · nextest · deny on Ubuntu + Windows
 ```
 
