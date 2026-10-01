@@ -12,9 +12,9 @@ Gates are decided in `docs/DECISIONS.md` (D-07). Phase 1 does **not** start unti
 Goal: a reproducible corpus + harness that measures every claim in `docs/LitePack-Method-v2.md` §5 against real tools, and a GO/NO-GO report.
 
 ### P0-1 Repository bootstrap — owner: implementer (sonnet)
-- [ ] Cargo workspace with `crates/lpk-bench` (binary, clap CLI), `rust-toolchain.toml` (stable), `deny.toml`, `.gitignore`, `LICENSE-MIT`, `LICENSE-APACHE` (fetch canonical text from https://www.apache.org/licenses/LICENSE-2.0.txt), `README.md`.
-- [ ] CI: `.github/workflows/ci.yml` runs fmt, clippy `-D warnings`, nextest, `cargo deny check` on `ubuntu-24.04` and `windows-2025`.
-- [ ] `cargo run -p lpk-bench -- --help` prints the subcommands `corpus`, `run`, `probe`, `report`.
+- [~] Cargo workspace with `crates/lpk-bench` (binary, clap CLI), `rust-toolchain.toml` (stable), `deny.toml`, `.gitignore`, `LICENSE-MIT`, `LICENSE-APACHE` (fetch canonical text from https://www.apache.org/licenses/LICENSE-2.0.txt), `README.md`.
+- [~] CI: `.github/workflows/ci.yml` runs fmt, clippy `-D warnings`, nextest, `cargo deny check` on `ubuntu-24.04` and `windows-2025`.
+- [~] `cargo run -p lpk-bench -- --help` prints the subcommands `corpus`, `run`, `probe`, `report`.
 - Acceptance: CI green on both OSes on the first push; `cargo deny check` passes with the allow-list in `deny.toml`.
 
 ### P0-2 Corpus specification and builder — owner: implementer (sonnet); spec review: reviewer (opus)
