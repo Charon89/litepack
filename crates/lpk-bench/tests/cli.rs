@@ -93,7 +93,7 @@ fn help_prints_subcommands() {
 
 #[test]
 fn stubs_fail_loudly_naming_the_task() {
-    for (arg, task) in [("run", "P0-3"), ("probe", "P0-4"), ("report", "P0-5")] {
+    for (arg, task) in [("probe", "P0-4"), ("report", "P0-5")] {
         let out = bin().arg(arg).output().expect("run");
         assert!(!out.status.success(), "`{arg}` stub must exit non-zero");
         let err = String::from_utf8_lossy(&out.stderr);
@@ -150,7 +150,7 @@ fn corpus_build_with_missing_registry_fails_cleanly() {
 
 #[test]
 fn documented_claude_md_commands_reach_the_stub_with_exit_1() {
-    let documented: [&[&str]; 2] = [&["run", "--tools", "all"], &["report"]];
+    let documented: [&[&str]; 1] = [&["report"]];
     for args in documented {
         let out = bin().args(args).output().expect("run");
         assert_eq!(out.status.code(), Some(1), "{args:?}");

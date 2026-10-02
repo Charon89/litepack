@@ -3,7 +3,10 @@
 //! ```text
 //! lpk-bench run --list-tools [--tools a,b] [--catalogue FILE] [--local FILE]
 //! lpk-bench run --validate <results-dir>
-//! lpk-bench run --tools <list|all> ...        (the measuring loop: not implemented yet)
+//! lpk-bench run --tools <list|all> --profile <small|full> [--corpus DIR] [--classes a,b]
+//!               [--repeats N] [--threads N] [--timeout-s N] [--results DIR] [--tmp DIR]
+//!               [--allow-dirty-build]                    (the measuring loop, [`exec`])
+//! lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]   ([`compare`])
 //! ```
 //!
 //! * [`catalogue`]: `bench/tools.toml` and the untracked `bench/tools.local.toml`.
@@ -18,10 +21,10 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 
 pub mod catalogue;
+pub mod compare;
 pub mod discover;
-#[allow(dead_code)] // consumed by the run loop (next sub-task)
+pub mod exec;
 pub mod host;
-#[allow(dead_code)] // consumed by the run loop (next sub-task)
 pub mod result;
 pub mod validate;
 
@@ -41,12 +44,39 @@ pub struct RunArgs {
     /// Validate a results directory against bench/results/schema.json and exit
     #[arg(long, value_name = "DIR")]
     pub validate: Option<PathBuf>,
-    /// Corpus profile (the measuring loop is not implemented yet)
+    /// Corpus profile, `small` or `full`: selects bench/corpus/<profile> (default: small)
     #[arg(long)]
     pub profile: Option<String>,
-    /// Repeats per measurement (the measuring loop is not implemented yet)
+    /// Corpus directory holding manifest.json (default: bench/corpus/<profile>)
+    #[arg(long, value_name = "DIR")]
+    pub corpus: Option<PathBuf>,
+    /// Only these corpus classes, comma-separated (default: every class of the manifest)
+    #[arg(long, value_delimiter = ',')]
+    pub classes: Vec<String>,
+    /// Repeats per combination (default: 3)
     #[arg(long)]
     pub repeats: Option<u32>,
+    /// Thread count given to every tool (default: the machine's logical cores)
+    #[arg(long)]
+    pub threads: Option<u32>,
+    /// Timeout of every compress or extract step, in seconds
+    #[arg(long, value_name = "SECONDS", default_value_t = 3600)]
+    pub timeout_s: u64,
+    /// Where result directories are created
+    #[arg(long, value_name = "DIR", default_value = "bench/results")]
+    pub results: PathBuf,
+    /// Where temporary files go (on the same volume as the corpus)
+    #[arg(long, value_name = "DIR", default_value = "bench/tmp")]
+    pub tmp: PathBuf,
+    /// Write results from a dirty or unknown build (recorded in host.json)
+    #[arg(long)]
+    pub allow_dirty_build: bool,
+    /// Compare two result directories of the same corpus and exit
+    #[arg(long, num_args = 2, value_names = ["DIR_A", "DIR_B"])]
+    pub compare: Vec<PathBuf>,
+    /// Largest accepted time difference for --compare, in percent
+    #[arg(long, value_name = "PERCENT", default_value_t = compare::DEFAULT_MAX_DIFF_PCT)]
+    pub max_diff_pct: f64,
     /// Tool catalogue
     #[arg(long, value_name = "FILE", default_value = DEFAULT_CATALOGUE)]
     pub catalogue: PathBuf,
@@ -136,16 +166,14 @@ pub fn run(args: RunArgs) -> ExitCode {
         };
     }
     let result = if args.list_tools {
-        list_tools(&args)
+        list_tools(&args).map(|()| ExitCode::SUCCESS)
+    } else if let [a, b] = args.compare.as_slice() {
+        compare::compare_command(a, b, args.max_diff_pct)
     } else {
-        eprintln!(
-            "error: `lpk-bench run` (measuring) is not implemented yet (PLAN task P0-3); \
-             no measurement was made. Available: --list-tools, --validate <dir>"
-        );
-        return ExitCode::FAILURE;
+        exec::measure_command(&args)
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e:#}");
             ExitCode::FAILURE

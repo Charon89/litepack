@@ -21,6 +21,58 @@ Check a results directory against `bench/results/schema.json`:
 cargo run -p lpk-bench -- run --validate bench/results/<date>-<host>
 ```
 
+## Measuring
+
+```text
+cargo run -p lpk-bench -- run --tools all --profile small [--corpus DIR] [--classes a,b]
+    [--repeats 3] [--threads N] [--timeout-s N] [--results DIR] [--tmp DIR] [--allow-dirty-build]
+cargo run -p lpk-bench -- run --compare <dirA> <dirB> [--max-diff-pct 3]
+```
+
+The defaults are the corpus `bench/corpus/<profile>`, three repeats, the machine's logical cores as
+the thread count, results in a new `bench/results/<date>-<host>[-<n>]/` and temporary files under
+`bench/tmp/<run>/`, which must be on the same volume as the corpus. The run refuses a build that
+is dirty or of unknown origin unless `--allow-dirty-build` is given (recorded in `host.json`).
+It exits non-zero when any combination failed or the written directory does not validate.
+
+How a combination is measured:
+
+- Before any timing for a class, every input file is read once and its BLAKE3 compared with the
+  manifest; a mismatch aborts the run and names the file.
+- Each tool runs through `lpk-procstat-sys`, never through a shell, in the parent of the class
+  directory (the corpus root for a private corpus) with relative paths. Tools are measured with
+  their output redirected, no progress display and no console, so every catalogue command line
+  pins the tool's assume-yes and quiet switches; nothing may wait for a keypress.
+- Tool-configuration environment variables are removed from the child (`XZ_OPT`, `XZ_DEFAULTS`,
+  `ZSTD_CLEVEL`, `ZSTD_NBTHREADS`, `GZIP`, `RAR`, `TAR_OPTIONS`, `TAR_READER_OPTIONS`,
+  `TAR_WRITER_OPTIONS`, `TAPE`); the names are recorded in every result's `measurement` object.
+  Configuration files (for example `Rar.ini`) are not touched.
+- Tar-stream tools (zstd, xz) run in two sequential steps through a temporary file, never
+  concurrently: tar writes the stream to a temporary tar file, then the compressor reads that file
+  on its standard input and writes the archive; extraction is the decompressor writing a temporary
+  tar, then tar extracting it. The published time is the sum of the two steps (each is also
+  recorded as `tar_step` and `tool_step`), the published peak memory the larger of the two. The tar
+  is the one the `store` tool resolved to. If a bsdtar step is ever flagged `descendants_killed`,
+  tar started an external helper program: that is an adapter problem to report, not a tool fault.
+- Every repeat compresses, extracts into an empty directory and verifies: each manifest file of the
+  class must exist in the extraction with the same BLAKE3 and nothing else may be there. Tool
+  output is never parsed (file names differ by code page); only the hashes decide.
+- A combination fails, and is recorded as `failed` with the reason, when a step exits non-zero,
+  times out, leaves descendants running, the archive is missing or empty, or verification finds a
+  missing, extra or different file. A failed combination carries no median and the run goes on.
+  The repeats completed before the failure stay in the file.
+- Medians are taken over the repeats for every measure.
+- A private corpus (`corpus scan --private`) is supported for tools that take a list of files
+  (`create_list` in the catalogue: tar, 7-Zip, WinRAR); the others are recorded as skipped with
+  the reason. Their results carry `private: true`.
+
+`--compare` prints, for each tool and setting present in both directories, the sum over classes of
+the median compress and of the median extract wall time, and the percentage difference
+(`|B - A| / A`). It exits non-zero when a difference exceeds `--max-diff-pct` or when the two
+directories differ in corpus, tool versions or thread count, or measured different classes, or a
+combination was measured in only one of them. This is the check behind the acceptance clause
+"a second run differs by < 3% in time".
+
 ## How a tool is found
 
 1. The `path` of its entry in `bench/tools.local.toml` (untracked), if present.

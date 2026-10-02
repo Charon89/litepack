@@ -26,5 +26,15 @@ environment dumps.
   its manifest hash, the thread count, every repeat and the medians, and whether every extracted
   file verified.
 - A combination that was skipped has a result file with the reason and no measurements.
+- A combination that ran and failed (non-zero exit, timeout, killed descendants, missing or empty
+  archive, or a missing, extra or different file after extraction) has a result file with a
+  `failed` object (reason, step, repeat, `timed_out`, `descendants_killed`), no median, and the
+  repeats completed before the failure. Every measure also records `timed_out` and
+  `descendants_killed`; the validator rejects a median or `verified: true` next to a failed,
+  timed-out or descendant-killing repeat.
+- `measurement.env_stripped` lists the names of the environment variables removed from the tools'
+  environment. Results from a private corpus carry `"private": true`.
+- Make a run with `lpk-bench run --tools all --profile small`; compare two runs of the same corpus
+  with `lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]`.
 - Check a directory, or this whole folder, with
   `cargo run -p lpk-bench -- run --validate bench/results` (or one `<date>-<host>` directory).
