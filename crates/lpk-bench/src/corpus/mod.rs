@@ -69,7 +69,8 @@
 //! manifest BLAKE3, `skipped`).
 //! * `build-info.json` also holds `accounting` (per source: files extraction produced versus files
 //!   that still exist with the right size when the manifest is written; the missing ones, e.g.
-//!   quarantined by antivirus, are listed, left out of the manifest and do not fail the build)
+//!   quarantined by antivirus, or changed in place (the bytes on disk are re-hashed), are
+//!   listed, left out of the manifest and do not fail the build)
 //!   and `summary` (files and bytes per class and in total), which the build also prints.
 //! * `<out>` is owned by the tool through a `.lpk-corpus` marker written on first use. A
 //!   non-empty directory without the marker is an error and is never modified. The cache must
@@ -263,6 +264,9 @@ pub fn run(args: CorpusArgs) -> ExitCode {
                     );
                     for p in &r.missing {
                         println!("missing after extraction (not in the manifest): {p}");
+                    }
+                    for p in &r.altered {
+                        println!("altered after extraction (not in the manifest): {p}");
                     }
                     for s in &r.skipped {
                         println!("skipped {}: {}", s.source, s.reason);

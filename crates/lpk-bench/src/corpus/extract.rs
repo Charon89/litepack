@@ -43,10 +43,18 @@ pub struct Selection {
     pub single_name: Option<String>,
     /// tar: skip link entries instead of rejecting the archive.
     pub skip_links: bool,
+    /// Ceiling for the bytes one source may extract: the sum of the (truncated) sizes of the
+    /// selected entries is checked before anything is written, and a stream of undeclared size
+    /// (`gz`) is cut off with an error at this many bytes.
+    pub ceiling: u64,
 }
 
-/// Upper bound for a stream whose size is not declared (guards against decompression bombs).
-const UNDECLARED_LIMIT: u64 = 16 << 30;
+/// Default per-source extraction ceiling; sources that legitimately extract more set
+/// `max_extracted_bytes` in the registry.
+pub const DEFAULT_CEILING: u64 = 2 << 30;
+
+/// Largest LZMA/LZMA2 dictionary a 7z archive may ask the decoder to allocate.
+pub const MAX_7Z_DICTIONARY: u64 = 1 << 30;
 
 impl Selection {
     pub fn new(
@@ -66,6 +74,7 @@ impl Selection {
             truncate: None,
             single_name: None,
             skip_links: false,
+            ceiling: DEFAULT_CEILING,
         })
     }
 
@@ -82,6 +91,7 @@ impl Selection {
             truncate: None,
             single_name: None,
             skip_links: false,
+            ceiling: DEFAULT_CEILING,
         }
     }
 }
@@ -272,6 +282,7 @@ fn write_entry(
     reader: &mut dyn Read,
     declared: Option<u64>,
     truncate: Option<u64>,
+    ceiling: u64,
 ) -> Result<Extracted> {
     let mut dest = target.to_path_buf();
     for comp in rel.split('/') {
@@ -294,7 +305,7 @@ fn write_entry(
         (Some(d), Some(t)) => d.min(t),
         (Some(d), None) => d,
         (None, Some(t)) => t,
-        (None, None) => UNDECLARED_LIMIT,
+        (None, None) => ceiling,
     };
     let mut hasher = blake3::Hasher::new();
     let mut limited = reader.take(read_max.saturating_add(1));
@@ -327,8 +338,8 @@ fn write_entry(
                 "entry `{rel}` has {total} bytes but declares {d}"
             ),
             None => ensure!(
-                total <= UNDECLARED_LIMIT,
-                "entry `{rel}` is larger than {UNDECLARED_LIMIT} bytes"
+                total <= ceiling,
+                "entry `{rel}` is larger than {ceiling} bytes"
             ),
         }
         return Ok(Extracted {
@@ -355,6 +366,46 @@ fn write_entry(
     })
 }
 
+/// Refuse a selection whose (truncated) sizes add up to more than the source ceiling, before
+/// anything is written.
+fn ensure_ceiling(picked: &[Candidate], sel: &Selection) -> Result<()> {
+    let total = picked.iter().fold(0u64, |t, c| {
+        t.saturating_add(sel.truncate.map_or(c.size, |x| c.size.min(x)))
+    });
+    ensure!(
+        total <= sel.ceiling,
+        "the selected entries declare {total} bytes, above the per-source ceiling of {} bytes \
+         (raise `max_extracted_bytes` or narrow the selection)",
+        sel.ceiling
+    );
+    Ok(())
+}
+
+/// Reject an LZMA or LZMA2 coder whose dictionary is larger than `bound` bytes (a crafted
+/// header could otherwise make the decoder allocate gigabytes). Other coders pass.
+pub fn check_7z_coder(method: &[u8], props: &[u8], bound: u64) -> Result<()> {
+    let dict = match (method, props) {
+        ([0x03, 0x01, 0x01], [_, a, b, c, d, ..]) => {
+            u64::from(u32::from_le_bytes([*a, *b, *c, *d]))
+        }
+        ([0x21], [b]) if *b <= 40 => {
+            if *b == 40 {
+                u64::from(u32::MAX)
+            } else {
+                (2 | u64::from(b & 1)) << (b / 2 + 11)
+            }
+        }
+        ([0x21], _) => bail!("invalid LZMA2 properties"),
+        ([0x03, 0x01, 0x01], _) => bail!("invalid LZMA properties"),
+        _ => return Ok(()),
+    };
+    ensure!(
+        dict <= bound,
+        "7z coder asks for a {dict}-byte dictionary, above the {bound}-byte limit"
+    );
+    Ok(())
+}
+
 fn extract_zip(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Extracted>> {
     let file = File::open(archive)?;
     let mut za = zip::ZipArchive::new(BufReader::new(file)).context("not a readable zip")?;
@@ -378,7 +429,9 @@ fn extract_zip(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Ext
         lister.add(&name, e.size(), i, sel.strip_components)?;
     }
     let mut written = Vec::new();
-    for c in pick(lister.cands, sel) {
+    let picked = pick(lister.cands, sel);
+    ensure_ceiling(&picked, sel)?;
+    for c in picked {
         let mut e = za
             .by_index(c.ordinal)
             .with_context(|| format!("zip entry `{}`", c.path))?;
@@ -388,6 +441,7 @@ fn extract_zip(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Ext
             &mut e,
             Some(c.size),
             sel.truncate,
+            sel.ceiling,
         )?);
     }
     Ok(written)
@@ -430,6 +484,7 @@ fn extract_tar_gz(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<
     std::io::copy(&mut tar.into_inner(), &mut std::io::sink())
         .context("truncated or corrupt gzip stream")?;
     let picked = pick(lister.cands, sel);
+    ensure_ceiling(&picked, sel)?;
     let by_ordinal: std::collections::BTreeMap<usize, &Candidate> =
         picked.iter().map(|c| (c.ordinal, c)).collect();
     // Pass 2: extract the selected entries.
@@ -444,6 +499,7 @@ fn extract_tar_gz(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<
                     &mut entry,
                     Some(c.size),
                     sel.truncate,
+                    sel.ceiling,
                 )?);
             }
         }
@@ -525,6 +581,15 @@ fn extract_7z(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Extr
     let mut reader = ArchiveReader::new(OffsetReader { inner: file, base }, Password::empty())
         .context("not a readable 7z archive")?;
 
+    for block in &reader.archive().blocks {
+        for coder in &block.coders {
+            check_7z_coder(
+                coder.encoder_method_id(),
+                coder.properties(),
+                MAX_7Z_DICTIONARY,
+            )?;
+        }
+    }
     let mut lister = Lister::default();
     for (i, e) in reader.archive().files.iter().enumerate() {
         let name = e.name();
@@ -550,6 +615,7 @@ fn extract_7z(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Extr
         lister.add(name, e.size(), i, sel.strip_components)?;
     }
     let picked = pick(lister.cands, sel);
+    ensure_ceiling(&picked, sel)?;
     // Entries are decoded in archive order (solid blocks cannot be skipped into), so map the
     // raw names to their candidates and drain everything that is not (fully) read.
     let wanted: std::collections::HashMap<String, &Candidate> = picked
@@ -566,7 +632,14 @@ fn extract_7z(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Extr
     let mut failure: Option<anyhow::Error> = None;
     let result = reader.for_each_entries(|entry, data| {
         if let Some(c) = wanted.get(entry.name()) {
-            match write_entry(target, &c.path, data, Some(c.size), sel.truncate) {
+            match write_entry(
+                target,
+                &c.path,
+                data,
+                Some(c.size),
+                sel.truncate,
+                sel.ceiling,
+            ) {
                 Ok(x) => written.push(x),
                 Err(e) => {
                     failure = Some(e);
@@ -602,8 +675,15 @@ fn extract_gz(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Extr
         "output name `{name}` must be one component"
     );
     let mut decoder = flate2::read::MultiGzDecoder::new(BufReader::new(File::open(archive)?));
-    let one = write_entry(target, &comps[0], &mut decoder, None, sel.truncate)
-        .context("not a readable gzip stream")?;
+    let one = write_entry(
+        target,
+        &comps[0],
+        &mut decoder,
+        None,
+        sel.truncate,
+        sel.ceiling,
+    )
+    .context("not a readable gzip stream")?;
     Ok(vec![one])
 }
 
@@ -1137,5 +1217,136 @@ mod tests {
             run(ArchiveFormat::TarGz, &evil, &sel).1.is_err(),
             "names still validated"
         );
+    }
+
+    fn sevenz_with(entries: Vec<(sevenz_rust2::ArchiveEntry, &'static [u8])>) -> Vec<u8> {
+        let mut w = sevenz_rust2::ArchiveWriter::new(Cursor::new(Vec::new())).expect("7z writer");
+        for (e, data) in entries {
+            w.push_archive_entry(e, Some(Cursor::new(data.to_vec())))
+                .expect("push");
+        }
+        w.finish().expect("finish").into_inner()
+    }
+
+    fn entry_with_attrs(name: &str, attrs: u32) -> sevenz_rust2::ArchiveEntry {
+        let mut e = sevenz_rust2::ArchiveEntry::new_file(name);
+        e.has_windows_attributes = true;
+        e.windows_attributes = attrs;
+        e
+    }
+
+    #[test]
+    fn sevenz_special_entries_and_unsafe_names_are_rejected() {
+        let ok = entry_with_attrs("ok.txt", 0x20);
+        let cases: Vec<(&str, sevenz_rust2::ArchiveEntry)> = vec![
+            ("reparse point", entry_with_attrs("link", 0x400)),
+            (
+                "unix symlink",
+                entry_with_attrs("link", 0x8000 | (0o120_777 << 16)),
+            ),
+            (
+                "unix fifo",
+                entry_with_attrs("pipe", 0x8000 | (0o010_644 << 16)),
+            ),
+            (
+                "unix char device",
+                entry_with_attrs("dev", 0x8000 | (0o020_644 << 16)),
+            ),
+            ("traversal", entry_with_attrs("../x", 0x20)),
+            ("nested traversal", entry_with_attrs("a/../../x", 0x20)),
+            ("absolute", entry_with_attrs("/abs", 0x20)),
+            ("reserved name", entry_with_attrs("NUL", 0x20)),
+            ("reserved with dir", entry_with_attrs("d/aux.txt", 0x20)),
+            ("drive", entry_with_attrs("C:/x", 0x20)),
+        ];
+        for (what, bad) in cases {
+            let z = sevenz_with(vec![(ok.clone(), b"fine"), (bad, b"x")]);
+            let (dir, r) = run(ArchiveFormat::SevenZ, &z, &Selection::all());
+            assert!(r.is_err(), "{what} must be rejected");
+            assert!(!dir.path().join("evil").exists());
+            assert!(!dir.path().join("x").exists(), "{what}");
+        }
+        // A regular Unix file mode is fine, and an anti-item is not.
+        let regular = entry_with_attrs("reg.txt", 0x8000 | (0o100_644 << 16));
+        let z = sevenz_with(vec![(regular, b"fine")]);
+        assert!(run(ArchiveFormat::SevenZ, &z, &Selection::all()).1.is_ok());
+        let mut anti = sevenz_rust2::ArchiveEntry::new_file("gone.txt");
+        anti.is_anti_item = true;
+        let mut w = sevenz_rust2::ArchiveWriter::new(Cursor::new(Vec::new())).expect("7z writer");
+        w.push_archive_entry(anti, None::<Cursor<Vec<u8>>>)
+            .expect("push");
+        let z = w.finish().expect("finish").into_inner();
+        let err = run(ArchiveFormat::SevenZ, &z, &Selection::all())
+            .1
+            .expect_err("anti-item");
+        assert!(format!("{err:#}").contains("anti-item"), "{err:#}");
+    }
+
+    #[test]
+    fn extraction_ceiling_is_checked_before_writing_and_applies_to_gz() {
+        let z = zip_bytes(&[
+            ("a", &[1u8; 10][..]),
+            ("b", &[2u8; 10][..]),
+            ("c", &[3u8; 10][..]),
+        ]);
+        let mut sel = Selection::all();
+        sel.ceiling = 25;
+        let (dir, r) = run(ArchiveFormat::Zip, &z, &sel);
+        let err = r.expect_err("30 declared bytes exceed 25");
+        assert!(format!("{err:#}").contains("ceiling"), "{err:#}");
+        assert!(
+            std::fs::read_dir(dir.path().join("out"))
+                .expect("dir")
+                .next()
+                .is_none(),
+            "nothing may be written"
+        );
+        sel.ceiling = 30;
+        assert!(run(ArchiveFormat::Zip, &z, &sel).1.is_ok());
+        // Truncated sizes are what counts.
+        sel.ceiling = 15;
+        sel.truncate = Some(5);
+        assert!(run(ArchiveFormat::Zip, &z, &sel).1.is_ok());
+        // tar and 7z take the same check.
+        let t = tar_gz_bytes(&[("a", tar::EntryType::Regular, &[1u8; 20], "")]);
+        let mut sel = Selection::all();
+        sel.ceiling = 10;
+        assert!(run(ArchiveFormat::TarGz, &t, &sel).1.is_err());
+        let z7 = sevenz_bytes(&[("a", &[1u8; 20])]);
+        assert!(run(ArchiveFormat::SevenZ, &z7, &sel).1.is_err());
+        // A gzip bomb stops at the ceiling instead of filling the disk.
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        e.write_all(&vec![0u8; 100_000]).expect("gz");
+        let bomb = e.finish().expect("finish");
+        let mut sel = Selection::all();
+        sel.single_name = Some("bomb.bin".into());
+        sel.ceiling = 1000;
+        let (dir, r) = run(ArchiveFormat::Gz, &bomb, &sel);
+        assert!(r.is_err());
+        let written = std::fs::metadata(dir.path().join("out/bomb.bin")).map_or(0, |m| m.len());
+        assert!(written <= 1001, "wrote {written} bytes before stopping");
+        sel.ceiling = 100_000;
+        assert!(run(ArchiveFormat::Gz, &bomb, &sel).1.is_ok());
+    }
+
+    #[test]
+    fn sevenz_dictionary_bound() {
+        let bound = 1 << 20;
+        // LZMA: props byte then dictionary size LE.
+        assert!(check_7z_coder(&[3, 1, 1], &[0x5D, 0, 0, 0x10, 0], bound).is_ok());
+        assert!(check_7z_coder(&[3, 1, 1], &[0x5D, 0, 0, 0x20, 0], bound).is_err());
+        // LZMA2: byte 18 is 2 MiB... (2 | 0) << (9 + 11) = 2 MiB, byte 16 is 1 MiB.
+        assert!(check_7z_coder(&[0x21], &[16], bound).is_ok());
+        assert!(check_7z_coder(&[0x21], &[17], bound).is_err());
+        assert!(check_7z_coder(&[0x21], &[40], bound).is_err());
+        assert!(check_7z_coder(&[0x21], &[41], bound).is_err());
+        assert!(check_7z_coder(&[0x21], &[], bound).is_err());
+        assert!(
+            check_7z_coder(&[0x03, 0x03, 0x01, 0x03], &[], bound).is_ok(),
+            "other coders pass"
+        );
+        // The real archives the corpus uses stay far below the production bound.
+        let z = sevenz_bytes(&[("a", b"x")]);
+        assert!(run(ArchiveFormat::SevenZ, &z, &Selection::all()).1.is_ok());
     }
 }

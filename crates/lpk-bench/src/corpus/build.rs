@@ -70,6 +70,8 @@ pub struct BuildReport {
     pub partial: bool,
     /// Files that extraction produced but that were gone when the manifest was written.
     pub missing: Vec<String>,
+    /// Files whose bytes on disk no longer matched the extraction-time hash.
+    pub altered: Vec<String>,
     /// Files and bytes per class and in total.
     pub summary: Summary,
 }
@@ -491,8 +493,15 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         .iter()
         .flat_map(|a| a.missing.iter().cloned())
         .collect();
+    let altered: Vec<String> = accounting
+        .iter()
+        .flat_map(|a| a.altered.iter().cloned())
+        .collect();
     for m in &missing {
         eprintln!("missing after extraction (not in the manifest): {m}");
+    }
+    for m in &altered {
+        eprintln!("altered after extraction (not in the manifest, will be removed): {m}");
     }
     let manifest = Manifest::new(opts.profile, found);
     let summary = Summary::of(&manifest);
@@ -539,43 +548,59 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         unused_pins,
         partial,
         missing,
+        altered,
         summary,
     })
 }
 
 /// Expected-versus-found accounting (D-14): keep the produced files that still exist below
-/// `out` with their recorded size, and report per source what is gone. `expected` lists
-/// `(source, class, files produced)` for every built source, in build order.
+/// `out` with the recorded size *and* hash (the bytes on disk are re-hashed, so antivirus that
+/// cleans a file in place without changing its length is caught), and report per source what is
+/// gone or altered. Altered files stay on disk but out of the manifest, so a full build's
+/// clean-up removes them. `expected` lists `(source, class, files produced)` for every built
+/// source, in build order.
 fn account_for(
     out: &Path,
     produced: Vec<(String, ManifestFile)>,
     expected: &[(String, String, u64)],
 ) -> (Vec<(String, ManifestFile)>, Vec<SourceAccount>) {
     let mut missing: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut altered: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut found = Vec::with_capacity(produced.len());
     for (class, file) in produced {
         let mut path = out.to_path_buf();
         path.extend(file.path.split('/'));
-        let intact = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == file.bytes);
-        if intact {
-            found.push((class, file));
-        } else {
-            missing
+        match std::fs::metadata(&path) {
+            Ok(m) if m.is_file() && m.len() == file.bytes => match super::fetch::hash_file(&path) {
+                Ok((_, h)) if h == file.blake3 => found.push((class, file)),
+                _ => altered
+                    .entry(file.source.clone())
+                    .or_default()
+                    .push(file.path),
+            },
+            Ok(m) if m.is_file() => altered
                 .entry(file.source.clone())
                 .or_default()
-                .push(file.path);
+                .push(file.path),
+            _ => missing
+                .entry(file.source.clone())
+                .or_default()
+                .push(file.path),
         }
     }
     let accounts = expected
         .iter()
         .map(|(source, class, n)| {
             let mut gone = missing.remove(source).unwrap_or_default();
+            let mut changed = altered.remove(source).unwrap_or_default();
             gone.sort();
+            changed.sort();
             SourceAccount {
                 class: class.clone(),
                 expected: *n,
-                found: n.saturating_sub(gone.len() as u64),
+                found: n.saturating_sub((gone.len() + changed.len()) as u64),
                 missing: gone,
+                altered: changed,
                 source: source.clone(),
             }
         })
@@ -615,6 +640,9 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
             )?;
             sel.truncate = spec.truncate_files;
             sel.skip_links = spec.skip_links;
+            if let Some(max) = spec.max_extracted_bytes {
+                sel.ceiling = max;
+            }
             if format == ArchiveFormat::Gz {
                 sel.single_name = Some(gz_output_name(&spec.url)?);
             }
@@ -1389,8 +1417,46 @@ files = [
         let (found, accounts) = account_for(&env.root.join("out"), produced, &expected);
         let pack = &accounts[0];
         assert_eq!((pack.expected, pack.found), (2, 0));
-        assert_eq!(pack.missing, ["beta/pack/a.txt", "beta/pack/z/last.txt"]);
+        assert_eq!(pack.missing, ["beta/pack/a.txt"]);
+        assert_eq!(
+            pack.altered,
+            ["beta/pack/z/last.txt"],
+            "different size is altered"
+        );
         assert_eq!((accounts[1].expected, accounts[1].found), (1, 1));
         assert!(found.iter().all(|(_, f)| f.source != "pack"));
+    }
+
+    #[test]
+    fn same_length_in_place_changes_are_altered_and_dropped_from_the_manifest() {
+        let env = Env::new(false);
+        build(&env.opts("out", true), &env.fetcher).expect("build");
+        let full = env.manifest("out");
+        // Same length, different bytes, as an antivirus clean-up could leave behind.
+        std::fs::write(env.root.join("out/beta/pack/a.txt"), b"FIRST!").expect("tamper");
+        let report = build(&env.opts("out2", false), &env.fetcher).expect("rebuild is clean");
+        assert_eq!(env.manifest("out2"), full, "a fresh build is unaffected");
+        assert!(report.altered.is_empty());
+
+        let m: Manifest = serde_json::from_str(&full).expect("json");
+        let produced: Vec<(String, ManifestFile)> = m
+            .classes
+            .iter()
+            .flat_map(|(c, e)| e.files.iter().map(move |f| (c.clone(), f.clone())))
+            .collect();
+        let expected = [
+            ("pack".to_string(), "beta".to_string(), 2),
+            ("blob".to_string(), "alpha".to_string(), 1),
+        ];
+        let (found, accounts) = account_for(&env.root.join("out"), produced, &expected);
+        assert_eq!(accounts[0].altered, ["beta/pack/a.txt"]);
+        assert!(accounts[0].missing.is_empty());
+        assert_eq!((accounts[0].expected, accounts[0].found), (2, 1));
+        assert!(found.iter().all(|(_, f)| f.path != "beta/pack/a.txt"));
+        // Unlisted files are removed by a full build's clean-up.
+        let listed: BTreeSet<String> = found.iter().map(|(_, f)| f.path.clone()).collect();
+        let removed = clean_unlisted(&env.root.join("out"), &listed).expect("clean");
+        assert!(removed.contains(&"beta/pack/a.txt".to_string()));
+        assert!(!env.root.join("out/beta/pack/a.txt").exists());
     }
 }

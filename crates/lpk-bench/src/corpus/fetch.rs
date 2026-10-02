@@ -21,6 +21,9 @@ pub enum FetchError {
     },
     /// Not worth retrying (404, 403, bad URL, ...).
     Permanent(String),
+    /// The partial file cannot be continued (416, or a `206` that is not exactly the rest of
+    /// the file): the downloader must request again from zero, through its politeness wait.
+    Restart,
 }
 
 /// Source of bytes for a URL. Tests implement this over memory; production uses [`HttpFetcher`].
@@ -117,7 +120,7 @@ impl Fetcher for HttpFetcher {
             drop(resp);
             if offset > 0 {
                 // A range that is not exactly the rest of the file: start over.
-                return self.open(url, 0, None);
+                return Err(FetchError::Restart);
             }
             return Err(FetchError::Permanent(
                 "server sent a partial response to a plain request".to_string(),
@@ -125,7 +128,7 @@ impl Fetcher for HttpFetcher {
         }
         if status.as_u16() == 416 && offset > 0 {
             // The partial file is not usable for this resource; start over.
-            return self.open(url, 0, None);
+            return Err(FetchError::Restart);
         }
         if status.is_success() {
             return Ok(Opened {
@@ -469,6 +472,7 @@ impl<'a> Downloader<'a> {
         let _ = std::fs::remove_file(part);
         let mut attempt = 1;
         let mut validator: Option<String> = None;
+        let mut restarts = 0u32;
         loop {
             self.politeness.wait(url);
             let outcome = self.try_once(url, part, &mut validator, pinned);
@@ -477,6 +481,17 @@ impl<'a> Downloader<'a> {
                 Ok(r) => return Ok(r),
                 Err(AttemptError::Local(e)) => {
                     return Err(DownloadError::Io(format!("source `{source}`: {e}")))
+                }
+                Err(AttemptError::Fetch(FetchError::Restart)) => {
+                    restarts += 1;
+                    if restarts > 3 {
+                        return Err(DownloadError::Fetch(format!(
+                            "source `{source}`: {url}: the server keeps refusing to resume"
+                        )));
+                    }
+                    // Discard the partial file; the next loop pass waits like any request.
+                    let _ = std::fs::remove_file(part);
+                    validator = None;
                 }
                 Err(AttemptError::Fetch(FetchError::Permanent(m))) => {
                     return Err(DownloadError::Fetch(format!(
@@ -622,6 +637,8 @@ pub mod fake {
         pub validator: RefCell<Option<String>>,
         /// `if_range` argument of every `open` call.
         pub if_ranges: RefCell<Vec<Option<String>>>,
+        /// Answer every ranged request (`offset > 0`) with a restart signal.
+        pub restart_on_resume: Cell<bool>,
         /// Change the validator when a cut-off response is produced (the file "changed").
         pub rotate_on_cut: Cell<bool>,
     }
@@ -664,6 +681,9 @@ pub mod fake {
             self.if_ranges
                 .borrow_mut()
                 .push(if_range.map(str::to_string));
+            if offset > 0 && self.restart_on_resume.get() {
+                return Err(FetchError::Restart);
+            }
             if self.fail_first.get() > 0 {
                 self.fail_first.set(self.fail_first.get() - 1);
                 return Err(FetchError::Transient {
@@ -1025,5 +1045,41 @@ mod tests {
             Some("slow.example".into())
         );
         assert_eq!(host_of("http://nope/"), None);
+    }
+
+    #[test]
+    fn restart_after_a_bad_range_goes_through_the_politeness_wait() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(3000).collect();
+        let url = "https://polite.example/a.bin";
+        let f = FakeFetcher::with(url, data.clone());
+        f.restart_on_resume.set(true);
+        f.cut_next_after.set(Some(500));
+        let hosts = BTreeMap::from([(
+            "polite.example".to_string(),
+            HostPolicy {
+                min_interval: Duration::from_millis(100),
+                max_bytes_per_s: None,
+            },
+        )]);
+        let dir = tempfile::tempdir().expect("tmp");
+        let d = dl(&f, dir.path()).with_politeness(Politeness::new(hosts));
+        let pin = LockEntry::artifact(
+            "s",
+            url,
+            data.len() as u64,
+            blake3::hash(&data).to_hex().to_string(),
+        );
+        let t = Instant::now();
+        let a = d.obtain("s", url, Expect::Pinned(&pin)).expect("obtain");
+        assert_eq!(
+            *f.offsets.borrow(),
+            [0, 500, 0],
+            "resume refused, then from zero"
+        );
+        assert!(
+            t.elapsed() >= Duration::from_millis(200),
+            "three requests need two 100 ms gaps, the restart included"
+        );
+        assert_eq!(std::fs::read(&a.path).expect("read"), data);
     }
 }

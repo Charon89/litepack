@@ -95,7 +95,12 @@ pub struct SourceAccount {
     pub class: String,
     pub expected: u64,
     pub found: u64,
+    /// Files that were gone when the manifest was written.
     pub missing: Vec<String>,
+    /// Files whose content on disk no longer hashes to what extraction wrote (cleaned or
+    /// tampered with in place). Left out of the manifest like missing ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub altered: Vec<String>,
     pub source: String,
 }
 

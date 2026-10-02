@@ -137,6 +137,9 @@ pub struct ArchiveSpec {
     /// validated) instead of failing the extraction. For source trees that contain links.
     #[serde(default)]
     pub skip_links: bool,
+    /// Ceiling for the bytes this source may extract (sum of the selected, truncated entry
+    /// sizes; for `gz` the decompressed size). Default: 2 GiB.
+    pub max_extracted_bytes: Option<u64>,
 }
 
 impl SourceSpec {
@@ -349,8 +352,28 @@ impl Registry {
                             s.id
                         );
                     }
-                    if a.truncate_files == Some(0) {
-                        bail!("source `{}`: truncate_files must be positive", s.id);
+                    if a.truncate_files == Some(0) || a.max_extracted_bytes == Some(0) {
+                        bail!(
+                            "source `{}`: truncate_files and max_extracted_bytes must be positive",
+                            s.id
+                        );
+                    }
+                    let format = a.format.or_else(|| ArchiveFormat::guess(&a.url));
+                    if a.skip_links && format != Some(ArchiveFormat::TarGz) {
+                        bail!("source `{}`: skip_links only applies to tar.gz", s.id);
+                    }
+                    if format == Some(ArchiveFormat::Gz)
+                        && (!a.include.is_empty()
+                            || !a.exclude.is_empty()
+                            || a.max_files.is_some()
+                            || a.max_bytes.is_some()
+                            || a.strip_components != 0)
+                    {
+                        bail!(
+                            "source `{}`: gz is a single file; include, exclude, max_files, \
+                             max_bytes and strip_components do not apply",
+                            s.id
+                        );
                     }
                     if a.format.or_else(|| ArchiveFormat::guess(&a.url)) == Some(ArchiveFormat::Gz)
                     {
@@ -538,5 +561,38 @@ max_files = 3
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/corpus-sources.toml");
         let r = Registry::load(&path).expect("committed registry parses");
         assert!(!r.sources.is_empty());
+    }
+
+    #[test]
+    fn archive_keys_the_format_would_ignore_are_rejected() {
+        let src = |extra: &str, url: &str| {
+            format!(
+                "[[source]]\nid = \"a\"\nclass = \"c\"\nlicence = \"MIT\"\norigin = \"o\"\n\
+                 profiles = [\"small\"]\nkind = \"archive\"\nurl = \"{url}\"\n{extra}\n"
+            )
+        };
+        let zip = "https://example.org/a.zip";
+        let gz = "https://example.org/a.img.gz";
+        let tgz = "https://example.org/a.tar.gz";
+        assert!(Registry::parse(&src("skip_links = true", tgz)).is_ok());
+        for url in [zip, gz, "https://example.org/a.7z"] {
+            assert!(
+                Registry::parse(&src("skip_links = true", url)).is_err(),
+                "{url}"
+            );
+        }
+        assert!(Registry::parse(&src("", gz)).is_ok());
+        assert!(Registry::parse(&src("truncate_files = 10\nmax_extracted_bytes = 99", gz)).is_ok());
+        for key in [
+            "include = [\"*\"]",
+            "exclude = [\"x\"]",
+            "max_files = 1",
+            "max_bytes = 1",
+            "strip_components = 1",
+        ] {
+            assert!(Registry::parse(&src(key, gz)).is_err(), "{key} on gz");
+            assert!(Registry::parse(&src(key, zip)).is_ok(), "{key} on zip");
+        }
+        assert!(Registry::parse(&src("max_extracted_bytes = 0", zip)).is_err());
     }
 }
