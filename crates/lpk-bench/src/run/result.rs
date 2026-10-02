@@ -371,6 +371,10 @@ pub struct RunFile {
     pub threads: u32,
     pub repeats_requested: u32,
     pub long_run_s: u64,
+    /// Pause per 1000 files after deleting extracted files, in milliseconds (0: none). Absent in
+    /// runs made before the pause existed, which had none.
+    #[serde(default)]
+    pub settle_ms_per_1000_files: u64,
     /// BLAKE3 of the catalogue file the run used.
     pub catalogue_blake3: String,
     /// Where `antivirus_end` came from (same values as the host file's `antivirus_source`).
@@ -619,6 +623,7 @@ pub mod samples {
             threads: results.first().map_or(4, |r| r.threads),
             repeats_requested: 3,
             long_run_s: 120,
+            settle_ms_per_1000_files: 500,
             catalogue_blake3: "ef".repeat(32),
             antivirus_end_source: "queried".into(),
             antivirus_end: host().antivirus,

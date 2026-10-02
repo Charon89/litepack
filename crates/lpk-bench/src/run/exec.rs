@@ -72,6 +72,8 @@ pub struct Config {
     /// A combination whose first repeat (compress plus extract wall time) takes at least this long
     /// is not repeated.
     pub long_run: Duration,
+    /// Milliseconds of pause per 1000 files after a deletion of extracted files (0: none).
+    pub settle_ms_per_1000_files: u64,
     /// BLAKE3 of the catalogue file used, recorded in `run.json`.
     pub catalogue_blake3: String,
     pub results_root: PathBuf,
@@ -151,6 +153,50 @@ pub fn relative(from: &Path, to: &Path) -> Result<String> {
     } else {
         parts.join("/")
     })
+}
+
+/// How long to pause after deleting `files` files: proportional, at least 250 ms and at most 30 s;
+/// none when the allowance is 0 or nothing was deleted.
+pub fn settle_duration(files: u64, ms_per_1000: u64) -> Duration {
+    if ms_per_1000 == 0 || files == 0 {
+        return Duration::ZERO;
+    }
+    let ms = files.saturating_mul(ms_per_1000) / 1000;
+    Duration::from_millis(ms.clamp(250, 30_000))
+}
+
+fn count_files(path: &Path) -> u64 {
+    let mut n = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => stack.push(e.path()),
+                Ok(_) => n += 1,
+                Err(_) => {}
+            }
+        }
+    }
+    n
+}
+
+/// Remove a tree and then pause so the file system can finish the deferred work of deleting many
+/// just-written files, which would otherwise fall into the next timed step. Never called inside
+/// a timed interval; the same for every tool.
+fn remove_and_settle(path: &Path, cfg: &Config) {
+    let files = if cfg.settle_ms_per_1000_files == 0 {
+        0
+    } else {
+        count_files(path)
+    };
+    rm_rf(path);
+    let pause = settle_duration(files, cfg.settle_ms_per_1000_files);
+    if !pause.is_zero() {
+        std::thread::sleep(pause);
+    }
 }
 
 fn rm_rf(path: &Path) {
@@ -794,7 +840,7 @@ fn one_repeat(
     expected: &BTreeMap<String, String>,
     record: &mut ArgRecord,
 ) -> Result<Sample, Fail> {
-    rm_rf(&ctx.work);
+    remove_and_settle(&ctx.work, ctx.cfg);
     if ctx.work.exists() {
         return Err(Fail::new(
             "compress",
@@ -1238,7 +1284,7 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                                 tar: tar.as_ref(),
                             };
                             let r = run_combination(&ctx, d, path, setting, &expected);
-                            rm_rf(&ctx.work);
+                            remove_and_settle(&ctx.work, cfg);
                             r
                         }
                     }
@@ -1288,6 +1334,7 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
         threads: cfg.threads,
         repeats_requested: cfg.repeats,
         long_run_s: cfg.long_run.as_secs(),
+        settle_ms_per_1000_files: cfg.settle_ms_per_1000_files,
         catalogue_blake3: cfg.catalogue_blake3.clone(),
         antivirus_end_source: av_end.0.to_string(),
         antivirus_changed,
@@ -1335,6 +1382,7 @@ pub fn measure_command(args: &RunArgs) -> Result<ExitCode> {
         threads: args.threads.unwrap_or(cores).max(1),
         timeout: Duration::from_secs(args.timeout_s),
         long_run: Duration::from_secs(args.long_run_s),
+        settle_ms_per_1000_files: args.settle_ms_per_1000_files,
         catalogue_blake3,
         results_root: args.results.clone(),
         tmp_root: args.tmp.clone(),
@@ -1368,6 +1416,17 @@ mod tests {
         assert!(path_warning(1, 1, 300)
             .expect("w")
             .contains("extraction path 300"));
+    }
+
+    #[test]
+    fn the_settle_pause_is_proportional_with_a_minimum_and_a_maximum() {
+        let ms = |files, per| settle_duration(files, per).as_millis();
+        assert_eq!(ms(0, 500), 0, "nothing deleted, no pause");
+        assert_eq!(ms(20_000, 0), 0, "disabled");
+        assert_eq!(ms(10, 500), 250, "minimum");
+        assert_eq!(ms(1_000, 500), 500, "proportional");
+        assert_eq!(ms(20_000, 500), 10_000);
+        assert_eq!(ms(10_000_000, 500), 30_000, "maximum");
     }
 
     #[test]

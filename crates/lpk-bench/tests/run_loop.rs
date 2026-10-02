@@ -252,8 +252,61 @@ fn command(e: &Env) -> Command {
         .arg("--results")
         .arg(&e.results)
         .arg("--tmp")
-        .arg(&e.work);
+        .arg(&e.work)
+        // The suite must not wait for the file system to settle (a later value overrides this).
+        .args(["--settle-ms-per-1000-files", "0"]);
     c
+}
+
+#[test]
+fn run_json_records_the_settle_setting() {
+    let e = env();
+    let out = measure(
+        &e,
+        &[
+            "--tools",
+            "store",
+            "--repeats",
+            "1",
+            "--classes",
+            "bin",
+            "--settle-ms-per-1000-files",
+            "7",
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        result(&results_dir(&e), "run.json")["settle_ms_per_1000_files"],
+        7
+    );
+    let out = measure(
+        &e,
+        &["--tools", "store", "--repeats", "1", "--classes", "bin"],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let dirs: Vec<PathBuf> = {
+        let mut d: Vec<PathBuf> = std::fs::read_dir(&e.results)
+            .unwrap()
+            .map(|d| d.unwrap().path())
+            .collect();
+        d.sort();
+        d
+    };
+    assert_eq!(result(&dirs[1], "run.json")["settle_ms_per_1000_files"], 0);
+    // --compare refuses runs measured with different settings.
+    let cmp = Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
+        .args(["run", "--compare"])
+        .arg(&dirs[0])
+        .arg(&dirs[1])
+        .args(["--max-diff-pct", "100000"])
+        .output()
+        .unwrap();
+    assert!(!cmp.status.success());
+    assert!(
+        String::from_utf8_lossy(&cmp.stderr).contains("--settle-ms-per-1000-files"),
+        "{}",
+        text(&cmp)
+    );
 }
 
 fn measure(e: &Env, extra: &[&str]) -> Output {

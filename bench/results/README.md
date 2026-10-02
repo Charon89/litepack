@@ -36,7 +36,7 @@ environment dumps.
   timed-out or descendant-killing repeat.
 - `measurement.env_stripped` lists the names of the environment variables removed from the tools'
   environment. Results from a private corpus carry `"private": true`.
-- `run.json` also records the antivirus products queried again after the last combination
+- `run.json` also records `settle_ms_per_1000_files`, the pause after deleting extracted files, and records the antivirus products queried again after the last combination
   (`antivirus_end_source`, `antivirus_end`) and `antivirus_changed`, true when the names or decoded
   scanner states differ from the start-of-run values in `host.json`. It lists the classes, every tool x setting x class with its outcome, the thread count,
   the repeats requested, `--long-run-s` and the catalogue's BLAKE3; `--validate` checks each listed

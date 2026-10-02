@@ -259,6 +259,7 @@
         "threads": { "type": "integer", "minimum": 1, "description": "Thread count of every result, a count." },
         "repeats_requested": { "type": "integer", "minimum": 1, "description": "Repeats asked for with --repeats, a count." },
         "long_run_s": { "type": "integer", "minimum": 0, "description": "The --long-run-s value, in seconds." },
+        "settle_ms_per_1000_files": { "type": "integer", "minimum": 0, "description": "The --settle-ms-per-1000-files value, in milliseconds: the pause per 1000 files after the loop deleted a tree of extracted files, before the next timed step (minimum 250 ms and maximum 30 s per pause; 0 means no pause)." },
         "catalogue_blake3": { "$ref": "#/$defs/blake3", "description": "BLAKE3 of the catalogue file (bench/tools.toml) the run used." },
         "antivirus_end_source": { "enum": ["queried", "query-failed", "not-applicable"], "description": "Where antivirus_end came from (same values as host.json antivirus_source)." },
         "antivirus_end": { "type": "array", "items": { "$ref": "#/$defs/av_product" }, "description": "Antivirus products queried again after the last combination, outside all timing." },

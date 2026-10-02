@@ -69,6 +69,12 @@ How a combination is measured:
   times out, leaves descendants running, the archive is missing or empty, or verification finds a
   missing, extra or different file. A failed combination carries no median and the run goes on.
   The repeats completed before the failure stay in the file.
+- After the loop deletes a tree of extracted files (between repeats and when a combination's
+  scratch directory is removed) it pauses before the next timed step, by default 500 ms per 1000
+  files removed (at least 250 ms, at most 30 s; `--settle-ms-per-1000-files`, 0 disables it). Deleting
+  many just-written files leaves deferred work in the file system that would otherwise fall into
+  the next timed step and penalise fast tools; the pause is the same for every tool, never inside a
+  timed interval, and recorded in `run.json`.
 - Medians are taken over the repeats for every measure. A combination whose first repeat (compress
   plus extract wall time) reaches `--long-run-s` is measured once; the result records the repeats
   requested, the repeats run and the reason (`repeats_short`).

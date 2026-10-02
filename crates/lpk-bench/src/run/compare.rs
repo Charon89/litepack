@@ -226,6 +226,12 @@ pub fn compare(a: &Path, b: &Path, max_diff_pct: f64) -> Result<Report> {
                 ra.long_run_s, rb.long_run_s
             ));
         }
+        if ra.settle_ms_per_1000_files != rb.settle_ms_per_1000_files {
+            rep.problems.push(format!(
+                "different --settle-ms-per-1000-files: {} against {}",
+                ra.settle_ms_per_1000_files, rb.settle_ms_per_1000_files
+            ));
+        }
         if ra.catalogue_blake3 != rb.catalogue_blake3 {
             rep.problems
                 .push("the two runs used different catalogue files (bench/tools.toml)".to_string());
@@ -538,6 +544,7 @@ mod tests {
         let mut run = samples::run_file(&results);
         run.repeats_requested = 5;
         run.long_run_s = 7;
+        run.settle_ms_per_1000_files = 0;
         run.catalogue_blake3 = "00".repeat(32);
         std::fs::write(b.join("run.json"), render(&run)).expect("w");
         let mut host = samples::host();
@@ -545,6 +552,7 @@ mod tests {
         std::fs::write(b.join("host.json"), render(&host)).expect("w");
         let rep = compare(&a, &b, 3.0).expect("compare");
         for what in [
+            "different --settle-ms-per-1000-files",
             "different hosts",
             "requested repeats",
             "--long-run-s",

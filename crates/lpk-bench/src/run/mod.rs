@@ -66,6 +66,16 @@ pub struct RunArgs {
     /// seconds is measured once and not repeated; the result records why
     #[arg(long, value_name = "SECONDS", default_value_t = 120)]
     pub long_run_s: u64,
+    /// After the loop deletes a tree of extracted files, pause this many milliseconds per 1000
+    /// files removed (minimum 250 ms, maximum 30 s) before the next timed step, so the file
+    /// system settles; 0 disables the pause
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = 500,
+        overrides_with = "settle_ms_per_1000_files"
+    )]
+    pub settle_ms_per_1000_files: u64,
     /// Where result directories are created
     #[arg(long, value_name = "DIR", default_value = "bench/results")]
     pub results: PathBuf,
