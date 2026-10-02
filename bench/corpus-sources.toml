@@ -5,7 +5,8 @@
 # a source run `lpk-bench corpus build --profile <p> --only <class> --update-lock` and commit
 # the lock. Per-profile differences are separate sources with distinct ids.
 
-# Per-host politeness: minimum gap between requests to the host, optional throughput cap.
+# Per-host politeness: minimum gap between requests to the host, optional throughput cap, and
+# optional retry patience (max_attempts, max_delay_ms).
 [[host]]
 name = "gutenberg.pglaf.org"
 min_interval_ms = 2000
@@ -17,6 +18,9 @@ min_interval_ms = 1000
 [[host]]
 name = "archive.org"
 min_interval_ms = 1000
+# Patient: rides out an outage of several minutes (waits 2, 4, 8, 16, 32, 64, then 120 s each).
+max_attempts = 11
+max_delay_ms = 120000
 
 [[host]]
 name = "upload.wikimedia.org"

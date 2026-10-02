@@ -75,7 +75,7 @@
 //!   Details, determinism rules and the skip behaviour in [`derive`].
 //!
 //! Top-level `[[host]]` tables set politeness per host (`name`, `min_interval_ms`,
-//! `max_mbit_per_s`); see "Downloader".
+//! `max_mbit_per_s`, `max_attempts`, `max_delay_ms`); see "Downloader".
 //!
 //! Archive selection (see [`extract`]): *every* entry is validated first, whether or not a
 //! glob would select it, and any of these fails the whole extraction on every OS: absolute
@@ -170,7 +170,12 @@
 //! Politeness is set per host in `[[host]]` tables and applies to every request the
 //! `Downloader` makes to that host (the host of the URL as written, not of redirect targets):
 //! `min_interval_ms` between the end of one request and the start of the next, and an optional
-//! `max_mbit_per_s` throughput cap.
+//! `max_mbit_per_s` throughput cap. Two optional keys set the patience for that host only:
+//! `max_attempts` (attempts per request, at least 1) and `max_delay_ms` (cap on one back-off
+//! wait, at least 1). Without them the defaults apply (5 attempts, waits of 2, 4, 8 and 16 s,
+//! capped at 60 s). `Retry-After` is still honoured, and a value above the global limit still
+//! fails the download. Zero values are rejected when the registry is loaded. `archive.org` is
+//! configured to ride out an outage of some ten minutes in total.
 //!
 //! API requests of list resolvers (`Ctx::api_get`) go through the same pacing and retry rules
 //! (`Downloader::get_bytes`), are never cached, and are refused outside `--update-lock`. Under
