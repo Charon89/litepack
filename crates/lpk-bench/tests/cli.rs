@@ -93,12 +93,11 @@ fn help_prints_subcommands() {
 
 #[test]
 fn stubs_fail_loudly_naming_the_task() {
-    for (arg, task) in [("probe", "P0-4"), ("report", "P0-5")] {
-        let out = bin().arg(arg).output().expect("run");
-        assert!(!out.status.success(), "`{arg}` stub must exit non-zero");
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains(task), "stderr for `{arg}` lacks {task}: {err}");
-    }
+    let (arg, task) = ("report", "P0-5");
+    let out = bin().arg(arg).output().expect("run");
+    assert!(!out.status.success(), "`{arg}` stub must exit non-zero");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(task), "stderr for `{arg}` lacks {task}: {err}");
 }
 
 #[test]

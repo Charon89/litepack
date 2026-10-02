@@ -275,7 +275,7 @@ impl Corpus {
     }
 
     /// Where the files named in the manifest are found.
-    fn files_root(&self) -> &Path {
+    pub fn files_root(&self) -> &Path {
         self.private_root.as_deref().unwrap_or(&self.dir)
     }
 

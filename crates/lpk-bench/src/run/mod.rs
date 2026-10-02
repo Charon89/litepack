@@ -158,9 +158,11 @@ fn validate_cmd(dir: &Path) -> Result<ExitCode> {
     }
     if report.problems.is_empty() {
         println!(
-            "{}: {} result file(s) plus host.json and tools.json validate against bench/results/schema.json",
+            "{}: {} result file(s) and {} probe file(s) validate (result files against \
+             bench/results/schema.json)",
             dir.display(),
-            report.results
+            report.results,
+            report.probes
         );
         Ok(ExitCode::SUCCESS)
     } else {

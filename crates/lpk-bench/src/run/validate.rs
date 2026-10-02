@@ -113,7 +113,7 @@ fn absolute_path_regex() -> Option<regex::Regex> {
         .ok()
 }
 
-fn scan_absolute_paths(value: &Value, pointer: &str, file: &str, out: &mut Vec<String>) {
+pub(crate) fn scan_absolute_paths(value: &Value, pointer: &str, file: &str, out: &mut Vec<String>) {
     fn walk(re: &regex::Regex, v: &Value, pointer: &str, file: &str, out: &mut Vec<String>) {
         match v {
             Value::String(s) => {
@@ -248,6 +248,8 @@ fn read_json(path: &Path, label: &str, problems: &mut Vec<String>) -> Option<Val
 pub struct Report {
     /// Number of per-combination result files checked.
     pub results: usize,
+    /// Number of `probe-*.json` files checked.
+    pub probes: usize,
     pub problems: Vec<String>,
     /// Things that are accepted but worth saying, such as probe files taken on trust.
     pub notes: Vec<String>,
@@ -293,6 +295,7 @@ pub fn validate_dir(dir: &Path) -> Result<Report> {
             .unwrap_or_default();
         let r = validate_one(&schemas, &sub)?;
         total.results += r.results;
+        total.probes += r.probes;
         total
             .notes
             .extend(r.notes.into_iter().map(|n| format!("{label}/{n}")));
@@ -331,13 +334,35 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         ));
     }
 
+    // A directory that holds only probe files (and host.json) needs neither tools.json nor
+    // run.json; one with any baseline file (run.json, tools.json or a result file) must satisfy
+    // the baseline rules as well.
+    let probe_only = {
+        let mut probes = 0usize;
+        let mut baseline = 0usize;
+        for e in std::fs::read_dir(dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .filter_map(|e| e.ok())
+        {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n.starts_with("probe-") && (n.ends_with(".json") || n.ends_with(".md")) {
+                probes += 1;
+            } else if n.ends_with(".json") && n != "host.json" {
+                baseline += 1;
+            }
+        }
+        probes > 0 && baseline == 0
+    };
+    let mut host_info: Option<(String, bool)> = None;
     let mut tools: std::collections::BTreeMap<String, ToolState> = Default::default();
     for (name, kind) in [("host.json", Kind::Host), ("tools.json", Kind::Tools)] {
         let path = dir.join(name);
         if !path.is_file() {
-            report
-                .problems
-                .push(format!("{name}: (root): file is missing"));
+            if !(probe_only && name == "tools.json") {
+                report
+                    .problems
+                    .push(format!("{name}: (root): file is missing"));
+            }
             continue;
         }
         let Some(v) = read_json(&path, name, &mut report.problems) else {
@@ -363,6 +388,7 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
                     ));
                 }
                 let host = v.get("host").and_then(Value::as_str).unwrap_or("");
+                host_info = Some((host.to_string(), allowed));
                 if let Some((_, rest)) = parsed_name {
                     if !host_matches(rest, host) {
                         report.problems.push(format!(
@@ -402,9 +428,11 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
     let mut run: Option<RunFile> = None;
     let run_path = dir.join("run.json");
     if !run_path.is_file() {
-        report.problems.push(
-            "run.json: (root): file is missing (an aborted run does not validate)".to_string(),
-        );
+        if !probe_only {
+            report.problems.push(
+                "run.json: (root): file is missing (an aborted run does not validate)".to_string(),
+            );
+        }
     } else if let Some(v) = read_json(&run_path, "run.json", &mut report.problems) {
         let schema_problems = schemas.check_value(Kind::Run, "run.json", &v);
         let clean = schema_problems.is_empty();
@@ -422,7 +450,8 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         Default::default();
 
     let mut names: Vec<String> = Vec::new();
-    let mut probes = 0usize;
+    let mut probe_json: Vec<String> = Vec::new();
+    let mut probe_md: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(|e| e.ok())
@@ -435,23 +464,53 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
             ));
         } else if name == "host.json" || name == "tools.json" || name == "run.json" {
         } else if name.starts_with("probe-") && name.ends_with(".json") {
-            probes += 1;
+            probe_json.push(name);
+        } else if name.starts_with("probe-") && name.ends_with(".md") {
+            probe_md.push(name);
         } else if name.ends_with(".json") {
             names.push(name);
         } else {
             report.problems.push(format!(
                 "{name}: unexpected file (a results directory holds host.json, tools.json, \
-                 result files and probe-*.json)"
+                 result files, probe-*.json and probe-*.md)"
             ));
         }
     }
-    if probes > 0 {
-        report.notes.push(format!(
-            "{probes} probe-*.json file(s) accepted by name only; their contents are not checked \
-             (probe formats arrive with PLAN P0-4)"
-        ));
-    }
     names.sort();
+    probe_json.sort();
+    probe_md.sort();
+    let mut probe_metas: Vec<(String, crate::probe::Meta)> = Vec::new();
+    for md in &probe_md {
+        let json = format!("{}.json", md.trim_end_matches(".md"));
+        if !probe_json.contains(&json) {
+            report
+                .problems
+                .push(format!("{md}: (file): has no {json} next to it"));
+        }
+    }
+    for name in &probe_json {
+        report.probes += 1;
+        let check = crate::probe::check_file(dir, name);
+        report.problems.extend(check.problems);
+        if let Some(meta) = check.meta {
+            if let Some((host, dirty_allowed)) = &host_info {
+                if meta.host != *host {
+                    report.problems.push(format!(
+                        "{name}: /host: `{}` but host.json says `{host}`",
+                        meta.host
+                    ));
+                }
+                if !crate::run::host::build_is_clean(&meta.build) && !dirty_allowed {
+                    report.problems.push(format!(
+                        "{name}: /build: `{}` is not a clean commit and host.json does not \
+                         record --allow-dirty-build",
+                        meta.build
+                    ));
+                }
+            }
+            probe_metas.push((name.clone(), meta));
+        }
+    }
     let mut corpus_seen: Option<(String, String, String)> = None;
     for name in names {
         report.results += 1;
@@ -542,6 +601,35 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
             Err(e) => report.problems.push(format!(
                 "{name}: (root): does not fit the result types: {e}"
             )),
+        }
+    }
+    // Probe files must agree with the baseline results (when there are any) and with each other
+    // on the corpus: one profile and one manifest per results directory.
+    let mut reference = corpus_seen;
+    for (name, meta) in &probe_metas {
+        match &reference {
+            None => {
+                reference = Some((
+                    meta.profile.clone(),
+                    meta.manifest_blake3.clone(),
+                    name.clone(),
+                ))
+            }
+            Some((profile, hash, first)) => {
+                if *profile != meta.profile {
+                    report.problems.push(format!(
+                        "{name}: /corpus/profile: `{}` but {first} has `{profile}` \
+                         (one profile per results directory)",
+                        meta.profile
+                    ));
+                }
+                if *hash != meta.manifest_blake3 {
+                    report.problems.push(format!(
+                        "{name}: /corpus/manifest_blake3: differs from {first} \
+                         (one manifest per results directory)"
+                    ));
+                }
+            }
         }
     }
     if let Some(run) = &run {
@@ -1307,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_files_are_reported_and_probes_are_accepted_by_name() {
+    fn unexpected_files_are_reported_and_probe_files_are_checked() {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = write_dir(tmp.path(), &[samples::measured()]);
         std::fs::write(dir.join("probe-jpeg.json"), "not even json").expect("probe");
@@ -1322,11 +1410,11 @@ mod tests {
             .problems
             .iter()
             .any(|m| m.starts_with("scratch: unexpected directory")));
-        assert!(!report.problems.iter().any(|m| m.contains("probe-jpeg")));
         assert!(report
-            .notes
+            .problems
             .iter()
-            .any(|n| n.contains("1 probe-*.json") && n.contains("not checked")));
+            .any(|m| m.starts_with("probe-jpeg.json: (root): not valid JSON")));
+        assert_eq!(report.probes, 1);
     }
 
     #[test]
