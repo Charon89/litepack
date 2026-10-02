@@ -379,13 +379,13 @@ files = [
 id = "commons-featured-small"
 class = "photo-jpeg"
 licence = "CC0-1.0, CC-BY or CC-BY-SA (each file carries its own licence and author)"
-origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0, CC BY or CC BY-SA, API order, 200 KB to 2 MB"
+origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0, CC BY or CC BY-SA, API order, 200 KB to 1.6 MB"
 profiles = ["small"]
 kind = "commons-photos"
 category = "Category:Featured_pictures_on_Wikimedia_Commons"
 count = 300
 min_bytes = 200000
-max_bytes = 2000000
+max_bytes = 1600000
 
 [[source]]
 id = "commons-featured-full"

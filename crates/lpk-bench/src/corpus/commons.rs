@@ -165,15 +165,19 @@ pub(super) fn accept_licence(short: &str) -> Option<String> {
     if parts.next().is_some() {
         return None;
     }
-    let known = match (base, version, suffix.as_deref()) {
-        (_, "1.0" | "2.0" | "2.5" | "3.0" | "4.0", None) => true,
-        ("CC-BY", "3.0", Some("AT" | "AU" | "DE" | "NL" | "US" | "IGO")) => true,
-        ("CC-BY", "2.5", Some("AU")) => true,
-        ("CC-BY-SA", "3.0", Some("AT" | "DE" | "IGO")) => true,
-        ("CC-BY-SA", "2.0", Some("UK")) => true,
-        ("CC-BY-SA", "2.1", Some("JP")) => true,
-        _ => false,
-    };
+    let known = matches!(
+        (base, version, suffix.as_deref()),
+        (_, "1.0" | "2.0" | "2.5" | "3.0" | "4.0", None)
+            | (
+                "CC-BY",
+                "3.0",
+                Some("AT" | "AU" | "DE" | "NL" | "US" | "IGO")
+            )
+            | ("CC-BY", "2.5", Some("AU"))
+            | ("CC-BY-SA", "3.0", Some("AT" | "DE" | "IGO"))
+            | ("CC-BY-SA", "2.0", Some("UK"))
+            | ("CC-BY-SA", "2.1", Some("JP"))
+    );
     if !known {
         return None;
     }
