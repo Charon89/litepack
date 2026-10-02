@@ -1,0 +1,160 @@
+{
+  "class": "model-weights",
+  "corpus": {
+    "class_bytes": 17756393,
+    "class_files": 1,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 17020270,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.6875,
+      "peak_job_memory_bytes": 618504192,
+      "peak_memory_bytes": 622977024,
+      "peak_process_commit_bytes": 618504192,
+      "timed_out": false,
+      "user_cpu_seconds": 1.21875,
+      "wall_seconds": 0.3876309
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.03125,
+      "peak_job_memory_bytes": 48488448,
+      "peak_memory_bytes": 39616512,
+      "peak_process_commit_bytes": 48488448,
+      "timed_out": false,
+      "user_cpu_seconds": 0.046875,
+      "wall_seconds": 0.0842625
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 17020270,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.765625,
+        "peak_job_memory_bytes": 616521728,
+        "peak_memory_bytes": 622264320,
+        "peak_process_commit_bytes": 616521728,
+        "timed_out": false,
+        "user_cpu_seconds": 1.21875,
+        "wall_seconds": 0.3856334
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.03125,
+        "peak_job_memory_bytes": 48504832,
+        "peak_memory_bytes": 39616512,
+        "peak_process_commit_bytes": 48504832,
+        "timed_out": false,
+        "user_cpu_seconds": 0.046875,
+        "wall_seconds": 0.0869796
+      }
+    },
+    {
+      "archive_bytes": 17020270,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.6875,
+        "peak_job_memory_bytes": 618557440,
+        "peak_memory_bytes": 623235072,
+        "peak_process_commit_bytes": 618557440,
+        "timed_out": false,
+        "user_cpu_seconds": 1.375,
+        "wall_seconds": 0.3876309
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.03125,
+        "peak_job_memory_bytes": 48443392,
+        "peak_memory_bytes": 39608320,
+        "peak_process_commit_bytes": 48443392,
+        "timed_out": false,
+        "user_cpu_seconds": 0.140625,
+        "wall_seconds": 0.0836991
+      }
+    },
+    {
+      "archive_bytes": 17020270,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.609375,
+        "peak_job_memory_bytes": 618504192,
+        "peak_memory_bytes": 622977024,
+        "peak_process_commit_bytes": 618504192,
+        "timed_out": false,
+        "user_cpu_seconds": 1.21875,
+        "wall_seconds": 0.3946797
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.0625,
+        "peak_job_memory_bytes": 48488448,
+        "peak_memory_bytes": 39645184,
+        "peak_process_commit_bytes": 48488448,
+        "timed_out": false,
+        "user_cpu_seconds": 0.046875,
+        "wall_seconds": 0.0842625
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "-r",
+      "-ep1",
+      "-cfg-",
+      "-idq",
+      "-y",
+      "-m5",
+      "-md256m",
+      "-rr3%",
+      "-mt24",
+      "../../tmp/run41056/c91/a.rar",
+      "model-weights/*"
+    ],
+    "extract_args": [
+      "x",
+      "-cfg-",
+      "-idq",
+      "-y",
+      "-mt24",
+      "a.rar",
+      "x\\"
+    ],
+    "id": "best-rr3"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "rar",
+    "mode": "directory",
+    "ratio_depends_on_threads": true,
+    "version": "7.00"
+  },
+  "verification": {
+    "files_checked": 1,
+    "files_ok": 1,
+    "verified": true
+  }
+}
