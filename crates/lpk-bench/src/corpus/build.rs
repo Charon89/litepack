@@ -52,6 +52,8 @@ pub struct BuildOptions {
     pub sources_path: PathBuf,
     pub lock_path: PathBuf,
     pub retry: RetryPolicy,
+    /// The `git` program for git sources (`None`: `git` from `PATH`). Injectable for tests.
+    pub git_program: Option<String>,
 }
 
 /// Result of a successful build.
@@ -107,9 +109,91 @@ pub struct Ctx<'a> {
     used: BTreeSet<(String, String)>,
     /// `(class, file)` for every file produced so far in this run.
     pub produced: Vec<(String, ManifestFile)>,
+    /// Name or path of the `git` program.
+    git_program: String,
+    /// External tool versions seen by this run (`build-info.json`, key `tools`).
+    tools: BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+impl<'a> Ctx<'a> {
+    /// A context over `fetcher` with an empty lock (leaked: tests only), for resolver tests.
+    pub fn for_tests(fetcher: &'a dyn Fetcher, root: &Path, update_lock: bool) -> Ctx<'a> {
+        let lock: &'static Lock = Box::leak(Box::default());
+        Ctx {
+            profile: Profile::Small,
+            update_lock,
+            out: root.join("out"),
+            downloader: Downloader::new(
+                fetcher,
+                root.join("cache"),
+                super::fetch::fake::fast_retry(),
+                Profile::Small,
+            ),
+            lock,
+            recorded: Vec::new(),
+            used: BTreeSet::new(),
+            produced: Vec::new(),
+            git_program: "git".into(),
+            tools: BTreeMap::new(),
+        }
+    }
 }
 
 impl Ctx<'_> {
+    /// Name or path of the `git` program git sources run.
+    pub fn git_program(&self) -> &str {
+        &self.git_program
+    }
+
+    /// The download cache directory (scratch space for resolvers that need some).
+    pub fn cache_dir(&self) -> &Path {
+        self.downloader.cache_dir()
+    }
+
+    /// Remember the version of an external program for `build-info.json`.
+    pub fn note_tool(&mut self, name: &str, version: &str) {
+        self.tools.insert(name.to_string(), version.to_string());
+    }
+
+    /// GET an API response (never cached). Only a resolver running under `--update-lock` may
+    /// call this; a normal build must make no API call.
+    pub fn api_get(&self, source: &Source, url: &str, limit: u64) -> Result<Vec<u8>> {
+        ensure!(
+            self.update_lock,
+            "source `{}`: API calls are only allowed with --update-lock",
+            source.id
+        );
+        Ok(self.downloader.get_bytes(&source.id, url, limit)?)
+    }
+
+    /// The downloader, for pacing helpers (`settle`, `backoff`).
+    pub fn downloader(&self) -> &Downloader<'_> {
+        &self.downloader
+    }
+
+    /// Pin (`--update-lock`) or verify (normal build) the commit of a git source. A normal
+    /// build requires the lock to carry exactly the registry's commit.
+    pub fn pin_commit(&mut self, source: &Source, url: &str, commit: &str) -> Result<()> {
+        if self.update_lock {
+            self.recorded
+                .push(LockEntry::commit_pin(&source.id, url, commit));
+            return Ok(());
+        }
+        let Some(pin) = self.lock.get(self.profile, &source.id, url) else {
+            return Err(missing_pin(self.profile, &source.id, url).into());
+        };
+        self.used.insert((source.id.clone(), url.to_string()));
+        ensure!(
+            pin.commit.as_deref() == Some(commit),
+            "source `{}`: the registry names commit {commit} but bench/corpus.lock pins {:?}. {}",
+            source.id,
+            pin.commit,
+            repin_hint(self.profile)
+        );
+        Ok(())
+    }
+
     /// The output root (`<out>`), e.g. for derivation steps reading other classes' files.
     #[allow(dead_code)] // for derived kinds (later sub-task)
     pub fn out(&self) -> &Path {
@@ -433,6 +517,11 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         recorded: Vec::new(),
         used: BTreeSet::new(),
         produced: Vec::new(),
+        git_program: opts
+            .git_program
+            .clone()
+            .unwrap_or_else(|| "git".to_string()),
+        tools: BTreeMap::new(),
     };
 
     let mut skipped = Vec::new();
@@ -535,6 +624,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         skipped: skipped.clone(),
         accounting,
         summary: summary.clone(),
+        tools: std::mem::take(&mut ctx.tools),
     };
     std::fs::write(opts.out.join(info_name), info.render())?;
 
@@ -673,7 +763,37 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
             }
             Ok(made)
         }
+        SourceSpec::CommonsPhotos(spec) => build_listed(ctx, source, dir, |c| {
+            super::commons::resolve(c, source, spec)
+        }),
+        SourceSpec::ArxivPapers(spec) => {
+            build_listed(ctx, source, dir, |c| super::arxiv::resolve(c, source, spec))
+        }
+        SourceSpec::GitRepo(spec) => super::gitsrc::build(ctx, source, spec, dir),
     }
+}
+
+/// A list kind: under `--update-lock` the resolver calls the API and returns the listing;
+/// otherwise the listing is the source's lock entries and no API is called. Either way each file
+/// goes through [`Ctx::fetch_listed`].
+fn build_listed(
+    ctx: &mut Ctx<'_>,
+    source: &Source,
+    dir: &Path,
+    resolve: impl FnOnce(&mut Ctx<'_>) -> Result<Vec<ListedFile>>,
+) -> Result<Vec<ManifestFile>> {
+    let items = if ctx.update_lock() {
+        let items = resolve(ctx)?;
+        ctx.check_listing(source, &items)?;
+        items
+    } else {
+        ctx.listed_pins(source)?
+    };
+    let mut made = Vec::with_capacity(items.len());
+    for item in &items {
+        made.push(ctx.fetch_listed(source, dir, item)?);
+    }
+    Ok(made)
 }
 
 #[cfg(test)]
@@ -772,6 +892,7 @@ url = "{OPT_URL}"
                 sources_path: self.root.join("sources.toml"),
                 lock_path: self.root.join("corpus.lock"),
                 retry: fast_retry(),
+                git_program: None,
             }
         }
 
@@ -1138,6 +1259,8 @@ url = "{OPT_URL}"
             recorded: Vec::new(),
             used: BTreeSet::new(),
             produced: Vec::new(),
+            git_program: "git".into(),
+            tools: BTreeMap::new(),
         }
     }
 
@@ -1232,6 +1355,8 @@ url = "{OPT_URL}"
             recorded: Vec::new(),
             used: BTreeSet::new(),
             produced: Vec::new(),
+            git_program: "git".into(),
+            tools: BTreeMap::new(),
         };
         let source = list_source();
         let target = dir.path().join("t");

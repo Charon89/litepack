@@ -83,6 +83,10 @@ pub struct BuildInfo {
     /// Files and bytes per class, and in total (public builds only).
     #[serde(default, skip_serializing_if = "Summary::is_empty")]
     pub summary: Summary,
+    /// Versions of external programs a build used (e.g. `git`), so a difference between two
+    /// builds can be traced to the tool.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, String>,
 }
 
 /// D-14 accounting for one source: how many files extraction produced (`expected`) and how many

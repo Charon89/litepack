@@ -393,6 +393,77 @@ impl<'a> Downloader<'a> {
         self
     }
 
+    /// The download cache directory.
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    /// Sleep for the configured minimum interval of `url`'s host (zero when none is set). A
+    /// resolver uses it to space out requests that go to a different host of the same operator.
+    pub fn settle(&self, url: &str) {
+        if let Some((_, p)) = self.politeness.policy(url) {
+            std::thread::sleep(p.min_interval);
+        }
+    }
+
+    /// Sleep for the retry back-off of `attempt` (counted from 1), e.g. after an API said
+    /// `maxlag`.
+    pub fn backoff(&self, attempt: u32) {
+        std::thread::sleep(self.retry.delay(attempt, None));
+    }
+
+    /// GET a small resource (an API response) into memory, with the same per-host pacing and
+    /// retry rules as downloads. At most `limit` bytes are accepted. Never cached.
+    pub fn get_bytes(&self, source: &str, url: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
+        let mut attempt = 1;
+        loop {
+            self.politeness.wait(url);
+            let outcome = self.fetcher.open(url, 0, None).and_then(|opened| {
+                let mut buf = Vec::new();
+                opened
+                    .body
+                    .take(limit.saturating_add(1))
+                    .read_to_end(&mut buf)
+                    .map_err(|e| FetchError::Transient {
+                        message: format!("read failed: {e}"),
+                        retry_after: None,
+                    })?;
+                if buf.len() as u64 > limit {
+                    return Err(FetchError::Permanent(format!(
+                        "response exceeds {limit} bytes"
+                    )));
+                }
+                Ok(buf)
+            });
+            self.politeness.finish(url);
+            match outcome {
+                Ok(b) => return Ok(b),
+                Err(FetchError::Permanent(m)) => {
+                    return Err(DownloadError::Fetch(format!(
+                        "source `{source}`: {url}: {m}"
+                    )))
+                }
+                Err(FetchError::Transient {
+                    message,
+                    retry_after,
+                }) => {
+                    if attempt >= self.retry.max_attempts {
+                        return Err(DownloadError::Fetch(format!(
+                            "source `{source}`: {url}: {message} (gave up after {attempt} attempts)"
+                        )));
+                    }
+                    let delay = self.retry.delay(attempt, retry_after);
+                    eprintln!(
+                        "  {source}: {message}; retry {attempt}/{} in {delay:?}",
+                        self.retry.max_attempts - 1
+                    );
+                    std::thread::sleep(delay);
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
     /// Cache location for `(source, url)`.
     pub fn cache_path(&self, source: &str, url: &str) -> PathBuf {
         let h = blake3::hash(url.as_bytes()).to_hex();

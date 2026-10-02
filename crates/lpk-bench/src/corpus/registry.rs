@@ -79,6 +79,62 @@ pub enum SourceSpec {
     Archive(ArchiveSpec),
     /// Several URLs with output names, each pinned separately (static list of files).
     Files(FilesSpec),
+    /// Camera JPEGs chosen from a Wikimedia Commons category through its API (list kind).
+    CommonsPhotos(CommonsSpec),
+    /// Open-access PDFs chosen from arXiv's OAI-PMH feed (list kind).
+    ArxivPapers(ArxivSpec),
+    /// A pinned commit of a git repository, fetched with the `git` program.
+    GitRepo(GitSpec),
+}
+
+/// Keys of `kind = "commons-photos"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommonsSpec {
+    /// Commons category, e.g. `Category:Featured_pictures_on_Wikimedia_Commons`.
+    pub category: String,
+    /// Stop paging as soon as this many files are accepted.
+    pub count: usize,
+    /// Accept files whose size lies in `min_bytes..=max_bytes`.
+    pub min_bytes: u64,
+    pub max_bytes: u64,
+}
+
+/// Keys of `kind = "arxiv-papers"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArxivSpec {
+    /// OAI-PMH datestamp window (`YYYY-MM-DD`, inclusive).
+    pub from: String,
+    pub until: String,
+    /// Optional OAI set (e.g. `cs`) to narrow the window.
+    pub set: Option<String>,
+    /// Take the first N accepted records by identifier.
+    pub count: usize,
+}
+
+/// What the git kind produces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitMode {
+    /// Working tree plus a normalised `.git` directory (history kept).
+    #[default]
+    Clone,
+    /// Working tree of the commit only, no `.git`.
+    Export,
+}
+
+/// Keys of `kind = "git-repo"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitSpec {
+    pub repo: String,
+    /// Full 40-hex commit id; fetched explicitly, never a moving branch.
+    pub commit: String,
+    #[serde(default)]
+    pub mode: GitMode,
+    /// History depth for `clone` mode (absent: full history). `export` always uses depth 1.
+    pub depth: Option<u32>,
 }
 
 /// Keys of `kind = "files"`.
@@ -150,12 +206,17 @@ impl SourceSpec {
             SourceSpec::File(f) => vec![f.url.as_str()],
             SourceSpec::Archive(a) => vec![a.url.as_str()],
             SourceSpec::Files(f) => f.files.iter().map(|i| i.url.as_str()).collect(),
+            SourceSpec::CommonsPhotos(_) | SourceSpec::ArxivPapers(_) => Vec::new(),
+            SourceSpec::GitRepo(g) => vec![g.repo.as_str()],
         }
     }
 
     /// True for kinds whose file list lives in the lock (pins carry the paths).
     pub fn is_list(&self) -> bool {
-        matches!(self, SourceSpec::Files(_))
+        matches!(
+            self,
+            SourceSpec::Files(_) | SourceSpec::CommonsPhotos(_) | SourceSpec::ArxivPapers(_)
+        )
     }
 }
 
@@ -214,6 +275,18 @@ pub struct Registry {
 const COMMON_KEYS: [&str; 7] = [
     "id", "class", "licence", "origin", "profiles", "optional", "inputs",
 ];
+
+fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+}
 
 fn valid_ident(s: &str) -> bool {
     !s.is_empty()
@@ -404,6 +477,44 @@ impl Registry {
                     }
                     super::extract::check_listing(&paths)
                         .with_context(|| format!("source `{}`", s.id))?;
+                }
+                SourceSpec::CommonsPhotos(c) => {
+                    if c.count == 0 || c.min_bytes > c.max_bytes {
+                        bail!(
+                            "source `{}`: need count > 0 and min_bytes <= max_bytes",
+                            s.id
+                        );
+                    }
+                    if c.category.trim().is_empty() {
+                        bail!("source `{}`: empty category", s.id);
+                    }
+                }
+                SourceSpec::ArxivPapers(a) => {
+                    if a.count == 0 {
+                        bail!("source `{}`: count must be positive", s.id);
+                    }
+                    for d in [&a.from, &a.until] {
+                        if !is_iso_date(d) {
+                            bail!("source `{}`: `{d}` is not a YYYY-MM-DD date", s.id);
+                        }
+                    }
+                    if a.from > a.until {
+                        bail!("source `{}`: `from` is after `until`", s.id);
+                    }
+                }
+                SourceSpec::GitRepo(g) => {
+                    if g.commit.len() != 40 || !g.commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        bail!(
+                            "source `{}`: `commit` must be a full 40-hex commit id",
+                            s.id
+                        );
+                    }
+                    if g.depth == Some(0) {
+                        bail!("source `{}`: depth must be positive", s.id);
+                    }
+                    if g.mode == GitMode::Export && g.depth.is_some() {
+                        bail!("source `{}`: `depth` applies to mode `clone` only", s.id);
+                    }
                 }
             }
         }

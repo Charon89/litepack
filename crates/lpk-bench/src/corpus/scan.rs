@@ -268,6 +268,7 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
             skipped: skipped.clone(),
             accounting: Vec::new(),
             summary: Default::default(),
+            tools: Default::default(),
         },
         private: true,
         root: root_text,

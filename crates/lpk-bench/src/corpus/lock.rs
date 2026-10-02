@@ -63,6 +63,23 @@ impl LockEntry {
     }
 }
 
+impl LockEntry {
+    /// A git pin: the commit of `url` (the repository).
+    pub fn commit_pin(source: &str, url: &str, commit: &str) -> LockEntry {
+        LockEntry {
+            attribution: None,
+            blake3: None,
+            bytes: None,
+            commit: Some(commit.to_string()),
+            extra: BTreeMap::new(),
+            licence: None,
+            path: None,
+            source: source.to_string(),
+            url: url.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct LockFile {
     profiles: BTreeMap<String, Vec<LockEntry>>,

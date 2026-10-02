@@ -48,6 +48,20 @@
 //!   listed-pin path: the whole listing is validated up front (portable names, no
 //!   case-insensitive duplicates, no file/directory clash), and a normal build requires the
 //!   registry's list to equal the pins in the lock.
+//! * `commons-photos`: `category`, `count`, `min_bytes`, `max_bytes`. A list kind (see "Lock
+//!   semantics"): under `--update-lock` it pages through the Wikimedia Commons API and keeps, in
+//!   API order, the first `count` camera JPEGs (Exif Make and Model present) licensed CC0 or
+//!   CC BY (no ShareAlike, NonCommercial or NoDerivs) whose size lies in the window. Names are
+//!   an ASCII slug plus a short title hash. Details in [`commons`].
+//! * `arxiv-papers`: `from`, `until`, optional `set`, `count`. A list kind: under `--update-lock`
+//!   it lists the OAI-PMH window, keeps CC BY 4.0 records, sorts by identifier and takes the
+//!   first `count`, each at its newest listed version. Details in [`arxiv`].
+//! * `git-repo`: `repo`, `commit` (40 hex), `mode` (`clone`, default, or `export`), `depth`
+//!   (`clone` only; absent = full history). Runs the external `git` program (name injectable
+//!   through `BuildOptions::git_program`); without it the source is skipped when `optional`.
+//!   `clone` yields the working tree plus a normalised `.git`, `export` the working tree only.
+//!   The lock pins the commit. The git version goes to `tools` in `build-info.json`.
+//!   Details and the determinism rules in [`gitsrc`].
 //!
 //! Top-level `[[host]]` tables set politeness per host (`name`, `min_interval_ms`,
 //! `max_mbit_per_s`); see "Downloader".
@@ -133,6 +147,10 @@
 //! `min_interval_ms` between the end of one request and the start of the next, and an optional
 //! `max_mbit_per_s` throughput cap.
 //!
+//! API requests of list resolvers (`Ctx::api_get`) go through the same pacing and retry rules
+//! (`Downloader::get_bytes`), are never cached, and are refused outside `--update-lock`. Under
+//! `maxlag` the Commons resolver backs off and asks again.
+//!
 //! # Adding a source kind
 //!
 //! 1. Add a variant wrapping a new struct to [`registry::SourceSpec`] (the struct carries
@@ -151,10 +169,13 @@
 //!    then reuses `pick` and `write_entry`, so the safety and cap rules stay shared.
 //! 4. Tests: serve bytes from `fetch::fake::FakeFetcher`; never hit the network in tests.
 
+pub mod arxiv;
 pub mod build;
 pub mod classify;
+pub mod commons;
 pub mod extract;
 pub mod fetch;
+pub mod gitsrc;
 pub mod lock;
 pub mod manifest;
 pub mod registry;
@@ -237,6 +258,7 @@ impl BuildArgs {
             sources_path: self.sources.clone(),
             lock_path: self.lock.clone(),
             retry: RetryPolicy::default(),
+            git_program: None,
         }
     }
 }
