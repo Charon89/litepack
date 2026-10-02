@@ -10,20 +10,33 @@
 //!   or an ODF `mimetype`, `META-INF/MANIFEST.MF`), then by file extension;
 //! * PNG: the concatenated `IDAT` payload, a zlib stream;
 //! * gzip: every member (RFC 1952 header, raw deflate, 8-byte trailer);
-//! * PDF: at each `stream` keyword a zlib stream (a stream whose first bytes are not a zlib
-//!   header, or that does not inflate cleanly, is not a candidate and is counted as
-//!   `rejected_candidates` only when the header looked right);
-//! * any other file, and a ZIP that cannot be parsed: a scan for zlib headers (`78 01`, `78 5E`,
-//!   `78 9C`, `78 DA`) at any offset, accepted only when the stream inflates cleanly (checksum
-//!   included) to at least [`MIN_SCANNED_PLAIN`] bytes. The scan resumes after an accepted stream.
+//! * PDF: after each `stream` keyword and its end-of-line, any valid zlib header (method 8,
+//!   window field at most 7, header divisible by 31, no preset dictionary). A stream that
+//!   inflates cleanly is cut exactly; one that does not is sent to the library with the bytes up
+//!   to the next `endstream` (or the end of the file), so it gets a named outcome;
+//! * any other file, and a ZIP that cannot be parsed: a scan for the four common zlib headers
+//!   (`78 01`, `78 5E`, `78 9C`, `78 DA`) at any offset, accepted only when the stream inflates
+//!   cleanly (checksum included) to at least [`MIN_SCANNED_PLAIN`] bytes (everything else
+//!   counts as `scan_false_hits`). The scan resumes after an accepted stream.
+//!
+//! The library has no "recognised encoder" flag. It estimates parameters for every stream it
+//! accepts, and the cost of a poor estimate shows as correction overhead. This probe therefore
+//! reports the estimate labels (strategy, hash, add policy, matching type) and overhead
+//! buckets, and draws no recognised/unrecognised line. ZIP entries that are stored (method 0)
+//! are not examined: the probe goes one level deep, so the result is a lower bound. The
+//! per-stream metadata (container headers, the parameter header) is not counted.
 //!
 //! Per stream: analysis with `preflate_whole_deflate_stream` (the library's own verification is
 //! off; the probe verifies by itself), then `recreate_whole_deflate_stream` from the plain data
-//! and the corrections, compared byte for byte with the original stream. A stream the library
-//! rejects is `failed` under the name of its `ExitCode`; `PlainTextLimit` (and a stream whose
-//! declared or measured plain size is over the limit) is `skipped`; a recreation that returns
-//! other bytes is `failed` as `RoundtripMismatch`; a panic inside the library is
-//! `AssertionFailure`.
+//! and the corrections, compared byte for byte with the original stream. The library returns
+//! `Ok` with a shortened stream when the input is truncated or the plain-text limit is hit
+//! after a first block, so the probe requires the stream to be complete (`is_done`) and the plain
+//! size to equal the known one. A stream the library rejects is `failed` under the name of its
+//! `ExitCode`; one that is incomplete is `failed` as `ShortRead`, or `skipped` when it is a
+//! complete stream whose plain size is over the limit; `PlainTextLimit` and a declared or
+//! measured plain size over the limit are `skipped`; a recreation that returns other bytes (or a
+//! plain size other than the known one) is `failed` as `RoundtripMismatch`; a panic in the
+//! library is `Panic`.
 //!
 //! Net gain per file: A = the file compressed whole with zstd (the baseline's `-19`) and xz
 //! preset 9, one thread each; B = the file with every reconstructed stream replaced in place by
@@ -40,8 +53,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use anyhow::Result;
 use flate2::{Decompress, FlushDecompress, Status};
 use preflate_rs::{
-    preflate_whole_deflate_stream, recreate_whole_deflate_stream, ExitCode, PlainText,
-    PreflateConfig, TokenPredictorParameters,
+    recreate_whole_deflate_stream, ExitCode, PlainText, PreflateConfig, PreflateStreamProcessor,
+    TokenPredictorParameters,
 };
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +85,9 @@ pub const BUCKETS: [&str; 6] = [
     "50_pct_or_more",
 ];
 
+/// Text of `Settings::recognition`.
+pub const RECOGNITION: &str = "the library has no recognised/unrecognised flag: every accepted stream gets an estimate; judge by the overhead buckets";
+
 /// Smallest plain size of a stream found by the zlib scan.
 pub const MIN_SCANNED_PLAIN: u64 = 1024;
 /// Plain text the library may hold for one stream.
@@ -91,6 +107,8 @@ const INFLATE_CAP: u64 = 1 << 32;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    /// What the labels mean: the library gives no recognised/unrecognised flag.
+    pub recognition: String,
     pub max_chain_length: u32,
     pub plain_text_limit: u64,
     pub file_plain_budget: u64,
@@ -146,9 +164,13 @@ pub struct StreamStats {
     pub skipped: u64,
     /// Failed streams by the library's error name (or `RoundtripMismatch`).
     pub failed: BTreeMap<String, u64>,
-    /// Candidates that looked like a stream but were refused before analysis (bad inflate, a
-    /// ZIP entry outside the file or encrypted, an overlapping entry).
-    pub rejected_candidates: u64,
+    /// ZIP entries refused before analysis (encrypted, outside the file, unreadable) and
+    /// overlapping candidates.
+    pub structural_refusals: u64,
+    /// Zlib-scan hits that did not inflate cleanly to the minimum size.
+    pub scan_false_hits: u64,
+    /// The file walker panicked (the file is then recorded as kind `other` with no streams).
+    pub walker_panics: u64,
     pub found_deflate_bytes: u64,
     pub reconstructed_deflate_bytes: u64,
     pub skipped_deflate_bytes: u64,
@@ -209,7 +231,10 @@ struct Candidate {
 struct Found {
     kind: &'static str,
     candidates: Vec<Candidate>,
+    /// Structural refusals.
     rejected: u64,
+    /// Zlib-scan false hits.
+    false_hits: u64,
 }
 
 enum Inflated {
@@ -251,6 +276,20 @@ fn zlib_header(b: &[u8]) -> bool {
     matches!(b, [0x78, 0x01 | 0x5e | 0x9c | 0xda, ..])
 }
 
+/// Any valid zlib header: method 8, window field at most 7, check divisible by 31, no preset
+/// dictionary.
+fn valid_zlib_header(b: &[u8]) -> bool {
+    match b {
+        [c, f, ..] => {
+            c & 0x0f == 8
+                && c >> 4 <= 7
+                && (u32::from(*c) * 256 + u32::from(*f)) % 31 == 0
+                && f & 0x20 == 0
+        }
+        _ => false,
+    }
+}
+
 fn extension(path: &str) -> String {
     path.rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
@@ -267,9 +306,6 @@ fn find_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 /// The zlib stream at `at` (header, deflate, 4-byte checksum) as the span of its deflate bytes.
 fn zlib_candidate(bytes: &[u8], at: usize, buf: &mut [u8]) -> Option<(Candidate, usize)> {
     let rest = bytes.get(at..)?;
-    if !zlib_header(rest) {
-        return None;
-    }
     match inflate_extent(rest, true, buf) {
         Inflated::Clean { consumed, out } if consumed >= 6 => Some((
             Candidate {
@@ -307,6 +343,7 @@ fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
     let mut candidates = Vec::new();
     let mut rejected = 0;
     let (mut apk, mut office, mut jar) = (false, false, false);
+    let mut office_dirs = false;
     for i in 0..zip.len() {
         let Ok(f) = zip.by_index_raw(i) else {
             rejected += 1;
@@ -314,8 +351,11 @@ fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
         };
         match f.name() {
             "AndroidManifest.xml" => apk = true,
-            "[Content_Types].xml" | "mimetype" => office = true,
+            "mimetype" => office = true,
             "META-INF/MANIFEST.MF" => jar = true,
+            n if n.starts_with("word/") || n.starts_with("xl/") || n.starts_with("ppt/") => {
+                office_dirs = true
+            }
             _ => {}
         }
         if f.is_dir() || f.compression() != zip::CompressionMethod::Deflated {
@@ -338,26 +378,23 @@ fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
             plain_known: Some(f.size()),
         });
     }
-    let by_ext = match ext {
+    // Packages that share `[Content_Types].xml` with Office are told apart by extension first.
+    let kind = match ext {
         "apk" => "apk",
         "docx" | "docm" | "dotx" | "xlsx" | "xlsm" | "pptx" | "ppsx" | "potx" | "odt" | "ods"
         | "odp" | "odg" | "epub" | "vsdx" => "office",
         "jar" | "war" | "ear" => "jar",
+        "msix" | "appx" | "nupkg" | "vsix" | "xps" => "zip",
+        _ if apk => "apk",
+        _ if office || office_dirs => "office",
+        _ if jar => "jar",
         _ => "zip",
-    };
-    let kind = if apk {
-        "apk"
-    } else if office {
-        "office"
-    } else if jar {
-        "jar"
-    } else {
-        by_ext
     };
     Some(Found {
         kind,
         candidates,
         rejected,
+        false_hits: 0,
     })
 }
 
@@ -381,6 +418,7 @@ fn find_png(bytes: &[u8], buf: &mut [u8]) -> Found {
         kind: "png",
         candidates: Vec::new(),
         rejected: 0,
+        false_hits: 0,
     };
     let total: usize = spans.iter().map(|(a, b)| b - a).sum();
     if total < 2 {
@@ -451,6 +489,7 @@ fn find_gzip(bytes: &[u8], buf: &mut [u8]) -> Found {
         kind: "gzip",
         candidates: Vec::new(),
         rejected: 0,
+        false_hits: 0,
     };
     let mut pos = 0;
     while let Some(h) = gzip_header_len(&bytes[pos..]) {
@@ -484,6 +523,7 @@ fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
         kind: "pdf",
         candidates: Vec::new(),
         rejected: 0,
+        false_hits: 0,
     };
     let mut from = 0;
     while let Some(k) = find_from(bytes, b"stream", from) {
@@ -496,7 +536,7 @@ fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
             Some([b'\n', _]) => from + 1,
             _ => continue,
         };
-        if !bytes.get(data..).is_some_and(zlib_header) {
+        if !bytes.get(data..).is_some_and(valid_zlib_header) {
             continue;
         }
         match zlib_candidate(bytes, data, buf) {
@@ -504,7 +544,15 @@ fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
                 found.candidates.push(c);
                 from = data + consumed;
             }
-            None => found.rejected += 1,
+            None => {
+                // Not a clean stream: the library names what is wrong with it.
+                let end = find_from(bytes, b"endstream", data).unwrap_or(bytes.len());
+                found.candidates.push(Candidate {
+                    spans: vec![(data + 2, end.max(data + 2))],
+                    plain_known: None,
+                });
+                from = end.max(from);
+            }
         }
     }
     found
@@ -526,11 +574,12 @@ fn find_streams(bytes: &[u8], ext: &str) -> Found {
         } else if bytes.starts_with(b"%PDF-") {
             find_pdf(bytes, &mut buf)
         } else {
-            let (candidates, rejected) = scan_zlib(bytes, &mut buf);
+            let (candidates, false_hits) = scan_zlib(bytes, &mut buf);
             Found {
                 kind: "other",
                 candidates,
-                rejected,
+                rejected: 0,
+                false_hits,
             }
         }
     });
@@ -588,7 +637,8 @@ fn estimate_label(p: Option<&TokenPredictorParameters>) -> String {
     match p {
         None => "none".to_string(),
         Some(p) => format!(
-            "hash={} add={} match={} zlib_compatible={}",
+            "strategy={} hash={} add={} match={} zlib_compatible={}",
+            variant(&format!("{:?}", p.strategy)),
             variant(&format!("{:?}", p.hash_algorithm)),
             variant(&format!("{:?}", p.add_policy)),
             variant(&format!("{:?}", p.matching_type)),
@@ -601,35 +651,45 @@ fn code_name(c: ExitCode) -> String {
     format!("{c:?}")
 }
 
-fn analyse_stream(deflate: &[u8], cfg: &PreflateConfig) -> StreamOutcome {
+/// The name recorded for a panic inside the library.
+pub const PANIC: &str = "Panic";
+
+fn analyse_stream(deflate: &[u8], plain_known: Option<u64>, cfg: &PreflateConfig) -> StreamOutcome {
+    let failed = |cause: &str, seconds: f64| StreamOutcome::Failed {
+        cause: cause.to_string(),
+        deflate_len: deflate.len(),
+        seconds,
+    };
+    let skipped = |seconds: f64| StreamOutcome::Skipped {
+        deflate_len: deflate.len(),
+        seconds,
+    };
+    // The library returns Ok with a shortened stream when the input ends early or the plain-text
+    // limit is hit after a first block: `is_done` tells a whole stream from a part.
     let (r, analyse_seconds) = timed(|| {
         catch_unwind(AssertUnwindSafe(|| {
-            preflate_whole_deflate_stream(deflate, cfg)
+            let mut sp = PreflateStreamProcessor::new(cfg);
+            let chunk = sp.decompress(deflate)?;
+            let done = sp.is_done();
+            Ok::<_, preflate_rs::PreflateError>((chunk, done, sp.detach_plain_text()))
         }))
     });
-    let (chunk, plain) = match r {
-        Err(_) => {
-            return StreamOutcome::Failed {
-                cause: code_name(ExitCode::AssertionFailure),
-                deflate_len: deflate.len(),
-                seconds: analyse_seconds,
-            }
-        }
-        Ok(Err(e)) if e.exit_code() == ExitCode::PlainTextLimit => {
-            return StreamOutcome::Skipped {
-                deflate_len: deflate.len(),
-                seconds: analyse_seconds,
-            }
-        }
-        Ok(Err(e)) => {
-            return StreamOutcome::Failed {
-                cause: code_name(e.exit_code()),
-                deflate_len: deflate.len(),
-                seconds: analyse_seconds,
-            }
-        }
+    let (chunk, done, plain) = match r {
+        Err(_) => return failed(PANIC, analyse_seconds),
+        Ok(Err(e)) if e.exit_code() == ExitCode::PlainTextLimit => return skipped(analyse_seconds),
+        Ok(Err(e)) => return failed(&code_name(e.exit_code()), analyse_seconds),
         Ok(Ok(v)) => v,
     };
+    if !done {
+        // Over the limit when the stream is complete and its plain size exceeds the limit.
+        let mut buf = vec![0u8; 64 * 1024];
+        return match inflate_extent(deflate, false, &mut buf) {
+            Inflated::Clean { out, .. } if out > cfg.plain_text_limit as u64 => {
+                skipped(analyse_seconds)
+            }
+            _ => failed(&code_name(ExitCode::ShortRead), analyse_seconds),
+        };
+    }
     let deflate_len = chunk.compressed_size;
     let original = deflate.get(..deflate_len);
     let (back, recreate_seconds) = timed(|| {
@@ -638,14 +698,12 @@ fn analyse_stream(deflate: &[u8], cfg: &PreflateConfig) -> StreamOutcome {
         }))
     });
     let seconds = analyse_seconds + recreate_seconds;
-    let fail = |cause: String| StreamOutcome::Failed {
-        cause,
-        deflate_len: deflate_len.min(deflate.len()),
-        seconds,
-    };
+    if plain_known.is_some_and(|k| k != plain.text().len() as u64) {
+        return failed(&code_name(ExitCode::RoundtripMismatch), seconds);
+    }
     match (back, original) {
-        (Err(_), _) => fail(code_name(ExitCode::AssertionFailure)),
-        (Ok(Err(e)), _) => fail(code_name(e.exit_code())),
+        (Err(_), _) => failed(PANIC, seconds),
+        (Ok(Err(e)), _) => failed(&code_name(e.exit_code()), seconds),
         (Ok(Ok(b)), Some(o)) if b == o => StreamOutcome::Done {
             plain,
             corrections: chunk.corrections.len(),
@@ -654,7 +712,7 @@ fn analyse_stream(deflate: &[u8], cfg: &PreflateConfig) -> StreamOutcome {
             analyse_seconds,
             recreate_seconds,
         },
-        (Ok(Ok(_)), _) => fail(code_name(ExitCode::RoundtripMismatch)),
+        (Ok(Ok(_)), _) => failed(&code_name(ExitCode::RoundtripMismatch), seconds),
     }
 }
 
@@ -714,14 +772,27 @@ fn contiguous<'a>(bytes: &'a [u8], spans: &[(usize, usize)]) -> Cow<'a, [u8]> {
 }
 
 fn process_file(bytes: &[u8], ext: &str, limits: &Limits) -> FileResult {
-    let found = find_streams(bytes, ext);
+    let (found, panicked) = match catch_unwind(AssertUnwindSafe(|| find_streams(bytes, ext))) {
+        Ok(f) => (f, false),
+        Err(_) => (
+            Found {
+                kind: "other",
+                candidates: Vec::new(),
+                rejected: 0,
+                false_hits: 0,
+            },
+            true,
+        ),
+    };
     let cfg = PreflateConfig {
         max_chain_length: PreflateConfig::default().max_chain_length,
         plain_text_limit: limits.plain_text_limit as usize,
         verify_compression: false,
     };
     let mut st = StreamStats {
-        rejected_candidates: found.rejected,
+        structural_refusals: found.rejected,
+        scan_false_hits: found.false_hits,
+        walker_panics: u64::from(panicked),
         ..StreamStats::default()
     };
     // (start, end, plain) for every edit of the replaced file.
@@ -738,7 +809,7 @@ fn process_file(bytes: &[u8], ext: &str, limits: &Limits) -> FileResult {
                 seconds: 0.0,
             }
         } else {
-            analyse_stream(&data, &cfg)
+            analyse_stream(&data, c.plain_known, &cfg)
         };
         match outcome {
             StreamOutcome::Done {
@@ -801,15 +872,17 @@ fn process_file(bytes: &[u8], ext: &str, limits: &Limits) -> FileResult {
         }
     }
     let replaced = (!edits.is_empty()).then(|| {
+        let mut edits = edits;
         edits.sort_by_key(|e| e.0);
         let mut out = Vec::with_capacity(bytes.len());
         let mut pos = 0;
-        for (a, b, plain) in &edits {
-            out.extend_from_slice(&bytes[pos..*a]);
+        for (a, b, plain) in edits {
+            out.extend_from_slice(&bytes[pos..a]);
             if let Some(p) = plain {
                 out.extend_from_slice(p.text());
+                // Each plain text is dropped as soon as it is copied.
             }
-            pos = *b;
+            pos = b;
         }
         out.extend_from_slice(&bytes[pos..]);
         out
@@ -882,7 +955,13 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
             let bytes = ctx.read_file(class, f)?;
             let r = process_file(&bytes, &extension(&f.path), &limits);
             let b_len = r.replaced.as_ref().map_or(bytes.len(), Vec::len);
-            held += (bytes.len() + b_len) as u64;
+            let this = (bytes.len() + b_len) as u64;
+            if held > 0 && held + this > BATCH_BYTES {
+                // A very large file is compressed alone.
+                flush(&mut batch, &mut rec.files, &zs, &xs)?;
+                held = 0;
+            }
+            held += this;
             batch.push(Pending {
                 record: FileRecord {
                     index: u32::try_from(i)?,
@@ -907,6 +986,7 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     }
     let data = Data {
         settings: Settings {
+            recognition: RECOGNITION.to_string(),
             max_chain_length: PreflateConfig::default().max_chain_length,
             plain_text_limit: limits.plain_text_limit,
             file_plain_budget: limits.file_plain_budget,
@@ -959,6 +1039,52 @@ fn check_groups(
             "{at}/{name}: the groups do not add up to the reconstructed streams"
         ));
     }
+}
+
+/// Keys allowed in `failed`: the library's `ExitCode` names, the probe's own two.
+const FAILURE_NAMES: [&str; 29] = [
+    "ReadDeflate",
+    "InvalidPredictionData",
+    "AnalyzeFailed",
+    "RecompressFailed",
+    "RoundtripMismatch",
+    "ReadBlock",
+    "PredictBlock",
+    "PredictTree",
+    "RecreateBlock",
+    "RecreateTree",
+    "EncodeBlock",
+    "InvalidCompressedWrapper",
+    "ZstdError",
+    "InvalidParameterHeader",
+    "ShortRead",
+    "OsError",
+    "GeneralFailure",
+    "InvalidIDat",
+    "MatchNotFound",
+    "InvalidDeflate",
+    "NoCompressionCandidates",
+    "InvalidParameter",
+    "AssertionFailure",
+    "NonZeroPadding",
+    "PredictionFailure",
+    "PlainTextLimit",
+    "WebPDecodeError",
+    "OutOfMemory",
+    PANIC,
+];
+
+fn estimate_label_ok(k: &str) -> bool {
+    if k == "none" {
+        return true;
+    }
+    let parts: Vec<&str> = k.split(' ').collect();
+    parts.len() == 5
+        && ["strategy=", "hash=", "add=", "match="]
+            .iter()
+            .zip(&parts)
+            .all(|(pre, part)| part.strip_prefix(pre).is_some_and(|v| !v.is_empty()))
+        && matches!(parts[4], "zlib_compatible=true" | "zlib_compatible=false")
 }
 
 /// Consistency rules of `data`, each as `<json pointer>: <message>`.
@@ -1014,8 +1140,28 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                     "{at}/streams/found_deflate_bytes: not the sum of the three outcomes"
                 ));
             }
-            if s.failed.keys().any(String::is_empty) {
-                p.push(format!("{at}/streams/failed: an empty cause name"));
+            for k in s.failed.keys() {
+                if !FAILURE_NAMES.contains(&k.as_str()) {
+                    p.push(format!("{at}/streams/failed/{k}: not a library error name"));
+                }
+            }
+            for k in s.estimates.keys() {
+                if !estimate_label_ok(k) {
+                    p.push(format!("{at}/streams/estimates/{k}: not an estimate label"));
+                }
+            }
+            if f.bytes > 0 && f.a.xz_bytes == 0 {
+                p.push(format!("{at}/a/xz_bytes: zero for a non-empty file"));
+            }
+            if s.found_deflate_bytes > f.bytes {
+                p.push(format!(
+                    "{at}/streams/found_deflate_bytes: more than the file"
+                ));
+            }
+            if s.reconstructed == 0 && (s.analyse_seconds != 0.0 || s.recreate_seconds != 0.0) {
+                p.push(format!(
+                    "{at}/streams: analysis time recorded though nothing was reconstructed"
+                ));
             }
             check_groups(&mut p, &at, "streams/estimates", &s.estimates, s, None);
             check_groups(
@@ -1064,6 +1210,8 @@ struct Summary {
     skipped: u64,
     failed: BTreeMap<String, u64>,
     rejected: u64,
+    false_hits: u64,
+    panics: u64,
     bytes: u64,
     deflate: u64,
     reconstructed_deflate: u64,
@@ -1087,7 +1235,9 @@ impl Summary {
         for (k, v) in &s.failed {
             *self.failed.entry(k.clone()).or_default() += v;
         }
-        self.rejected += s.rejected_candidates;
+        self.rejected += s.structural_refusals;
+        self.false_hits += s.scan_false_hits;
+        self.panics += s.walker_panics;
         self.bytes += f.bytes;
         self.deflate += s.found_deflate_bytes;
         self.reconstructed_deflate += s.reconstructed_deflate_bytes;
@@ -1155,7 +1305,9 @@ pub fn render(e: &Envelope<Data>) -> String {
         "Settings: max chain {}, plain text limit {} bytes per stream, {} bytes per file; library \
          verification {}; zstd level {}, xz preset {}; A = original file compressed whole, \
          B = reconstructed streams replaced by plain data, plus the correction bytes. Streams \
-         found by the zlib scan must inflate to at least {} bytes.\n\n",
+         found by the zlib scan must inflate to at least {} bytes. Recognition: {} Stored ZIP \
+         entries are not examined (one level deep), so the gains are a lower bound; per-stream \
+         metadata is not counted.\n\n",
         s_set.max_chain_length,
         s_set.plain_text_limit,
         s_set.file_plain_budget,
@@ -1166,7 +1318,8 @@ pub fn render(e: &Envelope<Data>) -> String {
         },
         s_set.zstd.level,
         s_set.xz.preset,
-        s_set.min_scanned_plain
+        s_set.min_scanned_plain,
+        s_set.recognition
     ));
     let mut by_kind: BTreeMap<&str, Summary> = BTreeMap::new();
     let mut by_class: Vec<(&str, Summary)> = Vec::new();
@@ -1223,8 +1376,8 @@ pub fn render(e: &Envelope<Data>) -> String {
         .collect();
     s.push_str(&md_table(&head, &rows));
     s.push_str(&format!(
-        "\nCandidates refused before analysis: {}.\n",
-        all.rejected
+        "\nStructural refusals (encrypted, out-of-range or overlapping entries): {}; zlib-scan false hits: {}; walker panics: {}.\n",
+        all.rejected, all.false_hits, all.panics
     ));
 
     s.push_str("\n## Reconstructed streams by the library's encoder estimate\n\n");
@@ -1423,13 +1576,49 @@ mod tests {
         assert_eq!(process_file(&plain, "docx", &limits()).kind, "office");
         assert_eq!(process_file(&plain, "jar", &limits()).kind, "jar");
         assert_eq!(process_file(&plain, "apk", &limits()).kind, "apk");
+        // Packages that share `[Content_Types].xml` with Office are not Office.
+        let msix = zip_with(&["[Content_Types].xml", "AppxManifest.xml"], &d);
+        assert_eq!(process_file(&msix, "msix", &limits()).kind, "zip");
+        assert_eq!(process_file(&msix, "nupkg", &limits()).kind, "zip");
         let r = process_file(&jar, "jar", &limits());
         assert_eq!(r.streams.found, 2, "the stored entry is not a stream");
         check_stats(&r);
-        // Every reconstructed entry is replaced by plain data, so the file grows.
-        if r.streams.reconstructed > 0 {
-            assert!(r.replaced.expect("replaced").len() > jar.len() - 1);
+        let one = process_file(&plain, "zip", &limits());
+        assert_eq!((one.streams.found, one.streams.reconstructed), (1, 1));
+        // The entry is replaced by plain data, so the file grows.
+        assert!(one.replaced.expect("replaced").len() > plain.len());
+    }
+
+    #[test]
+    fn overlapping_zip_entries_are_structural_refusals() {
+        // Two central-directory entries pointing at the same data.
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("a.txt", o).expect("start");
+        w.write_all(&text(5000, 1)).expect("write");
+        w.start_file("b.txt", o).expect("start");
+        w.write_all(&text(5000, 1)).expect("write");
+        let mut bytes = w.finish().expect("finish").into_inner();
+        // Make the second central entry's local header offset the first's (0).
+        let mut seen = 0;
+        for i in 0..bytes.len() - 46 {
+            if bytes[i..].starts_with(b"PK\x01\x02") {
+                seen += 1;
+                if seen == 2 {
+                    bytes[i + 42..i + 46].copy_from_slice(&[0, 0, 0, 0]);
+                }
+            }
         }
+        let r = process_file(&bytes, "zip", &limits());
+        assert_eq!(
+            r.streams.found + r.streams.structural_refusals,
+            2,
+            "{:?}",
+            r.streams
+        );
+        assert!(r.streams.structural_refusals >= 1, "{:?}", r.streams);
+        check_stats(&r);
     }
 
     #[test]
@@ -1437,7 +1626,7 @@ mod tests {
         let png = png_bytes();
         let r = process_file(&png, "png", &limits());
         assert_eq!(r.kind, "png");
-        assert_eq!(r.streams.found, 1);
+        assert_eq!((r.streams.found, r.streams.reconstructed), (1, 1));
         check_stats(&r);
         // Several IDAT chunks: split the payload by hand.
         let idat = {
@@ -1487,7 +1676,7 @@ mod tests {
         let small = zlib(&text(200, 3));
         let r = process_file(&[b"xx".as_slice(), &small].concat(), "bin", &limits());
         assert_eq!(r.streams.found, 0, "plain data under the minimum");
-        assert!(r.streams.rejected_candidates >= 1);
+        assert!(r.streams.scan_false_hits >= 1);
         let mut broken = zlib(&text(20_000, 4));
         let mid = broken.len() / 2;
         broken[mid] ^= 0xff;
@@ -1558,11 +1747,139 @@ mod tests {
 
     #[test]
     fn a_truncated_gzip_member_is_named_by_the_library() {
-        let g = gzip(&text(30_000, 7));
+        let g = gzip(&text(400_000, 7));
         let r = process_file(&g[..g.len() / 2], "gz", &limits());
         assert_eq!(r.kind, "gzip");
         assert_eq!(r.streams.found, 1);
+        assert_eq!(r.streams.reconstructed, 0, "{:?}", r.streams);
+        assert_eq!(
+            r.streams.failed.get("ShortRead"),
+            Some(&1),
+            "{:?}",
+            r.streams
+        );
+        assert_eq!(
+            r.streams.found_deflate_bytes,
+            r.streams.failed_deflate_bytes
+        );
+        assert!(r.replaced.is_none());
         check_stats(&r);
+    }
+
+    fn raw_deflate(data: &[u8]) -> Vec<u8> {
+        let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+        e.write_all(data).expect("write");
+        e.finish().expect("finish")
+    }
+
+    fn cfg_with(limit: usize) -> PreflateConfig {
+        PreflateConfig {
+            max_chain_length: 4096,
+            plain_text_limit: limit,
+            verify_compression: false,
+        }
+    }
+
+    #[test]
+    fn a_partial_stream_is_never_reconstructed() {
+        // Several blocks: enough varied data that the encoder closes blocks on its own.
+        let mut plain = Vec::new();
+        for i in 0..40u32 {
+            plain.extend_from_slice(&text(20_000, i));
+        }
+        let d = raw_deflate(&plain);
+        let cfg = cfg_with(64 * 1024 * 1024);
+        assert!(matches!(
+            analyse_stream(&d, Some(plain.len() as u64), &cfg),
+            StreamOutcome::Done { .. }
+        ));
+        // Truncated input: the library returns a shortened stream, the probe says ShortRead.
+        match analyse_stream(&d[..d.len() * 3 / 4], None, &cfg) {
+            StreamOutcome::Failed {
+                cause, deflate_len, ..
+            } => {
+                assert_eq!(cause, "ShortRead");
+                assert_eq!(deflate_len, d.len() * 3 / 4, "the tail is not dropped");
+            }
+            _ => panic!("a truncated stream must fail"),
+        }
+        // Plain-text limit reached after at least one block, size unknown: skipped.
+        let cfg = cfg_with(plain.len() / 2);
+        assert!(matches!(
+            analyse_stream(&d, None, &cfg),
+            StreamOutcome::Skipped { .. }
+        ));
+        // A wrong known size is a failure.
+        match analyse_stream(&d, Some(plain.len() as u64 + 1), &cfg_with(1 << 30)) {
+            StreamOutcome::Failed { cause, .. } => assert_eq!(cause, "RoundtripMismatch"),
+            _ => panic!("a size mismatch must fail"),
+        }
+    }
+
+    #[test]
+    fn pdf_streams_that_do_not_inflate_get_a_named_outcome() {
+        let plain = text(300_000, 3);
+        let z = zlib(&plain);
+        // Truncated stream, a plausible but arbitrary header, and a keyword inside a string.
+        let mut pdf = b"%PDF-1.4\n(a stream\nnot data) ".to_vec();
+        pdf.extend_from_slice(b"1 0 obj\nstream\r\n");
+        pdf.extend_from_slice(&z[..z.len() / 2]);
+        pdf.extend_from_slice(b"\nendstream\n2 0 obj\nstream\n\x58\x85 garbage\nendstream\n");
+        let r = process_file(&pdf, "pdf", &limits());
+        assert_eq!(r.kind, "pdf");
+        // The 0x58 0x85 header is valid (method 8, window 5, divisible by 31).
+        assert_eq!(r.streams.found, 2, "{:?}", r.streams);
+        assert_eq!(r.streams.reconstructed, 0);
+        let failed: u64 = r.streams.failed.values().sum();
+        assert_eq!(failed, 2, "{:?}", r.streams);
+        check_stats(&r);
+        assert!(valid_zlib_header(&[0x58, 0x85]));
+        assert!(!valid_zlib_header(&[0x78, 0x9d]));
+        assert!(!valid_zlib_header(&[0x78, 0xbb]), "preset dictionary");
+    }
+
+    #[test]
+    fn a_png_with_a_huge_declared_chunk_length_is_not_followed() {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&u32::MAX.to_be_bytes());
+        png.extend_from_slice(b"IDAT");
+        png.extend_from_slice(&[1, 2, 3]);
+        let r = process_file(&png, "png", &limits());
+        assert_eq!((r.kind, r.streams.found), ("png", 0));
+    }
+
+    #[test]
+    fn gzip_headers_with_extra_and_name_fields_are_walked() {
+        let plain = text(30_000, 11);
+        let body = raw_deflate(&plain);
+        let mut g = vec![0x1f, 0x8b, 8, 4 | 8, 0, 0, 0, 0, 0, 3];
+        g.extend_from_slice(&3u16.to_le_bytes());
+        g.extend_from_slice(b"abc");
+        g.extend_from_slice(b"name.txt\0");
+        g.extend_from_slice(&body);
+        g.extend_from_slice(&[0; 8]);
+        let r = process_file(&g, "gz", &limits());
+        assert_eq!(r.kind, "gzip");
+        assert_eq!(
+            (r.streams.found, r.streams.reconstructed),
+            (1, 1),
+            "{:?}",
+            r.streams
+        );
+        assert_eq!(r.streams.reconstructed_deflate_bytes, body.len() as u64);
+    }
+
+    #[test]
+    fn check_rejects_foreign_failure_names_and_labels() {
+        assert!(estimate_label_ok("none"));
+        assert!(estimate_label_ok(
+            "strategy=Default hash=Zlib add=AddAll match=Lazy zlib_compatible=true"
+        ));
+        assert!(!estimate_label_ok("hash=Zlib"));
+        assert!(!estimate_label_ok(
+            "strategy=Default hash=Zlib add=AddAll match=Lazy zlib_compatible=maybe"
+        ));
+        assert!(FAILURE_NAMES.contains(&"ShortRead") && FAILURE_NAMES.contains(&PANIC));
     }
 
     #[test]
