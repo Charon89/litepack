@@ -59,7 +59,13 @@ fn main() {
             watch(&p);
         }
     }
-    for source in ["src", "tests", "Cargo.toml", "../../Cargo.toml", "../../Cargo.lock"] {
+    for source in [
+        "src",
+        "tests",
+        "Cargo.toml",
+        "../../Cargo.toml",
+        "../../Cargo.lock",
+    ] {
         watch(source);
     }
 

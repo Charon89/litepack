@@ -142,6 +142,22 @@ mod tests {
     }
 
     #[test]
+    fn the_build_stamp_is_a_commit_in_a_git_checkout() {
+        let stamp = env!("LPK_GIT_COMMIT");
+        eprintln!("build stamp: {stamp}");
+        let in_checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .any(|p| p.join(".git").exists());
+        if in_checkout {
+            let hex = stamp.strip_suffix("-dirty").unwrap_or(stamp);
+            assert!(
+                hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+                "stamp `{stamp}`"
+            );
+        }
+    }
+
+    #[test]
     fn dirty_and_unknown_builds_are_refused_unless_allowed() {
         assert!(check_build("0123456789ab", false).is_ok());
         for stamp in ["0123456789ab-dirty", "unknown"] {
