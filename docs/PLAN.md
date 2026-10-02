@@ -34,6 +34,7 @@ Goal: a reproducible corpus + harness that measures every claim in `docs/LitePac
 - Acceptance: on the `small` profile all installed tools complete with 100% round-trip verification; a second run differs by < 3% in time; results validate against the schema.
 - Note: "Peak RSS" is published as defined in D-19 (item 1), and `bench/tools.toml` is the tool catalogue while per-machine versions go to each results directory's `tools.json` (D-19 item 2).
 - Note: the run-loop rules settled in review are D-20 (extraction in the scratch directory, flush between steps, long combinations measured once, `run.json` completeness, antivirus products in the host file).
+- Acceptance status, 2026-10-02 (build `d704bdf`; `bench/results/2026-10-02-megatron` and `2026-10-02-megatron-2`): both runs ended with 238 measured, 0 failed, 34 skipped (t-saur is not installed) and 0 validation problems, so the round-trip and schema clauses hold. `run --compare`: every compress total is within 3%; four extract totals are over (rar/best-rr3, store, zpaqfranz/m1, zstd/3). The cause is a bias of the loop on many-file classes, fixed by the settle pause of D-21 (`ffdb753`). A new pair of runs with the pause is needed before the boxes are ticked.
 - Note: started 2026-10-02 while P0-2's `full` profile is still unpinned — the runner needs only the `small` profile and the manifest format; `full` is needed for P0-5.
 
 ### P0-4 Component probes (the headroom experiments) — owner: implementer (sonnet), 4 probes may run as parallel worktree subagents
