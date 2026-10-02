@@ -3014,6 +3014,12 @@
         "url": "https://export.arxiv.org/pdf/2505.10600v1"
       },
       {
+        "blake3": "b1d70d0b911829a7226c329200b488966b3c6af09b66bc43ee334abc4f70b427",
+        "bytes": 275524128,
+        "source": "bbb-1080p",
+        "url": "https://download.blender.org/demo/movies/BBB/bbb_sunflower_1080p_30fps_normal.mp4.zip"
+      },
+      {
         "blake3": "f08a840882e8cc882253686b4555da81270e68c31351f594e973e49ea57575bd",
         "bytes": 17756393,
         "source": "bert-tiny",
@@ -51026,6 +51032,69 @@
         "url": "https://upload.wikimedia.org/wikipedia/commons/f/ff/Schwalbenschwanz%2C_Papilio_machaon.jpg"
       },
       {
+        "attribution": "European Archive Music / Giovanni Pierluigi da Palestrina (via Musopen) (Wikimedia Commons)",
+        "blake3": "8bb842dc864218ce01ac7add3667ba7377734b89f49f114f97106add97f5d2a1",
+        "bytes": 6851308,
+        "licence": "CC0-1.0",
+        "path": "missa-papae-marcelli-agnus-dei-i.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/0/04/Missa_Papae_Marcelli_-_V._Agnus_Dei_I.flac"
+      },
+      {
+        "attribution": "Flopinot2012 (Wikimedia Commons)",
+        "blake3": "f8886682b5ecfe22099433c6be8468dd9e535f4858a8b266fad5ef080cbf7888",
+        "bytes": 4425908,
+        "licence": "CC0-1.0",
+        "path": "con-amores-la-mi-madre.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/2/2b/Con_amores_la_mi_madre.flac"
+      },
+      {
+        "attribution": "Makeip (Wikimedia Commons)",
+        "blake3": "acfd3865d747025100dbb3e2e410cc192fa4ff965649ea6a7b4d1d1db365ba38",
+        "bytes": 7587747,
+        "licence": "CC0-1.0",
+        "path": "gora-doneztebe-mendi-abesbatza.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/4/4a/Gora_Doneztebe_-_Mendi_Abesbatza_%28Doneztebe-Santesteban%29.flac"
+      },
+      {
+        "attribution": "Wilfredor (Wikimedia Commons)",
+        "blake3": "a6def19ab4cfc4b0b5832fd5396e880bd08799323985696acd4cc63000981a0c",
+        "bytes": 2906072,
+        "licence": "CC0-1.0",
+        "path": "human-heart-rate.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/a/a4/Human_heart_rate.flac"
+      },
+      {
+        "attribution": "Spyros Papanastasiou (Wikimedia Commons)",
+        "blake3": "2d44f832cf2440a6e632d6dff3768a6d49d8b6720158fb161237e25cb594ea78",
+        "bytes": 3502090,
+        "licence": "CC0-1.0",
+        "path": "pica-pica-part15.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/b/b5/Pica_pica-2015-6-12-part15.flac"
+      },
+      {
+        "attribution": "Vera de Kok (Wikimedia Commons)",
+        "blake3": "d3eacb49ae1e53b9b5a677afb9c30400c7075bb43792023f96799ef4f7180c53",
+        "bytes": 3606009,
+        "licence": "CC0-1.0",
+        "path": "angelien-eijsink-voice-nl-long.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/d/d9/Angelien_Eijsink_-_voice_-_nl_-_long.flac"
+      },
+      {
+        "attribution": "Spyros Papanastasiou (Wikimedia Commons)",
+        "blake3": "c7958493805bf6f1128fa0d5333726d9f2f9d8a3d366516e23bcdf1a8f921c79",
+        "bytes": 4773872,
+        "licence": "CC0-1.0",
+        "path": "pica-pica-part9.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/f/f2/Pica_pica-2015-6-12-part9.flac"
+      },
+      {
         "blake3": "dcddcd38a75062308426ee90537843e37ceec9127070144dda05acdc9199c6a0",
         "bytes": 36445475,
         "source": "enwik8",
@@ -51060,6 +51129,12 @@
         "bytes": 323384538,
         "source": "govdocs-004",
         "url": "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/004.zip"
+      },
+      {
+        "blake3": "0beef53efd4f8d4bdd229fc1ab4c830a2f8d0a11147b3195d7f66b42e7f7ed11",
+        "bytes": 298435,
+        "source": "gson-jar",
+        "url": "https://repo1.maven.org/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.jar"
       },
       {
         "blake3": "20cc6211bc200bffc2ba671437f1f7e18362387700926ce80d1cd3a5671743f6",
@@ -51412,6 +51487,12 @@
         "url": "https://gutenberg.pglaf.org/9/98/98-0.txt"
       },
       {
+        "blake3": "8b4d8648a43587ec9db3185873ae7433ef4bcd89f7e355a9d71d8253c4b0794c",
+        "bytes": 474012,
+        "source": "gutenberg-epub",
+        "url": "https://gutenberg.pglaf.org/cache/epub/84/pg84-images.epub"
+      },
+      {
         "blake3": "0dda821478c0fe3a483044b67551778c4a478d30060d12521d5e278b5d1aeefc",
         "bytes": 1239525,
         "source": "kenney-music-jingles",
@@ -51622,6 +51703,55 @@
         "url": "https://r0k.us/graphics/kodak/kodak/kodim24.png"
       },
       {
+        "blake3": "5b3b19d17582935ef490089c2500f4014abc1505f40c42ede91c8175f67e5563",
+        "bytes": 4055167,
+        "path": "art_of_war_01-02_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_01-02_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "22bde727272f3a32e96bfcf4cdafdfb95aa1cec90151b2079f07d4415cebc63b",
+        "bytes": 3723859,
+        "path": "art_of_war_03-04_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_03-04_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "063c7195ea86855a7e7757cb12b8f75bbc497baf9f297fc12525e785db305beb",
+        "bytes": 5094335,
+        "path": "art_of_war_05-06_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_05-06_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "214afa10ce119e1e2c1372189c1eb777fa14abc36903f42a2893760cdebd0d12",
+        "bytes": 4246508,
+        "path": "art_of_war_07-08_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_07-08_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "7b8e5ed3afcf8ecba37dfa72990d481b95274e7f566f140f6bbf90da6d764ce5",
+        "bytes": 7059580,
+        "path": "art_of_war_09-10_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_09-10_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "5fbfd6940d7a171328cfc0c1992204f03720d1929b6208678ddec98693c26751",
+        "bytes": 6213090,
+        "path": "art_of_war_11_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_11_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "f85a586fdf6f5818203b7173c07f0e81b7b3376d5e758820b8cc77d25c64cbe7",
+        "bytes": 4312968,
+        "path": "art_of_war_12-13_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_12-13_sun_tzu_64kb.mp3"
+      },
+      {
         "blake3": "e95ba65c2fccca14d574d96bb13f7fda07d1aad839fab20b8a26d6186ed06710",
         "bytes": 50824,
         "path": "apple_gainmap_new.jpg",
@@ -51719,6 +51849,12 @@
         "url": "https://mattmahoney.net/dc/silesia.zip"
       },
       {
+        "blake3": "89947fbc3e0daa47dc2a260653d2e4a782bebfaf56f4010483f5945245680e3e",
+        "bytes": 681285470,
+        "source": "sintel-720p",
+        "url": "https://download.blender.org/durian/movies/Sintel.2010.720p.mkv.zip"
+      },
+      {
         "blake3": "2d8c454d9196a7a41de0a1bfacef109c62ec10381d4f9812d09f0704f14d826e",
         "bytes": 269060552,
         "source": "smollm2-135m",
@@ -51743,6 +51879,11 @@
       {
         "commit": "d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a",
         "source": "v3",
+        "url": "https://github.com/facebook/zstd"
+      },
+      {
+        "commit": "d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a",
+        "source": "zstd-history-full",
         "url": "https://github.com/facebook/zstd"
       }
     ],
