@@ -1,6 +1,7 @@
 /target
 /bench/corpus/
 /bench/tmp/
+/bench/tools.local.toml
 /bench/results/**/*.tmp
 *.lpk
 *.log

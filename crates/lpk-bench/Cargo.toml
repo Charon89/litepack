@@ -31,6 +31,9 @@ sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["defl
 tar = "0.4.46"
 toml = "1.1.6"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+jsonschema = { version = "0.58.4", default-features = false }
+regex = "1.13.1"
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
 [lints]
 workspace = true

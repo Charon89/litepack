@@ -13,6 +13,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 mod corpus;
+mod run;
 
 #[derive(Debug, Parser)]
 #[command(name = "lpk-bench", version, about = "LitePack Phase 0 benchmark tool")]

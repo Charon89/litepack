@@ -1,1 +1,214 @@
-# External tool versions used for baselines (filled by lpk-bench run --list-tools)
+# Catalogue of baseline tools read by `lpk-bench run` (docs/PLAN.md P0-3, docs/BASELINES.md).
+# Committed and machine-independent: no absolute paths. The versions actually used are recorded
+# per results directory in `tools.json`. A machine overrides or supplies tools in the untracked
+# `bench/tools.local.toml` (same `[[tool]]` shape, matched by `id`; see docs/BASELINES.md).
+#
+# Keys per [[tool]]:
+#   id, name        identifier (`[a-z0-9-]+`) and display name
+#   exe.<os>        executable names to look for, per OS (`windows`, `linux`, `macos`)
+#   hints.<os>      install-location hints, tried after PATH; `%VAR%` is an environment variable
+#   version         { args, pattern }: run with args, first capture group of pattern on stdout+stderr
+#   extension       archive file extension
+#   mode            `directory` (tool archives a directory itself) or `tar-stream` (the runner pipes
+#                   a tar stream into the tool's stdin and takes the archive from its stdout)
+#   create/extract  argument templates. Placeholders: {archive} {input} {outdir} {settings}
+#                   {threads}; `{settings}` expands to the setting's compress or extract arguments
+#   threads         thread-count template; `{n}` is the number; expands to one or more arguments
+#   licence         licence note; install = { winget, apt, url } hints
+#   manual          true: the owner licenses and configures the tool by hand (docs/BASELINES.md)
+#   verified        false: command lines taken from documentation, never run by us
+#   note            free text
+# Flags checked against current versions on 2026-10-01 unless `verified = false`.
+
+[[tool]]
+id = "store"
+name = "tar (store, control)"
+exe = { windows = ["tar"], linux = ["tar"], macos = ["tar"] }
+hints = { windows = ["%SystemRoot%/System32/tar.exe"] }
+version = { args = ["--version"], pattern = '(\d+(?:\.\d+)+)' }
+extension = ".tar"
+mode = "directory"
+create = ["-cf", "{archive}", "-C", "{input}", "."]
+extract = ["-xf", "{archive}", "-C", "{outdir}"]
+threads = []
+licence = "bsdtar (BSD-2-Clause) or GNU tar (GPL-3.0-or-later), used as an external program only"
+install = { apt = "tar", url = "bundled with Windows 10 and later" }
+note = "Tar without compression: the control for every other tool."
+[[tool.setting]]
+id = "store"
+compress = []
+extract = []
+
+[[tool]]
+id = "7z"
+name = "7-Zip"
+exe = { windows = ["7z"], linux = ["7zz", "7z"], macos = ["7zz"] }
+hints = { windows = ["%ProgramFiles%/7-Zip/7z.exe", "%ProgramFiles(x86)%/7-Zip/7z.exe", "%LOCALAPPDATA%/Programs/7-Zip/7z.exe"] }
+version = { args = [], pattern = '7-Zip[^\d\r\n]*(\d+(?:\.\d+)+)' }
+extension = ".7z"
+mode = "directory"
+create = ["a", "-bd", "-y", "{settings}", "{threads}", "{archive}", "{input}/*"]
+extract = ["x", "-bd", "-y", "{threads}", "-o{outdir}", "{archive}"]
+threads = ["-mmt={n}"]
+licence = "LGPL-2.1-or-later with unRAR restriction; used as an external program only"
+install = { winget = "7zip.7zip", apt = "7zip", url = "https://www.7-zip.org/" }
+note = "Catalogued against 7-Zip 26.03; the executable is `7zz` on Linux."
+[[tool.setting]]
+id = "mx5"
+compress = ["-mx5"]
+extract = []
+[[tool.setting]]
+id = "ultra"
+compress = ["-mx9", "-mqs"]
+extract = []
+
+[[tool]]
+id = "rar"
+name = "WinRAR (rar)"
+exe = { windows = ["rar"], linux = ["rar"], macos = ["rar"] }
+hints = { windows = ["%ProgramFiles%/WinRAR/Rar.exe", "%ProgramFiles(x86)%/WinRAR/Rar.exe"] }
+version = { args = [], pattern = 'RAR (\d+(?:\.\d+)+)' }
+extension = ".rar"
+mode = "directory"
+create = ["a", "-r", "-ep1", "-idq", "-y", "{settings}", "{threads}", "{archive}", "{input}/*"]
+extract = ["x", "-idq", "-y", "{threads}", "{archive}", "{outdir}/"]
+threads = ["-mt{n}"]
+licence = "Proprietary: 40-day trial, then a paid licence"
+install = { winget = "RARLab.WinRAR", apt = "rar (multiverse)", url = "https://www.rarlab.com/" }
+note = "Catalogued against WinRAR 7.23."
+[[tool.setting]]
+id = "m3"
+compress = ["-m3"]
+extract = []
+[[tool.setting]]
+id = "best"
+compress = ["-m5", "-md256m"]
+extract = []
+[[tool.setting]]
+id = "best-rr3"
+compress = ["-m5", "-rr3%"]
+extract = []
+
+[[tool]]
+id = "zstd"
+name = "Zstandard"
+exe = { windows = ["zstd"], linux = ["zstd"], macos = ["zstd"] }
+version = { args = ["--version"], pattern = 'v(\d+(?:\.\d+)+)' }
+extension = ".tar.zst"
+mode = "tar-stream"
+create = ["{settings}", "{threads}", "-c"]
+extract = ["-d", "{settings}", "-c"]
+threads = ["-T{n}"]
+licence = "BSD-3-Clause OR GPL-2.0-only; used as an external program only"
+install = { winget = "Meta.Zstandard", apt = "zstd", url = "https://github.com/facebook/zstd" }
+note = "Catalogued against zstd 1.5.7. Decoding a --long=27 stream needs no extra flag at that window size."
+[[tool.setting]]
+id = "3"
+compress = ["-3"]
+extract = []
+[[tool.setting]]
+id = "19"
+compress = ["-19"]
+extract = []
+[[tool.setting]]
+id = "ultra22-long27"
+compress = ["--ultra", "-22", "--long=27"]
+extract = []
+
+[[tool]]
+id = "xz"
+name = "XZ Utils"
+exe = { windows = ["xz"], linux = ["xz"], macos = ["xz"] }
+version = { args = ["--version"], pattern = 'xz[^\d\r\n]*(\d+(?:\.\d+)+)' }
+extension = ".tar.xz"
+mode = "tar-stream"
+create = ["{settings}", "{threads}", "-c"]
+extract = ["-d", "{settings}", "-c"]
+threads = ["-T{n}"]
+licence = "0BSD (liblzma) and GPL-2.0-or-later (command line tool); used as an external program only"
+install = { winget = "TukaaniProject.XZUtils", apt = "xz-utils", url = "https://tukaani.org/xz/" }
+note = "Catalogued against xz 5.8."
+[[tool.setting]]
+id = "6"
+compress = ["-6"]
+extract = []
+[[tool.setting]]
+id = "9"
+compress = ["-9"]
+extract = []
+
+[[tool]]
+id = "zpaqfranz"
+name = "zpaqfranz"
+exe = { windows = ["zpaqfranz"], linux = ["zpaqfranz"], macos = ["zpaqfranz"] }
+version = { args = ["-h"], pattern = 'zpaqfranz v?(\d+(?:\.\d+)*)' }
+extension = ".zpaq"
+mode = "directory"
+create = ["a", "{archive}", "{input}", "{settings}", "{threads}"]
+extract = ["x", "{archive}", "-to", "{outdir}", "{threads}"]
+threads = ["-t", "{n}"]
+licence = "MIT"
+install = { url = "https://github.com/fcorbelli/zpaqfranz" }
+verified = false
+note = "Command lines from the project README; not run by us."
+[[tool.setting]]
+id = "m1"
+compress = ["-m1"]
+extract = []
+[[tool.setting]]
+id = "m5"
+compress = ["-m5"]
+extract = []
+
+[[tool]]
+id = "tsaur"
+name = "t-saur"
+exe = { windows = ["tsaur"], linux = ["tsaur"], macos = ["tsaur"] }
+version = { args = ["--version"], pattern = '(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)' }
+extension = ".tsaur"
+mode = "directory"
+create = ["pack", "{archive}", "{input}", "{settings}", "{threads}"]
+extract = ["unpack", "{archive}", "{outdir}", "{threads}"]
+threads = ["--jobs", "{n}"]
+licence = "Apache-2.0 OR MIT"
+install = { url = "https://github.com/iulianbondari/t-saur" }
+verified = false
+note = "Catalogued against 1.0.0-rc.2. Command lines from the project README; not run by us. Its lite builds need --no-lepton, which a machine adds in bench/tools.local.toml."
+[[tool.setting]]
+id = "default"
+compress = []
+extract = []
+[[tool.setting]]
+id = "max"
+compress = ["--codec", "best", "--level", "19"]
+extract = []
+
+[[tool]]
+id = "wzzip"
+name = "WinZip command line"
+exe = { windows = ["wzzip"] }
+hints = { windows = ["%ProgramFiles%/WinZip/wzzip.exe", "%ProgramFiles(x86)%/WinZip/wzzip.exe"] }
+version = { args = ["-h"], pattern = 'WinZip[^\d\r\n]*(\d+(?:\.\d+)*)' }
+extension = ".zip"
+mode = "directory"
+threads = []
+licence = "Proprietary, paid licence (WinZip plus the Command Line add-on)"
+install = { url = "https://www.winzip.com/" }
+manual = true
+verified = false
+note = "Strongest-setting flags not verified. The owner supplies command lines in bench/tools.local.toml (docs/BASELINES.md)."
+
+[[tool]]
+id = "pacl"
+name = "PowerArchiver command line"
+exe = { windows = ["pacl"] }
+hints = { windows = ["%ProgramFiles%/PowerArchiver/pacl.exe", "%ProgramFiles(x86)%/PowerArchiver/pacl.exe"] }
+version = { args = [], pattern = '(\d+\.\d+(?:\.\d+)*)' }
+extension = ".zip"
+mode = "directory"
+threads = []
+licence = "Proprietary, paid licence"
+install = { url = "https://www.powerarchiver.com/" }
+manual = true
+verified = false
+note = "Strongest-setting flags and archive format not verified. The owner supplies command lines (and the extension) in bench/tools.local.toml (docs/BASELINES.md)."
