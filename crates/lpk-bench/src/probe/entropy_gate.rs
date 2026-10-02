@@ -862,6 +862,9 @@ pub fn render(e: &Envelope<Data>) -> String {
             .collect();
         s.push_str(&format!("### pooled\n\n{}\n\n", truth_line(blocks, &truth)));
         s.push_str(&pr_table(&pooled(&other)));
+    }
+    // The per-class listing includes classes with no block of 64 KiB, even when no class has one.
+    if !all_other.is_empty() {
         s.push_str(
             "\n### Per class: blocks a gate calls incompressible although xz>=95% says they are \
              not (false positives)\n\n",
@@ -1561,6 +1564,35 @@ mod tests {
             assert!(d.gate_cost.iter().all(|c| c.blocks == 5));
             assert!(out.libraries.contains_key("libzstd") && out.libraries.contains_key("liblzma"));
         });
+    }
+
+    #[test]
+    fn classes_with_no_block_are_listed_even_when_no_class_has_one() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("corpus");
+        let data = random(10 * 1024, 5);
+        let p = dir.join("small-files/tiny.bin");
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, &data).expect("write");
+        let m = Manifest::with_profile_name(
+            "small",
+            vec![("small-files".to_string(), mf("small-files/tiny.bin", &data))],
+        );
+        std::fs::write(dir.join("manifest.json"), m.render()).expect("manifest");
+        let corpus = load_corpus(&dir).expect("corpus");
+        let ctx = Ctx {
+            corpus: &corpus,
+            threads: 1,
+            scratch: tmp.path().to_path_buf(),
+            local_tools: PathBuf::from("none.toml"),
+            tool_timeout: Duration::from_secs(60),
+        };
+        let md = render(&envelope(run(&ctx).expect("run").data));
+        assert!(md.contains("no other class with a block of at least 64 KiB"));
+        assert!(
+            md.contains("| small-files |") && md.contains("no block >= 64 KiB"),
+            "{md}"
+        );
     }
 
     #[test]

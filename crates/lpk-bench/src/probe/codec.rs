@@ -3,8 +3,15 @@
 //!
 //! [`zstd_measure`] and [`xz_measure`] compress `data` (timed), decompress it (timed), compare
 //! the result with the input and return the sizes and times. They are timed sections: call them
-//! alone, on data already in memory. [`ZstdContext`] keeps one compressor and one decompressor
-//! alive across many calls, for probes that time thousands of small buffers.
+//! alone, on data already in memory. Rule: encoders, decoders and the output buffers of both
+//! directions are built and sized before the timed sections, so the figures measure the codec and
+//! not the allocator. [`ZstdContext`] keeps one compressor and one decompressor alive across many
+//! calls, for probes that time thousands of small buffers.
+//!
+//! The in-process xz is the generic C build of `liblzma-sys` 0.4.9: its hand-written `config.h`
+//! enables no unaligned-access, SSE2 match-compare or CLMUL CRC paths. In-process xz figures
+//! therefore measure that build, not upstream `xz`; compare speeds across tools with the
+//! process-wall rows (the command-line programs), not with these.
 
 #![allow(dead_code)] // shared helpers for probes that land in later tasks
 
@@ -100,6 +107,13 @@ impl ZstdContext {
         Ok(self.c.compress_to_buffer(data, out)?)
     }
 
+    /// Decompress into `out` (cleared first; its capacity must hold the whole output, so a timed
+    /// section does not allocate). Returns the decompressed size.
+    pub fn decompress_into(&mut self, compressed: &[u8], out: &mut Vec<u8>) -> Result<usize> {
+        out.clear();
+        Ok(self.d.decompress_to_buffer(compressed, out)?)
+    }
+
     /// `plain_len` is the exact size of the original data.
     pub fn decompress(&mut self, compressed: &[u8], plain_len: usize) -> Result<Vec<u8>> {
         Ok(self.d.decompress(compressed, plain_len)?)
@@ -150,14 +164,17 @@ pub struct Measured {
 /// reproduce `data` is an `Err`: it cannot be ignored.
 pub fn zstd_measure(data: &[u8], s: &ZstdSettings) -> Result<Measured> {
     let mut ctx = s.context()?;
-    let (c, compress_seconds) = timed(|| ctx.compress(data));
-    let c = c?;
-    let (d, decompress_seconds) = timed(|| ctx.decompress(&c, data.len()));
-    if d? != data {
+    // Both buffers are allocated before the timed sections.
+    let mut c = Vec::with_capacity(zstd::zstd_safe::compress_bound(data.len()));
+    let mut d: Vec<u8> = Vec::with_capacity(data.len());
+    let (n, compress_seconds) = timed(|| ctx.compress_into(data, &mut c));
+    let n = n?;
+    let (m, decompress_seconds) = timed(|| ctx.decompress_into(&c, &mut d));
+    if m? != data.len() || d != data {
         bail!("zstd round trip failed: the decompressed bytes differ from the input");
     }
     Ok(Measured {
-        compressed_bytes: c.len() as u64,
+        compressed_bytes: n as u64,
         compress_seconds,
         decompress_seconds,
     })
@@ -171,20 +188,26 @@ pub fn zstd_size(data: &[u8], s: &ZstdSettings) -> Result<u64> {
 /// Compress and decompress `data` with xz, timing each step (the encoder is built before the
 /// timed section). A round trip that does not reproduce `data` is an `Err`.
 pub fn xz_measure(data: &[u8], s: &XzSettings) -> Result<Measured> {
-    let mut enc = liblzma::write::XzEncoder::new_stream(Vec::new(), s.encoder()?);
+    // Encoder, decoder and both buffers are built before the timed sections.
+    let out = Vec::with_capacity(data.len() + data.len() / 8 + 4096);
+    let mut enc = liblzma::write::XzEncoder::new_stream(out, s.encoder()?);
     let (c, compress_seconds) = timed(|| -> Result<Vec<u8>> {
         enc.write_all(data)?;
         Ok(enc.finish()?)
     });
     let c = c?;
-    let (d, decompress_seconds) = timed(|| -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(data.len());
-        liblzma::read::XzDecoder::new(&c[..])
-            .read_to_end(&mut out)
+    let mut dec = liblzma::read::XzDecoder::new(&c[..]);
+    let mut d = vec![0u8; data.len()];
+    let (r, decompress_seconds) = timed(|| -> Result<bool> {
+        dec.read_exact(&mut d)
             .map_err(|e| anyhow!("xz decompression failed: {:?}", e.kind()))?;
-        Ok(out)
+        let mut extra = [0u8; 1];
+        Ok(dec
+            .read(&mut extra)
+            .map_err(|e| anyhow!("xz decompression failed: {:?}", e.kind()))?
+            == 0)
     });
-    if d? != data {
+    if !r? || d != data {
         bail!("xz round trip failed: the decompressed bytes differ from the input");
     }
     Ok(Measured {

@@ -34,7 +34,9 @@ pub const NAME: &str = "jpeg";
 /// The classes the probe reads, in the order of the result.
 pub const CLASSES: [&str; 2] = ["photo-jpeg", "photo-jpeg-edited"];
 
-/// Bytes after the first image's EOI above which a failure is blamed on trailing data.
+/// Bytes after the first image's EOI above which the size table counts a file in its "trailing
+/// data over the limit" column. It explains no failure: trailing data never makes the library
+/// fail by itself.
 pub const TRAILING_LIMIT: u64 = 4 * 1024 * 1024;
 
 /// The name of the library's feature preset the probe uses.
@@ -54,7 +56,8 @@ pub struct Data {
     /// The library's thread pool of the one-thread lap (`SingleThreadPool` runs everything
     /// inline on the calling thread; the default lap uses `DEFAULT_THREAD_POOL`).
     pub one_thread_pool: String,
-    /// Bytes after the first EOI above which a failure counts as trailing data.
+    /// Bytes after the first EOI above which the size table counts a file as having a large
+    /// trailer (a statistic; it explains no failure).
     pub trailing_limit_bytes: u64,
     /// One entry per class present in the corpus, in the order of [`CLASSES`].
     pub classes: Vec<ClassData>,
@@ -193,7 +196,7 @@ pub enum Cause {
     Arithmetic,
     DimensionCap,
     /// The file exceeds the library's file-size cap.
-    TrailingData,
+    SizeCap,
     VerificationMismatch,
     Other,
 }
@@ -205,7 +208,7 @@ impl Cause {
         Cause::FourComponents,
         Cause::Arithmetic,
         Cause::DimensionCap,
-        Cause::TrailingData,
+        Cause::SizeCap,
         Cause::VerificationMismatch,
         Cause::Other,
     ];
@@ -217,7 +220,7 @@ impl Cause {
             Cause::FourComponents => "four components (CMYK)",
             Cause::Arithmetic => "arithmetic-coded",
             Cause::DimensionCap => "dimension cap",
-            Cause::TrailingData => "file too large (size cap)",
+            Cause::SizeCap => "file too large (size cap)",
             Cause::VerificationMismatch => "verification mismatch",
             Cause::Other => "other",
         }
@@ -637,6 +640,11 @@ pub fn classify(fail: &Fail, lap: LapKind, scan: &Scan, features: &EnabledFeatur
 }
 
 /// The cause of an `UnsupportedJpeg`, from the library's message first and the marker scan second.
+///
+/// The message rules below follow lepton_jpeg 0.5.8's wording ("arithm", "image dimensions
+/// larger", "too large to encode", the progressive scan-script messages) and must be re-checked
+/// when the library is upgraded. A progressive-rejection message counts only for a file whose own
+/// marker scan says it is progressive.
 fn unsupported_jpeg_cause(message: &str, scan: &Scan, features: &EnabledFeatures) -> Cause {
     if message.contains("arithm") {
         return Cause::Arithmetic;
@@ -645,12 +653,13 @@ fn unsupported_jpeg_cause(message: &str, scan: &Scan, features: &EnabledFeatures
         return Cause::DimensionCap;
     }
     if message.contains("too large to encode") {
-        return Cause::TrailingData;
-    }
-    if is_progressive_rejection(message) {
-        return Cause::ProgressiveRejected;
+        return Cause::SizeCap;
     }
     let frame = scan.frame.as_ref();
+    if is_progressive_rejection(message) && frame.is_some_and(|f| f.kind == FrameKind::Progressive)
+    {
+        return Cause::ProgressiveRejected;
+    }
     if frame.is_some_and(|f| f.kind == FrameKind::Arithmetic) {
         Cause::Arithmetic
     } else if frame.is_some_and(|f| f.components == 4) {
@@ -985,7 +994,11 @@ fn check_failure(p: &mut Vec<String>, at: &str, f: &FileRecord, fail: &Failure, 
                 || (unsupported && frame.is_some_and(|x| x.components == 4))
         }
         Cause::Progressive => code == Some("ProgressiveUnsupported"),
-        Cause::ProgressiveRejected => unsupported && is_progressive_rejection(msg),
+        Cause::ProgressiveRejected => {
+            unsupported
+                && is_progressive_rejection(msg)
+                && frame.is_some_and(|x| x.kind == FrameKind::Progressive)
+        }
         Cause::DimensionCap => {
             unsupported
                 && (msg.starts_with("image dimensions larger")
@@ -993,7 +1006,7 @@ fn check_failure(p: &mut Vec<String>, at: &str, f: &FileRecord, fail: &Failure, 
                         x.width > d.features.max_jpeg_width || x.height > d.features.max_jpeg_height
                     }))
         }
-        Cause::TrailingData => unsupported && msg.contains("too large to encode"),
+        Cause::SizeCap => unsupported && msg.contains("too large to encode"),
         Cause::VerificationMismatch => {
             bare.is_none()
                 || matches!(
@@ -1624,8 +1637,9 @@ mod tests {
                 uj("file is too large to encode, increase max_jpeg_file_size"),
                 &plain
             ),
-            Cause::TrailingData
+            Cause::SizeCap
         );
+        let progressive = scan_of(Some((FrameKind::Progressive, 3, 100, 100)));
         for m in [
             "progress can't have two DC first stages",
             "progress must start with DC stage",
@@ -1633,7 +1647,13 @@ mod tests {
             "spectral selection parameter out of range",
             "successive approximation parameter out of range",
         ] {
-            assert_eq!(cause(uj(m), &plain), Cause::ProgressiveRejected, "{m}");
+            assert_eq!(
+                cause(uj(m), &progressive),
+                Cause::ProgressiveRejected,
+                "{m}"
+            );
+            // A baseline file with the same message is not explained by a progressive scan script.
+            assert_eq!(cause(uj(m), &plain), Cause::Other, "{m}");
         }
         // Then the scan.
         let arith = scan_of(Some((FrameKind::Arithmetic, 3, 100, 100)));
@@ -2056,7 +2076,7 @@ mod tests {
         assert!(check(&bad).iter().any(|p| p.contains("exactly one")));
         let mut bad = env.clone();
         if let Some(f) = bad.data.classes[0].files[2].failure.as_mut() {
-            f.cause = Cause::TrailingData;
+            f.cause = Cause::SizeCap;
         }
         assert!(check(&bad)
             .iter()

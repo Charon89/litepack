@@ -26,7 +26,7 @@
 //! are not examined: the probe goes one level deep, so the result is a lower bound. The
 //! per-stream metadata (container headers, the parameter header) is not counted.
 //!
-//! Per stream: analysis with `preflate_whole_deflate_stream` (the library's own verification is
+//! Per stream: analysis with `PreflateStreamProcessor` and its `is_done` (the library's own verification is
 //! off; the probe verifies by itself), then `recreate_whole_deflate_stream` from the plain data
 //! and the corrections, compared byte for byte with the original stream. The library returns
 //! `Ok` with a shortened stream when the input is truncated or the plain-text limit is hit
@@ -238,8 +238,14 @@ struct Found {
 }
 
 enum Inflated {
-    Clean { consumed: usize, out: u64 },
+    Clean {
+        consumed: usize,
+        out: u64,
+    },
+    /// The data is not a valid deflate stream.
     Bad,
+    /// Valid so far, but the input ran out (or the output cap was reached) before the end.
+    Unfinished,
 }
 
 /// Inflate `data` (zlib or raw deflate), discard the output, and say how many input bytes the
@@ -250,7 +256,7 @@ fn inflate_extent(data: &[u8], zlib: bool, buf: &mut [u8]) -> Inflated {
         let in_before = d.total_in();
         let out_before = d.total_out();
         let Some(rest) = data.get(in_before as usize..) else {
-            return Inflated::Bad;
+            return Inflated::Unfinished;
         };
         match d.decompress(rest, buf, FlushDecompress::None) {
             Ok(Status::StreamEnd) => {
@@ -261,10 +267,11 @@ fn inflate_extent(data: &[u8], zlib: bool, buf: &mut [u8]) -> Inflated {
             }
             Ok(_) => {
                 if d.total_in() == in_before && d.total_out() == out_before {
-                    return Inflated::Bad;
+                    // No progress and no error: the input ended inside the stream.
+                    return Inflated::Unfinished;
                 }
                 if d.total_out() > INFLATE_CAP {
-                    return Inflated::Bad;
+                    return Inflated::Unfinished;
                 }
             }
             Err(_) => return Inflated::Bad,
@@ -505,7 +512,7 @@ fn find_gzip(bytes: &[u8], buf: &mut [u8]) -> Found {
                     break;
                 }
             }
-            Inflated::Bad => {
+            Inflated::Bad | Inflated::Unfinished => {
                 // Let the library name what is wrong with the rest of the file.
                 found.candidates.push(Candidate {
                     spans: vec![(start, bytes.len())],
@@ -516,6 +523,19 @@ fn find_gzip(bytes: &[u8], buf: &mut [u8]) -> Found {
         }
     }
     found
+}
+
+/// Does the dictionary of the object whose `stream` keyword is at `kw` (the text after the last
+/// `obj` before it, at most 8 KiB back) name `/FlateDecode`?
+fn dictionary_has_flate(bytes: &[u8], kw: usize) -> bool {
+    let window = &bytes[kw.saturating_sub(8192)..kw];
+    let start = window
+        .windows(3)
+        .rposition(|w| w == b"obj")
+        .map_or(0, |p| p + 3);
+    window[start..]
+        .windows(b"/FlateDecode".len())
+        .any(|w| w == b"/FlateDecode")
 }
 
 fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
@@ -536,7 +556,11 @@ fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
             Some([b'\n', _]) => from + 1,
             _ => continue,
         };
-        if !bytes.get(data..).is_some_and(valid_zlib_header) {
+        let Some(head) = bytes.get(data..).filter(|h| valid_zlib_header(h)) else {
+            continue;
+        };
+        // A header other than the common `78 xx` needs the object's dictionary to say Flate.
+        if !zlib_header(head) && !dictionary_has_flate(bytes, k) {
             continue;
         }
         match zlib_candidate(bytes, data, buf) {
@@ -687,6 +711,8 @@ fn analyse_stream(deflate: &[u8], plain_known: Option<u64>, cfg: &PreflateConfig
             Inflated::Clean { out, .. } if out > cfg.plain_text_limit as u64 => {
                 skipped(analyse_seconds)
             }
+            // Corrupt data is InvalidDeflate; only input that ran out is ShortRead.
+            Inflated::Bad => failed(&code_name(ExitCode::InvalidDeflate), analyse_seconds),
             _ => failed(&code_name(ExitCode::ShortRead), analyse_seconds),
         };
     }
@@ -874,7 +900,13 @@ fn process_file(bytes: &[u8], ext: &str, limits: &Limits) -> FileResult {
     let replaced = (!edits.is_empty()).then(|| {
         let mut edits = edits;
         edits.sort_by_key(|e| e.0);
-        let mut out = Vec::with_capacity(bytes.len());
+        // The final size is known: the file minus every replaced span plus every plain text.
+        let removed: usize = edits.iter().map(|(a, b, _)| b - a).sum();
+        let added: usize = edits
+            .iter()
+            .map(|(_, _, p)| p.as_ref().map_or(0, |p| p.text().len()))
+            .sum();
+        let mut out = Vec::with_capacity(bytes.len() - removed + added);
         let mut pos = 0;
         for (a, b, plain) in edits {
             out.extend_from_slice(&bytes[pos..a]);
@@ -1074,16 +1106,42 @@ const FAILURE_NAMES: [&str; 29] = [
     PANIC,
 ];
 
+/// The variant names of preflate-rs 0.7.6's parameter types (as `Debug` prints them, cut at the
+/// first parenthesis): re-check them when the library is upgraded.
+const STRATEGIES: [&str; 4] = ["Default", "RleOnly", "HuffOnly", "Store"];
+const HASHES: [&str; 8] = [
+    "None",
+    "Zlib",
+    "MiniZFast",
+    "Libdeflate4Fast",
+    "Libdeflate4",
+    "ZlibNG",
+    "RandomVector",
+    "Crc32cHash",
+];
+const ADD_POLICIES: [&str; 5] = [
+    "AddAll",
+    "AddFirst",
+    "AddFirstAndLast",
+    "AddFirstExcept4kBoundary",
+    "AddFirstWith32KBoundary",
+];
+const MATCHES: [&str; 2] = ["Greedy", "Lazy"];
+
 fn estimate_label_ok(k: &str) -> bool {
     if k == "none" {
         return true;
     }
     let parts: Vec<&str> = k.split(' ').collect();
+    let value_in = |part: &str, prefix: &str, names: &[&str]| {
+        part.strip_prefix(prefix)
+            .is_some_and(|v| names.contains(&v))
+    };
     parts.len() == 5
-        && ["strategy=", "hash=", "add=", "match="]
-            .iter()
-            .zip(&parts)
-            .all(|(pre, part)| part.strip_prefix(pre).is_some_and(|v| !v.is_empty()))
+        && value_in(parts[0], "strategy=", &STRATEGIES)
+        && value_in(parts[1], "hash=", &HASHES)
+        && value_in(parts[2], "add=", &ADD_POLICIES)
+        && value_in(parts[3], "match=", &MATCHES)
         && matches!(parts[4], "zlib_compatible=true" | "zlib_compatible=false")
 }
 
@@ -1698,7 +1756,8 @@ mod tests {
         let r = process_file(&file, "bin", &small);
         assert_eq!((r.streams.found, r.streams.skipped), (1, 1));
         assert!(r.streams.skipped_deflate_bytes > 0 && r.replaced.is_none());
-        // The library's own limit is the other path to the same outcome (declared size lies).
+        // Here the probe's own pre-check fires (the entry's declared size is over the limit); the
+        // library's plain-text limit is covered by the multi-block test.
         let zipf = zip_with(&["a.txt"], &plain);
         let r = process_file(&zipf, "zip", &small);
         assert_eq!(r.streams.skipped, 1);
@@ -1824,7 +1883,13 @@ mod tests {
         let mut pdf = b"%PDF-1.4\n(a stream\nnot data) ".to_vec();
         pdf.extend_from_slice(b"1 0 obj\nstream\r\n");
         pdf.extend_from_slice(&z[..z.len() / 2]);
-        pdf.extend_from_slice(b"\nendstream\n2 0 obj\nstream\n\x58\x85 garbage\nendstream\n");
+        pdf.extend_from_slice(
+            b"\nendstream\n2 0 obj\n<< /Filter /FlateDecode >>\nstream\n\x58\x85 garbage\nendstream\n",
+        );
+        // The same header in an object that does not say Flate is not a stream at all.
+        let mut without = pdf.clone();
+        without.extend_from_slice(b"3 0 obj\n<< >>\nstream\n\x58\x85 more\nendstream\n");
+        assert_eq!(process_file(&without, "pdf", &limits()).streams.found, 2);
         let r = process_file(&pdf, "pdf", &limits());
         assert_eq!(r.kind, "pdf");
         // The 0x58 0x85 header is valid (method 8, window 5, divisible by 31).
@@ -1836,6 +1901,26 @@ mod tests {
         assert!(valid_zlib_header(&[0x58, 0x85]));
         assert!(!valid_zlib_header(&[0x78, 0x9d]));
         assert!(!valid_zlib_header(&[0x78, 0xbb]), "preset dictionary");
+    }
+
+    #[test]
+    fn inflate_extent_tells_corrupt_data_from_input_that_ran_out() {
+        let plain = text(50_000, 9);
+        let z = zlib(&plain);
+        let mut buf = vec![0u8; 4096];
+        assert!(matches!(
+            inflate_extent(&z, true, &mut buf),
+            Inflated::Clean { .. }
+        ));
+        assert!(matches!(
+            inflate_extent(&z[..z.len() / 2], true, &mut buf),
+            Inflated::Unfinished
+        ));
+        // A reserved block type (11) is corrupt, not short.
+        assert!(matches!(
+            inflate_extent(&[0x07, 0, 0, 0, 0], false, &mut buf),
+            Inflated::Bad
+        ));
     }
 
     #[test]

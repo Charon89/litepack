@@ -266,36 +266,37 @@ impl Ctx<'_> {
     }
 
     /// The files of a class grouped by their folder inside the class, `depth` folder levels deep
-    /// (a file with fewer levels is grouped by its own folder; depth 0: one group). Public
-    /// corpora: the label is the folder path (`""` for the class root); private corpora: the
-    /// label is `group-<n>`, `n` counting groups in manifest order, so no folder name is
-    /// published. Groups come in manifest order of their first file.
+    /// (a file with fewer levels is grouped by its own folder; depth 0: one group). Groups are
+    /// sorted by folder path in natural order (runs of digits compare as numbers: `v2` before
+    /// `v10`). Public corpora: the label is the folder path (`""` for the class root); private
+    /// corpora: the label is `group-<n>`, `n` counting groups in that sorted order, so no folder
+    /// name is published (the numbering is not stable across scans of a changing tree).
     pub fn groups(&self, class: &str, depth: usize) -> Vec<Group<'_>> {
-        let mut out: Vec<Group<'_>> = Vec::new();
-        let mut keys: Vec<String> = Vec::new();
+        let mut found: Vec<(String, Vec<&ManifestFile>)> = Vec::new();
         for f in self.class_files(class).unwrap_or(&[]) {
             let rel = self.rel_path(class, f);
             let mut parts: Vec<&str> = rel.split('/').collect();
             parts.pop();
             parts.truncate(depth);
             let key = parts.join("/");
-            match keys.iter().position(|k| *k == key) {
-                Some(i) => out[i].files.push(f),
-                None => {
-                    let label = if self.private() {
-                        format!("group-{}", keys.len())
-                    } else {
-                        key.clone()
-                    };
-                    keys.push(key);
-                    out.push(Group {
-                        label,
-                        files: vec![f],
-                    });
-                }
+            match found.iter().position(|(k, _)| *k == key) {
+                Some(i) => found[i].1.push(f),
+                None => found.push((key, vec![f])),
             }
         }
-        out
+        found.sort_by(|a, b| natural_cmp(&a.0, &b.0));
+        found
+            .into_iter()
+            .enumerate()
+            .map(|(n, (key, files))| Group {
+                label: if self.private() {
+                    format!("group-{n}")
+                } else {
+                    key
+                },
+                files,
+            })
+            .collect()
     }
 
     /// Read a class file in blocks of `block` bytes, passing each to `sink`, hashing as it goes;
@@ -391,6 +392,35 @@ pub fn hash_blocks<R: std::io::Read>(
         }
     }
     Ok((total, hasher.finalize().to_hex().to_string()))
+}
+
+/// Order of folder names with runs of digits compared as numbers (`v2` before `v10`); ties and
+/// equal numbers fall back to the plain text order.
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parts(s: &str) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        for c in s.chars() {
+            let digit = c.is_ascii_digit();
+            match out.last_mut() {
+                Some((d, run)) if *d == digit => run.push(c),
+                _ => out.push((digit, c.to_string())),
+            }
+        }
+        out
+    }
+    let (pa, pb) = (parts(a), parts(b));
+    for (x, y) in pa.iter().zip(pb.iter()) {
+        let ord = if x.0 && y.0 {
+            let (tx, ty) = (x.1.trim_start_matches('0'), y.1.trim_start_matches('0'));
+            tx.len().cmp(&ty.len()).then_with(|| tx.cmp(ty))
+        } else {
+            x.1.cmp(&y.1)
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    pa.len().cmp(&pb.len()).then_with(|| a.cmp(b))
 }
 
 /// Compare file contents with their manifest entry.

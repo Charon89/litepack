@@ -127,9 +127,11 @@ fn main() {
         ))
     });
     let label = match release {
-        Some(r) => format!("liblzma {r} (bundled by liblzma-sys {crate_version})"),
+        Some(r) => format!(
+            "liblzma {r} (bundled by liblzma-sys {crate_version}; generic C build, no SIMD or unaligned-access paths)"
+        ),
         None => format!(
-            "liblzma (release unknown: version.h not found; liblzma-sys crate {crate_version})"
+            "liblzma (release unknown: version.h not found or not parsed; generic C build of liblzma-sys {crate_version})"
         ),
     };
     println!("cargo:rustc-env=LPK_XZ_VERSION={label}");

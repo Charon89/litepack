@@ -324,34 +324,8 @@ pub fn window_covers(window_log: u32, old: u64, new: u64) -> bool {
     window_log < 64 && (1u64 << window_log) >= old.max(new)
 }
 
-/// Order of folder names with runs of digits compared as numbers (`v2` before `v10`); ties and
-/// equal numbers fall back to the plain text order.
-pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    fn parts(s: &str) -> Vec<(bool, String)> {
-        let mut out: Vec<(bool, String)> = Vec::new();
-        for c in s.chars() {
-            let digit = c.is_ascii_digit();
-            match out.last_mut() {
-                Some((d, run)) if *d == digit => run.push(c),
-                _ => out.push((digit, c.to_string())),
-            }
-        }
-        out
-    }
-    let (pa, pb) = (parts(a), parts(b));
-    for (x, y) in pa.iter().zip(pb.iter()) {
-        let ord = if x.0 && y.0 {
-            let (tx, ty) = (x.1.trim_start_matches('0'), y.1.trim_start_matches('0'));
-            tx.len().cmp(&ty.len()).then_with(|| tx.cmp(ty))
-        } else {
-            x.1.cmp(&y.1)
-        };
-        if ord != std::cmp::Ordering::Equal {
-            return ord;
-        }
-    }
-    pa.len().cmp(&pb.len()).then_with(|| a.cmp(b))
-}
+// The natural folder order lives in the framework now (`Ctx::groups` sorts with it).
+pub use super::natural_cmp;
 
 /// The `X.Y.Z` token of a `zstd --version` line, for example `1.5.7`.
 pub fn zstd_cli_version(line: &str) -> Option<String> {
@@ -1584,6 +1558,50 @@ mod tests {
             },
             "window_covers_input",
         );
+    }
+
+    #[test]
+    fn long_relative_names_give_identical_tars_for_identical_versions() {
+        // A relative name over 100 bytes takes the GNU long-name path of the tar writer.
+        let long = format!("sub/{}.bin", "d".repeat(130));
+        let a = noise(11, 30_000);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = build(
+            tmp.path(),
+            &[
+                (&format!("backup-versions/v1/{long}"), a.clone()),
+                (&format!("backup-versions/v2/{long}"), a),
+            ],
+        );
+        with_ctx(&dir, tmp.path(), |ctx| {
+            let t1 = tar_bytes_relative(ctx, VERSIONS_CLASS, "v1").expect("v1");
+            let t2 = tar_bytes_relative(ctx, VERSIONS_CLASS, "v2").expect("v2");
+            assert_eq!(t1, t2);
+            let mut ar = tar::Archive::new(&t1[..]);
+            let names: Vec<String> = ar
+                .entries()
+                .expect("entries")
+                .map(|e| {
+                    e.expect("entry")
+                        .path()
+                        .expect("path")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            assert_eq!(names, std::slice::from_ref(&long));
+        });
+    }
+
+    #[test]
+    fn public_versions_come_in_natural_order() {
+        let d = run_on(&[
+            ("backup-versions/v10/a.bin", noise(21, 5_000)),
+            ("backup-versions/v2/a.bin", noise(22, 5_000)),
+            ("backup-versions/v1/a.bin", noise(23, 5_000)),
+        ]);
+        let labels: Vec<&str> = d.versions.iter().map(|v| v.label.as_str()).collect();
+        assert_eq!(labels, ["v1", "v2", "v10"]);
     }
 
     #[test]

@@ -7,12 +7,16 @@
 //!
 //! * `xz` preset 9 and `zstd` level 19 through the libraries, one thread, each step timed alone
 //!   (`timing` is `in-process`);
-//! * the same two as command-line programs (`xz-cli`, `zstd-cli`, `-9 -T1` and `-19 -T1`), and
+//! * the same two as command-line programs (`xz-cli`, `zstd-cli`, `-9 -T1` and `-19 -T1`; xz decompresses with `-d -T1 -c`), and
 //!   `bsc` and `kanzi`, all as external programs through `lpk-procstat-sys` with the stream in
 //!   the scratch directory (`timing` is `process-wall`: process wall time, with CPU time and peak
 //!   memory of each step), when found, otherwise a skip with the reason;
 //! * an XWRT-style word-replacement pre-pass is recorded as skipped: XWRT is GPL and no
 //!   permissively licensed implementation exists, so none is written here.
+//!
+//! The CLI rows find `xz` and `zstd` through `PATH` and `bench/tools.local.toml` only, while the
+//! baseline runner also uses the install-location hints of `bench/tools.toml`, so the two can
+//! run different binaries; the version banner of each program is recorded.
 //!
 //! The two timing bases are not interchangeable: compare `in-process` rows with each other and
 //! `process-wall` rows with each other; the CLI rows exist to compare the two bases on the same
@@ -149,9 +153,9 @@ fn tool_of(name: &str) -> &str {
 }
 
 /// The setting a row of `name` must carry.
-fn expected_setting(name: &str, measured: bool) -> Option<String> {
+fn expected_setting(name: &str, skipped: bool) -> Option<String> {
     let (_, setting, _) = COMPRESSORS.iter().find(|c| c.0 == name)?;
-    Some(if is_external(name) && !measured {
+    Some(if is_external(name) && skipped {
         format!("{setting}{NOT_RUN}")
     } else {
         (*setting).to_string()
@@ -178,7 +182,7 @@ pub fn xz_call(compress: bool, _input: &str, _output: &str) -> ToolCall {
         args: if compress {
             strings(&["-9", "-T1", "-c"])
         } else {
-            strings(&["-d", "-c"])
+            strings(&["-d", "-T1", "-c"])
         },
         redirect: true,
     }
@@ -343,14 +347,15 @@ fn measure_inner(
     })
 }
 
-/// The first line of `text` that holds a version-like number (a digit, a dot and a digit).
+/// The first line of `text` that holds a version-like number (a digit, a dot and a digit) and no
+/// path separator (a line that shows a path is skipped).
 pub fn extract_banner(text: &str) -> Option<String> {
     text.lines().map(str::trim).find_map(|l| {
         let b = l.as_bytes();
         let hit = b
             .windows(3)
             .any(|w| w[0].is_ascii_digit() && w[1] == b'.' && w[2].is_ascii_digit());
-        hit.then(|| l.chars().take(200).collect())
+        (hit && !l.contains(['/', '\\'])).then(|| l.chars().take(200).collect())
     })
 }
 
@@ -362,7 +367,7 @@ pub fn unknown_version(exe_bytes: &[u8]) -> String {
 /// The banner a program prints (stdout and stderr, whatever the exit code, for `--version`,
 /// `-V` and no arguments), else `unknown` and its BLAKE3.
 fn version_banner(exe: &Path, work: &Path) -> String {
-    for args in [vec!["--version"], vec!["-V"], vec![]] {
+    for args in [vec!["--version"], vec!["-V"], vec!["-h"], vec!["--help"]] {
         let out = work.join("banner-out.txt");
         let err = work.join("banner-err.txt");
         let mut spec = ps::Spec::new(exe)
@@ -392,7 +397,6 @@ fn version_banner(exe: &Path, work: &Path) -> String {
 }
 
 fn run_row(name: &str, timing: &str, r: std::result::Result<Measured, String>) -> Run {
-    let measured = r.is_ok();
     let (m, failed) = match r {
         Ok(m) => (Some(m), None),
         Err(e) => {
@@ -406,7 +410,7 @@ fn run_row(name: &str, timing: &str, r: std::result::Result<Measured, String>) -
     };
     Run {
         compressor: name.to_string(),
-        setting: expected_setting(name, measured).unwrap_or_default(),
+        setting: expected_setting(name, false).unwrap_or_default(),
         timing: timing.to_string(),
         measured: m,
         skipped: None,
@@ -417,7 +421,7 @@ fn run_row(name: &str, timing: &str, r: std::result::Result<Measured, String>) -
 fn skip_row(name: &str, timing: &str, reason: &str) -> Run {
     Run {
         compressor: name.to_string(),
-        setting: expected_setting(name, false).unwrap_or_default(),
+        setting: expected_setting(name, true).unwrap_or_default(),
         timing: timing.to_string(),
         measured: None,
         skipped: Some(reason.to_string()),
@@ -585,7 +589,10 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
         if s.files == 0 {
             p.push(format!("{at}/files: a present class has no files"));
         }
-        let least = s.content_bytes + 512 * s.files + 1024;
+        let least = s
+            .content_bytes
+            .saturating_add(512u64.saturating_mul(s.files))
+            .saturating_add(1024);
         if !s.tar_bytes.is_multiple_of(512) || s.tar_bytes < least {
             p.push(format!(
                 "{at}/tar_bytes: {} is not a multiple of 512 of at least {least} (content, one \
@@ -611,7 +618,7 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                     "{at}: exactly one of measured, skipped and failed must be set (found {set})"
                 ));
             }
-            match expected_setting(&r.compressor, r.measured.is_some()) {
+            match expected_setting(&r.compressor, r.skipped.is_some()) {
                 Some(s) if s == r.setting => {}
                 Some(s) => p.push(format!("{at}/setting: `{}` (expected `{s}`)", r.setting)),
                 None => p.push(format!("{at}/compressor: unknown `{}`", r.compressor)),
@@ -1043,7 +1050,7 @@ mod tests {
         let x = xz_call(true, "ignored", "ignored");
         assert_eq!(x.args, ["-9", "-T1", "-c"]);
         assert!(x.redirect);
-        assert_eq!(xz_call(false, "a", "b").args, ["-d", "-c"]);
+        assert_eq!(xz_call(false, "a", "b").args, ["-d", "-T1", "-c"]);
         assert_eq!(
             zstd_call(true, "in", "out").args,
             ["-19", "-T1", "-q", "-f", "-o", "out", "in"]
@@ -1065,6 +1072,11 @@ mod tests {
             Some("tool 3.3.12 (2025)".to_string())
         );
         assert_eq!(extract_banner("no numbers here\n5 only\n"), None);
+        assert_eq!(
+            extract_banner("usage: /home/me/tool 1.2 [opts]\nC:\\tools\\x 3.4\ntool 5.6\n"),
+            Some("tool 5.6".to_string()),
+            "lines with a path separator are never recorded"
+        );
         let u = unknown_version(b"program bytes");
         assert!(u.starts_with("unknown (blake3 ") && u.ends_with(')'));
         assert_eq!(u, unknown_version(b"program bytes"));
@@ -1108,7 +1120,7 @@ mod tests {
             let measure = name != "bsc" && name != "kanzi";
             let mut r = Run {
                 compressor: name.to_string(),
-                setting: expected_setting(name, measure).expect("known"),
+                setting: expected_setting(name, !measure).expect("known"),
                 timing: timing.to_string(),
                 measured: None,
                 skipped: None,
