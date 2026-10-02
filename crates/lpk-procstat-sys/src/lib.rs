@@ -4,12 +4,16 @@
 //! spawned, peak memory, the exit code, and whether a timeout killed the process tree.
 //!
 //! * Windows: the child is created suspended, assigned to a Job Object (kill-on-close) and only
-//!   then resumed, so nothing it starts can escape accounting. Memory is the job's
-//!   `PeakProcessMemoryUsed` (peak *committed* memory of the largest single process) and
-//!   `PeakJobMemoryUsed` (peak committed memory of the whole job at once).
-//! * Linux: the child leads its own process group and is reaped with `wait4`; its rusage covers all
-//!   waited-for descendants. `ru_maxrss` is the largest resident set of any single process in the
-//!   tree (not a sum). `peak_job_memory` is `None`.
+//!   then resumed, so nothing it starts can escape accounting. The wall clock starts right before
+//!   the resume. `peak_rss` is the main process's `PeakWorkingSetSize` (descendants are not
+//!   included); `peak_commit_process` / `peak_commit_job` are the job's `PeakProcessMemoryUsed`
+//!   (largest single process) and `PeakJobMemoryUsed` (whole job at once), both *committed* memory.
+//! * Linux: the child leads its own process group; the exit is awaited with a blocking `waitid`
+//!   (a watchdog thread enforces the timeout) and the child is then reaped with `wait4`, whose
+//!   rusage covers all waited-for descendants. `peak_rss` is `ru_maxrss`: the largest resident set
+//!   of any single process in the tree (not a sum). The commit peaks are `None`.
+//!
+//! Only Windows and Linux are supported; other targets fail to compile.
 //!
 //! No shell is ever involved; arguments are passed as a list.
 
@@ -20,7 +24,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
+compile_error!(
+    "lpk-procstat-sys supports only Windows and Linux (ru_maxrss units differ elsewhere)"
+);
+
+#[cfg(target_os = "linux")]
 mod unix;
 #[cfg(windows)]
 mod windows_impl;
@@ -53,7 +62,12 @@ pub struct Spec {
     pub program: OsString,
     pub args: Vec<OsString>,
     pub cwd: Option<PathBuf>,
+    /// Variables to set. Applied after `env_clear` / `env_remove`.
     pub env: Vec<(OsString, OsString)>,
+    /// Variables to remove from the inherited environment.
+    pub env_remove: Vec<OsString>,
+    /// Start from an empty environment instead of the caller's.
+    pub env_clear: bool,
     pub stdout: Output,
     pub stderr: Output,
     /// When exceeded the whole process tree is killed and `timed_out` is set.
@@ -67,6 +81,8 @@ impl Spec {
             args: Vec::new(),
             cwd: None,
             env: Vec::new(),
+            env_remove: Vec::new(),
+            env_clear: false,
             stdout: Output::Inherit,
             stderr: Output::Inherit,
             timeout: None,
@@ -88,6 +104,14 @@ impl Spec {
         self.env.push((key.into(), value.into()));
         self
     }
+    pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
+        self.env_remove.push(key.into());
+        self
+    }
+    pub fn env_clear(mut self) -> Self {
+        self.env_clear = true;
+        self
+    }
     pub fn stdout(mut self, out: Output) -> Self {
         self.stdout = out;
         self
@@ -107,6 +131,12 @@ impl Spec {
         if let Some(d) = &self.cwd {
             c.current_dir(d);
         }
+        if self.env_clear {
+            c.env_clear();
+        }
+        for k in &self.env_remove {
+            c.env_remove(k);
+        }
         for (k, v) in &self.env {
             c.env(k, v);
         }
@@ -125,14 +155,20 @@ pub struct Measurement {
     pub user_cpu: Duration,
     /// Kernel-mode CPU time of the program and all its descendants.
     pub kernel_cpu: Duration,
-    /// Peak memory of the largest single process, in bytes (Windows: committed; Linux: resident).
-    pub peak_process_memory: u64,
+    /// Peak resident memory in bytes: the figure to publish. Linux: `ru_maxrss`, the largest
+    /// resident set of any process in the tree. Windows: peak working set of the main process only.
+    pub peak_rss: u64,
+    /// Windows only: peak committed memory of the largest single process in the job, in bytes.
+    pub peak_commit_process: Option<u64>,
     /// Windows only: peak committed memory of the whole job at one time, in bytes.
-    pub peak_job_memory: Option<u64>,
-    /// Exit code of the program; `None` if it was killed (timeout or signal).
+    pub peak_commit_job: Option<u64>,
+    /// Exit code of the program; `None` if it was killed (always `None` when `timed_out`).
     pub exit_code: Option<i32>,
     /// The timeout expired and the process tree was killed.
     pub timed_out: bool,
+    /// Descendants of the program were still running when it exited (or the timeout fired) and
+    /// were killed; their CPU time may be incomplete (Windows) or missing (Linux).
+    pub descendants_killed: bool,
 }
 
 impl Measurement {

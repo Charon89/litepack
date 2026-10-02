@@ -1,11 +1,22 @@
 //! Test helper for `lpk-procstat-sys`: allocate, burn CPU, spawn a grandchild, sleep, exit.
 //!
-//! Options (all `--name value`): `mem-mib`, `cpu-ms`, `exit-code`, `sleep` (any value),
-//! `write-file` + `write-after-ms` (after that delay, create the file), and the same options
-//! prefixed `child-` to spawn and wait for a copy of this program configured with them.
+//! Options (all `--name value`):
+//! * `mem-mib N`: allocate and touch N MiB.
+//! * `cpu-miters N`: burn a fixed N million loop iterations (CPU use independent of scheduling).
+//! * `start-file PATH`: create the file immediately at start.
+//! * `write-file PATH` + `write-after-ms MS`: create the file after the delay.
+//! * `print-env NAME`: print `NAME=<value or <unset>>`.
+//! * `sleep 1`: sleep forever (until killed). `no-wait 1`: do not wait for the grandchild.
+//! * `free-mem 1`: release the allocation before exiting.
+//! * `exit-code C`.
+//! * Any of the above prefixed `child-` spawns a copy of this program configured with them.
+//! * `measure-child 1`: instead of `spawn`, call `lpk_procstat_sys::run` on that copy (so this
+//!   probe runs `run` from inside whatever job it is in), print `inner exit=<code> rss=<bytes>`,
+//!   and exit 0, or 99 after printing `inner error=...`.
 
+use lpk_procstat_sys::{run, Spec};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn main() {
     let mut o: HashMap<String, String> = HashMap::new();
@@ -18,28 +29,54 @@ fn main() {
 
     println!("probe-ok");
 
-    let mut grandchild = None;
-    if o.keys().any(|k| k.starts_with("child-")) {
-        let mut c = std::process::Command::new(std::env::current_exe().expect("exe"));
-        for (k, v) in &o {
-            if let Some(rest) = k.strip_prefix("child-") {
-                c.arg(format!("--{rest}")).arg(v);
+    let child_args: Vec<String> = o
+        .iter()
+        .filter_map(|(k, v)| k.strip_prefix("child-").map(|r| (r, v)))
+        .flat_map(|(r, v)| [format!("--{r}"), v.clone()])
+        .collect();
+    let exe = std::env::current_exe().expect("exe");
+
+    if o.contains_key("measure-child") {
+        match run(&Spec::new(&exe).args(&child_args)) {
+            Ok(m) => {
+                println!("inner exit={:?} rss={}", m.exit_code, m.peak_rss);
+                std::process::exit(0);
+            }
+            Err(e) => {
+                println!("inner error={e}");
+                std::process::exit(99);
             }
         }
-        grandchild = Some(c.spawn().expect("spawn grandchild"));
+    }
+
+    if let Some(name) = o.get("print-env") {
+        match std::env::var(name) {
+            Ok(v) => println!("{name}={v}"),
+            Err(_) => println!("{name}=<unset>"),
+        }
+    }
+
+    if let Some(path) = o.get("start-file") {
+        let _ = std::fs::write(path, b"started");
+    }
+
+    let mut grandchild = None;
+    if !child_args.is_empty() {
+        grandchild = Some(
+            std::process::Command::new(&exe)
+                .args(&child_args)
+                .spawn()
+                .expect("spawn grandchild"),
+        );
     }
 
     let mem = num("mem-mib") as usize * 1024 * 1024;
     let buf = vec![0xA5u8; mem]; // non-zero fill commits and touches every page
     std::hint::black_box(&buf);
 
-    let cpu = Duration::from_millis(num("cpu-ms"));
-    let t = Instant::now();
     let mut x = 1u64;
-    while t.elapsed() < cpu {
-        for _ in 0..10_000 {
-            x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
-        }
+    for _ in 0..num("cpu-miters") * 1_000_000 {
+        x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
     }
 
     if let Some(path) = o.get("write-file") {
@@ -52,8 +89,14 @@ fn main() {
         }
     }
     if let Some(mut g) = grandchild {
-        let _ = g.wait();
+        if !o.contains_key("no-wait") {
+            let _ = g.wait();
+        }
     }
-    std::hint::black_box(&buf);
+    if o.contains_key("free-mem") {
+        drop(buf); // current usage falls back before exit; the peak must still be reported
+    } else {
+        std::hint::black_box(&buf);
+    }
     std::process::exit(num("exit-code") as i32);
 }
