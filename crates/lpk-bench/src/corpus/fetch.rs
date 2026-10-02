@@ -443,6 +443,11 @@ impl<'a> Downloader<'a> {
                         "source `{source}`: {url}: {m}"
                     )))
                 }
+                Err(FetchError::Restart) => {
+                    return Err(DownloadError::Fetch(format!(
+                        "source `{source}`: {url}: unexpected range response"
+                    )))
+                }
                 Err(FetchError::Transient {
                     message,
                     retry_after,
