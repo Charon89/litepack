@@ -131,6 +131,8 @@ pub struct ClassRec {
     /// Sum over the evaluated blocks of the zstd level 1 / xz preset 9 output.
     pub zstd1_bytes: u64,
     pub xz_bytes: u64,
+    /// Seconds of each gate (order of the gate-cost list) over this class's blocks.
+    pub gate_seconds: Vec<f64>,
     /// Blocks that are incompressible by the ground truth, one entry per `truth_percents`.
     pub truth_positive: Vec<u64>,
     /// One entry per gate, threshold and truth percentage, in the order of the grid.
@@ -174,6 +176,7 @@ impl ClassRec {
             block_input_bytes: 0,
             zstd1_bytes: 0,
             xz_bytes: 0,
+            gate_seconds: if present { vec![0.0; 3] } else { Vec::new() },
             truth_positive: if present {
                 vec![0; TRUTH_PERCENTS.len()]
             } else {
@@ -247,8 +250,15 @@ pub struct GateCost {
 #[serde(deny_unknown_fields)]
 pub struct RawClass {
     pub class: String,
+    pub files: u64,
+    /// Files of this pass that were read with the cache (unbuffered open or read refused).
+    pub buffered_files: u64,
     pub bytes: u64,
+    /// Seconds spent reading (from after the open until the file is read and closed).
     pub seconds: f64,
+    /// Seconds spent in the per-file open calls, kept apart so a class with many small files
+    /// can be judged with and without them.
+    pub open_seconds: f64,
 }
 
 /// One sequential pass over every corpus file.
@@ -257,21 +267,25 @@ pub struct RawClass {
 pub struct RawPass {
     pub files: u64,
     pub bytes: u64,
-    /// Sum of the per-class seconds (file opens included).
+    /// Sum of the per-class read seconds (opens excluded).
     pub seconds: f64,
+    /// Sum of the per-class open seconds.
+    pub open_seconds: f64,
     pub classes: Vec<RawClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawRead {
-    /// `unbuffered` (operating-system cache bypassed) or `buffered`.
+    /// `unbuffered` (every file read with the cache bypassed), `buffered` (none) or `mixed`.
     pub mode: String,
-    /// The cache bypass was in effect; a `buffered` pass may be served from the cache.
+    /// Every read had the cache bypass in effect. This is what the open flags asked for: a file
+    /// system can accept `O_DIRECT` and still serve reads from its cache (ZFS before 2.3), which
+    /// this field cannot detect.
     pub cache_bypassed: bool,
     pub buffer_bytes: u64,
     pub alignment: u64,
-    /// Why unbuffered reading was not used, when it was not.
+    /// Why a file was read buffered (the first refusal), when any was.
     pub fallback_note: Option<String>,
     pub passes: Vec<RawPass>,
 }
@@ -355,6 +369,7 @@ struct Runner {
     xz_threads: usize,
     batch: Vec<Vec<u8>>,
     cost: [GateCost; 3],
+    zstd_out: Vec<u8>,
 }
 
 impl Runner {
@@ -371,6 +386,7 @@ impl Runner {
             xz_threads: threads.clamp(1, MAX_XZ_THREADS) as usize,
             batch: Vec::new(),
             cost,
+            zstd_out: Vec::with_capacity(zstd::zstd_safe::compress_bound(BLOCK)),
         })
     }
 
@@ -404,14 +420,18 @@ impl Runner {
         let sizes = par_map(&self.batch, self.xz_threads, |_, b| xz_size(b, &xz));
         for (b, x) in self.batch.drain(..).zip(sizes) {
             let xz_bytes = x?;
+            // Touch the block first so no gate pays the cache misses alone.
+            std::hint::black_box(b.iter().fold(0u8, |a, &x| a.wrapping_add(x)));
             let (entropy, t0) = timed(|| entropy_bits(&b));
             let (sampled, t1) = timed(|| sampled_entropy_bits(&b));
-            let (z, t2) = timed(|| self.zstd.compress(&b));
-            let zstd = z?.len() as u64;
-            for (c, t) in self.cost.iter_mut().zip([t0, t1, t2]) {
-                c.blocks += 1;
-                c.bytes += b.len() as u64;
-                c.seconds += t;
+            // The output buffer is sized outside the timed section and reused.
+            let (z, t2) = timed(|| self.zstd.compress_into(&b, &mut self.zstd_out));
+            let zstd = z? as u64;
+            for (i, t) in [t0, t1, t2].into_iter().enumerate() {
+                self.cost[i].blocks += 1;
+                self.cost[i].bytes += b.len() as u64;
+                self.cost[i].seconds += t;
+                rec.gate_seconds[i] += t;
             }
             rec.add_block(&BlockRec {
                 len: b.len() as u64,
@@ -489,12 +509,9 @@ enum ReadMode {
     Buffered,
 }
 
-/// Read a whole file sequentially into `buf`, discarding the data; returns the bytes read.
-fn read_through(path: &Path, mode: ReadMode, buf: &mut [u8]) -> std::io::Result<u64> {
-    let mut f = match mode {
-        ReadMode::Unbuffered => open_unbuffered(path)?,
-        ReadMode::Buffered => File::open(path)?,
-    };
+/// Read an open file to its end into `buf`, discarding the data, and close it; returns the
+/// bytes read.
+fn drain(mut f: File, buf: &mut [u8]) -> std::io::Result<u64> {
     let mut total = 0u64;
     loop {
         match f.read(buf) {
@@ -506,88 +523,138 @@ fn read_through(path: &Path, mode: ReadMode, buf: &mut [u8]) -> std::io::Result<
     }
 }
 
+/// Read a whole file sequentially into `buf`, discarding the data; returns the bytes read.
+fn read_through(path: &Path, mode: ReadMode, buf: &mut [u8]) -> std::io::Result<u64> {
+    let f = match mode {
+        ReadMode::Unbuffered => open_unbuffered(path)?,
+        ReadMode::Buffered => File::open(path)?,
+    };
+    drain(f, buf)
+}
+
+/// One file read: bytes, seconds of the open and of the read, and the reason it fell back to
+/// a buffered read, if it did.
+struct FileRead {
+    bytes: u64,
+    open_seconds: f64,
+    seconds: f64,
+    fallback: Option<String>,
+}
+
+/// Read one file unbuffered; when the open or the read is refused, read it again buffered (only
+/// the successful attempt is timed) and say why.
+fn read_one(
+    path: &Path,
+    force_buffered: Option<&str>,
+    buf: &mut [u8],
+) -> std::io::Result<FileRead> {
+    let mut fallback = force_buffered.map(str::to_string);
+    if fallback.is_none() {
+        let t = Instant::now();
+        match open_unbuffered(path) {
+            Ok(f) => {
+                let open_seconds = t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                match drain(f, buf) {
+                    Ok(bytes) => {
+                        return Ok(FileRead {
+                            bytes,
+                            open_seconds,
+                            seconds: t.elapsed().as_secs_f64(),
+                            fallback: None,
+                        })
+                    }
+                    Err(e) => fallback = Some(format!("unbuffered read refused: {e}")),
+                }
+            }
+            Err(e) => fallback = Some(format!("unbuffered open refused: {e}")),
+        }
+    }
+    let t = Instant::now();
+    let f = File::open(path)?;
+    let open_seconds = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let bytes = drain(f, buf)?;
+    Ok(FileRead {
+        bytes,
+        open_seconds,
+        seconds: t.elapsed().as_secs_f64(),
+        fallback,
+    })
+}
+
 fn raw_read(ctx: &Ctx<'_>) -> Result<RawRead> {
     raw_read_with(ctx, None)
 }
 
-/// The three passes. `refused` forces the buffered fallback with that reason (tests); otherwise
-/// the first non-empty file decides whether the file system accepts unbuffered reads.
-fn raw_read_with(ctx: &Ctx<'_>, refused: Option<String>) -> Result<RawRead> {
+/// The three passes. Each file is tried unbuffered and falls back on its own when refused, which
+/// is counted per class. `force_buffered` skips the attempt with that reason (tests).
+fn raw_read_with(ctx: &Ctx<'_>, force_buffered: Option<&str>) -> Result<RawRead> {
     let mut buf = AlignedBuf::new(READ_BUFFER, READ_ALIGN);
-    let classes: Vec<(&String, &crate::corpus::manifest::ClassEntry)> =
-        ctx.corpus.manifest.classes.iter().collect();
-    let mut mode = ReadMode::Unbuffered;
-    let mut note = refused;
-    if note.is_none() {
-        let first = classes
-            .iter()
-            .flat_map(|(_, c)| c.files.iter())
-            .find(|f| f.bytes > 0);
-        if let Some(f) = first {
-            let p = ctx.corpus.files_root().join(&f.path);
-            match read_through(&p, ReadMode::Unbuffered, buf.slice()) {
-                Ok(n) if n == f.bytes => {}
-                Ok(n) => bail!(
-                    "unbuffered read of a corpus file returned {n} bytes, the manifest says {}",
-                    f.bytes
-                ),
-                Err(e) => note = Some(format!("unbuffered read refused: {e}")),
-            }
-        }
-    }
-    if note.is_some() {
-        mode = ReadMode::Buffered;
-    }
+    let mut note: Option<String> = None;
+    let mut buffered_total = 0u64;
+    let mut files_total = 0u64;
     let mut passes = Vec::new();
     for _ in 0..PASSES {
         let mut pass = RawPass {
             files: 0,
             bytes: 0,
             seconds: 0.0,
+            open_seconds: 0.0,
             classes: Vec::new(),
         };
-        for (class, entry) in &classes {
+        for (class, entry) in &ctx.corpus.manifest.classes {
             let mut rc = RawClass {
-                class: (*class).clone(),
+                class: class.clone(),
+                files: 0,
+                buffered_files: 0,
                 bytes: 0,
                 seconds: 0.0,
+                open_seconds: 0.0,
             };
             for f in &entry.files {
                 let p = ctx.corpus.files_root().join(&f.path);
-                let start = Instant::now();
-                let n = read_through(&p, mode, buf.slice());
-                let secs = start.elapsed().as_secs_f64();
-                let n = match n {
-                    Ok(n) => n,
-                    Err(e) => bail!(
-                        "class `{class}`: raw read of `{}` failed: {e}",
-                        ctx.label(f).unwrap_or_else(|| "(private file)".into())
-                    ),
-                };
-                if n != f.bytes {
+                let label = || ctx.label(f).unwrap_or_else(|| "(private file)".into());
+                let r = read_one(&p, force_buffered, buf.slice()).map_err(|e| {
+                    anyhow::anyhow!("class `{class}`: raw read of `{}` failed: {e}", label())
+                })?;
+                if r.bytes != f.bytes {
                     bail!(
-                        "class `{class}`: raw read of `{}` returned {n} bytes, the manifest says {}",
-                        ctx.label(f).unwrap_or_else(|| "(private file)".into()),
+                        "class `{class}`: raw read of `{}` returned {} bytes, the manifest says {}",
+                        label(),
+                        r.bytes,
                         f.bytes
                     );
                 }
-                pass.files += 1;
-                rc.bytes += n;
-                rc.seconds += secs;
+                if let Some(why) = r.fallback {
+                    rc.buffered_files += 1;
+                    buffered_total += 1;
+                    note.get_or_insert(why);
+                }
+                files_total += 1;
+                rc.files += 1;
+                rc.bytes += r.bytes;
+                rc.seconds += r.seconds;
+                rc.open_seconds += r.open_seconds;
             }
+            pass.files += rc.files;
             pass.bytes += rc.bytes;
             pass.seconds += rc.seconds;
+            pass.open_seconds += rc.open_seconds;
             pass.classes.push(rc);
         }
         passes.push(pass);
     }
+    let mode = if buffered_total == 0 {
+        "unbuffered"
+    } else if buffered_total == files_total {
+        "buffered"
+    } else {
+        "mixed"
+    };
     Ok(RawRead {
-        mode: match mode {
-            ReadMode::Unbuffered => "unbuffered",
-            ReadMode::Buffered => "buffered",
-        }
-        .to_string(),
-        cache_bypassed: mode == ReadMode::Unbuffered,
+        mode: mode.to_string(),
+        cache_bypassed: buffered_total == 0,
         buffer_bytes: READ_BUFFER as u64,
         alignment: READ_ALIGN as u64,
         fallback_note: note,
@@ -605,6 +672,9 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
             order.push(c.clone());
         }
     }
+    // The raw read goes first: it bypasses the cache, so the order does not matter, and a
+    // refusal cannot lose the evaluation.
+    let raw = raw_read(ctx)?;
     let mut runner = Runner::new(ctx.threads)?;
     let mut classes = Vec::new();
     for class in &order {
@@ -614,20 +684,27 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
             rec.files += 1;
             rec.bytes += f.bytes;
             ctx.read_blocks(class, f, BLOCK, |b| runner.push(&mut rec, b))?;
-            runner.flush(&mut rec)?;
         }
+        // Blocks of several files share a batch, so xz runs on all its threads.
+        runner.flush(&mut rec)?;
         classes.push(rec);
     }
-    let raw = raw_read(ctx)?;
     let mut out_notes = Vec::new();
     for c in classes.iter().filter(|c| !c.present) {
         out_notes.push(format!("class `{}` is not in this corpus", c.class));
     }
     if let Some(n) = &raw.fallback_note {
         out_notes.push(format!(
-            "raw read: {n}; the passes are buffered and may be served from the cache"
+            "raw read: {n}; {} mode, files read buffered may be served from the cache",
+            raw.mode
         ));
     }
+    out_notes.push(
+        "gate-cost seconds are single-threaded on this machine; raw-read speeds are of this \
+         machine's disk; a file system may accept O_DIRECT and still serve reads from its cache \
+         (ZFS before 2.3), which cache_bypassed cannot detect"
+            .to_string(),
+    );
     if ctx.threads > MAX_XZ_THREADS {
         out_notes.push(format!(
             "xz preset 9 sizes ran on at most {MAX_XZ_THREADS} threads (encoder memory)"
@@ -771,6 +848,11 @@ pub fn render(e: &Envelope<Data>) -> String {
         .iter()
         .filter(|c| c.role != "main" && c.present && c.blocks() > 0)
         .collect();
+    let all_other: Vec<&ClassRec> = d
+        .classes
+        .iter()
+        .filter(|c| c.role != "main" && c.present)
+        .collect();
     if other.is_empty() {
         s.push_str("no other class with a block of at least 64 KiB\n\n");
     } else {
@@ -789,20 +871,38 @@ pub fn render(e: &Envelope<Data>) -> String {
             ("sampled_entropy", 7.95),
             ("zstd1", 98.0),
         ];
-        let mut headers = vec!["class".to_string(), "blocks".to_string()];
-        headers.push("xz>=95% blocks".to_string());
+        let mut headers: Vec<String> = [
+            "class",
+            "files",
+            "dropped tails (<64 KiB)",
+            "dropped bytes",
+            "blocks",
+            "xz>=95% blocks",
+        ]
+        .iter()
+        .map(|x| x.to_string())
+        .collect();
         for (g, t) in probe_gates {
             headers.push(format!("FP {g} {}", threshold_label(g, t)));
         }
         let h: Vec<&str> = headers.iter().map(String::as_str).collect();
-        let rows: Vec<Vec<String>> = other
+        let rows: Vec<Vec<String>> = all_other
             .iter()
             .map(|c| {
                 let mut row = vec![
                     c.class.clone(),
+                    c.files.to_string(),
+                    c.dropped_tails.to_string(),
+                    c.dropped_bytes.to_string(),
                     c.blocks().to_string(),
                     c.truth_positive.first().copied().unwrap_or(0).to_string(),
                 ];
+                if c.blocks() == 0 {
+                    for _ in probe_gates {
+                        row.push("no block >= 64 KiB".to_string());
+                    }
+                    return row;
+                }
                 for (g, t) in probe_gates {
                     let fp = c
                         .gates
@@ -835,10 +935,41 @@ pub fn render(e: &Envelope<Data>) -> String {
         &["gate", "blocks", "bytes", "seconds", "MB/s of block bytes"],
         &rows,
     ));
-    s.push_str("\n## Raw read speed (sequential, whole corpus)\n\n");
+    s.push_str(
+        "\nSingle-threaded on this machine; each block is touched before the gates are timed, \
+         and the zstd output buffer is allocated outside the timed section. Per class (seconds \
+         for each gate):\n\n",
+    );
+    let rows: Vec<Vec<String>> = d
+        .classes
+        .iter()
+        .filter(|c| c.present && c.blocks() > 0)
+        .map(|c| {
+            let mut row = vec![c.class.clone(), c.block_input_bytes.to_string()];
+            for x in &c.gate_seconds {
+                row.push(format!("{x:.3} ({} MB/s)", mbps(c.block_input_bytes, *x)));
+            }
+            row
+        })
+        .collect();
+    s.push_str(&md_table(
+        &[
+            "class",
+            "block bytes",
+            "entropy",
+            "sampled_entropy",
+            "zstd1",
+        ],
+        &rows,
+    ));
+    s.push_str("\n## Raw read speed (sequential)\n\n");
     let r = &d.raw_read;
     s.push_str(&format!(
-        "mode: {}, cache bypassed: {}, buffer {} bytes aligned to {}{}\n\n",
+        "mode: {}, cache bypassed: {}, buffer {} bytes aligned to {}{}. Read seconds cover the \
+         read and close of each file; per-file open calls are timed apart (open seconds). The \
+         whole-corpus MB/s columns therefore state both: read only, and including opens. \
+         `cache bypassed` is what the open flags asked for; some file systems (ZFS before 2.3) \
+         accept O_DIRECT and still serve reads from cache, which this cannot detect.\n\n",
         r.mode,
         r.cache_bypassed,
         r.buffer_bytes,
@@ -853,26 +984,59 @@ pub fn render(e: &Envelope<Data>) -> String {
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let video = p.classes.iter().find(|c| c.class == "video");
             vec![
                 (i + 1).to_string(),
                 p.files.to_string(),
                 p.bytes.to_string(),
                 format!("{:.3}", p.seconds),
+                format!("{:.3}", p.open_seconds),
                 mbps(p.bytes, p.seconds),
-                video.map_or("n/a".to_string(), |v| {
-                    format!(
-                        "{} bytes in {:.3} s = {} MB/s",
-                        v.bytes,
-                        v.seconds,
-                        mbps(v.bytes, v.seconds)
-                    )
-                }),
+                mbps(p.bytes, p.seconds + p.open_seconds),
             ]
         })
         .collect();
+    s.push_str("### Whole corpus\n\n");
     s.push_str(&md_table(
-        &["pass", "files", "bytes", "seconds", "MB/s", "video class"],
+        &[
+            "pass",
+            "files",
+            "bytes",
+            "read seconds",
+            "open seconds",
+            "MB/s (read only)",
+            "MB/s (including opens)",
+        ],
+        &rows,
+    ));
+    s.push_str("\n### Per class (each row stands on its own)\n\n");
+    let mut rows = Vec::new();
+    for (i, p) in r.passes.iter().enumerate() {
+        for c in &p.classes {
+            rows.push(vec![
+                (i + 1).to_string(),
+                c.class.clone(),
+                c.files.to_string(),
+                c.buffered_files.to_string(),
+                c.bytes.to_string(),
+                format!("{:.3}", c.seconds),
+                format!("{:.3}", c.open_seconds),
+                mbps(c.bytes, c.seconds),
+                mbps(c.bytes, c.seconds + c.open_seconds),
+            ]);
+        }
+    }
+    s.push_str(&md_table(
+        &[
+            "pass",
+            "class",
+            "files",
+            "read buffered",
+            "bytes",
+            "read seconds",
+            "open seconds",
+            "MB/s (read only)",
+            "MB/s (including opens)",
+        ],
         &rows,
     ));
     s
@@ -920,6 +1084,7 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
     }
     let expect = grid();
     let mut total_blocks = 0u64;
+    let mut gate_sum = [0.0f64; 3];
     let mut total_block_bytes = 0u64;
     let mut class_bytes = 0u64;
     for (i, c) in d.classes.iter().enumerate() {
@@ -1018,6 +1183,7 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
             );
             continue;
         }
+        let mut grid_ok = true;
         for (gi, (g, t)) in expect.iter().enumerate() {
             for (ti, truth) in TRUTH_PERCENTS.iter().enumerate() {
                 let k = gi * TRUTH_PERCENTS.len() + ti;
@@ -1025,6 +1191,7 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                 let here = at(&format!("gates/{k}"));
                 if r.gate != g.as_str() || r.threshold != *t || r.truth_percent != *truth {
                     bad(here, "not the expected gate, threshold and truth".into());
+                    grid_ok = false;
                     continue;
                 }
                 if r.true_pos + r.false_pos + r.true_neg + r.false_neg != c.blocks() {
@@ -1033,6 +1200,54 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                 if r.true_pos + r.false_neg != c.truth_positive[ti] {
                     bad(here, "true positives plus false negatives differ from the ground-truth positives".into());
                 }
+            }
+        }
+        if grid_ok {
+            let nt = TRUTH_PERCENTS.len();
+            let predicted = |gi: usize, ti: usize| {
+                let r = &c.gates[gi * nt + ti];
+                r.true_pos + r.false_pos
+            };
+            for gi in 0..expect.len() {
+                // What a gate predicts does not depend on the ground truth.
+                if (1..nt).any(|ti| predicted(gi, ti) != predicted(gi, 0)) {
+                    bad(
+                        at(&format!("gates/{}", gi * nt)),
+                        "TP+FP differs between the ground-truth rows of one gate and threshold"
+                            .into(),
+                    );
+                }
+                // A stricter truth has no more true positives.
+                for ti in 1..nt {
+                    if c.gates[gi * nt + ti].true_pos > c.gates[gi * nt + ti - 1].true_pos {
+                        bad(
+                            at(&format!("gates/{}", gi * nt + ti)),
+                            "true positives rise with a stricter ground truth".into(),
+                        );
+                    }
+                }
+                // A higher threshold in the same gate predicts no more blocks.
+                if gi > 0
+                    && expect[gi].0 == expect[gi - 1].0
+                    && predicted(gi, 0) > predicted(gi - 1, 0)
+                {
+                    bad(
+                        at(&format!("gates/{}", gi * nt)),
+                        "TP+FP rises with the threshold".into(),
+                    );
+                }
+            }
+        }
+        if c.gate_seconds.len() != GATES.len()
+            || c.gate_seconds.iter().any(|x| !(x.is_finite() && *x >= 0.0))
+        {
+            bad(
+                at("gate_seconds"),
+                "one non-negative number per gate".into(),
+            );
+        } else {
+            for (i, x) in c.gate_seconds.iter().enumerate() {
+                gate_sum[i] += x;
             }
         }
     }
@@ -1056,6 +1271,14 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                 "must be a non-negative number".into(),
             );
         }
+        if let Some(sum) = gate_sum.get(i) {
+            if (sum - c.seconds).abs() > 1e-6 * (1.0 + c.seconds) {
+                bad(
+                    format!("{at}/seconds"),
+                    "differs from the sum of the per-class gate seconds".into(),
+                );
+            }
+        }
     }
     let r = &d.raw_read;
     if r.passes.len() != PASSES {
@@ -1064,12 +1287,28 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
             format!("expected {PASSES} passes"),
         );
     }
-    match (r.mode.as_str(), r.cache_bypassed, &r.fallback_note) {
-        ("unbuffered", true, None) | ("buffered", false, Some(_)) => {}
-        _ => bad(
+    let buffered: u64 = r
+        .passes
+        .iter()
+        .flat_map(|ps| ps.classes.iter())
+        .map(|c| c.buffered_files)
+        .sum();
+    let read_files: u64 = r.passes.iter().map(|ps| ps.files).sum();
+    let expect_mode = if buffered == 0 {
+        "unbuffered"
+    } else if buffered == read_files {
+        "buffered"
+    } else {
+        "mixed"
+    };
+    if r.mode != expect_mode
+        || r.cache_bypassed != (buffered == 0)
+        || r.fallback_note.is_some() != (buffered > 0)
+    {
+        bad(
             "/data/raw_read/mode".into(),
-            "mode, cache_bypassed and fallback_note disagree".into(),
-        ),
+            "mode, cache_bypassed and fallback_note disagree with the buffered file counts".into(),
+        );
     }
     if r.buffer_bytes != READ_BUFFER as u64 || r.alignment != READ_ALIGN as u64 {
         bad(
@@ -1095,6 +1334,36 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                 format!("{at}/seconds"),
                 "must be a non-negative number".into(),
             );
+        }
+        let open: f64 = ps.classes.iter().map(|c| c.open_seconds).sum();
+        if (open - ps.open_seconds).abs() > 1e-6 * (1.0 + ps.open_seconds) {
+            bad(
+                format!("{at}/open_seconds"),
+                "do not add up from the classes".into(),
+            );
+        }
+        for (j, c) in ps.classes.iter().enumerate() {
+            for (what, v) in [("seconds", c.seconds), ("open_seconds", c.open_seconds)] {
+                if !(v.is_finite() && v >= 0.0) {
+                    bad(
+                        format!("{at}/classes/{j}/{what}"),
+                        "must be a non-negative number".into(),
+                    );
+                }
+            }
+            if c.buffered_files > c.files {
+                bad(
+                    format!("{at}/classes/{j}/buffered_files"),
+                    "more than the files".into(),
+                );
+            }
+            let table = d.classes.iter().find(|t| t.present && t.class == c.class);
+            if table.is_some_and(|t| t.files != c.files) {
+                bad(
+                    format!("{at}/classes/{j}/files"),
+                    "differs from the class table".into(),
+                );
+            }
         }
         let present: Vec<(&str, u64)> = d
             .classes
@@ -1309,7 +1578,8 @@ mod tests {
                 "## Gate cost",
                 "## Raw read speed",
                 "precision (xz>=95%)",
-                "video class",
+                "Per class (each row stands on its own)",
+                "MB/s (including opens)",
             ] {
                 assert!(md.contains(needle), "{needle}");
             }
@@ -1361,6 +1631,58 @@ mod tests {
             assert!(p
                 .iter()
                 .any(|m| m.starts_with("/data/classes/2/truth_positive/1")));
+        });
+    }
+
+    #[test]
+    fn check_enforces_the_cross_row_invariants() {
+        with_run(|_, out| {
+            let base = out.data;
+            let idx = base
+                .classes
+                .iter()
+                .position(|c| c.class == "text-prose")
+                .expect("text-prose");
+            let nt = TRUTH_PERCENTS.len();
+            // One truth row predicts a block more than the others: TP+FP differs.
+            let mut d = base.clone();
+            d.classes[idx].gates[1].true_pos += 1;
+            d.classes[idx].gates[1].true_neg -= 1;
+            let p = check(&envelope(d));
+            assert!(
+                p.iter().any(|m| m.contains("TP+FP differs between")),
+                "{p:?}"
+            );
+            // A higher threshold predicts more blocks than a lower one.
+            let mut d = base.clone();
+            for k in 0..nt {
+                let g = &mut d.classes[idx].gates[nt + k];
+                g.false_pos += 1;
+                g.true_neg = g.true_neg.saturating_sub(1);
+            }
+            let p = check(&envelope(d));
+            assert!(
+                p.iter().any(|m| m.contains("rises with the threshold")),
+                "{p:?}"
+            );
+            // True positives rise with a stricter truth.
+            let mut d = base.clone();
+            d.classes[idx].gates[2].true_pos += 1;
+            d.classes[idx].gates[2].false_neg = d.classes[idx].gates[2].false_neg.saturating_sub(1);
+            let p = check(&envelope(d));
+            assert!(
+                p.iter().any(|m| m.contains("stricter ground truth")),
+                "{p:?}"
+            );
+            // A negative raw-read time.
+            let mut d = base;
+            d.raw_read.passes[0].classes[0].seconds = -1.0;
+            let p = check(&envelope(d));
+            assert!(
+                p.iter()
+                    .any(|m| m.starts_with("/data/raw_read/passes/0/classes/0/seconds")),
+                "{p:?}"
+            );
         });
     }
 
@@ -1437,8 +1759,10 @@ mod tests {
         with_run(|ctx, _| {
             let r = raw_read(ctx).expect("raw read");
             assert_eq!(r.passes.len(), 3);
+            #[cfg(windows)]
+            assert_eq!(r.mode, "unbuffered", "{:?}", r.fallback_note);
             assert_eq!(r.cache_bypassed, r.mode == "unbuffered");
-            assert_eq!(r.fallback_note.is_some(), r.mode == "buffered");
+            assert_eq!(r.fallback_note.is_some(), r.mode != "unbuffered");
             let total: u64 = ctx
                 .corpus
                 .manifest
@@ -1448,7 +1772,7 @@ mod tests {
                 .map(|f| f.bytes)
                 .sum();
             assert!(r.passes.iter().all(|p| p.bytes == total && p.files == 5));
-            let f = raw_read_with(ctx, Some("refused for the test".into())).expect("fallback");
+            let f = raw_read_with(ctx, Some("refused for the test")).expect("fallback");
             assert_eq!(f.mode, "buffered");
             assert!(!f.cache_bypassed);
             assert_eq!(f.fallback_note.as_deref(), Some("refused for the test"));

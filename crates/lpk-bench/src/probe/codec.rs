@@ -93,6 +93,13 @@ impl ZstdContext {
         Ok(self.c.compress(data)?)
     }
 
+    /// Compress into `out` (cleared first; give it `compress_bound` capacity to avoid growth),
+    /// so a timed section does not allocate. Returns the compressed size.
+    pub fn compress_into(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<usize> {
+        out.clear();
+        Ok(self.c.compress_to_buffer(data, out)?)
+    }
+
     /// `plain_len` is the exact size of the original data.
     pub fn decompress(&mut self, compressed: &[u8], plain_len: usize) -> Result<Vec<u8>> {
         Ok(self.d.decompress(compressed, plain_len)?)
@@ -234,6 +241,19 @@ mod tests {
             let c = ctx.compress(chunk).expect("c");
             assert_eq!(ctx.decompress(&c, chunk.len()).expect("d"), chunk);
         }
+    }
+
+    #[test]
+    fn compress_into_reuses_a_buffer_and_matches_compress() {
+        let data = sample();
+        let mut ctx = ZstdSettings::level(1).context().expect("ctx");
+        let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(data.len()));
+        let n = ctx.compress_into(&data, &mut out).expect("into");
+        assert_eq!(n, out.len());
+        assert_eq!(out, ctx.compress(&data).expect("compress"));
+        let n2 = ctx.compress_into(&data[..100], &mut out).expect("again");
+        assert_eq!(n2, out.len());
+        assert_eq!(ctx.decompress(&out, 100).expect("d"), &data[..100]);
     }
 
     #[test]
