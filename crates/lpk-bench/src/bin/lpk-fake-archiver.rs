@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Modes: `ok` (default); create: `noarchive` (exit 0, nothing written), `empty` (empty archive),
-//! `exit1`, `sleep` (until killed), `envcheck` (exit 17 when a tool-configuration variable is set);
+//! `exit1`, `sleep` (until killed), `orphan` (starts a sleeping child and exits 0), `envcheck` (exit 17 when a tool-configuration variable is set);
 //! extract: `miss` (leaves out the first file), `alter` (changes a byte of the first non-empty
 //! file), `extra` (adds a file), `exit3`; stream: `exit1`.
 //! An input of `@file` archives the relative paths listed in the file (flat, like a tool given a
@@ -70,6 +70,18 @@ fn create(mode: &str, archive: &str, input: &str) {
             return;
         }
         "exit1" => exit(1),
+        "orphan" => {
+            // Leave a child behind and exit 0: the runner must flag the surviving descendant.
+            let mut c = std::process::Command::new(std::env::current_exe().unwrap_or_default());
+            c.args(["create", "--mode=sleep", "unused.fk", "unused"]);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0000_0008); // DETACHED_PROCESS
+            }
+            let _ = c.spawn();
+            return;
+        }
         "sleep" => loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
         },

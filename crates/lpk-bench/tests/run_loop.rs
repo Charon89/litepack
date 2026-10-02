@@ -62,6 +62,9 @@ extract = ["--mode=extra"]
 [[tool.setting]]
 id = "exit3"
 extract = ["--mode=exit3"]
+[[tool.setting]]
+id = "orphan"
+compress = ["--mode=orphan"]
 
 [[tool]]
 id = "fake-env"
@@ -97,10 +100,13 @@ extension = ".fk"
 mode = "directory"
 create = ["create", "{archive}", "{input}"]
 create_list = ["create", "{archive}", "@{list}"]
-extract = ["extract", "{archive}", "{outdir}"]
+extract = ["extract", "{settings}", "{archive}", "{outdir}"]
 licence = "test"
 [[tool.setting]]
 id = "ok"
+[[tool.setting]]
+id = "miss"
+extract = ["--mode=miss"]
 
 [[tool]]
 id = "fake-stream"
@@ -492,6 +498,17 @@ fn failures_are_recorded_with_their_reason_and_do_not_stop_the_run() {
         why.contains("extra") && why.contains("__extra.txt"),
         "{why}"
     );
+    // A tool that leaves a child running is a failure, with the flag set.
+    let r = get("orphan");
+    assert!(r.get("median").is_none());
+    assert_eq!(r["failed"]["descendants_killed"], true, "{r}");
+    assert!(
+        r["failed"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("still running"),
+        "{r}"
+    );
     assert_tmp_clean(&e);
 }
 
@@ -592,7 +609,8 @@ fn a_private_corpus_runs_list_capable_tools_and_skips_the_others() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
+    // fake-list/miss fails on purpose.
+    assert!(!out.status.success(), "{}", text(&out));
     let dir = results_dir(&e);
     for name in ["store-store-mixed.json", "fake-list-ok-mixed.json"] {
         let r = result(&dir, name);
@@ -750,4 +768,205 @@ fn a_dirty_or_unknown_build_is_refused_without_the_flag() {
         // A clean checkout: nothing to refuse (the unit test of `check_build` covers the gate).
         assert!(out.status.success(), "{}", text(&out));
     }
+}
+
+/// A private corpus with Cyrillic, CJK and accented names and spaces, plus an ASCII class.
+fn write_private_non_ascii(e: &Env) -> PathBuf {
+    let root = e.tmp.path().join("private-root-u");
+    let corpus = e.tmp.path().join("private-corpus-u");
+    let uni: Vec<(&str, Vec<u8>)> = vec![
+        ("дом/файл с пробелом.txt", b"cyrillic".to_vec()),
+        ("日本語/ファイル.bin", bytes(5, 2000)),
+        ("café/geheim-ünï.txt", b"secret".to_vec()),
+    ];
+    let plain: Vec<(&str, Vec<u8>)> = vec![("plain/a b.txt", b"plain".to_vec())];
+    write_corpus(
+        &corpus,
+        &[("unicode", uni.as_slice()), ("ascii", plain.as_slice())],
+        Some(&root),
+    );
+    corpus
+}
+
+#[test]
+fn non_ascii_private_names_round_trip_through_the_list_path_and_the_system_tar_rule_holds() {
+    let e = env();
+    let corpus = write_private_non_ascii(&e);
+    let out = command(&e)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--allow-dirty-build")
+        .args(["--tools", "store,fake-list,fake-stream", "--repeats", "2"])
+        .output()
+        .unwrap();
+    // fake-list/miss fails on purpose; everything else must be consistent.
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("0 validation problem(s)"),
+        "{}",
+        text(&out)
+    );
+    let dir = results_dir(&e);
+    for class in ["unicode", "ascii"] {
+        let r = result(&dir, &format!("fake-list-ok-{class}.json"));
+        assert_eq!(r["verification"]["verified"], true, "{class}: {r}");
+        let s = result(&dir, &format!("store-store-{class}.json"));
+        if cfg!(windows) && class == "unicode" {
+            assert!(s["skipped"].as_str().unwrap().contains("non-ASCII"), "{s}");
+            let z = result(&dir, "fake-stream-ok-unicode.json");
+            assert!(z["skipped"].as_str().unwrap().contains("non-ASCII"), "{z}");
+        } else {
+            assert_eq!(s["verification"]["verified"], true, "{class}: {s}");
+        }
+    }
+    assert_tmp_clean(&e);
+}
+
+#[test]
+fn a_private_failure_names_no_file_in_any_result() {
+    let e = env();
+    let corpus = write_private_non_ascii(&e);
+    let out = command(&e)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--allow-dirty-build")
+        .args([
+            "--tools",
+            "fake-list",
+            "--repeats",
+            "1",
+            "--classes",
+            "unicode",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let dir = results_dir(&e);
+    let r = result(&dir, "fake-list-miss-unicode.json");
+    let why = r["failed"]["reason"].as_str().unwrap();
+    assert!(
+        why.contains("missing") && why.contains("manifest file #"),
+        "{why}"
+    );
+    let all: String = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|d| std::fs::read_to_string(d.unwrap().path()).unwrap())
+        .collect();
+    for secret in ["geheim", "ünï", "дом", "日本語", "пробелом", "unicode/"] {
+        assert!(
+            !all.contains(secret) || secret == "unicode/",
+            "`{secret}` leaked into the results"
+        );
+    }
+}
+
+#[test]
+fn a_long_combination_is_measured_once_and_says_so() {
+    let e = env();
+    let out = measure(
+        &e,
+        &[
+            "--tools",
+            "store,fake-nested",
+            "--repeats",
+            "3",
+            "--long-run-s",
+            "0",
+            "--classes",
+            "bin",
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("0 validation problem(s)"),
+        "{}",
+        text(&out)
+    );
+    let dir = results_dir(&e);
+    for name in ["store-store-bin.json", "fake-nested-ok-bin.json"] {
+        let r = result(&dir, name);
+        assert_eq!(r["repeats_requested"], 3);
+        assert_eq!(r["repeats"].as_array().unwrap().len(), 1);
+        assert!(
+            r["repeats_short"]
+                .as_str()
+                .unwrap()
+                .contains("--long-run-s"),
+            "{r}"
+        );
+        assert_eq!(r["verification"]["verified"], true);
+    }
+    let run = result(&dir, "run.json");
+    assert_eq!(run["long_run_s"], 0);
+    assert_eq!(run["complete"], true);
+}
+
+#[test]
+fn an_aborted_run_does_not_validate_and_a_trimmed_one_does_not_either() {
+    let e = env();
+    // Aborted: an input does not match the manifest, the run stops before run.json.
+    std::fs::write(e.corpus.join("text/a.txt"), b"tampered").unwrap();
+    let out = measure(&e, &["--tools", "store", "--repeats", "1"]);
+    assert!(!out.status.success());
+    let dir = results_dir(&e);
+    assert!(!dir.join("run.json").exists());
+    let v = Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
+        .args(["run", "--validate"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(!v.status.success());
+    assert!(
+        String::from_utf8_lossy(&v.stderr).contains("run.json"),
+        "{}",
+        text(&v)
+    );
+
+    // Trimmed: a result file removed from a complete run.
+    let e = env();
+    let out = measure(&e, &["--tools", "store", "--repeats", "1"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let dir = results_dir(&e);
+    std::fs::remove_file(dir.join("store-store-bin.json")).unwrap();
+    let v = Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
+        .args(["run", "--validate"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(!v.status.success());
+    assert!(
+        String::from_utf8_lossy(&v.stderr).contains("has no result file"),
+        "{}",
+        text(&v)
+    );
+}
+
+#[test]
+fn compare_refuses_runs_with_different_repeats() {
+    let e = env();
+    let base = ["--tools", "store", "--classes", "bin"];
+    assert!(measure(&e, &[&base[..], &["--repeats", "1"]].concat())
+        .status
+        .success());
+    assert!(measure(&e, &[&base[..], &["--repeats", "2"]].concat())
+        .status
+        .success());
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&e.results)
+        .unwrap()
+        .map(|d| d.unwrap().path())
+        .collect();
+    dirs.sort();
+    let out = Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
+        .args(["run", "--compare"])
+        .arg(&dirs[0])
+        .arg(&dirs[1])
+        .args(["--max-diff-pct", "100000"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("requested repeats"),
+        "{}",
+        text(&out)
+    );
 }
