@@ -6,7 +6,7 @@ Committed JSON measurements land here (see docs/PLAN.md P0-3). Never edit by han
 
 ```text
 bench/results/
-  schema.json                         JSON Schema for every file below
+  schema.json                         JSON Schema for host.json, tools.json, run.json and the result files (not for probe files)
   <YYYY-MM-DD>-<host>[-<n>]/          one directory per run on one machine (n >= 2: further runs
                                       on the same UTC day); one corpus profile and manifest hash
     host.json                         machine, OS, CPU, RAM, lpk-bench version, git commit, rustc
@@ -47,13 +47,27 @@ environment dumps.
   with `lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]`.
 ## Probe files
 
-`lpk-bench probe <jpeg|deflate|dedup|text|weights|entropy-gate|all> [--profile small|full]
-[--corpus DIR] [--results DIR] [--threads N] [--allow-dirty-build]` writes `probe-<name>.json` and
-`probe-<name>.md` into a results directory. `--results` names the directory itself: a new one
-(default: a new `bench/results/<date>-<host>[-<n>]`, with a `host.json` written by the same code
-as the baseline runner) or an existing one of the same machine and corpus (its `host.json` is
-left alone; another host, profile or manifest hash is refused). The clean-build rule is the same
-as for `run`. `probe all` runs every probe, goes on after a failure and exits non-zero if any failed.
+Run probes from a release build, because they time code of this crate:
+
+```text
+cargo run --release -p lpk-bench -- probe <jpeg|deflate|dedup|text|weights|entropy-gate|all>
+    [--profile small|full] [--corpus DIR] [--results ROOT | --into DIR] [--tmp DIR] [--threads N]
+    [--allow-dirty-build] [--allow-debug-build]
+```
+
+A debug build is refused unless `--allow-debug-build` is given; every probe file records the cargo
+profile, the opt-level, debug assertions and that flag (`build_profile`), and `run --validate`
+reports a file from an unoptimised build whose flag is not recorded.
+
+The probe writes `probe-<name>.json` and `probe-<name>.md`. `--results ROOT` (default
+`bench/results`, as for `run`) is the root under which a new `<date>-<host>[-<n>]` directory is
+created, with a `host.json` written by the same code as the baseline runner. `--into DIR` adds to
+an existing results directory instead: it must contain `host.json` and match this host, this build
+(one build per directory) and this corpus; its `host.json` is left alone. An earlier result of the
+same probe in that directory is removed before the probe runs, so a failing re-run leaves no stale
+file. Scratch files go to a per-run directory under `--tmp` (default `bench/tmp`), removed at the
+end. The clean-build rule is the same as for `run`. `probe all` runs every probe, goes on after a
+failure and exits non-zero if any failed.
 
 Every `probe-<name>.json` has the same envelope and a probe-specific `data` object:
 
@@ -61,7 +75,9 @@ Every `probe-<name>.json` has the same envelope and a probe-specific `data` obje
 |---|---|
 | `probe`, `format_version` | probe name (as in the file name); version of this format |
 | `corpus` | `profile`, `manifest_blake3`, `private` (true for a private corpus: per-file records carry an index and no name or path) |
-| `build`, `host`, `date`, `threads` | lpk-bench build stamp, host name, UTC time, threads used for size-only work |
+| `build`, `build_profile` | lpk-bench build stamp; `profile`, `opt_level`, `debug_assertions`, `allow_debug_build` |
+| `host`, `date` | host name; UTC time of the probe's start |
+| `threads`, `library_threads` | threads used for size-only work; threads the compression libraries used inside timed sections |
 | `libraries` | name to version of every compression library the probe used, linked C libraries included |
 | `elapsed_seconds`, `notes` | wall time of the probe; parts that were skipped, and why |
 | `data` | the probe's own typed structure |

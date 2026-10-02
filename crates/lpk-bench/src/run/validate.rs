@@ -147,7 +147,7 @@ pub(crate) fn scan_absolute_paths(value: &Value, pointer: &str, file: &str, out:
     }
 }
 
-fn valid_date(date: &str) -> bool {
+pub(crate) fn valid_date(date: &str) -> bool {
     let parts: Vec<&str> = date.split('-').collect();
     let [y, m, d] = parts.as_slice() else {
         return false;
@@ -256,7 +256,7 @@ pub struct Report {
 }
 
 /// Check `<dir>` (a `<date>-<host>` results directory): `host.json`, `tools.json` and every
-/// result file. `probe-*.json` files belong to the probes (PLAN P0-4) and are skipped.
+/// result file; `probe-*.json` files are checked by [`crate::probe::check_file`] and against the host and corpus of the rest.
 ///
 /// A parent such as `bench/results` (not itself a `<date>-<host>` directory and without
 /// `host.json`/`tools.json`) is also accepted: each subdirectory is checked, files such as
@@ -353,7 +353,7 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         }
         probes > 0 && baseline == 0
     };
-    let mut host_info: Option<(String, bool)> = None;
+    let mut host_info: Option<(String, String)> = None;
     let mut tools: std::collections::BTreeMap<String, ToolState> = Default::default();
     for (name, kind) in [("host.json", Kind::Host), ("tools.json", Kind::Tools)] {
         let path = dir.join(name);
@@ -388,7 +388,7 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
                     ));
                 }
                 let host = v.get("host").and_then(Value::as_str).unwrap_or("");
-                host_info = Some((host.to_string(), allowed));
+                host_info = Some((host.to_string(), commit.to_string()));
                 if let Some((_, rest)) = parsed_name {
                     if !host_matches(rest, host) {
                         report.problems.push(format!(
@@ -493,17 +493,18 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         let check = crate::probe::check_file(dir, name);
         report.problems.extend(check.problems);
         if let Some(meta) = check.meta {
-            if let Some((host, dirty_allowed)) = &host_info {
+            if let Some((host, commit)) = &host_info {
                 if meta.host != *host {
                     report.problems.push(format!(
                         "{name}: /host: `{}` but host.json says `{host}`",
                         meta.host
                     ));
                 }
-                if !crate::run::host::build_is_clean(&meta.build) && !dirty_allowed {
+                // One build per directory (host.json already carries the dirty-build rule).
+                if meta.build != *commit {
                     report.problems.push(format!(
-                        "{name}: /build: `{}` is not a clean commit and host.json does not \
-                         record --allow-dirty-build",
+                        "{name}: /build: `{}` but host.json says `{commit}` (one build per \
+                         results directory)",
                         meta.build
                     ));
                 }

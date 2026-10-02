@@ -36,7 +36,7 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 jsonschema = { version = "0.58.4", default-features = false }
 regex = "1.13.1"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
-zstd = { version = "0.14.0", features = ["zstdmt"] }
+zstd = { version = "0.14.0", default-features = false, features = ["zstdmt"] }
 liblzma = { version = "0.4.8", features = ["static", "parallel"] }
 lepton_jpeg = "0.5.8"
 preflate-rs = "0.7.6"

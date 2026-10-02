@@ -87,6 +87,23 @@ fn main() {
         watch(source);
     }
 
+    // How this binary is built, for the probe files: the speeds of an unoptimised build mean
+    // nothing, so every probe file records it.
+    for (var, out) in [("PROFILE", "LPK_PROFILE"), ("OPT_LEVEL", "LPK_OPT_LEVEL")] {
+        let value = std::env::var(var).unwrap_or_else(|_| "unknown".to_string());
+        println!("cargo:rustc-env={out}={value}");
+    }
+    // The xz release linked in is fixed by the `liblzma-sys` crate version in Cargo.lock.
+    let lock = std::fs::read_to_string("../../Cargo.lock").unwrap_or_default();
+    let lzma = lock
+        .split("[[package]]")
+        .find(|p| p.contains("name = \"liblzma-sys\""))
+        .and_then(|p| p.lines().find_map(|l| l.strip_prefix("version = \"")))
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or("unknown")
+        .to_string();
+    println!("cargo:rustc-env=LPK_LIBLZMA_SYS_VERSION={lzma}");
+
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     let version = output(&rustc, &["--version"]).unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=LPK_RUSTC_VERSION={version}");

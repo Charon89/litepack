@@ -2,8 +2,11 @@
 //!
 //! ```text
 //! lpk-bench probe <jpeg|deflate|dedup|text|weights|entropy-gate|all> [--profile small|full]
-//!     [--corpus DIR] [--results DIR] [--threads N] [--allow-dirty-build]
+//!     [--corpus DIR] [--results ROOT | --into DIR] [--tmp DIR] [--threads N]
+//!     [--allow-dirty-build] [--allow-debug-build]
 //! ```
+//!
+//! Run probes from a release build: `cargo run --release -p lpk-bench -- probe ...`.
 //!
 //! Each probe writes `probe-<name>.json` and `probe-<name>.md` into a results directory (plus
 //! `host.json` when the directory is new). The JSON is an [`Envelope`] shared by every probe with
@@ -17,12 +20,14 @@
 //! ([`timed`]). Timing rule: a timed section runs alone (nothing else of the probe runs in
 //! parallel), on data already in memory, and the JSON records how many threads the library used.
 
+#![allow(dead_code)] // shared helpers for probes that land in later tasks
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -35,11 +40,14 @@ use crate::run::exec::{load_corpus, Corpus};
 use crate::run::host;
 use crate::run::result::{render, HostFile};
 
+pub mod codec;
 pub mod dedup;
 pub mod deflate;
 pub mod entropy_gate;
 pub mod jpeg;
+pub mod tarball;
 pub mod text;
+pub mod tool;
 pub mod weights;
 
 /// Version of the envelope and of the rules in this module.
@@ -61,15 +69,30 @@ pub struct ProbeArgs {
     #[arg(value_parser = ["jpeg", "deflate", "dedup", "text", "weights", "entropy-gate", "all"])]
     pub name: String,
     /// Corpus profile, `small` or `full`: selects bench/corpus/<profile> (default: small)
-    #[arg(long)]
+    #[arg(long, value_parser = ["small", "full"])]
     pub profile: Option<String>,
     /// Corpus directory holding manifest.json (default: bench/corpus/<profile>)
     #[arg(long, value_name = "DIR")]
     pub corpus: Option<PathBuf>,
-    /// The results directory itself: a new one, or an existing one of the same host and corpus
-    /// (default: a new bench/results/<date>-<host>[-<n>])
+    /// Root under which a new `<date>-<host>[-<n>]` results directory is created
+    #[arg(
+        long,
+        value_name = "ROOT",
+        default_value = "bench/results",
+        conflicts_with = "into"
+    )]
+    pub results: PathBuf,
+    /// Add to this existing results directory instead (it must contain host.json and match this
+    /// host, build and corpus)
     #[arg(long, value_name = "DIR")]
-    pub results: Option<PathBuf>,
+    pub into: Option<PathBuf>,
+    /// Where scratch files go (default: bench/tmp, on the same volume as the corpus)
+    #[arg(long, value_name = "DIR", default_value = "bench/tmp")]
+    pub tmp: PathBuf,
+    /// Run from a build without optimisation (recorded in every probe file; speeds from such a
+    /// build are meaningless: use `cargo run --release -p lpk-bench -- probe ...`)
+    #[arg(long)]
+    pub allow_debug_build: bool,
     /// Threads for work where only sizes matter (default: the machine's logical cores); timed
     /// sections never run in parallel
     #[arg(long)]
@@ -102,11 +125,14 @@ pub struct Envelope<D> {
     pub corpus: CorpusId,
     /// Build stamp of lpk-bench (git commit, `-dirty` suffix when uncommitted).
     pub build: String,
+    pub build_profile: BuildProfile,
     pub host: String,
     /// UTC, RFC 3339.
     pub date: String,
     /// Threads used for the parts where only sizes matter.
     pub threads: u32,
+    /// Threads the compression libraries used inside timed sections.
+    pub library_threads: u32,
     /// Name -> version of every compression library the probe used (linked C libraries too).
     pub libraries: BTreeMap<String, String>,
     /// Wall time of the whole probe.
@@ -116,19 +142,97 @@ pub struct Envelope<D> {
     pub data: D,
 }
 
-/// What a probe's `run` returns.
+/// How the binary that ran a probe was built. Probes time code of this crate, so a build
+/// without optimisation gives meaningless speeds; `probe` refuses to run from one unless
+/// `--allow-debug-build` is given, and the flag is recorded here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildProfile {
+    /// Cargo profile name (`release`, `debug`).
+    pub profile: String,
+    pub opt_level: String,
+    pub debug_assertions: bool,
+    /// The run used `--allow-debug-build`.
+    pub allow_debug_build: bool,
+}
+
+impl BuildProfile {
+    pub fn current(allow_debug_build: bool) -> BuildProfile {
+        BuildProfile {
+            profile: env!("LPK_PROFILE").to_string(),
+            opt_level: env!("LPK_OPT_LEVEL").to_string(),
+            debug_assertions: cfg!(debug_assertions),
+            allow_debug_build,
+        }
+    }
+
+    /// An optimised build without debug assertions.
+    pub fn is_release(&self) -> bool {
+        self.profile == "release" && self.opt_level != "0" && !self.debug_assertions
+    }
+}
+
+/// What a probe's `run` returns. Build it with [`Output::new`] and register the compression
+/// libraries with [`Output::with_zstd`] / [`Output::with_xz`], so version strings come from one
+/// place.
 #[derive(Debug)]
 pub struct Output<D> {
     pub data: D,
     pub libraries: BTreeMap<String, String>,
     pub notes: Vec<String>,
+    /// Threads the compression libraries used inside timed sections (1: the calling thread).
+    pub library_threads: u32,
 }
 
-/// What a probe sees of the corpus.
+impl<D> Output<D> {
+    pub fn new(data: D, library_threads: u32) -> Self {
+        Output {
+            data,
+            libraries: BTreeMap::new(),
+            notes: Vec::new(),
+            library_threads: library_threads.max(1),
+        }
+    }
+
+    /// Record that libzstd was used.
+    pub fn with_zstd(mut self) -> Self {
+        self.libraries
+            .insert("libzstd".to_string(), codec::zstd_version());
+        self
+    }
+
+    /// Record that liblzma (xz) was used.
+    pub fn with_xz(mut self) -> Self {
+        self.libraries
+            .insert("liblzma".to_string(), codec::xz_version());
+        self
+    }
+
+    pub fn note(mut self, text: impl Into<String>) -> Self {
+        self.notes.push(text.into());
+        self
+    }
+}
+
+/// A set of files that share a folder, see [`Ctx::groups`].
+#[derive(Debug)]
+pub struct Group<'a> {
+    pub label: String,
+    pub files: Vec<&'a ManifestFile>,
+}
+
+/// What a probe sees of the corpus and of this run.
 #[derive(Debug)]
 pub struct Ctx<'a> {
     pub corpus: &'a Corpus,
+    /// Threads for work where only sizes matter.
     pub threads: u32,
+    /// This run's scratch directory (absolute; removed when the run ends, also on failure).
+    pub scratch: PathBuf,
+    /// `bench/tools.local.toml`, where programs not on `PATH` are named.
+    pub local_tools: PathBuf,
+    /// Timeout of one external program run.
+    pub tool_timeout: Duration,
 }
 
 impl Ctx<'_> {
@@ -149,6 +253,110 @@ impl Ctx<'_> {
     /// The manifest path of a file, or `None` for a private corpus (names stay out of results).
     pub fn label(&self, f: &ManifestFile) -> Option<String> {
         (!self.private()).then(|| f.path.clone())
+    }
+
+    /// A file's path inside its class, `/`-separated (the manifest path without the class
+    /// folder for a public corpus; private manifests have no class folder).
+    pub fn rel_path(&self, class: &str, f: &ManifestFile) -> String {
+        f.path
+            .strip_prefix(class)
+            .and_then(|r| r.strip_prefix('/'))
+            .unwrap_or(&f.path)
+            .to_string()
+    }
+
+    /// The files of a class grouped by their folder inside the class, `depth` folder levels deep
+    /// (a file with fewer levels is grouped by its own folder; depth 0: one group). Public
+    /// corpora: the label is the folder path (`""` for the class root); private corpora: the
+    /// label is `group-<n>`, `n` counting groups in manifest order, so no folder name is
+    /// published. Groups come in manifest order of their first file.
+    pub fn groups(&self, class: &str, depth: usize) -> Vec<Group<'_>> {
+        let mut out: Vec<Group<'_>> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        for f in self.class_files(class).unwrap_or(&[]) {
+            let rel = self.rel_path(class, f);
+            let mut parts: Vec<&str> = rel.split('/').collect();
+            parts.pop();
+            parts.truncate(depth);
+            let key = parts.join("/");
+            match keys.iter().position(|k| *k == key) {
+                Some(i) => out[i].files.push(f),
+                None => {
+                    let label = if self.private() {
+                        format!("group-{}", keys.len())
+                    } else {
+                        key.clone()
+                    };
+                    keys.push(key);
+                    out.push(Group {
+                        label,
+                        files: vec![f],
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Read a class file in blocks of `block` bytes, passing each to `sink`, hashing as it goes;
+    /// after the last block the size and BLAKE3 are compared with the manifest and a mismatch is
+    /// an error naming the file. For files too large to hold in memory.
+    pub fn read_blocks(
+        &self,
+        class: &str,
+        f: &ManifestFile,
+        block: usize,
+        mut sink: impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
+        use std::io::Read;
+        let path = self.corpus.files_root().join(&f.path);
+        let mut file = std::fs::File::open(&path).with_context(|| {
+            format!(
+                "class `{class}`: input file `{}` cannot be read (corpus changed or damaged?)",
+                f.path
+            )
+        })?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; block.max(1)];
+        let mut total = 0u64;
+        loop {
+            let n = file
+                .read(&mut buf)
+                .with_context(|| format!("class `{class}`: reading `{}`", f.path))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total += n as u64;
+            sink(&buf[..n])?;
+        }
+        let got = hasher.finalize().to_hex().to_string();
+        if total != f.bytes || got != f.blake3 {
+            bail!(
+                "class `{class}`: input file `{}` does not match the manifest \
+                 (expected {} bytes and BLAKE3 {}, found {total} bytes and {got}); rebuild the corpus",
+                f.path,
+                f.bytes,
+                f.blake3
+            );
+        }
+        Ok(())
+    }
+
+    /// A scratch directory of this run (created empty, removed with the run), named `name`.
+    pub fn scratch_dir(&self, name: &str) -> Result<PathBuf> {
+        let dir = self.scratch.join(name);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        Ok(dir)
+    }
+
+    /// Where an external program is: `bench/tools.local.toml` entry, then `PATH`. `Err` is the
+    /// skip reason (`not installed`). Names: `zstd`, `bsc`, `kanzi`, `hdiffz`, `hpatchz`.
+    pub fn find_tool(&self, name: &str) -> std::result::Result<PathBuf, String> {
+        tool::find_tool(name, &self.local_tools)
     }
 
     /// Read a class file and verify it against the manifest (size and BLAKE3) before it is used;
@@ -280,9 +488,28 @@ pub fn md_header<D>(e: &Envelope<D>) -> String {
             ""
         }
     ));
+    let bp = &e.build_profile;
     s.push_str(&format!(
-        "- build `{}` on `{}`, {}, {} thread(s) for size-only work, {:.1} s elapsed\n",
-        e.build, e.host, e.date, e.threads, e.elapsed_seconds
+        "- build `{}` ({} profile, opt-level {}{}{}) on `{}`, {}, {} thread(s) for size-only work, \
+         {} library thread(s) in timed sections, {:.1} s elapsed\n",
+        e.build,
+        bp.profile,
+        bp.opt_level,
+        if bp.debug_assertions {
+            ", debug assertions"
+        } else {
+            ""
+        },
+        if bp.allow_debug_build {
+            ", --allow-debug-build"
+        } else {
+            ""
+        },
+        e.host,
+        e.date,
+        e.threads,
+        e.library_threads,
+        e.elapsed_seconds
     ));
     let libs: Vec<String> = e
         .libraries
@@ -301,12 +528,12 @@ pub fn md_header<D>(e: &Envelope<D>) -> String {
 // Per-probe dispatch (the only place that lists the probes)
 
 /// Run one probe and return the envelope as JSON text.
-fn run_one(name: &str, ctx: &Ctx<'_>, build: &str, host: &str, date: &str) -> Result<String> {
+fn run_one(name: &str, ctx: &Ctx<'_>, info: &RunInfo) -> Result<String> {
     let started = Instant::now();
     macro_rules! go {
         ($m:ident) => {{
             let out = $m::run(ctx)?;
-            to_text(name, ctx, build, host, date, started, out)
+            to_text(name, ctx, info, started, out)
         }};
     }
     match name {
@@ -320,12 +547,19 @@ fn run_one(name: &str, ctx: &Ctx<'_>, build: &str, host: &str, date: &str) -> Re
     }
 }
 
+/// The envelope facts that do not depend on the probe.
+#[derive(Debug)]
+struct RunInfo {
+    build: String,
+    build_profile: BuildProfile,
+    host: String,
+    date: String,
+}
+
 fn to_text<D: Serialize>(
     name: &str,
     ctx: &Ctx<'_>,
-    build: &str,
-    host: &str,
-    date: &str,
+    info: &RunInfo,
     started: Instant,
     out: Output<D>,
 ) -> Result<String> {
@@ -337,10 +571,12 @@ fn to_text<D: Serialize>(
             manifest_blake3: ctx.corpus.manifest_blake3.clone(),
             private: ctx.private(),
         },
-        build: build.to_string(),
-        host: host.to_string(),
-        date: date.to_string(),
+        build: info.build.clone(),
+        build_profile: info.build_profile.clone(),
+        host: info.host.clone(),
+        date: info.date.clone(),
         threads: ctx.threads,
+        library_threads: out.library_threads,
         libraries: out.libraries,
         elapsed_seconds: started.elapsed().as_secs_f64(),
         notes: out.notes,
@@ -415,6 +651,7 @@ pub fn check_file(dir: &Path, json_name: &str) -> FileCheck {
         }
     };
     crate::run::validate::scan_absolute_paths(&value, "", json_name, &mut out.problems);
+    let data_value = value.get("data").cloned().unwrap_or(Value::Null);
     let head: Envelope<Value> = match serde_json::from_value(value) {
         Ok(h) => h,
         Err(e) => {
@@ -431,6 +668,9 @@ pub fn check_file(dir: &Path, json_name: &str) -> FileCheck {
         profile: head.corpus.profile.clone(),
         manifest_blake3: head.corpus.manifest_blake3.clone(),
     });
+    if head.corpus.private {
+        private_names(&data_value, "/data", json_name, &mut out.problems);
+    }
     let stem = json_name
         .strip_prefix("probe-")
         .and_then(|s| s.strip_suffix(".json"))
@@ -468,6 +708,30 @@ pub fn check_file(dir: &Path, json_name: &str) -> FileCheck {
         )),
     }
     out
+}
+
+/// Keys that carry a file or folder name: not allowed anywhere inside `data` of a private corpus.
+const NAME_KEYS: [&str; 3] = ["path", "name", "folder"];
+
+fn private_names(v: &Value, at: &str, file: &str, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            for (k, item) in map {
+                if NAME_KEYS.contains(&k.as_str()) {
+                    out.push(format!(
+                        "{file}: {at}/{k}: a private corpus carries no file or folder names"
+                    ));
+                }
+                private_names(item, &format!("{at}/{k}"), file, out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                private_names(item, &format!("{at}/{i}"), file, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 type RenderFn<D> = fn(&Envelope<D>) -> String;
@@ -508,6 +772,34 @@ fn check_typed<D: DeserializeOwned>(
     }
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ` with a real calendar date and a real time of day.
+pub fn valid_timestamp(s: &str) -> bool {
+    let b = s.as_bytes();
+    let shape = b.len() == 20
+        && s.is_ascii()
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
+        && b[16] == b':'
+        && b[19] == b'Z';
+    if !shape {
+        return false;
+    }
+    let field = |from: usize, to: usize| -> Option<u32> {
+        let t = &s[from..to];
+        if t.bytes().all(|c| c.is_ascii_digit()) {
+            t.parse().ok()
+        } else {
+            None
+        }
+    };
+    let (Some(h), Some(mi), Some(sec)) = (field(11, 13), field(14, 16), field(17, 19)) else {
+        return false;
+    };
+    h < 24 && mi < 60 && sec < 60 && crate::run::validate::valid_date(&s[..10])
+}
+
 /// The rules every envelope must satisfy.
 pub fn check_common<D>(e: &Envelope<D>) -> Vec<String> {
     let mut p = Vec::new();
@@ -534,15 +826,18 @@ pub fn check_common<D>(e: &Envelope<D>) -> Vec<String> {
     if !hash_ok {
         p.push("/corpus/manifest_blake3: must be 64 lower-case hex digits".to_string());
     }
-    let d = &e.date;
-    let date_ok = d.len() == 20
-        && d.is_ascii()
-        && d.as_bytes()[4] == b'-'
-        && d.as_bytes()[7] == b'-'
-        && d.as_bytes()[10] == b'T'
-        && d.ends_with('Z');
-    if !date_ok {
-        p.push("/date: must be UTC RFC 3339, YYYY-MM-DDTHH:MM:SSZ".to_string());
+    if !valid_timestamp(&e.date) {
+        p.push("/date: must be a real UTC time, YYYY-MM-DDTHH:MM:SSZ".to_string());
+    }
+    if e.library_threads == 0 {
+        p.push("/library_threads: must be at least 1".to_string());
+    }
+    if !e.build_profile.is_release() && !e.build_profile.allow_debug_build {
+        p.push(
+            "/build_profile: not an optimised release build and --allow-debug-build is not \
+             recorded: the timings mean nothing"
+                .to_string(),
+        );
     }
     if e.host != host::sanitize_host(&e.host) {
         p.push("/host: must be lower-case [a-z0-9-]".to_string());
@@ -558,11 +853,18 @@ pub fn check_common<D>(e: &Envelope<D>) -> Vec<String> {
 pub struct Config {
     pub probes: Vec<String>,
     pub corpus: PathBuf,
-    /// The results directory itself; `None`: a new directory under `results_root`.
-    pub results_dir: Option<PathBuf>,
+    /// Add to this existing results directory (it must hold `host.json`); `None`: a new
+    /// directory under `results_root`.
+    pub into: Option<PathBuf>,
     pub results_root: PathBuf,
+    /// Scratch root; a per-run directory is created under it and removed at the end.
+    pub tmp_root: PathBuf,
     pub threads: u32,
     pub allow_dirty: bool,
+    pub allow_debug_build: bool,
+    /// `bench/tools.local.toml`
+    pub local_tools: PathBuf,
+    pub tool_timeout: Duration,
 }
 
 /// What a run did.
@@ -583,7 +885,7 @@ fn same_machine(a: &HostFile, b: &HostFile) -> bool {
         && a.logical_cores == b.logical_cores
 }
 
-/// The (profile, manifest hash) every result or probe file already in `dir` was made on.
+/// The (file, profile, manifest hash) of every result or probe file already in `dir`.
 fn existing_corpora(dir: &Path) -> Result<Vec<(String, String, String)>> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir)
@@ -613,38 +915,29 @@ fn existing_corpora(dir: &Path) -> Result<Vec<(String, String, String)>> {
     Ok(found)
 }
 
-/// Decide where results go and make sure the directory has a `host.json`: a new directory gets
-/// one (written by the same code as the baseline runner); an existing directory must be on the same
-/// machine and corpus, and its `host.json` is left alone.
+/// Decide where results go and make sure the directory has a `host.json`. A new directory (under
+/// the results root) gets one, written by the same code as the baseline runner. An existing one
+/// (`--into`) must hold a `host.json` of the same machine and build and only files of the same
+/// corpus; its `host.json` is left alone.
 fn prepare_dir(cfg: &Config, corpus: &Corpus, now: u64) -> Result<PathBuf> {
     let current = host::collect(cfg.allow_dirty);
-    let dir = match &cfg.results_dir {
-        Some(d) => d.clone(),
-        None => {
-            std::fs::create_dir_all(&cfg.results_root)
-                .with_context(|| format!("creating {}", cfg.results_root.display()))?;
-            cfg.results_root.join(host::free_results_dir_name(
-                &cfg.results_root,
-                now,
-                &current.host,
-            ))
-        }
-    };
-    let populated = dir.is_dir()
-        && std::fs::read_dir(&dir)
-            .with_context(|| format!("reading {}", dir.display()))?
-            .next()
-            .is_some();
-    if !populated {
+    let Some(dir) = &cfg.into else {
+        std::fs::create_dir_all(&cfg.results_root)
+            .with_context(|| format!("creating {}", cfg.results_root.display()))?;
+        let dir = cfg.results_root.join(host::free_results_dir_name(
+            &cfg.results_root,
+            now,
+            &current.host,
+        ));
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         std::fs::write(dir.join("host.json"), render(&current))
             .with_context(|| format!("writing {}", dir.join("host.json").display()))?;
         return Ok(dir);
-    }
+    };
     let host_path = dir.join("host.json");
     let text = std::fs::read_to_string(&host_path).with_context(|| {
         format!(
-            "{} is not empty and has no host.json: not a results directory",
+            "{} has no host.json: --into needs an existing results directory",
             dir.display()
         )
     })?;
@@ -659,13 +952,15 @@ fn prepare_dir(cfg: &Config, corpus: &Corpus, now: u64) -> Result<PathBuf> {
             current.host
         );
     }
-    if !host::build_is_clean(&current.git_commit) && !existing.dirty_build_allowed {
+    if existing.git_commit != current.git_commit {
         bail!(
-            "this build is not a clean commit and the directory's host.json does not record \
-             --allow-dirty-build: refusing to add to it"
+            "{} was made by build `{}`, this is build `{}`: one build per results directory",
+            dir.display(),
+            existing.git_commit,
+            current.git_commit
         );
     }
-    for (file, profile, hash) in existing_corpora(&dir)? {
+    for (file, profile, hash) in existing_corpora(dir)? {
         if profile != corpus.manifest.profile || hash != corpus.manifest_blake3 {
             bail!(
                 "{} holds {file} from another corpus (profile `{profile}`, manifest {hash}); \
@@ -676,22 +971,67 @@ fn prepare_dir(cfg: &Config, corpus: &Corpus, now: u64) -> Result<PathBuf> {
             );
         }
     }
-    Ok(dir)
+    Ok(dir.clone())
+}
+
+/// Removes the run's scratch directory when dropped, whatever happened.
+#[derive(Debug)]
+struct ScratchGuard(PathBuf);
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The refusal of a build without optimisation, unless the flag allows it.
+pub fn check_profile(allow_debug_build: bool) -> Result<()> {
+    let p = BuildProfile::current(allow_debug_build);
+    if p.is_release() || allow_debug_build {
+        Ok(())
+    } else {
+        bail!(
+            "this binary is not an optimised release build ({} profile, opt-level {}{}): probe \
+             timings from it mean nothing. Run `cargo run --release -p lpk-bench -- probe ...`, or \
+             pass --allow-debug-build to record the run as such",
+            p.profile,
+            p.opt_level,
+            if p.debug_assertions {
+                ", debug assertions"
+            } else {
+                ""
+            }
+        )
+    }
 }
 
 /// Run the selected probes, write their files, and validate the directory. A failing probe is
-/// reported and the next one runs.
+/// reported and the next one runs. Any earlier result of a probe is removed before it runs, so a
+/// failure leaves no stale file behind.
 pub fn execute(cfg: &Config) -> Result<Outcome> {
     host::check_build(env!("LPK_GIT_COMMIT"), cfg.allow_dirty).map_err(anyhow::Error::msg)?;
+    check_profile(cfg.allow_debug_build)?;
     let corpus = load_corpus(&cfg.corpus)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let dir = prepare_dir(cfg, &corpus, now)?;
-    let host_name = host::sanitize_host(&sysinfo::System::host_name().unwrap_or_default());
+    let scratch =
+        crate::run::exec::absolute(&cfg.tmp_root)?.join(format!("probe{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).with_context(|| format!("creating {}", scratch.display()))?;
+    let _guard = ScratchGuard(scratch.clone());
+    let info = RunInfo {
+        build: env!("LPK_GIT_COMMIT").to_string(),
+        build_profile: BuildProfile::current(cfg.allow_debug_build),
+        host: host::sanitize_host(&sysinfo::System::host_name().unwrap_or_default()),
+        date: String::new(),
+    };
     let ctx = Ctx {
         corpus: &corpus,
         threads: cfg.threads.max(1),
+        scratch,
+        local_tools: cfg.local_tools.clone(),
+        tool_timeout: cfg.tool_timeout,
     };
     let mut out = Outcome {
         results_dir: dir.clone(),
@@ -699,19 +1039,37 @@ pub fn execute(cfg: &Config) -> Result<Outcome> {
     };
     println!("results: {}", dir.display());
     for name in &cfg.probes {
-        let date = rfc3339_utc(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
-        );
+        for ext in ["json", "md"] {
+            let _ = std::fs::remove_file(dir.join(format!("probe-{name}.{ext}")));
+        }
+        let info = RunInfo {
+            date: rfc3339_utc(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+            ),
+            build: info.build.clone(),
+            build_profile: info.build_profile.clone(),
+            host: info.host.clone(),
+        };
         println!("probe {name}: running");
-        let step =
-            run_one(name, &ctx, env!("LPK_GIT_COMMIT"), &host_name, &date).and_then(|json| {
-                let md = render_file(name, &json).context("rendering the table from the JSON")?;
-                std::fs::write(dir.join(format!("probe-{name}.json")), &json)?;
-                std::fs::write(dir.join(format!("probe-{name}.md")), &md)?;
-                Ok(md)
-            });
+        let step = run_one(name, &ctx, &info).and_then(|json| {
+            let md = render_file(name, &json).context("rendering the table from the JSON")?;
+            std::fs::write(dir.join(format!("probe-{name}.json")), &json)?;
+            std::fs::write(dir.join(format!("probe-{name}.md")), &md)?;
+            Ok(md)
+        });
+        // Whatever the probe left in its scratch space goes before the next one.
+        if let Ok(rd) = std::fs::read_dir(&ctx.scratch) {
+            for e in rd.filter_map(|e| e.ok()) {
+                let p = e.path();
+                let _ = if p.is_dir() {
+                    std::fs::remove_dir_all(&p)
+                } else {
+                    std::fs::remove_file(&p)
+                };
+            }
+        }
         match step {
             Ok(md) => {
                 println!("{md}");
@@ -744,10 +1102,14 @@ pub fn command(args: &ProbeArgs) -> ExitCode {
             .corpus
             .clone()
             .unwrap_or_else(|| PathBuf::from("bench/corpus").join(&profile)),
-        results_dir: args.results.clone(),
-        results_root: PathBuf::from("bench/results"),
+        into: args.into.clone(),
+        results_root: args.results.clone(),
+        tmp_root: args.tmp.clone(),
         threads: args.threads.unwrap_or_else(host::logical_cores).max(1),
         allow_dirty: args.allow_dirty_build,
+        allow_debug_build: args.allow_debug_build,
+        local_tools: PathBuf::from(crate::run::DEFAULT_LOCAL),
+        tool_timeout: Duration::from_secs(3600),
     };
     match execute(&cfg) {
         Ok(o) => {

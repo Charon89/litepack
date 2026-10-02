@@ -59,14 +59,57 @@ fn tiny_corpus(tmp: &Path, private: bool) -> PathBuf {
 }
 
 fn config(corpus: PathBuf, root: PathBuf, probes: &[&str]) -> Config {
+    let tmp_root = root.join("tmp");
     Config {
         probes: probes.iter().map(|s| s.to_string()).collect(),
         corpus,
-        results_dir: None,
+        into: None,
         results_root: root,
+        tmp_root,
         threads: 2,
         allow_dirty: true,
+        // The tests run in a debug build.
+        allow_debug_build: true,
+        local_tools: PathBuf::from("no-such-local-tools.toml"),
+        tool_timeout: Duration::from_secs(60),
     }
+}
+
+/// A corpus with a class `docs`: `a.txt`, `sub/b.txt`, `sub/deep/c.txt`.
+pub(crate) fn tiny_class_corpus(tmp: &Path) -> PathBuf {
+    let dir = tmp.join("classcorpus");
+    let mut files = Vec::new();
+    for (rel, data) in [
+        ("a.txt", "alpha"),
+        ("sub/b.txt", "bravo bravo"),
+        ("sub/deep/c.txt", "charlie"),
+    ] {
+        let p = dir.join("docs").join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, data).expect("write");
+        files.push((
+            "docs".to_string(),
+            manifest_file(&format!("docs/{rel}"), data.as_bytes()),
+        ));
+    }
+    let m = Manifest::with_profile_name("small", files);
+    std::fs::write(dir.join("manifest.json"), m.render()).expect("manifest");
+    dir
+}
+
+/// Run `f` with a context on the corpus in `corpus_dir` and a scratch directory under `tmp`.
+pub(crate) fn with_ctx(corpus_dir: &Path, tmp: &Path, f: impl FnOnce(&Ctx<'_>)) {
+    let corpus = load_corpus(corpus_dir).expect("corpus");
+    let scratch = tmp.join("scratch");
+    std::fs::create_dir_all(&scratch).expect("scratch");
+    let ctx = Ctx {
+        corpus: &corpus,
+        threads: 2,
+        scratch,
+        local_tools: PathBuf::from("none.toml"),
+        tool_timeout: Duration::from_secs(60),
+    };
+    f(&ctx);
 }
 
 fn problems(dir: &Path) -> Vec<String> {
@@ -116,7 +159,7 @@ fn weights_end_to_end_writes_json_and_table_and_the_directory_validates() {
         .map(|d| d.dtype.as_str())
         .collect();
     assert_eq!(names, ["BF16", "F32"]);
-    assert!(md.contains("## By dtype, all files") && md.contains("## Not parsed"));
+    assert!(md.contains("## Sizes by dtype, all files") && md.contains("## Not parsed"));
     // The output carries no absolute path or user name.
     assert!(!json.contains(tmp.path().to_string_lossy().as_ref()));
 }
@@ -156,11 +199,11 @@ fn unknown_fields_and_broken_rules_are_reported() {
 
     std::fs::write(&path, &original).expect("restore");
     edit_json(&path, |v| {
-        v["data"]["files"][0]["dtypes"][1]["split_compressed_bytes"] = Value::from(1)
+        v["data"]["files"][0]["dtypes"][1]["byte_planes"]["compressed_bytes"] = Value::from(1)
     });
     assert!(problems(&dir)
         .iter()
-        .any(|m| m.contains("/data/files/0/dtypes/1/split_compressed_bytes")));
+        .any(|m| m.contains("/data/files/0/dtypes/1/byte_planes/compressed_bytes")));
 
     std::fs::write(&path, &original).expect("restore");
     edit_json(&path, |v| {
@@ -288,7 +331,7 @@ fn an_existing_results_directory_is_extended_only_for_the_same_corpus_and_host()
     let host_before = std::fs::read_to_string(dir.join("host.json")).expect("host");
     let corpus = tmp.path().join("corpus");
     let mut cfg = config(corpus.clone(), tmp.path().join("results"), &["weights"]);
-    cfg.results_dir = Some(dir.clone());
+    cfg.into = Some(dir.clone());
     let again = execute(&cfg).expect("same corpus is accepted");
     assert_eq!(again.results_dir, dir);
     assert_eq!(
@@ -322,7 +365,7 @@ fn an_existing_results_directory_is_extended_only_for_the_same_corpus_and_host()
     let stray = tmp.path().join("stray");
     std::fs::create_dir_all(&stray).expect("mkdir");
     std::fs::write(stray.join("x.txt"), "x").expect("write");
-    cfg.results_dir = Some(stray);
+    cfg.into = Some(stray);
     assert!(execute(&cfg).is_err());
 }
 
@@ -382,9 +425,16 @@ fn the_envelope_rules_catch_bad_headers() {
             private: false,
         },
         build: "abc123".to_string(),
+        build_profile: BuildProfile {
+            profile: "release".to_string(),
+            opt_level: "3".to_string(),
+            debug_assertions: false,
+            allow_debug_build: false,
+        },
         host: "box".to_string(),
         date: "2026-10-02T10:00:00Z".to_string(),
         threads: 4,
+        library_threads: 1,
         libraries: [("libzstd".to_string(), "1".to_string())]
             .into_iter()
             .collect(),
@@ -400,5 +450,244 @@ fn the_envelope_rules_catch_bad_headers() {
     env.host = "Box!".to_string();
     env.elapsed_seconds = -1.0;
     env.format_version = 9;
-    assert_eq!(check_common(&env).len(), 7, "{:?}", check_common(&env));
+    env.library_threads = 0;
+    assert_eq!(check_common(&env).len(), 8, "{:?}", check_common(&env));
+}
+
+#[test]
+fn timestamps_must_be_real() {
+    assert!(valid_timestamp("2026-10-02T10:00:00Z"));
+    assert!(valid_timestamp("2028-02-29T23:59:59Z"));
+    for bad in [
+        "2026-99-99T99:99:99Z",
+        "2026-02-30T10:00:00Z",
+        "2026-10-02T24:00:00Z",
+        "2026-10-02T10:60:00Z",
+        "2026-10-02T10:00:60Z",
+        "2026-10-02 10:00:00Z",
+        "2026-10-02T10:00:00",
+        "20x6-10-02T10:00:00Z",
+        "",
+    ] {
+        assert!(!valid_timestamp(bad), "{bad}");
+    }
+}
+
+#[test]
+fn an_unoptimised_build_is_refused_unless_allowed_and_the_validator_checks_the_record() {
+    if cfg!(debug_assertions) {
+        assert!(
+            check_profile(false).is_err(),
+            "the test build is a debug build"
+        );
+        let msg = check_profile(false).expect_err("refused").to_string();
+        assert!(
+            msg.contains("--allow-debug-build") && msg.contains("--release"),
+            "{msg}"
+        );
+        let tmp = tempfile::tempdir().expect("tmp");
+        let corpus = tiny_corpus(tmp.path(), false);
+        let mut cfg = config(corpus, tmp.path().join("results"), &["weights"]);
+        cfg.allow_debug_build = false;
+        assert!(execute(&cfg).is_err());
+    }
+    assert!(check_profile(true).is_ok());
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (dir, _) = weights_run(tmp.path());
+    let json: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("probe-weights.json")).expect("json"),
+    )
+    .expect("parse");
+    assert_eq!(
+        json["build_profile"]["allow_debug_build"],
+        Value::Bool(true)
+    );
+    assert!(json["build_profile"]["profile"].is_string());
+    assert!(json["library_threads"].is_u64());
+    // An unoptimised profile with the flag not recorded is a problem.
+    let path = dir.join("probe-weights.json");
+    edit_json(&path, |v| {
+        v["build_profile"] = serde_json::json!({
+            "profile": "debug", "opt_level": "0", "debug_assertions": true,
+            "allow_debug_build": false
+        });
+    });
+    assert!(problems(&dir)
+        .iter()
+        .any(|m| m.contains("/build_profile: not an optimised release build")));
+}
+
+#[test]
+fn one_build_per_directory_when_adding_and_when_validating() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (dir, _) = weights_run(tmp.path());
+    let mut cfg = config(
+        tmp.path().join("corpus"),
+        tmp.path().join("results"),
+        &["weights"],
+    );
+    cfg.into = Some(dir.clone());
+    edit_json(&dir.join("host.json"), |v| {
+        v["git_commit"] = Value::from("0123456789ab")
+    });
+    let err = execute(&cfg).expect_err("refused").to_string();
+    assert!(err.contains("one build per results directory"), "{err}");
+    assert!(problems(&dir)
+        .iter()
+        .any(|m| m.starts_with("probe-weights.json: /build:") && m.contains("one build per")));
+}
+
+#[test]
+fn into_needs_an_existing_directory_with_host_json_and_results_is_a_root() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tiny_corpus(tmp.path(), false);
+    let mut cfg = config(corpus, tmp.path().join("results"), &["weights"]);
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("mkdir");
+    cfg.into = Some(empty);
+    assert!(execute(&cfg)
+        .expect_err("no host.json")
+        .to_string()
+        .contains("host.json"));
+    cfg.into = Some(tmp.path().join("missing"));
+    assert!(execute(&cfg).is_err());
+    cfg.into = None;
+    let out = execute(&cfg).expect("fresh");
+    assert_eq!(
+        out.results_dir.parent(),
+        Some(tmp.path().join("results").as_path())
+    );
+    let second = execute(&cfg).expect("a second fresh directory");
+    assert_ne!(second.results_dir, out.results_dir);
+    assert!(second.results_dir.to_string_lossy().ends_with("-2"));
+}
+
+#[test]
+fn a_failing_rerun_removes_the_earlier_files_and_the_scratch_is_gone() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (dir, _) = weights_run(tmp.path());
+    assert!(dir.join("probe-weights.json").is_file());
+    // Same manifest, damaged input: the probe fails.
+    std::fs::write(
+        tmp.path().join("corpus/model-weights/readme.txt"),
+        b"damaged!!!",
+    )
+    .expect("write");
+    let mut cfg = config(
+        tmp.path().join("corpus"),
+        tmp.path().join("results"),
+        &["weights"],
+    );
+    cfg.into = Some(dir.clone());
+    let out = execute(&cfg).expect("execute");
+    assert_eq!(out.failed.len(), 1);
+    assert!(!dir.join("probe-weights.json").exists() && !dir.join("probe-weights.md").exists());
+    // Nothing stale is left: the directory is just a host.json, which is no result at all.
+    assert!(
+        problems(&dir).iter().all(|m| !m.contains("probe-weights")),
+        "{:?}",
+        problems(&dir)
+    );
+    let left: Vec<_> = std::fs::read_dir(&cfg.tmp_root)
+        .map(|r| r.filter_map(|e| e.ok()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "scratch directories left behind: {left:?}");
+}
+
+#[test]
+fn a_private_result_with_name_fields_in_data_is_rejected() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tiny_corpus(tmp.path(), true);
+    let cfg = config(corpus, tmp.path().join("results"), &["weights"]);
+    let out = execute(&cfg).expect("execute");
+    let path = out.results_dir.join("probe-weights.json");
+    for key in ["name", "folder", "path"] {
+        let original = std::fs::read_to_string(&path).expect("read");
+        edit_json(&path, |v| {
+            v["data"]["not_parsed"][0][key] = Value::from("x");
+        });
+        assert!(
+            problems(&out.results_dir)
+                .iter()
+                .any(|m| m.contains(&format!(
+                    "/data/not_parsed/0/{key}: a private corpus carries no file or folder names"
+                ))),
+            "{key}"
+        );
+        std::fs::write(&path, original).expect("restore");
+    }
+}
+
+#[test]
+fn groups_label_by_folder_and_index_for_private_corpora() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tiny_class_corpus(tmp.path());
+    with_ctx(&corpus, tmp.path(), |ctx| {
+        let g = ctx.groups("docs", 1);
+        let labels: Vec<&str> = g.iter().map(|g| g.label.as_str()).collect();
+        assert_eq!(labels, ["", "sub"]);
+        assert_eq!(
+            g[1].files.len(),
+            2,
+            "deeper files fall into their depth-1 folder"
+        );
+        let g2 = ctx.groups("docs", 2);
+        let labels: Vec<&str> = g2.iter().map(|g| g.label.as_str()).collect();
+        assert_eq!(labels, ["", "sub", "sub/deep"]);
+        assert_eq!(ctx.groups("docs", 0).len(), 1);
+        assert!(ctx.groups("nope", 1).is_empty());
+    });
+    // Private: index labels, no folder names.
+    let private = tmp.path().join("private");
+    std::fs::create_dir_all(&private).expect("mkdir");
+    std::fs::copy(corpus.join("manifest.json"), private.join("manifest.json")).expect("copy");
+    let info = serde_json::json!({"private": true, "root": corpus.to_string_lossy()});
+    std::fs::write(private.join("build-info.json"), info.to_string()).expect("info");
+    with_ctx(&private, tmp.path(), |ctx| {
+        let labels: Vec<String> = ctx.groups("docs", 2).into_iter().map(|g| g.label).collect();
+        assert_eq!(labels, ["group-0", "group-1", "group-2"]);
+    });
+}
+
+#[test]
+fn blocks_are_streamed_and_a_changed_file_fails_at_the_end() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tiny_class_corpus(tmp.path());
+    with_ctx(&corpus, tmp.path(), |ctx| {
+        let f = &ctx.class_files("docs").expect("class")[1];
+        let mut got = Vec::new();
+        let mut blocks = 0;
+        ctx.read_blocks("docs", f, 4, |b| {
+            got.extend_from_slice(b);
+            blocks += 1;
+            Ok(())
+        })
+        .expect("streamed");
+        assert_eq!(got, b"bravo bravo");
+        assert_eq!(blocks, 3);
+        std::fs::write(corpus.join("docs/sub/b.txt"), b"bravo brav0").expect("tamper");
+        let err = ctx
+            .read_blocks("docs", f, 4, |_| Ok(()))
+            .expect_err("mismatch");
+        assert!(err.to_string().contains("docs/sub/b.txt"), "{err}");
+        let err = ctx.read_file("docs", f).expect_err("mismatch");
+        assert!(err.to_string().contains("does not match the manifest"));
+    });
+}
+
+#[test]
+fn the_scratch_helper_gives_empty_directories() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tiny_class_corpus(tmp.path());
+    with_ctx(&corpus, tmp.path(), |ctx| {
+        let d = ctx.scratch_dir("work").expect("dir");
+        std::fs::write(d.join("x"), b"x").expect("write");
+        let again = ctx.scratch_dir("work").expect("dir");
+        assert_eq!(d, again);
+        assert!(std::fs::read_dir(&again).expect("read").next().is_none());
+        assert_eq!(
+            ctx.find_tool("definitely-not-a-tool-xyz"),
+            Err(tool::NOT_INSTALLED.to_string())
+        );
+    });
 }

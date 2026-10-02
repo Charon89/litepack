@@ -2,25 +2,35 @@
 //!
 //! Class `model-weights`. Every file is tried as a safetensors file: an 8-byte little-endian
 //! header length, a JSON header mapping tensor name to dtype, shape and `data_offsets`, then the
-//! data. For each floating-point tensor (F16, BF16, F32, F64) the bytes are split into planes
-//! (plane `i` holds byte `i` of every element, plane 0 being the lowest byte), each plane is
-//! compressed with zstd level 19, and the total is compared with zstd level 19 on the tensor's
-//! bytes unsplit. The whole file is also compressed with level 19. Merging the planes must
-//! reproduce the tensor bytes exactly, or the probe stops with an error.
+//! data. For each floating-point tensor (F16, BF16, F32, F64) three variants are compressed with
+//! zstd level 19 (window log 27, long-distance matching, one thread, one compressor and one
+//! decompressor reused for everything):
 //!
-//! Timing: zstd runs single-threaded; "split + compress" and "decompress + merge" are each timed
-//! alone, per tensor, on data already in memory. The size-only compressions (plain tensors and
-//! the whole file) run before, in parallel over `--threads`.
+//! * `plain`: the tensor's bytes as they are;
+//! * `byte_planes`: the bytes split into planes, plane `i` holding byte `i` of every element
+//!   (plane 0 is the lowest byte), each plane compressed on its own;
+//! * `rotated_planes`: every element first rotated left by one bit, then split as above. For
+//!   BF16 and F32 this moves the whole exponent into the highest byte (the sign bit goes to
+//!   the lowest bit), which is the "exponent plane / mantissa planes" split.
+//!
+//! Both split variants are reversed and compared with the tensor's bytes, and the plain one is
+//! decompressed and compared too; a mismatch stops the probe with an error. The whole file is
+//! also compressed with the same settings. Each variant's compression and decompression is
+//! timed alone, per tensor, on data already in memory.
+//!
+//! Reasons for files that are not parsed come from a fixed list of categories: nothing from the
+//! file's content (serde's messages quote values) ever reaches the result.
 
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Result};
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{mbps, md_header, md_table, par_map, pct, timed, Ctx, Envelope, Output};
+use super::codec::{ZstdContext, ZstdSettings};
+use super::{mbps, md_header, md_table, pct, timed, Ctx, Envelope, Output};
 
 pub const CLASS: &str = "model-weights";
-pub const ZSTD_LEVEL: i32 = 19;
 /// safetensors refuses headers larger than this.
 const MAX_HEADER_BYTES: u64 = 100_000_000;
 
@@ -32,9 +42,11 @@ const MAX_HEADER_BYTES: u64 = 100_000_000;
 #[serde(deny_unknown_fields)]
 pub struct Data {
     pub class: String,
-    pub zstd_level: i32,
-    /// Threads zstd used inside every timed section.
-    pub library_threads: u32,
+    /// Number of files the manifest lists for the class: every one is in `files` or
+    /// `not_parsed`, by index 0..manifest_files.
+    pub manifest_files: u32,
+    /// The same settings for the plain, the split and the whole-file compression.
+    pub zstd: ZstdSettings,
     /// Files parsed as safetensors, in manifest order.
     pub files: Vec<FileRecord>,
     /// Files that are not safetensors (or whose header is malformed), in manifest order.
@@ -53,13 +65,37 @@ pub struct FileRecord {
     /// The 8-byte length field plus the JSON header.
     pub header_bytes: u64,
     pub tensors: u64,
-    /// zstd level 19 on the whole file.
+    /// The whole file with the probe's zstd settings.
     pub whole_file_compressed_bytes: u64,
     /// Tensors of other dtypes (integers, booleans, 8-bit floats) and their bytes.
     pub other_tensors: u64,
     pub other_bytes: u64,
     /// One record per floating-point dtype present, sorted by dtype name.
     pub dtypes: Vec<DtypeRecord>,
+}
+
+/// A variant compressed as one piece per tensor.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Whole {
+    /// Sum over tensors.
+    pub compressed_bytes: u64,
+    pub compress_seconds: f64,
+    pub decompress_seconds: f64,
+}
+
+/// A variant compressed as one piece per byte plane.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Planes {
+    /// Sum over tensors and planes.
+    pub compressed_bytes: u64,
+    /// `compressed_bytes` by plane (index 0 = lowest byte of each element).
+    pub plane_compressed_bytes: Vec<u64>,
+    /// Rotation (rotated variant only), splitting and compressing every plane, summed over tensors.
+    pub compress_seconds: f64,
+    /// Decompressing every plane, merging (and un-rotating), summed over tensors.
+    pub decompress_seconds: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,16 +105,9 @@ pub struct DtypeRecord {
     pub element_bytes: u32,
     pub tensors: u64,
     pub original_bytes: u64,
-    /// Sum over tensors of zstd level 19 on the tensor's bytes.
-    pub plain_compressed_bytes: u64,
-    /// Sum over tensors and planes of zstd level 19 on a plane.
-    pub split_compressed_bytes: u64,
-    /// `split_compressed_bytes` by plane (index 0 = lowest byte of each element).
-    pub plane_compressed_bytes: Vec<u64>,
-    /// Splitting plus compressing all planes, summed over tensors.
-    pub split_compress_seconds: f64,
-    /// Decompressing all planes plus merging them, summed over tensors.
-    pub decompress_merge_seconds: f64,
+    pub plain: Whole,
+    pub byte_planes: Planes,
+    pub rotated_planes: Planes,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,7 +117,7 @@ pub struct NotParsed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     pub bytes: u64,
-    /// Why the file was not parsed; never contains file or tensor names.
+    /// One of a fixed list of categories; never contains file or tensor names or values.
     pub reason: String,
 }
 
@@ -120,6 +149,36 @@ struct RawTensor {
     data_offsets: [u64; 2],
 }
 
+/// The header object read directly into typed entries (`__metadata__` skipped).
+struct Entries(Vec<RawTensor>);
+
+impl<'de> Deserialize<'de> for Entries {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Entries;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a safetensors header object")
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut m: A,
+            ) -> std::result::Result<Entries, A::Error> {
+                let mut v = Vec::new();
+                while let Some(key) = m.next_key::<String>()? {
+                    if key == "__metadata__" {
+                        m.next_value::<IgnoredAny>()?;
+                    } else {
+                        v.push(m.next_value::<RawTensor>()?);
+                    }
+                }
+                Ok(Entries(v))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
 /// Bytes per element of a safetensors dtype, `None` for a dtype this probe does not know.
 pub fn element_width(dtype: &str) -> Option<u64> {
     match dtype {
@@ -135,9 +194,12 @@ pub fn is_float(dtype: &str) -> bool {
     matches!(dtype, "F16" | "BF16" | "F32" | "F64")
 }
 
-/// Parse and check the header of a safetensors file held in memory. Never panics; the error
-/// text says what is wrong without quoting anything from the file.
+/// Parse and check the header of a safetensors file held in memory. Never panics; the error is
+/// one of a fixed list of texts and quotes nothing from the file.
 pub fn parse_header(file: &[u8]) -> std::result::Result<Header, String> {
+    if file.starts_with(b"PK\x03\x04") || file.starts_with(b"PK\x05\x06") {
+        return Err("not safetensors: ZIP archive (PyTorch checkpoint)".to_string());
+    }
     let total = file.len() as u64;
     let Some(len_bytes) = file.get(..8) else {
         return Err("shorter than the 8-byte header length".to_string());
@@ -146,35 +208,29 @@ pub fn parse_header(file: &[u8]) -> std::result::Result<Header, String> {
     raw.copy_from_slice(len_bytes);
     let n = u64::from_le_bytes(raw);
     if n > MAX_HEADER_BYTES {
-        return Err(format!(
-            "declared header length {n} exceeds the limit of {MAX_HEADER_BYTES}"
-        ));
+        return Err("declared header length exceeds the limit".to_string());
     }
     if n > total - 8 {
-        return Err(format!(
-            "declared header length {n} exceeds the {} bytes after the length field",
-            total - 8
-        ));
+        return Err("declared header length exceeds the file".to_string());
     }
     let json = &file[8..8 + n as usize];
-    let map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(json).map_err(|e| format!("header is not a JSON object: {e}"))?;
+    let entries: Entries = serde_json::from_slice(json).map_err(|e| {
+        match e.classify() {
+            serde_json::error::Category::Syntax => "header JSON is not valid",
+            serde_json::error::Category::Eof => "header JSON ends early",
+            _ => "header JSON has an unexpected structure",
+        }
+        .to_string()
+    })?;
     let data_len = total - 8 - n;
     let mut tensors = Vec::new();
-    for (name, value) in map {
-        if name == "__metadata__" {
-            continue;
-        }
-        let t: RawTensor = serde_json::from_value(value)
-            .map_err(|e| format!("a tensor entry is malformed: {e}"))?;
+    for t in entries.0 {
         let [begin, end] = t.data_offsets;
         if begin > end {
-            return Err("a tensor has begin offset after its end offset".to_string());
+            return Err("a tensor has its begin offset after its end offset".to_string());
         }
         if end > data_len {
-            return Err(format!(
-                "a tensor ends at {end}, beyond the {data_len}-byte data area"
-            ));
+            return Err("a tensor ends beyond the data area".to_string());
         }
         if let Some(w) = element_width(&t.dtype) {
             let elements = t
@@ -183,11 +239,7 @@ pub fn parse_header(file: &[u8]) -> std::result::Result<Header, String> {
                 .try_fold(1u64, |acc, d| acc.checked_mul(*d))
                 .ok_or_else(|| "a tensor's shape overflows".to_string())?;
             if elements.checked_mul(w) != Some(end - begin) {
-                return Err(format!(
-                    "a {} tensor's data size {} does not match its shape",
-                    t.dtype,
-                    end - begin
-                ));
+                return Err("a tensor's data size does not match its shape".to_string());
             }
         }
         tensors.push(Tensor {
@@ -217,7 +269,7 @@ pub fn tensor_bytes<'a>(file: &'a [u8], h: &Header, t: &Tensor) -> Option<&'a [u
 }
 
 // ---------------------------------------------------------------------------------------------
-// Byte planes
+// Byte planes and rotation
 
 /// Split `data` into `width` planes: plane `i` holds byte `i` of every element.
 pub fn split_planes(data: &[u8], width: usize) -> Result<Vec<Vec<u8>>> {
@@ -250,103 +302,177 @@ pub fn merge_planes(planes: &[Vec<u8>]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn zstd_len(data: &[u8]) -> Result<u64> {
-    if data.is_empty() {
-        return Ok(0);
+/// Rotate every `width`-byte little-endian element left by one bit.
+pub fn rotate_left1(data: &[u8], width: usize) -> Result<Vec<u8>> {
+    if width == 0 || !data.len().is_multiple_of(width) {
+        bail!(
+            "{} bytes are not a whole number of {width}-byte elements",
+            data.len()
+        );
     }
-    Ok(zstd::bulk::compress(data, ZSTD_LEVEL)?.len() as u64)
+    let mut out = Vec::with_capacity(data.len());
+    for el in data.chunks_exact(width) {
+        for i in 0..width {
+            let below = if i == 0 { el[width - 1] } else { el[i - 1] };
+            out.push((el[i] << 1) | (below >> 7));
+        }
+    }
+    Ok(out)
+}
+
+/// Rotate every `width`-byte little-endian element right by one bit; the inverse of
+/// [`rotate_left1`].
+pub fn rotate_right1(data: &[u8], width: usize) -> Result<Vec<u8>> {
+    if width == 0 || !data.len().is_multiple_of(width) {
+        bail!(
+            "{} bytes are not a whole number of {width}-byte elements",
+            data.len()
+        );
+    }
+    let mut out = Vec::with_capacity(data.len());
+    for el in data.chunks_exact(width) {
+        for i in 0..width {
+            let above = if i + 1 == width { el[0] } else { el[i + 1] };
+            out.push((el[i] >> 1) | (above << 7));
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------------------------
 // Measuring
 
 #[derive(Default)]
+struct PlanesAcc {
+    planes: Vec<u64>,
+    compress_s: f64,
+    decompress_s: f64,
+}
+
+#[derive(Default)]
 struct DtypeAcc {
     element_bytes: u32,
     tensors: u64,
     original: u64,
-    plain: u64,
-    split_planes: Vec<u64>,
-    split_seconds: f64,
-    merge_seconds: f64,
+    plain: Whole,
+    byte: PlanesAcc,
+    rotated: PlanesAcc,
+}
+
+/// Compress the planes of `data` (after `rotate`, when set), then decompress and merge them back,
+/// each step timed; check that the result equals `data`.
+fn measure_planes(
+    zc: &mut ZstdContext,
+    data: &[u8],
+    width: usize,
+    rotate: bool,
+    acc: &mut PlanesAcc,
+) -> Result<()> {
+    let (planes_c, t_c) = timed(|| -> Result<Vec<Vec<u8>>> {
+        let rotated;
+        let src = if rotate {
+            rotated = rotate_left1(data, width)?;
+            &rotated[..]
+        } else {
+            data
+        };
+        split_planes(src, width)?
+            .iter()
+            .map(|p| zc.compress(p))
+            .collect()
+    });
+    let planes_c = planes_c?;
+    let plane_len = data.len() / width;
+    let (merged, t_d) = timed(|| -> Result<Vec<u8>> {
+        let planes = planes_c
+            .iter()
+            .map(|c| zc.decompress(c, plane_len))
+            .collect::<Result<Vec<_>>>()?;
+        let merged = merge_planes(&planes)?;
+        if rotate {
+            rotate_right1(&merged, width)
+        } else {
+            Ok(merged)
+        }
+    });
+    if merged? != data {
+        bail!(
+            "reversing the {} variant did not reproduce a tensor's bytes",
+            if rotate {
+                "rotated-plane"
+            } else {
+                "byte-plane"
+            }
+        );
+    }
+    if acc.planes.len() != width {
+        acc.planes = vec![0; width];
+    }
+    for (slot, c) in acc.planes.iter_mut().zip(&planes_c) {
+        *slot += c.len() as u64;
+    }
+    acc.compress_s += t_c;
+    acc.decompress_s += t_d;
+    Ok(())
+}
+
+fn planes_record(a: PlanesAcc) -> Planes {
+    Planes {
+        compressed_bytes: a.planes.iter().sum(),
+        plane_compressed_bytes: a.planes,
+        compress_seconds: a.compress_s,
+        decompress_seconds: a.decompress_s,
+    }
 }
 
 /// Measure one file held in memory. `Ok(Err(reason))`: not a usable safetensors file;
-/// `Err`: the measurement itself failed (compression error, planes that do not merge back).
+/// `Err`: the measurement itself failed (compression error, a variant that does not reverse).
 fn analyze(
+    zc: &mut ZstdContext,
     file: &[u8],
     index: u32,
     path: Option<String>,
-    threads: usize,
 ) -> Result<std::result::Result<FileRecord, String>> {
     let header = match parse_header(file) {
         Ok(h) => h,
         Err(reason) => return Ok(Err(reason)),
     };
-    let mut slices: Vec<(&Tensor, &[u8])> = Vec::new();
+    let whole = zc.compress(file)?.len() as u64;
     let mut other_tensors = 0u64;
     let mut other_bytes = 0u64;
+    let mut acc: BTreeMap<String, DtypeAcc> = BTreeMap::new();
     for t in &header.tensors {
         let data = tensor_bytes(file, &header, t)
             .ok_or_else(|| anyhow!("a tensor lies outside the file after the header check"))?;
-        if is_float(&t.dtype) {
-            slices.push((t, data));
-        } else {
+        if !is_float(&t.dtype) {
             other_tensors += 1;
             other_bytes += data.len() as u64;
+            continue;
         }
-    }
-
-    // Size-only compressions, in parallel: the whole file first, then every float tensor.
-    let mut jobs: Vec<&[u8]> = vec![file];
-    jobs.extend(slices.iter().map(|(_, d)| *d));
-    let sizes = par_map(&jobs, threads, |_, d| zstd_len(d));
-    let mut sizes = sizes.into_iter();
-    let whole = sizes.next().ok_or_else(|| anyhow!("no job result"))??;
-
-    let mut acc: BTreeMap<String, DtypeAcc> = BTreeMap::new();
-    for ((t, data), plain) in slices.iter().zip(sizes) {
-        let plain = plain?;
         let width = element_width(&t.dtype).unwrap_or(0) as usize;
         let a = acc.entry(t.dtype.clone()).or_default();
         a.element_bytes = width as u32;
         a.tensors += 1;
         a.original += data.len() as u64;
-        a.plain += plain;
-        if a.split_planes.len() != width {
-            a.split_planes = vec![0; width];
+        if a.byte.planes.len() != width {
+            a.byte.planes = vec![0; width];
+            a.rotated.planes = vec![0; width];
         }
         if data.is_empty() {
             continue;
         }
-        // Timed alone: split and compress every plane.
-        let (planes_c, t_split) = timed(|| -> Result<Vec<Vec<u8>>> {
-            split_planes(data, width)?
-                .iter()
-                .map(|p| Ok(zstd::bulk::compress(p, ZSTD_LEVEL)?))
-                .collect()
-        });
-        let planes_c = planes_c?;
-        // Timed alone: decompress every plane and merge.
-        let plane_len = data.len() / width;
-        let (merged, t_merge) = timed(|| -> Result<Vec<u8>> {
-            let planes = planes_c
-                .iter()
-                .map(|c| Ok(zstd::bulk::decompress(c, plane_len)?))
-                .collect::<Result<Vec<_>>>()?;
-            merge_planes(&planes)
-        });
-        if merged? != *data {
-            bail!(
-                "merging the decompressed planes of a {} tensor did not reproduce its bytes",
-                t.dtype
-            );
+        // Each of these runs alone, on data in memory.
+        let (c, t_c) = timed(|| zc.compress(data));
+        let c = c?;
+        let (d, t_d) = timed(|| zc.decompress(&c, data.len()));
+        if d? != data {
+            bail!("a tensor did not decompress to its own bytes");
         }
-        for (slot, c) in a.split_planes.iter_mut().zip(&planes_c) {
-            *slot += c.len() as u64;
-        }
-        a.split_seconds += t_split;
-        a.merge_seconds += t_merge;
+        a.plain.compressed_bytes += c.len() as u64;
+        a.plain.compress_seconds += t_c;
+        a.plain.decompress_seconds += t_d;
+        measure_planes(zc, data, width, false, &mut a.byte)?;
+        measure_planes(zc, data, width, true, &mut a.rotated)?;
     }
     let dtypes = acc
         .into_iter()
@@ -355,11 +481,9 @@ fn analyze(
             element_bytes: a.element_bytes,
             tensors: a.tensors,
             original_bytes: a.original,
-            plain_compressed_bytes: a.plain,
-            split_compressed_bytes: a.split_planes.iter().sum(),
-            plane_compressed_bytes: a.split_planes,
-            split_compress_seconds: a.split_seconds,
-            decompress_merge_seconds: a.merge_seconds,
+            plain: a.plain,
+            byte_planes: planes_record(a.byte),
+            rotated_planes: planes_record(a.rotated),
         })
         .collect();
     Ok(Ok(FileRecord {
@@ -376,23 +500,26 @@ fn analyze(
 }
 
 pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
-    let mut notes = Vec::new();
+    let settings = ZstdSettings::level19();
     let mut data = Data {
         class: CLASS.to_string(),
-        zstd_level: ZSTD_LEVEL,
-        library_threads: 1,
+        manifest_files: 0,
+        zstd: settings.clone(),
         files: Vec::new(),
         not_parsed: Vec::new(),
     };
+    let mut notes = Vec::new();
     match ctx.class_files(CLASS) {
         None => notes.push(format!(
             "the corpus has no class `{CLASS}`: nothing was measured"
         )),
         Some(files) => {
+            data.manifest_files = u32::try_from(files.len())?;
+            let mut zc = settings.context()?;
             for (i, f) in files.iter().enumerate() {
                 let index = u32::try_from(i)?;
                 let bytes = ctx.read_file(CLASS, f)?;
-                match analyze(&bytes, index, ctx.label(f), ctx.threads as usize)? {
+                match analyze(&mut zc, &bytes, index, ctx.label(f))? {
                     Ok(rec) => data.files.push(rec),
                     Err(reason) => data.not_parsed.push(NotParsed {
                         index,
@@ -402,26 +529,58 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
                     }),
                 }
             }
-            if data.files.iter().all(|f| f.dtypes.is_empty()) {
+            if data.files.is_empty() {
                 notes.push(
-                    "no floating-point tensor was found: the table has no dtype rows".to_string(),
+                    "no file of the class could be parsed as safetensors: this corpus profile \
+                     cannot exercise this probe"
+                        .to_string(),
                 );
+            } else if data.files.iter().all(|f| f.dtypes.is_empty()) {
+                notes.push("no floating-point tensor was found".to_string());
             }
         }
     }
-    let libraries = [("libzstd", zstd::zstd_safe::version_string())]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    Ok(Output {
-        data,
-        libraries,
-        notes,
-    })
+    let mut out = Output::new(data, settings.threads).with_zstd();
+    out.notes = notes;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------------------------
 // Validation rules and the table
+
+fn check_planes(p: &mut Vec<String>, at: &str, name: &str, v: &Planes, width: u32) {
+    let at = format!("{at}/{name}");
+    if v.plane_compressed_bytes.len() != width as usize {
+        p.push(format!(
+            "{at}/plane_compressed_bytes: {} entries for {width}-byte elements",
+            v.plane_compressed_bytes.len()
+        ));
+    }
+    let sum: u64 = v.plane_compressed_bytes.iter().sum();
+    if sum != v.compressed_bytes {
+        p.push(format!(
+            "{at}/compressed_bytes: {} but the planes add up to {sum}",
+            v.compressed_bytes
+        ));
+    }
+    for (field, s) in [
+        ("compress_seconds", v.compress_seconds),
+        ("decompress_seconds", v.decompress_seconds),
+    ] {
+        if !(s.is_finite() && s >= 0.0) {
+            p.push(format!("{at}/{field}: must be a non-negative number"));
+        }
+    }
+}
+
+fn check_path(p: &mut Vec<String>, private: bool, at: &str, path: &Option<String>) {
+    if private && path.is_some() {
+        p.push(format!("{at}/path: a private corpus carries no file names"));
+    }
+    if !private && path.is_none() {
+        p.push(format!("{at}/path: missing"));
+    }
+}
 
 /// Consistency rules of `data`, each as `<json pointer>: <message>`.
 pub fn check(e: &Envelope<Data>) -> Vec<String> {
@@ -430,35 +589,45 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
     if d.class != CLASS {
         p.push(format!("/data/class: `{}` (expected `{CLASS}`)", d.class));
     }
-    if d.zstd_level != ZSTD_LEVEL {
-        p.push(format!(
-            "/data/zstd_level: {} (expected {ZSTD_LEVEL})",
-            d.zstd_level
-        ));
+    if d.zstd != ZstdSettings::level19() {
+        p.push("/data/zstd: the settings are not the probe's (level 19, window log 27, long-distance matching, 1 thread)".to_string());
     }
-    if d.library_threads == 0 {
-        p.push("/data/library_threads: must be at least 1".to_string());
+    if e.library_threads != 1 {
+        p.push("/library_threads: this probe runs zstd on one thread".to_string());
     }
     let private = e.corpus.private;
-    let mut indices: Vec<(u32, String)> = Vec::new();
-    fn check_path(p: &mut Vec<String>, private: bool, at: &str, path: &Option<String>) {
-        if private && path.is_some() {
-            p.push(format!("{at}/path: a private corpus carries no file names"));
-        }
-        if !private && path.is_none() {
-            p.push(format!("{at}/path: missing"));
-        }
-    }
-    for (i, f) in d.files.iter().enumerate() {
-        check_path(&mut p, private, &format!("/data/files/{i}"), &f.path);
-        indices.push((f.index, format!("/data/files/{i}")));
+    // Every manifest index appears exactly once, in `files` or `not_parsed`.
+    let mut seen: Vec<u32> = d
+        .files
+        .iter()
+        .map(|f| f.index)
+        .chain(d.not_parsed.iter().map(|f| f.index))
+        .collect();
+    seen.sort_unstable();
+    let expected: Vec<u32> = (0..d.manifest_files).collect();
+    if seen != expected {
+        p.push(format!(
+            "/data/manifest_files: {} files are listed in the manifest but the records cover \
+             indices {:?}",
+            d.manifest_files,
+            if seen.len() > 20 {
+                &seen[..20]
+            } else {
+                &seen[..]
+            }
+        ));
     }
     for (i, f) in d.not_parsed.iter().enumerate() {
         check_path(&mut p, private, &format!("/data/not_parsed/{i}"), &f.path);
-        indices.push((f.index, format!("/data/not_parsed/{i}")));
+        if i > 0 && d.not_parsed[i - 1].index >= f.index {
+            p.push(format!(
+                "/data/not_parsed/{i}/index: must be in strictly increasing manifest order"
+            ));
+        }
     }
     for (i, f) in d.files.iter().enumerate() {
         let at = format!("/data/files/{i}");
+        check_path(&mut p, private, &at, &f.path);
         if i > 0 && d.files[i - 1].index >= f.index {
             p.push(format!(
                 "{at}/index: files must be in strictly increasing manifest order"
@@ -498,42 +667,27 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                     "{at}/dtype: records must be sorted by dtype, once each"
                 ));
             }
-            if t.plane_compressed_bytes.len() != t.element_bytes as usize {
-                p.push(format!(
-                    "{at}/plane_compressed_bytes: {} entries for {}-byte elements",
-                    t.plane_compressed_bytes.len(),
-                    t.element_bytes
-                ));
-            }
-            let planes: u64 = t.plane_compressed_bytes.iter().sum();
-            if planes != t.split_compressed_bytes {
-                p.push(format!(
-                    "{at}/split_compressed_bytes: {} but the planes add up to {planes}",
-                    t.split_compressed_bytes
-                ));
-            }
+            check_planes(&mut p, &at, "byte_planes", &t.byte_planes, t.element_bytes);
+            check_planes(
+                &mut p,
+                &at,
+                "rotated_planes",
+                &t.rotated_planes,
+                t.element_bytes,
+            );
             if t.element_bytes > 0 && !t.original_bytes.is_multiple_of(u64::from(t.element_bytes)) {
                 p.push(format!(
                     "{at}/original_bytes: not a whole number of elements"
                 ));
             }
-            for (name, v) in [
-                ("split_compress_seconds", t.split_compress_seconds),
-                ("decompress_merge_seconds", t.decompress_merge_seconds),
+            for (field, s) in [
+                ("plain/compress_seconds", t.plain.compress_seconds),
+                ("plain/decompress_seconds", t.plain.decompress_seconds),
             ] {
-                if !(v.is_finite() && v >= 0.0) {
-                    p.push(format!("{at}/{name}: must be a non-negative number"));
+                if !(s.is_finite() && s >= 0.0) {
+                    p.push(format!("{at}/{field}: must be a non-negative number"));
                 }
             }
-        }
-    }
-    indices.sort();
-    for pair in indices.windows(2) {
-        if pair[0].0 == pair[1].0 {
-            p.push(format!(
-                "{}/index: {} is used twice ({} and {})",
-                pair[1].1, pair[1].0, pair[0].1, pair[1].1
-            ));
         }
     }
     p
@@ -543,22 +697,42 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
 struct Totals {
     tensors: u64,
     original: u64,
-    plain: u64,
-    split: u64,
-    planes: Vec<(u64, u64)>,
-    split_s: f64,
-    merge_s: f64,
+    plain: Whole,
+    byte: Planes,
+    rotated: Planes,
 }
 
-fn gain(plain: u64, split: u64) -> String {
+fn add_planes(a: &mut Planes, b: &Planes) {
+    a.compressed_bytes += b.compressed_bytes;
+    a.compress_seconds += b.compress_seconds;
+    a.decompress_seconds += b.decompress_seconds;
+    if a.plane_compressed_bytes.len() < b.plane_compressed_bytes.len() {
+        a.plane_compressed_bytes
+            .resize(b.plane_compressed_bytes.len(), 0);
+    }
+    for (x, y) in a
+        .plane_compressed_bytes
+        .iter_mut()
+        .zip(&b.plane_compressed_bytes)
+    {
+        *x += y;
+    }
+}
+
+/// `(plain - variant) / plain` as a signed percentage.
+fn gain(plain: u64, variant: u64) -> String {
     if plain == 0 {
         "n/a".to_string()
     } else {
         format!(
             "{:+.2}%",
-            100.0 * (plain as f64 - split as f64) / plain as f64
+            100.0 * (plain as f64 - variant as f64) / plain as f64
         )
     }
+}
+
+fn sized(bytes: u64, of: u64) -> String {
+    format!("{bytes} ({})", pct(bytes, of))
 }
 
 /// The table, as a pure function of the parsed JSON.
@@ -566,16 +740,30 @@ pub fn render(e: &Envelope<Data>) -> String {
     let d = &e.data;
     let mut s = md_header(e);
     s.push_str(&format!(
-        "Class `{}`: {} file(s) parsed as safetensors, {} not parsed. zstd level {}, \
-         {} library thread(s) in timed sections. Planes: plane 0 is the lowest byte of each \
-         element. Gain = (plain - split) / plain; negative means the split is larger. \
-         Speeds are MB/s of the tensor bytes (10^6 bytes per second).\n\n",
+        "Class `{}`: {} file(s) parsed as safetensors, {} not parsed. zstd level {}, window log {}, \
+         long-distance matching {}, {} thread(s), one compressor and decompressor reused. \
+         Variants: plain = tensor bytes as they are; byte planes = bytes split by position in the \
+         element (plane 0 is the lowest byte); rotated planes = each element rotated left by one \
+         bit first, then split (for BF16 and F32 the whole exponent is in the top plane). Gain = \
+         (plain - variant) / plain; negative means the variant is larger. Speeds are MB/s of the \
+         tensor bytes (10^6 bytes per second), each step timed alone.\n\n",
         d.class,
         d.files.len(),
         d.not_parsed.len(),
-        d.zstd_level,
-        d.library_threads
+        d.zstd.level,
+        d.zstd
+            .window_log
+            .map_or("default".to_string(), |w| w.to_string()),
+        if d.zstd.long_distance_matching { "on" } else { "off" },
+        d.zstd.threads
     ));
+
+    if d.files.is_empty() {
+        s.push_str(
+            "This corpus profile cannot exercise this probe: no file of the class could be \
+             parsed as safetensors.\n\n",
+        );
+    }
 
     let mut by_dtype: BTreeMap<&str, Totals> = BTreeMap::new();
     for f in &d.files {
@@ -583,64 +771,94 @@ pub fn render(e: &Envelope<Data>) -> String {
             let a = by_dtype.entry(t.dtype.as_str()).or_default();
             a.tensors += t.tensors;
             a.original += t.original_bytes;
-            a.plain += t.plain_compressed_bytes;
-            a.split += t.split_compressed_bytes;
-            if a.planes.len() < t.plane_compressed_bytes.len() {
-                a.planes.resize(t.plane_compressed_bytes.len(), (0, 0));
-            }
-            let plane_len = t.original_bytes / u64::from(t.element_bytes.max(1));
-            for (slot, c) in a.planes.iter_mut().zip(&t.plane_compressed_bytes) {
-                slot.0 += plane_len;
-                slot.1 += c;
-            }
-            a.split_s += t.split_compress_seconds;
-            a.merge_s += t.decompress_merge_seconds;
+            a.plain.compressed_bytes += t.plain.compressed_bytes;
+            a.plain.compress_seconds += t.plain.compress_seconds;
+            a.plain.decompress_seconds += t.plain.decompress_seconds;
+            add_planes(&mut a.byte, &t.byte_planes);
+            add_planes(&mut a.rotated, &t.rotated_planes);
         }
     }
 
-    s.push_str("## By dtype, all files\n\n");
-    let rows: Vec<Vec<String>> = by_dtype
-        .iter()
-        .map(|(dtype, a)| {
-            vec![
-                dtype.to_string(),
-                a.tensors.to_string(),
-                a.original.to_string(),
-                format!("{} ({})", a.plain, pct(a.plain, a.original)),
-                format!("{} ({})", a.split, pct(a.split, a.original)),
-                gain(a.plain, a.split),
-                mbps(a.original, a.split_s),
-                mbps(a.original, a.merge_s),
-            ]
-        })
-        .collect();
-    if rows.is_empty() {
-        s.push_str("No floating-point tensors.\n\n");
-    } else {
+    if !by_dtype.is_empty() {
+        s.push_str("## Sizes by dtype, all files\n\n");
+        let rows: Vec<Vec<String>> = by_dtype
+            .iter()
+            .map(|(dtype, a)| {
+                vec![
+                    dtype.to_string(),
+                    a.tensors.to_string(),
+                    a.original.to_string(),
+                    sized(a.plain.compressed_bytes, a.original),
+                    sized(a.byte.compressed_bytes, a.original),
+                    gain(a.plain.compressed_bytes, a.byte.compressed_bytes),
+                    sized(a.rotated.compressed_bytes, a.original),
+                    gain(a.plain.compressed_bytes, a.rotated.compressed_bytes),
+                ]
+            })
+            .collect();
         s.push_str(&md_table(
             &[
                 "dtype",
                 "tensors",
                 "original bytes",
                 "plain zstd bytes (of original)",
-                "split zstd bytes (of original)",
-                "gain",
-                "split+compress MB/s",
-                "decompress+merge MB/s",
+                "byte-plane bytes (of original)",
+                "byte-plane gain",
+                "rotated-plane bytes (of original)",
+                "rotated-plane gain",
             ],
             &rows,
         ));
         s.push('\n');
+
+        s.push_str("## Speed by dtype, all files (MB/s)\n\n");
+        let rows: Vec<Vec<String>> = by_dtype
+            .iter()
+            .map(|(dtype, a)| {
+                vec![
+                    dtype.to_string(),
+                    mbps(a.original, a.plain.compress_seconds),
+                    mbps(a.original, a.plain.decompress_seconds),
+                    mbps(a.original, a.byte.compress_seconds),
+                    mbps(a.original, a.byte.decompress_seconds),
+                    mbps(a.original, a.rotated.compress_seconds),
+                    mbps(a.original, a.rotated.decompress_seconds),
+                ]
+            })
+            .collect();
+        s.push_str(&md_table(
+            &[
+                "dtype",
+                "plain compress",
+                "plain decompress",
+                "byte-plane split+compress",
+                "byte-plane decompress+merge",
+                "rotated split+compress",
+                "rotated decompress+merge",
+            ],
+            &rows,
+        ));
+        s.push('\n');
+
         s.push_str("## Planes, all files\n\n");
         let mut prow = Vec::new();
         for (dtype, a) in &by_dtype {
-            for (i, (plane_bytes, c)) in a.planes.iter().enumerate() {
+            let width = a.byte.plane_compressed_bytes.len().max(1) as u64;
+            let plane_bytes = a.original / width;
+            for i in 0..a.byte.plane_compressed_bytes.len() {
+                let b = a.byte.plane_compressed_bytes[i];
+                let r = a
+                    .rotated
+                    .plane_compressed_bytes
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0);
                 prow.push(vec![
                     dtype.to_string(),
                     i.to_string(),
                     plane_bytes.to_string(),
-                    c.to_string(),
-                    pct(*c, *plane_bytes),
+                    sized(b, plane_bytes),
+                    sized(r, plane_bytes),
                 ]);
             }
         }
@@ -649,8 +867,8 @@ pub fn render(e: &Envelope<Data>) -> String {
                 "dtype",
                 "plane",
                 "plane bytes",
-                "compressed bytes",
-                "compressed / plane",
+                "byte-plane compressed (of plane)",
+                "rotated-plane compressed (of plane)",
             ],
             &prow,
         ));
@@ -662,21 +880,28 @@ pub fn render(e: &Envelope<Data>) -> String {
     for f in &d.files {
         let name = f.path.clone().unwrap_or_else(|| format!("#{}", f.index));
         let float: u64 = f.dtypes.iter().map(|t| t.original_bytes).sum();
-        let plain: u64 = f.dtypes.iter().map(|t| t.plain_compressed_bytes).sum();
-        let split: u64 = f.dtypes.iter().map(|t| t.split_compressed_bytes).sum();
+        let plain: u64 = f.dtypes.iter().map(|t| t.plain.compressed_bytes).sum();
+        let byte: u64 = f
+            .dtypes
+            .iter()
+            .map(|t| t.byte_planes.compressed_bytes)
+            .sum();
+        let rot: u64 = f
+            .dtypes
+            .iter()
+            .map(|t| t.rotated_planes.compressed_bytes)
+            .sum();
         frows.push(vec![
             name,
             f.bytes.to_string(),
             f.tensors.to_string(),
-            format!(
-                "{} ({})",
-                f.whole_file_compressed_bytes,
-                pct(f.whole_file_compressed_bytes, f.bytes)
-            ),
+            sized(f.whole_file_compressed_bytes, f.bytes),
             float.to_string(),
             pct(plain, float),
-            pct(split, float),
-            gain(plain, split),
+            pct(byte, float),
+            gain(plain, byte),
+            pct(rot, float),
+            gain(plain, rot),
         ]);
     }
     if frows.is_empty() {
@@ -689,9 +914,11 @@ pub fn render(e: &Envelope<Data>) -> String {
                 "tensors",
                 "whole-file zstd bytes (of file)",
                 "float tensor bytes",
-                "plain zstd / float",
-                "split zstd / float",
-                "gain",
+                "plain / float",
+                "byte planes / float",
+                "byte-plane gain",
+                "rotated planes / float",
+                "rotated-plane gain",
             ],
             &frows,
         ));
@@ -801,31 +1028,26 @@ mod tests {
     #[test]
     fn malformed_headers_are_rejected_without_panicking() {
         let ok = st(&[("a", "F32", vec![2], vec![0; 8])]);
-        // Truncated at every length.
         for cut in 0..ok.len() {
-            let r = parse_header(&ok[..cut]);
-            if cut < ok.len() {
-                assert!(r.is_err(), "cut at {cut} was accepted");
-            }
+            assert!(
+                parse_header(&ok[..cut]).is_err(),
+                "cut at {cut} was accepted"
+            );
         }
-        // Huge declared length.
         let mut huge = u64::MAX.to_le_bytes().to_vec();
         huge.extend_from_slice(b"{}");
         assert!(parse_header(&huge).expect_err("huge").contains("exceeds"));
         let mut big = (MAX_HEADER_BYTES + 1).to_le_bytes().to_vec();
         big.extend_from_slice(b"{}");
         assert!(parse_header(&big).is_err());
-        // Declared length beyond the file, but under the limit.
         let mut beyond = 100u64.to_le_bytes().to_vec();
         beyond.extend_from_slice(b"{}");
         assert!(parse_header(&beyond)
             .expect_err("beyond")
             .contains("exceeds"));
-        // Not JSON, not an object, bad entry.
         assert!(parse_header(&with_header("nope", b"")).is_err());
         assert!(parse_header(&with_header("[]", b"")).is_err());
         assert!(parse_header(&with_header(r#"{"a":{"dtype":"F32"}}"#, b"")).is_err());
-        // Offsets out of range, reversed, and shape mismatch.
         let out_of_range = r#"{"a":{"dtype":"F32","shape":[4],"data_offsets":[0,16]}}"#;
         assert!(parse_header(&with_header(out_of_range, &[0; 8]))
             .expect_err("range")
@@ -839,6 +1061,39 @@ mod tests {
         let overflow =
             r#"{"a":{"dtype":"F32","shape":[4294967296,4294967296],"data_offsets":[0,8]}}"#;
         assert!(parse_header(&with_header(overflow, &[0; 8])).is_err());
+    }
+
+    #[test]
+    fn reasons_never_quote_the_file() {
+        let secret = "SECRETVALUE";
+        let bad: [String; 6] = [
+            format!(r#"{{"a":{{"dtype":5,"shape":"{secret}","data_offsets":[0,0]}}}}"#),
+            format!(
+                r#"{{"{secret}":{{"dtype":"F32","shape":[1],"data_offsets":["{secret}",1]}}}}"#
+            ),
+            format!(r#"{{"{secret}": nope}}"#),
+            format!(r#"{{"{secret}":"#),
+            format!(r#"["{secret}"]"#),
+            format!(r#"{{"{secret}":{{"dtype":"{secret}","shape":[1],"data_offsets":[5,1]}}}}"#),
+        ];
+        for json in &bad {
+            let reason = parse_header(&with_header(json, &[0; 8])).expect_err("rejected");
+            assert!(!reason.contains(secret), "{reason}");
+            assert!(
+                !reason.contains("invalid type"),
+                "serde text leaked: {reason}"
+            );
+        }
+        // An unknown dtype is accepted, and its name is not recorded in any reason.
+        let unknown =
+            format!(r#"{{"{secret}":{{"dtype":"{secret}","shape":[1],"data_offsets":[0,3]}}}}"#);
+        assert!(parse_header(&with_header(&unknown, &[0; 8])).is_ok());
+    }
+
+    #[test]
+    fn a_zip_file_is_named_as_a_pytorch_checkpoint() {
+        let reason = parse_header(b"PK\x03\x04 and then some bytes").expect_err("zip");
+        assert_eq!(reason, "not safetensors: ZIP archive (PyTorch checkpoint)");
     }
 
     #[test]
@@ -873,14 +1128,42 @@ mod tests {
     }
 
     #[test]
-    fn analysis_measures_float_tensors_and_counts_the_rest() {
+    fn rotation_round_trips_and_puts_the_exponent_in_the_top_byte() {
+        for width in 1..=8usize {
+            for elements in [0usize, 1, 5, 300] {
+                let data: Vec<u8> = (0..elements * width).map(|i| (i * 37 + 11) as u8).collect();
+                let r = rotate_left1(&data, width).expect("rotl");
+                assert_eq!(
+                    rotate_right1(&r, width).expect("rotr"),
+                    data,
+                    "width {width}"
+                );
+            }
+        }
+        // bf16 1.0 = 0x3F80, little endian [0x80, 0x3F]; rotated left by one bit it is 0x7F00:
+        // the exponent (127) is the whole top byte.
+        assert_eq!(rotate_left1(&[0x80, 0x3F], 2).expect("rot"), [0x00, 0x7F]);
+        // bf16 -1.0 = 0xBF80 -> 0x7F01: the sign bit lands in the lowest bit.
+        assert_eq!(rotate_left1(&[0x80, 0xBF], 2).expect("rot"), [0x01, 0x7F]);
+        // f32 1.0 = 0x3F800000 -> 0x7F000000.
+        assert_eq!(
+            rotate_left1(&[0, 0, 0x80, 0x3F], 4).expect("rot"),
+            [0, 0, 0, 0x7F]
+        );
+        assert!(rotate_left1(&[1, 2, 3], 2).is_err());
+        assert!(rotate_right1(&[1, 2, 3], 2).is_err());
+    }
+
+    #[test]
+    fn analysis_measures_three_variants_and_counts_the_rest() {
         let file = st(&[
             ("w", "F32", vec![100, 30], sample_floats(3000, 4)),
             ("h", "F16", vec![500], sample_floats(500, 2)),
             ("e", "BF16", vec![0], vec![]),
             ("ids", "I64", vec![4], vec![9; 32]),
         ]);
-        let rec = analyze(&file, 3, Some("c/m.safetensors".into()), 2)
+        let mut zc = ZstdSettings::level19().context().expect("ctx");
+        let rec = analyze(&mut zc, &file, 3, Some("c/m.safetensors".into()))
             .expect("measured")
             .expect("parsed");
         assert_eq!(rec.index, 3);
@@ -890,24 +1173,27 @@ mod tests {
         assert_eq!(names, ["BF16", "F16", "F32"]);
         let f32r = &rec.dtypes[2];
         assert_eq!((f32r.element_bytes, f32r.original_bytes), (4, 12_000));
-        assert_eq!(f32r.plane_compressed_bytes.len(), 4);
-        assert_eq!(
-            f32r.plane_compressed_bytes.iter().sum::<u64>(),
-            f32r.split_compressed_bytes
-        );
-        assert!(f32r.plain_compressed_bytes > 0 && f32r.split_compressed_bytes > 0);
+        for v in [&f32r.byte_planes, &f32r.rotated_planes] {
+            assert_eq!(v.plane_compressed_bytes.len(), 4);
+            assert_eq!(
+                v.plane_compressed_bytes.iter().sum::<u64>(),
+                v.compressed_bytes
+            );
+            assert!(v.compressed_bytes > 0);
+        }
+        assert!(f32r.plain.compressed_bytes > 0);
         let empty = &rec.dtypes[0];
         assert_eq!(
             (
                 empty.tensors,
                 empty.original_bytes,
-                empty.plain_compressed_bytes
+                empty.plain.compressed_bytes
             ),
             (1, 0, 0)
         );
+        assert_eq!(empty.byte_planes.plane_compressed_bytes, [0, 0]);
         assert!(rec.whole_file_compressed_bytes > 0);
-        // A non-safetensors file is reported as not parsed, not as a failure.
-        let np = analyze(b"just some text", 0, None, 1).expect("no failure");
+        let np = analyze(&mut zc, b"just some text", 0, None).expect("no failure");
         assert!(np.is_err());
     }
 }
