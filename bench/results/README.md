@@ -14,7 +14,8 @@ bench/results/
                                       (a directory without it is an aborted run and does not validate)
     tools.json                        every catalogue tool: found or skipped, reason, version used
     <tool>-<setting>-<class>.json     one file per tool x setting x corpus class
-    probe-<name>.json                 component probes (PLAN P0-4)
+    probe-<name>.json                 component probes (PLAN P0-4), see "Probe files" below
+    probe-<name>.md                   the probe's table, rendered from the JSON
 ```
 
 The date is UTC and the host name is lower-cased and reduced to `[a-z0-9-]`. Each machine writes
@@ -44,5 +45,37 @@ environment dumps.
   once and says so in `repeats_short`. `host.json` records the antivirus products Windows Security Center lists (name, raw `productState` as hex, decoded scanner state, and `antivirus_source`: `queried`, `query-failed` or `not-applicable`) and, independently, `defender_realtime` from the registry.
 - Make a run with `lpk-bench run --tools all --profile small`; compare two runs of the same corpus
   with `lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]`.
+## Probe files
+
+`lpk-bench probe <jpeg|deflate|dedup|text|weights|entropy-gate|all> [--profile small|full]
+[--corpus DIR] [--results DIR] [--threads N] [--allow-dirty-build]` writes `probe-<name>.json` and
+`probe-<name>.md` into a results directory. `--results` names the directory itself: a new one
+(default: a new `bench/results/<date>-<host>[-<n>]`, with a `host.json` written by the same code
+as the baseline runner) or an existing one of the same machine and corpus (its `host.json` is
+left alone; another host, profile or manifest hash is refused). The clean-build rule is the same
+as for `run`. `probe all` runs every probe, goes on after a failure and exits non-zero if any failed.
+
+Every `probe-<name>.json` has the same envelope and a probe-specific `data` object:
+
+| field | meaning |
+|---|---|
+| `probe`, `format_version` | probe name (as in the file name); version of this format |
+| `corpus` | `profile`, `manifest_blake3`, `private` (true for a private corpus: per-file records carry an index and no name or path) |
+| `build`, `host`, `date`, `threads` | lpk-bench build stamp, host name, UTC time, threads used for size-only work |
+| `libraries` | name to version of every compression library the probe used, linked C libraries included |
+| `elapsed_seconds`, `notes` | wall time of the probe; parts that were skipped, and why |
+| `data` | the probe's own typed structure |
+
+Rules: quantities are raw (bytes, seconds, counts); percentages and MB/s (10^6 bytes per second)
+are computed only when rendering the table, which is a pure function of the parsed JSON. A timed
+section runs alone, on data already in memory, and the JSON records how many threads the library
+used. Output is deterministic apart from timings, date and host.
+
+`run --validate` checks each probe file: typed parse with unknown fields rejected, the envelope
+rules, the consistency rules each probe declares (for example, counts add up), host, build and
+corpus against `host.json` and the directory's other files, and `probe-<name>.md` equal to the
+table rendered from the JSON. A directory with only probe files and `host.json` needs neither
+`run.json` nor `tools.json`; a directory with any baseline file must satisfy the baseline rules too.
+
 - Check a directory, or this whole folder, with
   `cargo run -p lpk-bench -- run --validate bench/results` (or one `<date>-<host>` directory).
