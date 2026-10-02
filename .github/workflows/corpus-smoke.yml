@@ -1,0 +1,77 @@
+name: Corpus smoke build
+
+# Manual only: the small profile downloads over a gigabyte from third-party hosts, so it must
+# never run on every push. Run it from the Actions tab to prove that `corpus build --profile
+# small` completes, and is reproducible, on a clean Linux machine.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  corpus-small:
+    name: corpus build --profile small (ubuntu-24.04)
+    timeout-minutes: 120
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux build prerequisites (OpenSSL for native-tls)
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # ffmpeg is deliberately not installed: the runner has none, so the video encodes take the
+      # "skipped with a reason" path, as they would on a clean machine.
+      - name: Restore the corpus download cache
+        id: dl-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: bench/corpus/.cache
+          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}
+      - name: Build lpk-bench
+        run: cargo build --release --locked -p lpk-bench
+      - name: Build the small corpus
+        run: ./target/release/lpk-bench corpus build --profile small
+      - name: Save the corpus download cache
+        if: ${{ always() && steps.dl-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: bench/corpus/.cache
+          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}
+      - name: Keep the first manifest
+        run: cp bench/corpus/small/manifest.json first-manifest.json
+      - name: Rebuild the small corpus from scratch
+        run: |
+          rm -rf bench/corpus/small
+          ./target/release/lpk-bench corpus build --profile small
+      - name: Fail if the two manifests differ
+        run: cmp first-manifest.json bench/corpus/small/manifest.json
+      - name: Job summary
+        run: |
+          python3 - >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}" <<'PY'
+          import json
+          info = json.load(open("bench/corpus/small/build-info.json"))
+          print("## Corpus small build")
+          print()
+          print("| class | files | bytes |")
+          print("| --- | ---: | ---: |")
+          for name, c in info["summary"]["classes"].items():
+              print(f"| {name} | {c['files']} | {c['bytes']} |")
+          for key in ("tools", "skipped", "unavailable"):
+              print()
+              print(f"### {key}")
+              print()
+              print("```json")
+              print(json.dumps(info.get(key, []), indent=2, sort_keys=True))
+              print("```")
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: corpus-small-metadata
+          path: |
+            bench/corpus/small/manifest.json
+            bench/corpus/small/build-info.json
+          if-no-files-found: error

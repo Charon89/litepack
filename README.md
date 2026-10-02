@@ -71,6 +71,7 @@ bench/reports/            generated Markdown reports
 deny.toml                 cargo-deny licence policy
 scripts/setup-windows.ps1 one-shot machine setup (build tools, Rust toolchain, cargo tools)
 .github/workflows/ci.yml  fmt · clippy · nextest · deny on Ubuntu + Windows
+.github/workflows/corpus-smoke.yml  manual Linux build of the small corpus, built twice and compared
 ```
 
 ### First session script (copy-paste)
