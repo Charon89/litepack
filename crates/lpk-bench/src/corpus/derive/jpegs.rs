@@ -544,6 +544,54 @@ mod tests {
     }
 
     #[test]
+    fn an_edited_photo_drops_adobe_and_mpf_segments() {
+        fn seg(marker: u8, payload: &[u8]) -> Vec<u8> {
+            let mut s = vec![0xFF, marker];
+            s.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+            s.extend_from_slice(payload);
+            s
+        }
+        let plain = jpeg_of(160, 120);
+        let exif = seg(0xE1, b"Exif\0\0MM\0*fake exif payload");
+        let mpf = seg(0xE2, b"MPF\0fake mp index");
+        let icc = seg(0xE2, b"ICC_PROFILE\0\x01\x01profile bytes");
+        let adobe = seg(0xEE, b"Adobe\0d\x80\0\0\0\0");
+        let mut src_jpeg = plain[..20].to_vec();
+        for s in [&exif, &mpf, &adobe, &icc] {
+            src_jpeg.extend_from_slice(s);
+        }
+        src_jpeg.extend_from_slice(&plain[20..]);
+        assert_eq!(
+            app_segments(&src_jpeg),
+            [exif.clone(), icc.clone()].concat()
+        );
+
+        let src = source(
+            "edited",
+            "photo-jpeg-edited",
+            &["photo-jpeg"],
+            SourceSpec::JpegCrop(JpegCropSpec {
+                from: vec![],
+                every: 1,
+                crop_permille: 25,
+                quality: 85,
+            }),
+        );
+        let d = tempfile::tempdir().expect("tmp");
+        put(d.path(), "photo-jpeg", "commons", "a.jpg", &src_jpeg);
+        run(d.path(), &src, &[("photo-jpeg", "commons")]).expect("run");
+        let files = read_all(d.path(), "photo-jpeg-edited", "edited");
+        let out = &files[0].1;
+        assert_eq!(
+            &out[20..20 + exif.len() + icc.len()],
+            [exif, icc].concat().as_slice()
+        );
+        let has = |needle: &[u8]| out.windows(needle.len()).any(|w| w == needle);
+        assert!(!has(b"MPF\0") && !has(b"Adobe\0"));
+        assert!(decode_rgb(out).is_ok());
+    }
+
+    #[test]
     fn conversions_take_the_smallest_photos_first() {
         let src = source(
             "conv",

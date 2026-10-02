@@ -619,7 +619,8 @@ pub fn encode(
 }
 
 /// The APP1..APP15 segments (EXIF, XMP, ICC and the like) of a JPEG, verbatim, each from its
-/// `FF En` marker to the end of its payload, concatenated in file order.
+/// `FF En` marker to the end of its payload, concatenated in file order. APP14 segments and
+/// APP2 `MPF\0` segments are left out.
 pub fn app_segments(jpeg: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 2;
@@ -637,7 +638,11 @@ pub fn app_segments(jpeg: &[u8]) -> Vec<u8> {
         if len < 2 || end > jpeg.len() {
             break;
         }
-        if (0xE1..=0xEF).contains(&m) {
+        let payload = &jpeg[i + 4..end];
+        // APP14 (Adobe) states the source's colour transform, and an MPF APP2 points at preview
+        // images stored after the EOI; neither is true of the re-encoded file.
+        let skip = m == 0xEE || (m == 0xE2 && payload.starts_with(b"MPF\0"));
+        if (0xE1..=0xEF).contains(&m) && !skip {
             out.extend_from_slice(&jpeg[i..end]);
         }
         i = end;
