@@ -285,6 +285,7 @@ pub fn split_planes(data: &[u8], width: usize) -> Result<Vec<Vec<u8>>> {
 }
 
 /// Interleave planes back into element order; the inverse of [`split_planes`].
+#[cfg(test)]
 pub fn merge_planes(planes: &[Vec<u8>]) -> Result<Vec<u8>> {
     let Some(first) = planes.first() else {
         return Ok(Vec::new());
@@ -367,8 +368,16 @@ fn measure_planes(
     width: usize,
     rotate: bool,
     acc: &mut PlanesAcc,
+    bufs: &mut Bufs,
 ) -> Result<()> {
-    let (planes_c, t_c) = timed(|| -> Result<Vec<Vec<u8>>> {
+    let plane_len = data.len() / width;
+    // Buffers are pre-sized and pre-touched outside the timed sections.
+    bufs.prepare(
+        width,
+        zstd::zstd_safe::compress_bound(plane_len),
+        data.len(),
+    );
+    let (done, t_c) = timed(|| -> Result<()> {
         let rotated;
         let src = if rotate {
             rotated = rotate_left1(data, width)?;
@@ -376,19 +385,26 @@ fn measure_planes(
         } else {
             data
         };
-        split_planes(src, width)?
-            .iter()
-            .map(|p| zc.compress(p))
-            .collect()
+        for (i, p) in split_planes(src, width)?.iter().enumerate() {
+            zc.compress_into(p, &mut bufs.comp[i])?;
+        }
+        Ok(())
     });
-    let planes_c = planes_c?;
-    let plane_len = data.len() / width;
+    done?;
     let (merged, t_d) = timed(|| -> Result<Vec<u8>> {
-        let planes = planes_c
-            .iter()
-            .map(|c| zc.decompress(c, plane_len))
-            .collect::<Result<Vec<_>>>()?;
-        let merged = merge_planes(&planes)?;
+        // Each plane is decompressed into the one reusable buffer and interleaved straight into
+        // the pre-sized output.
+        let mut merged = std::mem::take(&mut bufs.merged);
+        merged.resize(data.len(), 0);
+        for i in 0..width {
+            let n = zc.decompress_into(&bufs.comp[i], &mut bufs.dec)?;
+            if n != plane_len {
+                bail!("a plane decompressed to a different size");
+            }
+            for (e, b) in bufs.dec.iter().enumerate() {
+                merged[e * width + i] = *b;
+            }
+        }
         if rotate {
             rotate_right1(&merged, width)
         } else {
@@ -408,7 +424,7 @@ fn measure_planes(
     if acc.planes.len() != width {
         acc.planes = vec![0; width];
     }
-    for (slot, c) in acc.planes.iter_mut().zip(&planes_c) {
+    for (slot, c) in acc.planes.iter_mut().zip(&bufs.comp) {
         *slot += c.len() as u64;
     }
     acc.compress_s += t_c;
@@ -425,6 +441,37 @@ fn planes_record(a: PlanesAcc) -> Planes {
     }
 }
 
+/// Reusable codec buffers, grown and pre-touched outside the timed sections: one compressed
+/// buffer per plane, one decompressed buffer and one merged buffer.
+#[derive(Default)]
+struct Bufs {
+    comp: Vec<Vec<u8>>,
+    dec: Vec<u8>,
+    merged: Vec<u8>,
+}
+
+fn grow(v: &mut Vec<u8>, cap: usize) {
+    if v.capacity() < cap {
+        *v = Vec::with_capacity(cap);
+        v.resize(cap, 0); // touches the pages now
+    }
+    v.clear();
+}
+
+impl Bufs {
+    /// Make `planes` compressed buffers of `comp_cap` bytes and the other two of `plain_cap`.
+    fn prepare(&mut self, planes: usize, comp_cap: usize, plain_cap: usize) {
+        if self.comp.len() < planes {
+            self.comp.resize_with(planes, Vec::new);
+        }
+        for c in self.comp.iter_mut().take(planes) {
+            grow(c, comp_cap);
+        }
+        grow(&mut self.dec, plain_cap);
+        grow(&mut self.merged, plain_cap);
+    }
+}
+
 /// Measure one file held in memory. `Ok(Err(reason))`: not a usable safetensors file;
 /// `Err`: the measurement itself failed (compression error, a variant that does not reverse).
 fn analyze(
@@ -438,6 +485,7 @@ fn analyze(
         Err(reason) => return Ok(Err(reason)),
     };
     let whole = zc.compress(file)?.len() as u64;
+    let mut bufs = Bufs::default();
     let mut other_tensors = 0u64;
     let mut other_bytes = 0u64;
     let mut acc: BTreeMap<String, DtypeAcc> = BTreeMap::new();
@@ -462,17 +510,18 @@ fn analyze(
             continue;
         }
         // Each of these runs alone, on data in memory.
-        let (c, t_c) = timed(|| zc.compress(data));
+        bufs.prepare(1, zstd::zstd_safe::compress_bound(data.len()), data.len());
+        let (c, t_c) = timed(|| zc.compress_into(data, &mut bufs.comp[0]));
         let c = c?;
-        let (d, t_d) = timed(|| zc.decompress(&c, data.len()));
-        if d? != data {
+        let (d, t_d) = timed(|| zc.decompress_into(&bufs.comp[0], &mut bufs.dec));
+        if d? != data.len() || bufs.dec != data {
             bail!("a tensor did not decompress to its own bytes");
         }
-        a.plain.compressed_bytes += c.len() as u64;
+        a.plain.compressed_bytes += c as u64;
         a.plain.compress_seconds += t_c;
         a.plain.decompress_seconds += t_d;
-        measure_planes(zc, data, width, false, &mut a.byte)?;
-        measure_planes(zc, data, width, true, &mut a.rotated)?;
+        measure_planes(zc, data, width, false, &mut a.byte, &mut bufs)?;
+        measure_planes(zc, data, width, true, &mut a.rotated, &mut bufs)?;
     }
     let dtypes = acc
         .into_iter()

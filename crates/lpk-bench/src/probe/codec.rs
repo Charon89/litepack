@@ -4,9 +4,12 @@
 //! [`zstd_measure`] and [`xz_measure`] compress `data` (timed), decompress it (timed), compare
 //! the result with the input and return the sizes and times. They are timed sections: call them
 //! alone, on data already in memory. Rule: encoders, decoders and the output buffers of both
-//! directions are built and sized before the timed sections, so the figures measure the codec and
-//! not the allocator. [`ZstdContext`] keeps one compressor and one decompressor alive across many
-//! calls, for probes that time thousands of small buffers.
+//! directions are built and sized before the timed sections, so there is no allocation inside the
+//! interval. The zstd and xz measure functions here do not pre-touch their buffers: first-touch
+//! page faults of the pre-sized buffers are included in the time and are the same for every
+//! caller (callers that reuse buffers, as `weights` does, pre-touch them when they grow them).
+//! [`ZstdContext`] keeps one compressor and one decompressor alive across many calls, for probes
+//! that time thousands of small buffers.
 //!
 //! The in-process xz is the generic C build of `liblzma-sys` 0.4.9: its hand-written `config.h`
 //! enables no unaligned-access, SSE2 match-compare or CLMUL CRC paths. In-process xz figures
