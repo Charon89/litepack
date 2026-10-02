@@ -1,0 +1,155 @@
+{
+  "class": "game-assets",
+  "corpus": {
+    "class_bytes": 52470892,
+    "class_files": 4660,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 16363967,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.53125,
+      "peak_job_memory_bytes": 580091904,
+      "peak_memory_bytes": 557899776,
+      "peak_process_commit_bytes": 580091904,
+      "timed_out": false,
+      "user_cpu_seconds": 5.453125,
+      "wall_seconds": 4.0518931
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.59375,
+      "peak_job_memory_bytes": 71856128,
+      "peak_memory_bytes": 77561856,
+      "peak_process_commit_bytes": 71856128,
+      "timed_out": false,
+      "user_cpu_seconds": 0.28125,
+      "wall_seconds": 0.9372299
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 16363967,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.5625,
+        "peak_job_memory_bytes": 580083712,
+        "peak_memory_bytes": 557895680,
+        "peak_process_commit_bytes": 580083712,
+        "timed_out": false,
+        "user_cpu_seconds": 5.46875,
+        "wall_seconds": 4.0518931
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.546875,
+        "peak_job_memory_bytes": 71856128,
+        "peak_memory_bytes": 77557760,
+        "peak_process_commit_bytes": 71856128,
+        "timed_out": false,
+        "user_cpu_seconds": 0.296875,
+        "wall_seconds": 0.9569247
+      }
+    },
+    {
+      "archive_bytes": 16363967,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.40625,
+        "peak_job_memory_bytes": 580091904,
+        "peak_memory_bytes": 557907968,
+        "peak_process_commit_bytes": 580091904,
+        "timed_out": false,
+        "user_cpu_seconds": 5.453125,
+        "wall_seconds": 4.0068166
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.59375,
+        "peak_job_memory_bytes": 71852032,
+        "peak_memory_bytes": 77561856,
+        "peak_process_commit_bytes": 71852032,
+        "timed_out": false,
+        "user_cpu_seconds": 0.25,
+        "wall_seconds": 0.9372299
+      }
+    },
+    {
+      "archive_bytes": 16363967,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.53125,
+        "peak_job_memory_bytes": 580091904,
+        "peak_memory_bytes": 557899776,
+        "peak_process_commit_bytes": 580091904,
+        "timed_out": false,
+        "user_cpu_seconds": 5.328125,
+        "wall_seconds": 4.0705162
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.609375,
+        "peak_job_memory_bytes": 71860224,
+        "peak_memory_bytes": 77561856,
+        "peak_process_commit_bytes": 71860224,
+        "timed_out": false,
+        "user_cpu_seconds": 0.28125,
+        "wall_seconds": 0.9293778
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "-bd",
+      "-y",
+      "-mx9",
+      "-mqs",
+      "-mmt=24",
+      "../../tmp/run17792/c59/a.7z",
+      "game-assets"
+    ],
+    "extract_args": [
+      "x",
+      "-bd",
+      "-y",
+      "-mmt=24",
+      "-ox",
+      "a.7z"
+    ],
+    "id": "ultra"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "7z",
+    "mode": "directory",
+    "ratio_depends_on_threads": true,
+    "version": "26.03"
+  },
+  "verification": {
+    "files_checked": 4660,
+    "files_ok": 4660,
+    "verified": true
+  }
+}

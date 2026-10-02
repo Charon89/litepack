@@ -1,0 +1,22 @@
+{
+  "class": "small-files",
+  "corpus": {
+    "class_bytes": 66170985,
+    "class_files": 20000,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [],
+    "extract_args": [],
+    "id": "default"
+  },
+  "skipped": "not installed",
+  "threads": 24,
+  "tool": {
+    "id": "tsaur",
+    "mode": "directory",
+    "ratio_depends_on_threads": false
+  }
+}
