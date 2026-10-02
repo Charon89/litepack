@@ -179,8 +179,52 @@ pub struct Report {
 
 /// Check `<dir>` (a `<date>-<host>` results directory): `host.json`, `tools.json` and every
 /// result file. `probe-*.json` files belong to the probes (PLAN P0-4) and are skipped.
+///
+/// A parent such as `bench/results` (not itself a `<date>-<host>` directory and without
+/// `host.json`/`tools.json`) is also accepted: each subdirectory is checked, files such as
+/// `README.md` and `schema.json` are ignored, and problems are prefixed with the subdirectory.
 pub fn validate_dir(dir: &Path) -> Result<Report> {
     let schemas = Schemas::load()?;
+    let abs = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let own_name_ok = abs
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(dir_name_ok);
+    if !dir.is_dir()
+        || own_name_ok
+        || dir.join("host.json").exists()
+        || dir.join("tools.json").exists()
+    {
+        return validate_one(&schemas, dir);
+    }
+    let mut subdirs: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    subdirs.sort();
+    let mut total = Report::default();
+    if subdirs.is_empty() {
+        total
+            .problems
+            .push(format!("{}: no results directories found", dir.display()));
+    }
+    for sub in subdirs {
+        let label = sub
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let r = validate_one(&schemas, &sub)?;
+        total.results += r.results;
+        total
+            .problems
+            .extend(r.problems.into_iter().map(|p| format!("{label}/{p}")));
+    }
+    Ok(total)
+}
+
+fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
     let mut report = Report::default();
     if !dir.is_dir() {
         report
@@ -533,10 +577,37 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_directory_checks_each_results_subdirectory() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        std::fs::write(tmp.path().join("README.md"), "x").expect("readme");
+        std::fs::write(tmp.path().join("schema.json"), "{}").expect("schema");
+        let good = write_dir(tmp.path(), &[samples::measured()]);
+        let report = validate_dir(tmp.path()).expect("validate");
+        assert_eq!(
+            (report.results, report.problems.len()),
+            (1, 0),
+            "{:?}",
+            report.problems
+        );
+        // Break one file: the problem names the subdirectory.
+        std::fs::write(good.join("host.json"), "{}").expect("host");
+        let p = problems(tmp.path());
+        assert!(
+            p.iter()
+                .any(|m| m.starts_with("2026-10-01-testbox/host.json:")),
+            "{p:?}"
+        );
+        // An empty parent is a problem, not a silent pass.
+        let empty = tempfile::tempdir().expect("tmp");
+        assert!(problems(empty.path())[0].contains("no results directories"));
+    }
+
+    #[test]
     fn directory_level_problems() {
         let tmp = tempfile::tempdir().expect("tmp");
         let bad_name = tmp.path().join("results");
         std::fs::create_dir_all(&bad_name).expect("dir");
+        std::fs::write(bad_name.join("host.json"), "{}").expect("host");
         let p = problems(&bad_name);
         assert!(p.iter().any(|m| m.contains("directory name")));
         assert!(p.iter().any(|m| m.starts_with("host.json:")));

@@ -6,7 +6,9 @@
 # Keys per [[tool]]:
 #   id, name        identifier (`[a-z0-9-]+`) and display name
 #   exe.<os>        executable names to look for, per OS (`windows`, `linux`, `macos`)
-#   hints.<os>      install-location hints, tried after PATH; `%VAR%` is an environment variable
+#   hints.<os>      install-location hints, tried after PATH; `%VAR%` is an environment variable;
+#                   `*` inside a folder or file name matches any text (winget portable folders
+#                   carry the version; the highest name wins)
 #   version         { args, pattern }: run with args, first capture group of pattern on stdout+stderr
 #   extension       archive file extension
 #   mode            `directory` (tool archives a directory itself) or `tar-stream` (the runner pipes
@@ -93,6 +95,7 @@ extract = []
 id = "zstd"
 name = "Zstandard"
 exe = { windows = ["zstd"], linux = ["zstd"], macos = ["zstd"] }
+hints = { windows = ["%LOCALAPPDATA%/Microsoft/WinGet/Links/zstd.exe", "%LOCALAPPDATA%/Microsoft/WinGet/Packages/Meta.Zstandard_*/zstd-v*/zstd.exe"] }
 version = { args = ["--version"], pattern = 'v(\d+(?:\.\d+)+)' }
 extension = ".tar.zst"
 mode = "tar-stream"
@@ -119,6 +122,7 @@ extract = []
 id = "xz"
 name = "XZ Utils"
 exe = { windows = ["xz"], linux = ["xz"], macos = ["xz"] }
+hints = { windows = ["%LOCALAPPDATA%/Microsoft/WinGet/Links/xz.exe", "%LOCALAPPDATA%/Microsoft/WinGet/Packages/TukaaniProject.XZUtils_*/bin_x86-64/xz.exe"] }
 version = { args = ["--version"], pattern = 'xz[^\d\r\n]*(\d+(?:\.\d+)+)' }
 extension = ".tar.xz"
 mode = "tar-stream"

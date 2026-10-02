@@ -108,13 +108,71 @@ pub fn find_executable(tool: &Tool, env: &Env) -> Option<PathBuf> {
     }
     for hint in tool.hint_list(env.os) {
         if let Some(expanded) = expand_hint(hint, &*env.vars) {
-            let p = PathBuf::from(expanded);
-            if is_executable(&p) {
+            if let Some(p) = expand_glob(&expanded)
+                .into_iter()
+                .find(|p| is_executable(p))
+            {
                 return Some(p);
             }
         }
     }
     None
+}
+
+/// Does `name` match `pattern`, where `*` matches any run of characters (ASCII case-insensitive)?
+fn wild_match(pattern: &str, name: &str) -> bool {
+    let (p, n) = (pattern.to_ascii_lowercase(), name.to_ascii_lowercase());
+    let parts: Vec<&str> = p.split('*').collect();
+    let Some((first, rest)) = parts.split_first() else {
+        return false;
+    };
+    let Some(mut tail) = n.strip_prefix(first) else {
+        return false;
+    };
+    let Some((last, middle)) = rest.split_last() else {
+        return tail.is_empty();
+    };
+    for part in middle {
+        match tail.find(part) {
+            Some(i) => tail = &tail[i + part.len()..],
+            None => return false,
+        }
+    }
+    tail.ends_with(last)
+}
+
+/// Expand `*` wildcards in directory or file name segments (one segment each, never across
+/// separators), for hints such as winget's version-named portable folders. Candidates come back
+/// in reverse name order so that the highest version tends to come first. Without `*` the path
+/// is returned as is.
+pub fn expand_glob(path: &str) -> Vec<PathBuf> {
+    let Some(star) = path.find('*') else {
+        return vec![PathBuf::from(path)];
+    };
+    let split = path[..star].rfind(['/', '\\']).map_or(0, |i| i + 1);
+    let mut current = vec![PathBuf::from(&path[..split])];
+    for seg in path[split..].split(['/', '\\']) {
+        let mut next = Vec::new();
+        for base in &current {
+            if seg.contains('*') {
+                let Ok(rd) = std::fs::read_dir(base) else {
+                    continue;
+                };
+                let mut hits: Vec<String> = rd
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|n| wild_match(seg, n))
+                    .collect();
+                hits.sort();
+                hits.reverse();
+                next.extend(hits.into_iter().map(|h| base.join(h)));
+            } else {
+                next.push(base.join(seg));
+            }
+        }
+        current = next;
+    }
+    current
 }
 
 /// First capture group of `pattern` in `text`.
@@ -272,6 +330,29 @@ mod tests {
         assert_eq!(expand_hint("%Nope%/x", &vars), None);
         assert_eq!(expand_hint("plain", &vars).as_deref(), Some("plain"));
         assert_eq!(expand_hint("%broken", &vars), None);
+    }
+
+    #[test]
+    fn wildcard_hints_pick_the_highest_matching_folder() {
+        assert!(wild_match("zstd-v*-win64", "zstd-v1.5.7-win64"));
+        assert!(!wild_match("zstd-v*-win64", "zstd-v1.5.7-win32"));
+        assert!(wild_match("a*b*c", "aXbYc") && !wild_match("a*b*c", "aXbY"));
+        let tmp = tempfile::tempdir().expect("tmp");
+        for v in ["1.5.6", "1.5.7"] {
+            let d = tmp.path().join(format!("Pkg_x/zstd-v{v}-win64"));
+            std::fs::create_dir_all(&d).expect("dir");
+            touch_exe(&d, "zstd.exe");
+        }
+        let root = tmp.path().to_string_lossy().into_owned();
+        let hits = expand_glob(&format!("{root}/Pkg_*/zstd-v*/zstd.exe"));
+        assert!(hits[0].to_string_lossy().contains("1.5.7"), "{hits:?}");
+        assert!(expand_glob(&format!("{root}/none_*/x")).is_empty());
+        let mut tool = catalogue().get("zstd").expect("zstd").clone();
+        tool.hints
+            .insert("windows".into(), vec!["%WG%/Pkg_*/zstd-v*/zstd.exe".into()]);
+        let env = fake_env("windows", vec![], vec![("WG", root)]);
+        let found = find_executable(&tool, &env).expect("found");
+        assert!(found.to_string_lossy().contains("1.5.7"));
     }
 
     #[test]
