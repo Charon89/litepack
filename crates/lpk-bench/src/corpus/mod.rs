@@ -66,6 +66,10 @@
 //! Files go to `<out>/<class>/<source-id>/<path>`, plus `manifest.json` (deterministic: sorted
 //! keys, `/` paths, no timestamps) and `build-info.json` (`built_at`, tool version, host,
 //! manifest BLAKE3, `skipped`).
+//! * `build-info.json` also holds `accounting` (per source: files extraction produced versus files
+//!   that still exist with the right size when the manifest is written; the missing ones, e.g.
+//!   quarantined by antivirus, are listed, left out of the manifest and do not fail the build)
+//!   and `summary` (files and bytes per class and in total), which the build also prints.
 //! * `<out>` is owned by the tool through a `.lpk-corpus` marker written on first use. A
 //!   non-empty directory without the marker is an error and is never modified. The cache must
 //!   not live inside `<out>`.
@@ -249,6 +253,16 @@ pub fn run(args: CorpusArgs) -> ExitCode {
                         r.manifest_path.display(),
                         r.manifest_blake3
                     );
+                    for (class, t) in &r.summary.classes {
+                        println!("  {class}: {} files, {} bytes", t.files, t.bytes);
+                    }
+                    println!(
+                        "  total: {} files, {} bytes",
+                        r.summary.total_files, r.summary.total_bytes
+                    );
+                    for p in &r.missing {
+                        println!("missing after extraction (not in the manifest): {p}");
+                    }
                     for s in &r.skipped {
                         println!("skipped {}: {}", s.source, s.reason);
                     }

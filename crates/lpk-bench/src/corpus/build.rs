@@ -19,7 +19,9 @@ use super::fetch::{
     repin_hint, Artifact, DownloadError, Downloader, Expect, Fetcher, Politeness, RetryPolicy,
 };
 use super::lock::{Lock, LockEntry};
-use super::manifest::{now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped};
+use super::manifest::{
+    now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped, SourceAccount, Summary,
+};
 use super::registry::{
     file_name_for, gz_output_name, ArchiveFormat, FilesSpec, Profile, Registry, Source, SourceSpec,
 };
@@ -66,6 +68,10 @@ pub struct BuildReport {
     pub unused_pins: Vec<String>,
     /// True for `--only` builds.
     pub partial: bool,
+    /// Files that extraction produced but that were gone when the manifest was written.
+    pub missing: Vec<String>,
+    /// Files and bytes per class and in total.
+    pub summary: Summary,
 }
 
 /// One file of a list-type source. This is the contract for such sources: the lock *is* the
@@ -430,6 +436,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
     let mut skipped = Vec::new();
     let mut pins: Vec<(String, Vec<LockEntry>)> = Vec::new();
     let mut built_ids: Vec<&str> = Vec::new();
+    let mut expected: Vec<(String, String, u64)> = Vec::new();
     for source in &sources {
         eprintln!("[{}] {} ({})", source.class, source.id, source.origin);
         let dir = opts.out.join(&source.class).join(&source.id);
@@ -441,6 +448,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         match build_source(&mut ctx, source, &dir) {
             Ok(files) => {
                 eprintln!("  {} files", files.len());
+                expected.push((source.id.clone(), source.class.clone(), files.len() as u64));
                 ctx.produced
                     .extend(files.into_iter().map(|f| (source.class.clone(), f)));
                 pins.push((source.id.clone(), std::mem::take(&mut ctx.recorded)));
@@ -478,7 +486,16 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         }
     }
 
-    let manifest = Manifest::new(opts.profile, std::mem::take(&mut ctx.produced));
+    let (found, accounting) = account_for(&opts.out, std::mem::take(&mut ctx.produced), &expected);
+    let missing: Vec<String> = accounting
+        .iter()
+        .flat_map(|a| a.missing.iter().cloned())
+        .collect();
+    for m in &missing {
+        eprintln!("missing after extraction (not in the manifest): {m}");
+    }
+    let manifest = Manifest::new(opts.profile, found);
+    let summary = Summary::of(&manifest);
     let removed = if partial {
         Vec::new()
     } else {
@@ -507,6 +524,8 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         manifest_blake3: manifest_blake3.clone(),
         profile: opts.profile.name().to_string(),
         skipped: skipped.clone(),
+        accounting,
+        summary: summary.clone(),
     };
     std::fs::write(opts.out.join(info_name), info.render())?;
 
@@ -519,7 +538,49 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         removed,
         unused_pins,
         partial,
+        missing,
+        summary,
     })
+}
+
+/// Expected-versus-found accounting (D-14): keep the produced files that still exist below
+/// `out` with their recorded size, and report per source what is gone. `expected` lists
+/// `(source, class, files produced)` for every built source, in build order.
+fn account_for(
+    out: &Path,
+    produced: Vec<(String, ManifestFile)>,
+    expected: &[(String, String, u64)],
+) -> (Vec<(String, ManifestFile)>, Vec<SourceAccount>) {
+    let mut missing: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut found = Vec::with_capacity(produced.len());
+    for (class, file) in produced {
+        let mut path = out.to_path_buf();
+        path.extend(file.path.split('/'));
+        let intact = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == file.bytes);
+        if intact {
+            found.push((class, file));
+        } else {
+            missing
+                .entry(file.source.clone())
+                .or_default()
+                .push(file.path);
+        }
+    }
+    let accounts = expected
+        .iter()
+        .map(|(source, class, n)| {
+            let mut gone = missing.remove(source).unwrap_or_default();
+            gone.sort();
+            SourceAccount {
+                class: class.clone(),
+                expected: *n,
+                found: n.saturating_sub(gone.len() as u64),
+                missing: gone,
+                source: source.clone(),
+            }
+        })
+        .collect();
+    (found, accounts)
 }
 
 /// Materialise one source into `dir` (`<out>/<class>/<id>`, empty on entry).
@@ -1293,5 +1354,42 @@ files = [
         let err = preflight_pins(&picked, &lock, Profile::Small).expect_err("list unpinned");
         let msg = format!("{err:#}");
         assert!(msg.contains("set2") && msg.contains("(list)"), "{msg}");
+    }
+
+    #[test]
+    fn missing_files_are_accounted_not_fatal_and_summary_is_written() {
+        let env = Env::new(false);
+        let report = build(&env.opts("out", true), &env.fetcher).expect("build");
+        assert!(report.missing.is_empty());
+        let info: BuildInfo =
+            serde_json::from_str(&env.read("out", "build-info.json")).expect("json");
+        assert_eq!(info.summary.total_files, 4);
+        assert_eq!(info.summary.total_bytes, 23);
+        assert_eq!(info.summary.classes["beta"].files, 2);
+        assert!(info
+            .accounting
+            .iter()
+            .all(|a| a.expected == a.found && a.missing.is_empty()));
+        assert_eq!(report.summary, info.summary);
+
+        // A file that vanished after extraction (antivirus) is listed, not an error.
+        let m: Manifest = serde_json::from_str(&env.manifest("out")).expect("json");
+        let produced: Vec<(String, ManifestFile)> = m
+            .classes
+            .iter()
+            .flat_map(|(c, e)| e.files.iter().map(move |f| (c.clone(), f.clone())))
+            .collect();
+        std::fs::remove_file(env.root.join("out/beta/pack/a.txt")).expect("rm");
+        std::fs::write(env.root.join("out/beta/pack/z/last.txt"), b"x").expect("resize");
+        let expected = [
+            ("pack".to_string(), "beta".to_string(), 2),
+            ("blob".to_string(), "alpha".to_string(), 1),
+        ];
+        let (found, accounts) = account_for(&env.root.join("out"), produced, &expected);
+        let pack = &accounts[0];
+        assert_eq!((pack.expected, pack.found), (2, 0));
+        assert_eq!(pack.missing, ["beta/pack/a.txt", "beta/pack/z/last.txt"]);
+        assert_eq!((accounts[1].expected, accounts[1].found), (1, 1));
+        assert!(found.iter().all(|(_, f)| f.source != "pack"));
     }
 }

@@ -77,6 +77,68 @@ pub struct BuildInfo {
     pub manifest_blake3: String,
     pub profile: String,
     pub skipped: Vec<Skipped>,
+    /// Expected versus found files per built source (public builds only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounting: Vec<SourceAccount>,
+    /// Files and bytes per class, and in total (public builds only).
+    #[serde(default, skip_serializing_if = "Summary::is_empty")]
+    pub summary: Summary,
+}
+
+/// D-14 accounting for one source: how many files extraction produced (`expected`) and how many
+/// still existed with the right size when the manifest was written (`found`). Missing files
+/// (for example quarantined by antivirus) are listed and left out of the manifest; the build
+/// does not fail. Exclude them by name in the registry to make every machine build the same
+/// corpus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceAccount {
+    pub class: String,
+    pub expected: u64,
+    pub found: u64,
+    pub missing: Vec<String>,
+    pub source: String,
+}
+
+/// Files and bytes of one class.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassTotals {
+    pub bytes: u64,
+    pub files: u64,
+}
+
+/// End-of-build summary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    pub classes: BTreeMap<String, ClassTotals>,
+    pub total_bytes: u64,
+    pub total_files: u64,
+}
+
+impl Summary {
+    pub fn is_empty(&self) -> bool {
+        self.classes.is_empty()
+    }
+
+    pub fn of(manifest: &Manifest) -> Summary {
+        let classes: BTreeMap<String, ClassTotals> = manifest
+            .classes
+            .iter()
+            .map(|(k, c)| {
+                (
+                    k.clone(),
+                    ClassTotals {
+                        bytes: c.bytes_total,
+                        files: c.files.len() as u64,
+                    },
+                )
+            })
+            .collect();
+        Summary {
+            total_bytes: classes.values().map(|c| c.bytes).sum(),
+            total_files: classes.values().map(|c| c.files).sum(),
+            classes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

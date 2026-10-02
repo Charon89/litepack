@@ -266,6 +266,8 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
             manifest_blake3: manifest_blake3.clone(),
             profile: PRIVATE.to_string(),
             skipped: skipped.clone(),
+            accounting: Vec::new(),
+            summary: Default::default(),
         },
         private: true,
         root: root_text,
