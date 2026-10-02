@@ -7,15 +7,11 @@
 //! threading and one processor thread. A file the library cannot handle, or whose decoded bytes
 //! differ, is a failure with a cause; it counts as stored as-is (output size = input size).
 //!
-//! Failure cause mapping, see [`classify`]: the library's `ExitCode` decides first
-//! (`Unsupported4Colors` is four components, `ProgressiveUnsupported` is progressive, the two
-//! `Verification*` codes are a verification mismatch); every other code is looked at through the
-//! marker scan, in this order: arithmetic-coded frame, four components, dimensions over the
-//! feature caps, gain map or multi-picture markers, bytes after the first EOI over the limit. A
-//! progressive frame is never a cause by itself (the write features accept progressive files);
-//! only the library's `ProgressiveUnsupported` is. If the scan explains nothing the cause is `other` and the code name is kept. A
-//! decoded file that differs from the input is a verification mismatch, a decode error is `other`
-//! with the code name prefixed `decode:`. The code name is recorded with every library failure.
+//! Failure cause mapping: see [`classify`] (the library's `ExitCode` and message decide; the
+//! marker scan only backs up `UnsupportedJpeg`). Gain-map, multi-picture and trailing data are
+//! never a cause: the library keeps the bytes after the first EOI as opaque data, so such files
+//! are counted among the successes and reported separately. The code name and the library's
+//! message are recorded with every failure.
 //!
 //! Every timed lap runs alone, on data in memory. Only this file and its tests change for the
 //! probe.
@@ -25,7 +21,10 @@ use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use anyhow::Result;
-use lepton_jpeg::{decode_lepton, encode_lepton, EnabledFeatures, ExitCode, DEFAULT_THREAD_POOL};
+use lepton_jpeg::{
+    decode_lepton, encode_lepton, EnabledFeatures, ExitCode, LeptonThreadPool, SingleThreadPool,
+    DEFAULT_THREAD_POOL,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{mbps, md_header, md_table, pct, timed, Ctx, Envelope, Output};
@@ -52,6 +51,9 @@ pub struct Data {
     pub features: Features,
     /// `max_processor_threads` of the one-thread lap.
     pub one_thread_processor_threads: u32,
+    /// The library's thread pool of the one-thread lap (`SingleThreadPool` runs everything
+    /// inline on the calling thread; the default lap uses `DEFAULT_THREAD_POOL`).
+    pub one_thread_pool: String,
     /// Bytes after the first EOI above which a failure counts as trailing data.
     pub trailing_limit_bytes: u64,
     /// One entry per class present in the corpus, in the order of [`CLASSES`].
@@ -160,17 +162,37 @@ pub struct Failure {
     /// The library's `ExitCode` name (`decode:` prefixed for the decode side, `panic` when the
     /// library panicked); absent for a mismatch of bytes.
     pub exit_code: Option<String>,
+    /// The library's message with its context markers (everything from the first line break)
+    /// removed: fixed texts and numbers, no file names. Absent for a mismatch of bytes and a
+    /// panic.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// The lap in which the failure happened.
+    pub lap: LapKind,
 }
 
-/// Why a file is stored as-is.
+/// Which of the two laps of a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LapKind {
+    Default,
+    OneThread,
+}
+
+/// Why a file is stored as-is. (A gain-map or multi-picture file never fails because of its
+/// extra data: the library keeps everything after the first EOI as opaque bytes, so there is no
+/// such cause; such files are counted among the successes, see the size table.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cause {
+    /// The library says progressive files are disabled (`ProgressiveUnsupported`).
     Progressive,
+    /// The library rejects the progressive scan script of the file.
+    ProgressiveRejected,
     FourComponents,
     Arithmetic,
     DimensionCap,
-    GainMap,
+    /// The file exceeds the library's file-size cap.
     TrailingData,
     VerificationMismatch,
     Other,
@@ -179,10 +201,10 @@ pub enum Cause {
 impl Cause {
     pub const ALL: [Cause; 8] = [
         Cause::Progressive,
+        Cause::ProgressiveRejected,
         Cause::FourComponents,
         Cause::Arithmetic,
         Cause::DimensionCap,
-        Cause::GainMap,
         Cause::TrailingData,
         Cause::VerificationMismatch,
         Cause::Other,
@@ -190,12 +212,12 @@ impl Cause {
 
     pub fn label(self) -> &'static str {
         match self {
-            Cause::Progressive => "progressive",
+            Cause::Progressive => "progressive (disabled)",
+            Cause::ProgressiveRejected => "progressive (rejected by the library)",
             Cause::FourComponents => "four components (CMYK)",
             Cause::Arithmetic => "arithmetic-coded",
             Cause::DimensionCap => "dimension cap",
-            Cause::GainMap => "gain map / multi-picture",
-            Cause::TrailingData => "trailing data over limit",
+            Cause::TrailingData => "file too large (size cap)",
             Cause::VerificationMismatch => "verification mismatch",
             Cause::Other => "other",
         }
@@ -280,8 +302,9 @@ pub struct Scan {
     pub restart_interval: bool,
     /// An APP2 segment starting with `MPF\0` (multi-picture).
     pub mpf: bool,
-    /// An APP1 segment mentioning `hdrgm` (gain-map XMP).
-    pub gain_map_xmp: bool,
+    /// A gain-map marker: an APP1 segment mentioning `hdrgm` (Adobe/Google XMP) or `HDRGainMap`
+    /// (Apple), or an APP2 segment starting with `urn:iso:std:iso:ts:21496:-1` (ISO 21496-1).
+    pub gain_map_marker: bool,
     /// An APP14 segment starting with `Adobe`.
     pub adobe: bool,
     /// Start-of-scan segments before the first EOI.
@@ -306,7 +329,7 @@ pub fn marker_scan(data: &[u8]) -> Scan {
         frame: None,
         restart_interval: false,
         mpf: false,
-        gain_map_xmp: false,
+        gain_map_marker: false,
         adobe: false,
         scans: 0,
         eoi_found: false,
@@ -374,8 +397,14 @@ pub fn marker_scan(data: &[u8]) -> Scan {
                 }
             }
             0xDD => s.restart_interval |= be16(payload) != 0,
-            0xE1 => s.gain_map_xmp |= payload.windows(5).any(|w| w == b"hdrgm"),
-            0xE2 => s.mpf |= payload.starts_with(b"MPF\0"),
+            0xE1 => {
+                s.gain_map_marker |= payload.windows(5).any(|w| w == b"hdrgm")
+                    || payload.windows(10).any(|w| w == b"HDRGainMap")
+            }
+            0xE2 => {
+                s.mpf |= payload.starts_with(b"MPF\0");
+                s.gain_map_marker |= payload.starts_with(b"urn:iso:std:iso:ts:21496:-1");
+            }
             0xEE => s.adobe |= payload.starts_with(b"Adobe"),
             _ => {}
         }
@@ -407,15 +436,22 @@ pub fn marker_scan(data: &[u8]) -> Scan {
         }
     }
 }
-
 // ---------------------------------------------------------------------------------------------
 // Encode, decode, compare
+
+/// What the one-thread lap runs on.
+pub const ONE_THREAD_POOL: &str = "SingleThreadPool";
 
 /// What went wrong in one lap.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fail {
-    /// The library returned this code on the encode (`decode: false`) or decode side.
-    Code { code: ExitCode, decode: bool },
+    /// The library returned this code (with its cleaned message) on the encode
+    /// (`decode: false`) or decode side.
+    Code {
+        code: ExitCode,
+        message: String,
+        decode: bool,
+    },
     /// The library panicked.
     Panic { decode: bool },
     /// The decoded bytes differ from the input.
@@ -430,11 +466,26 @@ pub struct Lap {
     pub decode_seconds: f64,
 }
 
-/// Encode `input`, decode the result and compare with `input`. `after_decode` may change the
-/// decoded bytes before the comparison (tests use it to provoke a mismatch).
+/// The library's message without its context markers (everything from the first line break),
+/// printable ASCII only and at most 200 characters.
+pub fn clean_message(m: &str) -> String {
+    m.lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(200)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Encode `input` on `pool`, decode the result and compare with `input`. `after_decode` may
+/// change the decoded bytes before the comparison (tests use it to provoke a mismatch).
 pub fn roundtrip(
     input: &[u8],
     features: &EnabledFeatures,
+    pool: &dyn LeptonThreadPool,
     after_decode: &dyn Fn(&mut Vec<u8>),
 ) -> std::result::Result<Lap, Fail> {
     let sink = Vec::with_capacity(input.len() / 2 + 1024);
@@ -442,8 +493,7 @@ pub fn roundtrip(
         catch_unwind(AssertUnwindSafe(|| {
             let mut reader = Cursor::new(input);
             let mut writer = Cursor::new(sink);
-            encode_lepton(&mut reader, &mut writer, features, &DEFAULT_THREAD_POOL)
-                .map(|_| writer.into_inner())
+            encode_lepton(&mut reader, &mut writer, features, pool).map(|_| writer.into_inner())
         }))
     });
     let lepton = match enc {
@@ -451,6 +501,7 @@ pub fn roundtrip(
         Ok(Err(e)) => {
             return Err(Fail::Code {
                 code: e.exit_code(),
+                message: clean_message(e.message()),
                 decode: false,
             })
         }
@@ -461,8 +512,7 @@ pub fn roundtrip(
         catch_unwind(AssertUnwindSafe(|| {
             let mut reader = Cursor::new(&lepton[..]);
             let mut writer = Cursor::new(out);
-            decode_lepton(&mut reader, &mut writer, features, &DEFAULT_THREAD_POOL)
-                .map(|_| writer.into_inner())
+            decode_lepton(&mut reader, &mut writer, features, pool).map(|_| writer.into_inner())
         }))
     });
     let mut decoded = match dec {
@@ -470,6 +520,7 @@ pub fn roundtrip(
         Ok(Err(e)) => {
             return Err(Fail::Code {
                 code: e.exit_code(),
+                message: clean_message(e.message()),
                 decode: true,
             })
         }
@@ -490,71 +541,131 @@ fn code_name(code: ExitCode) -> String {
     format!("{code:?}")
 }
 
-/// The cause of a failure, see the module documentation for the mapping.
-pub fn classify(fail: &Fail, scan: &Scan, features: &EnabledFeatures) -> Failure {
-    let (code, decode) = match fail {
-        Fail::Mismatch => {
-            return Failure {
-                cause: Cause::VerificationMismatch,
-                exit_code: None,
-            }
-        }
-        Fail::Panic { decode } => {
-            let name = if *decode { "decode:panic" } else { "panic" };
-            return Failure {
-                cause: Cause::Other,
-                exit_code: Some(name.to_string()),
-            };
-        }
-        Fail::Code { code, decode } => (*code, *decode),
-    };
-    let name = code_name(code);
-    if decode {
-        return Failure {
-            cause: match code {
-                ExitCode::VerificationLengthMismatch | ExitCode::VerificationContentMismatch => {
-                    Cause::VerificationMismatch
-                }
-                _ => Cause::Other,
-            },
-            exit_code: Some(format!("decode:{name}")),
-        };
-    }
-    let cause = match code {
-        ExitCode::VerificationLengthMismatch | ExitCode::VerificationContentMismatch => {
-            Cause::VerificationMismatch
-        }
-        ExitCode::Unsupported4Colors => Cause::FourComponents,
-        ExitCode::ProgressiveUnsupported => Cause::Progressive,
-        _ => scan_cause(scan, features).unwrap_or(Cause::Other),
-    };
-    Failure {
+/// The library's `ExitCode` names the probe may record (`decode:` prefixed for the decode
+/// side); `panic` and `decode:panic` stand for a panic.
+pub const EXIT_CODE_NAMES: [&str; 22] = [
+    "AssertionFailure",
+    "ShortRead",
+    "Unsupported4Colors",
+    "CoefficientOutOfRange",
+    "StreamInconsistent",
+    "ProgressiveUnsupported",
+    "SamplingBeyondTwoUnsupported",
+    "VersionUnsupported",
+    "OsError",
+    "UnsupportedJpeg",
+    "UnsupportedJpegWithZeroIdct0",
+    "InvalidResetCode",
+    "InvalidPadding",
+    "BadLeptonFile",
+    "ChannelFailure",
+    "IntegerCastOverflow",
+    "VerificationLengthMismatch",
+    "VerificationContentMismatch",
+    "SyntaxError",
+    "FileNotFound",
+    "ExternalVerificationFailed",
+    "OutOfMemory",
+];
+
+/// Whether a recorded exit-code string is a known name, a `decode:` name or a panic.
+pub fn known_exit_code(s: &str) -> bool {
+    let bare = s.strip_prefix("decode:").unwrap_or(s);
+    bare == "panic" || EXIT_CODE_NAMES.contains(&bare)
+}
+
+/// The library's message of a progressive file whose scan script it rejects.
+pub fn is_progressive_rejection(m: &str) -> bool {
+    m.starts_with("progress")
+        || m.contains("spectral selection")
+        || m.contains("successive approximation")
+}
+
+/// The cause of a failure. The library's `ExitCode` decides: `Unsupported4Colors` is four
+/// components, `ProgressiveUnsupported` is progressive (disabled), the two `Verification*` codes
+/// and a difference of bytes are a verification mismatch. `UnsupportedJpeg` is the library's
+/// catch-all and is explained by its message (arithmetic coding, dimensions over the caps, a file
+/// over the size cap, a progressive scan script it rejects) and, failing that, by the marker scan
+/// (arithmetic frame, four components, dimensions). Every other code, whatever the marker scan
+/// says, is `other` with its code name: gain-map, multi-picture and trailing data never make the
+/// library fail by themselves. A decode-side error is `other` (a `Verification*` code excepted)
+/// with the code name prefixed `decode:`.
+pub fn classify(fail: &Fail, lap: LapKind, scan: &Scan, features: &EnabledFeatures) -> Failure {
+    let mk = |cause, exit_code: Option<String>, message: Option<String>| Failure {
         cause,
-        exit_code: Some(name),
+        exit_code,
+        message,
+        lap,
+    };
+    match fail {
+        Fail::Mismatch => mk(Cause::VerificationMismatch, None, None),
+        Fail::Panic { decode } => mk(
+            Cause::Other,
+            Some(if *decode { "decode:panic" } else { "panic" }.to_string()),
+            None,
+        ),
+        Fail::Code {
+            code,
+            message,
+            decode,
+        } => {
+            let name = code_name(*code);
+            let shown = if *decode {
+                format!("decode:{name}")
+            } else {
+                name
+            };
+            let verification = matches!(
+                code,
+                ExitCode::VerificationLengthMismatch | ExitCode::VerificationContentMismatch
+            );
+            let cause = if verification {
+                Cause::VerificationMismatch
+            } else if *decode {
+                Cause::Other
+            } else {
+                match code {
+                    ExitCode::Unsupported4Colors => Cause::FourComponents,
+                    ExitCode::ProgressiveUnsupported => Cause::Progressive,
+                    ExitCode::UnsupportedJpeg => unsupported_jpeg_cause(message, scan, features),
+                    _ => Cause::Other,
+                }
+            };
+            mk(cause, Some(shown), Some(message.clone()))
+        }
     }
 }
 
-/// The cause the marker scan explains, in the order of the module documentation.
-fn scan_cause(scan: &Scan, features: &EnabledFeatures) -> Option<Cause> {
+/// The cause of an `UnsupportedJpeg`, from the library's message first and the marker scan second.
+fn unsupported_jpeg_cause(message: &str, scan: &Scan, features: &EnabledFeatures) -> Cause {
+    if message.contains("arithm") {
+        return Cause::Arithmetic;
+    }
+    if message.starts_with("image dimensions larger") {
+        return Cause::DimensionCap;
+    }
+    if message.contains("too large to encode") {
+        return Cause::TrailingData;
+    }
+    if is_progressive_rejection(message) {
+        return Cause::ProgressiveRejected;
+    }
     let frame = scan.frame.as_ref();
     if frame.is_some_and(|f| f.kind == FrameKind::Arithmetic) {
-        Some(Cause::Arithmetic)
+        Cause::Arithmetic
     } else if frame.is_some_and(|f| f.components == 4) {
-        Some(Cause::FourComponents)
+        Cause::FourComponents
     } else if frame
         .is_some_and(|f| f.width > features.max_jpeg_width || f.height > features.max_jpeg_height)
     {
-        Some(Cause::DimensionCap)
-    } else if scan.mpf || scan.gain_map_xmp {
-        Some(Cause::GainMap)
-    } else if scan.trailing_bytes > TRAILING_LIMIT {
-        Some(Cause::TrailingData)
+        Cause::DimensionCap
     } else {
-        None
+        Cause::Other
     }
 }
 
-/// Measure one JPEG file: the marker scan, the default-threading lap and the one-thread lap.
+/// Measure one JPEG file: the marker scan, the default-threading lap (`DEFAULT_THREAD_POOL`) and
+/// the one-thread lap (`SingleThreadPool`, inline).
 pub fn measure(
     input: &[u8],
     features: &EnabledFeatures,
@@ -574,17 +685,18 @@ pub fn measure(
         one_thread: None,
         one_thread_output_identical: None,
     };
-    let first = match roundtrip(input, features, after_decode) {
+    let first = match roundtrip(input, features, &DEFAULT_THREAD_POOL, after_decode) {
         Ok(lap) => lap,
         Err(fail) => {
-            rec.failure = Some(classify(&fail, &rec.scan, features));
+            rec.failure = Some(classify(&fail, LapKind::Default, &rec.scan, features));
             return rec;
         }
     };
-    let second = match roundtrip(input, one_thread, after_decode) {
+    let single = SingleThreadPool::default();
+    let second = match roundtrip(input, one_thread, &single, after_decode) {
         Ok(lap) => lap,
         Err(fail) => {
-            rec.failure = Some(classify(&fail, &rec.scan, features));
+            rec.failure = Some(classify(&fail, LapKind::OneThread, &rec.scan, features));
             return rec;
         }
     };
@@ -601,10 +713,27 @@ pub fn measure(
     rec
 }
 
+/// One untimed encode and decode in each setting, so the start-up of the library's thread pool
+/// and the first allocations do not land in the first file's laps.
+fn warm_up(features: &EnabledFeatures, one_thread: &EnabledFeatures) {
+    let (w, h) = (64usize, 64usize);
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            rgb.extend_from_slice(&[(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8]);
+        }
+    }
+    if let Ok(jpeg) = crate::corpus::derive::jpegenc::encode(&rgb, w, h, 80, false) {
+        let _ = roundtrip(&jpeg, features, &DEFAULT_THREAD_POOL, &|_| {});
+        let _ = roundtrip(&jpeg, one_thread, &SingleThreadPool::default(), &|_| {});
+    }
+}
+
 pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     let features = write_features();
     let mut one = features.clone();
     one.max_processor_threads = 1;
+    warm_up(&features, &one);
     let mut classes = Vec::new();
     let mut notes = Vec::new();
     for class in CLASSES {
@@ -635,9 +764,14 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
                 data.not_jpeg.push(index);
                 continue;
             }
+            let group = group_of.get(f.path.as_str()).copied().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "internal error: file {index} of class `{class}` belongs to no folder group"
+                )
+            })?;
             let mut rec = measure(&bytes, &features, &one, &|_| {});
             rec.index = index;
-            rec.group = group_of.get(f.path.as_str()).copied().unwrap_or(0);
+            rec.group = group;
             rec.path = ctx.label(f);
             data.files.push(rec);
         }
@@ -647,12 +781,15 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     let data = Data {
         features: Features::of(&features),
         one_thread_processor_threads: 1,
+        one_thread_pool: ONE_THREAD_POOL.to_string(),
         trailing_limit_bytes: TRAILING_LIMIT,
         classes,
     };
     let mut out = Output::new(data, threads).note(
-        "library threads: the default lap lets the library use up to max_processor_threads \
-         processor threads (fewer when the image has fewer partitions); the one-thread lap uses one",
+        "library threads: the default lap uses the library's default pool and lets it use up to \
+         max_processor_threads processor threads (fewer when the image has fewer partitions); the \
+         one-thread lap runs inline on the calling thread (SingleThreadPool, \
+         max_processor_threads 1). One untimed warm-up encode and decode precede the first file",
     );
     out.notes.extend(notes);
     out.libraries
@@ -680,6 +817,12 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
     }
     if d.one_thread_processor_threads != 1 {
         p.push("/data/one_thread_processor_threads: must be 1".to_string());
+    }
+    if d.one_thread_pool != ONE_THREAD_POOL {
+        p.push(format!(
+            "/data/one_thread_pool: `{}` (the probe uses {ONE_THREAD_POOL})",
+            d.one_thread_pool
+        ));
     }
     if d.trailing_limit_bytes != TRAILING_LIMIT {
         p.push("/data/trailing_limit_bytes: not the probe's limit".to_string());
@@ -816,23 +959,53 @@ fn check_file(
 fn check_failure(p: &mut Vec<String>, at: &str, f: &FileRecord, fail: &Failure, d: &Data) {
     let frame = f.scan.frame.as_ref();
     let code = fail.exit_code.as_deref();
+    let bare = code.map(|c| c.strip_prefix("decode:").unwrap_or(c));
+    let msg = fail.message.as_deref().unwrap_or("");
+    if let Some(c) = code {
+        if !known_exit_code(c) {
+            p.push(format!(
+                "{at}/failure/exit_code: `{c}` is not a name of the library's ExitCode"
+            ));
+        }
+    }
+    if msg.contains('\n') || msg.len() > 200 || !msg.is_ascii() {
+        p.push(format!(
+            "{at}/failure/message: must be one printable ASCII line of at most 200 characters"
+        ));
+    }
+    let unsupported = code == Some("UnsupportedJpeg");
     let ok = match fail.cause {
-        Cause::Arithmetic => frame.is_some_and(|x| x.kind == FrameKind::Arithmetic),
+        Cause::Arithmetic => {
+            unsupported
+                && (msg.contains("arithm")
+                    || frame.is_some_and(|x| x.kind == FrameKind::Arithmetic))
+        }
         Cause::FourComponents => {
-            frame.is_some_and(|x| x.components == 4) || code == Some("Unsupported4Colors")
+            code == Some("Unsupported4Colors")
+                || (unsupported && frame.is_some_and(|x| x.components == 4))
         }
         Cause::Progressive => code == Some("ProgressiveUnsupported"),
-        Cause::DimensionCap => frame.is_some_and(|x| {
-            x.width > d.features.max_jpeg_width || x.height > d.features.max_jpeg_height
-        }),
-        Cause::GainMap => f.scan.mpf || f.scan.gain_map_xmp,
-        Cause::TrailingData => f.scan.trailing_bytes > d.trailing_limit_bytes,
-        Cause::VerificationMismatch => true,
+        Cause::ProgressiveRejected => unsupported && is_progressive_rejection(msg),
+        Cause::DimensionCap => {
+            unsupported
+                && (msg.starts_with("image dimensions larger")
+                    || frame.is_some_and(|x| {
+                        x.width > d.features.max_jpeg_width || x.height > d.features.max_jpeg_height
+                    }))
+        }
+        Cause::TrailingData => unsupported && msg.contains("too large to encode"),
+        Cause::VerificationMismatch => {
+            bare.is_none()
+                || matches!(
+                    bare,
+                    Some("VerificationLengthMismatch" | "VerificationContentMismatch")
+                )
+        }
         Cause::Other => code.is_some(),
     };
     if !ok {
         p.push(format!(
-            "{at}/failure: cause `{}` is not supported by the file's marker scan or exit code",
+            "{at}/failure: cause `{}` is not supported by the exit code, message and marker scan",
             fail.cause.label()
         ));
     }
@@ -850,6 +1023,11 @@ struct Agg {
     ok_lepton: u64,
     fail_files: u64,
     fail_bytes: u64,
+    /// Bytes after the first EOI of the recompressed files.
+    ok_after_eoi: u64,
+    /// Recompressed files with an MPF or gain-map marker, and their bytes.
+    ok_multi_files: u64,
+    ok_multi_bytes: u64,
     causes: [(u64, u64); 8],
     default_encode: f64,
     default_decode: f64,
@@ -870,6 +1048,11 @@ impl Agg {
                     a.ok_files += 1;
                     a.ok_input += f.bytes;
                     a.ok_lepton += l;
+                    a.ok_after_eoi += f.scan.trailing_bytes;
+                    if f.scan.mpf || f.scan.gain_map_marker {
+                        a.ok_multi_files += 1;
+                        a.ok_multi_bytes += f.bytes;
+                    }
                     if let Some(t) = &f.default_threads {
                         a.default_encode += t.encode_seconds;
                         a.default_decode += t.decode_seconds;
@@ -964,8 +1147,9 @@ pub fn render(e: &Envelope<Data>) -> String {
         f.max_jpeg_file_size
     ));
     s.push_str(&format!(
-        "- one-thread lap: max_processor_threads {}; trailing-data limit {} bytes\n",
-        d.one_thread_processor_threads, d.trailing_limit_bytes
+        "- one-thread lap: max_processor_threads {} on the library's `{}`; the scan table counts \
+         bytes after the first EOI over {} as over the limit\n",
+        d.one_thread_processor_threads, d.one_thread_pool, d.trailing_limit_bytes
     ));
     for c in &d.classes {
         s.push_str(&format!(
@@ -979,7 +1163,11 @@ pub fn render(e: &Envelope<Data>) -> String {
     let scopes = scopes(d);
     let aggs: Vec<Agg> = scopes.iter().map(|(_, files)| Agg::of(files)).collect();
 
-    s.push_str("## Sizes (bytes); a failed file is stored as-is\n\n");
+    s.push_str(
+        "## Sizes (bytes)\n\nA recompressed file means: the primary image recompressed by Lepton \
+         and the data after its EOI (if any) deflated by the library, verified byte for byte. \
+         A failed file is stored as-is.\n\n",
+    );
     let rows: Vec<Vec<String>> = scopes
         .iter()
         .zip(&aggs)
@@ -990,6 +1178,8 @@ pub fn render(e: &Envelope<Data>) -> String {
                 a.bytes.to_string(),
                 a.ok_files.to_string(),
                 a.ok_input.to_string(),
+                a.ok_after_eoi.to_string(),
+                format!("{} ({} bytes)", a.ok_multi_files, a.ok_multi_bytes),
                 a.ok_lepton.to_string(),
                 gain(a.ok_input, a.ok_lepton),
                 a.fail_files.to_string(),
@@ -1007,6 +1197,8 @@ pub fn render(e: &Envelope<Data>) -> String {
             "Input",
             "Recompressed files",
             "Their input",
+            "Their bytes after EOI",
+            "of them MPF / gain-map files",
             "After Lepton",
             "Gain on those",
             "Failed files",
@@ -1074,7 +1266,7 @@ pub fn render(e: &Envelope<Data>) -> String {
     s.push_str(&md_table(&headers, &rows));
 
     // The library's code names behind the failures.
-    let mut codes: BTreeMap<(String, String), u64> = BTreeMap::new();
+    let mut codes: BTreeMap<(String, String, String), u64> = BTreeMap::new();
     for (_, files) in scopes.iter().take(1) {
         for f in files {
             if let Some(fail) = &f.failure {
@@ -1082,8 +1274,13 @@ pub fn render(e: &Envelope<Data>) -> String {
                     .exit_code
                     .clone()
                     .unwrap_or_else(|| "(bytes differ)".to_string());
+                let lap = match fail.lap {
+                    LapKind::Default => "default",
+                    LapKind::OneThread => "one thread",
+                };
+                let message = format!("{} [{lap} lap]", fail.message.as_deref().unwrap_or(""));
                 *codes
-                    .entry((fail.cause.label().to_string(), code))
+                    .entry((fail.cause.label().to_string(), code, message))
                     .or_insert(0) += 1;
             }
         }
@@ -1094,9 +1291,12 @@ pub fn render(e: &Envelope<Data>) -> String {
     } else {
         let rows: Vec<Vec<String>> = codes
             .into_iter()
-            .map(|((cause, code), n)| vec![cause, code, n.to_string()])
+            .map(|((cause, code, message), n)| vec![cause, code, message, n.to_string()])
             .collect();
-        s.push_str(&md_table(&["Cause", "Library code", "Files"], &rows));
+        s.push_str(&md_table(
+            &["Cause", "Library code", "Library message", "Files"],
+            &rows,
+        ));
     }
 
     s.push_str("\n## Marker scan, files\n\n");
@@ -1107,7 +1307,7 @@ pub fn render(e: &Envelope<Data>) -> String {
         "four components",
         "restart interval",
         "MPF",
-        "gain-map XMP",
+        "gain-map marker",
         "Adobe APP14",
         "bytes after EOI",
         "over limit",
@@ -1131,7 +1331,7 @@ pub fn render(e: &Envelope<Data>) -> String {
             }));
             r.push(count(&|sc| sc.restart_interval));
             r.push(count(&|sc| sc.mpf));
-            r.push(count(&|sc| sc.gain_map_xmp));
+            r.push(count(&|sc| sc.gain_map_marker));
             r.push(count(&|sc| sc.adobe));
             r.push(count(&|sc| sc.trailing_bytes > 0));
             r.push(count(&|sc| sc.trailing_bytes > d.trailing_limit_bytes));
@@ -1191,7 +1391,7 @@ mod tests {
         );
         assert!(b.eoi_found && b.trailing_bytes == 0 && b.problem.is_none());
         assert_eq!(b.scans, 1);
-        assert!(!b.restart_interval && !b.mpf && !b.gain_map_xmp);
+        assert!(!b.restart_interval && !b.mpf && !b.gain_map_marker);
         let p = marker_scan(&progressive(40, 24));
         assert_eq!(p.frame.expect("frame").kind, FrameKind::Progressive);
         assert!(p.scans > 1 && p.eoi_found);
@@ -1222,7 +1422,7 @@ mod tests {
         }
         j.extend_from_slice(&base[2..]);
         let s = marker_scan(&j);
-        assert!(s.mpf && s.gain_map_xmp && s.adobe && s.restart_interval);
+        assert!(s.mpf && s.gain_map_marker && s.adobe && s.restart_interval);
         assert!(s.frame.is_some() && s.eoi_found);
 
         // Truncated at every length: never a panic, always an answer.
@@ -1360,7 +1560,7 @@ mod tests {
             }),
             restart_interval: false,
             mpf: false,
-            gain_map_xmp: false,
+            gain_map_marker: false,
             adobe: false,
             scans: 1,
             eoi_found: true,
@@ -1369,115 +1569,316 @@ mod tests {
         }
     }
 
-    fn code(c: ExitCode) -> Fail {
+    fn code(c: ExitCode, message: &str) -> Fail {
         Fail::Code {
             code: c,
+            message: message.to_string(),
             decode: false,
         }
+    }
+
+    fn classify_default(fail: &Fail, scan: &Scan, f: &EnabledFeatures) -> Failure {
+        classify(fail, LapKind::Default, scan, f)
     }
 
     #[test]
     fn each_branch_of_the_classification() {
         let f = write_features();
         let plain = scan_of(Some((FrameKind::Baseline, 3, 100, 100)));
-        let cause = |fail: Fail, scan: &Scan| classify(&fail, scan, &f);
+        let cause = |fail: Fail, scan: &Scan| classify_default(&fail, scan, &f).cause;
+        let uj = |m: &str| code(ExitCode::UnsupportedJpeg, m);
         // The exit code decides first.
         assert_eq!(
-            cause(code(ExitCode::Unsupported4Colors), &plain).cause,
+            cause(code(ExitCode::Unsupported4Colors, ""), &plain),
             Cause::FourComponents
         );
         assert_eq!(
-            cause(code(ExitCode::ProgressiveUnsupported), &plain).cause,
+            cause(code(ExitCode::ProgressiveUnsupported, ""), &plain),
             Cause::Progressive
         );
+        for c in [
+            ExitCode::VerificationContentMismatch,
+            ExitCode::VerificationLengthMismatch,
+        ] {
+            assert_eq!(cause(code(c, ""), &plain), Cause::VerificationMismatch);
+        }
+        assert_eq!(cause(Fail::Mismatch, &plain), Cause::VerificationMismatch);
         assert_eq!(
-            cause(code(ExitCode::VerificationContentMismatch), &plain).cause,
-            Cause::VerificationMismatch
+            classify_default(&Fail::Mismatch, &plain, &f).exit_code,
+            None
+        );
+        // UnsupportedJpeg: the message first.
+        assert_eq!(
+            cause(
+                uj("sof9 marker found, image is coded arithm. sequential"),
+                &plain
+            ),
+            Cause::Arithmetic
         );
         assert_eq!(
-            cause(code(ExitCode::VerificationLengthMismatch), &plain).cause,
-            Cause::VerificationMismatch
+            cause(uj("image dimensions larger than 16386x16386"), &plain),
+            Cause::DimensionCap
         );
         assert_eq!(
-            cause(Fail::Mismatch, &plain).cause,
-            Cause::VerificationMismatch
+            cause(
+                uj("file is too large to encode, increase max_jpeg_file_size"),
+                &plain
+            ),
+            Cause::TrailingData
         );
-        assert_eq!(cause(Fail::Mismatch, &plain).exit_code, None);
+        for m in [
+            "progress can't have two DC first stages",
+            "progress must start with DC stage",
+            "progressive encoding range was invalid 3 to 70",
+            "spectral selection parameter out of range",
+            "successive approximation parameter out of range",
+        ] {
+            assert_eq!(cause(uj(m), &plain), Cause::ProgressiveRejected, "{m}");
+        }
         // Then the scan.
         let arith = scan_of(Some((FrameKind::Arithmetic, 3, 100, 100)));
         assert_eq!(
-            cause(code(ExitCode::UnsupportedJpeg), &arith).cause,
+            cause(uj("unknown marker found: FF C9"), &arith),
             Cause::Arithmetic
         );
         let cmyk = scan_of(Some((FrameKind::Baseline, 4, 100, 100)));
-        assert_eq!(
-            cause(code(ExitCode::UnsupportedJpeg), &cmyk).cause,
-            Cause::FourComponents
-        );
+        assert_eq!(cause(uj("x"), &cmyk), Cause::FourComponents);
         let big = scan_of(Some((FrameKind::Baseline, 3, 20000, 100)));
-        assert_eq!(
-            cause(code(ExitCode::UnsupportedJpeg), &big).cause,
-            Cause::DimensionCap
-        );
+        assert_eq!(cause(uj("x"), &big), Cause::DimensionCap);
         let tall = scan_of(Some((FrameKind::Baseline, 3, 100, 16387)));
+        assert_eq!(cause(uj("x"), &tall), Cause::DimensionCap);
+        // Not explained: lossless, differential, a progressive frame, 12-bit data.
+        for kind in [
+            FrameKind::Lossless,
+            FrameKind::Differential,
+            FrameKind::Progressive,
+        ] {
+            let s = scan_of(Some((kind, 3, 100, 100)));
+            assert_eq!(
+                cause(uj("sof3 marker found, image is coded lossless"), &s),
+                Cause::Other
+            );
+        }
         assert_eq!(
-            cause(code(ExitCode::UnsupportedJpeg), &tall).cause,
-            Cause::DimensionCap
+            cause(uj("12 bit data precision is not supported"), &plain),
+            Cause::Other
         );
-        let mut mpf = plain.clone();
-        mpf.mpf = true;
-        assert_eq!(
-            cause(code(ExitCode::UnsupportedJpeg), &mpf).cause,
-            Cause::GainMap
-        );
-        let mut xmp = plain.clone();
-        xmp.gain_map_xmp = true;
-        assert_eq!(
-            cause(code(ExitCode::InvalidPadding), &xmp).cause,
-            Cause::GainMap
-        );
+        // Gain-map, multi-picture and trailing data explain no failure, whatever the code.
+        let mut busy = plain.clone();
+        busy.mpf = true;
+        busy.gain_map_marker = true;
+        busy.trailing_bytes = TRAILING_LIMIT + 1;
+        for c in [
+            ExitCode::UnsupportedJpeg,
+            ExitCode::InvalidPadding,
+            ExitCode::CoefficientOutOfRange,
+            ExitCode::ShortRead,
+            ExitCode::SamplingBeyondTwoUnsupported,
+        ] {
+            let o = classify_default(&code(c, "m"), &busy, &f);
+            assert_eq!(o.cause, Cause::Other, "{c:?}");
+            assert_eq!(o.exit_code, Some(format!("{c:?}")));
+            assert_eq!(o.message.as_deref(), Some("m"));
+        }
+        // Only the other codes keep the code of a file with a progressive frame.
         let prog = scan_of(Some((FrameKind::Progressive, 3, 100, 100)));
         assert_eq!(
-            cause(code(ExitCode::UnsupportedJpeg), &prog).cause,
-            Cause::Other,
-            "a progressive frame alone explains nothing: the features accept it"
+            cause(code(ExitCode::CoefficientOutOfRange, "m"), &prog),
+            Cause::Other
         );
-        let mut trailing = plain.clone();
-        trailing.trailing_bytes = TRAILING_LIMIT + 1;
-        assert_eq!(
-            cause(code(ExitCode::UnsupportedJpeg), &trailing).cause,
-            Cause::TrailingData
-        );
-        trailing.trailing_bytes = TRAILING_LIMIT;
-        let o = cause(code(ExitCode::UnsupportedJpeg), &trailing);
-        assert_eq!(o.cause, Cause::Other, "the limit itself is not over it");
-        // Nothing explains it: other, with the library's name.
-        let o = cause(code(ExitCode::SamplingBeyondTwoUnsupported), &plain);
-        assert_eq!(
-            (o.cause, o.exit_code.as_deref()),
-            (Cause::Other, Some("SamplingBeyondTwoUnsupported"))
-        );
-        let none = scan_of(None);
-        assert_eq!(cause(code(ExitCode::ShortRead), &none).cause, Cause::Other);
         // Panics and decode-side errors.
-        let o = cause(Fail::Panic { decode: false }, &plain);
+        let o = classify_default(&Fail::Panic { decode: false }, &plain, &f);
         assert_eq!(
-            (o.cause, o.exit_code.as_deref()),
-            (Cause::Other, Some("panic"))
+            (o.cause, o.exit_code.as_deref(), o.message),
+            (Cause::Other, Some("panic"), None)
         );
-        let o = cause(Fail::Panic { decode: true }, &plain);
+        let o = classify_default(&Fail::Panic { decode: true }, &plain, &f);
         assert_eq!(o.exit_code.as_deref(), Some("decode:panic"));
-        let o = cause(
-            Fail::Code {
-                code: ExitCode::StreamInconsistent,
-                decode: true,
-            },
-            &arith,
-        );
+        let dec = |c| Fail::Code {
+            code: c,
+            message: "bad".to_string(),
+            decode: true,
+        };
+        let o = classify_default(&dec(ExitCode::StreamInconsistent), &arith, &f);
         assert_eq!(
             (o.cause, o.exit_code.as_deref()),
             (Cause::Other, Some("decode:StreamInconsistent"))
         );
+        let o = classify(
+            &dec(ExitCode::VerificationContentMismatch),
+            LapKind::OneThread,
+            &arith,
+            &f,
+        );
+        assert_eq!(o.cause, Cause::VerificationMismatch);
+        assert_eq!(o.lap, LapKind::OneThread);
+    }
+
+    #[test]
+    fn library_messages_lose_their_context_and_stay_plain() {
+        assert_eq!(
+            clean_message(
+                "progress can't have two DC first stages\n at C:\\Users\\x\\a.rs:1:2\n at b"
+            ),
+            "progress can't have two DC first stages"
+        );
+        assert_eq!(clean_message(""), "");
+        assert_eq!(clean_message("caf\u{e9} \u{1}x"), "caf x");
+        assert_eq!(clean_message(&"a".repeat(500)).len(), 200);
+    }
+
+    #[test]
+    fn exit_code_names_match_the_library() {
+        for c in [
+            ExitCode::AssertionFailure,
+            ExitCode::ShortRead,
+            ExitCode::Unsupported4Colors,
+            ExitCode::CoefficientOutOfRange,
+            ExitCode::StreamInconsistent,
+            ExitCode::ProgressiveUnsupported,
+            ExitCode::SamplingBeyondTwoUnsupported,
+            ExitCode::VersionUnsupported,
+            ExitCode::OsError,
+            ExitCode::UnsupportedJpeg,
+            ExitCode::UnsupportedJpegWithZeroIdct0,
+            ExitCode::InvalidResetCode,
+            ExitCode::InvalidPadding,
+            ExitCode::BadLeptonFile,
+            ExitCode::ChannelFailure,
+            ExitCode::IntegerCastOverflow,
+            ExitCode::VerificationLengthMismatch,
+            ExitCode::VerificationContentMismatch,
+            ExitCode::SyntaxError,
+            ExitCode::FileNotFound,
+            ExitCode::ExternalVerificationFailed,
+            ExitCode::OutOfMemory,
+        ] {
+            assert!(known_exit_code(&code_name(c)), "{c:?}");
+            assert!(known_exit_code(&format!("decode:{c:?}")));
+        }
+        assert!(known_exit_code("panic") && known_exit_code("decode:panic"));
+        assert!(!known_exit_code("Bogus") && !known_exit_code("decode:"));
+    }
+
+    #[test]
+    fn a_second_lap_failure_is_marked() {
+        // A one-thread setting that cannot work while the default one does.
+        let f = write_features();
+        let mut one = f.clone();
+        one.max_jpeg_width = 8;
+        one.max_jpeg_height = 8;
+        let r = measure(&baseline(32, 32), &f, &one, &nothing);
+        let fail = r.failure.expect("fails");
+        assert_eq!(fail.lap, LapKind::OneThread);
+        assert_eq!(
+            fail.message
+                .as_deref()
+                .map(|m| m.starts_with("image dimensions")),
+            Some(true)
+        );
+        // And the default lap's failure says so.
+        let mut tight = f.clone();
+        tight.max_jpeg_width = 8;
+        let r = measure(&baseline(32, 32), &tight, &tight, &nothing);
+        assert_eq!(r.failure.expect("fails").lap, LapKind::Default);
+    }
+
+    #[test]
+    fn the_scan_survives_hostile_input() {
+        let ff = 0xFF;
+        let cases: Vec<Vec<u8>> = vec![
+            vec![ff, 0xD8, ff, 0xE0, 0, 0],
+            vec![ff, 0xD8, ff, 0xE0, 0, 1],
+            vec![ff, 0xD8, ff, 0xE0, 0xFF, 0xFF, 1, 2],
+            vec![ff, 0xD8, ff, ff, ff, ff, ff, ff],
+            vec![ff, 0xD8, ff, 0xE1],
+            vec![ff, 0xD8, ff, 0xE1, 0],
+            vec![ff, 0xD8, ff, 0xE1, 0, 2],
+            vec![ff, 0xD8, ff, 0xDA, 0, 2, ff],
+            vec![ff, 0xD8, ff, 0xDA, 0, 2, ff, 0],
+            vec![ff, 0xD8, ff, 0xC0, 0, 3, 8],
+            vec![ff, 0xD8, ff, 0xDD, 0, 2],
+            vec![ff, 0xD8],
+            vec![ff],
+            vec![],
+        ];
+        for c in &cases {
+            let s = marker_scan(c);
+            assert!(!s.eoi_found || c.len() > 2, "{c:?}");
+        }
+        assert!(marker_scan(&cases[0]).problem.is_some());
+        assert!(marker_scan(&cases[2]).problem.is_some());
+        // Seeded random bytes, with and without a JPEG start.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..2000 {
+            let len = (next() % 300) as usize;
+            let mut v: Vec<u8> = (0..len)
+                .map(|_| match next() % 4 {
+                    0 => 0xFF,
+                    1 => 0,
+                    _ => (next() >> 8) as u8,
+                })
+                .collect();
+            if round % 2 == 0 {
+                v.splice(0..0, [0xFF, 0xD8]);
+            }
+            let s = marker_scan(&v);
+            assert!(s.trailing_bytes <= v.len() as u64);
+        }
+        // Random damage to a real file.
+        let base = baseline(24, 24);
+        for _ in 0..300 {
+            let mut v = base.clone();
+            for _ in 0..3 {
+                let at = (next() % v.len() as u64) as usize;
+                v[at] = (next() >> 8) as u8;
+            }
+            let _ = marker_scan(&v);
+        }
+    }
+
+    #[test]
+    fn gain_map_markers_of_all_three_kinds_are_detected() {
+        let base = baseline(16, 16);
+        let with = |marker: u8, payload: &[u8]| {
+            let mut j = vec![0xFF, 0xD8, 0xFF, marker];
+            j.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+            j.extend_from_slice(payload);
+            j.extend_from_slice(&base[2..]);
+            marker_scan(&j)
+        };
+        assert!(with(0xE1, b"xmp hdrgm:Version=1").gain_map_marker);
+        assert!(with(0xE1, b"xmp xmlns:HDRGainMap=x").gain_map_marker);
+        let iso = with(0xE2, b"urn:iso:std:iso:ts:21496:-1\0rest");
+        assert!(iso.gain_map_marker && !iso.mpf);
+        assert!(!with(0xE1, b"plain exif").gain_map_marker);
+    }
+
+    #[test]
+    fn a_file_with_a_gain_map_marker_that_recompresses_counts_as_such_in_the_aggregate() {
+        let (f, one) = pair();
+        let base = baseline(32, 32);
+        let mut j = vec![0xFF, 0xD8, 0xFF, 0xE2];
+        let payload = b"MPF\0abcd";
+        j.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+        j.extend_from_slice(payload);
+        j.extend_from_slice(&base[2..]);
+        j.extend_from_slice(&baseline(16, 16));
+        let r = measure(&j, &f, &one, &nothing);
+        assert!(r.failure.is_none(), "{:?}", r.failure);
+        let a = Agg::of(&[&r]);
+        assert_eq!(
+            (a.ok_files, a.ok_multi_files, a.ok_multi_bytes),
+            (1, 1, r.bytes)
+        );
+        assert_eq!(a.ok_after_eoi, r.scan.trailing_bytes);
+        assert!(a.ok_after_eoi > 0);
     }
 
     #[test]
@@ -1649,6 +2050,8 @@ mod tests {
         bad.data.classes[0].files[0].failure = Some(Failure {
             cause: Cause::Arithmetic,
             exit_code: None,
+            message: None,
+            lap: LapKind::Default,
         });
         assert!(check(&bad).iter().any(|p| p.contains("exactly one")));
         let mut bad = env.clone();
@@ -1657,7 +2060,27 @@ mod tests {
         }
         assert!(check(&bad)
             .iter()
-            .any(|p| p.contains("not supported by the file's marker scan")));
+            .any(|p| p.contains("not supported by the exit code")));
+        let mut bad = env.clone();
+        if let Some(f) = bad.data.classes[0].files[2].failure.as_mut() {
+            f.exit_code = Some("NotACode".to_string());
+        }
+        assert!(check(&bad).iter().any(|p| p.contains("not a name")));
+        let mut bad = env.clone();
+        if let Some(f) = bad.data.classes[0].files[2].failure.as_mut() {
+            f.cause = Cause::VerificationMismatch;
+        }
+        assert!(check(&bad)
+            .iter()
+            .any(|p| p.contains("not supported by the exit code")));
+        let mut bad = env.clone();
+        if let Some(f) = bad.data.classes[0].files[2].failure.as_mut() {
+            f.message = Some("two\nlines".to_string());
+        }
+        assert!(check(&bad).iter().any(|p| p.contains("failure/message")));
+        let mut bad = env.clone();
+        bad.data.one_thread_pool = "x".to_string();
+        assert!(check(&bad).iter().any(|p| p.contains("one_thread_pool")));
         let mut bad = env.clone();
         bad.data.features.progressive = false;
         assert!(check(&bad).iter().any(|p| p.contains("/data/features")));
