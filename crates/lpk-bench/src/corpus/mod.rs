@@ -174,7 +174,7 @@
 //! `max_attempts` (attempts per request, at least 1) and `max_delay_ms` (cap on one back-off
 //! wait, at least 1). Without them the defaults apply (5 attempts, waits of 2, 4, 8 and 16 s,
 //! capped at 60 s). `Retry-After` is still honoured, and a value above the global limit still
-//! fails the download. Zero values are rejected when the registry is loaded. `archive.org` is
+//! fails the download. Values outside 1..=20 attempts and 1..=900000 ms are rejected when the registry is loaded. `archive.org` is
 //! configured to ride out an outage of some ten minutes in total.
 //!
 //! API requests of list resolvers (`Ctx::api_get`) go through the same pacing and retry rules

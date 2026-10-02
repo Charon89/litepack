@@ -6,7 +6,8 @@ name: Corpus smoke build
 #
 # A run only counts as a from-scratch download test when `use_cache` is false (the default).
 #
-# The download cache is saved after every run, also a failed one, under a per-run key, so a
+# The download cache is saved after a run that added or changed files, also a failed one, under
+# a per-run-attempt key (run id and attempt, since "Re-run jobs" keeps the run id), so a
 # retry after a host outage does not fetch everything again. With `use_cache` the newest cache
 # for the same bench/corpus.lock is restored. A partial cache is safe: the builder re-checks
 # every cached file against the lock and fetches whatever is missing.
@@ -60,24 +61,48 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: bench/corpus/.cache
-          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}-${{ github.run_id }}
+          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             corpus-downloads-${{ hashFiles('bench/corpus.lock') }}-
+      # A listing (name and size) of the download cache before the builds, to save a new cache
+      # only when this run changed it. Partial downloads (.part) are not counted.
+      - name: List the download cache before the builds
+        run: |
+          mkdir -p bench/corpus/.cache
+          (cd bench/corpus/.cache && find . -type f ! -name '*.part' -printf '%P %s\n' | LC_ALL=C sort) > "$RUNNER_TEMP/cache-before.txt"
+          echo "files before: $(wc -l < "$RUNNER_TEMP/cache-before.txt")"
       - name: Build lpk-bench
         run: cargo build --release --locked -p lpk-bench
+      # Step timeouts sit below the job timeout: a timed-out step fails (the save step below
+      # still runs), whereas a timed-out job is cancelled and nothing after it runs.
       - name: Build the small corpus
+        timeout-minutes: 80
         run: ./target/release/lpk-bench corpus build --profile small
-      # Saved even when the build step failed (a partial cache is safe, see the header). The key
-      # is unique per run, so it never collides with the cache that was restored.
-      - name: Save the corpus download cache
+      - name: Check whether the builds changed the download cache
+        id: dl-changed
         if: ${{ !cancelled() }}
+        run: |
+          (cd bench/corpus/.cache && find . -type f ! -name '*.part' -printf '%P %s\n' | LC_ALL=C sort) > "$RUNNER_TEMP/cache-after.txt"
+          if cmp -s "$RUNNER_TEMP/cache-before.txt" "$RUNNER_TEMP/cache-after.txt"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "download cache unchanged: not saving"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "download cache changed: saving"
+          fi
+      # Saved even when the build step failed (a partial cache is safe, see the header), but only
+      # when this run changed it. The key is unique per run attempt, so it never collides with the
+      # cache that was restored or with an earlier attempt of the same run.
+      - name: Save the corpus download cache
+        if: ${{ !cancelled() && steps.dl-changed.outputs.changed == 'true' }}
         uses: actions/cache/save@v6
         with:
           path: bench/corpus/.cache
-          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}-${{ github.run_id }}
+          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Keep the first manifest
         run: cp bench/corpus/small/manifest.json first-manifest.json
       - name: Rebuild the small corpus from scratch
+        timeout-minutes: 30
         run: |
           rm -rf bench/corpus/small
           ./target/release/lpk-bench corpus build --profile small

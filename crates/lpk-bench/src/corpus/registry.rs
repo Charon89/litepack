@@ -419,6 +419,11 @@ pub struct HostSpec {
     pub max_delay_ms: Option<u64>,
 }
 
+/// Largest `max_attempts` a `[[host]]` may set.
+const MAX_HOST_ATTEMPTS: u32 = 20;
+/// Largest `max_delay_ms` a `[[host]]` may set: the downloader's `Retry-After` limit (900 s).
+const MAX_HOST_DELAY_MS: u64 = 900_000;
+
 /// All sources, in file order (the build runs them in this order).
 #[derive(Debug, Clone, Default)]
 pub struct Registry {
@@ -521,17 +526,17 @@ impl Registry {
             if h.max_mbit_per_s == Some(0) {
                 bail!("host `{}`: max_mbit_per_s must be positive", h.name);
             }
-            if h.max_attempts == Some(0) {
-                bail!("host `{}`: max_attempts must be positive", h.name);
+            if !matches!(h.max_attempts, None | Some(1..=MAX_HOST_ATTEMPTS)) {
+                bail!(
+                    "host `{}`: max_attempts must be between 1 and {MAX_HOST_ATTEMPTS}",
+                    h.name
+                );
             }
-            if h.max_delay_ms == Some(0) {
-                bail!("host `{}`: max_delay_ms must be positive", h.name);
-            }
-            if h.max_attempts == Some(0) {
-                bail!("host `{}`: max_attempts must be positive", h.name);
-            }
-            if h.max_delay_ms == Some(0) {
-                bail!("host `{}`: max_delay_ms must be positive", h.name);
+            if !matches!(h.max_delay_ms, None | Some(1..=MAX_HOST_DELAY_MS)) {
+                bail!(
+                    "host `{}`: max_delay_ms must be between 1 and {MAX_HOST_DELAY_MS}",
+                    h.name
+                );
             }
         }
         let mut ids = BTreeSet::new();
@@ -1039,7 +1044,15 @@ max_files = 3
         let plain = Registry::parse(&host("")).expect("plain");
         assert_eq!(plain.hosts[0].max_attempts, None);
         assert_eq!(plain.hosts[0].max_delay_ms, None);
-        for bad in ["max_attempts = 0", "max_delay_ms = 0", "max_attempts = -1"] {
+        assert!(Registry::parse(&host("max_attempts = 20\nmax_delay_ms = 900000")).is_ok());
+        for bad in [
+            "max_attempts = 0",
+            "max_delay_ms = 0",
+            "max_attempts = -1",
+            "max_attempts = 21",
+            "max_delay_ms = 900001",
+            "max_delay_ms = 1200000",
+        ] {
             assert!(Registry::parse(&host(bad)).is_err(), "{bad}");
         }
     }
