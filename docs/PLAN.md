@@ -32,6 +32,7 @@ Goal: a reproducible corpus + harness that measures every claim in `docs/LitePac
 - [~] Peak RSS: Windows Job Object (`windows` crate: `JOB_OBJECT_LIMIT_INFORMATION`/`QueryInformationJobObject` → `PeakProcessMemoryUsed`); Linux `getrusage`/`/usr/bin/time -v`.
 - [~] Results: `bench/results/<date>-<host>/<tool>-<setting>-<class>.json` with a schema file `bench/results/schema.json`; `bench/tools.toml` records tool versions.
 - Acceptance: on the `small` profile all installed tools complete with 100% round-trip verification; a second run differs by < 3% in time; results validate against the schema.
+- Note: "Peak RSS" is published as defined in D-19 (item 1), and `bench/tools.toml` is the tool catalogue while per-machine versions go to each results directory's `tools.json` (D-19 item 2).
 - Note: started 2026-10-02 while P0-2's `full` profile is still unpinned — the runner needs only the `small` profile and the manifest format; `full` is needed for P0-5.
 
 ### P0-4 Component probes (the headroom experiments) — owner: implementer (sonnet), 4 probes may run as parallel worktree subagents
