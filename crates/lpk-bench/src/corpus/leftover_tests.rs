@@ -31,6 +31,7 @@ fn opts(root: &Path) -> BuildOptions {
         git_program: None,
         ffmpeg_program: None,
         repin: Vec::new(),
+        list_only: false,
         allow_unavailable: false,
     }
 }

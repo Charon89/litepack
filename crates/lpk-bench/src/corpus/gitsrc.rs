@@ -677,6 +677,7 @@ mod tests {
             allow_unavailable: false,
             ffmpeg_program: None,
             repin: Vec::new(),
+            list_only: false,
         };
         let report = build_corpus(&opts, &fetcher).expect("build");
         assert_eq!(report.skipped.len(), 1);

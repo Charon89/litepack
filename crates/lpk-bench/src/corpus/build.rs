@@ -18,7 +18,7 @@ use super::extract::{check_listing, extract, sanitize_path, Selection};
 use super::fetch::{
     repin_hint, Artifact, DownloadError, Downloader, Expect, Fetcher, Politeness, RetryPolicy,
 };
-use super::lock::{Lock, LockEntry};
+use super::lock::{Lock, LockEntry, RunLock};
 use super::manifest::{
     now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped, SourceAccount, Summary, Unavailable,
 };
@@ -62,6 +62,8 @@ pub struct BuildOptions {
     /// `--repin`: source ids (or `all`) whose pins are forgotten and fetched again. Needs
     /// `update_lock`.
     pub repin: Vec<String>,
+    /// `--list-only`: resolve and save the listings, download nothing (see [`list_only`]).
+    pub list_only: bool,
 }
 
 /// Result of a successful build.
@@ -140,6 +142,8 @@ pub struct Ctx<'a> {
     reused: usize,
     /// When the working lock was last saved.
     last_save: std::time::Instant,
+    /// Sources named by `--repin`: their cached files are not trusted, everything is fetched.
+    repinning: BTreeSet<String>,
 }
 
 /// Pins recorded between two saves of the lock while a list source is being pinned.
@@ -181,6 +185,7 @@ impl<'a> Ctx<'a> {
             unsaved: 0,
             reused: 0,
             last_save: std::time::Instant::now(),
+            repinning: BTreeSet::new(),
         }
     }
 }
@@ -303,6 +308,28 @@ impl Ctx<'_> {
         } else {
             None
         };
+        // A cached file whose SHA-1 equals the one the API lists for it is the listed file: take
+        // it instead of downloading it again (this is what makes a re-resolved listing cheap).
+        if self.update_lock && existing.is_none() && !self.repinning.contains(&source.id) {
+            if let Some(want) = meta.and_then(|m| m.extra.get("sha1")) {
+                let cached = self.downloader.cache_path(&source.id, url);
+                let same = cached.is_file()
+                    && sha1_file(&cached).is_ok_and(|got| want.eq_ignore_ascii_case(&got));
+                if same {
+                    let (bytes, blake3) = super::fetch::hash_file(&cached)
+                        .map_err(|e| DownloadError::Io(format!("source `{}`: {e}", source.id)))?;
+                    let a = Artifact {
+                        path: cached,
+                        bytes,
+                        blake3,
+                        cached: true,
+                    };
+                    self.reused += 1;
+                    self.record_new(source, url, meta, &a)?;
+                    return Ok(a);
+                }
+            }
+        }
         let expect = if self.update_lock {
             match &existing {
                 Some(pin) => Expect::Pinned(pin),
@@ -334,25 +361,37 @@ impl Ctx<'_> {
                 if !want.eq_ignore_ascii_case(&got) {
                     return Err(DownloadError::Mismatch(format!(
                         "source `{}`: {url} has SHA-1 {got} but the API listed {want}; the file \
-                         changed while listing, run --update-lock again",
+                         changed after it was listed (a pin run lists the source again by \
+                         itself and keeps the other pins)",
                         source.id
                     )));
                 }
             }
         }
         if self.update_lock {
-            let mut entry = LockEntry::artifact(&source.id, url, a.bytes, a.blake3.clone());
-            if let Some(m) = meta {
-                entry.path = Some(m.path.clone());
-                entry.licence = m.licence.clone();
-                entry.attribution = m.attribution.clone();
-                entry.extra = m.extra.clone();
-            }
-            self.recorded.push(entry);
-            self.note_recorded()
-                .map_err(|e| DownloadError::Io(format!("source `{}`: {e:#}", source.id)))?;
+            self.record_new(source, url, meta, &a)?;
         }
         Ok(a)
+    }
+
+    /// Record the pin of a freshly verified artifact (`--update-lock`).
+    fn record_new(
+        &mut self,
+        source: &Source,
+        url: &str,
+        meta: Option<&ListedFile>,
+        a: &Artifact,
+    ) -> Result<(), DownloadError> {
+        let mut entry = LockEntry::artifact(&source.id, url, a.bytes, a.blake3.clone());
+        if let Some(m) = meta {
+            entry.path = Some(m.path.clone());
+            entry.licence = m.licence.clone();
+            entry.attribution = m.attribution.clone();
+            entry.extra = m.extra.clone();
+        }
+        self.recorded.push(entry);
+        self.note_recorded()
+            .map_err(|e| DownloadError::Io(format!("source `{}`: {e:#}", source.id)))
     }
 
     /// Count a recorded pin and save the working lock every [`CHECKPOINT_EVERY`] pins or
@@ -410,6 +449,7 @@ impl Ctx<'_> {
     fn forget_pins(&mut self, ids: &[&str]) -> Result<()> {
         for id in ids {
             self.work.replace_source(self.profile, id, Vec::new());
+            self.repinning.insert((*id).to_string());
         }
         if let Some(path) = self.lock_path.clone() {
             self.work.save(&path)?;
@@ -429,26 +469,99 @@ impl Ctx<'_> {
 
     /// `--update-lock`: save a freshly resolved listing in the lock before any download. The
     /// entries carry the API's metadata but no hash yet; a normal build refuses them.
+    ///
+    /// A hashed pin of the same URL with the same API sha1 is kept (its hash is carried over),
+    /// so resolving a source again re-downloads only what changed.
     fn save_listing(&mut self, source: &Source, items: &[ListedFile]) -> Result<()> {
         let Some(path) = self.lock_path.clone() else {
             return Ok(());
         };
         let entries = items
             .iter()
-            .map(|i| LockEntry {
-                attribution: i.attribution.clone(),
-                blake3: None,
-                bytes: None,
-                commit: None,
-                extra: i.extra.clone(),
-                licence: i.licence.clone(),
-                path: Some(i.path.clone()),
-                source: source.id.clone(),
-                url: i.url.clone(),
+            .map(|i| {
+                let kept = self
+                    .work
+                    .get(self.profile, &source.id, &i.url)
+                    .filter(|o| o.blake3.is_some() && o.bytes.is_some())
+                    .filter(|o| o.extra.get("sha1") == i.extra.get("sha1"));
+                LockEntry {
+                    attribution: i.attribution.clone(),
+                    blake3: kept.and_then(|o| o.blake3.clone()),
+                    bytes: kept.and_then(|o| o.bytes),
+                    commit: None,
+                    extra: i.extra.clone(),
+                    licence: i.licence.clone(),
+                    path: Some(i.path.clone()),
+                    source: source.id.clone(),
+                    url: i.url.clone(),
+                }
             })
             .collect();
         self.work.replace_source(self.profile, &source.id, entries);
         self.work.save(&path)
+    }
+
+    /// `--update-lock`, list kinds: the listing to pin. A listing saved in the lock is used as it
+    /// is, without an API call, when it has `count` files and was made for the same list
+    /// specification (`fingerprint`; a pin without one is accepted); otherwise the source is
+    /// resolved and the listing saved. Returns the listing and whether it was resolved now.
+    fn listing_for_update(
+        &mut self,
+        source: &Source,
+        fingerprint: &str,
+        count: usize,
+        resolve: &dyn Fn(&mut Ctx<'_>) -> Result<Vec<ListedFile>>,
+    ) -> Result<(Vec<ListedFile>, bool)> {
+        let saved = self.saved_listing(source)?;
+        if let Some(saved) = &saved {
+            if let Some(other) = saved
+                .iter()
+                .filter_map(|i| i.extra.get("spec"))
+                .find(|s| *s != fingerprint)
+            {
+                bail!(
+                    "source `{id}`: its registry entry changed since the listing in \
+                     bench/corpus.lock was saved (list specification {other}, now {fingerprint}). \
+                     Run with `--update-lock --repin {id}` to list and download it again",
+                    id = source.id
+                );
+            }
+            if saved.len() == count {
+                eprintln!(
+                    "  continuing from the listing saved in the lock ({} files), no API call",
+                    saved.len()
+                );
+                self.check_listing(source, saved)?;
+                return Ok((saved.clone(), false));
+            }
+            eprintln!(
+                "  the saved listing has {} files but the registry wants {count}; resolving again",
+                saved.len()
+            );
+        }
+        Ok((self.relist(source, fingerprint, resolve)?, true))
+    }
+
+    /// Resolve a list source through its API and save the listing (keeping matching hashed pins).
+    fn relist(
+        &mut self,
+        source: &Source,
+        fingerprint: &str,
+        resolve: &dyn Fn(&mut Ctx<'_>) -> Result<Vec<ListedFile>>,
+    ) -> Result<Vec<ListedFile>> {
+        let mut items = resolve(self)?;
+        for i in &mut items {
+            i.extra.insert("spec".to_string(), fingerprint.to_string());
+        }
+        self.check_listing(source, &items)?;
+        // What this run pinned so far belongs to the old listing: merge it, then let the new
+        // listing keep what still matches.
+        for e in std::mem::take(&mut self.recorded) {
+            self.work.upsert(self.profile, e);
+        }
+        self.unsaved = 0;
+        self.save_listing(source, &items)?;
+        Ok(items)
     }
 
     /// The file list of a list-type source in a normal build: its lock entries, sorted by URL.
@@ -582,10 +695,11 @@ fn fetch_items(
             .collect();
         bail!(
             "source `{}`: {} listed file(s) are gone upstream or no longer match their pin:\n{}\n\
-             Either re-pin (`lpk-bench corpus build --profile <p> --update-lock`, which lists the \
-             source again and may change other files) or build without them with \
-             `--allow-unavailable` (they are left out and recorded under `unavailable` in \
-             build-info.json)",
+             Either re-pin: `lpk-bench corpus build --profile <p> --update-lock` fetches what the \
+             cache lacks and, for a file that is gone or changed, lists the source again and \
+             replaces just those pins (`--repin <source-id>` starts over and re-downloads \
+             everything); or build without them with `--allow-unavailable` (they are left out \
+             and recorded under `unavailable` in build-info.json)",
             source.id,
             missing.len(),
             list.join("\n")
@@ -881,32 +995,22 @@ fn resolve_repin<'a>(
     Ok(ids)
 }
 
-/// Build the corpus. `fetcher` supplies bytes for URLs (HTTPS in production, memory in tests).
-pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> {
-    let registry = Registry::load(&opts.sources_path)?;
-    let sources = registry.select(opts.profile, &opts.only)?;
-    if sources.is_empty() {
-        bail!("no sources apply to profile `{}`", opts.profile.name());
-    }
-    let partial = !opts.only.is_empty();
-    let lock = Lock::load(&opts.lock_path)?;
-    let repin_ids = resolve_repin(&opts.repin, &sources, opts.update_lock)?;
-
-    // Fail before touching anything if the request cannot be satisfied.
-    check_derived_inputs(&sources, &opts.out, partial, opts.profile)?;
-    if !opts.update_lock {
-        preflight_pins(&sources, &lock, opts.profile)?;
-    }
-
-    prepare_out(&opts.out, &opts.cache)?;
-    let lock_snapshot = lock.clone();
-    let mut ctx = Ctx {
+/// The shared state of one run. `snapshot` is the lock as read (normal builds verify against
+/// it); under `--update-lock` the working lock starts as `lock`.
+fn new_ctx<'a>(
+    opts: &BuildOptions,
+    registry: &Registry,
+    fetcher: &'a dyn Fetcher,
+    snapshot: &'a Lock,
+    lock: &Lock,
+) -> Ctx<'a> {
+    Ctx {
         profile: opts.profile,
         update_lock: opts.update_lock,
         out: opts.out.clone(),
         downloader: Downloader::new(fetcher, opts.cache.clone(), opts.retry, opts.profile)
             .with_politeness(Politeness::from_specs(&registry.hosts)),
-        lock: &lock_snapshot,
+        lock: snapshot,
         recorded: Vec::new(),
         used: BTreeSet::new(),
         produced: Vec::new(),
@@ -927,7 +1031,128 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         unsaved: 0,
         reused: 0,
         last_save: std::time::Instant::now(),
+        repinning: BTreeSet::new(),
+    }
+}
+
+/// What `--list-only` found for one source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListingSummary {
+    pub source: String,
+    /// Files in the listing.
+    pub files: usize,
+    /// Sum of the API's sizes (`None` when the API does not report sizes, or the saved listing
+    /// predates them).
+    pub bytes: Option<u64>,
+}
+
+/// `--list-only` (with `--update-lock`): resolve and save the listing of every API-listed source
+/// of the selection (a listing already saved is reused unless `--repin` names the source),
+/// download nothing, and report files and API sizes per source.
+pub fn list_only(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<Vec<ListingSummary>> {
+    ensure!(opts.update_lock, "--list-only needs --update-lock");
+    let registry = Registry::load(&opts.sources_path)?;
+    let sources = registry.select(opts.profile, &opts.only)?;
+    let _run_lock = RunLock::acquire(&opts.lock_path)?;
+    let lock = Lock::load(&opts.lock_path)?;
+    let repin_ids = resolve_repin(&opts.repin, &sources, true)?;
+    std::fs::create_dir_all(&opts.cache)
+        .with_context(|| format!("creating {}", opts.cache.display()))?;
+    let snapshot = lock.clone();
+    let mut ctx = new_ctx(opts, &registry, fetcher, &snapshot, &lock);
+    if !repin_ids.is_empty() {
+        ctx.forget_pins(&repin_ids)?;
+    }
+    let mut out = Vec::new();
+    for source in &sources {
+        let listed = match &source.spec {
+            SourceSpec::CommonsPhotos(spec) => {
+                eprintln!("[{}] {}", source.class, source.id);
+                let fp = list_fingerprint(&source.spec);
+                Some(ctx.listing_for_update(source, &fp, spec.count, &|c| {
+                    super::commons::resolve(c, source, spec)
+                })?)
+            }
+            SourceSpec::ArxivPapers(spec) => {
+                eprintln!("[{}] {}", source.class, source.id);
+                let fp = list_fingerprint(&source.spec);
+                Some(ctx.listing_for_update(source, &fp, spec.count, &|c| {
+                    super::arxiv::resolve(c, source, spec)
+                })?)
+            }
+            _ => None,
+        };
+        let Some((items, _)) = listed else {
+            continue;
+        };
+        let sizes: Vec<Option<u64>> = items
+            .iter()
+            .map(|i| i.extra.get("size").and_then(|s| s.parse().ok()))
+            .collect();
+        out.push(ListingSummary {
+            source: source.id.clone(),
+            files: items.len(),
+            bytes: sizes
+                .iter()
+                .all(Option::is_some)
+                .then(|| sizes.iter().flatten().sum()),
+        });
+    }
+    Ok(out)
+}
+
+/// Version of the selection rules of the API-listed kinds (what a resolver accepts). Bump it when
+/// `commons.rs` or `arxiv.rs` change which files they select, so saved listings made under the
+/// old rules are refused.
+const LIST_RULES_VERSION: u32 = 1;
+
+/// Fingerprint of everything in a list source's registry entry that affects which files it
+/// lists, plus [`LIST_RULES_VERSION`]. Stored as `extra.spec` of every pin the pin run writes;
+/// a pin without it (made before fingerprints existed) is accepted as it is.
+fn list_fingerprint(spec: &SourceSpec) -> String {
+    let text = match spec {
+        SourceSpec::CommonsPhotos(c) => format!(
+            "v{LIST_RULES_VERSION}|commons|{}|{}|{}|{}",
+            c.category, c.count, c.min_bytes, c.max_bytes
+        ),
+        SourceSpec::ArxivPapers(a) => format!(
+            "v{LIST_RULES_VERSION}|arxiv|{}|{}|{:?}|{}",
+            a.from, a.until, a.set, a.count
+        ),
+        _ => String::new(),
     };
+    blake3::hash(text.as_bytes()).to_hex().as_str()[..16].to_string()
+}
+
+/// Build the corpus. `fetcher` supplies bytes for URLs (HTTPS in production, memory in tests).
+pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> {
+    let registry = Registry::load(&opts.sources_path)?;
+    let sources = registry.select(opts.profile, &opts.only)?;
+    if sources.is_empty() {
+        bail!("no sources apply to profile `{}`", opts.profile.name());
+    }
+    let partial = !opts.only.is_empty();
+    ensure!(
+        !opts.list_only,
+        "--list-only is not a build; use `list_only`"
+    );
+    // A pin run is the only writer of the lock for its whole duration.
+    let _run_lock = opts
+        .update_lock
+        .then(|| RunLock::acquire(&opts.lock_path))
+        .transpose()?;
+    let lock = Lock::load(&opts.lock_path)?;
+    let repin_ids = resolve_repin(&opts.repin, &sources, opts.update_lock)?;
+
+    // Fail before touching anything if the request cannot be satisfied.
+    check_derived_inputs(&sources, &opts.out, partial, opts.profile)?;
+    if !opts.update_lock {
+        preflight_pins(&sources, &lock, opts.profile)?;
+    }
+
+    prepare_out(&opts.out, &opts.cache)?;
+    let lock_snapshot = lock.clone();
+    let mut ctx = new_ctx(opts, &registry, fetcher, &lock_snapshot, &lock);
     if !repin_ids.is_empty() {
         eprintln!("re-pinning from scratch: {}", repin_ids.join(", "));
         ctx.forget_pins(&repin_ids)?;
@@ -1203,12 +1428,18 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
             ctx.check_listing(source, &items)?;
             fetch_items(ctx, source, dir, &items, false)
         }
-        SourceSpec::CommonsPhotos(spec) => build_listed(ctx, source, dir, spec.count, |c| {
-            super::commons::resolve(c, source, spec)
-        }),
-        SourceSpec::ArxivPapers(spec) => build_listed(ctx, source, dir, spec.count, |c| {
-            super::arxiv::resolve(c, source, spec)
-        }),
+        SourceSpec::CommonsPhotos(spec) => {
+            let fp = list_fingerprint(&source.spec);
+            build_listed(ctx, source, dir, &fp, spec.count, &|c| {
+                super::commons::resolve(c, source, spec)
+            })
+        }
+        SourceSpec::ArxivPapers(spec) => {
+            let fp = list_fingerprint(&source.spec);
+            build_listed(ctx, source, dir, &fp, spec.count, &|c| {
+                super::arxiv::resolve(c, source, spec)
+            })
+        }
         SourceSpec::GitRepo(spec) => super::gitsrc::build(ctx, source, spec, dir),
         _ => super::derive::build(ctx, source, dir),
     }
@@ -1221,43 +1452,58 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
 /// Under `--update-lock` a listing already saved in the lock (from an earlier, possibly
 /// interrupted run) is used as it is, without an API call, as long as it has `count` files; a
 /// freshly resolved listing is saved (unhashed) before the first download. `--repin` forgets the
-/// saved listing first.
+/// saved listing first. A saved listing made for another list specification (`fingerprint`) is an
+/// error naming `--repin`.
+///
+/// If a listed file turns out to be gone (404/410) or no longer matches the API's sha1 (or its
+/// pin), the saved listing is stale: the source is resolved again in the same run (at most
+/// [`MAX_RESOLVES`] times), every hashed pin whose URL and sha1 reappear is kept, a cached file
+/// with the listed sha1 is taken without a download, and only the rest is fetched.
 fn build_listed(
     ctx: &mut Ctx<'_>,
     source: &Source,
     dir: &Path,
+    fingerprint: &str,
     count: usize,
-    resolve: impl FnOnce(&mut Ctx<'_>) -> Result<Vec<ListedFile>>,
+    resolve: &dyn Fn(&mut Ctx<'_>) -> Result<Vec<ListedFile>>,
 ) -> Result<Vec<ManifestFile>> {
-    let items = if ctx.update_lock() {
-        match ctx.saved_listing(source)? {
-            Some(saved) if saved.len() == count => {
-                eprintln!(
-                    "  continuing from the listing saved in the lock ({} files), no API call",
-                    saved.len()
-                );
-                ctx.check_listing(source, &saved)?;
-                saved
-            }
-            saved => {
-                if let Some(s) = saved {
-                    eprintln!(
-                        "  the saved listing has {} files but the registry wants {count}; \
-                         resolving again",
-                        s.len()
-                    );
-                }
-                let items = resolve(ctx)?;
-                ctx.check_listing(source, &items)?;
-                ctx.save_listing(source, &items)?;
-                items
-            }
+    if !ctx.update_lock() {
+        let items = ctx.listed_pins(source)?;
+        return fetch_items(ctx, source, dir, &items, true);
+    }
+    let (mut items, fresh) = ctx.listing_for_update(source, fingerprint, count, resolve)?;
+    let mut resolves = u32::from(fresh);
+    loop {
+        let err = match fetch_items(ctx, source, dir, &items, true) {
+            Ok(files) => return Ok(files),
+            Err(e) => e,
+        };
+        let stale = matches!(
+            err.downcast_ref::<DownloadError>(),
+            Some(DownloadError::Gone(_) | DownloadError::Mismatch(_))
+        );
+        if !stale {
+            return Err(err);
         }
-    } else {
-        ctx.listed_pins(source)?
-    };
-    fetch_items(ctx, source, dir, &items, true)
+        if resolves >= MAX_RESOLVES {
+            return Err(err.context(format!(
+                "source `{}`: the listing went stale and was resolved {resolves} time(s) in \
+                 this run; run `--update-lock` again to continue, or `--update-lock --repin {}` \
+                 to start over",
+                source.id, source.id
+            )));
+        }
+        eprintln!("  {err:#}\n  the saved listing is stale; listing the source again");
+        // Files copied for the old listing must not clash with the new one.
+        std::fs::remove_dir_all(dir).with_context(|| format!("clearing {}", dir.display()))?;
+        std::fs::create_dir_all(dir)?;
+        items = ctx.relist(source, fingerprint, resolve)?;
+        resolves += 1;
+    }
 }
+
+/// Times a pin run resolves one source (the first listing included) before giving up.
+const MAX_RESOLVES: u32 = 3;
 
 #[cfg(test)]
 mod tests {
@@ -1359,6 +1605,7 @@ url = "{OPT_URL}"
                 allow_unavailable: false,
                 ffmpeg_program: None,
                 repin: Vec::new(),
+                list_only: false,
             }
         }
 
@@ -1825,6 +2072,7 @@ url = "{OPT_URL}"
             unsaved: 0,
             reused: 0,
             last_save: std::time::Instant::now(),
+            repinning: BTreeSet::new(),
         }
     }
 
@@ -1929,6 +2177,7 @@ url = "{OPT_URL}"
             unsaved: 0,
             reused: 0,
             last_save: std::time::Instant::now(),
+            repinning: BTreeSet::new(),
         };
         let source = list_source();
         let target = dir.path().join("t");

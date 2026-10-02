@@ -151,6 +151,23 @@
 //!   the API (a listing of another size is resolved again; changing other settings of such a
 //!   source, e.g. the size window, needs `--repin`). A normal build refuses a listing with
 //!   unhashed entries, naming the source and saying the pin run was not finished.
+//! * A listed file that is gone (404/410) or no longer matches the API's sha1 or its pin makes
+//!   a pin run list that source again in the same run (at most three times): hashed pins whose
+//!   URL and sha1 reappear are kept, a cached file with the listed sha1 is taken without a
+//!   download, and only the rest is fetched.
+//! * Every pin written for an API-listed source carries `extra.spec`, a fingerprint of the
+//!   registry entry's selection settings plus a version number of the selection rules
+//!   (`LIST_RULES_VERSION` in `build.rs`), and commons pins carry `extra.size`, the API size.
+//!   `--update-lock` refuses to continue a listing whose fingerprint differs, naming
+//!   `--repin <id>`; a pin without `spec` (made earlier) is accepted, and a normal build never
+//!   looks at it, so existing pins stay valid and the lock only gains the keys when a source is
+//!   listed again.
+//! * `--update-lock --list-only` resolves and saves the listings of the API-listed sources and
+//!   prints files and API-size sums per source without downloading anything.
+//! * An `--update-lock` run holds `<lock>.run` (created with create-new, removed at exit) so two
+//!   pin runs cannot overwrite each other's pins; a second run fails naming the file, which is
+//!   to be deleted by hand if a run was killed. The lock itself is written through a file
+//!   handle, synced, and renamed over the old one, retrying briefly on sharing violations.
 //!
 //! * Listed files of the API-resolved kinds (`commons-photos`, `arxiv-papers`; never a static
 //!   `files` source): two conditions make a file *unavailable* in a normal build, an HTTP 404 or
@@ -283,6 +300,11 @@ pub struct BuildArgs {
     /// continue with plain --update-lock; repeating --repin starts over
     #[arg(long, value_delimiter = ',', requires = "update_lock")]
     pub repin: Vec<String>,
+    /// With --update-lock: only resolve and save the listings of the API-listed sources
+    /// (commons-photos, arxiv-papers), download nothing, and print per source the number of
+    /// accepted files and the sum of their API sizes
+    #[arg(long, requires = "update_lock")]
+    pub list_only: bool,
     /// Continue without listed files (commons-photos, arxiv-papers) that are gone upstream
     /// (404/410) or no longer match their pin; they are recorded under `unavailable` in
     /// build-info.json. Default: the build fails and names them
@@ -325,6 +347,7 @@ impl BuildArgs {
             allow_unavailable: self.allow_unavailable,
             ffmpeg_program: None,
             repin: self.repin.clone(),
+            list_only: self.list_only,
         }
     }
 }
@@ -332,6 +355,25 @@ impl BuildArgs {
 /// Entry point for `lpk-bench corpus ...`.
 pub fn run(args: CorpusArgs) -> ExitCode {
     match args.command {
+        CorpusCommand::Build(b) if b.list_only => {
+            match HttpFetcher::new().and_then(|f| build::list_only(&b.options(), &f)) {
+                Ok(list) => {
+                    for s in &list {
+                        match s.bytes {
+                            Some(n) => {
+                                println!("{}: {} files, {n} bytes (API sizes)", s.source, s.files)
+                            }
+                            None => println!("{}: {} files, sizes not reported", s.source, s.files),
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         CorpusCommand::Build(b) => {
             let result = HttpFetcher::new().and_then(|f| build::build(&b.options(), &f));
             match result {
@@ -402,6 +444,7 @@ mod tests {
             only: vec![],
             update_lock: false,
             repin: vec![],
+            list_only: false,
             allow_unavailable: false,
             sources: PathBuf::from("s"),
             lock: PathBuf::from("l"),
