@@ -8,6 +8,8 @@ No neural tier in the product (research track only). Full rationale: `docs/LiteP
 
 ## Where things are
 - `docs/PLAN.md` — the ordered task list with acceptance criteria. Work through it top to bottom.
+- `docs/STATUS.md` — where the work stands between sessions: branches in flight, how to resume, open points.
+  Read it first (`git show origin/main:docs/STATUS.md` from a task branch); update it when you stop mid-task.
 - `docs/DECISIONS.md` — decisions already made (do not re-litigate; append new ones).
 - `docs/CORPUS.md` — benchmark corpus specification (Phase 0).
 - `docs/LICENSING.md` — licence allow-list and freedom-to-operate items.
