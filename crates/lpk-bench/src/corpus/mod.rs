@@ -147,14 +147,17 @@
 //!   source-level string otherwise. For the API-resolved kinds the resolved listing is saved
 //!   to the lock before the first download: entries carry the URL and the API's metadata
 //!   (path, licence, attribution, sha1, timestamp) but no `bytes`/`blake3`. A resumed
-//!   `--update-lock` continues from a saved listing of the registry's `count` without calling
-//!   the API (a listing of another size is resolved again; changing other settings of such a
-//!   source, e.g. the size window, needs `--repin`). A normal build refuses a listing with
+//!   `--update-lock` continues from the saved listing without calling the API; changing any
+//!   selection setting of the source (count and size window included) is refused and needs
+//!   `--repin` (only pins made before fingerprints existed are checked by file count alone,
+//!   and a listing of another size is resolved again). A normal build refuses a listing with
 //!   unhashed entries, naming the source and saying the pin run was not finished.
-//! * A listed file that is gone (404/410) or no longer matches the API's sha1 or its pin makes
-//!   a pin run list that source again in the same run (at most three times): hashed pins whose
+//! * A listed file that is gone (404/410) or no longer has the sha1 the API listed makes a pin
+//!   run list that source again in the same run (at most three times): hashed pins whose
 //!   URL and sha1 reappear are kept, a cached file with the listed sha1 is taken without a
-//!   download, and only the rest is fetched.
+//!   download, and only the rest is fetched. Bytes that differ from an existing hashed pin, or
+//!   a source without a sha1 (arXiv), cannot be repaired by listing again: the run fails at
+//!   once, naming `--update-lock --repin <id>`.
 //! * Every pin written for an API-listed source carries `extra.spec`, a fingerprint of the
 //!   registry entry's selection settings plus a version number of the selection rules
 //!   (`LIST_RULES_VERSION` in `build.rs`), and commons pins carry `extra.size`, the API size.

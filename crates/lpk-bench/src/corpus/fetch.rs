@@ -383,6 +383,8 @@ pub enum DownloadError {
     /// The server answered 404 or 410: the file is gone upstream.
     Gone(String),
     Mismatch(String),
+    /// A fresh download does not have the SHA-1 the API listed for it: the listing is stale.
+    Stale(String),
     Io(String),
 }
 
@@ -392,6 +394,7 @@ impl fmt::Display for DownloadError {
             DownloadError::Fetch(m)
             | DownloadError::Gone(m)
             | DownloadError::Mismatch(m)
+            | DownloadError::Stale(m)
             | DownloadError::Io(m) => f.write_str(m),
         }
     }

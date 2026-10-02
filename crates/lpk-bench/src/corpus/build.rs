@@ -355,11 +355,14 @@ impl Ctx<'_> {
             return Ok(a);
         }
         if self.update_lock {
-            if let Some(want) = meta.and_then(|m| m.extra.get("sha1")) {
+            if let Some(want) = meta
+                .and_then(|m| m.extra.get("sha1"))
+                .filter(|s| !s.is_empty())
+            {
                 let got = sha1_file(&a.path)
                     .map_err(|e| DownloadError::Io(format!("source `{}`: {e}", source.id)))?;
                 if !want.eq_ignore_ascii_case(&got) {
-                    return Err(DownloadError::Mismatch(format!(
+                    return Err(DownloadError::Stale(format!(
                         "source `{}`: {url} has SHA-1 {got} but the API listed {want}; the file \
                          changed after it was listed (a pin run lists the source again by \
                          itself and keeps the other pins)",
@@ -1450,13 +1453,14 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
 /// goes through [`Ctx::fetch_listed`].
 ///
 /// Under `--update-lock` a listing already saved in the lock (from an earlier, possibly
-/// interrupted run) is used as it is, without an API call, as long as it has `count` files; a
-/// freshly resolved listing is saved (unhashed) before the first download. `--repin` forgets the
-/// saved listing first. A saved listing made for another list specification (`fingerprint`) is an
-/// error naming `--repin`.
+/// interrupted run) is used as it is, without an API call; a freshly resolved listing is saved
+/// (unhashed) before the first download. `--repin` forgets the saved listing first. A saved
+/// listing made for another list specification (`fingerprint`, which includes `count`) is an
+/// error naming `--repin`; only pins made before fingerprints existed are checked by their file
+/// count, and a listing of another size is resolved again.
 ///
-/// If a listed file turns out to be gone (404/410) or no longer matches the API's sha1 (or its
-/// pin), the saved listing is stale: the source is resolved again in the same run (at most
+/// If a listed file turns out to be gone (404/410) or no longer has the sha1 the API listed, the
+/// saved listing is stale: the source is resolved again in the same run (at most
 /// [`MAX_RESOLVES`] times), every hashed pin whose URL and sha1 reappear is kept, a cached file
 /// with the listed sha1 is taken without a download, and only the rest is fetched.
 fn build_listed(
@@ -1478,11 +1482,31 @@ fn build_listed(
             Ok(files) => return Ok(files),
             Err(e) => e,
         };
-        let stale = matches!(
+        // Listing again helps when a file is gone or no longer has the sha1 the API listed (the
+        // new listing carries the new sha1). It cannot help when bytes differ from an existing
+        // hashed pin (the API's sha1 may be unchanged) or when the source has no sha1 to compare:
+        // those fail at once and point to `--repin`.
+        let has_sha1 = items
+            .iter()
+            .any(|i| i.extra.get("sha1").is_some_and(|s| !s.is_empty()));
+        let relistable = has_sha1
+            && matches!(
+                err.downcast_ref::<DownloadError>(),
+                Some(DownloadError::Gone(_) | DownloadError::Stale(_))
+            );
+        let pin_mismatch = matches!(
             err.downcast_ref::<DownloadError>(),
-            Some(DownloadError::Gone(_) | DownloadError::Mismatch(_))
+            Some(DownloadError::Gone(_) | DownloadError::Stale(_) | DownloadError::Mismatch(_))
         );
-        if !stale {
+        if !relistable {
+            if pin_mismatch {
+                return Err(err.context(format!(
+                    "source `{id}`: listing it again cannot repair this (the bytes differ from \
+                     an existing pin, or the source has no sha1 to compare); run \
+                     `--update-lock --repin {id}`",
+                    id = source.id
+                )));
+            }
             return Err(err);
         }
         if resolves >= MAX_RESOLVES {

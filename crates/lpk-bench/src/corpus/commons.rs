@@ -1110,6 +1110,46 @@ max_bytes = 100
     }
 
     #[test]
+    fn bytes_that_differ_from_a_pin_fail_at_once_pointing_to_repin() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        let fetcher = pinned(root);
+        // The API's sha1 is unchanged but the served bytes are not the pinned ones.
+        fetcher
+            .files
+            .borrow_mut()
+            .insert(file_url("Beta"), vec![b'Q'; 12]);
+        fetcher.calls.borrow_mut().clear();
+        let err = build(&opts_for(root, "o2", "cache2", true), &fetcher).expect_err("mismatch");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--repin wc") && msg.contains("does not match"),
+            "{msg}"
+        );
+        assert_eq!(api_calls(&fetcher), 0, "no relisting");
+    }
+
+    #[test]
+    fn a_source_without_sha1_is_not_listed_again_on_failure() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        std::fs::write(root.join("sources.toml"), REGISTRY).expect("w");
+        let mut a = entry("File:Alpha.jpg", 10, "CC0", "z", "image/jpeg", true);
+        let mut b = entry("File:Beta.jpg", 12, "CC0", "z", "image/jpeg", true);
+        a["imageinfo"][0]["sha1"] = json!("");
+        b["imageinfo"][0]["sha1"] = json!("");
+        let fetcher = api_with(vec![a, b]);
+        fetcher
+            .files
+            .borrow_mut()
+            .insert(file_url("Alpha"), content("File:Alpha.jpg", 10));
+        let err = build(&opts_for(root, "o", "cache", true), &fetcher).expect_err("Beta is gone");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--repin wc") && msg.contains("404"), "{msg}");
+        assert_eq!(api_calls(&fetcher), 1, "listed once, not again");
+    }
+
+    #[test]
     fn a_changed_list_specification_is_refused_with_repin_but_legacy_pins_are_accepted() {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path();

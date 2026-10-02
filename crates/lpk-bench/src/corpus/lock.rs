@@ -199,13 +199,21 @@ impl Lock {
     }
 }
 
+/// A file held by another program: `PermissionDenied`, or on Windows the raw errors 32
+/// (`ERROR_SHARING_VIOLATION`, reported as `Uncategorized` when a held file is created or
+/// renamed) and 33 (`ERROR_LOCK_VIOLATION`).
+fn is_busy(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)))
+}
+
 /// Run `op`, trying again a few times with a short pause while it fails with `PermissionDenied`
 /// (a sharing violation on Windows).
 fn retry_busy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
     let mut attempt = 0u32;
     loop {
         match op() {
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 8 => {
+            Err(e) if is_busy(&e) && attempt < 8 => {
                 attempt += 1;
                 std::thread::sleep(std::time::Duration::from_millis(50 * u64::from(attempt)));
             }
@@ -264,6 +272,34 @@ impl Drop for RunLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn save_waits_for_a_temporary_file_held_without_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("corpus.lock");
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(dir.path().join("corpus.lock.tmp"))
+            .expect("hold the temporary file");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            drop(held);
+        });
+        let mut l = Lock::default();
+        l.replace_source(
+            Profile::Small,
+            "s",
+            vec![LockEntry::artifact("s", "https://x/a", 1, "ab".repeat(32))],
+        );
+        l.save(&path).expect("saved once the file is released");
+        releaser.join().expect("thread");
+        assert_eq!(Lock::load(&path).expect("load"), l);
+    }
 
     #[test]
     fn run_lock_is_exclusive_and_released_on_drop() {
