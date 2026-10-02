@@ -27,11 +27,12 @@ Goal: a reproducible corpus + harness that measures every claim in `docs/LitePac
 - Open (carried forward): `office-versions` is not built (LibreOffice re-saves are not byte-deterministic); `model-weights` in `small` is bert-tiny, which is fp32 rather than fp16/bf16 (matters for `probe weights` in P0-4); the private scan has not been tried on a OneDrive-backed folder; on Windows `libz-sys` can link a vcpkg zlib when vcpkg is configured (the golden tests would catch a difference).
 
 ### P0-3 Baseline tool runner — owner: implementer (sonnet)
-- [ ] `lpk-bench run --tools <list|all> --profile small --repeats 3`: for each class × tool × setting: compress, measure wall time, CPU time, peak RSS, output size; extract to temp; verify every file's BLAKE3 against the manifest; delete temp. Median of repeats.
-- [ ] Tool adapters (skip gracefully if not installed; record why): 7-Zip (`7z`/`7zz`; `-mx5`, `-mx9 -mqs`), WinRAR `rar` (`-m3`, `-m5 -md256m`, `-m5 -rr3%`; licence note), zstd (`-3`, `-19`, `--ultra -22 --long=27`), xz (`-6`, `-9`), zpaqfranz (`-m1`, `-m5`), t-saur (default + max), WinZip `wzzip` and PowerArchiver `PACL` as **optional/manual** adapters with a documented procedure if the user has licences; "store" (tar, no compression) as the control.
-- [ ] Peak RSS: Windows Job Object (`windows` crate: `JOB_OBJECT_LIMIT_INFORMATION`/`QueryInformationJobObject` → `PeakProcessMemoryUsed`); Linux `getrusage`/`/usr/bin/time -v`.
-- [ ] Results: `bench/results/<date>-<host>/<tool>-<setting>-<class>.json` with a schema file `bench/results/schema.json`; `bench/tools.toml` records tool versions.
+- [~] `lpk-bench run --tools <list|all> --profile small --repeats 3`: for each class × tool × setting: compress, measure wall time, CPU time, peak RSS, output size; extract to temp; verify every file's BLAKE3 against the manifest; delete temp. Median of repeats.
+- [~] Tool adapters (skip gracefully if not installed; record why): 7-Zip (`7z`/`7zz`; `-mx5`, `-mx9 -mqs`), WinRAR `rar` (`-m3`, `-m5 -md256m`, `-m5 -rr3%`; licence note), zstd (`-3`, `-19`, `--ultra -22 --long=27`), xz (`-6`, `-9`), zpaqfranz (`-m1`, `-m5`), t-saur (default + max), WinZip `wzzip` and PowerArchiver `PACL` as **optional/manual** adapters with a documented procedure if the user has licences; "store" (tar, no compression) as the control.
+- [~] Peak RSS: Windows Job Object (`windows` crate: `JOB_OBJECT_LIMIT_INFORMATION`/`QueryInformationJobObject` → `PeakProcessMemoryUsed`); Linux `getrusage`/`/usr/bin/time -v`.
+- [~] Results: `bench/results/<date>-<host>/<tool>-<setting>-<class>.json` with a schema file `bench/results/schema.json`; `bench/tools.toml` records tool versions.
 - Acceptance: on the `small` profile all installed tools complete with 100% round-trip verification; a second run differs by < 3% in time; results validate against the schema.
+- Note: started 2026-10-02 while P0-2's `full` profile is still unpinned — the runner needs only the `small` profile and the manifest format; `full` is needed for P0-5.
 
 ### P0-4 Component probes (the headroom experiments) — owner: implementer (sonnet), 4 probes may run as parallel worktree subagents
 Each probe is a `lpk-bench probe <name>` subcommand producing `bench/results/.../probe-<name>.json` and a Markdown table.
