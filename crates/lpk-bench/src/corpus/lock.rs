@@ -165,17 +165,173 @@ impl Lock {
         s
     }
 
+    /// Add or replace one pin of `profile`, keeping every other entry.
+    pub fn upsert(&mut self, profile: Profile, entry: LockEntry) {
+        self.entries
+            .entry(profile.name().to_string())
+            .or_default()
+            .insert((entry.source.clone(), entry.url.clone()), entry);
+    }
+
+    /// Write the lock atomically: a temporary file next to it, then a rename over it, so an
+    /// interrupted run leaves either the old or the new lock, never a torn one.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, self.render()).with_context(|| format!("writing {}", path.display()))
+        let mut name = path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".tmp");
+        let tmp = path.with_file_name(name);
+        let text = self.render();
+        // Antivirus, the search indexer or an editor may hold the file for a moment on Windows.
+        retry_busy(|| {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()
+        })
+        .with_context(|| format!("writing {}", tmp.display()))?;
+        retry_busy(|| std::fs::rename(&tmp, path))
+            .with_context(|| format!("replacing {}", path.display()))
+    }
+}
+
+/// A file held by another program: `PermissionDenied`, or on Windows the raw errors 32
+/// (`ERROR_SHARING_VIOLATION`, reported as `Uncategorized` when a held file is created or
+/// renamed) and 33 (`ERROR_LOCK_VIOLATION`).
+fn is_busy(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)))
+}
+
+/// Run `op`, trying again a few times with a short pause while it fails with `PermissionDenied`
+/// (a sharing violation on Windows).
+fn retry_busy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0u32;
+    loop {
+        match op() {
+            Err(e) if is_busy(&e) && attempt < 8 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50 * u64::from(attempt)));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Exclusive right to pin: a `<lock>.run` file created with create-new for the whole duration of
+/// an `--update-lock` run and removed when the run ends. Two pin runs at once would overwrite
+/// each other's pins.
+#[derive(Debug)]
+pub struct RunLock {
+    path: std::path::PathBuf,
+}
+
+impl RunLock {
+    /// Take the run lock of the lock file `lock_path`; fails when another run holds it.
+    pub fn acquire(lock_path: &Path) -> Result<RunLock> {
+        if let Some(dir) = lock_path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut name = lock_path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".run");
+        let path = lock_path.with_file_name(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = writeln!(f, "pid {}", std::process::id());
+                Ok(RunLock { path })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+                "another `--update-lock` run holds {} (two pin runs would overwrite each \
+                 other's pins). If no pin run is active, a previous run was killed: delete \
+                 that file and try again",
+                path.display()
+            ),
+            Err(e) => Err(e).with_context(|| format!("creating {}", path.display())),
+        }
+    }
+}
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn save_waits_for_a_temporary_file_held_without_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("corpus.lock");
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(dir.path().join("corpus.lock.tmp"))
+            .expect("hold the temporary file");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            drop(held);
+        });
+        let mut l = Lock::default();
+        l.replace_source(
+            Profile::Small,
+            "s",
+            vec![LockEntry::artifact("s", "https://x/a", 1, "ab".repeat(32))],
+        );
+        l.save(&path).expect("saved once the file is released");
+        releaser.join().expect("thread");
+        assert_eq!(Lock::load(&path).expect("load"), l);
+    }
+
+    #[test]
+    fn run_lock_is_exclusive_and_released_on_drop() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let lock = dir.path().join("corpus.lock");
+        let first = RunLock::acquire(&lock).expect("first");
+        let err = RunLock::acquire(&lock).expect_err("second");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("corpus.lock.run") && msg.contains("delete"),
+            "{msg}"
+        );
+        drop(first);
+        assert!(!dir.path().join("corpus.lock.run").exists());
+        RunLock::acquire(&lock).expect("free again");
+    }
+
+    #[test]
+    fn save_leaves_no_temporary_file_and_replaces_the_old_lock() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("corpus.lock");
+        let mut l = Lock::default();
+        l.save(&path).expect("first");
+        l.replace_source(
+            Profile::Small,
+            "s",
+            vec![LockEntry::artifact("s", "https://x/a", 1, "ab".repeat(32))],
+        );
+        l.save(&path).expect("second");
+        assert_eq!(Lock::load(&path).expect("load"), l);
+        assert!(!dir.path().join("corpus.lock.tmp").exists());
+    }
 
     fn entry(source: &str, url: &str) -> LockEntry {
         LockEntry::artifact(source, url, 3, "ab".repeat(32))

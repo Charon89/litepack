@@ -10,3 +10,5 @@ Thumbs.db
 /.claude/worktrees/
 /.claude/settings.local.json
 CLAUDE.local.md
+bench/corpus.lock.run
+bench/corpus.lock.tmp

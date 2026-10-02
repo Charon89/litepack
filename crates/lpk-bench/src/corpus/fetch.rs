@@ -363,6 +363,8 @@ pub struct Artifact {
     pub path: PathBuf,
     pub bytes: u64,
     pub blake3: String,
+    /// True when the cache already held the verified file and no request was made.
+    pub cached: bool,
 }
 
 /// What the downloaded bytes are checked against.
@@ -381,6 +383,8 @@ pub enum DownloadError {
     /// The server answered 404 or 410: the file is gone upstream.
     Gone(String),
     Mismatch(String),
+    /// A fresh download does not have the SHA-1 the API listed for it: the listing is stale.
+    Stale(String),
     Io(String),
 }
 
@@ -390,6 +394,7 @@ impl fmt::Display for DownloadError {
             DownloadError::Fetch(m)
             | DownloadError::Gone(m)
             | DownloadError::Mismatch(m)
+            | DownloadError::Stale(m)
             | DownloadError::Io(m) => f.write_str(m),
         }
     }
@@ -400,9 +405,10 @@ impl std::error::Error for DownloadError {}
 /// How to re-pin: the command to run after reviewing upstream changes.
 pub fn repin_hint(profile: Profile) -> String {
     format!(
-        "Re-pin with `lpk-bench corpus build --profile {p} --update-lock` and commit \
-         bench/corpus.lock (`--only <class>` pins just that class but writes only \
-         manifest.partial.json).",
+        "Re-pin with `lpk-bench corpus build --profile {p} --update-lock --repin <source-id>` \
+         (without `--repin`, --update-lock keeps what is already pinned and only completes the \
+         rest) and commit bench/corpus.lock (`--only <class>` pins just that class but writes \
+         only manifest.partial.json).",
         p = profile.name()
     )
 }
@@ -621,6 +627,7 @@ impl<'a> Downloader<'a> {
                         path,
                         bytes,
                         blake3,
+                        cached: true,
                     });
                 }
                 eprintln!("  cache for `{source}` does not match the lock; fetching again");
@@ -645,6 +652,7 @@ impl<'a> Downloader<'a> {
             path,
             bytes,
             blake3,
+            cached: false,
         })
     }
 
