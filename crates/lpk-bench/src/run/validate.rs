@@ -346,6 +346,17 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         }
         match kind {
             Kind::Host => {
+                let commit = v.get("git_commit").and_then(Value::as_str).unwrap_or("");
+                let allowed = v
+                    .get("dirty_build_allowed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if !crate::run::host::build_is_clean(commit) && !allowed {
+                    report.problems.push(format!(
+                        "{name}: /git_commit: `{commit}` is not a clean commit and \
+                         /dirty_build_allowed is not set"
+                    ));
+                }
                 let host = v.get("host").and_then(Value::as_str).unwrap_or("");
                 if let Some((_, rest)) = parsed_name {
                     if !host_matches(rest, host) {
@@ -471,13 +482,13 @@ fn semantic_checks(
             "{name}: (file name): must be `{expected}` for the tool, setting and class inside"
         ));
     }
-    let measured = r.skipped.is_none();
+    let ran = r.skipped.is_none();
     match tools.get(&r.tool.id) {
         None => out.push(format!(
             "{name}: /tool/id: `{}` does not appear in tools.json",
             r.tool.id
         )),
-        Some(state) if measured => {
+        Some(state) if ran => {
             if !state.found {
                 out.push(format!(
                     "{name}: /tool/id: `{}` is marked skipped in tools.json but has measurements",
@@ -492,8 +503,34 @@ fn semantic_checks(
         }
         Some(_) => {}
     }
-    if !measured {
+    if !ran {
         return;
+    }
+    let empty = Vec::new();
+    let repeats = r.repeats.as_ref().unwrap_or(&empty);
+    // A repeat that timed out or lost descendants cannot be part of a good result.
+    let flagged = repeats.iter().any(|s| {
+        [&s.compress, &s.extract]
+            .iter()
+            .any(|m| m.timed_out || m.descendants_killed)
+    });
+    let verified_true = r.verification.as_ref().is_some_and(|v| v.verified);
+    if flagged && r.failed.is_none() {
+        out.push(format!(
+            "{name}: /repeats: a repeat timed out or lost descendants but /failed is absent"
+        ));
+    }
+    if (flagged || r.failed.is_some()) && verified_true {
+        out.push(format!(
+            "{name}: /verification/verified: true for a result with a failed, timed-out or \
+             descendant-killing repeat"
+        ));
+    }
+    if (flagged || r.failed.is_some()) && r.median.is_some() {
+        out.push(format!(
+            "{name}: /median: present for a result with a failed, timed-out or \
+             descendant-killing repeat"
+        ));
     }
     if let Some(ver) = &r.verification {
         let all = ver.files_ok == ver.files_checked && ver.files_checked == r.corpus.class_files;
@@ -501,28 +538,27 @@ fn semantic_checks(
             out.push(format!(
                 "{name}: /verification/files_ok: exceeds files_checked"
             ));
-        } else if ver.verified != all {
+        } else if r.failed.is_none() && ver.verified != all {
             out.push(format!(
                 "{name}: /verification/verified: disagrees with the counts \
                  (verified means files_ok == files_checked == corpus.class_files)"
             ));
         }
     }
-    let (Some(repeats), Some(median)) = (&r.repeats, &r.median) else {
-        return;
-    };
-    let expected_median = Sample::median_of(repeats);
-    let mut diffs = Vec::new();
-    diff_values(
-        "/median",
-        &serde_json::to_value(median).unwrap_or(Value::Null),
-        &serde_json::to_value(expected_median).unwrap_or(Value::Null),
-        &mut diffs,
-    );
-    for d in diffs {
-        out.push(format!(
-            "{name}: {d}: is not the median of the repeats (recomputed from /repeats)"
-        ));
+    if let Some(median) = &r.median {
+        let expected_median = Sample::median_of(repeats);
+        let mut diffs = Vec::new();
+        diff_values(
+            "/median",
+            &serde_json::to_value(median).unwrap_or(Value::Null),
+            &serde_json::to_value(expected_median).unwrap_or(Value::Null),
+            &mut diffs,
+        );
+        for d in diffs {
+            out.push(format!(
+                "{name}: {d}: is not the median of the repeats (recomputed from /repeats)"
+            ));
+        }
     }
     // Tar-stream tools: the tar must be recorded and the steps must add up in every repeat.
     let tar_stream = r.tool.mode == Mode::TarStream;
@@ -676,12 +712,14 @@ mod tests {
     #[test]
     fn schema_and_types_agree() {
         let schema = schema_value().expect("schema");
-        let (m, s, z) = (
+        let (m, s, z, f) = (
             to_value(&samples::measured()),
             to_value(&samples::skipped()),
             to_value(&samples::tar_stream()),
+            to_value(&samples::failed()),
         );
-        assert_agree(&schema, "result", &[&m, &s, &z]);
+        assert_agree(&schema, "result", &[&m, &s, &z, &f]);
+        assert_agree(&schema, "failure", &[&f["failed"]]);
         assert_agree(&schema, "tool_ref", &[&m["tool"], &s["tool"]]);
         assert_agree(&schema, "setting_ref", &[&m["setting"]]);
         assert_agree(&schema, "corpus_ref", &[&m["corpus"]]);
@@ -720,6 +758,7 @@ mod tests {
             "measurement",
             "tar_info",
             "verification",
+            "failure",
             "tools",
             "tool_entry",
             "host",
@@ -838,6 +877,83 @@ mod tests {
         stranger.tool.id = "ghost".into();
         let dir = write_dir(tmp.path(), &[stranger]);
         assert!(problems(&dir).iter().any(|m| m.contains("tools.json")));
+    }
+
+    #[test]
+    fn failed_results_validate_and_cannot_carry_a_median_or_verified() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = write_dir(tmp.path(), &[samples::failed()]);
+        assert!(problems(&dir).is_empty(), "{:?}", problems(&dir));
+
+        // A failed result with a median.
+        let mut with_median = samples::failed();
+        with_median.median = Some(crate::run::result::Sample::median_of(&[samples::sample(
+            1.0,
+        )]));
+        let dir = write_dir(tmp.path(), &[with_median]);
+        assert!(!problems(&dir).is_empty());
+
+        // A failed result claiming verified.
+        let mut verified = samples::failed();
+        verified.verification = samples::measured().verification;
+        let dir = write_dir(tmp.path(), &[verified]);
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("/verification/verified")));
+
+        // A failed result with a failed verification may differ from the counts (an extra file).
+        let mut extra = samples::failed();
+        extra.verification = Some(crate::run::result::Verification {
+            verified: false,
+            files_checked: 10,
+            files_ok: 10,
+        });
+        let dir = write_dir(tmp.path(), &[extra]);
+        assert!(problems(&dir).is_empty(), "{:?}", problems(&dir));
+
+        // A timed-out repeat without `failed`, with a median and verified: all three reported.
+        let mut timed = samples::measured();
+        let mut repeats = timed.repeats.clone().expect("repeats");
+        repeats[0].compress.timed_out = true;
+        timed.median = Some(crate::run::result::Sample::median_of(&repeats));
+        timed.repeats = Some(repeats);
+        let dir = write_dir(tmp.path(), &[timed]);
+        let p = problems(&dir);
+        for what in ["/repeats", "/verification/verified", "/median"] {
+            assert!(p.iter().any(|m| m.contains(what)), "{what}: {p:?}");
+        }
+
+        // `failed` and `skipped` together, and a failed result with no measurement.
+        let mut both = samples::failed();
+        both.skipped = Some("not installed".into());
+        let dir = write_dir(tmp.path(), &[both]);
+        assert!(!problems(&dir).is_empty());
+        let mut no_m = samples::failed();
+        no_m.measurement = None;
+        let dir = write_dir(tmp.path(), &[no_m]);
+        assert!(!problems(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_dirty_or_unknown_build_needs_the_flag_in_host_json() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = write_dir(tmp.path(), &[samples::measured()]);
+        for (commit, allowed, ok) in [
+            ("0123456789ab-dirty", false, false),
+            ("unknown", false, false),
+            ("0123456789ab-dirty", true, true),
+            ("0123456789ab", false, true),
+        ] {
+            let mut h = samples::host();
+            h.git_commit = commit.into();
+            h.dirty_build_allowed = allowed;
+            std::fs::write(dir.join("host.json"), render(&h)).expect("host");
+            let p = problems(&dir);
+            assert_eq!(p.is_empty(), ok, "{commit} {allowed}: {p:?}");
+            if !ok {
+                assert!(p.iter().any(|m| m.starts_with("host.json: /git_commit")));
+            }
+        }
     }
 
     #[test]

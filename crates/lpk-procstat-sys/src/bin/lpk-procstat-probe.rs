@@ -7,6 +7,7 @@
 //! * `write-file PATH` + `write-after-ms MS`: create the file after the delay.
 //! * `print-env NAME`: print `NAME=<value or <unset>>`.
 //! * `sleep 1`: sleep forever (until killed). `no-wait 1`: do not wait for the grandchild.
+//! * `count-stdin 1`: read standard input to the end and print `stdin-bytes=N`.
 //! * `free-mem 1`: release the allocation before exiting.
 //! * `exit-code C`.
 //! * Any of the above prefixed `child-` spawns a copy of this program configured with them.
@@ -47,6 +48,12 @@ fn main() {
                 std::process::exit(99);
             }
         }
+    }
+
+    if o.contains_key("count-stdin") {
+        let mut buf = Vec::new();
+        let n = std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf).unwrap_or(0);
+        println!("stdin-bytes={n}");
     }
 
     if let Some(name) = o.get("print-env") {

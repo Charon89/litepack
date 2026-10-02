@@ -56,6 +56,25 @@ impl Output {
     }
 }
 
+/// Where the child's standard input comes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Input {
+    /// Nothing: reads see end of file at once.
+    #[default]
+    Null,
+    /// Read this existing file from its start.
+    File(PathBuf),
+}
+
+impl Input {
+    pub(crate) fn to_stdio(&self) -> io::Result<Stdio> {
+        Ok(match self {
+            Input::Null => Stdio::null(),
+            Input::File(p) => Stdio::from(File::open(p)?),
+        })
+    }
+}
+
 /// A program to run and how to run it.
 #[derive(Debug, Clone)]
 pub struct Spec {
@@ -68,6 +87,7 @@ pub struct Spec {
     pub env_remove: Vec<OsString>,
     /// Start from an empty environment instead of the caller's.
     pub env_clear: bool,
+    pub stdin: Input,
     pub stdout: Output,
     pub stderr: Output,
     /// When exceeded the whole process tree is killed and `timed_out` is set.
@@ -83,10 +103,15 @@ impl Spec {
             env: Vec::new(),
             env_remove: Vec::new(),
             env_clear: false,
+            stdin: Input::Null,
             stdout: Output::Inherit,
             stderr: Output::Inherit,
             timeout: None,
         }
+    }
+    pub fn stdin(mut self, input: Input) -> Self {
+        self.stdin = input;
+        self
     }
     pub fn args<I, S>(mut self, args: I) -> Self
     where
@@ -140,7 +165,7 @@ impl Spec {
         for (k, v) in &self.env {
             c.env(k, v);
         }
-        c.stdin(Stdio::null());
+        c.stdin(self.stdin.to_stdio()?);
         c.stdout(self.stdout.to_stdio()?);
         c.stderr(self.stderr.to_stdio()?);
         Ok(c)

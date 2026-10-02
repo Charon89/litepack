@@ -8,12 +8,13 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Placeholders allowed in `create` / `extract` templates.
-const PLACEHOLDERS: [&str; 5] = [
+const PLACEHOLDERS: [&str; 6] = [
     "{archive}",
     "{input}",
     "{outdir}",
     "{settings}",
     "{threads}",
+    "{list}",
 ];
 
 /// The OS key used in `exe.<os>` and `hints.<os>`.
@@ -94,6 +95,10 @@ pub struct Tool {
     pub layout: Layout,
     #[serde(default)]
     pub create: Vec<String>,
+    /// Create template for a private corpus (a list file of relative paths, `{list}`); absent:
+    /// the tool is skipped for private corpora.
+    #[serde(default)]
+    pub create_list: Option<Vec<String>>,
     #[serde(default)]
     pub extract: Vec<String>,
     #[serde(default)]
@@ -134,6 +139,7 @@ pub struct ToolOverride {
     pub mode: Option<Mode>,
     pub layout: Option<Layout>,
     pub create: Option<Vec<String>>,
+    pub create_list: Option<Vec<String>>,
     pub extract: Option<Vec<String>>,
     pub threads: Option<Vec<String>>,
     pub ratio_depends_on_threads: Option<bool>,
@@ -232,6 +238,9 @@ impl Catalogue {
             if let Some(v) = ov.create {
                 tool.create = v;
             }
+            if let Some(v) = ov.create_list {
+                tool.create_list = Some(v);
+            }
             if let Some(v) = ov.extract {
                 tool.extract = v;
             }
@@ -309,6 +318,12 @@ impl Tool {
         }
         check_template(id, "create", &self.create)?;
         check_template(id, "extract", &self.extract)?;
+        if let Some(list) = &self.create_list {
+            check_template(id, "create_list", list)?;
+            if !list.iter().any(|a| a.contains("{list}")) {
+                bail!("tool `{id}`: create_list needs `{{list}}`");
+            }
+        }
         if !self.threads.is_empty() && !self.threads.iter().any(|a| a.contains("{n}")) {
             bail!("tool `{id}`: threads template needs `{{n}}`");
         }

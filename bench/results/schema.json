@@ -7,6 +7,10 @@
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._-]*$"
     },
+    "id_upper": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
     "blake3": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
@@ -45,14 +49,16 @@
     },
     "measure": {
       "type": "object",
-      "description": "One measured run (compress or extract). For tar-stream tools the three times are the tar step plus the compressor step, and the two steps are also recorded separately.",
+      "description": "One measured run (compress or extract). For tar-stream tools the steps run one after the other through a temporary file; the three times are the tar step plus the compressor step, and the two steps are also recorded separately.",
       "additionalProperties": false,
-      "required": ["wall_seconds", "user_cpu_seconds", "kernel_cpu_seconds", "peak_memory_bytes"],
+      "required": ["wall_seconds", "user_cpu_seconds", "kernel_cpu_seconds", "peak_memory_bytes", "timed_out", "descendants_killed"],
       "properties": {
         "wall_seconds": { "$ref": "#/$defs/seconds", "description": "Elapsed (wall clock) time, in seconds." },
         "user_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "User-mode CPU time, in seconds." },
         "kernel_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "Kernel-mode CPU time, in seconds." },
         "peak_memory_bytes": { "$ref": "#/$defs/count", "description": "Peak resident memory in bytes, as named by measurement.peak_memory_kind (the larger of the two steps for tar-stream tools)." },
+        "timed_out": { "type": "boolean", "description": "True when the timeout expired and the process tree was killed (either step, for tar-stream tools). A result with a repeat that timed out has no median and is failed." },
+        "descendants_killed": { "type": "boolean", "description": "True when processes started by the tool were still running when it exited and were killed (either step). A result with such a repeat has no median and is failed." },
         "peak_job_memory_bytes": { "$ref": "#/$defs/count", "description": "Windows only: peak committed memory of all processes in the job object, in bytes." },
         "peak_process_commit_bytes": { "$ref": "#/$defs/count", "description": "Windows only: peak committed memory of the largest single process in the job object, in bytes." },
         "tar_step": { "$ref": "#/$defs/step_times", "description": "Tar-stream tools only: the tar step of this run." },
@@ -89,7 +95,7 @@
       "properties": {
         "id": { "$ref": "#/$defs/id", "description": "Catalogue id of the tool." },
         "version": { "$ref": "#/$defs/text", "description": "Version string read from the tool; absent when it was not found." },
-        "mode": { "enum": ["directory", "tar-stream"], "description": "directory: the tool archives the directory itself; tar-stream: tar makes the stream and the tool compresses it." },
+        "mode": { "enum": ["directory", "tar-stream"], "description": "directory: the tool archives the directory itself; tar-stream: tar writes the stream to a temporary file and the compressor reads that file on its standard input (extraction: the decompressor writes a temporary tar, then tar extracts it); the steps run one after the other, never concurrently." },
         "ratio_depends_on_threads": { "type": "boolean", "description": "True when the thread count changes the archive size, not only the speed." }
       }
     },
@@ -131,11 +137,12 @@
       "type": "object",
       "description": "How the numbers were taken.",
       "additionalProperties": false,
-      "required": ["wall_cpu_method", "peak_memory_kind", "every_repeat_verified"],
+      "required": ["wall_cpu_method", "peak_memory_kind", "every_repeat_verified", "env_stripped"],
       "properties": {
         "wall_cpu_method": { "$ref": "#/$defs/text", "description": "How wall and CPU time were taken, in words." },
         "peak_memory_kind": { "enum": ["peak-working-set", "max-rss"], "description": "peak-working-set: Windows peak working set of the tool's main process; max-rss: Linux ru_maxrss. Unit of peak_memory_bytes: bytes." },
         "every_repeat_verified": { "const": true, "description": "Always true: every repeat was extracted and verified, not only one." },
+        "env_stripped": { "type": "array", "items": { "$ref": "#/$defs/id_upper" }, "description": "Names (never values) of the tool-configuration environment variables removed from the child's environment before every run." },
         "tar": { "$ref": "#/$defs/tar_info", "description": "Present for tar-stream tools." }
       }
     },
@@ -156,20 +163,46 @@
         "repeats": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sample" }, "description": "One entry per repeat." },
         "median": { "$ref": "#/$defs/sample", "description": "Median of every field over the repeats (the validator recomputes it)." },
         "verification": { "$ref": "#/$defs/verification", "description": "Round-trip verification." },
-        "skipped": { "$ref": "#/$defs/text", "description": "Why the combination was skipped; then there are no measurements." }
+        "skipped": { "$ref": "#/$defs/text", "description": "Why the combination was skipped; then there are no measurements." },
+        "failed": { "$ref": "#/$defs/failure", "description": "Present when the combination ran and failed (non-zero exit, missing or empty archive, timeout, killed descendants, or a verification finding). The repeats completed before the failure may be recorded; there is no median and verification.verified is false." }
       },
-      "if": { "required": ["skipped"] },
-      "then": {
-        "not": {
-          "anyOf": [
-            { "required": ["repeats"] },
-            { "required": ["median"] },
-            { "required": ["verification"] },
-            { "required": ["measurement"] }
-          ]
+      "allOf": [
+        {
+          "if": { "required": ["skipped"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["repeats"] },
+                { "required": ["median"] },
+                { "required": ["verification"] },
+                { "required": ["measurement"] },
+                { "required": ["failed"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": { "required": ["failed"] },
+          "then": { "not": { "required": ["median"] }, "required": ["measurement"] }
+        },
+        {
+          "if": { "not": { "anyOf": [{ "required": ["skipped"] }, { "required": ["failed"] }] } },
+          "then": { "required": ["repeats", "median", "verification", "measurement"] }
         }
-      },
-      "else": { "required": ["repeats", "median", "verification", "measurement"] }
+      ]
+    },
+    "failure": {
+      "type": "object",
+      "description": "Why a combination failed.",
+      "additionalProperties": false,
+      "required": ["reason", "step", "repeat", "timed_out", "descendants_killed"],
+      "properties": {
+        "reason": { "$ref": "#/$defs/text", "description": "What went wrong, without paths: exit code, missing or empty archive, timeout, or the verification finding (missing, extra or different file, by manifest-relative name)." },
+        "step": { "enum": ["compress", "extract", "verify"], "description": "The step that failed." },
+        "repeat": { "type": "integer", "minimum": 1, "description": "The repeat that failed, counting from 1." },
+        "timed_out": { "type": "boolean", "description": "True when the failing step hit the timeout and the process tree was killed." },
+        "descendants_killed": { "type": "boolean", "description": "True when processes started by the failing step were still running when it exited and were killed." }
+      }
     },
     "tool_entry": {
       "type": "object",

@@ -1045,6 +1045,7 @@ dependencies = [
  "jpeg-decoder",
  "jsonschema",
  "libz-sys",
+ "lpk-procstat-sys",
  "miniz_oxide 0.8.9",
  "png",
  "quick-xml",

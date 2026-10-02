@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use lpk_procstat_sys::{run, Measurement, Output, Spec};
+use lpk_procstat_sys::{run, Input, Measurement, Output, Spec};
 use std::path::Path;
 use std::time::Duration;
 
@@ -188,6 +188,27 @@ fn output_can_go_to_a_file() {
     let (m, out) = run_capture(Spec::new(PROBE).stderr(Output::Discard), dir.path());
     assert_eq!(m.exit_code, Some(0));
     assert_eq!(out.trim(), "probe-ok");
+}
+
+#[test]
+fn stdin_can_come_from_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.bin");
+    std::fs::write(&input, vec![7u8; 100_000]).unwrap();
+    let base = || {
+        Spec::new(PROBE)
+            .args(["--count-stdin", "1"])
+            .stderr(Output::Discard)
+    };
+    let (m, out) = run_capture(base().stdin(Input::File(input.clone())), dir.path());
+    assert_eq!(m.exit_code, Some(0));
+    assert!(out.contains("stdin-bytes=100000"), "{out}");
+    // The default is an empty input.
+    let (_, out) = run_capture(base(), dir.path());
+    assert!(out.contains("stdin-bytes=0"), "{out}");
+    // A missing file is an error, not a silent empty input.
+    let missing = dir.path().join("absent.bin");
+    assert!(run(&base().stdin(Input::File(missing))).is_err());
 }
 
 #[test]

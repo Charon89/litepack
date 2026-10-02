@@ -73,6 +73,10 @@ pub struct Measure {
     pub user_cpu_seconds: f64,
     pub kernel_cpu_seconds: f64,
     pub peak_memory_bytes: u64,
+    /// The timeout expired and the process tree was killed (either step, for tar-stream tools).
+    pub timed_out: bool,
+    /// Descendants of the program were still running when it exited and were killed (either step).
+    pub descendants_killed: bool,
     /// Windows only: peak committed memory of the whole job object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_job_memory_bytes: Option<u64>,
@@ -132,8 +136,27 @@ pub struct Measurement {
     pub peak_memory_kind: PeakMemoryKind,
     /// Always true: every repeat was extracted and verified.
     pub every_repeat_verified: bool,
+    /// Names of the tool-configuration environment variables removed from the child's
+    /// environment (names only, never values).
+    pub env_stripped: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tar: Option<TarInfo>,
+}
+
+/// Why a combination failed. A failed result has no median; the repeats completed before the
+/// failure may be recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Failure {
+    /// What went wrong, without paths: exit code, missing or empty archive, timeout, or the
+    /// verification finding (missing, extra or different file, by manifest-relative name).
+    pub reason: String,
+    /// `compress`, `extract` or `verify`.
+    pub step: String,
+    /// The repeat (counting from 1) that failed.
+    pub repeat: u32,
+    pub timed_out: bool,
+    pub descendants_killed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -159,6 +182,9 @@ pub struct ToolResult {
     /// Why the combination was skipped; then there are no measurements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
+    /// The combination ran and failed; then there is no median.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<Failure>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -228,6 +254,8 @@ impl Measure {
             user_cpu_seconds: f(|m| m.user_cpu_seconds),
             kernel_cpu_seconds: f(|m| m.kernel_cpu_seconds),
             peak_memory_bytes: median_u64(items.iter().map(|m| m.peak_memory_bytes).collect()),
+            timed_out: items.iter().any(|m| m.timed_out),
+            descendants_killed: items.iter().any(|m| m.descendants_killed),
             peak_job_memory_bytes: opt(|m| m.peak_job_memory_bytes),
             peak_process_commit_bytes: opt(|m| m.peak_process_commit_bytes),
             tar_step: median_steps(&items.iter().map(|m| m.tar_step).collect::<Vec<_>>()),
@@ -335,6 +363,8 @@ pub mod samples {
             user_cpu_seconds: wall * 3.0,
             kernel_cpu_seconds: 0.25,
             peak_memory_bytes: 1 << 20,
+            timed_out: false,
+            descendants_killed: false,
             peak_job_memory_bytes: Some(2 << 20),
             peak_process_commit_bytes: Some(1 << 21),
             tar_step: None,
@@ -359,6 +389,8 @@ pub mod samples {
             user_cpu_seconds: tar.user_cpu_seconds + tool.user_cpu_seconds,
             kernel_cpu_seconds: tar.kernel_cpu_seconds + tool.kernel_cpu_seconds,
             peak_memory_bytes: 1 << 20,
+            timed_out: false,
+            descendants_killed: false,
             peak_job_memory_bytes: None,
             peak_process_commit_bytes: None,
             tar_step: Some(tar),
@@ -388,6 +420,7 @@ pub mod samples {
                 .into(),
             peak_memory_kind: PeakMemoryKind::PeakWorkingSet,
             every_repeat_verified: true,
+            env_stripped: vec!["XZ_OPT".into(), "ZSTD_CLEVEL".into()],
             tar: None,
         }
     }
@@ -431,7 +464,26 @@ pub mod samples {
                 files_ok: 10,
             }),
             skipped: None,
+            failed: None,
         }
+    }
+
+    /// A combination that failed in the second repeat's extract step: one completed repeat, no
+    /// median.
+    pub fn failed() -> ToolResult {
+        let mut r = measured();
+        r.private = false;
+        r.median = None;
+        r.repeats = Some(vec![sample(1.0)]);
+        r.verification = None;
+        r.failed = Some(Failure {
+            reason: "extract: exit code 2".into(),
+            step: "extract".into(),
+            repeat: 2,
+            timed_out: false,
+            descendants_killed: false,
+        });
+        r
     }
 
     /// A tar-stream result (zstd), with its tar recorded.
@@ -541,7 +593,7 @@ mod tests {
 
     #[test]
     fn results_round_trip_through_json() {
-        for r in [measured(), skipped(), tar_stream()] {
+        for r in [measured(), skipped(), tar_stream(), failed()] {
             let back: ToolResult = serde_json::from_str(&render(&r)).expect("parse");
             assert_eq!(back, r);
         }

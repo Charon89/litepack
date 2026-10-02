@@ -15,14 +15,23 @@
 #   version         { args, pattern }: run with args, capture group 1 of pattern on stdout+stderr
 #                   (`)` characters are dropped, so `GNU tar) 1.35` is recorded as `GNU tar 1.35`)
 #   extension       archive file extension
-#   mode            `directory` (tool archives a directory itself) or `tar-stream` (the runner pipes
-#                   a tar stream, made by the `store` tool's tar, into the tool's stdin and takes
-#                   the archive from its stdout; extraction reverses it)
+#   mode            `directory` (tool archives a directory itself) or `tar-stream`. Tar-stream tools
+#                   run in two sequential steps through a temporary file, never concurrently:
+#                   compress = the `store` tool's tar writes the stream to a temporary tar file,
+#                   then the tool reads that file on its standard input and writes the archive
+#                   to its standard output; extract = the tool reads the archive on its standard
+#                   input and writes a temporary tar file, then tar extracts it. The published
+#                   time is the sum of the two steps (each is also recorded), the published peak
+#                   memory the larger of the two.
 #   layout          directory mode only. Where the extracted tree appears relative to `{outdir}`:
 #                   `flat` (the files of the input directory) or `nested` (inside a directory
 #                   named like `{input}`). Default `flat`.
 #   create/extract  argument templates. Placeholders: {archive} {input} {outdir} {settings}
 #                   {threads}; `{settings}` expands to the setting's compress or extract arguments
+#   create_list     optional, directory mode: the create template for a private corpus, where the
+#                   runner gives the tool a list file of relative paths (placeholder `{list}`)
+#                   and runs it in the corpus root. Tools without it are skipped for private
+#                   corpora. The extracted tree is then flat, whatever `layout` says.
 #   threads         thread-count template; `{n}` is the number; expands to one or more arguments
 #   ratio_depends_on_threads
 #                   true when the thread count changes the archive size, not only the speed.
@@ -36,6 +45,10 @@
 # The templates below were run that way against the real tools (see the commit that introduced
 # this rule): create, extract into an empty directory, compare with the input tree.
 # All settings run at the machine's thread count, as a user would run them.
+# Every tool runs with its output redirected and without a console, so nothing may wait for a
+# keypress: each template pins the tool's assume-yes and quiet or no-progress switches. The
+# runner never parses tool output (file names differ by code page); only the BLAKE3 of the
+# extracted files decides whether a round trip worked.
 #
 #   licence         licence note; install = { winget, apt, url } hints
 #   manual          true: the owner licenses and configures the tool by hand (docs/BASELINES.md)
@@ -54,6 +67,7 @@ ratio_depends_on_threads = false
 extension = ".tar"
 mode = "directory"
 create = ["-cf", "{archive}", "-C", "{input}", "."]
+create_list = ["-cf", "{archive}", "-T", "{list}"]
 extract = ["-xf", "{archive}", "-C", "{outdir}"]
 threads = []
 licence = "bsdtar (BSD-2-Clause) or GNU tar (GPL-3.0-or-later), used as an external program only"
@@ -74,6 +88,7 @@ extension = ".7z"
 mode = "directory"
 layout = "nested"
 create = ["a", "-bd", "-y", "{settings}", "{threads}", "{archive}", "{input}"]
+create_list = ["a", "-bd", "-y", "-scsUTF-8", "{settings}", "{threads}", "{archive}", "@{list}"]
 extract = ["x", "-bd", "-y", "{threads}", "-o{outdir}", "{archive}"]
 threads = ["-mmt={n}"]
 ratio_depends_on_threads = true
@@ -98,12 +113,13 @@ version = { args = [], pattern = 'RAR (\d+(?:\.\d+)+)' }
 extension = ".rar"
 mode = "directory"
 create = ["a", "-r", "-ep1", "-idq", "-y", "{settings}", "{threads}", "{archive}", "{input}/*"]
+create_list = ["a", "-idq", "-y", "-scul", "{settings}", "{threads}", "{archive}", "@{list}"]
 extract = ["x", "-idq", "-y", "{threads}", "{archive}", "{outdir}/"]
 threads = ["-mt{n}"]
 ratio_depends_on_threads = true
 licence = "Proprietary: 40-day trial, then a paid licence"
 install = { winget = "RARLab.WinRAR", apt = "rar (multiverse)", url = "https://www.rarlab.com/" }
-note = "Catalogued against WinRAR 7.23. WinRAR is non-solid by default, which is what PLAN lists and what most users get; `best-solid` adds -s for its strongest sensible configuration. The -rr3% setting differs from `best` only by the recovery record."
+note = "Catalogued against WinRAR 7.23. Thread-count dependence of the archive size was seen on one sample (1 versus 4 threads) and not otherwise checked. WinRAR is non-solid by default, which is what PLAN lists and what most users get; `best-solid` adds -s for its strongest sensible configuration. The -rr3% setting differs from `best` only by the recovery record."
 [[tool.setting]]
 id = "m3"
 compress = ["-m3"]
@@ -129,8 +145,8 @@ hints = { windows = ["%LOCALAPPDATA%/Microsoft/WinGet/Links/zstd.exe", "%LOCALAP
 version = { args = ["--version"], pattern = 'v(\d+(?:\.\d+)+)' }
 extension = ".tar.zst"
 mode = "tar-stream"
-create = ["{settings}", "{threads}", "-c"]
-extract = ["-d", "{settings}", "-c"]
+create = ["-f", "-q", "{settings}", "{threads}", "-c"]
+extract = ["-d", "-f", "-q", "{settings}", "-c"]
 threads = ["-T{n}"]
 ratio_depends_on_threads = true
 licence = "BSD-3-Clause OR GPL-2.0-only; used as an external program only"
@@ -157,8 +173,8 @@ hints = { windows = ["%LOCALAPPDATA%/Microsoft/WinGet/Links/xz.exe", "%LOCALAPPD
 version = { args = ["--version"], pattern = 'xz[^\d\r\n]*(\d+(?:\.\d+)+)' }
 extension = ".tar.xz"
 mode = "tar-stream"
-create = ["{settings}", "{threads}", "-c"]
-extract = ["-d", "{settings}", "{threads}", "-c"]
+create = ["-f", "-q", "{settings}", "{threads}", "-c"]
+extract = ["-d", "-f", "-q", "{settings}", "{threads}", "-c"]
 threads = ["-T{n}"]
 ratio_depends_on_threads = true
 licence = "0BSD (liblzma) and GPL-2.0-or-later (command line tool); used as an external program only"
@@ -181,8 +197,8 @@ version = { args = ["-h"], pattern = 'zpaqfranz v?(\d+(?:\.\d+)*)' }
 extension = ".zpaq"
 mode = "directory"
 layout = "nested"
-create = ["a", "{archive}", "{input}", "{settings}", "{threads}"]
-extract = ["x", "{archive}", "-to", "{outdir}", "{threads}"]
+create = ["a", "{archive}", "{input}", "{settings}", "{threads}", "-noeta"]
+extract = ["x", "{archive}", "-to", "{outdir}", "{threads}", "-noeta"]
 threads = ["-t{n}"]
 ratio_depends_on_threads = false
 licence = "MIT"

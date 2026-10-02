@@ -34,8 +34,11 @@ fn main() {
     let mut commit = output("git", &["rev-parse", "--short=12", "HEAD"])
         .unwrap_or_else(|| "unknown".to_string());
     if commit != "unknown" {
-        // Any change to tracked or untracked (non-ignored) files makes the build dirty.
-        let status = Command::new("git").args(["status", "--porcelain"]).output();
+        // Any change to a tracked file makes the build dirty. Untracked files do not: a new
+        // results directory must not make the next build refuse to run.
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .output();
         match status {
             Ok(s) if s.status.success() => {
                 if !s.stdout.iter().all(u8::is_ascii_whitespace) {
@@ -65,6 +68,10 @@ fn main() {
         "Cargo.toml",
         "../../Cargo.toml",
         "../../Cargo.lock",
+        // lpk-bench depends on lpk-procstat-sys: watch every crate, and the catalogue read at
+        // run time.
+        "../../crates",
+        "../../bench/tools.toml",
     ] {
         watch(source);
     }
