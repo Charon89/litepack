@@ -175,6 +175,10 @@ format = "zip"
 include = ["HDFS.log"]
 truncate_files = 64000000
 
+# Full-only extraction limits (checked against the archives' declared sizes): the whole HDFS_v1
+# set fits the default extraction ceiling; the Windows log is cut by truncate_files, and its
+# archive must hold few enough files to stay below the ceiling after the cut (a third file would
+# fail the build loudly); PortableGit's 7z dictionary is within the decoder's bound.
 [[source]]
 id = "loghub-hdfs"
 class = "logs-text"
@@ -214,7 +218,7 @@ licence = "NYC Open Data terms of use"
 origin = "NYC Open Data qp3b-zxtp CSV export, first rows by :id"
 profiles = ["full"]
 kind = "file"
-url = "https://data.cityofnewyork.us/resource/qp3b-zxtp.csv?$limit=2000000&$order=:id"
+url = "https://data.cityofnewyork.us/resource/qp3b-zxtp.csv?$limit=1000000&$order=:id"
 
 [[source]]
 id = "python-embed"
@@ -395,13 +399,13 @@ max_bytes = 1600000
 id = "commons-featured-full"
 class = "photo-jpeg"
 licence = "CC0-1.0, CC-BY or CC-BY-SA (each file carries its own licence and author)"
-origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0, CC BY or CC BY-SA, API order, 200 KB to 6 MB"
+origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0, CC BY or CC BY-SA, API order, 200 KB to 4 MB"
 profiles = ["full"]
 kind = "commons-photos"
 category = "Category:Featured_pictures_on_Wikimedia_Commons"
 count = 3000
 min_bytes = 200000
-max_bytes = 6000000
+max_bytes = 4000000
 
 [[source]]
 id = "arxiv-cc-by-small"
@@ -440,6 +444,8 @@ include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
 strip_components = 1
 max_bytes = 230000000
 
+# Threads 000-004: each capped (max_bytes, declared sizes, sorted order) so that the full profile
+# stays inside its size target; every one is far below the default extraction ceiling.
 [[source]]
 id = "govdocs-000"
 class = "office-pdf"
@@ -451,6 +457,7 @@ url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/000.
 format = "zip"
 include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
 strip_components = 1
+max_bytes = 400000000
 
 [[source]]
 id = "govdocs-001"
@@ -463,6 +470,7 @@ url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/001.
 format = "zip"
 include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
 strip_components = 1
+max_bytes = 400000000
 
 [[source]]
 id = "govdocs-002"
@@ -475,6 +483,7 @@ url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/002.
 format = "zip"
 include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
 strip_components = 1
+max_bytes = 400000000
 
 [[source]]
 id = "govdocs-003"
@@ -487,6 +496,7 @@ url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/003.
 format = "zip"
 include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
 strip_components = 1
+max_bytes = 400000000
 
 [[source]]
 id = "govdocs-004"
@@ -499,6 +509,7 @@ url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/004.
 format = "zip"
 include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
 strip_components = 1
+max_bytes = 400000000
 
 [[source]]
 id = "v1"
