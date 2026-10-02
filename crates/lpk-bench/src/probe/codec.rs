@@ -40,8 +40,9 @@ impl ZstdSettings {
         }
     }
 
-    /// "zstd level 19" as the baseline runner's `zstd -19` runs it: library defaults (no
-    /// long-distance matching, the level's default window), single-threaded.
+    /// "zstd level 19" with the library defaults of the baseline runner's `zstd -19` (no
+    /// long-distance matching, the level's default window). The baseline runs the command-line
+    /// tool at the machine's thread count; this setting is single-threaded.
     pub fn level19() -> Self {
         ZstdSettings::level(19)
     }

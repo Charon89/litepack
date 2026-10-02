@@ -35,6 +35,11 @@ fn tiny_corpus(tmp: &Path, private: bool) -> PathBuf {
     std::fs::create_dir_all(&class_dir).expect("mkdir");
     std::fs::write(class_dir.join("secret-name.safetensors"), &weights).expect("write");
     std::fs::write(class_dir.join("readme.txt"), &text).expect("write");
+    // A JPEG-class file whose bytes differ from the manifest's record: `probe jpeg` fails on its
+    // input check, whatever state the other probes are in.
+    let photo_dir = files_dir.join("photo-jpeg");
+    std::fs::create_dir_all(&photo_dir).expect("mkdir");
+    std::fs::write(photo_dir.join("damaged.jpg"), b"damaged bytes").expect("write");
     let manifest = Manifest::with_profile_name(
         if private { "private" } else { "small" },
         vec![
@@ -45,6 +50,10 @@ fn tiny_corpus(tmp: &Path, private: bool) -> PathBuf {
             (
                 "model-weights".to_string(),
                 manifest_file("model-weights/readme.txt", &text),
+            ),
+            (
+                "photo-jpeg".to_string(),
+                manifest_file("photo-jpeg/damaged.jpg", b"the bytes the manifest recorded"),
             ),
         ],
     );
@@ -311,8 +320,7 @@ fn probe_all_continues_after_a_failing_probe() {
     let corpus = tiny_corpus(tmp.path(), false);
     let cfg = config(corpus, tmp.path().join("results"), &NAMES);
     let out = execute(&cfg).expect("execute");
-    // Independent of which probes are still stubs: every name either wrote its file or
-    // failed as a stub, and the run went on after the first failure.
+    // Every name either wrote its file or failed, and the run went on after the first failure.
     let failed: Vec<&str> = out.failed.iter().map(|(n, _)| n.as_str()).collect();
     let mut covered: Vec<&str> = out.written.iter().map(String::as_str).collect();
     covered.extend(failed.iter().copied());
@@ -320,11 +328,28 @@ fn probe_all_continues_after_a_failing_probe() {
     let mut all: Vec<&str> = NAMES.to_vec();
     all.sort_unstable();
     assert_eq!(covered, all, "every probe either wrote its file or failed");
-    assert!(out.written.iter().any(|n| n == "weights"), "weights ran");
-    for (name, reason) in &out.failed {
-        assert!(reason.contains("not implemented yet"), "{name}: {reason}");
+    // `jpeg` fails on the damaged input, not because it is a stub.
+    let (_, reason) = out
+        .failed
+        .iter()
+        .find(|(n, _)| n == "jpeg")
+        .expect("jpeg failed");
+    assert!(reason.contains("does not match the manifest"), "{reason}");
+    for name in &failed {
         assert!(!out.results_dir.join(format!("probe-{name}.json")).exists());
     }
+    // `text` and `weights` come after `jpeg` in NAMES and still ran.
+    for name in ["text", "weights"] {
+        assert!(out.written.iter().any(|n| n == name), "{name} ran");
+        assert!(out.results_dir.join(format!("probe-{name}.json")).is_file());
+    }
+    let index = |n: &str| NAMES.iter().position(|x| *x == n).expect("name");
+    assert!(
+        failed
+            .iter()
+            .any(|f| out.written.iter().any(|w| index(f) < index(w))),
+        "a failed probe precedes a written one"
+    );
     assert_eq!(out.problems, 0, "the written files validate");
     assert!(out.results_dir.join("probe-weights.json").is_file());
 }
