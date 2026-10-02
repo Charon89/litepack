@@ -50,8 +50,9 @@
 //!   registry's list to equal the pins in the lock.
 //! * `commons-photos`: `category`, `count`, `min_bytes`, `max_bytes`. A list kind (see "Lock
 //!   semantics"): under `--update-lock` it pages through the Wikimedia Commons API and keeps, in
-//!   API order, the first `count` camera JPEGs (Exif Make and Model present) licensed CC0 or
-//!   CC BY (no ShareAlike, NonCommercial or NoDerivs) whose size lies in the window. Names are
+//!   API order, the first `count` camera JPEGs (Exif Make and Model present) licensed CC0,
+//!   CC BY or CC BY-SA (no NonCommercial or NoDerivs; names mapped onto a fixed SPDX table) whose
+//!   size lies in the window. Names are
 //!   an ASCII slug plus a short title hash. Details in [`commons`].
 //! * `arxiv-papers`: `from`, `until`, optional `set`, `count`. A list kind: under `--update-lock`
 //!   it lists the OAI-PMH window, keeps CC BY 4.0 records, sorts by identifier and takes the
@@ -125,6 +126,16 @@
 //!   source's pinned entries ([`build::Ctx::listed_pins`]). Per-file licence and author live
 //!   in the pin; the manifest carries the per-file licence when the pin has one and the
 //!   source-level string otherwise.
+//!
+//! * A listed file that is gone or no longer matches its pin does not fail a normal build: it is
+//!   left out of the manifest and reported as `unavailable` in `build-info.json` and the printed
+//!   summary. Under `--update-lock` any such failure is fatal. Re-pin procedure: the pin names
+//!   the URL of the file as it was when listed. If a Commons file was re-uploaded, its pin goes
+//!   stale (no archive-URL fallback: the archive name of an old version carries the time it was
+//!   replaced, not the pinned upload time, so it cannot be computed from the lock). To refresh,
+//!   run `--update-lock` for the source; this re-runs the API listing and may change several
+//!   files, so review the lock diff. When pinning, the API's `sha1` is compared with the
+//!   downloaded bytes and a difference is an error.
 //!
 //! # Downloader
 //!
@@ -294,6 +305,12 @@ pub fn run(args: CorpusArgs) -> ExitCode {
                         println!(
                             "WARNING: source `{}` was SKIPPED, the corpus lacks it: {}",
                             s.source, s.reason
+                        );
+                    }
+                    for u in &r.unavailable {
+                        println!(
+                            "WARNING: unavailable, left out of the manifest: {} ({}): {}",
+                            u.url, u.source, u.reason
                         );
                     }
                     for p in &r.removed {

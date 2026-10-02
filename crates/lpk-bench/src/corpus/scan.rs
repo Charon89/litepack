@@ -269,6 +269,7 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
             accounting: Vec::new(),
             summary: Default::default(),
             tools: Default::default(),
+            unavailable: Vec::new(),
         },
         private: true,
         root: root_text,

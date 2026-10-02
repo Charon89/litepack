@@ -394,6 +394,16 @@ mod tests {
         }
     }
 
+    /// The bytes the fake server serves for a title (fill byte = first letter after `File:`).
+    fn content(title: &str, size: u64) -> Vec<u8> {
+        vec![title.as_bytes()[5]; size as usize]
+    }
+
+    fn sha1_hex(b: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        Sha1::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+    }
+
     fn file_url(n: &str) -> String {
         format!("https://upload.wikimedia.org/wikipedia/commons/a/ab/{n}.jpg")
     }
@@ -412,7 +422,7 @@ mod tests {
                 "size": size,
                 "url": format!("{}?utm_source=commons.wikimedia.org&utm_content=original",
                     file_url(title.trim_start_matches("File:").trim_end_matches(".jpg"))),
-                "sha1": "aa11",
+                "sha1": sha1_hex(&content(title, size)),
                 "mime": mime,
                 "commonmetadata": meta,
                 "extmetadata": {
@@ -496,7 +506,7 @@ mod tests {
             Some("Ann & Bo (Wikimedia Commons)")
         );
         assert_eq!(f.url, file_url("Good"), "query string removed");
-        assert_eq!(f.extra["sha1"], "aa11");
+        assert_eq!(f.extra["sha1"], sha1_hex(&content("File:Good.jpg", 500)));
         assert_eq!(f.extra["timestamp"], "2020-01-02T03:04:05Z");
         assert!(accept(&c("File:A.jpg", 500, "CC0", "", "image/jpeg", true), &s).is_some());
         // Rejections: MIME, no camera, size window (both ends), licence, CC BY without artist.
@@ -701,11 +711,11 @@ max_bytes = 100
         fetcher
             .files
             .borrow_mut()
-            .insert(file_url("Alpha"), vec![1; 10]);
+            .insert(file_url("Alpha"), content("File:Alpha.jpg", 10));
         fetcher
             .files
             .borrow_mut()
-            .insert(file_url("Beta"), vec![2; 12]);
+            .insert(file_url("Beta"), content("File:Beta.jpg", 12));
         let opts = |out: &str, update_lock| BuildOptions {
             profile: Profile::Small,
             out: root.join(out),
@@ -750,10 +760,95 @@ max_bytes = 100
         assert!(files.iter().all(|f| f.licence == "CC-BY-4.0"));
         let lock = std::fs::read_to_string(root.join("corpus.lock")).expect("lock");
         assert!(lock.contains("\"attribution\": \"Zoe (Wikimedia Commons)\""));
-        assert!(lock.contains("\"sha1\": \"aa11\""));
+        assert!(lock.contains(&format!(
+            "\"sha1\": \"{}\"",
+            sha1_hex(&content("File:Alpha.jpg", 10))
+        )));
         assert!(root
             .join("o2/photo-jpeg/wc")
             .join(output_name("File:Alpha.jpg"))
             .is_file());
+    }
+
+    fn opts_for(root: &std::path::Path, out: &str, cache: &str, update_lock: bool) -> BuildOptions {
+        BuildOptions {
+            profile: Profile::Small,
+            out: root.join(out),
+            cache: root.join(cache),
+            only: vec![],
+            update_lock,
+            sources_path: root.join("sources.toml"),
+            lock_path: root.join("corpus.lock"),
+            retry: fast_retry(),
+            git_program: None,
+        }
+    }
+
+    fn api_with(items: Vec<Value>) -> FakeFetcher {
+        let fetcher = FakeFetcher::default();
+        fetcher.files.borrow_mut().insert(
+            api_url("Category:Test", &BTreeMap::new()),
+            answer(items, None),
+        );
+        fetcher
+    }
+
+    #[test]
+    fn the_api_sha1_is_checked_against_the_bytes_when_pinning() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        std::fs::write(root.join("sources.toml"), REGISTRY).expect("w");
+        let mut bad = entry("File:Alpha.jpg", 10, "CC0", "z", "image/jpeg", true);
+        bad["imageinfo"][0]["sha1"] = json!("0000");
+        let fetcher = api_with(vec![
+            bad,
+            entry("File:Beta.jpg", 12, "CC0", "z", "image/jpeg", true),
+        ]);
+        fetcher
+            .files
+            .borrow_mut()
+            .insert(file_url("Alpha"), content("File:Alpha.jpg", 10));
+        fetcher
+            .files
+            .borrow_mut()
+            .insert(file_url("Beta"), content("File:Beta.jpg", 12));
+        let err = build(&opts_for(root, "o", "cache", true), &fetcher).expect_err("sha1");
+        assert!(format!("{err:#}").contains("SHA-1"), "{err:#}");
+    }
+
+    #[test]
+    fn a_file_that_vanished_or_changed_is_reported_and_left_out() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        std::fs::write(root.join("sources.toml"), REGISTRY).expect("w");
+        let fetcher = api_with(vec![
+            entry("File:Alpha.jpg", 10, "CC0", "z", "image/jpeg", true),
+            entry("File:Beta.jpg", 12, "CC0", "z", "image/jpeg", true),
+        ]);
+        for (t, n) in [("Alpha", 10), ("Beta", 12)] {
+            fetcher
+                .files
+                .borrow_mut()
+                .insert(file_url(t), content(&format!("File:{t}.jpg"), n));
+        }
+        build(&opts_for(root, "o1", "cache", true), &fetcher).expect("pin");
+        // Upstream: Alpha disappears, Beta is replaced by other bytes.
+        fetcher.files.borrow_mut().remove(&file_url("Alpha"));
+        let report = build(&opts_for(root, "o2", "cache2", false), &fetcher).expect("normal");
+        assert_eq!(report.unavailable.len(), 1);
+        assert!(report.unavailable[0].url.ends_with("Alpha.jpg"));
+        assert_eq!(report.files, 1, "the other file is still built");
+        fetcher
+            .files
+            .borrow_mut()
+            .insert(file_url("Beta"), vec![9; 12]);
+        let report = build(&opts_for(root, "o3", "cache3", false), &fetcher).expect("normal");
+        assert_eq!(report.unavailable.len(), 2, "{:?}", report.unavailable);
+        assert!(report.unavailable[1].reason.contains("does not match"));
+        assert_eq!(report.files, 0);
+        let info = std::fs::read_to_string(root.join("o3/build-info.json")).expect("info");
+        assert!(info.contains("\"unavailable\""), "{info}");
+        // The same failures are fatal while pinning.
+        assert!(build(&opts_for(root, "o4", "cache4", true), &fetcher).is_err());
     }
 }

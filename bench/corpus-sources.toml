@@ -378,20 +378,20 @@ files = [
 [[source]]
 id = "commons-featured-small"
 class = "photo-jpeg"
-licence = "CC0-1.0 or CC-BY (each file carries its own licence and author)"
-origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0 or CC BY, API order, 200 KB to 3.5 MB"
+licence = "CC0-1.0, CC-BY or CC-BY-SA (each file carries its own licence and author)"
+origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0, CC BY or CC BY-SA, API order, 200 KB to 2 MB"
 profiles = ["small"]
 kind = "commons-photos"
 category = "Category:Featured_pictures_on_Wikimedia_Commons"
 count = 300
 min_bytes = 200000
-max_bytes = 3500000
+max_bytes = 2000000
 
 [[source]]
 id = "commons-featured-full"
 class = "photo-jpeg"
-licence = "CC0-1.0 or CC-BY (each file carries its own licence and author)"
-origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0 or CC BY, API order, 200 KB to 6 MB"
+licence = "CC0-1.0, CC-BY or CC-BY-SA (each file carries its own licence and author)"
+origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0, CC BY or CC BY-SA, API order, 200 KB to 6 MB"
 profiles = ["full"]
 kind = "commons-photos"
 category = "Category:Featured_pictures_on_Wikimedia_Commons"

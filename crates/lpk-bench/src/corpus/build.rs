@@ -20,7 +20,7 @@ use super::fetch::{
 };
 use super::lock::{Lock, LockEntry};
 use super::manifest::{
-    now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped, SourceAccount, Summary,
+    now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped, SourceAccount, Summary, Unavailable,
 };
 use super::registry::{
     file_name_for, gz_output_name, ArchiveFormat, FilesSpec, Profile, Registry, Source, SourceSpec,
@@ -76,6 +76,8 @@ pub struct BuildReport {
     pub altered: Vec<String>,
     /// Files and bytes per class and in total.
     pub summary: Summary,
+    /// Listed files that could not be fetched or no longer match their pin; left out.
+    pub unavailable: Vec<Unavailable>,
 }
 
 /// One file of a list-type source. This is the contract for such sources: the lock *is* the
@@ -113,6 +115,8 @@ pub struct Ctx<'a> {
     git_program: String,
     /// External tool versions seen by this run (`build-info.json`, key `tools`).
     tools: BTreeMap<String, String>,
+    /// Listed files that were gone or no longer matched their pin (normal builds).
+    unavailable: Vec<Unavailable>,
 }
 
 #[cfg(test)]
@@ -136,6 +140,7 @@ impl<'a> Ctx<'a> {
             produced: Vec::new(),
             git_program: "git".into(),
             tools: BTreeMap::new(),
+            unavailable: Vec::new(),
         }
     }
 }
@@ -245,6 +250,18 @@ impl Ctx<'_> {
         };
         let a = self.downloader.obtain(&source.id, url, expect)?;
         if self.update_lock {
+            if let Some(want) = meta.and_then(|m| m.extra.get("sha1")) {
+                let got = sha1_file(&a.path)
+                    .map_err(|e| DownloadError::Io(format!("source `{}`: {e}", source.id)))?;
+                if !want.eq_ignore_ascii_case(&got) {
+                    return Err(DownloadError::Mismatch(format!(
+                        "source `{}`: {url} has SHA-1 {got} but the API listed {want}; the file                          changed while listing, run --update-lock again",
+                        source.id
+                    )));
+                }
+            }
+        }
+        if self.update_lock {
             let mut entry = LockEntry::artifact(&source.id, url, a.bytes, a.blake3.clone());
             if let Some(m) = meta {
                 entry.path = Some(m.path.clone());
@@ -337,6 +354,54 @@ impl Ctx<'_> {
             .map(|e| format!("{}: {}", e.source, e.url))
             .collect()
     }
+}
+
+/// SHA-1 of a file as lower-case hex (used only to check the API's `sha1` when pinning).
+fn sha1_file(path: &Path) -> std::io::Result<String> {
+    use sha1::{Digest, Sha1};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha1::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Fetch every item of a list source. In a normal build a file that is gone or no longer
+/// matches its pin is not fatal: it is recorded as unavailable (build-info and printed summary)
+/// and left out. Under `--update-lock` any failure is fatal (the pins would be incomplete).
+fn fetch_items(
+    ctx: &mut Ctx<'_>,
+    source: &Source,
+    dir: &Path,
+    items: &[ListedFile],
+) -> Result<Vec<ManifestFile>> {
+    let mut made = Vec::with_capacity(items.len());
+    for item in items {
+        match ctx.fetch_listed(source, dir, item) {
+            Ok(f) => made.push(f),
+            Err(e) if !ctx.update_lock => match e.downcast_ref::<DownloadError>() {
+                Some(DownloadError::Fetch(_) | DownloadError::Mismatch(_)) => {
+                    eprintln!("  unavailable: {}: {e:#}", item.url);
+                    ctx.unavailable.push(Unavailable {
+                        reason: format!("{e:#}"),
+                        source: source.id.clone(),
+                        url: item.url.clone(),
+                    });
+                    let _ = std::fs::remove_file(dir.join(&item.path));
+                }
+                _ => return Err(e),
+            },
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(made)
 }
 
 fn missing_pin(profile: Profile, source: &str, url: &str) -> DownloadError {
@@ -537,6 +602,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
             .clone()
             .unwrap_or_else(|| "git".to_string()),
         tools: BTreeMap::new(),
+        unavailable: Vec::new(),
     };
 
     let mut skipped = Vec::new();
@@ -640,6 +706,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         accounting,
         summary: summary.clone(),
         tools: std::mem::take(&mut ctx.tools),
+        unavailable: ctx.unavailable.clone(),
     };
     std::fs::write(opts.out.join(info_name), info.render())?;
 
@@ -655,6 +722,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         missing,
         altered,
         summary,
+        unavailable: std::mem::take(&mut ctx.unavailable),
     })
 }
 
@@ -772,11 +840,7 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
                 pinned
             };
             ctx.check_listing(source, &items)?;
-            let mut made = Vec::new();
-            for item in &items {
-                made.push(ctx.fetch_listed(source, dir, item)?);
-            }
-            Ok(made)
+            fetch_items(ctx, source, dir, &items)
         }
         SourceSpec::CommonsPhotos(spec) => build_listed(ctx, source, dir, |c| {
             super::commons::resolve(c, source, spec)
@@ -804,11 +868,7 @@ fn build_listed(
     } else {
         ctx.listed_pins(source)?
     };
-    let mut made = Vec::with_capacity(items.len());
-    for item in &items {
-        made.push(ctx.fetch_listed(source, dir, item)?);
-    }
-    Ok(made)
+    fetch_items(ctx, source, dir, &items)
 }
 
 #[cfg(test)]
@@ -1276,6 +1336,7 @@ url = "{OPT_URL}"
             produced: Vec::new(),
             git_program: "git".into(),
             tools: BTreeMap::new(),
+            unavailable: Vec::new(),
         }
     }
 
@@ -1372,6 +1433,7 @@ url = "{OPT_URL}"
             produced: Vec::new(),
             git_program: "git".into(),
             tools: BTreeMap::new(),
+            unavailable: Vec::new(),
         };
         let source = list_source();
         let target = dir.path().join("t");

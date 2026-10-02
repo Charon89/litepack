@@ -87,6 +87,17 @@ pub struct BuildInfo {
     /// builds can be traced to the tool.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, String>,
+    /// Listed files that were gone or no longer matched their pin: left out of the manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<Unavailable>,
+}
+
+/// A file of a list source that a normal build could not obtain as pinned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unavailable {
+    pub reason: String,
+    pub source: String,
+    pub url: String,
 }
 
 /// D-14 accounting for one source: how many files extraction produced (`expected`) and how many
