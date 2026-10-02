@@ -21,6 +21,8 @@ pub enum FetchError {
     },
     /// Not worth retrying (404, 403, bad URL, ...).
     Permanent(String),
+    /// The server says the resource is gone (HTTP 404 or 410).
+    Gone(String),
     /// The partial file cannot be continued (416, or a `206` that is not exactly the rest of
     /// the file): the downloader must request again from zero, through its politeness wait.
     Restart,
@@ -151,6 +153,9 @@ impl Fetcher for HttpFetcher {
                 message: format!("HTTP {status}"),
                 retry_after: header_retry_after,
             });
+        }
+        if matches!(status.as_u16(), 404 | 410) {
+            return Err(FetchError::Gone(format!("HTTP {status}")));
         }
         Err(FetchError::Permanent(format!("HTTP {status}")))
     }
@@ -324,7 +329,8 @@ impl RetryPolicy {
     pub fn check_retry_after(&self, retry_after: Option<Duration>) -> Result<(), String> {
         match retry_after {
             Some(r) if r > self.max_retry_after => Err(format!(
-                "the server asked to wait {} s (Retry-After), more than the {} s this tool                  waits; try again later",
+                "the server asked to wait {} s (Retry-After), more than the {} s this tool \
+                 waits; try again later",
                 r.as_secs(),
                 self.max_retry_after.as_secs()
             )),
@@ -354,6 +360,8 @@ pub enum Expect<'a> {
 #[derive(Debug)]
 pub enum DownloadError {
     Fetch(String),
+    /// The server answered 404 or 410: the file is gone upstream.
+    Gone(String),
     Mismatch(String),
     Io(String),
 }
@@ -361,9 +369,10 @@ pub enum DownloadError {
 impl fmt::Display for DownloadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DownloadError::Fetch(m) | DownloadError::Mismatch(m) | DownloadError::Io(m) => {
-                f.write_str(m)
-            }
+            DownloadError::Fetch(m)
+            | DownloadError::Gone(m)
+            | DownloadError::Mismatch(m)
+            | DownloadError::Io(m) => f.write_str(m),
         }
     }
 }
@@ -486,9 +495,21 @@ impl<'a> Downloader<'a> {
             });
             self.politeness.finish(url);
             match outcome {
-                Ok(b) => return Ok(b),
+                Ok(b) => {
+                    if let Err(m) = self.retry.check_retry_after(b.1) {
+                        return Err(DownloadError::Fetch(format!(
+                            "source `{source}`: {url}: {m}"
+                        )));
+                    }
+                    return Ok(b);
+                }
                 Err(FetchError::Permanent(m)) => {
                     return Err(DownloadError::Fetch(format!(
+                        "source `{source}`: {url}: {m}"
+                    )))
+                }
+                Err(FetchError::Gone(m)) => {
+                    return Err(DownloadError::Gone(format!(
                         "source `{source}`: {url}: {m}"
                     )))
                 }
@@ -622,6 +643,11 @@ impl<'a> Downloader<'a> {
                     // Discard the partial file; the next loop pass waits like any request.
                     let _ = std::fs::remove_file(part);
                     validator = None;
+                }
+                Err(AttemptError::Fetch(FetchError::Gone(m))) => {
+                    return Err(DownloadError::Gone(format!(
+                        "source `{source}`: {url}: {m}"
+                    )))
                 }
                 Err(AttemptError::Fetch(FetchError::Permanent(m))) => {
                     return Err(DownloadError::Fetch(format!(
@@ -831,7 +857,7 @@ pub mod fake {
             }
             let files = self.files.borrow();
             let Some(bytes) = files.get(url) else {
-                return Err(FetchError::Permanent("HTTP 404".into()));
+                return Err(FetchError::Gone("HTTP 404".into()));
             };
             let current = self.validator.borrow().clone();
             let changed = if_range.is_some() && current.as_deref() != if_range;
@@ -984,7 +1010,7 @@ mod tests {
         let err = dl(&f, dir.path())
             .obtain("s", URL, Expect::Unpinned)
             .expect_err("404");
-        assert!(matches!(err, DownloadError::Fetch(_)));
+        assert!(matches!(err, DownloadError::Gone(_)));
         assert_eq!(f.call_count(), 1);
     }
 

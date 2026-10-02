@@ -3,7 +3,7 @@
 //! # Commands
 //!
 //! ```text
-//! lpk-bench corpus build --profile <small|full> [--out DIR] [--cache DIR] [--only a,b] [--update-lock]
+//! lpk-bench corpus build --profile <small|full> [--out DIR] [--cache DIR] [--only a,b] [--update-lock] [--allow-unavailable]
 //! lpk-bench corpus scan  --private DIR --out DIR      (see [`scan`] and [`classify`])
 //! ```
 //!
@@ -127,9 +127,13 @@
 //!   in the pin; the manifest carries the per-file licence when the pin has one and the
 //!   source-level string otherwise.
 //!
-//! * A listed file that is gone or no longer matches its pin does not fail a normal build: it is
-//!   left out of the manifest and reported as `unavailable` in `build-info.json` and the printed
-//!   summary. Under `--update-lock` any such failure is fatal. Re-pin procedure: the pin names
+//! * Listed files of the API-resolved kinds (`commons-photos`, `arxiv-papers`; never a static
+//!   `files` source): two conditions make a file *unavailable* in a normal build, an HTTP 404 or
+//!   410, or bytes that no longer match the pin. By default the build fails, names each such file
+//!   and the two ways forward. With `--allow-unavailable` it continues, leaves them out of the
+//!   manifest, records them under `unavailable` in `build-info.json` and prints a warning. Timeouts,
+//!   5xx, connection failures and a refused `Retry-After` stay fatal. Under `--update-lock`
+//!   every failure is fatal. Re-pin procedure: the pin names
 //!   the URL of the file as it was when listed. If a Commons file was re-uploaded, its pin goes
 //!   stale (no archive-URL fallback: the archive name of an old version carries the time it was
 //!   replaced, not the pinned upload time, so it cannot be computed from the lock). To refresh,
@@ -236,6 +240,11 @@ pub struct BuildArgs {
     /// the lock instead of verifying against it; other sources' pins are kept
     #[arg(long)]
     pub update_lock: bool,
+    /// Continue without listed files (commons-photos, arxiv-papers) that are gone upstream
+    /// (404/410) or no longer match their pin; they are recorded under `unavailable` in
+    /// build-info.json. Default: the build fails and names them
+    #[arg(long)]
+    pub allow_unavailable: bool,
     /// Source registry file
     #[arg(long, default_value = "bench/corpus-sources.toml")]
     pub sources: PathBuf,
@@ -270,6 +279,7 @@ impl BuildArgs {
             lock_path: self.lock.clone(),
             retry: RetryPolicy::default(),
             git_program: None,
+            allow_unavailable: self.allow_unavailable,
         }
     }
 }
@@ -346,6 +356,7 @@ mod tests {
             cache: PathBuf::from("c"),
             only: vec![],
             update_lock: false,
+            allow_unavailable: false,
             sources: PathBuf::from("s"),
             lock: PathBuf::from("l"),
         };

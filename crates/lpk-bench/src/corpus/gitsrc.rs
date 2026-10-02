@@ -259,14 +259,25 @@ fn init_repo(git: &Git<'_>) -> Result<()> {
 /// produces the same tree or fails the same way.
 fn check_tree(git: &Git<'_>, commit: &str) -> Result<()> {
     let out = git.run(&["ls-tree", "-r", "-z", "--name-only", commit])?;
-    let paths: Vec<String> = out
-        .stdout
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| String::from_utf8_lossy(p).into_owned())
-        .collect();
+    let paths = tree_paths(&out.stdout, commit)?;
     super::extract::check_listing(&paths)
         .with_context(|| format!("the tree of commit {commit} is not portable"))
+}
+
+/// Split `ls-tree -z` output into paths. A path that is not valid UTF-8 is an error: git
+/// writes the raw bytes as the name, and Windows and Linux would not agree on it.
+fn tree_paths(stdout: &[u8], commit: &str) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for p in stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let name = std::str::from_utf8(p).map_err(|_| {
+            anyhow::anyhow!(
+                "the tree of commit {commit} holds a path that is not valid UTF-8: {}",
+                String::from_utf8_lossy(p)
+            )
+        })?;
+        paths.push(name.to_string());
+    }
+    Ok(paths)
 }
 
 /// `git fetch` of one commit, then check that it arrived and that its tree is portable. Any git
@@ -663,6 +674,7 @@ mod tests {
             lock_path: root.join("corpus.lock"),
             retry: fast_retry(),
             git_program: Some("no-such-git-program-xyz".into()),
+            allow_unavailable: false,
         };
         let report = build_corpus(&opts, &fetcher).expect("build");
         assert_eq!(report.skipped.len(), 1);
@@ -802,5 +814,13 @@ mod tests {
 ",
             "the pointer text is kept as is"
         );
+    }
+
+    #[test]
+    fn non_utf8_tree_paths_are_rejected() {
+        let ok = tree_paths(b"a/b.txt\0c\xc3\xa9.txt\0", "c").expect("valid");
+        assert_eq!(ok, ["a/b.txt", "c\u{e9}.txt"]);
+        let err = tree_paths(b"fine.txt\0bad\xff\xfe.txt\0", "c").expect_err("invalid");
+        assert!(format!("{err:#}").contains("not valid UTF-8"), "{err:#}");
     }
 }

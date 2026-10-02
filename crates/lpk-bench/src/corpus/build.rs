@@ -54,6 +54,9 @@ pub struct BuildOptions {
     pub retry: RetryPolicy,
     /// The `git` program for git sources (`None`: `git` from `PATH`). Injectable for tests.
     pub git_program: Option<String>,
+    /// Continue when listed files of a list source are gone (404/410) or no longer match their
+    /// pin, leaving them out and recording them as unavailable. Default: fail.
+    pub allow_unavailable: bool,
 }
 
 /// Result of a successful build.
@@ -117,6 +120,8 @@ pub struct Ctx<'a> {
     tools: BTreeMap<String, String>,
     /// Listed files that were gone or no longer matched their pin (normal builds).
     unavailable: Vec<Unavailable>,
+    /// `--allow-unavailable`: continue without listed files that are gone or changed.
+    allow_unavailable: bool,
 }
 
 #[cfg(test)]
@@ -141,6 +146,7 @@ impl<'a> Ctx<'a> {
             git_program: "git".into(),
             tools: BTreeMap::new(),
             unavailable: Vec::new(),
+            allow_unavailable: false,
         }
     }
 }
@@ -255,7 +261,8 @@ impl Ctx<'_> {
                     .map_err(|e| DownloadError::Io(format!("source `{}`: {e}", source.id)))?;
                 if !want.eq_ignore_ascii_case(&got) {
                     return Err(DownloadError::Mismatch(format!(
-                        "source `{}`: {url} has SHA-1 {got} but the API listed {want}; the file                          changed while listing, run --update-lock again",
+                        "source `{}`: {url} has SHA-1 {got} but the API listed {want}; the file \
+                         changed while listing, run --update-lock again",
                         source.id
                     )));
                 }
@@ -373,34 +380,63 @@ fn sha1_file(path: &Path) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Fetch every item of a list source. In a normal build a file that is gone or no longer
-/// matches its pin is not fatal: it is recorded as unavailable (build-info and printed summary)
-/// and left out. Under `--update-lock` any failure is fatal (the pins would be incomplete).
+/// Fetch every item of a list source. Under `--update-lock` any failure is fatal. In a normal
+/// build, for the API-resolved kinds only (`tolerant`), two conditions make a file
+/// "unavailable": the server says it is gone (404/410) or the bytes no longer match the pin.
+/// By default the build then fails, listing each such file and the ways forward;
+/// `--allow-unavailable` leaves them out and records them. Timeouts, 5xx, connection failures
+/// and refused `Retry-After` waits are always fatal, and so is every failure of a static source.
 fn fetch_items(
     ctx: &mut Ctx<'_>,
     source: &Source,
     dir: &Path,
     items: &[ListedFile],
+    tolerant: bool,
 ) -> Result<Vec<ManifestFile>> {
     let mut made = Vec::with_capacity(items.len());
+    let mut missing: Vec<Unavailable> = Vec::new();
     for item in items {
         match ctx.fetch_listed(source, dir, item) {
             Ok(f) => made.push(f),
-            Err(e) if !ctx.update_lock => match e.downcast_ref::<DownloadError>() {
-                Some(DownloadError::Fetch(_) | DownloadError::Mismatch(_)) => {
-                    eprintln!("  unavailable: {}: {e:#}", item.url);
-                    ctx.unavailable.push(Unavailable {
-                        reason: format!("{e:#}"),
-                        source: source.id.clone(),
-                        url: item.url.clone(),
-                    });
-                    let _ = std::fs::remove_file(dir.join(&item.path));
+            Err(e) => {
+                let gone_or_changed = matches!(
+                    e.downcast_ref::<DownloadError>(),
+                    Some(DownloadError::Gone(_) | DownloadError::Mismatch(_))
+                );
+                if ctx.update_lock || !tolerant || !gone_or_changed {
+                    return Err(e);
                 }
-                _ => return Err(e),
-            },
-            Err(e) => return Err(e),
+                missing.push(Unavailable {
+                    reason: format!("{e:#}"),
+                    source: source.id.clone(),
+                    url: item.url.clone(),
+                });
+            }
         }
     }
+    if missing.is_empty() {
+        return Ok(made);
+    }
+    if !ctx.allow_unavailable {
+        let list: Vec<String> = missing
+            .iter()
+            .map(|u| format!("  {}: {}", u.url, u.reason))
+            .collect();
+        bail!(
+            "source `{}`: {} listed file(s) are gone upstream or no longer match their pin:\n{}\n\
+             Either re-pin (`lpk-bench corpus build --profile <p> --update-lock`, which lists the \
+             source again and may change other files) or build without them with \
+             `--allow-unavailable` (they are left out and recorded under `unavailable` in \
+             build-info.json)",
+            source.id,
+            missing.len(),
+            list.join("\n")
+        );
+    }
+    for u in &missing {
+        eprintln!("  unavailable: {}: {}", u.url, u.reason);
+    }
+    ctx.unavailable.extend(missing);
     Ok(made)
 }
 
@@ -597,6 +633,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         recorded: Vec::new(),
         used: BTreeSet::new(),
         produced: Vec::new(),
+        allow_unavailable: opts.allow_unavailable,
         git_program: opts
             .git_program
             .clone()
@@ -631,7 +668,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
                 let tolerated = source.optional
                     && matches!(
                         e.downcast_ref::<DownloadError>(),
-                        Some(DownloadError::Fetch(_))
+                        Some(DownloadError::Fetch(_) | DownloadError::Gone(_))
                     );
                 if !tolerated {
                     return Err(e.context(format!("building source `{}`", source.id)));
@@ -840,7 +877,7 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
                 pinned
             };
             ctx.check_listing(source, &items)?;
-            fetch_items(ctx, source, dir, &items)
+            fetch_items(ctx, source, dir, &items, false)
         }
         SourceSpec::CommonsPhotos(spec) => build_listed(ctx, source, dir, |c| {
             super::commons::resolve(c, source, spec)
@@ -868,7 +905,7 @@ fn build_listed(
     } else {
         ctx.listed_pins(source)?
     };
-    fetch_items(ctx, source, dir, &items)
+    fetch_items(ctx, source, dir, &items, true)
 }
 
 #[cfg(test)]
@@ -968,6 +1005,7 @@ url = "{OPT_URL}"
                 lock_path: self.root.join("corpus.lock"),
                 retry: fast_retry(),
                 git_program: None,
+                allow_unavailable: false,
             }
         }
 
@@ -1337,6 +1375,7 @@ url = "{OPT_URL}"
             git_program: "git".into(),
             tools: BTreeMap::new(),
             unavailable: Vec::new(),
+            allow_unavailable: false,
         }
     }
 
@@ -1434,6 +1473,7 @@ url = "{OPT_URL}"
             git_program: "git".into(),
             tools: BTreeMap::new(),
             unavailable: Vec::new(),
+            allow_unavailable: false,
         };
         let source = list_source();
         let target = dir.path().join("t");

@@ -640,6 +640,22 @@ mod tests {
     }
 
     #[test]
+    fn a_huge_retry_after_on_a_maxlag_answer_is_refused() {
+        let fetcher = FakeFetcher::default();
+        fetcher.files.borrow_mut().insert(
+            api_url("Category:Test", &BTreeMap::new()),
+            br#"{"error":{"code":"maxlag"}}"#.to_vec(),
+        );
+        fetcher
+            .retry_after
+            .set(Some(std::time::Duration::from_secs(100_000)));
+        let (_dir, mut e) = Env::new(&fetcher);
+        let err = e.resolve(&spec(1)).expect_err("refused");
+        assert!(format!("{err:#}").contains("Retry-After"), "{err:#}");
+        assert_eq!(fetcher.call_count(), 1, "no waiting, no retry");
+    }
+
+    #[test]
     fn maxlag_is_retried() {
         let fetcher = FakeFetcher::default();
         let url = api_url("Category:Test", &BTreeMap::new());
@@ -730,6 +746,7 @@ max_bytes = 100
             lock_path: root.join("corpus.lock"),
             retry: fast_retry(),
             git_program: None,
+            allow_unavailable: false,
         };
         build(&opts("o1", true), &fetcher).expect("pin");
         let api = |f: &FakeFetcher| {
@@ -785,6 +802,7 @@ max_bytes = 100
             lock_path: root.join("corpus.lock"),
             retry: fast_retry(),
             git_program: None,
+            allow_unavailable: false,
         }
     }
 
@@ -820,10 +838,13 @@ max_bytes = 100
         assert!(format!("{err:#}").contains("SHA-1"), "{err:#}");
     }
 
-    #[test]
-    fn a_file_that_vanished_or_changed_is_reported_and_left_out() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let root = dir.path();
+    fn allowing(mut o: BuildOptions) -> BuildOptions {
+        o.allow_unavailable = true;
+        o
+    }
+
+    /// Pin two files, then let `change` alter the upstream.
+    fn pinned(root: &std::path::Path) -> FakeFetcher {
         std::fs::write(root.join("sources.toml"), REGISTRY).expect("w");
         let fetcher = api_with(vec![
             entry("File:Alpha.jpg", 10, "CC0", "z", "image/jpeg", true),
@@ -836,23 +857,94 @@ max_bytes = 100
                 .insert(file_url(t), content(&format!("File:{t}.jpg"), n));
         }
         build(&opts_for(root, "o1", "cache", true), &fetcher).expect("pin");
-        // Upstream: Alpha disappears, Beta is replaced by other bytes.
+        fetcher
+    }
+
+    #[test]
+    fn gone_and_changed_files_fail_by_default_and_are_left_out_with_the_flag() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        let fetcher = pinned(root);
+        // Upstream: Alpha is gone (404), Beta is replaced by other bytes.
         fetcher.files.borrow_mut().remove(&file_url("Alpha"));
-        let report = build(&opts_for(root, "o2", "cache2", false), &fetcher).expect("normal");
-        assert_eq!(report.unavailable.len(), 1);
-        assert!(report.unavailable[0].url.ends_with("Alpha.jpg"));
-        assert_eq!(report.files, 1, "the other file is still built");
         fetcher
             .files
             .borrow_mut()
             .insert(file_url("Beta"), vec![9; 12]);
-        let report = build(&opts_for(root, "o3", "cache3", false), &fetcher).expect("normal");
+        // Default: fails, names both files and both ways forward.
+        let err = build(&opts_for(root, "o2", "cache2", false), &fetcher).expect_err("fails");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Alpha.jpg") && msg.contains("Beta.jpg"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("--update-lock") && msg.contains("--allow-unavailable"),
+            "{msg}"
+        );
+        assert!(
+            !root.join("o2/manifest.json").exists(),
+            "no manifest after a failure"
+        );
+        // With the flag: continues, records both.
+        let report =
+            build(&allowing(opts_for(root, "o3", "cache3", false)), &fetcher).expect("allowed");
         assert_eq!(report.unavailable.len(), 2, "{:?}", report.unavailable);
+        assert!(report.unavailable[0].reason.contains("404"));
         assert!(report.unavailable[1].reason.contains("does not match"));
         assert_eq!(report.files, 0);
         let info = std::fs::read_to_string(root.join("o3/build-info.json")).expect("info");
         assert!(info.contains("\"unavailable\""), "{info}");
-        // The same failures are fatal while pinning.
-        assert!(build(&opts_for(root, "o4", "cache4", true), &fetcher).is_err());
+        // Pinning stays fatal, flag or not.
+        assert!(build(&allowing(opts_for(root, "o4", "cache4", true)), &fetcher).is_err());
+    }
+
+    #[test]
+    fn one_gone_file_with_the_flag_keeps_the_rest() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        let fetcher = pinned(root);
+        fetcher.files.borrow_mut().remove(&file_url("Alpha"));
+        let report =
+            build(&allowing(opts_for(root, "o2", "cache2", false)), &fetcher).expect("allowed");
+        assert_eq!(report.unavailable.len(), 1);
+        assert_eq!(report.files, 1, "the other file is still built");
+    }
+
+    #[test]
+    fn transient_failures_stay_fatal_even_with_the_flag() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        let fetcher = pinned(root);
+        fetcher.fail_first.set(1000);
+        let err = build(&allowing(opts_for(root, "o2", "cache2", false)), &fetcher)
+            .expect_err("network trouble is not unavailability");
+        assert!(format!("{err:#}").contains("gave up"), "{err:#}");
+        // A Retry-After beyond the cap is a refusal, also fatal.
+        fetcher
+            .retry_after
+            .set(Some(std::time::Duration::from_secs(5000)));
+        let err = build(&allowing(opts_for(root, "o3", "cache3", false)), &fetcher)
+            .expect_err("refused wait");
+        assert!(format!("{err:#}").contains("Retry-After"), "{err:#}");
+    }
+
+    #[test]
+    fn a_static_files_source_stays_fatal_even_with_the_flag() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        std::fs::write(
+            root.join("sources.toml"),
+            "[[source]]\nid = \"f\"\nclass = \"c\"\nlicence = \"MIT\"\norigin = \"t\"\n\
+             profiles = [\"small\"]\nkind = \"files\"\n\
+             files = [{ url = \"https://example.org/a.bin\" }]\n",
+        )
+        .expect("w");
+        let fetcher = FakeFetcher::with("https://example.org/a.bin", b"data".to_vec());
+        build(&opts_for(root, "o1", "cache", true), &fetcher).expect("pin");
+        fetcher.files.borrow_mut().clear();
+        let err = build(&allowing(opts_for(root, "o2", "cache2", false)), &fetcher)
+            .expect_err("static sources never tolerate missing files");
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
     }
 }
