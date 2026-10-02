@@ -6,8 +6,10 @@
 //!
 //! A file is accepted when all of these hold:
 //! * MIME `image/jpeg` and an `https://upload.wikimedia.org/` URL;
-//! * `LicenseShortName` is `CC0` or `CC BY <version>` (ShareAlike, NonCommercial and NoDerivs
-//!   variants are rejected), and for CC BY a non-empty artist;
+//! * `LicenseShortName` maps onto a fixed table of SPDX identifiers: `CC0-1.0`, `CC-BY-x.y` and
+//!   `CC-BY-SA-x.y` (with the few national variants SPDX knows); NonCommercial, NoDerivs,
+//!   combined licences and anything unknown are rejected. CC BY and CC BY-SA need a non-empty
+//!   artist;
 //! * Exif `Make` and `Model` are present (a camera original, not a scan or a render);
 //! * its byte size lies in the registry's window.
 //!
@@ -26,6 +28,8 @@ use super::registry::{CommonsSpec, Source};
 const API_LIMIT: u64 = 32 << 20;
 /// Pages the API may answer `maxlag` before the resolver gives up.
 const MAXLAG_ATTEMPTS: u32 = 6;
+/// Upper bound on pages per listing (the whole featured category is a few hundred).
+const MAX_PAGES: u32 = 3000;
 
 /// Percent-encode everything except RFC 3986 unreserved characters.
 pub(super) fn percent_encode(s: &str) -> String {
@@ -148,17 +152,35 @@ pub(super) fn accept_licence(short: &str) -> Option<String> {
     if s == "CC0" || s.starts_with("CC0 ") {
         return Some("CC0-1.0".to_string());
     }
-    let rest = s.strip_prefix("CC BY ")?;
-    let restricted = rest
-        .split(|c: char| c.is_whitespace() || c == '-')
-        .any(|t| matches!(t.to_ascii_uppercase().as_str(), "SA" | "NC" | "ND"));
-    if restricted || rest.trim().is_empty() {
+    // Fixed table of SPDX identifiers; anything else (NC, ND, combined licences such as
+    // "CC BY 3.0, GFDL", unknown variants) is rejected.
+    let (base, rest) = if let Some(r) = s.strip_prefix("CC BY-SA ") {
+        ("CC-BY-SA", r)
+    } else {
+        ("CC-BY", s.strip_prefix("CC BY ")?)
+    };
+    let mut parts = rest.split(' ');
+    let version = parts.next()?;
+    let suffix = parts.next().map(str::to_ascii_uppercase);
+    if parts.next().is_some() {
         return None;
     }
-    Some(format!(
-        "CC-BY-{}",
-        rest.split_whitespace().collect::<Vec<_>>().join("-")
-    ))
+    let known = match (base, version, suffix.as_deref()) {
+        (_, "1.0" | "2.0" | "2.5" | "3.0" | "4.0", None) => true,
+        ("CC-BY", "3.0", Some("AT" | "AU" | "DE" | "NL" | "US" | "IGO")) => true,
+        ("CC-BY", "2.5", Some("AU")) => true,
+        ("CC-BY-SA", "3.0", Some("AT" | "DE" | "IGO")) => true,
+        ("CC-BY-SA", "2.0", Some("UK")) => true,
+        ("CC-BY-SA", "2.1", Some("JP")) => true,
+        _ => false,
+    };
+    if !known {
+        return None;
+    }
+    Some(match suffix {
+        Some(x) => format!("{base}-{version}-{x}"),
+        None => format!("{base}-{version}"),
+    })
 }
 
 fn decode_entities(s: &str) -> String {
@@ -283,13 +305,13 @@ pub(super) fn accept(c: &Candidate, spec: &CommonsSpec) -> Option<ListedFile> {
 
 fn fetch_page(ctx: &Ctx<'_>, source: &Source, url: &str) -> Result<Page> {
     for attempt in 1..=MAXLAG_ATTEMPTS {
-        let body = ctx.api_get(source, url, API_LIMIT)?;
+        let (body, retry_after) = ctx.api_get_response(source, url, API_LIMIT)?;
         let page = parse_page(&body).with_context(|| format!("source `{}`: {url}", source.id))?;
         if !page.maxlag {
             return Ok(page);
         }
         eprintln!("  {}: server lag, waiting (attempt {attempt})", source.id);
-        ctx.downloader().backoff(attempt);
+        ctx.downloader().maxlag_wait(attempt, retry_after);
     }
     bail!("source `{}`: the API kept answering maxlag", source.id)
 }
@@ -301,6 +323,7 @@ pub fn resolve(ctx: &mut Ctx<'_>, source: &Source, spec: &CommonsSpec) -> Result
     let mut seen_titles = BTreeSet::new();
     let mut seen_urls = BTreeSet::new();
     let mut pages = 0u32;
+    let mut seen_conts: BTreeSet<BTreeMap<String, String>> = BTreeSet::new();
     loop {
         let page = fetch_page(ctx, source, &api_url(&spec.category, &cont))?;
         pages += 1;
@@ -327,7 +350,19 @@ pub fn resolve(ctx: &mut Ctx<'_>, source: &Source, spec: &CommonsSpec) -> Result
             break;
         }
         match page.cont {
-            Some(c) => cont = c,
+            Some(c) => {
+                ensure!(
+                    seen_conts.insert(c.clone()),
+                    "source `{}`: the API repeated a continuation ({c:?}); stopping",
+                    source.id
+                );
+                ensure!(
+                    pages < MAX_PAGES,
+                    "source `{}`: more than {MAX_PAGES} pages without enough files",
+                    source.id
+                );
+                cont = c;
+            }
             None => break,
         }
     }
@@ -407,8 +442,20 @@ mod tests {
             accept_licence("CC BY 3.0 DE").as_deref(),
             Some("CC-BY-3.0-DE")
         );
+        assert_eq!(
+            accept_licence("CC BY-SA 4.0").as_deref(),
+            Some("CC-BY-SA-4.0")
+        );
+        assert_eq!(
+            accept_licence("CC BY-SA 3.0 de").as_deref(),
+            Some("CC-BY-SA-3.0-DE")
+        );
         for bad in [
-            "CC BY-SA 4.0",
+            "CC BY 3.0, GFDL",
+            "CC BY-SA 4.0 or GPL",
+            "CC BY 9.9",
+            "CC BY 3.0 XX",
+            "CC BY-SA 1.0 DE",
             "CC BY-NC 2.0",
             "CC BY-ND 2.0",
             "CC BY-NC-SA 3.0",
@@ -460,7 +507,7 @@ mod tests {
         assert!(accept(&c("File:F.jpg", 100, "CC0", "x", "image/jpeg", true), &s).is_some());
         assert!(accept(&c("File:G.jpg", 1000, "CC0", "x", "image/jpeg", true), &s).is_some());
         assert!(accept(
-            &c("File:H.jpg", 500, "CC BY-SA 4.0", "x", "image/jpeg", true),
+            &c("File:H.jpg", 500, "CC BY-NC 4.0", "x", "image/jpeg", true),
             &s
         )
         .is_none());
@@ -526,7 +573,7 @@ mod tests {
             answer(
                 vec![
                     ok("File:One.jpg"),
-                    entry("File:Sa.jpg", 500, "CC BY-SA 4.0", "x", "image/jpeg", true),
+                    entry("File:Sa.jpg", 500, "CC BY-ND 4.0", "x", "image/jpeg", true),
                     ok("File:Two.jpg"),
                 ],
                 Some("file|AB C|1"),
@@ -552,6 +599,30 @@ mod tests {
         // Not enough files anywhere: an error, not a short listing.
         let err = ctx_env.resolve(&spec(9)).expect_err("short");
         assert!(format!("{err:#}").contains("only 5"), "{err:#}");
+    }
+
+    #[test]
+    fn a_repeated_continuation_stops_the_paging_loop() {
+        let fetcher = FakeFetcher::default();
+        let cont = BTreeMap::from([
+            ("gcmcontinue".to_string(), "same".to_string()),
+            ("continue".to_string(), "gcmcontinue||".to_string()),
+        ]);
+        fetcher.files.borrow_mut().insert(
+            api_url("Category:Test", &BTreeMap::new()),
+            answer(vec![], Some("same")),
+        );
+        fetcher.files.borrow_mut().insert(
+            api_url("Category:Test", &cont),
+            answer(vec![], Some("same")),
+        );
+        let (_dir, mut e) = Env::new(&fetcher);
+        let err = e.resolve(&spec(1)).expect_err("loop");
+        assert!(
+            format!("{err:#}").contains("repeated a continuation"),
+            "{err:#}"
+        );
+        assert_eq!(fetcher.call_count(), 2);
     }
 
     #[test]

@@ -167,6 +167,21 @@ impl Ctx<'_> {
         Ok(self.downloader.get_bytes(&source.id, url, limit)?)
     }
 
+    /// Like [`Ctx::api_get`], also returning the response's `Retry-After`.
+    pub fn api_get_response(
+        &self,
+        source: &Source,
+        url: &str,
+        limit: u64,
+    ) -> Result<(Vec<u8>, Option<std::time::Duration>)> {
+        ensure!(
+            self.update_lock,
+            "source `{}`: API calls are only allowed with --update-lock",
+            source.id
+        );
+        Ok(self.downloader.get_response(&source.id, url, limit)?)
+    }
+
     /// The downloader, for pacing helpers (`settle`, `backoff`).
     pub fn downloader(&self) -> &Downloader<'_> {
         &self.downloader

@@ -43,6 +43,8 @@ pub struct Opened {
     pub start: u64,
     /// Strong `ETag`, else `Last-Modified`, of this response (usable as `If-Range`).
     pub validator: Option<String>,
+    /// `Retry-After` header of this response, if any (an API may ask to wait even with 200).
+    pub retry_after: Option<Duration>,
 }
 
 /// In-process HTTPS client (no external curl).
@@ -103,6 +105,11 @@ impl Fetcher for HttpFetcher {
                 .get(reqwest::header::LAST_MODIFIED)
                 .and_then(|v| v.to_str().ok()),
         );
+        let header_retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| parse_retry_after(v, std::time::SystemTime::now()));
         if status.as_u16() == 206 {
             let ok = offset > 0
                 && resp
@@ -115,6 +122,7 @@ impl Fetcher for HttpFetcher {
                     body: Box::new(resp),
                     start: offset,
                     validator,
+                    retry_after: None,
                 });
             }
             drop(resp);
@@ -135,22 +143,27 @@ impl Fetcher for HttpFetcher {
                 body: Box::new(resp),
                 start: 0,
                 validator,
+                retry_after: header_retry_after,
             });
         }
         if status.as_u16() == 429 || status.is_server_error() {
-            let retry_after = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
             return Err(FetchError::Transient {
                 message: format!("HTTP {status}"),
-                retry_after,
+                retry_after: header_retry_after,
             });
         }
         Err(FetchError::Permanent(format!("HTTP {status}")))
     }
+}
+
+/// `Retry-After`: delta-seconds or an HTTP date (relative to `now`; a past date is zero).
+pub fn parse_retry_after(v: &str, now: std::time::SystemTime) -> Option<Duration> {
+    let v = v.trim();
+    if let Ok(secs) = v.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let when = httpdate::parse_http_date(v).ok()?;
+    Some(when.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// Parse `bytes <start>-<end>/<total>`.
@@ -272,6 +285,11 @@ pub struct RetryPolicy {
     pub max_attempts: u32,
     pub base_delay: Duration,
     pub max_delay: Duration,
+    /// Longest `Retry-After` the tool waits for; a larger request fails the download with a
+    /// clear error (never an early retry).
+    pub max_retry_after: Duration,
+    /// Smallest wait after an API answered `maxlag` (MediaWiki asks for at least 5 s).
+    pub maxlag_min: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -280,6 +298,8 @@ impl Default for RetryPolicy {
             max_attempts: 5,
             base_delay: Duration::from_secs(2),
             max_delay: Duration::from_secs(60),
+            max_retry_after: Duration::from_secs(900),
+            maxlag_min: Duration::from_secs(5),
         }
     }
 }
@@ -291,7 +311,25 @@ impl RetryPolicy {
             .base_delay
             .saturating_mul(1u32 << (attempt - 1).min(16))
             .min(self.max_delay);
-        retry_after.map_or(backoff, |r| r.min(self.max_delay.max(backoff)))
+        retry_after.map_or(backoff, |r| r.max(backoff))
+    }
+
+    /// Wait after a `maxlag` answer: never below `maxlag_min`, nor below the server's request.
+    pub fn maxlag_delay(&self, attempt: u32, retry_after: Option<Duration>) -> Duration {
+        self.delay(attempt, retry_after).max(self.maxlag_min)
+    }
+
+    /// Err with a message when the server asks for a longer wait than this tool is willing to
+    /// give.
+    pub fn check_retry_after(&self, retry_after: Option<Duration>) -> Result<(), String> {
+        match retry_after {
+            Some(r) if r > self.max_retry_after => Err(format!(
+                "the server asked to wait {} s (Retry-After), more than the {} s this tool                  waits; try again later",
+                r.as_secs(),
+                self.max_retry_after.as_secs()
+            )),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -406,20 +444,31 @@ impl<'a> Downloader<'a> {
         }
     }
 
-    /// Sleep for the retry back-off of `attempt` (counted from 1), e.g. after an API said
-    /// `maxlag`.
-    pub fn backoff(&self, attempt: u32) {
-        std::thread::sleep(self.retry.delay(attempt, None));
+    /// Sleep after an API said `maxlag` (attempt counted from 1): at least `maxlag_min` and
+    /// the server's `Retry-After`.
+    pub fn maxlag_wait(&self, attempt: u32, retry_after: Option<Duration>) {
+        std::thread::sleep(self.retry.maxlag_delay(attempt, retry_after));
     }
 
     /// GET a small resource (an API response) into memory, with the same per-host pacing and
     /// retry rules as downloads. At most `limit` bytes are accepted. Never cached.
     pub fn get_bytes(&self, source: &str, url: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
+        self.get_response(source, url, limit).map(|r| r.0)
+    }
+
+    /// Like [`Downloader::get_bytes`], also returning the `Retry-After` of the final response.
+    pub fn get_response(
+        &self,
+        source: &str,
+        url: &str,
+        limit: u64,
+    ) -> Result<(Vec<u8>, Option<Duration>), DownloadError> {
         let mut attempt = 1;
         loop {
             self.politeness.wait(url);
             let outcome = self.fetcher.open(url, 0, None).and_then(|opened| {
                 let mut buf = Vec::new();
+                let retry_after = opened.retry_after;
                 opened
                     .body
                     .take(limit.saturating_add(1))
@@ -433,7 +482,7 @@ impl<'a> Downloader<'a> {
                         "response exceeds {limit} bytes"
                     )));
                 }
-                Ok(buf)
+                Ok((buf, retry_after))
             });
             self.politeness.finish(url);
             match outcome {
@@ -455,6 +504,11 @@ impl<'a> Downloader<'a> {
                     if attempt >= self.retry.max_attempts {
                         return Err(DownloadError::Fetch(format!(
                             "source `{source}`: {url}: {message} (gave up after {attempt} attempts)"
+                        )));
+                    }
+                    if let Err(m) = self.retry.check_retry_after(retry_after) {
+                        return Err(DownloadError::Fetch(format!(
+                            "source `{source}`: {url}: {message}: {m}"
                         )));
                     }
                     let delay = self.retry.delay(attempt, retry_after);
@@ -583,6 +637,11 @@ impl<'a> Downloader<'a> {
                             "source `{source}`: {url}: {message} (gave up after {attempt} attempts)"
                         )));
                     }
+                    if let Err(m) = self.retry.check_retry_after(retry_after) {
+                        return Err(DownloadError::Fetch(format!(
+                            "source `{source}`: {url}: {message}: {m}"
+                        )));
+                    }
                     let delay = self.retry.delay(attempt, retry_after);
                     eprintln!(
                         "  {source}: {message}; retry {attempt}/{} in {delay:?}",
@@ -624,6 +683,7 @@ impl<'a> Downloader<'a> {
             mut body,
             start,
             validator: seen,
+            ..
         } = opened;
         if start == 0 {
             *validator = seen;
@@ -717,6 +777,8 @@ pub mod fake {
         pub restart_on_resume: Cell<bool>,
         /// Change the validator when a cut-off response is produced (the file "changed").
         pub rotate_on_cut: Cell<bool>,
+        /// `Retry-After` the pretend server attaches to transient failures and to answers.
+        pub retry_after: Cell<Option<Duration>>,
     }
 
     /// Yields `data`, then fails (a connection dropped mid-body).
@@ -764,7 +826,7 @@ pub mod fake {
                 self.fail_first.set(self.fail_first.get() - 1);
                 return Err(FetchError::Transient {
                     message: "HTTP 503".into(),
-                    retry_after: None,
+                    retry_after: self.retry_after.get(),
                 });
             }
             let files = self.files.borrow();
@@ -788,12 +850,14 @@ pub mod fake {
                     body: Box::new(DropAfter(std::io::Cursor::new(data))),
                     start,
                     validator: current,
+                    retry_after: None,
                 });
             }
             Ok(Opened {
                 body: Box::new(std::io::Cursor::new(data)),
                 start,
                 validator: current,
+                retry_after: self.retry_after.get(),
             })
         }
     }
@@ -803,6 +867,8 @@ pub mod fake {
             max_attempts: 3,
             base_delay: Duration::ZERO,
             max_delay: Duration::ZERO,
+            max_retry_after: Duration::from_secs(900),
+            maxlag_min: Duration::ZERO,
         }
     }
 }
@@ -994,11 +1060,13 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_and_caps() {
+    fn backoff_doubles_and_never_retries_before_retry_after() {
         let p = RetryPolicy {
             max_attempts: 5,
             base_delay: Duration::from_secs(2),
             max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(900),
+            maxlag_min: Duration::from_secs(5),
         };
         assert_eq!(p.delay(1, None), Duration::from_secs(2));
         assert_eq!(p.delay(2, None), Duration::from_secs(4));
@@ -1008,9 +1076,59 @@ mod tests {
             Duration::from_secs(7)
         );
         assert_eq!(
-            p.delay(1, Some(Duration::from_secs(700))),
-            Duration::from_secs(10)
+            p.delay(1, Some(Duration::from_secs(300))),
+            Duration::from_secs(300),
+            "the full Retry-After is waited, not cut to the back-off cap"
         );
+        assert!(p.check_retry_after(Some(Duration::from_secs(900))).is_ok());
+        let e = p
+            .check_retry_after(Some(Duration::from_secs(901)))
+            .expect_err("too long");
+        assert!(e.contains("Retry-After"), "{e}");
+        // maxlag: at least five seconds, more when the server says so.
+        assert_eq!(p.maxlag_delay(1, None), Duration::from_secs(5));
+        assert_eq!(
+            p.maxlag_delay(1, Some(Duration::from_secs(30))),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_and_http_dates() {
+        use std::time::{Duration as D, SystemTime, UNIX_EPOCH};
+        let now = UNIX_EPOCH + D::from_secs(784_111_700);
+        assert_eq!(parse_retry_after(" 120 ", now), Some(D::from_secs(120)));
+        // 784_111_777 = Sun, 06 Nov 1994 08:49:37 GMT
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", now),
+            Some(D::from_secs(784_111_777 - 784_111_700))
+        );
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", SystemTime::now()),
+            Some(D::ZERO),
+            "a date in the past means no wait"
+        );
+        assert_eq!(parse_retry_after("soon", now), None);
+    }
+
+    #[test]
+    fn too_long_retry_after_fails_clearly_instead_of_retrying_early() {
+        let f = FakeFetcher::with("https://example.org/a", b"x".to_vec());
+        f.fail_first.set(1);
+        f.retry_after.set(Some(Duration::from_secs(5000)));
+        let dir = tempfile::tempdir().expect("tmp");
+        let d = dl(&f, dir.path());
+        let err = d
+            .get_bytes("s", "https://example.org/a", 100)
+            .expect_err("refused");
+        assert!(err.to_string().contains("Retry-After"), "{err}");
+        assert_eq!(f.call_count(), 1, "no early retry");
+        f.fail_first.set(1);
+        let err = d
+            .obtain("s", "https://example.org/a", Expect::Unpinned)
+            .expect_err("refused");
+        assert!(err.to_string().contains("Retry-After"), "{err}");
+        assert_eq!(f.call_count(), 2);
     }
 
     #[test]

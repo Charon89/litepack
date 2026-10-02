@@ -24,6 +24,8 @@ pub const CC_BY_4: &str = "http://creativecommons.org/licenses/by/4.0/";
 const OAI: &str = "https://oaipmh.arxiv.org/oai";
 const PDF_HOST: &str = "https://export.arxiv.org/";
 const API_LIMIT: u64 = 256 << 20;
+/// Upper bound on pages per window (a page holds up to a thousand records).
+const MAX_PAGES: u32 = 2000;
 
 /// One `arXivRaw` record.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -216,6 +218,7 @@ pub fn resolve(ctx: &mut Ctx<'_>, source: &Source, spec: &ArxivSpec) -> Result<V
     let mut url = first_url(spec);
     let mut all: Vec<Record> = Vec::new();
     let mut pages = 0u32;
+    let mut tokens = std::collections::BTreeSet::new();
     loop {
         let body = ctx.api_get(source, &url, API_LIMIT)?;
         let page = parse_list(&body).with_context(|| format!("source `{}`: {url}", source.id))?;
@@ -227,7 +230,19 @@ pub fn resolve(ctx: &mut Ctx<'_>, source: &Source, spec: &ArxivSpec) -> Result<V
             all.len()
         );
         match page.token {
-            Some(t) => url = token_url(&t),
+            Some(t) => {
+                ensure!(
+                    tokens.insert(t.clone()),
+                    "source `{}`: the server repeated a resumption token; stopping",
+                    source.id
+                );
+                ensure!(
+                    pages < MAX_PAGES,
+                    "source `{}`: more than {MAX_PAGES} pages in the window",
+                    source.id
+                );
+                url = token_url(&t);
+            }
             None => break,
         }
     }
@@ -364,6 +379,34 @@ mod tests {
             select(&[old_style], 1)[0].path,
             "arxiv-hep-th_9901001v1.pdf"
         );
+    }
+
+    #[test]
+    fn a_repeated_resumption_token_stops_the_loop() {
+        let fetcher = FakeFetcher::default();
+        fetcher
+            .files
+            .borrow_mut()
+            .insert(first_url(&spec(1)), page(&[], Some("t")));
+        fetcher
+            .files
+            .borrow_mut()
+            .insert(token_url("t"), page(&[], Some("t")));
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut ctx = Ctx::for_tests(&fetcher, dir.path(), true);
+        let source = Source {
+            id: "ax".into(),
+            class: "office-pdf".into(),
+            licence: "x".into(),
+            origin: "x".into(),
+            profiles: vec![Profile::Small],
+            optional: false,
+            inputs: vec![],
+            spec: SourceSpec::ArxivPapers(spec(1)),
+        };
+        let err = resolve(&mut ctx, &source, &spec(1)).expect_err("loop");
+        assert!(format!("{err:#}").contains("repeated a resumption token"));
+        assert_eq!(fetcher.call_count(), 2);
     }
 
     #[test]
