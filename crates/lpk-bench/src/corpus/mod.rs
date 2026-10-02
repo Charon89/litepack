@@ -3,7 +3,7 @@
 //! # Commands
 //!
 //! ```text
-//! lpk-bench corpus build --profile <small|full> [--out DIR] [--cache DIR] [--only a,b] [--update-lock] [--allow-unavailable]
+//! lpk-bench corpus build --profile <small|full> [--out DIR] [--cache DIR] [--only a,b] [--update-lock [--repin a,b|all]] [--allow-unavailable]
 //! lpk-bench corpus scan  --private DIR --out DIR      (see [`scan`] and [`classify`])
 //! ```
 //!
@@ -128,14 +128,49 @@
 //!   naming the source and the re-pin command. A cache file is reused only after re-hashing
 //!   it against the lock; otherwise it is downloaded again. Pins of built sources that the
 //!   build did not use are reported.
-//! * `--update-lock`: downloads everything selected, ignoring the cache (there is nothing to
-//!   verify it against), records the result and rewrites the entries of those sources; other
-//!   sources' entries are kept. With `--only` it pins just those classes.
+//! * `--update-lock`: pins the selected sources and rewrites their entries; other sources'
+//!   entries are kept. With `--only` it pins just those classes. It is *resumable* (a full
+//!   profile is many gigabytes at the hosts' rate limits): an artifact that is already pinned
+//!   for this profile (with a hash) is checked against its pin, so a cached file that matches is
+//!   reused without any request and only unpinned or mismatching artifacts are fetched (a
+//!   download of an already pinned URL must match the pin, so an existing pin never changes
+//!   silently). The lock is written atomically (temporary file, then rename) after every
+//!   source and, while a list source is pinned, every 16 files or 10 seconds and when a source fails, so an
+//!   interrupted run keeps its progress. Run the same command again to continue.
+//! * `--repin <source-id,...|all>` (with `--update-lock`): forget the pins of those sources
+//!   (the lock is saved at once) and resolve and download them again, ignoring the cache. After
+//!   an interruption continue with plain `--update-lock`; repeating `--repin` starts over.
 //! * List-type sources (URLs resolved from an API): the lock is the listing. Only
 //!   `--update-lock` may call the API; a normal build makes no API call and builds exactly the
 //!   source's pinned entries ([`build::Ctx::listed_pins`]). Per-file licence and author live
 //!   in the pin; the manifest carries the per-file licence when the pin has one and the
-//!   source-level string otherwise.
+//!   source-level string otherwise. For the API-resolved kinds the resolved listing is saved
+//!   to the lock before the first download: entries carry the URL and the API's metadata
+//!   (path, licence, attribution, sha1, timestamp) but no `bytes`/`blake3`. A resumed
+//!   `--update-lock` continues from the saved listing without calling the API; changing any
+//!   selection setting of the source (count and size window included) is refused and needs
+//!   `--repin` (only pins made before fingerprints existed are checked by file count alone,
+//!   and a listing of another size is resolved again). A normal build refuses a listing with
+//!   unhashed entries, naming the source and saying the pin run was not finished.
+//! * A listed file that is gone (404/410) or no longer has the sha1 the API listed makes a pin
+//!   run list that source again in the same run (at most three times): hashed pins whose
+//!   URL and sha1 reappear are kept, a cached file with the listed sha1 is taken without a
+//!   download, and only the rest is fetched. Bytes that differ from an existing hashed pin, or
+//!   a source without a sha1 (arXiv), cannot be repaired by listing again: the run fails at
+//!   once, naming `--update-lock --repin <id>`.
+//! * Every pin written for an API-listed source carries `extra.spec`, a fingerprint of the
+//!   registry entry's selection settings plus a version number of the selection rules
+//!   (`LIST_RULES_VERSION` in `build.rs`), and commons pins carry `extra.size`, the API size.
+//!   `--update-lock` refuses to continue a listing whose fingerprint differs, naming
+//!   `--repin <id>`; a pin without `spec` (made earlier) is accepted, and a normal build never
+//!   looks at it, so existing pins stay valid and the lock only gains the keys when a source is
+//!   listed again.
+//! * `--update-lock --list-only` resolves and saves the listings of the API-listed sources and
+//!   prints files and API-size sums per source without downloading anything.
+//! * An `--update-lock` run holds `<lock>.run` (created with create-new, removed at exit) so two
+//!   pin runs cannot overwrite each other's pins; a second run fails naming the file, which is
+//!   to be deleted by hand if a run was killed. The lock itself is written through a file
+//!   handle, synced, and renamed over the old one, retrying briefly on sharing violations.
 //!
 //! * Listed files of the API-resolved kinds (`commons-photos`, `arxiv-papers`; never a static
 //!   `files` source): two conditions make a file *unavailable* in a normal build, an HTTP 404 or
@@ -255,10 +290,24 @@ pub struct BuildArgs {
     /// its input classes selected too or already present in the output directory
     #[arg(long, value_delimiter = ',')]
     pub only: Vec<String>,
-    /// Re-download the selected sources (the cache is ignored), record their pins and rewrite
-    /// the lock instead of verifying against it; other sources' pins are kept
+    /// Pin the selected sources and write the lock instead of verifying against it. Resumable:
+    /// an artifact that is already pinned and whose cached file matches its pin is reused without
+    /// a request, a list source continues from the listing saved in the lock (no API call), and
+    /// the lock is saved after every source and every few files, so an interrupted run keeps its
+    /// progress: just run the same command again (without --repin). Other sources' pins are
+    /// kept. To change an existing pin use --repin
     #[arg(long)]
     pub update_lock: bool,
+    /// With --update-lock: forget the pins of these sources (ids, comma separated, or `all` for
+    /// every selected source) and resolve and download them again. After an interruption,
+    /// continue with plain --update-lock; repeating --repin starts over
+    #[arg(long, value_delimiter = ',', requires = "update_lock")]
+    pub repin: Vec<String>,
+    /// With --update-lock: only resolve and save the listings of the API-listed sources
+    /// (commons-photos, arxiv-papers), download nothing, and print per source the number of
+    /// accepted files and the sum of their API sizes
+    #[arg(long, requires = "update_lock")]
+    pub list_only: bool,
     /// Continue without listed files (commons-photos, arxiv-papers) that are gone upstream
     /// (404/410) or no longer match their pin; they are recorded under `unavailable` in
     /// build-info.json. Default: the build fails and names them
@@ -300,6 +349,8 @@ impl BuildArgs {
             git_program: None,
             allow_unavailable: self.allow_unavailable,
             ffmpeg_program: None,
+            repin: self.repin.clone(),
+            list_only: self.list_only,
         }
     }
 }
@@ -307,6 +358,25 @@ impl BuildArgs {
 /// Entry point for `lpk-bench corpus ...`.
 pub fn run(args: CorpusArgs) -> ExitCode {
     match args.command {
+        CorpusCommand::Build(b) if b.list_only => {
+            match HttpFetcher::new().and_then(|f| build::list_only(&b.options(), &f)) {
+                Ok(list) => {
+                    for s in &list {
+                        match s.bytes {
+                            Some(n) => {
+                                println!("{}: {} files, {n} bytes (API sizes)", s.source, s.files)
+                            }
+                            None => println!("{}: {} files, sizes not reported", s.source, s.files),
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         CorpusCommand::Build(b) => {
             let result = HttpFetcher::new().and_then(|f| build::build(&b.options(), &f));
             match result {
@@ -376,6 +446,8 @@ mod tests {
             cache: PathBuf::from("c"),
             only: vec![],
             update_lock: false,
+            repin: vec![],
+            list_only: false,
             allow_unavailable: false,
             sources: PathBuf::from("s"),
             lock: PathBuf::from("l"),
