@@ -138,10 +138,14 @@ pub struct Ctx<'a> {
     unsaved: usize,
     /// Artifacts of the current source taken from the cache without a request.
     reused: usize,
+    /// When the working lock was last saved.
+    last_save: std::time::Instant,
 }
 
 /// Pins recorded between two saves of the lock while a list source is being pinned.
 const CHECKPOINT_EVERY: usize = 16;
+/// Also save when this long has passed since the last save (slow hosts, large files).
+const CHECKPOINT_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 impl<'a> Ctx<'a> {
@@ -176,6 +180,7 @@ impl<'a> Ctx<'a> {
             lock_path: None,
             unsaved: 0,
             reused: 0,
+            last_save: std::time::Instant::now(),
         }
     }
 }
@@ -350,10 +355,11 @@ impl Ctx<'_> {
         Ok(a)
     }
 
-    /// Count a recorded pin and save the working lock every [`CHECKPOINT_EVERY`] pins.
+    /// Count a recorded pin and save the working lock every [`CHECKPOINT_EVERY`] pins or
+    /// [`CHECKPOINT_AFTER`], whichever comes first.
     fn note_recorded(&mut self) -> Result<()> {
         self.unsaved += 1;
-        if self.unsaved >= CHECKPOINT_EVERY {
+        if self.unsaved >= CHECKPOINT_EVERY || self.last_save.elapsed() >= CHECKPOINT_AFTER {
             self.flush()?;
         }
         Ok(())
@@ -374,6 +380,7 @@ impl Ctx<'_> {
         }
         self.work.save(&path)?;
         self.unsaved = 0;
+        self.last_save = std::time::Instant::now();
         Ok(())
     }
 
@@ -919,6 +926,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         lock_path: opts.update_lock.then(|| opts.lock_path.clone()),
         unsaved: 0,
         reused: 0,
+        last_save: std::time::Instant::now(),
     };
     if !repin_ids.is_empty() {
         eprintln!("re-pinning from scratch: {}", repin_ids.join(", "));
@@ -1816,6 +1824,7 @@ url = "{OPT_URL}"
             lock_path: None,
             unsaved: 0,
             reused: 0,
+            last_save: std::time::Instant::now(),
         }
     }
 
@@ -1919,6 +1928,7 @@ url = "{OPT_URL}"
             lock_path: None,
             unsaved: 0,
             reused: 0,
+            last_save: std::time::Instant::now(),
         };
         let source = list_source();
         let target = dir.path().join("t");

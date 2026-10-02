@@ -135,7 +135,7 @@
 //!   reused without any request and only unpinned or mismatching artifacts are fetched (a
 //!   download of an already pinned URL must match the pin, so an existing pin never changes
 //!   silently). The lock is written atomically (temporary file, then rename) after every
-//!   source and, while a list source is pinned, every 16 files and when a source fails, so an
+//!   source and, while a list source is pinned, every 16 files or 10 seconds and when a source fails, so an
 //!   interrupted run keeps its progress. Run the same command again to continue.
 //! * `--repin <source-id,...|all>` (with `--update-lock`): forget the pins of those sources
 //!   (the lock is saved at once) and resolve and download them again, ignoring the cache. After
