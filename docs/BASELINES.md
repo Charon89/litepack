@@ -105,8 +105,13 @@ the list came from: `queried`, `query-failed`, or `not-applicable` (not Windows,
 Center, as on Windows Server). The query runs once per run, before any timing, through Windows
 PowerShell (`pwsh` as a fallback) with a time limit; a failure gives `query-failed`, never an
 error. `defender_realtime` is an independent value read from the Defender registry key (`on`,
-`off`, or `unknown`, which includes machines where the value is absent). For comparable runs,
-keep the scanner state the same.
+`off`, or `unknown`, which includes machines where the value is absent). A snoozed scanner can
+resume in the middle of a run, so the products are queried again after the last combination (outside
+all timing) and `run.json` records that list and `antivirus_changed`; the run prints a warning when
+names or decoded states differ from the start. `--compare` prints a note, by name, when the product
+names or decoded states differ between the two directories (start or end) or changed within either
+run (names and decoded states only, not the raw value, whose low byte changes with definition
+updates). For comparable runs, keep the scanner state the same.
 
 ## How a tool is found
 

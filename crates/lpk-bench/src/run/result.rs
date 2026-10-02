@@ -373,6 +373,13 @@ pub struct RunFile {
     pub long_run_s: u64,
     /// BLAKE3 of the catalogue file the run used.
     pub catalogue_blake3: String,
+    /// Where `antivirus_end` came from (same values as the host file's `antivirus_source`).
+    pub antivirus_end_source: String,
+    /// The antivirus products queried again after the last combination, outside all timing.
+    pub antivirus_end: Vec<AvProduct>,
+    /// True when the names or decoded scanner states differ from the host file's start-of-run
+    /// values (a snoozed scanner can resume in the middle of a run).
+    pub antivirus_changed: bool,
     pub combinations: Vec<RunCombination>,
 }
 
@@ -613,6 +620,9 @@ pub mod samples {
             repeats_requested: 3,
             long_run_s: 120,
             catalogue_blake3: "ef".repeat(32),
+            antivirus_end_source: "queried".into(),
+            antivirus_end: host().antivirus,
+            antivirus_changed: false,
             combinations: results
                 .iter()
                 .map(|r| RunCombination {

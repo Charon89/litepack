@@ -1265,6 +1265,21 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
         }
     }
 
+    // The scanners again, after the last combination and outside all timing: a snoozed scanner
+    // can resume in the middle of a run.
+    let av_end = host::antivirus_products();
+    let antivirus_changed = !host::av_equivalent(
+        (&host_file.antivirus_source, &host_file.antivirus),
+        (av_end.0, &av_end.1),
+    );
+    if antivirus_changed {
+        eprintln!(
+            "warning: the antivirus state changed during the run: at the start {}; at the end {}",
+            host::av_summary(&host_file.antivirus_source, &host_file.antivirus),
+            host::av_summary(av_end.0, &av_end.1)
+        );
+    }
+
     // run.json is written last: a directory without it is an aborted run and does not validate.
     let run_file = RunFile {
         schema_version: SCHEMA_VERSION,
@@ -1274,6 +1289,9 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
         repeats_requested: cfg.repeats,
         long_run_s: cfg.long_run.as_secs(),
         catalogue_blake3: cfg.catalogue_blake3.clone(),
+        antivirus_end_source: av_end.0.to_string(),
+        antivirus_changed,
+        antivirus_end: av_end.1,
         combinations: planned,
     };
     std::fs::write(results_dir.join("run.json"), render(&run_file))?;

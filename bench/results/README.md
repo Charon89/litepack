@@ -36,7 +36,9 @@ environment dumps.
   timed-out or descendant-killing repeat.
 - `measurement.env_stripped` lists the names of the environment variables removed from the tools'
   environment. Results from a private corpus carry `"private": true`.
-- `run.json` lists the classes, every tool x setting x class with its outcome, the thread count,
+- `run.json` also records the antivirus products queried again after the last combination
+  (`antivirus_end_source`, `antivirus_end`) and `antivirus_changed`, true when the names or decoded
+  scanner states differ from the start-of-run values in `host.json`. It lists the classes, every tool x setting x class with its outcome, the thread count,
   the repeats requested, `--long-run-s` and the catalogue's BLAKE3; `--validate` checks each listed
   combination against its file. A combination whose first repeat reached `--long-run-s` is measured
   once and says so in `repeats_short`. `host.json` records the antivirus products Windows Security Center lists (name, raw `productState` as hex, decoded scanner state, and `antivirus_source`: `queried`, `query-failed` or `not-applicable`) and, independently, `defender_realtime` from the registry.

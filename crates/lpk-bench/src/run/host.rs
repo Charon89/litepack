@@ -166,12 +166,11 @@ pub fn antivirus_products() -> (&'static str, Vec<AvProduct>) {
     // The result goes through a file the script writes itself: the child runs without a console,
     // where a shell's pipeline output can be lost.
     let res = dir.join(format!("lpk-av-{}.res", std::process::id()));
-    let script = format!(
-        "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | \
-         ForEach-Object {{ $_.displayName + '|' + $_.productState }} | \
-         Out-File -FilePath '{}' -Encoding utf8",
-        res.display().to_string().replace('\'', "''")
-    );
+    // Constant script text: the path travels in the environment, so no character of it can break
+    // the script's quoting.
+    let script = "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | \
+         ForEach-Object { $_.displayName + '|' + $_.productState } | \
+         Out-File -LiteralPath $env:LPK_AV_OUT -Encoding utf8";
     let mut answer = ("query-failed", Vec::new());
     for shell in ["powershell", "pwsh"] {
         let (Ok(o), Ok(e)) = (std::fs::File::create(&out), std::fs::File::create(&err)) else {
@@ -180,7 +179,8 @@ pub fn antivirus_products() -> (&'static str, Vec<AvProduct>) {
         // `std::process` with a watchdog (not the measuring crate, which starts children without
         // a console: Windows PowerShell then does nothing).
         let Ok(mut child) = Command::new(shell)
-            .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("LPK_AV_OUT", &res)
             .stdin(Stdio::null())
             .stdout(Stdio::from(o))
             .stderr(Stdio::from(e))
@@ -231,6 +231,32 @@ pub fn antivirus_products() -> (&'static str, Vec<AvProduct>) {
 #[cfg(not(windows))]
 pub fn antivirus_products() -> (&'static str, Vec<AvProduct>) {
     ("not-applicable", Vec::new())
+}
+
+/// Do two product lists name the same products in the same decoded scanner states? Compares
+/// names and decoded states only (not the raw state, whose low byte changes with definition
+/// updates), ignoring order; the source of each side must also agree.
+pub fn av_equivalent(a: (&str, &[AvProduct]), b: (&str, &[AvProduct])) -> bool {
+    let key = |l: &[AvProduct]| {
+        let mut v: Vec<(String, String)> = l
+            .iter()
+            .map(|p| (p.name.clone(), p.scanner.clone()))
+            .collect();
+        v.sort();
+        v
+    };
+    a.0 == b.0 && key(a.1) == key(b.1)
+}
+
+/// The products as `name (state)`, comma separated, for notes and warnings.
+pub fn av_summary(source: &str, list: &[AvProduct]) -> String {
+    if list.is_empty() {
+        return format!("none listed ({source})");
+    }
+    list.iter()
+        .map(|p| format!("{} ({})", p.name, p.scanner))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Logical processors (cheap; queries nothing else).
@@ -355,6 +381,36 @@ mod tests {
         if !cfg!(windows) {
             assert_eq!(source, "not-applicable");
         }
+    }
+
+    #[test]
+    fn product_lists_compare_by_name_and_decoded_state_only() {
+        let p = |n: &str, raw: &str, s: &str| AvProduct {
+            name: n.into(),
+            product_state: raw.into(),
+            scanner: s.into(),
+        };
+        let a = [
+            p("Defender", "0x60100", "off"),
+            p("Avast", "0x42000", "snoozed"),
+        ];
+        // Order and the raw low byte do not matter.
+        let b = [
+            p("Avast", "0x42010", "snoozed"),
+            p("Defender", "0x60100", "off"),
+        ];
+        assert!(av_equivalent(("queried", &a), ("queried", &b)));
+        // A changed decoded state, a missing product, a different source do.
+        let c = [p("Defender", "0x60100", "off"), p("Avast", "0x41000", "on")];
+        assert!(!av_equivalent(("queried", &a), ("queried", &c)));
+        assert!(!av_equivalent(("queried", &a), ("queried", &a[..1])));
+        assert!(!av_equivalent(("queried", &[]), ("query-failed", &[])));
+        assert!(av_equivalent(("queried", &[]), ("queried", &[])));
+        assert_eq!(av_summary("queried", &a), "Defender (off), Avast (snoozed)");
+        assert_eq!(
+            av_summary("query-failed", &[]),
+            "none listed (query-failed)"
+        );
     }
 
     #[test]

@@ -15,7 +15,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 
-use super::result::{HostFile, RunFile, ToolResult, ToolsFile};
+use super::host::{av_equivalent, av_summary};
+use super::result::{AvProduct, HostFile, RunFile, ToolResult, ToolsFile};
 
 pub const DEFAULT_MAX_DIFF_PCT: f64 = 3.0;
 
@@ -47,6 +48,8 @@ struct Loaded {
     unreadable: Vec<String>,
     run: Option<RunFile>,
     host: Option<String>,
+    /// Antivirus at the start of the run (host.json): source and products.
+    av_start: Option<(String, Vec<AvProduct>)>,
 }
 
 fn load(dir: &Path) -> Result<Loaded> {
@@ -66,6 +69,7 @@ fn load(dir: &Path) -> Result<Loaded> {
         .with_context(|| format!("reading {}", host_path.display()))?;
     let host: HostFile =
         serde_json::from_str(&text).with_context(|| format!("parsing {}", host_path.display()))?;
+    out.av_start = Some((host.antivirus_source, host.antivirus));
     out.host = Some(host.host);
     let tools_path = dir.join("tools.json");
     let text = std::fs::read_to_string(&tools_path)
@@ -150,6 +154,41 @@ fn thread_set(l: &Loaded) -> BTreeSet<u32> {
         .collect()
 }
 
+/// Notes (never failures) on antivirus differences: between the two directories (start or end
+/// values) and within either run. Names and decoded scanner states only.
+fn antivirus_notes(a: &Loaded, b: &Loaded, notes: &mut Vec<String>) {
+    let end = |l: &Loaded| {
+        l.run
+            .as_ref()
+            .map(|r| (r.antivirus_end_source.clone(), r.antivirus_end.clone()))
+    };
+    for (label, l) in [("A", a), ("B", b)] {
+        if let (Some(r), Some((src, list))) = (&l.run, &l.av_start) {
+            if r.antivirus_changed {
+                notes.push(format!(
+                    "antivirus changed within run {label}: at the start {}; at the end {}",
+                    av_summary(src, list),
+                    av_summary(&r.antivirus_end_source, &r.antivirus_end)
+                ));
+            }
+        }
+    }
+    for (what, x, y) in [
+        ("at the start", a.av_start.clone(), b.av_start.clone()),
+        ("at the end", end(a), end(b)),
+    ] {
+        if let (Some(x), Some(y)) = (x, y) {
+            if !av_equivalent((&x.0, &x.1), (&y.0, &y.1)) {
+                notes.push(format!(
+                    "antivirus differs between the directories {what}: A {}; B {}",
+                    av_summary(&x.0, &x.1),
+                    av_summary(&y.0, &y.1)
+                ));
+            }
+        }
+    }
+}
+
 pub fn compare(a: &Path, b: &Path, max_diff_pct: f64) -> Result<Report> {
     let (la, lb) = (load(a)?, load(b)?);
     let mut rep = Report::default();
@@ -166,6 +205,7 @@ pub fn compare(a: &Path, b: &Path, max_diff_pct: f64) -> Result<Report> {
                 .to_string(),
         );
     }
+    antivirus_notes(&la, &lb, &mut rep.notes);
     if la.host != lb.host {
         rep.problems.push(format!(
             "different hosts: {:?} against {:?}",
@@ -529,6 +569,67 @@ mod tests {
         // No run.json: an error, not a comparison.
         std::fs::remove_file(f2.join("run.json")).expect("rm");
         assert!(compare(&f1, &f2, 3.0).is_err());
+    }
+
+    #[test]
+    fn antivirus_differences_are_noted_by_name_and_never_fail() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let results = two_classes(1.0);
+        let same_a = write(tmp.path(), "a", &results, &samples::tools());
+        let same_b = write(tmp.path(), "b", &results, &samples::tools());
+        let rep = compare(&same_a, &same_b, 3.0).expect("compare");
+        assert!(rep.notes.is_empty(), "{:?}", rep.notes);
+
+        // The raw state's low byte changing is not a difference.
+        let mut raw = samples::host();
+        raw.antivirus[0].product_state = "0x60110".into();
+        std::fs::write(same_b.join("host.json"), render(&raw)).expect("w");
+        assert!(compare(&same_a, &same_b, 3.0)
+            .expect("compare")
+            .notes
+            .is_empty());
+
+        // A decoded state differing at the start, and one differing at the end.
+        let mut host = samples::host();
+        host.antivirus[0].scanner = "on".into();
+        std::fs::write(same_b.join("host.json"), render(&host)).expect("w");
+        let mut run = samples::run_file(&results);
+        run.antivirus_end[0].scanner = "snoozed".into();
+        std::fs::write(same_b.join("run.json"), render(&run)).expect("w");
+        let rep = compare(&same_a, &same_b, 3.0).expect("compare");
+        let joined = rep.notes.join("\n");
+        assert!(
+            joined.contains("differs between the directories at the start"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("differs between the directories at the end"),
+            "{joined}"
+        );
+        assert!(joined.contains("Windows Defender (on)"), "{joined}");
+        assert!(
+            rep.problems.iter().all(|p| !p.contains("antivirus")),
+            "{:?}",
+            rep.problems
+        );
+
+        // Changed within a run.
+        let mut run = samples::run_file(&results);
+        run.antivirus_changed = true;
+        run.antivirus_end[0].scanner = "on".into();
+        std::fs::write(same_a.join("run.json"), render(&run)).expect("w");
+        std::fs::write(same_b.join("host.json"), render(&samples::host())).expect("w");
+        std::fs::write(
+            same_b.join("run.json"),
+            render(&samples::run_file(&results)),
+        )
+        .expect("w");
+        let rep = compare(&same_a, &same_b, 3.0).expect("compare");
+        assert!(
+            rep.notes.iter().any(|n| n.contains("changed within run A")),
+            "{:?}",
+            rep.notes
+        );
     }
 
     #[test]

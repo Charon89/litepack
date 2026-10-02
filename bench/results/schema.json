@@ -251,7 +251,7 @@
       "type": "object",
       "description": "run.json: written last, so that a directory without it is an aborted run.",
       "additionalProperties": false,
-      "required": ["schema_version", "complete", "classes", "threads", "repeats_requested", "long_run_s", "catalogue_blake3", "combinations"],
+      "required": ["schema_version", "complete", "classes", "threads", "repeats_requested", "long_run_s", "catalogue_blake3", "antivirus_end_source", "antivirus_end", "antivirus_changed", "combinations"],
       "properties": {
         "schema_version": { "const": 1, "description": "Result format version." },
         "complete": { "const": true, "description": "Always true: the run reached its end." },
@@ -260,6 +260,9 @@
         "repeats_requested": { "type": "integer", "minimum": 1, "description": "Repeats asked for with --repeats, a count." },
         "long_run_s": { "type": "integer", "minimum": 0, "description": "The --long-run-s value, in seconds." },
         "catalogue_blake3": { "$ref": "#/$defs/blake3", "description": "BLAKE3 of the catalogue file (bench/tools.toml) the run used." },
+        "antivirus_end_source": { "enum": ["queried", "query-failed", "not-applicable"], "description": "Where antivirus_end came from (same values as host.json antivirus_source)." },
+        "antivirus_end": { "type": "array", "items": { "$ref": "#/$defs/av_product" }, "description": "Antivirus products queried again after the last combination, outside all timing." },
+        "antivirus_changed": { "type": "boolean", "description": "True when the product names or decoded scanner states at the end differ from the start-of-run values in host.json (a snoozed scanner can resume in the middle of a run)." },
         "combinations": { "type": "array", "items": { "$ref": "#/$defs/run_combination" }, "description": "Every combination the run covered with its outcome; each has a result file." }
       }
     },
