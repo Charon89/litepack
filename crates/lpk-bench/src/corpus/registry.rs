@@ -133,6 +133,10 @@ pub struct ArchiveSpec {
     pub strip_components: usize,
     /// Keep only the first N bytes of every larger file, cut at the last line break.
     pub truncate_files: Option<u64>,
+    /// `tar.gz` only: symlink and hardlink entries are skipped (their names are still
+    /// validated) instead of failing the extraction. For source trees that contain links.
+    #[serde(default)]
+    pub skip_links: bool,
 }
 
 impl SourceSpec {

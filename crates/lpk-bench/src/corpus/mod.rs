@@ -41,7 +41,8 @@
 //!   the `/`-separated path after `strip_components`; `*` stays within a directory, `**`
 //!   crosses), `max_files`, `max_bytes`, `strip_components`, and `truncate_files = N`: keep only
 //!   the first N bytes of every larger file, cut after the last line break before N (the
-//!   manifest lists the truncated size).
+//!   manifest lists the truncated size), `skip_links = true` (`tar.gz`: skip symlink and
+//!   hardlink entries instead of failing).
 //! * `files`: `files = [{ url, path?, licence?, attribution? }, ...]`, one source listing many
 //!   URLs with output names (default: last URL segment), each pinned separately. It uses the
 //!   listed-pin path: the whole listing is validated up front (portable names, no

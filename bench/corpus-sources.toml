@@ -444,6 +444,7 @@ kind = "archive"
 url = "https://github.com/facebook/zstd/archive/5c7b7bad26808e6b40ac3b3d0075466e27738a9d.tar.gz"
 format = "tar.gz"
 strip_components = 1
+skip_links = true
 
 [[source]]
 id = "v2"
@@ -455,6 +456,7 @@ kind = "archive"
 url = "https://github.com/facebook/zstd/archive/82d322c4973d9e2968d94047a40892bc6d9a9bdf.tar.gz"
 format = "tar.gz"
 strip_components = 1
+skip_links = true
 
 [[source]]
 id = "v3"
@@ -466,6 +468,7 @@ kind = "archive"
 url = "https://github.com/facebook/zstd/archive/d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a.tar.gz"
 format = "tar.gz"
 strip_components = 1
+skip_links = true
 
 [[source]]
 id = "librivox-art-of-war"

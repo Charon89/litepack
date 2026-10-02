@@ -614,6 +614,7 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
                 spec.strip_components,
             )?;
             sel.truncate = spec.truncate_files;
+            sel.skip_links = spec.skip_links;
             if format == ArchiveFormat::Gz {
                 sel.single_name = Some(gz_output_name(&spec.url)?);
             }

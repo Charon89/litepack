@@ -41,6 +41,8 @@ pub struct Selection {
     pub truncate: Option<u64>,
     /// Output file name for single-file formats (`gz`).
     pub single_name: Option<String>,
+    /// tar: skip link entries instead of rejecting the archive.
+    pub skip_links: bool,
 }
 
 /// Upper bound for a stream whose size is not declared (guards against decompression bombs).
@@ -63,6 +65,7 @@ impl Selection {
             strip_components,
             truncate: None,
             single_name: None,
+            skip_links: false,
         })
     }
 
@@ -78,6 +81,7 @@ impl Selection {
             strip_components: 0,
             truncate: None,
             single_name: None,
+            skip_links: false,
         }
     }
 }
@@ -414,6 +418,9 @@ fn extract_tar_gz(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<
                 sanitize_path(&name)?;
             }
             T::XGlobalHeader | T::XHeader | T::GNULongName | T::GNULongLink => {}
+            T::Symlink | T::Link if sel.skip_links => {
+                sanitize_path(&name)?;
+            }
             T::Symlink | T::Link => bail!("link entry `{name}` is not allowed"),
             other => bail!("special entry `{name}` ({other:?}) is not allowed"),
         }
@@ -1109,5 +1116,26 @@ mod tests {
         assert!(ok(&["a/x", "a"]).is_err());
         assert!(ok(&["../x"]).is_err());
         assert!(ok(&["./"]).is_err());
+    }
+
+    #[test]
+    fn tar_links_can_be_skipped_when_asked() {
+        let t = tar_gz_bytes(&[
+            ("src/zstd", tar::EntryType::Regular, b"bin", ""),
+            ("src/unzstd", tar::EntryType::Symlink, b"", "zstd"),
+            ("src/zstdcat", tar::EntryType::Link, b"", "src/zstd"),
+        ]);
+        let mut sel = Selection::all();
+        assert!(run(ArchiveFormat::TarGz, &t, &sel).1.is_err());
+        sel.skip_links = true;
+        assert_eq!(
+            paths(&run(ArchiveFormat::TarGz, &t, &sel).1.expect("x")),
+            ["src/zstd"]
+        );
+        let evil = tar_gz_bytes(&[("../evil", tar::EntryType::Symlink, b"", "zstd")]);
+        assert!(
+            run(ArchiveFormat::TarGz, &evil, &sel).1.is_err(),
+            "names still validated"
+        );
     }
 }
