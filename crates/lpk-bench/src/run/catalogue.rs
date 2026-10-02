@@ -54,6 +54,17 @@ pub enum Mode {
     TarStream,
 }
 
+/// Where the extracted tree appears relative to `{outdir}` (directory mode).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layout {
+    /// The files of the input directory.
+    #[default]
+    Flat,
+    /// Inside a directory named like `{input}`.
+    Nested,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Setting {
@@ -73,15 +84,23 @@ pub struct Tool {
     pub exe: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub hints: BTreeMap<String, Vec<String>>,
+    /// Try the hints before PATH.
+    #[serde(default)]
+    pub hints_first: bool,
     pub version: VersionProbe,
     pub extension: String,
     pub mode: Mode,
+    #[serde(default)]
+    pub layout: Layout,
     #[serde(default)]
     pub create: Vec<String>,
     #[serde(default)]
     pub extract: Vec<String>,
     #[serde(default)]
     pub threads: Vec<String>,
+    /// The thread count changes the archive size, not only the speed.
+    #[serde(default)]
+    pub ratio_depends_on_threads: bool,
     pub licence: String,
     #[serde(default)]
     pub install: Install,
@@ -109,12 +128,15 @@ pub struct ToolOverride {
     pub path: Option<String>,
     pub exe: Option<BTreeMap<String, Vec<String>>>,
     pub hints: Option<BTreeMap<String, Vec<String>>>,
+    pub hints_first: Option<bool>,
     pub version: Option<VersionProbe>,
     pub extension: Option<String>,
     pub mode: Option<Mode>,
+    pub layout: Option<Layout>,
     pub create: Option<Vec<String>>,
     pub extract: Option<Vec<String>>,
     pub threads: Option<Vec<String>>,
+    pub ratio_depends_on_threads: Option<bool>,
     #[serde(default, rename = "setting")]
     pub settings: Vec<Setting>,
 }
@@ -188,6 +210,15 @@ impl Catalogue {
             }
             if let Some(v) = ov.hints {
                 tool.hints = v;
+            }
+            if let Some(v) = ov.hints_first {
+                tool.hints_first = v;
+            }
+            if let Some(v) = ov.layout {
+                tool.layout = v;
+            }
+            if let Some(v) = ov.ratio_depends_on_threads {
+                tool.ratio_depends_on_threads = v;
             }
             if let Some(v) = ov.version {
                 tool.version = v;
@@ -341,7 +372,7 @@ mod tests {
                 .unwrap_or_default()
         };
         assert_eq!(settings("7z"), ["mx5", "ultra"]);
-        assert_eq!(settings("rar"), ["m3", "best", "best-rr3"]);
+        assert_eq!(settings("rar"), ["m3", "best", "best-solid", "best-rr3"]);
         assert_eq!(settings("zstd"), ["3", "19", "ultra22-long27"]);
         assert_eq!(settings("xz"), ["6", "9"]);
         assert_eq!(settings("zpaqfranz"), ["m1", "m5"]);
@@ -350,10 +381,61 @@ mod tests {
             let t = cat.get(id).expect("manual tool");
             assert!(t.manual && !t.verified && t.settings.is_empty() && t.create.is_empty());
         }
-        for id in ["zpaqfranz", "tsaur"] {
-            assert!(!cat.get(id).expect("tool").verified);
+        assert!(!cat.get("tsaur").expect("tool").verified);
+        for id in ["7z", "rar", "zstd", "xz", "zpaqfranz", "store"] {
+            assert!(cat.get(id).expect("tool").verified, "{id}");
         }
-        assert!(cat.get("7z").expect("7z").verified);
+    }
+
+    #[test]
+    fn rar_settings_differ_only_where_intended() {
+        let cat = Catalogue::parse(REAL).expect("catalogue");
+        let rar = cat.get("rar").expect("rar");
+        let args = |id: &str| -> Vec<&str> {
+            let s = rar.settings.iter().find(|s| s.id == id).expect("setting");
+            s.compress.iter().map(String::as_str).collect()
+        };
+        assert_eq!(args("m3"), ["-m3"]);
+        assert_eq!(args("best"), ["-m5", "-md256m"]);
+        assert_eq!(args("best-solid"), ["-m5", "-md256m", "-s"]);
+        assert_eq!(args("best-rr3"), ["-m5", "-md256m", "-rr3%"]);
+    }
+
+    #[test]
+    fn thread_templates_and_layouts_follow_what_the_real_tools_accept() {
+        let cat = Catalogue::parse(REAL).expect("catalogue");
+        // zpaqfranz rejects `-t N`; `-t4` is one argument.
+        assert_eq!(cat.get("zpaqfranz").expect("t").threads, ["-t{n}"]);
+        // xz decompresses with threads too.
+        assert!(cat
+            .get("xz")
+            .expect("xz")
+            .extract
+            .contains(&"{threads}".to_string()));
+        // Thread dependence of the ratio is stated for every non-manual tool.
+        for (id, dep) in [
+            ("7z", true),
+            ("rar", true),
+            ("zstd", true),
+            ("xz", true),
+            ("zpaqfranz", false),
+        ] {
+            assert_eq!(
+                cat.get(id).expect("t").ratio_depends_on_threads,
+                dep,
+                "{id}"
+            );
+        }
+        assert_eq!(cat.get("7z").expect("t").layout, Layout::Nested);
+        assert_eq!(cat.get("zpaqfranz").expect("t").layout, Layout::Nested);
+        assert_eq!(cat.get("rar").expect("t").layout, Layout::Flat);
+        assert!(cat.get("store").expect("t").hints_first);
+        // No directory-mode template passes an absolute-looking input: `{input}` only.
+        for t in cat.tools.iter().filter(|t| t.mode == Mode::Directory) {
+            for a in t.create.iter().chain(&t.extract) {
+                assert!(!a.starts_with('/') && !a.contains(":\\"), "{}: {a}", t.id);
+            }
+        }
     }
 
     #[test]

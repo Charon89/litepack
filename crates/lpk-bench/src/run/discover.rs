@@ -96,6 +96,14 @@ fn candidates(name: &str, os: &str) -> Vec<String> {
 
 /// Find a tool's executable: PATH first, then the install-location hints.
 pub fn find_executable(tool: &Tool, env: &Env) -> Option<PathBuf> {
+    if tool.hints_first {
+        find_in_hints(tool, env).or_else(|| find_on_path(tool, env))
+    } else {
+        find_on_path(tool, env).or_else(|| find_in_hints(tool, env))
+    }
+}
+
+fn find_on_path(tool: &Tool, env: &Env) -> Option<PathBuf> {
     for name in tool.exe_names(env.os) {
         for dir in &env.path_dirs {
             for cand in candidates(name, env.os) {
@@ -106,6 +114,10 @@ pub fn find_executable(tool: &Tool, env: &Env) -> Option<PathBuf> {
             }
         }
     }
+    None
+}
+
+fn find_in_hints(tool: &Tool, env: &Env) -> Option<PathBuf> {
     for hint in tool.hint_list(env.os) {
         if let Some(expanded) = expand_hint(hint, &*env.vars) {
             if let Some(p) = expand_glob(&expanded)
@@ -117,6 +129,35 @@ pub fn find_executable(tool: &Tool, env: &Env) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Order names so that digit runs compare as numbers (`v1.5.10` after `v1.5.9`).
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn chunks(s: &str) -> Vec<(bool, &str)> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let bytes = s.as_bytes();
+        for i in 1..=bytes.len() {
+            if i == bytes.len() || bytes[i].is_ascii_digit() != bytes[start].is_ascii_digit() {
+                out.push((bytes[start].is_ascii_digit(), &s[start..i]));
+                start = i;
+            }
+        }
+        out
+    }
+    let (ca, cb) = (chunks(a), chunks(b));
+    for (x, y) in ca.iter().zip(&cb) {
+        let ord = if x.0 && y.0 {
+            let (nx, ny) = (x.1.trim_start_matches('0'), y.1.trim_start_matches('0'));
+            nx.len().cmp(&ny.len()).then_with(|| nx.cmp(ny))
+        } else {
+            x.1.cmp(y.1)
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    ca.len().cmp(&cb.len())
 }
 
 /// Does `name` match `pattern`, where `*` matches any run of characters (ASCII case-insensitive)?
@@ -163,8 +204,7 @@ pub fn expand_glob(path: &str) -> Vec<PathBuf> {
                     .filter_map(|e| e.file_name().into_string().ok())
                     .filter(|n| wild_match(seg, n))
                     .collect();
-                hits.sort();
-                hits.reverse();
+                hits.sort_by(|a, b| natural_cmp(b, a));
                 next.extend(hits.into_iter().map(|h| base.join(h)));
             } else {
                 next.push(base.join(seg));
@@ -178,7 +218,8 @@ pub fn expand_glob(path: &str) -> Vec<PathBuf> {
 /// First capture group of `pattern` in `text`.
 pub fn extract_version(text: &str, pattern: &str) -> Option<String> {
     let re = regex::Regex::new(pattern).ok()?;
-    re.captures(text)?.get(1).map(|m| m.as_str().to_string())
+    let m = re.captures(text)?.get(1)?;
+    Some(m.as_str().replace(')', ""))
 }
 
 /// Run the executable with the version arguments and read the version from its output
@@ -356,6 +397,53 @@ mod tests {
     }
 
     #[test]
+    fn version_numbers_compare_numerically_not_lexically() {
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(
+            natural_cmp("zstd-v1.5.10-win64", "zstd-v1.5.9-win64"),
+            Greater
+        );
+        assert_eq!(natural_cmp("v1.5.7", "v1.5.10"), Less);
+        assert_eq!(natural_cmp("a", "a"), std::cmp::Ordering::Equal);
+        let tmp = tempfile::tempdir().expect("tmp");
+        for v in ["1.5.9", "1.5.10", "1.5.2"] {
+            let d = tmp.path().join(format!("zstd-v{v}-win64"));
+            std::fs::create_dir_all(&d).expect("dir");
+            touch_exe(&d, "zstd.exe");
+        }
+        let root = tmp.path().to_string_lossy().into_owned();
+        let hits = expand_glob(&format!("{root}/zstd-v*/zstd.exe"));
+        assert!(hits[0].to_string_lossy().contains("1.5.10"), "{hits:?}");
+    }
+
+    #[test]
+    fn hints_first_beats_path_and_otherwise_path_wins() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path_dir = tmp.path().join("onpath");
+        let hint_dir = tmp.path().join("hint");
+        std::fs::create_dir_all(&path_dir).expect("dir");
+        std::fs::create_dir_all(&hint_dir).expect("dir");
+        let on_path = touch_exe(&path_dir, "tar.exe");
+        let hinted = touch_exe(&hint_dir, "tar.exe");
+        let mut tool = catalogue().get("store").expect("store").clone();
+        tool.hints
+            .insert("windows".into(), vec!["%H%/tar.exe".into()]);
+        let env = fake_env(
+            "windows",
+            vec![path_dir],
+            vec![("H", hint_dir.to_string_lossy().into_owned())],
+        );
+        assert!(tool.hints_first);
+        assert_eq!(find_executable(&tool, &env), Some(hinted.clone()));
+        tool.hints_first = false;
+        assert_eq!(find_executable(&tool, &env), Some(on_path));
+        // hints_first falls back to PATH when no hint exists.
+        tool.hints_first = true;
+        std::fs::remove_file(&hinted).expect("rm");
+        assert!(find_executable(&tool, &env).is_some());
+    }
+
+    #[test]
     fn versions_are_read_with_the_catalogue_patterns() {
         let cat = catalogue();
         let pat = |id: &str| cat.get(id).expect("tool").version.pattern.clone();
@@ -378,7 +466,17 @@ mod tests {
             ),
             ("xz", "xz (XZ Utils) 5.8.1\nliblzma 5.8.1", "5.8.1"),
             ("tsaur", "tsaur 1.0.0-rc.2", "1.0.0-rc.2"),
-            ("store", "bsdtar 3.7.7 - libarchive 3.7.7", "3.7.7"),
+            (
+                "store",
+                "bsdtar 3.7.7 - libarchive 3.7.7 zlib/1.3.1",
+                "bsdtar 3.7.7",
+            ),
+            ("store", "tar (GNU tar) 1.35\nCopyright", "GNU tar 1.35"),
+            (
+                "zpaqfranz",
+                "zpaqfranz v65.4m-JIT67+M,HW SHA1/2,SSE2, SFX64 v55.1,(2026-09-01)",
+                "65.4",
+            ),
         ];
         for (id, text, want) in cases {
             assert_eq!(

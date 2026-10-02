@@ -6,16 +6,37 @@
 # Keys per [[tool]]:
 #   id, name        identifier (`[a-z0-9-]+`) and display name
 #   exe.<os>        executable names to look for, per OS (`windows`, `linux`, `macos`)
-#   hints.<os>      install-location hints, tried after PATH; `%VAR%` is an environment variable;
-#                   `*` inside a folder or file name matches any text (winget portable folders
-#                   carry the version; the highest name wins)
-#   version         { args, pattern }: run with args, first capture group of pattern on stdout+stderr
+#   hints.<os>      install-location hints, tried after PATH (before it when `hints_first`);
+#                   `%VAR%` is an environment variable; `*` inside a folder or file name matches
+#                   any text (winget portable folders carry the version; the highest version,
+#                   digit runs compared as numbers, wins)
+#   hints_first     true: try the hints before PATH (`store` needs the Windows bsdtar, not the
+#                   GNU tar that Git for Windows puts on PATH)
+#   version         { args, pattern }: run with args, capture group 1 of pattern on stdout+stderr
+#                   (`)` characters are dropped, so `GNU tar) 1.35` is recorded as `GNU tar 1.35`)
 #   extension       archive file extension
 #   mode            `directory` (tool archives a directory itself) or `tar-stream` (the runner pipes
-#                   a tar stream into the tool's stdin and takes the archive from its stdout)
+#                   a tar stream, made by the `store` tool's tar, into the tool's stdin and takes
+#                   the archive from its stdout; extraction reverses it)
+#   layout          directory mode only. Where the extracted tree appears relative to `{outdir}`:
+#                   `flat` (the files of the input directory) or `nested` (inside a directory
+#                   named like `{input}`). Default `flat`.
 #   create/extract  argument templates. Placeholders: {archive} {input} {outdir} {settings}
 #                   {threads}; `{settings}` expands to the setting's compress or extract arguments
 #   threads         thread-count template; `{n}` is the number; expands to one or more arguments
+#   ratio_depends_on_threads
+#                   true when the thread count changes the archive size, not only the speed.
+#                   Copied into every result. Unknown for manual tools: the owner sets it in
+#                   bench/tools.local.toml.
+#
+# Working-directory rule for every directory-mode tool (and for the tar step of tar-stream tools):
+# the runner executes the tool with its working directory set to the parent of the class
+# directory, and passes `{input}` as a path relative to it (the class directory's name), and
+# `{archive}` and `{outdir}` relative to it as well. No archive then contains an absolute path.
+# The templates below were run that way against the real tools (see the commit that introduced
+# this rule): create, extract into an empty directory, compare with the input tree.
+# All settings run at the machine's thread count, as a user would run them.
+#
 #   licence         licence note; install = { winget, apt, url } hints
 #   manual          true: the owner licenses and configures the tool by hand (docs/BASELINES.md)
 #   verified        false: command lines taken from documentation, never run by us
@@ -27,7 +48,9 @@ id = "store"
 name = "tar (store, control)"
 exe = { windows = ["tar"], linux = ["tar"], macos = ["tar"] }
 hints = { windows = ["%SystemRoot%/System32/tar.exe"] }
-version = { args = ["--version"], pattern = '(\d+(?:\.\d+)+)' }
+hints_first = true
+version = { args = ["--version"], pattern = '(bsdtar \d+(?:\.\d+)+|GNU tar\)? \d+(?:\.\d+)+)' }
+ratio_depends_on_threads = false
 extension = ".tar"
 mode = "directory"
 create = ["-cf", "{archive}", "-C", "{input}", "."]
@@ -35,7 +58,7 @@ extract = ["-xf", "{archive}", "-C", "{outdir}"]
 threads = []
 licence = "bsdtar (BSD-2-Clause) or GNU tar (GPL-3.0-or-later), used as an external program only"
 install = { apt = "tar", url = "bundled with Windows 10 and later" }
-note = "Tar without compression: the control for every other tool."
+note = "Tar without compression: the control for every other tool. On Windows the System32 bsdtar is used: GNU tar reads `D:` in an archive path as a remote host."
 [[tool.setting]]
 id = "store"
 compress = []
@@ -49,9 +72,11 @@ hints = { windows = ["%ProgramFiles%/7-Zip/7z.exe", "%ProgramFiles(x86)%/7-Zip/7
 version = { args = [], pattern = '7-Zip[^\d\r\n]*(\d+(?:\.\d+)+)' }
 extension = ".7z"
 mode = "directory"
-create = ["a", "-bd", "-y", "{settings}", "{threads}", "{archive}", "{input}/*"]
+layout = "nested"
+create = ["a", "-bd", "-y", "{settings}", "{threads}", "{archive}", "{input}"]
 extract = ["x", "-bd", "-y", "{threads}", "-o{outdir}", "{archive}"]
 threads = ["-mmt={n}"]
+ratio_depends_on_threads = true
 licence = "LGPL-2.1-or-later with unRAR restriction; used as an external program only"
 install = { winget = "7zip.7zip", apt = "7zip", url = "https://www.7-zip.org/" }
 note = "Catalogued against 7-Zip 26.03; the executable is `7zz` on Linux."
@@ -75,9 +100,10 @@ mode = "directory"
 create = ["a", "-r", "-ep1", "-idq", "-y", "{settings}", "{threads}", "{archive}", "{input}/*"]
 extract = ["x", "-idq", "-y", "{threads}", "{archive}", "{outdir}/"]
 threads = ["-mt{n}"]
+ratio_depends_on_threads = true
 licence = "Proprietary: 40-day trial, then a paid licence"
 install = { winget = "RARLab.WinRAR", apt = "rar (multiverse)", url = "https://www.rarlab.com/" }
-note = "Catalogued against WinRAR 7.23."
+note = "Catalogued against WinRAR 7.23. WinRAR is non-solid by default, which is what PLAN lists and what most users get; `best-solid` adds -s for its strongest sensible configuration. The -rr3% setting differs from `best` only by the recovery record."
 [[tool.setting]]
 id = "m3"
 compress = ["-m3"]
@@ -87,8 +113,12 @@ id = "best"
 compress = ["-m5", "-md256m"]
 extract = []
 [[tool.setting]]
+id = "best-solid"
+compress = ["-m5", "-md256m", "-s"]
+extract = []
+[[tool.setting]]
 id = "best-rr3"
-compress = ["-m5", "-rr3%"]
+compress = ["-m5", "-md256m", "-rr3%"]
 extract = []
 
 [[tool]]
@@ -102,6 +132,7 @@ mode = "tar-stream"
 create = ["{settings}", "{threads}", "-c"]
 extract = ["-d", "{settings}", "-c"]
 threads = ["-T{n}"]
+ratio_depends_on_threads = true
 licence = "BSD-3-Clause OR GPL-2.0-only; used as an external program only"
 install = { winget = "Meta.Zstandard", apt = "zstd", url = "https://github.com/facebook/zstd" }
 note = "Catalogued against zstd 1.5.7. Decoding a --long=27 stream needs no extra flag at that window size."
@@ -127,8 +158,9 @@ version = { args = ["--version"], pattern = 'xz[^\d\r\n]*(\d+(?:\.\d+)+)' }
 extension = ".tar.xz"
 mode = "tar-stream"
 create = ["{settings}", "{threads}", "-c"]
-extract = ["-d", "{settings}", "-c"]
+extract = ["-d", "{settings}", "{threads}", "-c"]
 threads = ["-T{n}"]
+ratio_depends_on_threads = true
 licence = "0BSD (liblzma) and GPL-2.0-or-later (command line tool); used as an external program only"
 install = { winget = "TukaaniProject.XZUtils", apt = "xz-utils", url = "https://tukaani.org/xz/" }
 note = "Catalogued against xz 5.8."
@@ -148,13 +180,14 @@ exe = { windows = ["zpaqfranz"], linux = ["zpaqfranz"], macos = ["zpaqfranz"] }
 version = { args = ["-h"], pattern = 'zpaqfranz v?(\d+(?:\.\d+)*)' }
 extension = ".zpaq"
 mode = "directory"
+layout = "nested"
 create = ["a", "{archive}", "{input}", "{settings}", "{threads}"]
 extract = ["x", "{archive}", "-to", "{outdir}", "{threads}"]
-threads = ["-t", "{n}"]
+threads = ["-t{n}"]
+ratio_depends_on_threads = false
 licence = "MIT"
 install = { url = "https://github.com/fcorbelli/zpaqfranz" }
-verified = false
-note = "Command lines from the project README; not run by us."
+note = "Run against zpaqfranz 65.4 (create, extract, compare). `-t N` as two arguments is not accepted; `-t4` is. Archive size did not change with the thread count at -m1 in a check on a source-code sample; -m5 was not checked."
 [[tool.setting]]
 id = "m1"
 compress = ["-m1"]
@@ -174,6 +207,7 @@ mode = "directory"
 create = ["pack", "{archive}", "{input}", "{settings}", "{threads}"]
 extract = ["unpack", "{archive}", "{outdir}", "{threads}"]
 threads = ["--jobs", "{n}"]
+ratio_depends_on_threads = false
 licence = "Apache-2.0 OR MIT"
 install = { url = "https://github.com/iulianbondari/t-saur" }
 verified = false
