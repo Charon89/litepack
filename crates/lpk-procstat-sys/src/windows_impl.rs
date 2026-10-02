@@ -9,7 +9,9 @@ use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_MORE_DATA, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
@@ -22,7 +24,7 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
-    OpenThread, ResumeThread, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, INFINITE,
+    OpenThread, ResumeThread, WaitForSingleObject, CREATE_SUSPENDED, DETACHED_PROCESS, INFINITE,
     THREAD_SUSPEND_RESUME,
 };
 
@@ -106,12 +108,12 @@ fn peak_working_set(proc: HANDLE) -> io::Result<u64> {
 /// True if the job holds any process other than `main_pid`. The main process itself is ignored
 /// by id, so the moment at which the job drops it does not matter.
 fn has_other_processes(job: HANDLE, main_pid: u32) -> io::Result<bool> {
-    // Room for the header plus well over 200 ids; more would make the call fail with
-    // ERROR_MORE_DATA, which we report as an error.
+    // Room for the header plus well over 200 ids; a bigger job makes the call fail with
+    // ERROR_MORE_DATA, which certainly means there are other processes.
     let mut buf = [0u64; 256];
     // SAFETY: `buf` is valid for writes of its full size and 8-byte aligned, which satisfies the
     // alignment of JOBOBJECT_BASIC_PROCESS_ID_LIST.
-    unsafe {
+    let q = unsafe {
         QueryInformationJobObject(
             Some(job),
             JobObjectBasicProcessIdList,
@@ -119,8 +121,12 @@ fn has_other_processes(job: HANDLE, main_pid: u32) -> io::Result<bool> {
             std::mem::size_of_val(&buf) as u32,
             None,
         )
+    };
+    match q {
+        Ok(()) => {}
+        Err(e) if e.code() == ERROR_MORE_DATA.to_hresult() => return Ok(true),
+        Err(e) => return Err(werr(e)),
     }
-    .map_err(werr)?;
     let base = buf.as_ptr() as *const u8;
     // SAFETY: the kernel filled a JOBOBJECT_BASIC_PROCESS_ID_LIST header at the start of `buf`.
     let n = unsafe { (*(base as *const JOBOBJECT_BASIC_PROCESS_ID_LIST)).NumberOfProcessIdsInList }
@@ -152,11 +158,12 @@ fn query_accounting(job: HANDLE) -> io::Result<JOBOBJECT_BASIC_AND_IO_ACCOUNTING
 pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
     let job = create_job()?;
     let mut cmd = spec.command()?;
-    // No console window of its own (so no extra conhost.exe joins the job) when nothing is
-    // inherited from our console; with an inherited stream keep default console behaviour.
+    // With no inherited stream the child needs no console at all. DETACHED_PROCESS gives it none,
+    // so no conhost.exe joins the job (CREATE_NO_WINDOW would add one, measured). With an inherited
+    // stream keep the default console behaviour.
     let mut flags = CREATE_SUSPENDED.0;
     if spec.stdout != crate::Output::Inherit && spec.stderr != crate::Output::Inherit {
-        flags |= CREATE_NO_WINDOW.0;
+        flags |= DETACHED_PROCESS.0;
     }
     cmd.creation_flags(flags);
     let mut child = cmd.spawn()?;
@@ -215,23 +222,14 @@ pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
         let _ = child.kill();
         return Err(e);
     }
+    // Everything below is read at the same moment as `wall`, before anything can wind down.
     let wall = start.elapsed();
-    let status = child.wait()?;
-    let peak_rss = peak_working_set(proc)?;
-
     if !timed_out {
-        // The wall clock has stopped. Short-lived helpers (e.g. a console host) may still be
-        // winding down: give them up to 300 ms before deciding that descendants outlived it.
-        let deadline = Instant::now() + Duration::from_millis(300);
-        loop {
-            descendants_killed = has_other_processes(job.0, child.id())?;
-            if !descendants_killed || Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        descendants_killed = has_other_processes(job.0, child.id())?;
     }
     let acct = query_accounting(job.0)?;
+    let status = child.wait()?;
+    let peak_rss = peak_working_set(proc)?;
     let mut ext = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     // SAFETY: `ext` is a valid buffer of the stated size for this information class.
     unsafe {

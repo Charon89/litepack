@@ -150,6 +150,8 @@ impl Spec {
 /// What one run measured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Measurement {
+    /// Wall-clock time. Windows: from resuming the suspended child (process creation excluded).
+    /// Linux: from just before fork/exec (process creation included).
     pub wall: Duration,
     /// User-mode CPU time of the program and all its descendants.
     pub user_cpu: Duration,
@@ -167,7 +169,11 @@ pub struct Measurement {
     /// The timeout expired and the process tree was killed.
     pub timed_out: bool,
     /// Descendants of the program were still running when it exited (or the timeout fired) and
-    /// were killed; their CPU time may be incomplete (Windows) or missing (Linux).
+    /// were killed; their CPU time may be incomplete (Windows) or missing (Linux). Decided at the
+    /// moment the program exits, with no grace period. One known false positive: on Windows with
+    /// an inherited stdout or stderr and a caller without a console, Windows gives the child a
+    /// console host, which is then reported as a descendant. The same happens when the program itself
+    /// starts console programs without detaching them (the first child runs without a console).
     pub descendants_killed: bool,
 }
 

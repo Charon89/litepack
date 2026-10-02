@@ -62,12 +62,16 @@ fn main() {
 
     let mut grandchild = None;
     if !child_args.is_empty() {
-        grandchild = Some(
-            std::process::Command::new(&exe)
-                .args(&child_args)
-                .spawn()
-                .expect("spawn grandchild"),
-        );
+        let mut c = std::process::Command::new(&exe);
+        c.args(&child_args);
+        // We run detached (no console) under `lpk_procstat_sys::run`; without this the grandchild
+        // would get a console host of its own, which would join the job and exit late.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0000_0008); // DETACHED_PROCESS
+        }
+        grandchild = Some(c.spawn().expect("spawn grandchild"));
     }
 
     let mem = num("mem-mib") as usize * 1024 * 1024;

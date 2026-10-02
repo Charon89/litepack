@@ -218,3 +218,12 @@ fn env_set_remove_and_clear() {
     assert_eq!(m.exit_code, Some(0));
     assert!(out.contains("PATH=<unset>"), "{out}");
 }
+
+/// Deterministic guard against a console host (conhost.exe) joining the job: the timeout path
+/// checks once, without any grace period, so any extra process in the job would show up here.
+#[test]
+fn no_helper_processes_without_real_descendants() {
+    let m = run(&probe(&["--sleep", "1"]).timeout(Duration::from_millis(300))).unwrap();
+    assert!(m.timed_out, "{m:?}");
+    assert!(!m.descendants_killed, "{m:?}");
+}

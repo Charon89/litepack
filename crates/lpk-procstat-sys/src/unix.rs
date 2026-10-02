@@ -17,10 +17,9 @@ fn tv(t: libc::timeval) -> Duration {
 }
 
 /// True if a live process other than the leader is still in process group `pgid`.
-fn group_has_descendants(pgid: libc::pid_t) -> bool {
-    let Ok(dir) = std::fs::read_dir("/proc") else {
-        return false;
-    };
+/// An unreadable `/proc` is an error, not "none".
+fn group_has_descendants(pgid: libc::pid_t) -> io::Result<bool> {
+    let dir = std::fs::read_dir("/proc")?;
     for entry in dir.flatten() {
         let name = entry.file_name();
         let Some(pid) = name.to_str().and_then(|n| n.parse::<libc::pid_t>().ok()) else {
@@ -41,10 +40,10 @@ fn group_has_descendants(pgid: libc::pid_t) -> bool {
         let _ppid = f.next();
         let pgrp = f.next().and_then(|v| v.parse::<libc::pid_t>().ok());
         if pgrp == Some(pgid) && state != Some("Z") {
-            return true;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 fn kill_group(pgid: libc::pid_t) {
@@ -84,7 +83,7 @@ pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
     let pid = child.id() as libc::pid_t;
     // `child` is never waited on through std; we reap it ourselves below.
 
-    // The watchdog returns Some(had_descendants) if it fired and killed the group.
+    // The watchdog returns Some(had_descendants?) if it fired and killed the group.
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let watchdog = spec.timeout.map(|t| {
         std::thread::spawn(move || match stop_rx.recv_timeout(t) {
@@ -96,7 +95,7 @@ pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
             _ => None,
         })
     });
-    let stop_watchdog = |w: Option<std::thread::JoinHandle<Option<bool>>>| {
+    let stop_watchdog = |w: Option<std::thread::JoinHandle<Option<io::Result<bool>>>>| {
         let _ = stop_tx.send(());
         w.and_then(|h| h.join().ok().flatten())
     };
@@ -121,18 +120,23 @@ pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
             continue;
         }
         stop_watchdog(watchdog);
-        kill_group(pid);
-        let _ = reap(pid);
+        // ECHILD: the child was auto-reaped (SIGCHLD ignored by the embedder), so its pid may
+        // already belong to someone else: signal nothing.
+        if e.raw_os_error() != Some(libc::ECHILD) {
+            kill_group(pid);
+            let _ = reap(pid);
+        }
         return Err(e);
     }
     let wall = start.elapsed();
 
     let fired = stop_watchdog(watchdog);
     let timed_out = fired.is_some();
-    let descendants_killed = fired.unwrap_or_else(|| group_has_descendants(pid));
+    let descendants = fired.unwrap_or_else(|| group_has_descendants(pid));
     // Leader is still an unreaped zombie here, so the group id is still ours.
     kill_group(pid);
     let (status, rusage) = reap(pid)?;
+    let descendants_killed = descendants?;
 
     let exit_code = if !timed_out && libc::WIFEXITED(status) {
         Some(libc::WEXITSTATUS(status))
