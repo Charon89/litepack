@@ -43,18 +43,36 @@ pub struct ToolFailure {
 /// Run a program as one measured step. `what` names it in the failure reason (for example
 /// `zstd --patch-from`). Success means exit code 0, no timeout and no leftover descendants.
 pub fn run_tool(spec: &ToolSpec<'_>, what: &str) -> Result<ps::Measurement, ToolFailure> {
+    // As in the baseline loop: a file handed from one step to the next is written to disk
+    // outside the timed interval, so the next step does not pay for it.
+    if let ps::Input::File(p) = &spec.stdin {
+        flush_file(p);
+    }
+    let result = run_tool_inner(spec, what);
+    if result.is_ok() {
+        if let ps::Output::File(p) = &spec.stdout {
+            flush_file(p);
+        }
+    }
+    result
+}
+
+/// Write a file's pages to disk (best effort; on Windows the handle needs write access). Call it
+/// after any step that produces a file a later timed step reads and that `run_tool` did not
+/// write (for example an archive a tool created itself).
+pub fn flush_file(path: &Path) {
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = f.sync_all();
+    }
+}
+
+fn run_tool_inner(spec: &ToolSpec<'_>, what: &str) -> Result<ps::Measurement, ToolFailure> {
     let mut s = ps::Spec::new(spec.exe)
         .args(spec.args)
         .cwd(spec.cwd)
-        .stdin(match &spec.stdin {
-            ps::Input::File(p) => ps::Input::File(p.clone()),
-            _ => ps::Input::Null,
-        })
-        .stdout(match &spec.stdout {
-            ps::Output::File(p) => ps::Output::File(p.clone()),
-            ps::Output::Inherit => ps::Output::Inherit,
-            _ => ps::Output::Discard,
-        })
+        // Passed through as given: every variant is supported by the measuring crate.
+        .stdin(spec.stdin.clone())
+        .stdout(spec.stdout.clone())
         .stderr(ps::Output::File(spec.stderr_file.to_path_buf()))
         .timeout(spec.timeout);
     for name in STRIPPED_ENV {
@@ -119,24 +137,37 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
+/// The skip reason for a `bench/tools.local.toml` entry that names a program that is not there.
+pub const LOCAL_PATH_NOT_FOUND: &str = "tools.local.toml path not found";
+/// The error for a `bench/tools.local.toml` that cannot be parsed.
+pub const LOCAL_UNPARSEABLE: &str = "tools.local.toml does not parse";
+
 /// Find a program by name: the `path` of a `[[tool]]` entry with that `id` in the given text of
-/// `bench/tools.local.toml` first, then the directories given. Returns the skip reason
-/// ([`NOT_INSTALLED`]) when there is none.
+/// `bench/tools.local.toml` first, then the directories given. `Err` is a skip reason:
+/// [`NOT_INSTALLED`]; [`LOCAL_PATH_NOT_FOUND`] when the file has an entry for the tool whose path
+/// does not exist or is not executable (no quiet fall back to `PATH`); or [`LOCAL_UNPARSEABLE`].
 pub fn find_tool_in(
     name: &str,
     local_toml: Option<&str>,
     path_dirs: &[PathBuf],
     windows: bool,
 ) -> Result<PathBuf, String> {
-    if let Some(value) = local_toml.and_then(|t| t.parse::<toml::Table>().ok()) {
+    if let Some(text) = local_toml {
+        let value = text
+            .parse::<toml::Table>()
+            .map_err(|_| LOCAL_UNPARSEABLE.to_string())?;
         let entries = value.get("tool").and_then(|t| t.as_array());
         for entry in entries.into_iter().flatten() {
             let id = entry.get("id").and_then(|v| v.as_str());
             let path = entry.get("path").and_then(|v| v.as_str());
             if let (Some(id), Some(path)) = (id, path) {
-                let p = PathBuf::from(path);
-                if id == name && is_executable(&p) {
-                    return Ok(p);
+                if id == name {
+                    let p = PathBuf::from(path);
+                    return if is_executable(&p) {
+                        Ok(p)
+                    } else {
+                        Err(LOCAL_PATH_NOT_FOUND.to_string())
+                    };
                 }
             }
         }
@@ -155,7 +186,11 @@ pub fn find_tool_in(
 /// [`find_tool_in`] with this machine's `PATH` and the local override file at `local` (missing
 /// file: no overrides). Names used by the probes: `zstd`, `bsc`, `kanzi`, `hdiffz`, `hpatchz`.
 pub fn find_tool(name: &str, local: &Path) -> Result<PathBuf, String> {
-    let text = std::fs::read_to_string(local).ok();
+    let text = match std::fs::read_to_string(local) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err("tools.local.toml cannot be read".to_string()),
+    };
     let dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
@@ -221,7 +256,21 @@ mod tests {
             find_tool_in("othertool", Some(&local), &[], cfg!(windows)),
             Ok(exe)
         );
-        assert!(find_tool_in("othertool", Some("not [ toml"), &[], cfg!(windows)).is_err());
+        assert_eq!(
+            find_tool_in("othertool", Some("not [ toml"), &[], cfg!(windows)),
+            Err(LOCAL_UNPARSEABLE.to_string())
+        );
+        // An entry whose path is missing is a skip reason, even when the tool is on PATH.
+        let missing = "[[tool]]\nid = \"faketool\"\npath = 'no/such/file'\n";
+        assert_eq!(
+            find_tool_in("faketool", Some(missing), &dirs, cfg!(windows)),
+            Err(LOCAL_PATH_NOT_FOUND.to_string())
+        );
+        // An entry for another tool does not matter.
+        assert_eq!(
+            find_tool_in("faketool", Some(&local), &dirs, cfg!(windows)),
+            Ok(dirs[0].join(name))
+        );
     }
 
     #[test]

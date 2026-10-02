@@ -1218,6 +1218,7 @@ dependencies = [
  "lepton_jpeg",
  "libc",
  "liblzma",
+ "liblzma-sys",
  "libz-sys",
  "lpk-procstat-sys",
  "miniz_oxide 0.8.9",

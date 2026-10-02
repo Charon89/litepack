@@ -39,6 +39,7 @@ sysinfo = { version = "0.38.4", default-features = false, features = ["system"] 
 zstd = { version = "0.14.0", default-features = false, features = ["zstdmt"] }
 liblzma = { version = "0.4.8", features = ["static", "parallel"] }
 lepton_jpeg = "0.5.8"
+liblzma-sys = "0.4.9"
 preflate-rs = "0.7.6"
 fastcdc = "5.0.0"
 

@@ -13,18 +13,52 @@ use anyhow::{Context as _, Result};
 
 use super::Ctx;
 
+/// What a tar holds. Headers, padding and long-name entries are a large share of `tar_bytes` for
+/// classes of many small files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TarStats {
+    pub files: u64,
+    /// Bytes of file content.
+    pub content_bytes: u64,
+    /// Bytes of the whole tar stream.
+    pub tar_bytes: u64,
+}
+
+struct CountingWriter<W: Write> {
+    inner: W,
+    written: u64,
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Write the tar of the files of `class` whose class-relative path is inside `folder`
-/// (`None`: the whole class) to `out`. Returns the number of files written.
+/// (`None`: the whole class) to `out`. Returns the counts of what was written. This tar is not
+/// byte-identical to the baseline `store` tool's (a different writer, GNU long-name entries,
+/// fixed metadata): compare it with tool results only by what it contains.
 pub fn write_tar<W: Write>(
     ctx: &Ctx<'_>,
     class: &str,
     folder: Option<&str>,
     out: W,
-) -> Result<u64> {
+) -> Result<TarStats> {
     let files = ctx.class_files(class).unwrap_or(&[]);
     let prefix = folder.map(|f| format!("{}/", f.trim_matches('/')));
-    let mut builder = tar::Builder::new(out);
-    let mut count = 0u64;
+    let mut counter = CountingWriter {
+        inner: out,
+        written: 0,
+    };
+    let mut builder = tar::Builder::new(&mut counter);
+    let mut stats = TarStats::default();
     for f in files {
         let rel = ctx.rel_path(class, f);
         if let Some(p) = &prefix {
@@ -43,10 +77,13 @@ pub fn write_tar<W: Write>(
         builder
             .append_data(&mut h, rel, &data[..])
             .context("writing a tar entry")?;
-        count += 1;
+        stats.files += 1;
+        stats.content_bytes += data.len() as u64;
     }
-    builder.into_inner().context("finishing the tar")?;
-    Ok(count)
+    builder.finish().context("finishing the tar")?;
+    drop(builder);
+    stats.tar_bytes = counter.written;
+    Ok(stats)
 }
 
 /// [`write_tar`] into memory.
@@ -86,6 +123,12 @@ mod tests {
                 names.push(e.path().expect("path").to_string_lossy().into_owned());
             }
             assert_eq!(names, ["a.txt", "sub/b.txt", "sub/deep/c.txt"]);
+            let mut sink = Vec::new();
+            let stats = write_tar(ctx, "docs", None, &mut sink).expect("stats");
+            assert_eq!(stats.files, 3);
+            assert_eq!(stats.content_bytes, 5 + 11 + 7);
+            assert_eq!(stats.tar_bytes, sink.len() as u64);
+            assert!(stats.tar_bytes > stats.content_bytes);
             let sub = tar_bytes(ctx, "docs", Some("sub")).expect("sub");
             let mut ar = tar::Archive::new(&sub[..]);
             let n = ar.entries().expect("entries").count();

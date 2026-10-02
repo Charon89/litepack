@@ -500,7 +500,7 @@ fn analyze(
 }
 
 pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
-    let settings = ZstdSettings::level19();
+    let settings = ZstdSettings::level19_long27();
     let mut data = Data {
         class: CLASS.to_string(),
         manifest_files: 0,
@@ -589,8 +589,8 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
     if d.class != CLASS {
         p.push(format!("/data/class: `{}` (expected `{CLASS}`)", d.class));
     }
-    if d.zstd != ZstdSettings::level19() {
-        p.push("/data/zstd: the settings are not the probe's (level 19, window log 27, long-distance matching, 1 thread)".to_string());
+    if d.zstd != ZstdSettings::level19_long27() {
+        p.push("/data/zstd: the settings are not the probe's (level 19, window log 27, long-distance matching, 1 thread: level19_long27)".to_string());
     }
     if e.library_threads != 1 {
         p.push("/library_threads: this probe runs zstd on one thread".to_string());
@@ -1162,7 +1162,7 @@ mod tests {
             ("e", "BF16", vec![0], vec![]),
             ("ids", "I64", vec![4], vec![9; 32]),
         ]);
-        let mut zc = ZstdSettings::level19().context().expect("ctx");
+        let mut zc = ZstdSettings::level19_long27().context().expect("ctx");
         let rec = analyze(&mut zc, &file, 3, Some("c/m.safetensors".into()))
             .expect("measured")
             .expect("parsed");

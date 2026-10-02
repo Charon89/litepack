@@ -308,7 +308,6 @@ impl Ctx<'_> {
         block: usize,
         mut sink: impl FnMut(&[u8]) -> Result<()>,
     ) -> Result<()> {
-        use std::io::Read;
         let path = self.corpus.files_root().join(&f.path);
         let mut file = std::fs::File::open(&path).with_context(|| {
             format!(
@@ -316,21 +315,8 @@ impl Ctx<'_> {
                 f.path
             )
         })?;
-        let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0u8; block.max(1)];
-        let mut total = 0u64;
-        loop {
-            let n = file
-                .read(&mut buf)
-                .with_context(|| format!("class `{class}`: reading `{}`", f.path))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            total += n as u64;
-            sink(&buf[..n])?;
-        }
-        let got = hasher.finalize().to_hex().to_string();
+        let (total, got) = hash_blocks(&mut file, block, &mut sink)
+            .with_context(|| format!("class `{class}`: reading `{}`", f.path))?;
         if total != f.bytes || got != f.blake3 {
             bail!(
                 "class `{class}`: input file `{}` does not match the manifest \
@@ -372,6 +358,39 @@ impl Ctx<'_> {
         verify_bytes(class, f, &bytes)?;
         Ok(bytes)
     }
+}
+
+/// Deliver `reader` to `sink` in blocks of exactly `block` bytes (only the last may be shorter,
+/// however short the individual reads are) and return the byte count and BLAKE3 of the stream.
+pub fn hash_blocks<R: std::io::Read>(
+    reader: &mut R,
+    block: usize,
+    sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+) -> Result<(u64, String)> {
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; block.max(1)];
+    let mut total = 0u64;
+    loop {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match reader.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if filled == 0 {
+            break;
+        }
+        hasher.update(&buf[..filled]);
+        total += filled as u64;
+        sink(&buf[..filled])?;
+        if filled < buf.len() {
+            break;
+        }
+    }
+    Ok((total, hasher.finalize().to_hex().to_string()))
 }
 
 /// Compare file contents with their manifest entry.
@@ -1081,6 +1100,11 @@ pub fn execute(cfg: &Config) -> Result<Outcome> {
             }
         }
     }
+    if cfg.into.is_none() && out.written.is_empty() {
+        // A directory this run created and wrote no probe file into: nothing to keep.
+        let _ = std::fs::remove_dir_all(&dir);
+        return Ok(out);
+    }
     let report = crate::run::validate::validate_dir(&dir)?;
     for p in &report.problems {
         eprintln!("error: {p}");
@@ -1113,7 +1137,9 @@ pub fn command(args: &ProbeArgs) -> ExitCode {
     };
     match execute(&cfg) {
         Ok(o) => {
-            println!("results written to {}", o.results_dir.display());
+            if !o.written.is_empty() {
+                println!("results written to {}", o.results_dir.display());
+            }
             if o.failed.is_empty() && o.problems == 0 {
                 ExitCode::SUCCESS
             } else {

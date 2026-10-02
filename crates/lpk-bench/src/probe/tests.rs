@@ -675,6 +675,83 @@ fn blocks_are_streamed_and_a_changed_file_fails_at_the_end() {
     });
 }
 
+/// A reader that returns at most `step` bytes per call.
+struct Trickle<'a> {
+    data: &'a [u8],
+    step: usize,
+}
+
+impl std::io::Read for Trickle<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.step.min(buf.len()).min(self.data.len());
+        buf[..n].copy_from_slice(&self.data[..n]);
+        self.data = &self.data[n..];
+        Ok(n)
+    }
+}
+
+#[test]
+fn blocks_are_full_size_even_when_reads_are_short() {
+    let data: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+    for (block, step) in [
+        (64usize, 1usize),
+        (64, 7),
+        (100, 100),
+        (1, 1),
+        (4096, 3),
+        (7, 64),
+    ] {
+        let mut sizes = Vec::new();
+        let mut got = Vec::new();
+        let (total, hash) = hash_blocks(&mut Trickle { data: &data, step }, block, &mut |b| {
+            sizes.push(b.len());
+            got.extend_from_slice(b);
+            Ok(())
+        })
+        .expect("blocks");
+        assert_eq!(got, data);
+        assert_eq!(total, 1000);
+        assert_eq!(hash, blake3::hash(&data).to_hex().to_string());
+        let (last, full) = sizes.split_last().expect("sizes");
+        assert!(
+            full.iter().all(|s| *s == block.min(1000)),
+            "{block}/{step}: {sizes:?}"
+        );
+        assert!(*last <= block && *last > 0);
+    }
+    let (total, _) =
+        hash_blocks(&mut Trickle { data: &[], step: 5 }, 8, &mut |_| Ok(())).expect("empty");
+    assert_eq!(total, 0);
+}
+
+#[test]
+fn level_19_means_the_baseline_setting_and_the_long_variant_is_named() {
+    let plain = codec::ZstdSettings::level19();
+    assert_eq!(
+        (plain.level, plain.window_log, plain.long_distance_matching),
+        (19, None, false)
+    );
+    let long = codec::ZstdSettings::level19_long27();
+    assert_eq!(
+        (long.level, long.window_log, long.long_distance_matching),
+        (19, Some(27), true)
+    );
+}
+
+#[test]
+fn a_run_that_wrote_nothing_leaves_no_new_directory() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tiny_corpus(tmp.path(), false);
+    std::fs::write(corpus.join("model-weights/readme.txt"), b"tampered!!!").expect("write");
+    let cfg = config(corpus, tmp.path().join("results"), &["weights"]);
+    let out = execute(&cfg).expect("execute");
+    assert!(
+        out.written.is_empty() && !out.results_dir.exists(),
+        "{:?}",
+        out.results_dir
+    );
+}
+
 #[test]
 fn the_scratch_helper_gives_empty_directories() {
     let tmp = tempfile::tempdir().expect("tmp");

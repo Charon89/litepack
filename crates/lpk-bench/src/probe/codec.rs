@@ -10,7 +10,7 @@
 
 use std::io::{Read, Write};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use liblzma::stream::{Check, MtStreamBuilder, Stream};
 use serde::{Deserialize, Serialize};
 use zstd::zstd_safe::{CParameter, DParameter};
@@ -40,8 +40,16 @@ impl ZstdSettings {
         }
     }
 
-    /// The probes' "zstd level 19": window log 27 with long-distance matching, single-threaded.
+    /// "zstd level 19" as the baseline runner's `zstd -19` runs it: library defaults (no
+    /// long-distance matching, the level's default window), single-threaded.
     pub fn level19() -> Self {
+        ZstdSettings::level(19)
+    }
+
+    /// Level 19 with an explicit window log of 27 and long-distance matching, single-threaded.
+    /// Any table that uses it must say so (a window or long-matching setting that differs from
+    /// the library default is part of the label).
+    pub fn level19_long27() -> Self {
         ZstdSettings {
             level: 19,
             window_log: Some(27),
@@ -128,21 +136,22 @@ pub struct Measured {
     pub compressed_bytes: u64,
     pub compress_seconds: f64,
     pub decompress_seconds: f64,
-    /// Decompression reproduced the input exactly.
-    pub round_trip_ok: bool,
 }
 
-/// Compress and decompress `data` with zstd, timing each step.
+/// Compress and decompress `data` with zstd, timing each step. A round trip that does not
+/// reproduce `data` is an `Err`: it cannot be ignored.
 pub fn zstd_measure(data: &[u8], s: &ZstdSettings) -> Result<Measured> {
     let mut ctx = s.context()?;
     let (c, compress_seconds) = timed(|| ctx.compress(data));
     let c = c?;
     let (d, decompress_seconds) = timed(|| ctx.decompress(&c, data.len()));
+    if d? != data {
+        bail!("zstd round trip failed: the decompressed bytes differ from the input");
+    }
     Ok(Measured {
         compressed_bytes: c.len() as u64,
         compress_seconds,
         decompress_seconds,
-        round_trip_ok: d? == data,
     })
 }
 
@@ -151,10 +160,11 @@ pub fn zstd_size(data: &[u8], s: &ZstdSettings) -> Result<u64> {
     Ok(s.context()?.compress(data)?.len() as u64)
 }
 
-/// Compress and decompress `data` with xz, timing each step.
+/// Compress and decompress `data` with xz, timing each step (the encoder is built before the
+/// timed section). A round trip that does not reproduce `data` is an `Err`.
 pub fn xz_measure(data: &[u8], s: &XzSettings) -> Result<Measured> {
+    let mut enc = liblzma::write::XzEncoder::new_stream(Vec::new(), s.encoder()?);
     let (c, compress_seconds) = timed(|| -> Result<Vec<u8>> {
-        let mut enc = liblzma::write::XzEncoder::new_stream(Vec::new(), s.encoder()?);
         enc.write_all(data)?;
         Ok(enc.finish()?)
     });
@@ -166,11 +176,13 @@ pub fn xz_measure(data: &[u8], s: &XzSettings) -> Result<Measured> {
             .map_err(|e| anyhow!("xz decompression failed: {:?}", e.kind()))?;
         Ok(out)
     });
+    if d? != data {
+        bail!("xz round trip failed: the decompressed bytes differ from the input");
+    }
     Ok(Measured {
         compressed_bytes: c.len() as u64,
         compress_seconds,
         decompress_seconds,
-        round_trip_ok: d? == data,
     })
 }
 
@@ -186,9 +198,10 @@ pub fn zstd_version() -> String {
     zstd::zstd_safe::version_string().to_string()
 }
 
-/// Version of the linked xz: the `liblzma-sys` crate, which bundles a fixed xz release.
+/// Version of the linked xz as `liblzma <x.y.z> (bundled by liblzma-sys <crate version>)`; when
+/// the build could not read the release number it falls back to the crate version and says so.
 pub fn xz_version() -> String {
-    format!("liblzma-sys {}", env!("LPK_LIBLZMA_SYS_VERSION"))
+    env!("LPK_XZ_VERSION").to_string()
 }
 
 #[cfg(test)]
@@ -211,7 +224,7 @@ mod tests {
             },
         ] {
             let m = zstd_measure(&data, &s).expect("measure");
-            assert!(m.round_trip_ok && m.compressed_bytes > 0);
+            assert!(m.compressed_bytes > 0);
             assert!(m.compress_seconds >= 0.0 && m.decompress_seconds >= 0.0);
             assert_eq!(zstd_size(&data, &s).expect("size"), m.compressed_bytes);
         }
@@ -233,7 +246,7 @@ mod tests {
             },
         ] {
             let m = xz_measure(&data, &s).expect("measure");
-            assert!(m.round_trip_ok && m.compressed_bytes > 0);
+            assert!(m.compressed_bytes > 0);
             assert!(xz_size(&data, &s).expect("size") > 0);
         }
     }
@@ -241,6 +254,11 @@ mod tests {
     #[test]
     fn library_versions_are_reported() {
         assert!(zstd_version().starts_with("1."));
-        assert!(xz_version().starts_with("liblzma-sys 0."));
+        assert!(
+            xz_version().starts_with("liblzma 5.")
+                && xz_version().contains("(bundled by liblzma-sys 0.4."),
+            "{}",
+            xz_version()
+        );
     }
 }

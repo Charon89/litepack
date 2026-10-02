@@ -93,16 +93,46 @@ fn main() {
         let value = std::env::var(var).unwrap_or_else(|_| "unknown".to_string());
         println!("cargo:rustc-env={out}={value}");
     }
-    // The xz release linked in is fixed by the `liblzma-sys` crate version in Cargo.lock.
+    // The xz release linked in: the numbers in the version.h of the include directory that
+    // liblzma-sys exposes (`links = "lzma"`, bundled-source path); the crate version comes from
+    // Cargo.lock. Without the header the label says that only the crate version is known.
     let lock = std::fs::read_to_string("../../Cargo.lock").unwrap_or_default();
-    let lzma = lock
+    let crate_version = lock
         .split("[[package]]")
         .find(|p| p.contains("name = \"liblzma-sys\""))
         .and_then(|p| p.lines().find_map(|l| l.strip_prefix("version = \"")))
         .and_then(|v| v.strip_suffix('"'))
         .unwrap_or("unknown")
         .to_string();
-    println!("cargo:rustc-env=LPK_LIBLZMA_SYS_VERSION={lzma}");
+    println!("cargo:rerun-if-env-changed=DEP_LZMA_INCLUDE");
+    let header = std::env::var("DEP_LZMA_INCLUDE")
+        .ok()
+        .map(|d| Path::new(&d).join("lzma").join("version.h"));
+    let number = |text: &str, name: &str| -> Option<u32> {
+        text.lines().find_map(|l| {
+            let mut w = l.split_whitespace();
+            (w.next() == Some("#define") && w.next() == Some(name))
+                .then(|| w.next().and_then(|v| v.parse().ok()))
+                .flatten()
+        })
+    };
+    let release = header.as_ref().and_then(|h| {
+        watch(&h.to_string_lossy());
+        let text = std::fs::read_to_string(h).ok()?;
+        Some(format!(
+            "{}.{}.{}",
+            number(&text, "LZMA_VERSION_MAJOR")?,
+            number(&text, "LZMA_VERSION_MINOR")?,
+            number(&text, "LZMA_VERSION_PATCH")?
+        ))
+    });
+    let label = match release {
+        Some(r) => format!("liblzma {r} (bundled by liblzma-sys {crate_version})"),
+        None => format!(
+            "liblzma (release unknown: version.h not found; liblzma-sys crate {crate_version})"
+        ),
+    };
+    println!("cargo:rustc-env=LPK_XZ_VERSION={label}");
 
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     let version = output(&rustc, &["--version"]).unwrap_or_else(|| "unknown".to_string());

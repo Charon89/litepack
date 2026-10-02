@@ -87,6 +87,13 @@ are computed only when rendering the table, which is a pure function of the pars
 section runs alone, on data already in memory, and the JSON records how many threads the library
 used. Output is deterministic apart from timings, date and host.
 
+Private corpora: inside `data` the keys `path`, `name` and `folder` are forbidden when
+`corpus.private` is true, and the validator rejects them anywhere in `data`. A probe must therefore
+use exactly those names for anything that could carry a file or folder name, so the check can see
+it. Per-file records carry an index instead, and folder groups are labelled `group-<n>`, numbered
+in manifest order; these labels are not stable across scans of a changing folder tree. Reasons and
+other text in `data` are fixed categories and never quote file content.
+
 `run --validate` checks each probe file: typed parse with unknown fields rejected, the envelope
 rules, the consistency rules each probe declares (for example, counts add up), host, build and
 corpus against `host.json` and the directory's other files, and `probe-<name>.md` equal to the
