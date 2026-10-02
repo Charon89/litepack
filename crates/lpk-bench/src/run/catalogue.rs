@@ -172,18 +172,16 @@ impl Catalogue {
 
     /// Merge the local override file's entries over the catalogue. Unknown ids are errors (a typo
     /// must not silently drop a tool).
-    pub fn with_local(mut self, text: &str) -> Result<(Catalogue, Vec<LocalPath>)> {
+    pub fn with_local(mut self, text: &str) -> Result<(Catalogue, Local)> {
         let file: LocalFile = toml::from_str(text).context("parsing the local tool overrides")?;
-        let mut paths = Vec::new();
+        let mut local = Local::default();
         for ov in file.tools {
             let Some(tool) = self.tools.iter_mut().find(|t| t.id == ov.id) else {
                 bail!("local override for unknown tool `{}`", ov.id);
             };
+            local.overridden.insert(ov.id.clone());
             if let Some(p) = ov.path {
-                paths.push(LocalPath {
-                    tool: ov.id.clone(),
-                    path: p,
-                });
+                local.paths.insert(ov.id.clone(), p);
             }
             if let Some(v) = ov.exe {
                 tool.exe = v;
@@ -217,15 +215,17 @@ impl Catalogue {
             }
         }
         self.validate()?;
-        Ok((self, paths))
+        Ok((self, local))
     }
 }
 
-/// An explicit executable path from the local override file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalPath {
-    pub tool: String,
-    pub path: String,
+/// What the local override file said besides field replacements.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Local {
+    /// Ids that have an entry in the file.
+    pub overridden: BTreeSet<String>,
+    /// Explicit executable paths by tool id.
+    pub paths: BTreeMap<String, String>,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -271,7 +271,7 @@ impl Tool {
         for (os, hints) in &self.hints {
             for h in hints {
                 // Hints are written with environment variables, never literal locations.
-                if !h.starts_with('%') && !h.starts_with('$') {
+                if !h.starts_with('%') {
                     bail!("tool `{id}`: {os} hint `{h}` must start with an environment variable");
                 }
             }
@@ -413,13 +413,8 @@ compress = ["-ex"]
         assert_eq!(t.settings.len(), 1);
         assert_eq!(t.settings[0].compress, ["-ex"]);
         assert_eq!(t.create[0], "-a");
-        assert_eq!(
-            paths,
-            [LocalPath {
-                tool: "wzzip".into(),
-                path: "somewhere/wzzip".into()
-            }]
-        );
+        assert_eq!(paths.paths["wzzip"], "somewhere/wzzip");
+        assert!(paths.overridden.contains("wzzip"));
 
         let cat = Catalogue::parse(REAL).expect("catalogue");
         assert!(cat.with_local("[[tool]]\nid='nope'\n").is_err());

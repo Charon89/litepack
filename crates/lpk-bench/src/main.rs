@@ -34,7 +34,7 @@ enum Command {
     /// Build the public corpus or scan a private folder (PLAN P0-2)
     Corpus(corpus::CorpusArgs),
     /// Run baseline tools over the corpus with round-trip verification (PLAN P0-3)
-    Run(StubArgs),
+    Run(run::RunArgs),
     /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate (PLAN P0-4)
     Probe(StubArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
@@ -55,6 +55,9 @@ impl Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Run(args) = cli.command {
+        return run::run(args);
+    }
     if let Command::Corpus(args) = cli.command {
         return corpus::run(args);
     }

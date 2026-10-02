@@ -4,6 +4,63 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
 }
 
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+#[test]
+fn list_tools_prints_one_line_per_catalogue_tool() {
+    let out = bin()
+        .current_dir(repo_root())
+        .args(["run", "--list-tools"])
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let ids = [
+        "store",
+        "7z",
+        "rar",
+        "zstd",
+        "xz",
+        "zpaqfranz",
+        "tsaur",
+        "wzzip",
+        "pacl",
+    ];
+    assert_eq!(text.lines().count(), ids.len(), "{text}");
+    for (line, id) in text.lines().zip(ids) {
+        assert!(line.starts_with(id), "{line}");
+        assert!(
+            line.contains(" found ") || line.contains("skipped: "),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn list_tools_filters_and_rejects_unknown_ids() {
+    let out = bin()
+        .current_dir(repo_root())
+        .args(["run", "--list-tools", "--tools", "wzzip,pacl"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.lines().count(), 2, "{text}");
+    let bad = bin()
+        .current_dir(repo_root())
+        .args(["run", "--list-tools", "--tools", "nope"])
+        .output()
+        .expect("run");
+    assert_eq!(bad.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown tool `nope`"));
+}
+
 #[test]
 fn help_prints_subcommands() {
     let out = bin().arg("--help").output().expect("run");
