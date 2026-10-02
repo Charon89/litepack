@@ -85,6 +85,127 @@ pub enum SourceSpec {
     ArxivPapers(ArxivSpec),
     /// A pinned commit of a git repository, fetched with the `git` program.
     GitRepo(GitSpec),
+    /// Derived kinds (see [`crate::corpus::derive`]): no download, no lock entries.
+    EncryptedRandom(EncryptedRandomSpec),
+    SmallFiles(SmallFilesSpec),
+    FlacToWav(FlacToWavSpec),
+    PngToJpeg(PngToJpegSpec),
+    JpegCrop(JpegCropSpec),
+    PhotoConvert(PhotoConvertSpec),
+    BuiltZips(BuiltZipsSpec),
+    FfmpegEncode(FfmpegEncodeSpec),
+}
+
+/// Keys of `kind = "encrypted-random"` (no `inputs`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptedRandomSpec {
+    /// Size of each of the two files.
+    pub bytes: u64,
+}
+
+/// Keys of `kind = "small-files"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmallFilesSpec {
+    /// Number of files written.
+    pub count: usize,
+    /// Every file is at most this many bytes.
+    pub max_file_bytes: u64,
+    /// Percentage of files written as JSON lines made from CSV rows.
+    pub json_percent: u8,
+    /// Percentage of files that are raw CSV segments (the rest are log segments).
+    pub csv_percent: u8,
+    /// Restrict the input to these source ids (default: all non-derived sources of the inputs).
+    #[serde(default)]
+    pub from: Vec<String>,
+}
+
+/// Keys of `kind = "flac-to-wav"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlacToWavSpec {
+    #[serde(default)]
+    pub from: Vec<String>,
+}
+
+/// Keys of `kind = "png-to-jpeg"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PngToJpegSpec {
+    #[serde(default)]
+    pub from: Vec<String>,
+    /// Quality (1-100) of the baseline JPEG written for every PNG.
+    pub baseline_quality: u8,
+    /// Quality (1-100) of the progressive JPEG written for every PNG.
+    pub progressive_quality: u8,
+}
+
+/// Keys of `kind = "jpeg-crop"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JpegCropSpec {
+    #[serde(default)]
+    pub from: Vec<String>,
+    /// Take every N-th input JPEG in sorted order (the N-th, the 2N-th, ...).
+    pub every: usize,
+    /// Per mille of width and height cut from *each* edge (25 = 2.5%).
+    pub crop_permille: u32,
+    /// Quality (1-100) of the re-saved baseline JPEG.
+    pub quality: u8,
+}
+
+/// Keys of `kind = "photo-convert"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhotoConvertSpec {
+    #[serde(default)]
+    pub from: Vec<String>,
+    /// At most this many photos are converted.
+    pub max_files: usize,
+    /// Budget for the bytes written; a photo whose PNG and BMP do not fit is skipped.
+    pub max_bytes: u64,
+}
+
+/// One ZIP family of `kind = "built-zips"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZipBundle {
+    /// Name stem of the ZIPs (`<name>-<encoder>.zip`).
+    pub name: String,
+    /// Input class the entries come from (must be listed in `inputs`).
+    pub class: String,
+    /// Take every N-th file of the class in sorted order (default 1).
+    #[serde(default = "one")]
+    pub every: usize,
+    pub max_files: usize,
+    /// Cap on the summed uncompressed size of the entries.
+    pub max_bytes: u64,
+}
+
+fn one() -> usize {
+    1
+}
+
+/// Keys of `kind = "built-zips"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuiltZipsSpec {
+    pub bundles: Vec<ZipBundle>,
+    /// `zlib-<1..9>` (genuine zlib) or `miniz-<1..10>` (miniz_oxide).
+    pub encoders: Vec<String>,
+}
+
+/// Keys of `kind = "ffmpeg-encode"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FfmpegEncodeSpec {
+    #[serde(default)]
+    pub from: Vec<String>,
+    /// Length of the clip taken from the start of each input video.
+    pub clip_seconds: u32,
+    /// Subset of `hevc`, `av1`.
+    pub codecs: Vec<String>,
 }
 
 /// Keys of `kind = "commons-photos"`.
@@ -208,7 +329,36 @@ impl SourceSpec {
             SourceSpec::Files(f) => f.files.iter().map(|i| i.url.as_str()).collect(),
             SourceSpec::CommonsPhotos(_) | SourceSpec::ArxivPapers(_) => Vec::new(),
             SourceSpec::GitRepo(g) => vec![g.repo.as_str()],
+            _ => Vec::new(),
         }
+    }
+
+    /// The `from` source ids of a derived kind (empty: all non-derived sources of the inputs).
+    pub fn input_sources(&self) -> &[String] {
+        match self {
+            SourceSpec::SmallFiles(s) => &s.from,
+            SourceSpec::FlacToWav(s) => &s.from,
+            SourceSpec::PngToJpeg(s) => &s.from,
+            SourceSpec::JpegCrop(s) => &s.from,
+            SourceSpec::PhotoConvert(s) => &s.from,
+            SourceSpec::FfmpegEncode(s) => &s.from,
+            _ => &[],
+        }
+    }
+
+    /// True for derived kinds: they read other classes (or nothing) and pin nothing.
+    pub fn is_derived(&self) -> bool {
+        matches!(
+            self,
+            SourceSpec::EncryptedRandom(_)
+                | SourceSpec::SmallFiles(_)
+                | SourceSpec::FlacToWav(_)
+                | SourceSpec::PngToJpeg(_)
+                | SourceSpec::JpegCrop(_)
+                | SourceSpec::PhotoConvert(_)
+                | SourceSpec::BuiltZips(_)
+                | SourceSpec::FfmpegEncode(_)
+        )
     }
 
     /// True for kinds whose file list lives in the lock (pins carry the paths).
@@ -370,6 +520,7 @@ impl Registry {
         }
         let mut ids = BTreeSet::new();
         let mut classes_before: BTreeSet<&str> = BTreeSet::new();
+        let mut earlier: Vec<&Source> = Vec::new();
         for s in &self.sources {
             if !valid_ident(&s.id) {
                 bail!(
@@ -394,14 +545,55 @@ impl Registry {
                 bail!("source `{}` needs a non-empty licence and origin", s.id);
             }
             for input in &s.inputs {
-                if input == &s.class || !classes_before.contains(input.as_str()) {
+                if !classes_before.contains(input.as_str()) {
                     bail!(
                         "source `{}`: input class `{input}` must have a source earlier in the \
-                         registry and differ from the source's own class",
+                         registry (the source's own class is allowed if an earlier source has it)",
                         s.id
                     );
                 }
             }
+            if s.spec.is_derived() {
+                let wants_none = matches!(s.spec, SourceSpec::EncryptedRandom(_));
+                if wants_none != s.inputs.is_empty() {
+                    bail!(
+                        "source `{}`: kind `{}` {}",
+                        s.id,
+                        kind_name(&s.spec),
+                        if wants_none {
+                            "takes no `inputs`"
+                        } else {
+                            "needs `inputs` (the classes it is derived from)"
+                        }
+                    );
+                }
+                validate_derived(&s.spec, &s.inputs)
+                    .with_context(|| format!("source `{}`", s.id))?;
+                for id in s.spec.input_sources() {
+                    let Some(src) = earlier.iter().find(|e| &e.id == id) else {
+                        bail!(
+                            "source `{}`: `from` names `{id}`, which is not a source earlier in \
+                             the registry",
+                            s.id
+                        );
+                    };
+                    if !s.inputs.contains(&src.class) {
+                        bail!(
+                            "source `{}`: `from` source `{id}` has class `{}`, which is not in \
+                             `inputs`",
+                            s.id,
+                            src.class
+                        );
+                    }
+                    if !src.profiles.iter().any(|p| s.profiles.contains(p)) {
+                        bail!(
+                            "source `{}`: `from` source `{id}` shares no profile with it",
+                            s.id
+                        );
+                    }
+                }
+            }
+            earlier.push(s);
             classes_before.insert(s.class.as_str());
             for url in s.spec.static_urls() {
                 if !url.starts_with("https://") {
@@ -432,6 +624,18 @@ impl Registry {
                         );
                     }
                     let format = a.format.or_else(|| ArchiveFormat::guess(&a.url));
+                    if let Some(t) = a.truncate_files {
+                        let ceiling = a
+                            .max_extracted_bytes
+                            .unwrap_or(super::extract::DEFAULT_CEILING);
+                        if t > ceiling {
+                            bail!(
+                                "source `{}`: truncate_files ({t}) exceeds max_extracted_bytes \
+                                 ({ceiling}); a file could be written up to that size",
+                                s.id
+                            );
+                        }
+                    }
                     if a.skip_links && format != Some(ArchiveFormat::TarGz) {
                         bail!("source `{}`: skip_links only applies to tar.gz", s.id);
                     }
@@ -516,6 +720,7 @@ impl Registry {
                         bail!("source `{}`: `depth` applies to mode `clone` only", s.id);
                     }
                 }
+                _ => {} // derived kinds: validated above
             }
         }
         Ok(())
@@ -548,6 +753,108 @@ impl Registry {
         }
         Ok(picked)
     }
+}
+
+/// The `kind` string of a spec (for messages).
+fn kind_name(spec: &SourceSpec) -> &'static str {
+    match spec {
+        SourceSpec::File(_) => "file",
+        SourceSpec::Archive(_) => "archive",
+        SourceSpec::Files(_) => "files",
+        SourceSpec::CommonsPhotos(_) => "commons-photos",
+        SourceSpec::ArxivPapers(_) => "arxiv-papers",
+        SourceSpec::GitRepo(_) => "git-repo",
+        SourceSpec::EncryptedRandom(_) => "encrypted-random",
+        SourceSpec::SmallFiles(_) => "small-files",
+        SourceSpec::FlacToWav(_) => "flac-to-wav",
+        SourceSpec::PngToJpeg(_) => "png-to-jpeg",
+        SourceSpec::JpegCrop(_) => "jpeg-crop",
+        SourceSpec::PhotoConvert(_) => "photo-convert",
+        SourceSpec::BuiltZips(_) => "built-zips",
+        SourceSpec::FfmpegEncode(_) => "ffmpeg-encode",
+    }
+}
+
+/// Parameter checks of the derived kinds.
+fn validate_derived(spec: &SourceSpec, inputs: &[String]) -> Result<()> {
+    let quality = |name: &str, q: u8| -> Result<()> {
+        if !(1..=100).contains(&q) {
+            bail!("{name} must be 1..=100");
+        }
+        Ok(())
+    };
+    match spec {
+        SourceSpec::EncryptedRandom(e) => {
+            if e.bytes == 0 {
+                bail!("bytes must be positive");
+            }
+        }
+        SourceSpec::SmallFiles(f) => {
+            if f.count == 0 || f.max_file_bytes < 64 {
+                bail!("need count > 0 and max_file_bytes >= 64");
+            }
+            if u16::from(f.json_percent) + u16::from(f.csv_percent) > 100 {
+                bail!("json_percent + csv_percent must not exceed 100");
+            }
+        }
+        SourceSpec::PngToJpeg(p) => {
+            quality("baseline_quality", p.baseline_quality)?;
+            quality("progressive_quality", p.progressive_quality)?;
+        }
+        SourceSpec::JpegCrop(j) => {
+            quality("quality", j.quality)?;
+            if j.every == 0 || j.crop_permille >= 500 {
+                bail!("need every > 0 and crop_permille < 500");
+            }
+        }
+        SourceSpec::PhotoConvert(p) => {
+            if p.max_files == 0 || p.max_bytes == 0 {
+                bail!("max_files and max_bytes must be positive");
+            }
+        }
+        SourceSpec::BuiltZips(z) => {
+            if z.bundles.is_empty() || z.encoders.is_empty() {
+                bail!("bundles and encoders must not be empty");
+            }
+            for e in &z.encoders {
+                super::derive::zips::Encoder::parse(e)?;
+            }
+            let mut names = BTreeSet::new();
+            for b in &z.bundles {
+                if !valid_ident(&b.name) || !names.insert(b.name.as_str()) {
+                    bail!(
+                        "bundle name `{}` must be unique and match [a-z0-9._-]+",
+                        b.name
+                    );
+                }
+                if !inputs.contains(&b.class) {
+                    bail!(
+                        "bundle `{}`: class `{}` is not in `inputs`",
+                        b.name,
+                        b.class
+                    );
+                }
+                if b.every == 0 || b.max_files == 0 || b.max_bytes == 0 {
+                    bail!(
+                        "bundle `{}`: every, max_files and max_bytes must be positive",
+                        b.name
+                    );
+                }
+            }
+        }
+        SourceSpec::FfmpegEncode(v) => {
+            if v.clip_seconds == 0 || v.codecs.is_empty() {
+                bail!("need clip_seconds > 0 and at least one codec");
+            }
+            for c in &v.codecs {
+                if !matches!(c.as_str(), "hevc" | "av1") {
+                    bail!("unknown codec `{c}` (hevc, av1)");
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Output file name for a `file` source.

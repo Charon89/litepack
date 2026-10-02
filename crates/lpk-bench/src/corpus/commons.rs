@@ -747,6 +747,7 @@ max_bytes = 100
             retry: fast_retry(),
             git_program: None,
             allow_unavailable: false,
+            ffmpeg_program: None,
         };
         build(&opts("o1", true), &fetcher).expect("pin");
         let api = |f: &FakeFetcher| {
@@ -803,6 +804,7 @@ max_bytes = 100
             retry: fast_retry(),
             git_program: None,
             allow_unavailable: false,
+            ffmpeg_program: None,
         }
     }
 

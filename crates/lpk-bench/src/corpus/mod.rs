@@ -64,6 +64,16 @@
 //!   The lock pins the commit. The git version goes to `tools` in `build-info.json`.
 //!   Details and the determinism rules in [`gitsrc`].
 //!
+//! * Derived kinds (no download, nothing pinned in the lock; they need `inputs`, except
+//!   `encrypted-random`, and take an optional `from = [source ids]`): `encrypted-random`
+//!   (`bytes`), `small-files` (`count`, `max_file_bytes`, `json_percent`, `csv_percent`),
+//!   `flac-to-wav`, `png-to-jpeg` (`baseline_quality`, `progressive_quality`), `jpeg-crop`
+//!   (`every`, `crop_permille`, `quality`), `photo-convert` (`max_files`, `max_bytes`),
+//!   `built-zips` (`encoders`, `bundles`) and `ffmpeg-encode` (`clip_seconds`, `codecs`; runs the
+//!   external `ffmpeg`, name injectable through `BuildOptions::ffmpeg_program`, version in
+//!   `tools`). An input class may be the source's own class when an earlier source has it.
+//!   Details, determinism rules and the skip behaviour in [`derive`].
+//!
 //! Top-level `[[host]]` tables set politeness per host (`name`, `min_interval_ms`,
 //! `max_mbit_per_s`); see "Downloader".
 //!
@@ -188,6 +198,7 @@ pub mod arxiv;
 pub mod build;
 pub mod classify;
 pub mod commons;
+pub mod derive;
 pub mod extract;
 pub mod fetch;
 pub mod gitsrc;
@@ -195,6 +206,9 @@ pub mod lock;
 pub mod manifest;
 pub mod registry;
 pub mod scan;
+
+#[cfg(test)]
+mod leftover_tests;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -280,6 +294,7 @@ impl BuildArgs {
             retry: RetryPolicy::default(),
             git_program: None,
             allow_unavailable: self.allow_unavailable,
+            ffmpeg_program: None,
         }
     }
 }

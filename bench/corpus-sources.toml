@@ -624,7 +624,7 @@ format = "zip"
 [[source]]
 id = "alpine-virt"
 class = "vm-image"
-licence = "Alpine Linux ISO: mostly GPL-2.0-only and MIT components; bundled components under their own licences (test data only)"
+licence = "Alpine Linux image: various free-software licences per package (test data only)"
 origin = "Alpine Linux 3.24.2 virt x86_64 ISO"
 profiles = ["small", "full"]
 kind = "file"
@@ -643,7 +643,7 @@ format = "gz"
 [[source]]
 id = "ubuntu-cloudimg"
 class = "vm-image"
-licence = "Ubuntu cloud image: mostly GPL-2.0-only components; bundled components under their own licences (test data only)"
+licence = "Ubuntu cloud image: various free-software licences per package (test data only)"
 origin = "Ubuntu 24.04 server cloud image tarball release-20260926 (holds one raw ext4 filesystem image)"
 profiles = ["full"]
 kind = "archive"
@@ -686,3 +686,160 @@ origin = "Project Gutenberg EPUB of Frankenstein (id 84) from the mirror"
 profiles = ["small", "full"]
 kind = "file"
 url = "https://gutenberg.pglaf.org/cache/epub/84/pg84-images.epub"
+
+# ---- Derived classes (no download, no lock entries; see corpus/derive) ----
+
+# One file from a fixed-seed ChaCha20 keystream and the same bytes under AES-256-CTR.
+[[source]]
+id = "random-small"
+class = "encrypted-random"
+licence = "CC0-1.0"
+origin = "Generated locally: ChaCha20 keystream with a fixed key, and the same bytes AES-256-CTR encrypted under a fixed key"
+profiles = ["small"]
+kind = "encrypted-random"
+bytes = 33554432
+
+[[source]]
+id = "random-full"
+class = "encrypted-random"
+licence = "CC0-1.0"
+origin = "Generated locally: ChaCha20 keystream with a fixed key, and the same bytes AES-256-CTR encrypted under a fixed key"
+profiles = ["full"]
+kind = "encrypted-random"
+bytes = 209715200
+
+# 20,000 files under 8 KB cut at line boundaries from the logs and the CSV; a share written as
+# JSON lines made from CSV rows.
+[[source]]
+id = "small-files"
+class = "small-files"
+licence = "Derived from the logs-text class (licences as listed for its sources)"
+origin = "Cut locally from logs-text at line boundaries, fixed seed"
+profiles = ["small", "full"]
+inputs = ["logs-text"]
+kind = "small-files"
+count = 20000
+max_file_bytes = 8000
+json_percent = 30
+csv_percent = 20
+
+# One WAV per FLAC file in the audio class, decoded locally.
+[[source]]
+id = "flac-wav"
+class = "audio"
+licence = "Derived from the Commons FLAC files (CC0 / public domain)"
+origin = "Decoded locally from the FLAC files of the audio class"
+profiles = ["small", "full"]
+inputs = ["audio"]
+kind = "flac-to-wav"
+from = ["commons-flac"]
+
+# Kodak PNGs -> one baseline and one progressive JPEG each (D-15 item 1), in-tree encoder.
+[[source]]
+id = "kodak-jpeg"
+class = "photo-jpeg"
+licence = "Derived from the Kodak Lossless True Color Image Suite (see source kodak)"
+origin = "Encoded locally from the Kodak PNGs: baseline quality 90 and progressive quality 85, 4:2:0"
+profiles = ["small", "full"]
+inputs = ["photo-raw-png"]
+kind = "png-to-jpeg"
+from = ["kodak"]
+baseline_quality = 90
+progressive_quality = 85
+
+# Every fifth Commons photo: decoded, 2.5% cropped off each edge, re-saved at quality 85.
+[[source]]
+id = "edited-small"
+class = "photo-jpeg-edited"
+licence = "Derived from Commons photos (CC0 / CC BY / CC BY-SA; per-file licences in bench/corpus.lock)"
+origin = "Every fifth photo of commons-featured-small, cropped and re-saved locally"
+profiles = ["small"]
+inputs = ["photo-jpeg"]
+kind = "jpeg-crop"
+from = ["commons-featured-small"]
+every = 5
+crop_permille = 25
+quality = 85
+
+[[source]]
+id = "edited-full"
+class = "photo-jpeg-edited"
+licence = "Derived from Commons photos (CC0 / CC BY / CC BY-SA; per-file licences in bench/corpus.lock)"
+origin = "Every fifth photo of commons-featured-full, cropped and re-saved locally"
+profiles = ["full"]
+inputs = ["photo-jpeg"]
+kind = "jpeg-crop"
+from = ["commons-featured-full"]
+every = 5
+crop_permille = 25
+quality = 85
+
+# ZIPs written in-process (D-15 item 6) from fixed subsets of three classes, each subset once per
+# Deflate encoder: genuine zlib at levels 1, 6 and 9, and miniz_oxide at level 6.
+[[source]]
+id = "built-zips"
+class = "archives-nested"
+licence = "Derived from the office-pdf, backup-versions and logs-text classes (licences as listed for their sources)"
+origin = "ZIPs written locally with zlib (levels 1, 6, 9) and miniz_oxide (level 6), fixed timestamps"
+profiles = ["small", "full"]
+inputs = ["office-pdf", "backup-versions", "logs-text"]
+kind = "built-zips"
+encoders = ["zlib-1", "zlib-6", "zlib-9", "miniz-6"]
+bundles = [
+  { name = "office", class = "office-pdf", every = 7, max_files = 400, max_bytes = 8388608 },
+  { name = "backup", class = "backup-versions", every = 9, max_files = 2000, max_bytes = 8388608 },
+  { name = "logs", class = "logs-text", every = 1, max_files = 100, max_bytes = 8388608 },
+]
+
+# HEVC and AV1 encodes of the Big Buck Bunny file through ffmpeg (D-15 item 8); skipped, with a
+# reason, when ffmpeg is not installed.
+[[source]]
+id = "bbb-encodes-small"
+class = "video"
+licence = "CC-BY-3.0 (Blender Foundation, derived)"
+origin = "First 60 s of bbb-320x180 encoded locally with ffmpeg (libx265, libaom-av1), single-threaded, bit-exact flags"
+profiles = ["small"]
+optional = true
+inputs = ["video"]
+kind = "ffmpeg-encode"
+from = ["bbb-320x180"]
+clip_seconds = 60
+codecs = ["hevc", "av1"]
+
+[[source]]
+id = "bbb-encodes-full"
+class = "video"
+licence = "CC-BY-3.0 (Blender Foundation, derived)"
+origin = "First 10 s of bbb-1080p encoded locally with ffmpeg (libx265, libaom-av1), single-threaded, bit-exact flags"
+profiles = ["full"]
+optional = true
+inputs = ["video"]
+kind = "ffmpeg-encode"
+from = ["bbb-1080p"]
+clip_seconds = 10
+codecs = ["hevc", "av1"]
+
+# PNG and BMP versions of Commons photos smallest file first, within a byte budget.
+[[source]]
+id = "convert-small"
+class = "photo-raw-png"
+licence = "Derived from Commons photos (CC0 / CC BY / CC BY-SA; per-file licences in bench/corpus.lock)"
+origin = "Lossless PNG and BMP conversions of photos of commons-featured-small"
+profiles = ["small"]
+inputs = ["photo-jpeg"]
+kind = "photo-convert"
+from = ["commons-featured-small"]
+max_files = 50
+max_bytes = 104857600
+
+[[source]]
+id = "convert-full"
+class = "photo-raw-png"
+licence = "Derived from Commons photos (CC0 / CC BY / CC BY-SA; per-file licences in bench/corpus.lock)"
+origin = "Lossless PNG and BMP conversions of photos of commons-featured-full"
+profiles = ["full"]
+inputs = ["photo-jpeg"]
+kind = "photo-convert"
+from = ["commons-featured-full"]
+max_files = 50
+max_bytes = 524288000

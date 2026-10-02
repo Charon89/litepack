@@ -57,6 +57,8 @@ pub struct BuildOptions {
     /// Continue when listed files of a list source are gone (404/410) or no longer match their
     /// pin, leaving them out and recording them as unavailable. Default: fail.
     pub allow_unavailable: bool,
+    /// The `ffmpeg` program for video encodes (`None`: `ffmpeg` from `PATH`). Injectable for tests.
+    pub ffmpeg_program: Option<String>,
 }
 
 /// Result of a successful build.
@@ -116,6 +118,8 @@ pub struct Ctx<'a> {
     pub produced: Vec<(String, ManifestFile)>,
     /// Name or path of the `git` program.
     git_program: String,
+    /// State of the derived kinds (see [`super::derive`]).
+    pub(super) derive: super::derive::State,
     /// External tool versions seen by this run (`build-info.json`, key `tools`).
     tools: BTreeMap<String, String>,
     /// Listed files that were gone or no longer matched their pin (normal builds).
@@ -126,6 +130,11 @@ pub struct Ctx<'a> {
 
 #[cfg(test)]
 impl<'a> Ctx<'a> {
+    /// The version recorded for external tool `name` by this context, if any.
+    pub fn take_tool(&self, name: &str) -> Option<String> {
+        self.tools.get(name).cloned()
+    }
+
     /// A context over `fetcher` with an empty lock (leaked: tests only), for resolver tests.
     pub fn for_tests(fetcher: &'a dyn Fetcher, root: &Path, update_lock: bool) -> Ctx<'a> {
         let lock: &'static Lock = Box::leak(Box::default());
@@ -144,6 +153,7 @@ impl<'a> Ctx<'a> {
             used: BTreeSet::new(),
             produced: Vec::new(),
             git_program: "git".into(),
+            derive: Default::default(),
             tools: BTreeMap::new(),
             unavailable: Vec::new(),
             allow_unavailable: false,
@@ -221,9 +231,24 @@ impl Ctx<'_> {
     }
 
     /// The output root (`<out>`), e.g. for derivation steps reading other classes' files.
-    #[allow(dead_code)] // for derived kinds (later sub-task)
     pub fn out(&self) -> &Path {
         &self.out
+    }
+
+    /// What the derived kinds need to know about this run.
+    pub fn derive_state(&self) -> &super::derive::State {
+        &self.derive
+    }
+
+    /// Record that part of a derived source's output was left out (`skipped` in
+    /// `build-info.json`).
+    pub fn note_skip(&mut self, source: &str, reason: String) {
+        self.derive.skipped.push((source.to_string(), reason));
+    }
+
+    /// Name or path of the `ffmpeg` program.
+    pub fn ffmpeg_program(&self) -> &str {
+        self.derive.ffmpeg.as_deref().unwrap_or("ffmpeg")
     }
 
     /// True under `--update-lock`: the only mode in which a resolver may call an API.
@@ -483,26 +508,73 @@ fn spec_listing(spec: &FilesSpec) -> Result<Vec<ListedFile>> {
     Ok(v)
 }
 
-/// Refuse to build derived sources whose input classes are neither part of this run nor already
-/// in `<out>`. Only relevant with `--only` (a full run builds everything in registry order).
-fn check_derived_inputs(sources: &[&Source], out: &Path) -> Result<()> {
+/// Refuse to build derived sources whose input classes have no selected source earlier in this
+/// run. With `--only` an input class that is not selected at all may instead already be in
+/// `<out>`. A derived source that is itself `optional` passes: it is skipped, with a reason, when
+/// its turn comes (see [`check_inputs_built`]).
+fn check_derived_inputs(
+    sources: &[&Source],
+    out: &Path,
+    partial: bool,
+    profile: Profile,
+) -> Result<()> {
     for (i, s) in sources.iter().enumerate() {
+        if s.optional {
+            continue;
+        }
         let missing: Vec<&str> = s
             .inputs
             .iter()
             .map(String::as_str)
             .filter(|class| !sources[..i].iter().any(|b| b.class == *class))
-            .filter(|class| !dir_has_files(&out.join(class)))
+            .filter(|class| {
+                !(partial
+                    && !sources.iter().any(|b| b.class == *class)
+                    && dir_has_files(&out.join(class)))
+            })
             .collect();
         if !missing.is_empty() {
+            if partial {
+                bail!(
+                    "source `{}` (class `{}`) is derived from class(es) {} which are neither \
+                     built earlier in this run nor present in {}; add them to --only or build \
+                     them first",
+                    s.id,
+                    s.class,
+                    missing.join(", "),
+                    out.display()
+                );
+            }
             bail!(
-                "source `{}` (class `{}`) is derived from class(es) {} which are neither built \
-                 earlier in this run nor present in {}; add them to --only or build them first",
+                "source `{}` (class `{}`) is derived from class(es) {} which have no source \
+                 before it in profile `{}`",
                 s.id,
                 s.class,
                 missing.join(", "),
-                out.display()
+                profile.name()
             );
+        }
+    }
+    Ok(())
+}
+
+/// Before a derived source runs: each input class must have produced something (a source of the
+/// class built in this run, or, for a class this run does not select, files already in `<out>`).
+/// Fails with a [`Skip`](super::derive::Skip) error, which an `optional` source tolerates.
+fn check_inputs_built(ctx: &Ctx<'_>, source: &Source) -> Result<()> {
+    let st = ctx.derive_state();
+    for class in &source.inputs {
+        let ok = if st.run_classes.contains(class) {
+            st.built.iter().any(|(c, _)| c == class)
+        } else {
+            dir_has_files(&ctx.out().join(class))
+        };
+        if !ok {
+            return Err(super::derive::Skip(format!(
+                "input class `{class}` has no files: every source of it was skipped or none \
+                 applies to this build"
+            ))
+            .into());
         }
     }
     Ok(())
@@ -614,9 +686,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
     let mut lock = Lock::load(&opts.lock_path)?;
 
     // Fail before touching anything if the request cannot be satisfied.
-    if partial {
-        check_derived_inputs(&sources, &opts.out)?;
-    }
+    check_derived_inputs(&sources, &opts.out, partial, opts.profile)?;
     if !opts.update_lock {
         preflight_pins(&sources, &lock, opts.profile)?;
     }
@@ -638,8 +708,32 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
             .git_program
             .clone()
             .unwrap_or_else(|| "git".to_string()),
+        derive: Default::default(),
         tools: BTreeMap::new(),
         unavailable: Vec::new(),
+    };
+    ctx.derive = super::derive::State {
+        built: Vec::new(),
+        run_classes: sources.iter().map(|s| s.class.clone()).collect(),
+        derived_ids: registry
+            .sources
+            .iter()
+            .filter(|s| !s.inputs.is_empty())
+            .map(|s| s.id.clone())
+            .collect(),
+        ffmpeg: opts.ffmpeg_program.clone(),
+        skipped: Vec::new(),
+        class_sources: registry
+            .sources
+            .iter()
+            .filter(|s| s.profiles.contains(&opts.profile))
+            .fold(
+                BTreeMap::new(),
+                |mut m: BTreeMap<String, BTreeSet<String>>, s| {
+                    m.entry(s.class.clone()).or_default().insert(s.id.clone());
+                    m
+                },
+            ),
     };
 
     let mut skipped = Vec::new();
@@ -654,9 +748,14 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         }
         std::fs::create_dir_all(&dir)?;
         ctx.recorded.clear();
-        match build_source(&mut ctx, source, &dir) {
+        let built =
+            check_inputs_built(&ctx, source).and_then(|()| build_source(&mut ctx, source, &dir));
+        match built {
             Ok(files) => {
                 eprintln!("  {} files", files.len());
+                ctx.derive
+                    .built
+                    .push((source.class.clone(), source.id.clone()));
                 expected.push((source.id.clone(), source.class.clone(), files.len() as u64));
                 ctx.produced
                     .extend(files.into_iter().map(|f| (source.class.clone(), f)));
@@ -666,10 +765,10 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&dir);
                 let tolerated = source.optional
-                    && matches!(
+                    && (matches!(
                         e.downcast_ref::<DownloadError>(),
                         Some(DownloadError::Fetch(_) | DownloadError::Gone(_))
-                    );
+                    ) || e.downcast_ref::<super::derive::Skip>().is_some());
                 if !tolerated {
                     return Err(e.context(format!("building source `{}`", source.id)));
                 }
@@ -682,6 +781,11 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         }
     }
 
+    skipped.extend(
+        std::mem::take(&mut ctx.derive.skipped)
+            .into_iter()
+            .map(|(source, reason)| Skipped { reason, source }),
+    );
     let mut unused_pins = Vec::new();
     if opts.update_lock {
         for (id, entries) in pins {
@@ -886,6 +990,7 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
             build_listed(ctx, source, dir, |c| super::arxiv::resolve(c, source, spec))
         }
         SourceSpec::GitRepo(spec) => super::gitsrc::build(ctx, source, spec, dir),
+        _ => super::derive::build(ctx, source, dir),
     }
 }
 
@@ -1006,6 +1111,7 @@ url = "{OPT_URL}"
                 retry: fast_retry(),
                 git_program: None,
                 allow_unavailable: false,
+                ffmpeg_program: None,
             }
         }
 
@@ -1373,6 +1479,7 @@ url = "{OPT_URL}"
             used: BTreeSet::new(),
             produced: Vec::new(),
             git_program: "git".into(),
+            derive: Default::default(),
             tools: BTreeMap::new(),
             unavailable: Vec::new(),
             allow_unavailable: false,
@@ -1471,6 +1578,7 @@ url = "{OPT_URL}"
             used: BTreeSet::new(),
             produced: Vec::new(),
             git_program: "git".into(),
+            derive: Default::default(),
             tools: BTreeMap::new(),
             unavailable: Vec::new(),
             allow_unavailable: false,

@@ -223,6 +223,16 @@ fn check_out(root: &Path, out: &Path) -> Result<PathBuf> {
     Ok(out_resolved)
 }
 
+/// A resolved path for printing: the Windows verbatim prefix (`\\?\`) that canonicalisation adds
+/// is dropped (`\\?\UNC\` paths are kept as they are). Other platforms never match.
+pub(super) fn display_path(p: &Path) -> PathBuf {
+    let text = p.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => p.to_path_buf(),
+    }
+}
+
 /// Scan `root` and write the manifest and build info into `out`.
 pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
     let meta = fs::metadata(root).with_context(|| {
@@ -289,7 +299,7 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
     }
     fs::write(out_dir.join("manifest.json"), &manifest_text)
         .with_context(|| format!("writing manifest.json in {}", out.display()))?;
-    let manifest_path = out.join("manifest.json");
+    let manifest_path = display_path(&out_dir.join("manifest.json"));
     let info_path = out_dir.join("build-info.json");
     fs::write(&info_path, info_text).with_context(|| format!("writing {}", info_path.display()))?;
 
