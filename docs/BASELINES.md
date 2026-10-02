@@ -71,7 +71,18 @@ create = ["pack", "{archive}", "{input}", "--no-lepton", "{settings}", "{threads
 ```
 
 Templates may use `{archive}`, `{input}`, `{outdir}`, `{settings}` and `{threads}` (see the header
-of `bench/tools.toml`). Result files record these templates with the placeholders unexpanded.
+of `bench/tools.toml`). The runner executes every directory-mode tool with its working directory
+set to the parent of the class directory and passes `{input}`, `{archive}` and `{outdir}` as
+relative paths, so no archive contains an absolute path. Result files record the exact argument
+list as executed (thread argument filled in, paths shown relative) plus the setting id. All
+settings run at the machine's thread count, as a user would run them; each result records
+whether the thread count changes the archive size for that tool (`ratio_depends_on_threads`).
+
+WinRAR's settings keep its default non-solid mode (`m3`, `best`, `best-rr3`) and add `best-solid`
+(`-s`) as its strongest sensible configuration; `best-rr3` differs from `best` only by the
+recovery record. The `store` tool uses the Windows System32 bsdtar (its hint is tried before
+PATH) because GNU tar, as shipped with Git for Windows, reads `D:` in an archive path as a remote
+host; the recorded version names the flavour.
 
 ## Manual tools: WinZip and PowerArchiver
 

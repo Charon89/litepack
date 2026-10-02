@@ -7,7 +7,8 @@ Committed JSON measurements land here (see docs/PLAN.md P0-3). Never edit by han
 ```text
 bench/results/
   schema.json                         JSON Schema for every file below
-  <YYYY-MM-DD>-<host>/                one directory per run on one machine
+  <YYYY-MM-DD>-<host>[-<n>]/          one directory per run on one machine (n >= 2: further runs
+                                      on the same UTC day); one corpus profile and manifest hash
     host.json                         machine, OS, CPU, RAM, lpk-bench version, git commit, rustc
     tools.json                        every catalogue tool: found or skipped, reason, version used
     <tool>-<setting>-<class>.json     one file per tool x setting x corpus class

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "lpk-bench result files",
-  "description": "A results directory bench/results/<date>-<host>/ holds host.json, tools.json and one result file per tool x setting x class named <tool>-<setting>-<class>.json. Beyond this schema, lpk-bench run --validate rejects any string that contains an absolute path, and checks file names against their contents. Kept in step with crates/lpk-bench/src/run/result.rs by a unit test.",
+  "description": "A results directory bench/results/<date>-<host>[-<n>]/ holds host.json, tools.json and one result file per tool x setting x class named <tool>-<setting>-<class>.json (plus probe-<name>.json files, accepted by name). Beyond this schema, lpk-bench run --validate rejects any string that contains an absolute path, recomputes the medians, and checks file names, directory name, host, tool versions, and one profile and manifest hash per directory against the contents. Kept in step with crates/lpk-bench/src/run/result.rs by a unit test; every property carries a description with its unit.",
   "$defs": {
     "id": {
       "type": "string",
@@ -32,83 +32,131 @@
         "pattern": "^(/|\\\\|[A-Za-z]:[\\\\/])"
       }
     },
+    "step_times": {
+      "type": "object",
+      "description": "Time of one step of a tar-stream pipeline.",
+      "additionalProperties": false,
+      "required": ["wall_seconds", "user_cpu_seconds", "kernel_cpu_seconds"],
+      "properties": {
+        "wall_seconds": { "$ref": "#/$defs/seconds", "description": "Elapsed (wall clock) time of the step, in seconds." },
+        "user_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "User-mode CPU time of the step's processes, in seconds." },
+        "kernel_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "Kernel-mode CPU time of the step's processes, in seconds." }
+      }
+    },
     "measure": {
       "type": "object",
+      "description": "One measured run (compress or extract). For tar-stream tools the three times are the tar step plus the compressor step, and the two steps are also recorded separately.",
       "additionalProperties": false,
       "required": ["wall_seconds", "user_cpu_seconds", "kernel_cpu_seconds", "peak_memory_bytes"],
       "properties": {
-        "wall_seconds": { "$ref": "#/$defs/seconds" },
-        "user_cpu_seconds": { "$ref": "#/$defs/seconds" },
-        "kernel_cpu_seconds": { "$ref": "#/$defs/seconds" },
-        "peak_memory_bytes": { "$ref": "#/$defs/count" }
+        "wall_seconds": { "$ref": "#/$defs/seconds", "description": "Elapsed (wall clock) time, in seconds." },
+        "user_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "User-mode CPU time, in seconds." },
+        "kernel_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "Kernel-mode CPU time, in seconds." },
+        "peak_memory_bytes": { "$ref": "#/$defs/count", "description": "Peak resident memory in bytes, as named by measurement.peak_memory_kind (the larger of the two steps for tar-stream tools)." },
+        "peak_job_memory_bytes": { "$ref": "#/$defs/count", "description": "Windows only: peak committed memory of all processes in the job object, in bytes." },
+        "peak_process_commit_bytes": { "$ref": "#/$defs/count", "description": "Windows only: peak committed memory of the largest single process in the job object, in bytes." },
+        "tar_step": { "$ref": "#/$defs/step_times", "description": "Tar-stream tools only: the tar step of this run." },
+        "tool_step": { "$ref": "#/$defs/step_times", "description": "Tar-stream tools only: the compressor or decompressor step of this run." }
       }
     },
     "sample": {
       "type": "object",
+      "description": "One repeat, or the medians over all repeats.",
       "additionalProperties": false,
       "required": ["compress", "extract", "archive_bytes"],
       "properties": {
-        "compress": { "$ref": "#/$defs/measure" },
-        "extract": { "$ref": "#/$defs/measure" },
-        "archive_bytes": { "$ref": "#/$defs/count" }
+        "compress": { "$ref": "#/$defs/measure", "description": "The compress run." },
+        "extract": { "$ref": "#/$defs/measure", "description": "The extract run." },
+        "archive_bytes": { "$ref": "#/$defs/count", "description": "Size of the archive in bytes." }
       }
     },
     "verification": {
       "type": "object",
+      "description": "Round-trip check of the extracted files against the manifest.",
       "additionalProperties": false,
       "required": ["verified", "files_checked", "files_ok"],
       "properties": {
-        "verified": { "type": "boolean" },
-        "files_checked": { "$ref": "#/$defs/count" },
-        "files_ok": { "$ref": "#/$defs/count" }
+        "verified": { "type": "boolean", "description": "True when every file of the class was extracted and its BLAKE3 hash matched (files_ok = files_checked = corpus.class_files)." },
+        "files_checked": { "$ref": "#/$defs/count", "description": "Number of files compared, a count." },
+        "files_ok": { "$ref": "#/$defs/count", "description": "Number of files whose hash matched, a count." }
       }
     },
     "tool_ref": {
       "type": "object",
+      "description": "The tool as it ran.",
       "additionalProperties": false,
-      "required": ["id"],
+      "required": ["id", "mode", "ratio_depends_on_threads"],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "version": { "$ref": "#/$defs/text" }
+        "id": { "$ref": "#/$defs/id", "description": "Catalogue id of the tool." },
+        "version": { "$ref": "#/$defs/text", "description": "Version string read from the tool; absent when it was not found." },
+        "mode": { "enum": ["directory", "tar-stream"], "description": "directory: the tool archives the directory itself; tar-stream: tar makes the stream and the tool compresses it." },
+        "ratio_depends_on_threads": { "type": "boolean", "description": "True when the thread count changes the archive size, not only the speed." }
       }
     },
     "setting_ref": {
       "type": "object",
+      "description": "The setting and the exact argument lists executed.",
       "additionalProperties": false,
       "required": ["id", "compress_args", "extract_args"],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "compress_args": { "type": "array", "items": { "$ref": "#/$defs/arg" } },
-        "extract_args": { "type": "array", "items": { "$ref": "#/$defs/arg" } }
+        "id": { "$ref": "#/$defs/id", "description": "Setting id within the tool." },
+        "compress_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the compress command as executed, thread argument filled in, paths shown relative to the working directory (the parent of the class directory)." },
+        "extract_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the extract command as executed, same conventions." }
       }
     },
     "corpus_ref": {
       "type": "object",
+      "description": "The corpus the class belongs to.",
       "additionalProperties": false,
-      "required": ["profile", "manifest_blake3", "files", "input_bytes"],
+      "required": ["profile", "manifest_blake3", "class_files", "class_bytes"],
       "properties": {
-        "profile": { "$ref": "#/$defs/id" },
-        "manifest_blake3": { "$ref": "#/$defs/blake3" },
-        "files": { "$ref": "#/$defs/count" },
-        "input_bytes": { "$ref": "#/$defs/count" }
+        "profile": { "$ref": "#/$defs/id", "description": "Corpus profile (small, full or private)." },
+        "manifest_blake3": { "$ref": "#/$defs/blake3", "description": "BLAKE3 hash of manifest.json (64 lowercase hex digits)." },
+        "class_files": { "$ref": "#/$defs/count", "description": "Number of files in this class, a count." },
+        "class_bytes": { "$ref": "#/$defs/count", "description": "Total size of this class's files in bytes." }
+      }
+    },
+    "tar_info": {
+      "type": "object",
+      "description": "The tar that made the stream for a tar-stream tool.",
+      "additionalProperties": false,
+      "required": ["tool", "format", "in_published_time"],
+      "properties": {
+        "tool": { "$ref": "#/$defs/text", "description": "Flavour and version of the tar executable, for example bsdtar 3.7.7." },
+        "format": { "$ref": "#/$defs/text", "description": "Tar format written (for example pax or ustar)." },
+        "in_published_time": { "const": true, "description": "Always true: the published time is the tar step plus the compressor step; each is also recorded separately." }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "description": "How the numbers were taken.",
+      "additionalProperties": false,
+      "required": ["wall_cpu_method", "peak_memory_kind", "every_repeat_verified"],
+      "properties": {
+        "wall_cpu_method": { "$ref": "#/$defs/text", "description": "How wall and CPU time were taken, in words." },
+        "peak_memory_kind": { "enum": ["peak-working-set", "max-rss"], "description": "peak-working-set: Windows peak working set of the tool's main process; max-rss: Linux ru_maxrss. Unit of peak_memory_bytes: bytes." },
+        "every_repeat_verified": { "const": true, "description": "Always true: every repeat was extracted and verified, not only one." },
+        "tar": { "$ref": "#/$defs/tar_info", "description": "Present for tar-stream tools." }
       }
     },
     "result": {
       "type": "object",
+      "description": "One tool x setting x class.",
       "additionalProperties": false,
       "required": ["schema_version", "tool", "setting", "class", "corpus", "threads"],
       "properties": {
-        "schema_version": { "const": 1 },
-        "tool": { "$ref": "#/$defs/tool_ref" },
-        "setting": { "$ref": "#/$defs/setting_ref" },
-        "class": { "$ref": "#/$defs/id" },
-        "corpus": { "$ref": "#/$defs/corpus_ref" },
-        "threads": { "type": "integer", "minimum": 1 },
-        "private": { "const": true },
-        "repeats": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sample" } },
-        "median": { "$ref": "#/$defs/sample" },
-        "verification": { "$ref": "#/$defs/verification" },
-        "skipped": { "$ref": "#/$defs/text" }
+        "schema_version": { "const": 1, "description": "Result format version." },
+        "tool": { "$ref": "#/$defs/tool_ref", "description": "The tool." },
+        "setting": { "$ref": "#/$defs/setting_ref", "description": "The setting." },
+        "class": { "$ref": "#/$defs/id", "description": "Corpus class name." },
+        "corpus": { "$ref": "#/$defs/corpus_ref", "description": "The corpus." },
+        "threads": { "type": "integer", "minimum": 1, "description": "Thread count passed to the tool, a count." },
+        "private": { "const": true, "description": "Present and true when the corpus is a private scan." },
+        "measurement": { "$ref": "#/$defs/measurement", "description": "How the numbers were taken." },
+        "repeats": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sample" }, "description": "One entry per repeat." },
+        "median": { "$ref": "#/$defs/sample", "description": "Median of every field over the repeats (the validator recomputes it)." },
+        "verification": { "$ref": "#/$defs/verification", "description": "Round-trip verification." },
+        "skipped": { "$ref": "#/$defs/text", "description": "Why the combination was skipped; then there are no measurements." }
       },
       "if": { "required": ["skipped"] },
       "then": {
@@ -116,22 +164,27 @@
           "anyOf": [
             { "required": ["repeats"] },
             { "required": ["median"] },
-            { "required": ["verification"] }
+            { "required": ["verification"] },
+            { "required": ["measurement"] }
           ]
         }
       },
-      "else": { "required": ["repeats", "median", "verification"] }
+      "else": { "required": ["repeats", "median", "verification", "measurement"] }
     },
     "tool_entry": {
       "type": "object",
+      "description": "One catalogue tool on this machine.",
       "additionalProperties": false,
-      "required": ["id", "name", "status"],
+      "required": ["id", "name", "status", "catalogue_verified", "manual", "local_override"],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "name": { "$ref": "#/$defs/text" },
-        "status": { "enum": ["found", "skipped"] },
-        "reason": { "$ref": "#/$defs/text" },
-        "version": { "$ref": "#/$defs/text" }
+        "id": { "$ref": "#/$defs/id", "description": "Catalogue id." },
+        "name": { "$ref": "#/$defs/text", "description": "Display name." },
+        "status": { "enum": ["found", "skipped"], "description": "Whether the tool was found and usable." },
+        "reason": { "$ref": "#/$defs/text", "description": "Why it was skipped; present exactly when status is skipped." },
+        "version": { "$ref": "#/$defs/text", "description": "Version read from the tool; present exactly when status is found." },
+        "catalogue_verified": { "type": "boolean", "description": "False when the catalogue's command lines come from documentation nobody has run." },
+        "manual": { "type": "boolean", "description": "True for tools the owner licenses and configures by hand." },
+        "local_override": { "type": "boolean", "description": "True when bench/tools.local.toml overrode this tool on this machine." }
       },
       "if": { "properties": { "status": { "const": "found" } } },
       "then": { "required": ["version"], "not": { "required": ["reason"] } },
@@ -139,15 +192,17 @@
     },
     "tools": {
       "type": "object",
+      "description": "tools.json: every catalogue tool.",
       "additionalProperties": false,
       "required": ["schema_version", "tools"],
       "properties": {
-        "schema_version": { "const": 1 },
-        "tools": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/tool_entry" } }
+        "schema_version": { "const": 1, "description": "Result format version." },
+        "tools": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/tool_entry" }, "description": "One entry per catalogue tool." }
       }
     },
     "host": {
       "type": "object",
+      "description": "host.json: the machine and the build.",
       "additionalProperties": false,
       "required": [
         "schema_version",
@@ -162,16 +217,17 @@
         "rustc_version"
       ],
       "properties": {
-        "schema_version": { "const": 1 },
-        "host": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-        "os": { "$ref": "#/$defs/text" },
-        "os_version": { "$ref": "#/$defs/text" },
-        "cpu_model": { "$ref": "#/$defs/text" },
-        "logical_cores": { "type": "integer", "minimum": 1 },
-        "ram_bytes": { "$ref": "#/$defs/count" },
-        "lpk_bench_version": { "$ref": "#/$defs/text" },
-        "git_commit": { "$ref": "#/$defs/text" },
-        "rustc_version": { "$ref": "#/$defs/text" }
+        "schema_version": { "const": 1, "description": "Result format version." },
+        "host": { "type": "string", "pattern": "^[a-z0-9-]+$", "description": "Host name, lower-cased and reduced to [a-z0-9-]; part of the directory name." },
+        "os": { "$ref": "#/$defs/text", "description": "Operating system family." },
+        "os_version": { "$ref": "#/$defs/text", "description": "Operating system version." },
+        "cpu_model": { "$ref": "#/$defs/text", "description": "CPU model name." },
+        "logical_cores": { "type": "integer", "minimum": 1, "description": "Logical processors, a count." },
+        "ram_bytes": { "$ref": "#/$defs/count", "description": "Installed RAM in bytes." },
+        "lpk_bench_version": { "$ref": "#/$defs/text", "description": "lpk-bench version." },
+        "git_commit": { "$ref": "#/$defs/text", "description": "Git commit the binary was built from (12 hex digits), with a -dirty suffix when the tree had uncommitted changes, or unknown." },
+        "rustc_version": { "$ref": "#/$defs/text", "description": "rustc version that built the binary." },
+        "dirty_build_allowed": { "const": true, "description": "Present and true when the run used the flag that allows results from a dirty or unknown build." }
       }
     }
   }

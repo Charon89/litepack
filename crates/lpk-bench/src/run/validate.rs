@@ -11,6 +11,9 @@ use anyhow::{Context, Result};
 use jsonschema::Validator;
 use serde_json::Value;
 
+use super::catalogue::Mode;
+use super::result::{Sample, ToolResult};
+
 /// The committed schema, embedded so the binary and the file cannot disagree.
 pub const SCHEMA_TEXT: &str = include_str!("../../../../bench/results/schema.json");
 
@@ -139,18 +142,84 @@ fn scan_absolute_paths(value: &Value, pointer: &str, file: &str, out: &mut Vec<S
     }
 }
 
+fn valid_date(date: &str) -> bool {
+    let parts: Vec<&str> = date.split('-').collect();
+    let [y, m, d] = parts.as_slice() else {
+        return false;
+    };
+    let (Ok(y), Ok(m), Ok(d)) = (y.parse::<u32>(), m.parse::<u32>(), d.parse::<u32>()) else {
+        return false;
+    };
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (2024..=2200).contains(&y) && (1..=days).contains(&d)
+}
+
+/// Split `<YYYY-MM-DD>-<rest>` where the date is a real calendar date and `rest` is `[a-z0-9-]+`.
+fn split_dir_name(name: &str) -> Option<(&str, &str)> {
+    let (date, rest) = (name.get(..10)?, name.get(11..)?);
+    let ok = name.as_bytes().get(10) == Some(&b'-')
+        && date.len() == 10
+        && valid_date(date)
+        && !rest.is_empty()
+        && rest
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    ok.then_some((date, rest))
+}
+
 fn dir_name_ok(name: &str) -> bool {
-    let b = name.as_bytes();
-    b.len() > 11
-        && b[..4].iter().all(u8::is_ascii_digit)
-        && b[4] == b'-'
-        && b[5..7].iter().all(u8::is_ascii_digit)
-        && b[7] == b'-'
-        && b[8..10].iter().all(u8::is_ascii_digit)
-        && b[10] == b'-'
-        && b[11..]
-            .iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+    split_dir_name(name).is_some()
+}
+
+/// Does the directory name's `rest` equal `host` or `host-<n>` with n >= 2 (a repeat run on the
+/// same UTC day)?
+fn host_matches(rest: &str, host: &str) -> bool {
+    match rest.strip_prefix(host) {
+        Some("") => true,
+        Some(suffix) => suffix
+            .strip_prefix('-')
+            .is_some_and(|n| !n.starts_with('0') && n.parse::<u32>().is_ok_and(|n| n >= 2)),
+        None => false,
+    }
+}
+
+/// Numbers compare with a tiny relative tolerance, everything else exactly. Differences are
+/// appended as JSON-pointer-like paths.
+fn diff_values(path: &str, a: &Value, b: &Value, out: &mut Vec<String>) {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            let same = match (x.as_f64(), y.as_f64()) {
+                (Some(fx), Some(fy)) if x.is_f64() || y.is_f64() => {
+                    let (x, y) = (fx, fy);
+                    (x - y).abs() <= 1e-9 * x.abs().max(y.abs()).max(1.0)
+                }
+                _ => x == y,
+            };
+            if !same {
+                out.push(path.to_string());
+            }
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            let mut keys: Vec<&String> = x.keys().chain(y.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            for k in keys {
+                match (x.get(k), y.get(k)) {
+                    (Some(p), Some(q)) => diff_values(&format!("{path}/{k}"), p, q, out),
+                    _ => out.push(format!("{path}/{k}")),
+                }
+            }
+        }
+        (x, y) if x == y => {}
+        _ => out.push(path.to_string()),
+    }
 }
 
 fn read_json(path: &Path, label: &str, problems: &mut Vec<String>) -> Option<Value> {
@@ -175,6 +244,8 @@ pub struct Report {
     /// Number of per-combination result files checked.
     pub results: usize,
     pub problems: Vec<String>,
+    /// Things that are accepted but worth saying, such as probe files taken on trust.
+    pub notes: Vec<String>,
 }
 
 /// Check `<dir>` (a `<date>-<host>` results directory): `host.json`, `tools.json` and every
@@ -218,10 +289,19 @@ pub fn validate_dir(dir: &Path) -> Result<Report> {
         let r = validate_one(&schemas, &sub)?;
         total.results += r.results;
         total
+            .notes
+            .extend(r.notes.into_iter().map(|n| format!("{label}/{n}")));
+        total
             .problems
             .extend(r.problems.into_iter().map(|p| format!("{label}/{p}")));
     }
     Ok(total)
+}
+
+/// What `tools.json` says about one tool.
+struct ToolState {
+    found: bool,
+    version: Option<String>,
 }
 
 fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
@@ -233,15 +313,20 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         return Ok(report);
     }
     let abs = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    if let Some(name) = abs.file_name().and_then(|n| n.to_str()) {
-        if !dir_name_ok(name) {
-            report.problems.push(format!(
-                "{name}: directory name must be <YYYY-MM-DD>-<host> with host in [a-z0-9-]"
-            ));
-        }
+    let dir_name = abs
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let parsed_name = split_dir_name(&dir_name);
+    if parsed_name.is_none() {
+        report.problems.push(format!(
+            "{dir_name}: directory name must be <YYYY-MM-DD>-<host>[-<n>] with a real date \
+             and host in [a-z0-9-]"
+        ));
     }
 
-    let mut tools_found: Vec<String> = Vec::new();
+    let mut tools: std::collections::BTreeMap<String, ToolState> = Default::default();
     for (name, kind) in [("host.json", Kind::Host), ("tools.json", Kind::Tools)] {
         let path = dir.join(name);
         if !path.is_file() {
@@ -250,34 +335,84 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
                 .push(format!("{name}: (root): file is missing"));
             continue;
         }
-        if let Some(v) = read_json(&path, name, &mut report.problems) {
-            report.problems.extend(schemas.check_value(kind, name, &v));
-            if kind == Kind::Tools {
-                tools_found = v
+        let Some(v) = read_json(&path, name, &mut report.problems) else {
+            continue;
+        };
+        let schema_problems = schemas.check_value(kind, name, &v);
+        let clean = schema_problems.is_empty();
+        report.problems.extend(schema_problems);
+        if !clean {
+            continue;
+        }
+        match kind {
+            Kind::Host => {
+                let host = v.get("host").and_then(Value::as_str).unwrap_or("");
+                if let Some((_, rest)) = parsed_name {
+                    if !host_matches(rest, host) {
+                        report.problems.push(format!(
+                            "{name}: /host: `{host}` does not match the directory name \
+                             `{dir_name}` (expected <date>-{host} or <date>-{host}-<n>, n >= 2)"
+                        ));
+                    }
+                }
+            }
+            Kind::Tools => {
+                for t in v
                     .get("tools")
                     .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|t| t.get("id").and_then(Value::as_str).map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                    .into_iter()
+                    .flatten()
+                {
+                    let id = t
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    tools.insert(
+                        id,
+                        ToolState {
+                            found: t.get("status").and_then(Value::as_str) == Some("found"),
+                            version: t.get("version").and_then(Value::as_str).map(String::from),
+                        },
+                    );
+                }
             }
+            Kind::Result => {}
         }
     }
 
-    let mut names: Vec<String> = std::fs::read_dir(dir)
+    let mut names: Vec<String> = Vec::new();
+    let mut probes = 0usize;
+    for entry in std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| {
-            n.ends_with(".json")
-                && n != "host.json"
-                && n != "tools.json"
-                && !n.starts_with("probe-")
-        })
-        .collect();
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            report.problems.push(format!(
+                "{name}: unexpected directory in a results directory"
+            ));
+        } else if name == "host.json" || name == "tools.json" {
+        } else if name.starts_with("probe-") && name.ends_with(".json") {
+            probes += 1;
+        } else if name.ends_with(".json") {
+            names.push(name);
+        } else {
+            report.problems.push(format!(
+                "{name}: unexpected file (a results directory holds host.json, tools.json, \
+                 result files and probe-*.json)"
+            ));
+        }
+    }
+    if probes > 0 {
+        report.notes.push(format!(
+            "{probes} probe-*.json file(s) accepted by name only; their contents are not checked \
+             (probe formats arrive with PLAN P0-4)"
+        ));
+    }
     names.sort();
+    let mut corpus_seen: Option<(String, String, String)> = None;
     for name in names {
         report.results += 1;
         let Some(v) = read_json(&dir.join(&name), &name, &mut report.problems) else {
@@ -286,49 +421,161 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         let schema_problems = schemas.check_value(Kind::Result, &name, &v);
         let clean = schema_problems.is_empty();
         report.problems.extend(schema_problems);
-        if clean {
-            semantic_checks(&name, &v, &tools_found, &mut report.problems);
+        if !clean {
+            continue;
+        }
+        match serde_json::from_value::<ToolResult>(v) {
+            Ok(r) => {
+                semantic_checks(&name, &r, &tools, &mut report.problems);
+                let here = (
+                    r.corpus.profile.clone(),
+                    r.corpus.manifest_blake3.clone(),
+                    name.clone(),
+                );
+                match &corpus_seen {
+                    None => corpus_seen = Some(here),
+                    Some((profile, hash, first)) => {
+                        if *profile != here.0 {
+                            report.problems.push(format!(
+                                "{name}: /corpus/profile: `{}` but {first} has `{profile}` \
+                                 (one profile per results directory)",
+                                here.0
+                            ));
+                        }
+                        if *hash != here.1 {
+                            report.problems.push(format!(
+                                "{name}: /corpus/manifest_blake3: differs from {first} \
+                                 (one manifest per results directory)"
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => report.problems.push(format!(
+                "{name}: (root): does not fit the result types: {e}"
+            )),
         }
     }
     Ok(report)
 }
 
-fn semantic_checks(name: &str, v: &Value, tools: &[String], out: &mut Vec<String>) {
-    let s = |p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or("");
-    let expected = format!(
-        "{}-{}-{}.json",
-        s("/tool/id"),
-        s("/setting/id"),
-        s("/class")
-    );
+fn semantic_checks(
+    name: &str,
+    r: &ToolResult,
+    tools: &std::collections::BTreeMap<String, ToolState>,
+    out: &mut Vec<String>,
+) {
+    let expected = r.file_name();
     if name != expected {
         out.push(format!(
             "{name}: (file name): must be `{expected}` for the tool, setting and class inside"
         ));
     }
-    if !tools.iter().any(|t| t == s("/tool/id")) {
-        out.push(format!(
+    let measured = r.skipped.is_none();
+    match tools.get(&r.tool.id) {
+        None => out.push(format!(
             "{name}: /tool/id: `{}` does not appear in tools.json",
-            s("/tool/id")
-        ));
+            r.tool.id
+        )),
+        Some(state) if measured => {
+            if !state.found {
+                out.push(format!(
+                    "{name}: /tool/id: `{}` is marked skipped in tools.json but has measurements",
+                    r.tool.id
+                ));
+            } else if state.version != r.tool.version {
+                out.push(format!(
+                    "{name}: /tool/version: {:?} differs from tools.json ({:?})",
+                    r.tool.version, state.version
+                ));
+            }
+        }
+        Some(_) => {}
     }
-    if let Some(ver) = v.get("verification") {
-        let n = |k: &str| ver.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let verified = ver
-            .get("verified")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let all = n("files_ok") == n("files_checked")
-            && v.pointer("/corpus/files").and_then(Value::as_u64) == Some(n("files_checked"));
-        if n("files_ok") > n("files_checked") {
+    if !measured {
+        return;
+    }
+    if let Some(ver) = &r.verification {
+        let all = ver.files_ok == ver.files_checked && ver.files_checked == r.corpus.class_files;
+        if ver.files_ok > ver.files_checked {
             out.push(format!(
                 "{name}: /verification/files_ok: exceeds files_checked"
             ));
-        } else if verified != all {
+        } else if ver.verified != all {
             out.push(format!(
                 "{name}: /verification/verified: disagrees with the counts \
-                 (verified means files_ok == files_checked == corpus.files)"
+                 (verified means files_ok == files_checked == corpus.class_files)"
             ));
+        }
+    }
+    let (Some(repeats), Some(median)) = (&r.repeats, &r.median) else {
+        return;
+    };
+    let expected_median = Sample::median_of(repeats);
+    let mut diffs = Vec::new();
+    diff_values(
+        "/median",
+        &serde_json::to_value(median).unwrap_or(Value::Null),
+        &serde_json::to_value(expected_median).unwrap_or(Value::Null),
+        &mut diffs,
+    );
+    for d in diffs {
+        out.push(format!(
+            "{name}: {d}: is not the median of the repeats (recomputed from /repeats)"
+        ));
+    }
+    // Tar-stream tools: the tar must be recorded and the steps must add up in every repeat.
+    let tar_stream = r.tool.mode == Mode::TarStream;
+    let has_tar = r.measurement.as_ref().is_some_and(|m| m.tar.is_some());
+    if tar_stream != has_tar {
+        out.push(format!(
+            "{name}: /measurement/tar: {} for a {} tool",
+            if has_tar { "present" } else { "missing" },
+            if tar_stream {
+                "tar-stream"
+            } else {
+                "directory"
+            }
+        ));
+    }
+    for (i, s) in repeats.iter().enumerate() {
+        for (what, m) in [("compress", &s.compress), ("extract", &s.extract)] {
+            let at = format!("{name}: /repeats/{i}/{what}");
+            match (tar_stream, m.tar_step, m.tool_step) {
+                (true, Some(t), Some(c)) => {
+                    let mut d = Vec::new();
+                    let total = |a: f64, b: f64| serde_json::json!(a + b);
+                    for (k, sum, have) in [
+                        (
+                            "wall_seconds",
+                            total(t.wall_seconds, c.wall_seconds),
+                            m.wall_seconds,
+                        ),
+                        (
+                            "user_cpu_seconds",
+                            total(t.user_cpu_seconds, c.user_cpu_seconds),
+                            m.user_cpu_seconds,
+                        ),
+                        (
+                            "kernel_cpu_seconds",
+                            total(t.kernel_cpu_seconds, c.kernel_cpu_seconds),
+                            m.kernel_cpu_seconds,
+                        ),
+                    ] {
+                        diff_values(k, &sum, &serde_json::json!(have), &mut d);
+                    }
+                    for k in d {
+                        out.push(format!("{at}/{k}: is not tar_step + tool_step"));
+                    }
+                }
+                (true, _, _) => out.push(format!(
+                    "{at}: tar_step and tool_step are both required for a tar-stream tool"
+                )),
+                (false, None, None) => {}
+                (false, _, _) => out.push(format!(
+                    "{at}: tar_step/tool_step belong to tar-stream tools only"
+                )),
+            }
         }
     }
 }
@@ -347,6 +594,7 @@ mod tests {
 
     fn write_dir(root: &Path, results: &[ToolResult]) -> std::path::PathBuf {
         let dir = root.join("2026-10-01-testbox");
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join("host.json"), render(&samples::host())).expect("host");
         std::fs::write(dir.join("tools.json"), render(&samples::tools())).expect("tools");
@@ -372,7 +620,7 @@ mod tests {
     #[test]
     fn this_machines_host_file_validates() {
         let schemas = Schemas::load().expect("schemas");
-        let host = to_value(&crate::run::host::collect());
+        let host = to_value(&crate::run::host::collect(false));
         let p = schemas.check_value(Kind::Host, "host.json", &host);
         assert!(p.is_empty(), "{p:?}");
     }
@@ -428,24 +676,37 @@ mod tests {
     #[test]
     fn schema_and_types_agree() {
         let schema = schema_value().expect("schema");
-        let (m, s) = (
+        let (m, s, z) = (
             to_value(&samples::measured()),
             to_value(&samples::skipped()),
+            to_value(&samples::tar_stream()),
         );
-        assert_agree(&schema, "result", &[&m, &s]);
+        assert_agree(&schema, "result", &[&m, &s, &z]);
         assert_agree(&schema, "tool_ref", &[&m["tool"], &s["tool"]]);
         assert_agree(&schema, "setting_ref", &[&m["setting"]]);
         assert_agree(&schema, "corpus_ref", &[&m["corpus"]]);
         assert_agree(&schema, "sample", &[&m["median"], &m["repeats"][0]]);
+        // `measure` has Windows-only and tar-stream-only optional fields: union over both shapes.
         assert_agree(
             &schema,
             "measure",
-            &[&m["median"]["compress"], &m["median"]["extract"]],
+            &[&m["median"]["compress"], &z["median"]["compress"]],
         );
+        assert_agree(
+            &schema,
+            "step_times",
+            &[&z["median"]["compress"]["tar_step"]],
+        );
+        assert_agree(
+            &schema,
+            "measurement",
+            &[&m["measurement"], &z["measurement"]],
+        );
+        assert_agree(&schema, "tar_info", &[&z["measurement"]["tar"]]);
         assert_agree(&schema, "verification", &[&m["verification"]]);
         let t = to_value(&samples::tools());
         assert_agree(&schema, "tools", &[&t]);
-        assert_agree(&schema, "tool_entry", &[&t["tools"][0], &t["tools"][1]]);
+        assert_agree(&schema, "tool_entry", &[&t["tools"][0], &t["tools"][2]]);
         assert_agree(&schema, "host", &[&to_value(&samples::host())]);
         // Every def with properties is covered above (a new def must be added to this test).
         let covered = [
@@ -455,6 +716,9 @@ mod tests {
             "corpus_ref",
             "sample",
             "measure",
+            "step_times",
+            "measurement",
+            "tar_info",
             "verification",
             "tools",
             "tool_entry",
@@ -574,6 +838,182 @@ mod tests {
         stranger.tool.id = "ghost".into();
         let dir = write_dir(tmp.path(), &[stranger]);
         assert!(problems(&dir).iter().any(|m| m.contains("tools.json")));
+    }
+
+    #[test]
+    fn every_schema_property_has_a_description() {
+        fn walk(v: &Value, at: &str, missing: &mut Vec<String>) {
+            if let Some(props) = v.get("properties").and_then(Value::as_object) {
+                for (k, p) in props {
+                    if p.get("description")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                    {
+                        missing.push(format!("{at}/{k}"));
+                    }
+                }
+            }
+        }
+        let schema = schema_value().expect("schema");
+        let mut missing = Vec::new();
+        for (name, def) in schema["$defs"].as_object().expect("defs") {
+            walk(def, name, &mut missing);
+        }
+        assert!(
+            missing.is_empty(),
+            "properties without a description: {missing:?}"
+        );
+    }
+
+    fn write_value(dir: &Path, name: &str, v: &Value) {
+        std::fs::write(dir.join(name), v.to_string()).expect("write");
+    }
+
+    #[test]
+    fn a_fabricated_median_is_caught() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = write_dir(tmp.path(), &[samples::measured()]);
+        let mut v = to_value(&samples::measured());
+        v["median"]["compress"]["wall_seconds"] = json!(0.01);
+        v["median"]["archive_bytes"] = json!(1);
+        write_value(&dir, "7z-mx5-text.json", &v);
+        let p = problems(&dir);
+        assert!(
+            p.iter()
+                .any(|m| m.contains("/median/compress/wall_seconds: is not the median")),
+            "{p:?}"
+        );
+        assert!(p
+            .iter()
+            .any(|m| m.contains("/median/archive_bytes: is not the median")));
+    }
+
+    #[test]
+    fn measured_results_need_a_found_tool_with_the_same_version() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // Tool marked skipped in tools.json (rar) but with measurements.
+        let mut rar = samples::measured();
+        rar.tool.id = "rar".into();
+        let dir = write_dir(tmp.path(), &[rar]);
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("marked skipped in tools.json")));
+        // Different version.
+        let mut other = samples::measured();
+        other.tool.version = Some("25.01".into());
+        let dir = write_dir(tmp.path(), &[other]);
+        assert!(problems(&dir).iter().any(|m| m.contains("/tool/version")));
+    }
+
+    #[test]
+    fn host_and_date_must_match_the_directory_name() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // host.json says a different host.
+        let dir = write_dir(tmp.path(), &[]);
+        let mut h = to_value(&samples::host());
+        h["host"] = json!("otherbox");
+        write_value(&dir, "host.json", &h);
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.starts_with("host.json: /host:")));
+        // A repeat-run suffix is accepted, a suffix of 1 or a different word is not.
+        for (name, ok) in [
+            ("2026-10-01-testbox-2", true),
+            ("2026-10-01-testbox-17", true),
+            ("2026-10-01-testbox-1", false),
+            ("2026-10-01-testbox-02", false),
+            ("2026-10-01-testbox-x", false),
+            ("2026-13-01-testbox", false),
+            ("2026-02-30-testbox", false),
+            ("1999-10-01-testbox", false),
+        ] {
+            let d = tmp.path().join(name);
+            std::fs::create_dir_all(&d).expect("dir");
+            std::fs::write(d.join("host.json"), render(&samples::host())).expect("host");
+            std::fs::write(d.join("tools.json"), render(&samples::tools())).expect("tools");
+            assert_eq!(problems(&d).is_empty(), ok, "{name}: {:?}", problems(&d));
+        }
+    }
+
+    #[test]
+    fn unexpected_files_are_reported_and_probes_are_accepted_by_name() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = write_dir(tmp.path(), &[samples::measured()]);
+        std::fs::write(dir.join("probe-jpeg.json"), "not even json").expect("probe");
+        std::fs::write(dir.join("notes.txt"), "x").expect("txt");
+        std::fs::create_dir(dir.join("scratch")).expect("dir");
+        let report = validate_dir(&dir).expect("validate");
+        assert!(report
+            .problems
+            .iter()
+            .any(|m| m.starts_with("notes.txt: unexpected file")));
+        assert!(report
+            .problems
+            .iter()
+            .any(|m| m.starts_with("scratch: unexpected directory")));
+        assert!(!report.problems.iter().any(|m| m.contains("probe-jpeg")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("1 probe-*.json") && n.contains("not checked")));
+    }
+
+    #[test]
+    fn one_profile_and_manifest_per_results_directory() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut a = samples::measured();
+        a.class = "audio".into();
+        a.corpus.manifest_blake3 = "cd".repeat(32);
+        let mut b = samples::measured();
+        b.class = "docs".into();
+        b.corpus.profile = "full".into();
+        let dir = write_dir(tmp.path(), &[samples::measured(), a, b]);
+        let p = problems(&dir);
+        assert!(
+            p.iter()
+                .any(|m| m.contains("/corpus/manifest_blake3: differs")),
+            "{p:?}"
+        );
+        assert!(p.iter().any(|m| m.contains("/corpus/profile:")), "{p:?}");
+    }
+
+    #[test]
+    fn tar_stream_results_record_their_tar_and_steps_that_add_up() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = write_dir(tmp.path(), &[samples::tar_stream()]);
+        let p = problems(&dir);
+        assert!(p.is_empty(), "{p:?}");
+
+        // Tar not recorded.
+        let mut no_tar = samples::tar_stream();
+        no_tar.measurement.as_mut().expect("m").tar = None;
+        let dir = write_dir(tmp.path(), &[no_tar]);
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("/measurement/tar: missing")));
+
+        // Steps that do not add up to the totals.
+        let mut v = to_value(&samples::tar_stream());
+        v["repeats"][0]["compress"]["wall_seconds"] = json!(99.0);
+        write_value(&dir, "zstd-3-text.json", &v);
+        // (the dir above holds a different file name; rewrite the matching one)
+        let dir = write_dir(tmp.path(), &[]);
+        write_value(&dir, "zstd-3-text.json", &v);
+        let p = problems(&dir);
+        assert!(
+            p.iter().any(
+                |m| m.contains("/repeats/0/compress/wall_seconds: is not tar_step + tool_step")
+            ),
+            "{p:?}"
+        );
+
+        // A directory-mode tool with a tar entry, or with steps.
+        let mut dm = samples::measured();
+        dm.measurement.as_mut().expect("m").tar = samples::tar_stream().measurement.expect("m").tar;
+        let dir = write_dir(tmp.path(), &[dm]);
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("/measurement/tar: present")));
     }
 
     #[test]

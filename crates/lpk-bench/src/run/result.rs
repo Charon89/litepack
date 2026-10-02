@@ -1,12 +1,14 @@
-//! Result-file types. The JSON they serialise to is described by `bench/results/schema.json`;
-//! a test (`schema_and_types_agree`) fails when the two disagree.
+//! Result-file types. The JSON they serialise to is described by `bench/results/schema.json`
+//! (every property there has a description with its unit); a test (`schema_and_types_agree`)
+//! fails when the two disagree.
 //!
-//! Layout: `bench/results/<date>-<host>/` holds `host.json`, `tools.json` and one
+//! Layout: `bench/results/<date>-<host>[-<n>]/` holds `host.json`, `tools.json` and one
 //! `<tool>-<setting>-<class>.json` per combination. No file may contain absolute paths, user
 //! names or environment dumps.
 
 use serde::{Deserialize, Serialize};
 
+use super::catalogue::Mode;
 use super::discover::{Discovered, Status};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -26,11 +28,14 @@ pub struct ToolRef {
     /// Absent when the tool was not found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    pub mode: Mode,
+    /// The thread count changes the archive size, not only the speed.
+    pub ratio_depends_on_threads: bool,
 }
 
-/// The setting and the exact argument lists used. Templates keep their placeholders
-/// (`{archive}`, `{input}`, `{outdir}`) so no machine-specific path is recorded; the thread
-/// argument is filled in.
+/// The setting and the exact argument lists executed: thread argument filled in, paths shown
+/// relative to the working directory (the parent of the class directory), so no machine-specific
+/// path is recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingRef {
@@ -44,10 +49,23 @@ pub struct SettingRef {
 pub struct CorpusRef {
     pub profile: String,
     pub manifest_blake3: String,
-    pub files: u64,
-    pub input_bytes: u64,
+    /// Files in this class (not in the whole manifest).
+    pub class_files: u64,
+    /// Bytes in this class.
+    pub class_bytes: u64,
 }
 
+/// Time of one step of a tar-stream pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepTimes {
+    pub wall_seconds: f64,
+    pub user_cpu_seconds: f64,
+    pub kernel_cpu_seconds: f64,
+}
+
+/// One measured run. For tar-stream tools the times are tar step plus tool step and the steps
+/// are recorded separately too; the memory peak is the larger of the two.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Measure {
@@ -55,6 +73,16 @@ pub struct Measure {
     pub user_cpu_seconds: f64,
     pub kernel_cpu_seconds: f64,
     pub peak_memory_bytes: u64,
+    /// Windows only: peak committed memory of the whole job object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_job_memory_bytes: Option<u64>,
+    /// Windows only: peak committed memory of the largest process in the job object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_process_commit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tar_step: Option<StepTimes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_step: Option<StepTimes>,
 }
 
 /// One repeat (or the medians of all repeats): compress and extract measurements and the
@@ -75,6 +103,39 @@ pub struct Verification {
     pub files_ok: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PeakMemoryKind {
+    /// Windows: peak working set of the tool's main process.
+    PeakWorkingSet,
+    /// Linux: `ru_maxrss`.
+    MaxRss,
+}
+
+/// The tar that made the stream for a tar-stream tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TarInfo {
+    /// Flavour and version, for example `bsdtar 3.7.7`.
+    pub tool: String,
+    /// Tar format written (`pax`, `ustar`, ...).
+    pub format: String,
+    /// Always true: published time = tar step + tool step.
+    pub in_published_time: bool,
+}
+
+/// How the numbers were taken.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Measurement {
+    pub wall_cpu_method: String,
+    pub peak_memory_kind: PeakMemoryKind,
+    /// Always true: every repeat was extracted and verified.
+    pub every_repeat_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tar: Option<TarInfo>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResult {
@@ -87,6 +148,8 @@ pub struct ToolResult {
     /// `true` when the corpus is a private scan; absent otherwise.
     #[serde(default, skip_serializing_if = "is_false")]
     pub private: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<Measurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeats: Option<Vec<Sample>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,14 +193,45 @@ fn median_u64(mut v: Vec<u64>) -> u64 {
     }
 }
 
+/// Median of an optional field: present only when every item has it.
+fn median_opt_u64(items: &[Option<u64>]) -> Option<u64> {
+    let all: Option<Vec<u64>> = items.iter().copied().collect();
+    all.filter(|v| !v.is_empty()).map(median_u64)
+}
+
+impl StepTimes {
+    fn median_of(items: &[StepTimes]) -> StepTimes {
+        let f = |g: fn(&StepTimes) -> f64| median_f64(items.iter().map(g).collect());
+        StepTimes {
+            wall_seconds: f(|m| m.wall_seconds),
+            user_cpu_seconds: f(|m| m.user_cpu_seconds),
+            kernel_cpu_seconds: f(|m| m.kernel_cpu_seconds),
+        }
+    }
+}
+
+fn median_steps(items: &[Option<StepTimes>]) -> Option<StepTimes> {
+    let all: Option<Vec<StepTimes>> = items.iter().copied().collect();
+    all.filter(|v| !v.is_empty())
+        .map(|v| StepTimes::median_of(&v))
+}
+
 impl Measure {
+    /// Median of each field; optional fields only when every item has them.
     pub fn median_of(items: &[Measure]) -> Measure {
         let f = |g: fn(&Measure) -> f64| median_f64(items.iter().map(g).collect());
+        let opt = |g: fn(&Measure) -> Option<u64>| {
+            median_opt_u64(&items.iter().map(g).collect::<Vec<_>>())
+        };
         Measure {
             wall_seconds: f(|m| m.wall_seconds),
             user_cpu_seconds: f(|m| m.user_cpu_seconds),
             kernel_cpu_seconds: f(|m| m.kernel_cpu_seconds),
             peak_memory_bytes: median_u64(items.iter().map(|m| m.peak_memory_bytes).collect()),
+            peak_job_memory_bytes: opt(|m| m.peak_job_memory_bytes),
+            peak_process_commit_bytes: opt(|m| m.peak_process_commit_bytes),
+            tar_step: median_steps(&items.iter().map(|m| m.tar_step).collect::<Vec<_>>()),
+            tool_step: median_steps(&items.iter().map(|m| m.tool_step).collect::<Vec<_>>()),
         }
     }
 }
@@ -166,6 +260,11 @@ pub struct ToolEntry {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// False when the catalogue's command lines were never run by us.
+    pub catalogue_verified: bool,
+    pub manual: bool,
+    /// `bench/tools.local.toml` overrode this tool on this machine.
+    pub local_override: bool,
 }
 
 /// `tools.json`: every catalogue tool, found or skipped, and the version used. The executable
@@ -181,21 +280,21 @@ impl ToolsFile {
     pub fn from_discovered(found: &[Discovered]) -> ToolsFile {
         let tools = found
             .iter()
-            .map(|d| match &d.status {
-                Status::Found { version, .. } => ToolEntry {
+            .map(|d| {
+                let (status, reason, version) = match &d.status {
+                    Status::Found { version, .. } => ("found", None, Some(version.clone())),
+                    Status::Skipped { reason } => ("skipped", Some(reason.clone()), None),
+                };
+                ToolEntry {
                     id: d.tool.id.clone(),
                     name: d.tool.name.clone(),
-                    status: "found".into(),
-                    reason: None,
-                    version: Some(version.clone()),
-                },
-                Status::Skipped { reason } => ToolEntry {
-                    id: d.tool.id.clone(),
-                    name: d.tool.name.clone(),
-                    status: "skipped".into(),
-                    reason: Some(reason.clone()),
-                    version: None,
-                },
+                    status: status.into(),
+                    reason,
+                    version,
+                    catalogue_verified: d.tool.verified,
+                    manual: d.tool.manual,
+                    local_override: d.local_override,
+                }
             })
             .collect();
         ToolsFile {
@@ -217,8 +316,12 @@ pub struct HostFile {
     pub logical_cores: u32,
     pub ram_bytes: u64,
     pub lpk_bench_version: String,
+    /// 12 hex digits, with `-dirty` when the tree had uncommitted changes, or `unknown`.
     pub git_commit: String,
     pub rustc_version: String,
+    /// The run used the flag that allows results from a dirty or unknown build.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dirty_build_allowed: bool,
 }
 
 #[cfg(test)]
@@ -232,6 +335,34 @@ pub mod samples {
             user_cpu_seconds: wall * 3.0,
             kernel_cpu_seconds: 0.25,
             peak_memory_bytes: 1 << 20,
+            peak_job_memory_bytes: Some(2 << 20),
+            peak_process_commit_bytes: Some(1 << 21),
+            tar_step: None,
+            tool_step: None,
+        }
+    }
+
+    /// A tar-stream measure: totals are the sum of the two steps.
+    pub fn tar_measure(wall: f64) -> Measure {
+        let tar = StepTimes {
+            wall_seconds: wall / 4.0,
+            user_cpu_seconds: 0.5,
+            kernel_cpu_seconds: 0.25,
+        };
+        let tool = StepTimes {
+            wall_seconds: wall,
+            user_cpu_seconds: wall * 3.0,
+            kernel_cpu_seconds: 0.5,
+        };
+        Measure {
+            wall_seconds: tar.wall_seconds + tool.wall_seconds,
+            user_cpu_seconds: tar.user_cpu_seconds + tool.user_cpu_seconds,
+            kernel_cpu_seconds: tar.kernel_cpu_seconds + tool.kernel_cpu_seconds,
+            peak_memory_bytes: 1 << 20,
+            peak_job_memory_bytes: None,
+            peak_process_commit_bytes: None,
+            tar_step: Some(tar),
+            tool_step: Some(tool),
         }
     }
 
@@ -243,34 +374,57 @@ pub mod samples {
         }
     }
 
+    pub fn tar_sample(wall: f64) -> Sample {
+        Sample {
+            compress: tar_measure(wall),
+            extract: tar_measure(wall / 2.0),
+            archive_bytes: 900,
+        }
+    }
+
+    pub fn measurement() -> Measurement {
+        Measurement {
+            wall_cpu_method: "wall: monotonic clock around the process; cpu: OS process accounting"
+                .into(),
+            peak_memory_kind: PeakMemoryKind::PeakWorkingSet,
+            every_repeat_verified: true,
+            tar: None,
+        }
+    }
+
     pub fn measured() -> ToolResult {
+        let repeats = vec![sample(1.0), sample(1.5), sample(2.0)];
         ToolResult {
             schema_version: SCHEMA_VERSION,
             tool: ToolRef {
                 id: "7z".into(),
                 version: Some("26.03".into()),
+                mode: Mode::Directory,
+                ratio_depends_on_threads: true,
             },
             setting: SettingRef {
                 id: "mx5".into(),
                 compress_args: vec![
                     "a".into(),
                     "-mx5".into(),
-                    "{archive}".into(),
-                    "{input}/*".into(),
+                    "-mmt=4".into(),
+                    "out/a.7z".into(),
+                    "text".into(),
                 ],
-                extract_args: vec!["x".into(), "-o{outdir}".into(), "{archive}".into()],
+                extract_args: vec!["x".into(), "-oout/x".into(), "out/a.7z".into()],
             },
             class: "text".into(),
             corpus: CorpusRef {
                 profile: "small".into(),
                 manifest_blake3: "ab".repeat(32),
-                files: 10,
-                input_bytes: 5000,
+                class_files: 10,
+                class_bytes: 5000,
             },
             threads: 4,
             private: true,
-            repeats: Some(vec![sample(1.0), sample(1.5), sample(2.0)]),
-            median: Some(sample(1.5)),
+            measurement: Some(measurement()),
+            median: Some(Sample::median_of(&repeats)),
+            repeats: Some(repeats),
             verification: Some(Verification {
                 verified: true,
                 files_checked: 10,
@@ -280,11 +434,33 @@ pub mod samples {
         }
     }
 
+    /// A tar-stream result (zstd), with its tar recorded.
+    pub fn tar_stream() -> ToolResult {
+        let mut r = measured();
+        r.tool.id = "zstd".into();
+        r.tool.version = Some("1.5.7".into());
+        r.tool.mode = Mode::TarStream;
+        r.setting.id = "3".into();
+        r.private = false;
+        let repeats = vec![tar_sample(1.0), tar_sample(1.5), tar_sample(2.0)];
+        r.median = Some(Sample::median_of(&repeats));
+        r.repeats = Some(repeats);
+        let mut m = measurement();
+        m.tar = Some(TarInfo {
+            tool: "bsdtar 3.7.7".into(),
+            format: "pax".into(),
+            in_published_time: true,
+        });
+        r.measurement = Some(m);
+        r
+    }
+
     pub fn skipped() -> ToolResult {
         let mut r = measured();
         r.tool.id = "rar".into();
         r.tool.version = None;
         r.private = false;
+        r.measurement = None;
         r.repeats = None;
         r.median = None;
         r.verification = None;
@@ -293,23 +469,22 @@ pub mod samples {
     }
 
     pub fn tools() -> ToolsFile {
+        let entry = |id: &str, name: &str, found: Option<&str>| ToolEntry {
+            id: id.into(),
+            name: name.into(),
+            status: if found.is_some() { "found" } else { "skipped" }.into(),
+            reason: found.is_none().then(|| "not installed".to_string()),
+            version: found.map(String::from),
+            catalogue_verified: true,
+            manual: false,
+            local_override: false,
+        };
         ToolsFile {
             schema_version: SCHEMA_VERSION,
             tools: vec![
-                ToolEntry {
-                    id: "7z".into(),
-                    name: "7-Zip".into(),
-                    status: "found".into(),
-                    reason: None,
-                    version: Some("26.03".into()),
-                },
-                ToolEntry {
-                    id: "rar".into(),
-                    name: "WinRAR (rar)".into(),
-                    status: "skipped".into(),
-                    reason: Some("not installed".into()),
-                    version: None,
-                },
+                entry("7z", "7-Zip", Some("26.03")),
+                entry("zstd", "Zstandard", Some("1.5.7")),
+                entry("rar", "WinRAR (rar)", None),
             ],
         }
     }
@@ -326,6 +501,7 @@ pub mod samples {
             lpk_bench_version: "0.0.1".into(),
             git_commit: "0123456789ab".into(),
             rustc_version: "rustc 1.99.0".into(),
+            dirty_build_allowed: true,
         }
     }
 }
@@ -348,12 +524,30 @@ mod tests {
     }
 
     #[test]
+    fn optional_fields_have_a_median_only_when_every_repeat_has_them() {
+        let mut items = [sample(1.0), sample(2.0), sample(3.0)];
+        assert_eq!(
+            Sample::median_of(&items).compress.peak_job_memory_bytes,
+            Some(2 << 20)
+        );
+        items[1].compress.peak_job_memory_bytes = None;
+        assert_eq!(
+            Sample::median_of(&items).compress.peak_job_memory_bytes,
+            None
+        );
+        let t = Sample::median_of(&[tar_sample(1.0), tar_sample(2.0), tar_sample(3.0)]);
+        assert_eq!(t.compress.tool_step.map(|s| s.wall_seconds), Some(2.0));
+    }
+
+    #[test]
     fn results_round_trip_through_json() {
-        for r in [measured(), skipped()] {
+        for r in [measured(), skipped(), tar_stream()] {
             let back: ToolResult = serde_json::from_str(&render(&r)).expect("parse");
             assert_eq!(back, r);
         }
         assert_eq!(measured().file_name(), "7z-mx5-text.json");
         assert!(!render(&skipped()).contains("private"));
+        assert!(render(&measured()).contains("\"mode\": \"directory\""));
+        assert!(render(&tar_stream()).contains("\"mode\": \"tar-stream\""));
     }
 }

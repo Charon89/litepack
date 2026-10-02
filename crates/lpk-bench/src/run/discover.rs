@@ -24,6 +24,8 @@ pub enum Status {
 pub struct Discovered {
     pub tool: Tool,
     pub status: Status,
+    /// `bench/tools.local.toml` has an entry for this tool.
+    pub local_override: bool,
 }
 
 /// The parts of the environment discovery depends on, injectable for tests.
@@ -313,6 +315,7 @@ pub fn discover_all(cat: &Catalogue, local: &Local, env: &Env) -> Vec<Discovered
         .map(|t| Discovered {
             tool: t.clone(),
             status: discover_tool(t, local, env),
+            local_override: local.overridden.contains(&t.id),
         })
         .collect()
 }
@@ -584,6 +587,7 @@ mod tests {
                 version: "5.8.1".into(),
                 path: PathBuf::from("p/xz"),
             },
+            local_override: false,
         };
         let line = list_line(&found);
         assert!(line.starts_with("xz") && line.contains("found") && line.contains("5.8.1"));
@@ -593,6 +597,7 @@ mod tests {
             status: Status::Skipped {
                 reason: SKIP_NOT_INSTALLED.into(),
             },
+            local_override: false,
         };
         assert_eq!(
             list_line(&skipped),

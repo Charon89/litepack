@@ -96,6 +96,7 @@ fn list_tools(args: &RunArgs) -> Result<()> {
             let d = discover::Discovered {
                 tool: tool.clone(),
                 status,
+                local_override: local.overridden.contains(&id),
             };
             println!("{}", discover::list_line(&d));
         }
@@ -105,6 +106,9 @@ fn list_tools(args: &RunArgs) -> Result<()> {
 
 fn validate_cmd(dir: &Path) -> Result<ExitCode> {
     let report = validate::validate_dir(dir)?;
+    for n in &report.notes {
+        println!("note: {n}");
+    }
     for p in &report.problems {
         eprintln!("error: {p}");
     }
