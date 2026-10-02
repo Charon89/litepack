@@ -115,8 +115,17 @@
 //! timeouts and mid-body failures are retried with exponential backoff (honouring
 //! `Retry-After`, capped). Bytes stream into `<cache>/<id>-<urlhash>.part` (the cache file
 //! name plus `.part`), are hashed on the way, and are renamed into place only after
-//! verification. A retry after a mid-body failure resumes with a `Range` request when the
-//! server honours it and restarts from zero when it does not.
+//! verification. A retry after a mid-body failure resumes with a `Range` request only when it is
+//! safe: the request carries `If-Range` with the `ETag` (else `Last-Modified`) of the first
+//! response; an unpinned download (`--update-lock`) whose first response had neither restarts
+//! from zero, and so does any `206` whose `Content-Range` is not exactly the rest of the file
+//! (`end + 1 == total`) or a server that ignores the range. User-Agent:
+//! `lpk-bench/<version> (https://github.com/Charon89/litepack; corpus-builder bot)`.
+//!
+//! Politeness is set per host in `[[host]]` tables and applies to every request the
+//! `Downloader` makes to that host (the host of the URL as written, not of redirect targets):
+//! `min_interval_ms` between the end of one request and the start of the next, and an optional
+//! `max_mbit_per_s` throughput cap.
 //!
 //! # Adding a source kind
 //!

@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 
 use super::extract::{check_listing, extract, sanitize_path, Selection};
-use super::fetch::{repin_hint, Artifact, DownloadError, Downloader, Expect, Fetcher, RetryPolicy};
+use super::fetch::{
+    repin_hint, Artifact, DownloadError, Downloader, Expect, Fetcher, Politeness, RetryPolicy,
+};
 use super::lock::{Lock, LockEntry};
 use super::manifest::{now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped};
 use super::registry::{
@@ -417,7 +419,8 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         profile: opts.profile,
         update_lock: opts.update_lock,
         out: opts.out.clone(),
-        downloader: Downloader::new(fetcher, opts.cache.clone(), opts.retry, opts.profile),
+        downloader: Downloader::new(fetcher, opts.cache.clone(), opts.retry, opts.profile)
+            .with_politeness(Politeness::from_specs(&registry.hosts)),
         lock: &lock_snapshot,
         recorded: Vec::new(),
         used: BTreeSet::new(),

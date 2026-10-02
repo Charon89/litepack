@@ -1,13 +1,15 @@
 //! Downloading: the [`Fetcher`] abstraction, the HTTPS implementation, and the verified cache.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::lock::LockEntry;
-use super::registry::Profile;
+use super::registry::{HostSpec, Profile};
 
 /// Why opening or reading a URL failed.
 #[derive(Debug)]
@@ -25,8 +27,10 @@ pub enum FetchError {
 pub trait Fetcher: fmt::Debug {
     /// Open a stream of the response body, starting at byte `offset` if the server supports it
     /// (`offset == 0` for a fresh download). [`Opened::start`] says where the stream really
-    /// starts, so a server that ignores the range simply yields `start == 0`.
-    fn open(&self, url: &str, offset: u64) -> Result<Opened, FetchError>;
+    /// starts, so a server that ignores the range simply yields `start == 0`. `if_range` is the
+    /// validator ([`Opened::validator`] of the first response) that must still match for the
+    /// server to honour the range; otherwise it sends the whole body again.
+    fn open(&self, url: &str, offset: u64, if_range: Option<&str>) -> Result<Opened, FetchError>;
 }
 
 /// An open response body.
@@ -34,6 +38,8 @@ pub struct Opened {
     pub body: Box<dyn Read>,
     /// Byte offset of the first byte of `body` within the resource.
     pub start: u64,
+    /// Strong `ETag`, else `Last-Modified`, of this response (usable as `If-Range`).
+    pub validator: Option<String>,
 }
 
 /// In-process HTTPS client (no external curl).
@@ -45,7 +51,7 @@ pub struct HttpFetcher {
 /// User-Agent sent on every request.
 pub fn user_agent() -> String {
     format!(
-        "lpk-bench/{} (+https://github.com/Charon89/litepack)",
+        "lpk-bench/{} (https://github.com/Charon89/litepack; corpus-builder bot)",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -67,10 +73,13 @@ impl HttpFetcher {
 }
 
 impl Fetcher for HttpFetcher {
-    fn open(&self, url: &str, offset: u64) -> Result<Opened, FetchError> {
+    fn open(&self, url: &str, offset: u64, if_range: Option<&str>) -> Result<Opened, FetchError> {
         let mut req = self.client.get(url);
         if offset > 0 {
             req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+            if let Some(v) = if_range {
+                req = req.header(reqwest::header::IF_RANGE, v);
+            }
         }
         let resp = req.send().map_err(|e| {
             if e.is_builder() || e.is_redirect() {
@@ -83,32 +92,46 @@ impl Fetcher for HttpFetcher {
             }
         })?;
         let status = resp.status();
+        let validator = response_validator(
+            resp.headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get(reqwest::header::LAST_MODIFIED)
+                .and_then(|v| v.to_str().ok()),
+        );
         if status.as_u16() == 206 {
-            let from = resp
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("bytes "))
-                .and_then(|v| v.split('-').next())
-                .and_then(|v| v.trim().parse::<u64>().ok());
-            return match from {
-                Some(start) if start == offset => Ok(Opened {
+            let ok = offset > 0
+                && resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| is_exact_tail(v, offset));
+            if ok {
+                return Ok(Opened {
                     body: Box::new(resp),
-                    start,
-                }),
-                _ => Err(FetchError::Permanent(
-                    "server sent an unexpected Content-Range".to_string(),
-                )),
-            };
+                    start: offset,
+                    validator,
+                });
+            }
+            drop(resp);
+            if offset > 0 {
+                // A range that is not exactly the rest of the file: start over.
+                return self.open(url, 0, None);
+            }
+            return Err(FetchError::Permanent(
+                "server sent a partial response to a plain request".to_string(),
+            ));
         }
         if status.as_u16() == 416 && offset > 0 {
             // The partial file is not usable for this resource; start over.
-            return self.open(url, 0);
+            return self.open(url, 0, None);
         }
         if status.is_success() {
             return Ok(Opened {
                 body: Box::new(resp),
                 start: 0,
+                validator,
             });
         }
         if status.as_u16() == 429 || status.is_server_error() {
@@ -124,6 +147,119 @@ impl Fetcher for HttpFetcher {
             });
         }
         Err(FetchError::Permanent(format!("HTTP {status}")))
+    }
+}
+
+/// Parse `bytes <start>-<end>/<total>`.
+pub fn parse_content_range(v: &str) -> Option<(u64, u64, Option<u64>)> {
+    let rest = v.trim().strip_prefix("bytes ")?;
+    let (range, total) = rest.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let total = match total.trim() {
+        "*" => None,
+        t => Some(t.parse().ok()?),
+    };
+    Some((start.trim().parse().ok()?, end.trim().parse().ok()?, total))
+}
+
+/// True when a `Content-Range` is exactly the rest of the file from `offset`: it starts at
+/// `offset`, and ends at the last byte of a known total.
+pub fn is_exact_tail(v: &str, offset: u64) -> bool {
+    matches!(
+        parse_content_range(v),
+        Some((start, end, Some(total))) if start == offset && end.checked_add(1) == Some(total)
+    )
+}
+
+/// Validator for `If-Range`: a strong `ETag` if present (weak ones cannot be used), else
+/// `Last-Modified`.
+pub fn response_validator(etag: Option<&str>, last_modified: Option<&str>) -> Option<String> {
+    etag.filter(|e| !e.trim_start().starts_with("W/"))
+        .or(last_modified)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Politeness limits for one host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostPolicy {
+    /// Minimum time between the end of one request and the start of the next.
+    pub min_interval: Duration,
+    /// Throughput cap in bytes per second.
+    pub max_bytes_per_s: Option<u64>,
+}
+
+/// Per-host request pacing, applied by the [`Downloader`] to every request it makes.
+#[derive(Debug, Default)]
+pub struct Politeness {
+    hosts: BTreeMap<String, HostPolicy>,
+    last: RefCell<BTreeMap<String, Instant>>,
+}
+
+/// Lower-case host of an `https://` URL.
+pub fn host_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+impl Politeness {
+    pub fn new(hosts: BTreeMap<String, HostPolicy>) -> Politeness {
+        Politeness {
+            hosts,
+            last: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// Build from the registry's `[[host]]` tables.
+    pub fn from_specs(specs: &[HostSpec]) -> Politeness {
+        Politeness::new(
+            specs
+                .iter()
+                .map(|h| {
+                    (
+                        h.name.clone(),
+                        HostPolicy {
+                            min_interval: Duration::from_millis(h.min_interval_ms),
+                            max_bytes_per_s: h.max_mbit_per_s.map(|m| m.saturating_mul(125_000)),
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn policy(&self, url: &str) -> Option<(String, HostPolicy)> {
+        let host = host_of(url)?;
+        let p = *self.hosts.get(&host)?;
+        Some((host, p))
+    }
+
+    /// Block until `min_interval` has passed since the previous request to this host ended.
+    pub fn wait(&self, url: &str) {
+        let Some((host, p)) = self.policy(url) else {
+            return;
+        };
+        let last = self.last.borrow().get(&host).copied();
+        if let Some(last) = last {
+            let since = last.elapsed();
+            if since < p.min_interval {
+                std::thread::sleep(p.min_interval - since);
+            }
+        }
+        self.last.borrow_mut().insert(host, Instant::now());
+    }
+
+    /// Record the end of a request (success or failure).
+    pub fn finish(&self, url: &str) {
+        if let Some((host, _)) = self.policy(url) {
+            self.last.borrow_mut().insert(host, Instant::now());
+        }
+    }
+
+    fn cap(&self, url: &str) -> Option<u64> {
+        self.policy(url).and_then(|(_, p)| p.max_bytes_per_s)
     }
 }
 
@@ -229,6 +365,7 @@ pub struct Downloader<'a> {
     cache_dir: PathBuf,
     retry: RetryPolicy,
     profile: Profile,
+    politeness: Politeness,
 }
 
 impl<'a> Downloader<'a> {
@@ -243,7 +380,14 @@ impl<'a> Downloader<'a> {
             cache_dir,
             retry,
             profile,
+            politeness: Politeness::default(),
         }
+    }
+
+    /// Apply per-host pacing to every request this downloader makes.
+    pub fn with_politeness(mut self, politeness: Politeness) -> Self {
+        self.politeness = politeness;
+        self
     }
 
     /// Cache location for `(source, url)`.
@@ -293,7 +437,7 @@ impl<'a> Downloader<'a> {
         }
 
         let part = part_path(&path);
-        let (bytes, blake3) = self.download(source, url, &part)?;
+        let (bytes, blake3) = self.download(source, url, &part, pinned.is_some())?;
         if let Some((pin_bytes, pin_hash)) = pinned {
             if bytes != pin_bytes || blake3 != pin_hash {
                 let _ = std::fs::remove_file(&part);
@@ -318,13 +462,18 @@ impl<'a> Downloader<'a> {
         source: &str,
         url: &str,
         part: &Path,
+        pinned: bool,
     ) -> Result<(u64, String), DownloadError> {
         // A leftover from an earlier run is never resumed; within this call a failed attempt
         // keeps its partial file and the next attempt continues from it.
         let _ = std::fs::remove_file(part);
         let mut attempt = 1;
+        let mut validator: Option<String> = None;
         loop {
-            match self.try_once(url, part) {
+            self.politeness.wait(url);
+            let outcome = self.try_once(url, part, &mut validator, pinned);
+            self.politeness.finish(url);
+            match outcome {
                 Ok(r) => return Ok(r),
                 Err(AttemptError::Local(e)) => {
                     return Err(DownloadError::Io(format!("source `{source}`: {e}")))
@@ -355,13 +504,50 @@ impl<'a> Downloader<'a> {
         }
     }
 
-    fn try_once(&self, url: &str, part: &Path) -> Result<(u64, String), AttemptError> {
+    /// One attempt. `validator` is the `ETag`/`Last-Modified` of the first response; a partial
+    /// file is resumed (with `If-Range`) only when there is one, or when the download is pinned
+    /// (the final hash is then checked anyway); otherwise the attempt restarts from zero.
+    fn try_once(
+        &self,
+        url: &str,
+        part: &Path,
+        validator: &mut Option<String>,
+        pinned: bool,
+    ) -> Result<(u64, String), AttemptError> {
         let have = std::fs::metadata(part).map_or(0, |m| m.len());
-        let Opened { mut body, start } =
-            self.fetcher.open(url, have).map_err(AttemptError::Fetch)?;
+        let offset = if have > 0 && validator.is_none() && !pinned {
+            0
+        } else {
+            have
+        };
+        let if_range = if offset > 0 {
+            validator.as_deref()
+        } else {
+            None
+        };
+        let opened = self
+            .fetcher
+            .open(url, offset, if_range)
+            .map_err(AttemptError::Fetch)?;
+        let Opened {
+            mut body,
+            start,
+            validator: seen,
+        } = opened;
+        if start == 0 {
+            *validator = seen;
+        } else if start != offset {
+            return Err(AttemptError::Fetch(FetchError::Transient {
+                message: format!("server resumed at {start}, expected {offset}"),
+                retry_after: None,
+            }));
+        }
+        let began = Instant::now();
+        let cap = self.politeness.cap(url);
+        let mut read_now = 0u64;
         let mut hasher = blake3::Hasher::new();
         let mut total = 0u64;
-        let mut out = if have > 0 && start == have {
+        let mut out = if offset > 0 && start == offset {
             // Resume: re-hash what is already on disk, then append.
             let mut existing = File::open(part).map_err(AttemptError::Local)?;
             total = std::io::copy(&mut existing, &mut hasher).map_err(AttemptError::Local)?;
@@ -395,6 +581,13 @@ impl<'a> Downloader<'a> {
             out.write_all(chunk).map_err(AttemptError::Local)?;
             hasher.update(chunk);
             total += n as u64;
+            read_now += n as u64;
+            if let Some(cap) = cap {
+                let due = Duration::from_secs_f64(read_now as f64 / cap as f64);
+                if let Some(wait) = due.checked_sub(began.elapsed()) {
+                    std::thread::sleep(wait);
+                }
+            }
         }
         out.flush().map_err(AttemptError::Local)?;
         Ok((total, hasher.finalize().to_hex().to_string()))
@@ -425,6 +618,12 @@ pub mod fake {
         pub ignore_range: Cell<bool>,
         /// `offset` argument of every `open` call.
         pub offsets: RefCell<Vec<u64>>,
+        /// Validator (`ETag`) the pretend server reports.
+        pub validator: RefCell<Option<String>>,
+        /// `if_range` argument of every `open` call.
+        pub if_ranges: RefCell<Vec<Option<String>>>,
+        /// Change the validator when a cut-off response is produced (the file "changed").
+        pub rotate_on_cut: Cell<bool>,
     }
 
     /// Yields `data`, then fails (a connection dropped mid-body).
@@ -454,9 +653,17 @@ pub mod fake {
     }
 
     impl Fetcher for FakeFetcher {
-        fn open(&self, url: &str, offset: u64) -> Result<Opened, FetchError> {
+        fn open(
+            &self,
+            url: &str,
+            offset: u64,
+            if_range: Option<&str>,
+        ) -> Result<Opened, FetchError> {
             self.calls.borrow_mut().push(url.to_string());
             self.offsets.borrow_mut().push(offset);
+            self.if_ranges
+                .borrow_mut()
+                .push(if_range.map(str::to_string));
             if self.fail_first.get() > 0 {
                 self.fail_first.set(self.fail_first.get() - 1);
                 return Err(FetchError::Transient {
@@ -468,18 +675,29 @@ pub mod fake {
             let Some(bytes) = files.get(url) else {
                 return Err(FetchError::Permanent("HTTP 404".into()));
             };
-            let start = if self.ignore_range.get() { 0 } else { offset };
+            let current = self.validator.borrow().clone();
+            let changed = if_range.is_some() && current.as_deref() != if_range;
+            let start = if self.ignore_range.get() || changed {
+                0
+            } else {
+                offset
+            };
             let mut data = bytes[start as usize..].to_vec();
             if let Some(n) = self.cut_next_after.take() {
                 data.truncate(n);
+                if self.rotate_on_cut.get() {
+                    *self.validator.borrow_mut() = Some("\"v2\"".into());
+                }
                 return Ok(Opened {
                     body: Box::new(DropAfter(std::io::Cursor::new(data))),
                     start,
+                    validator: current,
                 });
             }
             Ok(Opened {
                 body: Box::new(std::io::Cursor::new(data)),
                 start,
+                validator: current,
             })
         }
     }
@@ -517,7 +735,8 @@ mod tests {
     fn user_agent_format() {
         let ua = user_agent();
         assert!(ua.starts_with("lpk-bench/"));
-        assert!(ua.ends_with(" (+https://github.com/Charon89/litepack)"));
+        assert!(ua.ends_with(" (https://github.com/Charon89/litepack; corpus-builder bot)"));
+        assert!(ua.contains("bot"));
     }
 
     #[test]
@@ -696,5 +915,115 @@ mod tests {
             p.delay(1, Some(Duration::from_secs(700))),
             Duration::from_secs(10)
         );
+    }
+
+    #[test]
+    fn content_range_must_be_exactly_the_rest_of_the_file() {
+        assert_eq!(
+            parse_content_range("bytes 100-199/200"),
+            Some((100, 199, Some(200)))
+        );
+        assert_eq!(parse_content_range("bytes 5-9/*"), Some((5, 9, None)));
+        assert_eq!(parse_content_range("items 1-2/3"), None);
+        assert!(is_exact_tail("bytes 100-199/200", 100));
+        assert!(!is_exact_tail("bytes 100-150/200", 100), "ends early");
+        assert!(!is_exact_tail("bytes 90-199/200", 100), "wrong start");
+        assert!(!is_exact_tail("bytes 100-199/*", 100), "unknown total");
+        assert!(!is_exact_tail("garbage", 100));
+        assert_eq!(
+            response_validator(Some("W/\"weak\""), Some("Mon, 01 Jan 2024 00:00:00 GMT"))
+                .as_deref(),
+            Some("Mon, 01 Jan 2024 00:00:00 GMT")
+        );
+        assert_eq!(
+            response_validator(Some("\"abc\""), None).as_deref(),
+            Some("\"abc\"")
+        );
+        assert_eq!(response_validator(None, None), None);
+    }
+
+    #[test]
+    fn unpinned_download_resumes_only_with_a_validator() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(5000).collect();
+        // No validator: restart from zero instead of resuming an unverifiable partial file.
+        let dir = tempfile::tempdir().expect("tmp");
+        let f = FakeFetcher::with(URL, data.clone());
+        f.cut_next_after.set(Some(1234));
+        let a = dl(&f, dir.path())
+            .obtain("s", URL, Expect::Unpinned)
+            .expect("obtain");
+        assert_eq!(*f.offsets.borrow(), [0, 0]);
+        assert_eq!(std::fs::read(&a.path).expect("read"), data);
+        // With a validator: resume, sending it as If-Range.
+        let dir = tempfile::tempdir().expect("tmp");
+        let f = FakeFetcher::with(URL, data.clone());
+        *f.validator.borrow_mut() = Some("\"v1\"".into());
+        f.cut_next_after.set(Some(1234));
+        let a = dl(&f, dir.path())
+            .obtain("s", URL, Expect::Unpinned)
+            .expect("obtain");
+        assert_eq!(*f.offsets.borrow(), [0, 1234]);
+        assert_eq!(f.if_ranges.borrow()[1].as_deref(), Some("\"v1\""));
+        assert_eq!(std::fs::read(&a.path).expect("read"), data);
+        // The resource changes between attempts: the server ignores the stale If-Range and
+        // sends everything, which replaces the partial file instead of being appended to it.
+        let dir = tempfile::tempdir().expect("tmp");
+        let f = FakeFetcher::with(URL, data.clone());
+        *f.validator.borrow_mut() = Some("\"v1\"".into());
+        f.cut_next_after.set(Some(700));
+        f.rotate_on_cut.set(true);
+        let a = dl(&f, dir.path())
+            .obtain("s", URL, Expect::Unpinned)
+            .expect("obtain");
+        assert_eq!(
+            *f.offsets.borrow(),
+            [0, 700],
+            "resume attempted, then served in full"
+        );
+        assert_eq!(
+            std::fs::read(&a.path).expect("read"),
+            data,
+            "no spliced bytes"
+        );
+    }
+
+    #[test]
+    fn per_host_interval_and_throughput_cap_are_enforced() {
+        let hosts = BTreeMap::from([(
+            "slow.example".to_string(),
+            HostPolicy {
+                min_interval: Duration::from_millis(120),
+                max_bytes_per_s: Some(100_000),
+            },
+        )]);
+        let dir = tempfile::tempdir().expect("tmp");
+        let (u1, u2) = ("https://slow.example/a", "https://slow.example/b");
+        let f = FakeFetcher::with(u1, vec![1u8; 20_000]);
+        f.files.borrow_mut().insert(u2.into(), vec![2u8; 20_000]);
+        f.files
+            .borrow_mut()
+            .insert("https://other.example/c".into(), vec![3u8; 10]);
+        let d = dl(&f, dir.path()).with_politeness(Politeness::new(hosts));
+        let t = Instant::now();
+        d.obtain("s", u1, Expect::Unpinned).expect("a");
+        assert!(
+            t.elapsed() >= Duration::from_millis(200),
+            "20 kB at 100 kB/s"
+        );
+        let t = Instant::now();
+        d.obtain("s", "https://other.example/c", Expect::Unpinned)
+            .expect("c");
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "unlisted hosts are not paced"
+        );
+        let t = Instant::now();
+        d.obtain("s2", u2, Expect::Unpinned).expect("b");
+        assert!(t.elapsed() >= Duration::from_millis(200));
+        assert_eq!(
+            host_of("https://User@Slow.Example:8443/x?y"),
+            Some("slow.example".into())
+        );
+        assert_eq!(host_of("http://nope/"), None);
     }
 }
