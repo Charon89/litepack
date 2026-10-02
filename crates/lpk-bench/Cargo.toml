@@ -36,6 +36,11 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 jsonschema = { version = "0.58.4", default-features = false }
 regex = "1.13.1"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+zstd = { version = "0.14.0", features = ["zstdmt"] }
+liblzma = { version = "0.4.8", features = ["static", "parallel"] }
+lepton_jpeg = "0.5.8"
+preflate-rs = "0.7.6"
+fastcdc = "5.0.0"
 
 [lints]
 workspace = true
@@ -43,3 +48,6 @@ workspace = true
 [dev-dependencies]
 tempfile = "3.27.0"
 sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["compress"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
