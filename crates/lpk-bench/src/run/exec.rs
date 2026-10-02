@@ -760,7 +760,24 @@ fn one_repeat(
     let archive_name = format!("a{}", tool.extension);
     let archive = ctx.work.join(&archive_name);
     let archive_rel = ctx.rel(&archive_name);
-    let outdir_rel = ctx.rel("x");
+    let mut outdir_rel = ctx.rel("x");
+    // Some tools mishandle a relative destination that climbs out of the working directory
+    // (`extract_in_scratch`): they extract with the scratch directory as working directory.
+    let scratch_ctx = (tool.extract_in_scratch && tool.mode == Mode::Directory).then(|| Ctx {
+        cfg: ctx.cfg,
+        corpus: ctx.corpus,
+        class: ctx.class,
+        entry: ctx.entry,
+        cwd: ctx.work.clone(),
+        work: ctx.work.clone(),
+        work_rel: ".".to_string(),
+        tar: ctx.tar,
+    });
+    let mut extract_archive_rel = archive_rel.clone();
+    if scratch_ctx.is_some() {
+        outdir_rel = "x".to_string();
+        extract_archive_rel = archive_name.clone();
+    }
 
     if record.compress.is_empty() {
         let threads = thread_args(tool, ctx.cfg.threads);
@@ -779,7 +796,7 @@ fn one_repeat(
         };
         record.compress = expand(template, &v);
         let v = Vars {
-            archive: &archive_rel,
+            archive: &extract_archive_rel,
             input: ctx.class,
             outdir: &outdir_rel,
             list: "",
@@ -790,7 +807,15 @@ fn one_repeat(
     }
 
     let (compress_m, archive_bytes) = compress(ctx, tool, exe, setting, &archive, &archive_rel)?;
-    let extract_m = extract(ctx, tool, exe, setting, &archive, &archive_rel, &outdir_rel)?;
+    let extract_m = extract(
+        scratch_ctx.as_ref().unwrap_or(ctx),
+        tool,
+        exe,
+        setting,
+        &archive,
+        &extract_archive_rel,
+        &outdir_rel,
+    )?;
 
     let base =
         if ctx.corpus.is_private() || tool.layout == Layout::Flat || tool.mode == Mode::TarStream {
@@ -1024,7 +1049,9 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
         render(&ToolsFile::from_discovered(discovered)),
     )?;
 
-    let tmp_run = absolute(&cfg.tmp_root)?.join(&name);
+    // Not named after the results directory: the recorded arguments contain this path and a host
+    // name would end up in them.
+    let tmp_run = absolute(&cfg.tmp_root)?.join(format!("run{}", std::process::id()));
     std::fs::create_dir_all(&tmp_run).with_context(|| format!("creating {}", tmp_run.display()))?;
     let _guard = TmpGuard(tmp_run.clone());
 

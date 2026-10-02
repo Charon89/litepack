@@ -101,6 +101,10 @@ pub struct Tool {
     pub create_list: Option<Vec<String>>,
     #[serde(default)]
     pub extract: Vec<String>,
+    /// Directory mode: extract with the scratch directory as working directory, `{archive}` and
+    /// `{outdir}` relative to it (for tools that mishandle a destination climbing out of it).
+    #[serde(default)]
+    pub extract_in_scratch: bool,
     #[serde(default)]
     pub threads: Vec<String>,
     /// The thread count changes the archive size, not only the speed.

@@ -28,6 +28,11 @@
 #                   named like `{input}`). Default `flat`.
 #   create/extract  argument templates. Placeholders: {archive} {input} {outdir} {settings}
 #                   {threads}; `{settings}` expands to the setting's compress or extract arguments
+#   extract_in_scratch
+#                   true: extraction runs with the scratch directory as working directory and
+#                   `{archive}`, `{outdir}` relative to it, because the tool silently extracts
+#                   nothing when `-to` climbs two or more directories (zpaqfranz). Creation
+#                   still follows the working-directory rule below.
 #   create_list     optional, directory mode: the create template for a private corpus, where the
 #                   runner gives the tool a list file of relative paths (placeholder `{list}`)
 #                   and runs it in the corpus root. Tools without it are skipped for private
@@ -197,8 +202,9 @@ version = { args = ["-h"], pattern = 'zpaqfranz v?(\d+(?:\.\d+)*)' }
 extension = ".zpaq"
 mode = "directory"
 layout = "nested"
+extract_in_scratch = true
 create = ["a", "{archive}", "{input}", "{settings}", "{threads}", "-noeta"]
-extract = ["x", "{archive}", "-to", "{outdir}", "{threads}", "-noeta"]
+extract = ["x", "{archive}", "-to", "{outdir}/", "{threads}", "-noeta"]
 threads = ["-t{n}"]
 ratio_depends_on_threads = false
 licence = "MIT"
