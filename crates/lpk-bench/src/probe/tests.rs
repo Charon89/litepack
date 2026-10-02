@@ -311,17 +311,22 @@ fn probe_all_continues_after_a_failing_probe() {
     let corpus = tiny_corpus(tmp.path(), false);
     let cfg = config(corpus, tmp.path().join("results"), &NAMES);
     let out = execute(&cfg).expect("execute");
-    assert_eq!(
-        out.written,
-        ["dedup", "weights"],
-        "dedup and weights ran after jpeg and deflate failed"
-    );
+    // Independent of which probes are still stubs: every name either wrote its file or
+    // failed as a stub, and the run went on after the first failure.
     let failed: Vec<&str> = out.failed.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(failed, ["jpeg", "deflate", "text", "entropy-gate"]);
-    assert!(out.failed[0].1.contains("not implemented yet"));
+    let mut covered: Vec<&str> = out.written.iter().map(String::as_str).collect();
+    covered.extend(failed.iter().copied());
+    covered.sort_unstable();
+    let mut all: Vec<&str> = NAMES.to_vec();
+    all.sort_unstable();
+    assert_eq!(covered, all, "every probe either wrote its file or failed");
+    assert!(out.written.iter().any(|n| n == "weights"), "weights ran");
+    for (name, reason) in &out.failed {
+        assert!(reason.contains("not implemented yet"), "{name}: {reason}");
+        assert!(!out.results_dir.join(format!("probe-{name}.json")).exists());
+    }
     assert_eq!(out.problems, 0, "the written files validate");
     assert!(out.results_dir.join("probe-weights.json").is_file());
-    assert!(!out.results_dir.join("probe-jpeg.json").exists());
 }
 
 #[test]
