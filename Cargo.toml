@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lpk-bench"]
+members = ["crates/lpk-bench", "crates/lpk-procstat-sys"]
 
 [workspace.package]
 version = "0.0.1"
