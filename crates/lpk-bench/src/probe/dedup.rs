@@ -32,8 +32,8 @@ use lpk_procstat_sys as ps;
 use serde::{Deserialize, Serialize};
 
 use super::codec::{zstd_size, ZstdSettings};
-use super::tarball::tar_bytes;
-use super::tool::{run_tool, tool_version, ToolSpec};
+use super::tarball::tar_bytes_relative;
+use super::tool::{flush_file, run_tool, tool_version, ToolSpec};
 use super::{mbps, md_header, md_table, pct, timed, Ctx, Envelope, Output};
 
 pub const NAME: &str = "dedup";
@@ -120,6 +120,14 @@ pub struct Delta {
     pub new_tar_bytes: u64,
     /// Zstd level 19 (library defaults, one thread) of the new version's tar alone.
     pub new_alone_zstd19_bytes: u64,
+    /// Zstd level 19 of the same tar with the window log below and long-distance matching, as the
+    /// patch tools use it (one thread).
+    pub new_alone_zstd19_long_bytes: u64,
+    /// The `--long` window log used for the patch and for the line above.
+    pub window_log: u32,
+    /// `2^window_log` is at least the larger tar; `false` when a tar exceeds what the command
+    /// line's largest window (log 31) can cover.
+    pub window_covers_input: bool,
     pub tools: Vec<ToolRun>,
 }
 
@@ -311,6 +319,54 @@ pub fn long_window_log(old: u64, new: u64) -> u32 {
     n
 }
 
+/// Whether a window of `2^window_log` bytes covers the larger of the two inputs.
+pub fn window_covers(window_log: u32, old: u64, new: u64) -> bool {
+    window_log < 64 && (1u64 << window_log) >= old.max(new)
+}
+
+/// Order of folder names with runs of digits compared as numbers (`v2` before `v10`); ties and
+/// equal numbers fall back to the plain text order.
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parts(s: &str) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        for c in s.chars() {
+            let digit = c.is_ascii_digit();
+            match out.last_mut() {
+                Some((d, run)) if *d == digit => run.push(c),
+                _ => out.push((digit, c.to_string())),
+            }
+        }
+        out
+    }
+    let (pa, pb) = (parts(a), parts(b));
+    for (x, y) in pa.iter().zip(pb.iter()) {
+        let ord = if x.0 && y.0 {
+            let (tx, ty) = (x.1.trim_start_matches('0'), y.1.trim_start_matches('0'));
+            tx.len().cmp(&ty.len()).then_with(|| tx.cmp(ty))
+        } else {
+            x.1.cmp(&y.1)
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    pa.len().cmp(&pb.len()).then_with(|| a.cmp(b))
+}
+
+/// The `X.Y.Z` token of a `zstd --version` line, for example `1.5.7`.
+pub fn zstd_cli_version(line: &str) -> Option<String> {
+    line.split(|c: char| c.is_whitespace() || c == ',')
+        .map(|t| t.trim_start_matches('v'))
+        .find(|t| {
+            let parts: Vec<&str> = t.split('.').collect();
+            parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .map(str::to_string)
+}
+
 pub fn zstd_create_args(old: &str, new: &str, patch: &str, window_log: u32) -> Vec<String> {
     [
         "-19".to_string(),
@@ -446,7 +502,11 @@ fn patch_round(
             &what,
         )
     };
+    // No stale output may stand in for this step's; the inputs are on disk before the timed step.
     let _ = std::fs::remove_file(work.join(out_file));
+    let _ = std::fs::remove_file(work.join(patch_file));
+    flush_file(&work.join("old.tar"));
+    flush_file(&work.join("new.tar"));
     let m = match step(create.0, &create.1, format!("{tool} create")) {
         Ok(m) => m,
         Err(f) => return fail(base, f.reason),
@@ -456,6 +516,7 @@ fn patch_round(
         Err(_) => return fail(base, format!("{tool} create: no patch file was written")),
     };
     let create_seconds = m.wall.as_secs_f64();
+    flush_file(&work.join(patch_file));
     let m = match step(apply.0, &apply.1, format!("{tool} apply")) {
         Ok(m) => m,
         Err(f) => return fail(base, f.reason),
@@ -492,6 +553,17 @@ pub fn delta(
     std::fs::write(work.join("old.tar"), old)?;
     std::fs::write(work.join("new.tar"), new)?;
     let alone = zstd_size(new, &ZstdSettings::level19())?;
+    let wl = long_window_log(old.len() as u64, new.len() as u64);
+    let covers = window_covers(wl, old.len() as u64, new.len() as u64);
+    let alone_long = zstd_size(
+        new,
+        &ZstdSettings {
+            level: 19,
+            window_log: Some(wl),
+            long_distance_matching: true,
+            threads: 1,
+        },
+    )?;
     let mut runs = Vec::new();
     let skipped = |tool: &str, settings: &str, why: &str| ToolRun {
         tool: tool.to_string(),
@@ -505,7 +577,6 @@ pub fn delta(
     };
     match &tools.zstd {
         Ok(exe) => {
-            let wl = long_window_log(old.len() as u64, new.len() as u64);
             runs.push(patch_round(
                 "zstd --patch-from",
                 format!("level 19, --long={wl}, 1 thread"),
@@ -546,6 +617,9 @@ pub fn delta(
         old_tar_bytes: old.len() as u64,
         new_tar_bytes: new.len() as u64,
         new_alone_zstd19_bytes: alone,
+        new_alone_zstd19_long_bytes: alone_long,
+        window_log: wl,
+        window_covers_input: covers,
         tools: runs,
     })
 }
@@ -580,12 +654,28 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
             Ok(())
         };
         if is_versions {
-            for g in ctx.groups(class, 1) {
-                let folder = g
-                    .files
-                    .first()
-                    .and_then(|f| version_folder(&ctx.rel_path(class, f)));
-                acc.start(&g.label, folder);
+            // Natural order of the folder names; a private corpus is then labelled by position.
+            let mut groups: Vec<(Option<String>, super::Group<'_>)> = ctx
+                .groups(class, 1)
+                .into_iter()
+                .map(|g| {
+                    let folder = g
+                        .files
+                        .first()
+                        .and_then(|f| version_folder(&ctx.rel_path(class, f)));
+                    (folder, g)
+                })
+                .collect();
+            groups.sort_by(|a, b| {
+                natural_cmp(a.0.as_deref().unwrap_or(""), b.0.as_deref().unwrap_or(""))
+            });
+            for (n, (folder, g)) in groups.into_iter().enumerate() {
+                let label = if ctx.private() {
+                    format!("group-{n}")
+                } else {
+                    g.label.clone()
+                };
+                acc.start(&label, folder);
                 for f in &g.files {
                     one(f, Some(&mut acc))?;
                 }
@@ -612,7 +702,10 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     if let Ok(exe) = &tools.zstd {
         let work = ctx.scratch_dir("version-probe")?;
         if let Some(v) = tool_version(exe, &["--version"], &work) {
-            libs.push(("zstd (command line)".to_string(), v));
+            libs.push((
+                "zstd (command line)".to_string(),
+                zstd_cli_version(&v).unwrap_or(v),
+            ));
         }
     }
     if let Err(why) = &tools.zstd {
@@ -631,7 +724,7 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
             prev_tar = None;
             continue;
         };
-        let tar = tar_bytes(ctx, VERSIONS_CLASS, Some(&folder))?;
+        let tar = tar_bytes_relative(ctx, VERSIONS_CLASS, &folder)?;
         if let Some(old) = &prev_tar {
             let work = ctx.scratch_dir("delta")?;
             versions[i].delta = Some(
@@ -724,8 +817,8 @@ pub fn render(e: &Envelope<Data>) -> String {
         return s;
     }
     s.push_str(&format!(
-        "Versions of `{VERSIONS_CLASS}` (top-level folders, in manifest order): unique chunk \
-         bytes after adding each version in turn, and zstd level 19 (library defaults) of the \
+        "Versions of `{VERSIONS_CLASS}` (top-level folders, in natural order: runs of digits \
+         compare as numbers, so v2 comes before v10): unique chunk bytes after adding each version in turn, and zstd level 19 (library defaults) of the \
          chunks that are new in that version.\n\n"
     ));
     let rows: Vec<Vec<String>> = d
@@ -760,8 +853,10 @@ pub fn render(e: &Envelope<Data>) -> String {
 
     s.push_str(
         "Delta of each version against the one before, on the in-process deterministic tar of the \
-         version folder. Compared against zstd level 19 of the new tar alone and against zstd \
-         level 19 of the new unique chunks (previous table). Every patch is applied and the \
+         version folder (entries named relative to the folder, so identical content gives \
+         identical bytes). Compared against zstd level 19 of the new tar alone, with library \
+         defaults and again with the patch's window log and long-distance matching, and against \
+         zstd level 19 of the new unique chunks (previous table). Every patch is applied and the \
          result compared with the new tar byte for byte; seconds are the wall time of the \
          program run, with the program's own start-up.\n\n",
     );
@@ -769,12 +864,15 @@ pub fn render(e: &Envelope<Data>) -> String {
     for (i, v) in d.versions.iter().enumerate() {
         let Some(dl) = &v.delta else { continue };
         for t in &dl.tools {
-            let status = match (&t.skipped, &t.failed) {
+            let mut status = match (&t.skipped, &t.failed) {
                 (Some(why), _) => format!("skipped: {why}"),
                 (_, Some(why)) => format!("failed: {why}"),
                 _ if t.verified => "verified".to_string(),
                 _ => "not verified".to_string(),
             };
+            if !dl.window_covers_input {
+                status.push_str("; the window did not cover the input");
+            }
             rows.push(vec![
                 format!("{} vs {}", i + 1, i),
                 t.tool.clone(),
@@ -782,10 +880,12 @@ pub fn render(e: &Envelope<Data>) -> String {
                 dl.old_tar_bytes.to_string(),
                 dl.new_tar_bytes.to_string(),
                 dl.new_alone_zstd19_bytes.to_string(),
+                dl.new_alone_zstd19_long_bytes.to_string(),
                 v.new_unique_chunks_zstd19_bytes.to_string(),
                 t.patch_bytes.map_or("n/a".to_string(), |b| b.to_string()),
-                t.patch_bytes
-                    .map_or("n/a".to_string(), |b| pct(b, dl.new_alone_zstd19_bytes)),
+                t.patch_bytes.map_or("n/a".to_string(), |b| {
+                    pct(b, dl.new_alone_zstd19_long_bytes)
+                }),
                 t.create_seconds
                     .map_or("n/a".to_string(), |x| format!("{x:.3}")),
                 t.apply_seconds
@@ -802,9 +902,10 @@ pub fn render(e: &Envelope<Data>) -> String {
             "old tar bytes",
             "new tar bytes",
             "new alone, zstd 19 bytes",
+            "new alone, zstd 19 long bytes",
             "new unique chunks, zstd 19 bytes",
             "patch bytes",
-            "patch vs new alone",
+            "patch vs new alone (long)",
             "create s",
             "apply s",
             "status",
@@ -955,14 +1056,46 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                 "{at}/new_unique_chunk_bytes: more new bytes than the version has"
             ));
         }
+        if e.corpus.private && v.label != format!("group-{i}") {
+            p.push(format!(
+                "{at}/label: a private corpus labels versions `group-<n>`, found `{}`",
+                v.label
+            ));
+        }
+        if v.new_unique_chunk_bytes > 0 && v.new_unique_chunks_zstd19_bytes == 0 {
+            p.push(format!(
+                "{at}/new_unique_chunks_zstd19_bytes: zero for a version with new bytes"
+            ));
+        }
         match (&v.delta, i) {
             (Some(_), 0) => p.push(format!("{at}/delta: the first version has no predecessor")),
-            (Some(dl), _) => delta_rules(dl, &format!("{at}/delta"), &mut p),
+            (Some(dl), _) => {
+                delta_rules(dl, &format!("{at}/delta"), &mut p);
+                if let Some(prev) = i.checked_sub(1).and_then(|j| d.versions[j].delta.as_ref()) {
+                    if dl.old_tar_bytes != prev.new_tar_bytes {
+                        p.push(format!(
+                            "{at}/delta/old_tar_bytes: differs from the previous version's \
+                             new_tar_bytes"
+                        ));
+                    }
+                }
+            }
             (None, _) => {}
         }
     }
+    if d.versions.is_empty() && class_row.is_some_and(|r| r.files > 0) {
+        p.push(format!(
+            "/data/versions: empty although class `{VERSIONS_CLASS}` has files"
+        ));
+    }
     match (class_row, d.versions.is_empty()) {
         (Some(r), false) => {
+            if prev_chunks != r.unique_chunks {
+                p.push(format!(
+                    "/data/versions: the last cumulative unique chunks differ from class \
+                     `{VERSIONS_CLASS}`"
+                ));
+            }
             let files: u64 = d.versions.iter().map(|v| v.files).sum();
             let bytes: u64 = d.versions.iter().map(|v| v.bytes).sum();
             if files != r.files || bytes != r.bytes {
@@ -985,7 +1118,33 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
     p
 }
 
+/// The tools every delta lists, in this order.
+const TOOL_NAMES: [&str; 2] = ["zstd --patch-from", "hdiffz"];
+
 fn delta_rules(dl: &Delta, at: &str, p: &mut Vec<String>) {
+    let names: Vec<&str> = dl.tools.iter().map(|t| t.tool.as_str()).collect();
+    if names != TOOL_NAMES {
+        p.push(format!(
+            "{at}/tools: must list exactly {TOOL_NAMES:?}, found {names:?}"
+        ));
+    }
+    if dl.window_log != long_window_log(dl.old_tar_bytes, dl.new_tar_bytes) {
+        p.push(format!(
+            "{at}/window_log: not the log the tar sizes call for"
+        ));
+    }
+    if dl.window_covers_input != window_covers(dl.window_log, dl.old_tar_bytes, dl.new_tar_bytes) {
+        p.push(format!(
+            "{at}/window_covers_input: does not match the window log and the tar sizes"
+        ));
+    }
+    if dl.new_tar_bytes > 0
+        && (dl.new_alone_zstd19_bytes == 0 || dl.new_alone_zstd19_long_bytes == 0)
+    {
+        p.push(format!(
+            "{at}/new_alone_zstd19_bytes: zero for a non-empty tar"
+        ));
+    }
     for (j, t) in dl.tools.iter().enumerate() {
         let at = format!("{at}/tools/{j}");
         let results = [
@@ -1232,7 +1391,8 @@ mod tests {
     fn the_real_zstd_patch_is_applied_and_verified_when_installed() {
         let local = PathBuf::from("none.toml");
         let Ok(zstd) = super::super::tool::find_tool("zstd", &local) else {
-            return; // not installed here: the skip path is tested above
+            eprintln!("zstd not installed: the real-tool test is skipped");
+            return;
         };
         let tmp = tempfile::tempdir().expect("tmp");
         let old = noise(11, 300_000);
@@ -1248,6 +1408,31 @@ mod tests {
         assert!(t.verified, "{t:?}");
         assert!(t.patch_bytes.is_some_and(|b| b > 0 && b < new.len() as u64));
         assert!(t.create_seconds.is_some() && t.apply_seconds.is_some());
+    }
+
+    #[test]
+    fn a_stale_patch_is_not_taken_for_the_output_of_a_tool_that_wrote_nothing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let me = std::env::current_exe().expect("exe");
+        for f in ["old.tar", "new.tar", "p.bin", "o.bin"] {
+            std::fs::write(tmp.path().join(f), b"stale").expect("write");
+        }
+        let args = vec!["--list".to_string()];
+        let r = patch_round(
+            "fake",
+            String::new(),
+            tmp.path(),
+            Duration::from_secs(60),
+            (&me, args.clone()),
+            (&me, args),
+            "p.bin",
+            "o.bin",
+        );
+        assert!(!r.verified && r.patch_bytes.is_none(), "{r:?}");
+        assert!(r
+            .failed
+            .as_deref()
+            .is_some_and(|f| f.contains("no patch file")));
     }
 
     #[test]
@@ -1360,6 +1545,142 @@ mod tests {
             }
         })
         .is_empty());
+        let has = |f: &dyn Fn(&mut Data), what: &str| {
+            let mut x = d.clone();
+            f(&mut x);
+            let found = check(&envelope(x));
+            assert!(found.iter().any(|m| m.contains(what)), "{what}: {found:?}");
+        };
+        has(&|x| x.versions.clear(), "empty although");
+        has(
+            &|x| x.versions[1].cumulative_unique_chunks += 1,
+            "last cumulative unique chunks",
+        );
+        has(
+            &|x| {
+                if let Some(dl) = x.versions[1].delta.as_mut() {
+                    dl.tools.pop();
+                }
+            },
+            "must list exactly",
+        );
+        has(
+            &|x| x.versions[1].new_unique_chunks_zstd19_bytes = 0,
+            "zero for a version with new bytes",
+        );
+        has(
+            &|x| {
+                let mut third = x.versions[1].clone();
+                third.delta.as_mut().expect("delta").old_tar_bytes += 1;
+                x.versions.push(third);
+            },
+            "differs from the previous version's",
+        );
+        has(
+            &|x| {
+                if let Some(dl) = x.versions[1].delta.as_mut() {
+                    dl.window_covers_input = !dl.window_covers_input;
+                }
+            },
+            "window_covers_input",
+        );
+    }
+
+    #[test]
+    fn identical_version_folders_give_identical_tars() {
+        let a = noise(1, 70_000);
+        let b = noise(2, 5_000);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = build(
+            tmp.path(),
+            &[
+                ("backup-versions/v1/a.bin", a.clone()),
+                ("backup-versions/v1/sub/b.bin", b.clone()),
+                ("backup-versions/v2/a.bin", a),
+                ("backup-versions/v2/sub/b.bin", b),
+            ],
+        );
+        with_ctx(&dir, tmp.path(), |ctx| {
+            let t1 = tar_bytes_relative(ctx, VERSIONS_CLASS, "v1").expect("v1");
+            let t2 = tar_bytes_relative(ctx, VERSIONS_CLASS, "v2").expect("v2");
+            assert_eq!(t1, t2);
+            assert!(!t1.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_private_corpus_labels_versions_by_position_and_hides_folder_names() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let public = build(
+            tmp.path(),
+            &[
+                ("backup-versions/secretfolder10/a.bin", noise(1, 30_000)),
+                ("backup-versions/secretfolder2/a.bin", noise(2, 30_000)),
+            ],
+        );
+        let private = tmp.path().join("private");
+        std::fs::create_dir_all(&private).expect("mkdir");
+        std::fs::copy(public.join("manifest.json"), private.join("manifest.json")).expect("copy");
+        let info = serde_json::json!({"private": true, "root": public.to_string_lossy()});
+        std::fs::write(private.join("build-info.json"), info.to_string()).expect("info");
+        let mut data = None;
+        with_ctx(&private, tmp.path(), |ctx| {
+            assert!(ctx.private());
+            data = Some(run(ctx).expect("run").data);
+        });
+        let data = data.expect("data");
+        let labels: Vec<&str> = data.versions.iter().map(|v| v.label.as_str()).collect();
+        assert_eq!(labels, ["group-0", "group-1"]);
+        let mut e = envelope(data);
+        e.corpus.private = true;
+        let json = serde_json::to_string(&e).expect("json");
+        assert!(!json.contains("secretfolder"));
+        assert_eq!(check(&e), Vec::<String>::new());
+        e.data.versions[1].label = "secretfolder10".to_string();
+        assert!(check(&e).iter().any(|m| m.contains("group-<n>")));
+    }
+
+    #[test]
+    fn natural_order_window_and_version_token() {
+        let mut v = vec!["v10", "v2", "v1", "v02", "a9", "v1b"];
+        v.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(v, ["a9", "v1", "v1b", "v02", "v2", "v10"]);
+        assert_eq!(
+            zstd_cli_version("*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***").as_deref(),
+            Some("1.5.7")
+        );
+        assert_eq!(zstd_cli_version("no version here"), None);
+        assert!(window_covers(27, 1 << 27, 5));
+        assert!(!window_covers(27, (1 << 27) + 1, 5));
+        let big = 3u64 << 30;
+        assert_eq!(long_window_log(big, 5), 31);
+        assert!(!window_covers(31, big, 5));
+    }
+
+    #[test]
+    fn the_real_hdiffz_patch_is_applied_and_verified_when_installed() {
+        let local = PathBuf::from("none.toml");
+        let found = (
+            super::super::tool::find_tool("hdiffz", &local),
+            super::super::tool::find_tool("hpatchz", &local),
+        );
+        let (Ok(hdiffz), Ok(hpatchz)) = found else {
+            eprintln!("hdiffz/hpatchz not installed: the real-tool test is skipped");
+            return;
+        };
+        let tmp = tempfile::tempdir().expect("tmp");
+        let old = noise(21, 300_000);
+        let mut new = old.clone();
+        new[2000..2010].copy_from_slice(b"0123456789");
+        new.extend_from_slice(&noise(22, 5000));
+        let tools = Tools {
+            zstd: Err("not installed".to_string()),
+            hdiff: Ok((hdiffz, hpatchz)),
+        };
+        let dl = delta(&tools, tmp.path(), Duration::from_secs(120), &old, &new).expect("delta");
+        let t = &dl.tools[1];
+        assert!(t.verified, "{t:?}");
+        assert!(t.patch_bytes.is_some_and(|b| b > 0));
     }
 
     #[test]

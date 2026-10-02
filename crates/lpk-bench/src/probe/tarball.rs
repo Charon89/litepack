@@ -51,6 +51,35 @@ pub fn write_tar<W: Write>(
     folder: Option<&str>,
     out: W,
 ) -> Result<TarStats> {
+    write_tar_named(ctx, class, folder, false, out)
+}
+
+/// Like [`write_tar`] for a folder, with entries named relative to the folder (the folder's own
+/// name is not part of any entry name), so that two folders with the same content give the same
+/// bytes. Used for the version tars of `probe dedup`.
+pub fn write_tar_relative<W: Write>(
+    ctx: &Ctx<'_>,
+    class: &str,
+    folder: &str,
+    out: W,
+) -> Result<TarStats> {
+    write_tar_named(ctx, class, Some(folder), true, out)
+}
+
+/// [`write_tar_relative`] into memory.
+pub fn tar_bytes_relative(ctx: &Ctx<'_>, class: &str, folder: &str) -> Result<Vec<u8>> {
+    let mut v = Vec::new();
+    write_tar_relative(ctx, class, folder, &mut v)?;
+    Ok(v)
+}
+
+fn write_tar_named<W: Write>(
+    ctx: &Ctx<'_>,
+    class: &str,
+    folder: Option<&str>,
+    relative_to_folder: bool,
+    out: W,
+) -> Result<TarStats> {
     let files = ctx.class_files(class).unwrap_or(&[]);
     let prefix = folder.map(|f| format!("{}/", f.trim_matches('/')));
     let mut counter = CountingWriter {
@@ -66,6 +95,10 @@ pub fn write_tar<W: Write>(
                 continue;
             }
         }
+        let name = match (&prefix, relative_to_folder) {
+            (Some(p), true) => rel[p.len()..].to_string(),
+            _ => rel,
+        };
         let data = ctx.read_file(class, f)?;
         let mut h = tar::Header::new_gnu();
         h.set_entry_type(tar::EntryType::Regular);
@@ -75,7 +108,7 @@ pub fn write_tar<W: Write>(
         h.set_gid(0);
         h.set_mtime(0);
         builder
-            .append_data(&mut h, rel, &data[..])
+            .append_data(&mut h, name, &data[..])
             .context("writing a tar entry")?;
         stats.files += 1;
         stats.content_bytes += data.len() as u64;
