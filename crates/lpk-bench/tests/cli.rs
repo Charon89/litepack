@@ -62,6 +62,26 @@ fn list_tools_filters_and_rejects_unknown_ids() {
 }
 
 #[test]
+fn validate_reports_problems_by_file_and_field() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path().join("2026-10-01-testbox");
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("host.json"), "{}").expect("host");
+    let out = bin()
+        .args(["run", "--validate"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("host.json: (root): ") && err.contains("os_version"),
+        "{err}"
+    );
+    assert!(err.contains("tools.json: (root): file is missing"), "{err}");
+}
+
+#[test]
 fn help_prints_subcommands() {
     let out = bin().arg("--help").output().expect("run");
     assert!(out.status.success());

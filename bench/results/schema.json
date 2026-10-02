@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "lpk-bench result files",
+  "description": "A results directory bench/results/<date>-<host>/ holds host.json, tools.json and one result file per tool x setting x class named <tool>-<setting>-<class>.json. Beyond this schema, lpk-bench run --validate rejects any string that contains an absolute path, and checks file names against their contents. Kept in step with crates/lpk-bench/src/run/result.rs by a unit test.",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "blake3": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^(/|\\\\|[A-Za-z]:[\\\\/])"
+      }
+    },
+    "arg": {
+      "type": "string",
+      "not": {
+        "pattern": "^(/|\\\\|[A-Za-z]:[\\\\/])"
+      }
+    },
+    "measure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wall_seconds", "user_cpu_seconds", "kernel_cpu_seconds", "peak_memory_bytes"],
+      "properties": {
+        "wall_seconds": { "$ref": "#/$defs/seconds" },
+        "user_cpu_seconds": { "$ref": "#/$defs/seconds" },
+        "kernel_cpu_seconds": { "$ref": "#/$defs/seconds" },
+        "peak_memory_bytes": { "$ref": "#/$defs/count" }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compress", "extract", "archive_bytes"],
+      "properties": {
+        "compress": { "$ref": "#/$defs/measure" },
+        "extract": { "$ref": "#/$defs/measure" },
+        "archive_bytes": { "$ref": "#/$defs/count" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verified", "files_checked", "files_ok"],
+      "properties": {
+        "verified": { "type": "boolean" },
+        "files_checked": { "$ref": "#/$defs/count" },
+        "files_ok": { "$ref": "#/$defs/count" }
+      }
+    },
+    "tool_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "$ref": "#/$defs/text" }
+      }
+    },
+    "setting_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "compress_args", "extract_args"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "compress_args": { "type": "array", "items": { "$ref": "#/$defs/arg" } },
+        "extract_args": { "type": "array", "items": { "$ref": "#/$defs/arg" } }
+      }
+    },
+    "corpus_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "manifest_blake3", "files", "input_bytes"],
+      "properties": {
+        "profile": { "$ref": "#/$defs/id" },
+        "manifest_blake3": { "$ref": "#/$defs/blake3" },
+        "files": { "$ref": "#/$defs/count" },
+        "input_bytes": { "$ref": "#/$defs/count" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tool", "setting", "class", "corpus", "threads"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tool": { "$ref": "#/$defs/tool_ref" },
+        "setting": { "$ref": "#/$defs/setting_ref" },
+        "class": { "$ref": "#/$defs/id" },
+        "corpus": { "$ref": "#/$defs/corpus_ref" },
+        "threads": { "type": "integer", "minimum": 1 },
+        "private": { "const": true },
+        "repeats": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sample" } },
+        "median": { "$ref": "#/$defs/sample" },
+        "verification": { "$ref": "#/$defs/verification" },
+        "skipped": { "$ref": "#/$defs/text" }
+      },
+      "if": { "required": ["skipped"] },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["repeats"] },
+            { "required": ["median"] },
+            { "required": ["verification"] }
+          ]
+        }
+      },
+      "else": { "required": ["repeats", "median", "verification"] }
+    },
+    "tool_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "status"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/text" },
+        "status": { "enum": ["found", "skipped"] },
+        "reason": { "$ref": "#/$defs/text" },
+        "version": { "$ref": "#/$defs/text" }
+      },
+      "if": { "properties": { "status": { "const": "found" } } },
+      "then": { "required": ["version"], "not": { "required": ["reason"] } },
+      "else": { "required": ["reason"] }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tools"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tools": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/tool_entry" } }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "host",
+        "os",
+        "os_version",
+        "cpu_model",
+        "logical_cores",
+        "ram_bytes",
+        "lpk_bench_version",
+        "git_commit",
+        "rustc_version"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "host": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "os": { "$ref": "#/$defs/text" },
+        "os_version": { "$ref": "#/$defs/text" },
+        "cpu_model": { "$ref": "#/$defs/text" },
+        "logical_cores": { "type": "integer", "minimum": 1 },
+        "ram_bytes": { "$ref": "#/$defs/count" },
+        "lpk_bench_version": { "$ref": "#/$defs/text" },
+        "git_commit": { "$ref": "#/$defs/text" },
+        "rustc_version": { "$ref": "#/$defs/text" }
+      }
+    }
+  }
+}

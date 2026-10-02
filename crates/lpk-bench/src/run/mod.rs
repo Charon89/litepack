@@ -19,7 +19,11 @@ use clap::Args;
 
 pub mod catalogue;
 pub mod discover;
-// `host`, `result` and `validate` are added with the result format.
+#[allow(dead_code)] // consumed by the run loop (next sub-task)
+pub mod host;
+#[allow(dead_code)] // consumed by the run loop (next sub-task)
+pub mod result;
+pub mod validate;
 
 use catalogue::{Catalogue, Local};
 
@@ -99,7 +103,34 @@ fn list_tools(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
+fn validate_cmd(dir: &Path) -> Result<ExitCode> {
+    let report = validate::validate_dir(dir)?;
+    for p in &report.problems {
+        eprintln!("error: {p}");
+    }
+    if report.problems.is_empty() {
+        println!(
+            "{}: {} result file(s) plus host.json and tools.json validate against bench/results/schema.json",
+            dir.display(),
+            report.results
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("{} problem(s) in {}", report.problems.len(), dir.display());
+        Ok(ExitCode::FAILURE)
+    }
+}
+
 pub fn run(args: RunArgs) -> ExitCode {
+    if let Some(dir) = &args.validate {
+        return match validate_cmd(dir) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let result = if args.list_tools {
         list_tools(&args)
     } else {
