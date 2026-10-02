@@ -16,16 +16,833 @@
     ],
     "small": [
       {
+        "blake3": "ffcbf9c8796b879914da9a60394ec42c876b68c2f76fc27a4da6e9988402b7d7",
+        "bytes": 1764178,
+        "source": "7zip-extra",
+        "url": "https://github.com/ip7z/7zip/releases/download/26.03/7z2603-extra.7z"
+      },
+      {
+        "blake3": "14e4a260e7ac5375f2e5eb89a90156f4c04bffdccd384c8bf94beef37ef43b7a",
+        "bytes": 69206016,
+        "source": "alpine-virt",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-virt-3.24.2-x86_64.iso"
+      },
+      {
+        "blake3": "76d5d4527f9f31930a924f0394e1334414041218773c658502a2ab2ae969d502",
+        "bytes": 64657225,
+        "source": "bbb-320x180",
+        "url": "https://download.blender.org/peach/bigbuckbunny_movies/BigBuckBunny_320x180.mp4.zip"
+      },
+      {
+        "blake3": "f08a840882e8cc882253686b4555da81270e68c31351f594e973e49ea57575bd",
+        "bytes": 17756393,
+        "source": "bert-tiny",
+        "url": "https://huggingface.co/prajjwal1/bert-tiny/resolve/6f75de8b60a9f8a2fdf7b69cbd86d9e64bcb3837/pytorch_model.bin"
+      },
+      {
+        "blake3": "a8fbe32bfff53604463d4fbffcb6b37e29aac00734b46a5ac6c39dbeb04c9541",
+        "bytes": 20809932,
+        "source": "cirros",
+        "url": "https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-rootfs.img.gz"
+      },
+      {
+        "attribution": "European Archive Music / Giovanni Pierluigi da Palestrina (via Musopen) (Wikimedia Commons)",
+        "blake3": "8bb842dc864218ce01ac7add3667ba7377734b89f49f114f97106add97f5d2a1",
+        "bytes": 6851308,
+        "licence": "CC0-1.0",
+        "path": "missa-papae-marcelli-agnus-dei-i.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/0/04/Missa_Papae_Marcelli_-_V._Agnus_Dei_I.flac"
+      },
+      {
+        "attribution": "Flopinot2012 (Wikimedia Commons)",
+        "blake3": "f8886682b5ecfe22099433c6be8468dd9e535f4858a8b266fad5ef080cbf7888",
+        "bytes": 4425908,
+        "licence": "CC0-1.0",
+        "path": "con-amores-la-mi-madre.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/2/2b/Con_amores_la_mi_madre.flac"
+      },
+      {
+        "attribution": "Makeip (Wikimedia Commons)",
+        "blake3": "acfd3865d747025100dbb3e2e410cc192fa4ff965649ea6a7b4d1d1db365ba38",
+        "bytes": 7587747,
+        "licence": "CC0-1.0",
+        "path": "gora-doneztebe-mendi-abesbatza.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/4/4a/Gora_Doneztebe_-_Mendi_Abesbatza_%28Doneztebe-Santesteban%29.flac"
+      },
+      {
+        "attribution": "Wilfredor (Wikimedia Commons)",
+        "blake3": "a6def19ab4cfc4b0b5832fd5396e880bd08799323985696acd4cc63000981a0c",
+        "bytes": 2906072,
+        "licence": "CC0-1.0",
+        "path": "human-heart-rate.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/a/a4/Human_heart_rate.flac"
+      },
+      {
+        "attribution": "Spyros Papanastasiou (Wikimedia Commons)",
+        "blake3": "2d44f832cf2440a6e632d6dff3768a6d49d8b6720158fb161237e25cb594ea78",
+        "bytes": 3502090,
+        "licence": "CC0-1.0",
+        "path": "pica-pica-part15.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/b/b5/Pica_pica-2015-6-12-part15.flac"
+      },
+      {
+        "attribution": "Vera de Kok (Wikimedia Commons)",
+        "blake3": "d3eacb49ae1e53b9b5a677afb9c30400c7075bb43792023f96799ef4f7180c53",
+        "bytes": 3606009,
+        "licence": "CC0-1.0",
+        "path": "angelien-eijsink-voice-nl-long.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/d/d9/Angelien_Eijsink_-_voice_-_nl_-_long.flac"
+      },
+      {
+        "attribution": "Spyros Papanastasiou (Wikimedia Commons)",
+        "blake3": "c7958493805bf6f1128fa0d5333726d9f2f9d8a3d366516e23bcdf1a8f921c79",
+        "bytes": 4773872,
+        "licence": "CC0-1.0",
+        "path": "pica-pica-part9.flac",
+        "source": "commons-flac",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/f/f2/Pica_pica-2015-6-12-part9.flac"
+      },
+      {
         "blake3": "dcddcd38a75062308426ee90537843e37ceec9127070144dda05acdc9199c6a0",
         "bytes": 36445475,
         "source": "enwik8",
         "url": "https://mattmahoney.net/dc/enwik8.zip"
       },
       {
+        "blake3": "aed54e216b965447e3513b5c898c0cbdc51f26e6f8aa879bc06dac062e2dfc4c",
+        "bytes": 486762106,
+        "source": "govdocs-small",
+        "url": "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/000.zip"
+      },
+      {
+        "blake3": "0beef53efd4f8d4bdd229fc1ab4c830a2f8d0a11147b3195d7f66b42e7f7ed11",
+        "bytes": 298435,
+        "source": "gson-jar",
+        "url": "https://repo1.maven.org/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.jar"
+      },
+      {
+        "blake3": "20cc6211bc200bffc2ba671437f1f7e18362387700926ce80d1cd3a5671743f6",
+        "bytes": 5422721,
+        "path": "pg100.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/0/100/100-0.txt"
+      },
+      {
+        "blake3": "1ec25428299111c1ad1e7728a8166c88658d94c14cdb037f62ae94219add5d17",
+        "bytes": 477866,
+        "path": "pg105.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/0/105/105-0.txt"
+      },
+      {
+        "blake3": "93a906c234feca38a22cd8642f010b0e97040091fc6ffbe52eacafa86e1d90dc",
+        "bytes": 2025044,
+        "path": "pg1023.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/0/2/1023/1023-0.txt"
+      },
+      {
+        "blake3": "32fbc0d9f17690f96559332117f9ba8b72d97ce6360a76f8395986653080e883",
+        "bytes": 2706052,
+        "path": "pg1184.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/1/8/1184/1184-0.txt"
+      },
+      {
+        "blake3": "f54f3696a0734ffdcfd2ead20b5ab738a91534c41993739928323778ea20ac36",
+        "bytes": 151191,
+        "path": "pg11.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/11/11-0.txt"
+      },
+      {
+        "blake3": "c354fde7d283ddd31e11af6cf71e419a471c0f9121465f05e661a7d5f5323000",
+        "bytes": 262846,
+        "path": "pg16.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/16/16-0.txt"
+      },
+      {
+        "blake3": "62445ffbf630c4a3379635aca61437f77c38c29db3520a80482d672d1e2fc849",
+        "bytes": 372720,
+        "path": "pg120.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/2/120/120-0.txt"
+      },
+      {
+        "blake3": "e3ef07f38bdf0ce59287274cff3fe79222f825aeba7933525bf372141208382d",
+        "bytes": 448326,
+        "path": "pg121.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/2/121/121-0.txt"
+      },
+      {
+        "blake3": "6e84423fdaf4f910ffa075bd179baa1702c912cba18c018987f256ee8d0f2874",
+        "bytes": 283526,
+        "path": "pg1232.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/2/3/1232/1232-0.txt"
+      },
+      {
+        "blake3": "428f824365c8ceb0b7076b486d685bb7a36f5910fd120e4c2699e406469e4ecb",
+        "bytes": 1044063,
+        "path": "pg1260.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/2/6/1260/1260-0.txt"
+      },
+      {
+        "blake3": "355b63d8cbdd6fb41e7ffe002e018c64cf4c7b807e3ab45567cdb1b346b9de63",
+        "bytes": 3349503,
+        "path": "pg135.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/3/135/135-0.txt"
+      },
+      {
+        "blake3": "ed31a21f3622854b73247f12ff9ca97c87821fc92f08b1f685577e1b2d26f493",
+        "bytes": 738046,
+        "path": "pg1342.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/3/4/1342/1342-0.txt"
+      },
+      {
+        "blake3": "ae36cd8ba970cd7d857430b30f9149b560f70f1789ae27fd5c9a8ebba2bbc359",
+        "bytes": 2048246,
+        "path": "pg1399.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/3/9/1399/1399-0.txt"
+      },
+      {
+        "blake3": "df16afeb571dbb40a3383574e907a085718fbde39e364375e1891bdfe77ccef6",
+        "bytes": 1038512,
+        "path": "pg1400.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/4/0/1400/1400-0.txt"
+      },
+      {
+        "blake3": "dfd6f8a623a03c15ac1d3ed6ddd78239e6f319c739bc4f5c8c870c3fe2f54361",
+        "bytes": 893788,
+        "path": "pg141.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/4/141/141-0.txt"
+      },
+      {
+        "blake3": "5f4e3fc40a1a34807d54be12619f44e46315c7262d951753c93aaccb04a4a11f",
+        "bytes": 1199950,
+        "path": "pg1497.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/4/9/1497/1497-0.txt"
+      },
+      {
+        "blake3": "902deeccf2e931e8137bcca8b7e4252509253811ec80db0f38bd82d42d07e6f1",
+        "bytes": 897582,
+        "path": "pg158.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/5/158/158-0.txt"
+      },
+      {
+        "blake3": "2e0bcbe281dfba6a6c1ded3f947a87237327f1dba9057db6c1d1a7799474e499",
+        "bytes": 249831,
+        "path": "pg159.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/5/159/159-0.txt"
+      },
+      {
+        "blake3": "cf8ec8e0d39d9e5ce15d53f20dd68e2c3faeee11c30b3bf8db80c002af314e44",
+        "bytes": 712924,
+        "path": "pg161.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/6/161/161-0.txt"
+      },
+      {
+        "blake3": "a62392f737f53b777e3780aee774562f2b9504152b1c4c6a308b57ed4a240c38",
+        "bytes": 607504,
+        "path": "pg1661.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/6/6/1661/1661-0.txt"
+      },
+      {
+        "blake3": "182756f78c2b16bd73446866b377b1a188c2d7bbe0b18f8d5b43f274e33a1e17",
+        "bytes": 446090,
+        "path": "pg174.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/7/174/174-0.txt"
+      },
+      {
+        "blake3": "4ed4e16294f16f56e516baca09f449a15edafb590872ba92e9ff2934f287053b",
+        "bytes": 717663,
+        "path": "pg1727.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/7/2/1727/1727-0.txt"
+      },
+      {
+        "blake3": "dd4d8b9a5b6f7159973d407dd4225e9cf5b076e0ad879613608dc3e98468f611",
+        "bytes": 32008,
+        "path": "pg1952.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/1/9/5/1952/1952-0.txt"
+      },
+      {
+        "blake3": "56cc43c376d0ca65c5cddaabf52e8ac123095c88700bd1c1bb59a220af984500",
+        "bytes": 637939,
+        "path": "pg205.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/2/0/205/205-0.txt"
+      },
+      {
+        "blake3": "7d7361cce7ae4f974af7c27460d17da18250b24822d7d2a6ff2865b9c1691659",
+        "bytes": 180051,
+        "path": "pg215.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/2/1/215/215-0.txt"
+      },
+      {
+        "blake3": "4ad0286ccbf626be5f9c6391daddbedbc0373bd996390fb08562c7d935f4d2e7",
+        "bytes": 244344,
+        "path": "pg244.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/2/4/244/244-0.txt"
+      },
+      {
+        "blake3": "423e98ab41fb8ee2bc3988e09c5bc949ab75e17c22225c6c1c1fb184854aba46",
+        "bytes": 1159923,
+        "path": "pg2554.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/2/5/5/2554/2554-0.txt"
+      },
+      {
+        "blake3": "85d2e0d0c00a310ec412cbd0aac13424ffab91c1778415bc5204f6be5d4edd04",
+        "bytes": 3359405,
+        "path": "pg2600.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/2/6/0/2600/2600-0.txt"
+      },
+      {
+        "blake3": "f7fa57bac3f171d45c3c354ad704dd9c5cc866eec4cb22a9cfcfacb7dbe036b4",
+        "bytes": 1234613,
+        "path": "pg2701.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/2/7/0/2701/2701-0.txt"
+      },
+      {
+        "blake3": "b3b876ba5d3bbd5e77c5e0682dfd339518b7878357d0e0d5d264b63076e03f02",
+        "bytes": 405520,
+        "path": "pg2814.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/2/8/1/2814/2814-0.txt"
+      },
+      {
+        "blake3": "d610704f4ae12937d5728854b3b78631adc5bbc3055beee3196b171e998456bb",
+        "bytes": 1235295,
+        "path": "pg3207.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/3/2/0/3207/3207-0.txt"
+      },
+      {
+        "blake3": "5d022612e1776bcee96d363b6f6b08966dc3e72e72c491f74f6540aace22fdac",
+        "bytes": 181575,
+        "path": "pg35.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/3/35/35-0.txt"
+      },
+      {
+        "blake3": "79404a4a9b1d5805cfd5c164a42919c82c44f221b44ec62aa7df9c00293ab4d3",
+        "bytes": 340601,
+        "path": "pg36.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/3/36/36-0.txt"
+      },
+      {
+        "blake3": "038d73a1210a80409d62718e7058ad026f68e4f7e46c8f5100bf1179d29ad02b",
+        "bytes": 870683,
+        "path": "pg345.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/3/4/345/345-0.txt"
+      },
+      {
+        "blake3": "bd0c46b4ac30e8d588a0efb1c645a7c334b512ae953089c9237b73cc7fa20e76",
+        "bytes": 1566711,
+        "path": "pg4300.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/4/3/0/4300/4300-0.txt"
+      },
+      {
+        "blake3": "f5b8ecbf664abb8dfa8ad4568158bef7ac0a36e794208228a3475658bf84a23d",
+        "bytes": 141171,
+        "path": "pg43.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/4/43/43-0.txt"
+      },
+      {
+        "blake3": "ab9f0799d4575811d534bf72578cd2067c7d1d2a6ab24f47a6fa35e3335ff537",
+        "bytes": 181890,
+        "path": "pg46.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/4/46/46-0.txt"
+      },
+      {
+        "blake3": "72f9e823b15c25204b63a44a95ac77cbf0b17dd7d3d7ff6749df3d3ff83eb576",
+        "bytes": 512367,
+        "path": "pg47.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/4/47/47-0.txt"
+      },
+      {
+        "blake3": "521b4b8e003710ddf8bda5f5a50053098f29e7f5a3288d7067be90d5fdd9a799",
+        "bytes": 306114,
+        "path": "pg5230.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/5/2/3/5230/5230-0.txt"
+      },
+      {
+        "blake3": "285741edda66975e7fab4e81747e97e7bc32af82d2968089e8c20ae3bcdcba45",
+        "bytes": 217558,
+        "path": "pg55.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/5/55/55-0.txt"
+      },
+      {
+        "blake3": "164501fefc12ba51c823b8317cc563aa4ff04a187acc9f7209890e222215ef5f",
+        "bytes": 1798790,
+        "path": "pg580.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/5/8/580/580-0.txt"
+      },
+      {
+        "blake3": "f8202fa049c342110d4f641c2fda8ddf084abe71dcc055a2a1e8d034bbffda16",
+        "bytes": 1115936,
+        "path": "pg6130.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/6/1/3/6130/6130-0.txt"
+      },
+      {
+        "blake3": "90847fdfe60c8fd7bb0730fc75c967d80bf50c9c97bd4bf8bb0f109a73a1ffc0",
+        "bytes": 917357,
+        "path": "pg730.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/7/3/730/730-0.txt"
+      },
+      {
+        "blake3": "b6c3dca630d2582f69f9ae08771d5067efb8c9181f8b99a95ccbabff841ab8a0",
+        "bytes": 2013603,
+        "path": "pg766.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/7/6/766/766-0.txt"
+      },
+      {
+        "blake3": "cc4eb9bbf53f37ec53ec7c78c84f75bc5810d3e9c2fd236a13f9e13d9a2a2009",
+        "bytes": 661813,
+        "path": "pg768.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/7/6/768/768-0.txt"
+      },
+      {
+        "blake3": "e3680d8faacac44491952faf87e80b8a875a7469b8aafc1673225c7cb72d0381",
+        "bytes": 405783,
+        "path": "pg74.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/7/74/74-0.txt"
+      },
+      {
+        "blake3": "985ac85517db5e123b78d4ba1578ea9ad6654a7c72e04e8ad3aa58ae432bf998",
+        "bytes": 590757,
+        "path": "pg76.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/7/76/76-0.txt"
+      },
+      {
+        "blake3": "293e0c4d5fb84dbfd0cd45f1022d5eb8acbd3ad96e946481116f186c2d2bfa14",
+        "bytes": 606603,
+        "path": "pg786.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/7/8/786/786-0.txt"
+      },
+      {
+        "blake3": "f50d56e431edc15f1ec85eee04df5a38b58c3fb563a3b334d03ffb6047e97b46",
+        "bytes": 421633,
+        "path": "pg84.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/8/84/84-0.txt"
+      },
+      {
+        "blake3": "0428f057ba58b446296161014bdae7138ed4d92c79cc8440ec85e5a6a14e7341",
+        "bytes": 771600,
+        "path": "pg98.txt",
+        "source": "gutenberg-books",
+        "url": "https://gutenberg.pglaf.org/9/98/98-0.txt"
+      },
+      {
+        "blake3": "8b4d8648a43587ec9db3185873ae7433ef4bcd89f7e355a9d71d8253c4b0794c",
+        "bytes": 474012,
+        "source": "gutenberg-epub",
+        "url": "https://gutenberg.pglaf.org/cache/epub/84/pg84-images.epub"
+      },
+      {
+        "blake3": "0dda821478c0fe3a483044b67551778c4a478d30060d12521d5e278b5d1aeefc",
+        "bytes": 1239525,
+        "source": "kenney-music-jingles",
+        "url": "https://kenney.nl/media/pages/assets/music-jingles/f37e530b9e-1677590399/kenney_music-jingles.zip"
+      },
+      {
+        "blake3": "dfe5d3c118735638e71d8cc13fdb8d48fcefbab782d3592f8d586f96c3a1ec5a",
+        "bytes": 10537521,
+        "source": "kenney-nature-kit",
+        "url": "https://kenney.nl/media/pages/assets/nature-kit/37ac38a37b-1677698939/kenney_nature-kit.zip"
+      },
+      {
+        "blake3": "b7b71e8096063410b48cc47b1f9060b2876df3c5eb7c10b2b34cb25b4aed66aa",
+        "bytes": 141881,
+        "source": "kenney-pixel-ui-pack",
+        "url": "https://kenney.nl/media/pages/assets/pixel-ui-pack/821e760f21-1677661508/kenney_pixel-ui-pack.zip"
+      },
+      {
+        "blake3": "9aa3f56fb30e40ea9377c7903a5d4dbd0e9aa7a5fdefc24087ae1e003e8349e3",
+        "bytes": 4640135,
+        "source": "kenney-platformer-kit",
+        "url": "https://kenney.nl/media/pages/assets/platformer-kit/1585cf62b4-1775122253/kenney_platformer-kit.zip"
+      },
+      {
+        "blake3": "edc28a1cdf10c017d5bef17385304344c88039700d7078c2d26da37a84cc359a",
+        "bytes": 5875104,
+        "source": "kenney-sci-fi-sounds",
+        "url": "https://kenney.nl/media/pages/assets/sci-fi-sounds/6b296f9ecf-1677589334/kenney_sci-fi-sounds.zip"
+      },
+      {
+        "blake3": "9391a19fad0b58a5874fe21db38cd6c2bd3c68d3892b54255f413741ff8dbfa7",
+        "bytes": 1229750,
+        "source": "kenney-ui-pack",
+        "url": "https://kenney.nl/media/pages/assets/ui-pack/f651646eab-1718203990/kenney_ui-pack.zip"
+      },
+      {
+        "blake3": "d03701e44b3b0b7c836f872869f332d93e6c41d1cfaa68c642ae2da0e09417a8",
+        "bytes": 1851632,
+        "source": "kenney-voiceover-pack",
+        "url": "https://kenney.nl/media/pages/assets/voiceover-pack/3f7f168698-1677589897/kenney_voiceover-pack.zip"
+      },
+      {
+        "blake3": "9f5d95d894e11dd8c08f083c4eedfdc7fa8eaf3d149a600ac8ddcdcb2cb83439",
+        "bytes": 736501,
+        "path": "kodim01.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim01.png"
+      },
+      {
+        "blake3": "9b48fd189498666f3e2853fcb505a17ebdcd08a9ed0b576df9b379f7e129c248",
+        "bytes": 617995,
+        "path": "kodim02.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim02.png"
+      },
+      {
+        "blake3": "076d24f1b15bd708d963d952fece120be349f18fd8436bab654385a52edd0a17",
+        "bytes": 502888,
+        "path": "kodim03.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim03.png"
+      },
+      {
+        "blake3": "ef9ba1dfb12cf733dd2a733ee67a68f398b032712432fda49009e46ed50ea438",
+        "bytes": 637432,
+        "path": "kodim04.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim04.png"
+      },
+      {
+        "blake3": "6095692c2c2e77687f63cd306dac20bbc1f5bc4ffcb12789e9cc3edf1affa0d6",
+        "bytes": 785610,
+        "path": "kodim05.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim05.png"
+      },
+      {
+        "blake3": "552dd0e73757fd174ce2ed54756066f0cec897db5e512f7e465bda70c42f4485",
+        "bytes": 618959,
+        "path": "kodim06.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim06.png"
+      },
+      {
+        "blake3": "99b9ec194f63618968d25ee1f3212dd3a558c68c413b1c961a1c136003cf18b9",
+        "bytes": 566322,
+        "path": "kodim07.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim07.png"
+      },
+      {
+        "blake3": "92a915f1768b7a966dbf1876df103316e137051a4a14566246d32ff3a0956386",
+        "bytes": 788470,
+        "path": "kodim08.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim08.png"
+      },
+      {
+        "blake3": "27855bc89636b5dbe984c13f9db98785fde035f15fafa28064b5b62f51b77b1b",
+        "bytes": 582899,
+        "path": "kodim09.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim09.png"
+      },
+      {
+        "blake3": "1ea1285bd6797eb81926f13c0b0df06c51ba0d2bbcfe6271337397219d3b1596",
+        "bytes": 593463,
+        "path": "kodim10.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim10.png"
+      },
+      {
+        "blake3": "eaa51d95c80838b0bf518f3f255d9d2f2e475b869ea5fb5a84327b2a7cb87776",
+        "bytes": 621023,
+        "path": "kodim11.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim11.png"
+      },
+      {
+        "blake3": "919cbc055ca8f3a3b70609a5582b90195341f246226ddb4d8684d88e9deaaa1d",
+        "bytes": 531024,
+        "path": "kodim12.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim12.png"
+      },
+      {
+        "blake3": "74a7cc05abd811376b40b94585d3063592e468bf03cb83458b32e91f95fc8fd5",
+        "bytes": 822712,
+        "path": "kodim13.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim13.png"
+      },
+      {
+        "blake3": "9fddd8819cea6a49b33e8bc5fbbe80d565e64fccffc49d7451699a75b762c1a9",
+        "bytes": 692201,
+        "path": "kodim14.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim14.png"
+      },
+      {
+        "blake3": "1d61261f757a965be528e9a911db2da85de6e45c69f888600f7330c148d799df",
+        "bytes": 612582,
+        "path": "kodim15.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim15.png"
+      },
+      {
+        "blake3": "5736265181356209b39c79f3551933429cb93c739bf94d7635a17891c4f5dc1b",
+        "bytes": 534247,
+        "path": "kodim16.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim16.png"
+      },
+      {
+        "blake3": "e221ebda799897b8885a5fa89cb4687c92d1a394f555ab9b0fd2e79c931e6a2f",
+        "bytes": 602078,
+        "path": "kodim17.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim17.png"
+      },
+      {
+        "blake3": "477e3228b2d4b33013529f912a18b38bfae7a0f58ac4890eeb66283a251a9089",
+        "bytes": 780947,
+        "path": "kodim18.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim18.png"
+      },
+      {
+        "blake3": "d5c87a0c59cf66b4e04025bd35af1559a1b38a51c21dfb12f85fec52c4a31b52",
+        "bytes": 671476,
+        "path": "kodim19.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim19.png"
+      },
+      {
+        "blake3": "c9adbe7b290a3fdd01f71671515331aa7f2bf6f7a83c09e2c6daa97f777db6f2",
+        "bytes": 492462,
+        "path": "kodim20.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim20.png"
+      },
+      {
+        "blake3": "9a39926bf2259d65333e6dbb0383c832fc29d8cd5cd66b7ecf374856d7f58905",
+        "bytes": 637051,
+        "path": "kodim21.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim21.png"
+      },
+      {
+        "blake3": "6f8714646a80dbe1483f922cb17fc25185bb90034867ef011f0cf14f42c37771",
+        "bytes": 701970,
+        "path": "kodim22.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim22.png"
+      },
+      {
+        "blake3": "37c0d7cc9e7b9dcadff118b76adc99c327373a61a345da286043b6af2a79f624",
+        "bytes": 557596,
+        "path": "kodim23.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim23.png"
+      },
+      {
+        "blake3": "32d215650109463bfeb50b6279fe327b5dd2cdadf5361c5db07daded19365301",
+        "bytes": 706397,
+        "path": "kodim24.png",
+        "source": "kodak",
+        "url": "https://r0k.us/graphics/kodak/kodak/kodim24.png"
+      },
+      {
+        "blake3": "5b3b19d17582935ef490089c2500f4014abc1505f40c42ede91c8175f67e5563",
+        "bytes": 4055167,
+        "path": "art_of_war_01-02_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_01-02_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "22bde727272f3a32e96bfcf4cdafdfb95aa1cec90151b2079f07d4415cebc63b",
+        "bytes": 3723859,
+        "path": "art_of_war_03-04_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_03-04_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "063c7195ea86855a7e7757cb12b8f75bbc497baf9f297fc12525e785db305beb",
+        "bytes": 5094335,
+        "path": "art_of_war_05-06_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_05-06_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "214afa10ce119e1e2c1372189c1eb777fa14abc36903f42a2893760cdebd0d12",
+        "bytes": 4246508,
+        "path": "art_of_war_07-08_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_07-08_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "7b8e5ed3afcf8ecba37dfa72990d481b95274e7f566f140f6bbf90da6d764ce5",
+        "bytes": 7059580,
+        "path": "art_of_war_09-10_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_09-10_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "5fbfd6940d7a171328cfc0c1992204f03720d1929b6208678ddec98693c26751",
+        "bytes": 6213090,
+        "path": "art_of_war_11_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_11_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "f85a586fdf6f5818203b7173c07f0e81b7b3376d5e758820b8cc77d25c64cbe7",
+        "bytes": 4312968,
+        "path": "art_of_war_12-13_sun_tzu_64kb.mp3",
+        "source": "librivox-art-of-war",
+        "url": "https://archive.org/download/art_of_war_librivox/art_of_war_12-13_sun_tzu_64kb.mp3"
+      },
+      {
+        "blake3": "e95ba65c2fccca14d574d96bb13f7fda07d1aad839fab20b8a26d6186ed06710",
+        "bytes": 50824,
+        "path": "apple_gainmap_new.jpg",
+        "source": "libultrahdr-jpegs",
+        "url": "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/apple_gainmap_new.jpg"
+      },
+      {
+        "blake3": "57c7cf1cf184232efbd0948843985d59c8f82cbc79592ccaffbc376d1963d560",
+        "bytes": 50742,
+        "path": "apple_gainmap_old.jpg",
+        "source": "libultrahdr-jpegs",
+        "url": "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/apple_gainmap_old.jpg"
+      },
+      {
+        "blake3": "b40b35750135fdcc859a77796a47c66c08ba62dbecc4e147b03f07fce1f06065",
+        "bytes": 24430,
+        "path": "jpeg_image.jpg",
+        "source": "libultrahdr-jpegs",
+        "url": "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/jpeg_image.jpg"
+      },
+      {
+        "blake3": "e0678551c516d7651b4d719dcc38d8717f1d21cf787fefe1d969a8428a6ec93d",
+        "bytes": 20200,
+        "path": "minnie-320x240-rgb.jpg",
+        "source": "libultrahdr-jpegs",
+        "url": "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/minnie-320x240-rgb.jpg"
+      },
+      {
+        "blake3": "774b11c41097ee3b8e3ba690c915f45153dbb98264378b8cf9b03b55382d9f70",
+        "bytes": 20193,
+        "path": "minnie-320x240-y.jpg",
+        "source": "libultrahdr-jpegs",
+        "url": "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/minnie-320x240-y.jpg"
+      },
+      {
+        "blake3": "247f246c74b4cca126946220db57be0c86217385247a7002a865bb07a7c6fa2a",
+        "bytes": 34266,
+        "path": "minnie-320x240-yuv-icc.jpg",
+        "source": "libultrahdr-jpegs",
+        "url": "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/minnie-320x240-yuv-icc.jpg"
+      },
+      {
+        "blake3": "2c36f46c85cd2aa9636fe70cc7919058317e20f5def5ae70a5411c1f8deda4c3",
+        "bytes": 20193,
+        "path": "minnie-320x240-yuv.jpg",
+        "source": "libultrahdr-jpegs",
+        "url": "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/minnie-320x240-yuv.jpg"
+      },
+      {
+        "blake3": "82cba3b22893c9aa09ac6960e91d05bddda44272f7e90e919e343ef234800068",
+        "bytes": 262905,
+        "source": "loghub-apache",
+        "url": "https://zenodo.org/api/records/8196385/files/Apache.tar.gz/content"
+      },
+      {
+        "blake3": "f3ef1cb5ffd14f9b2ee75f359f2886baddb22eb56aa64e6ca1a412b136854d3c",
+        "bytes": 186645559,
+        "source": "loghub-hdfs-small",
+        "url": "https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content"
+      },
+      {
+        "blake3": "b9c594df79925ebdba95d7af7cc85aa1a680d78f1e82b339085ef31c6efca60b",
+        "bytes": 232039,
+        "source": "loghub-linux",
+        "url": "https://zenodo.org/api/records/8196385/files/Linux.tar.gz/content"
+      },
+      {
+        "blake3": "284b1ed6fd82b4fb89c7a3b10333de658ad2118c939a8fb076e1630f929e1167",
+        "bytes": 39602073,
+        "source": "mingit",
+        "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.1/MinGit-2.56.0-64-bit.zip"
+      },
+      {
+        "blake3": "f5621471ec5e579dfa20c92a5add901bee6e31c42c69850ecc373725f9245821",
+        "bytes": 40007867,
+        "source": "nyc-taxi-small",
+        "url": "https://data.cityofnewyork.us/resource/qp3b-zxtp.csv?$limit=265000&$order=:id"
+      },
+      {
         "blake3": "2f38bb1ba2464b3b42228eb72c4f810c53f5f8c836409f41f6d2dccda61530fe",
         "bytes": 12601679,
         "source": "python-embed",
         "url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip"
+      },
+      {
+        "blake3": "0466e2dc76190f3c61fe18eae3ab4e3dc1201802df5d670aa896d442a93e5e08",
+        "bytes": 2485243,
+        "source": "v1",
+        "url": "https://github.com/facebook/zstd/archive/5c7b7bad26808e6b40ac3b3d0075466e27738a9d.tar.gz"
+      },
+      {
+        "blake3": "8aadf117fcdd92745d19e3c748c6904ac36712a231bbc57eb7f87c5887d95794",
+        "bytes": 2485356,
+        "source": "v2",
+        "url": "https://github.com/facebook/zstd/archive/82d322c4973d9e2968d94047a40892bc6d9a9bdf.tar.gz"
+      },
+      {
+        "blake3": "f3f8fcff0784fd10f6ced04017db08002254772f5fbf1e31aabf71ed1f4b0beb",
+        "bytes": 2487434,
+        "source": "v3",
+        "url": "https://github.com/facebook/zstd/archive/d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a.tar.gz"
       }
     ]
   },
