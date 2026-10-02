@@ -2,10 +2,22 @@
   "profiles": {
     "full": [
       {
+        "blake3": "14e4a260e7ac5375f2e5eb89a90156f4c04bffdccd384c8bf94beef37ef43b7a",
+        "bytes": 69206016,
+        "source": "alpine-virt",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-virt-3.24.2-x86_64.iso"
+      },
+      {
         "blake3": "f08a840882e8cc882253686b4555da81270e68c31351f594e973e49ea57575bd",
         "bytes": 17756393,
         "source": "bert-tiny",
         "url": "https://huggingface.co/prajjwal1/bert-tiny/resolve/6f75de8b60a9f8a2fdf7b69cbd86d9e64bcb3837/pytorch_model.bin"
+      },
+      {
+        "blake3": "a8fbe32bfff53604463d4fbffcb6b37e29aac00734b46a5ac6c39dbeb04c9541",
+        "bytes": 20809932,
+        "source": "cirros",
+        "url": "https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-rootfs.img.gz"
       },
       {
         "blake3": "dcddcd38a75062308426ee90537843e37ceec9127070144dda05acdc9199c6a0",
@@ -364,6 +376,36 @@
         "url": "https://gutenberg.pglaf.org/9/98/98-0.txt"
       },
       {
+        "blake3": "82cba3b22893c9aa09ac6960e91d05bddda44272f7e90e919e343ef234800068",
+        "bytes": 262905,
+        "source": "loghub-apache",
+        "url": "https://zenodo.org/api/records/8196385/files/Apache.tar.gz/content"
+      },
+      {
+        "blake3": "f3ef1cb5ffd14f9b2ee75f359f2886baddb22eb56aa64e6ca1a412b136854d3c",
+        "bytes": 186645559,
+        "source": "loghub-hdfs",
+        "url": "https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content"
+      },
+      {
+        "blake3": "b9c594df79925ebdba95d7af7cc85aa1a680d78f1e82b339085ef31c6efca60b",
+        "bytes": 232039,
+        "source": "loghub-linux",
+        "url": "https://zenodo.org/api/records/8196385/files/Linux.tar.gz/content"
+      },
+      {
+        "blake3": "306a326df28600a2348e667547bd29ac0c7420a1548352a737b36cc4fcbb84ba",
+        "bytes": 1670098945,
+        "source": "loghub-windows",
+        "url": "https://zenodo.org/api/records/8196385/files/Windows.tar.gz/content"
+      },
+      {
+        "blake3": "f3a24fd8081e41a64b3967285da8b50d5c9ebf88ce51288741ea76dd63cfec89",
+        "bytes": 150889472,
+        "source": "nyc-taxi-full",
+        "url": "https://data.cityofnewyork.us/resource/qp3b-zxtp.csv?$limit=1000000&$order=:id"
+      },
+      {
         "blake3": "2f38bb1ba2464b3b42228eb72c4f810c53f5f8c836409f41f6d2dccda61530fe",
         "bytes": 12601679,
         "source": "python-embed",
@@ -380,6 +422,12 @@
         "bytes": 269060552,
         "source": "smollm2-135m",
         "url": "https://huggingface.co/HuggingFaceTB/SmolLM2-135M/resolve/93efa2f097d58c2a74874c7e644dbc9b0cee75a2/model.safetensors"
+      },
+      {
+        "blake3": "3095b27b68f9c3d1cb68b6db859f80107cf6e522708fce594c651538fc8d7fae",
+        "bytes": 545870042,
+        "source": "ubuntu-cloudimg",
+        "url": "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.tar.gz"
       }
     ],
     "small": [
