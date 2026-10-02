@@ -46,6 +46,7 @@ Each probe is a `lpk-bench probe <name>` subcommand producing `bench/results/...
 - [ ] `probe weights`: on the model-weights class, byte-plane split (exponent/mantissa planes for bf16/fp16) + zstd -19 per plane vs plain zstd -19; record gain.
 - [ ] `probe entropy-gate`: per 1 MB block, Shannon entropy and zstd -1 ratio over the video/encrypted class; record how reliably a cheap gate predicts "incompressible" (precision/recall vs xz -9 ground truth).
 - Acceptance: each probe runs on the `small` profile in < 30 min on an 8-core machine; JSON + table produced; `probe jpeg` and `probe deflate` report failure causes explicitly; no probe writes a number anywhere except its JSON/table.
+- Status 2026-10-02: code complete on `task/p0-4-probes` (PR #5) at `1b70b01` — the framework (`lpk-bench probe <name|all>`, typed probe files validated by `run --validate`, shared helpers) and all six probes, each reviewed to approval; rules in D-22. Smoke runs on `small` were made during implementation under `target/`; the official runs that tick the boxes are made on an idle machine after the P0-3 acceptance pair and committed under `bench/results/`.
 
 ### P0-5 Report and GO/NO-GO — owner: bench-runner (haiku) for runs, reviewer (opus) for the verdict
 - [ ] `lpk-bench report --results <dir>` writes `bench/reports/phase0-<date>.md`: per-class table (size %, compress MB/s, extract MB/s, peak RSS) for every tool; probe tables; **blended estimate** for three disk mixes (photo/doc-heavy, developer, video-heavy); gate evaluation (D-07) with PASS/FAIL per gate.
