@@ -10,7 +10,7 @@ Engine, CLI, format spec, benchmark harness: **Apache-2.0 OR MIT** (dual, like m
 
 ## Dependency policy (enforced by `cargo deny check`)
 - Allowed — `deny.toml` is the authoritative list: Apache-2.0, Apache-2.0 WITH LLVM-exception, MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, 0BSD, ISC, Zlib, CC0-1.0, Unicode-3.0, Unicode-DFS-2016, MPL-2.0 (as an unmodified dependency), BSL-1.0.
-- Allowed with a named exception in `deny.toml`, one entry per crate name: LGPL-2.1-or-later / LGPL-3.0-or-later crates. We publish the complete source of the binaries that contain them, which is how LGPL's relink requirement is met. This holds only for binaries whose complete source we publish; closed-source (GUI Pro) code reaches LGPL components only through the open-source engine as a separate process or DLL. Planned: `cabac` (required by `preflate-rs`; the exception is added in the change that introduces `preflate-rs`). Possible later: `packMP3` bindings, `bzip3`. LGPL code is depended on, never vendored or copied.
+- Allowed with a named exception in `deny.toml`, one entry per crate name, naming the exact licence the crate declares: LGPL-2.1 or LGPL-3.0 crates (-only or -or-later). LGPL's relink requirement is met by publishing the complete source of the binaries that contain them, so this holds only for binaries whose complete source we publish; closed-source (GUI Pro) code reaches LGPL components only through the open-source engine as a separate process or DLL. Planned: `cabac` (required by `preflate-rs`; the exception is added in the change that introduces `preflate-rs`). Possible later: `packMP3` bindings, `bzip3`. LGPL code is depended on, never vendored or copied.
 - Denied: GPL-2.0, GPL-3.0, AGPL, SSPL, proprietary. GPL projects may be *benchmarked* as external tools and *read for understanding only* — never copied, translated or "clean-room ported" by someone who read them.
 - Never: `jpegxl-rs` / `jpegxl-sys` (GPL-3.0-or-later). libjxl itself is BSD-3-Clause; if ever needed, use `jxl-sys` (MIT OR Apache-2.0) or build bindings in-house.
 - A crate that offers a choice (`A OR B`) is used under the allowed alternative; a crate that combines licences (`A AND B`) needs every one of them on the list, and the notices of each are reproduced.
@@ -88,7 +88,7 @@ No patent is known to us for the following; this is engineering knowledge, not t
 and counsel should confirm it before public binaries ship (E7): Reed-Solomon coding and PAR2, classic
 arithmetic coding (the well-known patents are reported expired; not checked), FLAC, the Burrows-Wheeler
 transform, and content-defined chunking as published (FastCDC, Gear hash, SeqCDC, VectorCDC).
-Two libraries deserve an exact statement rather than "clear": **zstd** is licensed BSD-3-Clause OR GPL-2.0-only;
+For two libraries the licence position on patents is stated exactly: **zstd** is licensed BSD-3-Clause OR GPL-2.0-only;
 its repository has carried no separate patent grant since the licence change of v1.3.1 in 2017
 ([changelog](https://github.com/facebook/zstd/blob/dev/CHANGELOG), [licence](https://github.com/facebook/zstd/blob/dev/LICENSE)); **Brotli** is MIT-licensed without patent
 text, and Google filed IETF IPR declarations for it ([2396](https://datatracker.ietf.org/ipr/2396/), offering
