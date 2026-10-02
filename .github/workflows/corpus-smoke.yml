@@ -3,8 +3,15 @@ name: Corpus smoke build
 # Manual only: the small profile downloads over a gigabyte from third-party hosts, so it must
 # never run on every push. Run it from the Actions tab to prove that `corpus build --profile
 # small` completes, and is reproducible, on a clean Linux machine.
+#
+# A run only counts as a from-scratch download test when `use_cache` is false (the default).
 on:
   workflow_dispatch:
+    inputs:
+      use_cache:
+        description: "Restore the download cache (skips the downloads; not a clean-machine test)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,10 +30,28 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # ffmpeg is deliberately not installed: the runner has none, so the video encodes take the
-      # "skipped with a reason" path, as they would on a clean machine.
+      # ffmpeg is deliberately not installed by this workflow. Whether the image already has it
+      # is recorded below; the video encodes are skipped with a reason when it is absent.
+      - name: Record whether ffmpeg and git are on PATH
+        run: |
+          {
+            echo "### Runner tools"
+            echo
+            for t in ffmpeg git; do
+              if command -v "$t" > /dev/null; then
+                case "$t" in
+                  ffmpeg) v=$(ffmpeg -version 2>&1 | head -n 1) ;;
+                  *) v=$("$t" --version 2>&1 | head -n 1) ;;
+                esac
+                echo "- $t: on PATH, $v"
+              else
+                echo "- $t: not on PATH"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Restore the corpus download cache
         id: dl-cache
+        if: ${{ inputs.use_cache }}
         uses: actions/cache/restore@v6
         with:
           path: bench/corpus/.cache
@@ -35,8 +60,10 @@ jobs:
         run: cargo build --release --locked -p lpk-bench
       - name: Build the small corpus
         run: ./target/release/lpk-bench corpus build --profile small
+      # Only after a successful build, and only when there was no exact hit: a cache cannot be
+      # overwritten under the same key, so a partial cache must never be saved.
       - name: Save the corpus download cache
-        if: ${{ always() && steps.dl-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && steps.dl-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
         with:
           path: bench/corpus/.cache
@@ -50,28 +77,58 @@ jobs:
       - name: Fail if the two manifests differ
         run: cmp first-manifest.json bench/corpus/small/manifest.json
       - name: Job summary
+        if: ${{ always() }}
+        env:
+          USE_CACHE: ${{ inputs.use_cache }}
+          CACHE_HIT: ${{ steps.dl-cache.outputs.cache-hit }}
         run: |
           python3 - >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}" <<'PY'
           import json
-          info = json.load(open("bench/corpus/small/build-info.json"))
+          import os
+
+          path = os.environ.get("INFO_PATH", "bench/corpus/small/build-info.json")
+          try:
+              with open(path, encoding="utf-8") as f:
+                  info = json.load(f)
+              if not isinstance(info, dict):
+                  info = {}
+          except (OSError, ValueError):
+              info = {}
+          use_cache = os.environ.get("USE_CACHE", "") == "true"
+          hit = os.environ.get("CACHE_HIT", "") == "true"
           print("## Corpus small build")
           print()
-          print("| class | files | bytes |")
-          print("| --- | ---: | ---: |")
-          for name, c in info["summary"]["classes"].items():
-              print(f"| {name} | {c['files']} | {c['bytes']} |")
-          for key in ("tools", "skipped", "unavailable"):
+          print(f"- download cache used: {'yes' if use_cache else 'no'}")
+          print(f"- download cache exact hit: {'yes' if hit else 'no'}")
+          if not info:
+              print("- build-info.json: missing or unreadable")
+          print(f"- manifest BLAKE3: {info.get('manifest_blake3', 'unknown')}")
+          print()
+          print(
+              "The manifest comparison in this job is between two builds on this runner only; "
+              "it does not show that Linux matches Windows. Compare the BLAKE3 above with a "
+              "Windows build by hand."
+          )
+          classes = (info.get("summary") or {}).get("classes") or {}
+          if classes:
+              print()
+              print("| class | files | bytes |")
+              print("| --- | ---: | ---: |")
+              for name, c in classes.items():
+                  print(f"| {name} | {c.get('files')} | {c.get('bytes')} |")
+          for key, empty in (("tools", {}), ("skipped", []), ("unavailable", [])):
               print()
               print(f"### {key}")
               print()
               print("```json")
-              print(json.dumps(info.get(key, []), indent=2, sort_keys=True))
+              print(json.dumps(info.get(key, empty), indent=2, sort_keys=True))
               print("```")
           PY
       - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
         with:
           name: corpus-small-metadata
           path: |
             bench/corpus/small/manifest.json
             bench/corpus/small/build-info.json
-          if-no-files-found: error
+          if-no-files-found: warn
