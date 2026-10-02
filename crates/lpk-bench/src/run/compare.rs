@@ -36,6 +36,8 @@ pub struct Row {
 pub struct Report {
     pub rows: Vec<Row>,
     pub problems: Vec<String>,
+    /// Things worth saying that do not fail the comparison.
+    pub notes: Vec<String>,
 }
 
 #[derive(Default)]
@@ -189,6 +191,32 @@ pub fn compare(a: &Path, b: &Path, max_diff_pct: f64) -> Result<Report> {
                 .push("the two runs used different catalogue files (bench/tools.toml)".to_string());
         }
     }
+    // A combination measured once in one directory (a long run) and fully repeated in the other.
+    let shorts = |l: &Loaded| -> BTreeMap<(String, String, String), bool> {
+        l.results
+            .iter()
+            .filter(|r| r.median.is_some() && r.skipped.is_none() && r.failed.is_none())
+            .map(|r| {
+                (
+                    (r.tool.id.clone(), r.setting.id.clone(), r.class.clone()),
+                    r.repeats_short.is_some(),
+                )
+            })
+            .collect()
+    };
+    let (sa, sb) = (shorts(&la), shorts(&lb));
+    for (key, short_a) in &sa {
+        if sb.get(key).is_some_and(|short_b| short_b != short_a) {
+            rep.notes.push(format!(
+                "{}/{}/{}: measured with a different number of repeats ({} was measured once \
+                 because of --long-run-s)",
+                key.0,
+                key.1,
+                key.2,
+                if *short_a { "A" } else { "B" }
+            ));
+        }
+    }
     let (ta, tb) = (thread_set(&la), thread_set(&lb));
     if ta != tb {
         rep.problems
@@ -315,6 +343,9 @@ pub fn table(rep: &Report, max_diff_pct: f64) -> String {
 pub fn compare_command(a: &Path, b: &Path, max_diff_pct: f64) -> Result<ExitCode> {
     let rep = compare(a, b, max_diff_pct)?;
     print!("{}", table(&rep, max_diff_pct));
+    for n in &rep.notes {
+        println!("note: {n}");
+    }
     for p in &rep.problems {
         eprintln!("error: {p}");
     }
@@ -498,6 +529,39 @@ mod tests {
         // No run.json: an error, not a comparison.
         std::fs::remove_file(f2.join("run.json")).expect("rm");
         assert!(compare(&f1, &f2, 3.0).is_err());
+    }
+
+    #[test]
+    fn a_combination_measured_once_in_one_directory_only_is_noted_by_name() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let full = two_classes(1.0);
+        let mut trimmed = two_classes(1.0);
+        // The first class: one repeat of three, with the long-run marker.
+        let reps = trimmed[0].repeats.take().expect("repeats")[..1].to_vec();
+        trimmed[0].median = Some(Sample::median_of(&reps));
+        trimmed[0].repeats = Some(reps);
+        trimmed[0].repeats_short = Some("measured once: long run".into());
+        let a = write(tmp.path(), "a", &full, &samples::tools());
+        let b = write(tmp.path(), "b", &trimmed, &samples::tools());
+        let rep = compare(&a, &b, 100000.0).expect("compare");
+        assert_eq!(rep.notes.len(), 1, "{:?}", rep.notes);
+        assert!(
+            rep.notes[0].contains("7z/mx5/text") && rep.notes[0].contains("B was measured once")
+        );
+        assert!(
+            !rep.problems.iter().any(|p| p.contains("repeats")),
+            "a note must not fail the comparison: {:?}",
+            rep.problems
+        );
+        // Reversed: A is the short one.
+        let rep = compare(&b, &a, 100000.0).expect("compare");
+        assert!(
+            rep.notes[0].contains("A was measured once"),
+            "{:?}",
+            rep.notes
+        );
+        // Same on both sides: no note.
+        assert!(compare(&a, &a, 3.0).expect("compare").notes.is_empty());
     }
 
     #[test]

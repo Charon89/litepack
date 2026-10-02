@@ -485,6 +485,29 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
                             r.threads, run.threads
                         ));
                     }
+                    // A result marked as measured once because it was long must have exactly one
+                    // repeat, and that repeat must really have reached the recorded limit.
+                    if r.repeats_short.is_some() && r.failed.is_none() {
+                        let reps = r.repeats.as_deref().unwrap_or(&[]);
+                        match reps {
+                            [only] => {
+                                let wall = only.compress.wall_seconds + only.extract.wall_seconds;
+                                if wall < run.long_run_s as f64 {
+                                    report.problems.push(format!(
+                                        "{name}: /repeats_short: the single repeat took {wall:.3} s \
+                                         of compress plus extract wall time, less than \
+                                         long_run_s ({}) in run.json",
+                                        run.long_run_s
+                                    ));
+                                }
+                            }
+                            _ => report.problems.push(format!(
+                                "{name}: /repeats_short: present, but {} repeats are recorded \
+                                 (a long run has exactly one)",
+                                reps.len()
+                            )),
+                        }
+                    }
                     if r.skipped.is_none() && r.repeats_requested != Some(run.repeats_requested) {
                         report.problems.push(format!(
                             "{name}: /repeats_requested: {:?} but run.json says {}",
@@ -1128,11 +1151,31 @@ mod tests {
         assert!(problems(&dir)
             .iter()
             .any(|m| m.contains("/repeats:") && m.contains("repeats_short")));
-        // Explained.
+        // Explained: one repeat that really reached long_run_s (120 in the sample run.json).
         let mut ok = one(samples::measured());
+        let long = vec![samples::sample(200.0)];
+        ok.median = Some(Sample::median_of(&long));
+        ok.repeats = Some(long);
         ok.repeats_short = Some("measured once: long run".into());
         let dir = write_dir(tmp.path(), &[ok]);
         assert!(problems(&dir).is_empty(), "{:?}", problems(&dir));
+        // The marker on a repeat that was too quick to be a long run.
+        let mut quick = one(samples::measured());
+        quick.repeats_short = Some("measured once: long run".into());
+        let dir = write_dir(tmp.path(), &[quick]);
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("/repeats_short") && m.contains("less than long_run_s")));
+        // Hand-trimmed: two of three repeats with the marker.
+        let mut two = samples::measured();
+        let reps = two.repeats.take().expect("repeats")[..2].to_vec();
+        two.median = Some(Sample::median_of(&reps));
+        two.repeats = Some(reps);
+        two.repeats_short = Some("measured once: long run".into());
+        let dir = write_dir(tmp.path(), &[two]);
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("/repeats_short") && m.contains("exactly one")));
         // A marker although everything ran.
         let mut lie = samples::measured();
         lie.repeats_short = Some("measured once: long run".into());

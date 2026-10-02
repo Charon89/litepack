@@ -1071,14 +1071,18 @@ const WINDOWS_PATH_LIMIT: usize = 259;
 
 /// The warning printed before a run when a path may exceed the Windows limit that some tools
 /// (WinRAR) cannot get around.
-pub fn path_warning(longest_input: usize, scratch: usize) -> Option<String> {
-    (longest_input > WINDOWS_PATH_LIMIT || scratch > WINDOWS_PATH_LIMIT).then(|| {
-        format!(
-            "warning: a path of this run is longer than {WINDOWS_PATH_LIMIT} characters \
-             (longest input path {longest_input}, scratch archive path {scratch}); some tools \
-             (WinRAR) fail on such paths. Use a shorter --tmp or a shorter checkout path."
-        )
-    })
+pub fn path_warning(longest_input: usize, scratch: usize, extraction: usize) -> Option<String> {
+    (longest_input > WINDOWS_PATH_LIMIT
+        || scratch > WINDOWS_PATH_LIMIT
+        || extraction > WINDOWS_PATH_LIMIT)
+        .then(|| {
+            format!(
+                "warning: a path of this run is longer than {WINDOWS_PATH_LIMIT} characters \
+                 (longest input path {longest_input}, scratch archive path {scratch}, longest \
+                 extraction path {extraction}); some tools (WinRAR) fail on such paths. Use a \
+                 shorter --tmp or a shorter checkout path."
+            )
+        })
 }
 
 /// Run everything. `discovered` is the whole catalogue; `selected` the tool ids to run.
@@ -1160,7 +1164,10 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
             .unwrap_or(0);
         let input = cwd_base.to_string_lossy().chars().count() + 1 + longest;
         let scratch = tmp_run.to_string_lossy().chars().count() + "/c999/a.tar.zst".len();
-        if let Some(w) = path_warning(input, scratch) {
+        // run temp directory + a combination directory + the extraction directory + the longest
+        // relative path (the manifest path is an upper bound: a public class's prefix is removed).
+        let extraction = tmp_run.to_string_lossy().chars().count() + "/c999/x/".len() + longest;
+        if let Some(w) = path_warning(input, scratch, extraction) {
             eprintln!("{w}");
         }
     }
@@ -1330,6 +1337,19 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn the_path_warning_considers_input_archive_and_extraction_paths() {
+        assert!(path_warning(100, 100, 100).is_none());
+        assert!(path_warning(259, 259, 259).is_none());
+        for (a, b, c) in [(260, 1, 1), (1, 260, 1), (1, 1, 260)] {
+            let w = path_warning(a, b, c).expect("warning");
+            assert!(w.contains("shorter --tmp"), "{w}");
+        }
+        assert!(path_warning(1, 1, 300)
+            .expect("w")
+            .contains("extraction path 300"));
     }
 
     #[test]
