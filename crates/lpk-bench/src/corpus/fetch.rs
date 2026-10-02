@@ -208,6 +208,10 @@ pub struct HostPolicy {
     pub min_interval: Duration,
     /// Throughput cap in bytes per second.
     pub max_bytes_per_s: Option<u64>,
+    /// Attempts per request, replacing [`RetryPolicy::max_attempts`] for this host.
+    pub max_attempts: Option<u32>,
+    /// Cap on one back-off wait, replacing [`RetryPolicy::max_delay`] for this host.
+    pub max_delay: Option<Duration>,
 }
 
 /// Per-host request pacing, applied by the [`Downloader`] to every request it makes.
@@ -244,6 +248,8 @@ impl Politeness {
                         HostPolicy {
                             min_interval: Duration::from_millis(h.min_interval_ms),
                             max_bytes_per_s: h.max_mbit_per_s.map(|m| m.saturating_mul(125_000)),
+                            max_attempts: h.max_attempts,
+                            max_delay: h.max_delay_ms.map(Duration::from_millis),
                         },
                     )
                 })
@@ -276,6 +282,18 @@ impl Politeness {
     pub fn finish(&self, url: &str) {
         if let Some((host, _)) = self.policy(url) {
             self.last.borrow_mut().insert(host, Instant::now());
+        }
+    }
+
+    /// `base` with the host's own attempts and back-off cap, when it sets them.
+    fn retry_for(&self, url: &str, base: RetryPolicy) -> RetryPolicy {
+        match self.policy(url) {
+            Some((_, p)) => RetryPolicy {
+                max_attempts: p.max_attempts.unwrap_or(base.max_attempts),
+                max_delay: p.max_delay.unwrap_or(base.max_delay),
+                ..base
+            },
+            None => base,
         }
     }
 
@@ -416,6 +434,9 @@ pub struct Downloader<'a> {
     retry: RetryPolicy,
     profile: Profile,
     politeness: Politeness,
+    /// Back-off waits requested instead of slept (tests only).
+    #[cfg(test)]
+    paused: RefCell<Vec<Duration>>,
 }
 
 impl<'a> Downloader<'a> {
@@ -431,7 +452,22 @@ impl<'a> Downloader<'a> {
             retry,
             profile,
             politeness: Politeness::default(),
+            #[cfg(test)]
+            paused: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Wait out a back-off delay (recorded instead of slept under test).
+    fn pause(&self, delay: Duration) {
+        #[cfg(test)]
+        self.paused.borrow_mut().push(delay);
+        #[cfg(not(test))]
+        std::thread::sleep(delay);
+    }
+
+    /// The retry rules for requests to `url`'s host.
+    fn retry_for(&self, url: &str) -> RetryPolicy {
+        self.politeness.retry_for(url, self.retry)
     }
 
     /// Apply per-host pacing to every request this downloader makes.
@@ -472,6 +508,7 @@ impl<'a> Downloader<'a> {
         url: &str,
         limit: u64,
     ) -> Result<(Vec<u8>, Option<Duration>), DownloadError> {
+        let retry = self.retry_for(url);
         let mut attempt = 1;
         loop {
             self.politeness.wait(url);
@@ -496,7 +533,7 @@ impl<'a> Downloader<'a> {
             self.politeness.finish(url);
             match outcome {
                 Ok(b) => {
-                    if let Err(m) = self.retry.check_retry_after(b.1) {
+                    if let Err(m) = retry.check_retry_after(b.1) {
                         return Err(DownloadError::Fetch(format!(
                             "source `{source}`: {url}: {m}"
                         )));
@@ -522,22 +559,22 @@ impl<'a> Downloader<'a> {
                     message,
                     retry_after,
                 }) => {
-                    if attempt >= self.retry.max_attempts {
+                    if attempt >= retry.max_attempts {
                         return Err(DownloadError::Fetch(format!(
                             "source `{source}`: {url}: {message} (gave up after {attempt} attempts)"
                         )));
                     }
-                    if let Err(m) = self.retry.check_retry_after(retry_after) {
+                    if let Err(m) = retry.check_retry_after(retry_after) {
                         return Err(DownloadError::Fetch(format!(
                             "source `{source}`: {url}: {message}: {m}"
                         )));
                     }
-                    let delay = self.retry.delay(attempt, retry_after);
+                    let delay = retry.delay(attempt, retry_after);
                     eprintln!(
                         "  {source}: {message}; retry {attempt}/{} in {delay:?}",
-                        self.retry.max_attempts - 1
+                        retry.max_attempts - 1
                     );
-                    std::thread::sleep(delay);
+                    self.pause(delay);
                     attempt += 1;
                 }
             }
@@ -621,6 +658,7 @@ impl<'a> Downloader<'a> {
         // A leftover from an earlier run is never resumed; within this call a failed attempt
         // keeps its partial file and the next attempt continues from it.
         let _ = std::fs::remove_file(part);
+        let retry = self.retry_for(url);
         let mut attempt = 1;
         let mut validator: Option<String> = None;
         let mut restarts = 0u32;
@@ -658,22 +696,22 @@ impl<'a> Downloader<'a> {
                     message,
                     retry_after,
                 })) => {
-                    if attempt >= self.retry.max_attempts {
+                    if attempt >= retry.max_attempts {
                         return Err(DownloadError::Fetch(format!(
                             "source `{source}`: {url}: {message} (gave up after {attempt} attempts)"
                         )));
                     }
-                    if let Err(m) = self.retry.check_retry_after(retry_after) {
+                    if let Err(m) = retry.check_retry_after(retry_after) {
                         return Err(DownloadError::Fetch(format!(
                             "source `{source}`: {url}: {message}: {m}"
                         )));
                     }
-                    let delay = self.retry.delay(attempt, retry_after);
+                    let delay = retry.delay(attempt, retry_after);
                     eprintln!(
                         "  {source}: {message}; retry {attempt}/{} in {delay:?}",
-                        self.retry.max_attempts - 1
+                        retry.max_attempts - 1
                     );
-                    std::thread::sleep(delay);
+                    self.pause(delay);
                     attempt += 1;
                 }
             }
@@ -1234,6 +1272,7 @@ mod tests {
             HostPolicy {
                 min_interval: Duration::from_millis(120),
                 max_bytes_per_s: Some(100_000),
+                ..HostPolicy::default()
             },
         )]);
         let dir = tempfile::tempdir().expect("tmp");
@@ -1278,7 +1317,7 @@ mod tests {
             "polite.example".to_string(),
             HostPolicy {
                 min_interval: Duration::from_millis(100),
-                max_bytes_per_s: None,
+                ..HostPolicy::default()
             },
         )]);
         let dir = tempfile::tempdir().expect("tmp");
@@ -1301,5 +1340,111 @@ mod tests {
             "three requests need two 100 ms gaps, the restart included"
         );
         assert_eq!(std::fs::read(&a.path).expect("read"), data);
+    }
+
+    fn patient_host(host: &str) -> Politeness {
+        Politeness::new(BTreeMap::from([(
+            host.to_string(),
+            HostPolicy {
+                max_attempts: Some(6),
+                max_delay: Some(Duration::from_secs(30)),
+                ..HostPolicy::default()
+            },
+        )]))
+    }
+
+    fn secs(v: &[u64]) -> Vec<Duration> {
+        v.iter().map(|s| Duration::from_secs(*s)).collect()
+    }
+
+    fn slow_retry() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(60),
+            max_retry_after: Duration::from_secs(900),
+            maxlag_min: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn host_attempts_and_backoff_cap_apply_to_that_host_only() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let (patient, other) = ("https://patient.example/a", "https://other.example/a");
+        let f = FakeFetcher::with(patient, b"x".to_vec());
+        f.files.borrow_mut().insert(other.into(), b"x".to_vec());
+        let d = Downloader::new(&f, dir.path().to_path_buf(), slow_retry(), Profile::Small)
+            .with_politeness(patient_host("patient.example"));
+
+        // Six attempts, waits double from 2 s and are capped at 30 s.
+        f.fail_first.set(5);
+        d.obtain("s", patient, Expect::Unpinned)
+            .expect("sixth works");
+        assert_eq!(f.call_count(), 6);
+        assert_eq!(*d.paused.borrow(), secs(&[2, 4, 8, 16, 30]));
+
+        // Gives up after exactly six attempts.
+        d.paused.borrow_mut().clear();
+        f.calls.borrow_mut().clear();
+        f.fail_first.set(100);
+        let err = d
+            .obtain("s", patient, Expect::Unpinned)
+            .expect_err("gives up");
+        assert!(
+            err.to_string().contains("gave up after 6 attempts"),
+            "{err}"
+        );
+        assert_eq!(f.call_count(), 6);
+
+        // Another host keeps the defaults: three attempts, waits 2 and 4 s.
+        d.paused.borrow_mut().clear();
+        f.calls.borrow_mut().clear();
+        f.fail_first.set(100);
+        let err = d
+            .obtain("s", other, Expect::Unpinned)
+            .expect_err("gives up");
+        assert!(
+            err.to_string().contains("gave up after 3 attempts"),
+            "{err}"
+        );
+        assert_eq!(f.call_count(), 3);
+        assert_eq!(*d.paused.borrow(), secs(&[2, 4]));
+    }
+
+    #[test]
+    fn api_requests_use_the_host_policy_and_retry_after_is_still_honoured_and_refused() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let url = "https://patient.example/api";
+        let f = FakeFetcher::with(url, b"{}".to_vec());
+        let d = Downloader::new(&f, dir.path().to_path_buf(), slow_retry(), Profile::Small)
+            .with_politeness(patient_host("patient.example"));
+        f.fail_first.set(4);
+        f.retry_after.set(Some(Duration::from_secs(45)));
+        d.get_bytes("s", url, 100).expect("fifth works");
+        assert_eq!(f.call_count(), 5);
+        // The wait is never shorter than Retry-After, even above the back-off cap.
+        assert_eq!(*d.paused.borrow(), secs(&[45, 45, 45, 45]));
+
+        // Above the (unchanged) Retry-After limit the build fails without retrying.
+        f.calls.borrow_mut().clear();
+        f.fail_first.set(4);
+        f.retry_after.set(Some(Duration::from_secs(901)));
+        let err = d.get_bytes("s", url, 100).expect_err("refused");
+        assert!(err.to_string().contains("Retry-After"), "{err}");
+        assert_eq!(f.call_count(), 1);
+    }
+
+    #[test]
+    fn default_policy_is_unchanged_without_host_settings() {
+        let p = Politeness::new(BTreeMap::from([(
+            "plain.example".to_string(),
+            HostPolicy::default(),
+        )]));
+        let base = RetryPolicy::default();
+        for url in ["https://plain.example/x", "https://unknown.example/x"] {
+            let r = p.retry_for(url, base);
+            assert_eq!(r.max_attempts, 5);
+            assert_eq!(r.max_delay, Duration::from_secs(60));
+        }
     }
 }
