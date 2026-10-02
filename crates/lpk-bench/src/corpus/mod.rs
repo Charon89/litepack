@@ -291,7 +291,10 @@ pub fn run(args: CorpusArgs) -> ExitCode {
                         println!("altered after extraction (not in the manifest): {p}");
                     }
                     for s in &r.skipped {
-                        println!("skipped {}: {}", s.source, s.reason);
+                        println!(
+                            "WARNING: source `{}` was SKIPPED, the corpus lacks it: {}",
+                            s.source, s.reason
+                        );
                     }
                     for p in &r.removed {
                         println!("removed unlisted file: {p}");

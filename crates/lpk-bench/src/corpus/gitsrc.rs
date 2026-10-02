@@ -22,9 +22,12 @@
 //! git versions (delta search, zlib builds, pack and index format defaults); working-tree files
 //! are unaffected.
 //!
-//! A missing `git` program, or a failed fetch, is reported as a fetch failure, so an
-//! `optional = true` source is listed under `skipped` with the reason instead of failing the
-//! build.
+//! Only a missing `git` program is a fetch failure, so an `optional = true` source is listed
+//! under `skipped` with the reason instead of failing the build. Any other git error (the commit
+//! is gone upstream, a failed fetch, a tree that is not portable to every OS) fails the build.
+//! git runs with: no credential helper, no hooks, no git-lfs filters, no inherited `GIT_*`
+//! variables, `https` as the only protocol (the file protocol only in tests), and
+//! `transfer.fsckObjects=true`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -47,7 +50,7 @@ fn fixed_config(repo: &str) -> String {
 }
 
 /// Settings passed to every git command (command-line values beat every config file).
-const SETTINGS: [&str; 18] = [
+const SETTINGS: &[&str] = &[
     "core.autocrlf=false",
     "core.eol=lf",
     "core.symlinks=false",
@@ -58,14 +61,20 @@ const SETTINGS: [&str; 18] = [
     "gc.auto=0",
     "maintenance.auto=false",
     "advice.detachedHead=false",
-    "protocol.file.allow=always",
+    "protocol.allow=never",
+    "protocol.https.allow=always",
+    "credential.helper=",
+    "filter.lfs.smudge=",
+    "filter.lfs.process=",
+    "filter.lfs.clean=",
+    "filter.lfs.required=false",
     "pack.threads=1",
     "pack.compression=6",
     "pack.writeReverseIndex=false",
     "repack.writeBitmaps=false",
     "pack.window=10",
     "pack.depth=50",
-    "fetch.fsckObjects=false",
+    "transfer.fsckObjects=true",
 ];
 
 /// A git program bound to a working directory.
@@ -84,18 +93,30 @@ fn not_found(program: &str) -> DownloadError {
 impl Git<'_> {
     fn command(&self) -> Command {
         let mut c = Command::new(self.program);
-        for s in SETTINGS {
+        for s in SETTINGS.iter() {
             c.arg("-c").arg(s);
+        }
+        // Hooks come from an empty directory; the file protocol exists only for tests.
+        c.arg("-c").arg(format!(
+            "core.hooksPath={}",
+            self.global_config.with_file_name("empty-hooks").display()
+        ));
+        if cfg!(test) {
+            c.arg("-c").arg("protocol.file.allow=always");
+        }
+        // No inherited GIT_* variable may steer git (repository, config, object format, ...).
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().to_ascii_uppercase().starts_with("GIT_") {
+                c.env_remove(&k);
+            }
         }
         c.current_dir(self.cwd)
             .env("GIT_CONFIG_GLOBAL", self.global_config)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("LC_ALL", "C")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_OBJECT_DIRECTORY");
+            .env("GIT_LFS_SKIP_SMUDGE", "1")
+            .env("GCM_INTERACTIVE", "never")
+            .env("LC_ALL", "C");
         c
     }
 
@@ -160,6 +181,7 @@ pub fn materialise(
     std::fs::create_dir_all(scratch)?;
     let global = scratch.join("empty.gitconfig");
     std::fs::write(&global, b"")?;
+    std::fs::create_dir_all(scratch.join("empty-hooks"))?;
     let abs = std::path::absolute(dir).context("resolving the output directory")?;
     match spec.mode {
         GitMode::Clone => {
@@ -168,7 +190,7 @@ pub fn materialise(
                 cwd: &abs,
                 global_config: &global,
             };
-            git.run(&["init", "-q"])?;
+            init_repo(&git)?;
             fetch_commit(&git, spec, spec.depth)?;
             git.run(&["update-ref", "refs/heads/main", &spec.commit])?;
             git.run(&["symbolic-ref", "HEAD", "refs/heads/main"])?;
@@ -196,7 +218,7 @@ pub fn materialise(
                     cwd: &tmp,
                     global_config: &global,
                 };
-                git.run(&["init", "-q"])?;
+                init_repo(&git)?;
                 fetch_commit(&git, spec, Some(1))?;
                 let wt = format!("--work-tree={}", abs.display());
                 git.run(&[
@@ -219,8 +241,37 @@ pub fn materialise(
     Ok(())
 }
 
-/// `git fetch` of one commit, then check that it arrived. A failed fetch is a fetch failure
-/// (tolerated for optional sources); a missing commit afterwards is not.
+/// `git init` with a fixed object format and ref storage (the user's defaults must not matter).
+/// `--ref-format` needs git 2.45; older versions only know the files format anyway.
+fn init_repo(git: &Git<'_>) -> Result<()> {
+    if git
+        .run(&["init", "-q", "--object-format=sha1", "--ref-format=files"])
+        .is_ok()
+    {
+        return Ok(());
+    }
+    git.run(&["init", "-q", "--object-format=sha1"])?;
+    Ok(())
+}
+
+/// Every path of the commit's tree must pass the same portability rules as archive entries
+/// (no case-insensitive duplicates, no `aux`, no trailing dot or space, ...), so every OS
+/// produces the same tree or fails the same way.
+fn check_tree(git: &Git<'_>, commit: &str) -> Result<()> {
+    let out = git.run(&["ls-tree", "-r", "-z", "--name-only", commit])?;
+    let paths: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    super::extract::check_listing(&paths)
+        .with_context(|| format!("the tree of commit {commit} is not portable"))
+}
+
+/// `git fetch` of one commit, then check that it arrived and that its tree is portable. Any git
+/// failure other than a missing program is a hard error (a commit that vanished upstream must
+/// not turn into a quiet skip).
 fn fetch_commit(git: &Git<'_>, spec: &GitSpec, depth: Option<u32>) -> Result<()> {
     let mut args: Vec<String> = vec!["fetch".into(), "-q".into(), "--no-tags".into()];
     if let Some(d) = depth {
@@ -228,14 +279,11 @@ fn fetch_commit(git: &Git<'_>, spec: &GitSpec, depth: Option<u32>) -> Result<()>
     }
     args.push(spec.repo.clone());
     args.push(spec.commit.clone());
-    if let Err(e) = git.run(&args) {
-        if e.downcast_ref::<DownloadError>().is_some() {
-            return Err(e);
-        }
-        return Err(DownloadError::Fetch(format!("{e:#}")).into());
-    }
+    git.run(&args)
+        .with_context(|| format!("fetching commit {} of {}", spec.commit, spec.repo))?;
     let ty = git.stdout(&["cat-file", "-t", &spec.commit])?;
     ensure!(ty == "commit", "{} is a {ty}, not a commit", spec.commit);
+    check_tree(git, &spec.commit)?;
     Ok(())
 }
 
@@ -639,5 +687,120 @@ mod tests {
         ] {
             assert!(Registry::parse(&bad).is_err(), "{bad}");
         }
+    }
+
+    /// A repository whose only commit holds the given `(name, content)` entries, built with
+    /// plumbing so that names a Windows checkout could not create are possible.
+    fn plumbing_repo(root: &Path, entries: &[(&str, &str)]) -> (PathBuf, String) {
+        let repo = root.join("plumb");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let global = root.join("empty.gitconfig");
+        std::fs::write(&global, b"").expect("cfg");
+        let git = Git {
+            program: "git",
+            cwd: &repo,
+            global_config: &global,
+        };
+        git.run(&["init", "-q"]).expect("init");
+        git.run(&["config", "uploadpack.allowAnySHA1InWant", "true"])
+            .expect("cfg");
+        for (name, content) in entries {
+            std::fs::write(repo.join("blob.tmp"), content).expect("w");
+            let blob = git
+                .stdout(&["hash-object", "-w", "blob.tmp"])
+                .expect("hash-object");
+            git.run(&[
+                "-c",
+                "core.protectNTFS=false",
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{blob},{name}"),
+            ])
+            .expect("update-index");
+        }
+        let tree = git.stdout(&["write-tree"]).expect("write-tree");
+        let commit = git
+            .stdout(&[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.org",
+                "commit-tree",
+                &tree,
+                "-m",
+                "c",
+            ])
+            .expect("commit-tree");
+        (repo, commit)
+    }
+
+    #[test]
+    fn tree_names_must_be_portable_and_a_missing_commit_is_a_hard_error() {
+        if !have_git() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tmp");
+        for (entries, what) in [
+            (vec![("README", "a"), ("readme", "b")], "case"),
+            (vec![("aux.h", "a")], "reserved"),
+            (vec![("trail.", "a")], "dot"),
+        ] {
+            let (repo, commit) = plumbing_repo(dir.path(), &entries);
+            let s = spec(&repo, &commit, GitMode::Export, None);
+            let out = dir.path().join(format!("out-{what}"));
+            std::fs::create_dir_all(&out).expect("out");
+            let err =
+                materialise("git", &s, &out, &dir.path().join("scratch"), "t").expect_err(what);
+            assert!(
+                format!("{err:#}").contains("not portable"),
+                "{what}: {err:#}"
+            );
+            assert!(err.downcast_ref::<DownloadError>().is_none());
+            std::fs::remove_dir_all(dir.path().join("plumb")).expect("rm");
+        }
+        // A commit the origin does not have is a hard error, not a skip.
+        let (repo, _) = plumbing_repo(dir.path(), &[("ok.txt", "a")]);
+        let s = spec(&repo, &"b".repeat(40), GitMode::Export, None);
+        let out = dir.path().join("out-missing");
+        std::fs::create_dir_all(&out).expect("out");
+        let err = materialise("git", &s, &out, &dir.path().join("scratch"), "t")
+            .expect_err("missing commit");
+        assert!(err.downcast_ref::<DownloadError>().is_none(), "{err:#}");
+    }
+
+    #[test]
+    fn lfs_attributes_do_not_run_filters_and_the_tree_is_exact() {
+        if !have_git() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tmp");
+        let (repo, commit) = plumbing_repo(
+            dir.path(),
+            &[
+                (
+                    ".gitattributes",
+                    "* filter=lfs diff=lfs merge=lfs -text
+",
+                ),
+                (
+                    "big.bin",
+                    "version https://git-lfs.github.com/spec/v1
+",
+                ),
+            ],
+        );
+        let (out, files) = run(
+            dir.path(),
+            "a",
+            &spec(&repo, &commit, GitMode::Export, None),
+        );
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(out.join("big.bin")).expect("r"),
+            "version https://git-lfs.github.com/spec/v1
+",
+            "the pointer text is kept as is"
+        );
     }
 }
