@@ -3,11 +3,14 @@
 //! manifest and write one result file per combination.
 //!
 //! Protocol (see also `bench/tools.toml` and `docs/BASELINES.md`):
-//! * Before any timing for a class every input file is read once and its BLAKE3 is compared with
-//!   the manifest (this verifies the input and warms the file cache); a mismatch aborts the run.
-//! * Tools run without a shell, in the parent of the class directory (the corpus root for a private
-//!   corpus), with relative paths, output redirected, no console, and the tool-configuration
-//!   environment variables of [`STRIPPED_ENV`] removed.
+//! * Before every tool x setting, outside any timing, every input file of the class is read and
+//!   its BLAKE3 compared with the manifest (this verifies the input and warms the file cache); a
+//!   mismatch aborts the run.
+//! * Tools run without a shell, creation in the parent of the class directory (the corpus root for
+//!   a private corpus) with relative paths, extraction in the combination's scratch directory
+//!   with plain names; output redirected, no console, the tool-configuration environment
+//!   variables of [`STRIPPED_ENV`] removed. Files a later step reads are flushed to disk between
+//!   steps, outside the timed intervals.
 //! * Tar-stream tools run in two sequential steps through a temporary file; the published time is
 //!   the sum of the steps, the published peak memory the larger of the two.
 //! * Every repeat is extracted into an empty directory and verified by BLAKE3 of every file; a
@@ -27,8 +30,9 @@ use super::catalogue::{Layout, Mode, Setting, Tool};
 use super::discover::{self, Discovered, Status};
 use super::host;
 use super::result::{
-    render, CorpusRef, Failure, Measure, Measurement, PeakMemoryKind, Sample, SettingRef,
-    StepTimes, TarInfo, ToolRef, ToolResult, ToolsFile, Verification, SCHEMA_VERSION,
+    render, CorpusRef, Failure, Measure, Measurement, PeakMemoryKind, RunCombination, RunFile,
+    Sample, SettingRef, StepTimes, TarInfo, ToolRef, ToolResult, ToolsFile, Verification,
+    SCHEMA_VERSION,
 };
 use super::validate;
 use super::{load_catalogue, select, RunArgs};
@@ -65,6 +69,11 @@ pub struct Config {
     pub repeats: u32,
     pub threads: u32,
     pub timeout: Duration,
+    /// A combination whose first repeat (compress plus extract wall time) takes at least this long
+    /// is not repeated.
+    pub long_run: Duration,
+    /// BLAKE3 of the catalogue file used, recorded in `run.json`.
+    pub catalogue_blake3: String,
     pub results_root: PathBuf,
     pub tmp_root: PathBuf,
     pub allow_dirty: bool,
@@ -276,16 +285,30 @@ impl Findings {
     }
 
     /// Short text naming the first offender of every kind.
+    #[cfg(test)]
     pub fn reason(&self) -> String {
+        self.reason_with(None)
+    }
+
+    /// With `private_index` (tree path -> manifest position) no file name appears: expected files
+    /// are named by their position in the manifest and extra files (names a tool produced) only
+    /// counted.
+    pub fn reason_with(&self, private_index: Option<&BTreeMap<String, usize>>) -> String {
         let mut parts = Vec::new();
-        for (what, list) in [
-            ("missing", &self.missing),
-            ("different", &self.different),
-            ("extra", &self.extra),
+        for (what, list, expected) in [
+            ("missing", &self.missing, true),
+            ("different", &self.different, true),
+            ("extra", &self.extra, false),
         ] {
-            if let Some(first) = list.first() {
-                parts.push(format!("{} {what} (first: {first})", list.len()));
-            }
+            let Some(first) = list.first() else { continue };
+            parts.push(match private_index {
+                None => format!("{} {what} (first: {first})", list.len()),
+                Some(index) if expected => match index.get(first) {
+                    Some(i) => format!("{} {what} (first: manifest file #{i})", list.len()),
+                    None => format!("{} {what}", list.len()),
+                },
+                Some(_) => format!("{} {what}", list.len()),
+            });
         }
         format!("verification: {}", parts.join("; "))
     }
@@ -365,7 +388,8 @@ fn expand(template: &[String], v: &Vars<'_>) -> Vec<String> {
                 arg.replace("{archive}", v.archive)
                     .replace("{input}", v.input)
                     .replace("{outdir}", v.outdir)
-                    .replace("{list}", v.list),
+                    .replace("{list}", v.list)
+                    .replace("{sep}", std::path::MAIN_SEPARATOR_STR),
             ),
         }
     }
@@ -415,7 +439,7 @@ struct Ctx<'a> {
     corpus: &'a Corpus,
     class: &'a str,
     entry: &'a ClassEntry,
-    /// Working directory of every tool: parent of the class directory, or the private root.
+    /// Working directory of creation: parent of the class directory, or the private root.
     cwd: PathBuf,
     /// Scratch directory of the current combination (absolute) and relative to `cwd`.
     work: PathBuf,
@@ -423,9 +447,24 @@ struct Ctx<'a> {
     tar: Option<&'a TarTool>,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
     fn rel(&self, name: &str) -> String {
         format!("{}/{name}", self.work_rel)
+    }
+
+    /// The same combination with the scratch directory as working directory: extraction runs there,
+    /// with plain relative names.
+    fn in_scratch(&self) -> Ctx<'a> {
+        Ctx {
+            cfg: self.cfg,
+            corpus: self.corpus,
+            class: self.class,
+            entry: self.entry,
+            cwd: self.work.clone(),
+            work: self.work.clone(),
+            work_rel: ".".to_string(),
+            tar: self.tar,
+        }
     }
 }
 
@@ -482,6 +521,15 @@ fn print_stderr_tail(file: &Path) {
         if !text.is_empty() {
             eprintln!("    tool stderr (tail): {text}");
         }
+    }
+}
+
+/// Write a file's pages to disk (outside every timed interval) so that a later timed step does
+/// not pay for flushing the previous step's output. Best effort; on Windows the handle needs
+/// write access.
+fn flush(path: &Path) {
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = f.sync_all();
     }
 }
 
@@ -593,6 +641,7 @@ fn compress(
                 ps::Output::Discard,
             )?;
             let bytes = archive_size("compress", archive)?;
+            flush(archive);
             Ok((single_measure(&m), bytes))
         }
         Mode::TarStream => {
@@ -623,6 +672,7 @@ fn compress(
             )?;
             archive_size("compress", &stream)
                 .map_err(|_| Fail::new("compress", "tar step: the tar stream was not created"))?;
+            flush(&stream);
             let args = vars(archive_rel);
             let tool_m = run_step(
                 ctx,
@@ -635,27 +685,33 @@ fn compress(
             )?;
             let _ = std::fs::remove_file(&stream);
             let bytes = archive_size("compress", archive)?;
+            flush(archive);
             Ok((combined_measure(&tar_m, &tool_m), bytes))
         }
     }
 }
 
+/// Name of the archive and of the extraction directory inside the scratch directory.
+const OUTDIR: &str = "x";
+const UNPACKED: &str = "unpacked.tar";
+
+/// One repeat's extract step. `ctx` is the scratch-directory context ([`Ctx::in_scratch`]):
+/// `archive_name` and the extraction directory are plain names in the working directory.
 fn extract(
     ctx: &Ctx<'_>,
     tool: &Tool,
     exe: &Path,
     setting: &Setting,
     archive: &Path,
-    archive_rel: &str,
-    outdir_rel: &str,
+    archive_name: &str,
 ) -> Result<Measure, Fail> {
     let threads = thread_args(tool, ctx.cfg.threads);
     match tool.mode {
         Mode::Directory => {
             let v = Vars {
-                archive: archive_rel,
+                archive: archive_name,
                 input: ctx.class,
-                outdir: outdir_rel,
+                outdir: OUTDIR,
                 list: "",
                 settings: &setting.extract,
                 threads: &threads,
@@ -678,11 +734,11 @@ fn extract(
                     "the store tool's tar is not available",
                 ));
             };
-            let stream = ctx.work.join("unpacked.tar");
+            let stream = ctx.work.join(UNPACKED);
             let v = Vars {
-                archive: archive_rel,
+                archive: archive_name,
                 input: ctx.class,
-                outdir: outdir_rel,
+                outdir: OUTDIR,
                 list: "",
                 settings: &setting.extract,
                 threads: &threads,
@@ -696,11 +752,11 @@ fn extract(
                 ps::Input::File(archive.to_path_buf()),
                 ps::Output::File(stream.clone()),
             )?;
-            let stream_rel = ctx.rel("unpacked.tar");
+            flush(&stream);
             let v = Vars {
-                archive: &stream_rel,
+                archive: UNPACKED,
                 input: ctx.class,
-                outdir: outdir_rel,
+                outdir: OUTDIR,
                 list: "",
                 settings: &[],
                 threads: &[],
@@ -720,8 +776,9 @@ fn extract(
     }
 }
 
-/// The recorded argument lists of a combination: the arguments of the first repeat, paths relative
-/// to the working directory.
+/// The recorded argument lists of a combination: the arguments of the first repeat. Creation
+/// paths are relative to the working directory (the parent of the class directory); extraction
+/// runs in the scratch directory with plain names.
 #[derive(Debug, Default, Clone)]
 struct ArgRecord {
     compress: Vec<String>,
@@ -747,7 +804,7 @@ fn one_repeat(
     let io =
         |e: std::io::Error| Fail::new("compress", format!("scratch directory: {:?}", e.kind()));
     std::fs::create_dir_all(&ctx.work).map_err(io)?;
-    let outdir = ctx.work.join("x");
+    let outdir = ctx.work.join(OUTDIR);
     std::fs::create_dir_all(&outdir).map_err(io)?;
     if ctx.corpus.is_private() {
         let mut list = String::new();
@@ -760,24 +817,6 @@ fn one_repeat(
     let archive_name = format!("a{}", tool.extension);
     let archive = ctx.work.join(&archive_name);
     let archive_rel = ctx.rel(&archive_name);
-    let mut outdir_rel = ctx.rel("x");
-    // Some tools mishandle a relative destination that climbs out of the working directory
-    // (`extract_in_scratch`): they extract with the scratch directory as working directory.
-    let scratch_ctx = (tool.extract_in_scratch && tool.mode == Mode::Directory).then(|| Ctx {
-        cfg: ctx.cfg,
-        corpus: ctx.corpus,
-        class: ctx.class,
-        entry: ctx.entry,
-        cwd: ctx.work.clone(),
-        work: ctx.work.clone(),
-        work_rel: ".".to_string(),
-        tar: ctx.tar,
-    });
-    let mut extract_archive_rel = archive_rel.clone();
-    if scratch_ctx.is_some() {
-        outdir_rel = "x".to_string();
-        extract_archive_rel = archive_name.clone();
-    }
 
     if record.compress.is_empty() {
         let threads = thread_args(tool, ctx.cfg.threads);
@@ -796,9 +835,9 @@ fn one_repeat(
         };
         record.compress = expand(template, &v);
         let v = Vars {
-            archive: &extract_archive_rel,
+            archive: &archive_name,
             input: ctx.class,
-            outdir: &outdir_rel,
+            outdir: OUTDIR,
             list: "",
             settings: &setting.extract,
             threads: &threads,
@@ -808,13 +847,12 @@ fn one_repeat(
 
     let (compress_m, archive_bytes) = compress(ctx, tool, exe, setting, &archive, &archive_rel)?;
     let extract_m = extract(
-        scratch_ctx.as_ref().unwrap_or(ctx),
+        &ctx.in_scratch(),
         tool,
         exe,
         setting,
         &archive,
-        &extract_archive_rel,
-        &outdir_rel,
+        &archive_name,
     )?;
 
     let base =
@@ -826,7 +864,17 @@ fn one_repeat(
     let found = verify_tree(&base, expected);
     let checked = expected.len() as u64;
     if !found.is_clean() {
-        let mut f = Fail::new("verify", found.reason());
+        // A private corpus must not leak file names (its own or a tool's) into a result file:
+        // refer to files by their position in the manifest.
+        let index: Option<BTreeMap<String, usize>> = ctx.corpus.is_private().then(|| {
+            ctx.entry
+                .files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (tree_path(ctx.corpus, ctx.class, f).to_string(), i))
+                .collect()
+        });
+        let mut f = Fail::new("verify", found.reason_with(index.as_ref()));
         f.verification = Some(Verification {
             verified: false,
             files_checked: checked,
@@ -882,6 +930,8 @@ fn base_result(
         corpus: corpus_ref(corpus, entry),
         threads: cfg.threads,
         private: corpus.is_private(),
+        repeats_requested: None,
+        repeats_short: None,
         measurement: None,
         repeats: None,
         median: None,
@@ -918,7 +968,6 @@ fn measurement_info(tar: Option<&TarTool>, d: &Discovered) -> Measurement {
 }
 
 /// Run one tool x setting x class combination.
-#[allow(clippy::too_many_arguments)]
 fn run_combination(
     ctx: &Ctx<'_>,
     d: &Discovered,
@@ -928,12 +977,24 @@ fn run_combination(
 ) -> ToolResult {
     let mut result = base_result(ctx.cfg, ctx.corpus, ctx.entry, ctx.class, d, setting);
     result.measurement = Some(measurement_info(ctx.tar, d));
+    result.repeats_requested = Some(ctx.cfg.repeats);
     let mut record = ArgRecord::default();
     let mut samples: Vec<Sample> = Vec::new();
     let mut failure: Option<(u32, Fail)> = None;
+    let mut short: Option<String> = None;
     for n in 1..=ctx.cfg.repeats {
         match one_repeat(ctx, &d.tool, exe, setting, expected, &mut record) {
-            Ok(s) => samples.push(s),
+            Ok(s) => {
+                let first_wall = s.compress.wall_seconds + s.extract.wall_seconds;
+                samples.push(s);
+                if n == 1 && n < ctx.cfg.repeats && first_wall >= ctx.cfg.long_run.as_secs_f64() {
+                    short = Some(format!(
+                        "the first repeat's compress plus extract wall time reached --long-run-s ({} s): not repeated",
+                        ctx.cfg.long_run.as_secs()
+                    ));
+                    break;
+                }
+            }
             Err(f) => {
                 failure = Some((n, f));
                 break;
@@ -953,6 +1014,7 @@ fn run_combination(
                 files_ok: expected.len() as u64,
             });
             result.repeats = Some(samples);
+            result.repeats_short = short;
         }
         Some((n, f)) => {
             result.repeats = (!samples.is_empty()).then_some(samples);
@@ -980,13 +1042,14 @@ fn summary_line(r: &ToolResult) -> String {
     match (&r.median, &r.verification) {
         (Some(m), Some(v)) => {
             format!(
-            "{id}: archive {} B, compress {:.3} s, extract {:.3} s, peak {:.1} MiB, verified {}/{}",
+            "{id}: archive {} B, compress {:.3} s, extract {:.3} s, peak {:.1} MiB, verified {}/{}{}",
             m.archive_bytes,
             m.compress.wall_seconds,
             m.extract.wall_seconds,
             m.compress.peak_memory_bytes.max(m.extract.peak_memory_bytes) as f64 / 1048576.0,
             v.files_ok,
-            v.files_checked
+            v.files_checked,
+            if r.repeats_short.is_some() { " (measured once: long run)" } else { "" }
         )
         }
         _ => format!("{id}: no data"),
@@ -1000,6 +1063,23 @@ fn write_result(dir: &Path, r: &ToolResult) -> Result<()> {
 
 const SKIP_PRIVATE: &str =
     "private corpus: this tool cannot take a list of files (run it on a public corpus)";
+const SKIP_NON_ASCII: &str = "private corpus on Windows: the system tar cannot read non-ASCII \
+file names from a list, and this class has some";
+
+/// Windows' classic path limit (MAX_PATH minus the terminating NUL).
+const WINDOWS_PATH_LIMIT: usize = 259;
+
+/// The warning printed before a run when a path may exceed the Windows limit that some tools
+/// (WinRAR) cannot get around.
+pub fn path_warning(longest_input: usize, scratch: usize) -> Option<String> {
+    (longest_input > WINDOWS_PATH_LIMIT || scratch > WINDOWS_PATH_LIMIT).then(|| {
+        format!(
+            "warning: a path of this run is longer than {WINDOWS_PATH_LIMIT} characters \
+             (longest input path {longest_input}, scratch archive path {scratch}); some tools \
+             (WinRAR) fail on such paths. Use a shorter --tmp or a shorter checkout path."
+        )
+    })
+}
 
 /// Run everything. `discovered` is the whole catalogue; `selected` the tool ids to run.
 pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> Result<Outcome> {
@@ -1070,7 +1150,23 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
         cfg.threads,
         cfg.repeats
     );
+    if cfg!(windows) {
+        let longest = classes
+            .iter()
+            .filter_map(|c| corpus.manifest.classes.get(c))
+            .flat_map(|e| e.files.iter())
+            .map(|f| f.path.chars().count())
+            .max()
+            .unwrap_or(0);
+        let input = cwd_base.to_string_lossy().chars().count() + 1 + longest;
+        let scratch = tmp_run.to_string_lossy().chars().count() + "/c999/a.tar.zst".len();
+        if let Some(w) = path_warning(input, scratch) {
+            eprintln!("{w}");
+        }
+    }
 
+    let mut planned: Vec<RunCombination> = Vec::new();
+    let mut combo_no = 0usize;
     for class in &classes {
         let Some(entry) = corpus.manifest.classes.get(class) else {
             continue;
@@ -1079,37 +1175,18 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
             println!("{class}: no files, skipped");
             continue;
         }
-        println!(
-            "{class}: checking {} input file(s) against the manifest",
-            entry.files.len()
-        );
-        corpus.check_inputs(class, entry)?;
         let expected: BTreeMap<String, String> = entry
             .files
             .iter()
             .map(|f| (tree_path(&corpus, class, f).to_string(), f.blake3.clone()))
             .collect();
-        let work = tmp_run.join("c");
-        let work_rel = relative(&cwd_base, &work)?;
-        let ctx = Ctx {
-            cfg,
-            corpus: &corpus,
-            class,
-            entry,
-            cwd: if corpus.is_private() {
-                cwd_base.clone()
-            } else {
-                corpus_dir.clone()
-            },
-            work,
-            work_rel,
-            tar: tar.as_ref(),
-        };
+        let non_ascii = entry.files.iter().any(|f| !f.path.is_ascii());
         for id in selected {
             let Some(d) = discovered.iter().find(|d| &d.tool.id == id) else {
                 continue;
             };
             for setting in &d.tool.settings {
+                let uses_system_tar = d.tool.id == "store" || d.tool.mode == Mode::TarStream;
                 let result = match &d.status {
                     Status::Skipped { reason } => {
                         let mut r = base_result(cfg, &corpus, entry, class, d, setting);
@@ -1117,7 +1194,11 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                         r
                     }
                     Status::Found { path, .. } => {
-                        if corpus.is_private()
+                        if corpus.is_private() && cfg!(windows) && non_ascii && uses_system_tar {
+                            let mut r = base_result(cfg, &corpus, entry, class, d, setting);
+                            r.skipped = Some(SKIP_NON_ASCII.to_string());
+                            r
+                        } else if corpus.is_private()
                             && (d.tool.mode == Mode::TarStream || d.tool.create_list.is_none())
                         {
                             let mut r = base_result(cfg, &corpus, entry, class, d, setting);
@@ -1129,23 +1210,66 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                                 Some("needs the store tool's tar, which was not found".to_string());
                             r
                         } else {
-                            run_combination(&ctx, d, path, setting, &expected)
+                            // Every combination starts with its inputs verified and in the file
+                            // cache, outside any timing.
+                            println!(
+                                "{class}: checking {} input file(s) against the manifest",
+                                entry.files.len()
+                            );
+                            corpus.check_inputs(class, entry)?;
+                            combo_no += 1;
+                            let work = tmp_run.join(format!("c{combo_no}"));
+                            let work_rel = relative(&cwd_base, &work)?;
+                            let ctx = Ctx {
+                                cfg,
+                                corpus: &corpus,
+                                class,
+                                entry,
+                                cwd: cwd_base.clone(),
+                                work,
+                                work_rel,
+                                tar: tar.as_ref(),
+                            };
+                            let r = run_combination(&ctx, d, path, setting, &expected);
+                            rm_rf(&ctx.work);
+                            r
                         }
                     }
                 };
                 println!("{}", summary_line(&result));
-                if result.skipped.is_some() {
+                let outcome = if result.skipped.is_some() {
                     out.skipped += 1;
+                    "skipped"
                 } else if result.failed.is_some() {
                     out.failed += 1;
+                    "failed"
                 } else {
                     out.measured += 1;
-                }
+                    "measured"
+                };
+                planned.push(RunCombination {
+                    tool: d.tool.id.clone(),
+                    setting: setting.id.clone(),
+                    class: class.clone(),
+                    outcome: outcome.to_string(),
+                });
                 write_result(&results_dir, &result)?;
-                rm_rf(&ctx.work);
             }
         }
     }
+
+    // run.json is written last: a directory without it is an aborted run and does not validate.
+    let run_file = RunFile {
+        schema_version: SCHEMA_VERSION,
+        complete: true,
+        classes: classes.clone(),
+        threads: cfg.threads,
+        repeats_requested: cfg.repeats,
+        long_run_s: cfg.long_run.as_secs(),
+        catalogue_blake3: cfg.catalogue_blake3.clone(),
+        combinations: planned,
+    };
+    std::fs::write(results_dir.join("run.json"), render(&run_file))?;
 
     let report = validate::validate_dir(&results_dir)?;
     for n in &report.notes {
@@ -1173,12 +1297,20 @@ pub fn measure_command(args: &RunArgs) -> Result<ExitCode> {
         .clone()
         .unwrap_or_else(|| PathBuf::from("bench/corpus").join(&profile));
     let cores = host::collect(args.allow_dirty_build).logical_cores;
+    let catalogue_blake3 = blake3::hash(
+        &std::fs::read(&args.catalogue)
+            .with_context(|| format!("reading {}", args.catalogue.display()))?,
+    )
+    .to_hex()
+    .to_string();
     let cfg = Config {
         corpus,
         classes: args.classes.clone(),
         repeats: args.repeats.unwrap_or(3),
         threads: args.threads.unwrap_or(cores).max(1),
         timeout: Duration::from_secs(args.timeout_s),
+        long_run: Duration::from_secs(args.long_run_s),
+        catalogue_blake3,
         results_root: args.results.clone(),
         tmp_root: args.tmp.clone(),
         allow_dirty: args.allow_dirty_build,

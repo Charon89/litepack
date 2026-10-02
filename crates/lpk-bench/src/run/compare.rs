@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 
-use super::result::{ToolResult, ToolsFile};
+use super::result::{HostFile, RunFile, ToolResult, ToolsFile};
 
 pub const DEFAULT_MAX_DIFF_PCT: f64 = 3.0;
 
@@ -43,10 +43,28 @@ struct Loaded {
     results: Vec<ToolResult>,
     versions: BTreeMap<String, Option<String>>,
     unreadable: Vec<String>,
+    run: Option<RunFile>,
+    host: Option<String>,
 }
 
 fn load(dir: &Path) -> Result<Loaded> {
     let mut out = Loaded::default();
+    let run_path = dir.join("run.json");
+    let text = std::fs::read_to_string(&run_path).with_context(|| {
+        format!(
+            "reading {} (a directory without run.json is an aborted run)",
+            run_path.display()
+        )
+    })?;
+    out.run = Some(
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", run_path.display()))?,
+    );
+    let host_path = dir.join("host.json");
+    let text = std::fs::read_to_string(&host_path)
+        .with_context(|| format!("reading {}", host_path.display()))?;
+    let host: HostFile =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", host_path.display()))?;
+    out.host = Some(host.host);
     let tools_path = dir.join("tools.json");
     let text = std::fs::read_to_string(&tools_path)
         .with_context(|| format!("reading {}", tools_path.display()))?;
@@ -60,7 +78,7 @@ fn load(dir: &Path) -> Result<Loaded> {
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".json") && !n.starts_with("probe-"))
-        .filter(|n| n != "host.json" && n != "tools.json")
+        .filter(|n| n != "host.json" && n != "tools.json" && n != "run.json")
         .collect();
     names.sort();
     for name in names {
@@ -146,6 +164,31 @@ pub fn compare(a: &Path, b: &Path, max_diff_pct: f64) -> Result<Report> {
                 .to_string(),
         );
     }
+    if la.host != lb.host {
+        rep.problems.push(format!(
+            "different hosts: {:?} against {:?}",
+            la.host.as_deref().unwrap_or("?"),
+            lb.host.as_deref().unwrap_or("?")
+        ));
+    }
+    if let (Some(ra), Some(rb)) = (&la.run, &lb.run) {
+        if ra.repeats_requested != rb.repeats_requested {
+            rep.problems.push(format!(
+                "different requested repeats: {} against {}",
+                ra.repeats_requested, rb.repeats_requested
+            ));
+        }
+        if ra.long_run_s != rb.long_run_s {
+            rep.problems.push(format!(
+                "different --long-run-s: {} against {}",
+                ra.long_run_s, rb.long_run_s
+            ));
+        }
+        if ra.catalogue_blake3 != rb.catalogue_blake3 {
+            rep.problems
+                .push("the two runs used different catalogue files (bench/tools.toml)".to_string());
+        }
+    }
     let (ta, tb) = (thread_set(&la), thread_set(&lb));
     if ta != tb {
         rep.problems
@@ -220,6 +263,12 @@ pub fn compare(a: &Path, b: &Path, max_diff_pct: f64) -> Result<Report> {
             }
             (None, None) => {}
         }
+    }
+    for key in ma.failed.intersection(&mb.failed) {
+        rep.problems.push(format!(
+            "{}/{}: failed in both directories (it cannot be compared)",
+            key.0, key.1
+        ));
     }
     if rep.rows.is_empty() {
         rep.problems
@@ -308,6 +357,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join("host.json"), render(&samples::host())).expect("host");
         std::fs::write(dir.join("tools.json"), render(tools)).expect("tools");
+        std::fs::write(dir.join("run.json"), render(&samples::run_file(results))).expect("run");
         for r in results {
             std::fs::write(dir.join(r.file_name()), render(r)).expect("result");
         }
@@ -406,6 +456,48 @@ mod tests {
             "{:?}",
             rep.problems
         );
+    }
+
+    #[test]
+    fn different_host_repeats_long_run_or_catalogue_are_problems_and_double_failures_are_listed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let results = two_classes(1.0);
+        let a = write(tmp.path(), "a", &results, &samples::tools());
+        let b = write(tmp.path(), "b", &results, &samples::tools());
+        let mut run = samples::run_file(&results);
+        run.repeats_requested = 5;
+        run.long_run_s = 7;
+        run.catalogue_blake3 = "00".repeat(32);
+        std::fs::write(b.join("run.json"), render(&run)).expect("w");
+        let mut host = samples::host();
+        host.host = "otherbox".into();
+        std::fs::write(b.join("host.json"), render(&host)).expect("w");
+        let rep = compare(&a, &b, 3.0).expect("compare");
+        for what in [
+            "different hosts",
+            "requested repeats",
+            "--long-run-s",
+            "catalogue files",
+        ] {
+            assert!(
+                rep.problems.iter().any(|p| p.contains(what)),
+                "{what}: {:?}",
+                rep.problems
+            );
+        }
+        let f1 = write(tmp.path(), "f1", &[samples::failed()], &samples::tools());
+        let f2 = write(tmp.path(), "f2", &[samples::failed()], &samples::tools());
+        let rep = compare(&f1, &f2, 3.0).expect("compare");
+        assert!(
+            rep.problems
+                .iter()
+                .any(|p| p.contains("failed in both directories")),
+            "{:?}",
+            rep.problems
+        );
+        // No run.json: an error, not a comparison.
+        std::fs::remove_file(f2.join("run.json")).expect("rm");
+        assert!(compare(&f1, &f2, 3.0).is_err());
     }
 
     #[test]

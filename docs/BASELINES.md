@@ -25,7 +25,7 @@ cargo run -p lpk-bench -- run --validate bench/results/<date>-<host>
 
 ```text
 cargo run -p lpk-bench -- run --tools all --profile small [--corpus DIR] [--classes a,b]
-    [--repeats 3] [--threads N] [--timeout-s N] [--results DIR] [--tmp DIR] [--allow-dirty-build]
+    [--repeats 3] [--threads N] [--timeout-s N] [--long-run-s 120] [--results DIR] [--tmp DIR] [--allow-dirty-build]
 cargo run -p lpk-bench -- run --compare <dirA> <dirB> [--max-diff-pct 3]
 ```
 
@@ -37,16 +37,24 @@ It exits non-zero when any combination failed or the written directory does not 
 
 How a combination is measured:
 
-- Before any timing for a class, every input file is read once and its BLAKE3 compared with the
-  manifest; a mismatch aborts the run and names the file.
-- Each tool runs through `lpk-procstat-sys`, never through a shell, in the parent of the class
-  directory (the corpus root for a private corpus) with relative paths. Tools are measured with
+- Before every tool and setting, outside any timing, every input file of the class is read and its
+  BLAKE3 compared with the manifest (this also leaves the inputs in the file cache); a mismatch
+  aborts the run and names the file.
+- Each tool runs through `lpk-procstat-sys`, never through a shell. Creation runs in the parent of
+  the class directory (the corpus root for a private corpus) with relative paths. Extraction, for
+  every tool and for both steps of the tar-stream tools, runs in the combination's own scratch
+  directory (`c1`, `c2`, ... under the run's temporary directory) with plain names for the archive
+  and the output directory: WinRAR's long-path handling fails whenever its output argument contains
+  `/` or `..`, and zpaqfranz extracts nothing when `-to` climbs two or more directories. Files that
+  a later step reads (the archive, the tar file) are flushed to disk between steps, outside the
+  timed intervals, so one step does not pay for the previous step's unwritten pages. Tools are measured with
   their output redirected, no progress display and no console, so every catalogue command line
   pins the tool's assume-yes and quiet switches; nothing may wait for a keypress.
 - Tool-configuration environment variables are removed from the child (`XZ_OPT`, `XZ_DEFAULTS`,
   `ZSTD_CLEVEL`, `ZSTD_NBTHREADS`, `GZIP`, `RAR`, `TAR_OPTIONS`, `TAR_READER_OPTIONS`,
   `TAR_WRITER_OPTIONS`, `TAPE`); the names are recorded in every result's `measurement` object.
-  Configuration files (for example `Rar.ini`) are not touched.
+  WinRAR is also run with `-cfg-`, which makes it ignore `rar.ini`, `.rarrc` and the `RAR`
+  variable. Other tools' configuration files are not touched.
 - Tar-stream tools (zstd, xz) run in two sequential steps through a temporary file, never
   concurrently: tar writes the stream to a temporary tar file, then the compressor reads that file
   on its standard input and writes the archive; extraction is the decompressor writing a temporary
@@ -61,17 +69,39 @@ How a combination is measured:
   times out, leaves descendants running, the archive is missing or empty, or verification finds a
   missing, extra or different file. A failed combination carries no median and the run goes on.
   The repeats completed before the failure stay in the file.
-- Medians are taken over the repeats for every measure.
+- Medians are taken over the repeats for every measure. A combination whose first repeat (compress
+  plus extract wall time) reaches `--long-run-s` is measured once; the result records the repeats
+  requested, the repeats run and the reason (`repeats_short`).
+- `run.json` is written last and lists every planned combination with its outcome, the repeats
+  requested, `--long-run-s`, the thread count and the BLAKE3 of the catalogue file. A results
+  directory without it is an aborted run and does not validate, and `run --validate` checks that
+  every listed combination has its file with the listed outcome.
+- On Windows the run warns before starting when the longest input path or the scratch archive
+  path exceeds 259 characters (some tools, WinRAR among them, fail on such paths); use a shorter
+  `--tmp` or checkout path.
 - A private corpus (`corpus scan --private`) is supported for tools that take a list of files
   (`create_list` in the catalogue: tar, 7-Zip, WinRAR); the others are recorded as skipped with
-  the reason. Their results carry `private: true`.
+  the reason. Their results carry `private: true`. Nothing derived from file names or tool output
+  reaches a result file of a private corpus: failure reasons name a file by its position in the
+  manifest. The system tar on Windows (bsdtar) cannot read non-ASCII names from a `-T` list, so a
+  private class with any non-ASCII path is recorded as skipped for `store` and for the tar-stream
+  tools there; classes with only ASCII paths run normally, and 7-Zip and WinRAR handle both.
 
 `--compare` prints, for each tool and setting present in both directories, the sum over classes of
 the median compress and of the median extract wall time, and the percentage difference
 (`|B - A| / A`). It exits non-zero when a difference exceeds `--max-diff-pct` or when the two
-directories differ in corpus, tool versions or thread count, or measured different classes, or a
-combination was measured in only one of them. This is the check behind the acceptance clause
+directories differ in corpus, host, tool versions, thread count, requested repeats,
+`--long-run-s` or catalogue file, or measured different classes, or a combination was measured in
+only one of them or failed in both. This is the check behind the acceptance clause
 "a second run differs by < 3% in time".
+
+## Real-time scanners
+
+Extraction times include the cost of whatever real-time scanner is active (a scanner inspects every
+file an extraction writes). `host.json` records, best effort, whether Microsoft Defender real-time
+protection was on (`defender_realtime`: `on`, `off`, or `unknown` when it could not be determined,
+which includes every system other than Windows and any machine where the registry value is absent).
+Third-party scanners are not detected. For comparable runs, keep the scanner state the same.
 
 ## How a tool is found
 

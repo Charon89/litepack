@@ -159,6 +159,8 @@
         "corpus": { "$ref": "#/$defs/corpus_ref", "description": "The corpus." },
         "threads": { "type": "integer", "minimum": 1, "description": "Thread count passed to the tool, a count." },
         "private": { "const": true, "description": "Present and true when the corpus is a private scan." },
+        "repeats_requested": { "type": "integer", "minimum": 1, "description": "Repeats asked for with --repeats, a count; present on every result that ran." },
+        "repeats_short": { "$ref": "#/$defs/text", "description": "Why fewer repeats than requested were run: a combination whose first repeat reached --long-run-s is measured once. Absent when all requested repeats ran." },
         "measurement": { "$ref": "#/$defs/measurement", "description": "How the numbers were taken." },
         "repeats": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sample" }, "description": "One entry per repeat." },
         "median": { "$ref": "#/$defs/sample", "description": "Median of every field over the repeats (the validator recomputes it)." },
@@ -233,11 +235,40 @@
         "tools": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/tool_entry" }, "description": "One entry per catalogue tool." }
       }
     },
+    "run_combination": {
+      "type": "object",
+      "description": "One planned tool x setting x class and how it ended.",
+      "additionalProperties": false,
+      "required": ["tool", "setting", "class", "outcome"],
+      "properties": {
+        "tool": { "$ref": "#/$defs/id", "description": "Tool id." },
+        "setting": { "$ref": "#/$defs/id", "description": "Setting id." },
+        "class": { "$ref": "#/$defs/id", "description": "Corpus class." },
+        "outcome": { "enum": ["measured", "failed", "skipped"], "description": "How the combination ended; its result file must agree." }
+      }
+    },
+    "run": {
+      "type": "object",
+      "description": "run.json: written last, so that a directory without it is an aborted run.",
+      "additionalProperties": false,
+      "required": ["schema_version", "complete", "classes", "threads", "repeats_requested", "long_run_s", "catalogue_blake3", "combinations"],
+      "properties": {
+        "schema_version": { "const": 1, "description": "Result format version." },
+        "complete": { "const": true, "description": "Always true: the run reached its end." },
+        "classes": { "type": "array", "items": { "$ref": "#/$defs/id" }, "description": "Corpus classes the run covered." },
+        "threads": { "type": "integer", "minimum": 1, "description": "Thread count of every result, a count." },
+        "repeats_requested": { "type": "integer", "minimum": 1, "description": "Repeats asked for with --repeats, a count." },
+        "long_run_s": { "type": "integer", "minimum": 0, "description": "The --long-run-s value, in seconds." },
+        "catalogue_blake3": { "$ref": "#/$defs/blake3", "description": "BLAKE3 of the catalogue file (bench/tools.toml) the run used." },
+        "combinations": { "type": "array", "items": { "$ref": "#/$defs/run_combination" }, "description": "Every combination the run covered with its outcome; each has a result file." }
+      }
+    },
     "host": {
       "type": "object",
       "description": "host.json: the machine and the build.",
       "additionalProperties": false,
       "required": [
+        "defender_realtime",
         "schema_version",
         "host",
         "os",
@@ -260,6 +291,7 @@
         "lpk_bench_version": { "$ref": "#/$defs/text", "description": "lpk-bench version." },
         "git_commit": { "$ref": "#/$defs/text", "description": "Git commit the binary was built from (12 hex digits), with a -dirty suffix when the tree had uncommitted changes, or unknown." },
         "rustc_version": { "$ref": "#/$defs/text", "description": "rustc version that built the binary." },
+        "defender_realtime": { "enum": ["on", "off", "unknown"], "description": "Windows Defender real-time protection when the run started (best effort; unknown when it could not be determined and outside Windows). Extraction times include the cost of whatever real-time scanner is active." },
         "dirty_build_allowed": { "const": true, "description": "Present and true when the run used the flag that allows results from a dirty or unknown build." }
       }
     }

@@ -171,6 +171,12 @@ pub struct ToolResult {
     /// `true` when the corpus is a private scan; absent otherwise.
     #[serde(default, skip_serializing_if = "is_false")]
     pub private: bool,
+    /// Repeats asked for (`--repeats`); present on every result that ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeats_requested: Option<u32>,
+    /// Why fewer repeats than requested were run (a long combination is measured once).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeats_short: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurement: Option<Measurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,6 +338,33 @@ impl ToolsFile {
     }
 }
 
+/// One planned combination and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunCombination {
+    pub tool: String,
+    pub setting: String,
+    pub class: String,
+    /// `measured`, `failed` or `skipped`.
+    pub outcome: String,
+}
+
+/// `run.json`: written last; its absence marks an aborted run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunFile {
+    pub schema_version: u32,
+    /// Always true: the run reached its end.
+    pub complete: bool,
+    pub classes: Vec<String>,
+    pub threads: u32,
+    pub repeats_requested: u32,
+    pub long_run_s: u64,
+    /// BLAKE3 of the catalogue file the run used.
+    pub catalogue_blake3: String,
+    pub combinations: Vec<RunCombination>,
+}
+
 /// `host.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -347,6 +380,9 @@ pub struct HostFile {
     /// 12 hex digits, with `-dirty` when the tree had uncommitted changes, or `unknown`.
     pub git_commit: String,
     pub rustc_version: String,
+    /// Windows Defender real-time protection when the run started: `on`, `off` or `unknown`
+    /// (best effort; always `unknown` outside Windows).
+    pub defender_realtime: String,
     /// The run used the flag that allows results from a dirty or unknown build.
     #[serde(default, skip_serializing_if = "is_false")]
     pub dirty_build_allowed: bool,
@@ -455,6 +491,8 @@ pub mod samples {
             },
             threads: 4,
             private: true,
+            repeats_requested: Some(3),
+            repeats_short: None,
             measurement: Some(measurement()),
             median: Some(Sample::median_of(&repeats)),
             repeats: Some(repeats),
@@ -511,6 +549,7 @@ pub mod samples {
         let mut r = measured();
         r.tool.id = "rar".into();
         r.tool.version = None;
+        r.repeats_requested = None;
         r.private = false;
         r.measurement = None;
         r.repeats = None;
@@ -541,6 +580,41 @@ pub mod samples {
         }
     }
 
+    /// The `run.json` that matches `results` (outcomes read from the results themselves).
+    pub fn run_file(results: &[ToolResult]) -> RunFile {
+        let mut classes: Vec<String> = Vec::new();
+        for r in results {
+            if !classes.contains(&r.class) {
+                classes.push(r.class.clone());
+            }
+        }
+        RunFile {
+            schema_version: SCHEMA_VERSION,
+            complete: true,
+            classes,
+            threads: results.first().map_or(4, |r| r.threads),
+            repeats_requested: 3,
+            long_run_s: 120,
+            catalogue_blake3: "ef".repeat(32),
+            combinations: results
+                .iter()
+                .map(|r| RunCombination {
+                    tool: r.tool.id.clone(),
+                    setting: r.setting.id.clone(),
+                    class: r.class.clone(),
+                    outcome: if r.skipped.is_some() {
+                        "skipped"
+                    } else if r.failed.is_some() {
+                        "failed"
+                    } else {
+                        "measured"
+                    }
+                    .into(),
+                })
+                .collect(),
+        }
+    }
+
     pub fn host() -> HostFile {
         HostFile {
             schema_version: SCHEMA_VERSION,
@@ -553,6 +627,7 @@ pub mod samples {
             lpk_bench_version: "0.0.1".into(),
             git_commit: "0123456789ab".into(),
             rustc_version: "rustc 1.99.0".into(),
+            defender_realtime: "unknown".into(),
             dirty_build_allowed: true,
         }
     }

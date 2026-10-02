@@ -62,6 +62,10 @@ pub struct RunArgs {
     /// Timeout of every compress or extract step, in seconds
     #[arg(long, value_name = "SECONDS", default_value_t = 3600)]
     pub timeout_s: u64,
+    /// A combination whose first repeat (compress plus extract wall time) takes at least this many
+    /// seconds is measured once and not repeated; the result records why
+    #[arg(long, value_name = "SECONDS", default_value_t = 120)]
+    pub long_run_s: u64,
     /// Where result directories are created
     #[arg(long, value_name = "DIR", default_value = "bench/results")]
     pub results: PathBuf,

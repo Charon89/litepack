@@ -8,13 +8,14 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Placeholders allowed in `create` / `extract` templates.
-const PLACEHOLDERS: [&str; 6] = [
+const PLACEHOLDERS: [&str; 7] = [
     "{archive}",
     "{input}",
     "{outdir}",
     "{settings}",
     "{threads}",
     "{list}",
+    "{sep}",
 ];
 
 /// The OS key used in `exe.<os>` and `hints.<os>`.
@@ -101,10 +102,6 @@ pub struct Tool {
     pub create_list: Option<Vec<String>>,
     #[serde(default)]
     pub extract: Vec<String>,
-    /// Directory mode: extract with the scratch directory as working directory, `{archive}` and
-    /// `{outdir}` relative to it (for tools that mishandle a destination climbing out of it).
-    #[serde(default)]
-    pub extract_in_scratch: bool,
     #[serde(default)]
     pub threads: Vec<String>,
     /// The thread count changes the archive size, not only the speed.

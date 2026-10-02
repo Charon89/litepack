@@ -97,8 +97,72 @@ pub fn collect(allow_dirty: bool) -> HostFile {
         lpk_bench_version: env!("CARGO_PKG_VERSION").to_string(),
         git_commit: env!("LPK_GIT_COMMIT").to_string(),
         rustc_version: env!("LPK_RUSTC_VERSION").to_string(),
+        defender_realtime: defender_realtime().to_string(),
         dirty_build_allowed: allow_dirty,
     }
+}
+
+/// Read `reg query` output for `DisableRealtimeMonitoring`: `0x1` means real-time protection is
+/// off, `0x0` on, anything else `unknown`. (The value is absent on a default installation, in
+/// which case the answer is `unknown`, not a guess.)
+pub fn parse_defender(reg_output: &str) -> &'static str {
+    for line in reg_output.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() == Some("DisableRealtimeMonitoring") && words.next() == Some("REG_DWORD") {
+            return match words.next() {
+                Some("0x0") => "on",
+                Some("0x1") => "off",
+                _ => "unknown",
+            };
+        }
+    }
+    "unknown"
+}
+
+/// Whether Windows Defender real-time protection is on, best effort: `unknown` on any failure
+/// and outside Windows.
+#[cfg(windows)]
+pub fn defender_realtime() -> &'static str {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection",
+            "/v",
+            "DisableRealtimeMonitoring",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return "unknown";
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() < Duration::from_secs(5) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return "unknown";
+            }
+        }
+    }
+    let mut text = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut out, &mut text);
+    }
+    parse_defender(&text)
+}
+
+#[cfg(not(windows))]
+pub fn defender_realtime() -> &'static str {
+    "unknown"
 }
 
 #[cfg(test)]
@@ -112,6 +176,27 @@ mod tests {
         assert_eq!(sanitize_host("Ünï.local"), "n-local");
         assert_eq!(sanitize_host("***"), "unknown");
         assert_eq!(sanitize_host(""), "unknown");
+    }
+
+    #[test]
+    fn defender_state_is_read_from_the_registry_output_or_unknown() {
+        let q = |v: &str| {
+            format!(
+                "\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Defender\\Real-Time Protection\n    DisableRealtimeMonitoring    REG_DWORD    {v}\n\n"
+            )
+        };
+        assert_eq!(parse_defender(&q("0x0")), "on");
+        assert_eq!(parse_defender(&q("0x1")), "off");
+        assert_eq!(parse_defender(&q("0x7")), "unknown");
+        assert_eq!(parse_defender(""), "unknown");
+        assert_eq!(
+            parse_defender("ERROR: The system was unable to find the specified registry key"),
+            "unknown"
+        );
+        assert!(["on", "off", "unknown"].contains(&defender_realtime()));
+        if !cfg!(windows) {
+            assert_eq!(defender_realtime(), "unknown");
+        }
     }
 
     #[test]

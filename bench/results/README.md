@@ -10,6 +10,8 @@ bench/results/
   <YYYY-MM-DD>-<host>[-<n>]/          one directory per run on one machine (n >= 2: further runs
                                       on the same UTC day); one corpus profile and manifest hash
     host.json                         machine, OS, CPU, RAM, lpk-bench version, git commit, rustc
+    run.json                          written last: what the run covered, each combination's outcome
+                                      (a directory without it is an aborted run and does not validate)
     tools.json                        every catalogue tool: found or skipped, reason, version used
     <tool>-<setting>-<class>.json     one file per tool x setting x corpus class
     probe-<name>.json                 component probes (PLAN P0-4)
@@ -34,6 +36,10 @@ environment dumps.
   timed-out or descendant-killing repeat.
 - `measurement.env_stripped` lists the names of the environment variables removed from the tools'
   environment. Results from a private corpus carry `"private": true`.
+- `run.json` lists the classes, every tool x setting x class with its outcome, the thread count,
+  the repeats requested, `--long-run-s` and the catalogue's BLAKE3; `--validate` checks each listed
+  combination against its file. A combination whose first repeat reached `--long-run-s` is measured
+  once and says so in `repeats_short`. `host.json` records `defender_realtime` (best effort).
 - Make a run with `lpk-bench run --tools all --profile small`; compare two runs of the same corpus
   with `lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]`.
 - Check a directory, or this whole folder, with

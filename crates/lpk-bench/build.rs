@@ -34,10 +34,21 @@ fn main() {
     let mut commit = output("git", &["rev-parse", "--short=12", "HEAD"])
         .unwrap_or_else(|| "unknown".to_string());
     if commit != "unknown" {
-        // Any change to a tracked file makes the build dirty. Untracked files do not: a new
-        // results directory must not make the next build refuse to run.
+        // A change to a tracked or untracked file of the build's inputs makes the build dirty.
+        // Results directories live outside these paths, so a new results directory does not.
+        // (`-C ../..`: the repository root, whatever the directory cargo runs this script in.)
         let status = Command::new("git")
-            .args(["status", "--porcelain", "--untracked-files=no"])
+            .args([
+                "-C",
+                "../..",
+                "status",
+                "--porcelain",
+                "--",
+                "crates",
+                "Cargo.toml",
+                "Cargo.lock",
+                "bench/tools.toml",
+            ])
             .output();
         match status {
             Ok(s) if s.status.success() => {

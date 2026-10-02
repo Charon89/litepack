@@ -27,28 +27,31 @@
 #                   `flat` (the files of the input directory) or `nested` (inside a directory
 #                   named like `{input}`). Default `flat`.
 #   create/extract  argument templates. Placeholders: {archive} {input} {outdir} {settings}
-#                   {threads}; `{settings}` expands to the setting's compress or extract arguments
-#   extract_in_scratch
-#                   true: extraction runs with the scratch directory as working directory and
-#                   `{archive}`, `{outdir}` relative to it, because the tool silently extracts
-#                   nothing when `-to` climbs two or more directories (zpaqfranz). Creation
-#                   still follows the working-directory rule below.
+#                   {threads} {list} {sep}; `{settings}` expands to the setting's compress or
+#                   extract arguments; `{sep}` is the platform's path separator (a tool that
+#                   wants a trailing separator on the output directory: `{outdir}{sep}`)
 #   create_list     optional, directory mode: the create template for a private corpus, where the
 #                   runner gives the tool a list file of relative paths (placeholder `{list}`)
 #                   and runs it in the corpus root. Tools without it are skipped for private
-#                   corpora. The extracted tree is then flat, whatever `layout` says.
+#                   corpora. The extracted tree is then flat, whatever `layout` says. On Windows
+#                   the tar of `store` cannot read non-ASCII names from a list: such a class is
+#                   skipped for `store` (and for tar-stream tools).
 #   threads         thread-count template; `{n}` is the number; expands to one or more arguments
 #   ratio_depends_on_threads
 #                   true when the thread count changes the archive size, not only the speed.
 #                   Copied into every result. Unknown for manual tools: the owner sets it in
 #                   bench/tools.local.toml.
 #
-# Working-directory rule for every directory-mode tool (and for the tar step of tar-stream tools):
-# the runner executes the tool with its working directory set to the parent of the class
+# Working-directory rules. CREATE (every directory-mode tool and the tar step of tar-stream
+# tools): the runner executes the tool with its working directory set to the parent of the class
 # directory, and passes `{input}` as a path relative to it (the class directory's name), and
-# `{archive}` and `{outdir}` relative to it as well. No archive then contains an absolute path.
-# The templates below were run that way against the real tools (see the commit that introduced
-# this rule): create, extract into an empty directory, compare with the input tree.
+# `{archive}` relative to it as well. No archive then contains an absolute path. EXTRACT (every
+# tool, and both steps of tar-stream tools): the working directory is the combination's scratch
+# directory, and `{archive}` and `{outdir}` are plain names in it (`a<ext>`, `x`), because some
+# tools mishandle an output path that contains `..` or `/` (WinRAR's long-path handling, and
+# zpaqfranz extracting nothing when `-to` climbs two or more directories). One rule for all tools.
+# The templates below were run that way against the real tools: create, extract into an empty
+# directory, compare with the input tree.
 # All settings run at the machine's thread count, as a user would run them.
 # Every tool runs with its output redirected and without a console, so nothing may wait for a
 # keypress: each template pins the tool's assume-yes and quiet or no-progress switches. The
@@ -117,9 +120,9 @@ hints = { windows = ["%ProgramFiles%/WinRAR/Rar.exe", "%ProgramFiles(x86)%/WinRA
 version = { args = [], pattern = 'RAR (\d+(?:\.\d+)+)' }
 extension = ".rar"
 mode = "directory"
-create = ["a", "-r", "-ep1", "-idq", "-y", "{settings}", "{threads}", "{archive}", "{input}/*"]
-create_list = ["a", "-idq", "-y", "-scul", "{settings}", "{threads}", "{archive}", "@{list}"]
-extract = ["x", "-idq", "-y", "{threads}", "{archive}", "{outdir}/"]
+create = ["a", "-r", "-ep1", "-cfg-", "-idq", "-y", "{settings}", "{threads}", "{archive}", "{input}/*"]
+create_list = ["a", "-idq", "-y", "-scfl", "-cfg-", "{settings}", "{threads}", "{archive}", "@{list}"]
+extract = ["x", "-cfg-", "-idq", "-y", "{threads}", "{archive}", "{outdir}{sep}"]
 threads = ["-mt{n}"]
 ratio_depends_on_threads = true
 licence = "Proprietary: 40-day trial, then a paid licence"
@@ -150,8 +153,8 @@ hints = { windows = ["%LOCALAPPDATA%/Microsoft/WinGet/Links/zstd.exe", "%LOCALAP
 version = { args = ["--version"], pattern = 'v(\d+(?:\.\d+)+)' }
 extension = ".tar.zst"
 mode = "tar-stream"
-create = ["-f", "-q", "{settings}", "{threads}", "-c"]
-extract = ["-d", "-f", "-q", "{settings}", "-c"]
+create = ["-q", "{settings}", "{threads}", "-c"]
+extract = ["-d", "-q", "{settings}", "-c"]
 threads = ["-T{n}"]
 ratio_depends_on_threads = true
 licence = "BSD-3-Clause OR GPL-2.0-only; used as an external program only"
@@ -178,8 +181,8 @@ hints = { windows = ["%LOCALAPPDATA%/Microsoft/WinGet/Links/xz.exe", "%LOCALAPPD
 version = { args = ["--version"], pattern = 'xz[^\d\r\n]*(\d+(?:\.\d+)+)' }
 extension = ".tar.xz"
 mode = "tar-stream"
-create = ["-f", "-q", "{settings}", "{threads}", "-c"]
-extract = ["-d", "-f", "-q", "{settings}", "{threads}", "-c"]
+create = ["-q", "{settings}", "{threads}", "-c"]
+extract = ["-d", "-q", "{settings}", "{threads}", "-c"]
 threads = ["-T{n}"]
 ratio_depends_on_threads = true
 licence = "0BSD (liblzma) and GPL-2.0-or-later (command line tool); used as an external program only"
@@ -202,7 +205,6 @@ version = { args = ["-h"], pattern = 'zpaqfranz v?(\d+(?:\.\d+)*)' }
 extension = ".zpaq"
 mode = "directory"
 layout = "nested"
-extract_in_scratch = true
 create = ["a", "{archive}", "{input}", "{settings}", "{threads}", "-noeta"]
 extract = ["x", "{archive}", "-to", "{outdir}/", "{threads}", "-noeta"]
 threads = ["-t{n}"]

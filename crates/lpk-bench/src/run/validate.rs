@@ -12,7 +12,7 @@ use jsonschema::Validator;
 use serde_json::Value;
 
 use super::catalogue::Mode;
-use super::result::{Sample, ToolResult};
+use super::result::{RunFile, Sample, ToolResult};
 
 /// The committed schema, embedded so the binary and the file cannot disagree.
 pub const SCHEMA_TEXT: &str = include_str!("../../../../bench/results/schema.json");
@@ -23,6 +23,7 @@ pub enum Kind {
     Result,
     Tools,
     Host,
+    Run,
 }
 
 impl Kind {
@@ -31,6 +32,7 @@ impl Kind {
             Kind::Result => "result",
             Kind::Tools => "tools",
             Kind::Host => "host",
+            Kind::Run => "run",
         }
     }
 }
@@ -39,6 +41,7 @@ pub struct Schemas {
     result: Validator,
     tools: Validator,
     host: Validator,
+    run: Validator,
 }
 
 impl std::fmt::Debug for Schemas {
@@ -69,6 +72,7 @@ impl Schemas {
             result: build(&schema, Kind::Result)?,
             tools: build(&schema, Kind::Tools)?,
             host: build(&schema, Kind::Host)?,
+            run: build(&schema, Kind::Run)?,
         })
     }
 
@@ -77,6 +81,7 @@ impl Schemas {
             Kind::Result => &self.result,
             Kind::Tools => &self.tools,
             Kind::Host => &self.host,
+            Kind::Run => &self.run,
         }
     }
 
@@ -388,9 +393,33 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
                     );
                 }
             }
-            Kind::Result => {}
+            Kind::Result | Kind::Run => {}
         }
     }
+
+    // run.json is written last: without it the run was aborted and nothing can be trusted to be
+    // complete.
+    let mut run: Option<RunFile> = None;
+    let run_path = dir.join("run.json");
+    if !run_path.is_file() {
+        report.problems.push(
+            "run.json: (root): file is missing (an aborted run does not validate)".to_string(),
+        );
+    } else if let Some(v) = read_json(&run_path, "run.json", &mut report.problems) {
+        let schema_problems = schemas.check_value(Kind::Run, "run.json", &v);
+        let clean = schema_problems.is_empty();
+        report.problems.extend(schema_problems);
+        if clean {
+            match serde_json::from_value::<RunFile>(v) {
+                Ok(r) => run = Some(r),
+                Err(e) => report
+                    .problems
+                    .push(format!("run.json: (root): does not fit the run types: {e}")),
+            }
+        }
+    }
+    let mut seen: std::collections::BTreeMap<(String, String, String), &'static str> =
+        Default::default();
 
     let mut names: Vec<String> = Vec::new();
     let mut probes = 0usize;
@@ -404,7 +433,7 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
             report.problems.push(format!(
                 "{name}: unexpected directory in a results directory"
             ));
-        } else if name == "host.json" || name == "tools.json" {
+        } else if name == "host.json" || name == "tools.json" || name == "run.json" {
         } else if name.starts_with("probe-") && name.ends_with(".json") {
             probes += 1;
         } else if name.ends_with(".json") {
@@ -438,6 +467,31 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         match serde_json::from_value::<ToolResult>(v) {
             Ok(r) => {
                 semantic_checks(&name, &r, &tools, &mut report.problems);
+                let outcome = if r.skipped.is_some() {
+                    "skipped"
+                } else if r.failed.is_some() {
+                    "failed"
+                } else {
+                    "measured"
+                };
+                seen.insert(
+                    (r.tool.id.clone(), r.setting.id.clone(), r.class.clone()),
+                    outcome,
+                );
+                if let Some(run) = &run {
+                    if r.threads != run.threads {
+                        report.problems.push(format!(
+                            "{name}: /threads: {} but run.json says {}",
+                            r.threads, run.threads
+                        ));
+                    }
+                    if r.skipped.is_none() && r.repeats_requested != Some(run.repeats_requested) {
+                        report.problems.push(format!(
+                            "{name}: /repeats_requested: {:?} but run.json says {}",
+                            r.repeats_requested, run.repeats_requested
+                        ));
+                    }
+                }
                 let here = (
                     r.corpus.profile.clone(),
                     r.corpus.manifest_blake3.clone(),
@@ -465,6 +519,40 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
             Err(e) => report.problems.push(format!(
                 "{name}: (root): does not fit the result types: {e}"
             )),
+        }
+    }
+    if let Some(run) = &run {
+        let mut listed: std::collections::BTreeSet<(String, String, String)> = Default::default();
+        for c in &run.combinations {
+            let key = (c.tool.clone(), c.setting.clone(), c.class.clone());
+            let label = format!("{}/{}/{}", c.tool, c.setting, c.class);
+            if !listed.insert(key.clone()) {
+                report.problems.push(format!(
+                    "run.json: /combinations: `{label}` is listed twice"
+                ));
+            }
+            match seen.get(&key) {
+                None => report.problems.push(format!(
+                    "run.json: /combinations: `{label}` has no result file"
+                )),
+                Some(outcome) if *outcome != c.outcome => report.problems.push(format!(
+                    "run.json: /combinations: `{label}` is listed as {} but its file says {outcome}",
+                    c.outcome
+                )),
+                Some(_) => {}
+            }
+            if !run.classes.contains(&c.class) {
+                report.problems.push(format!(
+                    "run.json: /combinations: `{label}` is of a class not in /classes"
+                ));
+            }
+        }
+        for (tool, setting, class) in seen.keys() {
+            if !listed.contains(&(tool.clone(), setting.clone(), class.clone())) {
+                report.problems.push(format!(
+                    "run.json: /combinations: result file for `{tool}/{setting}/{class}` is not listed"
+                ));
+            }
         }
     }
     Ok(report)
@@ -508,6 +596,41 @@ fn semantic_checks(
     }
     let empty = Vec::new();
     let repeats = r.repeats.as_ref().unwrap_or(&empty);
+    // Repeat counts: all requested repeats ran, unless the combination failed (then the failing
+    // repeat is the one after the completed ones) or was marked as measured once for being long.
+    match r.repeats_requested {
+        None => out.push(format!(
+            "{name}: /repeats_requested: missing from a result that ran"
+        )),
+        Some(req) => {
+            let run = repeats.len() as u64;
+            if let Some(f) = &r.failed {
+                if u64::from(f.repeat) != run + 1 || run >= u64::from(req) {
+                    out.push(format!(
+                        "{name}: /failed/repeat: {} is not the repeat after the {run} recorded \
+                         (of {req} requested)",
+                        f.repeat
+                    ));
+                }
+                if r.repeats_short.is_some() {
+                    out.push(format!(
+                        "{name}: /repeats_short: present on a failed result"
+                    ));
+                }
+            } else if r.repeats_short.is_some() {
+                if run >= u64::from(req) {
+                    out.push(format!(
+                        "{name}: /repeats_short: present although all {req} requested repeats ran"
+                    ));
+                }
+            } else if run != u64::from(req) {
+                out.push(format!(
+                    "{name}: /repeats: {run} recorded but {req} requested and no /repeats_short \
+                     explains the difference"
+                ));
+            }
+        }
+    }
     // A repeat that timed out or lost descendants cannot be part of a good result.
     let flagged = repeats.iter().any(|s| {
         [&s.compress, &s.extract]
@@ -634,6 +757,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join("host.json"), render(&samples::host())).expect("host");
         std::fs::write(dir.join("tools.json"), render(&samples::tools())).expect("tools");
+        std::fs::write(dir.join("run.json"), render(&samples::run_file(results))).expect("run");
         for r in results {
             std::fs::write(dir.join(r.file_name()), render(r)).expect("result");
         }
@@ -712,13 +836,20 @@ mod tests {
     #[test]
     fn schema_and_types_agree() {
         let schema = schema_value().expect("schema");
-        let (m, s, z, f) = (
+        let mut short = samples::measured();
+        short.repeats_short = Some("measured once: long run".into());
+        short.repeats = short.repeats.map(|r| r[..1].to_vec());
+        let (m, s, z, f, sh) = (
             to_value(&samples::measured()),
             to_value(&samples::skipped()),
             to_value(&samples::tar_stream()),
             to_value(&samples::failed()),
+            to_value(&short),
         );
-        assert_agree(&schema, "result", &[&m, &s, &z, &f]);
+        assert_agree(&schema, "result", &[&m, &s, &z, &f, &sh]);
+        let run = to_value(&samples::run_file(&[samples::measured()]));
+        assert_agree(&schema, "run", &[&run]);
+        assert_agree(&schema, "run_combination", &[&run["combinations"][0]]);
         assert_agree(&schema, "failure", &[&f["failed"]]);
         assert_agree(&schema, "tool_ref", &[&m["tool"], &s["tool"]]);
         assert_agree(&schema, "setting_ref", &[&m["setting"]]);
@@ -759,6 +890,8 @@ mod tests {
             "tar_info",
             "verification",
             "failure",
+            "run",
+            "run_combination",
             "tools",
             "tool_entry",
             "host",
@@ -935,6 +1068,81 @@ mod tests {
     }
 
     #[test]
+    fn an_aborted_or_trimmed_directory_does_not_validate() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let two = [samples::measured(), samples::skipped()];
+
+        // Aborted: no run.json.
+        let dir = write_dir(tmp.path(), &two);
+        std::fs::remove_file(dir.join("run.json")).expect("rm");
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.starts_with("run.json:") && m.contains("missing")));
+
+        // Trimmed: a listed combination lost its file.
+        let dir = write_dir(tmp.path(), &two);
+        std::fs::remove_file(dir.join(two[1].file_name())).expect("rm");
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("has no result file")));
+
+        // An unlisted result file.
+        let dir = write_dir(tmp.path(), &two[..1]);
+        std::fs::write(dir.join(two[1].file_name()), render(&two[1])).expect("w");
+        assert!(problems(&dir).iter().any(|m| m.contains("is not listed")));
+
+        // Outcome disagreement, thread and repeat-count disagreement.
+        let dir = write_dir(tmp.path(), &two);
+        let mut run = samples::run_file(&two);
+        run.combinations[0].outcome = "failed".into();
+        run.threads = 9;
+        run.repeats_requested = 5;
+        std::fs::write(dir.join("run.json"), render(&run)).expect("w");
+        let p = problems(&dir);
+        for what in ["is listed as failed", "run.json says 9", "run.json says 5"] {
+            assert!(p.iter().any(|m| m.contains(what)), "{what}: {p:?}");
+        }
+
+        // complete: false is not accepted.
+        let dir = write_dir(tmp.path(), &two);
+        let mut v = to_value(&samples::run_file(&two));
+        v["complete"] = json!(false);
+        std::fs::write(dir.join("run.json"), v.to_string()).expect("w");
+        assert!(!problems(&dir).is_empty());
+    }
+
+    #[test]
+    fn fewer_repeats_than_requested_need_the_long_run_marker() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let one = |mut r: ToolResult| {
+            let reps = r.repeats.take().expect("repeats")[..1].to_vec();
+            r.median = Some(Sample::median_of(&reps));
+            r.repeats = Some(reps);
+            r
+        };
+        // One repeat of three, unexplained.
+        let dir = write_dir(tmp.path(), &[one(samples::measured())]);
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("/repeats:") && m.contains("repeats_short")));
+        // Explained.
+        let mut ok = one(samples::measured());
+        ok.repeats_short = Some("measured once: long run".into());
+        let dir = write_dir(tmp.path(), &[ok]);
+        assert!(problems(&dir).is_empty(), "{:?}", problems(&dir));
+        // A marker although everything ran.
+        let mut lie = samples::measured();
+        lie.repeats_short = Some("measured once: long run".into());
+        let dir = write_dir(tmp.path(), &[lie]);
+        assert!(problems(&dir).iter().any(|m| m.contains("/repeats_short")));
+        // failed.repeat must follow the recorded repeats.
+        let mut bad = samples::failed();
+        bad.failed.as_mut().expect("failed").repeat = 3;
+        let dir = write_dir(tmp.path(), &[bad]);
+        assert!(problems(&dir).iter().any(|m| m.contains("/failed/repeat")));
+    }
+
+    #[test]
     fn a_dirty_or_unknown_build_needs_the_flag_in_host_json() {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = write_dir(tmp.path(), &[samples::measured()]);
@@ -1047,6 +1255,7 @@ mod tests {
             std::fs::create_dir_all(&d).expect("dir");
             std::fs::write(d.join("host.json"), render(&samples::host())).expect("host");
             std::fs::write(d.join("tools.json"), render(&samples::tools())).expect("tools");
+            std::fs::write(d.join("run.json"), render(&samples::run_file(&[]))).expect("run");
             assert_eq!(problems(&d).is_empty(), ok, "{name}: {:?}", problems(&d));
         }
     }
