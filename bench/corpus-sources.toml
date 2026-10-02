@@ -399,13 +399,13 @@ max_bytes = 1600000
 id = "commons-featured-full"
 class = "photo-jpeg"
 licence = "CC0-1.0, CC-BY or CC-BY-SA (each file carries its own licence and author)"
-origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0, CC BY or CC BY-SA, API order, 200 KB to 4 MB"
+origin = "Wikimedia Commons featured pictures: camera JPEGs (Exif Make and Model present) under CC0, CC BY or CC BY-SA, API order, 200 KB to 4.5 MB"
 profiles = ["full"]
 kind = "commons-photos"
 category = "Category:Featured_pictures_on_Wikimedia_Commons"
 count = 3000
 min_bytes = 200000
-max_bytes = 4000000
+max_bytes = 4500000
 
 [[source]]
 id = "arxiv-cc-by-small"
