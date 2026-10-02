@@ -28,6 +28,286 @@
         "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-virt-3.24.2-x86_64.iso"
       },
       {
+        "attribution": "Timothy Werquin and Roos Hubrechtsen and Ashok Thangarajan and Frank Piessens and Jan Tobias Muehlberg (arXiv:2102.12345)",
+        "blake3": "44d4673ea38b76471dba0a3a9d35b1533c865ff76175bfab2bfa7e5b9f4f45d9",
+        "bytes": 3024176,
+        "extra": {
+          "id": "2102.12345",
+          "title": "Automated Fuzzing of Automotive Control Units",
+          "version": "v2"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2102.12345v2.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2102.12345v2"
+      },
+      {
+        "attribution": "Umut \\c{S}im\\c{s}ekli, Mert G\\\"urb\\\"uzbalaban, Sinan Y{\\i}ld{\\i}r{\\i}m, Lingjiong Zhu (arXiv:2403.02051)",
+        "blake3": "df35ee7c0f853897ed77d13b3fbe70692f8522767b7c81e046f70ccbaa10482f",
+        "bytes": 434919,
+        "extra": {
+          "id": "2403.02051",
+          "title": "Privacy of SGD under Gaussian or Heavy-Tailed Noise: Guarantees without Gradient Clipping",
+          "version": "v2"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2403.02051v2.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2403.02051v2"
+      },
+      {
+        "attribution": "Ryan McKenna (arXiv:2405.15913)",
+        "blake3": "4eae07d4528e71f66266f48de200f6264a54e3976e87990bc18a3ec257b944d4",
+        "bytes": 1083201,
+        "extra": {
+          "id": "2405.15913",
+          "title": "Scaling up the Banded Matrix Factorization Mechanism for Differentially Private ML",
+          "version": "v4"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2405.15913v4.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2405.15913v4"
+      },
+      {
+        "attribution": "Huda Naeem Hleeb Al-Jabbari and Abbas Maarefparvar (arXiv:2409.02222)",
+        "blake3": "bcf9a436a65ba58c4f9c8b3de72d0e31c48cf7b51b91ea94495cb899987081cb",
+        "bytes": 265085,
+        "extra": {
+          "id": "2409.02222",
+          "title": "A Digital signature scheme based on Module-LWE and Module-SIS",
+          "version": "v2"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2409.02222v2.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2409.02222v2"
+      },
+      {
+        "attribution": "Zebo Yang, Ali Ghubaish, Raj Jain, Ala Al-Fuqaha, Aiman Erbad, Ramana Kompella, Hassan Shapourian, Reza Nejabati (arXiv:2501.06989)",
+        "blake3": "1d27212edac1e8d4b179fd810f9b775d75ca8a9001d894930d3718d07c80892e",
+        "bytes": 2420714,
+        "extra": {
+          "id": "2501.06989",
+          "title": "Layer-Wise Security Framework and Analysis for the Quantum Internet",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2501.06989v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2501.06989v1"
+      },
+      {
+        "attribution": "Andrey Labunets, Nishit V. Pandya, Ashish Hooda, Xiaohan Fu, Earlence Fernandes (arXiv:2501.09798)",
+        "blake3": "1c97c7df4a4f73bfb035f3b89c1b15e108e8acef7ffa9d38d0154bd5c3c4469c",
+        "bytes": 787722,
+        "extra": {
+          "id": "2501.09798",
+          "title": "Fun-tuning: Characterizing the Vulnerability of Proprietary LLMs to Optimization-based Prompt Injection Attacks via the Fine-Tuning Interface",
+          "version": "v2"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2501.09798v2.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2501.09798v2"
+      },
+      {
+        "attribution": "Meet Udeshi and Minghao Shao and Haoran Xi and Nanda Rani and Kimberly Milner and Venkata Sai Charan Putrevu and Brendan Dolan-Gavitt and Sandeep Kumar Shukla and Prashanth Krishnamurthy and Farshad Khorrami and Ramesh Karri and Muhammad Shafique (arXiv:2502.10931)",
+        "blake3": "8c5d1c348a6a91cfcde55e3006677d164a2dc57d42f57b47a054e5baeabac024",
+        "bytes": 3483153,
+        "extra": {
+          "id": "2502.10931",
+          "title": "D-CIPHER: Dynamic Collaborative Intelligent Multi-Agent System with Planner and Heterogeneous Executors for Offensive Security",
+          "version": "v2"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2502.10931v2.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2502.10931v2"
+      },
+      {
+        "attribution": "Yixin Cheng, Hongcheng Guo, Yangming Li, Leonid Sigal (arXiv:2505.05190)",
+        "blake3": "5eadede749506598e74c3b6b10a49697b854f897c5cf60c96c4a4679d2e24dea",
+        "bytes": 2658904,
+        "extra": {
+          "id": "2505.05190",
+          "title": "Revealing Weaknesses in Text Watermarking Through Self-Information Rewrite Attacks",
+          "version": "v2"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.05190v2.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.05190v2"
+      },
+      {
+        "attribution": "Jayeeta Chaudhuri, Arjun Chaudhuri, and Krishnendu Chakrabarty (arXiv:2505.06364)",
+        "blake3": "4a23362bbc33a832bb0c3a1bcf97a6b7e0cc41b84bcf3adb30795ab1e6456cf6",
+        "bytes": 670785,
+        "extra": {
+          "id": "2505.06364",
+          "title": "LATENT: LLM-Augmented Trojan Insertion and Evaluation Framework for Analog Netlist Topologies",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06364v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06364v1"
+      },
+      {
+        "attribution": "Aditya Mishra, Haroon Lone (arXiv:2505.06384)",
+        "blake3": "da9589d3360f83b8ed28f55d54bf53f3873ac3366a99dbc6d175314b65c9bb77",
+        "bytes": 1344460,
+        "extra": {
+          "id": "2505.06384",
+          "title": "RiM: Record, Improve and Maintain Physical Well-being using Federated Learning",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06384v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06384v1"
+      },
+      {
+        "attribution": "Brian Tan and Ewan S. D. Davies and Indrakshi Ray and Mahmoud A. Abdelgawad (arXiv:2505.06406)",
+        "blake3": "e63fcff524f2bfd4eac890d910280d076d43a725fed457d42ce20430f6da55d4",
+        "bytes": 584680,
+        "extra": {
+          "id": "2505.06406",
+          "title": "Safety Analysis in the NGAC Model",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06406v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06406v1"
+      },
+      {
+        "attribution": "Krti Tallam (arXiv:2505.06409)",
+        "blake3": "513d55fb122687d24dd71170f2018358d29242b5672c50210b38111eb1cc8bf3",
+        "bytes": 1010761,
+        "extra": {
+          "id": "2505.06409",
+          "title": "Engineering Risk-Aware, Security-by-Design Frameworks for Assurance of Large-Scale Autonomous AI Models",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06409v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06409v1"
+      },
+      {
+        "attribution": "Syed Mhamudul Hasan, Hussein Zangoti, Iraklis Anagnostopoulos, Abdur R. Shahid (arXiv:2505.06454)",
+        "blake3": "dffaf3f70b4ab71bd19efdf5bf6d68a7e3283d554da9a410fcbf8c2a91161568",
+        "bytes": 654265,
+        "extra": {
+          "id": "2505.06454",
+          "title": "Sponge Attacks on Sensing AI: Energy-Latency Vulnerabilities and Defense via Model Pruning",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06454v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06454v1"
+      },
+      {
+        "attribution": "Mohammed Elnawawy, Gargi Mitra, Shahrear Iqbal, Karthik Pattabiraman (arXiv:2505.06477)",
+        "blake3": "b6cfe6178d5890275ad3b885ed5671cf9eeb8eaf64effcd0193842db8a774c82",
+        "bytes": 2354864,
+        "extra": {
+          "id": "2505.06477",
+          "title": "Learning from the Good Ones: Risk Profiling-Based Defenses Against Evasion Attacks on DNNs",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06477v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06477v1"
+      },
+      {
+        "attribution": "Yangguang Shao, Xinjie Lin, Haozheng Luo, Chengshang Hou, Gang Xiong, Jiahao Yu and Junzheng Shi (arXiv:2505.06579)",
+        "blake3": "0b50c12208d439c49197009032eca70964b5c134d4e522d568453e94b654534f",
+        "bytes": 1182358,
+        "extra": {
+          "id": "2505.06579",
+          "title": "POISONCRAFT: Practical Poisoning of Retrieval-Augmented Generation for Large Language Models",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06579v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06579v1"
+      },
+      {
+        "attribution": "Yifan Zeng (arXiv:2505.06636)",
+        "blake3": "26f4dedf04db52e9aeae8b6ebb9ca348811cc8c0899d001169c9b6c39afd0042",
+        "bytes": 3261794,
+        "extra": {
+          "id": "2505.06636",
+          "title": "A Contrastive Federated Semi-Supervised Learning Intrusion Detection Framework for Internet of Robotic Things",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06636v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06636v1"
+      },
+      {
+        "attribution": "Faisal Haque Bappy, EunJeong Cheon, Tariqul Islam (arXiv:2505.06661)",
+        "blake3": "40ab06331ea9012788213c947f5cd2b7f6e19bfd7f05f2249bcba9c1258160ef",
+        "bytes": 587557,
+        "extra": {
+          "id": "2505.06661",
+          "title": "Centralized Trust in Decentralized Systems: Unveiling Hidden Contradictions in Blockchain and Cryptocurrency",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06661v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06661v1"
+      },
+      {
+        "attribution": "Xavier Mart\\'inez-Lua\\~na, Manuel Fern\\'andez-Veiga, Rebeca P. D\\'iaz-Redondo, Ana Fern\\'andez-Vilas (arXiv:2505.06759)",
+        "blake3": "6b43e4a96d6068120c2b9d5e8b58729f686db3b601ea5ed5f5e257f4f704f561",
+        "bytes": 2115735,
+        "extra": {
+          "id": "2505.06759",
+          "title": "Privacy-aware Berrut Approximated Coded Computing applied to general distributed learning",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06759v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06759v1"
+      },
+      {
+        "attribution": "Dipayan Saha, Hasan Al Shaikh, Shams Tarek and Farimah Farahmandi (arXiv:2505.06821)",
+        "blake3": "c8d851eb16961493a7c19d571ab03bcf1e45fea41681294a7648531945f8feae",
+        "bytes": 710282,
+        "extra": {
+          "id": "2505.06821",
+          "title": "ThreatLens: LLM-guided Threat Modeling and Test Plan Generation for Hardware Security Verification",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06821v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06821v1"
+      },
+      {
+        "attribution": "Fabrice Y Harel-Canada, Boran Erol, Connor Choi, Jason Liu, Gary Jiarui Song, Nanyun Peng, Amit Sahai (arXiv:2505.06827)",
+        "blake3": "68dbbe75287e70ecde6445f306440717b5021b4ab5cc41a17915cbac7213ebe4",
+        "bytes": 9687581,
+        "extra": {
+          "id": "2505.06827",
+          "title": "Sandcastles in the Storm: Revisiting the (Im)possibility of Strong Watermarking",
+          "version": "v1"
+        },
+        "licence": "CC-BY-4.0",
+        "path": "arxiv-2505.06827v1.pdf",
+        "source": "arxiv-cc-by-small",
+        "url": "https://export.arxiv.org/pdf/2505.06827v1"
+      },
+      {
         "blake3": "76d5d4527f9f31930a924f0394e1334414041218773c658502a2ab2ae969d502",
         "bytes": 64657225,
         "source": "bbb-320x180",
@@ -827,22 +1107,24 @@
         "url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip"
       },
       {
-        "blake3": "0466e2dc76190f3c61fe18eae3ab4e3dc1201802df5d670aa896d442a93e5e08",
-        "bytes": 2485243,
+        "commit": "5c7b7bad26808e6b40ac3b3d0075466e27738a9d",
         "source": "v1",
-        "url": "https://github.com/facebook/zstd/archive/5c7b7bad26808e6b40ac3b3d0075466e27738a9d.tar.gz"
+        "url": "https://github.com/facebook/zstd"
       },
       {
-        "blake3": "8aadf117fcdd92745d19e3c748c6904ac36712a231bbc57eb7f87c5887d95794",
-        "bytes": 2485356,
+        "commit": "82d322c4973d9e2968d94047a40892bc6d9a9bdf",
         "source": "v2",
-        "url": "https://github.com/facebook/zstd/archive/82d322c4973d9e2968d94047a40892bc6d9a9bdf.tar.gz"
+        "url": "https://github.com/facebook/zstd"
       },
       {
-        "blake3": "f3f8fcff0784fd10f6ced04017db08002254772f5fbf1e31aabf71ed1f4b0beb",
-        "bytes": 2487434,
+        "commit": "d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a",
         "source": "v3",
-        "url": "https://github.com/facebook/zstd/archive/d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a.tar.gz"
+        "url": "https://github.com/facebook/zstd"
+      },
+      {
+        "commit": "d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a",
+        "source": "zstd-history-small",
+        "url": "https://github.com/facebook/zstd"
       }
     ]
   },
