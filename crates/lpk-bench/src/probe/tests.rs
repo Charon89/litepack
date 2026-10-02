@@ -313,11 +313,11 @@ fn probe_all_continues_after_a_failing_probe() {
     let out = execute(&cfg).expect("execute");
     assert_eq!(
         out.written,
-        ["weights"],
-        "weights ran after jpeg, deflate, dedup and text failed"
+        ["dedup", "weights"],
+        "dedup and weights ran after jpeg and deflate failed"
     );
     let failed: Vec<&str> = out.failed.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(failed, ["jpeg", "deflate", "dedup", "text", "entropy-gate"]);
+    assert_eq!(failed, ["jpeg", "deflate", "text", "entropy-gate"]);
     assert!(out.failed[0].1.contains("not implemented yet"));
     assert_eq!(out.problems, 0, "the written files validate");
     assert!(out.results_dir.join("probe-weights.json").is_file());
