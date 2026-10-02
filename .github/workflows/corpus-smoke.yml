@@ -5,6 +5,11 @@ name: Corpus smoke build
 # small` completes, and is reproducible, on a clean Linux machine.
 #
 # A run only counts as a from-scratch download test when `use_cache` is false (the default).
+#
+# The download cache is saved after every run, also a failed one, under a per-run key, so a
+# retry after a host outage does not fetch everything again. With `use_cache` the newest cache
+# for the same bench/corpus.lock is restored. A partial cache is safe: the builder re-checks
+# every cached file against the lock and fetches whatever is missing.
 on:
   workflow_dispatch:
     inputs:
@@ -55,19 +60,21 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: bench/corpus/.cache
-          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}
+          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            corpus-downloads-${{ hashFiles('bench/corpus.lock') }}-
       - name: Build lpk-bench
         run: cargo build --release --locked -p lpk-bench
       - name: Build the small corpus
         run: ./target/release/lpk-bench corpus build --profile small
-      # Only after a successful build, and only when there was no exact hit: a cache cannot be
-      # overwritten under the same key, so a partial cache must never be saved.
+      # Saved even when the build step failed (a partial cache is safe, see the header). The key
+      # is unique per run, so it never collides with the cache that was restored.
       - name: Save the corpus download cache
-        if: ${{ success() && steps.dl-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() }}
         uses: actions/cache/save@v6
         with:
           path: bench/corpus/.cache
-          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}
+          key: corpus-downloads-${{ hashFiles('bench/corpus.lock') }}-${{ github.run_id }}
       - name: Keep the first manifest
         run: cp bench/corpus/small/manifest.json first-manifest.json
       - name: Rebuild the small corpus from scratch
@@ -80,7 +87,7 @@ jobs:
         if: ${{ always() }}
         env:
           USE_CACHE: ${{ inputs.use_cache }}
-          CACHE_HIT: ${{ steps.dl-cache.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.dl-cache.outputs.cache-matched-key }}
         run: |
           python3 - >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}" <<'PY'
           import json
@@ -95,11 +102,17 @@ jobs:
           except (OSError, ValueError):
               info = {}
           use_cache = os.environ.get("USE_CACHE", "") == "true"
-          hit = os.environ.get("CACHE_HIT", "") == "true"
+          matched = os.environ.get("CACHE_MATCHED_KEY", "")
           print("## Corpus small build")
           print()
           print(f"- download cache used: {'yes' if use_cache else 'no'}")
-          print(f"- download cache exact hit: {'yes' if hit else 'no'}")
+          if not use_cache:
+              restored = "none (not requested)"
+          elif matched:
+              restored = f"`{matched}`"
+          else:
+              restored = "none (no cache matched)"
+          print(f"- download cache restored: {restored}")
           if not info:
               print("- build-info.json: missing or unreadable")
           print(f"- manifest BLAKE3: {info.get('manifest_blake3', 'unknown')}")
