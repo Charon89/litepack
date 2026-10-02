@@ -11,8 +11,9 @@
 //! (`Unsupported4Colors` is four components, `ProgressiveUnsupported` is progressive, the two
 //! `Verification*` codes are a verification mismatch); every other code is looked at through the
 //! marker scan, in this order: arithmetic-coded frame, four components, dimensions over the
-//! feature caps, gain map or multi-picture markers, progressive frame, bytes after the first EOI
-//! over the limit; if the scan explains nothing the cause is `other` and the code name is kept. A
+//! feature caps, gain map or multi-picture markers, bytes after the first EOI over the limit. A
+//! progressive frame is never a cause by itself (the write features accept progressive files);
+//! only the library's `ProgressiveUnsupported` is. If the scan explains nothing the cause is `other` and the code name is kept. A
 //! decoded file that differs from the input is a verification mismatch, a decode error is `other`
 //! with the code name prefixed `decode:`. The code name is recorded with every library failure.
 //!
@@ -546,8 +547,6 @@ fn scan_cause(scan: &Scan, features: &EnabledFeatures) -> Option<Cause> {
         Some(Cause::DimensionCap)
     } else if scan.mpf || scan.gain_map_xmp {
         Some(Cause::GainMap)
-    } else if frame.is_some_and(|f| f.kind == FrameKind::Progressive) {
-        Some(Cause::Progressive)
     } else if scan.trailing_bytes > TRAILING_LIMIT {
         Some(Cause::TrailingData)
     } else {
@@ -822,10 +821,7 @@ fn check_failure(p: &mut Vec<String>, at: &str, f: &FileRecord, fail: &Failure, 
         Cause::FourComponents => {
             frame.is_some_and(|x| x.components == 4) || code == Some("Unsupported4Colors")
         }
-        Cause::Progressive => {
-            frame.is_some_and(|x| x.kind == FrameKind::Progressive)
-                || code == Some("ProgressiveUnsupported")
-        }
+        Cause::Progressive => code == Some("ProgressiveUnsupported"),
         Cause::DimensionCap => frame.is_some_and(|x| {
             x.width > d.features.max_jpeg_width || x.height > d.features.max_jpeg_height
         }),
@@ -1443,7 +1439,8 @@ mod tests {
         let prog = scan_of(Some((FrameKind::Progressive, 3, 100, 100)));
         assert_eq!(
             cause(code(ExitCode::UnsupportedJpeg), &prog).cause,
-            Cause::Progressive
+            Cause::Other,
+            "a progressive frame alone explains nothing: the features accept it"
         );
         let mut trailing = plain.clone();
         trailing.trailing_bytes = TRAILING_LIMIT + 1;
