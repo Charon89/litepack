@@ -676,6 +676,7 @@ mod tests {
             git_program: Some("no-such-git-program-xyz".into()),
             allow_unavailable: false,
             ffmpeg_program: None,
+            repin: Vec::new(),
         };
         let report = build_corpus(&opts, &fetcher).expect("build");
         assert_eq!(report.skipped.len(), 1);

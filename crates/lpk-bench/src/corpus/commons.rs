@@ -748,6 +748,7 @@ max_bytes = 100
             git_program: None,
             allow_unavailable: false,
             ffmpeg_program: None,
+            repin: Vec::new(),
         };
         build(&opts("o1", true), &fetcher).expect("pin");
         let api = |f: &FakeFetcher| {
@@ -805,6 +806,7 @@ max_bytes = 100
             git_program: None,
             allow_unavailable: false,
             ffmpeg_program: None,
+            repin: Vec::new(),
         }
     }
 
@@ -929,6 +931,119 @@ max_bytes = 100
         let err = build(&allowing(opts_for(root, "o3", "cache3", false)), &fetcher)
             .expect_err("refused wait");
         assert!(format!("{err:#}").contains("Retry-After"), "{err:#}");
+    }
+
+    fn serve_all(f: &FakeFetcher) {
+        for (t, n) in [("Alpha", 10), ("Beta", 12)] {
+            f.files
+                .borrow_mut()
+                .insert(file_url(t), content(&format!("File:{t}.jpg"), n));
+        }
+    }
+
+    fn api_calls(f: &FakeFetcher) -> usize {
+        f.calls
+            .borrow()
+            .iter()
+            .filter(|u| u.contains("api.php"))
+            .count()
+    }
+
+    fn two_item_api() -> FakeFetcher {
+        api_with(vec![
+            entry("File:Alpha.jpg", 10, "CC0", "z", "image/jpeg", true),
+            entry("File:Beta.jpg", 12, "CC0", "z", "image/jpeg", true),
+        ])
+    }
+
+    #[test]
+    fn an_interrupted_pin_resumes_without_the_api_and_matches_an_uninterrupted_lock() {
+        // Reference: one uninterrupted run.
+        let ref_dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(ref_dir.path().join("sources.toml"), REGISTRY).expect("w");
+        let reference = two_item_api();
+        serve_all(&reference);
+        build(&opts_for(ref_dir.path(), "o", "cache", true), &reference).expect("pin");
+        let want = std::fs::read_to_string(ref_dir.path().join("corpus.lock")).expect("lock");
+
+        // Interrupted: the second file fails.
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        std::fs::write(root.join("sources.toml"), REGISTRY).expect("w");
+        let fetcher = two_item_api();
+        fetcher
+            .files
+            .borrow_mut()
+            .insert(file_url("Alpha"), content("File:Alpha.jpg", 10));
+        assert!(build(&opts_for(root, "o", "cache", true), &fetcher).is_err());
+        assert_eq!(api_calls(&fetcher), 1);
+        let partial = std::fs::read_to_string(root.join("corpus.lock")).expect("partial lock");
+        assert!(partial.contains("Beta"), "the listing is saved: {partial}");
+        assert_eq!(
+            partial.matches("\"blake3\"").count(),
+            1,
+            "only Alpha is hashed"
+        );
+
+        // A normal build refuses the unfinished pin and says so, before any request.
+        fetcher.calls.borrow_mut().clear();
+        let err = build(&opts_for(root, "n", "cache", false), &fetcher).expect_err("unfinished");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("`wc`") && msg.contains("not finished"),
+            "{msg}"
+        );
+        assert_eq!(fetcher.call_count(), 0);
+
+        // Resume: the API is gone, Beta is back; only Beta is requested.
+        fetcher
+            .files
+            .borrow_mut()
+            .remove(&api_url("Category:Test", &BTreeMap::new()));
+        serve_all(&fetcher);
+        build(&opts_for(root, "o", "cache", true), &fetcher).expect("resume");
+        assert_eq!(*fetcher.calls.borrow(), [file_url("Beta")]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("corpus.lock")).expect("lock"),
+            want,
+            "the resumed lock equals the uninterrupted one"
+        );
+        // And the finished pin builds normally.
+        build(&opts_for(root, "n", "cache", false), &fetcher).expect("normal build");
+    }
+
+    #[test]
+    fn update_lock_reuses_a_finished_pin_and_repin_fetches_again() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        let fetcher = pinned(root);
+        let lock = std::fs::read_to_string(root.join("corpus.lock")).expect("lock");
+        fetcher.calls.borrow_mut().clear();
+        build(&opts_for(root, "o2", "cache", true), &fetcher).expect("again");
+        assert_eq!(
+            fetcher.call_count(),
+            0,
+            "nothing is requested for a finished pin"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("corpus.lock")).expect("lock"),
+            lock
+        );
+        let mut o = opts_for(root, "o3", "cache", true);
+        o.repin = vec!["wc".into()];
+        build(&o, &fetcher).expect("repin");
+        assert_eq!(api_calls(&fetcher), 1, "--repin lists again");
+        assert_eq!(fetcher.call_count(), 3, "and downloads both files again");
+        assert_eq!(
+            std::fs::read_to_string(root.join("corpus.lock")).expect("lock"),
+            lock
+        );
+        // Misuse.
+        o.repin = vec!["nope".into()];
+        assert!(format!("{:#}", build(&o, &fetcher).expect_err("unknown")).contains("nope"));
+        o.update_lock = false;
+        o.repin = vec!["all".into()];
+        assert!(build(&o, &fetcher).is_err());
     }
 
     #[test]

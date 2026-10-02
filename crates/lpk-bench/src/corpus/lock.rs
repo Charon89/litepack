@@ -165,11 +165,29 @@ impl Lock {
         s
     }
 
+    /// Add or replace one pin of `profile`, keeping every other entry.
+    pub fn upsert(&mut self, profile: Profile, entry: LockEntry) {
+        self.entries
+            .entry(profile.name().to_string())
+            .or_default()
+            .insert((entry.source.clone(), entry.url.clone()), entry);
+    }
+
+    /// Write the lock atomically: a temporary file next to it, then a rename over it, so an
+    /// interrupted run leaves either the old or the new lock, never a torn one.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, self.render()).with_context(|| format!("writing {}", path.display()))
+        let mut name = path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".tmp");
+        let tmp = path.with_file_name(name);
+        std::fs::write(&tmp, self.render())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
     }
 }
 

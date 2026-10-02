@@ -30,6 +30,7 @@ fn opts(root: &Path) -> BuildOptions {
         retry: fast_retry(),
         git_program: None,
         ffmpeg_program: None,
+        repin: Vec::new(),
         allow_unavailable: false,
     }
 }
