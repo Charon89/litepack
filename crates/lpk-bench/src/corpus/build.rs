@@ -14,11 +14,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 
-use super::extract::{extract, sanitize_path, Selection};
+use super::extract::{check_listing, extract, sanitize_path, Selection};
 use super::fetch::{repin_hint, Artifact, DownloadError, Downloader, Expect, Fetcher, RetryPolicy};
 use super::lock::{Lock, LockEntry};
 use super::manifest::{now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped};
-use super::registry::{file_name_for, ArchiveFormat, Profile, Registry, Source, SourceSpec};
+use super::registry::{
+    file_name_for, gz_output_name, ArchiveFormat, FilesSpec, Profile, Registry, Source, SourceSpec,
+};
 
 /// Marker written into every output directory this tool creates. A non-empty directory
 /// without it is never touched.
@@ -86,7 +88,6 @@ pub struct ListedFile {
 pub struct Ctx<'a> {
     profile: Profile,
     update_lock: bool,
-    #[allow(dead_code)] // read through `Ctx::out` by derived kinds (next sub-task)
     out: PathBuf,
     downloader: Downloader<'a>,
     lock: &'a Lock,
@@ -100,13 +101,12 @@ pub struct Ctx<'a> {
 
 impl Ctx<'_> {
     /// The output root (`<out>`), e.g. for derivation steps reading other classes' files.
-    #[allow(dead_code)] // extension point for list and derived kinds (next sub-task)
+    #[allow(dead_code)] // for derived kinds (later sub-task)
     pub fn out(&self) -> &Path {
         &self.out
     }
 
     /// True under `--update-lock`: the only mode in which a resolver may call an API.
-    #[allow(dead_code)] // extension point for list and derived kinds (next sub-task)
     pub fn update_lock(&self) -> bool {
         self.update_lock
     }
@@ -150,13 +150,13 @@ impl Ctx<'_> {
 
     /// The file list of a list-type source in a normal build: its lock entries, sorted by URL.
     /// An empty list is an error (the source was never pinned).
-    #[allow(dead_code)] // extension point for list and derived kinds (next sub-task)
     pub fn listed_pins(&self, source: &Source) -> Result<Vec<ListedFile>> {
         let pins = self.lock.entries(self.profile, &source.id);
         if pins.is_empty() {
             return Err(missing_pin(self.profile, &source.id, "(list)").into());
         }
-        pins.into_iter()
+        let listing: Vec<ListedFile> = pins
+            .into_iter()
             .map(|e| {
                 Ok(ListedFile {
                     url: e.url.clone(),
@@ -168,12 +168,21 @@ impl Ctx<'_> {
                     extra: e.extra.clone(),
                 })
             })
-            .collect()
+            .collect::<Result<_>>()?;
+        self.check_listing(source, &listing)?;
+        Ok(listing)
+    }
+
+    /// Validate a whole listing before anything is fetched (safe, portable paths; no
+    /// case-insensitive duplicates or file/directory clashes, identically on every OS). Resolvers
+    /// must call this under `--update-lock`; `listed_pins` does it for normal builds.
+    pub fn check_listing(&self, source: &Source, listing: &[ListedFile]) -> Result<()> {
+        let paths: Vec<String> = listing.iter().map(|f| f.path.clone()).collect();
+        check_listing(&paths).with_context(|| format!("source `{}`: listing", source.id))
     }
 
     /// Fetch one listed file (verified against its pin, or recorded under `--update-lock`) and
     /// place it at `dir/<item.path>`. The manifest entry carries the per-file licence when set.
-    #[allow(dead_code)] // extension point for list and derived kinds (next sub-task)
     pub fn fetch_listed(
         &mut self,
         source: &Source,
@@ -227,6 +236,41 @@ fn missing_pin(profile: Profile, source: &str, url: &str) -> DownloadError {
         profile.name(),
         repin_hint(profile)
     ))
+}
+
+/// Before any network traffic: every static URL needs a pin, and a list source needs a
+/// non-empty pinned listing (otherwise it would fail after earlier sources have downloaded).
+fn preflight_pins(sources: &[&Source], lock: &Lock, profile: Profile) -> Result<()> {
+    for s in sources {
+        if s.spec.is_list() && lock.entries(profile, &s.id).is_empty() {
+            return Err(missing_pin(profile, &s.id, "(list)").into());
+        }
+        for url in s.spec.static_urls() {
+            if lock.get(profile, &s.id, url).is_none() {
+                return Err(missing_pin(profile, &s.id, url).into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The listing a `files` source declares, sorted by URL (the order of its pins).
+fn spec_listing(spec: &FilesSpec) -> Result<Vec<ListedFile>> {
+    let mut v = spec
+        .files
+        .iter()
+        .map(|i| {
+            Ok(ListedFile {
+                url: i.url.clone(),
+                path: file_name_for(&i.url, i.path.as_deref())?,
+                licence: i.licence.clone(),
+                attribution: i.attribution.clone(),
+                extra: BTreeMap::new(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    v.sort_by(|a, b| a.url.cmp(&b.url));
+    Ok(v)
 }
 
 /// Refuse to build derived sources whose input classes are neither part of this run nor already
@@ -364,13 +408,7 @@ pub fn build(opts: &BuildOptions, fetcher: &dyn Fetcher) -> Result<BuildReport> 
         check_derived_inputs(&sources, &opts.out)?;
     }
     if !opts.update_lock {
-        for s in &sources {
-            for url in s.spec.static_urls() {
-                if lock.get(opts.profile, &s.id, url).is_none() {
-                    return Err(missing_pin(opts.profile, &s.id, url).into());
-                }
-            }
-        }
+        preflight_pins(&sources, &lock, opts.profile)?;
     }
 
     prepare_out(&opts.out, &opts.cache)?;
@@ -504,18 +542,43 @@ pub fn build_source(ctx: &mut Ctx<'_>, source: &Source, dir: &Path) -> Result<Ve
                 .format
                 .or_else(|| ArchiveFormat::guess(&spec.url))
                 .context("archive format unknown")?;
-            let sel = Selection::new(
+            let mut sel = Selection::new(
                 &spec.include,
                 &spec.exclude,
                 spec.max_files,
                 spec.max_bytes,
                 spec.strip_components,
             )?;
+            sel.truncate = spec.truncate_files;
+            if format == ArchiveFormat::Gz {
+                sel.single_name = Some(gz_output_name(&spec.url)?);
+            }
             let files = extract(format, &a.path, dir, &sel)?;
             Ok(files
                 .into_iter()
                 .map(|f| entry(&f.path, f.bytes, f.blake3))
                 .collect())
+        }
+        SourceSpec::Files(spec) => {
+            let declared = spec_listing(spec)?;
+            let items = if ctx.update_lock() {
+                declared
+            } else {
+                let pinned = ctx.listed_pins(source)?;
+                ensure!(
+                    pinned == declared,
+                    "source `{}`: the registry's file list differs from the pins in bench/corpus.lock. {}",
+                    source.id,
+                    repin_hint(ctx.profile)
+                );
+                pinned
+            };
+            ctx.check_listing(source, &items)?;
+            let mut made = Vec::new();
+            for item in &items {
+                made.push(ctx.fetch_listed(source, dir, item)?);
+            }
+            Ok(made)
         }
     }
 }
@@ -1093,5 +1156,139 @@ url = "{OPT_URL}"
             ctx.fetch_listed(&source, &target, &item(1, None)).is_err(),
             "same path twice"
         );
+    }
+
+    // ---- `files` kind, early list check ----
+
+    const A_URL: &str = "https://example.org/files/a.bin";
+    const B_URL: &str = "https://example.org/files/b.bin";
+
+    fn files_registry(extra: &str) -> String {
+        format!(
+            r#"
+[[source]]
+id = "set"
+class = "stuff"
+licence = "MIT"
+origin = "listed"
+profiles = ["small"]
+kind = "files"
+files = [
+  {{ url = "{A_URL}", path = "dir/a.bin" }},
+  {{ url = "{B_URL}", licence = "CC0-1.0", attribution = "Someone" }},{extra}
+]
+"#
+        )
+    }
+
+    fn files_env(extra: &str) -> Env {
+        let env = Env::new(false);
+        std::fs::write(env.root.join("sources.toml"), files_registry(extra)).expect("w");
+        env.fetcher
+            .files
+            .borrow_mut()
+            .insert(A_URL.into(), b"AAA".to_vec());
+        env.fetcher
+            .files
+            .borrow_mut()
+            .insert(B_URL.into(), b"BBBB".to_vec());
+        env
+    }
+
+    #[test]
+    fn files_kind_pins_each_file_and_rebuilds_identically() {
+        let env = files_env("");
+        build(&env.opts("out", true), &env.fetcher).expect("pin");
+        let lock = env.lock();
+        assert!(
+            lock.contains("\"path\": \"dir/a.bin\"")
+                && lock.contains("\"attribution\": \"Someone\"")
+        );
+        let m1 = env.manifest("out");
+        let m: Manifest = serde_json::from_str(&m1).expect("json");
+        let files = &m.classes["stuff"].files;
+        assert_eq!(
+            files[0].path, "stuff/set/b.bin",
+            "default name is the URL's last segment"
+        );
+        assert_eq!(files[0].licence, "CC0-1.0");
+        assert_eq!(files[1].path, "stuff/set/dir/a.bin");
+        assert_eq!(files[1].licence, "MIT");
+        std::fs::remove_dir_all(env.root.join("out")).expect("rm");
+        build(&env.opts("out2", false), &env.fetcher).expect("from lock");
+        assert_eq!(m1, env.manifest("out2"));
+    }
+
+    #[test]
+    fn files_kind_registry_and_lock_must_agree() {
+        let env = files_env("");
+        build(&env.opts("out", true), &env.fetcher).expect("pin");
+        // A new URL in the registry has no pin: caught before any network traffic.
+        let c = "https://example.org/files/c.bin";
+        env.fetcher
+            .files
+            .borrow_mut()
+            .insert(c.into(), b"C".to_vec());
+        std::fs::write(
+            env.root.join("sources.toml"),
+            files_registry(&format!("\n  {{ url = \"{c}\" }},")),
+        )
+        .expect("w");
+        let calls = env.fetcher.call_count();
+        let err = build(&env.opts("out2", false), &env.fetcher).expect_err("unpinned url");
+        assert!(format!("{err:#}").contains("--update-lock"));
+        assert_eq!(env.fetcher.call_count(), calls);
+        assert!(!env.root.join("out2").exists());
+        // A renamed output path differs from the pinned one.
+        std::fs::write(
+            env.root.join("sources.toml"),
+            files_registry("").replace("dir/a.bin", "dir/renamed.bin"),
+        )
+        .expect("w");
+        let err = build(&env.opts("out2", false), &env.fetcher).expect_err("path differs");
+        assert!(
+            format!("{err:#}").contains("differs from the pins"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn colliding_listed_paths_are_rejected_when_the_registry_loads() {
+        let env = files_env("");
+        let bad = files_registry("").replace("dir/a.bin", "Dup.bin").replace(
+            "{ url = \"https://example.org/files/b.bin\"",
+            "{ path = \"dup.BIN\", url = \"https://example.org/files/b.bin\"",
+        );
+        std::fs::write(env.root.join("sources.toml"), bad).expect("w");
+        let err = build(&env.opts("out", true), &env.fetcher).expect_err("collision");
+        assert!(format!("{err:#}").contains("duplicate"), "{err:#}");
+        assert_eq!(env.fetcher.call_count(), 0, "nothing fetched");
+    }
+
+    #[test]
+    fn list_source_without_pins_fails_before_earlier_sources_download() {
+        let env = files_env("");
+        let text = format!(
+            "{}\n{}",
+            registry_text(false),
+            files_registry("").replace("\"set\"", "\"set2\"")
+        );
+        std::fs::write(env.root.join("sources.toml"), text).expect("w");
+        let sources = Registry::load(&env.root.join("sources.toml")).expect("registry");
+        let picked = sources.select(Profile::Small, &[]).expect("select");
+        let mut lock = Lock::default();
+        // Pin everything except the list source's entries.
+        for s in picked.iter().filter(|s| !s.spec.is_list()) {
+            for url in s.spec.static_urls() {
+                lock.replace_source(
+                    Profile::Small,
+                    &s.id,
+                    vec![LockEntry::artifact(&s.id, url, 1, "ab".repeat(32))],
+                );
+            }
+        }
+        let err = preflight_pins(&picked, &lock, Profile::Small).expect_err("list unpinned");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("set2") && msg.contains("(list)"), "{msg}");
     }
 }

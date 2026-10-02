@@ -9,10 +9,18 @@
 //! Selection order: validate all entries -> drop dirs -> `strip_components` -> include/exclude
 //! globs -> sort by path bytes -> cap (`max_files`, then `max_bytes` on declared sizes; the
 //! first file that would exceed the byte cap ends the selection).
+//!
+//! Formats: `zip`, `tar.gz`, `7z` (also a self-extracting `.7z.exe`: the archive starts at the
+//! first 7z signature whose start-header CRC is valid) and `gz` (one gzip stream decompressed
+//! to a single file whose name the caller supplies).
+//!
+//! `truncate_files` keeps only the first N bytes of every larger file, cut after the last line
+//! break before the cap (or exactly at N when there is none). The extracted size is the
+//! truncated size, and `max_bytes` counts it as at most N.
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -29,7 +37,14 @@ pub struct Selection {
     pub max_files: Option<usize>,
     pub max_bytes: Option<u64>,
     pub strip_components: usize,
+    /// Keep only the first N bytes of larger files (cut at a line break). `None`: keep all.
+    pub truncate: Option<u64>,
+    /// Output file name for single-file formats (`gz`).
+    pub single_name: Option<String>,
 }
+
+/// Upper bound for a stream whose size is not declared (guards against decompression bombs).
+const UNDECLARED_LIMIT: u64 = 16 << 30;
 
 impl Selection {
     pub fn new(
@@ -46,6 +61,8 @@ impl Selection {
             max_files,
             max_bytes,
             strip_components,
+            truncate: None,
+            single_name: None,
         })
     }
 
@@ -59,6 +76,8 @@ impl Selection {
             max_files: None,
             max_bytes: None,
             strip_components: 0,
+            truncate: None,
+            single_name: None,
         }
     }
 }
@@ -148,12 +167,13 @@ pub fn pick(mut cands: Vec<Candidate>, sel: &Selection) -> Vec<Candidate> {
         if sel.max_files.is_some_and(|m| out.len() >= m) {
             break;
         }
+        let kept = sel.truncate.map_or(c.size, |t| c.size.min(t));
         if let Some(limit) = sel.max_bytes {
-            if total.checked_add(c.size).is_none_or(|t| t > limit) {
+            if total.checked_add(kept).is_none_or(|t| t > limit) {
                 break;
             }
         }
-        total = total.saturating_add(c.size);
+        total = total.saturating_add(kept);
         out.push(c);
     }
     out
@@ -170,6 +190,8 @@ pub fn extract(
     let mut out = match format {
         ArchiveFormat::Zip => extract_zip(archive, target, sel),
         ArchiveFormat::TarGz => extract_tar_gz(archive, target, sel),
+        ArchiveFormat::SevenZ => extract_7z(archive, target, sel),
+        ArchiveFormat::Gz => extract_gz(archive, target, sel),
     }
     .with_context(|| format!("extracting {}", archive.display()))?;
     out.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
@@ -220,8 +242,33 @@ impl Lister {
     }
 }
 
+/// Validate a whole file listing before anything is fetched: every path must be safe and
+/// portable, and no two may collide case-insensitively (as on Windows), as a duplicate or as a
+/// file that is also another path's directory. Identical on every OS.
+pub fn check_listing(paths: &[String]) -> Result<()> {
+    let mut lister = Lister::default();
+    for (i, p) in paths.iter().enumerate() {
+        ensure!(
+            !sanitize_path(p)?.is_empty(),
+            "listed path `{p}` names no file"
+        );
+        lister.add(p, 0, i, 0)?;
+    }
+    Ok(())
+}
+
 /// Write one file below `target`, creating parents; fails if it already exists.
-fn write_entry(target: &Path, rel: &str, reader: &mut dyn Read, size: u64) -> Result<Extracted> {
+///
+/// `declared` is the size the archive claims (`None` for a bare stream). With `truncate`, a
+/// stream longer than that is cut after its last line break within the first `truncate` bytes
+/// (exactly at `truncate` when it has none) and the hash covers the kept bytes only.
+fn write_entry(
+    target: &Path,
+    rel: &str,
+    reader: &mut dyn Read,
+    declared: Option<u64>,
+    truncate: Option<u64>,
+) -> Result<Extracted> {
     let mut dest = target.to_path_buf();
     for comp in rel.split('/') {
         dest.push(comp);
@@ -234,14 +281,23 @@ fn write_entry(target: &Path, rel: &str, reader: &mut dyn Read, size: u64) -> Re
         std::fs::create_dir_all(parent)?;
     }
     let mut file = File::options()
+        .read(true)
         .write(true)
         .create_new(true)
         .open(&dest)
         .with_context(|| format!("creating {}", dest.display()))?;
+    let read_max = match (declared, truncate) {
+        (Some(d), Some(t)) => d.min(t),
+        (Some(d), None) => d,
+        (None, Some(t)) => t,
+        (None, None) => UNDECLARED_LIMIT,
+    };
     let mut hasher = blake3::Hasher::new();
-    let mut limited = reader.take(size.saturating_add(1));
+    let mut limited = reader.take(read_max.saturating_add(1));
     let mut buf = vec![0u8; 1 << 16];
     let mut total = 0u64;
+    // End (exclusive) of the last line break among the first `truncate` bytes.
+    let mut last_break = 0u64;
     loop {
         let n = limited
             .read(&mut buf)
@@ -251,15 +307,46 @@ fn write_entry(target: &Path, rel: &str, reader: &mut dyn Read, size: u64) -> Re
         }
         file.write_all(&buf[..n])?;
         hasher.update(&buf[..n]);
+        if let Some(t) = truncate {
+            let visible = (t.saturating_sub(total) as usize).min(n);
+            if let Some(i) = buf[..visible].iter().rposition(|&b| b == b'\n') {
+                last_break = total + i as u64 + 1;
+            }
+        }
         total += n as u64;
     }
-    ensure!(
-        total == size,
-        "entry `{rel}` has {total} bytes but declares {size}"
-    );
+    let cut = truncate.is_some_and(|t| total > t);
+    if !cut {
+        match declared {
+            Some(d) => ensure!(
+                total == d,
+                "entry `{rel}` has {total} bytes but declares {d}"
+            ),
+            None => ensure!(
+                total <= UNDECLARED_LIMIT,
+                "entry `{rel}` is larger than {UNDECLARED_LIMIT} bytes"
+            ),
+        }
+        return Ok(Extracted {
+            path: rel.to_string(),
+            bytes: total,
+            blake3: hasher.finalize().to_hex().to_string(),
+        });
+    }
+    let keep = if last_break > 0 {
+        last_break
+    } else {
+        truncate.unwrap_or(total)
+    };
+    file.set_len(keep)
+        .with_context(|| format!("truncating {}", dest.display()))?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut hasher = blake3::Hasher::new();
+    let n = std::io::copy(&mut (&mut file).take(keep), &mut hasher)?;
+    ensure!(n == keep, "truncated file `{rel}` is shorter than expected");
     Ok(Extracted {
         path: rel.to_string(),
-        bytes: total,
+        bytes: keep,
         blake3: hasher.finalize().to_hex().to_string(),
     })
 }
@@ -291,7 +378,13 @@ fn extract_zip(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Ext
         let mut e = za
             .by_index(c.ordinal)
             .with_context(|| format!("zip entry `{}`", c.path))?;
-        written.push(write_entry(target, &c.path, &mut e, c.size)?);
+        written.push(write_entry(
+            target,
+            &c.path,
+            &mut e,
+            Some(c.size),
+            sel.truncate,
+        )?);
     }
     Ok(written)
 }
@@ -338,7 +431,13 @@ fn extract_tar_gz(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<
         for (i, entry) in tar_entries(archive)?.entries()?.enumerate() {
             let mut entry = entry.with_context(|| format!("tar entry #{i}"))?;
             if let Some(c) = by_ordinal.get(&i) {
-                written.push(write_entry(target, &c.path, &mut entry, c.size)?);
+                written.push(write_entry(
+                    target,
+                    &c.path,
+                    &mut entry,
+                    Some(c.size),
+                    sel.truncate,
+                )?);
             }
         }
     }
@@ -347,6 +446,158 @@ fn extract_tar_gz(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<
         "archive changed between passes"
     );
     Ok(written)
+}
+
+/// 7z start-header signature.
+const SEVENZ_SIGNATURE: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+
+/// Offset of the 7z archive inside `file`: 0 for a plain `.7z`, the end of the stub for a
+/// self-extracting executable. A signature only counts when the start-header CRC (bytes 8..12
+/// over bytes 12..32) matches, so a stray signature inside the stub is skipped.
+fn find_7z_start(file: &mut File) -> Result<u64> {
+    const CHUNK: usize = 1 << 20;
+    let len = file.metadata()?.len();
+    let mut pos = 0u64;
+    let mut buf = Vec::with_capacity(CHUNK + 32);
+    while pos < len {
+        file.seek(SeekFrom::Start(pos))?;
+        buf.clear();
+        (&mut *file).take(CHUNK as u64 + 32).read_to_end(&mut buf)?;
+        for i in 0..buf.len().saturating_sub(31) {
+            if buf[i..i + 6] != SEVENZ_SIGNATURE || i >= CHUNK && pos + (i as u64) < len {
+                continue;
+            }
+            let header = &buf[i..i + 32];
+            let stored = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+            let mut crc = flate2::Crc::new();
+            crc.update(&header[12..32]);
+            if header[6] == 0 && crc.sum() == stored {
+                return Ok(pos + i as u64);
+            }
+        }
+        pos += CHUNK as u64;
+    }
+    bail!("no 7z signature with a valid start header found")
+}
+
+/// A `Read + Seek` view of `inner` that starts at `base`.
+struct OffsetReader<R> {
+    inner: R,
+    base: u64,
+}
+
+impl<R: Read> Read for OffsetReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<R: Seek> Seek for OffsetReader<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let abs = match pos {
+            SeekFrom::Start(p) => SeekFrom::Start(self.base.checked_add(p).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek overflow")
+            })?),
+            other => other,
+        };
+        let at = self.inner.seek(abs)?;
+        at.checked_sub(self.base).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before archive start",
+            )
+        })
+    }
+}
+
+fn extract_7z(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Extracted>> {
+    use sevenz_rust2::{ArchiveReader, Error as SzError, Password};
+    let mut file = File::open(archive)?;
+    let base = find_7z_start(&mut file)?;
+    file.seek(SeekFrom::Start(base))?;
+    let mut reader = ArchiveReader::new(OffsetReader { inner: file, base }, Password::empty())
+        .context("not a readable 7z archive")?;
+
+    let mut lister = Lister::default();
+    for (i, e) in reader.archive().files.iter().enumerate() {
+        let name = e.name();
+        if e.is_anti_item() {
+            bail!("anti-item entry `{name}` is not allowed");
+        }
+        // Windows reparse point (symlink, junction) or a Unix mode stored in the high bits.
+        let attrs = e.windows_attributes();
+        if attrs & 0x400 != 0 {
+            bail!("reparse-point entry `{name}` is not allowed");
+        }
+        if attrs & 0x8000 != 0 {
+            match (attrs >> 16) & 0o170_000 {
+                0 | 0o100_000 | 0o040_000 => {}
+                0o120_000 => bail!("symlink entry `{name}` is not allowed"),
+                _ => bail!("special file entry `{name}` is not allowed"),
+            }
+        }
+        if e.is_directory() {
+            sanitize_path(name)?;
+            continue;
+        }
+        lister.add(name, e.size(), i, sel.strip_components)?;
+    }
+    let picked = pick(lister.cands, sel);
+    // Entries are decoded in archive order (solid blocks cannot be skipped into), so map the
+    // raw names to their candidates and drain everything that is not (fully) read.
+    let wanted: std::collections::HashMap<String, &Candidate> = picked
+        .iter()
+        .filter_map(|c| {
+            reader
+                .archive()
+                .files
+                .get(c.ordinal)
+                .map(|e| (e.name().to_string(), c))
+        })
+        .collect();
+    let mut written = Vec::new();
+    let mut failure: Option<anyhow::Error> = None;
+    let result = reader.for_each_entries(|entry, data| {
+        if let Some(c) = wanted.get(entry.name()) {
+            match write_entry(target, &c.path, data, Some(c.size), sel.truncate) {
+                Ok(x) => written.push(x),
+                Err(e) => {
+                    failure = Some(e);
+                    return Err(SzError::Other("entry could not be written".into()));
+                }
+            }
+        }
+        // Verifies the entry's CRC when it was not read to the end and keeps the stream aligned.
+        std::io::copy(data, &mut std::io::sink())?;
+        Ok(true)
+    });
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    result.context("decoding 7z entries")?;
+    ensure!(
+        written.len() == picked.len(),
+        "7z archive yielded {} of {} selected entries",
+        written.len(),
+        picked.len()
+    );
+    Ok(written)
+}
+
+fn extract_gz(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Extracted>> {
+    let name = sel
+        .single_name
+        .as_deref()
+        .context("single-file format needs an output name")?;
+    let comps = sanitize_path(name)?;
+    ensure!(
+        comps.len() == 1,
+        "output name `{name}` must be one component"
+    );
+    let mut decoder = flate2::read::MultiGzDecoder::new(BufReader::new(File::open(archive)?));
+    let one = write_entry(target, &comps[0], &mut decoder, None, sel.truncate)
+        .context("not a readable gzip stream")?;
+    Ok(vec![one])
 }
 
 #[cfg(test)]
@@ -718,5 +969,145 @@ mod tests {
             .1
             .expect("extract");
         assert_eq!(paths(&r), ["one.txt", "two.txt"]);
+    }
+
+    fn sevenz_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut w = sevenz_rust2::ArchiveWriter::new(Cursor::new(Vec::new())).expect("7z writer");
+        for (name, data) in entries {
+            w.push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file(name),
+                Some(Cursor::new(data.to_vec())),
+            )
+            .expect("push");
+        }
+        w.finish().expect("finish").into_inner()
+    }
+
+    #[test]
+    fn sevenz_roundtrip_selection_and_skipped_entries() {
+        let z = sevenz_bytes(&[
+            ("top/b.txt", b"bb"),
+            ("top/skip.bin", &[7u8; 5000]),
+            ("top/a.txt", b"a"),
+        ]);
+        let sel = Selection::new(&["*.txt".into()], &[], None, None, 1).expect("sel");
+        let (dir, r) = run(ArchiveFormat::SevenZ, &z, &sel);
+        let r = r.expect("extract");
+        assert_eq!(paths(&r), ["a.txt", "b.txt"]);
+        assert_eq!(r[1].blake3, blake3::hash(b"bb").to_hex().to_string());
+        assert_eq!(
+            std::fs::read(dir.path().join("out/b.txt")).expect("read"),
+            b"bb"
+        );
+        assert!(!dir.path().join("out/skip.bin").exists());
+    }
+
+    #[test]
+    fn sevenz_self_extracting_stub_is_skipped_by_signature_and_crc() {
+        let z = sevenz_bytes(&[("x/data.txt", b"payload")]);
+        let mut sfx = b"MZ stub ".to_vec();
+        // A stray signature inside the stub must not be taken for the archive.
+        sfx.extend_from_slice(&SEVENZ_SIGNATURE);
+        sfx.extend_from_slice(&[0u8; 40]);
+        sfx.extend(std::iter::repeat_n(0x90u8, 3000));
+        sfx.extend_from_slice(&z);
+        let (_dir, r) = run(ArchiveFormat::SevenZ, &sfx, &Selection::all());
+        assert_eq!(paths(&r.expect("extract")), ["x/data.txt"]);
+        assert!(run(
+            ArchiveFormat::SevenZ,
+            b"MZ no archive here",
+            &Selection::all()
+        )
+        .1
+        .is_err());
+        // Truncated archives are errors, never panics.
+        for cut in [0, 10, z.len() / 2, z.len() - 1] {
+            assert!(run(ArchiveFormat::SevenZ, &z[..cut], &Selection::all())
+                .1
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn gz_decompresses_to_one_named_file() {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        e.write_all(b"disk image bytes").expect("gz");
+        let gz = e.finish().expect("finish");
+        let mut sel = Selection::all();
+        assert!(run(ArchiveFormat::Gz, &gz, &sel).1.is_err(), "needs a name");
+        sel.single_name = Some("disk.img".into());
+        let (dir, r) = run(ArchiveFormat::Gz, &gz, &sel);
+        let r = r.expect("extract");
+        assert_eq!(paths(&r), ["disk.img"]);
+        assert_eq!(r[0].bytes, 16);
+        assert_eq!(
+            std::fs::read(dir.path().join("out/disk.img")).expect("read"),
+            b"disk image bytes"
+        );
+        sel.single_name = Some("../evil".into());
+        assert!(run(ArchiveFormat::Gz, &gz, &sel).1.is_err());
+        assert!(run(ArchiveFormat::Gz, b"not gzip", &{
+            let mut s = Selection::all();
+            s.single_name = Some("x".into());
+            s
+        })
+        .1
+        .is_err());
+    }
+
+    #[test]
+    fn truncation_cuts_at_the_last_line_break_before_the_cap() {
+        let z = zip_bytes(&[
+            ("log.txt", b"aaa\nbbb\nccc\nddd\n"),
+            ("nobreak.bin", b"abcdefghij"),
+            ("short.txt", b"x\n"),
+        ]);
+        let mut sel = Selection::all();
+        sel.truncate = Some(9);
+        let (dir, r) = run(ArchiveFormat::Zip, &z, &sel);
+        let r = r.expect("extract");
+        assert_eq!(paths(&r), ["log.txt", "nobreak.bin", "short.txt"]);
+        // First 9 bytes are "aaa\nbbb\ncc": cut after the second break.
+        assert_eq!(r[0].bytes, 8);
+        assert_eq!(
+            std::fs::read(dir.path().join("out/log.txt")).expect("read"),
+            b"aaa\nbbb\n"
+        );
+        assert_eq!(
+            r[0].blake3,
+            blake3::hash(b"aaa\nbbb\n").to_hex().to_string()
+        );
+        assert_eq!(r[1].bytes, 9, "no break: cut exactly at the cap");
+        assert_eq!(r[2].bytes, 2, "small files are untouched");
+        // A chunk boundary inside the cap must not confuse the break search.
+        let big: Vec<u8> = (0..300_000u32)
+            .flat_map(|i| format!("line {i}\n").into_bytes())
+            .collect();
+        let z = zip_bytes(&[("big.log", &big)]);
+        sel.truncate = Some(200_000);
+        let r = run(ArchiveFormat::Zip, &z, &sel).1.expect("extract");
+        let kept = &big[..r[0].bytes as usize];
+        assert!(kept.len() <= 200_000 && kept.ends_with(b"\n"));
+        assert!(big[kept.len()..200_000].iter().all(|&b| b != b'\n'));
+        assert_eq!(r[0].blake3, blake3::hash(kept).to_hex().to_string());
+        // The byte cap counts the truncated size.
+        let z = zip_bytes(&[("a", &[b'x'; 100][..]), ("b", &[b'y'; 100][..])]);
+        let mut sel = Selection::new(&[], &[], None, Some(20), 0).expect("sel");
+        sel.truncate = Some(10);
+        assert_eq!(
+            paths(&run(ArchiveFormat::Zip, &z, &sel).1.expect("x")),
+            ["a", "b"]
+        );
+    }
+
+    #[test]
+    fn listing_check_catches_case_and_file_directory_clashes() {
+        let ok = |v: &[&str]| check_listing(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(ok(&["a/x.txt", "b/x.txt", "a/y.txt"]).is_ok());
+        assert!(ok(&["Photo.jpg", "photo.JPG"]).is_err());
+        assert!(ok(&["a", "A/x"]).is_err());
+        assert!(ok(&["a/x", "a"]).is_err());
+        assert!(ok(&["../x"]).is_err());
+        assert!(ok(&["./"]).is_err());
     }
 }

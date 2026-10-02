@@ -5,6 +5,48 @@
 # a source run `lpk-bench corpus build --profile <p> --only <class> --update-lock` and commit
 # the lock. Per-profile differences are separate sources with distinct ids.
 
+# Per-host politeness: minimum gap between requests to the host, optional throughput cap.
+[[host]]
+name = "gutenberg.pglaf.org"
+min_interval_ms = 2000
+
+[[host]]
+name = "r0k.us"
+min_interval_ms = 1000
+
+[[host]]
+name = "archive.org"
+min_interval_ms = 1000
+
+[[host]]
+name = "upload.wikimedia.org"
+min_interval_ms = 1000
+max_mbit_per_s = 25
+
+[[host]]
+name = "zenodo.org"
+min_interval_ms = 1000
+
+[[host]]
+name = "data.cityofnewyork.us"
+min_interval_ms = 1000
+
+[[host]]
+name = "kenney.nl"
+min_interval_ms = 1000
+
+[[host]]
+name = "github.com"
+min_interval_ms = 1000
+
+[[host]]
+name = "raw.githubusercontent.com"
+min_interval_ms = 500
+
+[[host]]
+name = "huggingface.co"
+min_interval_ms = 1000
+
 [[source]]
 id = "enwik8"
 class = "text-prose"
@@ -16,6 +58,147 @@ url = "https://mattmahoney.net/dc/enwik8.zip"
 format = "zip"
 
 [[source]]
+id = "gutenberg-books"
+class = "text-prose"
+licence = "Public domain (Project Gutenberg, US)"
+origin = "50 English classics, UTF-8 plain text, from the Project Gutenberg mirror gutenberg.pglaf.org"
+profiles = ["small", "full"]
+kind = "files"
+files = [
+  { url = "https://gutenberg.pglaf.org/1/3/4/1342/1342-0.txt", path = "pg1342.txt" },
+  { url = "https://gutenberg.pglaf.org/1/11/11-0.txt", path = "pg11.txt" },
+  { url = "https://gutenberg.pglaf.org/8/84/84-0.txt", path = "pg84.txt" },
+  { url = "https://gutenberg.pglaf.org/1/6/6/1661/1661-0.txt", path = "pg1661.txt" },
+  { url = "https://gutenberg.pglaf.org/2/7/0/2701/2701-0.txt", path = "pg2701.txt" },
+  { url = "https://gutenberg.pglaf.org/9/98/98-0.txt", path = "pg98.txt" },
+  { url = "https://gutenberg.pglaf.org/1/9/5/1952/1952-0.txt", path = "pg1952.txt" },
+  { url = "https://gutenberg.pglaf.org/7/74/74-0.txt", path = "pg74.txt" },
+  { url = "https://gutenberg.pglaf.org/7/76/76-0.txt", path = "pg76.txt" },
+  { url = "https://gutenberg.pglaf.org/3/4/345/345-0.txt", path = "pg345.txt" },
+  { url = "https://gutenberg.pglaf.org/1/7/174/174-0.txt", path = "pg174.txt" },
+  { url = "https://gutenberg.pglaf.org/1/2/6/1260/1260-0.txt", path = "pg1260.txt" },
+  { url = "https://gutenberg.pglaf.org/7/6/768/768-0.txt", path = "pg768.txt" },
+  { url = "https://gutenberg.pglaf.org/1/5/158/158-0.txt", path = "pg158.txt" },
+  { url = "https://gutenberg.pglaf.org/1/6/161/161-0.txt", path = "pg161.txt" },
+  { url = "https://gutenberg.pglaf.org/1/2/121/121-0.txt", path = "pg121.txt" },
+  { url = "https://gutenberg.pglaf.org/1/4/141/141-0.txt", path = "pg141.txt" },
+  { url = "https://gutenberg.pglaf.org/1/0/105/105-0.txt", path = "pg105.txt" },
+  { url = "https://gutenberg.pglaf.org/1/4/0/1400/1400-0.txt", path = "pg1400.txt" },
+  { url = "https://gutenberg.pglaf.org/7/3/730/730-0.txt", path = "pg730.txt" },
+  { url = "https://gutenberg.pglaf.org/7/6/766/766-0.txt", path = "pg766.txt" },
+  { url = "https://gutenberg.pglaf.org/4/46/46-0.txt", path = "pg46.txt" },
+  { url = "https://gutenberg.pglaf.org/5/8/580/580-0.txt", path = "pg580.txt" },
+  { url = "https://gutenberg.pglaf.org/1/0/2/1023/1023-0.txt", path = "pg1023.txt" },
+  { url = "https://gutenberg.pglaf.org/7/8/786/786-0.txt", path = "pg786.txt" },
+  { url = "https://gutenberg.pglaf.org/2/5/5/2554/2554-0.txt", path = "pg2554.txt" },
+  { url = "https://gutenberg.pglaf.org/2/6/0/2600/2600-0.txt", path = "pg2600.txt" },
+  { url = "https://gutenberg.pglaf.org/1/3/9/1399/1399-0.txt", path = "pg1399.txt" },
+  { url = "https://gutenberg.pglaf.org/1/3/135/135-0.txt", path = "pg135.txt" },
+  { url = "https://gutenberg.pglaf.org/1/1/8/1184/1184-0.txt", path = "pg1184.txt" },
+  { url = "https://gutenberg.pglaf.org/1/2/120/120-0.txt", path = "pg120.txt" },
+  { url = "https://gutenberg.pglaf.org/4/43/43-0.txt", path = "pg43.txt" },
+  { url = "https://gutenberg.pglaf.org/3/36/36-0.txt", path = "pg36.txt" },
+  { url = "https://gutenberg.pglaf.org/3/35/35-0.txt", path = "pg35.txt" },
+  { url = "https://gutenberg.pglaf.org/5/2/3/5230/5230-0.txt", path = "pg5230.txt" },
+  { url = "https://gutenberg.pglaf.org/1/5/159/159-0.txt", path = "pg159.txt" },
+  { url = "https://gutenberg.pglaf.org/1/16/16-0.txt", path = "pg16.txt" },
+  { url = "https://gutenberg.pglaf.org/5/55/55-0.txt", path = "pg55.txt" },
+  { url = "https://gutenberg.pglaf.org/4/47/47-0.txt", path = "pg47.txt" },
+  { url = "https://gutenberg.pglaf.org/2/0/205/205-0.txt", path = "pg205.txt" },
+  { url = "https://gutenberg.pglaf.org/1/2/3/1232/1232-0.txt", path = "pg1232.txt" },
+  { url = "https://gutenberg.pglaf.org/1/4/9/1497/1497-0.txt", path = "pg1497.txt" },
+  { url = "https://gutenberg.pglaf.org/1/7/2/1727/1727-0.txt", path = "pg1727.txt" },
+  { url = "https://gutenberg.pglaf.org/6/1/3/6130/6130-0.txt", path = "pg6130.txt" },
+  { url = "https://gutenberg.pglaf.org/1/0/100/100-0.txt", path = "pg100.txt" },
+  { url = "https://gutenberg.pglaf.org/3/2/0/3207/3207-0.txt", path = "pg3207.txt" },
+  { url = "https://gutenberg.pglaf.org/4/3/0/4300/4300-0.txt", path = "pg4300.txt" },
+  { url = "https://gutenberg.pglaf.org/2/8/1/2814/2814-0.txt", path = "pg2814.txt" },
+  { url = "https://gutenberg.pglaf.org/2/4/244/244-0.txt", path = "pg244.txt" },
+  { url = "https://gutenberg.pglaf.org/2/1/215/215-0.txt", path = "pg215.txt" },
+]
+
+[[source]]
+id = "silesia"
+class = "text-prose"
+licence = "Silesia corpus: free for any use (mattmahoney.net/dc/silesia.html)"
+origin = "Silesia corpus, for calibration against published benchmarks"
+profiles = ["full"]
+kind = "archive"
+url = "https://mattmahoney.net/dc/silesia.zip"
+format = "zip"
+
+[[source]]
+id = "loghub-apache"
+class = "logs-text"
+licence = "CC-BY-4.0 (Zenodo record 8196385; cite Loghub, github.com/logpai/loghub)"
+origin = "Loghub Apache logs"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://zenodo.org/api/records/8196385/files/Apache.tar.gz/content"
+format = "tar.gz"
+
+[[source]]
+id = "loghub-linux"
+class = "logs-text"
+licence = "CC-BY-4.0 (Zenodo record 8196385; cite Loghub, github.com/logpai/loghub)"
+origin = "Loghub Linux logs"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://zenodo.org/api/records/8196385/files/Linux.tar.gz/content"
+format = "tar.gz"
+
+[[source]]
+id = "loghub-hdfs-small"
+class = "logs-text"
+licence = "CC-BY-4.0 (Zenodo record 8196385; cite Loghub, github.com/logpai/loghub)"
+origin = "Loghub HDFS_v1: the main log only, truncated at a line break"
+profiles = ["small"]
+kind = "archive"
+url = "https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content"
+format = "zip"
+include = ["HDFS.log"]
+truncate_files = 64000000
+
+[[source]]
+id = "loghub-hdfs"
+class = "logs-text"
+licence = "CC-BY-4.0 (Zenodo record 8196385; cite Loghub, github.com/logpai/loghub)"
+origin = "Loghub HDFS_v1, whole"
+profiles = ["full"]
+kind = "archive"
+url = "https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content"
+format = "zip"
+
+[[source]]
+id = "loghub-windows"
+class = "logs-text"
+licence = "CC-BY-4.0 (Zenodo record 8196385; cite Loghub, github.com/logpai/loghub)"
+origin = "Loghub Windows logs, each file truncated at a line break"
+profiles = ["full"]
+kind = "archive"
+url = "https://zenodo.org/api/records/8196385/files/Windows.tar.gz/content"
+format = "tar.gz"
+truncate_files = 700000000
+
+[[source]]
+id = "nyc-taxi-small"
+class = "logs-text"
+licence = "NYC Open Data terms of use"
+origin = "NYC Open Data qp3b-zxtp CSV export, first rows by :id"
+profiles = ["small"]
+kind = "file"
+url = "https://data.cityofnewyork.us/resource/qp3b-zxtp.csv?$limit=265000&$order=:id"
+
+[[source]]
+id = "nyc-taxi-full"
+class = "logs-text"
+licence = "NYC Open Data terms of use"
+origin = "NYC Open Data qp3b-zxtp CSV export, first rows by :id"
+profiles = ["full"]
+kind = "file"
+url = "https://data.cityofnewyork.us/resource/qp3b-zxtp.csv?$limit=2000000&$order=:id"
+
+[[source]]
 id = "python-embed"
 class = "software-installed"
 licence = "PSF-2.0"
@@ -24,3 +207,391 @@ profiles = ["small", "full"]
 kind = "archive"
 url = "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip"
 format = "zip"
+
+[[source]]
+id = "mingit"
+class = "software-installed"
+licence = "GPL-2.0-only (test data only, never linked)"
+origin = "MinGit 2.56.0 64-bit (Git for Windows)"
+profiles = ["small"]
+kind = "archive"
+url = "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.1/MinGit-2.56.0-64-bit.zip"
+format = "zip"
+
+[[source]]
+id = "portablegit"
+class = "software-installed"
+licence = "GPL-2.0-only (test data only, never linked)"
+origin = "PortableGit 2.56.0 64-bit self-extracting 7z (Git for Windows)"
+profiles = ["full"]
+kind = "archive"
+url = "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.1/PortableGit-2.56.0-64-bit.7z.exe"
+format = "7z"
+
+[[source]]
+id = "7zip-extra"
+class = "software-installed"
+licence = "LGPL-2.1-or-later with unRAR restriction (test data only)"
+origin = "7-Zip 26.03 extra package"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://github.com/ip7z/7zip/releases/download/26.03/7z2603-extra.7z"
+format = "7z"
+
+[[source]]
+id = "kenney-platformer-kit"
+class = "game-assets"
+licence = "CC0-1.0"
+origin = "Kenney.nl Platformer Kit (3D models and textures)"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://kenney.nl/media/pages/assets/platformer-kit/1585cf62b4-1775122253/kenney_platformer-kit.zip"
+format = "zip"
+
+[[source]]
+id = "kenney-nature-kit"
+class = "game-assets"
+licence = "CC0-1.0"
+origin = "Kenney.nl Nature Kit (3D models and textures)"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://kenney.nl/media/pages/assets/nature-kit/37ac38a37b-1677698939/kenney_nature-kit.zip"
+format = "zip"
+
+[[source]]
+id = "kenney-sci-fi-sounds"
+class = "game-assets"
+licence = "CC0-1.0"
+origin = "Kenney.nl Sci-fi Sounds (OGG)"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://kenney.nl/media/pages/assets/sci-fi-sounds/6b296f9ecf-1677589334/kenney_sci-fi-sounds.zip"
+format = "zip"
+
+[[source]]
+id = "kenney-music-jingles"
+class = "game-assets"
+licence = "CC0-1.0"
+origin = "Kenney.nl Music Jingles (OGG)"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://kenney.nl/media/pages/assets/music-jingles/f37e530b9e-1677590399/kenney_music-jingles.zip"
+format = "zip"
+
+[[source]]
+id = "kenney-voiceover-pack"
+class = "game-assets"
+licence = "CC0-1.0"
+origin = "Kenney.nl Voiceover Pack (OGG)"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://kenney.nl/media/pages/assets/voiceover-pack/3f7f168698-1677589897/kenney_voiceover-pack.zip"
+format = "zip"
+
+[[source]]
+id = "kenney-ui-pack"
+class = "photo-raw-png"
+licence = "CC0-1.0"
+origin = "Kenney.nl UI Pack, PNG files only"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://kenney.nl/media/pages/assets/ui-pack/f651646eab-1718203990/kenney_ui-pack.zip"
+format = "zip"
+include = ["**/*.png"]
+
+[[source]]
+id = "kenney-pixel-ui-pack"
+class = "photo-raw-png"
+licence = "CC0-1.0"
+origin = "Kenney.nl Pixel UI Pack, PNG files only"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://kenney.nl/media/pages/assets/pixel-ui-pack/821e760f21-1677661508/kenney_pixel-ui-pack.zip"
+format = "zip"
+include = ["**/*.png"]
+
+[[source]]
+id = "kodak"
+class = "photo-raw-png"
+licence = "Kodak Lossless True Color Image Suite; released for unrestricted usage per r0k.us"
+origin = "Kodak Lossless True Color Image Suite, 24 PNG images, from r0k.us"
+profiles = ["small", "full"]
+kind = "files"
+files = [
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim01.png", path = "kodim01.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim02.png", path = "kodim02.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim03.png", path = "kodim03.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim04.png", path = "kodim04.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim05.png", path = "kodim05.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim06.png", path = "kodim06.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim07.png", path = "kodim07.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim08.png", path = "kodim08.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim09.png", path = "kodim09.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim10.png", path = "kodim10.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim11.png", path = "kodim11.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim12.png", path = "kodim12.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim13.png", path = "kodim13.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim14.png", path = "kodim14.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim15.png", path = "kodim15.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim16.png", path = "kodim16.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim17.png", path = "kodim17.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim18.png", path = "kodim18.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim19.png", path = "kodim19.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim20.png", path = "kodim20.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim21.png", path = "kodim21.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim22.png", path = "kodim22.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim23.png", path = "kodim23.png" },
+  { url = "https://r0k.us/graphics/kodak/kodak/kodim24.png", path = "kodim24.png" },
+]
+
+[[source]]
+id = "libultrahdr-jpegs"
+class = "photo-jpeg"
+licence = "CC-BY-4.0 (libultrahdr tests/data/LICENSE)"
+origin = "JPEG files of google/libultrahdr tests/data at commit 66821e0a261aa3a06c0e7c889f52eced52850be1"
+profiles = ["small", "full"]
+kind = "files"
+files = [
+  { url = "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/apple_gainmap_new.jpg", path = "apple_gainmap_new.jpg" },
+  { url = "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/apple_gainmap_old.jpg", path = "apple_gainmap_old.jpg" },
+  { url = "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/jpeg_image.jpg", path = "jpeg_image.jpg" },
+  { url = "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/minnie-320x240-rgb.jpg", path = "minnie-320x240-rgb.jpg" },
+  { url = "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/minnie-320x240-y.jpg", path = "minnie-320x240-y.jpg" },
+  { url = "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/minnie-320x240-yuv-icc.jpg", path = "minnie-320x240-yuv-icc.jpg" },
+  { url = "https://raw.githubusercontent.com/google/libultrahdr/66821e0a261aa3a06c0e7c889f52eced52850be1/tests/data/minnie-320x240-yuv.jpg", path = "minnie-320x240-yuv.jpg" },
+]
+
+[[source]]
+id = "govdocs-small"
+class = "office-pdf"
+licence = "US government documents via Digital Corpora (freely available for research; redistributable to the best of their knowledge)"
+origin = "GovDocs1 thread 000, Office and PDF files only, capped in sorted order"
+profiles = ["small"]
+kind = "archive"
+url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/000.zip"
+format = "zip"
+include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
+strip_components = 1
+max_bytes = 230000000
+
+[[source]]
+id = "govdocs-000"
+class = "office-pdf"
+licence = "US government documents via Digital Corpora (freely available for research; redistributable to the best of their knowledge)"
+origin = "GovDocs1 thread 000, Office and PDF files only"
+profiles = ["full"]
+kind = "archive"
+url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/000.zip"
+format = "zip"
+include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
+strip_components = 1
+
+[[source]]
+id = "govdocs-001"
+class = "office-pdf"
+licence = "US government documents via Digital Corpora (freely available for research; redistributable to the best of their knowledge)"
+origin = "GovDocs1 thread 001, Office and PDF files only"
+profiles = ["full"]
+kind = "archive"
+url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/001.zip"
+format = "zip"
+include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
+strip_components = 1
+
+[[source]]
+id = "govdocs-002"
+class = "office-pdf"
+licence = "US government documents via Digital Corpora (freely available for research; redistributable to the best of their knowledge)"
+origin = "GovDocs1 thread 002, Office and PDF files only"
+profiles = ["full"]
+kind = "archive"
+url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/002.zip"
+format = "zip"
+include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
+strip_components = 1
+
+[[source]]
+id = "govdocs-003"
+class = "office-pdf"
+licence = "US government documents via Digital Corpora (freely available for research; redistributable to the best of their knowledge)"
+origin = "GovDocs1 thread 003, Office and PDF files only"
+profiles = ["full"]
+kind = "archive"
+url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/003.zip"
+format = "zip"
+include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
+strip_components = 1
+
+[[source]]
+id = "govdocs-004"
+class = "office-pdf"
+licence = "US government documents via Digital Corpora (freely available for research; redistributable to the best of their knowledge)"
+origin = "GovDocs1 thread 004, Office and PDF files only"
+profiles = ["full"]
+kind = "archive"
+url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/zipfiles/004.zip"
+format = "zip"
+include = ["**/*.{pdf,doc,docx,xls,xlsx,ppt,pptx}"]
+strip_components = 1
+
+[[source]]
+id = "v1"
+class = "backup-versions"
+licence = "BSD-3-Clause OR GPL-2.0-only"
+origin = "facebook/zstd dev at 5c7b7bad26808e6b40ac3b3d0075466e27738a9d (2026-07-01), working tree without its top-level directory"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://github.com/facebook/zstd/archive/5c7b7bad26808e6b40ac3b3d0075466e27738a9d.tar.gz"
+format = "tar.gz"
+strip_components = 1
+
+[[source]]
+id = "v2"
+class = "backup-versions"
+licence = "BSD-3-Clause OR GPL-2.0-only"
+origin = "facebook/zstd dev at 82d322c4973d9e2968d94047a40892bc6d9a9bdf (2026-08-01), working tree without its top-level directory"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://github.com/facebook/zstd/archive/82d322c4973d9e2968d94047a40892bc6d9a9bdf.tar.gz"
+format = "tar.gz"
+strip_components = 1
+
+[[source]]
+id = "v3"
+class = "backup-versions"
+licence = "BSD-3-Clause OR GPL-2.0-only"
+origin = "facebook/zstd dev at d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a (2026-09-01), working tree without its top-level directory"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://github.com/facebook/zstd/archive/d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a.tar.gz"
+format = "tar.gz"
+strip_components = 1
+
+[[source]]
+id = "librivox-art-of-war"
+class = "audio"
+licence = "Public domain (LibriVox)"
+origin = "LibriVox The Art of War, 64 kb MP3 set (archive.org art_of_war_librivox)"
+profiles = ["small", "full"]
+kind = "files"
+files = [
+  { url = "https://archive.org/download/art_of_war_librivox/art_of_war_01-02_sun_tzu_64kb.mp3", path = "art_of_war_01-02_sun_tzu_64kb.mp3" },
+  { url = "https://archive.org/download/art_of_war_librivox/art_of_war_03-04_sun_tzu_64kb.mp3", path = "art_of_war_03-04_sun_tzu_64kb.mp3" },
+  { url = "https://archive.org/download/art_of_war_librivox/art_of_war_05-06_sun_tzu_64kb.mp3", path = "art_of_war_05-06_sun_tzu_64kb.mp3" },
+  { url = "https://archive.org/download/art_of_war_librivox/art_of_war_07-08_sun_tzu_64kb.mp3", path = "art_of_war_07-08_sun_tzu_64kb.mp3" },
+  { url = "https://archive.org/download/art_of_war_librivox/art_of_war_09-10_sun_tzu_64kb.mp3", path = "art_of_war_09-10_sun_tzu_64kb.mp3" },
+  { url = "https://archive.org/download/art_of_war_librivox/art_of_war_11_sun_tzu_64kb.mp3", path = "art_of_war_11_sun_tzu_64kb.mp3" },
+  { url = "https://archive.org/download/art_of_war_librivox/art_of_war_12-13_sun_tzu_64kb.mp3", path = "art_of_war_12-13_sun_tzu_64kb.mp3" },
+]
+
+[[source]]
+id = "commons-flac"
+class = "audio"
+licence = "CC0-1.0"
+origin = "Wikimedia Commons CC0 FLAC files chosen with the Commons API (filemime:audio/flac, licence checked in extmetadata)"
+profiles = ["small", "full"]
+kind = "files"
+files = [
+  { url = "https://upload.wikimedia.org/wikipedia/commons/a/a4/Human_heart_rate.flac", path = "human-heart-rate.flac", licence = "CC0-1.0", attribution = "Wilfredor (Wikimedia Commons)" },
+  { url = "https://upload.wikimedia.org/wikipedia/commons/2/2b/Con_amores_la_mi_madre.flac", path = "con-amores-la-mi-madre.flac", licence = "CC0-1.0", attribution = "Flopinot2012 (Wikimedia Commons)" },
+  { url = "https://upload.wikimedia.org/wikipedia/commons/0/04/Missa_Papae_Marcelli_-_V._Agnus_Dei_I.flac", path = "missa-papae-marcelli-agnus-dei-i.flac", licence = "CC0-1.0", attribution = "European Archive Music / Giovanni Pierluigi da Palestrina (via Musopen) (Wikimedia Commons)" },
+  { url = "https://upload.wikimedia.org/wikipedia/commons/b/b5/Pica_pica-2015-6-12-part15.flac", path = "pica-pica-part15.flac", licence = "CC0-1.0", attribution = "Spyros Papanastasiou (Wikimedia Commons)" },
+  { url = "https://upload.wikimedia.org/wikipedia/commons/4/4a/Gora_Doneztebe_-_Mendi_Abesbatza_%28Doneztebe-Santesteban%29.flac", path = "gora-doneztebe-mendi-abesbatza.flac", licence = "CC0-1.0", attribution = "Makeip (Wikimedia Commons)" },
+  { url = "https://upload.wikimedia.org/wikipedia/commons/d/d9/Angelien_Eijsink_-_voice_-_nl_-_long.flac", path = "angelien-eijsink-voice-nl-long.flac", licence = "CC0-1.0", attribution = "Vera de Kok (Wikimedia Commons)" },
+  { url = "https://upload.wikimedia.org/wikipedia/commons/f/f2/Pica_pica-2015-6-12-part9.flac", path = "pica-pica-part9.flac", licence = "CC0-1.0", attribution = "Spyros Papanastasiou (Wikimedia Commons)" },
+]
+
+[[source]]
+id = "bbb-320x180"
+class = "video"
+licence = "CC-BY-3.0 (Blender Foundation)"
+origin = "Big Buck Bunny 320x180 MP4"
+profiles = ["small"]
+kind = "archive"
+url = "https://download.blender.org/peach/bigbuckbunny_movies/BigBuckBunny_320x180.mp4.zip"
+format = "zip"
+
+[[source]]
+id = "bbb-1080p"
+class = "video"
+licence = "CC-BY-3.0 (Blender Foundation)"
+origin = "Big Buck Bunny sunflower 1080p 30fps MP4"
+profiles = ["full"]
+kind = "archive"
+url = "https://download.blender.org/demo/movies/BBB/bbb_sunflower_1080p_30fps_normal.mp4.zip"
+format = "zip"
+
+[[source]]
+id = "sintel-720p"
+class = "video"
+licence = "CC-BY-3.0 (Blender Foundation)"
+origin = "Sintel 720p MKV"
+profiles = ["full"]
+kind = "archive"
+url = "https://download.blender.org/durian/movies/Sintel.2010.720p.mkv.zip"
+format = "zip"
+
+[[source]]
+id = "alpine-virt"
+class = "vm-image"
+licence = "Alpine Linux: mostly MIT/GPL components (distribution ISO, test data only)"
+origin = "Alpine Linux 3.24.2 virt x86_64 ISO"
+profiles = ["small", "full"]
+kind = "file"
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-virt-3.24.2-x86_64.iso"
+
+[[source]]
+id = "cirros"
+class = "vm-image"
+licence = "GPL-2.0-or-later (CirrOS; test data only)"
+origin = "CirrOS 0.6.3 x86_64 raw rootfs image (gz decompressed to one file)"
+profiles = ["small", "full"]
+kind = "archive"
+url = "https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-rootfs.img.gz"
+format = "gz"
+
+[[source]]
+id = "ubuntu-cloudimg"
+class = "vm-image"
+licence = "Ubuntu cloud image: free software components (test data only)"
+origin = "Ubuntu 24.04 server cloud image tarball release-20260926 (holds one raw ext4 filesystem image)"
+profiles = ["full"]
+kind = "archive"
+url = "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.tar.gz"
+format = "tar.gz"
+
+[[source]]
+id = "bert-tiny"
+class = "model-weights"
+licence = "MIT"
+origin = "prajjwal1/bert-tiny pytorch_model.bin"
+profiles = ["small", "full"]
+kind = "file"
+url = "https://huggingface.co/prajjwal1/bert-tiny/resolve/6f75de8b60a9f8a2fdf7b69cbd86d9e64bcb3837/pytorch_model.bin"
+
+[[source]]
+id = "smollm2-135m"
+class = "model-weights"
+licence = "Apache-2.0"
+origin = "HuggingFaceTB/SmolLM2-135M model.safetensors"
+profiles = ["full"]
+kind = "file"
+url = "https://huggingface.co/HuggingFaceTB/SmolLM2-135M/resolve/93efa2f097d58c2a74874c7e644dbc9b0cee75a2/model.safetensors"
+
+[[source]]
+id = "gson-jar"
+class = "archives-nested"
+licence = "Apache-2.0"
+origin = "Maven Central com.google.code.gson:gson:2.11.0"
+profiles = ["small", "full"]
+kind = "file"
+url = "https://repo1.maven.org/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.jar"
+
+[[source]]
+id = "gutenberg-epub"
+class = "archives-nested"
+licence = "Public domain (Project Gutenberg, US)"
+origin = "Project Gutenberg EPUB of Frankenstein (id 84) from the mirror"
+profiles = ["small", "full"]
+kind = "file"
+url = "https://gutenberg.pglaf.org/cache/epub/84/pg84-images.epub"

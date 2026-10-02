@@ -39,6 +39,12 @@ pub enum ArchiveFormat {
     Zip,
     #[serde(rename = "tar.gz")]
     TarGz,
+    /// 7z, also a self-extracting `.7z.exe` (the archive is located by its signature).
+    #[serde(rename = "7z")]
+    SevenZ,
+    /// One gzip stream, decompressed to a single file.
+    #[serde(rename = "gz")]
+    Gz,
 }
 
 impl ArchiveFormat {
@@ -53,6 +59,10 @@ impl ArchiveFormat {
             Some(ArchiveFormat::Zip)
         } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
             Some(ArchiveFormat::TarGz)
+        } else if lower.ends_with(".7z") || lower.ends_with(".7z.exe") {
+            Some(ArchiveFormat::SevenZ)
+        } else if lower.ends_with(".gz") {
+            Some(ArchiveFormat::Gz)
         } else {
             None
         }
@@ -67,6 +77,28 @@ pub enum SourceSpec {
     File(FileSpec),
     /// One URL is an archive that is extracted (with filters and a deterministic cap).
     Archive(ArchiveSpec),
+    /// Several URLs with output names, each pinned separately (static list of files).
+    Files(FilesSpec),
+}
+
+/// Keys of `kind = "files"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesSpec {
+    pub files: Vec<FileItem>,
+}
+
+/// One entry of a `files` source.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileItem {
+    pub url: String,
+    /// Output path below `<out>/<class>/<source>/`; defaults to the last URL segment.
+    pub path: Option<String>,
+    /// Per-file licence (overrides the source's in the manifest).
+    pub licence: Option<String>,
+    /// Author / credit line, kept in the lock.
+    pub attribution: Option<String>,
 }
 
 /// Keys of `kind = "file"`.
@@ -99,6 +131,8 @@ pub struct ArchiveSpec {
     /// Drop this many leading path components; entries with too few components are skipped.
     #[serde(default)]
     pub strip_components: usize,
+    /// Keep only the first N bytes of every larger file, cut at the last line break.
+    pub truncate_files: Option<u64>,
 }
 
 impl SourceSpec {
@@ -108,7 +142,13 @@ impl SourceSpec {
         match self {
             SourceSpec::File(f) => vec![f.url.as_str()],
             SourceSpec::Archive(a) => vec![a.url.as_str()],
+            SourceSpec::Files(f) => f.files.iter().map(|i| i.url.as_str()).collect(),
         }
+    }
+
+    /// True for kinds whose file list lives in the lock (pins carry the paths).
+    pub fn is_list(&self) -> bool {
+        matches!(self, SourceSpec::Files(_))
     }
 }
 
@@ -145,10 +185,23 @@ struct Common {
     inputs: Vec<String>,
 }
 
+/// Politeness settings for one host (`[[host]]` table). Every request of the downloader to the
+/// host first waits for `min_interval_ms` since the previous request to it ended.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSpec {
+    pub name: String,
+    #[serde(default)]
+    pub min_interval_ms: u64,
+    /// Throughput cap in megabit per second.
+    pub max_mbit_per_s: Option<u64>,
+}
+
 /// All sources, in file order (the build runs them in this order).
 #[derive(Debug, Clone, Default)]
 pub struct Registry {
     pub sources: Vec<Source>,
+    pub hosts: Vec<HostSpec>,
 }
 
 const COMMON_KEYS: [&str; 7] = [
@@ -175,10 +228,14 @@ impl Registry {
     pub fn parse(text: &str) -> Result<Registry> {
         let root: toml::Table = text.parse().context("invalid TOML")?;
         for key in root.keys() {
-            if key != "source" {
-                bail!("unknown top-level key `{key}` (only `[[source]]` tables are allowed)");
+            if key != "source" && key != "host" {
+                bail!("unknown top-level key `{key}` (only `[[source]]` and `[[host]]` tables are allowed)");
             }
         }
+        let hosts: Vec<HostSpec> = match root.get("host") {
+            Some(h) => h.clone().try_into().context("invalid [[host]] table")?,
+            None => Vec::new(),
+        };
         let mut sources = Vec::new();
         if let Some(list) = root.get("source") {
             let list = list
@@ -213,12 +270,24 @@ impl Registry {
                 });
             }
         }
-        let registry = Registry { sources };
+        let registry = Registry { sources, hosts };
         registry.validate()?;
         Ok(registry)
     }
 
     fn validate(&self) -> Result<()> {
+        let mut host_names = BTreeSet::new();
+        for h in &self.hosts {
+            if h.name.is_empty() || h.name != h.name.to_ascii_lowercase() || h.name.contains('/') {
+                bail!("host name `{}` must be a lower-case host name", h.name);
+            }
+            if !host_names.insert(h.name.as_str()) {
+                bail!("duplicate [[host]] `{}`", h.name);
+            }
+            if h.max_mbit_per_s == Some(0) {
+                bail!("host `{}`: max_mbit_per_s must be positive", h.name);
+            }
+        }
         let mut ids = BTreeSet::new();
         let mut classes_before: BTreeSet<&str> = BTreeSet::new();
         for s in &self.sources {
@@ -276,10 +345,38 @@ impl Registry {
                             s.id
                         );
                     }
+                    if a.truncate_files == Some(0) {
+                        bail!("source `{}`: truncate_files must be positive", s.id);
+                    }
+                    if a.format.or_else(|| ArchiveFormat::guess(&a.url)) == Some(ArchiveFormat::Gz)
+                    {
+                        let name =
+                            gz_output_name(&a.url).with_context(|| format!("source `{}`", s.id))?;
+                        check_portable_component(&name)
+                            .with_context(|| format!("source `{}`: gz output name", s.id))?;
+                    }
                     compile_globs(&a.include)
                         .with_context(|| format!("source `{}` include", s.id))?;
                     compile_globs(&a.exclude)
                         .with_context(|| format!("source `{}` exclude", s.id))?;
+                }
+                SourceSpec::Files(f) => {
+                    if f.files.is_empty() {
+                        bail!("source `{}`: `files` is empty", s.id);
+                    }
+                    let mut urls = BTreeSet::new();
+                    let mut paths = Vec::new();
+                    for item in &f.files {
+                        if !urls.insert(item.url.as_str()) {
+                            bail!("source `{}`: URL listed twice: {}", s.id, item.url);
+                        }
+                        paths.push(
+                            file_name_for(&item.url, item.path.as_deref())
+                                .with_context(|| format!("source `{}`", s.id))?,
+                        );
+                    }
+                    super::extract::check_listing(&paths)
+                        .with_context(|| format!("source `{}`", s.id))?;
                 }
             }
         }
@@ -324,6 +421,15 @@ pub fn file_name_for(url: &str, filename: Option<&str>) -> Result<String> {
     match path.rsplit('/').next() {
         Some(last) if !last.is_empty() && !path.ends_with("://") => Ok(last.to_string()),
         _ => bail!("cannot derive a file name from `{url}`, set `filename`"),
+    }
+}
+
+/// Output file name of a `gz` source: the last URL segment without `.gz`.
+pub fn gz_output_name(url: &str) -> Result<String> {
+    let name = file_name_for(url, None)?;
+    match name.strip_suffix(".gz") {
+        Some(stem) if !stem.is_empty() => Ok(stem.to_string()),
+        _ => bail!("gz URL `{url}` does not end in a name plus `.gz`"),
     }
 }
 

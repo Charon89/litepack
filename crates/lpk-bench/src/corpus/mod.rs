@@ -35,10 +35,21 @@
 //!
 //! Kinds implemented:
 //! * `file`: `url`, optional `filename` (default: last URL segment). One URL becomes one file.
-//! * `archive`: `url`, optional `format` (`zip` | `tar.gz`, default guessed from the URL),
-//!   `include`/`exclude` glob lists (matched on the `/`-separated path after
-//!   `strip_components`; `*` stays within a directory, `**` crosses), `max_files`,
-//!   `max_bytes`, `strip_components`.
+//! * `archive`: `url`, optional `format` (`zip` | `tar.gz` | `7z` | `gz`, default guessed from the
+//!   URL; `7z` also reads a self-extracting `.7z.exe`; `gz` is one stream decompressed to a
+//!   single file named like the URL without `.gz`), `include`/`exclude` glob lists (matched on
+//!   the `/`-separated path after `strip_components`; `*` stays within a directory, `**`
+//!   crosses), `max_files`, `max_bytes`, `strip_components`, and `truncate_files = N`: keep only
+//!   the first N bytes of every larger file, cut after the last line break before N (the
+//!   manifest lists the truncated size).
+//! * `files`: `files = [{ url, path?, licence?, attribution? }, ...]`, one source listing many
+//!   URLs with output names (default: last URL segment), each pinned separately. It uses the
+//!   listed-pin path: the whole listing is validated up front (portable names, no
+//!   case-insensitive duplicates, no file/directory clash), and a normal build requires the
+//!   registry's list to equal the pins in the lock.
+//!
+//! Top-level `[[host]]` tables set politeness per host (`name`, `min_interval_ms`,
+//! `max_mbit_per_s`); see "Downloader".
 //!
 //! Archive selection (see [`extract`]): *every* entry is validated first, whether or not a
 //! glob would select it, and any of these fails the whole extraction on every OS: absolute
