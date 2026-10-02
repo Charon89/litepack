@@ -97,11 +97,16 @@ only one of them or failed in both. This is the check behind the acceptance clau
 
 ## Real-time scanners
 
-Extraction times include the cost of whatever real-time scanner is active (a scanner inspects every
-file an extraction writes). `host.json` records, best effort, whether Microsoft Defender real-time
-protection was on (`defender_realtime`: `on`, `off`, or `unknown` when it could not be determined,
-which includes every system other than Windows and any machine where the registry value is absent).
-Third-party scanners are not detected. For comparable runs, keep the scanner state the same.
+Results include the cost of whatever real-time scanner is active (a scanner inspects every file an
+extraction writes). `host.json` lists what Windows Security Center reports: every registered
+antivirus product with its name, its raw `productState` (hex text) and the scanner state decoded
+from bits 12-15 (`off`, `on`, `snoozed`, `expired`, `unknown`), and `antivirus_source` saying where
+the list came from: `queried`, `query-failed`, or `not-applicable` (not Windows, or no Security
+Center, as on Windows Server). The query runs once per run, before any timing, through Windows
+PowerShell (`pwsh` as a fallback) with a time limit; a failure gives `query-failed`, never an
+error. `defender_realtime` is an independent value read from the Defender registry key (`on`,
+`off`, or `unknown`, which includes machines where the value is absent). For comparable runs,
+keep the scanner state the same.
 
 ## How a tool is found
 

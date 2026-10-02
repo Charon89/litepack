@@ -2,7 +2,7 @@
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
-use super::result::{HostFile, SCHEMA_VERSION};
+use super::result::{AvProduct, HostFile, SCHEMA_VERSION};
 use crate::corpus::manifest::rfc3339_utc;
 
 /// Lower-case and reduce to `[a-z0-9-]`: other characters become `-`, runs of `-` collapse, and
@@ -86,6 +86,7 @@ pub fn collect(allow_dirty: bool) -> HostFile {
         v.filter(|s| !s.is_empty())
             .unwrap_or_else(|| "unknown".into())
     };
+    let av = antivirus_products();
     HostFile {
         schema_version: SCHEMA_VERSION,
         host: sanitize_host(&System::host_name().unwrap_or_default()),
@@ -98,6 +99,8 @@ pub fn collect(allow_dirty: bool) -> HostFile {
         git_commit: env!("LPK_GIT_COMMIT").to_string(),
         rustc_version: env!("LPK_RUSTC_VERSION").to_string(),
         defender_realtime: defender_realtime().to_string(),
+        antivirus_source: av.0.to_string(),
+        antivirus: av.1,
         dirty_build_allowed: allow_dirty,
     }
 }
@@ -105,6 +108,7 @@ pub fn collect(allow_dirty: bool) -> HostFile {
 /// Read `reg query` output for `DisableRealtimeMonitoring`: `0x1` means real-time protection is
 /// off, `0x0` on, anything else `unknown`. (The value is absent on a default installation, in
 /// which case the answer is `unknown`, not a guess.)
+#[cfg(any(windows, test))]
 pub fn parse_defender(reg_output: &str) -> &'static str {
     for line in reg_output.lines() {
         let mut words = line.split_whitespace();
@@ -117,6 +121,128 @@ pub fn parse_defender(reg_output: &str) -> &'static str {
         }
     }
     "unknown"
+}
+
+/// The scanner state in bits 12-15 of a Security Center `productState`.
+#[cfg(any(windows, test))]
+pub fn decode_scanner(state: u32) -> &'static str {
+    match (state >> 12) & 0xF {
+        0 => "off",
+        1 => "on",
+        2 => "snoozed",
+        3 => "expired",
+        _ => "unknown",
+    }
+}
+
+/// Parse `name|productState` lines (decimal state); lines that do not fit are skipped.
+#[cfg(any(windows, test))]
+pub fn parse_av_lines(text: &str) -> Vec<AvProduct> {
+    text.lines()
+        .filter_map(|line| {
+            let (name, state) = line.trim().rsplit_once('|')?;
+            let name = name.trim();
+            let state: u32 = state.trim().parse().ok()?;
+            (!name.is_empty()).then(|| AvProduct {
+                name: name.to_string(),
+                product_state: format!("0x{state:X}"),
+                scanner: decode_scanner(state).to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The antivirus products registered with Windows Security Center and where the answer came from
+/// (`queried`, `query-failed`, `not-applicable`). Never an error; best effort, with a time limit.
+#[cfg(windows)]
+pub fn antivirus_products() -> (&'static str, Vec<AvProduct>) {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let dir = std::env::temp_dir();
+    let (out, err) = (
+        dir.join(format!("lpk-av-{}.out", std::process::id())),
+        dir.join(format!("lpk-av-{}.err", std::process::id())),
+    );
+    // The result goes through a file the script writes itself: the child runs without a console,
+    // where a shell's pipeline output can be lost.
+    let res = dir.join(format!("lpk-av-{}.res", std::process::id()));
+    let script = format!(
+        "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | \
+         ForEach-Object {{ $_.displayName + '|' + $_.productState }} | \
+         Out-File -FilePath '{}' -Encoding utf8",
+        res.display().to_string().replace('\'', "''")
+    );
+    let mut answer = ("query-failed", Vec::new());
+    for shell in ["powershell", "pwsh"] {
+        let (Ok(o), Ok(e)) = (std::fs::File::create(&out), std::fs::File::create(&err)) else {
+            break;
+        };
+        // `std::process` with a watchdog (not the measuring crate, which starts children without
+        // a console: Windows PowerShell then does nothing).
+        let Ok(mut child) = Command::new(shell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(o))
+            .stderr(Stdio::from(e))
+            .spawn()
+        else {
+            continue;
+        };
+        let start = Instant::now();
+        let mut timed_out = false;
+        let exit = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.code(),
+                Ok(None) if start.elapsed() < Duration::from_secs(30) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                _ => {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let stdout = std::fs::read_to_string(&res)
+            .map(|t| t.trim_start_matches('\u{feff}').to_string())
+            .ok();
+        let stderr = std::fs::read_to_string(&err).unwrap_or_default();
+        answer = if timed_out {
+            ("query-failed", Vec::new())
+        } else if exit == Some(0) {
+            match &stdout {
+                Some(text) => ("queried", parse_av_lines(text)),
+                None => ("query-failed", Vec::new()),
+            }
+        } else if stderr.contains("Invalid namespace") || stderr.contains("InvalidNamespace") {
+            ("not-applicable", Vec::new())
+        } else {
+            ("query-failed", Vec::new())
+        };
+        break;
+    }
+    for f in [&out, &err, &res] {
+        let _ = std::fs::remove_file(f);
+    }
+    answer
+}
+
+#[cfg(not(windows))]
+pub fn antivirus_products() -> (&'static str, Vec<AvProduct>) {
+    ("not-applicable", Vec::new())
+}
+
+/// Logical processors (cheap; queries nothing else).
+pub fn logical_cores() -> u32 {
+    let sys =
+        System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()));
+    let n = if sys.cpus().is_empty() {
+        std::thread::available_parallelism().map_or(1, usize::from)
+    } else {
+        sys.cpus().len()
+    };
+    u32::try_from(n).unwrap_or(u32::MAX).max(1)
 }
 
 /// Whether Windows Defender real-time protection is on, best effort: `unknown` on any failure
@@ -196,6 +322,38 @@ mod tests {
         assert!(["on", "off", "unknown"].contains(&defender_realtime()));
         if !cfg!(windows) {
             assert_eq!(defender_realtime(), "unknown");
+        }
+    }
+
+    #[test]
+    fn scanner_state_is_decoded_from_bits_12_to_15() {
+        assert_eq!(decode_scanner(393472), "off");
+        assert_eq!(decode_scanner(270336), "snoozed");
+        assert_eq!(decode_scanner(0x1000), "on");
+        assert_eq!(decode_scanner(0x3000), "expired");
+        assert_eq!(decode_scanner(0x7000), "unknown");
+        assert_eq!(decode_scanner(0), "off");
+    }
+
+    #[test]
+    fn security_center_lines_are_parsed_and_malformed_ones_skipped() {
+        let text = "Windows Defender|393472\r\nSome AV | Pro|270336\n\nno separator\n|1000\nbad|state\nneg|-5\n";
+        let p = parse_av_lines(text);
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_eq!(p[0].name, "Windows Defender");
+        assert_eq!(p[0].product_state, "0x60100");
+        assert_eq!(p[0].scanner, "off");
+        assert_eq!(p[1].name, "Some AV | Pro");
+        assert_eq!(p[1].product_state, "0x42000");
+        assert_eq!(p[1].scanner, "snoozed");
+        assert!(parse_av_lines("").is_empty());
+        let (source, list) = antivirus_products();
+        assert!(["queried", "query-failed", "not-applicable"].contains(&source));
+        if source != "queried" {
+            assert!(list.is_empty());
+        }
+        if !cfg!(windows) {
+            assert_eq!(source, "not-applicable");
         }
     }
 

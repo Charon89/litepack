@@ -263,12 +263,25 @@
         "combinations": { "type": "array", "items": { "$ref": "#/$defs/run_combination" }, "description": "Every combination the run covered with its outcome; each has a result file." }
       }
     },
+    "av_product": {
+      "type": "object",
+      "description": "One antivirus product registered with Windows Security Center.",
+      "additionalProperties": false,
+      "required": ["name", "product_state", "scanner"],
+      "properties": {
+        "name": { "$ref": "#/$defs/text", "description": "Display name of the product." },
+        "product_state": { "type": "string", "pattern": "^0x[0-9A-F]+$", "description": "The raw productState value, as hex text." },
+        "scanner": { "enum": ["off", "on", "snoozed", "expired", "unknown"], "description": "Scanner state decoded from bits 12-15 of productState: 0 off, 1 on, 2 snoozed, 3 expired, anything else unknown." }
+      }
+    },
     "host": {
       "type": "object",
       "description": "host.json: the machine and the build.",
       "additionalProperties": false,
       "required": [
         "defender_realtime",
+        "antivirus_source",
+        "antivirus",
         "schema_version",
         "host",
         "os",
@@ -291,7 +304,9 @@
         "lpk_bench_version": { "$ref": "#/$defs/text", "description": "lpk-bench version." },
         "git_commit": { "$ref": "#/$defs/text", "description": "Git commit the binary was built from (12 hex digits), with a -dirty suffix when the tree had uncommitted changes, or unknown." },
         "rustc_version": { "$ref": "#/$defs/text", "description": "rustc version that built the binary." },
-        "defender_realtime": { "enum": ["on", "off", "unknown"], "description": "Windows Defender real-time protection when the run started (best effort; unknown when it could not be determined and outside Windows). Extraction times include the cost of whatever real-time scanner is active." },
+        "defender_realtime": { "enum": ["on", "off", "unknown"], "description": "Windows Defender real-time protection from the registry when the run started (best effort; unknown when it could not be determined and outside Windows). Independent of antivirus. Extraction times include the cost of whatever real-time scanner is active." },
+        "antivirus_source": { "enum": ["queried", "query-failed", "not-applicable"], "description": "Where antivirus came from: queried = Windows Security Center answered (the list may be empty); query-failed = the query did not complete; not-applicable = not Windows or no Security Center (for example Windows Server)." },
+        "antivirus": { "type": "array", "items": { "$ref": "#/$defs/av_product" }, "description": "Antivirus products registered with Windows Security Center; empty unless antivirus_source is queried." },
         "dirty_build_allowed": { "const": true, "description": "Present and true when the run used the flag that allows results from a dirty or unknown build." }
       }
     }

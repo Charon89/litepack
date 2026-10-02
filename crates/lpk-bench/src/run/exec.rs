@@ -1296,7 +1296,7 @@ pub fn measure_command(args: &RunArgs) -> Result<ExitCode> {
         .corpus
         .clone()
         .unwrap_or_else(|| PathBuf::from("bench/corpus").join(&profile));
-    let cores = host::collect(args.allow_dirty_build).logical_cores;
+    let cores = host::logical_cores();
     let catalogue_blake3 = blake3::hash(
         &std::fs::read(&args.catalogue)
             .with_context(|| format!("reading {}", args.catalogue.display()))?,

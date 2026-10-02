@@ -39,7 +39,7 @@ environment dumps.
 - `run.json` lists the classes, every tool x setting x class with its outcome, the thread count,
   the repeats requested, `--long-run-s` and the catalogue's BLAKE3; `--validate` checks each listed
   combination against its file. A combination whose first repeat reached `--long-run-s` is measured
-  once and says so in `repeats_short`. `host.json` records `defender_realtime` (best effort).
+  once and says so in `repeats_short`. `host.json` records the antivirus products Windows Security Center lists (name, raw `productState` as hex, decoded scanner state, and `antivirus_source`: `queried`, `query-failed` or `not-applicable`) and, independently, `defender_realtime` from the registry.
 - Make a run with `lpk-bench run --tools all --profile small`; compare two runs of the same corpus
   with `lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]`.
 - Check a directory, or this whole folder, with

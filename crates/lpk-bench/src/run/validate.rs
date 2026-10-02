@@ -876,7 +876,9 @@ mod tests {
         let t = to_value(&samples::tools());
         assert_agree(&schema, "tools", &[&t]);
         assert_agree(&schema, "tool_entry", &[&t["tools"][0], &t["tools"][2]]);
-        assert_agree(&schema, "host", &[&to_value(&samples::host())]);
+        let host = to_value(&samples::host());
+        assert_agree(&schema, "host", &[&host]);
+        assert_agree(&schema, "av_product", &[&host["antivirus"][0]]);
         // Every def with properties is covered above (a new def must be added to this test).
         let covered = [
             "result",
@@ -890,6 +892,7 @@ mod tests {
             "tar_info",
             "verification",
             "failure",
+            "av_product",
             "run",
             "run_combination",
             "tools",

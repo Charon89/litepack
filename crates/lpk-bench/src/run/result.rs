@@ -338,6 +338,17 @@ impl ToolsFile {
     }
 }
 
+/// One antivirus product registered with Windows Security Center.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AvProduct {
+    pub name: String,
+    /// The raw `productState`, as hex text (`0x60100`).
+    pub product_state: String,
+    /// Decoded from bits 12-15: `off`, `on`, `snoozed`, `expired` or `unknown`.
+    pub scanner: String,
+}
+
 /// One planned combination and how it ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -383,6 +394,12 @@ pub struct HostFile {
     /// Windows Defender real-time protection when the run started: `on`, `off` or `unknown`
     /// (best effort; always `unknown` outside Windows).
     pub defender_realtime: String,
+    /// Where `antivirus` came from: `queried` (Windows Security Center answered; the list may be
+    /// empty), `query-failed`, or `not-applicable` (not Windows, or no Security Center).
+    pub antivirus_source: String,
+    /// Antivirus products registered with Windows Security Center, when `antivirus_source` is
+    /// `queried`.
+    pub antivirus: Vec<AvProduct>,
     /// The run used the flag that allows results from a dirty or unknown build.
     #[serde(default, skip_serializing_if = "is_false")]
     pub dirty_build_allowed: bool,
@@ -628,6 +645,12 @@ pub mod samples {
             git_commit: "0123456789ab".into(),
             rustc_version: "rustc 1.99.0".into(),
             defender_realtime: "unknown".into(),
+            antivirus_source: "queried".into(),
+            antivirus: vec![AvProduct {
+                name: "Windows Defender".into(),
+                product_state: "0x60100".into(),
+                scanner: "off".into(),
+            }],
             dirty_build_allowed: true,
         }
     }

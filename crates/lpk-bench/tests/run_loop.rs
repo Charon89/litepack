@@ -970,3 +970,31 @@ fn compare_refuses_runs_with_different_repeats() {
         text(&out)
     );
 }
+
+/// Linux only: the system tar, through `create_list`, round-trips a private class whose names are
+/// not ASCII (the Windows bsdtar cannot; the runner skips that case there).
+#[cfg(target_os = "linux")]
+#[test]
+fn the_system_tar_round_trips_non_ascii_private_names_through_the_list_path() {
+    if Command::new("tar").arg("--version").output().is_err() {
+        eprintln!("skipped: no `tar` found on PATH");
+        return;
+    }
+    let e = env();
+    let corpus = write_private_non_ascii(&e);
+    let out = command(&e)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--allow-dirty-build")
+        .args(["--tools", "store", "--repeats", "2"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let dir = results_dir(&e);
+    for class in ["unicode", "ascii"] {
+        let r = result(&dir, &format!("store-store-{class}.json"));
+        assert!(r.get("skipped").is_none(), "{class}: {r}");
+        assert_eq!(r["verification"]["verified"], true, "{class}: {r}");
+    }
+    assert_tmp_clean(&e);
+}
