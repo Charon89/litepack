@@ -1,0 +1,46 @@
+{
+  "build": "6c04dedc7d5a",
+  "build_profile": {
+    "allow_debug_build": false,
+    "debug_assertions": false,
+    "opt_level": "3",
+    "profile": "release"
+  },
+  "corpus": {
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "private": false,
+    "profile": "small"
+  },
+  "data": {
+    "class": "model-weights",
+    "files": [],
+    "manifest_files": 1,
+    "not_parsed": [
+      {
+        "bytes": 17756393,
+        "index": 0,
+        "path": "model-weights/bert-tiny/pytorch_model.bin",
+        "reason": "not safetensors: ZIP archive (PyTorch checkpoint)"
+      }
+    ],
+    "zstd": {
+      "level": 19,
+      "long_distance_matching": true,
+      "threads": 1,
+      "window_log": 27
+    }
+  },
+  "date": "2026-10-03T11:02:39Z",
+  "elapsed_seconds": 0.0084462,
+  "format_version": 1,
+  "host": "megatron",
+  "libraries": {
+    "libzstd": "1.5.7"
+  },
+  "library_threads": 1,
+  "notes": [
+    "no file of the class could be parsed as safetensors: this corpus profile cannot exercise this probe"
+  ],
+  "probe": "weights",
+  "threads": 24
+}
