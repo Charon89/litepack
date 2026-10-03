@@ -10,10 +10,11 @@
 
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 mod corpus;
 mod probe;
+mod report;
 mod run;
 
 #[derive(Debug, Parser)]
@@ -21,13 +22,6 @@ mod run;
 struct Cli {
     #[command(subcommand)]
     command: Command,
-}
-
-/// Stub arguments: accepted and ignored until the implementing task defines the real ones.
-#[derive(Debug, Args)]
-struct StubArgs {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
-    _ignored: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -39,37 +33,16 @@ enum Command {
     /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate (PLAN P0-4)
     Probe(probe::ProbeArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
-    Report(StubArgs),
-}
-
-impl Command {
-    /// Subcommand name and the PLAN task that will implement it.
-    fn task(&self) -> (&'static str, &'static str) {
-        match self {
-            Command::Corpus(_) => ("corpus", "P0-2"),
-            Command::Run(_) => ("run", "P0-3"),
-            Command::Probe(_) => ("probe", "P0-4"),
-            Command::Report(_) => ("report", "P0-5"),
-        }
-    }
+    Report(report::ReportArgs),
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    if let Command::Run(args) = cli.command {
-        return run::run(args);
+    match Cli::parse().command {
+        Command::Run(args) => run::run(args),
+        Command::Probe(args) => probe::command(&args),
+        Command::Corpus(args) => corpus::run(args),
+        Command::Report(args) => report::command(&args),
     }
-    if let Command::Probe(args) = &cli.command {
-        return probe::command(args);
-    }
-    if let Command::Corpus(args) = cli.command {
-        return corpus::run(args);
-    }
-    let (name, task) = cli.command.task();
-    eprintln!(
-        "error: `lpk-bench {name}` is not implemented yet (PLAN task {task}); no measurement was made"
-    );
-    ExitCode::FAILURE
 }
 
 #[cfg(test)]
@@ -91,11 +64,11 @@ mod tests {
     }
 
     #[test]
-    fn documented_invocations_reach_the_stub() {
+    fn documented_invocations_parse() {
         let documented: [&[&str]; 3] = [
             &["corpus", "build", "--profile", "small"],
             &["run", "--tools", "all"],
-            &["report"],
+            &["report", "--results", "bench/results/d"],
         ];
         for args in documented {
             let argv = std::iter::once("lpk-bench").chain(args.iter().copied());
@@ -104,11 +77,29 @@ mod tests {
     }
 
     #[test]
-    fn every_stub_subcommand_parses_and_names_a_task() {
-        for (arg, task) in [("run", "P0-3"), ("report", "P0-5")] {
-            let cli = Cli::try_parse_from(["lpk-bench", arg]).expect("parse");
-            assert_eq!(cli.command.task(), (arg, task));
+    fn report_subcommand_parses_its_options() {
+        let argv = [
+            "lpk-bench",
+            "report",
+            "--results",
+            "r",
+            "--probes",
+            "p1",
+            "--probes",
+            "p2",
+            "--mixes",
+            "m.toml",
+            "--out",
+            "o.md",
+            "--allow-unclean",
+        ];
+        let cli = Cli::try_parse_from(argv).expect("parse");
+        match cli.command {
+            Command::Report(a) => assert_eq!(a.probes.len(), 2),
+            other => panic!("not a report: {other:?}"),
         }
+        assert!(Cli::try_parse_from(["lpk-bench", "report"]).is_err());
+        assert!(Cli::try_parse_from(["lpk-bench", "run"]).is_ok());
     }
 
     #[test]
@@ -123,7 +114,7 @@ mod tests {
             "all",
         ] {
             let cli = Cli::try_parse_from(["lpk-bench", "probe", name]).expect("parse");
-            assert_eq!(cli.command.task().0, "probe");
+            assert!(matches!(cli.command, Command::Probe(_)));
         }
         let argv = [
             "lpk-bench",

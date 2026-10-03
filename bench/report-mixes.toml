@@ -1,0 +1,19 @@
+# Disk mixes for `lpk-bench report` (docs/PLAN.md P0-5). Committed; the report prints this file's
+# contents as its own source. Each mix lists `class = weight`: the weights are shares of bytes and
+# must sum to 100; every class must be a corpus class (docs/CORPUS.md, D-15). A mix is "n/a" in the
+# report when the corpus lacks one of its classes.
+#
+# Blending: a size ratio is the weighted sum of the per-class ratios; a speed is the bytes-weighted
+# harmonic mean of the per-class speeds.
+
+[[mix]]
+name = "photo-doc"
+weights = { photo-jpeg = 45, photo-jpeg-edited = 5, photo-raw-png = 5, office-pdf = 25, text-prose = 5, archives-nested = 5, audio = 5, small-files = 5 }
+
+[[mix]]
+name = "developer"
+weights = { source-git = 15, backup-versions = 15, software-installed = 20, small-files = 10, logs-text = 15, text-prose = 5, archives-nested = 10, model-weights = 5, vm-image = 5 }
+
+[[mix]]
+name = "video-heavy"
+weights = { video = 60, photo-jpeg = 15, audio = 10, encrypted-random = 5, office-pdf = 5, vm-image = 5 }
