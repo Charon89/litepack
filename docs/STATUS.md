@@ -3,10 +3,15 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-03, about 14:30 UTC (10:30 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-03, about 16:30 UTC (12:30 local on the measuring machine).
 
-**Next event: the official `full` measurement on the measuring machine, Sunday night 2026-10-04 into
-Monday 2026-10-05 (owner's slot).** Everything it needs is prepared (see "P0-5 — the `full` run").
+**The official `full` measurement is running on the measuring machine** (owner's go-ahead; started
+2026-10-03 12:21 local as one detached process: baseline run, probes, report — about 22–24 h, so it
+should finish Sunday 2026-10-04 around noon local). Before starting anything heavy there, check
+`tasklist /FI "IMAGENAME eq lpk-bench.exe"`; progress is in the git-ignored
+`target/acceptance/full-status.log` (last line `== DONE` when finished). Do not start a second run.
+The owner's background programs (`cam_helper`, two `mpv` instances, another Claude session) were
+running when it started; the report will carry what the host recorded.
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -21,7 +26,7 @@ None. Everything is on `main` (`78bc960` or later); the main checkout of the mea
 
 ## How to resume
 
-### P0-5 — the `full` run (Sunday night 2026-10-04 → Monday 2026-10-05)
+### P0-5 — the `full` run (in progress since 2026-10-03 12:21 local)
 Estimated from the `small` results scaled per class: about 19 h for the baseline run (zpaqfranz `-m5` alone about 9 h; combinations over 120 s are measured once, D-20) plus 3–5 h for the probes (the text probe on the 2.7 GB `logs-text` class and the entropy gate's xz ground truth dominate), then the report in minutes — so roughly 22–24 h end to end.
 1. The machine must be the run's alone: no builds, agents, downloads or other Claude sessions; the owner's background programs that ran during the acceptance pair (`cam_helper`, two `mpv` instances) are best closed; a steady processor clock (turbo boost off in BIOS, or "maximum processor state 99%" in the power plan — the owner's setting) makes the speed figures more repeatable. The power plan must not sleep. About 60 GB free on the corpus volume is enough (per-combination scratch is deleted as it goes).
 2. The binary: a clean release build of `main` in the main checkout (`cargo build --release -p lpk-bench --locked`; `host.json` records the commit and the report refuses dirty or debug builds). On the measuring machine the build of `78bc960` is already in `target/release/` and `run --list-tools` finds store, 7z, rar, zstd, xz and zpaqfranz (t-saur, WinZip and PowerArchiver skipped).
