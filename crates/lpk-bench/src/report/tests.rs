@@ -47,7 +47,7 @@ fn result(
 }
 
 /// (class, class bytes, [store, 7z/ultra, 7z/mx5, zstd/3] archive bytes).
-const CLASSES: [(&str, u64, [u64; 4]); 6] = [
+const CLASSES: [(&str, u64, [u64; 4]); 7] = [
     (
         "photo-jpeg",
         10 * MB,
@@ -78,21 +78,31 @@ const CLASSES: [(&str, u64, [u64; 4]); 6] = [
         5 * MB,
         [5_000_100, 4_900_000, 4_950_000, 4_990_000],
     ),
+    (
+        "encrypted-random",
+        8 * MB,
+        [8_000_100, 8_000_900, 8_000_800, 8_000_700],
+    ),
 ];
 
 /// Seconds of (compress, extract) of `store`, `7z/ultra`, `7z/mx5`, `zstd/3`.
-fn walls(zstd_extract: f64) -> [(f64, f64); 4] {
-    [(1.0, 1.0), (10.0, 2.0), (5.0, 2.0), (1.0, zstd_extract)]
+fn walls(zstd_extract: f64, store_compress: f64) -> [(f64, f64); 4] {
+    [
+        (store_compress, 1.0),
+        (10.0, 2.0),
+        (5.0, 2.0),
+        (1.0, zstd_extract),
+    ]
 }
 
-fn baseline_results(zstd_extract: f64) -> Vec<ToolResult> {
+fn baseline_results(zstd_extract: f64, store_compress: f64) -> Vec<ToolResult> {
     let tools = [
         ("store", "store"),
         ("7z", "ultra"),
         ("7z", "mx5"),
         ("zstd", "3"),
     ];
-    let w = walls(zstd_extract);
+    let w = walls(zstd_extract, store_compress);
     let mut out = Vec::new();
     for (class, cb, sizes) in CLASSES {
         for (i, (t, s)) in tools.iter().enumerate() {
@@ -431,6 +441,7 @@ struct Knobs {
     last_new: u64,
     patches: Option<(u64, u64)>,
     raw_seconds: f64,
+    store_compress: f64,
 }
 
 impl Default for Knobs {
@@ -443,6 +454,7 @@ impl Default for Knobs {
             last_new: 500_000,
             patches: None,
             raw_seconds: 1.0,
+            store_compress: 1.0,
         }
     }
 }
@@ -450,7 +462,7 @@ impl Default for Knobs {
 /// Inputs with all probes (or none). Source ids: 1-3 baseline files, then the 24 results, then
 /// the probes, then the mixes file.
 fn inputs(k: &Knobs, with_probes: bool) -> Inputs {
-    let results = baseline_results(k.zstd_extract);
+    let results = baseline_results(k.zstd_extract, k.store_compress);
     let mut sources: Vec<String> = vec![
         "d/host.json".into(),
         "d/tools.json".into(),
@@ -496,10 +508,12 @@ fn inputs(k: &Knobs, with_probes: bool) -> Inputs {
     sources.push("bench/report-mixes.toml".into());
     let mixes_src = sources.len();
     let run = samples::run_file(&results);
+    let mut host = samples::host();
+    host.dirty_build_allowed = false;
     Inputs {
         baseline: Baseline {
             dir: "2026-10-02-testbox".into(),
-            host: samples::host(),
+            host,
             host_src: 1,
             tools: samples::tools(),
             tools_src: 2,
@@ -512,7 +526,7 @@ fn inputs(k: &Knobs, with_probes: bool) -> Inputs {
         mixes_src,
         mixes_text: MIXES.to_string(),
         sources,
-        allow_unclean: true,
+        outside: vec![],
     }
 }
 
@@ -747,7 +761,7 @@ fn g1_passes_and_fails_around_both_limits() {
     assert!(g
         .numbers
         .iter()
-        .any(|n| n.starts_with("combined estimate / best incumbents: ")));
+        .any(|n| n.starts_with("combined estimate / best single tool: ")));
     assert!(g
         .numbers
         .iter()
@@ -878,6 +892,7 @@ fn the_verdict_line_names_failures_and_goes_only_when_all_pass() {
         id,
         title: String::new(),
         numbers: vec![],
+        notes: vec![],
         verdict: v,
     };
     let all = [row("G1", Verdict::Pass), row("G2", Verdict::Pass)];
@@ -912,13 +927,20 @@ fn every_number_in_a_table_cell_has_a_source_bracket() {
         true,
     );
     let text = report_text(&i);
+    // A value segment is `[label: ]value[ unit] [ids]`: nothing but one value and its source.
+    let value = Regex::new(
+        r"^(?:[^\[\]]*: )?-?[\d.]+(?:% of class|%| bytes| MB/s| s)? \[\d+(?:[,-]\d+)*\]$",
+    )
+    .expect("regex");
     let bracket = Regex::new(r"\[\d+(?:[,-]\d+)*\]$").expect("regex");
     let digit = Regex::new(r"\d").expect("regex");
+    let tags = Regex::new(r"\[[\d,-]+\]").expect("regex");
     // Label columns (names, rules, results) carry no measured value.
     let label = [
         "class",
         "tool/setting",
         "best measured incumbent",
+        "best measured incumbent (single tool x setting)",
         "gate",
         "result",
         "mix",
@@ -951,11 +973,20 @@ fn every_number_in_a_table_cell_has_a_source_bracket() {
                     continue;
                 }
                 for seg in cell.split("<br>") {
-                    if digit.is_match(seg) {
-                        assert!(
-                            bracket.is_match(seg),
-                            "no source after a number in `{seg}` (row: {line})"
-                        );
+                    let outside = tags.replace_all(seg, "");
+                    if !digit.is_match(&outside) && seg.contains('[') {
+                        assert!(bracket.is_match(seg), "no source in `{seg}`");
+                        checked += 1;
+                    } else if digit.is_match(&outside) {
+                        let free_text = ["FAILED", "skipped:", "n/a:"]
+                            .iter()
+                            .any(|p| seg.starts_with(p));
+                        let ok = if free_text {
+                            bracket.is_match(seg)
+                        } else {
+                            value.is_match(seg)
+                        };
+                        assert!(ok, "not `value [source]`: `{seg}` (row: {line})");
                         checked += 1;
                     }
                 }
@@ -1077,7 +1108,7 @@ fn a_valid_directory_loads_and_the_command_writes_the_report() {
     assert_eq!(command(&args), ExitCode::SUCCESS);
     let text = std::fs::read_to_string(&out).expect("report");
     assert!(text.contains("## 6. Gates (D-07)"));
-    assert!(text.contains("`2026-10-01-testbox/7z-mx5-audio.json`"));
+    assert!(text.contains("/2026-10-01-testbox/7z-mx5-audio.json`"));
     assert!(
         text.contains("`m.toml`"),
         "the mixes file is a source, by file name only"
@@ -1216,6 +1247,14 @@ fn probe_files_load_through_the_validator_and_must_match_host_and_corpus() {
     // A debug build of the probe is refused without the flag.
     let err = format!("{:#}", load(&args(good, false)).expect_err("debug refused"));
     assert!(err.contains("--allow-unclean"), "{err}");
+    // The same probe in two directories is refused and both directories are named.
+    let mut twice = args(baseline("twice", &machine, &hash), true);
+    twice.probes.push(probe_dir.clone());
+    let err = format!("{:#}", load(&twice).expect_err("twice"));
+    assert!(
+        err.contains("given twice") && err.contains(" and in "),
+        "{err}"
+    );
     // Another corpus, another machine.
     let other_corpus = baseline("corpus", &machine, &"cd".repeat(32));
     let err = format!("{:#}", load(&args(other_corpus, true)).expect_err("corpus"));
@@ -1223,4 +1262,353 @@ fn probe_files_load_through_the_validator_and_must_match_host_and_corpus() {
     let other_host = baseline("host", "somebody-elses-box", &hash);
     let err = format!("{:#}", load(&args(other_host, true)).expect_err("host"));
     assert!(err.contains("one machine"), "{err}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The review round
+
+fn set_row(
+    i: &mut Inputs,
+    tool: &str,
+    setting: &str,
+    class: &str,
+    f: impl FnOnce(&mut ToolResult),
+) {
+    let (r, _) = i
+        .baseline
+        .results
+        .iter_mut()
+        .find(|(r, _)| r.tool.id == tool && r.setting.id == setting && r.class == class)
+        .expect("row");
+    f(r);
+}
+
+fn one_repeat(r: &mut ToolResult) {
+    r.repeats = r.repeats.take().map(|v| v[..1].to_vec());
+    r.repeats_short = Some("measured once: long run".into());
+}
+
+#[test]
+fn settle_zero_and_directories_outside_bench_results_are_refused_unless_allowed() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let mut results = real_class_results();
+    let dir = write_baseline(tmp.path(), &results);
+    let mixes = tmp.path().join("m.toml");
+    std::fs::write(
+        &mixes,
+        "[[mix]]\nname = \"only\"\nweights = { audio = 100 }\n",
+    )
+    .expect("mixes");
+    let args = |allow: bool| ReportArgs {
+        results: dir.clone(),
+        probes: vec![],
+        mixes: mixes.clone(),
+        out: None,
+        allow_unclean: allow,
+    };
+    // Outside bench/results (a temporary directory): refused, accepted and marked with the flag.
+    let err = format!("{:#}", load(&args(false)).expect_err("outside"));
+    assert!(err.contains("not under bench/results"), "{err}");
+    let loaded = load(&args(true)).expect("allowed");
+    assert_eq!(loaded.outside.len(), 1);
+    let text = report_text(&loaded);
+    assert!(text.starts_with("# UNCLEAN INPUTS: "), "{}", &text[..60]);
+    assert!(
+        text.contains("**UNCLEAN INPUTS: "),
+        "the verdict line is marked"
+    );
+    assert!(text.contains("not all of them under bench/results"));
+    assert!(!text.contains("from committed result files"));
+    // A baseline without the settle pause (field 0 or absent) is refused first.
+    let mut run = samples::run_file(&results);
+    run.settle_ms_per_1000_files = 0;
+    std::fs::write(dir.join("run.json"), render_json(&run)).expect("run");
+    let err = format!("{:#}", load(&args(false)).expect_err("settle"));
+    assert!(err.contains("no settle pause"), "{err}");
+    let text = report_text(&load(&args(true)).expect("allowed"));
+    assert!(text.contains("the baseline has no settle pause (D-21)"));
+    results.clear();
+}
+
+#[test]
+fn a_clean_report_says_committed_and_is_not_marked() {
+    let text = report_text(&inputs(&Knobs::default(), true));
+    assert!(text.starts_with("# LitePack Phase 0 report"));
+    assert!(text.contains("from committed result files"));
+    assert!(
+        !text.contains("UNCLEAN"),
+        "nothing is unclean in the fixture"
+    );
+    // The baseline's build profile cannot be checked: a caveat says so.
+    assert!(text.contains("build profile is not recorded in its host file"));
+}
+
+#[test]
+fn input_directories_are_labelled_from_the_repository_root() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join(".git")).expect("git");
+    let a = root.join("bench").join("results").join("2026-10-02-box");
+    let b = root.join("scratch").join("2026-10-02-box");
+    std::fs::create_dir_all(&a).expect("a");
+    std::fs::create_dir_all(&b).expect("b");
+    assert_eq!(
+        dir_label(&a),
+        ("bench/results/2026-10-02-box".to_string(), true)
+    );
+    assert_eq!(dir_label(&b), ("scratch/2026-10-02-box".to_string(), false));
+}
+
+#[test]
+fn g1_uses_the_best_single_tool_and_prints_the_stricter_sum() {
+    // mx5 at 95% of its own sizes on the G1 classes: best single = mx5, 17.1 MB combined, while
+    // the per-class bests are also mx5 (each below ultra).
+    let at = |office: u64| {
+        let mut i = inputs(
+            &Knobs {
+                office,
+                ..Knobs::default()
+            },
+            true,
+        );
+        for class in G1_CLASSES {
+            set_row(&mut i, "7z", "mx5", class, |r| {
+                let mut m = r.median.expect("median");
+                m.archive_bytes = m.archive_bytes * 95 / 100;
+                r.median = Some(m);
+            });
+        }
+        gate(&i, "G1")
+    };
+    // 9.8 MB + office: 90% of 17.1 MB is 15.39 MB (passes), 85% of ultra's 17.6 MB is 14.96 MB.
+    let pass = at(5_100_000);
+    assert_eq!(pass.verdict, Verdict::Pass, "14.9 MB passes both limits");
+    assert!(pass
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("combined best single tool (7z/mx5): ")));
+    assert!(pass
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("stricter, sum of the per-class bests")));
+    assert!(pass.title.contains("best single tool"));
+    // 15.0 MB: inside the 90% limit of the best single tool, outside 85% of ultra.
+    assert_eq!(at(5_200_000).verdict, Verdict::Fail);
+}
+
+#[test]
+fn mixes_use_the_best_single_tool_and_keep_the_stars() {
+    let mut i = inputs(&Knobs::default(), true);
+    set_row(&mut i, "7z", "ultra", "photo-jpeg", one_repeat);
+    let m = Model::build(&i);
+    let docs = m.mixes.iter().find(|x| x.name == "docs").expect("mix");
+    let best = docs.best.as_ref().expect("best");
+    assert_eq!(
+        best.name, "7z/ultra *",
+        "the single-measurement row is starred"
+    );
+    let per_class = docs.best_per_class.as_ref().expect("per class");
+    assert!(
+        per_class.value <= best.bytes.value + 1e-9,
+        "per-class bests are never larger"
+    );
+    let text = report_text(&i);
+    assert!(
+        text.contains("| 7z/ultra * |"),
+        "blended and section 5 rows keep the star"
+    );
+    // The class table's incumbent name carries it too.
+    assert!(m
+        .class("photo-jpeg")
+        .and_then(|c| c.best.as_ref())
+        .is_some_and(|b| b.name == "7z/ultra *"));
+}
+
+#[test]
+fn no_rule_and_stored_estimates_are_labelled() {
+    let text = report_text(&inputs(&Knobs::default(), true));
+    assert!(
+        text.contains("= best incumbent, no rule ["),
+        "audio has no rule"
+    );
+    assert!(text.contains("stored, no rule ["), "video is stored");
+}
+
+#[test]
+fn a_mixes_file_without_a_final_newline_keeps_the_code_fence_intact() {
+    let mut i = inputs(&Knobs::default(), false);
+    i.mixes_text = i.mixes_text.trim_end().to_string();
+    let text = report_text(&i);
+    assert!(
+        text.contains("= 100 }\n```\n"),
+        "the fence closes on its own line"
+    );
+}
+
+#[test]
+fn g1_and_g2_name_failed_and_skipped_rows_of_their_classes() {
+    let mut i = inputs(&Knobs::default(), true);
+    set_row(&mut i, "zstd", "3", "backup-versions", |r| {
+        r.median = None;
+        r.failed = samples::failed().failed;
+    });
+    set_row(&mut i, "7z", "mx5", "photo-jpeg", |r| {
+        r.median = None;
+        r.repeats = None;
+        r.skipped = Some("not installed".into());
+    });
+    let (g1, g2) = (gate(&i, "G1"), gate(&i, "G2"));
+    assert!(
+        g1.notes
+            .iter()
+            .any(|n| n.contains("skipped: 7z/mx5 (not installed)")),
+        "{:?}",
+        g1.notes
+    );
+    assert!(
+        g2.notes
+            .iter()
+            .any(|n| n.contains("failed: zstd/3 on backup-versions")),
+        "{:?}",
+        g2.notes
+    );
+    assert!(report_text(&i).contains("- G2 inputs, failed: zstd/3 on backup-versions"));
+}
+
+#[test]
+fn g3_exactly_at_eighty_percent_passes_and_just_below_fails() {
+    // The raw rate is 100 MB/s (50 MB in 0.5 s); store at 0.625 s is exactly 80 MB/s.
+    let at = |store_compress: f64| {
+        let k = Knobs {
+            raw_seconds: 0.5,
+            store_compress,
+            ..Knobs::default()
+        };
+        verdict_of(&inputs(&k, true), "G3")
+    };
+    assert_eq!(at(0.625), Verdict::Pass);
+    assert_eq!(at(0.626), Verdict::Fail);
+}
+
+#[test]
+fn g3_shows_its_context_and_marks_a_failed_or_single_measurement_store() {
+    let g = gate(&inputs(&Knobs::default(), true), "G3");
+    for want in [
+        "video class bytes: ",
+        "store median compress wall seconds on video: ",
+        "store first repeat compress on video: ",
+        "store compress on encrypted-random: ",
+        "raw read of video, median of the passes, read only: ",
+        "gate cost, entropy, gate rate as a share of the raw read rate: ",
+    ] {
+        assert!(
+            g.numbers.iter().any(|n| n.starts_with(want)),
+            "missing `{want}`"
+        );
+    }
+    let mut one = inputs(&Knobs::default(), true);
+    set_row(&mut one, "store", "store", "video", one_repeat);
+    let g = gate(&one, "G3");
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("store* compress on video: ")));
+    assert!(g
+        .notes
+        .iter()
+        .any(|n| n.contains("rests on one measurement")));
+    let mut failed = inputs(&Knobs::default(), true);
+    set_row(&mut failed, "store", "store", "video", |r| {
+        r.median = None;
+        r.failed = samples::failed().failed;
+    });
+    let g = gate(&failed, "G3");
+    assert!(matches!(g.verdict, Verdict::NotEvaluable(_)));
+    assert!(
+        g.notes.iter().any(|n| n.contains("store on video failed")),
+        "{:?}",
+        g.notes
+    );
+    // The static note on how the two rates differ is in the report.
+    assert!(report_text(&failed).contains("cache-warm"));
+}
+
+#[test]
+fn g4_keeps_the_reason_of_a_mix_it_could_not_evaluate_when_it_fails() {
+    let mut i = inputs(
+        &Knobs {
+            zstd_extract: 3.0,
+            ..Knobs::default()
+        },
+        true,
+    );
+    // The default fixture's `absent` mix is not evaluable; zstd/3 is slower on the others: FAIL.
+    let g = gate(&i, "G4");
+    assert_eq!(g.verdict, Verdict::Fail);
+    assert!(
+        g.notes.iter().any(|n| n.contains("mix absent")),
+        "{:?}",
+        g.notes
+    );
+    i.mixes = mixes::Mixes::parse(MIXES).expect("mixes");
+}
+
+fn dedup_with(f: impl FnOnce(&mut dedup::Data)) -> Probes {
+    let mut d = dedup_data(500_000, Some((100_000, 100_000)));
+    f(&mut d);
+    Probes {
+        dedup: Some(probe_file("dedup", d, 7)),
+        ..Probes::default()
+    }
+}
+
+#[test]
+fn backup_b_needs_every_patch_verified_and_present() {
+    let cb = Traced::new(30_000_000.0, 1);
+    let ok = backup_est_for(&dedup_with(|_| {}), &cb);
+    assert_eq!(ok.bytes.value, 3_200_000.0);
+    assert!(ok.basis.contains("(b)"));
+    // An unverified patch: (b) cannot be formed, (a) is used and the basis says so.
+    let unverified = backup_est_for(
+        &dedup_with(|d| {
+            if let Some(delta) = d.versions[2].delta.as_mut() {
+                delta.tools[0].verified = false;
+            }
+        }),
+        &cb,
+    );
+    assert_eq!(unverified.bytes.value, 4_000_000.0);
+    assert!(unverified.basis.contains("(a)") && unverified.basis.contains("incomplete"));
+    // A missing delta behaves the same.
+    let missing = backup_est_for(&dedup_with(|d| d.versions[1].delta = None), &cb);
+    assert_eq!(missing.bytes.value, 4_000_000.0);
+}
+
+fn backup_est_for(p: &Probes, cb: &Traced) -> Est {
+    estimate("backup-versions", p, cb, None).expect("estimate")
+}
+
+#[test]
+fn partial_coverage_counts_as_stored_and_over_coverage_is_refused() {
+    let p = Probes {
+        jpeg: Some(probe_file("jpeg", jpeg_data(7 * MB, 2_800_000), 5)),
+        ..Probes::default()
+    };
+    // The probe measured 10 MB of a 12 MB class: the other 2 MB are counted as stored.
+    let e = estimate("photo-jpeg", &p, &Traced::new(12e6, 1), None).expect("partial");
+    assert_eq!(e.bytes.value, 9_000_000.0);
+    assert!(e.basis.contains("did not measure"));
+    assert!(e.bytes.sources.contains(&1) && e.bytes.sources.contains(&5));
+    // The probe covering more bytes than the baseline's class is an error, not an estimate.
+    let err = estimate("photo-jpeg", &p, &Traced::new(9e6, 1), None).expect_err("over");
+    assert!(err.contains("more bytes"), "{err}");
+}
+
+#[test]
+fn the_known_classes_come_from_the_corpus_registry() {
+    let known = mixes::known_classes();
+    assert_eq!(known.len(), 17);
+    for c in ["video", "backup-versions", "photo-jpeg-edited"] {
+        assert!(known.contains(c), "{c}");
+    }
 }

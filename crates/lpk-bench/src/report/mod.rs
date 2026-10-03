@@ -12,6 +12,7 @@
 //!   gates, all as [`traced::Traced`] values (a number with the source files it came from).
 //! * [`render`]: the Markdown; [`mixes`]: `bench/report-mixes.toml`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -94,6 +95,40 @@ fn dir_name(dir: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// How an input directory is labelled in the source list, and whether it lies under
+/// `bench/results`. The label is the path relative to the repository root (the nearest ancestor
+/// holding `.git`); without one, the last two components. Separators are `/`.
+fn dir_label(dir: &Path) -> (String, bool) {
+    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let leaf_of = |p: Option<&Path>| {
+        p.and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let parent = canon.parent();
+    let under = leaf_of(parent) == "results" && leaf_of(parent.and_then(Path::parent)) == "bench";
+    let rel = canon
+        .ancestors()
+        .skip(1)
+        .find(|a| a.join(".git").exists())
+        .and_then(|root| canon.strip_prefix(root).ok().map(Path::to_path_buf))
+        .unwrap_or_else(|| {
+            let name = leaf_of(Some(&canon));
+            let up = leaf_of(parent);
+            if up.is_empty() {
+                PathBuf::from(name)
+            } else {
+                PathBuf::from(format!("{up}/{name}"))
+            }
+        });
+    let label = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    (label, under)
+}
+
 /// Refuse a directory the validator has any problem with, or that is not one results directory.
 fn check_dir(dir: &Path) -> Result<()> {
     if !dir.join("host.json").is_file() {
@@ -120,10 +155,14 @@ fn check_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn load_baseline(dir: &Path, sources: &mut Sources) -> Result<Baseline> {
+fn load_baseline(dir: &Path, sources: &mut Sources, outside: &mut Vec<String>) -> Result<Baseline> {
     check_dir(dir)?;
     let name = dir_name(dir);
-    let src = |sources: &mut Sources, file: &str| sources.add(format!("{name}/{file}"));
+    let (label, under) = dir_label(dir);
+    if !under {
+        outside.push(label.clone());
+    }
+    let src = |sources: &mut Sources, file: &str| sources.add(format!("{label}/{file}"));
     if !dir.join("run.json").is_file() {
         bail!(
             "{}: no run.json: this is not a baseline directory",
@@ -164,9 +203,20 @@ fn load_probes_dir(
     allow_unclean: bool,
     probes: &mut Probes,
     sources: &mut Sources,
+    seen: &mut BTreeMap<String, String>,
+    outside: &mut Vec<String>,
 ) -> Result<()> {
     check_dir(dir)?;
-    let name = dir_name(dir);
+    let (name, under) = dir_label(dir);
+    if !under {
+        if !allow_unclean {
+            bail!(
+                "{}: not under bench/results; use --allow-unclean to accept and mark it",
+                dir.display()
+            );
+        }
+        outside.push(name.clone());
+    }
     let host: HostFile = read_json(&dir.join("host.json"))?;
     if host.host != base.host.host {
         bail!(
@@ -186,8 +236,13 @@ fn load_probes_dir(
                 let env: Envelope<probe::$module::Data> = serde_json::from_str(&json)
                     .with_context(|| format!("parsing {}", path.display()))?;
                 if probes.$field.is_some() {
-                    bail!("probe `{}` is given twice", $probe);
+                    bail!(
+                        "probe `{}` is given twice: in `{}` and in `{name}`",
+                        $probe,
+                        seen.get($probe).map_or("?", String::as_str)
+                    );
                 }
+                seen.insert($probe.to_string(), name.clone());
                 if env.host != base.host.host {
                     bail!("{file}: taken on host `{}`, not `{}`", env.host, base.host.host);
                 }
@@ -230,7 +285,21 @@ fn load_probes_dir(
 /// Read and validate every input.
 pub fn load(args: &ReportArgs) -> Result<Inputs> {
     let mut sources = Sources::default();
-    let baseline = load_baseline(&args.results, &mut sources)?;
+    let mut outside = Vec::new();
+    let baseline = load_baseline(&args.results, &mut sources, &mut outside)?;
+    if !args.allow_unclean && baseline.run.settle_ms_per_1000_files == 0 {
+        bail!(
+            "{}: run.json has no settle pause (settle_ms_per_1000_files is 0 or absent; D-21 rules \
+             such baselines out for the report); use --allow-unclean to accept and mark it",
+            args.results.display()
+        );
+    }
+    if !args.allow_unclean && !outside.is_empty() {
+        bail!(
+            "{}: not under bench/results; use --allow-unclean to accept and mark it",
+            args.results.display()
+        );
+    }
     if !args.allow_unclean
         && (baseline.host.dirty_build_allowed || !build_is_clean(&baseline.host.git_commit))
     {
@@ -242,6 +311,7 @@ pub fn load(args: &ReportArgs) -> Result<Inputs> {
         );
     }
     let mut probes = Probes::default();
+    let mut seen = BTreeMap::new();
     for dir in &args.probes {
         load_probes_dir(
             dir,
@@ -249,6 +319,8 @@ pub fn load(args: &ReportArgs) -> Result<Inputs> {
             args.allow_unclean,
             &mut probes,
             &mut sources,
+            &mut seen,
+            &mut outside,
         )?;
     }
     let mixes_text = read_text(&args.mixes)?;
@@ -270,7 +342,7 @@ pub fn load(args: &ReportArgs) -> Result<Inputs> {
         mixes_src,
         mixes_text,
         sources: sources.list,
-        allow_unclean: args.allow_unclean,
+        outside,
     })
 }
 

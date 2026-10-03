@@ -103,8 +103,8 @@ pub struct Inputs {
     pub mixes_text: String,
     /// Source labels; the id of a source is its position + 1.
     pub sources: Vec<String>,
-    /// `--allow-unclean` was given.
-    pub allow_unclean: bool,
+    /// Labels of input directories that are not under `bench/results`.
+    pub outside: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -126,6 +126,10 @@ pub struct Measured {
     /// The larger of the compress and extract peak memory medians, in MiB.
     pub rss_mib: Traced,
     pub repeats: Traced,
+    /// Median compress wall seconds.
+    pub compress_seconds: Traced,
+    /// Class bytes over the first repeat's compress wall time, MB/s.
+    pub first_compress_mbps: Traced,
     /// Set when the row rests on one measurement: why.
     pub single: Option<String>,
 }
@@ -203,6 +207,9 @@ fn row_of(r: &ToolResult, src: SourceId) -> Row {
                 extract_mbps: class_bytes.map(|b| b / 1e6 / ew),
                 rss_mib: Traced::from_u64(peak, src).map(|b| b / 1_048_576.0),
                 repeats: Traced::from_u64(reps.len() as u64, src),
+                compress_seconds: Traced::new(cw, src),
+                first_compress_mbps: class_bytes
+                    .map(|b| b / 1e6 / reps.first().map_or(cw, |s| s.compress.wall_seconds)),
                 single: (reps.len() == 1).then(|| {
                     r.repeats_short
                         .clone()
@@ -278,6 +285,8 @@ pub struct Blend {
     pub size_pct: Traced,
     pub compress_mbps: Traced,
     pub extract_mbps: Traced,
+    /// Some class of the mix rests on one measurement for this tool.
+    pub single: bool,
 }
 
 /// Blend one tool × setting over a mix: the size ratio is `Σ w·ratio / Σ w`, a speed the
@@ -292,11 +301,13 @@ pub fn blend(
     let mut cmp = Vec::new();
     let mut ext = Vec::new();
     let mut weights = Vec::new();
+    let mut single = false;
     for (class, w) in &mix.weights {
         let row = find(rows, key, class).ok_or_else(|| format!("no result for class `{class}`"))?;
         let m = row
             .measured()
             .ok_or_else(|| format!("class `{class}` has no measured result"))?;
+        single |= m.single.is_some();
         let w = Traced::new(f64::from(*w), mixes_src);
         size.push(&w * &m.size_pct);
         cmp.push(&w / &m.compress_mbps);
@@ -309,6 +320,7 @@ pub fn blend(
         size_pct: &sum(&size)? / &total,
         compress_mbps: &total / &sum(&cmp)?,
         extract_mbps: &total / &sum(&ext)?,
+        single,
     })
 }
 
@@ -349,7 +361,11 @@ pub fn best_incumbent(rows: &[Row], class: &str) -> Option<Incumbent> {
         bytes.sources.extend(t.sources.iter().copied());
     }
     Some(Incumbent {
-        name: row.label(),
+        name: format!(
+            "{}{}",
+            row.label(),
+            if m.single.is_some() { " *" } else { "" }
+        ),
         bytes,
     })
 }
@@ -659,6 +675,125 @@ pub fn estimate(
     }
 }
 
+/// How a class's estimate came about, for the table cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstKind {
+    Probe,
+    Stored,
+    NoRule,
+}
+
+pub fn est_kind(class: &str) -> EstKind {
+    match class {
+        "video" | "encrypted-random" => EstKind::Stored,
+        c if RULED.contains(&c) => EstKind::Probe,
+        _ => EstKind::NoRule,
+    }
+}
+
+/// The best single tool × setting over the combined bytes of `classes`: the smallest sum of
+/// archive bytes among the tool × settings measured on every class. The value carries the
+/// sources of every candidate compared.
+pub fn best_single(rows: &[Row], classes: &[&str]) -> Option<Incumbent> {
+    let mut best: Option<(String, Traced, bool)> = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for (t, s) in settings(rows) {
+        let mut parts = Vec::new();
+        let mut single = false;
+        for c in classes {
+            let Some(m) = find(rows, (&t, &s), c).and_then(Row::measured) else {
+                break;
+            };
+            single |= m.single.is_some();
+            parts.push(m.size_bytes.clone());
+        }
+        if parts.len() != classes.len() {
+            continue;
+        }
+        let Some(sum) = Traced::sum(&parts) else {
+            continue;
+        };
+        seen.extend(sum.sources.iter().copied());
+        if best.as_ref().is_none_or(|b| sum.value < b.1.value) {
+            best = Some((format!("{t}/{s}"), sum, single));
+        }
+    }
+    let (name, mut bytes, single) = best?;
+    bytes.sources = seen;
+    Some(Incumbent {
+        name: format!("{name}{}", if single { " *" } else { "" }),
+        bytes,
+    })
+}
+
+/// The mix's blended size (percent of the mix's bytes) of the best single tool × setting.
+fn mix_best_single(rows: &[Row], mix: &Mix, src: SourceId) -> Result<Incumbent, String> {
+    let mut best: Option<(String, Traced, bool)> = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for (t, s) in settings(rows) {
+        let (mut terms, mut ws, mut single) = (Vec::new(), Vec::new(), false);
+        for (class, w) in &mix.weights {
+            let Some(row) = find(rows, (&t, &s), class) else {
+                break;
+            };
+            let Some(m) = row.measured() else { break };
+            single |= m.single.is_some();
+            let w = Traced::new(f64::from(*w), src);
+            terms.push(&w * &(&m.size_bytes / &row.class_bytes));
+            ws.push(w);
+        }
+        if terms.len() != mix.weights.len() {
+            continue;
+        }
+        let (Some(num), Some(den)) = (Traced::sum(&terms), Traced::sum(&ws)) else {
+            continue;
+        };
+        let ratio = (&num / &den).map(|x| x * 100.0);
+        seen.extend(ratio.sources.iter().copied());
+        if best.as_ref().is_none_or(|b| ratio.value < b.1.value) {
+            best = Some((format!("{t}/{s}"), ratio, single));
+        }
+    }
+    let (name, mut bytes, single) =
+        best.ok_or("no tool has a measured result for every class of the mix")?;
+    bytes.sources = seen;
+    Ok(Incumbent {
+        name: format!("{name}{}", if single { " *" } else { "" }),
+        bytes,
+    })
+}
+
+/// Failed or skipped rows of the classes, as one sentence (none: `None`).
+pub fn problem_rows(rows: &[Row], classes: &[&str]) -> Option<String> {
+    let mut failed = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for r in rows.iter().filter(|r| classes.contains(&r.class.as_str())) {
+        match &r.state {
+            RowState::Failed { reason, .. } => {
+                failed.push(format!("{} on {} ({reason})", r.label(), r.class))
+            }
+            RowState::Skipped { reason, .. } => {
+                let s = format!("{} ({reason})", r.label());
+                if !skipped.contains(&s) {
+                    skipped.push(s);
+                }
+            }
+            RowState::Measured(_) => {}
+        }
+    }
+    if failed.is_empty() && skipped.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !failed.is_empty() {
+        parts.push(format!("failed: {}", failed.join("; ")));
+    }
+    if !skipped.is_empty() {
+        parts.push(format!("skipped: {}", skipped.join("; ")));
+    }
+    Some(parts.join(". "))
+}
+
 #[derive(Debug, Clone)]
 pub struct ClassView {
     pub class: String,
@@ -671,8 +806,10 @@ pub struct ClassView {
 #[derive(Debug, Clone)]
 pub struct MixView {
     pub name: String,
-    /// Blended ratios in percent of the mix's bytes; `Err` carries why not.
-    pub best: Result<Traced, String>,
+    /// Blended ratios in percent of the mix's bytes; `Err` carries why not. `best` is the best
+    /// single tool × setting (named); `best_per_class` the stricter sum of per-class bests.
+    pub best: Result<Incumbent, String>,
+    pub best_per_class: Result<Traced, String>,
     pub ultra: Result<Traced, String>,
     pub est: Result<Traced, String>,
 }
@@ -745,7 +882,12 @@ impl Model {
                 };
                 MixView {
                     name: mix.name.clone(),
-                    best: guard(mix_ratio(mix, src, &by_class, |v| {
+                    best: if missing.is_empty() {
+                        mix_best_single(&rows, mix, src)
+                    } else {
+                        Err(format!("not in the corpus: {}", missing.join(", ")))
+                    },
+                    best_per_class: guard(mix_ratio(mix, src, &by_class, |v| {
                         v.best
                             .as_ref()
                             .map(|b| b.bytes.clone())
@@ -802,6 +944,8 @@ pub struct GateRow {
     pub title: String,
     /// One traced number per line.
     pub numbers: Vec<String>,
+    /// Sentences printed under the table: failed, skipped or one-measurement inputs, reasons.
+    pub notes: Vec<String>,
     pub verdict: Verdict,
 }
 
@@ -839,11 +983,16 @@ fn ratio_pct(a: &Traced, b: &Traced) -> Traced {
 fn gate1(m: &Model) -> GateRow {
     let title = format!(
         "G1 photo/document size: on photo-jpeg, photo-jpeg-edited and office-pdf together, \
-         estimate at most {G1_VS_BEST_PCT:.0}% of the best measured incumbent (D-07's fallback \
-         wording: WinZip and PowerArchiver were not measured) and at most {G1_VS_ULTRA_PCT:.0}% \
-         of 7-Zip Ultra; the three classes alone are shown for information"
+         estimate at most {G1_VS_BEST_PCT:.0}% of the best measured incumbent (the best single \
+         tool x setting over the combined bytes; D-07's fallback wording: WinZip and PowerArchiver \
+         were not measured) and at most {G1_VS_ULTRA_PCT:.0}% of 7-Zip Ultra; the sum of the \
+         per-class bests (stricter) and the three classes alone are shown for information"
     );
     let mut numbers = Vec::new();
+    let notes: Vec<String> = problem_rows(&m.rows, &G1_CLASSES)
+        .map(|p| format!("G1 inputs, {p}"))
+        .into_iter()
+        .collect();
     let mut parts: Vec<(&str, Traced, Traced, Traced)> = Vec::new();
     let mut why: Option<String> = None;
     for c in G1_CLASSES {
@@ -871,36 +1020,49 @@ fn gate1(m: &Model) -> GateRow {
             id: "G1",
             title,
             numbers,
+            notes,
             verdict: Verdict::NotEvaluable(w),
         };
     }
-    let (Some(e), Some(b), Some(u)) = (
+    let (Some(e), Some(sum_b), Some(u), Some(single)) = (
         Traced::sum(parts.iter().map(|p| &p.1)),
         Traced::sum(parts.iter().map(|p| &p.2)),
         Traced::sum(parts.iter().map(|p| &p.3)),
+        best_single(&m.rows, &G1_CLASSES),
     ) else {
         return GateRow {
             id: "G1",
             title,
             numbers,
-            verdict: Verdict::NotEvaluable("no class".into()),
+            notes,
+            verdict: Verdict::NotEvaluable("no tool has a measured result on every class".into()),
         };
     };
+    let b = single.bytes.clone();
     let vs_best = ratio_pct(&e, &b);
     let vs_ultra = ratio_pct(&e, &u);
     numbers.push(format!("combined estimate: {}", e.show(bytes_s)));
     numbers.push(format!(
-        "combined best incumbents (per class): {}",
+        "combined best single tool ({}): {}",
+        single.name,
         b.show(bytes_s)
     ));
     numbers.push(format!("combined 7-Zip Ultra: {}", u.show(bytes_s)));
     numbers.push(format!(
-        "combined estimate / best incumbents: {}",
+        "combined estimate / best single tool: {}",
         vs_best.show(pct1)
     ));
     numbers.push(format!(
         "combined estimate / 7-Zip Ultra: {}",
         vs_ultra.show(pct1)
+    ));
+    numbers.push(format!(
+        "stricter, sum of the per-class bests (no single tool): {}",
+        sum_b.show(bytes_s)
+    ));
+    numbers.push(format!(
+        "combined estimate / sum of the per-class bests: {}",
+        ratio_pct(&e, &sum_b).show(pct1)
     ));
     for (c, e, b, u) in &parts {
         numbers.push(format!(
@@ -918,6 +1080,7 @@ fn gate1(m: &Model) -> GateRow {
         id: "G1",
         title,
         numbers,
+        notes,
         verdict: if pass { Verdict::Pass } else { Verdict::Fail },
     }
 }
@@ -952,10 +1115,15 @@ fn gate2(m: &Model) -> GateRow {
             }
         },
     };
+    let notes = problem_rows(&m.rows, &["backup-versions"])
+        .map(|p| format!("G2 inputs, {p}"))
+        .into_iter()
+        .collect();
     GateRow {
         id: "G2",
         title,
         numbers,
+        notes,
         verdict,
     }
 }
@@ -973,9 +1141,17 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     })
 }
 
-/// The video class's own raw read rate: median over the passes of bytes / (read + open seconds).
-pub fn raw_video_rate(p: &Probes, class: &str) -> Option<Traced> {
+/// The class's own raw read rate: median over the passes of bytes / (read + open seconds), or of
+/// bytes / read seconds when `with_opens` is false.
+pub fn raw_rate(p: &Probes, class: &str, with_opens: bool) -> Option<Traced> {
     let pf = p.entropy_gate.as_ref()?;
+    let secs = |c: &entropy_gate::RawClass| {
+        if with_opens {
+            c.seconds + c.open_seconds
+        } else {
+            c.seconds
+        }
+    };
     let rates: Vec<f64> = pf
         .env
         .data
@@ -983,10 +1159,15 @@ pub fn raw_video_rate(p: &Probes, class: &str) -> Option<Traced> {
         .passes
         .iter()
         .filter_map(|pass| pass.classes.iter().find(|c| c.class == class))
-        .filter(|c| c.bytes > 0 && c.seconds + c.open_seconds > 0.0)
-        .map(|c| c.bytes as f64 / 1e6 / (c.seconds + c.open_seconds))
+        .filter(|c| c.bytes > 0 && secs(c) > 0.0)
+        .map(|c| c.bytes as f64 / 1e6 / secs(c))
         .collect();
     median(rates).map(|v| Traced::new(v, pf.src))
+}
+
+/// The video class's raw read rate including opens (the figure of the gate).
+pub fn raw_video_rate(p: &Probes, class: &str) -> Option<Traced> {
+    raw_rate(p, class, true)
 }
 
 fn gate3(m: &Model, p: &Probes) -> GateRow {
@@ -995,7 +1176,31 @@ fn gate3(m: &Model, p: &Probes) -> GateRow {
          writing the files) is at least {G3_MIN_PCT:.0}% of the video class's raw read rate"
     );
     let mut numbers = Vec::new();
-    let store = find(&m.rows, STORE, "video").and_then(Row::measured);
+    let mut notes: Vec<String> = Vec::new();
+    let store_row = find(&m.rows, STORE, "video");
+    let store = store_row.and_then(Row::measured);
+    if let Some(r) = store_row {
+        match &r.state {
+            RowState::Failed { step, reason, .. } => notes.push(format!(
+                "G3 input: store on video failed ({step}): {reason}"
+            )),
+            RowState::Skipped { reason, .. } => {
+                notes.push(format!("G3 input: store on video was skipped: {reason}"))
+            }
+            RowState::Measured(x) => {
+                if let Some(why) = &x.single {
+                    notes.push(format!(
+                        "G3 input: store on video rests on one measurement ({why})"
+                    ));
+                }
+            }
+        }
+    }
+    let star = if store.is_some_and(|s| s.single.is_some()) {
+        "*"
+    } else {
+        ""
+    };
     let raw = raw_video_rate(p, "video");
     let verdict = match (store, &raw) {
         (None, _) => Verdict::NotEvaluable("no measured store result on class video".into()),
@@ -1003,14 +1208,39 @@ fn gate3(m: &Model, p: &Probes) -> GateRow {
             Verdict::NotEvaluable("probe entropy-gate has no raw read rate for video".into())
         }
         (Some(s), Some(r)) => {
+            let cb = store_row.map(|x| x.class_bytes.clone());
             numbers.push(format!(
-                "store compress on video: {}",
+                "store{star} compress on video: {}",
                 s.compress_mbps.show(mbps_s)
             ));
+            if let Some(cb) = &cb {
+                numbers.push(format!("video class bytes: {}", cb.show(bytes_s)));
+            }
+            numbers.push(format!(
+                "store{star} median compress wall seconds on video: {}",
+                s.compress_seconds.show(|v| format!("{v:.3} s"))
+            ));
+            numbers.push(format!(
+                "store{star} first repeat compress on video: {}",
+                s.first_compress_mbps.show(mbps_s)
+            ));
+            if let Some(e) = find(&m.rows, STORE, "encrypted-random").and_then(Row::measured) {
+                numbers.push(format!(
+                    "store{} compress on encrypted-random: {}",
+                    if e.single.is_some() { "*" } else { "" },
+                    e.compress_mbps.show(mbps_s)
+                ));
+            }
             numbers.push(format!(
                 "raw read of video, median of the passes, including opens: {}",
                 r.show(mbps_s)
             ));
+            if let Some(ro) = raw_rate(p, "video", false) {
+                numbers.push(format!(
+                    "raw read of video, median of the passes, read only: {}",
+                    ro.show(mbps_s)
+                ));
+            }
             let ratio = ratio_pct(&s.compress_mbps, r);
             numbers.push(format!("store / raw read: {}", ratio.show(pct1)));
             if at_least_pct(s.compress_mbps.value, r.value, G3_MIN_PCT) {
@@ -1023,11 +1253,19 @@ fn gate3(m: &Model, p: &Probes) -> GateRow {
     if let Some(pf) = &p.entropy_gate {
         for c in &pf.env.data.gate_cost {
             if c.seconds > 0.0 {
+                let rate = Traced::new(c.bytes as f64 / 1e6 / c.seconds, pf.src);
                 numbers.push(format!(
                     "gate cost, {} (single thread, information only): {}",
                     c.gate,
-                    Traced::new(c.bytes as f64 / 1e6 / c.seconds, pf.src).show(mbps_s)
+                    rate.show(mbps_s)
                 ));
+                if let Some(r) = &raw {
+                    numbers.push(format!(
+                        "gate cost, {}, gate rate as a share of the raw read rate: {}",
+                        c.gate,
+                        ratio_pct(&rate, r).show(pct1)
+                    ));
+                }
             }
         }
     }
@@ -1035,6 +1273,7 @@ fn gate3(m: &Model, p: &Probes) -> GateRow {
         id: "G3",
         title,
         numbers,
+        notes,
         verdict,
     }
 }
@@ -1044,6 +1283,7 @@ fn gate4(m: &Model, inputs: &Inputs) -> GateRow {
                  the 7z/mx5 extraction MB/s, blended over each disk mix"
         .to_string();
     let mut numbers = Vec::new();
+    let mut notes = Vec::new();
     let (mut any_fail, mut why) = (false, None::<String>);
     for mix in &inputs.mixes.mix {
         let z = blend(&m.rows, FAST, mix, inputs.mixes_src);
@@ -1051,13 +1291,15 @@ fn gate4(m: &Model, inputs: &Inputs) -> GateRow {
         match (z, s) {
             (Ok(z), Ok(s)) => {
                 numbers.push(format!(
-                    "{}: zstd/3 extract: {}",
+                    "{}: zstd/3{} extract: {}",
                     mix.name,
+                    if z.single { "*" } else { "" },
                     z.extract_mbps.show(mbps_s)
                 ));
                 numbers.push(format!(
-                    "{}: 7z/mx5 extract: {}",
+                    "{}: 7z/mx5{} extract: {}",
                     mix.name,
+                    if s.single { "*" } else { "" },
                     s.extract_mbps.show(mbps_s)
                 ));
                 if z.extract_mbps.value < s.extract_mbps.value {
@@ -1066,7 +1308,9 @@ fn gate4(m: &Model, inputs: &Inputs) -> GateRow {
             }
             (z, s) => {
                 let e = z.err().or(s.err()).unwrap_or_default();
-                why.get_or_insert(format!("mix {}: {e}", mix.name));
+                let line = format!("mix {}: {e}", mix.name);
+                notes.push(format!("G4: not evaluable on {line}"));
+                why.get_or_insert(line);
             }
         }
     }
@@ -1081,6 +1325,7 @@ fn gate4(m: &Model, inputs: &Inputs) -> GateRow {
         id: "G4",
         title,
         numbers,
+        notes,
         verdict,
     }
 }
@@ -1092,6 +1337,31 @@ pub fn gates(m: &Model, inputs: &Inputs) -> Vec<GateRow> {
         gate3(m, &inputs.probes),
         gate4(m, inputs),
     ]
+}
+
+/// Why the inputs are unclean (empty: all clean): a baseline without the settle pause (D-21), an
+/// input directory outside `bench/results`, a dirty or unknown build, an unoptimised probe build.
+pub fn unclean_reasons(i: &Inputs) -> Vec<String> {
+    let b = &i.baseline;
+    let mut v = Vec::new();
+    if b.run.settle_ms_per_1000_files == 0 {
+        v.push("the baseline has no settle pause (D-21)".to_string());
+    }
+    for d in &i.outside {
+        v.push(format!("`{d}` is not under bench/results"));
+    }
+    if b.host.dirty_build_allowed || !crate::run::host::build_is_clean(&b.host.git_commit) {
+        v.push("the baseline was run from a dirty or unknown build".to_string());
+    }
+    for p in i.probes.present() {
+        if !p.release || !crate::run::host::build_is_clean(&p.build) {
+            v.push(format!(
+                "probe {} is from a dirty, unknown or unoptimised build",
+                p.name
+            ));
+        }
+    }
+    v
 }
 
 /// The proposal line printed under the gate table.

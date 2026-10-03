@@ -1,30 +1,16 @@
 //! The disk mixes (`bench/report-mixes.toml`): parsed and checked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{bail, Result};
 use serde::Deserialize;
 
-/// The corpus classes (docs/CORPUS.md as adjusted by D-15).
-pub const KNOWN_CLASSES: [&str; 17] = [
-    "archives-nested",
-    "audio",
-    "backup-versions",
-    "encrypted-random",
-    "game-assets",
-    "logs-text",
-    "model-weights",
-    "office-pdf",
-    "photo-jpeg",
-    "photo-jpeg-edited",
-    "photo-raw-png",
-    "small-files",
-    "software-installed",
-    "source-git",
-    "text-prose",
-    "video",
-    "vm-image",
-];
+/// The corpus classes: those of the corpus source registry (`bench/corpus-sources.toml`).
+pub fn known_classes() -> BTreeSet<String> {
+    crate::corpus::registry::Registry::parse(include_str!("../../../../bench/corpus-sources.toml"))
+        .map(|r| r.sources.iter().map(|s| s.class.clone()).collect())
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +33,7 @@ impl Mixes {
         if m.mix.is_empty() {
             bail!("the mixes file defines no mix");
         }
+        let known = known_classes();
         let mut seen: Vec<&str> = Vec::new();
         for mix in &m.mix {
             if seen.contains(&mix.name.as_str()) {
@@ -54,7 +41,7 @@ impl Mixes {
             }
             seen.push(&mix.name);
             for (class, w) in &mix.weights {
-                if !KNOWN_CLASSES.contains(&class.as_str()) {
+                if !known.contains(class) {
                     bail!("mix `{}`: unknown class `{class}`", mix.name);
                 }
                 if *w == 0 {
