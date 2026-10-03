@@ -18,6 +18,10 @@ on:
         description: "Restore the download cache (skips the downloads; not a clean-machine test)"
         type: boolean
         default: false
+      run_smoke:
+        description: "After the corpus builds, smoke-run the baseline runner on a few classes (not a measurement)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -108,6 +112,42 @@ jobs:
           ./target/release/lpk-bench corpus build --profile small
       - name: Fail if the two manifests differ
         run: cmp first-manifest.json bench/corpus/small/manifest.json
+      # Smoke test of the baseline runner (`lpk-bench run`) on Linux. It proves that the runner,
+      # the peak-memory measurement through getrusage, extraction and BLAKE3 verification work on
+      # Linux with whatever free tools the image can install, and that tools it cannot find
+      # (WinRAR, zpaqfranz, t-saur) are skipped with a reason. It does not prove anything about
+      # speed or ratio: one repeat on a shared CI host, so no timing claim may be taken from it,
+      # and the results are an artifact of this run only, never committed under bench/results/.
+      # The `7zip` package provides `7zz`, the executable the catalogue looks for first.
+      - name: Install the free baseline tools
+        if: ${{ inputs.run_smoke }}
+        run: sudo apt-get install -y --no-install-recommends zstd xz-utils 7zip
+      - name: List the tools the catalogue finds
+        if: ${{ inputs.run_smoke }}
+        run: ./target/release/lpk-bench run --list-tools
+      - name: Smoke-run the baseline runner on the small corpus
+        if: ${{ inputs.run_smoke }}
+        timeout-minutes: 40
+        run: |
+          ./target/release/lpk-bench run --tools all --profile small --repeats 1 \
+            --classes archives-nested,source-git,small-files,photo-jpeg-edited \
+            --results "$RUNNER_TEMP/results" --tmp "$RUNNER_TEMP/tmp"
+      - name: Validate the smoke results against the schema
+        if: ${{ inputs.run_smoke }}
+        run: |
+          dirs=("$RUNNER_TEMP"/results/*/)
+          if [ "${#dirs[@]}" -ne 1 ]; then
+            echo "expected exactly one results directory, found ${#dirs[@]}"
+            exit 1
+          fi
+          ./target/release/lpk-bench run --validate "${dirs[0]%/}"
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() && inputs.run_smoke }}
+        with:
+          name: smoke-results-small-linux
+          path: ${{ runner.temp }}/results
+          retention-days: 14
+          if-no-files-found: warn
       - name: Job summary
         if: ${{ always() }}
         env:
