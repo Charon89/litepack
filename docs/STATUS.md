@@ -3,20 +3,21 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-02, about 23:40 UTC (19:40 local on the measuring machine).
+Last updated: 2026-10-03, about 01:50 UTC (21:50 local on the measuring machine).
 
 ## Summary
 - **P0-1** and **P0-2** done. The `full` corpus profile is pinned and built (PR #3 merged).
 - **P0-3** (baseline runner): code complete, reviewed and approved, CI green. A first pair of acceptance runs passed the round-trip and schema clauses and agreed within 3% on every compress total, but not on four extract totals; the cause (a bias of the run loop on classes with thousands of files) is fixed (D-21) and checked. **Next step: a new pair of acceptance runs**, planned for the night of 2026-10-02 as soon as the machine is idle.
 - **P0-4** (probes): **code complete** on `task/p0-4-probes` — the framework and all six probes, each reviewed to approval (D-22). What remains is the official run of every probe on `small`, on an idle machine, committed under `bench/results/`, and the PLAN ticks.
 - **P0-6** (licensing): boxes 2 and 3 written, reviewed and approved on their branch; box 1 waits for P0-4 to merge.
-- **P0-5** (report, verdict): not started.
+- **P0-5** (report, verdict): the report generator `lpk-bench report` is implemented, reviewed and approved on `task/p0-5-report` (PR #6, stacked on #5; rules in D-23). The official report comes from the official `full` runs; the verdict (D-08) is the owner's after that. Two things the trial report on `small` already showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives, and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read.
 
 ## Branches in flight
 | Branch | Pull request | State | What is left |
 |---|---|---|---|
 | `task/p0-3-runner` | #2 (draft) | Run loop, catalogue, result format, `--compare`; D-19, D-20, D-21; four result directories; `main` merged in | New acceptance pair, PLAN ticks, fast-forward `main` (see "P0-3") |
 | `task/p0-4-probes` | #5 (draft, stacked on #2) | Probe framework and six probes, all reviewed; D-22; PLAN status note | Official probe runs on `small`, PLAN ticks, then retarget #5 to `main` and merge after #2 (see "P0-4") |
+| `task/p0-5-report` | #6 (draft, stacked on #5) | Report generator, reviewed; D-23; CLAUDE.md command lines | Official report from the official `full` runs; retarget #6 to `main` after #5 |
 | `task/p0-6-licensing` | #4 (draft) | `docs/LICENSING.md` rewritten; review verdict APPROVE; 21 factual claims checked against the web sources | Merge after P0-3 (it points to `docs/BASELINES.md`), tick boxes 2 and 3, add the decision named below |
 
 ## How to resume
@@ -55,6 +56,9 @@ The acceptance line reads: all installed tools complete with 100% round-trip ver
 - **Method document.** It names "xEnc3" as a component; no public source or licence exists. `docs/LICENSING.md` marks it as not usable; the method document itself is unchanged (it needs the owner's say-so).
 - **Licence option.** The corpus builder carries its own small JPEG encoder because the `jpeg-encoder` crate includes the IJG licence, which is not on the allow-list (D-18). Adding IJG to the list would allow the crate instead.
 - **Corpus gaps carried forward** (see the P0-2 notes in PLAN): `office-versions` is not built; the `small` model-weights file is fp32 and not safetensors; the private scan was never tried on a OneDrive folder; in `full`, 43 of the 50 photo conversions fit their budget and the Ubuntu image is just under the size range the spec names.
+
+## Merge order
+`main` ← `task/p0-3-runner` (#2) ← `task/p0-4-probes` (#5) ← `task/p0-5-report` (#6). After the acceptance pair: fast-forward `main` to #2; retarget #5 to `main` and fast-forward; retarget #6 and fast-forward; then P0-6 (#4): rebase, ticks, the LGPL-boundary decision, and box 1 (reconcile `deny.toml`). Then the official probe run on `small` (P0-4 ticks), the `full` baseline run and `probe all --profile full` (long, idle machine), the official report, and D-08.
 
 ## Working notes
 - A measured benchmark run needs the machine to itself; plan other work around it.
