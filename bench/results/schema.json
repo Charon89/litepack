@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "lpk-bench result files",
+  "description": "A results directory bench/results/<date>-<host>[-<n>]/ holds host.json, tools.json and one result file per tool x setting x class named <tool>-<setting>-<class>.json (plus probe-<name>.json files, accepted by name). Beyond this schema, lpk-bench run --validate rejects any string that contains an absolute path, recomputes the medians, and checks file names, directory name, host, tool versions, and one profile and manifest hash per directory against the contents. Kept in step with crates/lpk-bench/src/run/result.rs by a unit test; every property carries a description with its unit.",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "id_upper": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "blake3": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^(/|\\\\|[A-Za-z]:[\\\\/])"
+      }
+    },
+    "arg": {
+      "type": "string",
+      "not": {
+        "pattern": "^(/|\\\\|[A-Za-z]:[\\\\/])"
+      }
+    },
+    "step_times": {
+      "type": "object",
+      "description": "Time of one step of a tar-stream pipeline.",
+      "additionalProperties": false,
+      "required": ["wall_seconds", "user_cpu_seconds", "kernel_cpu_seconds"],
+      "properties": {
+        "wall_seconds": { "$ref": "#/$defs/seconds", "description": "Elapsed (wall clock) time of the step, in seconds." },
+        "user_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "User-mode CPU time of the step's processes, in seconds." },
+        "kernel_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "Kernel-mode CPU time of the step's processes, in seconds." }
+      }
+    },
+    "measure": {
+      "type": "object",
+      "description": "One measured run (compress or extract). For tar-stream tools the steps run one after the other through a temporary file; the three times are the tar step plus the compressor step, and the two steps are also recorded separately.",
+      "additionalProperties": false,
+      "required": ["wall_seconds", "user_cpu_seconds", "kernel_cpu_seconds", "peak_memory_bytes", "timed_out", "descendants_killed"],
+      "properties": {
+        "wall_seconds": { "$ref": "#/$defs/seconds", "description": "Elapsed (wall clock) time, in seconds." },
+        "user_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "User-mode CPU time, in seconds." },
+        "kernel_cpu_seconds": { "$ref": "#/$defs/seconds", "description": "Kernel-mode CPU time, in seconds." },
+        "peak_memory_bytes": { "$ref": "#/$defs/count", "description": "Peak resident memory in bytes, as named by measurement.peak_memory_kind (the larger of the two steps for tar-stream tools)." },
+        "timed_out": { "type": "boolean", "description": "True when the timeout expired and the process tree was killed (either step, for tar-stream tools). A result with a repeat that timed out has no median and is failed." },
+        "descendants_killed": { "type": "boolean", "description": "True when processes started by the tool were still running when it exited and were killed (either step). A result with such a repeat has no median and is failed." },
+        "peak_job_memory_bytes": { "$ref": "#/$defs/count", "description": "Windows only: peak committed memory of all processes in the job object, in bytes." },
+        "peak_process_commit_bytes": { "$ref": "#/$defs/count", "description": "Windows only: peak committed memory of the largest single process in the job object, in bytes." },
+        "tar_step": { "$ref": "#/$defs/step_times", "description": "Tar-stream tools only: the tar step of this run." },
+        "tool_step": { "$ref": "#/$defs/step_times", "description": "Tar-stream tools only: the compressor or decompressor step of this run." }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "description": "One repeat, or the medians over all repeats.",
+      "additionalProperties": false,
+      "required": ["compress", "extract", "archive_bytes"],
+      "properties": {
+        "compress": { "$ref": "#/$defs/measure", "description": "The compress run." },
+        "extract": { "$ref": "#/$defs/measure", "description": "The extract run." },
+        "archive_bytes": { "$ref": "#/$defs/count", "description": "Size of the archive in bytes." }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "description": "Round-trip check of the extracted files against the manifest.",
+      "additionalProperties": false,
+      "required": ["verified", "files_checked", "files_ok"],
+      "properties": {
+        "verified": { "type": "boolean", "description": "True when every file of the class was extracted and its BLAKE3 hash matched (files_ok = files_checked = corpus.class_files)." },
+        "files_checked": { "$ref": "#/$defs/count", "description": "Number of files compared, a count." },
+        "files_ok": { "$ref": "#/$defs/count", "description": "Number of files whose hash matched, a count." }
+      }
+    },
+    "tool_ref": {
+      "type": "object",
+      "description": "The tool as it ran.",
+      "additionalProperties": false,
+      "required": ["id", "mode", "ratio_depends_on_threads"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id", "description": "Catalogue id of the tool." },
+        "version": { "$ref": "#/$defs/text", "description": "Version string read from the tool; absent when it was not found." },
+        "mode": { "enum": ["directory", "tar-stream"], "description": "directory: the tool archives the directory itself; tar-stream: tar writes the stream to a temporary file and the compressor reads that file on its standard input (extraction: the decompressor writes a temporary tar, then tar extracts it); the steps run one after the other, never concurrently." },
+        "ratio_depends_on_threads": { "type": "boolean", "description": "True when the thread count changes the archive size, not only the speed." }
+      }
+    },
+    "setting_ref": {
+      "type": "object",
+      "description": "The setting and the exact argument lists executed.",
+      "additionalProperties": false,
+      "required": ["id", "compress_args", "extract_args"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id", "description": "Setting id within the tool." },
+        "compress_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the compress command as executed, thread argument filled in, paths shown relative to the working directory (the parent of the class directory)." },
+        "extract_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the extract command as executed, same conventions." }
+      }
+    },
+    "corpus_ref": {
+      "type": "object",
+      "description": "The corpus the class belongs to.",
+      "additionalProperties": false,
+      "required": ["profile", "manifest_blake3", "class_files", "class_bytes"],
+      "properties": {
+        "profile": { "$ref": "#/$defs/id", "description": "Corpus profile (small, full or private)." },
+        "manifest_blake3": { "$ref": "#/$defs/blake3", "description": "BLAKE3 hash of manifest.json (64 lowercase hex digits)." },
+        "class_files": { "$ref": "#/$defs/count", "description": "Number of files in this class, a count." },
+        "class_bytes": { "$ref": "#/$defs/count", "description": "Total size of this class's files in bytes." }
+      }
+    },
+    "tar_info": {
+      "type": "object",
+      "description": "The tar that made the stream for a tar-stream tool.",
+      "additionalProperties": false,
+      "required": ["tool", "format", "in_published_time"],
+      "properties": {
+        "tool": { "$ref": "#/$defs/text", "description": "Flavour and version of the tar executable, for example bsdtar 3.7.7." },
+        "format": { "$ref": "#/$defs/text", "description": "Tar format written (for example pax or ustar)." },
+        "in_published_time": { "const": true, "description": "Always true: the published time is the tar step plus the compressor step; each is also recorded separately." }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "description": "How the numbers were taken.",
+      "additionalProperties": false,
+      "required": ["wall_cpu_method", "peak_memory_kind", "every_repeat_verified", "env_stripped"],
+      "properties": {
+        "wall_cpu_method": { "$ref": "#/$defs/text", "description": "How wall and CPU time were taken, in words." },
+        "peak_memory_kind": { "enum": ["peak-working-set", "max-rss"], "description": "peak-working-set: Windows peak working set of the tool's main process; max-rss: Linux ru_maxrss. Unit of peak_memory_bytes: bytes." },
+        "every_repeat_verified": { "const": true, "description": "Always true: every repeat was extracted and verified, not only one." },
+        "env_stripped": { "type": "array", "items": { "$ref": "#/$defs/id_upper" }, "description": "Names (never values) of the tool-configuration environment variables removed from the child's environment before every run." },
+        "tar": { "$ref": "#/$defs/tar_info", "description": "Present for tar-stream tools." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "description": "One tool x setting x class.",
+      "additionalProperties": false,
+      "required": ["schema_version", "tool", "setting", "class", "corpus", "threads"],
+      "properties": {
+        "schema_version": { "const": 1, "description": "Result format version." },
+        "tool": { "$ref": "#/$defs/tool_ref", "description": "The tool." },
+        "setting": { "$ref": "#/$defs/setting_ref", "description": "The setting." },
+        "class": { "$ref": "#/$defs/id", "description": "Corpus class name." },
+        "corpus": { "$ref": "#/$defs/corpus_ref", "description": "The corpus." },
+        "threads": { "type": "integer", "minimum": 1, "description": "Thread count passed to the tool, a count." },
+        "private": { "const": true, "description": "Present and true when the corpus is a private scan." },
+        "repeats_requested": { "type": "integer", "minimum": 1, "description": "Repeats asked for with --repeats, a count; present on every result that ran." },
+        "repeats_short": { "$ref": "#/$defs/text", "description": "Why fewer repeats than requested were run: a combination whose first repeat reached --long-run-s is measured once. Absent when all requested repeats ran." },
+        "measurement": { "$ref": "#/$defs/measurement", "description": "How the numbers were taken." },
+        "repeats": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sample" }, "description": "One entry per repeat." },
+        "median": { "$ref": "#/$defs/sample", "description": "Median of every field over the repeats (the validator recomputes it)." },
+        "verification": { "$ref": "#/$defs/verification", "description": "Round-trip verification." },
+        "skipped": { "$ref": "#/$defs/text", "description": "Why the combination was skipped; then there are no measurements." },
+        "failed": { "$ref": "#/$defs/failure", "description": "Present when the combination ran and failed (non-zero exit, missing or empty archive, timeout, killed descendants, or a verification finding). The repeats completed before the failure may be recorded; there is no median and verification.verified is false." }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["skipped"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["repeats"] },
+                { "required": ["median"] },
+                { "required": ["verification"] },
+                { "required": ["measurement"] },
+                { "required": ["failed"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": { "required": ["failed"] },
+          "then": { "not": { "required": ["median"] }, "required": ["measurement"] }
+        },
+        {
+          "if": { "not": { "anyOf": [{ "required": ["skipped"] }, { "required": ["failed"] }] } },
+          "then": { "required": ["repeats", "median", "verification", "measurement"] }
+        }
+      ]
+    },
+    "failure": {
+      "type": "object",
+      "description": "Why a combination failed.",
+      "additionalProperties": false,
+      "required": ["reason", "step", "repeat", "timed_out", "descendants_killed"],
+      "properties": {
+        "reason": { "$ref": "#/$defs/text", "description": "What went wrong, without paths: exit code, missing or empty archive, timeout, or the verification finding (missing, extra or different file, by manifest-relative name)." },
+        "step": { "enum": ["compress", "extract", "verify"], "description": "The step that failed." },
+        "repeat": { "type": "integer", "minimum": 1, "description": "The repeat that failed, counting from 1." },
+        "timed_out": { "type": "boolean", "description": "True when the failing step hit the timeout and the process tree was killed." },
+        "descendants_killed": { "type": "boolean", "description": "True when processes started by the failing step were still running when it exited and were killed." }
+      }
+    },
+    "tool_entry": {
+      "type": "object",
+      "description": "One catalogue tool on this machine.",
+      "additionalProperties": false,
+      "required": ["id", "name", "status", "catalogue_verified", "manual", "local_override"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id", "description": "Catalogue id." },
+        "name": { "$ref": "#/$defs/text", "description": "Display name." },
+        "status": { "enum": ["found", "skipped"], "description": "Whether the tool was found and usable." },
+        "reason": { "$ref": "#/$defs/text", "description": "Why it was skipped; present exactly when status is skipped." },
+        "version": { "$ref": "#/$defs/text", "description": "Version read from the tool; present exactly when status is found." },
+        "catalogue_verified": { "type": "boolean", "description": "False when the catalogue's command lines come from documentation nobody has run." },
+        "manual": { "type": "boolean", "description": "True for tools the owner licenses and configures by hand." },
+        "local_override": { "type": "boolean", "description": "True when bench/tools.local.toml overrode this tool on this machine." }
+      },
+      "if": { "properties": { "status": { "const": "found" } } },
+      "then": { "required": ["version"], "not": { "required": ["reason"] } },
+      "else": { "required": ["reason"] }
+    },
+    "tools": {
+      "type": "object",
+      "description": "tools.json: every catalogue tool.",
+      "additionalProperties": false,
+      "required": ["schema_version", "tools"],
+      "properties": {
+        "schema_version": { "const": 1, "description": "Result format version." },
+        "tools": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/tool_entry" }, "description": "One entry per catalogue tool." }
+      }
+    },
+    "run_combination": {
+      "type": "object",
+      "description": "One planned tool x setting x class and how it ended.",
+      "additionalProperties": false,
+      "required": ["tool", "setting", "class", "outcome"],
+      "properties": {
+        "tool": { "$ref": "#/$defs/id", "description": "Tool id." },
+        "setting": { "$ref": "#/$defs/id", "description": "Setting id." },
+        "class": { "$ref": "#/$defs/id", "description": "Corpus class." },
+        "outcome": { "enum": ["measured", "failed", "skipped"], "description": "How the combination ended; its result file must agree." }
+      }
+    },
+    "run": {
+      "type": "object",
+      "description": "run.json: written last, so that a directory without it is an aborted run.",
+      "additionalProperties": false,
+      "required": ["schema_version", "complete", "classes", "threads", "repeats_requested", "long_run_s", "catalogue_blake3", "antivirus_end_source", "antivirus_end", "antivirus_changed", "combinations"],
+      "properties": {
+        "schema_version": { "const": 1, "description": "Result format version." },
+        "complete": { "const": true, "description": "Always true: the run reached its end." },
+        "classes": { "type": "array", "items": { "$ref": "#/$defs/id" }, "description": "Corpus classes the run covered." },
+        "threads": { "type": "integer", "minimum": 1, "description": "Thread count of every result, a count." },
+        "repeats_requested": { "type": "integer", "minimum": 1, "description": "Repeats asked for with --repeats, a count." },
+        "long_run_s": { "type": "integer", "minimum": 0, "description": "The --long-run-s value, in seconds." },
+        "settle_ms_per_1000_files": { "type": "integer", "minimum": 0, "description": "The --settle-ms-per-1000-files value, in milliseconds: the pause per 1000 files after the loop deleted a tree of extracted files, before the next timed step (minimum 250 ms and maximum 30 s per pause; 0 means no pause)." },
+        "catalogue_blake3": { "$ref": "#/$defs/blake3", "description": "BLAKE3 of the catalogue file (bench/tools.toml) the run used." },
+        "antivirus_end_source": { "enum": ["queried", "query-failed", "not-applicable"], "description": "Where antivirus_end came from (same values as host.json antivirus_source)." },
+        "antivirus_end": { "type": "array", "items": { "$ref": "#/$defs/av_product" }, "description": "Antivirus products queried again after the last combination, outside all timing." },
+        "antivirus_changed": { "type": "boolean", "description": "True when the product names or decoded scanner states at the end differ from the start-of-run values in host.json (a snoozed scanner can resume in the middle of a run)." },
+        "combinations": { "type": "array", "items": { "$ref": "#/$defs/run_combination" }, "description": "Every combination the run covered with its outcome; each has a result file." }
+      }
+    },
+    "av_product": {
+      "type": "object",
+      "description": "One antivirus product registered with Windows Security Center.",
+      "additionalProperties": false,
+      "required": ["name", "product_state", "scanner"],
+      "properties": {
+        "name": { "$ref": "#/$defs/text", "description": "Display name of the product." },
+        "product_state": { "type": "string", "pattern": "^0x[0-9A-F]+$", "description": "The raw productState value, as hex text." },
+        "scanner": { "enum": ["off", "on", "snoozed", "expired", "unknown"], "description": "Scanner state decoded from bits 12-15 of productState: 0 off, 1 on, 2 snoozed, 3 expired, anything else unknown." }
+      }
+    },
+    "host": {
+      "type": "object",
+      "description": "host.json: the machine and the build.",
+      "additionalProperties": false,
+      "required": [
+        "defender_realtime",
+        "antivirus_source",
+        "antivirus",
+        "schema_version",
+        "host",
+        "os",
+        "os_version",
+        "cpu_model",
+        "logical_cores",
+        "ram_bytes",
+        "lpk_bench_version",
+        "git_commit",
+        "rustc_version"
+      ],
+      "properties": {
+        "schema_version": { "const": 1, "description": "Result format version." },
+        "host": { "type": "string", "pattern": "^[a-z0-9-]+$", "description": "Host name, lower-cased and reduced to [a-z0-9-]; part of the directory name." },
+        "os": { "$ref": "#/$defs/text", "description": "Operating system family." },
+        "os_version": { "$ref": "#/$defs/text", "description": "Operating system version." },
+        "cpu_model": { "$ref": "#/$defs/text", "description": "CPU model name." },
+        "logical_cores": { "type": "integer", "minimum": 1, "description": "Logical processors, a count." },
+        "ram_bytes": { "$ref": "#/$defs/count", "description": "Installed RAM in bytes." },
+        "lpk_bench_version": { "$ref": "#/$defs/text", "description": "lpk-bench version." },
+        "git_commit": { "$ref": "#/$defs/text", "description": "Git commit the binary was built from (12 hex digits), with a -dirty suffix when the tree had uncommitted changes, or unknown." },
+        "rustc_version": { "$ref": "#/$defs/text", "description": "rustc version that built the binary." },
+        "defender_realtime": { "enum": ["on", "off", "unknown"], "description": "Windows Defender real-time protection from the registry when the run started (best effort; unknown when it could not be determined and outside Windows). Independent of antivirus. Extraction times include the cost of whatever real-time scanner is active." },
+        "antivirus_source": { "enum": ["queried", "query-failed", "not-applicable"], "description": "Where antivirus came from: queried = Windows Security Center answered (the list may be empty); query-failed = the query did not complete; not-applicable = not Windows or no Security Center (for example Windows Server)." },
+        "antivirus": { "type": "array", "items": { "$ref": "#/$defs/av_product" }, "description": "Antivirus products registered with Windows Security Center; empty unless antivirus_source is queried." },
+        "dirty_build_allowed": { "const": true, "description": "Present and true when the run used the flag that allows results from a dirty or unknown build." }
+      }
+    }
+  }
+}

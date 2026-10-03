@@ -1,0 +1,150 @@
+{
+  "class": "backup-versions",
+  "corpus": {
+    "class_bytes": 25541629,
+    "class_files": 1974,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 27258368,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.046875,
+      "peak_job_memory_bytes": 1499136,
+      "peak_memory_bytes": 6803456,
+      "peak_process_commit_bytes": 1499136,
+      "timed_out": false,
+      "user_cpu_seconds": 0.046875,
+      "wall_seconds": 0.1030894
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.203125,
+      "peak_job_memory_bytes": 1294336,
+      "peak_memory_bytes": 6926336,
+      "peak_process_commit_bytes": 1294336,
+      "timed_out": false,
+      "user_cpu_seconds": 0.046875,
+      "wall_seconds": 0.3098852
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 27258368,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.03125,
+        "peak_job_memory_bytes": 1499136,
+        "peak_memory_bytes": 6803456,
+        "peak_process_commit_bytes": 1499136,
+        "timed_out": false,
+        "user_cpu_seconds": 0.0625,
+        "wall_seconds": 0.1061166
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.171875,
+        "peak_job_memory_bytes": 1323008,
+        "peak_memory_bytes": 6897664,
+        "peak_process_commit_bytes": 1323008,
+        "timed_out": false,
+        "user_cpu_seconds": 0.046875,
+        "wall_seconds": 0.3098852
+      }
+    },
+    {
+      "archive_bytes": 27258368,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.046875,
+        "peak_job_memory_bytes": 1499136,
+        "peak_memory_bytes": 6807552,
+        "peak_process_commit_bytes": 1499136,
+        "timed_out": false,
+        "user_cpu_seconds": 0.03125,
+        "wall_seconds": 0.1023931
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.203125,
+        "peak_job_memory_bytes": 1294336,
+        "peak_memory_bytes": 6934528,
+        "peak_process_commit_bytes": 1294336,
+        "timed_out": false,
+        "user_cpu_seconds": 0.015625,
+        "wall_seconds": 0.2345374
+      }
+    },
+    {
+      "archive_bytes": 27258368,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.0625,
+        "peak_job_memory_bytes": 1499136,
+        "peak_memory_bytes": 6795264,
+        "peak_process_commit_bytes": 1499136,
+        "timed_out": false,
+        "user_cpu_seconds": 0.046875,
+        "wall_seconds": 0.1030894
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.203125,
+        "peak_job_memory_bytes": 1269760,
+        "peak_memory_bytes": 6926336,
+        "peak_process_commit_bytes": 1269760,
+        "timed_out": false,
+        "user_cpu_seconds": 0.046875,
+        "wall_seconds": 0.8861747
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "-cf",
+      "../../tmp/run45212/c29/a.tar",
+      "-C",
+      "backup-versions",
+      "."
+    ],
+    "extract_args": [
+      "-xf",
+      "a.tar",
+      "-C",
+      "x"
+    ],
+    "id": "store"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "store",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "bsdtar 3.8.8"
+  },
+  "verification": {
+    "files_checked": 1974,
+    "files_ok": 1974,
+    "verified": true
+  }
+}

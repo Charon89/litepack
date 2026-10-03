@@ -1,0 +1,26 @@
+{
+  "antivirus": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_source": "queried",
+  "cpu_model": "Intel(R) Core(TM) Ultra 9 285K",
+  "defender_realtime": "off",
+  "git_commit": "feddbfbb21f5",
+  "host": "megatron",
+  "logical_cores": 24,
+  "lpk_bench_version": "0.0.1",
+  "os": "windows",
+  "os_version": "Windows 11 Pro",
+  "ram_bytes": 102298484736,
+  "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "schema_version": 1
+}

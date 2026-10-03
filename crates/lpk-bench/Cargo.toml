@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+default-run = "lpk-bench"
 
 [dependencies]
 aes = "0.9.3"
@@ -16,7 +17,8 @@ clap = { version = "4.6.7", features = ["derive"] }
 claxon = "0.4.3"
 ctr = "0.10.1"
 flate2 = { version = "1.1.10", features = ["zlib"] }
-libz-sys = { version = "1.1.29", features = ["static"] }
+lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
+libz-sys ={ version = "1.1.29", features = ["static"] }
 globset = "0.4.20"
 httpdate = "1.0.3"
 sha1 = "0.10.6"
@@ -31,6 +33,15 @@ sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["defl
 tar = "0.4.46"
 toml = "1.1.6"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+jsonschema = { version = "0.58.4", default-features = false }
+regex = "1.13.1"
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+zstd = { version = "0.14.0", default-features = false, features = ["zstdmt"] }
+liblzma = { version = "0.4.8", features = ["static", "parallel"] }
+lepton_jpeg = "0.5.8"
+liblzma-sys = "0.4.9"
+preflate-rs = "0.7.6"
+fastcdc = "5.0.0"
 
 [lints]
 workspace = true
@@ -38,3 +49,6 @@ workspace = true
 [dev-dependencies]
 tempfile = "3.27.0"
 sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["compress"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"

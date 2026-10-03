@@ -1,0 +1,52 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "547a3882e326421076eeaa7ee859df86c0c75d509c18bf01948a49a48ec18721",
+  "classes": [
+    "small-files"
+  ],
+  "combinations": [
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 5,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 0,
+  "threads": 24
+}

@@ -13,6 +13,8 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 mod corpus;
+mod probe;
+mod run;
 
 #[derive(Debug, Parser)]
 #[command(name = "lpk-bench", version, about = "LitePack Phase 0 benchmark tool")]
@@ -33,9 +35,9 @@ enum Command {
     /// Build the public corpus or scan a private folder (PLAN P0-2)
     Corpus(corpus::CorpusArgs),
     /// Run baseline tools over the corpus with round-trip verification (PLAN P0-3)
-    Run(StubArgs),
+    Run(run::RunArgs),
     /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate (PLAN P0-4)
-    Probe(StubArgs),
+    Probe(probe::ProbeArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
     Report(StubArgs),
 }
@@ -54,6 +56,12 @@ impl Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Run(args) = cli.command {
+        return run::run(args);
+    }
+    if let Command::Probe(args) = &cli.command {
+        return probe::command(args);
+    }
     if let Command::Corpus(args) = cli.command {
         return corpus::run(args);
     }
@@ -97,10 +105,43 @@ mod tests {
 
     #[test]
     fn every_stub_subcommand_parses_and_names_a_task() {
-        for (arg, task) in [("run", "P0-3"), ("probe", "P0-4"), ("report", "P0-5")] {
+        for (arg, task) in [("run", "P0-3"), ("report", "P0-5")] {
             let cli = Cli::try_parse_from(["lpk-bench", arg]).expect("parse");
             assert_eq!(cli.command.task(), (arg, task));
         }
+    }
+
+    #[test]
+    fn probe_subcommand_parses_names_and_options() {
+        for name in [
+            "jpeg",
+            "deflate",
+            "dedup",
+            "text",
+            "weights",
+            "entropy-gate",
+            "all",
+        ] {
+            let cli = Cli::try_parse_from(["lpk-bench", "probe", name]).expect("parse");
+            assert_eq!(cli.command.task().0, "probe");
+        }
+        let argv = [
+            "lpk-bench",
+            "probe",
+            "weights",
+            "--profile",
+            "small",
+            "--corpus",
+            "c",
+            "--results",
+            "r",
+            "--threads",
+            "3",
+            "--allow-dirty-build",
+        ];
+        assert!(Cli::try_parse_from(argv).is_ok());
+        assert!(Cli::try_parse_from(["lpk-bench", "probe"]).is_err());
+        assert!(Cli::try_parse_from(["lpk-bench", "probe", "nope"]).is_err());
     }
 
     #[test]
