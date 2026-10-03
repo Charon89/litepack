@@ -497,7 +497,7 @@ fn backup_est(p: &Probes, cb: &Traced) -> Result<Est, String> {
     })
 }
 
-fn text_est(p: &Probes, class: &str, cb: &Traced) -> Result<Est, String> {
+pub(super) fn text_est(p: &Probes, class: &str, cb: &Traced) -> Result<Est, String> {
     let pf = p.text.as_ref().ok_or("probe text is not available")?;
     let c = pf
         .env
@@ -529,7 +529,7 @@ fn text_est(p: &Probes, class: &str, cb: &Traced) -> Result<Est, String> {
     })
 }
 
-fn weights_est(p: &Probes, class: &str, cb: &Traced) -> Result<Est, String> {
+pub(super) fn weights_est(p: &Probes, class: &str, cb: &Traced) -> Result<Est, String> {
     let pf = p.weights.as_ref().ok_or("probe weights is not available")?;
     let d = &pf.env.data;
     if d.class != class {
@@ -815,6 +815,11 @@ pub fn within(a: f64, b: f64, limit_pct: f64) -> bool {
     a * 100.0 <= limit_pct * b
 }
 
+/// `a >= pct% of b`.
+pub fn at_least_pct(a: f64, b: f64, pct: f64) -> bool {
+    a * 100.0 >= pct * b
+}
+
 pub const G1_CLASSES: [&str; 3] = ["photo-jpeg", "photo-jpeg-edited", "office-pdf"];
 
 fn pct1(v: f64) -> String {
@@ -1008,7 +1013,7 @@ fn gate3(m: &Model, p: &Probes) -> GateRow {
             ));
             let ratio = ratio_pct(&s.compress_mbps, r);
             numbers.push(format!("store / raw read: {}", ratio.show(pct1)));
-            if s.compress_mbps.value * 100.0 >= G3_MIN_PCT * r.value {
+            if at_least_pct(s.compress_mbps.value, r.value, G3_MIN_PCT) {
                 Verdict::Pass
             } else {
                 Verdict::Fail

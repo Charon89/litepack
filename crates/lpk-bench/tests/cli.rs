@@ -92,12 +92,19 @@ fn help_prints_subcommands() {
 }
 
 #[test]
-fn stubs_fail_loudly_naming_the_task() {
-    let (arg, task) = ("report", "P0-5");
-    let out = bin().arg(arg).output().expect("run");
-    assert!(!out.status.success(), "`{arg}` stub must exit non-zero");
+fn report_needs_a_results_directory_and_refuses_one_that_is_missing() {
+    let out = bin().arg("report").output().expect("run");
+    assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains(task), "stderr for `{arg}` lacks {task}: {err}");
+    assert!(err.contains("--results"), "{err}");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let out = bin()
+        .args(["report", "--results"])
+        .arg(tmp.path().join("nope"))
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&out.stderr).is_empty());
 }
 
 #[test]
@@ -145,15 +152,4 @@ fn corpus_build_with_missing_registry_fails_cleanly() {
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("corpus-sources.toml"), "{err}");
-}
-
-#[test]
-fn documented_claude_md_commands_reach_the_stub_with_exit_1() {
-    let documented: [&[&str]; 1] = [&["report"]];
-    for args in documented {
-        let out = bin().args(args).output().expect("run");
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("not implemented yet"), "{args:?}: {err}");
-    }
 }
