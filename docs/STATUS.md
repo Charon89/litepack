@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-03, about 13:00 UTC (09:00 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-03, about 14:30 UTC (10:30 local on the measuring machine). No measurement is running.
 
 **Next event: the official `full` measurement on the measuring machine, Sunday night 2026-10-04 into
 Monday 2026-10-05 (owner's slot).** Everything it needs is prepared (see "P0-5 — the `full` run").
@@ -13,27 +13,25 @@ Monday 2026-10-05 (owner's slot).** Everything it needs is prepared (see "P0-5 �
   - P0-3's second acceptance pair (`bench/results/2026-10-03-megatron`, `-megatron-2`) met the round-trip and schema clauses twice over; the owner took the 3% clause as met in substance (D-24: 23 of 28 totals within 3%, the five others caused by the machine's clock and by single stalled sub-second repeats, not by the loop).
   - P0-4's official `small` probe run is `bench/results/2026-10-03-megatron-3`.
   - P0-6 cut `deny.toml` to what the tree needs (D-25) and fixed the LGPL boundary (D-26).
-- **P0-5** (report, verdict) is what remains of Phase 0. The report generator is on `main` (PR #6 merged; rules in D-23). Left: (a) the Linux CI smoke test of the runner on `small` (in progress on `task/p0-5-linux-smoke`, see below); (b) the `full` baseline run and `probe all --profile full` on the measuring machine; (c) the official report from them, committed under `bench/reports/`; (d) the verdict D-08, recorded by the owner.
+- **P0-5** (report, verdict) is what remains of Phase 0. The report generator is on `main` (PR #6 merged; rules in D-23). The Linux CI smoke test of the runner on `small` is done (PR #7 merged; evidence under the P0-5 box in PLAN). Left: (b) the `full` baseline run and `probe all --profile full` on the measuring machine; (c) the official report from them, committed under `bench/reports/`; (d) the verdict D-08, recorded by the owner.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-| Branch | Pull request | State | What is left |
-|---|---|---|---|
-| `task/p0-5-linux-smoke` | opened by the implementer (draft) | Extends the manual workflow `corpus-smoke.yml` with `lpk-bench run` on four classes of the `small` corpus on `ubuntu-24.04`, validation, artifact upload | Workflow run green, review, merge; then it is the "small on Linux CI" evidence of P0-5 box 2 |
+None. Everything is on `main` (`78bc960` or later); the main checkout of the measuring machine is on `main` with a clean release build of its head in `target/release/`.
 
 ## How to resume
 
 ### P0-5 — the `full` run (Sunday night 2026-10-04 → Monday 2026-10-05)
 Estimated from the `small` results scaled per class: about 19 h for the baseline run (zpaqfranz `-m5` alone about 9 h; combinations over 120 s are measured once, D-20) plus 3–5 h for the probes (the text probe on the 2.7 GB `logs-text` class and the entropy gate's xz ground truth dominate), then the report in minutes — so roughly 22–24 h end to end.
 1. The machine must be the run's alone: no builds, agents, downloads or other Claude sessions; the owner's background programs that ran during the acceptance pair (`cam_helper`, two `mpv` instances) are best closed; a steady processor clock (turbo boost off in BIOS, or "maximum processor state 99%" in the power plan — the owner's setting) makes the speed figures more repeatable. The power plan must not sleep. About 60 GB free on the corpus volume is enough (per-combination scratch is deleted as it goes).
-2. The binary: a clean release build of `main` in the main checkout (`cargo build --release -p lpk-bench --locked`; `host.json` records the commit and the report refuses dirty or debug builds). On the measuring machine the build of `d65a869` is already in `target/release/` and `run --list-tools` finds store, 7z, rar, zstd, xz and zpaqfranz (t-saur, WinZip and PowerArchiver skipped).
+2. The binary: a clean release build of `main` in the main checkout (`cargo build --release -p lpk-bench --locked`; `host.json` records the commit and the report refuses dirty or debug builds). On the measuring machine the build of `78bc960` is already in `target/release/` and `run --list-tools` finds store, 7z, rar, zstd, xz and zpaqfranz (t-saur, WinZip and PowerArchiver skipped).
 3. Launch the git-ignored script `target/acceptance/full.sh` **detached** (its header shows the PowerShell `Start-Process` line; the two-hour limit on background commands in the "Working notes" is why). It runs, in order: `run --tools all --profile full --repeats 3` → `run --validate` → `probe all --profile full` → `run --validate` → `report --results <baseline dir> --probes <probe dir>` (default output `bench/reports/phase0-<date>.md`), and writes `target/acceptance/full-status.log` (`== baseline start/exit`, `== probes start/exit`, `== report exit`, `== summary rc1 rc2 rc3`, `== DONE`). Logs: `full-run.log`, `full-probe.log`, `full-report.log`, `full-validate-*.log` in the same folder.
 4. When `== DONE` with all three exit codes 0: check the run log's last lines ("N measured, 0 failed, N skipped; 0 validation problem(s)"), commit the two result directories and the report (`chore(bench): official full-profile run ...`), tick the first two P0-5 boxes with the evidence (the report is generated by one command from committed JSON; every number carries a source bracket), push `main`.
 5. Then D-08: a read-only reviewer (opus) checks the report's arithmetic against the JSON and writes a verdict proposal; the owner records the verdict in `docs/DECISIONS.md` (D-08) with the numbers, settling the G2 and G3 questions above; tick the third box. Phase 0 is then complete.
 - If a step fails: the directories are per build and validate on their own; a failed probe does not stop the others (`probe all` continues); the report can be re-run by hand from the two directories. A baseline run that dies part-way leaves no `run.json` and must be re-run whole (delete the incomplete directory).
 
-### P0-5 — Linux CI smoke test (in progress)
-An implementer is extending `.github/workflows/corpus-smoke.yml` (manual workflow): install `zstd`, `xz-utils`, `p7zip-full`; `run --tools all --profile small --repeats 1 --classes archives-nested,source-git,small-files,photo-jpeg-edited`; `run --validate`; upload the results as an artifact (CI results are never committed). Evidence for the PLAN box: the workflow run URL and its "measured / failed / skipped / validation" summary lines. After it merges, nothing else is needed from CI for Phase 0.
+### P0-5 — Linux CI smoke test (done)
+The manual workflow `corpus-smoke.yml` has an input `run_smoke` (default on): after the corpus build it installs `zstd`, `xz-utils` and `7zip`, runs the baseline runner on four classes with one repeat, validates and uploads the results as an artifact (CI results are never committed). The green run and its summary lines are cited under the P0-5 box in PLAN. Nothing else is needed from CI for Phase 0.
 
 ## Open points for the owner
 - **G2 and G3 before D-08** (see the summary): decide what "2× smaller on versioned backups" means against incumbents that already deduplicate inside solid archives, and what "store at ≥ 80% of raw read" should be measured against (the current proxy is a real program reading and writing the files against an uncached raw read).
