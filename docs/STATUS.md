@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-03, about 11:00 UTC (07:00 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-03, about 11:30 UTC (07:30 local on the measuring machine). No measurement is running.
 
 **Waiting on the owner:** the P0-3 acceptance clause "a second run differs by < 3% in time" (see the first
 open point below). Everything else in P0-3 is done and evidenced; the merge order below starts when that
@@ -12,7 +12,7 @@ is settled.
 ## Summary
 - **P0-1** and **P0-2** done. The `full` corpus profile is pinned and built (PR #3 merged).
 - **P0-3** (baseline runner): code complete, reviewed and approved, CI green. The second acceptance pair (with the settle pause of D-21) ran on the night of 2026-10-02/03 and is committed (`bench/results/2026-10-03-megatron` and `-megatron-2`): both runs complete with 100% round-trip verification and 0 validation problems; 23 of the 28 compare totals agree within 3%, five do not, for two causes that are not the run loop — a processor that ran slower for part of a run, and single slow repeats of sub-second extractions on two many-file classes (details in the PLAN note and the open point). **The boxes stay `[~]` until the owner rules on the 3% clause.**
-- **P0-4** (probes): **code complete** on `task/p0-4-probes` — the framework and all six probes, each reviewed to approval (D-22). What remains is the official run of every probe on `small`, on an idle machine, committed under `bench/results/`, and the PLAN ticks.
+- **P0-4** (probes): **done** — framework and six probes reviewed to approval (D-22), and the official run on `small` is committed (`bench/results/2026-10-03-megatron-3`, `bcee912` on `task/p0-4-probes`) with every box ticked in PLAN. Not installed, recorded as skipped: `bsc`, `kanzi`, `hdiffz`; `probe weights` has nothing to parse in `small` (no safetensors file) and gets its figure from the `full` run.
 - **P0-6** (licensing): boxes 2 and 3 written, reviewed and approved on their branch; box 1 waits for P0-4 to merge.
 - **P0-5** (report, verdict): the report generator `lpk-bench report` is implemented, reviewed and approved on `task/p0-5-report` (PR #6, stacked on #5; rules in D-23). The official report comes from the official `full` runs; the verdict (D-08) is the owner's after that. Two things the trial report on `small` already showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives, and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read.
 
@@ -20,7 +20,7 @@ is settled.
 | Branch | Pull request | State | What is left |
 |---|---|---|---|
 | `task/p0-3-runner` | #2 (draft) | Run loop, catalogue, result format, `--compare`; D-19, D-20, D-21; four result directories; `main` merged in | New acceptance pair, PLAN ticks, fast-forward `main` (see "P0-3") |
-| `task/p0-4-probes` | #5 (draft, stacked on #2) | Probe framework and six probes, all reviewed; D-22; PLAN status note | Official probe runs on `small`, PLAN ticks, then retarget #5 to `main` and merge after #2 (see "P0-4") |
+| `task/p0-4-probes` | #5 (draft, stacked on #2) | Probe framework and six probes, all reviewed; D-22; official `small` probe run committed; P0-4 boxes ticked | Retarget #5 to `main` and fast-forward after #2 |
 | `task/p0-5-report` | #6 (draft, stacked on #5) | Report generator, reviewed; D-23; CLAUDE.md command lines | Official report from the official `full` runs; retarget #6 to `main` after #5 |
 | `task/p0-6-licensing` | #4 (draft) | `docs/LICENSING.md` rewritten; review verdict APPROVE; 21 factual claims checked against the web sources | Merge after P0-3 (it points to `docs/BASELINES.md`), tick boxes 2 and 3, add the decision named below |
 
@@ -36,13 +36,12 @@ The acceptance line reads: all installed tools complete with 100% round-trip ver
 - Result directories on the branch: `2026-10-02-megatron` and `-megatron-2` are the first pair, measured without the settle pause — evidence for D-21, not to be used for the report. `-megatron-3` (pause off) and `-megatron-4` (pause on) are the short check of the remedy on `small-files`. `2026-10-03-megatron` and `-megatron-2` are the second pair, the candidate baseline for the `small` report.
 - Parked, low severity: a failed end-of-run antivirus query is reported as "changed" instead of "unknown" (`run/exec.rs`, `run/host.rs`); the validator does not recompute `antivirus_changed` in `run.json`; `run.json` has no schema-version step for the settle field, so a hand-edited new file can pass as an old one (D-21).
 
-### P0-4 — official probe runs and ticks
-1. On an idle machine, from a clean release build of `task/p0-4-probes`: `cargo run --release -p lpk-bench -- probe all --profile small` (results go to a fresh `bench/results/<date>-<host>[-n]`; probes refuse debug builds). Expect about twenty minutes on the measuring machine; `probe text` is the slowest (about ten minutes). `probe weights` produces no dtype rows on `small` (no safetensors file there) — that is expected and recorded.
-2. `cargo run --release -p lpk-bench -- run --validate bench/results/<that directory>`; commit the directory.
-3. Tick the P0-4 boxes in `docs/PLAN.md` with the evidence (elapsed time per probe from the files, validation line, CI run), note that `bsc`, `kanzi` and `hdiffz` were not installed (skipped rows) and that `weights` needs `full`.
-4. Retarget PR #5 to `main` once PR #2 is merged, fast-forward `main`, push. Then P0-6 box 1 (see below).
+### P0-4 — done; what is left is the merge
+1. Retarget PR #5 to `main` once PR #2 is merged, fast-forward `main`, push. Then P0-6 box 1 (see below).
+- The official run: `probe all --profile small` from a clean release build of `6c04ded`, 16 min 40 s for all six probes; the directory was renamed from the auto-chosen `2026-10-03-megatron` to `-megatron-3` because the acceptance pair on the P0-3 branch holds `-megatron` and `-megatron-2` (one build per directory — the merge would otherwise collide). Probe runs made from a worktree while another branch's results exist should be given a free suffix the same way (or `--into` a directory prepared for them).
 - What P0-5 must know when reading probe files: in-process speed rows measure the libraries this crate links (the bundled xz is a generic C build without SIMD paths) — use the process-wall rows (`xz-cli`, `zstd-cli`, `bsc`, `kanzi`) for speed comparisons across tools; `probe deflate` groups streams by the library's encoder estimate and by correction-overhead bucket (the library reports no "recognised" flag); the D-07 video gate uses the video class's own raw-read rate from the `full` profile (median of three passes), and the store-throughput numerator must include file opens over the same files; rows that rest on a single measurement are marked.
 - Optional decision for later (affects the product too): build the bundled xz with its fast paths enabled (`CFLAGS` through `.cargo/config.toml`), so in-process xz matches upstream.
+- A trial report (not official, not committed) from the second pair's run 1 and the official probes was generated with the P0-5 branch's `lpk-bench report` on 2026-10-03; it repeats the earlier picture: G1 and G4 pass, G2 and G3 fail for the reasons in the summary above. The official report comes from the `full` runs.
 
 ### P0-6 — finish
 1. After P0-3 is on `main`: rebase `task/p0-6-licensing`, tick boxes 2 and 3 (evidence: the review verdict and the web check), and add a decision (next free number after D-22): *closed-source GUI code reaches LGPL components only through the open engine as a separate process or DLL; LGPL C sources only through a separately published crate with its own named `deny.toml` exception*.
