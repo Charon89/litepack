@@ -3,11 +3,17 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-03, about 01:50 UTC (21:50 local on the measuring machine).
+Last updated: 2026-10-03, about 04:10 UTC (00:10 local on the measuring machine).
+
+**A measurement is running on the measuring machine** (started 2026-10-03 00:00 local): the new P0-3
+acceptance pair, as one detached process that runs both runs and the comparison (about seven hours).
+Before starting anything heavy there, check `tasklist /FI "IMAGENAME eq lpk-bench.exe"`; the progress
+is in the git-ignored `target/acceptance/pair2-status.log` (its last line is `== DONE` when finished).
+Do not start a second pair while it runs.
 
 ## Summary
 - **P0-1** and **P0-2** done. The `full` corpus profile is pinned and built (PR #3 merged).
-- **P0-3** (baseline runner): code complete, reviewed and approved, CI green. A first pair of acceptance runs passed the round-trip and schema clauses and agreed within 3% on every compress total, but not on four extract totals; the cause (a bias of the run loop on classes with thousands of files) is fixed (D-21) and checked. **Next step: a new pair of acceptance runs**, planned for the night of 2026-10-02 as soon as the machine is idle.
+- **P0-3** (baseline runner): code complete, reviewed and approved, CI green. A first pair of acceptance runs passed the round-trip and schema clauses and agreed within 3% on every compress total, but not on four extract totals; the cause (a bias of the run loop on classes with thousands of files) is fixed (D-21) and checked. **The new pair of acceptance runs is in progress** (see the top of this file); its results will be `bench/results/2026-10-03-megatron` and `-megatron-2`.
 - **P0-4** (probes): **code complete** on `task/p0-4-probes` — the framework and all six probes, each reviewed to approval (D-22). What remains is the official run of every probe on `small`, on an idle machine, committed under `bench/results/`, and the PLAN ticks.
 - **P0-6** (licensing): boxes 2 and 3 written, reviewed and approved on their branch; box 1 waits for P0-4 to merge.
 - **P0-5** (report, verdict): the report generator `lpk-bench report` is implemented, reviewed and approved on `task/p0-5-report` (PR #6, stacked on #5; rules in D-23). The official report comes from the official `full` runs; the verdict (D-08) is the owner's after that. Two things the trial report on `small` already showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives, and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read.
@@ -62,6 +68,11 @@ The acceptance line reads: all installed tools complete with 100% round-trip ver
 
 ## Working notes
 - A measured benchmark run needs the machine to itself; plan other work around it.
+- A command run in the background from a Claude session is killed after two hours whatever timeout it was
+  given, and its child processes die with it (that ended a first attempt at the acceptance pair after 155 of
+  238 combinations). Launch anything longer as a detached process (on Windows: PowerShell `Start-Process`
+  on a script with a hidden window and redirected output; the git-ignored `target/acceptance/pair2.sh` is
+  the one in use) and follow it through a status file.
 - Subagent worktrees start from `main`: before dispatching, make sure `main` is an ancestor of the task branch (merge `main` in), and give the implementer the expected head hash; their sandbox refuses `git reset --hard`.
 - Implementers and reviewers run out of turns on large tasks: ask for a commit after each step, then resume them. Agents from an earlier session cannot be resumed; start a fresh one with the context it needs.
 - A subagent that reports a refused command is not to be worked around; the refusal goes to the owner.
