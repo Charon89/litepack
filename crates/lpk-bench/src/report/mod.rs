@@ -95,38 +95,65 @@ fn dir_name(dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// How an input directory is labelled in the source list, and whether it lies under
-/// `bench/results`. The label is the path relative to the repository root (the nearest ancestor
-/// holding `.git`); without one, the last two components. Separators are `/`.
-fn dir_label(dir: &Path) -> (String, bool) {
-    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let leaf_of = |p: Option<&Path>| {
-        p.and_then(Path::file_name)
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    let parent = canon.parent();
-    let under = leaf_of(parent) == "results" && leaf_of(parent.and_then(Path::parent)) == "bench";
+/// The canonical path of `path` relative to the repository root (the nearest ancestor holding
+/// `.git`), as `/`-separated components; `None` when there is no repository above it.
+fn repo_components(path: &Path) -> (PathBuf, Option<Vec<String>>) {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let rel = canon
         .ancestors()
         .skip(1)
         .find(|a| a.join(".git").exists())
-        .and_then(|root| canon.strip_prefix(root).ok().map(Path::to_path_buf))
-        .unwrap_or_else(|| {
-            let name = leaf_of(Some(&canon));
-            let up = leaf_of(parent);
-            if up.is_empty() {
-                PathBuf::from(name)
-            } else {
-                PathBuf::from(format!("{up}/{name}"))
-            }
+        .and_then(|root| canon.strip_prefix(root).ok())
+        .map(|rel| {
+            rel.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect()
         });
-    let label = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/");
-    (label, under)
+    (canon, rel)
+}
+
+/// How an input directory is labelled in the source list, and whether it lies inside
+/// `bench/results`: only when its path relative to the repository root is exactly
+/// `bench/results/<dir>`. The label is that relative path; with no repository above the
+/// directory it is the last two components and the directory counts as outside.
+fn dir_label(dir: &Path) -> (String, bool) {
+    match repo_components(dir) {
+        (_, Some(c)) => {
+            let under = c.len() == 3 && c[0] == "bench" && c[1] == "results";
+            (c.join("/"), under)
+        }
+        (canon, None) => {
+            let leaf = |p: Option<&Path>| {
+                p.and_then(Path::file_name)
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
+            let (name, up) = (leaf(Some(&canon)), leaf(canon.parent()));
+            (
+                if up.is_empty() {
+                    name
+                } else {
+                    format!("{up}/{name}")
+                },
+                false,
+            )
+        }
+    }
+}
+
+/// The label of a file inside the repository (relative to its root), or its bare file name
+/// when it lies outside any repository; the flag says whether it is inside one.
+fn file_label(file: &Path) -> (String, bool) {
+    match repo_components(file) {
+        (_, Some(c)) => (c.join("/"), true),
+        (canon, None) => (
+            canon
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            false,
+        ),
+    }
 }
 
 /// Refuse a directory the validator has any problem with, or that is not one results directory.
@@ -326,14 +353,7 @@ pub fn load(args: &ReportArgs) -> Result<Inputs> {
     let mixes_text = read_text(&args.mixes)?;
     let mixes =
         mixes::Mixes::parse(&mixes_text).with_context(|| format!("in {}", args.mixes.display()))?;
-    let label = if args.mixes.is_relative() {
-        args.mixes.to_string_lossy().replace('\\', "/")
-    } else {
-        args.mixes
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
+    let (label, in_repo) = file_label(&args.mixes);
     let mixes_src = sources.add(label);
     Ok(Inputs {
         baseline,
@@ -343,6 +363,7 @@ pub fn load(args: &ReportArgs) -> Result<Inputs> {
         mixes_text,
         sources: sources.list,
         outside,
+        mixes_outside: !in_repo,
     })
 }
 
@@ -366,7 +387,7 @@ fn run_inner(args: &ReportArgs) -> Result<()> {
     }
     std::fs::write(&out, text).with_context(|| format!("writing {}", out.display()))?;
     let model = model::Model::build(&inputs);
-    let line = model::verdict_line(&model::gates(&model, &inputs));
+    let line = model::marked_verdict(&inputs, &model::gates(&model, &inputs));
     println!("wrote {}", out.display());
     println!("{line}");
     Ok(())

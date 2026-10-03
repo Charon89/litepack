@@ -527,6 +527,7 @@ fn inputs(k: &Knobs, with_probes: bool) -> Inputs {
         mixes_text: MIXES.to_string(),
         sources,
         outside: vec![],
+        mixes_outside: false,
     }
 }
 
@@ -934,6 +935,9 @@ fn every_number_in_a_table_cell_has_a_source_bracket() {
     .expect("regex");
     let bracket = Regex::new(r"\[\d+(?:[,-]\d+)*\]$").expect("regex");
     let digit = Regex::new(r"\d").expect("regex");
+    let number = Regex::new(r"\d+(?:\.\d+)?").expect("regex");
+    let tools = Regex::new(r"(?:\b(?:7z|zstd|zpaqfranz|rar|xz|store|tsaur)/[\w-]+|7-Zip|zstd1)")
+        .expect("regex");
     let tags = Regex::new(r"\[[\d,-]+\]").expect("regex");
     // Label columns (names, rules, results) carry no measured value.
     let label = [
@@ -981,10 +985,14 @@ fn every_number_in_a_table_cell_has_a_source_bracket() {
                         let free_text = ["FAILED", "skipped:", "n/a:"]
                             .iter()
                             .any(|p| seg.starts_with(p));
+                        // Exactly one numeric token outside the brackets once tool names
+                        // (`7z/mx5`, `zstd/3`, `zstd1`, `7-Zip`) are removed.
+                        let bare = tools.replace_all(&outside, "");
+                        let numbers = number.find_iter(&bare).count();
                         let ok = if free_text {
                             bracket.is_match(seg)
                         } else {
-                            value.is_match(seg)
+                            numbers == 1 && value.is_match(seg)
                         };
                         assert!(ok, "not `value [source]`: `{seg}` (row: {line})");
                         checked += 1;
@@ -1318,7 +1326,7 @@ fn settle_zero_and_directories_outside_bench_results_are_refused_unless_allowed(
         "the verdict line is marked"
     );
     assert!(text.contains("not all of them under bench/results"));
-    assert!(!text.contains("from committed result files"));
+    assert!(!text.contains("from result files under bench/results"));
     // A baseline without the settle pause (field 0 or absent) is refused first.
     let mut run = samples::run_file(&results);
     run.settle_ms_per_1000_files = 0;
@@ -1334,7 +1342,7 @@ fn settle_zero_and_directories_outside_bench_results_are_refused_unless_allowed(
 fn a_clean_report_says_committed_and_is_not_marked() {
     let text = report_text(&inputs(&Knobs::default(), true));
     assert!(text.starts_with("# LitePack Phase 0 report"));
-    assert!(text.contains("from committed result files"));
+    assert!(text.contains("from result files under bench/results"));
     assert!(
         !text.contains("UNCLEAN"),
         "nothing is unclean in the fixture"
@@ -1357,6 +1365,66 @@ fn input_directories_are_labelled_from_the_repository_root() {
         ("bench/results/2026-10-02-box".to_string(), true)
     );
     assert_eq!(dir_label(&b), ("scratch/2026-10-02-box".to_string(), false));
+    // A nested `bench/results` below the repository root is not the repository's.
+    let n = root
+        .join("crates")
+        .join("x")
+        .join("bench")
+        .join("results")
+        .join("d");
+    std::fs::create_dir_all(&n).expect("n");
+    assert_eq!(
+        dir_label(&n),
+        ("crates/x/bench/results/d".to_string(), false)
+    );
+    // `bench/results/d` with no repository above it is outside, and labelled by its last two parts.
+    let lone = tempfile::tempdir().expect("lone");
+    let l = lone.path().join("bench").join("results").join("d");
+    std::fs::create_dir_all(&l).expect("l");
+    assert_eq!(dir_label(&l), ("results/d".to_string(), false));
+    // Files: relative to the root inside a repository, the bare name outside.
+    let f = root.join("bench").join("report-mixes.toml");
+    std::fs::write(&f, "x").expect("f");
+    assert_eq!(
+        file_label(&f),
+        ("bench/report-mixes.toml".to_string(), true)
+    );
+    let g = lone.path().join("m.toml");
+    std::fs::write(&g, "x").expect("g");
+    assert_eq!(file_label(&g), ("m.toml".to_string(), false));
+}
+
+#[test]
+fn a_mixes_file_outside_the_repository_marks_the_report_and_the_console_line() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = write_baseline(tmp.path(), &real_class_results());
+    let mixes = tmp.path().join("m.toml");
+    std::fs::write(
+        &mixes,
+        "[[mix]]\nname = \"only\"\nweights = { audio = 100 }\n",
+    )
+    .expect("mixes");
+    let args = ReportArgs {
+        results: dir,
+        probes: vec![],
+        mixes,
+        out: None,
+        allow_unclean: true,
+    };
+    let i = load(&args).expect("loads");
+    assert!(i.mixes_outside);
+    assert!(unclean_reasons(&i)
+        .iter()
+        .any(|r| r.contains("mixes file is outside")));
+    // The console line is the report's verdict line, mark included.
+    let m = Model::build(&i);
+    let g = gates(&m, &i);
+    let line = marked_verdict(&i, &g);
+    assert!(line.starts_with("UNCLEAN INPUTS: "), "{line}");
+    assert!(report_text(&i).contains(&format!("**{line}**")));
+    // A fixture inside the repository is not marked.
+    let clean = inputs(&Knobs::default(), true);
+    assert!(!marked_verdict(&clean, &gates(&Model::build(&clean), &clean)).contains("UNCLEAN"));
 }
 
 #[test]

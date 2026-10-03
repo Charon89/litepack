@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use super::model::{
-    blend, class_bytes, est_kind, gates, settings, unclean_reasons, verdict_line, Baseline,
+    blend, class_bytes, est_kind, gates, marked_verdict, settings, unclean_reasons, Baseline,
     EstKind, Inputs, Model, RowState, RULED, RULES,
 };
 use super::traced::{brackets, Traced};
@@ -97,7 +97,7 @@ pub fn render(inputs: &Inputs) -> String {
     let mut s = String::new();
     let unclean = unclean_reasons(inputs);
     let origin = if inputs.outside.is_empty() {
-        "committed result files"
+        "result files under bench/results"
     } else {
         "result files, not all of them under bench/results"
     };
@@ -568,12 +568,7 @@ fn gate_section(s: &mut String, m: &Model, inputs: &Inputs) {
         .map(|r| vec![r.title.clone(), r.numbers.join("<br>"), r.verdict.word()])
         .collect();
     s.push_str(&md_table(&["gate", "numbers", "result"], &rows));
-    let unclean = !unclean_reasons(inputs).is_empty();
-    s.push_str(&format!(
-        "\n**{}{}**\n\n",
-        if unclean { "UNCLEAN INPUTS: " } else { "" },
-        verdict_line(&g)
-    ));
+    s.push_str(&format!("\n**{}**\n\n", marked_verdict(inputs, &g)));
     for r in &g {
         for n in &r.notes {
             s.push_str(&format!("- {n}\n"));

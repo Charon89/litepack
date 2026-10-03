@@ -105,6 +105,8 @@ pub struct Inputs {
     pub sources: Vec<String>,
     /// Labels of input directories that are not under `bench/results`.
     pub outside: Vec<String>,
+    /// The mixes file lies outside the repository.
+    pub mixes_outside: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1350,6 +1352,9 @@ pub fn unclean_reasons(i: &Inputs) -> Vec<String> {
     for d in &i.outside {
         v.push(format!("`{d}` is not under bench/results"));
     }
+    if i.mixes_outside {
+        v.push("the mixes file is outside the repository".to_string());
+    }
     if b.host.dirty_build_allowed || !crate::run::host::build_is_clean(&b.host.git_commit) {
         v.push("the baseline was run from a dirty or unknown build".to_string());
     }
@@ -1362,6 +1367,20 @@ pub fn unclean_reasons(i: &Inputs) -> Vec<String> {
         }
     }
     v
+}
+
+/// The proposal line with the "UNCLEAN INPUTS: " mark when any input is unclean; the report and
+/// the command's console output print this same text.
+pub fn marked_verdict(i: &Inputs, gates: &[GateRow]) -> String {
+    format!(
+        "{}{}",
+        if unclean_reasons(i).is_empty() {
+            ""
+        } else {
+            "UNCLEAN INPUTS: "
+        },
+        verdict_line(gates)
+    )
 }
 
 /// The proposal line printed under the gate table.
