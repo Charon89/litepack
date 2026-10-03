@@ -22,7 +22,7 @@ allow = [
 ]
 confidence-threshold = 0.9
 # LGPL exceptions are allowed only by crate name (we are open source, so relinking is satisfied).
-# `cabac` is required by preflate-rs (D-01, docs/LICENSING.md); no other crate may be listed here.
+# `cabac` is required by preflate-rs (D-22, docs/LICENSING.md); any further crate needs its own recorded decision (D-25, D-26).
 exceptions = [
   { crate = "cabac", allow = ["LGPL-3.0-or-later"] },
 ]
