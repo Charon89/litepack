@@ -302,6 +302,7 @@ fn options(encoder: ZstdTestEncoder) -> WriterOptions {
         records: Vec::new(),
         recovery: Default::default(),
         seal: None,
+        dedup: false,
     }
 }
 

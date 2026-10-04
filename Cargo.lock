@@ -1453,6 +1453,7 @@ dependencies = [
  "clap",
  "hkdf",
  "liblzma",
+ "lpk-check",
  "lzma-rs",
  "proptest",
  "rand",

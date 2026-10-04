@@ -168,6 +168,14 @@ pub struct WriterOptions {
     /// come from the RNG the writer is given ([`Writer::new_with_rng`]), the
     /// thread's RNG otherwise.
     pub seal: Option<SealOptions>,
+    /// Deduplicate chunks within the archive: a chunk whose BLAKE3 and length
+    /// equal those of a chunk this writer already stored is referenced by its
+    /// index instead of being written (`false` by default: every chunk is
+    /// written, as in the earlier revisions of this writer; an append always
+    /// reuses the old table's chunks, whatever this says). The writer keeps
+    /// one hash-map entry per stored chunk (32 bytes of key, 8 of value, plus
+    /// the map's own overhead) for the life of the archive.
+    pub dedup: bool,
 }
 
 /// The output with the recovery spool beside it: while the spool is set, every
@@ -199,6 +207,7 @@ impl std::fmt::Debug for WriterOptions {
             .field("records", &self.records.len())
             .field("chunk_size", &self.chunk_size)
             .field("block_size", &self.block_size)
+            .field("dedup", &self.dedup)
             .field("archive_id", &self.archive_id)
             .finish()
     }
@@ -214,6 +223,7 @@ impl Default for WriterOptions {
             records: Vec::new(),
             recovery: RecoveryOptions::default(),
             seal: None,
+            dedup: false,
         }
     }
 }
@@ -239,6 +249,11 @@ pub struct WriterSummary {
     /// Chunks an append found in the old chunk table and referenced instead of
     /// writing (always 0 outside [`Writer::append`]).
     pub reused_chunks: u64,
+    /// Chunk references this write made to chunks it had already stored
+    /// (`WriterOptions::dedup`; 0 without it). Not counted in `reused_chunks`.
+    pub deduped_chunks: u64,
+    /// The bytes of those chunks.
+    pub deduped_bytes: u64,
 }
 
 /// A file entry being written in parts (see [`Writer::begin_entry`]).
@@ -297,6 +312,11 @@ pub struct Writer<W: Write> {
     deleted: BTreeSet<String>,
     /// Chunks of this write an append took from the old table.
     reused: u64,
+    /// Hash to index of the chunks this write stored (only with `options.dedup`).
+    own: HashMap<[u8; 32], u64>,
+    /// Chunk references to chunks this write already stored, and their bytes.
+    deduped_chunks: u64,
+    deduped_bytes: u64,
     /// Window and BWT block maxima of the earlier generations' graphs and of
     /// this write's blocks so far.
     graph_res: GraphResources,
@@ -539,6 +559,9 @@ impl<W: Write> Writer<W> {
             base: None,
             deleted: BTreeSet::new(),
             reused: 0,
+            own: HashMap::new(),
+            deduped_chunks: 0,
+            deduped_bytes: 0,
             graph_res: GraphResources::default(),
             salt,
             generations: vec![GenerationInfo {
@@ -775,6 +798,9 @@ impl<W: Write> Writer<W> {
             base: Some(base),
             deleted: BTreeSet::new(),
             reused: 0,
+            own: HashMap::new(),
+            deduped_chunks: 0,
+            deduped_bytes: 0,
             graph_res: GraphResources {
                 window: index.envelope.max_window,
                 bwt_block: index.envelope.max_bwt_block,
@@ -1145,21 +1171,58 @@ impl<W: Write> Writer<W> {
         self.note(r)
     }
 
-    fn add_chunk(&mut self, data: &[u8]) -> Result<u64, FormatError> {
-        let len = data.len() as u64;
-        // An append reuses a chunk of the old table with the same hash and length.
+    /// The index of a chunk this write may reference instead of storing:
+    /// `(index, from_old_table)`. A chunk of a block whose graph names a
+    /// reconstruction primitive is skipped when `allow_recon` is false (a
+    /// record's chunks may not lie in such a block, spec section 12).
+    fn find_known(&self, hash: &[u8; 32], len: u64, allow_recon: bool) -> Option<(u64, bool)> {
+        let same_len = |i: u64| {
+            usize::try_from(i)
+                .ok()
+                .and_then(|i| self.records.get(i))
+                .is_some_and(|r| r.plain_len == len)
+        };
         if let Some(base) = &self.base {
-            let hash = *blake3::hash(data).as_bytes();
-            if let Some(&old) = base.by_hash.get(&hash) {
-                let same_len = usize::try_from(old)
-                    .ok()
-                    .and_then(|i| self.records.get(i))
-                    .is_some_and(|r| r.plain_len == len);
-                if same_len {
-                    self.reused += 1;
-                    return Ok(old);
+            if let Some(&old) = base.by_hash.get(hash) {
+                if same_len(old) {
+                    return Some((old, true));
                 }
             }
+        }
+        if self.options.dedup {
+            if let Some(&i) = self.own.get(hash) {
+                if same_len(i) && (allow_recon || !self.in_recon_block(i)) {
+                    return Some((i, false));
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether chunk `c` lies in a block this writer closed whose graph names a
+    /// reconstruction primitive.
+    fn in_recon_block(&self, c: u64) -> bool {
+        let i = self.recon_blocks.partition_point(|&(f, _)| f <= c);
+        i > 0 && c - self.recon_blocks[i - 1].0 < self.recon_blocks[i - 1].1
+    }
+
+    fn note_known(&mut self, len: u64, old_table: bool) {
+        if old_table {
+            self.reused += 1;
+        } else {
+            self.deduped_chunks += 1;
+            self.deduped_bytes += len;
+        }
+    }
+
+    fn add_chunk(&mut self, data: &[u8], allow_recon: bool) -> Result<u64, FormatError> {
+        let len = data.len() as u64;
+        let hash = *blake3::hash(data).as_bytes();
+        // An append reuses a chunk of the old table with the same hash and length;
+        // with `dedup`, so does any chunk this write stored before.
+        if let Some((i, old)) = self.find_known(&hash, len, allow_recon) {
+            self.note_known(len, old);
+            return Ok(i);
         }
         if self.pending_chunks > 0 && self.pending.len() as u64 + len > self.options.block_size {
             self.flush_block()?;
@@ -1167,11 +1230,91 @@ impl<W: Write> Writer<W> {
         let index = self.records.len() as u64;
         self.records.push(ChunkRecord {
             plain_len: len,
-            hash: *blake3::hash(data).as_bytes(),
+            hash,
         });
+        if self.options.dedup {
+            self.own.entry(hash).or_insert(index);
+        }
         self.pending.extend_from_slice(data);
         self.pending_chunks += 1;
         Ok(index)
+    }
+
+    /// Cut `plain` with the chunker into `(start, end)` ranges, checked as the
+    /// writer checks a stream's.
+    fn cut_all(&mut self, plain: &[u8]) -> Result<Vec<(usize, usize)>, FormatError> {
+        let chunk_size = self.options.chunk_size as usize;
+        self.chunker.reset();
+        let cuts = self.chunker.feed(plain, true);
+        let mut start = 0usize;
+        let mut out = Vec::with_capacity(cuts.len());
+        for cut in cuts {
+            if cut <= start || cut > plain.len() {
+                return Err(FormatError::BadChunk {
+                    reason: "cut positions",
+                });
+            }
+            if cut - start > chunk_size {
+                return Err(FormatError::BadChunk {
+                    reason: "chunk longer than chunk_size",
+                });
+            }
+            out.push((start, cut));
+            start = cut;
+        }
+        if start != plain.len() {
+            return Err(FormatError::BadChunk {
+                reason: "bytes left uncut at eof",
+            });
+        }
+        Ok(out)
+    }
+
+    /// Add the part of the open entry that starts at `offset` when every chunk
+    /// of `plain` (cut by the chunker) is already stored in this archive (needs
+    /// `WriterOptions::dedup`): the part then references them, nothing is
+    /// written, and the chunk indices are returned. Otherwise nothing happens
+    /// and `None` comes back (an empty `plain` is `None` too). Chunks in
+    /// reconstruction blocks count: the entry lists chunks without a record.
+    pub fn add_part_known(
+        &mut self,
+        offset: u64,
+        plain: &[u8],
+    ) -> Result<Option<Vec<u64>>, FormatError> {
+        self.check_alive()?;
+        let r = self.add_part_known_inner(offset, plain);
+        self.note(r)
+    }
+
+    fn add_part_known_inner(
+        &mut self,
+        offset: u64,
+        plain: &[u8],
+    ) -> Result<Option<Vec<u64>>, FormatError> {
+        if self.open.is_none() {
+            return Err(bad_options("no entry is open"));
+        }
+        if !self.options.dedup || plain.is_empty() {
+            return Ok(None);
+        }
+        let mut found = Vec::new();
+        for (a, b) in self.cut_all(plain)? {
+            let data = &plain[a..b];
+            let hash = *blake3::hash(data).as_bytes();
+            match self.find_known(&hash, data.len() as u64, true) {
+                Some((i, old)) => found.push((i, old, data.len() as u64)),
+                None => return Ok(None),
+            }
+        }
+        let mut chunks = Vec::with_capacity(found.len());
+        for (i, old, len) in found {
+            self.note_known(len, old);
+            chunks.push(i);
+        }
+        if let Some(o) = &mut self.open {
+            o.parts.push((offset, plain.len() as u64, chunks.clone()));
+        }
+        Ok(Some(chunks))
     }
 
     /// Add a regular file: its bytes are read to the end, cut into chunks and
@@ -1251,7 +1394,7 @@ impl<W: Write> Writer<W> {
             return Err(bad_options("no entry is open"));
         }
         let mut chunks = Vec::new();
-        let len = self.chunk_stream(data, &mut chunks)?;
+        let len = self.chunk_stream(data, &mut chunks, false)?;
         if let Some(o) = &mut self.open {
             o.parts.push((offset, len, chunks.clone()));
         }
@@ -1294,23 +1437,9 @@ impl<W: Write> Writer<W> {
             return Err(bad_options("encoded part length"));
         }
         self.flush_block()?;
-        let chunk_size = self.options.chunk_size as usize;
-        self.chunker.reset();
-        let cuts = self.chunker.feed(plain, true);
-        let mut start = 0usize;
-        let mut chunks = Vec::with_capacity(cuts.len());
-        for cut in cuts {
-            if cut <= start || cut > plain.len() {
-                return Err(FormatError::BadChunk {
-                    reason: "cut positions",
-                });
-            }
-            if cut - start > chunk_size {
-                return Err(FormatError::BadChunk {
-                    reason: "chunk longer than chunk_size",
-                });
-            }
-            let data = &plain[start..cut];
+        let mut chunks = Vec::new();
+        for (a, b) in self.cut_all(plain)? {
+            let data = &plain[a..b];
             chunks.push(self.records.len() as u64);
             self.records.push(ChunkRecord {
                 plain_len: data.len() as u64,
@@ -1318,14 +1447,16 @@ impl<W: Write> Writer<W> {
             });
             self.pending.extend_from_slice(data);
             self.pending_chunks += 1;
-            start = cut;
-        }
-        if start != plain.len() {
-            return Err(FormatError::BadChunk {
-                reason: "bytes left uncut at eof",
-            });
         }
         self.flush_block_with(Some(encoded))?;
+        if self.options.dedup {
+            // Later files may reference these chunks (never a record: see `find_known`).
+            for &c in &chunks {
+                if let Some(r) = usize::try_from(c).ok().and_then(|i| self.records.get(i)) {
+                    self.own.entry(r.hash).or_insert(c);
+                }
+            }
+        }
         self.extra_memory = self.extra_memory.max(memory);
         if let Some(o) = &mut self.open {
             o.parts.push((offset, plain.len() as u64, chunks.clone()));
@@ -1406,7 +1537,7 @@ impl<W: Write> Writer<W> {
         };
         self.check(&entry)?;
         let mut chunks = Vec::new();
-        entry.size = self.chunk_stream(data, &mut chunks)?;
+        entry.size = self.chunk_stream(data, &mut chunks, true)?;
         entry.chunks = chunks;
         self.push_entry(entry);
         Ok(())
@@ -1418,6 +1549,7 @@ impl<W: Write> Writer<W> {
         &mut self,
         data: &mut dyn Read,
         chunks: &mut Vec<u64>,
+        allow_recon: bool,
     ) -> Result<u64, FormatError> {
         let chunk_size = self.options.chunk_size as usize;
         let mut size = 0u64;
@@ -1444,7 +1576,7 @@ impl<W: Write> Writer<W> {
                         reason: "chunk longer than chunk_size",
                     });
                 }
-                let i = self.add_chunk(&buf[start..cut])?;
+                let i = self.add_chunk(&buf[start..cut], allow_recon)?;
                 chunks.push(i);
                 start = cut;
             }
@@ -1687,6 +1819,8 @@ impl<W: Write> Writer<W> {
             generation,
             new_chunks: self.records.len() as u64 - old_chunks,
             reused_chunks: self.reused,
+            deduped_chunks: self.deduped_chunks,
+            deduped_bytes: self.deduped_bytes,
         })
     }
 }
