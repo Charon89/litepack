@@ -789,10 +789,11 @@ A writer settles this by computing the index again with the length it just produ
 
 A file's bytes are cut into chunks of exactly the chunk size, the last one shorter; an empty file has no chunks.
 Chunks are numbered in the order they are written; this writer gives each file a run of consecutive numbers
-(files may be added in any order, so the numbers need not follow the entry order), but a reader accepts any chunk list whose indices are in
-range and whose lengths add up to the file size. The chunk table has one record per chunk (section 5). The
-rule that chooses the cut is a property of the writer, not of the format: a reader finds each chunk's length in
-the chunk table and never assumes a size, so another way of cutting changes only the chunk boundaries. A
+(files may be added in any order, so the numbers need not follow the entry order), but a reader accepts any
+chunk list whose indices are in range and whose lengths add up to the file size. The chunk table has one record
+per chunk (section 5). The rule that chooses the cut is a property of the writer, not of the format: a reader
+finds each chunk's length in the chunk table and never assumes a size, so another way of cutting changes only
+the chunk boundaries. A
 writer's chunker is fed the bytes of one file as a stream and may hold back a tail of at most one chunk; the
 chunker starts afresh for each file, so a chunk never holds bytes of two files, and no chunk is longer than the
 chunk size.
