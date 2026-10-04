@@ -1,5 +1,5 @@
 //! Block-ordered extraction (E2-19): plan, decode every needed block once (in parallel under a
-//! memory bound), write each chunk to every place that needs it, on one thread in block order.
+//! memory bound), write each chunk to every place that needs it, each file by one writer, in block order.
 //!
 //! **The plan.** The entry table is read and every entry passes the [`ExtractPolicy`] before
 //! anything is written (path, device name, symlink, then the format tool's conflicting-name
@@ -25,7 +25,7 @@
 //! with one worker the blocks are decoded on the writer's thread, exactly as a sequential
 //! extraction would.
 //!
-//! **The write path.** One thread writes, in block order. A file is created on its first chunk
+//! **The write path.** Files are dealt to `min(threads, files)` writer threads (file `i` to writer `i mod n`); each writer receives every block in index order and writes its own files' chunks, and a block's permit returns when the last writer has written it (with one thread, the writer is the decoding thread). A file is created on its first chunk
 //! (create-new, so nothing is ever replaced; set to its final length when it has more than one
 //! chunk), written at offsets, and closed with its modification time set as soon as its last
 //! chunk is written; files with no chunk are created during the plan. At most
@@ -44,7 +44,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lpk_format::{cli, Archive, Entry, EntryKind, FormatError, MemoryPriors};
@@ -133,6 +133,8 @@ pub struct ExtractSummary {
     pub workers: usize,
     /// Most decoded blocks in flight.
     pub in_flight: usize,
+    /// File writers.
+    pub writers: usize,
     /// Times a file closed by the open-file bound was opened again.
     pub reopened: u64,
 }
@@ -461,12 +463,25 @@ fn plan<R: Read + Seek>(
     })
 }
 
-/// The pool size for `archive` under `opts`: `(workers, in_flight)`.
+/// The pool for `archive` under `opts`: decode workers, decoded blocks in flight, file writers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pool {
+    /// Decode workers: `min(threads, budget / cost, needed blocks)`, at least one.
+    pub workers: usize,
+    /// Decoded blocks in flight (decoding, waiting or being written): as many as the workers.
+    pub in_flight: usize,
+    /// File writers: `min(threads, files with content)`, at least one; each file is written by
+    /// one writer, every writer in block order.
+    pub writers: usize,
+}
+
+/// The pool size for `archive` under `opts`, for `needed` blocks and `files` files with content.
 pub fn pool_size<R: Read + Seek>(
     archive: &Archive<R>,
     opts: &ExtractOptions,
     needed: usize,
-) -> (usize, usize) {
+    files: usize,
+) -> Pool {
     let env = archive.index().envelope;
     let cost = env.max_block_plain.saturating_add(env.decode_memory).max(1);
     let budget = opts.memory.unwrap_or(archive.resources().memory);
@@ -476,12 +491,16 @@ pub fn pool_size<R: Read + Seek>(
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
         .max(1);
     let workers = threads.min(by_memory).min(needed.max(1));
-    (workers, workers)
+    Pool {
+        workers,
+        in_flight: workers,
+        writers: threads.min(files.max(1)),
+    }
 }
 
 /// Extract every entry of `archive` under `dir`. `reopen` gives another reader of the same
-/// archive bytes for each decode worker beyond the first (called only when the pool has more
-/// than one worker). See the module documentation for the plan, the pool and the failure rule.
+/// archive bytes for each decode worker (called only when the pool has more than one thread).
+/// See the module documentation for the plan, the pool and the failure rule.
 pub fn extract_archive<R, F>(
     archive: &mut Archive<R>,
     reopen: F,
@@ -500,9 +519,10 @@ where
         directories,
         placements,
     } = plan(archive, dir, policy, opts.max_open_files)?;
-    let (workers, in_flight) = pool_size(archive, opts, needed.len());
+    let with_content = out.targets.iter().filter(|t| t.chunks > 0).count();
+    let pool = pool_size(archive, opts, needed.len(), with_content);
     let decoded = AtomicU64::new(0);
-    let r = if workers <= 1 {
+    let (r, mut outs) = if pool.workers <= 1 && pool.writers <= 1 {
         let mut r = Ok(());
         for &b in &needed {
             let plain = archive.decode_block_checked(b);
@@ -514,54 +534,102 @@ where
                 break;
             }
         }
-        r
+        (r, vec![out])
     } else {
-        parallel(
-            archive, &reopen, &needed, &per_block, &mut out, workers, in_flight, &decoded,
-        )
+        let forks = (0..pool.workers)
+            .map(|_| reopen().map(|reader| archive.fork(reader)))
+            .collect::<std::io::Result<Vec<_>>>();
+        match forks {
+            Ok(forks) => parallel(forks, &needed, per_block, out, pool, &decoded),
+            Err(e) => (Err(FormatError::from(e).into()), vec![out]),
+        }
     };
     if let Err(e) = r {
-        out.clean_up();
+        for o in &mut outs {
+            o.clean_up();
+        }
         return Err(e);
     }
     Ok(ExtractSummary {
-        files: out.files,
+        files: outs.iter().map(|o| o.files).sum(),
         directories,
-        bytes: out.bytes,
+        bytes: outs.iter().map(|o| o.bytes).sum(),
         blocks: archive.index().blocks.len() as u64,
         blocks_needed: needed.len() as u64,
         blocks_decoded: decoded.load(Ordering::Relaxed),
         placements,
-        workers,
-        in_flight,
-        reopened: out.reopened,
+        workers: pool.workers,
+        in_flight: pool.in_flight,
+        writers: pool.writers,
+        reopened: outs.iter().map(|o| o.reopened).sum(),
     })
 }
 
 type Decoded = (usize, Result<Vec<u8>, FormatError>);
 
-#[allow(clippy::too_many_arguments)]
-fn parallel<R, F>(
-    archive: &Archive<R>,
-    reopen: &F,
-    needed: &[usize],
-    per_block: &[Vec<Place>],
-    out: &mut Out,
-    workers: usize,
-    in_flight: usize,
-    decoded: &AtomicU64,
-) -> Result<(), CoreError>
-where
-    R: Read + Seek + Send,
-    F: Fn() -> std::io::Result<R>,
-{
-    let mut forks = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let reader = reopen().map_err(FormatError::from)?;
-        forks.push(archive.fork(reader));
+/// A decoded block on its way to the writers; its permit is returned when the last writer
+/// drops it.
+struct Held<'p> {
+    block: usize,
+    plain: Vec<u8>,
+    permits: &'p Permits,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.permits.release();
     }
+}
+
+impl Out {
+    /// Deal the targets to `n` writers: target `i` goes to writer `i % n` as its target `i / n`.
+    fn split(self, n: usize) -> Vec<Out> {
+        let mut outs: Vec<Out> = (0..n)
+            .map(|_| Out {
+                targets: Vec::new(),
+                open: HashMap::new(),
+                order: VecDeque::new(),
+                max_open: (self.max_open / n).max(1),
+                files: 0,
+                bytes: 0,
+                reopened: 0,
+            })
+            .collect();
+        if let Some(first) = outs.first_mut() {
+            first.files = self.files;
+            first.bytes = self.bytes;
+        }
+        for (i, t) in self.targets.into_iter().enumerate() {
+            outs[i % n].targets.push(t);
+        }
+        outs
+    }
+}
+
+const WRITER_STOPPED: &str = "a file writer stopped";
+
+fn parallel<R: Read + Seek + Send>(
+    forks: Vec<Archive<R>>,
+    needed: &[usize],
+    per_block: Vec<Vec<Place>>,
+    out: Out,
+    pool: Pool,
+    decoded: &AtomicU64,
+) -> (Result<(), CoreError>, Vec<Out>) {
+    let n = pool.writers.max(1);
+    // The placements of writer w in block b, with the writer's own target numbers.
+    let mut split: Vec<Vec<Vec<Place>>> = vec![vec![Vec::new(); per_block.len()]; n];
+    for (b, places) in per_block.into_iter().enumerate() {
+        for p in places {
+            split[p.file % n][b].push(Place {
+                file: p.file / n,
+                ..p
+            });
+        }
+    }
+    let outs = out.split(n);
     let permits = Permits {
-        free: Mutex::new(in_flight),
+        free: Mutex::new(pool.in_flight),
         cv: Condvar::new(),
         cancelled: AtomicBool::new(false),
     };
@@ -588,19 +656,61 @@ where
             });
         }
         drop(tx);
-        let r = write_in_order(&rx, needed, per_block, out, &permits);
-        permits.cancel();
+        let mut senders = Vec::with_capacity(n);
+        let mut handles = Vec::with_capacity(n);
+        for (mut o, places) in outs.into_iter().zip(&split) {
+            let (wtx, wrx) = mpsc::channel::<Arc<Held<'_>>>();
+            senders.push(wtx);
+            let permits = &permits;
+            handles.push(s.spawn(move || {
+                let mut r = Ok(());
+                for held in wrx {
+                    r = o.write_block(held.block, &places[held.block], &held.plain);
+                    if r.is_err() {
+                        permits.cancel();
+                        break;
+                    }
+                }
+                (o, r)
+            }));
+        }
+        let r = dispatch_in_order(&rx, needed, &split, &senders, &permits);
+        if r.is_err() {
+            permits.cancel();
+        }
+        drop(senders);
         drop(rx);
-        r
+        let mut outs = Vec::with_capacity(n);
+        let mut writer_err = None;
+        for h in handles {
+            match h.join() {
+                Ok((o, wr)) => {
+                    outs.push(o);
+                    if let (Err(e), None) = (wr, &writer_err) {
+                        writer_err = Some(e);
+                    }
+                }
+                Err(_) => {
+                    writer_err.get_or_insert(CoreError::Extract(WRITER_STOPPED));
+                }
+            }
+        }
+        // A writer's own error explains an internal stop of the dispatcher; a decode error
+        // (or any other) stands.
+        let r = match (r, writer_err) {
+            (Err(CoreError::Extract(_)) | Ok(()), Some(w)) => Err(w),
+            (r, _) => r,
+        };
+        (r, outs)
     })
 }
 
-fn write_in_order(
+fn dispatch_in_order<'p>(
     rx: &mpsc::Receiver<Decoded>,
     needed: &[usize],
-    per_block: &[Vec<Place>],
-    out: &mut Out,
-    permits: &Permits,
+    split: &[Vec<Vec<Place>>],
+    senders: &[mpsc::Sender<Arc<Held<'p>>>],
+    permits: &'p Permits,
 ) -> Result<(), CoreError> {
     let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     for (want, &b) in needed.iter().enumerate() {
@@ -613,9 +723,16 @@ fn write_in_order(
                 .map_err(|_| CoreError::Extract("a decode worker stopped"))?;
             pending.insert(k, r?);
         };
-        out.write_block(b, &per_block[b], &plain)?;
-        drop(plain);
-        permits.release();
+        let held = Arc::new(Held {
+            block: b,
+            plain,
+            permits,
+        });
+        for (w, tx) in senders.iter().enumerate() {
+            if !split[w][b].is_empty() && tx.send(Arc::clone(&held)).is_err() {
+                return Err(CoreError::Extract(WRITER_STOPPED));
+            }
+        }
     }
     Ok(())
 }

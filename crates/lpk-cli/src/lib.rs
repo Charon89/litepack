@@ -274,7 +274,7 @@ fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             if x.verbose {
                 let _ = writeln!(
                     err,
-                    "{}: {} files, {} directories, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight; {} blocks decoded, {} files reopened",
+                    "{}: {} files, {} directories, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} files reopened",
                     x.archive.display(),
                     s.files,
                     s.directories,
@@ -284,6 +284,7 @@ fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                     s.blocks,
                     s.workers,
                     s.in_flight,
+                    s.writers,
                     s.blocks_decoded,
                     s.reopened
                 );
