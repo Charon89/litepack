@@ -103,6 +103,38 @@ pub enum FormatError {
         /// Which payload.
         what: &'static str,
     },
+    /// A chunk's bytes do not match its table hash (or length).
+    #[error("chunk {chunk} does not match its hash")]
+    ChunkMismatch {
+        /// Index of the chunk in the chunk table.
+        chunk: u64,
+    },
+    /// A chunk index is not in the chunk table.
+    #[error("chunk index {chunk} out of range (table has {len})")]
+    ChunkIndexOutOfRange {
+        /// The offending index.
+        chunk: u64,
+        /// Number of records in the table.
+        len: u64,
+    },
+    /// A file's length differs from the sum of its chunk lengths.
+    #[error("file size {expected} does not match chunk total {found}")]
+    FileSizeMismatch {
+        /// The file length claimed.
+        expected: u64,
+        /// The sum of the chunks' `plain_len`.
+        found: u64,
+    },
+    /// A requested byte range extends past the end of the file.
+    #[error("range {offset}+{len} is outside a file of {file_len} bytes")]
+    RangeOutOfFile {
+        /// First byte of the range.
+        offset: u64,
+        /// Length of the range.
+        len: u64,
+        /// Length of the file.
+        file_len: u64,
+    },
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

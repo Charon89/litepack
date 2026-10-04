@@ -26,6 +26,7 @@ fn spec_tables_match_code() {
         lpk_format::entry_byte_table(),
         lpk_format::entry_kind_table(),
         lpk_format::entry_flag_table(),
+        lpk_format::chunk_record_table(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }

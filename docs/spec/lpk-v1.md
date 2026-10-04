@@ -119,7 +119,7 @@ One entry:
 | chunks | chunk_count varints | file only | indices into the archive chunk list (defined with the chunk frames) |
 
 A directory or a symlink has no chunk list. Whether a file's `size` agrees with its chunk list is defined
-with the chunk frames (task E1-3) and is not checked by the entry table.
+in section 5 and is not checked by the entry table.
 
 Entry kinds:
 
@@ -169,3 +169,63 @@ replace or escape the target directory; that rule belongs to the extraction task
 
 Reading: a reader first reads only `entry_count` (and applies the bound above); entries are then decoded one after another as a
 stream, so a table of any size can be walked without holding all entries in memory.
+
+## 5. Chunks and the Merkle tree
+
+The archive's content is a list of chunks, numbered from 0 in table order. An entry's `chunks` field (section 4)
+holds indices into this list. The chunk table has one record per chunk and is embedded by the index frame
+(task E1-4); this section defines its encoding, the Merkle tree over it, and how files and byte ranges are
+verified against it. Where the chunk data itself is stored is defined with the chunk frames.
+
+The chunk table is a varint `chunk_count` followed by `chunk_count` records. One record:
+
+| Field | Size | Meaning |
+|---|---|---|
+| plain_len | varint | length in bytes of the chunk's original data; 0 is allowed |
+| hash | 32 | BLAKE3-256 of the chunk's original data (the bytes extraction returns, not the stored form) |
+
+The smallest record is 33 bytes (a one-byte `plain_len` and the hash). A `chunk_count` larger than the bytes
+after it divided by 33 (rounded down) is `Truncated` for "chunk table", raised when the count is read. Records
+are decoded as a stream; a payload that ends inside a record is `Truncated` for "chunk table", and bytes left
+after the last record are `TrailingBytes` for "chunk table". A `plain_len` that is not a canonical varint is
+`NonCanonicalVarint`.
+
+Merkle tree: the leaves are the chunk hashes in table order, and the leaf value is the chunk hash itself, with
+no further hashing. An internal node over a left child and a right child is the 32-byte BLAKE3 key derivation
+`derive_key(context, left || right)` with the context string `LitePack lpk v1 Merkle node` and the 64-byte
+concatenation as key material. For `n` leaves: if `n` is 1 the root is the leaf; otherwise let `k` be the
+largest power of two strictly less than `n`, and the root is the node over the root of the first `k` leaves
+and the root of the remaining `n - k` leaves. There is no padding, and an unpaired node is never duplicated.
+The root of a table with no records is `derive_key(context, [])` with the context string
+`LitePack lpk v1 Merkle empty` and empty key material. Roots are 32 bytes.
+
+Shape for five leaves (`N(a, b)` is the node over `a` and `b`; `L0` to `L4` are the leaf values):
+
+```
+root = N( N( N(L0, L1), N(L2, L3) ), L4 )
+```
+
+Inclusion proof: the proof of leaf `i` is the list of sibling values met on the way from the leaf to the root,
+nearest the leaf first, and a level where the node has no sibling contributes nothing. In the five-leaf tree
+the proof of leaf 2 is `[L3, N(L0, L1), L4]` and the proof of leaf 4 is `[N( N(L0, L1), N(L2, L3) )]`. A proof
+has at most `ceil(log2 n)` entries. A verifier is given the root, the index `i`, the leaf count `n`, the leaf
+value and the proof; it recomputes the root by the split rule above (at each split the last proof entry is the
+sibling of the half that holds `i`, and a proof that is too short or too long fails) and accepts when the result
+equals the root. An index not below `n` never verifies. The proof of a leaf in a left half holds the right half
+only as a hash, so a proof alone does not pin `n` for every leaf; the verifier takes `n` from the chunk table.
+
+File verification: a file is the chunks named by its entry, in order. Verification checks, in this order, that
+every index is below the table length (otherwise `ChunkIndexOutOfRange` with the index and the table length),
+that the sum of the chunks' `plain_len` equals the file length (otherwise `FileSizeMismatch` with the expected
+and the found length), and then, for each chunk in order, that the original bytes have length `plain_len` and
+hash to the table's hash (otherwise `ChunkMismatch` with the chunk index). A chunk may appear in several files
+and several times in one file.
+
+Range verification: verifying bytes `[offset, offset + len)` of a file first checks that the range lies inside
+the file (otherwise `RangeOutOfFile` with the offset, the length and the file length; a sum that overflows is
+also out of the file), then the index and size checks above, and then reads and checks only the chunks that
+overlap the range, found from the running sum of `plain_len`. A chunk of length 0 holds no byte and is not
+read, and an empty range reads no chunk. A chunk that is read is checked whole.
+
+Errors of this section: `ChunkMismatch`, `ChunkIndexOutOfRange`, `FileSizeMismatch`, `RangeOutOfFile`, plus
+`Truncated`, `TrailingBytes` and `NonCanonicalVarint` for the table.

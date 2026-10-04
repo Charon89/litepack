@@ -4,12 +4,22 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod chunk;
 pub mod entry;
 pub mod error;
 pub mod frame;
 pub mod header;
 pub mod magic;
+pub mod merkle;
 pub mod varint;
+
+pub use chunk::{
+    chunk_record_table, verify_file, verify_range, ChunkIter, ChunkRecord, ChunkSource, ChunkTable,
+    ChunkTableWriter, MIN_CHUNK_RECORD_LEN,
+};
+pub use merkle::{
+    merkle_root, verify_proof, MerkleTree, MERKLE_EMPTY_CONTEXT, MERKLE_NODE_CONTEXT,
+};
 
 pub use entry::{
     entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,
