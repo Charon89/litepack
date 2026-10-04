@@ -255,7 +255,14 @@ fn nonces_are_unique_across_many_frames() {
     assert_eq!(seqs.len(), locs.len());
     let mut nonces = std::collections::HashSet::new();
     for (kind, l) in &locs {
-        assert!(nonces.insert(derive_nonce(&key, &[0x6B; 16], *kind, l.sequence, 24)));
+        assert!(nonces.insert(derive_nonce(
+            &key,
+            &[0x6B; 16],
+            *kind,
+            l.sequence,
+            &a.trailer().salt,
+            24
+        )));
     }
     assert_eq!(nonces.len(), locs.len());
     assert!(a.verify().unwrap().chunks_checked);
@@ -661,7 +668,12 @@ fn a_recorded_sequence_that_differs_from_the_real_one_fails_the_tag() {
     let plain = index.encode().unwrap();
     let sealer = lpk_format::Sealer::new(Suite::AesGcm, key, [0x6B; 16]);
     let sealed = sealer
-        .seal(&plain, FrameKind::Index as u16, lpk_format::INDEX_SEQUENCE)
+        .seal(
+            &plain,
+            FrameKind::Index as u16,
+            lpk_format::INDEX_SEQUENCE,
+            &a.trailer().salt,
+        )
         .unwrap();
     let t = a.trailer();
     let idx_loc = FrameLocation {

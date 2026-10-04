@@ -5,9 +5,9 @@ use crate::frame::{Frame, FrameFlags, FrameKind};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Length of the trailer payload in bytes.
-pub const TRAILER_PAYLOAD_LEN: usize = 80;
+pub const TRAILER_PAYLOAD_LEN: usize = 96;
 /// Length of the whole trailer frame: kind (2), flags (2), payload length
-/// varint (1), payload (80) and hash (32).
+/// varint (1), payload (96) and hash (32).
 pub const TRAILER_FRAME_LEN: u64 = 2 + 2 + 1 + TRAILER_PAYLOAD_LEN as u64 + 32;
 
 const FRAME_LEN: usize = TRAILER_FRAME_LEN as usize;
@@ -30,6 +30,9 @@ pub struct Trailer {
     /// Absolute offset of the previous generation's trailer frame; 0 for
     /// generation 0 (spec section 15).
     pub previous_trailer_offset: u64,
+    /// Random per-generation salt mixed into the nonces of the generation's
+    /// sealed frames (spec section 14); zeros in an archive that is not encrypted.
+    pub salt: [u8; 16],
 }
 
 impl Trailer {
@@ -41,6 +44,7 @@ impl Trailer {
         p.extend_from_slice(&self.generation.to_le_bytes());
         p.extend_from_slice(&self.archive_id);
         p.extend_from_slice(&self.previous_trailer_offset.to_le_bytes());
+        p.extend_from_slice(&self.salt);
         p
     }
 
@@ -78,6 +82,8 @@ impl Trailer {
         index_hash.copy_from_slice(&payload[16..48]);
         let mut archive_id = [0u8; 16];
         archive_id.copy_from_slice(&payload[56..72]);
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&payload[80..96]);
         Ok(Trailer {
             index_offset: u(0),
             index_len: u(8),
@@ -85,6 +91,7 @@ impl Trailer {
             generation: u(48),
             archive_id,
             previous_trailer_offset: u(72),
+            salt,
         })
     }
 
@@ -118,7 +125,8 @@ pub fn trailer_layout_table() -> String {
          | 16 | 32 | index_hash | BLAKE3-256 of the index frame's payload |\n\
          | 48 | 8 | generation | 0 for the first write, one more for every append (u64) |\n\
          | 56 | 16 | archive_id | must equal the header's archive_id |\n\
-         | 72 | 8 | previous_trailer_offset | absolute offset of the previous generation's trailer frame; 0 for generation 0 (u64) |\n",
+         | 72 | 8 | previous_trailer_offset | absolute offset of the previous generation's trailer frame; 0 for generation 0 (u64) |\n\
+         | 80 | 16 | salt | random per-generation salt for the sealed frames' nonces; zeros when not encrypted |\n",
     )
 }
 
@@ -135,6 +143,7 @@ mod tests {
             generation: 3,
             archive_id: [9; 16],
             previous_trailer_offset: 777,
+            salt: [5; 16],
         }
     }
 
@@ -146,8 +155,8 @@ mod tests {
 
     #[test]
     fn constants_and_round_trip() {
-        assert_eq!(TRAILER_FRAME_LEN, 117);
-        assert_eq!(TRAILER_PAYLOAD_LEN, 80);
+        assert_eq!(TRAILER_FRAME_LEN, 133);
+        assert_eq!(TRAILER_PAYLOAD_LEN, 96);
         let t = sample();
         let b = bytes(&t);
         assert_eq!(b.len() as u64, TRAILER_FRAME_LEN);
@@ -214,9 +223,9 @@ mod tests {
     fn short_input() {
         let b = bytes(&sample());
         let short = &b[1..];
-        assert_eq!(short.len(), 116);
+        assert_eq!(short.len(), 132);
         assert!(matches!(
-            Trailer::read_tail(&mut Cursor::new(short.to_vec()), 116),
+            Trailer::read_tail(&mut Cursor::new(short.to_vec()), 132),
             Err(FormatError::NoTrailer)
         ));
         assert!(matches!(
@@ -230,6 +239,7 @@ mod tests {
         let t = trailer_layout_table();
         assert!(t.contains("| 56 | 16 | archive_id |"));
         assert!(t.contains("| 72 | 8 | previous_trailer_offset |"));
-        assert_eq!(8 + 8 + 32 + 8 + 16 + 8, TRAILER_PAYLOAD_LEN);
+        assert!(t.contains("| 80 | 16 | salt |"));
+        assert_eq!(8 + 8 + 32 + 8 + 16 + 8 + 16, TRAILER_PAYLOAD_LEN);
     }
 }

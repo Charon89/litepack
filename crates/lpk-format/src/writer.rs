@@ -12,7 +12,7 @@ use crate::error::FormatError;
 use crate::frame::{Frame, FrameFlags, FrameKind};
 use crate::graph::{BlockHeader, Graph, Step, MAX_STEPS};
 use crate::header::{Header, HeaderFlags};
-use crate::index::{BlockLocation, FrameLocation, Index};
+use crate::index::{BlockLocation, FrameLocation, GenerationInfo, Index};
 use crate::merkle::merkle_root;
 use crate::primitive::{GraphResources, PrimitiveId};
 use crate::record::{Record, RecordsWriter};
@@ -282,6 +282,12 @@ pub struct Writer<W: Write> {
     reused: u64,
     /// Window and BWT block maxima of the earlier generations' graphs.
     old_graph: GraphResources,
+    /// This generation's nonce salt (zeros when the archive is not encrypted).
+    salt: [u8; 16],
+    /// The generation table of the new index: the earlier generations, then this one.
+    generations: Vec<GenerationInfo>,
+    /// Called before the trailer is written, to put the data on disk (section 15).
+    sync: Option<Box<dyn FnMut() -> std::io::Result<()>>>,
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -410,6 +416,12 @@ impl<W: Write> Writer<W> {
             sealer = Some(Sealer::new(seal.suite, key, options.archive_id));
         }
         let listable = options.seal.as_ref().is_some_and(|s| s.listable);
+        // The salt matters only to sealed frames; an archive that is not
+        // encrypted keeps zeros, so its bytes depend on nothing random.
+        let mut salt = [0u8; 16];
+        if sealer.is_some() {
+            rng.fill_bytes(&mut salt);
+        }
         Header::new(flags, options.archive_id).write(&mut out)?;
         // The covered range starts right after the header.
         let out = Tee { inner: out, spool };
@@ -437,6 +449,14 @@ impl<W: Write> Writer<W> {
             deleted: BTreeSet::new(),
             reused: 0,
             old_graph: GraphResources::default(),
+            salt,
+            generations: vec![GenerationInfo {
+                generation: 0,
+                start_offset: Header::LEN as u64,
+                first_sequence: 0,
+                salt,
+            }],
+            sync: None,
         };
         if let Some(slot) = slot {
             // The key slot is the first frame, in clear.
@@ -490,17 +510,88 @@ impl<W: Write> Writer<W> {
 
     /// [`Writer::append`] with another chunker.
     pub fn append_with_chunker<R: Read + Seek>(
+        existing: Archive<R>,
+        out: W,
+        options: WriterOptions,
+        credentials: Option<&Credentials>,
+        chunker: Box<dyn Chunker>,
+    ) -> Result<Self, FormatError> {
+        Self::append_with_chunker_and_rng(
+            existing,
+            out,
+            options,
+            credentials,
+            chunker,
+            &mut rand::rng(),
+        )
+    }
+
+    /// [`Writer::append_with_chunker`] drawing the new generation's salt from
+    /// `rng` (use an operating system RNG for real archives; a seeded one makes
+    /// the output reproducible).
+    pub fn append_with_chunker_and_rng<R: Read + Seek>(
         mut existing: Archive<R>,
         out: W,
         mut options: WriterOptions,
         credentials: Option<&Credentials>,
         chunker: Box<dyn Chunker>,
+        rng: &mut dyn RngCore,
     ) -> Result<Self, FormatError> {
         if existing.is_keyless() || (existing.is_encrypted() && credentials.is_none()) {
             return Err(FormatError::AppendNeedsCredentials);
         }
+        // The key comes from the key slot and the credentials given here, not
+        // from the opened archive: a wrong password is `WrongKey`.
+        let sealer = match (existing.key_slot(), credentials) {
+            (Some(slot), Some(c)) => {
+                let needed = u64::from(slot.argon2.m_kib) * 1024;
+                if needed > existing.resources().memory {
+                    return Err(FormatError::Refused(crate::envelope::Refusal {
+                        field: "argon2_m",
+                        needed,
+                        allowed: existing.resources().memory,
+                    }));
+                }
+                let header = existing.header();
+                let key = slot.unwrap(&header.archive_id, header.flags.bits(), c)?;
+                Some(Sealer::new(slot.suite, key, header.archive_id))
+            }
+            _ => None,
+        };
+        let new_generation =
+            existing
+                .trailer()
+                .generation
+                .checked_add(1)
+                .ok_or(FormatError::BadTrailer {
+                    reason: "generation",
+                })?;
         options.archive_id = existing.header().archive_id;
         options.seal = None;
+        // Old blocks name records by position: a new records frame must keep
+        // every old record as it was.
+        if !options.records.is_empty() {
+            if let Some(old) = existing.records()? {
+                let table = old.table()?;
+                for (i, r) in (0u64..).zip(table.iter()) {
+                    let r = r?;
+                    let same =
+                        options
+                            .records
+                            .get(i as usize)
+                            .ok_or(FormatError::RecordOutOfRange {
+                                record: i,
+                                count: options.records.len() as u64,
+                            })?;
+                    if same.kind != r.kind || same.encode() != r.encode() {
+                        return Err(FormatError::BadRecord {
+                            record: i,
+                            reason: "changed by an append",
+                        });
+                    }
+                }
+            }
+        }
         let record_count = if options.records.is_empty() {
             existing.record_count()?
         } else {
@@ -540,6 +631,17 @@ impl<W: Write> Writer<W> {
         let seq = last
             .checked_add(3)
             .ok_or(FormatError::BadOptions { reason: "sequence" })?;
+        let mut salt = [0u8; 16];
+        if sealer.is_some() {
+            rng.fill_bytes(&mut salt);
+        }
+        let mut generations = index.generations.clone();
+        generations.push(GenerationInfo {
+            generation: new_generation,
+            start_offset: end,
+            first_sequence: seq,
+            salt,
+        });
         let base = Base {
             generation,
             trailer_offset,
@@ -563,7 +665,7 @@ impl<W: Write> Writer<W> {
             bad_chunk: None,
             recovery_locs: index.recovery.clone(),
             cover_start: end,
-            sealer: existing.sealer().cloned(),
+            sealer,
             seq,
             last_hash: [0; 32],
             listable: existing.is_listable(),
@@ -574,9 +676,21 @@ impl<W: Write> Writer<W> {
                 window: index.envelope.max_window,
                 bwt_block: index.envelope.max_bwt_block,
             },
+            salt,
+            generations,
+            sync: None,
             options,
         };
         Ok(w)
+    }
+
+    /// Call `sync` before the trailer is written, after everything else of the
+    /// generation has been flushed: it must put the data on disk (for a file,
+    /// `sync_data`). The trailer commits the generation (spec section 15), so
+    /// a writer that can sync should; one over a plain `Write` cannot.
+    pub fn with_sync(mut self, sync: Box<dyn FnMut() -> std::io::Result<()>>) -> Self {
+        self.sync = Some(sync);
+        self
     }
 
     /// Bytes sealing adds to a payload (0 for a plain archive).
@@ -691,7 +805,10 @@ impl<W: Write> Writer<W> {
         // The sequence is read after `make_room`, which may write a recovery frame.
         let sequence = self.seq;
         let (flags, payload) = match (&self.sealer, sealed) {
-            (Some(s), true) => (FrameFlags::SEALED, s.seal(&payload, kind as u16, sequence)?),
+            (Some(s), true) => (
+                FrameFlags::SEALED,
+                s.seal(&payload, kind as u16, sequence, &self.salt)?,
+            ),
             _ => (FrameFlags::EMPTY, payload),
         };
         self.write_wire_frame(kind, flags, payload)
@@ -776,7 +893,8 @@ impl<W: Write> Writer<W> {
         let at = if let Some(sealer) = &self.sealer {
             let mut payload = head;
             payload.extend_from_slice(&encoded);
-            let sealed = sealer.seal(&payload, FrameKind::ChunkData as u16, self.seq)?;
+            let sealed =
+                sealer.seal(&payload, FrameKind::ChunkData as u16, self.seq, &self.salt)?;
             self.write_wire_frame(FrameKind::ChunkData, FrameFlags::SEALED, sealed)?
         } else {
             let at = FrameLocation {
@@ -1062,6 +1180,7 @@ impl<W: Write> Writer<W> {
             entry_table_hash,
             records,
             recovery,
+            generations: std::mem::take(&mut self.generations),
         };
         // The envelope names the index's own payload length, which depends on
         // the envelope's varints. Starting from an upper bound the length can
@@ -1091,7 +1210,10 @@ impl<W: Write> Writer<W> {
         };
         // The index is sealed under a fixed sequence: the trailer cannot name
         // its position. The trailer's hash covers the payload as stored.
-        let generation = self.base.as_ref().map_or(0, |b| b.generation + 1);
+        let generation = self
+            .base
+            .as_ref()
+            .map_or(0, |b| b.generation.saturating_add(1));
         let (flags, payload) = match &self.sealer {
             Some(s) => (
                 FrameFlags::SEALED,
@@ -1099,21 +1221,28 @@ impl<W: Write> Writer<W> {
                     &payload,
                     FrameKind::Index as u16,
                     index_sequence(generation),
+                    &self.salt,
                 )?,
             ),
             None => (FrameFlags::EMPTY, payload),
         };
         let index_hash = *blake3::hash(&payload).as_bytes();
         let at = self.write_wire_frame(FrameKind::Index, flags, payload)?;
-        Trailer {
+        let trailer = Trailer {
             index_offset: at.offset,
             index_len: at.len,
             index_hash,
             generation,
             archive_id: self.options.archive_id,
             previous_trailer_offset: self.base.as_ref().map_or(0, |b| b.trailer_offset),
+            salt: self.salt,
+        };
+        // The trailer commits the generation: its data must be on disk first.
+        self.out.flush()?;
+        if let Some(sync) = &mut self.sync {
+            sync()?;
         }
-        .write(&mut self.out)?;
+        trailer.write(&mut self.out)?;
         self.pos += TRAILER_FRAME_LEN;
         self.out.flush()?;
         let old_chunks = self.base.as_ref().map_or(0, |b| b.chunks);
@@ -1145,4 +1274,27 @@ fn frames_max(index: &Index) -> u64 {
         0,
     )
     .max_frame_payload
+}
+
+impl Writer<std::fs::File> {
+    /// Append a generation to the archive at `path`: the file is opened for
+    /// reading to read the old archive, then for appending (every write goes
+    /// to its end), and the data is synced before the trailer is written.
+    /// [`Writer::append`] with a bare writer trusts the caller that `out` is
+    /// positioned at the end of the archive; this does not.
+    pub fn append_file(
+        path: &std::path::Path,
+        options: WriterOptions,
+        credentials: Option<&Credentials>,
+    ) -> Result<Self, FormatError> {
+        let existing = Archive::open_with(
+            std::fs::File::open(path)?,
+            &crate::envelope::Resources::default(),
+            credentials,
+        )?;
+        let out = std::fs::OpenOptions::new().append(true).open(path)?;
+        let sync_handle = out.try_clone()?;
+        Ok(Self::append(existing, out, options, credentials)?
+            .with_sync(Box::new(move || sync_handle.sync_data())))
+    }
 }

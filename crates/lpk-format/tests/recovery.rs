@@ -605,6 +605,12 @@ mod hand_built {
                 sequence: 0,
             }),
             recovery: locs.clone(),
+            generations: vec![lpk_format::GenerationInfo {
+                generation: 0,
+                start_offset: 32,
+                first_sequence: 0,
+                salt: [0; 16],
+            }],
         };
         let mut guess = 0u64;
         let payload = loop {
@@ -636,6 +642,7 @@ mod hand_built {
             generation: 0,
             archive_id: id,
             previous_trailer_offset: 0,
+            salt: [0; 16],
         }
         .write(&mut bytes)
         .unwrap();

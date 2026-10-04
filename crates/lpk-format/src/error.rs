@@ -173,6 +173,15 @@ pub enum FormatError {
     /// The last bytes of the archive are not a trailer frame.
     #[error("no trailer at the end of the archive")]
     NoTrailer,
+    /// The index's generation table breaks its rules (section 15).
+    #[error("bad generation table")]
+    BadGenerationTable,
+    /// A trailer field is out of range.
+    #[error("bad trailer ({reason})")]
+    BadTrailer {
+        /// The field at fault.
+        reason: &'static str,
+    },
     /// Rollback named a generation the archive does not have.
     #[error("no generation {requested} in the archive (latest is {latest})")]
     NoSuchGeneration {

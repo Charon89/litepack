@@ -289,3 +289,48 @@ fn the_writer_refuses_invalid_records_and_mismatched_kinds() {
         }
     ));
 }
+
+#[test]
+fn an_append_may_not_change_or_drop_old_records() {
+    let old = vec![utf16(1), deflate()];
+    let bytes = write_archive(options(old.clone()), &[("a", pattern(1, 5000))]);
+    let try_append = |records: Vec<Record>| {
+        let a = open(bytes.clone());
+        let mut tail = Vec::new();
+        Writer::append(a, &mut tail, options(records), None).map(|_| ())
+    };
+    assert!(matches!(
+        try_append(vec![utf16(2), deflate()]),
+        Err(FormatError::BadRecord { record: 0, .. })
+    ));
+    assert!(matches!(
+        try_append(vec![utf16(1)]),
+        Err(FormatError::RecordOutOfRange {
+            record: 1,
+            count: 1
+        })
+    ));
+    // Extending the list keeps the old records in place.
+    let a = open(bytes.clone());
+    let mut tail = Vec::new();
+    let mut w = Writer::append(
+        a,
+        &mut tail,
+        options(vec![utf16(1), deflate(), utf16(3)]),
+        None,
+    )
+    .unwrap();
+    w.add_file(
+        "b",
+        lpk_format::EntryFlags::EMPTY,
+        0,
+        &mut &pattern(2, 5000)[..],
+    )
+    .unwrap();
+    w.finish().unwrap();
+    let mut all = bytes.clone();
+    all.extend(tail);
+    let mut a = open(all);
+    assert_eq!(a.records().unwrap().unwrap().len(), 3);
+    a.verify().unwrap();
+}

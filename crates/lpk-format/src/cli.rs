@@ -359,7 +359,10 @@ fn info(
         writeln!(out, "keyfile required: {}", slot.keyfile_required)?;
     }
     writeln!(out, "generation: {}", t.generation)?;
-    writeln!(out, "chain length: {}", a.history()?.len())?;
+    match a.history() {
+        Ok(h) => writeln!(out, "chain length: {}", h.len())?,
+        Err(e) => writeln!(out, "chain: error: {e}")?,
+    }
     writeln!(out, "length: {archive_len} bytes")?;
     if let Some(n) = entries {
         writeln!(out, "entries: {n}")?;

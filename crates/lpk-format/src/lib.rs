@@ -36,7 +36,7 @@ pub use chunk::{
     chunk_record_table, verify_file, verify_range, ChunkIndex, ChunkIter, ChunkLookup, ChunkPlace,
     ChunkRecord, ChunkSource, ChunkTable, ChunkTableWriter, MIN_CHUNK_RECORD_LEN,
 };
-pub use index::{index_layout_table, BlockLocation, FrameLocation, Index};
+pub use index::{index_layout_table, BlockLocation, FrameLocation, GenerationInfo, Index};
 pub use merkle::{
     merkle_root, verify_proof, MerkleTree, MERKLE_EMPTY_CONTEXT, MERKLE_NODE_CONTEXT,
 };

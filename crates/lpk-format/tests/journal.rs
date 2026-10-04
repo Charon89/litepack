@@ -6,12 +6,12 @@
 mod common;
 
 use common::journal::*;
-use common::sealed::{seal_options, SeedRng};
+use common::sealed::seal_options;
 use common::{pattern, write_archive};
 use lpk_format::cli::run;
 use lpk_format::{
-    derive_nonce, index_sequence, repair, rollback, Archive, ArchiveKey, Credentials, EntryFlags,
-    FormatError, RecoveryOptions, Resources, Suite, Trailer, Writer, TRAILER_FRAME_LEN,
+    index_sequence, repair, rollback, Archive, Credentials, EntryFlags, FormatError,
+    RecoveryOptions, Resources, Suite, Trailer, Writer, TRAILER_FRAME_LEN,
 };
 use std::collections::HashSet;
 use std::io::{Cursor, Write};
@@ -359,13 +359,16 @@ fn encrypted_append_needs_credentials_and_keeps_nonces_unique() {
     .unwrap();
     assert!(a.verify().unwrap().chunks_checked);
     assert_eq!(a.history().unwrap().len(), 3);
-    // The two indexes are sealed under different sequences, so their nonces differ.
-    let key = ArchiveKey::generate(&mut SeedRng(1));
-    let id = [0x4A; 16];
-    let n0 = derive_nonce(&key, &id, 5, index_sequence(0), 12);
-    let n1 = derive_nonce(&key, &id, 5, index_sequence(1), 12);
-    let n2 = derive_nonce(&key, &id, 5, index_sequence(2), 12);
-    assert!(n0 != n1 && n1 != n2 && n0 != n2);
+    // The three indexes are sealed under different sequences and salts, so the
+    // nonce bytes stored at the start of each index frame differ.
+    let nl = Suite::AesGcm.nonce_len();
+    let nonces: Vec<Vec<u8>> = a
+        .history()
+        .unwrap()
+        .iter()
+        .map(|g| stored_nonce(&snaps[2], g.index_offset, nl))
+        .collect();
+    assert!(nonces[0] != nonces[1] && nonces[1] != nonces[2] && nonces[0] != nonces[2]);
     assert_eq!(index_sequence(0), u64::MAX);
     // Every sealed frame has its own (kind, sequence): the sequences the index
     // lists are unique and ascend across the generations.
@@ -594,10 +597,243 @@ fn the_tool_rolls_back_and_reports_missing_generations() {
 }
 
 #[test]
-fn trailer_frame_len_is_117_and_the_old_one_is_not_accepted() {
-    assert_eq!(TRAILER_FRAME_LEN, 117);
+fn trailer_frame_len_is_133_and_a_short_tail_is_not_accepted() {
+    assert_eq!(TRAILER_FRAME_LEN, 133);
     let (snaps, _) = plain();
     // A 109-byte trailer-shaped tail (the old layout) is not a trailer.
     let cut = &snaps[0][..snaps[0].len() - 8];
     assert!(Archive::open(Cursor::new(cut.to_vec()), &Resources::default()).is_err());
+}
+
+/// The nonce stored at the start of the payload of the frame at `offset`.
+fn stored_nonce(bytes: &[u8], offset: u64, len: usize) -> Vec<u8> {
+    let mut r = &bytes[offset as usize + 4..];
+    let plen = lpk_format::varint::read(&mut r).unwrap();
+    assert!(plen as usize > len);
+    r[..len].to_vec()
+}
+
+fn open_keyed(bytes: &[u8], c: &Credentials) -> Archive<Cursor<Vec<u8>>> {
+    Archive::open_with(Cursor::new(bytes.to_vec()), &Resources::default(), Some(c)).unwrap()
+}
+
+#[test]
+fn nonces_do_not_repeat_after_a_rollback_and_a_different_append() {
+    let c = creds();
+    let (snaps, _) = build_journal(&|| sealed_opts(false), Some(&c));
+    let old = open_keyed(&snaps[2], &c);
+    let old_idx = old.trailer().index_offset;
+    let old_block = *old.index().blocks.last().unwrap();
+    // Roll back to generation 1 and append different content for generation 2.
+    let (again, _) = append_gen(&snaps[1], sealed_opts(false), Some(&c), |w| {
+        w.add_file("d/e", EntryFlags::EMPTY, 1, &mut &pattern(77, 2_000)[..])
+            .unwrap();
+        w.add_file("f.txt", EntryFlags::EMPTY, 1, &mut &pattern(78, 6_000)[..])
+            .unwrap();
+    });
+    let new = open_keyed(&again, &c);
+    let new_block = *new.index().blocks.last().unwrap();
+    assert_eq!(new.generation(), old.generation());
+    // Same position, same sequence: the stored nonces still differ.
+    assert_eq!(new_block.sequence, old_block.sequence);
+    assert_eq!(new_block.frame_offset, old_block.frame_offset);
+    let nl = Suite::AesGcm.nonce_len();
+    assert!(
+        stored_nonce(&snaps[2], old_block.frame_offset, nl)
+            != stored_nonce(&again, new_block.frame_offset, nl)
+    );
+    assert!(
+        stored_nonce(&snaps[2], old_idx, nl)
+            != stored_nonce(&again, new.trailer().index_offset, nl)
+    );
+    assert!(old.trailer().salt != new.trailer().salt);
+    // The re-appended archive reads fine, new content included.
+    let got = extract_all(&again, Some(&c));
+    assert!(got
+        .iter()
+        .any(|(p, d)| p == "f.txt" && d == &pattern(78, 6_000)));
+    open_keyed(&again, &c).verify().unwrap();
+}
+
+#[test]
+fn a_wrong_password_cannot_append() {
+    let c = creds();
+    let (snaps, _) = build_journal(&|| sealed_opts(false), Some(&c));
+    let a = open_keyed(&snaps[2], &c);
+    let mut tail = Vec::new();
+    let wrong = Credentials::password(b"not the password".to_vec());
+    assert!(matches!(
+        Writer::append(a, &mut tail, options(0), Some(&wrong)),
+        Err(FormatError::WrongKey)
+    ));
+    assert!(tail.is_empty());
+}
+
+fn resign(bytes: &mut [u8], at: u64, t: Trailer) {
+    let mut v = Vec::new();
+    t.write(&mut v).unwrap();
+    bytes[at as usize..at as usize + v.len()].copy_from_slice(&v);
+}
+
+#[test]
+fn previous_trailer_offset_must_point_at_a_trailer_before_the_index() {
+    let (snaps, _) = plain();
+    let a = open(&snaps[2]);
+    let t = *a.trailer();
+    let at = (snaps[2].len() as u64) - TRAILER_FRAME_LEN;
+    // At or after the index of the same generation.
+    for bad in [t.index_offset, t.index_offset + 1, at] {
+        let mut forged = snaps[2].clone();
+        resign(
+            &mut forged,
+            at,
+            Trailer {
+                previous_trailer_offset: bad,
+                ..t
+            },
+        );
+        assert!(matches!(
+            open(&forged).history(),
+            Err(FormatError::BadFrameLocation { what: "trailer" })
+        ));
+    }
+    // Inside a frame: not a trailer.
+    let mut forged = snaps[2].clone();
+    resign(
+        &mut forged,
+        at,
+        Trailer {
+            previous_trailer_offset: t.previous_trailer_offset + 7,
+            ..t
+        },
+    );
+    assert!(open(&forged).history().is_err());
+}
+
+#[test]
+fn an_absurd_generation_is_refused_at_open() {
+    let (snaps, _) = plain();
+    let t = *open(&snaps[0]).trailer();
+    let at = (snaps[0].len() as u64) - TRAILER_FRAME_LEN;
+    let mut forged = snaps[0].clone();
+    resign(
+        &mut forged,
+        at,
+        Trailer {
+            generation: u64::MAX,
+            ..t
+        },
+    );
+    assert!(matches!(
+        Archive::open(Cursor::new(forged), &Resources::default()),
+        Err(FormatError::BadTrailer {
+            reason: "generation"
+        })
+    ));
+}
+
+#[test]
+fn info_reports_a_damaged_old_trailer_instead_of_failing() {
+    let (snaps, _) = plain();
+    let h = open(&snaps[2]).history().unwrap();
+    let mut dmg = snaps[2].clone();
+    dmg[h[1].trailer_offset as usize + 20] ^= 1;
+    let f = temp_file(&dmg);
+    let (code, out, _) = cli(&["info", f.path().to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("generation: 2\n") && out.contains("chain: error"),
+        "{out}"
+    );
+}
+
+#[test]
+fn append_file_appends_in_place_and_syncs() {
+    let (snaps, _) = plain();
+    let f = temp_file(&snaps[1]);
+    let mut w = Writer::append_file(f.path(), options(0), None).unwrap();
+    w.add_file(
+        "d/e",
+        EntryFlags::EMPTY,
+        1_000,
+        &mut &pattern(14, 2_000)[..],
+    )
+    .unwrap();
+    w.add_file(
+        "f.txt",
+        EntryFlags::EMPTY,
+        1_000,
+        &mut &pattern(1, 6_000)[..],
+    )
+    .unwrap();
+    let s = w.finish().unwrap();
+    assert_eq!(s.generation, 2);
+    let bytes = read(&f);
+    assert!(bytes == snaps[2], "same bytes as the in-memory append");
+}
+
+mod model {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
+
+    const NAMES: [&str; 5] = ["a", "b", "c", "d/x", "e"];
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+
+        #[test]
+        fn three_generations_match_a_model(
+            first in proptest::collection::vec((0u64..40, 1usize..9_000), 5),
+            ops in proptest::collection::vec(
+                proptest::collection::vec((0u8..3, 0u64..40, 1usize..9_000), 5), 2),
+        ) {
+            let mut model: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            let mut g0 = Vec::new();
+            let mut w = Writer::new(&mut g0, options(0)).unwrap();
+            for (n, (seed, len)) in NAMES.iter().zip(&first) {
+                let d = pattern(*seed, *len);
+                w.add_file(n, EntryFlags::EMPTY, 0, &mut &d[..]).unwrap();
+                model.insert((*n).to_string(), d);
+            }
+            w.finish().unwrap();
+            let mut snaps = vec![g0.clone()];
+            let mut models = vec![model.clone()];
+            let mut cur = g0;
+            for gen_ops in &ops {
+                let (next, _) = append_gen(&cur, options(0), None, |w| {
+                    for (n, (op, seed, len)) in NAMES.iter().zip(gen_ops) {
+                        match op {
+                            1 => {
+                                let d = pattern(*seed, *len);
+                                w.add_file(n, EntryFlags::EMPTY, 0, &mut &d[..]).unwrap();
+                                model.insert((*n).to_string(), d);
+                            }
+                            2 => {
+                                w.delete_path(n).unwrap();
+                                model.remove(*n);
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                cur = next;
+                snaps.push(cur.clone());
+                models.push(model.clone());
+            }
+            for (snap, m) in snaps.iter().zip(&models) {
+                let got = extract_all(snap, None);
+                let want: Vec<_> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                prop_assert!(got == want);
+                open(snap).verify().unwrap();
+            }
+            // Rolling the last archive back reproduces each earlier one.
+            let f = temp_file(&cur);
+            let mut file = std::fs::OpenOptions::new().read(true).write(true).open(f.path()).unwrap();
+            for g in [1u64, 0] {
+                rollback(&mut file, g).unwrap();
+                prop_assert!(read(&f) == snaps[g as usize]);
+            }
+        }
+    }
 }

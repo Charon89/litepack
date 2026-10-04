@@ -9,7 +9,7 @@ use crate::envelope::{Envelope, Refusal, Resources};
 use crate::error::FormatError;
 use crate::frame::{Frame, FrameFlags, FrameKind, ReadFrame, ReadLimits};
 use crate::header::{Header, HeaderFlags};
-use crate::index::{FrameLocation, Index};
+use crate::index::{FrameLocation, GenerationInfo, Index};
 use crate::merkle::merkle_root;
 use crate::priors::PriorStore;
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
@@ -219,6 +219,7 @@ fn unseal(
     listable: bool,
     frame: Frame,
     sequence: u64,
+    salt: &[u8; 16],
 ) -> Result<Frame, FormatError> {
     check_sealing(encrypted, listable, &frame)?;
     if !frame.flags.contains(FrameFlags::SEALED) {
@@ -229,6 +230,7 @@ fn unseal(
         &frame.payload,
         frame.kind as u16,
         sequence,
+        salt,
         frame.payload.len() as u64,
     )?;
     Ok(Frame {
@@ -282,12 +284,17 @@ fn read_key_slot<R: Read + Seek>(reader: &mut R) -> Result<(KeySlot, u64), Forma
 /// archive with several generations has several entry tables and trailers: the
 /// last entry table is the current one, the walk runs to the last trailer, and
 /// the recovery frames of every generation are returned.
+/// The entry table's location, the recovery frames and the generation starts.
+type EnvelopeWalk = (Option<FrameLocation>, Vec<FrameLocation>, Vec<u64>);
+
 fn walk_envelopes<R: Read + Seek>(
     reader: &mut R,
     start: u64,
     file_len: u64,
-) -> Result<(Option<FrameLocation>, Vec<FrameLocation>), FormatError> {
+) -> Result<EnvelopeWalk, FormatError> {
     let mut pos = start;
+    // Where each generation starts: after the header, then after each trailer.
+    let mut starts = vec![Header::LEN as u64];
     let mut sequence = 1u64;
     let mut entry = None;
     let mut recovery = Vec::new();
@@ -324,7 +331,8 @@ fn walk_envelopes<R: Read + Seek>(
             }),
             Some(FrameKind::KeySlot) => return Err(FormatError::UnexpectedKeySlot),
             // The last trailer ends the file; an earlier one ends a generation.
-            Some(FrameKind::Trailer) if end == file_len => return Ok((entry, recovery)),
+            Some(FrameKind::Trailer) if end == file_len => return Ok((entry, recovery, starts)),
+            Some(FrameKind::Trailer) => starts.push(end),
             _ => {}
         }
         pos = end;
@@ -421,8 +429,14 @@ impl<R: Read + Seek> Archive<R> {
         if trailer.archive_id != header.archive_id {
             return Err(FormatError::ArchiveIdMismatch);
         }
+        // Every generation holds at least a trailer frame.
+        if trailer.generation > len / TRAILER_FRAME_LEN {
+            return Err(FormatError::BadTrailer {
+                reason: "generation",
+            });
+        }
         if keyless {
-            let (entry_table, recovery) = walk_envelopes(&mut reader, after_slot, len)?;
+            let (entry_table, recovery, starts) = walk_envelopes(&mut reader, after_slot, len)?;
             // A listable archive's clear entry table must be there; a sealed one
             // cannot be read without the key and its location is not needed.
             let entry_table = match entry_table {
@@ -438,6 +452,17 @@ impl<R: Read + Seek> Archive<R> {
                     sequence: 0,
                 },
             };
+            // Only the offsets are known without the key: they are what the
+            // recovery scan needs.
+            let generations = (0u64..)
+                .zip(&starts)
+                .map(|(generation, &start_offset)| GenerationInfo {
+                    generation,
+                    start_offset,
+                    first_sequence: 0,
+                    salt: trailer.salt,
+                })
+                .collect();
             let index = Index {
                 chunk_table: ChunkTableWriter::encode(&[]).into(),
                 merkle_root: merkle_root(&[]),
@@ -455,6 +480,7 @@ impl<R: Read + Seek> Archive<R> {
                 entry_table_hash: [0; 32],
                 records: None,
                 recovery,
+                generations,
             };
             let chunks = index.chunk_index()?;
             return Ok(Archive {
@@ -492,9 +518,22 @@ impl<R: Read + Seek> Archive<R> {
             listable,
             raw,
             index_sequence(trailer.generation),
+            &trailer.salt,
         )?;
-        let (index, chunks) =
-            Index::parse_with_chunks_in(&frame.payload, trailer.index_offset, trailer.generation)?;
+        let (index, chunks) = Index::parse_with_chunks_in(
+            &frame.payload,
+            trailer.index_offset,
+            trailer.generation,
+            trailer.previous_trailer_offset,
+        )?;
+        let table_ok = index.generations.len() as u64 == trailer.generation + 1
+            && index
+                .generations
+                .last()
+                .is_some_and(|g| g.generation == trailer.generation && g.salt == trailer.salt);
+        if !table_ok {
+            return Err(FormatError::BadGenerationTable);
+        }
         index
             .envelope
             .check(resources)
@@ -600,9 +639,11 @@ impl<R: Read + Seek> Archive<R> {
         walk_chain(&mut self.reader, self.header.archive_id, self.trailer, at)
     }
 
-    /// The archive's sealer (none for a plain or keyless archive).
-    pub(crate) fn sealer(&self) -> Option<&Sealer> {
-        self.sealer.as_ref()
+    /// The salt of the generation that wrote the frame with this `sequence`.
+    pub(crate) fn salt_for(&self, sequence: u64) -> [u8; 16] {
+        let g = &self.index.generations;
+        let n = g.partition_point(|x| x.first_sequence <= sequence);
+        n.checked_sub(1).map_or(self.trailer.salt, |i| g[i].salt)
     }
 
     /// The index.
@@ -668,6 +709,7 @@ impl<R: Read + Seek> Archive<R> {
             self.is_listable(),
             raw,
             at.sequence,
+            &self.salt_for(at.sequence),
         )?;
         Ok(frame.payload)
     }
@@ -688,6 +730,7 @@ impl<R: Read + Seek> Archive<R> {
             self.is_listable(),
             raw,
             at.sequence,
+            &self.salt_for(at.sequence),
         )
     }
 
@@ -816,15 +859,17 @@ pub fn generation_rules_table() -> String {
     String::from(
         "| Rule | Value |\n|---|---|\n\
          | generation number | 0 for the first write; an append writes the previous number plus one |\n\
-         | trailer length | 117 bytes (payload 80), the same for every generation |\n\
+         | trailer length | 133 bytes (payload 96), the same for every generation |\n\
          | previous_trailer_offset | offset of the previous generation's trailer frame; 0 in generation 0 |\n\
-         | index | complete: every chunk, block, recovery frame and prior of every generation |\n\
+         | generation salt | 16 random bytes per generation (zeros when not encrypted), in the trailer and in the index's generation table |\n\
+         | index | complete: every chunk, block, recovery frame and prior of every generation, and the generation table |\n\
          | entry table | complete: the entries of the new generation, in sorted order |\n\
-         | frame sequence | frames are numbered by position in the file; a new generation continues after the previous trailer |\n\
+         | frame sequence | the position of the frame in the file, counting every frame; a new generation continues after the previous trailer |\n\
          | index sequence | 2^64 - 1 - generation |\n\
+         | nonce | derived from the key, the archive id, kind, sequence and the salt of the generation that wrote the frame |\n\
          | deduplication | a new chunk with the BLAKE3 and length of a chunk of the old table is referenced, not written |\n\
          | recovery | a generation's recovery frames cover only its own data frames |\n\
-         | commit | the append is committed when the last byte of the new trailer is written |\n\
+         | commit | the append is committed when the last byte of the new trailer is written, after the data is synced |\n\
          | rollback | truncate the file to the end of an earlier generation's trailer |\n",
     )
 }
@@ -850,7 +895,9 @@ pub fn rollback(file: &mut std::fs::File, generation: u64) -> Result<Generation,
             | FormatError::Truncated { .. },
         ) => {
             let mut r = &mut *file;
-            let d = Archive::<&mut std::fs::File>::walk(&mut r, &ReadLimits::default(), None);
+            // No frame is longer than the file.
+            let limits = ReadLimits { max_payload: len };
+            let d = Archive::<&mut std::fs::File>::walk(&mut r, &limits, None);
             if d.last_trailer_end < TRAILER_FRAME_LEN {
                 return Err(d.error.unwrap_or(FormatError::NoTrailer));
             }
@@ -1016,6 +1063,12 @@ mod tests {
             entry_table_hash: entry_hash,
             records: None,
             recovery: vec![],
+            generations: vec![crate::index::GenerationInfo {
+                generation: 0,
+                start_offset: 32,
+                first_sequence: 0,
+                salt: [0; 16],
+            }],
         };
         let payload = index.encode().unwrap();
         let index_hash = *blake3::hash(&payload).as_bytes();
@@ -1029,6 +1082,7 @@ mod tests {
             generation: 0,
             archive_id: ID,
             previous_trailer_offset: 0,
+            salt: [0; 16],
         };
         trailer.write(&mut bytes).unwrap();
         Built {

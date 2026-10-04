@@ -278,6 +278,11 @@ The payload, in this order:
 | recovery_offset | varint | per recovery frame: absolute offset of the frame |
 | recovery_len | varint | per recovery frame: whole encoded length of that frame |
 | recovery_sequence | varint | per recovery frame: position of that frame among the archive's frames |
+| generation_count | varint | number of generations (section 15); at most the bytes left after it divided by 19 |
+| generation | varint | per generation: its number; the entries count 0, 1, 2, ... |
+| start_offset | varint | per generation: absolute offset of its first frame; strictly ascending |
+| first_sequence | varint | per generation: sequence of that first frame; strictly ascending |
+| salt | 16 | per generation: the salt of its sealed frames' nonces (zeros when not encrypted) |
 
 The chunk table is not length-prefixed: a reader walks its declared records (under the count bound of
 section 5) and continues after the last one. The six envelope varints follow the Merkle root; an input
@@ -314,7 +319,7 @@ of the chunks before it in that block.
 
 ### The trailer frame (kind 6)
 
-The trailer is written with empty frame flags and has a fixed 80-byte payload:
+The trailer is written with empty frame flags and has a fixed 96-byte payload:
 
 | Offset | Size | Field | Meaning |
 |---|---|---|---|
@@ -324,9 +329,10 @@ The trailer is written with empty frame flags and has a fixed 80-byte payload:
 | 48 | 8 | generation | 0 for the first write, one more for every append (u64) |
 | 56 | 16 | archive_id | must equal the header's archive_id |
 | 72 | 8 | previous_trailer_offset | absolute offset of the previous generation's trailer frame; 0 for generation 0 (u64) |
+| 80 | 16 | salt | random per-generation salt for the sealed frames' nonces; zeros when not encrypted |
 
-The whole trailer frame is `kind` (2) + `flags` (2) + `payload_len` varint (1 byte, the value 80) + payload
-(80) + hash (32) = 117 bytes, and it is the last thing in the archive. The index must lie at or after the
+The whole trailer frame is `kind` (2) + `flags` (2) + `payload_len` varint (1 byte, the value 96) + payload
+(96) + hash (32) = 133 bytes, and it is the last thing in the archive. The index must lie at or after the
 end of the header and end no later than the start of the trailer, otherwise `BadFrameLocation` (`index`).
 An archive that has been appended to (section 15) holds the trailers of its earlier generations as ordinary frames
 inside the body; `previous_trailer_offset` chains them, and the reader opens the last one.
@@ -337,11 +343,12 @@ Every read of a recorded frame is bounded by the recorded length: nothing past `
 frame that is cut by that bound, or whose own encoded size differs from the recorded length, is
 `BadFrameLocation` naming the frame (`index`, `entry table` or `records`). The kind is checked first.
 
-1. If the input is shorter than the header plus the trailer frame (149 bytes), go to the diagnosis below.
+1. If the input is shorter than the header plus the trailer frame (165 bytes), go to the diagnosis below.
 2. Read the 32-byte header (errors of section 2 apply).
-3. Read the last 117 bytes. They must be a frame of kind 6, empty flags, payload length 80, with a valid hash;
+3. Read the last 133 bytes. They must be a frame of kind 6, empty flags, payload length 96, with a valid hash;
    if they are not, go to the diagnosis below. A trailer whose `archive_id` differs from the header's is
-   `ArchiveIdMismatch`.
+   `ArchiveIdMismatch`. A trailer whose `generation` exceeds the file length divided by 133 cannot be true (each
+   generation holds at least a trailer frame) and is `BadTrailer` (`reason` `generation`).
 4. Read the frame at `index_offset`. Its kind must be 5 (otherwise `WrongFrameKind` with the expected and the
    found kind), its hash must verify (otherwise `HashMismatch`), its encoded length must equal `index_len`
    (otherwise `BadFrameLocation`), and the BLAKE3 of its payload must equal the trailer's `index_hash`
@@ -366,7 +373,7 @@ like any other cut. Only when the first thing after a trailer is not a readable 
 broken) is the error `TrailingBytes` with `what` set to `archive`. The walk also reports how many frames verified and
 the offset just after the last good frame, so a repair tool knows where the readable part ends. Two edge
 cases: if the walk ends on a trailer frame that is not of the fixed shape (flags not empty, or a payload that is
-not 80 bytes) with nothing after it, the error is `NoTrailer`; and a header that is shorter than 32 bytes or
+not 96 bytes) with nothing after it, the error is `NoTrailer`; and a header that is shorter than 32 bytes or
 invalid ends the walk at once with the header's own error (section 2), not `Truncated` with `what` `trailer`.
 
 Errors of this section: `MerkleRootMismatch`, `IndexHashMismatch`, `ArchiveIdMismatch`,
@@ -948,11 +955,12 @@ whose `group_shards` is larger, in which case the shards after the real ones are
 written, and the reader pads in the same way.
 
 A reader checks the tiling: the index lists the recovery frames in ascending order and, in generation 0, the last
-ends where the index starts (`BadFrameLocation`, `what` `recovery`; a later generation written without recovery lists
-earlier frames only, so there the last frame ends before the index), and each frame's range ends where the frame
-itself starts and starts where the previous frame ends (`BadRecovery`, `reason` `coverage`). The one exception is the
-first frame of a later generation (section 15): its range starts right after an earlier generation's trailer (a valid
-trailer frame ends at `cover_offset`), because the old index and trailer are not covered.
+ends where the index starts, or, when the latest generation wrote no recovery frame, ends at or before the previous
+trailer's offset (`BadFrameLocation`, `what` `recovery`), and each frame's range ends where the frame itself starts
+and starts where the previous frame ends (`BadRecovery`, `reason` `coverage`). The one exception is the first frame
+of a later generation (section 15): its range starts at that generation's `start_offset` from the index's generation
+table, which the trailer's index hash authenticates, because the old index and trailer are not covered. No byte of
+an uncovered old trailer is read to decide this.
 
 ### Geometry and bounds
 
@@ -1084,13 +1092,17 @@ says yes is `UnsealedFrame`. A frame of unknown kind is skipped as in section 3 
 The writer draws a random 32-byte archive key `K`. Every sealed frame is encrypted with `K` directly. Nonces are
 derived, never random:
 
-`nonce = HKDF-SHA256(ikm = K, salt = archive_id, info = "LitePack lpk v1 nonce" || kind (u16 LE) || sequence (u64 LE))`,
-cut to the nonce length of the suite (the first 12 or 24 bytes of the output).
+`nonce = HKDF-SHA256(ikm = K, salt = archive_id, info = "LitePack lpk v1 nonce" || kind (u16 LE) || sequence (u64 LE) || salt (16))`,
+cut to the nonce length of the suite (the first 12 or 24 bytes of the output). `salt` is the salt of the generation
+that wrote the frame (section 15): a random value drawn for each generation, so that a generation written again after
+a rollback never reuses a nonce of the generation it replaced. A reader finds the generation of a frame from its
+sequence and the index's generation table (`first_sequence` ranges); the index itself uses the salt of the trailer it
+was read with. An archive that is not encrypted has zero salts.
 
 `sequence` is the position of the frame among the frames of the archive, counting every frame (sealed or not, the key
 slot included) from 0 for the first frame after the header. The index frame is the exception (and the sequence below is reserved for it): the trailer cannot
-name its position, so the index is sealed under the constant sequence 2^64 - 1, which no counted frame reaches. A key seals exactly one index: a later generation of the archive (section 6) must not seal its index under this sequence again with the same key, which would reuse a nonce; it uses its own, `2^64 - 1 - generation`. Each
-(kind, sequence) pair is unique in an archive, so no nonce is used twice under `K`; a random nonce could repeat across
+name its position, so the index is sealed under the constant sequence 2^64 - 1, which no counted frame reaches. The index of generation `g` is sealed under `2^64 - 1 - g` (section 15), so no two generations of one archive seal an index under the same sequence. Each
+(kind, sequence, generation salt) triple is unique, so no nonce is used twice under `K`; a random nonce could repeat across
 the very large number of frames an archive may hold, and a repeat under GCM or Poly1305 breaks both secrecy and
 authenticity. The sealed payload still carries the nonce; a reader recomputes it and rejects a payload whose stored nonce
 differs.
@@ -1172,24 +1184,27 @@ is zpaq's: append-only updates with deduplication against what is already stored
 | Rule | Value |
 |---|---|
 | generation number | 0 for the first write; an append writes the previous number plus one |
-| trailer length | 117 bytes (payload 80), the same for every generation |
+| trailer length | 133 bytes (payload 96), the same for every generation |
 | previous_trailer_offset | offset of the previous generation's trailer frame; 0 in generation 0 |
-| index | complete: every chunk, block, recovery frame and prior of every generation |
+| generation salt | 16 random bytes per generation (zeros when not encrypted), in the trailer and in the index's generation table |
+| index | complete: every chunk, block, recovery frame and prior of every generation, and the generation table |
 | entry table | complete: the entries of the new generation, in sorted order |
-| frame sequence | frames are numbered by position in the file; a new generation continues after the previous trailer |
+| frame sequence | the position of the frame in the file, counting every frame; a new generation continues after the previous trailer |
 | index sequence | 2^64 - 1 - generation |
+| nonce | derived from the key, the archive id, kind, sequence and the salt of the generation that wrote the frame |
 | deduplication | a new chunk with the BLAKE3 and length of a chunk of the old table is referenced, not written |
 | recovery | a generation's recovery frames cover only its own data frames |
-| commit | the append is committed when the last byte of the new trailer is written |
+| commit | the append is committed when the last byte of the new trailer is written, after the data is synced |
 | rollback | truncate the file to the end of an earlier generation's trailer |
 
 ### Layout of an append
 
 After the trailer of generation `g` the writer appends, in this order: the new `ChunkData` frames (with their
 recovery frames when recovery is on); the `EntryTable` frame; a `Records` frame when the append brings its own; the
-last recovery frame; the `Index` frame; the `Trailer` frame with `generation = g + 1` and `previous_trailer_offset` set
-to the offset of the old trailer. The new index describes the whole archive, so a reader opens the latest generation
-exactly as it opens a one-shot archive and nothing in the open path (section 6) changes:
+last recovery frame; the `Index` frame; the `Trailer` frame with `generation = g + 1`, `previous_trailer_offset` set
+to the offset of the old trailer and a fresh `salt`. The new index describes the whole archive, so a reader opens the
+latest generation exactly as it opens a one-shot archive; the open path (section 6) only gains the generation table
+checks below:
 
 - The chunk table lists every chunk of every generation, in order: the old chunks keep their numbers, the new ones
   follow. Chunks that only deleted entries referenced stay in the table, unreferenced, so the table only grows.
@@ -1197,27 +1212,43 @@ exactly as it opens a one-shot archive and nothing in the open path (section 6) 
   only, so the blocks still partition the table.
 - The entry table is complete: the old entries that still exist, the new and the replaced ones, in sorted order. A
   replaced path has its new chunk list; a deleted path is absent.
-- The prior list and the recovery list are the unions over all generations. The recovery list of the index may end
-  before the index (section 13). The envelope is recomputed over the whole archive. The `Records` location is the old
-  frame's unless the append wrote a new `Records` frame, which then replaces it and must keep the old records at their
-  positions.
+- The prior list and the recovery list are the unions over all generations. The envelope is recomputed over the
+  whole archive. The `Records` location is the old frame's unless the append wrote a new `Records` frame, which then
+  replaces it; every old record must be in it at its old position and unchanged (the writer compares them in order:
+  `BadRecord` for a changed one, `RecordOutOfRange` for a missing one), because old blocks name records by position.
+- The generation table (after the recovery list) has one entry per generation, 0 to the latest, in order: the
+  generation number, the `start_offset` of its first frame (the end of the header for generation 0, the end of the
+  previous trailer for the others), the `first_sequence` of that frame and the generation's `salt`. Offsets and
+  sequences ascend strictly (`BadGenerationTable` otherwise). A reader that opened the archive at the trailer of
+  generation `g` requires `g + 1` entries whose last one carries `g` and the trailer's salt.
 
-### Sequence numbers and nonces
+A trailer whose `generation` is larger than the file length divided by 133 is refused (`BadTrailer`); a writer that
+would pass the largest `u64` refuses too.
 
-Frames are numbered by their position in the file (section 14), so the trailers and the indexes of earlier
-generations count: the first frame of generation `g + 1` has the number after the old trailer's. A writer finds it as
-the largest sequence the old index lists, plus 3 (the old index, the old trailer, then the new frame). The key slot
-is written once, in generation 0, and reused; appending to an encrypted archive needs the credentials to unwrap the key
-(`AppendNeedsCredentials` without them). The index of generation `g` is sealed under the sequence `2^64 - 1 - g`: the
-index cannot be numbered by position, so each generation takes the next constant down, and no nonce is used twice.
-The reader derives the sequence from the trailer's `generation`.
+### Sequence numbers, salts and nonces
+
+The sequence of a frame is its position in the file, counting every frame: the key slot is 0 in an encrypted archive,
+and the indexes and trailers of earlier generations count like any other frame. This is the rule; the reference
+writer finds the first sequence of an append as the largest sequence the old index lists plus 3 (the old index, the
+old trailer, then the new frame), which is the same number because nothing but the old index and trailer follows the
+last listed frame. The index is the exception: it is sealed under `2^64 - 1 - g` in generation `g`.
+
+A nonce is a function of the archive key, the archive id, the frame kind, the sequence and the salt of the generation
+(section 14). After a rollback to generation `g` and a new append, the new generation `g + 1` has the same sequences
+as the one it replaces, and its index the same index sequence: only the fresh random salt keeps the nonces apart, and
+the writer draws it from a cryptographic RNG for every generation of an encrypted archive. The key slot is written once,
+in generation 0, and reused. Appending to an encrypted archive needs the credentials: the writer unwraps the key slot
+with them (`WrongKey` for a wrong password, `AppendNeedsCredentials` when none were given or the archive was opened
+without them) and seals with that key.
 
 ### The trailer chain
 
 `previous_trailer_offset` is 0 in generation 0. From the last trailer a reader walks back: the trailer at the offset
-must verify, carry the archive's id and a generation number one lower (otherwise `GenerationMismatch`, or `ArchiveIdMismatch`),
-lie before the index of the trailer that names it, and each index frame must end exactly where its own trailer starts.
-`Archive::history` returns the chain, newest first: each generation's number, trailer offset, index offset and index hash.
+must verify, lie before the index of the trailer that names it (`BadFrameLocation`, `what` `trailer`, for an offset at or
+after that index), carry the archive's id and a generation number one lower (`ArchiveIdMismatch`, `GenerationMismatch`),
+and each index frame must end exactly where its own trailer starts. `Archive::history` returns the chain, newest first:
+each generation's number, trailer offset, index offset and index hash. `lpk-decode info` prints the chain length, or
+the chain error when an old trailer is damaged (the archive itself still opens at its last trailer).
 
 ### Deduplication against the old table
 
@@ -1230,24 +1261,38 @@ defined chunking and full deduplication come with the writer's later tasks.
 ### Recovery
 
 The recovery frames of generation `g + 1` cover only its own data frames: the first group starts right after the old
-trailer (the old index and trailer stay uncovered, as in section 13), and the interleaving rule of section 13 goes on
-from there. Earlier generations keep their own frames, which the new index still lists, so damage in any generation
-is repaired as before.
+trailer, at the generation's `start_offset` (the old index and trailer stay uncovered, as in section 13), and the
+interleaving rule of section 13 goes on from there. Earlier generations keep their own frames, which the new index
+still lists, so damage in any generation is repaired as before. The recovery list may end before the index when the
+latest generation wrote no recovery frames (section 13).
+
+### Without the key
+
+A reader without credentials (sections 6 and 14) finds the frames by walking their envelopes. The walk passes
+every trailer that is not the last one (a trailer ends a generation, not the file), records the end of each as a
+generation start, takes the last `EntryTable` frame as the current table and lists the recovery frames of every
+generation.
 
 ### Rollback
 
 `lpk-decode rollback <archive> <generation>` (the library function `rollback`) truncates the file to the end of the
 named generation's trailer. The last complete trailer is found from the end of the file, or, when the end is not a
-trailer, by walking the frames; the chain is verified back to generation 0 and the named generation must be on it
-(`NoSuchGeneration` with the requested and the latest number otherwise). No credentials are needed. The file after a rollback is
-byte-identical to the archive as it was when that generation was written.
+trailer, by walking the frames (with a frame length limit of the file's length); the chain is verified back to
+generation 0 and the named generation must be on it (`NoSuchGeneration` with the requested and the latest number
+otherwise). No credentials are needed. The file after a rollback is byte-identical to the archive as it was when that
+generation was written. After a cut append the diagnosis (`Diagnosis.last_trailer_end`) and `rollback` name the last
+complete generation: rolling back to the latest complete generation removes the broken tail.
 
 ### The commit rule and a half-written append
 
-An append is committed when the last byte of the new trailer is written: until then the last valid trailer is the
-old one, but it is no longer at the end of the file, so opening fails through the diagnosis walk of section 6 with
-`Truncated` (`what` `trailer`). The walk continues past trailers, so it reports the cut and the offset after the last
-complete trailer. Rolling back to the latest complete generation (`rollback` with that number) truncates the broken
-tail and restores the archive. `lpk-decode info` prints the generation and the length of the chain.
+An append is committed when the last byte of the new trailer is written, and the data it commits must be on disk first:
+a writer that can sync (`Writer::append_file` opens the file for appending and syncs with `sync_data`) flushes and syncs
+everything before the trailer, and one over a bare `Write` should be given a sync hook (`Writer::with_sync`). Until the
+trailer is complete the last valid trailer is the old one, but it is no longer at the end of the file, so opening fails
+through the diagnosis walk of section 6 with `Truncated` (`what` `trailer`). The walk continues past trailers, so it
+reports the cut and the offset after the last complete trailer. `Writer::append` with a bare writer trusts the caller
+that the output is positioned at the end of the archive. `lpk-decode info` prints the generation and the length of the
+chain.
 
-Errors of this section: `NoSuchGeneration`, `AppendNeedsCredentials`, `GenerationMismatch`, plus those of sections 6, 13 and 14.
+Errors of this section: `NoSuchGeneration`, `AppendNeedsCredentials`, `GenerationMismatch`, `BadGenerationTable`,
+`BadTrailer`, plus those of sections 6, 12, 13 and 14.

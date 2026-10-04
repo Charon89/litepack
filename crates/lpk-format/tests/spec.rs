@@ -304,13 +304,13 @@ fn spec_states_the_record_rules() {
 #[test]
 fn spec_states_the_trailer_constants() {
     let text = spec();
-    assert_eq!(lpk_format::TRAILER_PAYLOAD_LEN, 80);
-    assert_eq!(lpk_format::TRAILER_FRAME_LEN, 117);
-    assert!(text.contains("fixed 80-byte payload"));
-    assert!(text.contains("= 117 bytes"));
-    assert!(text.contains("(149 bytes)"));
+    assert_eq!(lpk_format::TRAILER_PAYLOAD_LEN, 96);
+    assert_eq!(lpk_format::TRAILER_FRAME_LEN, 133);
+    assert!(text.contains("fixed 96-byte payload"));
+    assert!(text.contains("= 133 bytes"));
+    assert!(text.contains("(165 bytes)"));
     assert_eq!(
         lpk_format::Header::LEN as u64 + lpk_format::TRAILER_FRAME_LEN,
-        149
+        165
     );
 }

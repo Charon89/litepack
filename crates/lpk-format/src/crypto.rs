@@ -262,19 +262,22 @@ impl ArchiveKey {
 }
 
 /// The nonce of a sealed frame: `HKDF-SHA256(key, salt = archive_id, info =
-/// "LitePack lpk v1 nonce" || kind (u16 LE) || sequence (u64 LE))`, cut to `len`
-/// bytes (12 or 24).
+/// "LitePack lpk v1 nonce" || kind (u16 LE) || sequence (u64 LE) || salt (16))`,
+/// cut to `len` bytes (12 or 24). `salt` is the salt of the generation that
+/// wrote the frame (spec section 15).
 pub fn derive_nonce(
     key: &ArchiveKey,
     archive_id: &[u8; 16],
     kind: u16,
     sequence: u64,
+    salt: &[u8; 16],
     len: usize,
 ) -> Vec<u8> {
-    let mut info = Vec::with_capacity(NONCE_INFO.len() + 10);
+    let mut info = Vec::with_capacity(NONCE_INFO.len() + 26);
     info.extend_from_slice(NONCE_INFO);
     info.extend_from_slice(&kind.to_le_bytes());
     info.extend_from_slice(&sequence.to_le_bytes());
+    info.extend_from_slice(salt);
     let mut out = vec![0u8; len];
     // `len` is at most 24, far below the HKDF limit.
     if Hkdf::<Sha256>::new(Some(archive_id), &key.0)
@@ -516,9 +519,15 @@ impl Sealer {
 
     /// Seal `payload` of a frame of `kind` at `sequence`: `nonce | ciphertext |
     /// tag`. The associated data names the sealed payload's length.
-    pub fn seal(&self, payload: &[u8], kind: u16, sequence: u64) -> Result<Vec<u8>, FormatError> {
+    pub fn seal(
+        &self,
+        payload: &[u8],
+        kind: u16,
+        sequence: u64,
+        salt: &[u8; 16],
+    ) -> Result<Vec<u8>, FormatError> {
         let nl = self.suite.nonce_len();
-        let nonce = derive_nonce(&self.key, &self.archive_id, kind, sequence, nl);
+        let nonce = derive_nonce(&self.key, &self.archive_id, kind, sequence, salt, nl);
         let sealed_len = (payload.len() + nl + TAG_LEN) as u64;
         let ad = associated_data(&self.archive_id, kind, sequence, sealed_len);
         let ct = aead_encrypt(self.suite, &self.key.0, &nonce, &ad, payload)
@@ -536,6 +545,7 @@ impl Sealer {
         sealed: &[u8],
         kind: u16,
         sequence: u64,
+        salt: &[u8; 16],
         expected_len: u64,
     ) -> Result<Vec<u8>, FormatError> {
         let fail = FormatError::AuthenticationFailed { kind, sequence };
@@ -544,7 +554,7 @@ impl Sealer {
             return Err(fail);
         }
         let (nonce, ct) = sealed.split_at(nl);
-        if nonce != derive_nonce(&self.key, &self.archive_id, kind, sequence, nl) {
+        if nonce != derive_nonce(&self.key, &self.archive_id, kind, sequence, salt, nl) {
             return Err(fail);
         }
         let ad = associated_data(&self.archive_id, kind, sequence, expected_len);
@@ -634,8 +644,8 @@ mod tests {
     #[test]
     fn nonce_known_answer() {
         let key = ArchiveKey::from_bytes([0x11; 32]);
-        let n12 = derive_nonce(&key, &[0x22; 16], 2, 5, 12);
-        let n24 = derive_nonce(&key, &[0x22; 16], 2, 5, 24);
+        let n12 = derive_nonce(&key, &[0x22; 16], 2, 5, &[0x33; 16], 12);
+        let n24 = derive_nonce(&key, &[0x22; 16], 2, 5, &[0x33; 16], 24);
         assert_eq!(n12.len(), 12);
         assert_eq!(&n24[..12], &n12[..]);
         let hex: String = n12.iter().map(|b| format!("{b:02x}")).collect();
@@ -644,7 +654,7 @@ mod tests {
 
     // Pinned and cross-checked against an independent HKDF-SHA256 (Python hmac); any change to the
     // derivation changes this value and breaks every sealed archive.
-    const KAT_NONCE12: &str = "b8ad28ccb405d2d32dd4a80c";
+    const KAT_NONCE12: &str = "0b9cfb9b888e5d8712c4f3f5";
 
     #[test]
     fn ad_layout() {
@@ -663,10 +673,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for kind in 1..=7u16 {
             for seq in 0..500u64 {
-                assert!(seen.insert(derive_nonce(&key, &ID, kind, seq, 12)));
+                assert!(seen.insert(derive_nonce(&key, &ID, kind, seq, &[0; 16], 12)));
             }
         }
-        assert!(seen.insert(derive_nonce(&key, &ID, 5, INDEX_SEQUENCE, 12)));
+        assert!(seen.insert(derive_nonce(&key, &ID, 5, INDEX_SEQUENCE, &[0; 16], 12)));
     }
 
     #[test]
@@ -809,26 +819,29 @@ mod tests {
         for suite in [Suite::AesGcm, Suite::XChaCha] {
             let s = Sealer::new(suite, ArchiveKey::from_bytes([5; 32]), ID);
             let plain = b"some frame payload".to_vec();
-            let sealed = s.seal(&plain, 2, 4).unwrap();
+            let sealed = s.seal(&plain, 2, 4, &[0; 16]).unwrap();
             assert_eq!(sealed.len(), plain.len() + suite.overhead());
             let n = sealed.len() as u64;
-            assert_eq!(s.open(&sealed, 2, 4, n).unwrap(), plain);
+            assert_eq!(s.open(&sealed, 2, 4, &[0; 16], n).unwrap(), plain);
             for (kind, seq, len) in [(3, 4, n), (2, 5, n), (2, 4, n + 1)] {
                 assert!(matches!(
-                    s.open(&sealed, kind, seq, len),
+                    s.open(&sealed, kind, seq, &[0; 16], len),
                     Err(FormatError::AuthenticationFailed { .. })
                 ));
             }
             for i in 0..sealed.len() {
                 let mut t = sealed.clone();
                 t[i] ^= 1;
-                assert!(s.open(&t, 2, 4, n).is_err(), "byte {i}");
+                assert!(s.open(&t, 2, 4, &[0; 16], n).is_err(), "byte {i}");
             }
-            assert!(s.open(&sealed[..10], 2, 4, 10).is_err());
+            assert!(s.open(&sealed[..10], 2, 4, &[0; 16], 10).is_err());
             // An empty payload seals to nonce and tag only.
-            let e = s.seal(&[], 3, 0).unwrap();
+            let e = s.seal(&[], 3, 0, &[0; 16]).unwrap();
             assert_eq!(e.len(), suite.overhead());
-            assert!(s.open(&e, 3, 0, e.len() as u64).unwrap().is_empty());
+            assert!(s
+                .open(&e, 3, 0, &[0; 16], e.len() as u64)
+                .unwrap()
+                .is_empty());
         }
     }
 

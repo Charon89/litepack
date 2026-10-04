@@ -16,6 +16,8 @@ const MIN_FRAME_LEN: u64 = 4 + 1 + 32;
 const MIN_BLOCK_LEN: usize = 6;
 /// Smallest encoded recovery location: three one-byte varints.
 const MIN_LOCATION_LEN: usize = 3;
+/// Smallest generation table entry: three one-byte varints and the salt.
+const MIN_GENERATION_LEN: usize = 3 + 16;
 
 /// Where one `ChunkData` block is and which chunks it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +83,24 @@ pub struct Index {
     pub records: Option<FrameLocation>,
     /// Locations of the `Recovery` frames, in the order written (section 13).
     pub recovery: Vec<FrameLocation>,
+    /// One entry per generation, ascending (section 15): where the generation
+    /// starts and the salt its sealed frames' nonces use.
+    pub generations: Vec<GenerationInfo>,
+}
+
+/// A generation as the index lists it (section 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationInfo {
+    /// The generation number; the table counts 0, 1, 2, ... in order.
+    pub generation: u64,
+    /// Absolute offset of the generation's first frame (the end of the header
+    /// for generation 0, else the end of the previous trailer).
+    pub start_offset: u64,
+    /// Position among the archive's frames of that first frame; the frames of
+    /// the generation have sequences from here to the next generation's.
+    pub first_sequence: u64,
+    /// The generation's nonce salt (zeros when the archive is not encrypted).
+    pub salt: [u8; 16],
 }
 
 /// Cursor that assigns chunks, in order, to blocks and checks each block's
@@ -346,6 +366,13 @@ impl Index {
             varint::write(&mut out, f.len)?;
             varint::write(&mut out, f.sequence)?;
         }
+        varint::write(&mut out, self.generations.len() as u64)?;
+        for g in &self.generations {
+            varint::write(&mut out, g.generation)?;
+            varint::write(&mut out, g.start_offset)?;
+            varint::write(&mut out, g.first_sequence)?;
+            out.extend_from_slice(&g.salt);
+        }
         Self::parse(&out, u64::MAX)?;
         Ok(out)
     }
@@ -367,17 +394,19 @@ impl Index {
         payload: &[u8],
         index_offset: u64,
     ) -> Result<(Index, ChunkIndex), FormatError> {
-        Self::parse_with_chunks_in(payload, index_offset, 0)
+        Self::parse_with_chunks_in(payload, index_offset, 0, 0)
     }
 
-    /// [`Index::parse_with_chunks`] for the index of generation `generation`.
-    /// In generation 0 the last recovery frame ends where the index starts;
-    /// a later generation written without recovery lists the earlier ones, so
-    /// the last one then ends somewhere before.
+    /// [`Index::parse_with_chunks`] for the index of generation `generation`
+    /// whose trailer names `previous_trailer_offset`. The last recovery frame
+    /// ends where the index starts; in a later generation that wrote no
+    /// recovery frame it is an earlier generation's, ending at or before the
+    /// previous trailer.
     pub fn parse_with_chunks_in(
         payload: &[u8],
         index_offset: u64,
         generation: u64,
+        previous_trailer_offset: u64,
     ) -> Result<(Index, ChunkIndex), FormatError> {
         let (table, used) = ChunkTable::parse_prefix(payload)?;
         let mut s = &payload[used..];
@@ -430,6 +459,32 @@ impl Index {
                 sequence: rv(&mut s)?,
             });
         }
+        let gen_count = rv(&mut s)?;
+        if gen_count > (s.len() / MIN_GENERATION_LEN) as u64 {
+            return Err(FormatError::Truncated { what: WHAT });
+        }
+        let mut generations: Vec<GenerationInfo> = Vec::with_capacity(gen_count as usize);
+        for i in 0..gen_count {
+            let g = rv(&mut s)?;
+            let start_offset = rv(&mut s)?;
+            let first_sequence = rv(&mut s)?;
+            let (salt, rest) = s
+                .split_first_chunk::<16>()
+                .ok_or(FormatError::Truncated { what: WHAT })?;
+            s = rest;
+            let ordered = generations
+                .last()
+                .is_none_or(|p| start_offset > p.start_offset && first_sequence > p.first_sequence);
+            if g != i || !ordered {
+                return Err(FormatError::BadGenerationTable);
+            }
+            generations.push(GenerationInfo {
+                generation: g,
+                start_offset,
+                first_sequence,
+                salt: *salt,
+            });
+        }
         if !s.is_empty() {
             return Err(FormatError::TrailingBytes { what: WHAT });
         }
@@ -451,11 +506,15 @@ impl Index {
         // (the last group closes before the index). The end is checked only
         // where the index's offset is known (`encode` passes `u64::MAX`).
         let ascending = recovery.windows(2).all(|w| w[0].offset < w[1].offset);
+        let latest_start = generations.last().map(|g| g.start_offset);
         let ends_at_index = index_offset == u64::MAX
-            || generation > 0
-            || recovery
-                .last()
-                .is_none_or(|l| l.offset.saturating_add(l.len) == index_offset);
+            || recovery.last().is_none_or(|l| {
+                let end = l.offset.saturating_add(l.len);
+                end == index_offset
+                    || (generation > 0
+                        && latest_start.is_some_and(|s| l.offset < s)
+                        && end <= previous_trailer_offset)
+            });
         if !(ascending && ends_at_index) {
             return Err(FormatError::BadFrameLocation { what: "recovery" });
         }
@@ -478,6 +537,7 @@ impl Index {
                 entry_table_hash,
                 records,
                 recovery,
+                generations,
             },
             chunks,
         ))
@@ -526,7 +586,12 @@ pub fn index_layout_table() -> String {
          | recovery_count | varint | number of `Recovery` frames (section 13); at most the bytes left after it divided by {MIN_LOCATION_LEN} |\n\
          | recovery_offset | varint | per recovery frame: absolute offset of the frame |\n\
          | recovery_len | varint | per recovery frame: whole encoded length of that frame |\n\
-         | recovery_sequence | varint | per recovery frame: position of that frame among the archive's frames |\n"
+         | recovery_sequence | varint | per recovery frame: position of that frame among the archive's frames |\n\
+         | generation_count | varint | number of generations (section 15); at most the bytes left after it divided by {MIN_GENERATION_LEN} |\n\
+         | generation | varint | per generation: its number; the entries count 0, 1, 2, ... |\n\
+         | start_offset | varint | per generation: absolute offset of its first frame; strictly ascending |\n\
+         | first_sequence | varint | per generation: sequence of that first frame; strictly ascending |\n\
+         | salt | 16 | per generation: the salt of its sealed frames' nonces (zeros when not encrypted) |\n"
     )
 }
 
@@ -594,6 +659,7 @@ mod tests {
             entry_table_hash: [0; 32],
             records: None,
             recovery: vec![],
+            generations: vec![],
         };
         fit_envelope(&mut idx);
         idx
@@ -777,6 +843,7 @@ mod tests {
             varint::write(&mut out, f.len).unwrap();
             varint::write(&mut out, f.sequence).unwrap();
         }
+        varint::write(&mut out, 0).unwrap();
         out
     }
 
