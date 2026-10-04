@@ -323,7 +323,7 @@ impl Index {
         if merkle_root(&leaves) != merkle_root_stored {
             return Err(FormatError::MerkleRootMismatch);
         }
-        envelope.validate(&blocks, payload.len() as u64)?;
+        envelope.validate(&blocks, entry_table, records, payload.len() as u64)?;
         Ok((
             Index {
                 chunk_table,
@@ -360,7 +360,7 @@ pub fn index_layout_table() -> String {
          | max_window | varint | the decode envelope of section 7: largest match-finder window, in bytes |\n\
          | max_bwt_block | varint | envelope: largest BWT block, in bytes (0 when none) |\n\
          | max_block_plain | varint | envelope: largest block `plain_len`; must equal the maximum over the block table |\n\
-         | max_frame_payload | varint | envelope: largest frame payload; at least the index's own payload and every block's |\n\
+         | max_frame_payload | varint | envelope: largest frame payload; must admit the index's own payload and every recorded frame (section 7) |\n\
          | decode_memory | varint | envelope: the writer's estimate of peak decoder memory per thread, in bytes |\n\
          | threads_hint | varint | envelope: independent blocks decodable at once; 0 = no hint |\n\
          | block_count | varint | number of blocks; at most the bytes left after it divided by {MIN_BLOCK_LEN} |\n\
@@ -411,17 +411,42 @@ mod tests {
             first += c;
         }
         let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
-        Index {
+        let mut idx = Index {
             chunk_table: table_of(recs),
             merkle_root: merkle_root(&leaves),
-            envelope: Envelope::for_blocks(&blocks, 1 << 40, 1 << 20, 0, 1 << 24, 0),
+            envelope: Envelope::for_archive(&blocks, 0, 60, 0, 1 << 20, 0, 1 << 24, 0),
             blocks,
             entry_table: FrameLocation {
                 offset: 32,
                 len: 60,
             },
             records: None,
+        };
+        fit_envelope(&mut idx);
+        idx
+    }
+
+    /// Set the envelope the way a writer does: `max_frame_payload` has to cover the
+    /// index payload, which contains it, so iterate until it is stable.
+    fn fit_envelope(idx: &mut Index) {
+        for _ in 0..6 {
+            let len = encode_unchecked(idx).len() as u64;
+            let e = Envelope::for_archive(
+                &idx.blocks,
+                len,
+                idx.entry_table.len,
+                idx.records.map_or(0, |r| r.len),
+                idx.envelope.max_window,
+                idx.envelope.max_bwt_block,
+                idx.envelope.decode_memory,
+                idx.envelope.threads_hint,
+            );
+            if e == idx.envelope {
+                return;
+            }
+            idx.envelope = e;
         }
+        panic!("envelope did not settle");
     }
 
     const IDX_AT: u64 = 10_000;
@@ -453,6 +478,7 @@ mod tests {
                 }),
             ] {
                 idx.records = records;
+                fit_envelope(&mut idx);
                 let p = idx.encode().unwrap();
                 assert_eq!(Index::parse(&p, IDX_AT).unwrap(), idx);
             }
@@ -728,11 +754,14 @@ mod tests {
     }
 
     #[test]
-    fn envelope_understating_the_blocks_is_a_mismatch() {
+    fn envelope_understating_the_archive_is_a_mismatch() {
         let (_, idx) = three();
         // The three() blocks: plain 5, 16, 1; frames of 80 bytes (payload 43).
+        let len = encode_unchecked(&idx).len() as u64;
+        assert!((128..16_384).contains(&len));
         assert_eq!(idx.envelope.max_block_plain, 16);
-        assert_eq!(idx.envelope.max_frame_payload, 1 << 40);
+        // The derived value: the index payload is the largest frame.
+        assert_eq!(idx.envelope.max_frame_payload, len);
         for (tweak, field) in [
             (
                 (|i: &mut Index| i.envelope.max_block_plain = 15) as fn(&mut Index),
@@ -755,12 +784,8 @@ mod tests {
                 Err(FormatError::EnvelopeMismatch { .. })
             ));
         }
-        // The payload length itself is the bound (both values are two-byte varints).
+        // Exactly the payload length is enough, one less is not (same varint size).
         let mut i = idx.clone();
-        i.envelope.max_frame_payload = 1000;
-        let len = encode_unchecked(&i).len() as u64;
-        assert!((128..1000).contains(&len));
-        i.envelope.max_frame_payload = len;
         Index::parse(&encode_unchecked(&i), IDX_AT).unwrap();
         i.envelope.max_frame_payload = len - 1;
         assert!(matches!(
@@ -769,11 +794,56 @@ mod tests {
                 field: "max_frame_payload"
             }
         ));
-        // The writer's own derivation parses.
+        // The writer's own derivation parses and fits the index payload.
         let mut i = idx.clone();
-        i.envelope = Envelope::for_blocks(&i.blocks, len, 1, 2, 3, 4);
+        i.envelope.max_window = 1;
+        fit_envelope(&mut i);
         assert_eq!(i.envelope.max_block_plain, 16);
         i.encode().unwrap();
+    }
+
+    #[test]
+    fn entry_table_and_records_count_towards_max_frame_payload() {
+        let (_, mut idx) = three();
+        // The entry table is the largest frame by far.
+        idx.entry_table = FrameLocation {
+            offset: 5000,
+            len: 4000,
+        };
+        let stale = idx.envelope;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::EnvelopeMismatch {
+                field: "max_frame_payload"
+            }
+        ));
+        fit_envelope(&mut idx);
+        assert_eq!(idx.envelope.max_frame_payload, 4000 - 36 - 2);
+        assert_ne!(idx.envelope, stale);
+        idx.encode().unwrap();
+        // One short of it is a mismatch.
+        idx.envelope.max_frame_payload -= 1;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::EnvelopeMismatch {
+                field: "max_frame_payload"
+            }
+        ));
+        // Likewise the records frame.
+        let (_, mut idx) = three();
+        idx.records = Some(FrameLocation {
+            offset: 5000,
+            len: 4000,
+        });
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::EnvelopeMismatch {
+                field: "max_frame_payload"
+            }
+        ));
+        fit_envelope(&mut idx);
+        assert_eq!(idx.envelope.max_frame_payload, 4000 - 36 - 2);
+        idx.encode().unwrap();
     }
 
     #[test]

@@ -50,9 +50,8 @@ fn spec_states_the_envelope_caps_and_refusal_message() {
     assert_eq!(lpk_format::DEFAULT_MAX_BWT_BLOCK, 67_108_864);
     assert!(text.contains("`max_window` at most 268435456 bytes (256 MiB)"));
     assert!(text.contains("`max_bwt_block` at most 67108864 bytes (64 MiB)"));
-    assert!(
-        text.contains("the archive needs <field> of <needed> bytes; this reader allows\n<allowed>")
-    );
+    assert!(text
+        .contains("`the archive needs <field> of <needed> bytes; this reader allows <allowed>`"));
     let r = lpk_format::Refusal {
         field: "f",
         needed: 1,

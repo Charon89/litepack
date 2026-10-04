@@ -333,12 +333,16 @@ mod tests {
     }
 
     fn build() -> Built {
+        build_with(ENTRY_PAYLOAD.to_vec())
+    }
+
+    fn build_with(entry_payload: Vec<u8>) -> Built {
         let mut bytes = Vec::new();
         Header::new(HeaderFlags::EMPTY, ID)
             .write(&mut bytes)
             .unwrap();
         let entry_off = bytes.len() as u64;
-        let e = frame_bytes(FrameKind::EntryTable, ENTRY_PAYLOAD.to_vec());
+        let e = frame_bytes(FrameKind::EntryTable, entry_payload);
         bytes.extend_from_slice(&e);
         let placeholder = |seed: u8| -> Vec<u8> {
             (0..BLOCK_PAYLOAD)
@@ -391,7 +395,16 @@ mod tests {
         let index = Index {
             chunk_table: ChunkTableWriter::encode(&recs),
             merkle_root: merkle_root(&leaves),
-            envelope: Envelope::for_blocks(&blocks, 1000, 1 << 20, 1 << 16, 1 << 24, 2),
+            envelope: Envelope::for_archive(
+                &blocks,
+                1000,
+                e.len() as u64,
+                0,
+                1 << 20,
+                1 << 16,
+                1 << 24,
+                2,
+            ),
             blocks,
             entry_table: FrameLocation {
                 offset: entry_off,
@@ -572,6 +585,16 @@ mod tests {
             FrameKind::ChunkData,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn an_entry_table_larger_than_every_block_is_readable_after_open() {
+        let big = 3 * BLOCK_PAYLOAD;
+        let b = build_with(vec![7u8; big]);
+        assert_eq!(b.index.envelope.max_frame_payload, big as u64);
+        let mut a = open(b.bytes.clone()).unwrap();
+        assert_eq!(a.limits().max_payload, big as u64);
+        assert_eq!(a.entries().unwrap().len(), big);
     }
 
     #[test]

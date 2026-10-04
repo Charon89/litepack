@@ -2,7 +2,7 @@
 //! index, and the refusal rule a reader applies before decoding (spec section 7).
 
 use crate::error::FormatError;
-use crate::index::BlockLocation;
+use crate::index::{BlockLocation, FrameLocation};
 use crate::varint;
 use std::fmt;
 use std::io::{Read, Write};
@@ -99,19 +99,21 @@ fn rv(r: &mut impl Read) -> Result<u64, FormatError> {
     }
 }
 
-/// The payload length of a frame whose whole encoded length is `frame_len`:
-/// the `p` with `p + 36 + len(varint(p)) == frame_len`. When no payload
-/// length fits (the length is not that of any frame), the largest payload a
-/// frame of that length could hold, so the result is never too small.
-pub(crate) fn frame_payload_len(frame_len: u64) -> u64 {
-    for k in 1..=10u64 {
-        if let Some(p) = frame_len.checked_sub(FRAME_FIXED_LEN + k) {
-            if varint::len(p) as u64 == k {
-                return p;
-            }
-        }
+/// True when a frame of whole encoded length `frame_len` can hold a payload
+/// of at most `max_payload` bytes: `frame_len <= max_payload + 36 +
+/// len(varint(max_payload))`. The right side is increasing in `max_payload`.
+pub(crate) fn frame_len_admissible(frame_len: u64, max_payload: u64) -> bool {
+    frame_len <= max_payload.saturating_add(FRAME_FIXED_LEN + varint::len(max_payload) as u64)
+}
+
+/// The smallest `max_payload` for which `frame_len` is admissible.
+fn min_payload_for(frame_len: u64) -> u64 {
+    // The answer is within ten of `frame_len - 37`.
+    let mut m = frame_len.saturating_sub(FRAME_FIXED_LEN + 10);
+    while !frame_len_admissible(frame_len, m) {
+        m += 1;
     }
-    frame_len.saturating_sub(FRAME_FIXED_LEN + 1)
+    m
 }
 
 impl Envelope {
@@ -181,37 +183,48 @@ impl Envelope {
     }
 
     /// An envelope whose `max_block_plain` and `max_frame_payload` are computed
-    /// from the block table (and the index's own payload length); the other
-    /// fields are the writer's.
-    pub fn for_blocks(
+    /// from the archive's frames: the blocks, the entry table (`entry_table_len`,
+    /// its whole encoded length), the records frame (`records_len`, 0 when
+    /// there is none) and the index's own payload length; the other fields are
+    /// the writer's. `max_frame_payload` is the smallest value that admits
+    /// every recorded frame length and the index payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_archive(
         blocks: &[BlockLocation],
         index_payload_len: u64,
+        entry_table_len: u64,
+        records_len: u64,
         max_window: u64,
         max_bwt_block: u64,
         decode_memory: u64,
         threads_hint: u32,
     ) -> Envelope {
+        let frames = blocks
+            .iter()
+            .map(|b| b.frame_len)
+            .chain([entry_table_len, records_len])
+            .map(min_payload_for)
+            .max()
+            .unwrap_or(0);
         Envelope {
             max_window,
             max_bwt_block,
             max_block_plain: blocks.iter().map(|b| b.plain_len).max().unwrap_or(0),
-            max_frame_payload: blocks
-                .iter()
-                .map(|b| frame_payload_len(b.frame_len))
-                .max()
-                .unwrap_or(0)
-                .max(index_payload_len),
+            max_frame_payload: frames.max(index_payload_len),
             decode_memory,
             threads_hint,
         }
     }
 
-    /// The consistency rules between the envelope and the block table: the
-    /// index's payload length and the blocks' frames fit `max_frame_payload`,
-    /// and `max_block_plain` is the maximum block `plain_len`.
+    /// The consistency rules between the envelope and the index: the index's
+    /// payload length fits `max_frame_payload`, every recorded frame (blocks,
+    /// entry table, records) is admissible under it, and `max_block_plain` is
+    /// the maximum block `plain_len`.
     pub(crate) fn validate(
         &self,
         blocks: &[BlockLocation],
+        entry_table: FrameLocation,
+        records: Option<FrameLocation>,
         index_payload_len: u64,
     ) -> Result<(), FormatError> {
         let plain = blocks.iter().map(|b| b.plain_len).max().unwrap_or(0);
@@ -220,12 +233,12 @@ impl Envelope {
                 field: "max_block_plain",
             });
         }
-        let frames = blocks
-            .iter()
-            .map(|b| frame_payload_len(b.frame_len))
-            .max()
-            .unwrap_or(0);
-        if self.max_frame_payload < frames.max(index_payload_len) {
+        let m = self.max_frame_payload;
+        let ok = index_payload_len <= m
+            && blocks.iter().all(|b| frame_len_admissible(b.frame_len, m))
+            && frame_len_admissible(entry_table.len, m)
+            && records.is_none_or(|r| frame_len_admissible(r.len, m));
+        if !ok {
             return Err(FormatError::EnvelopeMismatch {
                 field: "max_frame_payload",
             });
@@ -240,7 +253,7 @@ pub fn envelope_layout_table() -> String {
      | max_window | varint | largest match-finder window (dictionary) any block needs, in bytes |\n\
      | max_bwt_block | varint | largest BWT block any block needs, in bytes; 0 when no BWT is used |\n\
      | max_block_plain | varint | largest `plain_len` of any block; must equal the maximum over the block table |\n\
-     | max_frame_payload | varint | largest frame payload in the archive; at least the index's own payload length and every block's frame payload |\n\
+     | max_frame_payload | varint | largest frame payload in the archive; must admit the index's own payload and every recorded frame (blocks, entry table, records) |\n\
      | decode_memory | varint | the writer's estimate of peak decoder memory for one decoding thread, in bytes |\n\
      | threads_hint | varint | independent blocks a reader may decode at once within `decode_memory` times this; 0 = no hint; at most 4294967295 |\n"
         .to_string()
@@ -378,10 +391,17 @@ mod tests {
                     allowed
                 })
             );
-            // One below the limit passes.
-            let mut ok = fits();
-            ok.max_window -= 1;
-            assert_eq!(ok.check(&big()), Ok(()));
+            // One below the limit passes: lower the tweaked field.
+            let mut at = fits();
+            tweak(&mut at);
+            match field {
+                "max_window" => at.max_window -= 1,
+                "max_bwt_block" => at.max_bwt_block -= 1,
+                "max_block_plain" => at.max_block_plain -= 1,
+                "max_frame_payload" => at.max_frame_payload -= 1,
+                _ => at.decode_memory -= 1,
+            }
+            assert_eq!(at.check(&big()), Ok(()));
         }
         // Several exceed: the first in field order is reported.
         let mut e = fits();
@@ -417,23 +437,14 @@ mod tests {
     }
 
     #[test]
-    fn frame_payload_len_inverts_the_frame_grammar() {
-        for p in [
-            0u64,
-            1,
-            126,
-            127,
-            128,
-            129,
-            16_382,
-            16_383,
-            16_384,
-            100_000,
-            1 << 21,
-            1 << 28,
-        ] {
+    fn admissible_frame_lengths() {
+        // Frames of payload p have length 36 + len(varint(p)) + p, and are admissible for M >= p.
+        for p in [0u64, 1, 126, 127, 128, 16_383, 16_384, 100_000, 1 << 28] {
             let len = 36 + varint::len(p) as u64 + p;
-            assert_eq!(frame_payload_len(len), p, "payload {p}");
+            assert!(frame_len_admissible(len, p), "payload {p}");
+            if p > 0 {
+                assert!(!frame_len_admissible(len, p - 1), "payload {p} - 1");
+            }
         }
         // Real frames.
         for n in [0usize, 5, 127, 128, 300] {
@@ -442,11 +453,28 @@ mod tests {
                 flags: FrameFlags::EMPTY,
                 payload: vec![0; n],
             };
-            assert_eq!(frame_payload_len(f.encoded_len()), n as u64);
+            assert!(frame_len_admissible(f.encoded_len(), n as u64));
+            assert!(n == 0 || !frame_len_admissible(f.encoded_len(), n as u64 - 1));
         }
-        // 165 is no frame's length (payload 127 gives 164, 128 gives 166): never too small.
-        assert_eq!(frame_payload_len(165), 128);
-        assert_eq!(frame_payload_len(0), 0);
+        // 165 is no frame's length: payload 127 gives 164, 128 gives 166.
+        assert!(frame_len_admissible(164, 127));
+        assert!(!frame_len_admissible(165, 127));
+        assert!(frame_len_admissible(165, 128));
+        // Same at the three-byte varint boundary: 16421 and 16423.
+        assert!(frame_len_admissible(16_421, 16_383));
+        assert!(!frame_len_admissible(16_422, 16_383));
+        assert!(frame_len_admissible(16_422, 16_384));
+        assert!(frame_len_admissible(16_423, 16_384));
+        assert!(!frame_len_admissible(16_424, 16_384));
+        // The smallest M: monotone, and never overflowing.
+        assert_eq!(min_payload_for(165), 128);
+        assert_eq!(min_payload_for(16_422), 16_384);
+        assert_eq!(min_payload_for(0), 0);
+        assert_eq!(min_payload_for(37), 0);
+        assert_eq!(min_payload_for(38), 1);
+        let m = min_payload_for(u64::MAX);
+        assert!(frame_len_admissible(u64::MAX, m));
+        assert!(!frame_len_admissible(u64::MAX, m - 1));
     }
 
     fn block(frame_len: u64, plain_len: u64) -> BlockLocation {
@@ -459,10 +487,14 @@ mod tests {
         }
     }
 
+    fn floc(len: u64) -> FrameLocation {
+        FrameLocation { offset: 40, len }
+    }
+
     #[test]
-    fn for_blocks_takes_the_maxima() {
+    fn for_archive_takes_the_maxima() {
         let blocks = [block(137, 50), block(1037, 20), block(537, 90)];
-        let e = Envelope::for_blocks(&blocks, 10, 7, 8, 9, 2);
+        let e = Envelope::for_archive(&blocks, 10, 40, 0, 7, 8, 9, 2);
         assert_eq!(e.max_block_plain, 90);
         assert_eq!(e.max_frame_payload, 1037 - 36 - 2);
         assert_eq!(
@@ -474,56 +506,66 @@ mod tests {
             ),
             (7, 8, 9, 2)
         );
-        // The index payload can be the largest frame.
-        let e = Envelope::for_blocks(&blocks, 5000, 0, 0, 0, 0);
+        // The index payload, the entry table or the records frame can be the largest.
+        let e = Envelope::for_archive(&blocks, 5000, 40, 0, 0, 0, 0, 0);
         assert_eq!(e.max_frame_payload, 5000);
-        let e = Envelope::for_blocks(&[], 77, 0, 0, 0, 0);
+        let e = Envelope::for_archive(&blocks, 10, 3000, 40, 0, 0, 0, 0);
+        assert_eq!(e.max_frame_payload, 3000 - 36 - 2);
+        let e = Envelope::for_archive(&blocks, 10, 40, 4000, 0, 0, 0, 0);
+        assert_eq!(e.max_frame_payload, 4000 - 36 - 2);
+        let e = Envelope::for_archive(&[], 77, 40, 0, 0, 0, 0, 0);
         assert_eq!((e.max_block_plain, e.max_frame_payload), (0, 77));
-        e.validate(&[], 77).unwrap();
+        e.validate(&[], floc(40), None, 77).unwrap();
+    }
+
+    fn mismatch(r: Result<(), FormatError>, field: &str) {
+        assert!(
+            matches!(r, Err(FormatError::EnvelopeMismatch { field: f }) if f == field),
+            "{field}: {r:?}"
+        );
     }
 
     #[test]
     fn validate_rules() {
         let blocks = [block(137, 50), block(1037, 90)];
-        let good = Envelope::for_blocks(&blocks, 100, 1, 1, 1, 1);
-        good.validate(&blocks, 100).unwrap();
+        let good = Envelope::for_archive(&blocks, 100, 200, 0, 1, 1, 1, 1);
+        good.validate(&blocks, floc(200), None, 100).unwrap();
         // Overstating the frame payload is allowed; the plain maximum is exact.
         let mut e = good;
         e.max_frame_payload += 1;
-        e.validate(&blocks, 100).unwrap();
+        e.validate(&blocks, floc(200), None, 100).unwrap();
         let mut e = good;
         e.max_block_plain = 89;
-        assert!(matches!(
-            e.validate(&blocks, 100),
-            Err(FormatError::EnvelopeMismatch {
-                field: "max_block_plain"
-            })
-        ));
+        mismatch(e.validate(&blocks, floc(200), None, 100), "max_block_plain");
         e.max_block_plain = 91;
-        assert!(matches!(
-            e.validate(&blocks, 100),
-            Err(FormatError::EnvelopeMismatch {
-                field: "max_block_plain"
-            })
-        ));
+        mismatch(e.validate(&blocks, floc(200), None, 100), "max_block_plain");
         let mut e = good;
         e.max_frame_payload = 1037 - 36 - 2 - 1;
-        assert!(matches!(
-            e.validate(&blocks, 100),
-            Err(FormatError::EnvelopeMismatch {
-                field: "max_frame_payload"
-            })
-        ));
+        mismatch(
+            e.validate(&blocks, floc(200), None, 100),
+            "max_frame_payload",
+        );
         let mut e = good;
         e.max_frame_payload = 100;
         e.max_block_plain = 50;
-        assert!(e.validate(&blocks[..1], 100).is_ok());
-        assert!(matches!(
-            e.validate(&blocks[..1], 101),
-            Err(FormatError::EnvelopeMismatch {
-                field: "max_frame_payload"
-            })
-        ));
+        assert!(e.validate(&blocks[..1], floc(136), None, 100).is_ok());
+        mismatch(
+            e.validate(&blocks[..1], floc(136), None, 101),
+            "max_frame_payload",
+        );
+        // The entry table and the records frame count too (payload 100 admits length 137).
+        assert!(e.validate(&blocks[..1], floc(137), None, 100).is_ok());
+        mismatch(
+            e.validate(&blocks[..1], floc(138), None, 100),
+            "max_frame_payload",
+        );
+        assert!(e
+            .validate(&blocks[..1], floc(40), Some(floc(137)), 100)
+            .is_ok());
+        mismatch(
+            e.validate(&blocks[..1], floc(40), Some(floc(138)), 100),
+            "max_frame_payload",
+        );
     }
 
     #[test]

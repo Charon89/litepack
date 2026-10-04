@@ -254,7 +254,7 @@ The payload, in this order:
 | max_window | varint | the decode envelope of section 7: largest match-finder window, in bytes |
 | max_bwt_block | varint | envelope: largest BWT block, in bytes (0 when none) |
 | max_block_plain | varint | envelope: largest block `plain_len`; must equal the maximum over the block table |
-| max_frame_payload | varint | envelope: largest frame payload; at least the index's own payload and every block's |
+| max_frame_payload | varint | envelope: largest frame payload; must admit the index's own payload and every recorded frame (section 7) |
 | decode_memory | varint | envelope: the writer's estimate of peak decoder memory per thread, in bytes |
 | threads_hint | varint | envelope: independent blocks decodable at once; 0 = no hint |
 | block_count | varint | number of blocks; at most the bytes left after it divided by 5 |
@@ -364,26 +364,35 @@ index payload (section 6):
 | max_window | varint | largest match-finder window (dictionary) any block needs, in bytes |
 | max_bwt_block | varint | largest BWT block any block needs, in bytes; 0 when no BWT is used |
 | max_block_plain | varint | largest `plain_len` of any block; must equal the maximum over the block table |
-| max_frame_payload | varint | largest frame payload in the archive; at least the index's own payload length and every block's frame payload |
+| max_frame_payload | varint | largest frame payload in the archive; must admit the index's own payload and every recorded frame (blocks, entry table, records) |
 | decode_memory | varint | the writer's estimate of peak decoder memory for one decoding thread, in bytes |
 | threads_hint | varint | independent blocks a reader may decode at once within `decode_memory` times this; 0 = no hint; at most 4294967295 |
 
 `max_window` is the largest match-finder window (dictionary) any block needs; `max_bwt_block` is the largest
 Burrows-Wheeler block any block needs (0 when none is used); both are in bytes. `max_block_plain` is the
-largest `plain_len` of any block. `max_frame_payload` is the largest frame payload in the archive. `decode_memory`
+largest `plain_len` of any block. `max_frame_payload` is the largest frame payload in the archive: it covers the index, every block, the entry
+table and the records frame. `decode_memory`
 is the writer's estimate of the peak memory of one decoding thread, in bytes, and `threads_hint` is the number
 of independent blocks a reader may decode at once without exceeding `decode_memory` times `threads_hint`
 (0 = no hint; a value above 4294967295 is `EnvelopeMismatch` with `field` `threads_hint`).
 
-Mismatch rules, checked when the index is parsed after the block rules of section 6:
+Order of the checks. A `threads_hint` above 4294967295 is raised while the envelope is read, before the block
+rules and before a later truncation can be noticed. The other mismatches are checked after the block rules and
+after `MerkleRootMismatch` of section 6, in the order below:
 
 - `max_block_plain` must equal the maximum `plain_len` over the block table (0 when there are no blocks),
   otherwise `EnvelopeMismatch` with `field` `max_block_plain`.
-- `max_frame_payload` must be at least the length of the index payload itself and at least the payload length
-  of every block's frame, otherwise `EnvelopeMismatch` with `field` `max_frame_payload`. A block frame's
-  payload length is the `p` with `p + 36 + len(varint(p))` equal to the frame's recorded length (36 bytes are
-  the kind, flags and hash); a recorded length that no frame has counts as the largest payload a frame of that
-  length could hold. A larger `max_frame_payload` than needed is allowed.
+- `max_frame_payload` is `M` below. The length of the index payload must be at most `M`, and every recorded
+  frame length `L` (each block's `frame_len`, the entry table's and, when present, the records frame's) must
+  satisfy `L <= M + 36 + varint_len(M)`, where `varint_len(M)` is the encoded length of `M` as a varint (36
+  bytes are the kind, flags and hash); otherwise `EnvelopeMismatch` with `field` `max_frame_payload`. The right
+  side grows with `M`, so a larger `M` than needed is allowed. A recorded length that is the length of no
+  frame, such as 165 (payloads 127 and 128 give 164 and 166) or 16422, is admitted by the first `M` whose bound
+  reaches it (128 and 16384).
+- The index payload contains the envelope's own varints, so `max_frame_payload` depends on the size it is part
+  of: a writer repeats the computation until the value is stable. An index payload larger than the reader's own
+  `max_frame_payload` is not `Refused`: reading the frame fails with `PayloadTooLarge` (section 3), because the
+  reader's limit applies while the index is read.
 
 The format itself does not limit any value of the envelope; the limits are the reader's. The reader's resources
 are `max_window`, `max_bwt_block`, `max_block_plain`, `max_frame_payload` and `memory`, all in bytes, with these
@@ -404,8 +413,8 @@ not a rule of the parser.
 Refusal rule. Each of `max_window`, `max_bwt_block`, `max_block_plain` and `max_frame_payload` must be at most
 the reader's resource of the same name, and `decode_memory` at most `memory`. The first field in that order that
 exceeds its limit is the refusal: `Refused`, carrying the field name, the value the archive needs and the value
-the reader allows, with the message "the archive needs <field> of <needed> bytes; this reader allows
-<allowed>". `threads_hint` never refuses. The check happens when the archive is opened, after the index has
+the reader allows, with the message
+`the archive needs <field> of <needed> bytes; this reader allows <allowed>`. `threads_hint` never refuses. The check happens when the archive is opened, after the index has
 been read and before any block is read. Allowing more is the caller passing larger resources; there is no
 switch that skips the check.
 
