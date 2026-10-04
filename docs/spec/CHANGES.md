@@ -92,3 +92,6 @@ order and early block close. No reader behaviour or vector byte changed.
    block of its own (section 9, informative).
 4. New vector `jpeg-peel.lpk` with `expected.toml` (1.0 reader: list, info, `UnimplementedPrimitive`) and
    `expected-1.1.toml` (full reader: files, verify). No byte of an earlier vector changed.
+
+2026-10-04: revision 1.1 text clarified after the independent decoder's reading (fifteen points); no behaviour or
+byte changed.
