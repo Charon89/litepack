@@ -1431,6 +1431,7 @@ dependencies = [
  "lepton_jpeg",
  "libc",
  "liblzma",
+ "lpk-check",
  "lpk-format",
  "same-file",
  "tempfile",

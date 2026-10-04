@@ -119,9 +119,11 @@ fn render() -> String {
 /// what CI runs). `lepton_jpeg` deflates its stream header with `flate2`, whose backend Cargo
 /// unifies across the build: in the workspace `lpk-bench` enables the zlib backend, while
 /// `lpk-core` built alone gets `miniz_oxide`, and the two write different (equally valid) zlib
-/// bytes. So a build with the other backend gets a structural check instead of byte identity:
+/// bytes. The committed vector was written by the workspace build, that is with flate2's zlib
+/// backend. A build with the other backend gets a structural check instead of byte identity:
 /// the same Merkle root (the chunk table hashes the original bytes), the same record, the same
-/// nested block, and the same extracted file.
+/// nested block, and the same extracted file. When the environment variable `CI` is set (CI
+/// builds the workspace, the backend of the committed vector) a difference fails instead.
 #[test]
 fn the_vector_regenerates_identically() {
     let committed = std::fs::read(vectors().join(VECTOR)).unwrap();
@@ -129,6 +131,10 @@ fn the_vector_regenerates_identically() {
     if committed == built {
         return;
     }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "jpeg-peel.lpk differs from this build's under CI, where byte identity is required"
+    );
     eprintln!("jpeg-peel.lpk differs from this build's (flate2 backend?): structural check");
     let open = |b: Vec<u8>| {
         let mut a = Archive::open(Cursor::new(b), &Resources::default()).unwrap();
@@ -213,10 +219,15 @@ fn lpk_check_reports_unimplemented_primitive_7() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!out.status.success(), "{text}");
-    assert!(
-        text.contains("UnimplementedPrimitive") || text.contains("0x0007"),
-        "{text}"
-    );
+    assert!(text.contains("0x0007"), "{text}");
+    // The tool prints the message only; the class comes from the same decoder as a library.
+    let data = std::fs::read(vectors().join(VECTOR)).unwrap();
+    let e = lpk_check::archive::Archive::open(data, lpk_check::archive::Options::default())
+        .unwrap()
+        .verify()
+        .unwrap_err();
+    assert_eq!(e.class, "UnimplementedPrimitive");
+    assert!(e.to_string().contains("0x0007"), "{e}");
 }
 
 #[test]
