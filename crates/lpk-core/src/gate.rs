@@ -71,14 +71,14 @@ pub(crate) fn histogram(data: &[u8]) -> [u64; 256] {
 }
 
 fn add_counts(h: &mut [[u64; 256]; 4], data: &[u8]) {
-    let mut chunks = data.chunks_exact(4);
-    for c in &mut chunks {
+    let (chunks, rest) = data.as_chunks::<4>();
+    for c in chunks {
         h[0][c[0] as usize] += 1;
         h[1][c[1] as usize] += 1;
         h[2][c[2] as usize] += 1;
         h[3][c[3] as usize] += 1;
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         h[0][b as usize] += 1;
     }
 }

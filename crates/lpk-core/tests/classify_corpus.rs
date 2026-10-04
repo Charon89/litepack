@@ -42,9 +42,18 @@ fn expected(class_dir: &str, rel: &str) -> Option<Vec<Class>> {
     Some(vec![c])
 }
 
-/// Files that legitimately disagree with the table: (path suffix, class it takes, reason).
-/// Empty unless the run showed one.
-const EXCEPTIONS: &[(&str, Class, &str)] = &[];
+/// A file that legitimately disagrees with the table: it is accepted only while the stated
+/// reason can be checked on the bytes read.
+///
+/// `small-files/**/*.log`: a few synthetic log files embed raw exploit bytes (0xF7, 0xFF, ...)
+/// after a `gethostbyname error for` line, so the head is not valid UTF-8; the classifier is
+/// right to say `Other` for them and the extension is wrong to promise text.
+fn excepted(class_dir: &str, rel: &str, got: Class, head: &[u8]) -> bool {
+    class_dir == "small-files"
+        && rel.ends_with(".log")
+        && got == Class::Other
+        && std::str::from_utf8(head).is_err_and(|e| e.error_len().is_some())
+}
 
 #[derive(Default)]
 struct Row {
@@ -52,6 +61,7 @@ struct Row {
     asserted: u64,
     agreed: u64,
     disagreed: u64,
+    excepted: u64,
 }
 
 #[test]
@@ -86,11 +96,11 @@ fn classifier_agrees_with_the_extension_table() {
                 continue;
             };
             row.asserted += 1;
-            let excepted = EXCEPTIONS
-                .iter()
-                .any(|(suffix, c, _)| i.path.ends_with(suffix) && *c == got);
-            if want.contains(&got) || excepted {
+            if want.contains(&got) {
                 row.agreed += 1;
+            } else if excepted(&name, &i.path, got, &buf) {
+                row.agreed += 1;
+                row.excepted += 1;
             } else {
                 row.disagreed += 1;
                 total_bad += 1;
@@ -108,12 +118,12 @@ fn classifier_agrees_with_the_extension_table() {
     }
     println!(
         "{:<22} {:>7} {:>9} {:>7} {:>10}",
-        "class", "files", "asserted", "agreed", "disagreed"
+        "class", "files", "asserted", "agreed", "disagreed (+excepted, counted as agreed)"
     );
     for (n, r) in &rows {
         println!(
-            "{n:<22} {:>7} {:>9} {:>7} {:>10}",
-            r.files, r.asserted, r.agreed, r.disagreed
+            "{n:<22} {:>7} {:>9} {:>7} {:>10} (+{})",
+            r.files, r.asserted, r.agreed, r.disagreed, r.excepted
         );
     }
     for s in &shown {
