@@ -10,8 +10,6 @@ use lzma_rs::decompress::raw::{LzmaDecoder as Inner, LzmaParams, LzmaProperties}
 use std::io::{self, Cursor, Write};
 
 const ID: u16 = 2;
-/// The smallest dictionary buffer asked of the decoder.
-const MIN_DICT: u64 = 4096;
 
 fn lerr(reason: impl Into<String>) -> FormatError {
     FormatError::LzmaError {
@@ -76,13 +74,16 @@ impl PrimitiveDecoder for LzmaDecoder {
                 allowed: limits.max_window,
             });
         }
-        // No distance can reach back past the output, so the buffer need not
-        // be larger than it; never beyond the declared dictionary either.
-        let buffer = expected_len
-            .min(u64::from(dict_size))
-            .max(MIN_DICT)
-            .min(limits.max_window.max(1));
+        // The buffer is the dictionary, capped by the output: lzma-rs refuses
+        // a distance beyond the buffer, so exactly the distances beyond
+        // `dict_size` or beyond the bytes produced are refused, whatever the
+        // reader's `max_window` is (`dict_size` <= `max_window` was checked).
+        let buffer = expected_len.min(u64::from(dict_size)).max(1);
         let buffer = u32::try_from(buffer).map_err(|_| lerr("dictionary"))?;
+        // The first byte of a range coder stream is always 0.
+        if input.first().is_some_and(|&b| b != 0) {
+            return Err(lerr("range coder"));
+        }
         let props = LzmaProperties {
             lc: u32::from(lc),
             lp: u32::from(lp),
@@ -91,42 +92,26 @@ impl PrimitiveDecoder for LzmaDecoder {
         // First as a stream that ends with the end-of-payload marker (what
         // liblzma writes); a stream without one fails that pass and is
         // decoded again by its known size.
-        if let Ok(out) = run(props, buffer, None, input, expected_len) {
+        let first = pass(props, buffer, None, input, expected_len);
+        let short = first.is_ok();
+        if let Ok((out, _)) = first {
             if out.len() as u64 == expected_len {
                 return Ok(out);
             }
         }
-        let (out, used) = run_sized(props, buffer, input, expected_len)?;
-        if (out.len() as u64) < expected_len {
-            return Err(lerr("truncated"));
+        match pass(props, buffer, Some(expected_len), input, expected_len) {
+            // The marker came before the bound: the first pass saw it too.
+            Err(FormatError::PayloadTooLarge { .. }) if short => Err(lerr("truncated")),
+            Err(e) => Err(e),
+            Ok((out, _)) if (out.len() as u64) < expected_len => Err(lerr("truncated")),
+            Ok((_, used)) if used < input.len() as u64 => Err(lerr("trailing input")),
+            Ok((out, _)) => Ok(out),
         }
-        if used < input.len() as u64 {
-            return Err(lerr("trailing input"));
-        }
-        Ok(out)
     }
 }
 
-/// One decoding pass, ignoring how far the input was used.
-fn run(
-    props: LzmaProperties,
-    buffer: u32,
-    size: Option<u64>,
-    input: &[u8],
-    expected_len: u64,
-) -> Result<Vec<u8>, FormatError> {
-    pass(props, buffer, size, input, expected_len).map(|(o, _)| o)
-}
-
-fn run_sized(
-    props: LzmaProperties,
-    buffer: u32,
-    input: &[u8],
-    expected_len: u64,
-) -> Result<(Vec<u8>, u64), FormatError> {
-    pass(props, buffer, Some(expected_len), input, expected_len)
-}
-
+/// One decoding pass: with `size` the stream ends at that many bytes, without
+/// it at the end-of-payload marker (which must then be the last input).
 fn pass(
     props: LzmaProperties,
     buffer: u32,
@@ -151,20 +136,20 @@ fn pass(
         });
     }
     if let Err(e) = res {
-        // `lzma-rs` itself reports a stream that ends off its size.
+        // Only the over-length case is read from the text: lzma-rs checks its
+        // size after a match crossed the bound and says so in words. A marker
+        // before the bound gives the same words; the caller tells the two
+        // apart by the first pass.
         let text = e.to_string();
-        if let Some(got) = text
-            .split("decompressed to ")
-            .nth(1)
-            .and_then(|t| t.trim().parse::<u64>().ok())
-        {
-            return Err(if got > expected_len {
-                FormatError::PayloadTooLarge {
-                    len: got,
-                    max: expected_len,
-                }
-            } else {
-                lerr("truncated")
+        if text.starts_with("lzma error: Expected unpacked size") {
+            let len = text
+                .rsplit("decompressed to ")
+                .next()
+                .and_then(|t| t.trim().parse::<u64>().ok())
+                .unwrap_or(expected_len.saturating_add(1));
+            return Err(FormatError::PayloadTooLarge {
+                len,
+                max: expected_len,
             });
         }
         return Err(lerr(map_reason(&e)));

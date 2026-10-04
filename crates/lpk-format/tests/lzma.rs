@@ -177,6 +177,81 @@ fn output_never_passes_expected_len() {
 }
 
 #[test]
+fn a_distance_beyond_dict_size_is_refused_whatever_max_window_is() {
+    let mut data = pattern(1, 2000);
+    data.extend_from_slice(&data.clone());
+    let raw = lzma_raw(&lzma_options(6, 1 << 20, 3, 0, 2), &data);
+    let n = data.len() as u64;
+    // Declared dictionary 1000, but the stream reaches back 2000.
+    let p = lzma_params(1000, 3, 0, 2);
+    let tight = Resources {
+        max_window: 1000,
+        ..Resources::default()
+    };
+    let a = reason(dec(&p, &raw, n, &tight));
+    let b = reason(dec(&p, &raw, n, &Resources::default()));
+    assert!(a.contains("beyond"), "{a}");
+    assert_eq!(a, b);
+}
+
+#[test]
+fn first_range_coder_byte_must_be_zero() {
+    let data = pattern(2, 1000);
+    let p = lzma_params(1 << 20, 3, 0, 2);
+    let mut raw = lzma_raw(&lzma_options(6, 1 << 20, 3, 0, 2), &data);
+    assert_eq!(raw[0], 0);
+    raw[0] = 1;
+    assert_eq!(
+        reason(dec(&p, &raw, 1000, &Resources::default())),
+        "range coder"
+    );
+    let mut m = markerless(&data);
+    m[0] = 0x80;
+    assert_eq!(
+        reason(dec(
+            &lzma_params(1 << 23, 3, 0, 2),
+            &m,
+            1000,
+            &Resources::default()
+        )),
+        "range coder"
+    );
+}
+
+#[test]
+fn a_match_crossing_the_bound_is_payload_too_large_and_a_symbol_boundary_is_trailing() {
+    // Zeros: one literal, then long matches. Every bound is either inside a
+    // match (PayloadTooLarge) or between two symbols (trailing input).
+    let data = vec![0u8; 10_000];
+    let marker = lzma_raw(&lzma_options(6, 1 << 20, 3, 0, 2), &data);
+    let free = markerless(&data);
+    let (pm, pf) = (lzma_params(1 << 20, 3, 0, 2), lzma_params(1 << 23, 3, 0, 2));
+    let (mut over, mut trailing) = (0, 0);
+    for want in 1..700u64 {
+        let class = |p: &[u8], s: &[u8]| match dec(p, s, want, &Resources::default()) {
+            Err(FormatError::PayloadTooLarge { len, max }) => {
+                assert_eq!(max, want);
+                assert!(len > want);
+                0
+            }
+            Err(FormatError::LzmaError { reason }) if reason == "trailing input" => 1,
+            other => panic!("want {want}: {other:?}"),
+        };
+        // The two encoders cut their symbols differently, so each stream is
+        // classified on its own.
+        for c in [class(&pm, &marker), class(&pf, &free)] {
+            if c == 0 {
+                over += 1;
+            } else {
+                trailing += 1;
+            }
+        }
+    }
+    assert!(over > 600, "{over}");
+    assert!(trailing >= 2, "{trailing}");
+}
+
+#[test]
 fn registry_has_it_and_the_writer_round_trips() {
     assert!(Registry::v1().is_implemented(PrimitiveId::Lzma));
     let files = vec![
@@ -227,9 +302,11 @@ mod hostile {
         fn random_bytes_never_panic(
             input in proptest::collection::vec(any::<u8>(), 0..2000),
             lc in 0u8..=4,
+            lp in 0u8..=4,
             pb in 0u8..=4,
         ) {
-            let _ = dec(&lzma_params(1 << 16, lc, 0, pb), &input, 10_000, &tight());
+            let lp = lp.min(4 - lc);
+            let _ = dec(&lzma_params(1 << 16, lc, lp, pb), &input, 10_000, &tight());
         }
 
         #[test]
@@ -239,13 +316,15 @@ mod hostile {
             muts in proptest::collection::vec((any::<usize>(), any::<u8>()), 0..6),
             cut in proptest::option::of(any::<usize>()),
             marker in any::<bool>(),
+            lp in 0u8..=1,
         ) {
             let data = pattern(seed, len);
             let mut stream = if marker {
-                lzma_raw(&lzma_options(6, 1 << 16, 3, 0, 2), &data)
+                lzma_raw(&lzma_options(6, 1 << 16, 3, lp, 2), &data)
             } else {
                 markerless(&data)
             };
+            let lp = if marker { lp } else { 0 };
             for (at, v) in muts {
                 let n = stream.len();
                 stream[at % n] ^= v | 1;
@@ -253,8 +332,9 @@ mod hostile {
             if let Some(c) = cut {
                 stream.truncate(c % (stream.len() + 1));
             }
-            if let Ok(out) = dec(&lzma_params(1 << 16, 3, 0, 2), &stream, 10_000, &tight()) {
-                prop_assert!(out.len() <= 10_000);
+            let p = lzma_params(1 << 16, 3, lp, 2);
+            if let Ok(out) = dec(&p, &stream, data.len() as u64, &tight()) {
+                prop_assert_eq!(out.len(), data.len());
             }
         }
     }
