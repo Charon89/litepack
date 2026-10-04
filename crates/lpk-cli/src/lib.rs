@@ -1,7 +1,9 @@
 //! The `lpk` command line: `a` creates an archive from a directory, `x` extracts, `t` tests.
 //!
-//! Extraction and testing go through the reference tool's code (`lpk_format::cli`), so the
-//! extraction refusals (unsafe paths, devices, symlinks, existing files) are the format's own.
+//! Extraction and testing go through the reference tool's code (`lpk_format::cli::run_with`), so
+//! the extraction refusals (unsafe paths, devices, symlinks, existing files) are the format's own;
+//! every archive it opens gets `lpk-core`'s full reader (revision 1.1's `jpeg-reconstruct`), so
+//! peeled files extract and verify.
 //! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation. Nothing is ever prompted;
 //! progress goes to stderr and only with `-v`.
 #![forbid(unsafe_code)]
@@ -156,11 +158,33 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
             f.zstd_blocks, f.stored_by_gate, f.stored_by_class, f.stored_no_gain
         );
     }
+    let p = &s.peel;
     let _ = writeln!(
         err,
-        "stage seconds: walk {:.3}, classify {:.3}, model {:.3}, seal {:.3}",
+        "peel: {} files peeled ({} bytes in, {} bytes out), {} stored as-is",
+        p.peeled.files,
+        p.peeled.bytes,
+        p.peeled_output_bytes,
+        p.fallback_total().files
+    );
+    for c in lpk_core::Cause::ALL {
+        let n = p.fallback(c);
+        if n.files > 0 {
+            let _ = writeln!(
+                err,
+                "  as-is, {}: {} files, {} bytes",
+                c.label(),
+                n.files,
+                n.bytes
+            );
+        }
+    }
+    let _ = writeln!(
+        err,
+        "stage seconds: walk {:.3}, classify {:.3}, peel {:.3}, model {:.3}, seal {:.3}",
         t.walk.as_secs_f64(),
         t.classify.as_secs_f64(),
+        t.peel.as_secs_f64(),
         t.model.as_secs_f64(),
         t.seal.as_secs_f64()
     );
@@ -188,7 +212,12 @@ fn reference(
     if let Some(d) = outdir {
         args.push(d.into());
     }
-    match lpk_format::cli::run(args, out, err) {
+    match lpk_format::cli::run_with(
+        args,
+        out,
+        err,
+        lpk_core::register_full_reader::<std::fs::File>,
+    ) {
         0 => EXIT_OK,
         _ => EXIT_FAILED,
     }
