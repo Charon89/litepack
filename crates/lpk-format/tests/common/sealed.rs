@@ -135,5 +135,8 @@ pub fn vectors_toml() -> String {
             s.push_str(&format!("keyfile = \"{SEALED_KEYFILE}\"\n"));
         }
     }
+    s.push_str(
+        "\n[\"recovery-groups.lpk\"]\n# no password; store graph, recovery percent 20, shard_len 1024, group_shards 12\n",
+    );
     s
 }

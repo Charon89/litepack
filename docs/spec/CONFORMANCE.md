@@ -27,32 +27,42 @@ from a xorshift pattern by `tests/common/mod.rs::pattern`; the hashes make that 
 
 ## The vectors
 
-| Archive | Needs | What it proves |
-|---|---|---|
-| `zstd-basic.lpk` | nothing | one block, zstd (window_log 20); chunk table, entry table, Merkle roots |
-| `zstd-multiblock.lpk` | nothing | several blocks (32 KiB), a file whose chunks span two blocks |
-| `zstd-dict.lpk` | prior `zstd-dict.prior` | a zstd step with a dictionary named by BLAKE3 in the index; without the prior the error is `MissingPrior` and the archive does not verify |
-| `zstd-window.lpk` | nothing | a frame that declares window 2^24 (no content size); the envelope's `max_window` |
-| `lzma-basic.lpk` | nothing | raw LZMA1, 8 MiB dictionary, lc 3, lp 0, pb 2 |
-| `lzma-multiblock.lpk` | nothing | LZMA over several blocks, a file across a block boundary |
-| `lzma-props.lpk` | nothing | LZMA with lc 0, lp 2, pb 0 and a 1 MiB dictionary |
-| `sealed-aes.lpk` | password `correct horse` | an encrypted archive, AES-256-GCM suite, sealed frames, key slot |
-| `sealed-xchacha.lpk` | password `battery staple` | the XChaCha20-Poly1305 suite |
-| `sealed-listable.lpk` | password `list me` | an encrypted archive whose entry table is readable without the password (a listing needs none; extraction does) |
-| `sealed-keyfile.lpk` | password `two factors` and keyfile `sealed-keyfile.key` | a key slot that needs a second factor; a missing keyfile or a wrong password is `WrongKey` |
-| `journal-3gen.lpk` | nothing | three generations (append-only journal), a deleted file, a replaced file, a copy; rollback |
-| `malformed-truncated.lpk` | nothing | not a valid archive: see below |
-| `malformed-hashflip.lpk` | nothing | not a valid archive: see below |
+Graph = the block graph of the data blocks. Recovery = recovery frames present. Generations = more than one.
 
-The passwords and the keyfile are also in `tests/vectors/vectors.toml` (test values, not secrets). The three sealed
-vectors with the same contents (`sealed-*`) decode to the same three files.
+| Archive | Graph | Recovery | Generations | Needs | What it proves |
+|---|---|---|---|---|---|
+| `zstd-basic.lpk` | zstd | no | 1 | nothing | one block (window_log 20); chunk table, entry table, Merkle roots |
+| `zstd-multiblock.lpk` | zstd | no | 1 | nothing | several blocks (32 KiB), a file whose chunks span two blocks |
+| `zstd-dict.lpk` | zstd | no | 1 | prior `zstd-dict.prior` | a zstd step with a dictionary named by BLAKE3 in the index; without the prior the error is `MissingPrior` and the archive does not verify |
+| `zstd-window.lpk` | zstd | no | 1 | nothing | a frame that declares window 2^24 (no content size); the envelope's `max_window` |
+| `lzma-basic.lpk` | lzma | no | 1 | nothing | raw LZMA1, 8 MiB dictionary, lc 3, lp 0, pb 2 |
+| `lzma-multiblock.lpk` | lzma | no | 1 | nothing | LZMA over several blocks, a file across a block boundary |
+| `lzma-props.lpk` | lzma | no | 1 | nothing | LZMA with lc 0, lp 2, pb 0 and a 1 MiB dictionary |
+| `sealed-aes.lpk` | store | no | 1 | password `correct horse` | an encrypted archive, AES-256-GCM suite, sealed frames, key slot |
+| `sealed-xchacha.lpk` | store | no | 1 | password `battery staple` | the XChaCha20-Poly1305 suite |
+| `sealed-listable.lpk` | store | no | 1 | password `list me` | an encrypted archive whose entry table is readable without the password (a listing needs none; extraction does) |
+| `sealed-keyfile.lpk` | store | no | 1 | password `two factors` and keyfile `sealed-keyfile.key` | a key slot that needs a second factor; a missing keyfile or a wrong password is `WrongKey` |
+| `journal-3gen.lpk` | store | no | 3 | nothing | append-only journal: a deleted file, a replaced file, a copy; rollback |
+| `recovery-groups.lpk` | store | yes: 3 frames (percent 20, shard_len 1024, group_shards 12) | 1 | nothing | recovery frames over several groups; `check` is clean (see below) |
+| `malformed-truncated.lpk` | zstd | no | 1 | nothing | not a valid archive: see below |
+| `malformed-hashflip.lpk` | zstd | no | 1 | nothing | not a valid archive: see below |
+| `malformed-recovery-damaged.lpk` | store | yes | 1 | nothing | one damaged data shard: `check` reports it, `repair` restores `recovery-groups.lpk` |
+
+The passwords and the keyfile are also in `tests/vectors/vectors.toml` (test values, not secrets). The four sealed
+vectors (`sealed-*`) decode to the same three files.
+
+Recovery expectations (`expected.toml`): for `recovery-groups.lpk` `check` prints
+`recovery frames: 3, unusable: 0, damaged shards: 0, repaired shards: 0` and exits 0. For
+`malformed-recovery-damaged.lpk` (one bit flipped in the middle of the first block's frame) the archive opens, `check`
+reports 1 damaged shard and exits 1, and `repair` writes a copy that is byte-identical to `recovery-groups.lpk`
+(1 shard repaired). The other vectors carry no recovery frames, so `check` finds nothing to scan on them.
 
 The vectors do not exercise the reconstruction primitives (7 to 12), which have no decoder in v1 yet; a decoder that
 meets one reports `UnimplementedPrimitive` and does not guess.
 
 ## Malformed vectors
 
-Both are derived from `zstd-basic.lpk` by `tests/conformance.rs` (the test checks the committed bytes against
+The first two are derived from `zstd-basic.lpk` (the third from the recovery vector, see above) by `tests/conformance.rs` (the test checks the committed bytes against
 the derivation, so they cannot drift).
 
 | Archive | Derivation | Required outcome |

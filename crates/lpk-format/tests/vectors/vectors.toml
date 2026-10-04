@@ -12,3 +12,6 @@ password = "list me"
 ["sealed-keyfile.lpk"]
 password = "two factors"
 keyfile = "sealed-keyfile.key"
+
+["recovery-groups.lpk"]
+# no password; store graph, recovery percent 20, shard_len 1024, group_shards 12

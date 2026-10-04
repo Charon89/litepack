@@ -8,6 +8,7 @@
 mod common;
 
 use common::journal::JOURNAL_VECTOR;
+use common::recovery::{RECOVERY_DAMAGED, RECOVERY_VECTOR};
 use common::sealed::{sealed_keyfile_bytes, sealed_password, SEALED_VECTORS};
 use common::{vectors_dir, DICT_FILE, VECTORS};
 use lpk_format::{Archive, Credentials, FormatError, MemoryPriors, Resources};
@@ -93,6 +94,7 @@ fn render() -> String {
     let mut names: Vec<&str> = VECTORS.to_vec();
     names.extend(SEALED_VECTORS);
     names.push(JOURNAL_VECTOR);
+    names.push(RECOVERY_VECTOR);
     for name in names {
         let creds = creds_of(name);
         let mut a = open(read(name), name, creds.as_ref());
@@ -128,6 +130,9 @@ fn render() -> String {
         writeln!(s, "]").unwrap();
         writeln!(s, "list = {:?}", run("list")).unwrap();
         writeln!(s, "verify = {:?}", run("verify")).unwrap();
+        if name == RECOVERY_VECTOR {
+            writeln!(s, "check = {:?}", run("check")).unwrap();
+        }
         if name == JOURNAL_VECTOR {
             let latest = a.generation();
             writeln!(s, "latest_generation = {latest}").unwrap();
@@ -161,7 +166,46 @@ fn render() -> String {
         writeln!(s, "error = {:?}", variant(&err)).unwrap();
         writeln!(s, "message = {:?}", err.to_string()).unwrap();
     }
+    // The damaged recovery vector: opens, `check` reports one damaged shard, `repair`
+    // restores the original bytes.
+    let damaged = read(RECOVERY_DAMAGED);
+    let mut a = open(damaged.clone(), RECOVERY_DAMAGED, None);
+    let report = a.check_recovery().unwrap();
+    let mut fixed = Cursor::new(Vec::new());
+    let repaired =
+        lpk_format::repair(Cursor::new(damaged), &mut fixed, &Resources::default()).unwrap();
+    assert!(fixed.into_inner() == read(RECOVERY_VECTOR));
+    let p = dir.join(RECOVERY_DAMAGED);
+    let (code, out, err) = cli(&["lpk-decode", "check", p.to_str().unwrap()]);
+    writeln!(s, "\n[\"{RECOVERY_DAMAGED}\"]").unwrap();
+    writeln!(s, "recovery_frames = {}", report.frames).unwrap();
+    writeln!(s, "shards_damaged = {}", report.shards_damaged).unwrap();
+    writeln!(
+        s,
+        "shards_repaired_by_repair = {}",
+        repaired.shards_repaired
+    )
+    .unwrap();
+    writeln!(s, "repaired_copy_equals = \"{RECOVERY_VECTOR}\"").unwrap();
+    writeln!(s, "check_exit = {code}").unwrap();
+    writeln!(s, "check_stdout = {out:?}").unwrap();
+    writeln!(s, "check_stderr = {err:?}").unwrap();
     s
+}
+
+#[test]
+fn the_recovery_vectors_are_reproduced() {
+    let good = common::recovery::build_recovery_vector();
+    assert!(read(RECOVERY_VECTOR) == good);
+    assert!(read(RECOVERY_DAMAGED) == common::recovery::damaged_from(&good));
+}
+
+#[test]
+fn the_recovery_vector_has_at_least_three_groups() {
+    let mut a = open(read(RECOVERY_VECTOR), RECOVERY_VECTOR, None);
+    let r = a.check_recovery().unwrap();
+    assert!(r.frames >= 3, "{r:?}");
+    assert_eq!((r.shards_damaged, r.frames_unusable), (0, 0));
 }
 
 #[test]
