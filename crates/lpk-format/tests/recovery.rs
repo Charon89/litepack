@@ -1,13 +1,11 @@
-//! Recovery groups: the writer's group encoding, repair and detection (spec section 13).
+//! Recovery groups: interleaved recovery frames, repair and detection (spec section 13).
 #![allow(clippy::unwrap_used)]
 
 use lpk_format::{
-    Archive, EntryFlags, FormatError, FrameKind, RecoveryFrame, RecoveryOptions, Resources, Writer,
-    WriterOptions,
+    Archive, EntryFlags, FormatError, FrameKind, FrameLocation, RecoveryFrame, RecoveryOptions,
+    Resources, Writer, WriterOptions,
 };
-use std::cell::RefCell;
-use std::io::{Cursor, Write};
-use std::rc::Rc;
+use std::io::Cursor;
 
 /// Deterministic pseudo-random bytes.
 struct Rng(u64);
@@ -99,32 +97,59 @@ fn no_recovery_by_default() {
 }
 
 #[test]
-fn writer_makes_one_frame_per_group_with_the_right_shards() {
+fn recovery_frames_sit_between_the_data_frames_they_cover() {
     let bytes = pack(options(10), &tree());
     let mut a = open(&bytes);
     a.verify().unwrap();
     let frames = frames_of(&bytes);
-    let locs = a.recovery_frames().to_vec();
+    let rlocs = a.recovery_frames().to_vec();
     assert!(frames.len() >= 8, "{}", frames.len());
-    // Groups are consecutive, from the end of the header to the first frame.
-    let mut next = 32u64;
-    for (i, f) in frames.iter().enumerate() {
-        assert_eq!(f.cover_offset, next);
-        next += f.cover_len;
-        assert_eq!(f.shard_len, SHARD);
+    // Every data frame, from the index, in stream order.
+    let ix = a.index();
+    let mut data: Vec<FrameLocation> = ix
+        .blocks
+        .iter()
+        .map(|b| FrameLocation {
+            offset: b.frame_offset,
+            len: b.frame_len,
+        })
+        .collect();
+    data.push(ix.entry_table);
+    data.extend(ix.records);
+    data.sort_by_key(|l| l.offset);
+    let mut prev_end = 32u64;
+    for (k, (f, loc)) in frames.iter().zip(&rlocs).enumerate() {
+        // The frame covers exactly what was written since the previous one,
+        // and lies right after it.
+        assert_eq!(f.cover_offset, prev_end, "frame {k}");
+        assert_eq!(f.cover_offset + f.cover_len, loc.offset, "frame {k}");
+        assert!(f.cover_len <= u64::from(GROUP * SHARD));
         assert_eq!(f.group_shards, GROUP);
         assert_eq!(f.recovery_shards, 2); // ceil(16 * 10 / 100)
-        if i + 1 < frames.len() {
-            assert_eq!(f.data_shards, GROUP);
-            assert_eq!(f.cover_len, u64::from(GROUP * SHARD));
-        } else {
-            assert!(f.data_shards <= GROUP);
+        assert_eq!(u64::from(f.data_shards), f.cover_len.div_ceil(4096));
+        // The data frames inside the range tile it; none straddles an end.
+        let inside: Vec<&FrameLocation> = data
+            .iter()
+            .filter(|d| d.offset >= f.cover_offset && d.offset < loc.offset)
+            .collect();
+        assert!(!inside.is_empty());
+        assert_eq!(inside[0].offset, f.cover_offset);
+        for w in inside.windows(2) {
+            assert_eq!(w[0].offset + w[0].len, w[1].offset);
         }
-        if i > 0 {
-            assert_eq!(locs[i].offset, locs[i - 1].offset + locs[i - 1].len);
-        }
+        let last = inside.last().unwrap();
+        assert_eq!(last.offset + last.len, loc.offset, "frame {k}");
+        prev_end = loc.offset + loc.len;
     }
-    assert_eq!(next, locs[0].offset);
+    assert_eq!(prev_end, a.trailer().index_offset);
+    // Every data frame is covered by exactly one recovery frame.
+    for d in &data {
+        let n = frames
+            .iter()
+            .filter(|f| d.offset >= f.cover_offset && d.offset < f.cover_offset + f.cover_len)
+            .count();
+        assert_eq!(n, 1);
+    }
     // Hashes are of the zero-padded shards; recovery is the library's coding
     // of the group padded with implicit zero shards.
     for f in &frames {
@@ -168,41 +193,51 @@ fn bad_options_are_refused() {
         o.recovery.group_shards = 32768;
         o.recovery.shard_len = 65536;
     });
+    // A block (here 64 KiB) does not fit in a group of 16 * 4096 bytes.
+    refused(&|o| o.block_size = 64 * 1024);
     // With percent 0 the other settings are not looked at.
     let mut o = options(0);
     o.recovery.shard_len = 100;
     assert!(Writer::new(Vec::new(), o).is_ok());
 }
 
-/// A sink the test can look at while the writer owns it.
-#[derive(Clone)]
-struct Shared(Rc<RefCell<Vec<u8>>>);
-
-impl Write for Shared {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.borrow_mut().extend_from_slice(buf);
-        Ok(buf.len())
+#[test]
+fn a_frame_larger_than_a_group_is_refused() {
+    let mut o = options(5);
+    o.recovery.group_shards = 8; // 32 KiB
+    let mut sink = Vec::new();
+    let mut w = Writer::new(&mut sink, o).unwrap();
+    // 800 empty files with long names: the entry table outgrows the group.
+    for i in 0..800 {
+        let name = format!("{}{i:04}", "n".repeat(60));
+        w.add_file(&name, EntryFlags::EMPTY, 0, &mut [].as_slice())
+            .unwrap();
     }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+    assert!(matches!(
+        w.finish(),
+        Err(FormatError::BadOptions {
+            reason: "group smaller than a block"
+        })
+    ));
 }
 
 #[test]
-fn the_writer_keeps_no_covered_bytes_beyond_one_shard_and_one_group_encoder() {
-    // Groups of 4 shards of 64 KiB, one recovery shard each (25 percent).
+fn the_writer_holds_at_most_one_group_of_buffers() {
+    // Groups of 24 shards of 64 KiB (1.5 MiB), one 1 MiB block per group;
+    // 20 percent is 5 recovery shards.
     let mut o = options(20);
     o.recovery = RecoveryOptions {
         percent: 20,
         shard_len: 1 << 16,
-        group_shards: 4,
+        group_shards: 24,
     };
     o.chunk_size = 1 << 16;
     o.block_size = 1 << 20;
-    let sink = Shared(Rc::new(RefCell::new(Vec::new())));
-    let mut w = Writer::new(sink.clone(), o).unwrap();
+    let group_bytes = 24u64 << 16;
+    let mut sink = Vec::new();
+    let mut w = Writer::new(&mut sink, o).unwrap();
     let mut rng = Rng(77);
-    let mut peak = 0usize;
+    let mut peak_shard = 0usize;
     // 20 MiB, one 1 MiB file at a time.
     for i in 0..20 {
         let data = rng.bytes(1 << 20);
@@ -213,25 +248,23 @@ fn the_writer_keeps_no_covered_bytes_beyond_one_shard_and_one_group_encoder() {
             &mut data.as_slice(),
         )
         .unwrap();
-        peak = peak.max(w.recovery_buffered());
-        // Finished groups hold only their recovery shards: a quarter of the
-        // covered bytes written so far, never the covered bytes themselves.
-        let written = sink.0.borrow().len() as u64;
-        assert!(
-            w.recovery_held() <= written / 4,
-            "held {}",
-            w.recovery_held()
-        );
-        assert!(i < 2 || w.recovery_held() > 0);
+        peak_shard = peak_shard.max(w.recovery_buffered());
+        // The open group never exceeds its capacity.
+        assert!(w.recovery_group_bytes() <= group_bytes);
     }
-    assert!(peak <= 1 << 16, "peak {peak}");
+    assert!(peak_shard <= 1 << 16, "peak {peak_shard}");
+    let summary = w.finish().unwrap();
+    // At most one group's recovery shards were ever held, finish included.
+    assert_eq!(summary.recovery_peak, 5 << 16);
     // The encoder's work buffer is one group's, whatever the archive's size.
-    assert_eq!(lpk_format::encoder_work_bytes(4, 1, 1 << 16), 4 << 16);
-    w.finish().unwrap();
-    let bytes = sink.0.borrow().clone();
-    let mut a = open(&bytes);
+    assert_eq!(
+        lpk_format::encoder_work_bytes(24, 5, 1 << 16),
+        24 << 16 // 24 is already a multiple of next_pow2(5) = 8
+    );
+    assert!(summary.archive_len > 20 << 20);
+    let mut a = open(&sink);
     a.verify().unwrap();
-    assert!(a.recovery_frames().len() > 70);
+    assert!(a.recovery_frames().len() >= 20);
     assert_eq!(a.check_recovery().unwrap().shards_damaged, 0);
 }
 
@@ -450,8 +483,8 @@ fn a_group_the_decoder_cannot_fit_in_memory_is_refused() {
 mod hand_built {
     use super::*;
     use lpk_format::{
-        merkle_root, ArchiveSizes, ChunkTableWriter, Envelope, Frame, FrameFlags, FrameLocation,
-        GraphResources, Header, HeaderFlags, Index, Trailer,
+        merkle_root, ArchiveSizes, ChunkTableWriter, Envelope, Frame, FrameFlags, GraphResources,
+        Header, HeaderFlags, Index, Trailer,
     };
 
     fn frame_bytes(kind: FrameKind, payload: Vec<u8>) -> Vec<u8> {
@@ -466,10 +499,39 @@ mod hand_built {
         v
     }
 
-    /// An archive with two recovery frames over the two halves of the body.
+    /// A recovery frame (as frame bytes) over `bytes[from..to]`, coded with
+    /// `extra` implicit zero shards beyond the real ones.
+    fn recovery(bytes: &[u8], from: u64, to: u64, extra: usize) -> (Vec<u8>, RecoveryFrame) {
+        let cover = &bytes[from as usize..to as usize];
+        let data = cover.len().div_ceil(64);
+        let group = data + extra;
+        let mut shards: Vec<Vec<u8>> = cover.chunks(64).map(<[u8]>::to_vec).collect();
+        for s in &mut shards {
+            s.resize(64, 0);
+        }
+        let hashes = shards.iter().map(|s| *blake3::hash(s).as_bytes()).collect();
+        shards.resize(group, vec![0; 64]);
+        let coded = reed_solomon_simd::encode(group, 3, &shards).unwrap();
+        let frame = RecoveryFrame {
+            cover_offset: from,
+            cover_len: to - from,
+            shard_len: 64,
+            data_shards: data as u32,
+            group_shards: group as u32,
+            recovery_shards: 3,
+            shard_hashes: hashes,
+            recovery: coded.concat(),
+        };
+        (
+            frame_bytes(FrameKind::Recovery, frame.encode().unwrap()),
+            frame,
+        )
+    }
+
+    /// header, entry table, recovery 0, records, recovery 1, index, trailer.
     /// The first group is coded with 2 implicit zero shards beyond its real
-    /// ones. With `overlap`, the second frame also covers 40 bytes of the first
-    /// recovery frame.
+    /// ones. With `overlap`, frame 1 claims to start 40 bytes early, inside
+    /// recovery frame 0.
     pub fn build(overlap: bool) -> (Vec<u8>, Vec<RecoveryFrame>) {
         let id = [3u8; 16];
         let mut rng = Rng(99);
@@ -480,43 +542,23 @@ mod hand_built {
         let entry_off = bytes.len() as u64;
         let e = frame_bytes(FrameKind::EntryTable, rng.bytes(3000));
         bytes.extend_from_slice(&e);
+        let (r0, f0) = recovery(&bytes, 32, bytes.len() as u64, 2);
+        let rec0 = FrameLocation {
+            offset: bytes.len() as u64,
+            len: r0.len() as u64,
+        };
+        bytes.extend_from_slice(&r0);
         let rec_off = bytes.len() as u64;
         let r = frame_bytes(FrameKind::Records, rng.bytes(3000));
         bytes.extend_from_slice(&r);
-        let body_end = bytes.len() as u64;
-        let mid = 32 + (body_end - 32) / 2;
-        let mut frames = Vec::new();
-        let mut locs = Vec::new();
-        for (n, (from, to)) in [(32u64, mid), (mid, body_end)].into_iter().enumerate() {
-            let to = if overlap && n == 1 { to + 40 } else { to };
-            let cover = &bytes[from as usize..to as usize];
-            let data = cover.len().div_ceil(64);
-            let group = if n == 0 { data + 2 } else { data };
-            let mut shards: Vec<Vec<u8>> = cover.chunks(64).map(<[u8]>::to_vec).collect();
-            for s in &mut shards {
-                s.resize(64, 0);
-            }
-            let hashes = shards.iter().map(|s| *blake3::hash(s).as_bytes()).collect();
-            shards.resize(group, vec![0; 64]);
-            let coded = reed_solomon_simd::encode(group, 3, &shards).unwrap();
-            let frame = RecoveryFrame {
-                cover_offset: from,
-                cover_len: to - from,
-                shard_len: 64,
-                data_shards: data as u32,
-                group_shards: group as u32,
-                recovery_shards: 3,
-                shard_hashes: hashes,
-                recovery: coded.concat(),
-            };
-            let fb = frame_bytes(FrameKind::Recovery, frame.encode().unwrap());
-            locs.push(FrameLocation {
-                offset: bytes.len() as u64,
-                len: fb.len() as u64,
-            });
-            bytes.extend_from_slice(&fb);
-            frames.push(frame);
-        }
+        let from = if overlap { rec_off - 40 } else { rec_off };
+        let (r1, f1) = recovery(&bytes, from, bytes.len() as u64, 0);
+        let rec1 = FrameLocation {
+            offset: bytes.len() as u64,
+            len: r1.len() as u64,
+        };
+        bytes.extend_from_slice(&r1);
+        let locs = vec![rec0, rec1];
         let index_off = bytes.len() as u64;
         let mut index = Index {
             chunk_table: ChunkTableWriter::encode(&[]).into(),
@@ -573,7 +615,7 @@ mod hand_built {
         }
         .write(&mut bytes)
         .unwrap();
-        (bytes, frames)
+        (bytes, vec![f0, f1])
     }
 }
 
@@ -595,7 +637,7 @@ fn a_short_group_with_implicit_zero_shards_is_repaired() {
 }
 
 #[test]
-fn a_frame_covering_a_recovery_frame_is_unusable_not_fatal() {
+fn a_frame_that_does_not_tile_the_data_frames_is_unusable_not_fatal() {
     let (good, frames) = hand_built::build(true);
     let mut bad = good.clone();
     smash_shard(&mut bad, &frames[0], 0);

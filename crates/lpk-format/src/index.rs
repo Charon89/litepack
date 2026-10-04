@@ -404,6 +404,17 @@ impl Index {
             check_location(*r, index_offset, "recovery")?;
         }
         check_recovery_disjoint(&blocks, entry_table, records, &recovery)?;
+        // Recovery frames ascend, and the last one ends where the index starts
+        // (the last group closes before the index). The end is checked only
+        // where the index's offset is known (`encode` passes `u64::MAX`).
+        let ascending = recovery.windows(2).all(|w| w[0].offset < w[1].offset);
+        let ends_at_index = index_offset == u64::MAX
+            || recovery
+                .last()
+                .is_none_or(|l| l.offset.saturating_add(l.len) == index_offset);
+        if !(ascending && ends_at_index) {
+            return Err(FormatError::BadFrameLocation { what: "recovery" });
+        }
 
         let chunk_table: Arc<[u8]> = Arc::from(&payload[..used]);
         let (chunks, leaves) = ChunkIndex::build_with_leaves(Arc::clone(&chunk_table), &blocks)?;
@@ -608,7 +619,7 @@ mod tests {
                 len: 90,
             },
             FrameLocation {
-                offset: 700,
+                offset: 9910,
                 len: 90,
             },
         ];
@@ -638,12 +649,25 @@ mod tests {
         // Too long for max_frame_payload.
         let mut o = idx.clone();
         o.recovery[1].len = 5000;
-        o.recovery[1].offset = 800;
+        o.recovery[1].offset = 5000;
         assert!(matches!(
             parse_err(&o),
             FormatError::EnvelopeMismatch {
                 field: "max_frame_payload"
             }
+        ));
+        // The last frame must end where the index starts, and the frames ascend.
+        let mut o = idx.clone();
+        o.recovery[1].offset = 9000;
+        assert!(matches!(
+            parse_err(&o),
+            FormatError::BadFrameLocation { what: "recovery" }
+        ));
+        let mut o = idx.clone();
+        o.recovery.swap(0, 1);
+        assert!(matches!(
+            parse_err(&o),
+            FormatError::BadFrameLocation { what: "recovery" }
         ));
         // A count larger than the bytes left.
         let mut bytes = encode_unchecked(&idx);

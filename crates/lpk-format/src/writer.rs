@@ -197,6 +197,8 @@ pub struct WriterSummary {
     pub blocks: u64,
     /// Total length of the archive in bytes.
     pub archive_len: u64,
+    /// Most bytes of recovery shards held at once (one group's; 0 without recovery).
+    pub recovery_peak: u64,
 }
 
 /// Builds an archive in one pass over a stream of entries.
@@ -217,6 +219,10 @@ pub struct Writer<W: Write> {
     failed: Option<(std::io::ErrorKind, String)>,
     /// Set after a chunker broke the rules; every later call fails with it.
     bad_chunk: Option<&'static str>,
+    /// Locations of the recovery frames written so far.
+    recovery_locs: Vec<FrameLocation>,
+    /// Offset where the open recovery group starts.
+    cover_start: u64,
 }
 
 impl<W: Write> std::fmt::Debug for Writer<W> {
@@ -273,6 +279,13 @@ impl<W: Write> Writer<W> {
             Record::parse(r.kind, &r.encode(), i as u64)?;
         }
         options.recovery.check()?;
+        // A block (plus its frame's overhead) must fit in one group.
+        if options.recovery.percent > 0
+            && options.block_size.saturating_add(4096)
+                > u64::from(options.recovery.group_shards) * u64::from(options.recovery.shard_len)
+        {
+            return Err(bad_options("group smaller than a block"));
+        }
         let spool = if options.recovery.percent > 0 {
             Some(GroupEncoder::new(&options.recovery)?)
         } else {
@@ -295,6 +308,8 @@ impl<W: Write> Writer<W> {
             pending_chunks: 0,
             failed: None,
             bad_chunk: None,
+            recovery_locs: Vec::new(),
+            cover_start: Header::LEN as u64,
         })
     }
 
@@ -302,19 +317,81 @@ impl<W: Write> Writer<W> {
     /// more than one shard (`recovery.shard_len`), whatever the archive's
     /// size; 0 without recovery. Memory rule: that shard buffer, the
     /// encoder's work buffer for one group
-    /// ([`crate::recovery::encoder_work_bytes`]), and the recovery shards of
-    /// the finished groups (`percent` of the covered length) until their
-    /// frames are written after the covered range.
+    /// ([`crate::recovery::encoder_work_bytes`]) and that group's recovery
+    /// shards while its frame is written; independent of the archive's size.
     pub fn recovery_buffered(&self) -> usize {
         self.out.spool.as_ref().map_or(0, GroupEncoder::buffered)
     }
 
-    /// Bytes of recovery shards held for finished groups right now.
-    pub fn recovery_held(&self) -> u64 {
-        self.out
-            .spool
-            .as_ref()
-            .map_or(0, GroupEncoder::held_recovery)
+    /// Bytes the open group has taken so far (0 without recovery).
+    pub fn recovery_group_bytes(&self) -> u64 {
+        self.out.spool.as_ref().map_or(0, GroupEncoder::group_bytes)
+    }
+
+    /// Before a data frame of `len` bytes: close the group when the frame
+    /// would not fit in it, and refuse a frame no group can hold.
+    fn make_room(&mut self, len: u64) -> Result<(), FormatError> {
+        let o = self.options.recovery;
+        if o.percent == 0 {
+            return Ok(());
+        }
+        let cap = u64::from(o.group_shards) * u64::from(o.shard_len);
+        if len > cap {
+            return Err(bad_options("group smaller than a block"));
+        }
+        if self.pos - self.cover_start > 0 && self.pos - self.cover_start + len > cap {
+            self.close_group()?;
+        }
+        Ok(())
+    }
+
+    /// Close the open group and write its `Recovery` frame right after the
+    /// frames it covers (nothing when the group is empty or there is no
+    /// recovery). The frame is written piecewise, outside any group.
+    fn close_group(&mut self) -> Result<(), FormatError> {
+        let Some(mut enc) = self.out.spool.take() else {
+            return Ok(());
+        };
+        let r = self.write_group_frame(&mut enc);
+        self.out.spool = Some(enc);
+        r
+    }
+
+    fn write_group_frame(&mut self, enc: &mut GroupEncoder) -> Result<(), FormatError> {
+        let Some(g) = enc.end_group()? else {
+            return Ok(());
+        };
+        let o = self.options.recovery;
+        let frame = RecoveryFrame {
+            cover_offset: self.cover_start,
+            cover_len: g.cover_len,
+            shard_len: o.shard_len,
+            data_shards: g.hashes.len() as u32,
+            group_shards: o.group_shards,
+            recovery_shards: crate::recovery::group_recovery_shards(o.group_shards, o.percent),
+            shard_hashes: g.hashes,
+            recovery: Vec::new(),
+        };
+        let head = frame.head_bytes();
+        let payload_len = head.len() as u64 + g.recovery.len() as u64;
+        let at = FrameLocation {
+            offset: self.pos,
+            len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
+        };
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&head);
+        hasher.update(&g.recovery);
+        let w = &mut self.out;
+        w.write_all(&(FrameKind::Recovery as u16).to_le_bytes())?;
+        w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
+        varint::write(w, payload_len)?;
+        w.write_all(&head)?;
+        w.write_all(&g.recovery)?;
+        w.write_all(hasher.finalize().as_bytes())?;
+        self.pos += at.len;
+        self.cover_start = self.pos;
+        self.recovery_locs.push(at);
+        Ok(())
     }
 
     fn write_frame(
@@ -327,6 +404,9 @@ impl<W: Write> Writer<W> {
             flags: FrameFlags::EMPTY,
             payload,
         };
+        if matches!(kind, FrameKind::EntryTable | FrameKind::Records) {
+            self.make_room(frame.encoded_len())?;
+        }
         let at = FrameLocation {
             offset: self.pos,
             len: frame.encoded_len(),
@@ -361,6 +441,9 @@ impl<W: Write> Writer<W> {
         match &r {
             Err(FormatError::Io(e)) => self.failed = Some((e.kind(), e.to_string())),
             Err(FormatError::BadChunk { reason }) => self.bad_chunk = Some(reason),
+            Err(e @ FormatError::BadOptions { .. }) => {
+                self.failed = Some((std::io::ErrorKind::Other, e.to_string()));
+            }
             _ => {}
         }
         r
@@ -383,6 +466,7 @@ impl<W: Write> Writer<W> {
         // block (the identity encoder still copies the plain block once).
         let head = header.encode();
         let payload_len = (head.len() + encoded.len()) as u64;
+        self.make_room(4 + varint::len(payload_len) as u64 + payload_len + 32)?;
         let at = FrameLocation {
             offset: self.pos,
             len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
@@ -566,59 +650,20 @@ impl<W: Write> Writer<W> {
         Ok((entry_table, records))
     }
 
-    /// Write one `Recovery` frame per finished group, after the covered range
-    /// (none without recovery). Each frame is written piecewise: the recovery
-    /// shards are not copied into a payload buffer.
-    fn write_recovery(&mut self) -> Result<Vec<FrameLocation>, FormatError> {
-        let Some(spool) = self.out.spool.take() else {
-            return Ok(Vec::new());
-        };
-        let o = self.options.recovery;
-        let groups = spool.finish()?;
-        let recovery_shards = crate::recovery::group_recovery_shards(o.group_shards, o.percent);
-        let mut cover_offset = Header::LEN as u64;
-        let mut locations = Vec::with_capacity(groups.len());
-        for g in groups {
-            let frame = RecoveryFrame {
-                cover_offset,
-                cover_len: g.cover_len,
-                shard_len: o.shard_len,
-                data_shards: g.hashes.len() as u32,
-                group_shards: o.group_shards,
-                recovery_shards,
-                shard_hashes: g.hashes,
-                recovery: Vec::new(),
-            };
-            cover_offset += g.cover_len;
-            let head = frame.head_bytes();
-            let payload_len = head.len() as u64 + g.recovery.len() as u64;
-            let at = FrameLocation {
-                offset: self.pos,
-                len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
-            };
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&head);
-            hasher.update(&g.recovery);
-            let w = &mut self.out;
-            w.write_all(&(FrameKind::Recovery as u16).to_le_bytes())?;
-            w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
-            varint::write(w, payload_len)?;
-            w.write_all(&head)?;
-            w.write_all(&g.recovery)?;
-            w.write_all(hasher.finalize().as_bytes())?;
-            self.pos += at.len;
-            locations.push(at);
-        }
-        Ok(locations)
-    }
-
     /// Close the last block and write the entry table, the recovery frames, the
     /// index and the trailer.
     pub fn finish(mut self) -> Result<WriterSummary, FormatError> {
         self.check_alive()?;
         let (entry_table, records) = self.write_covered_tail()?;
         let records_len = records.map_or(0, |r| r.len);
-        let recovery = self.write_recovery()?;
+        // The last group closes before the index.
+        self.close_group()?;
+        let recovery_peak = self
+            .out
+            .spool
+            .as_ref()
+            .map_or(0, GroupEncoder::peak_recovery);
+        let recovery = std::mem::take(&mut self.recovery_locs);
         let recovery_len = recovery.iter().map(|r| r.len).max().unwrap_or(0);
 
         let recs = &self.records;
@@ -687,6 +732,7 @@ impl<W: Write> Writer<W> {
             chunks: self.records.len() as u64,
             blocks: index.blocks.len() as u64,
             archive_len: self.pos,
+            recovery_peak,
         })
     }
 }

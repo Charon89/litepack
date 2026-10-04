@@ -24,7 +24,7 @@ pub const DEFAULT_SHARD_LEN: u32 = 1 << 16;
 /// Largest shard length: 16 MiB.
 pub const MAX_SHARD_LEN: u32 = 16 << 20;
 /// Default data shards per group.
-pub const DEFAULT_GROUP_SHARDS: u32 = 1024;
+pub const DEFAULT_GROUP_SHARDS: u32 = 2048;
 /// Most data shards in one group.
 pub const MAX_GROUP_SHARDS: u32 = 32768;
 /// Most data shards plus recovery shards in one group.
@@ -322,8 +322,9 @@ pub(crate) struct Group {
     pub recovery: Vec<u8>,
 }
 
-/// Collects the covered bytes of a stream into shards and groups; each full
-/// group is encoded at once, so no covered byte is kept beyond one shard.
+/// Collects the bytes of the frames of the current group into shards and adds
+/// them to the group's encoder; the writer closes the group between frames.
+/// No covered byte is kept beyond one shard.
 pub(crate) struct GroupEncoder {
     shard_len: usize,
     group_shards: u32,
@@ -334,7 +335,7 @@ pub(crate) struct GroupEncoder {
     in_group: u32,
     group_bytes: u64,
     hashes: Vec<[u8; 32]>,
-    done: Vec<Group>,
+    peak_recovery: u64,
 }
 
 impl GroupEncoder {
@@ -356,7 +357,7 @@ impl GroupEncoder {
             in_group: 0,
             group_bytes: 0,
             hashes: Vec::new(),
-            done: Vec::new(),
+            peak_recovery: 0,
         })
     }
 
@@ -365,42 +366,22 @@ impl GroupEncoder {
         self.buf.len()
     }
 
-    /// Bytes of recovery shards held for finished groups.
-    pub(crate) fn held_recovery(&self) -> u64 {
-        self.done.iter().map(|g| g.recovery.len() as u64).sum()
+    /// Most bytes of recovery shards held at once so far (one group's).
+    pub(crate) fn peak_recovery(&self) -> u64 {
+        self.peak_recovery
     }
 
-    fn close_group(&mut self) -> Result<(), FormatError> {
-        for _ in self.in_group..self.group_shards {
-            self.encoder
-                .add_original_shard(&self.zero)
-                .map_err(rs_error)?;
-        }
-        let mut recovery = Vec::with_capacity(self.recovery_shards as usize * self.shard_len);
-        {
-            let result = self.encoder.encode().map_err(rs_error)?;
-            for s in result.recovery_iter() {
-                recovery.extend_from_slice(s);
-            }
-        }
-        self.encoder
-            .reset(
-                self.group_shards as usize,
-                self.recovery_shards as usize,
-                self.shard_len,
-            )
-            .map_err(rs_error)?;
-        self.done.push(Group {
-            cover_len: self.group_bytes,
-            hashes: std::mem::take(&mut self.hashes),
-            recovery,
-        });
-        self.in_group = 0;
-        self.group_bytes = 0;
-        Ok(())
+    /// Bytes of the open group so far.
+    pub(crate) fn group_bytes(&self) -> u64 {
+        self.group_bytes
     }
 
     fn complete(&mut self) -> Result<(), FormatError> {
+        if self.in_group >= self.group_shards {
+            return Err(FormatError::BadOptions {
+                reason: "group smaller than a block",
+            });
+        }
         self.buf.resize(self.shard_len, 0);
         self.hashes.push(*blake3::hash(&self.buf).as_bytes());
         self.encoder
@@ -408,9 +389,6 @@ impl GroupEncoder {
             .map_err(rs_error)?;
         self.buf.clear();
         self.in_group += 1;
-        if self.in_group == self.group_shards {
-            self.close_group()?;
-        }
         Ok(())
     }
 
@@ -427,15 +405,43 @@ impl GroupEncoder {
         Ok(())
     }
 
-    /// Close the covered range: the finished groups, in order.
-    pub(crate) fn finish(mut self) -> Result<Vec<Group>, FormatError> {
+    /// Close the open group: pad it with zero shards and encode. `None` when
+    /// the group is empty.
+    pub(crate) fn end_group(&mut self) -> Result<Option<Group>, FormatError> {
         if !self.buf.is_empty() {
             self.complete()?;
         }
-        if self.in_group > 0 {
-            self.close_group()?;
+        if self.in_group == 0 {
+            return Ok(None);
         }
-        Ok(self.done)
+        for _ in self.in_group..self.group_shards {
+            self.encoder
+                .add_original_shard(&self.zero)
+                .map_err(rs_error)?;
+        }
+        let mut recovery = Vec::with_capacity(self.recovery_shards as usize * self.shard_len);
+        {
+            let result = self.encoder.encode().map_err(rs_error)?;
+            for s in result.recovery_iter() {
+                recovery.extend_from_slice(s);
+            }
+        }
+        self.peak_recovery = self.peak_recovery.max(recovery.len() as u64);
+        self.encoder
+            .reset(
+                self.group_shards as usize,
+                self.recovery_shards as usize,
+                self.shard_len,
+            )
+            .map_err(rs_error)?;
+        let g = Group {
+            cover_len: self.group_bytes,
+            hashes: std::mem::take(&mut self.hashes),
+            recovery,
+        };
+        self.in_group = 0;
+        self.group_bytes = 0;
+        Ok(Some(g))
     }
 }
 
@@ -469,14 +475,23 @@ fn read_shard<R: Read + Seek>(
     Ok(())
 }
 
-/// The coverage may not overlap any recovery frame (its own included).
-fn check_cover(frame: &RecoveryFrame, locations: &[FrameLocation]) -> Result<(), FormatError> {
-    let end = frame.cover_offset + frame.cover_len;
-    if locations
-        .iter()
-        .any(|l| frame.cover_offset < l.offset.saturating_add(l.len) && l.offset < end)
+/// Each frame covers exactly the bytes written since the previous recovery
+/// frame (or the header): they start where the previous frame ends and end
+/// where this frame starts. This also keeps the ranges ascending, disjoint,
+/// clear of every recovery frame and tiling the data frames.
+fn check_cover(
+    frame: &RecoveryFrame,
+    i: usize,
+    locations: &[FrameLocation],
+) -> Result<(), FormatError> {
+    let start = match i.checked_sub(1) {
+        None => Header::LEN as u64,
+        Some(p) => locations[p].offset.saturating_add(locations[p].len),
+    };
+    if frame.cover_offset != start
+        || frame.cover_offset.saturating_add(frame.cover_len) != locations[i].offset
     {
-        return Err(bad("cover range"));
+        return Err(bad("coverage"));
     }
     Ok(())
 }
@@ -509,7 +524,7 @@ fn scan<R: Read + Seek>(
             }
         };
         let frame = match RecoveryFrame::parse_vec(payload, index_at)
-            .and_then(|f| check_cover(&f, &locations).map(|()| f))
+            .and_then(|f| check_cover(&f, i, &locations).map(|()| f))
         {
             Ok(f) => f,
             // The hash passed but a rule is broken: also unusable.
@@ -874,13 +889,22 @@ mod tests {
     }
 
     #[test]
-    fn cover_may_not_overlap_a_recovery_frame() {
-        let f = frame(200, 64, 8, 2);
+    fn cover_must_tile_the_frames_between_recovery_frames() {
+        let f = frame(200, 64, 8, 2); // covers 32..232
         let at = |offset, len| FrameLocation { offset, len };
-        assert!(check_cover(&f, &[at(232, 100)]).is_ok());
-        assert!(check_cover(&f, &[at(100, 50)]).is_err());
-        assert!(check_cover(&f, &[at(0, 40)]).is_err());
-        assert!(check_cover(&f, &[at(0, 32)]).is_ok());
+        assert!(check_cover(&f, 0, &[at(232, 100)]).is_ok());
+        for bad_locs in [[at(233, 100)], [at(231, 100)], [at(100, 50)]] {
+            assert!(matches!(
+                check_cover(&f, 0, &bad_locs),
+                Err(FormatError::BadRecovery { reason: "coverage" })
+            ));
+        }
+        // Frame 1 starts where frame 0's location ends.
+        let mut g = frame(200, 64, 8, 2);
+        g.cover_offset = 332;
+        assert!(check_cover(&g, 1, &[at(232, 100), at(532, 100)]).is_ok());
+        assert!(check_cover(&g, 1, &[at(232, 99), at(532, 100)]).is_err());
+        assert!(check_cover(&f, 1, &[at(0, 40), at(232, 100)]).is_err());
     }
 
     #[test]

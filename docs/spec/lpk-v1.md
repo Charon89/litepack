@@ -280,8 +280,9 @@ the last recovery location are `TrailingBytes` (`what` is `index`); an input tha
 (`what` is `index`, or `chunk table` inside the table). A `block_count` larger than the bytes left divided by 5
 is `Truncated` and nothing is allocated for it; a `recovery_count` larger than the bytes left divided by 2 is
 `Truncated` likewise. Each recovery location follows the same location rule as the records frame and overlaps no
-block, no other recovery frame, the entry table and the records frame; a violation is `BadFrameLocation` with
-`what` `recovery`.
+block, no other recovery frame, the entry table and the records frame; the recovery frames are in ascending offset
+order and, when there are any, the last one ends at the offset of the index frame (section 13); a violation is
+`BadFrameLocation` with `what` `recovery`.
 
 Block rules. Blocks are in ascending `first_chunk` order and partition the chunk indices `0..n` exactly,
 contiguously and without overlap, where `n` is the chunk table's count: the first block starts at 0, each
@@ -587,10 +588,11 @@ records is a count of the bytes already written. The frames follow in this order
 2. zero or more `ChunkData` frames (kind 2), each holding one block;
 3. the `EntryTable` frame (kind 1);
 4. optionally the `Records` frame;
-5. optionally the `Recovery` frames (kind 4), one per group of data shards, after the `Records` frame (section 13);
-6. the `Index` frame (kind 5), which records the location of every frame above, the chunk table and the Merkle
+   (with recovery on, a `Recovery` frame (kind 4) follows each group of data frames, ahead of the next frame, and
+   the last one closes the data frames, as section 13 says);
+5. the `Index` frame (kind 5), which records the location of every frame above, the chunk table and the Merkle
    root over its hashes, and the decode envelope (section 7);
-7. the `Trailer` frame (kind 6), which locates the index.
+6. the `Trailer` frame (kind 6), which locates the index.
 
 The frames of a stream-written archive have no flags set and the header flags are zero. An archive without file
 content has no blocks and an empty chunk table.
@@ -916,15 +918,23 @@ on the group, not on the archive. The index lists every frame (section 6).
 
 ### Coverage and groups
 
-The covered region runs from the end of the header (offset 32) to the end of the last frame before the first
-recovery frame: every `ChunkData` frame, the `EntryTable` frame and the `Records` frame, if any. The index and
-the trailer are not covered: the trailer holds the index hash, which authenticates the index, and a damaged index
-is not repaired by this version. The region is cut into shards of `shard_len` bytes (the last padded with zeros;
-the padding is never stored) and the shards into consecutive groups of `group_shards`; the last group may have
-fewer real shards. Each group's frame covers exactly that group's byte range, `[cover_offset, cover_offset +
-cover_len)`, and a group is coded as if it had `group_shards` data shards: the missing ones after the real shards
-are implicit all-zero shards, never written, and a reader pads in the same way. A frame's coverage overlaps no
-recovery frame, itself included.
+A group is a run of whole data frames (`ChunkData`, `EntryTable`, `Records`) written one after another. Its
+`Recovery` frame is written immediately after them and covers exactly their bytes: `cover_offset` is the end of
+the previous recovery frame (offset 32, the end of the header, for the first) and `cover_offset + cover_len` is
+the offset of the recovery frame itself. So each recovery frame covers the frames written since the previous
+recovery frame (or the header), and no recovery frame is covered by any group. The index and the trailer are not
+covered: the trailer holds the index hash, which authenticates the index, and a damaged index is not repaired by
+this version. A writer closes a group, and writes its frame, when the next data frame would make the group longer
+than `group_shards * shard_len` bytes; the last group closes before the index, so every data frame is covered
+when recovery is on. A single frame longer than a group cannot be written (`BadOptions`, `reason` `group smaller
+than a block`; the reference writer also refuses at the start a `block_size` plus 4096 above that length).
+The group's bytes are cut into shards of `shard_len` bytes (the last padded with zeros; the padding is never
+stored). A group is coded as if it had `group_shards` data shards: the shards after the real ones are implicit
+all-zero shards, never written, and a reader pads in the same way.
+
+A reader checks the tiling: the index lists the recovery frames in ascending order and the last ends where the
+index starts (`BadFrameLocation`, `what` `recovery`), and each frame's range starts where the previous frame ends
+and ends where the frame itself starts (`BadRecovery`, `reason` `coverage`).
 
 ### Geometry and bounds
 
@@ -933,7 +943,7 @@ recovery frame, itself included.
 `ceil(cover_len / shard_len)` and between 1 and `group_shards`. `recovery_shards` is at least 1 and
 `group_shards + recovery_shards` is at most 65535. The reference writer takes `recovery_shards =
 ceil(group_shards * percent / 100)` (at least 1) with `percent` from 1 to 20 (0 means no recovery frames); its
-defaults are `shard_len` 65536 and `group_shards` 1024. It refuses options outside these bounds (`BadOptions`).
+defaults are `shard_len` 65536 and `group_shards` 2048 (128 MiB, so that the default 64 MiB block fits). It refuses options outside these bounds (`BadOptions`).
 
 ### Payload
 
@@ -961,15 +971,13 @@ index's list; the repairing reader checks it and counts a frame that breaks it a
 
 ### Writing and memory
 
-A writer feeds the covered bytes to a one-shard buffer, hashes each shard when it completes and adds it to the
-current group's encoder, which is built up front with `group_shards` originals and `recovery_shards`. When a group
-is full (or the covered region ends) the writer pads the group with zero shards, encodes it and keeps only that
-group's recovery shards and shard hashes; it does not keep covered bytes, and uses no temporary file. The frames
-are written after the covered region, in group order, and the index lists them; `max_frame_payload` admits them
-(section 7). Memory rule: one shard buffer; the encoder's work buffer for one group, `work_count * shard_len`
-bytes where `work_count` is `group_shards` rounded up to a multiple of `next_pow2(recovery_shards)`; and the
-recovery shards of the finished groups (`percent` of the covered length at most), held until their frames are
-written. Only the last term grows with the archive.
+A writer feeds the bytes of the open group to a one-shard buffer, hashes each shard when it completes and adds it
+to the group's encoder, which is built up front with `group_shards` originals and `recovery_shards`. When the group
+closes the writer pads it with zero shards, encodes it and writes its frame at once; it does not keep covered
+bytes and uses no temporary file. The index lists the frames and `max_frame_payload` admits them (section 7).
+Memory rule: one shard buffer; the encoder's work buffer for one group, `work_count * shard_len` bytes where
+`work_count` is `group_shards` rounded up to a multiple of `next_pow2(recovery_shards)`; and that group's recovery
+shards (`recovery_shards * shard_len`) while its frame is written. All of it is independent of the archive's size.
 
 ### Repair
 
@@ -977,7 +985,7 @@ A reader repairs an archive in these steps. It opens the archive; an archive who
 repaired and the error of the opening is the result. For each recovery frame the index lists:
 
 1. Read the frame at its recorded location and check its hash. A frame that fails (its hash, its kind or its
-   length), or that passes its hash but breaks a rule above or covers a recovery frame, is unusable: it is counted
+   length), or that passes its hash but breaks a rule above or the coverage rule, is unusable: it is counted
    and skipped, and its coverage is not protected by it.
 2. Cut the group's range into shards and hash each one (the last padded with zeros). A shard whose hash differs
    from the frame's `shard_hashes` entry is damaged. This locates damage shard by shard without decoding.
