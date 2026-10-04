@@ -8,6 +8,7 @@
 
 pub mod archive;
 pub mod chunk;
+pub mod cli;
 pub mod decode;
 pub mod entry;
 pub mod envelope;
