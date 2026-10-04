@@ -299,10 +299,10 @@ pub struct ToolEntry {
     pub manual: bool,
     /// `bench/tools.local.toml` overrode this tool on this machine.
     pub local_override: bool,
-    /// The catalogue flags the tool as deduplicating across files (D-43); absent in results
-    /// written before that.
-    #[serde(default)]
-    pub dedup: bool,
+    /// The catalogue flags the tool as deduplicating across files (D-43). `None`: an older
+    /// `tools.json` without the field (unknown, not false); every file written now carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup: Option<bool>,
 }
 
 /// `tools.json`: every catalogue tool, found or skipped, and the version used. The executable
@@ -332,7 +332,7 @@ impl ToolsFile {
                     catalogue_verified: d.tool.verified,
                     manual: d.tool.manual,
                     local_override: d.local_override,
-                    dedup: d.tool.dedup,
+                    dedup: Some(d.tool.dedup),
                 }
             })
             .collect();
@@ -602,7 +602,7 @@ pub mod samples {
             catalogue_verified: true,
             manual: false,
             local_override: false,
-            dedup: matches!(id, "zpaqfranz" | "tsaur"),
+            dedup: Some(matches!(id, "zpaqfranz" | "tsaur")),
         };
         ToolsFile {
             schema_version: SCHEMA_VERSION,
@@ -698,7 +698,7 @@ mod tests {
             })
             .collect();
         let file = ToolsFile::from_discovered(&found);
-        assert!(file.tools[0].dedup && !file.tools[1].dedup);
+        assert!(file.tools[0].dedup == Some(true) && file.tools[1].dedup == Some(false));
         let text = render(&file);
         assert!(text.contains("\"dedup\": true") && text.contains("\"dedup\": false"));
         let back: ToolsFile = serde_json::from_str(&text).expect("round trip");
@@ -708,7 +708,7 @@ mod tests {
             .replace(",\n      \"dedup\": false", "");
         assert!(!old.contains("dedup"));
         let parsed: ToolsFile = serde_json::from_str(&old).expect("old file");
-        assert!(parsed.tools.iter().all(|t| !t.dedup));
+        assert!(parsed.tools.iter().all(|t| t.dedup.is_none()));
     }
 
     #[test]

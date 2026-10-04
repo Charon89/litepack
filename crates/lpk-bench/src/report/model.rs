@@ -864,6 +864,8 @@ pub struct Model {
     pub rows: Vec<Row>,
     /// Ids of the tools the catalogue flags `dedup = true` (recorded in `tools.json`).
     pub dedup_tools: std::collections::BTreeSet<String>,
+    /// Some tool entry of `tools.json` carries the `dedup` field (older files do not).
+    pub dedup_known: bool,
     pub classes: Vec<ClassView>,
     pub mixes: Vec<MixView>,
 }
@@ -934,12 +936,19 @@ impl Model {
             .tools
             .tools
             .iter()
-            .filter(|t| t.dedup)
+            .filter(|t| t.dedup == Some(true))
             .map(|t| t.id.clone())
             .collect();
+        let dedup_known = inputs
+            .baseline
+            .tools
+            .tools
+            .iter()
+            .any(|t| t.dedup.is_some());
         Model {
             rows,
             dedup_tools,
+            dedup_known,
             classes,
             mixes,
         }
@@ -1120,7 +1129,11 @@ fn gate1(m: &Model) -> GateRow {
     }
 }
 
-fn gate2(m: &Model) -> GateRow {
+/// The largest dictionary window of any incumbent: WinRAR `-md256m` in `bench/tools.toml` (the
+/// catalogue has no machine-readable window field). G2 needs every version to exceed it.
+pub const LARGEST_INCUMBENT_WINDOW_BYTES: u64 = 256 * 1024 * 1024;
+
+fn gate2(m: &Model, probes: &Probes) -> GateRow {
     let title = format!(
         "G2 versioned backup (D-43): on {G2_CLASS}, estimate at most {G2_VS_BEST_PCT:.0}% of the \
          best measured tool x setting among the tools that do not deduplicate across files"
@@ -1143,8 +1156,42 @@ fn gate2(m: &Model) -> GateRow {
             refs.sort_unstable();
             refs.dedup();
             let compared = best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t));
+            if m.dedup_known {
+                numbers.push(format!(
+                    "tools treated as deduplicating: {}",
+                    if m.dedup_tools.is_empty() {
+                        "none".to_string()
+                    } else {
+                        m.dedup_tools.iter().cloned().collect::<Vec<_>>().join(", ")
+                    }
+                ));
+            }
+            // D-43's premise: every version exceeds the largest incumbent window.
+            let mut too_small = false;
+            if let Some(pf) = &probes.dedup {
+                numbers.push(format!(
+                    "largest incumbent window: {}",
+                    Traced::from_u64(LARGEST_INCUMBENT_WINDOW_BYTES, pf.src).show(bytes_s)
+                ));
+                const ORDINALS: [&str; 6] =
+                    ["first", "second", "third", "fourth", "fifth", "sixth"];
+                for (n, ver) in pf.env.data.versions_large.iter().enumerate() {
+                    numbers.push(format!(
+                        "{} version of the class: {}",
+                        ORDINALS.get(n).copied().unwrap_or("a later"),
+                        Traced::from_u64(ver.bytes, pf.src).show(bytes_s)
+                    ));
+                    too_small |= ver.bytes < LARGEST_INCUMBENT_WINDOW_BYTES;
+                }
+            }
             let verdict = match (&v.est, &compared) {
                 (Err(e), _) => Verdict::NotEvaluable(format!("estimate: {e}")),
+                _ if !m.dedup_known => {
+                    Verdict::NotEvaluable("tools.json predates D-43 (no dedup flags)".into())
+                }
+                _ if too_small => Verdict::NotEvaluable(
+                    "a version is smaller than the largest incumbent window".into(),
+                ),
                 (_, None) => Verdict::NotEvaluable(
                     "no measured incumbent among the tools not flagged dedup".into(),
                 ),
@@ -1399,7 +1446,7 @@ fn gate4(m: &Model, inputs: &Inputs) -> GateRow {
 pub fn gates(m: &Model, inputs: &Inputs) -> Vec<GateRow> {
     vec![
         gate1(m),
-        gate2(m),
+        gate2(m, &inputs.probes),
         gate3(m, &inputs.probes),
         gate4(m, inputs),
     ]

@@ -17,6 +17,8 @@ use crate::run::result::samples;
 use crate::run::result::{render as render_json, Sample, ToolResult};
 
 const MB: u64 = 1_000_000;
+/// A version of the large class: above the 256 MiB window (D-43 premise).
+const LARGE_VERSION_BYTES: u64 = 300 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures
@@ -70,7 +72,7 @@ const CLASSES: [(&str, u64, [u64; 4]); 8] = [
     ),
     (
         "backup-versions-large",
-        30 * MB,
+        LARGE_VERSION_BYTES * 3,
         [30_000_100, 8_000_000, 9_000_000, 12_000_000],
     ),
     (
@@ -310,7 +312,13 @@ fn dedup_data(last_new: u64, patches: Option<(u64, u64)>) -> dedup::Data {
         classes: vec![row("backup-versions"), row("backup-versions-large")],
         corpus: row("(corpus)"),
         versions: versions.clone(),
-        versions_large: versions,
+        versions_large: versions
+            .into_iter()
+            .map(|v| dedup::Version {
+                bytes: LARGE_VERSION_BYTES,
+                ..v
+            })
+            .collect(),
     }
 }
 
@@ -824,10 +832,18 @@ fn add_dedup_tool(i: &mut Inputs, class: &str) {
         catalogue_verified: true,
         manual: false,
         local_override: false,
-        dedup: true,
+        dedup: Some(true),
     });
     i.baseline.results.push((
-        result("zpaqfranz", "m5", class, 30 * MB, 2_000_000, 5.0, 2.0),
+        result(
+            "zpaqfranz",
+            "m5",
+            class,
+            LARGE_VERSION_BYTES * 3,
+            2_000_000,
+            5.0,
+            2.0,
+        ),
         1,
     ));
     i.baseline
@@ -852,10 +868,21 @@ fn g2_compares_against_the_best_tool_that_does_not_deduplicate() {
     assert!(
         g.numbers
             .iter()
-            .any(|n| n.starts_with("best incumbent, not deduplicating (7z/ultra)")),
+            .any(|n| n.starts_with("best incumbent, not deduplicating (7z/ultra): 8000000")),
         "{:?}",
         g.numbers
     );
+    assert!(
+        g.numbers
+            .iter()
+            .any(|n| n.starts_with("estimate / best incumbent: 50.0%")),
+        "{:?}",
+        g.numbers
+    );
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("tools treated as deduplicating: zpaqfranz")));
     assert!(
         g.numbers
             .iter()
@@ -897,6 +924,50 @@ fn g2_is_not_evaluable_without_the_large_class_even_when_backup_versions_exists(
         .contains(&"backup-versions".to_string()));
     match verdict_of(&i, "G2") {
         Verdict::NotEvaluable(why) => assert!(why.contains("backup-versions-large"), "{why}"),
+        v => panic!("expected not evaluable, got {v:?}"),
+    }
+}
+
+#[test]
+fn g2_is_not_evaluable_when_tools_json_has_no_dedup_flags_and_names_none_when_none() {
+    let mut i = inputs(&Knobs::default(), true);
+    for t in &mut i.baseline.tools.tools {
+        t.dedup = None;
+    }
+    match verdict_of(&i, "G2") {
+        Verdict::NotEvaluable(why) => assert!(why.contains("predates D-43"), "{why}"),
+        v => panic!("expected not evaluable, got {v:?}"),
+    }
+    // Flags present but none set: evaluated, and the line says "none".
+    for t in &mut i.baseline.tools.tools {
+        t.dedup = Some(false);
+    }
+    let g = gate(&i, "G2");
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n == "tools treated as deduplicating: none"));
+}
+
+#[test]
+fn g2_checks_that_every_version_exceeds_the_largest_incumbent_window() {
+    let mut i = inputs(&Knobs::default(), true);
+    let g = gate(&i, "G2");
+    assert_eq!(g.verdict, Verdict::Pass);
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("first version of the class: 314572800 bytes")));
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("largest incumbent window: 268435456 bytes")));
+    if let Some(pf) = i.probes.dedup.as_mut() {
+        pf.env.data.versions_large[1].bytes = LARGEST_INCUMBENT_WINDOW_BYTES - 1;
+    }
+    match verdict_of(&i, "G2") {
+        Verdict::NotEvaluable(why) => assert!(why.contains("smaller than the largest"), "{why}"),
         v => panic!("expected not evaluable, got {v:?}"),
     }
 }
