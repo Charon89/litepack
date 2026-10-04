@@ -771,7 +771,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "locked/f", 1);
         let locked = dir.path().join("locked");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         let can_read = fs::read_dir(&locked).is_ok();
         let r = walk(dir.path(), &IngestOptions::default());
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
