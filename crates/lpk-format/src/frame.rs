@@ -235,8 +235,8 @@ pub fn frame_layout_table() -> String {
          | payload_len | varint | length of the payload in bytes |\n\
          | payload | payload_len | the frame content |\n\
          | hash | {} | BLAKE3-256 of the payload bytes only |\n",
-        std::mem::size_of::<u16>(),
-        std::mem::size_of::<u16>(),
+        std::mem::size_of::<FrameKind>(),
+        std::mem::size_of::<FrameFlags>(),
         blake3::OUT_LEN
     )
 }

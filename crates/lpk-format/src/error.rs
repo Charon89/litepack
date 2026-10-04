@@ -89,6 +89,14 @@ pub enum FormatError {
         /// Short reason.
         reason: &'static str,
     },
+    /// An entry's fields contradict each other.
+    #[error("entry {index}: inconsistent ({reason})")]
+    InconsistentEntry {
+        /// Index of the entry.
+        index: u64,
+        /// Short reason.
+        reason: &'static str,
+    },
     /// Bytes remain after the last item of a payload.
     #[error("trailing bytes after {what}")]
     TrailingBytes {

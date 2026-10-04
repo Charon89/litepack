@@ -6,6 +6,9 @@ use std::cmp::Ordering;
 
 const WHAT: &str = "entry table";
 const MAX_PATH: usize = 65535;
+/// Smallest encoded entry: a directory with a one-byte path
+/// (kind 1 + flags 2 + path_len 1 + path 1 + mtime 8 + size 1).
+pub const MIN_ENTRY_LEN: usize = 14;
 
 /// Kind of an archive entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,26 +167,29 @@ impl EntryTableWriter {
                 }
             }
             prev = Some(e.path.as_bytes());
-            let inconsistent = FormatError::InvalidPath {
-                index,
-                reason: "inconsistent entry",
-            };
+            let inconsistent = |reason| FormatError::InconsistentEntry { index, reason };
             match e.kind {
                 EntryKind::Symlink => {
-                    let t = e.symlink_target.as_deref().ok_or(inconsistent)?;
+                    let t = e
+                        .symlink_target
+                        .as_deref()
+                        .ok_or_else(|| inconsistent("symlink without target"))?;
                     check_target(t, e.size, index)?;
                     if !e.chunks.is_empty() {
-                        return Err(FormatError::InvalidPath {
-                            index,
-                            reason: "inconsistent entry",
-                        });
+                        return Err(inconsistent("symlink has chunks"));
                     }
                 }
                 EntryKind::File | EntryKind::Directory => {
-                    if e.symlink_target.is_some()
-                        || (e.kind == EntryKind::Directory && !e.chunks.is_empty())
-                    {
-                        return Err(inconsistent);
+                    if e.symlink_target.is_some() {
+                        return Err(inconsistent("target on non-symlink"));
+                    }
+                    if e.kind == EntryKind::Directory {
+                        if e.size != 0 {
+                            return Err(inconsistent("directory size"));
+                        }
+                        if !e.chunks.is_empty() {
+                            return Err(inconsistent("directory has chunks"));
+                        }
                     }
                 }
             }
@@ -221,13 +227,18 @@ pub struct EntryTable<'a> {
 }
 
 impl<'a> EntryTable<'a> {
-    /// Read the entry count; no entry is examined until iteration.
+    /// Read the entry count; no entry is examined until iteration. A count
+    /// the remaining bytes cannot hold (`MIN_ENTRY_LEN` bytes per entry) is
+    /// `Truncated`.
     pub fn parse(payload: &'a [u8]) -> Result<EntryTable<'a>, FormatError> {
         let mut cur = Cursor {
             data: payload,
             pos: 0,
         };
         let count = cur.varint()?;
+        if count > (cur.rest() / MIN_ENTRY_LEN) as u64 {
+            return Err(FormatError::Truncated { what: WHAT });
+        }
         Ok(EntryTable {
             payload,
             body: cur.pos,
@@ -368,6 +379,12 @@ impl<'a> EntryIter<'a> {
         let size = self.cur.varint()?;
         let mut symlink_target = None;
         let mut chunks = Vec::new();
+        if kind == EntryKind::Directory && size != 0 {
+            return Err(FormatError::InconsistentEntry {
+                index,
+                reason: "directory size",
+            });
+        }
         match kind {
             EntryKind::Symlink => {
                 let tl = self.cur.varint()?;
@@ -387,7 +404,7 @@ impl<'a> EntryIter<'a> {
                 if n > self.cur.rest() as u64 {
                     return Err(FormatError::Truncated { what: WHAT });
                 }
-                chunks.reserve(n as usize);
+                chunks.reserve(n.min(1024) as usize);
                 for _ in 0..n {
                     chunks.push(self.cur.varint()?);
                 }
@@ -440,6 +457,35 @@ pub fn entry_kind_table() -> String {
         s.push_str(&format!("| {} | {} |\n", k as u8, k.name()));
     }
     s
+}
+
+/// The Markdown table of the entry table payload, pasted verbatim into the spec.
+pub fn entry_payload_table() -> String {
+    String::from(
+        "| Field | Size | Meaning |\n|---|---|---|\n\
+         | entry_count | varint | number of entries that follow |\n\
+         | entries | | `entry_count` entries, sorted by path |\n",
+    )
+}
+
+/// The Markdown byte table of one entry, pasted verbatim into the spec.
+pub fn entry_byte_table() -> String {
+    format!(
+        "| Field | Size | Present | Meaning |\n|---|---|---|---|\n\
+         | kind | {} | always | entry kind (see below); an unknown value is `UnsupportedEntryKind` |\n\
+         | flags | {} | always | entry flags (see below) |\n\
+         | path_len | varint | always | length of the path in bytes, 1 to {MAX_PATH} |\n\
+         | path | path_len | always | the path, see the path rules |\n\
+         | mtime_ns | {} | always | signed 64-bit nanoseconds since 1970-01-01T00:00:00Z; the minimum `i64` value means unknown |\n\
+         | size | varint | always | file: byte length; directory: 0; symlink: length of the target in bytes |\n\
+         | target_len | varint | symlink only | must equal size |\n\
+         | target | target_len | symlink only | the link target: any bytes except NUL, 1 to {MAX_PATH} bytes |\n\
+         | chunk_count | varint | file only | number of chunk indices |\n\
+         | chunks | chunk_count varints | file only | indices into the archive chunk list (defined with the chunk frames) |\n",
+        std::mem::size_of::<u8>(),
+        std::mem::size_of::<u16>(),
+        std::mem::size_of::<i64>(),
+    )
 }
 
 /// The Markdown table of entry flags, pasted verbatim into the spec.
@@ -593,6 +639,8 @@ mod tests {
             v.extend_from_slice(path);
             v.extend_from_slice(&[0u8; 8]);
             varint::write(&mut v, 0).unwrap();
+            // Pad so the count passes the parse bound; the path error comes first.
+            v.resize(v.len().max(1 + MIN_ENTRY_LEN), 0);
             v
         };
         let reason = |path: &[u8]| match collect(&build(path)).unwrap_err() {
@@ -763,21 +811,106 @@ mod tests {
                 reason: "empty component"
             })
         ));
+        let reason_of = |e: Entry| match EntryTableWriter::encode(&[file("a", &[]), e]) {
+            Err(FormatError::InconsistentEntry { index: 1, reason }) => reason,
+            r => panic!("unexpected {r:?}"),
+        };
         let mut d = dir("d");
         d.chunks = vec![1];
-        assert!(EntryTableWriter::encode(&[d]).is_err());
+        assert_eq!(reason_of(d), "directory has chunks");
+        let mut d = dir("d");
+        d.size = 1;
+        assert_eq!(reason_of(d), "directory size");
         let mut f = file("f", &[]);
         f.symlink_target = Some(vec![1]);
-        assert!(EntryTableWriter::encode(&[f]).is_err());
+        assert_eq!(reason_of(f), "target on non-symlink");
         let mut l = link("l", b"t");
         l.symlink_target = None;
-        assert!(EntryTableWriter::encode(&[l]).is_err());
+        assert_eq!(reason_of(l), "symlink without target");
+        let mut l = link("l", b"t");
+        l.chunks = vec![1];
+        assert_eq!(reason_of(l), "symlink has chunks");
+    }
+
+    #[test]
+    fn reader_rejects_directory_size() {
+        let mut p = EntryTableWriter::encode(&[file("a", &[]), dir("b")]).unwrap();
+        // The directory is the last entry; its size varint is the last byte.
+        let n = p.len();
+        assert_eq!(p[n - 1], 0);
+        p[n - 1] = 5;
+        assert!(matches!(
+            collect(&p),
+            Err(FormatError::InconsistentEntry {
+                index: 1,
+                reason: "directory size"
+            })
+        ));
+    }
+
+    fn symlink_payload(size: u64, tl: u64, target: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        varint::write(&mut v, 1).unwrap();
+        v.push(2);
+        v.extend_from_slice(&[0, 0]);
+        varint::write(&mut v, 1).unwrap();
+        v.push(b'l');
+        v.extend_from_slice(&[0u8; 8]);
+        varint::write(&mut v, size).unwrap();
+        varint::write(&mut v, tl).unwrap();
+        v.extend_from_slice(target);
+        v
+    }
+
+    #[test]
+    fn reader_symlink_target_rules() {
+        assert!(collect(&symlink_payload(3, 3, b"abc")).is_ok());
+        let bad = |size, tl, target: &[u8]| {
+            assert!(
+                matches!(
+                    collect(&symlink_payload(size, tl, target)),
+                    Err(FormatError::InvalidPath {
+                        index: 0,
+                        reason: "symlink target"
+                    })
+                ),
+                "size {size} tl {tl}"
+            );
+        };
+        bad(3, 3, b"a\0c");
+        bad(0, 0, b"");
+        bad(2, 3, b"abc");
+        bad(3, 2, b"ab");
+        let big = vec![b'x'; 65536];
+        bad(65536, 65536, &big);
+        let max = vec![b'x'; 65535];
+        assert!(collect(&symlink_payload(65535, 65535, &max)).is_ok());
+    }
+
+    #[test]
+    fn huge_entry_count_is_rejected_by_parse() {
+        let mut v = Vec::new();
+        varint::write(&mut v, u64::MAX).unwrap();
+        v.extend_from_slice(&[0u8; 100]);
+        assert!(matches!(
+            EntryTable::parse(&v),
+            Err(FormatError::Truncated {
+                what: "entry table"
+            })
+        ));
+        // Exactly at the bound is accepted by parse, one over is not.
+        let mut v = vec![7u8];
+        v.extend_from_slice(&[0u8; 7 * MIN_ENTRY_LEN]);
+        assert_eq!(EntryTable::parse(&v).unwrap().len(), 7);
+        v[0] = 8;
+        assert!(EntryTable::parse(&v).is_err());
     }
 
     #[test]
     fn parse_reads_only_the_count() {
-        // Count 5, then garbage: parse succeeds, iteration and validate fail.
-        let payload = [5u8, 0xFF, 0xFF, 0xFF];
+        // Count 5, then 14 invalid bytes per entry: parse succeeds, iteration and validate fail.
+        let mut payload = vec![5u8];
+        payload.extend_from_slice(&[0xFF; 5 * MIN_ENTRY_LEN]);
         let t = EntryTable::parse(&payload).unwrap();
         assert_eq!(t.len(), 5);
         assert!(matches!(
@@ -881,6 +1014,26 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn arbitrary_bytes_never_panic(
+            count in 0u8..8,
+            body in proptest::collection::vec(any::<u8>(), 0..400),
+        ) {
+            let mut payload = vec![count];
+            payload.extend_from_slice(&body);
+            if let Ok(t) = EntryTable::parse(&payload) {
+                let mut n = 0u64;
+                for item in t.iter() {
+                    if item.is_err() {
+                        break;
+                    }
+                    n += 1;
+                }
+                prop_assert!(n <= t.len());
+                let _ = t.find("a");
+            }
+        }
+
         #[test]
         fn round_trip_random(entries in arb_entries()) {
             let payload = EntryTableWriter::encode(&entries).unwrap();

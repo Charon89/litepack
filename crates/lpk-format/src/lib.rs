@@ -12,8 +12,8 @@ pub mod magic;
 pub mod varint;
 
 pub use entry::{
-    entry_flag_table, entry_kind_table, validate_path, Entry, EntryFlags, EntryIter, EntryKind,
-    EntryTable, EntryTableWriter,
+    entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,
+    Entry, EntryFlags, EntryIter, EntryKind, EntryTable, EntryTableWriter, MIN_ENTRY_LEN,
 };
 pub use error::FormatError;
 pub use frame::{

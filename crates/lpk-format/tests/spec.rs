@@ -22,6 +22,8 @@ fn spec_tables_match_code() {
         lpk_format::frame_flag_table(),
         lpk_format::header_flag_table(),
         lpk_format::header_byte_table(),
+        lpk_format::entry_payload_table(),
+        lpk_format::entry_byte_table(),
         lpk_format::entry_kind_table(),
         lpk_format::entry_flag_table(),
     ] {

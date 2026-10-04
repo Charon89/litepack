@@ -118,7 +118,8 @@ One entry:
 | chunk_count | varint | file only | number of chunk indices |
 | chunks | chunk_count varints | file only | indices into the archive chunk list (defined with the chunk frames) |
 
-A directory or a symlink has no chunk list. An empty file has `size` 0 and `chunk_count` 0.
+A directory or a symlink has no chunk list. Whether a file's `size` agrees with its chunk list is defined
+with the chunk frames (task E1-3) and is not checked by the entry table.
 
 Entry kinds:
 
@@ -146,9 +147,25 @@ A bad symlink target (empty, longer than 65535 bytes, containing NUL, or `target
 `size`) is `InvalidPath` with the reason "symlink target". Paths are compared as bytes and are not
 normalised; a reader does not alter case or Unicode form.
 
+Consistency: an entry whose fields contradict each other is `InconsistentEntry` with the entry index and
+a reason. The reader raises one reason: "directory size" (a directory whose `size` is not 0). A writer
+also refuses, with the same error, "directory has chunks", "symlink has chunks", "symlink without
+target" and "target on non-symlink"; those cannot occur on the wire.
+
 Errors: the payload ending inside the table is `Truncated` for "entry table"; bytes left after the last
 entry are `TrailingBytes` for "entry table". Counts and lengths are checked against the bytes that remain
-before anything is allocated.
+before anything is allocated. The smallest possible entry is 14 bytes (a directory with a one-byte path:
+1 + 2 + 1 + 1 + 8 + 1), so an `entry_count` larger than the bytes after it divided by 14 (rounded down)
+is `Truncated` for "entry table", raised when the count is read.
 
-Reading: a reader first reads only `entry_count`; entries are then decoded one after another as a
+Check order: a reader checks each entry in field order, so when several rules are broken the first of
+these wins: kind, flags, path (length, then truncation, UTF-8, path rules), sort order, mtime, size
+(and for a directory its size), then the symlink target or the chunk list. Entries are checked in order,
+and after the last one the trailing-bytes check applies.
+
+Names: paths are opaque to the table. They may contain `:` and names that Windows reserves (`CON`, a
+component ending in a dot or a space). An extractor must map such names and must never let a component
+replace or escape the target directory; that rule belongs to the extraction task, not to this format.
+
+Reading: a reader first reads only `entry_count` (and applies the bound above); entries are then decoded one after another as a
 stream, so a table of any size can be walked without holding all entries in memory.
