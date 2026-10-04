@@ -3,22 +3,26 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 14:10 UTC (10:10 local on the measuring machine). The build of the `backup-versions-large` corpus class is about to start.
+Last updated: 2026-10-04, about 16:00 UTC (12:00 local on the measuring machine). No measurement is running.
 
 **Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
 (37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
 done (D-44)**: buffered reads for every size (no memory map), opens that never follow a link and verify the identity
-the walk recorded, bounded reads, a synced commit, the archive never its own input. **E0-1 (the larger versioned set)
-is half done:** the harness side is on `main` (the `backup-versions-large` spec row and lock entries, the `dedup`
-catalogue flag, the G2 rule against the non-deduplicating incumbents with zpaqfranz printed as reference); what is
-left is on the measuring machine — build `full` from a release build of `main` (the class is `full`-only; a full
-rebuild re-extracts every class from the cache, so keep the old manifest aside and check the old classes are
-identical), build the class a second time into a scratch directory for the determinism check, verify from the
-manifest that each `godot-v*` folder exceeds 256 MiB (if not, stop and go to the owner), then
-`run --tools all --profile full --classes backup-versions-large` and `probe dedup --profile full --into <that
-directory>` as detached processes, then `report` for the G2 row, commit the directory and tick E0-1.
-**E2-2 (classifier and entropy gate) is in flight** (`task/e2-2-classifier`, branched from E2-1). Then E2-3 (Fast
-tier), E2-4 (pipeline and the `lpk` CLI stub for the runner), E2-5 (JPEG peel). E1-15 (the normative Reed-Solomon
+the walk recorded, bounded reads, a synced commit, the archive never its own input. **E0-1 (the larger versioned set) is waiting for the owner:** the harness side is on `main` (the `backup-versions-large`
+spec row and lock entries, the `dedup` catalogue flag, the G2 rule against the non-deduplicating incumbents with
+zpaqfranz printed as reference, the 256 MiB premise checked per version). The class was built (the `full` rebuild
+kept the seventeen old classes byte-identical; a second build of the class was identical), **but the godot working
+trees are 173, 196 and 245 MiB — all under WinRAR's 256 MiB window**, so D-43's premise fails and the report would
+print G2 as not evaluable. Measured alternatives (shallow clones, deleted afterwards): `nodejs/node` at v22.0.0,
+v23.0.0, v24.0.0 is about 535–543 MiB per version (MIT; the recommendation); `llvm/llvm-project` at llvmorg-19.1.7
+is about 1.6 GiB (would need the runner's per-step timeout raised for zpaqfranz). Once the owner picks the source:
+re-pin the three sources in `bench/corpus-sources.toml` and `bench/corpus.lock` (`corpus build --profile full
+--update-lock --only backup-versions-large`, then a plain `full` build twice — the last rebuild took seven
+minutes from the cache), amend the CORPUS.md row (owner-approved), then `run --tools all --profile full --classes
+backup-versions-large` and `probe dedup --profile full --into <that directory>` as detached processes, `report`
+for the G2 row, commit the directory and tick E0-1.
+**E2-2 (classifier and entropy gate) is done (D-45).** Next E2-3 (Fast tier), E2-4 (pipeline and the `lpk` CLI stub for
+the runner), E2-5 (JPEG peel). E1-15 (the normative Reed-Solomon
 description) is a format revision that can be done any time by a fresh implementer.
 
 ## Summary
@@ -30,15 +34,12 @@ description) is a format revision that can be done any time by a fresh implement
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e2-2-classifier` — E2-2, implementer running (brief: `Class` labels by magic and byte statistics; the
-  two-stage entropy gate with the sample rejecting below 7.5 bits/byte and the full pass deciding at 7.95, both
-  thresholds read off the Phase 0 report's entropy-gate tables; corpus table test and gate precision/recall test
-  against xz preset 9 ground truth, both ignored and run once per task).
+None at the moment.
 
 ## How to resume
 
 ### Phase 1 — how it runs
-1. One task at a time from `docs/PLAN.md` (E2-2 next, then E2-3, E2-4, …): implementer in a worktree from a brief
+1. One task at a time from `docs/PLAN.md` (E2-3 next, then E2-4, E2-5, …): implementer in a worktree from a brief
    with the exact values → read-only review (spec compliance and quality, benchmark honesty for harness tasks) →
    fix rounds with rulings → a decision in `docs/DECISIONS.md` → PLAN tick with evidence → PR → CI green →
    `main` fast-forwarded (merge `main` into the branch first).
