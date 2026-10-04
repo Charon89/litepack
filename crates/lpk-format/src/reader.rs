@@ -335,7 +335,7 @@ impl<R: Read + Seek> Archive<R> {
     /// rules, the chunk indices and sums, the block order, and the record ids
     /// of every block graph.
     ///
-    /// A listable archive opened without credentials ([`Archive::open_with`])
+    /// An encrypted archive opened without credentials ([`Archive::open_with`])
     /// cannot decode anything: `verify` then hashes every frame, checks the
     /// recovery frames' shards and reports `chunks_checked: false`.
     pub fn verify(&mut self) -> Result<VerifySummary, FormatError> {

@@ -627,7 +627,7 @@ pub fn repair_with_report<R: Read + Seek, W: Write + Seek>(
 /// Like [`repair_with_report`] for an encrypted archive: the index, which
 /// lists the recovery frames, is sealed, so the credentials are needed to open
 /// it (the repair itself works on the sealed bytes and never decrypts a
-/// frame). A listable archive given no credentials is `PasswordRequired`.
+/// frame). An encrypted archive given no credentials is repaired on its sealed bytes.
 pub fn repair_with_credentials<R: Read + Seek, W: Write + Seek>(
     archive: R,
     mut out: W,

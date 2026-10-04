@@ -217,9 +217,7 @@ fn walk_envelopes<R: Read + Seek>(
     let mut entry = None;
     let mut recovery = Vec::new();
     loop {
-        let trunc = FormatError::Truncated {
-            what: "entry table",
-        };
+        let trunc = FormatError::Truncated { what: "frames" };
         if pos.saturating_add(5) > file_len {
             return Err(trunc);
         }
@@ -231,9 +229,7 @@ fn walk_envelopes<R: Read + Seek>(
         let frame_len = (4 + crate::varint::len(payload_len) as u64)
             .checked_add(payload_len)
             .and_then(|n| n.checked_add(32))
-            .ok_or(FormatError::BadFrameLocation {
-                what: "entry table",
-            })?;
+            .ok_or(FormatError::BadFrameLocation { what: "frames" })?;
         let end = pos.saturating_add(frame_len);
         if end > file_len {
             return Err(trunc);
@@ -468,7 +464,7 @@ impl<R: Read + Seek> Archive<R> {
         self.keyless
     }
 
-    /// Fail with `PasswordRequired` when only the entry table is available.
+    /// Fail with `PasswordRequired` when the archive was opened keyless (no index).
     pub(crate) fn need_index(&self) -> Result<(), FormatError> {
         if self.keyless {
             Err(FormatError::PasswordRequired)
