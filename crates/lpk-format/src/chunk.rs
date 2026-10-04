@@ -350,8 +350,9 @@ pub struct ChunkPlace {
 /// records are decoded on demand). An opened archive also keeps the table's
 /// bytes in `Index::chunk_table`, a second copy of the same size. While an
 /// index is parsed, the Merkle leaves add a temporary 32 bytes per chunk.
-/// In all, an opened archive holds at least 82 bytes per chunk, and at most
-/// 114 bytes per chunk while it is being opened.
+/// In all, an opened archive holds at least 82 bytes per chunk, and at least
+/// 114 bytes per chunk while it is being opened (`Archive::open` also holds
+/// the index frame's payload, a third copy of the table, until parsing ends).
 #[derive(Debug, Clone)]
 pub struct ChunkIndex {
     payload: Vec<u8>,
