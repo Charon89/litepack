@@ -175,8 +175,18 @@ impl BlockHeader {
         block: usize,
         record_count: u64,
     ) -> Result<(BlockHeader, usize), FormatError> {
-        let (graph, mut pos) = Graph::parse(payload)?;
+        let (graph, pos) = Graph::parse(payload)?;
         graph.check_records(record_count)?;
+        Self::from_graph(graph, pos, payload, block)
+    }
+
+    /// The rest of the header after its graph (`pos` bytes of `payload`).
+    pub(crate) fn from_graph(
+        graph: Graph,
+        mut pos: usize,
+        payload: &[u8],
+        block: usize,
+    ) -> Result<(BlockHeader, usize), FormatError> {
         let plain_len = rv(payload, &mut pos, HEADER)?;
         let encoded_len = rv(payload, &mut pos, HEADER)?;
         if encoded_len != (payload.len() - pos) as u64 {

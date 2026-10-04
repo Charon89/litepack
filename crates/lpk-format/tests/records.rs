@@ -4,7 +4,8 @@ mod common;
 
 use common::{pattern, write_archive};
 use lpk_format::{
-    Archive, BlockEncoder, DeflateRecord, FormatError, Graph, GraphResources, PrimitiveId, Record,
+    Archive, ArchiveChunks, BlockEncoder, BlockHeader, ChunkSource, ContainerMember,
+    ContainerRecord, DeflateRecord, FormatError, Graph, GraphResources, PrimitiveId, Record,
     RecordBody, RecordKind, Resources, Step, Utf16Record, Writer, WriterOptions,
 };
 use std::io::Cursor;
@@ -97,7 +98,7 @@ fn an_archive_with_records_returns_the_table() {
 }
 
 #[test]
-fn a_damaged_records_frame_is_a_hash_mismatch_and_the_archive_still_opens() {
+fn a_damaged_records_frame_is_a_hash_mismatch_found_by_verify_and_the_archive_still_opens() {
     let bytes = write_archive(options(vec![utf16(1)]), &[("a", pattern(1, 5000))]);
     let loc = open(bytes.clone()).index().records.unwrap();
     let mut bad = bytes;
@@ -107,8 +108,14 @@ fn a_damaged_records_frame_is_a_hash_mismatch_and_the_archive_still_opens() {
         a.records().unwrap_err(),
         FormatError::HashMismatch { kind: 3 }
     ));
-    // Blocks that name no record do not read the frame.
-    a.verify().unwrap();
+    // Whole-archive verification reads the frame whenever the index lists it.
+    assert!(matches!(
+        a.verify().unwrap_err(),
+        FormatError::HashMismatch { kind: 3 }
+    ));
+    // A block that names no record never reads it: chunks still extract.
+    let mut src = ArchiveChunks::new(&mut a);
+    assert_eq!(src.chunk(0).unwrap().len(), 4096);
 }
 
 #[test]
@@ -144,36 +151,48 @@ fn a_reconstruction_block_passes_the_record_check_and_stops_at_the_missing_decod
     ));
 }
 
+/// An archive of one 5000-byte file (chunks of 4096 and 904 bytes, one
+/// block) whose blocks name `record` of `records` with `primitive`.
+fn recon_archive(primitive: PrimitiveId, record: u8, records: Vec<Record>) -> Vec<u8> {
+    let mut o = options(records);
+    o.encoder = Box::new(Recon { primitive, record });
+    write_archive(o, &[("a", pattern(1, 5000))])
+}
+
 #[test]
-fn record_ids_in_range_pass_and_the_header_check_rejects_out_of_range() {
-    // Write with two records, then swap the records frame for a one-record
-    // frame of the same length class: a block that names id 1 now fails.
-    let mut o = options(vec![utf16(1), utf16(2)]);
-    o.encoder = Box::new(Recon {
-        primitive: PrimitiveId::Utf16,
-        record: 1,
-    });
-    let two = write_archive(o, &[("a", pattern(1, 5000))]);
-    let mut o = options(vec![utf16(1)]);
-    o.encoder = Box::new(Recon {
-        primitive: PrimitiveId::Utf16,
-        record: 0,
-    });
-    // Same writer, one record: id 0 is in range and the block header parses.
-    let one = write_archive(o, &[("a", pattern(1, 5000))]);
-    let mut a = open(one);
-    assert!(matches!(
-        a.verify().unwrap_err(),
-        FormatError::UnimplementedPrimitive { id: 11 }
-    ));
-    // The two-record archive is fine as written.
-    let mut a = open(two);
-    assert!(matches!(
-        a.verify().unwrap_err(),
-        FormatError::UnimplementedPrimitive { id: 11 }
-    ));
-    // A header naming id 1 against a count of 1 is `RecordOutOfRange`.
-    let payload = lpk_format::BlockHeader {
+fn a_block_naming_a_record_the_frame_lacks_is_out_of_range_end_to_end() {
+    let mut bytes = recon_archive(PrimitiveId::Utf16, 0, vec![utf16(1)]);
+    // Patch the block's record id (graph: count, id u16, flags, params_len,
+    // params) and recompute the block frame's hash.
+    let loc = open(bytes.clone()).index().blocks[0];
+    let off = loc.frame_offset as usize;
+    let mut rest = &bytes[off + 4..];
+    let plen = lpk_format::varint::read(&mut rest).unwrap() as usize;
+    let payload_at = off + 4 + (bytes[off + 4..].len() - rest.len());
+    bytes[payload_at + 5] = 5;
+    let hash = *blake3::hash(&bytes[payload_at..payload_at + plen]).as_bytes();
+    bytes[payload_at + plen..payload_at + plen + 32].copy_from_slice(&hash);
+    let mut a = open(bytes);
+    let want = |e: FormatError| {
+        assert!(
+            matches!(
+                e,
+                FormatError::RecordOutOfRange {
+                    record: 5,
+                    count: 1
+                }
+            ),
+            "{e:?}"
+        )
+    };
+    want(a.verify().unwrap_err());
+    // The block reader raises it too, when the block is read.
+    want(ArchiveChunks::new(&mut a).chunk(0).unwrap_err());
+}
+
+#[test]
+fn the_block_header_check_rejects_an_id_at_the_count() {
+    let payload = BlockHeader {
         graph: Graph {
             steps: vec![Step {
                 primitive: PrimitiveId::Utf16,
@@ -185,10 +204,88 @@ fn record_ids_in_range_pass_and_the_header_check_rejects_out_of_range() {
     }
     .encode();
     assert!(matches!(
-        lpk_format::BlockHeader::parse(&payload, 0, 1).unwrap_err(),
+        BlockHeader::parse(&payload, 0, 1).unwrap_err(),
         FormatError::RecordOutOfRange {
             record: 1,
             count: 1
+        }
+    ));
+    BlockHeader::parse(&payload, 0, 2).unwrap();
+}
+
+fn container(len: u64, chunks: Vec<u64>) -> Record {
+    Record::new(RecordBody::Container(ContainerRecord {
+        format: 0,
+        original_len: len,
+        framing: vec![],
+        members: vec![ContainerMember {
+            offset: 0,
+            len,
+            chunks,
+        }],
+        original_hash: [1; 32],
+    }))
+}
+
+#[test]
+fn verify_checks_the_chunks_a_record_names() {
+    let check = |len: u64, chunks: Vec<u64>| {
+        let bytes = recon_archive(
+            PrimitiveId::ContainerReconstruct,
+            0,
+            vec![container(len, chunks)],
+        );
+        open(bytes).verify().unwrap_err()
+    };
+    // Chunk 99 does not exist (the archive has two chunks).
+    assert!(matches!(
+        check(10, vec![99]),
+        FormatError::ChunkIndexOutOfRange { chunk: 99, len: 2 }
+    ));
+    // Chunk 1 holds 904 bytes, not 10.
+    assert!(matches!(
+        check(10, vec![1]),
+        FormatError::BadRecord {
+            record: 0,
+            reason: "chunk lengths"
+        }
+    ));
+    // The only block names the record, so it cannot hold chunks of the record.
+    for chunks in [vec![0, 1], vec![1]] {
+        let len = if chunks.len() == 2 { 5000 } else { 904 };
+        assert!(matches!(
+            check(len, chunks),
+            FormatError::BadRecord {
+                record: 0,
+                reason: "chunk order"
+            }
+        ));
+    }
+}
+
+#[test]
+fn the_writer_refuses_invalid_records_and_mismatched_kinds() {
+    let bad = |r: Record| {
+        let mut out = Vec::new();
+        Writer::new(&mut out, options(vec![r])).err().unwrap()
+    };
+    let RecordBody::Deflate(mut d) = deflate().body else {
+        unreachable!()
+    };
+    d.library = 3;
+    assert!(matches!(
+        bad(Record::new(RecordBody::Deflate(d))),
+        FormatError::BadRecord {
+            record: 0,
+            reason: "library"
+        }
+    ));
+    let mut r = deflate();
+    r.kind = RecordKind::Jpeg;
+    assert!(matches!(
+        bad(r),
+        FormatError::BadOptions {
+            reason: "record kind"
         }
     ));
 }

@@ -129,12 +129,14 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             other => other?,
         };
         // The records frame is read only for a block whose graph names a record.
-        let record_count = if Graph::parse(&frame.payload)?.0.uses_records() {
+        let (graph, graph_len) = Graph::parse(&frame.payload)?;
+        let record_count = if graph.uses_records() {
             a.record_count()?
         } else {
             0
         };
-        let (header, used) = BlockHeader::parse(&frame.payload, block, record_count)?;
+        graph.check_records(record_count)?;
+        let (header, used) = BlockHeader::from_graph(graph, graph_len, &frame.payload, block)?;
         let need = header.graph.resources();
         let env = &a.index().envelope;
         if need.window > env.max_window {
@@ -215,6 +217,64 @@ impl<R: Read + Seek> Archive<R> {
         Ok(Some(OwnedRecordsTable { payload, count }))
     }
 
+    /// Walk the `Records` frame (when there is one) and check what needs the
+    /// chunk table and the blocks: chunk indices in range, chunk lengths that
+    /// add up, every chunk of a record in an earlier block than any block
+    /// whose graph names the record, and every record id of a block graph.
+    fn verify_records(&mut self) -> Result<(), FormatError> {
+        let Some(owned) = self.records()? else {
+            return Ok(());
+        };
+        let records = owned.table()?.iter().collect::<Result<Vec<_>, _>>()?;
+        let count = records.len() as u64;
+        let chunks = self.chunks_arc();
+        for (id, rec) in (0u64..).zip(&records) {
+            for (list, want) in rec.chunk_groups() {
+                let mut total = 0u64;
+                for &c in list {
+                    let r = chunks.record(c).ok_or(FormatError::ChunkIndexOutOfRange {
+                        chunk: c,
+                        len: chunks.len(),
+                    })?;
+                    total = total.saturating_add(r.plain_len);
+                }
+                if total != want {
+                    return Err(FormatError::BadRecord {
+                        record: id,
+                        reason: "chunk lengths",
+                    });
+                }
+            }
+        }
+        let blocks = self.index().blocks.clone();
+        for (b, loc) in blocks.iter().enumerate() {
+            let at = FrameLocation {
+                offset: loc.frame_offset,
+                len: loc.frame_len,
+            };
+            let frame = self.read_frame_at(at, FrameKind::ChunkData)?;
+            let (graph, _) = Graph::parse(&frame.payload)?;
+            graph.check_records(count)?;
+            for step in &graph.steps {
+                let Some(id) = step.primitive.record_id(&step.params) else {
+                    continue;
+                };
+                let rec = usize::try_from(id).ok().and_then(|i| records.get(i));
+                for (list, _) in rec.map(|r| r.chunk_groups()).unwrap_or_default() {
+                    for &c in list {
+                        if chunks.locate(c).is_none_or(|p| p.block >= b) {
+                            return Err(FormatError::BadRecord {
+                                record: id,
+                                reason: "chunk order",
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Number of records (0 without a `Records` frame), cached.
     pub(crate) fn record_count(&mut self) -> Result<u64, FormatError> {
         if let Some(n) = self.record_count {
@@ -262,7 +322,13 @@ impl<R: Read + Seek> Archive<R> {
     /// reported as `HashMismatch`), then every file entry's chunk list and
     /// size are checked against the chunk table, which needs no block reads.
     /// The Merkle root and the index were checked when the archive was opened.
+    ///
+    /// When the index lists a `Records` frame it is read and every record
+    /// checked first (spec section 12): the frame and body hashes, the field
+    /// rules, the chunk indices and sums, the block order, and the record ids
+    /// of every block graph.
     pub fn verify(&mut self) -> Result<VerifySummary, FormatError> {
+        self.verify_records()?;
         let table = self.chunks_arc();
         let blocks = self.index().blocks.clone();
         let mut source = ArchiveChunks::strict(self);

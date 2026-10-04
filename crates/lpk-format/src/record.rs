@@ -275,17 +275,37 @@ impl JpegRecord {
         }
         let n = r.count(8 + 8 + 1)?;
         let mut gainmaps = Vec::with_capacity(n);
+        // Secondary images lie after the primary image, ascending, not overlapping.
+        let mut prev_end = primary_len;
+        let mut covered = 0u64;
         for _ in 0..n {
             let offset = r.u64()?;
             let len = r.u64()?;
-            if offset.checked_add(len).is_none_or(|e| e > original_len) {
-                return Err(r.bad("gainmaps"));
-            }
+            let end = offset
+                .checked_add(len)
+                .filter(|&e| e <= original_len && offset >= prev_end)
+                .ok_or_else(|| r.bad("gainmaps"))?;
+            prev_end = end;
+            covered = covered.saturating_add(len);
             gainmaps.push(SecondaryImage {
                 offset,
                 len,
                 chunks: r.chunks()?,
             });
+        }
+        let after = original_len - primary_len;
+        if !trailing.is_empty() {
+            // Raw trailing data is everything after the primary image,
+            // secondary images included; none is peeled separately.
+            if !gainmaps.is_empty() {
+                return Err(r.bad("gainmaps"));
+            }
+            if trailing.len() as u64 != after {
+                return Err(r.bad("trailing"));
+            }
+        } else if nested_trailing_chunks.is_empty() && covered != after {
+            // Nothing else holds the bytes after the primary image.
+            return Err(r.bad("gainmaps"));
         }
         Ok(JpegRecord {
             original_len,
@@ -416,13 +436,18 @@ impl PngFilterRecord {
             return Err(r.bad("color_type"));
         }
         let interlace = r.small(1, "interlace")?;
+        let filters = r.bytes()?;
+        // A non-interlaced image has one filter byte per scanline.
+        if interlace == 0 && filters.len() as u64 != u64::from(height) {
+            return Err(r.bad("filters"));
+        }
         let v = PngFilterRecord {
             width,
             height,
             bit_depth,
             color_type,
             interlace,
-            filters: r.bytes()?,
+            filters,
             original_hash: r.hash()?,
         };
         r.finish()?;
@@ -478,6 +503,10 @@ impl Base64Record {
         let line_len = r.u16()?;
         let line_ending = r.small(2, "line_ending")?;
         let padding = r.small(1, "padding")?;
+        // No line breaks (line_len 0) is line_ending 2, and only that.
+        if (line_len == 0) != (line_ending == 2) {
+            return Err(r.bad("line_ending"));
+        }
         let v = Base64Record {
             variant,
             line_len,
@@ -558,8 +587,6 @@ pub struct ContainerMember {
     pub len: u64,
     /// The chunks holding the member's data as stored, after any nested peel.
     pub chunks: Vec<u64>,
-    /// BLAKE3 of the member's bytes in the original.
-    pub original_hash: [u8; 32],
 }
 
 /// Record of a peeled container (kind 12).
@@ -571,8 +598,12 @@ pub struct ContainerRecord {
     pub original_len: u64,
     /// The verbatim bytes that are not member data.
     pub framing: Vec<u8>,
-    /// The members, in the order stored.
+    /// The members: ascending, not overlapping. The original is the framing
+    /// bytes with each member's data inserted at its `offset`, so
+    /// `framing.len() + sum(member.len) == original_len`.
     pub members: Vec<ContainerMember>,
+    /// BLAKE3 of the whole original container.
+    pub original_hash: [u8; 32],
 }
 
 impl ContainerRecord {
@@ -585,8 +616,8 @@ impl ContainerRecord {
             out.extend_from_slice(&m.offset.to_le_bytes());
             out.extend_from_slice(&m.len.to_le_bytes());
             put_chunks(out, &m.chunks);
-            out.extend_from_slice(&m.original_hash);
         }
+        out.extend_from_slice(&self.original_hash);
     }
 
     /// The body bytes.
@@ -602,43 +633,44 @@ impl ContainerRecord {
         let format = r.small(3, "format")?;
         let original_len = r.u64()?;
         let framing = r.bytes()?;
-        let n = r.count(8 + 8 + 1 + HASH_LEN)?;
+        let n = r.count(8 + 8 + 1)?;
         let mut members = Vec::with_capacity(n);
+        // Members ascend and do not overlap; their lengths and the framing
+        // add up to the container.
+        let mut prev_end = 0u64;
+        let mut total = framing.len() as u64;
         for _ in 0..n {
             let offset = r.u64()?;
             let len = r.u64()?;
-            if offset.checked_add(len).is_none_or(|e| e > original_len) {
-                return Err(r.bad("members"));
-            }
+            let end = offset
+                .checked_add(len)
+                .filter(|&e| e <= original_len && offset >= prev_end)
+                .ok_or_else(|| r.bad("members"))?;
+            prev_end = end;
+            total = total.saturating_add(len);
             members.push(ContainerMember {
                 offset,
                 len,
                 chunks: r.chunks()?,
-                original_hash: r.hash()?,
             });
         }
+        if total != original_len {
+            return Err(r.bad("original_len"));
+        }
+        let original_hash = r.hash()?;
         r.finish()?;
         Ok(ContainerRecord {
             format,
             original_len,
             framing,
             members,
+            original_hash,
         })
     }
 
-    /// True when `original` (the whole container) has the recorded length and
-    /// every member's bytes hash to its `original_hash`. The framing bytes
-    /// carry no hash of their own: the container's chunks, which the
-    /// extractor rebuilds around the members, are verified by the Merkle tree.
+    /// True when `original` (the whole container) has the recorded length and hash.
     pub fn verify_hash(&self, original: &[u8]) -> bool {
-        original.len() as u64 == self.original_len
-            && self.members.iter().all(|m| {
-                let span = usize::try_from(m.offset)
-                    .ok()
-                    .zip(usize::try_from(m.len).ok())
-                    .and_then(|(o, l)| original.get(o..o.checked_add(l)?));
-                span.is_some_and(|s| hash_matches(s, &m.original_hash))
-            })
+        original.len() as u64 == self.original_len && hash_matches(original, &self.original_hash)
     }
 }
 
@@ -719,6 +751,38 @@ impl Record {
             RecordKind::Container => RecordBody::Container(ContainerRecord::parse(body, record)?),
         };
         Ok(Record { kind, body })
+    }
+
+    /// The chunk lists the record references, each with the total `plain_len`
+    /// its chunks must add up to: a JPEG's secondary images and (when the
+    /// trailing data is peeled) its nested trailing chunks, which hold the
+    /// bytes after the primary image that no secondary image covers; a
+    /// container's members.
+    pub fn chunk_groups(&self) -> Vec<(&[u64], u64)> {
+        match &self.body {
+            RecordBody::Jpeg(j) => {
+                let mut v: Vec<(&[u64], u64)> = j
+                    .gainmaps
+                    .iter()
+                    .map(|g| (g.chunks.as_slice(), g.len))
+                    .collect();
+                if j.trailing.is_empty() {
+                    let covered = j.gainmaps.iter().fold(0u64, |a, g| a.saturating_add(g.len));
+                    let rest = j
+                        .original_len
+                        .saturating_sub(j.primary_len)
+                        .saturating_sub(covered);
+                    v.push((j.nested_trailing_chunks.as_slice(), rest));
+                }
+                v
+            }
+            RecordBody::Container(c) => c
+                .members
+                .iter()
+                .map(|m| (m.chunks.as_slice(), m.len))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Check the original bytes against the record's verification target
@@ -980,9 +1044,9 @@ pub fn record_layout_tables() -> String {
 | framing | bytes | the verbatim bytes of the container that are not member data (ZIP: every local header, extra field, data descriptor, the central directory and the end record; PDF: object headers and xref; gzip: header and trailer; TAR: the headers) |\n\
 | member_count | varint | number of members |\n\
 | offset | u64 LE | per member: position in the original |\n\
-| len | u64 LE | per member: length in the original; `offset + len` is at most `original_len` |\n\
+| len | u64 LE | per member: length in the original; members ascend and do not overlap, and `offset + len` is at most `original_len` |\n\
 | chunks | chunk list | per member: the chunks holding its data as stored, after any nested peel |\n\
-| original_hash | 32 | per member: BLAKE3-256 of the member's bytes in the original |\n"
+| original_hash | 32 | after the last member: BLAKE3-256 of the whole original container |\n"
         .to_string()
 }
 
@@ -1001,7 +1065,8 @@ mod tests {
         JpegRecord {
             original_len: 5000,
             primary_len: 4000,
-            trailing: if nested { vec![] } else { vec![1, 2, 3] },
+            // Raw trailing data is everything after the primary image.
+            trailing: if nested { vec![] } else { vec![1; 1000] },
             nested_trailing_chunks: if nested { vec![7, 8] } else { vec![] },
             gainmaps: (0..gainmaps as u64)
                 .map(|i| SecondaryImage {
@@ -1058,18 +1123,19 @@ mod tests {
     }
 
     fn container(members: usize) -> ContainerRecord {
+        // Four framing bytes first, then the members back to back.
         ContainerRecord {
             format: 0,
-            original_len: 1000,
+            original_len: 4 + 50 * members as u64,
             framing: vec![0x50, 0x4B, 3, 4],
             members: (0..members as u64)
                 .map(|i| ContainerMember {
-                    offset: 100 * i,
+                    offset: 4 + 50 * i,
                     len: 50,
                     chunks: vec![i; (i + 1) as usize],
-                    original_hash: h(i as u8),
                 })
                 .collect(),
+            original_hash: h(6),
         }
     }
 
@@ -1139,14 +1205,21 @@ mod tests {
 
     #[test]
     fn every_record_type_round_trips_with_and_without_optional_parts() {
-        for nested in [false, true] {
-            for g in [0, 1, 2] {
-                round_trip!(JpegRecord, jpeg(nested, g));
-            }
+        // Raw trailing data holds the secondary images too; peeled data has them apart.
+        round_trip!(JpegRecord, jpeg(false, 0));
+        for g in [0, 1, 2] {
+            round_trip!(JpegRecord, jpeg(true, g));
         }
+        // Nothing after the primary image.
         let mut both_empty = jpeg(false, 0);
         both_empty.trailing.clear();
+        both_empty.original_len = both_empty.primary_len;
         round_trip!(JpegRecord, both_empty);
+        // Secondary images that cover everything after the primary image.
+        let mut covered = jpeg(true, 2);
+        covered.nested_trailing_chunks.clear();
+        covered.gainmaps[1].len = 1000 - 100;
+        round_trip!(JpegRecord, covered);
         round_trip!(DeflateRecord, deflate());
         let mut d = deflate();
         d.corrections.clear();
@@ -1170,6 +1243,16 @@ mod tests {
         let mut c = container(3);
         c.framing.clear();
         c.format = 3;
+        c.original_len = 150;
+        for (i, m) in c.members.iter_mut().enumerate() {
+            m.offset = 50 * i as u64;
+        }
+        round_trip!(ContainerRecord, c);
+        // Members with framing between them.
+        let mut c = container(2);
+        c.framing = vec![9; 10];
+        c.original_len = 110;
+        c.members[1].offset = 4 + 50 + 6;
         round_trip!(ContainerRecord, c);
         // The typed wrapper round-trips too.
         for r in all_kinds() {
@@ -1217,17 +1300,18 @@ mod tests {
             ..utf16()
         };
         assert!(u.verify_hash(&data) && !u.verify_hash(&flip(&data)));
-        // A container: three members at 0, 100 and 200, 50 bytes each.
-        let mut c = container(3);
-        c.original_len = 5000;
-        for m in &mut c.members {
-            let at = m.offset as usize;
-            m.original_hash = *blake3::hash(&data[at..at + 50]).as_bytes();
-        }
+        // A container: the hash covers the whole file, framing bytes included.
+        let c = ContainerRecord {
+            original_len: 5000,
+            original_hash: hash,
+            ..container(3)
+        };
         assert!(c.verify_hash(&data));
-        let mut hit = data.clone();
-        hit[120] ^= 1;
-        assert!(!c.verify_hash(&hit));
+        for at in [0usize, 2, 4 + 25, 4999] {
+            let mut hit = data.clone();
+            hit[at] ^= 1;
+            assert!(!c.verify_hash(&hit), "flip at {at}");
+        }
         assert!(!c.verify_hash(&data[..4999]));
         for r in all_kinds() {
             // The wrapper dispatches; none of the samples hashes `data`.
@@ -1324,6 +1408,108 @@ mod tests {
             reason(ContainerRecord::parse(&c.encode(), 4).unwrap_err()),
             "members"
         );
+        // Assembly rules: ascending, not overlapping, lengths add up.
+        let mut c = container(2);
+        c.members[1].offset = c.members[0].offset + 10;
+        assert_eq!(
+            reason(ContainerRecord::parse(&c.encode(), 4).unwrap_err()),
+            "members"
+        );
+        let mut c = container(2);
+        c.members.swap(0, 1);
+        assert_eq!(
+            reason(ContainerRecord::parse(&c.encode(), 4).unwrap_err()),
+            "members"
+        );
+        let mut c = container(2);
+        c.original_len += 1;
+        assert_eq!(
+            reason(ContainerRecord::parse(&c.encode(), 4).unwrap_err()),
+            "original_len"
+        );
+        let mut c = container(2);
+        c.framing.push(0);
+        assert_eq!(
+            reason(ContainerRecord::parse(&c.encode(), 4).unwrap_err()),
+            "original_len"
+        );
+        // JPEG: secondary images after the primary image and apart; raw
+        // trailing data is everything after it; peeled data is covered.
+        let mut j = jpeg(true, 1);
+        j.gainmaps[0].offset = 3999;
+        assert_eq!(
+            reason(JpegRecord::parse(&j.encode(), 4).unwrap_err()),
+            "gainmaps"
+        );
+        let mut j = jpeg(true, 2);
+        j.gainmaps[1].offset = 4050;
+        assert_eq!(
+            reason(JpegRecord::parse(&j.encode(), 4).unwrap_err()),
+            "gainmaps"
+        );
+        let mut j = jpeg(false, 0);
+        j.trailing.pop();
+        assert_eq!(
+            reason(JpegRecord::parse(&j.encode(), 4).unwrap_err()),
+            "trailing"
+        );
+        let mut j = jpeg(false, 0);
+        j.gainmaps.push(SecondaryImage {
+            offset: 4000,
+            len: 10,
+            chunks: vec![],
+        });
+        assert_eq!(
+            reason(JpegRecord::parse(&j.encode(), 4).unwrap_err()),
+            "gainmaps"
+        );
+        let mut j = jpeg(true, 1);
+        j.nested_trailing_chunks.clear();
+        assert_eq!(
+            reason(JpegRecord::parse(&j.encode(), 4).unwrap_err()),
+            "gainmaps"
+        );
+        // Contradictory text and image shapes.
+        for (ll, le) in [(0u16, 0u8), (0, 1), (76, 2)] {
+            let mut b = b64();
+            (b.line_len, b.line_ending) = (ll, le);
+            assert_eq!(
+                reason(Base64Record::parse(&b.encode(), 4).unwrap_err()),
+                "line_ending"
+            );
+        }
+        let mut p = png();
+        p.filters.pop();
+        assert_eq!(
+            reason(PngFilterRecord::parse(&p.encode(), 4).unwrap_err()),
+            "filters"
+        );
+        // An interlaced image has more scanlines than its height.
+        p.interlace = 1;
+        PngFilterRecord::parse(&p.encode(), 4).unwrap();
+    }
+
+    #[test]
+    fn chunk_groups_list_what_the_records_reference() {
+        let j = Record::new(RecordBody::Jpeg(jpeg(true, 2)));
+        let g = j.chunk_groups();
+        // Two secondary images of 100 bytes, then the rest: 1000 - 200.
+        assert_eq!(
+            g,
+            vec![
+                (&[0u64, 1, 300][..], 100),
+                (&[1, 2, 300][..], 100),
+                (&[7, 8][..], 800)
+            ]
+        );
+        // Raw trailing data references no chunks.
+        let j = Record::new(RecordBody::Jpeg(jpeg(false, 0)));
+        assert!(j.chunk_groups().is_empty());
+        let c = Record::new(RecordBody::Container(container(2)));
+        assert_eq!(c.chunk_groups(), vec![(&[0u64][..], 50), (&[1, 1][..], 50)]);
+        assert!(Record::new(RecordBody::Utf16(utf16()))
+            .chunk_groups()
+            .is_empty());
     }
 
     #[test]
@@ -1549,32 +1735,36 @@ mod tests {
     fn arb_record() -> impl Strategy<Value = Record> {
         let jpeg = (
             0u64..1 << 40,
-            prop::collection::vec(any::<u8>(), 0..8),
-            arb_chunks(),
-            prop::collection::vec((0u64..100, 0u64..100, arb_chunks()), 0..3),
+            any::<Option<u8>>(),
+            prop::collection::vec(any::<u64>(), 1..5),
+            prop::collection::vec((0u64..=100, arb_chunks()), 0..3),
             any::<u8>(),
             arb_hash(),
         )
-            .prop_map(|(primary, trailing, nested, maps, lv, hash)| {
-                // Raw trailing data or nested chunks, never both.
-                let (trailing, nested) = if trailing.is_empty() {
-                    (trailing, nested)
-                } else {
-                    (trailing, vec![])
+            .prop_map(|(primary, raw, nested, maps, lv, hash)| {
+                // 200 bytes follow the primary image: raw trailing data, or
+                // secondary images at primary and primary + 100 and nested chunks.
+                let (trailing, nested, gainmaps) = match raw {
+                    Some(fill) => (vec![fill; 200], vec![], vec![]),
+                    None => (
+                        vec![],
+                        nested,
+                        maps.into_iter()
+                            .enumerate()
+                            .map(|(i, (len, chunks))| SecondaryImage {
+                                offset: primary + 100 * i as u64,
+                                len,
+                                chunks,
+                            })
+                            .collect(),
+                    ),
                 };
                 RecordBody::Jpeg(JpegRecord {
                     original_len: primary + 200,
                     primary_len: primary,
                     trailing,
                     nested_trailing_chunks: nested,
-                    gainmaps: maps
-                        .into_iter()
-                        .map(|(offset, len, chunks)| SecondaryImage {
-                            offset: primary + offset.min(100),
-                            len: len.min(100),
-                            chunks,
-                        })
-                        .collect(),
+                    gainmaps,
                     lepton_version: lv,
                     original_hash: hash,
                 })
@@ -1596,7 +1786,7 @@ mod tests {
             });
         let png = (
             any::<u32>(),
-            any::<u32>(),
+            0u32..16,
             prop::sample::select(vec![1u8, 2, 4, 8, 16]),
             prop::sample::select(vec![0u8, 2, 3, 4, 6]),
             0u8..=1,
@@ -1604,7 +1794,10 @@ mod tests {
             arb_hash(),
         )
             .prop_map(
-                |(width, height, bit_depth, color_type, interlace, filters, hash)| {
+                |(width, height, bit_depth, color_type, interlace, mut filters, hash)| {
+                    if interlace == 0 {
+                        filters.resize(height as usize, 0);
+                    }
                     RecordBody::PngFilter(PngFilterRecord {
                         width,
                         height,
@@ -1619,23 +1812,23 @@ mod tests {
         let b64 = (
             0u8..=1,
             any::<u16>(),
-            0u8..=2,
+            0u8..=1,
             0u8..=1,
             any::<u64>(),
             arb_hash(),
         )
-            .prop_map(
-                |(variant, line_len, line_ending, padding, original_len, hash)| {
-                    RecordBody::Base64(Base64Record {
-                        variant,
-                        line_len,
-                        line_ending,
-                        padding,
-                        original_len,
-                        original_hash: hash,
-                    })
-                },
-            );
+            .prop_map(|(variant, line_len, crlf, padding, original_len, hash)| {
+                // No line breaks is line_ending 2 and only that.
+                let line_ending = if line_len == 0 { 2 } else { crlf };
+                RecordBody::Base64(Base64Record {
+                    variant,
+                    line_len,
+                    line_ending,
+                    padding,
+                    original_len,
+                    original_hash: hash,
+                })
+            });
         let utf = (0u8..=1, 0u8..=1, any::<u64>(), arb_hash()).prop_map(|(endian, bom, len, h)| {
             RecordBody::Utf16(Utf16Record {
                 endian,
@@ -1647,22 +1840,30 @@ mod tests {
         let cont = (
             0u8..=3,
             prop::collection::vec(any::<u8>(), 0..16),
-            prop::collection::vec((0u64..500, 0u64..500, arb_chunks(), arb_hash()), 0..4),
+            prop::collection::vec((0u64..500, arb_chunks()), 0..4),
+            arb_hash(),
         )
-            .prop_map(|(format, framing, members)| {
-                RecordBody::Container(ContainerRecord {
-                    format,
-                    original_len: 1000,
-                    framing,
-                    members: members
-                        .into_iter()
-                        .map(|(offset, len, chunks, original_hash)| ContainerMember {
-                            offset,
+            .prop_map(|(format, framing, members, hash)| {
+                // Members back to back after the framing.
+                let mut at = framing.len() as u64;
+                let members: Vec<ContainerMember> = members
+                    .into_iter()
+                    .map(|(len, chunks)| {
+                        let m = ContainerMember {
+                            offset: at,
                             len,
                             chunks,
-                            original_hash,
-                        })
-                        .collect(),
+                        };
+                        at += len;
+                        m
+                    })
+                    .collect();
+                RecordBody::Container(ContainerRecord {
+                    format,
+                    original_len: at,
+                    framing,
+                    members,
+                    original_hash: hash,
                 })
             });
         prop_oneof![jpeg, deflate, png, b64, utf, cont].prop_map(Record::new)

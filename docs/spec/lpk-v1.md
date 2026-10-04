@@ -738,8 +738,8 @@ The payload is a `record_count` and the records in ascending id order. Each reco
 belongs to, its body and the hash of the body, so a record verifies on its own, without the rest of the frame.
 The payload's own hash is the frame hash of section 3.
 
-Integers written `u8`, `u16`, `u32`, `u64` below are fixed width, little endian; counts, lengths and chunk
-indices are varints. `bytes` is a varint length followed by that many bytes. `chunk list` is a varint count
+Counts, byte-string lengths, `body_len`, `record_count` and chunk indices are varints; fields with a stated width
+(`u8`, `u16`, `u32`, `u64`) are fixed-width little-endian. `bytes` is a varint length followed by that many bytes. `chunk list` is a varint count
 followed by that many varint chunk indices (section 5).
 
 | Kind | Name | Primitive |
@@ -829,9 +829,9 @@ followed by that many varint chunk indices (section 5).
 | framing | bytes | the verbatim bytes of the container that are not member data (ZIP: every local header, extra field, data descriptor, the central directory and the end record; PDF: object headers and xref; gzip: header and trailer; TAR: the headers) |
 | member_count | varint | number of members |
 | offset | u64 LE | per member: position in the original |
-| len | u64 LE | per member: length in the original; `offset + len` is at most `original_len` |
+| len | u64 LE | per member: length in the original; members ascend and do not overlap, and `offset + len` is at most `original_len` |
 | chunks | chunk list | per member: the chunks holding its data as stored, after any nested peel |
-| original_hash | 32 | per member: BLAKE3-256 of the member's bytes in the original |
+| original_hash | 32 | after the last member: BLAKE3-256 of the whole original container |
 
 Rules. Records are decoded as a stream. A `record_count` larger than the bytes after it divided by 5 (rounded
 down) is `Truncated` for "records", raised when the count is read. A payload that ends inside a record, a
@@ -845,7 +845,11 @@ a `bit_depth` outside 1, 2, 4, 8, 16, a `color_type` outside 0, 2, 3, 4, 6, an `
 `endian` or `bom` above 1, a `line_ending` above 2, a container `format` above 3) is `BadRecord` with the id and
 the field's name as `reason`. So are these inconsistencies: a JPEG `primary_len` above `original_len`
 (`primary_len`); a JPEG with both raw `trailing` bytes and `nested_trailing_chunks` (`nested_trailing_chunks`);
-a secondary image or member whose `offset + len` overflows or exceeds `original_len` (`gainmaps`, `members`).
+a secondary image or member whose `offset + len` overflows or exceeds `original_len`, that is out of order, overlaps
+another or (for a secondary image) starts before `primary_len` (`gainmaps`, `members`); the sums of the assembly rules
+below that do not hold (`trailing`, `gainmaps`, `original_len`); a base64 `line_len` of 0 with a `line_ending`
+other than 2, or a `line_len` above 0 with `line_ending` 2 (`line_ending`); a non-interlaced png-filter record
+whose `filters` are not `height` bytes long (`filters`).
 The first error ends the walk, and asking for record `n` walks from the start, so the first error among records
 `0` to `n` is the one reported.
 
@@ -858,19 +862,40 @@ original bytes, they must hash to it (and have `original_len` bytes where the re
 - deflate: the original compressed Deflate stream, not its decompressed form.
 - png-filter: the filtered scanline bytes, that is the Deflate-decoded IDAT data, not the PNG file.
 - base64, utf16: the original encoded text.
-- container: each member's bytes in the original (`offset`, `len`); the framing carries no hash of its own,
-  the container as a whole is covered by the chunk hashes and the Merkle tree of section 5.
+- container: the whole original container, framing and members.
+
+### How a record's parts fit together
+
+- container: the original is the `framing` bytes with each member's data inserted at its `offset`: reading the
+  original from the start, the bytes of the members are the ranges `[offset, offset + len)`, and the framing
+  bytes fill the rest in order. Members ascend and do not overlap, and `framing.len() + sum(len) == original_len`.
+  A member's `chunks` give its data as stored, in order, and their `plain_len` add up to `len`.
+- jpeg: the original is the primary image (`primary_len` bytes, ending with its EOI) followed by `original_len -
+  primary_len` bytes. When `trailing` is not empty it is exactly those bytes, secondary images included (none is
+  peeled separately, so `gainmap_count` is 0 and `nested_trailing_chunks` is empty). Otherwise they are made of
+  the secondary images, which lie after `primary_len`, ascend, do not overlap and end at or before `original_len`
+  (each one's `chunks` add up to its `len`), and the nested trailing data, which fills the remaining ranges in
+  order: the `nested_trailing_chunks` add up to `original_len - primary_len - sum(secondary len)`. With no nested
+  chunks the secondary images must cover every byte after the primary image.
+- Chunk indices. Every chunk index a record names is below the chunk count (`ChunkIndexOutOfRange`). A chunk a
+  record names lies in a block with a strictly lower index than every block whose graph names that record, so
+  a record never needs the block that is being rebuilt from it and two blocks never need each other. The
+  chunk sums above and this order are checked by whole-archive verification (`BadRecord` with `reason`
+  `chunk lengths` or `chunk order`), which knows the blocks and the chunk table; parsing a record cannot.
 
 ### What the reference decoder does with records
 
 The reference decoder parses, validates and hashes records (the frame hash, every `body_hash`, every field rule
 above) and checks the record ids of every block header it parses; it applies none. A block whose graph names a
 reconstruction primitive is reported as `UnimplementedPrimitive` (section 8), as before. Applying records needs the
-JPEG and Deflate libraries of the full reader.
+JPEG and Deflate libraries of the full reader. Whole-archive verification (section 9), whenever the index lists a
+`Records` frame, reads it and walks every record (a damaged frame is `HashMismatch`), checks the chunk indices,
+chunk sums and block order above, and checks the record ids of every block graph, all before it decodes a block.
 
 Writing. A writer given records writes them as one `Records` frame after the entry table and before the index, and
 sets the index's `records_offset` and `records_len`; the envelope's `max_frame_payload` admits the frame (section 7).
-The reference writer refuses an encoder whose graph names a record id it was not given (`RecordOutOfRange`).
+The reference writer refuses an encoder whose graph names a record id it was not given (`RecordOutOfRange`), a
+record that does not parse under the rules above, and a record whose `kind` differs from its body's (`BadOptions`).
 
 Errors of this section: `UnknownRecordKind`, `ReservedRecordBits`, `RecordHashMismatch`, `RecordOutOfRange`,
 `BadRecord`, and `Truncated` and `TrailingBytes` as above.

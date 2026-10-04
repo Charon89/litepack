@@ -238,6 +238,13 @@ impl<W: Write> Writer<W> {
             s.primitive.validate_params(&s.params)?;
         }
         graph.check_records(options.records.len() as u64)?;
+        // A record the reader would refuse is refused here.
+        for (i, r) in options.records.iter().enumerate() {
+            if r.kind != r.body.kind() {
+                return Err(bad_options("record kind"));
+            }
+            Record::parse(r.kind, &r.encode(), i as u64)?;
+        }
         Header::new(HeaderFlags::EMPTY, options.archive_id).write(&mut out)?;
         Ok(Writer {
             out,
