@@ -95,10 +95,15 @@ impl<'a> ChunkTable<'a> {
             return Ok(None);
         }
         let skip = usize::try_from(index).map_err(|_| FormatError::Truncated { what: WHAT })?;
-        match self.iter().nth(skip) {
-            Some(r) => r.map(Some),
-            None => Ok(None),
+        let mut it = self.iter();
+        for _ in 0..skip {
+            match it.next() {
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(e),
+                None => return Ok(None),
+            }
         }
+        it.next().transpose()
     }
 
     /// Walk every record, including the trailing-bytes check.
@@ -163,19 +168,31 @@ pub trait ChunkSource {
     fn chunk(&mut self, index: u64) -> Result<Vec<u8>, FormatError>;
 }
 
-/// Resolve every chunk index of a file to its record and total the lengths.
-fn resolve(chunks: &[u64], table: &ChunkTable<'_>) -> Result<(Vec<ChunkRecord>, u64), FormatError> {
+/// Resolve every chunk index of a file to its record and check that the
+/// lengths add up to `file_len`; a sum that overflows `u64` is reported as
+/// `FileSizeMismatch` with `found` = `u64::MAX`.
+fn resolve(
+    chunks: &[u64],
+    file_len: u64,
+    table: &ChunkTable<'_>,
+) -> Result<Vec<ChunkRecord>, FormatError> {
     let mut recs = Vec::with_capacity(chunks.len().min(1 << 16));
-    let mut total = 0u64;
+    let mut total = Some(0u64);
     for &c in chunks {
         let r = table.get(c)?.ok_or(FormatError::ChunkIndexOutOfRange {
             chunk: c,
             len: table.len(),
         })?;
-        total = total.saturating_add(r.plain_len);
+        total = total.and_then(|t| t.checked_add(r.plain_len));
         recs.push(r);
     }
-    Ok((recs, total))
+    match total {
+        Some(t) if t == file_len => Ok(recs),
+        found => Err(FormatError::FileSizeMismatch {
+            expected: file_len,
+            found: found.unwrap_or(u64::MAX),
+        }),
+    }
 }
 
 fn fetch_and_check(
@@ -198,13 +215,7 @@ pub fn verify_file(
     table: &ChunkTable<'_>,
     source: &mut dyn ChunkSource,
 ) -> Result<(), FormatError> {
-    let (recs, total) = resolve(chunks, table)?;
-    if total != file_len {
-        return Err(FormatError::FileSizeMismatch {
-            expected: file_len,
-            found: total,
-        });
-    }
+    let recs = resolve(chunks, file_len, table)?;
     for (&c, r) in chunks.iter().zip(&recs) {
         fetch_and_check(source, c, r)?;
     }
@@ -232,13 +243,7 @@ pub fn verify_range(
             })
         }
     };
-    let (recs, total) = resolve(chunks, table)?;
-    if total != file_len {
-        return Err(FormatError::FileSizeMismatch {
-            expected: file_len,
-            found: total,
-        });
-    }
+    let recs = resolve(chunks, file_len, table)?;
     if len == 0 {
         return Ok(());
     }
@@ -462,6 +467,67 @@ mod tests {
         s.data[2].push(0);
         let e = verify_file(&all(7), total, &t, &mut s).unwrap_err();
         assert!(matches!(e, FormatError::ChunkMismatch { chunk: 2 }));
+    }
+
+    #[test]
+    fn overflowing_lengths_are_a_size_mismatch() {
+        let recs = [rec(10, 1), rec(u64::MAX, 2)];
+        let p = ChunkTableWriter::encode(&recs);
+        let t = ChunkTable::parse(&p).unwrap();
+        let mut s = Store {
+            data: vec![],
+            fetched: vec![],
+        };
+        let e = verify_file(&[0, 1], u64::MAX, &t, &mut s).unwrap_err();
+        assert!(matches!(
+            e,
+            FormatError::FileSizeMismatch {
+                expected: u64::MAX,
+                found: u64::MAX
+            }
+        ));
+        let e = verify_range(&[0, 1], u64::MAX, 0, 5, &t, &mut s).unwrap_err();
+        assert!(matches!(e, FormatError::FileSizeMismatch { .. }));
+        assert!(s.fetched.is_empty());
+    }
+
+    #[test]
+    fn get_reports_a_corrupt_record_before_the_index() {
+        // Record 1 has a non-canonical plain_len; records 0 and 2 are fine.
+        let mut p = vec![3u8, 1];
+        p.extend_from_slice(&[0u8; 32]);
+        p.extend_from_slice(&[0x80, 0x00]);
+        p.extend_from_slice(&[0u8; 32]);
+        p.push(1);
+        p.extend_from_slice(&[0u8; 32]);
+        let t = ChunkTable::parse(&p).unwrap();
+        assert!(t.get(0).unwrap().is_some());
+        assert!(matches!(t.get(1), Err(FormatError::NonCanonicalVarint)));
+        assert!(matches!(t.get(2), Err(FormatError::NonCanonicalVarint)));
+        assert!(t.get(3).unwrap().is_none());
+    }
+
+    #[test]
+    fn permuted_and_repeated_indices() {
+        let data = seven();
+        let (p, mut s) = build(&data);
+        let t = ChunkTable::parse(&p).unwrap();
+        let idx = [3u64, 0, 3, 1];
+        let len = |i: u64| data[i as usize].len() as u64;
+        let total: u64 = idx.iter().map(|i| len(*i)).sum();
+        verify_file(&idx, total, &t, &mut s).unwrap();
+        // From the start of list position 1 (chunk 0) one byte into position 2.
+        s.fetched.clear();
+        verify_range(&idx, total, len(3), len(0) + 1, &t, &mut s).unwrap();
+        assert_eq!(s.fetched, vec![0, 3]);
+        // Corruption is attributed to the chunk index, wherever it repeats.
+        s.data[3][0] ^= 1;
+        let e = verify_file(&idx, total, &t, &mut s).unwrap_err();
+        assert!(matches!(e, FormatError::ChunkMismatch { chunk: 3 }));
+        s.data[3][0] ^= 1;
+        s.data[1][0] ^= 1;
+        let e = verify_file(&idx, total, &t, &mut s).unwrap_err();
+        assert!(matches!(e, FormatError::ChunkMismatch { chunk: 1 }));
     }
 
     #[test]

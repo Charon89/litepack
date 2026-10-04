@@ -217,7 +217,8 @@ only as a hash, so a proof alone does not pin `n` for every leaf; the verifier t
 File verification: a file is the chunks named by its entry, in order. Verification checks, in this order, that
 every index is below the table length (otherwise `ChunkIndexOutOfRange` with the index and the table length),
 that the sum of the chunks' `plain_len` equals the file length (otherwise `FileSizeMismatch` with the expected
-and the found length), and then, for each chunk in order, that the original bytes have length `plain_len` and
+and the found length; a chunk list whose lengths add up to more than the largest `u64` is malformed and is
+reported the same way, with the found length set to the largest `u64`), and then, for each chunk in order, that the original bytes have length `plain_len` and
 hash to the table's hash (otherwise `ChunkMismatch` with the chunk index). A chunk may appear in several files
 and several times in one file.
 
@@ -226,6 +227,12 @@ the file (otherwise `RangeOutOfFile` with the offset, the length and the file le
 also out of the file), then the index and size checks above, and then reads and checks only the chunks that
 overlap the range, found from the running sum of `plain_len`. A chunk of length 0 holds no byte and is not
 read, and an empty range reads no chunk. A chunk that is read is checked whole.
+
+Test vectors (checked by the crate's tests, in hexadecimal): the root of an empty table is
+`f986dffb57677490beca54d2e3583730ff1b3e102731e6b019a8361c1a4efa0c`. The root of the two leaves
+`1111111111111111111111111111111111111111111111111111111111111111` and
+`2222222222222222222222222222222222222222222222222222222222222222` (each 32 bytes of 0x11 and 0x22) is
+`2c3cddfa1e3c1c08f0088621676bc301fa3b581d7aa895c340239273754da9d3`.
 
 Errors of this section: `ChunkMismatch`, `ChunkIndexOutOfRange`, `FileSizeMismatch`, `RangeOutOfFile`, plus
 `Truncated`, `TrailingBytes` and `NonCanonicalVarint` for the table.

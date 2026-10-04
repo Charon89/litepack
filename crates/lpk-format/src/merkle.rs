@@ -208,7 +208,7 @@ mod tests {
             let root = t.root();
             for (i, leaf) in l.iter().enumerate() {
                 let p = t.proof(i as u64).unwrap();
-                assert!(p.len() <= 64 - (n as u64).leading_zeros() as usize);
+                assert!(p.len() <= 64 - (n as u64 - 1).leading_zeros() as usize);
                 assert!(verify_proof(&root, i as u64, n as u64, leaf, &p), "{n}/{i}");
             }
             assert!(t.proof(n as u64).is_none());

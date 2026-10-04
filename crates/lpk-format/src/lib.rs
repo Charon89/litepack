@@ -1,4 +1,5 @@
-//! LitePack `.lpk` container format: header, varints and the hashed frame grammar.
+//! LitePack `.lpk` container format: header, varints, the hashed frame grammar, the entry
+//! table, the chunk table and the Merkle tree with file and range verification.
 //!
 //! This is the reference reader side of the format; see `docs/spec/lpk-v1.md`.
 #![forbid(unsafe_code)]
