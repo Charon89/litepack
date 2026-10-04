@@ -472,11 +472,21 @@ impl Index {
                 .split_first_chunk::<16>()
                 .ok_or(FormatError::Truncated { what: WHAT })?;
             s = rest;
+            let bad = |reason| Err(FormatError::BadGenerationTable { reason });
+            if g != i {
+                return bad("generation");
+            }
+            if i == 0 && start_offset != crate::header::Header::LEN as u64 {
+                return bad("first start_offset");
+            }
+            if i == 0 && first_sequence != 0 {
+                return bad("first first_sequence");
+            }
             let ordered = generations
                 .last()
                 .is_none_or(|p| start_offset > p.start_offset && first_sequence > p.first_sequence);
-            if g != i || !ordered {
-                return Err(FormatError::BadGenerationTable);
+            if !ordered {
+                return bad("order");
             }
             generations.push(GenerationInfo {
                 generation: g,
@@ -799,6 +809,34 @@ mod tests {
         assert!(Index::parse(&bytes, IDX_AT).is_err());
     }
 
+    /// Spec section 15 (E1-14d ruling 10): the rules of the generation table
+    /// alone, each a `BadGenerationTable` with its reason.
+    #[test]
+    fn generation_table_rules() {
+        let gen = |generation, start_offset, first_sequence| GenerationInfo {
+            generation,
+            start_offset,
+            first_sequence,
+            salt: [0; 16],
+        };
+        let base = make(&[rec(3, 1), rec(4, 2)], &[2]);
+        for (table, reason) in [
+            (vec![gen(1, 32, 0)], "generation"),
+            (vec![gen(0, 33, 0)], "first start_offset"),
+            (vec![gen(0, 32, 1)], "first first_sequence"),
+            (vec![gen(0, 32, 0), gen(1, 32, 5)], "order"),
+            (vec![gen(0, 32, 0), gen(1, 500, 0)], "order"),
+        ] {
+            let mut idx = base.clone();
+            idx.generations = table;
+            let r = Index::parse(&encode_unchecked(&idx), u64::MAX);
+            assert!(
+                matches!(r, Err(FormatError::BadGenerationTable { reason: x }) if x == reason),
+                "{reason}: {r:?}"
+            );
+        }
+    }
+
     fn encode_unchecked(idx: &Index) -> Vec<u8> {
         // Same layout as `encode`, without validation.
         let mut out = idx.chunk_table.to_vec();
@@ -843,7 +881,13 @@ mod tests {
             varint::write(&mut out, f.len).unwrap();
             varint::write(&mut out, f.sequence).unwrap();
         }
-        varint::write(&mut out, 0).unwrap();
+        varint::write(&mut out, idx.generations.len() as u64).unwrap();
+        for g in &idx.generations {
+            varint::write(&mut out, g.generation).unwrap();
+            varint::write(&mut out, g.start_offset).unwrap();
+            varint::write(&mut out, g.first_sequence).unwrap();
+            out.extend_from_slice(&g.salt);
+        }
         out
     }
 

@@ -18,6 +18,13 @@ pub enum FormatError {
         /// The offending bits.
         bits: u32,
     },
+    /// The header flags combine in a way v1 does not allow (`LISTABLE`
+    /// without `ENCRYPTED`).
+    #[error("bad header flags {bits:#x}: LISTABLE without ENCRYPTED")]
+    BadHeaderFlags {
+        /// The header's flag bits.
+        bits: u32,
+    },
     /// Reserved frame flag bits are set.
     #[error("reserved frame flag bits set: {bits:#x}")]
     ReservedFrameBits {
@@ -174,8 +181,11 @@ pub enum FormatError {
     #[error("no trailer at the end of the archive")]
     NoTrailer,
     /// The index's generation table breaks its rules (section 15).
-    #[error("bad generation table")]
-    BadGenerationTable,
+    #[error("bad generation table ({reason})")]
+    BadGenerationTable {
+        /// The rule broken.
+        reason: &'static str,
+    },
     /// A trailer field is out of range.
     #[error("bad trailer ({reason})")]
     BadTrailer {

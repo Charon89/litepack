@@ -692,9 +692,13 @@ fn previous_trailer_offset_must_point_at_a_trailer_before_the_index() {
                 ..t
             },
         );
+        // The index's generation table pins where the latest generation
+        // starts, so open refuses a forged previous offset (spec section 15).
         assert!(matches!(
-            open(&forged).history(),
-            Err(FormatError::BadFrameLocation { what: "trailer" })
+            Archive::open(Cursor::new(forged), &Resources::default()),
+            Err(FormatError::BadGenerationTable {
+                reason: "start_offset"
+            })
         ));
     }
     // Inside a frame: not a trailer.
@@ -707,7 +711,42 @@ fn previous_trailer_offset_must_point_at_a_trailer_before_the_index() {
             ..t
         },
     );
-    assert!(open(&forged).history().is_err());
+    assert!(Archive::open(Cursor::new(forged), &Resources::default()).is_err());
+}
+
+/// Spec sections 6 and 15 (E1-14d ruling 10): the trailer and generation
+/// table checks of open, each with its class and reason.
+#[test]
+fn trailer_and_generation_table_checks_at_open() {
+    let (snaps, _) = plain();
+    let t = *open(&snaps[0]).trailer();
+    let at = (snaps[0].len() as u64) - TRAILER_FRAME_LEN;
+    let try_open = |t: Trailer| {
+        let mut forged = snaps[0].clone();
+        resign(&mut forged, at, t);
+        Archive::open(Cursor::new(forged), &Resources::default())
+    };
+    assert!(matches!(
+        try_open(Trailer {
+            previous_trailer_offset: 32,
+            ..t
+        }),
+        Err(FormatError::BadTrailer {
+            reason: "previous_trailer_offset"
+        })
+    ));
+    assert!(matches!(
+        try_open(Trailer { salt: [1; 16], ..t }),
+        Err(FormatError::BadGenerationTable { reason: "salt" })
+    ));
+    assert!(matches!(
+        try_open(Trailer {
+            generation: 1,
+            previous_trailer_offset: 32,
+            ..t
+        }),
+        Err(FormatError::BadGenerationTable { reason: "count" })
+    ));
 }
 
 #[test]

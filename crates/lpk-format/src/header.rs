@@ -37,12 +37,16 @@ impl HeaderFlags {
         self.0
     }
 
-    /// Validate raw bits; reserved bits give `ReservedHeaderBits`.
+    /// Validate raw bits; reserved bits give `ReservedHeaderBits`, then
+    /// `LISTABLE` without `ENCRYPTED` gives `BadHeaderFlags`.
     pub fn from_bits(bits: u32) -> Result<Self, FormatError> {
         if bits & !Self::KNOWN != 0 {
             return Err(FormatError::ReservedHeaderBits {
                 bits: bits & !Self::KNOWN,
             });
+        }
+        if bits & Self::LISTABLE.0 != 0 && bits & Self::ENCRYPTED.0 == 0 {
+            return Err(FormatError::BadHeaderFlags { bits });
         }
         Ok(HeaderFlags(bits))
     }
@@ -203,6 +207,23 @@ mod tests {
         b[12] |= 0b100;
         let e = Header::read(&mut b.as_slice()).unwrap_err();
         assert!(matches!(e, FormatError::ReservedHeaderBits { bits: 4 }));
+    }
+
+    #[test]
+    fn listable_without_encrypted_is_bad_header_flags() {
+        let mut b = bytes(&sample());
+        b[12] = 0b10;
+        let e = Header::read(&mut b.as_slice()).unwrap_err();
+        assert!(matches!(e, FormatError::BadHeaderFlags { bits: 2 }));
+        // Reserved bits are checked first.
+        b[12] = 0b110;
+        let e = Header::read(&mut b.as_slice()).unwrap_err();
+        assert!(matches!(e, FormatError::ReservedHeaderBits { bits: 4 }));
+        // ENCRYPTED alone and no flags are fine.
+        for f in [0u8, 1, 3] {
+            b[12] = f;
+            assert!(Header::read(&mut b.as_slice()).is_ok());
+        }
     }
 
     #[test]

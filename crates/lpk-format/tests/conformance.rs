@@ -224,6 +224,48 @@ fn the_malformed_vectors_are_derived_from_zstd_basic() {
     assert!(read(HASHFLIP) == flipped);
 }
 
+/// Spec section 3 (E1-14d ruling 5): a v1 archive holds no frame that the
+/// index of some generation does not account for. Walking every vector frame
+/// by frame, each frame is the key slot, a frame listed by the index of the
+/// latest or an earlier generation (an old entry table stays in the file), or
+/// the index or trailer of some generation.
+#[test]
+fn every_frame_of_every_vector_is_accounted_for() {
+    let mut names: Vec<&str> = VECTORS.to_vec();
+    names.extend(SEALED_VECTORS);
+    names.push(JOURNAL_VECTOR);
+    names.push(RECOVERY_VECTOR);
+    for name in names {
+        let bytes = read(name);
+        let mut a = open(bytes.clone(), name, creds_of(name).as_ref());
+        let mut known: Vec<u64> = Vec::new();
+        for g in a.history().unwrap() {
+            known.extend([g.index_offset, g.trailer_offset]);
+            let end = (g.trailer_offset + 133) as usize;
+            let old = open(bytes[..end].to_vec(), name, creds_of(name).as_ref());
+            let idx = old.index();
+            known.extend(idx.blocks.iter().map(|b| b.frame_offset));
+            known.push(idx.entry_table.offset);
+            known.extend(idx.records.map(|r| r.offset));
+            known.extend(idx.recovery.iter().map(|r| r.offset));
+        }
+        if a.header()
+            .flags
+            .contains(lpk_format::HeaderFlags::ENCRYPTED)
+        {
+            known.push(32);
+        }
+        let mut r = Cursor::new(&bytes[32..]);
+        let mut at = 32u64;
+        while let Some(f) = lpk_format::Frame::read(&mut r, &Default::default()).unwrap() {
+            assert!(known.contains(&at), "{name}: unlisted frame at {at}");
+            let _ = f;
+            at = 32 + r.position();
+        }
+        assert_eq!(at, bytes.len() as u64);
+    }
+}
+
 /// CONFORMANCE "malformed-hashflip" and spec section 9 (E1-14d ruling 1):
 /// extracting a file of the damaged block fails with the block frame's
 /// `HashMismatch { kind: 2 }`, the same error as `verify`.

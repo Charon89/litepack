@@ -112,6 +112,11 @@ pub(crate) fn walk_chain<R: Read + Seek>(
         }
         out.push(Generation::of(&trailer, offset));
         if trailer.generation == 0 {
+            if trailer.previous_trailer_offset != 0 {
+                return Err(FormatError::BadTrailer {
+                    reason: "previous_trailer_offset",
+                });
+            }
             return Ok(out);
         }
         let prev = trailer.previous_trailer_offset;
@@ -131,6 +136,41 @@ pub(crate) fn walk_chain<R: Read + Seek>(
         trailer = t;
         offset = prev;
     }
+}
+
+/// The generation-table rules that need the trailer (spec section 15), in
+/// this order: `g + 1` entries for a trailer of generation `g` (`count`); the
+/// last entry's salt is the trailer's (`salt`); in a later generation the last
+/// entry starts right after the previous trailer (`start_offset`); in an
+/// archive that is not encrypted every salt is zero (`salt not zero`).
+/// The rules of the table alone are checked when the index is parsed.
+fn check_generation_table(
+    generations: &[GenerationInfo],
+    trailer: &Trailer,
+    encrypted: bool,
+) -> Result<(), FormatError> {
+    let bad = |reason| Err(FormatError::BadGenerationTable { reason });
+    let Some(last) = generations.last() else {
+        return bad("count");
+    };
+    if generations.len() as u64 != trailer.generation.saturating_add(1) {
+        return bad("count");
+    }
+    if last.salt != trailer.salt {
+        return bad("salt");
+    }
+    if trailer.generation > 0
+        && Some(last.start_offset)
+            != trailer
+                .previous_trailer_offset
+                .checked_add(TRAILER_FRAME_LEN)
+    {
+        return bad("start_offset");
+    }
+    if !encrypted && generations.iter().any(|g| g.salt != [0; 16]) {
+        return bad("salt not zero");
+    }
+    Ok(())
 }
 
 /// Counts the bytes handed out, which is the logical read position.
@@ -435,6 +475,11 @@ impl<R: Read + Seek> Archive<R> {
                 reason: "generation",
             });
         }
+        if trailer.generation == 0 && trailer.previous_trailer_offset != 0 {
+            return Err(FormatError::BadTrailer {
+                reason: "previous_trailer_offset",
+            });
+        }
         if keyless {
             let (entry_table, recovery, starts) = walk_envelopes(&mut reader, after_slot, len)?;
             // A listable archive's clear entry table must be there; a sealed one
@@ -504,7 +549,10 @@ impl<R: Read + Seek> Archive<R> {
             len: trailer.index_len,
             sequence: index_sequence(trailer.generation),
         };
-        if !at.fits_below(len - TRAILER_FRAME_LEN) {
+        // The index ends exactly where its trailer starts.
+        if !at.fits_below(len - TRAILER_FRAME_LEN)
+            || at.offset.checked_add(at.len) != Some(len - TRAILER_FRAME_LEN)
+        {
             return Err(FormatError::BadFrameLocation { what: "index" });
         }
         let raw = read_frame_at_impl(&mut reader, &limits, at, FrameKind::Index)?;
@@ -526,14 +574,7 @@ impl<R: Read + Seek> Archive<R> {
             trailer.generation,
             trailer.previous_trailer_offset,
         )?;
-        let table_ok = index.generations.len() as u64 == trailer.generation + 1
-            && index
-                .generations
-                .last()
-                .is_some_and(|g| g.generation == trailer.generation && g.salt == trailer.salt);
-        if !table_ok {
-            return Err(FormatError::BadGenerationTable);
-        }
+        check_generation_table(&index.generations, &trailer, encrypted)?;
         index
             .envelope
             .check(resources)
@@ -1367,7 +1408,17 @@ mod tests {
             open(bytes),
             Err(FormatError::BadFrameLocation { .. })
         ));
+        // An index that does not end where the trailer starts is a bad
+        // location (spec section 6), checked before the kind.
         let bytes = with_trailer(&b, |t| t.index_offset = b.chunk1_off);
+        assert!(matches!(
+            open(bytes),
+            Err(FormatError::BadFrameLocation { what: "index" })
+        ));
+        let bytes = with_trailer(&b, |t| {
+            t.index_offset = b.chunk1_off;
+            t.index_len = b.trailer_off - b.chunk1_off;
+        });
         assert!(matches!(
             open(bytes),
             Err(FormatError::WrongFrameKind {
@@ -1424,6 +1475,20 @@ mod tests {
                 what: "entry table"
             })
         ));
+    }
+
+    /// Spec section 3 (E1-14d ruling 5): MUST_UNDERSTAND on a known kind is
+    /// accepted and ignored; the trailer alone must have empty flags.
+    #[test]
+    fn must_understand_on_a_known_kind_is_ignored() {
+        let b = build();
+        let mut bytes = b.bytes.clone();
+        bytes[b.entry_off as usize + 2] |= 1;
+        let mut a = open(bytes).unwrap();
+        assert!(a.entries().is_ok());
+        let clean = open(b.bytes.clone()).unwrap().verify().map(|_| ());
+        let r = a.verify().map(|_| ());
+        assert_eq!(format!("{r:?}"), format!("{clean:?}"));
     }
 
     #[test]
