@@ -1,8 +1,9 @@
-# LitePack `.lpk` format, version 1 — working draft
+# LitePack `.lpk` format, version 1 — freeze candidate
 
-Status: this is a working draft. The format is not frozen until the independent-decoder gate (task E1-14).
-Sections are added task by task; this revision covers conventions, the header, the frame grammar, the entry table, chunks and the Merkle tree, the index and trailer, and writing and reading an archive.
-The reference reader is the `lpk-format` crate; the tables below are checked against it by a test.
+Status: freeze candidate. This revision applies the findings of two independent readings of the text and of an
+independent decoder written from it (`docs/spec/CHANGES.md` lists every change); once frozen it is format v1.
+The reference reader is the `lpk-format` crate; the tables below are checked against it by a test. Section 16 lists
+every error class. `docs/spec/CONFORMANCE.md` states what an independent decoder must do with the test vectors.
 
 ## 1. Conventions
 
@@ -13,6 +14,40 @@ The reference reader is the `lpk-format` crate; the tables below are checked aga
   present, must be exactly `0x01`; a varint that continues past ten bytes is an error.
 - Hash: BLAKE3-256 (32 bytes, default output).
 - Sizes: all lengths are in bytes.
+- Text: every string this specification quotes in backticks as a constant (context strings, associated-data
+  prefixes, `info` strings) is ASCII and is used as its bytes, with no length prefix and no terminator. Paths are
+  UTF-8 that is well-formed as RFC 3629 defines it: no surrogate code points (U+D800 to U+DFFF), no overlong
+  forms, nothing above U+10FFFF.
+- Normative terms: MUST, MUST NOT and MAY have their RFC 2119 meaning. Every rule a reader enforces names its
+  error class; the class, with its `reason` or `what` string where one is given, is normative, and the message
+  text is not. Section 16 lists every class with its fields and where it is raised. Remarks that name the
+  reference implementation's libraries, defaults or internal choices are informative.
+- Order of checks: where one input can break several rules, the section gives the order, and the first rule
+  broken in that order is the error.
+
+### What is authenticated
+
+Each check below authenticates (detects any change to) exactly what it names:
+
+- A frame's hash: its payload as stored (the sealed bytes when sealed). It is a plain hash, so it detects damage;
+  it does not stop someone who rewrites the payload and its hash together.
+- The trailer's `index_hash`: the index frame's payload as stored. The trailer is the root of a plain archive:
+  everything the index records is authenticated through it.
+- The Merkle root in the index: the chunk table's hashes; each chunk's bytes are then checked against their
+  record (length and BLAKE3-256) before they are used.
+- The index's `entry_table_hash`: the entry table's payload as stored.
+- The index's frame locations: where every block, the entry table, the records frame and every recovery frame
+  are, and their lengths. A record's `body_hash` authenticates its body; a recovery frame's `shard_hashes`
+  authenticate the covered bytes shard by shard.
+- In an encrypted archive (section 14): the header flags, through the key wrap's associated data; and every
+  sealed payload, through its AEAD tag, whose associated data binds the archive id, the kind, the sequence and
+  the sealed length.
+
+Only checked for consistency, not authenticated: the header's `version_minor`; in a plain archive the header's
+`archive_id` (compared with the trailer's) and the header flags; and the envelope (kind, flags, `payload_len`) of
+every frame in a plain archive, and of every unsealed frame in an encrypted one. A changed envelope fails a
+location, kind, length or hash check, with one exception: a MUST_UNDERSTAND bit set on a frame of a known kind is
+ignored (section 3), so it changes nothing that is read.
 
 ## 2. Header
 
@@ -30,11 +65,13 @@ The magic follows the PNG pattern: a non-ASCII lead byte, the name, CR LF to cat
 conversion, SUB to stop the DOS `type` command, and LF.
 
 A reader checks the header in this order: the length (input shorter than 32 bytes is the error
-`Truncated { what: "header" }`), the magic (a mismatch is the error `BadMagic`), the major version, and
-only then the flags, because a future major version may redefine them.
+`Truncated { what: "header" }`), the magic (a mismatch is the error `BadMagic`), the major version
+(`UnsupportedMajor` with the value found), and only then the flags, because a future major version may redefine
+them: a reserved bit set is `ReservedHeaderBits` with the reserved bits found, and then `LISTABLE` set without
+`ENCRYPTED` is `BadHeaderFlags`. `version_minor` and `archive_id` are not checked here.
 
 Version rule: a reader accepts `version_major` 1 and any `version_minor`; any other major version is
-an error.
+`UnsupportedMajor`.
 
 Header flags:
 
@@ -76,21 +113,35 @@ Frame kinds:
 | 6 | Trailer |
 | 7 | KeySlot |
 
-Kind 0 is invalid. Kinds 8 to 0x7FFF are reserved for later versions of this specification. Kinds 0x8000 to
-0xFFFF are experimental and are never written by the reference writer.
+Kind 0 is invalid (`InvalidKind`). Kinds 8 to 0x7FFF are reserved for later versions of this specification.
+Kinds 0x8000 to 0xFFFF are experimental; a v1 writer MUST NOT write them.
 
-Unknown kinds: a reader meeting a kind it does not know fails if MUST_UNDERSTAND is set. Otherwise it
-skips the frame: the payload is still read and its hash verified, and the kind, flags and payload length
-are reported to the caller.
+Reading a frame, in this order:
 
-Hash rule: a payload whose BLAKE3-256 differs from the stored hash is an error, for known and unknown
-kinds alike.
+1. Input that ends exactly at a frame boundary is a clean end. Input that ends inside the four bytes of kind and
+   flags is `Truncated` (`frame header`).
+2. A reserved flag bit set is `ReservedFrameBits` with the reserved bits found.
+3. Kind 0 is `InvalidKind`.
+4. `payload_len`: a non-canonical varint is `NonCanonicalVarint`, one that continues past ten bytes is
+   `VarintTooLong`, and input that ends inside it is `Truncated` (`frame header`).
+5. A `payload_len` above the reader's limit is `PayloadTooLarge` with the length and the limit, raised before any
+   payload byte is read or allocated. The limit is the reader's `max_frame_payload` resource (section 7); once the
+   index is read it is the smaller of that and the envelope's `max_frame_payload`.
+6. A kind the reader does not know with MUST_UNDERSTAND set is `UnknownMustUnderstand` with the kind. Without
+   the bit the frame is skipped: its payload is still read and hashed, and the kind, flags and payload length are
+   reported to the caller.
+7. Input that ends inside the payload is `Truncated` (`payload`); inside the hash, `Truncated` (`hash`).
+8. A payload whose BLAKE3-256 differs from the stored hash is `HashMismatch` with the kind, for known and unknown
+   kinds alike.
 
-Truncation: input that ends inside a frame header, a payload or a hash is an error naming that part.
-Input that ends exactly at a frame boundary is a clean end.
+MUST_UNDERSTAND on a frame of a known kind is accepted and ignored; writers do not set it. The trailer is the
+exception: its shape is fixed (section 6), so a trailer with any flag set is not a trailer.
 
-Reader limits: a reader enforces a maximum payload length (the reference default is 1 GiB for now). A
-`payload_len` above the limit is an error, raised before any payload byte is read or allocated.
+No unaccounted frames: every frame of a v1 archive is the key slot (section 14), a frame that the index of the
+latest generation or of an earlier one lists, or the index or trailer of a generation (section 15). A writer MUST
+NOT write any other frame. A reader that opens an archive through its trailer never reads such a frame; when one
+shifts a recorded frame the location checks of section 6 fail (`BadFrameLocation`), and the diagnosis walk
+(section 6) reports what it finds as it would for any frame.
 
 ## 4. Entry table
 
@@ -131,7 +182,7 @@ Entry kinds:
 | 1 | Directory |
 | 2 | Symlink |
 
-Entry flags:
+Entry flags (a reserved bit set is `ReservedEntryBits` with the bits and the entry index):
 
 | Bit | Name | Meaning |
 |---|---|---|
@@ -143,8 +194,12 @@ Entry flags:
 
 Path rules: a path is UTF-8 with `/` as the separator, 1 to 65535 bytes long. It has no leading or
 trailing `/`, no empty component, no component equal to `.` or `..`, and contains no `\` and no NUL byte.
-A violation is `InvalidPath` with the entry index and one of these reasons: "empty", "not utf-8",
-"leading slash", "backslash", "nul", "dot component", "empty component", "trailing slash", "too long".
+A violation is `InvalidPath` with the entry index and a reason, checked in this order: a `path_len` of 0
+("empty"); a `path_len` above 65535 ("too long"); then, once the path bytes are read (a payload that ends inside
+them is `Truncated`), bytes that are not well-formed UTF-8 ("not utf-8"); a leading `/` ("leading slash"); a `\`
+anywhere ("backslash"); a NUL byte anywhere ("nul"); a trailing `/` ("trailing slash"); and then, component by
+component from the left, an empty component ("empty component") or a component `.` or `..` ("dot component").
+So `/a\b` is "leading slash" and `a//..` is "empty component".
 A bad symlink target (empty, longer than 65535 bytes, containing NUL, or `target_len` different from
 `size`) is `InvalidPath` with the reason "symlink target". Paths are compared as bytes and are not
 normalised; a reader does not alter case or Unicode form.
@@ -158,16 +213,20 @@ Errors: the payload ending inside the table is `Truncated` for "entry table"; by
 entry are `TrailingBytes` for "entry table". Counts and lengths are checked against the bytes that remain
 before anything is allocated. The smallest possible entry is 14 bytes (a directory with a one-byte path:
 1 + 2 + 1 + 1 + 8 + 1), so an `entry_count` larger than the bytes after it divided by 14 (rounded down)
-is `Truncated` for "entry table", raised when the count is read.
+is `Truncated` for "entry table", raised when the count is read. Likewise a file's `chunk_count` larger than the
+bytes that remain in the payload after it (every index takes at least one byte) is `Truncated` for "entry
+table", raised when the count is read.
 
 Check order: a reader checks each entry in field order, so when several rules are broken the first of
-these wins: kind, flags, path (length, then truncation, UTF-8, path rules), sort order, mtime, size
+these wins: kind, flags, path (length, then truncation, UTF-8, the path rules in the order above), sort order,
+mtime, size
 (and for a directory its size), then the symlink target or the chunk list. Entries are checked in order,
 and after the last one the trailing-bytes check applies.
 
 Names: paths are opaque to the table. They may contain `:` and names that Windows reserves (`CON`, a
-component ending in a dot or a space). An extractor must map such names and must never let a component
-replace or escape the target directory; that rule belongs to the extraction task, not to this format.
+component ending in a dot or a space). An extractor must map or refuse such names and must never let a component
+replace or escape the target directory; that rule belongs to the extractor (section 9 states the reference
+tool's), not to this format.
 
 Reading: a reader first reads only `entry_count` (and applies the bound above); entries are then decoded one after another as a
 stream, so a table of any size can be walked without holding all entries in memory.
@@ -176,7 +235,7 @@ stream, so a table of any size can be walked without holding all entries in memo
 
 The archive's content is a list of chunks, numbered from 0 in table order. An entry's `chunks` field (section 4)
 holds indices into this list. The chunk table has one record per chunk and is embedded by the index frame
-(task E1-4); this section defines its encoding, the Merkle tree over it, and how files and byte ranges are
+(section 6); this section defines its encoding, the Merkle tree over it, and how files and byte ranges are
 verified against it. Where the chunk data itself is stored is defined with the chunk frames.
 
 The chunk table is a varint `chunk_count` followed by `chunk_count` records. One record:
@@ -288,8 +347,8 @@ The chunk table is not length-prefixed: a reader walks its declared records (und
 section 5) and continues after the last one. The six envelope varints follow the Merkle root; an input
 that ends inside them is `Truncated` (`what` is `index`). The prior list (section 10) follows the envelope and
 precedes `block_count`. The six block fields repeat `block_count` times; `sequence` is the sixth. The entry table's location (offset, length, sequence) is followed by `entry_table_hash`, 32 raw bytes; a reader that has the index compares it with the BLAKE3-256 of the entry table's payload as stored (the sealed bytes when the table is sealed) and fails with `EntryTableMismatch` when they differ.
-Every `sequence` is the position of the frame among the archive's frames, counted from 0 for the first frame after the header (section 14); plain archives write them too. "No records frame" is `records_offset`, `records_len` and `records_sequence` all 0. The reader does not otherwise check a sequence: a wrong one makes the frame fail its tag when it is opened (section 14), and in a plain archive it is not used. Bytes after
-the last recovery location are `TrailingBytes` (`what` is `index`); an input that ends early is `Truncated`
+Every `sequence` is the position of the frame among the archive's frames, counted from 0 for the first frame after the header (section 14); plain archives write them too. "No records frame" is `records_offset`, `records_len` and `records_sequence` all 0. Positions count every frame, including the key slot and the indexes and trailers of earlier generations (sections 14 and 15). The reader does not otherwise check a sequence: a wrong one makes the frame fail its tag when it is opened (section 14), and in a plain archive it is not used. Bytes after
+the generation table are `TrailingBytes` (`what` is `index`); an input that ends early is `Truncated`
 (`what` is `index`, or `chunk table` inside the table). A `block_count` larger than the bytes left divided by 6
 is `Truncated` and nothing is allocated for it; a `recovery_count` larger than the bytes left divided by 3 is
 `Truncated` likewise. Each recovery location follows the same location rule as the records frame and overlaps no
@@ -317,6 +376,33 @@ archive is `BlockCoverage`. The stored `merkle_root` must equal the root recompu
 table's hashes, otherwise `MerkleRootMismatch`. A chunk's place is its block and the sum of the `plain_len`
 of the chunks before it in that block.
 
+The generation table (section 15) is checked entry by entry as it is read, each a `BadGenerationTable` with the
+`reason` in brackets: the entry's `generation` equals its position [`generation`]; the first entry's
+`start_offset` is 32 [`first start_offset`] and its `first_sequence` is 0 [`first first_sequence`]; each later
+entry's `start_offset` and `first_sequence` are greater than the previous entry's [`order`]. The rules that need
+the trailer are checked when the archive is opened (below).
+
+Parse order. A reader parses the index payload and applies the rules in this order; the first failure is the error:
+
+1. The chunk table (section 5): its count bound, its records, `Truncated` (`chunk table`).
+2. `merkle_root`, the six envelope varints (`threads_hint` above 4294967295 is `EnvelopeMismatch` here), the prior
+   list (its count bound, then `BadPriorList` entry by entry), `block_count` (its bound) and the block fields, the
+   entry table's location and hash, the records location, `recovery_count` (its bound) and the recovery locations,
+   `generation_count` (at most the bytes left divided by 19, otherwise `Truncated`) and the generation entries
+   with their rules above; any input that ends early is `Truncated` (`index`).
+3. Bytes left after the generation table: `TrailingBytes` (`index`).
+4. The block rules, block by block: the location (`BlockOutOfRange`), the frame order and the single empty block
+   (`BlockCoverage`), the chunk range (`BlockCoverage`), and at the end blocks that stop short (`BlockCoverage`
+   with the number of blocks).
+5. The entry table's location, then the records location (`BadFrameLocation`).
+6. The entry table and the records frame against the blocks and each other (`BadFrameLocation`).
+7. Each recovery location (`BadFrameLocation`, `recovery`), then their overlaps with the blocks, the entry table,
+   the records frame and each other, then their ascending order and where the last one ends (all
+   `BadFrameLocation`, `recovery`).
+8. One pass over the chunk records against the blocks (`BlockLengthMismatch`, `BlockCoverage`), then the Merkle
+   root (`MerkleRootMismatch`).
+9. The envelope rules of section 7, in the order given there.
+
 ### The trailer frame (kind 6)
 
 The trailer is written with empty frame flags and has a fixed 96-byte payload:
@@ -331,35 +417,62 @@ The trailer is written with empty frame flags and has a fixed 96-byte payload:
 | 72 | 8 | previous_trailer_offset | absolute offset of the previous generation's trailer frame; 0 for generation 0 (u64) |
 | 80 | 16 | salt | random per-generation salt for the sealed frames' nonces; zeros when not encrypted |
 
+`index_hash` covers the index payload as stored: the sealed bytes when the index is sealed, as for
+`entry_table_hash`.
+
 The whole trailer frame is `kind` (2) + `flags` (2) + `payload_len` varint (1 byte, the value 96) + payload
 (96) + hash (32) = 133 bytes, and it is the last thing in the archive. The index must lie at or after the
-end of the header and end no later than the start of the trailer, otherwise `BadFrameLocation` (`index`).
+end of the header and end exactly where the trailer starts (no gap), otherwise `BadFrameLocation` (`index`). A
+trailer of generation 0 whose `previous_trailer_offset` is not 0 is `BadTrailer` (`reason`
+`previous_trailer_offset`).
 An archive that has been appended to (section 15) holds the trailers of its earlier generations as ordinary frames
 inside the body; `previous_trailer_offset` chains them, and the reader opens the last one.
 
 ### Opening an archive
 
-Every read of a recorded frame is bounded by the recorded length: nothing past `offset + len` is read, and a
-frame that is cut by that bound, or whose own encoded size differs from the recorded length, is
-`BadFrameLocation` naming the frame (`index`, `entry table` or `records`). The kind is checked first.
+Reading a recorded frame. Every read of a frame at a location the index (or the trailer) records is bounded
+by the recorded length: nothing past `offset + len` is read. In this order: a recorded length too short to hold
+the kind is `BadFrameLocation`; the kind must be the expected one (`WrongFrameKind` with the expected and the
+found kind); then the frame is read as in section 3 under the bound. A frame that the bound cuts (its envelope
+claims more than the recorded length) is `BadFrameLocation`, and its hash is never reached; a frame that ends
+before the bound is read and hashed first (`HashMismatch`), and then its encoded size, which differs from the
+recorded length, is `BadFrameLocation`. `BadFrameLocation` names the frame: `index`, `entry table`, `records`,
+or, for a block or a recovery frame read this way, the kind's name `ChunkData` or `Recovery`. In an encrypted
+archive the sealing rules and the tag (section 14) are checked after the frame is read.
+
+Opening an archive is one procedure, in this order:
 
 1. If the input is shorter than the header plus the trailer frame (165 bytes), go to the diagnosis below.
-2. Read the 32-byte header (errors of section 2 apply).
-3. Read the last 133 bytes. They must be a frame of kind 6, empty flags, payload length 96, with a valid hash;
-   if they are not, go to the diagnosis below. A trailer whose `archive_id` differs from the header's is
-   `ArchiveIdMismatch`. A trailer whose `generation` exceeds the file length divided by 133 cannot be true (each
-   generation holds at least a trailer frame) and is `BadTrailer` (`reason` `generation`).
-4. Read the frame at `index_offset`. Its kind must be 5 (otherwise `WrongFrameKind` with the expected and the
-   found kind), its hash must verify (otherwise `HashMismatch`), its encoded length must equal `index_len`
-   (otherwise `BadFrameLocation`), and the BLAKE3 of its payload must equal the trailer's `index_hash`
-   (otherwise `IndexHashMismatch`).
-5. Parse the index under the rules above (including the envelope's consistency rules of section 7). The reader walks the chunk table once to find where it ends, then
+2. Read the 32-byte header (section 2).
+3. Encrypted archive (header flag `ENCRYPTED`): read and parse the key slot that must follow the header
+   (section 14, its own order of checks). With credentials: a key slot whose Argon2 memory exceeds the reader's
+   `memory` resource is `Refused` (field `argon2_m`), then the key is unwrapped (`WrongKey`). Without
+   credentials the archive opens keyless (section 14). Plain archive: a frame of kind 7 right after the header is
+   `UnexpectedKeySlot`. The key slot is read before the trailer.
+4. Read the last 133 bytes. They must be a frame of kind 6, empty flags, payload length 96, with a valid hash;
+   if they are not (or they cannot be read), go to the diagnosis below. A trailer whose `archive_id` differs from
+   the header's is `ArchiveIdMismatch`. A trailer whose `generation` exceeds the file length divided by 133 cannot
+   be true (each generation holds at least a trailer frame) and is `BadTrailer` (`reason` `generation`). A
+   generation-0 trailer with a non-zero `previous_trailer_offset` is `BadTrailer` (`previous_trailer_offset`).
+5. A keyless archive stops here and walks the frame envelopes instead (section 14).
+6. The index location: it must start at or after offset 32 and end exactly where the trailer starts, otherwise
+   `BadFrameLocation` (`index`). Read the frame there as a recorded frame of kind 5 (above), under the reader's
+   `max_frame_payload`.
+7. The BLAKE3 of its payload as stored must equal the trailer's `index_hash` (`IndexHashMismatch`).
+8. Encrypted archive: the index must be sealed (`UnsealedFrame`) and is opened with the trailer's salt and the
+   sequence 2^64 - 1 - `generation` (`AuthenticationFailed`).
+9. Parse the index (parse order above). The reader walks the chunk table once to find where it ends, then
    makes one pass over its records that checks the block lengths, gathers the hashes for the Merkle root and
-   builds the chunk index (record offsets and cumulative plain offsets).
-6. Compare the envelope with the reader's resources (section 7); an archive that needs more is refused before
-   any block is read.
-7. The entry table is read only when asked: the frame at the recorded location must be of kind 1 and have
-   the recorded length, and its hash must verify.
+   builds the chunk index.
+10. The generation table against the trailer, each a `BadGenerationTable`: it has `generation + 1` entries
+    [`count`]; the last entry's salt is the trailer's [`salt`]; in a generation above 0 the last entry's
+    `start_offset` is `previous_trailer_offset + 133` [`start_offset`]; in an archive that is not encrypted every
+    salt is zero [`salt not zero`].
+11. Compare the envelope with the reader's resources (section 7); an archive that needs more is `Refused`
+    before any block is read. From here the frame limit is the smaller of the envelope's and the reader's
+    `max_frame_payload`.
+12. The entry table is read only when asked, as a recorded frame of kind 1; then its payload as stored must hash
+    to `entry_table_hash` (`EntryTableMismatch`).
 
 ### Truncated versus corrupt
 
@@ -369,8 +482,10 @@ ends exactly at a frame boundary, or inside a frame, without a trailer frame hav
 cut short: `Truncated` with `what` set to `trailer`. If a frame fails its hash, the error is that frame's
 `HashMismatch` (or whatever error the frame grammar gives). A trailer frame does not end the walk when bytes follow it: they are the next
 generation (section 15), and the walk goes on, so an append that was cut short ends in `Truncated` with `what` `trailer`
-like any other cut. Only when the first thing after a trailer is not a readable frame at all (it is not cut short but
-broken) is the error `TrailingBytes` with `what` set to `archive`. The walk also reports how many frames verified and
+like any other cut. Only when the first frame after a trailer fails to read for any reason other than being cut short
+(a reserved flag bit, kind 0, a bad varint, a payload above the limit, an unknown kind with MUST_UNDERSTAND, or a hash
+that does not verify) is the error `TrailingBytes` with `what` set to `archive`; the sealing rules of section 14, which
+the walk also applies to every frame it reads, keep their own errors there. The walk also reports how many frames verified and
 the offset just after the last good frame, so a repair tool knows where the readable part ends. Two edge
 cases: if the walk ends on a trailer frame that is not of the fixed shape (flags not empty, or a payload that is
 not 96 bytes) with nothing after it, the error is `NoTrailer`; and a header that is shorter than 32 bytes or
@@ -378,8 +493,9 @@ invalid ends the walk at once with the header's own error (section 2), not `Trun
 
 Errors of this section: `MerkleRootMismatch`, `IndexHashMismatch`, `ArchiveIdMismatch`,
 `BlockLengthMismatch`, `BlockCoverage`, `BlockOutOfRange`, `BadFrameLocation`, `WrongFrameKind`,
-`EnvelopeMismatch`, `Refused`, `BadPriorList`, `NoTrailer` (the last frame is not a trailer of the fixed shape), plus `Truncated` and `TrailingBytes` with the
-`what` strings `index`, `trailer` and `archive`.
+`EnvelopeMismatch`, `Refused`, `BadPriorList`, `BadTrailer`, `BadGenerationTable`, `EntryTableMismatch`,
+`UnexpectedKeySlot`, `NoTrailer` (the last frame is not a trailer of the fixed shape), plus `Truncated` and
+`TrailingBytes` with the `what` strings `index`, `chunk table`, `trailer` and `archive`.
 
 ## 7. Decode envelope
 
@@ -399,8 +515,8 @@ allows more. The envelope is six varints placed right after `merkle_root` and be
 
 `max_window` is the largest match-finder window (dictionary) any block needs; `max_bwt_block` is the largest
 Burrows-Wheeler block any block needs (0 when none is used); both are in bytes. `max_block_plain` is the
-largest `plain_len` of any block. `max_frame_payload` is the largest frame payload in the archive: it covers the index, every block, the entry
-table and the records frame. `decode_memory`
+largest `plain_len` of any block. `max_frame_payload` is the largest frame payload in the archive: it covers every recorded frame (below).
+`decode_memory`
 is the writer's estimate of the peak memory of one decoding thread, in bytes, and `threads_hint` is the number
 of independent blocks a reader may decode at once without exceeding `decode_memory` times `threads_hint`
 (0 = no hint; a value above 4294967295 is `EnvelopeMismatch` with `field` `threads_hint`).
@@ -412,8 +528,9 @@ after `MerkleRootMismatch` of section 6, in the order below:
 - `max_block_plain` must equal the maximum `plain_len` over the block table (0 when there are no blocks),
   otherwise `EnvelopeMismatch` with `field` `max_block_plain`.
 - `max_frame_payload` is `M` below. The length of the index payload must be at most `M`, and every recorded
-  frame length `L` (each block's `frame_len`, the entry table's and, when present, the records frame's) must
-  satisfy `L <= M + 36 + varint_len(M)`, where `varint_len(M)` is the encoded length of `M` as a varint (36
+  frame length `L` must satisfy the bound below. The recorded frames are, in the order they are checked: every
+  block's `frame_len`, the entry table's, the records frame's when there is one, and every recovery frame's. The
+  bound is `L <= M + 36 + varint_len(M)`, where `varint_len(M)` is the encoded length of `M` as a varint (36
   bytes are the kind, flags and hash); otherwise `EnvelopeMismatch` with `field` `max_frame_payload`. The right
   side grows with `M`, so a larger `M` than needed is allowed. A recorded length that is the length of no
   frame, such as 165 (payloads 127 and 128 give 164 and 166) or 16422, is admitted by the first `M` whose bound
@@ -424,8 +541,9 @@ after `MerkleRootMismatch` of section 6, in the order below:
   reader's limit applies while the index is read.
 
 The format itself does not limit any value of the envelope; the limits are the reader's. The reader's resources
-are `max_window`, `max_bwt_block`, `max_block_plain`, `max_frame_payload` and `memory`, all in bytes, with these
-defaults:
+are `max_window`, `max_bwt_block`, `max_block_plain`, `max_frame_payload` and `memory`, all in bytes. The `memory`
+resource also bounds the Argon2 memory of a key slot (section 14) and the decoder buffer of a recovery group
+(section 13). The reference reader's defaults (informative):
 
 | Resource | Default (bytes) | Bounds the envelope field |
 |---|---|---|
@@ -484,7 +602,12 @@ data. The registry gives each primitive a 16-bit ID, a name, a parameter layout 
 what earlier drafts put in the parameters of `base64` and `utf16` (section 12). Violating a layout's rules, such
 as a `window_log` of 9 or 32, an `lc` of 9, a `patch_format` of 2, or a `record_id` that is empty, not a
 canonical varint or followed by other bytes (reason `record_id`), is `BadParams` carrying the ID and a short
-reason.
+reason. A `params` whose length differs from the layout's is `BadParams` with the reason `length`.
+
+Primitives 3 to 12. This revision gives `bwt`, `bcj-x86`, `bcj-arm64`, `delta` and the six reconstruction
+primitives an ID, a parameter layout and their resources, but no decoding. A v1 writer MUST NOT emit them, and a v1
+reader MUST report `UnimplementedPrimitive` with the ID for a graph that names one, before it runs any step (it
+still validates their parameters as above). Their decoding is specified by later revisions.
 
 ### The decode graph
 
@@ -505,8 +628,10 @@ Order of application. Steps are applied in the order written, to decode: the enc
 step's decoder, its output into the second step's, and the last output is the block's plain bytes. A writer that
 compressed with `bcj-x86` and then with `lzma` therefore writes the graph `[lzma, bcj-x86]`.
 
-Bounds. Every intermediate output is bounded by the reader's `max_block_plain`; a larger one is
-`PayloadTooLarge`. The last step must produce exactly `plain_len` bytes; any other length, including a decoder
+Bounds. Every intermediate output is bounded by the archive's envelope `max_block_plain` (section 7), which the
+reader has already compared with its own resource; a larger one is `PayloadTooLarge`. So whether a block decodes
+never depends on the reader's resources beyond the checks that refuse the archive. The last step must produce
+exactly `plain_len` bytes; any other length, including a decoder
 that would produce more, is `BlockLengthMismatch`. A block whose `plain_len` exceeds `max_block_plain` is
 `PayloadTooLarge`, raised before any decoding. Before the first step runs, a reader checks the whole graph:
 the step count, every step's parameters, and that every primitive is one it can run (otherwise
@@ -532,10 +657,29 @@ A block with the graph `[store]` has `encoded_len == plain_len` and its encoded 
 `encoded_len` that differs from the bytes present, a `plain_len` that differs from the block table's, or a last
 step whose output length differs from `plain_len` is `BlockLengthMismatch`.
 
+Order of checks for a block, from its frame to its first step:
+
+1. The block's frame is read at its recorded location as a frame of kind 2 (section 6; in an encrypted archive
+   the sealing rules and the tag, section 14).
+2. The graph is parsed: `step_count` (`BadGraph`, `step count`), then per step the primitive ID
+   (`UnknownPrimitive`), the step flags (`BadGraph`, `step flags`), `params_len` (`BadGraph`, `params length`),
+   the params bytes and their layout (`BadParams`); input that ends inside the graph is `Truncated` (`graph`).
+3. When the graph names a reconstruction primitive, the archive's record count is read (the `Records` frame, with
+   its own errors, section 12) and every `record_id` must be below it (`RecordOutOfRange`).
+4. `plain_len` and `encoded_len` (`Truncated`, `block header`); `encoded_len` must equal the bytes that follow
+   (`BlockLengthMismatch`).
+5. The graph's resources against the envelope: a window above `max_window`, then a BWT block above
+   `max_bwt_block` (`EnvelopeMismatch` with that field).
+6. Every prior the graph names must be in the index's prior list (`UnlistedPrior`).
+7. `plain_len` must equal the block table's (`BlockLengthMismatch`) and be at most the envelope's
+   `max_block_plain` (`PayloadTooLarge`).
+8. Every primitive of the graph must be one the reader runs (`UnimplementedPrimitive`), and only then does the
+   first step run; each step then applies its own rules (below).
+
 ### What the reference decoder runs
 
 The reference decoder knows the name, the parameter layout and the validation of all 13 primitives. Each ID is
-in exactly one of two groups:
+in exactly one of two groups (informative; the normative rule for 3 to 12 is above):
 
 - Implemented now: `store`, `zstd`, `lzma`.
 - Requires the full reader: `bwt`, `bcj-x86`, `bcj-arm64`, `delta`, `jpeg-reconstruct`,
@@ -544,24 +688,37 @@ in exactly one of two groups:
 For a primitive without a decoder the reference decoder reports `UnimplementedPrimitive` with the ID, before it
 runs any step of the graph.
 
+### Normative decoders
+
+The decoding of a `zstd` step is that of RFC 8878 (Zstandard frames), and the decoding of an `lzma` step is that of
+the LZMA SDK's `lzma-specification.txt` (LZMA1, its reference decoder `LzmaSpec`), including how much input each
+consumes. For an `lzma` step, the end of the stream is the input position of that decoder after the end-of-payload
+marker, or, for a stream without the marker (allowed only in the last step of a graph), its input position when the
+output bound is reached; "trailing input" is any byte after that position. For a `zstd` step the input is a sequence
+of whole frames and nothing else.
+
 ### What the reference decoder enforces for `zstd`
 
-The reference decoder decodes a `zstd` step's input as one zstd frame or a sequence of frames (skippable
-frames are skipped) into at most the step's output bound, in steps of about 64 KiB, with a pure-Rust decoder. It
-applies these rules, in this order:
+A decoder decodes a `zstd` step's input as one zstd frame or a sequence of frames (skippable frames are skipped)
+into at most the step's output bound. It applies these rules, in this order:
 
 1. The `window_log` must be 10..=31 (`BadParams`, `window_log`).
 2. The window the step declares, 2^`window_log` bytes, must not exceed the reader's `max_window`; otherwise
    `WindowTooLarge` with the window needed and the window allowed. This is raised before the input is read.
 3. When `dictionary` is not all zeros the reader's store of priors (section 10) must hold a prior of that ID,
    and the bytes it returns must hash to the ID; otherwise `MissingPrior`, raised before the input is read.
-   The prior must be a zstd dictionary (the format that begins with the magic number 0xEC30A437); other
-   bytes are a `ZstdError`.
-4. The window a frame declares in its header must not exceed 2^`window_log` (`BadParams`, `frame window exceeds
+   The prior must be a zstd dictionary as RFC 8878 section 5 defines it (it begins with the magic number
+   0xEC30A437, stored little-endian as the bytes `37 A4 30 EC`); other bytes are a `ZstdError`.
+4. Input of zero bytes with a non-zero output bound is `ZstdError` with the reason `truncated`.
+5. Each frame's `Window_Size`, as RFC 8878 defines it (for a single-segment frame, its `Frame_Content_Size`), must
+   not exceed 2^`window_log` (`BadParams`, `frame window exceeds
    declared`); the decoder allocates nothing for a window before this check.
-5. Output past the step's bound is `PayloadTooLarge` (`BlockLengthMismatch` on the last step, as above); a
-   frame that is cut short, damaged, names a dictionary other than the prior, or whose content checksum (when
-   it has one) does not match the output is `ZstdError` carrying the decoder's own text.
+6. Dictionaries: when the step names a prior, every frame is decoded with that prior, whether its header carries
+   no `Dictionary_ID` or the prior's; a frame whose `Dictionary_ID` is another one is `ZstdError`. When the step's
+   `dictionary` is all zeros, a frame that carries a `Dictionary_ID` is `ZstdError`.
+7. Output past the step's bound is `PayloadTooLarge` (`BlockLengthMismatch` on the last step, as above); a
+   frame that is cut short or damaged, or whose content checksum (when it has one) does not match the output,
+   is `ZstdError`; the `reason` is the decoder's own text and is not normative.
 
 Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`, `BadParams`,
 `BlockLengthMismatch`, `PayloadTooLarge`, `WindowTooLarge`, `ZstdError`, `LzmaError`, and `Truncated` with the
@@ -570,32 +727,36 @@ Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`
 ### What the reference decoder enforces for `lzma`
 
 The encoded bytes of an `lzma` step are a raw LZMA1 stream: no `.lzma` or `.xz` header (the properties are
-the step's parameters, the output length is the step's output bound), decoded with a pure-Rust decoder. The
-decoder stops when it has produced exactly the step's output bound. `lzma` parameters carry no prior ID: v1
+the step's parameters, the output length is the step's output bound). In the last step of a graph the output
+bound is the block's `plain_len` and the decoder stops when it has produced exactly that many bytes. A step that
+is not the last has only a bound (the envelope's `max_block_plain`), so its stream MUST end with the
+end-of-payload marker: a stream without it that reaches the bound is `LzmaError` with the reason
+`marker required`, and one that ends early without it is `LzmaError` with `truncated`. `lzma` parameters carry no prior ID: v1
 has no priors for LZMA (section 10 is about `zstd` only). The rules, in this order:
 
-1. `lc` <= 8, `lp` <= 4, `pb` <= 4 and `lc + lp` <= 4 (`BadParams`, `lc`, `lp`, `pb` or `lc + lp`). The
-   last limit is liblzma's `LZMA_LCLP_MAX` and bounds the table of literal probabilities (3 * 2^(`lc` + `lp`)
-   entries of 0x100 each in the reader); the LZMA SDK would accept up to 12. Under it `lc` 5 to 8 can
-   never be used, although the parameter layout allows them.
+1. `lc` <= 8, `lp` <= 4, `pb` <= 4 and `lc + lp` <= 4 (`BadParams`, `lc`, `lp`, `pb` or `lc + lp`), in that
+   order. The last limit bounds the table of literal probabilities (0x300 * 2^(`lc` + `lp`) entries); under it
+   `lc` 5 to 8 can never be used, although the parameter layout allows them. (Informative: it is liblzma's
+   `LZMA_LCLP_MAX`; the LZMA SDK would accept up to 12.)
 2. `dict_size` must not exceed the reader's `max_window`; otherwise `WindowTooLarge` with the size needed and
    the size allowed, raised before the input is read.
 3. A match distance greater than `dict_size`, or greater than the number of bytes produced so far, is
-   `LzmaError` carrying the decoder's text. Whether a stream decodes never depends on the reader's
-   `max_window` beyond rule 2: the reference decoder allocates a buffer of the smaller of `dict_size` and
+   `LzmaError`. Whether a stream decodes never depends on the reader's
+   `max_window` beyond rule 2: a decoder needs a buffer of the smaller of `dict_size` and
    the output bound (at least 1 byte), which is exactly the reach a valid stream can use.
 4. The first byte of the range coder stream must be 0, else `LzmaError` with reason `range coder`. The
    range coder's end condition (its code value being 0 after the last symbol) is checked only when the
    end-of-payload marker is present; a stream that ends at the output bound without a marker is not checked
    for it, and a decoder must not refuse a marker-less stream because its final code value is not 0.
-5. The stream may end with the end-of-payload marker or without one: the encoder liblzma used for the test
-   vectors always writes it, other writers (such as `.lzma` files of known size) do not, and a decoder that has
-   produced the output bound accepts either. Any input after the stream (after the marker, when there is one)
+5. In the last step the stream may end with the end-of-payload marker or without one (the test vectors carry
+   it; `.lzma` files of known size do not), and a decoder that has produced the output bound accepts either. Any input after the stream (after the marker, when there is one)
    is `LzmaError` with reason `trailing input`; so is a stream whose symbols continue past the output bound
    when the bound falls between two symbols. Input that ends before the output bound is reached, or a
    marker before it, is `LzmaError` with reason `truncated`.
 6. A match that crosses the output bound is `PayloadTooLarge` (`BlockLengthMismatch` on the last step); the
-   decoder never writes past the bound. Any other damage is `LzmaError` carrying the decoder's own text.
+   decoder never writes past the bound. Any other damage is `LzmaError`; its `reason` is the decoder's own text
+   and is not normative, except the reasons `range coder`, `trailing input`, `truncated` and `marker required`
+   named above.
 
 ## 9. Writing and reading an archive
 
@@ -605,6 +766,7 @@ An archive can be written without seeking and without reading back what was writ
 records is a count of the bytes already written. The frames follow in this order:
 
 1. the header (section 2);
+   in an encrypted archive, the `KeySlot` frame (kind 7) right after it (section 14);
 2. zero or more `ChunkData` frames (kind 2), each holding one block;
 3. the `EntryTable` frame (kind 1);
 4. optionally the `Records` frame;
@@ -614,13 +776,14 @@ records is a count of the bytes already written. The frames follow in this order
    root over its hashes, and the decode envelope (section 7);
 6. the `Trailer` frame (kind 6), which locates the index.
 
-The frames of a stream-written archive have no flags set and the header flags are zero. An archive without file
-content has no blocks and an empty chunk table.
+In a plain archive the header flags are zero and no frame has a flag set; an encrypted archive sets the header
+flags and the `SEALED` frame flag as section 14 says, and nothing else. An archive without file content has no blocks
+and an empty chunk table.
 
 The index payload states its own length through `max_frame_payload`, whose varint width depends on the value.
 A writer settles this by computing the index again with the length it just produced until the declared
-`max_frame_payload` equals the larger of the longest other frame's smallest admissible payload and the index
-payload length.
+`max_frame_payload` equals the larger of the index payload length and, over every other recorded frame of length
+`L`, the smallest `M` with `L <= M + 36 + varint_len(M)` (section 7).
 
 ### Chunks and blocks
 
@@ -660,13 +823,16 @@ resources need a window above `max_window` or a BWT block above `max_bwt_block` 
 field, raised when the block header is parsed. It keeps the plain bytes of the block it read last, so chunks
 read in order decode each block once.
 Every chunk is compared with its record in the chunk table (length and BLAKE3) before its bytes are used; a
-mismatch is `ChunkMismatch` with the chunk's number. A block whose frame hash fails cannot vouch for any chunk it
-holds, so when a file is extracted, reading a chunk of that block is reported as a `ChunkMismatch` of that
-chunk.
+mismatch is `ChunkMismatch` with the chunk's number. A block whose frame hash fails is that frame's `HashMismatch`
+(kind 2), whether a file of the block is extracted or the archive is verified: the error names the damaged frame,
+not a chunk. `ChunkMismatch` is reported only when the block's frame is intact and decodes, and a chunk cut from it
+differs from its record.
 
-Whole-archive verification decodes every block and compares every chunk with its record, so a chunk no entry
-uses is checked too; a block whose frame hash fails is reported as that frame's `HashMismatch`. It then checks
-every file entry's chunk list and total size against the chunk table, which needs no block reads.
+Whole-archive verification first walks the `Records` frame when the index lists one (section 12), then decodes
+every block and compares every chunk with its record, so a chunk no entry uses is checked too; a block whose frame
+hash fails is that frame's `HashMismatch`. It then checks every file entry's chunk list and total size against the
+chunk table, which needs no block reads. Verification with the key does not read the recovery frames; `check`
+(section 13) does. Verification without the key is described in section 14.
 
 Only the block read last is kept, so a chunk list that alternates between chunks of two blocks makes every
 reference read and decode a whole block; a reader of untrusted archives needs a decode budget.
@@ -679,24 +845,29 @@ anything:
 - a symlink entry is refused (`SymlinkRefused`); what an extractor does with links is a policy outside this
   format;
 - a path component that is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `COM` followed
-  by a superscript 1, 2 or 3, `LPT1` to `LPT9`, `LPT` followed by a superscript 1, 2 or 3, `CONIN$`, `CONOUT$`),
+  by a superscript 1, 2 or 3 (U+00B9, U+00B2, U+00B3), `LPT1` to `LPT9`, `LPT` followed by one of the same
+  superscripts, `CONIN$`, `CONOUT$`),
   compared in any letter case on the part before the first dot with its trailing spaces removed, so that
   `con .txt` is refused as well as `CON.txt`; a component that contains `:`; or one that ends in a dot or a space
-  is refused (`UnsafePath`).
+  is refused (`UnsafePath`);
+- an entry one of whose parent paths is an entry that is not a directory, such as a file `a` beside `a/b`, is
+  refused (`UnsafePath`, reason `conflicting name`).
 
-The tool does not overwrite an existing file and reuses existing directories. Each file is created with
+A file whose parent directories have no entry of their own is extracted, its missing parents created. The tool
+does not overwrite an existing file and reuses existing directories. Each file is created with
 "create new" semantics at its final path; a file the tool created and could not finish is removed, and a file
 that was already there is left untouched. Paths in the tool's listing have control characters escaped.
 
-Errors of this section: `UnsortedEntries`, `InvalidPath`, `BadChunk`, `ChunkMismatch`, `FileSizeMismatch`,
-`ChunkIndexOutOfRange`, `SymlinkRefused`, `UnsafePath`.
+Errors of this section: `UnsortedEntries`, `InvalidPath`, `ChunkMismatch`, `HashMismatch`, `FileSizeMismatch`,
+`ChunkIndexOutOfRange`, `SymlinkRefused`, `UnsafePath`; and for writers `BadChunk` (a chunker that breaks the
+cutting rules) and `BadOptions`.
 
 The tool takes `--prior <file>` (repeatable) for the priors an archive needs (section 10); `info` lists the
 IDs the index names.
 
 ## 10. Priors
 
-A prior is a byte string a decoder needs besides the archive, for example a zstd dictionary (D-10). Its ID is
+A prior is a byte string a decoder needs besides the archive, for example a zstd dictionary. Its ID is
 the BLAKE3-256 of its bytes. A step names a prior by ID in its parameters (for `zstd`, the `dictionary` field of
 section 8; all zeros means none). The archive never contains the prior and the reader never fetches it: the
 caller gives the reader a store that maps an ID to bytes, and the reader looks nothing up anywhere else (no
@@ -717,7 +888,8 @@ which priors are needed before it decodes anything.
 Errors of this section. `MissingPrior` with the ID: a block's graph names a prior the caller's store does not
 hold, or holds under bytes that do not hash to the ID; it is raised before the step's input is read.
 `UnlistedPrior` with the ID: a block's header names a prior the index does not list; it is raised when the
-block header is parsed, before the block is decoded. `BadPriorList` as above.
+block header is parsed, before the block is decoded. The index may list a prior that no block names; a reader
+does not check that. `BadPriorList` as above.
 
 ## 11. Test vectors
 
@@ -738,7 +910,9 @@ the tests from seeded patterns, so the repository holds only the archives and th
 - `lzma-props.lpk`: the non-default properties lc 0, lp 2, pb 0 with a 1 MiB dictionary.
 
 The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts
-it (with `--prior tests/vectors/zstd-dict.prior` for the dictionary one). The vectors are not a normative
+it (with `--prior tests/vectors/zstd-dict.prior` for the dictionary one). The full list of vectors, including the
+encrypted, journal, recovery and malformed ones, and what an independent decoder must do with each, is in
+`docs/spec/CONFORMANCE.md`. The vectors are not a normative
 encoding: regenerating them reproduces the committed bytes only with the same zstd and liblzma library versions, which an
 ignored test checks on purpose. To regenerate them: `cargo test -p lpk-format --test gen_vectors -- --ignored`.
 The frame of `zstd-window.lpk` is written without a declared content size, so its header declares the 2^24
