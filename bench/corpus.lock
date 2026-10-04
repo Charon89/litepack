@@ -51101,21 +51101,6 @@
         "url": "https://mattmahoney.net/dc/enwik8.zip"
       },
       {
-        "commit": "46dc277917a93cbf601bbcf0d27d00f6feeec0d5",
-        "source": "godot-v1",
-        "url": "https://github.com/godotengine/godot"
-      },
-      {
-        "commit": "77dcf97d82cbfe4e4615475fa52ca03da645dbd8",
-        "source": "godot-v2",
-        "url": "https://github.com/godotengine/godot"
-      },
-      {
-        "commit": "4c311cbee68c0b66ff8ebb8b0defdd9979dd2a41",
-        "source": "godot-v3",
-        "url": "https://github.com/godotengine/godot"
-      },
-      {
         "blake3": "aed54e216b965447e3513b5c898c0cbdc51f26e6f8aa879bc06dac062e2dfc4c",
         "bytes": 486762106,
         "source": "govdocs-000",
@@ -51838,6 +51823,21 @@
         "bytes": 1670098945,
         "source": "loghub-windows",
         "url": "https://zenodo.org/api/records/8196385/files/Windows.tar.gz/content"
+      },
+      {
+        "commit": "12fb157f79da8c094a54bc99370994941c28c235",
+        "source": "node-v1",
+        "url": "https://github.com/nodejs/node"
+      },
+      {
+        "commit": "80c899860da26b56971969e84bb6c902f00317ff",
+        "source": "node-v2",
+        "url": "https://github.com/nodejs/node"
+      },
+      {
+        "commit": "c5349f43cd66d2aa02d86414c9ed426f71d3ae48",
+        "source": "node-v3",
+        "url": "https://github.com/nodejs/node"
       },
       {
         "blake3": "f3a24fd8081e41a64b3967285da8b50d5c9ebf88ce51288741ea76dd63cfec89",
