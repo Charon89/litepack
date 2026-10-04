@@ -5,7 +5,6 @@
 use std::io::Write;
 
 use crate::error::{Error, Result};
-use crate::inflate;
 use crate::record::bad_record;
 
 /// The fixed term of the writer's allowance (section 8, "Resources"); informative for a reader.
@@ -128,7 +127,7 @@ pub fn stream_frame(id: u64, stream: &[u8], primary_len: u64) -> Result<FrameInf
     let z = stream.get(28..28 + compressed_len).ok_or_else(bad)?;
     // Inflate no further than the 7 header bytes and `primary_len` bytes of raw header.
     let limit = usize::try_from(primary_len.saturating_add(7)).unwrap_or(usize::MAX);
-    let (d, _) = inflate::zlib_prefix(z, limit);
+    let d = zlib_prefix(z, limit);
     if d.len() < 7 || &d[..3] != b"HDR" {
         return Err(bad());
     }
@@ -141,6 +140,24 @@ pub fn stream_frame(id: u64, stream: &[u8], primary_len: u64) -> Result<FrameInf
     jpeg.extend_from_slice(&[0xFF, 0xD8]);
     jpeg.extend_from_slice(raw);
     find_frame(&jpeg).ok_or_else(bad)
+}
+
+/// Inflates zlib data (RFC 1950) into at most `limit` bytes, with `flate2`. Only as far as the
+/// header needs: reaching `limit` stops it, the Adler-32 is not required, and the bytes produced
+/// before any damage are kept (too few of them is the caller's `lepton stream` refusal).
+fn zlib_prefix(z: &[u8], limit: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut dec = flate2::read::ZlibDecoder::new(z);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    while out.len() < limit {
+        let want = buf.len().min(limit - out.len());
+        match dec.read(&mut buf[..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+        }
+    }
+    out
 }
 
 /// Check 5's comparison: the image's term against the archive's `decode_memory` (never above the

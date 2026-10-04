@@ -12,7 +12,6 @@ pub mod entries;
 pub mod error;
 pub mod extract;
 pub mod index;
-pub mod inflate;
 pub mod journal;
 pub mod jpeg;
 pub mod keyless;
