@@ -5,8 +5,8 @@ mod common;
 use common::{pattern, write_archive};
 use lpk_format::{
     Archive, ArchiveChunks, BlockEncoder, BlockHeader, ChunkSource, ContainerMember,
-    ContainerRecord, DeflateRecord, FormatError, Graph, GraphResources, PrimitiveId, Record,
-    RecordBody, RecordKind, Resources, Step, Utf16Record, Writer, WriterOptions,
+    ContainerRecord, DeflateRecord, Encoded, FormatError, Graph, GraphResources, PrimitiveId,
+    Record, RecordBody, RecordKind, Resources, Step, Utf16Record, Writer, WriterOptions,
 };
 use std::io::Cursor;
 
@@ -46,19 +46,17 @@ struct Recon {
 }
 
 impl BlockEncoder for Recon {
-    fn graph(&self) -> Graph {
-        Graph {
-            steps: vec![Step {
-                primitive: self.primitive,
-                params: vec![self.record],
-            }],
-        }
-    }
-    fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
-        Ok(plain.to_vec())
-    }
-    fn resources(&self) -> GraphResources {
-        GraphResources::default()
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        Ok(Encoded {
+            graph: Graph {
+                steps: vec![Step {
+                    primitive: self.primitive,
+                    params: vec![self.record],
+                }],
+            },
+            bytes: plain.to_vec(),
+            resources: GraphResources::default(),
+        })
     }
 }
 
@@ -127,7 +125,11 @@ fn the_writer_refuses_a_graph_naming_a_missing_record() {
             record: id,
         });
         let mut out = Vec::new();
-        let e = Writer::new(&mut out, o).err().unwrap();
+        // The graph is checked when the block closes.
+        let mut w = Writer::new(&mut out, o).unwrap();
+        w.add_file("a", lpk_format::EntryFlags::EMPTY, 0, &mut &b"data"[..])
+            .unwrap();
+        let e = w.close_block().unwrap_err();
         assert!(
             matches!(e, FormatError::RecordOutOfRange { record, count } if record == u64::from(id) && count == records.len() as u64),
             "{e:?}"

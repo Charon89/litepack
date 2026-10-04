@@ -82,7 +82,7 @@ pub use recovery::{
     MAX_SHARD_LEN, MAX_TOTAL_SHARDS, SHARD_ALIGN,
 };
 pub use writer::{
-    BlockEncoder, Chunker, FixedChunker, SealOptions, StoreEncoder, Writer, WriterOptions,
+    BlockEncoder, Chunker, Encoded, FixedChunker, SealOptions, StoreEncoder, Writer, WriterOptions,
     WriterSummary, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
 pub use zstd::ZstdDecoder;

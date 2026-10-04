@@ -88,7 +88,8 @@ fn the_window_vector_frame_declares_its_window() {
     let plain = &vector_files("zstd-window.lpk")[0].1;
     let frame = common::ZstdTestEncoder::new(3, 24, None)
         .encode(plain)
-        .unwrap();
+        .unwrap()
+        .bytes;
     // Magic (4), descriptor (not single-segment), window descriptor: 2^24.
     assert_eq!(frame[4] & 0x20, 0);
     assert_eq!(frame[5], 0x70);

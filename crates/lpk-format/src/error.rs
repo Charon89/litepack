@@ -72,6 +72,12 @@ pub enum FormatError {
         /// Index of the offending entry.
         index: u64,
     },
+    /// The writer was given the same path twice.
+    #[error("duplicate entry path {path:?}")]
+    DuplicateEntry {
+        /// The path added twice.
+        path: String,
+    },
     /// Entry kind byte not known to this reader.
     #[error("entry {index}: unsupported kind {kind}")]
     UnsupportedEntryKind {

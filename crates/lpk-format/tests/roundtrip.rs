@@ -479,42 +479,51 @@ fn writer_refusals() {
     let mut o = small_options();
     o.block_size = 4095;
     assert!(matches!(new(o), Err(FormatError::BadOptions { .. })));
-    // An encoder whose graph does not validate is refused before the header.
+    // An encoder whose graph does not validate is refused when the block closes.
     struct BadGraph(Vec<lpk_format::Step>);
     impl lpk_format::BlockEncoder for BadGraph {
-        fn graph(&self) -> lpk_format::Graph {
-            lpk_format::Graph {
-                steps: self.0.clone(),
-            }
-        }
-        fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
-            Ok(plain.to_vec())
-        }
-        fn resources(&self) -> lpk_format::GraphResources {
-            lpk_format::GraphResources::default()
+        fn encode(&mut self, plain: &[u8]) -> Result<lpk_format::Encoded, FormatError> {
+            Ok(lpk_format::Encoded {
+                graph: lpk_format::Graph {
+                    steps: self.0.clone(),
+                },
+                bytes: plain.to_vec(),
+                resources: lpk_format::GraphResources::default(),
+            })
         }
     }
     let zstd_step = |params: Vec<u8>| lpk_format::Step {
         primitive: lpk_format::PrimitiveId::Zstd,
         params,
     };
-    let mut o = small_options();
-    o.encoder = Box::new(BadGraph(vec![zstd_step(vec![20; 5])]));
-    assert!(matches!(new(o), Err(FormatError::BadParams { id: 1, .. })));
-    let mut o = small_options();
-    o.encoder = Box::new(BadGraph(vec![]));
-    assert!(matches!(new(o), Err(FormatError::BadGraph { .. })));
+    let finish_with = |steps: Vec<lpk_format::Step>| {
+        let mut o = small_options();
+        o.encoder = Box::new(BadGraph(steps));
+        let mut w = new(o).unwrap();
+        let mut data: &[u8] = b"data";
+        w.add_file("a", EntryFlags::EMPTY, 0, &mut data).unwrap();
+        w.close_block()
+    };
+    assert!(matches!(
+        finish_with(vec![zstd_step(vec![20; 5])]),
+        Err(FormatError::BadParams { id: 1, .. })
+    ));
+    assert!(matches!(
+        finish_with(vec![]),
+        Err(FormatError::BadGraph { .. })
+    ));
 
     let mut w = new(small_options()).unwrap();
     let mut empty: &[u8] = b"";
     w.add_file("b", EntryFlags::EMPTY, 0, &mut empty).unwrap();
+    // Adds may come in any order; the same path twice is refused.
     assert!(matches!(
-        w.add_file("a", EntryFlags::EMPTY, 0, &mut empty),
-        Err(FormatError::UnsortedEntries { index: 1 })
+        w.add_file("b", EntryFlags::EMPTY, 0, &mut empty),
+        Err(FormatError::DuplicateEntry { path }) if path == "b"
     ));
     assert!(matches!(
         w.add_directory("b", EntryFlags::EMPTY, 0),
-        Err(FormatError::UnsortedEntries { index: 1 })
+        Err(FormatError::DuplicateEntry { .. })
     ));
     for bad in ["", "/x", "x/", "a\\b", "x/../y", "c//d"] {
         assert!(
@@ -530,7 +539,7 @@ fn writer_refusals() {
         Err(FormatError::InvalidPath { .. })
     ));
     // Refused entries leave the writer usable.
-    w.add_directory("c", EntryFlags::EMPTY, 0).unwrap();
+    w.add_directory("a", EntryFlags::EMPTY, 0).unwrap();
     assert_eq!(w.finish().unwrap().entries, 2);
 }
 

@@ -4,7 +4,7 @@
 #![allow(dead_code, clippy::unwrap_used)]
 
 use lpk_format::{
-    BlockEncoder, FormatError, Graph, GraphResources, PrimitiveId, Step, Writer, WriterOptions,
+    BlockEncoder, Encoded, FormatError, Graph, PrimitiveId, Step, Writer, WriterOptions,
 };
 use std::io::Write;
 
@@ -91,8 +91,8 @@ impl ZstdTestEncoder {
     }
 }
 
-impl BlockEncoder for ZstdTestEncoder {
-    fn graph(&self) -> Graph {
+impl ZstdTestEncoder {
+    pub fn graph(&self) -> Graph {
         Graph {
             steps: vec![Step {
                 primitive: PrimitiveId::Zstd,
@@ -100,18 +100,21 @@ impl BlockEncoder for ZstdTestEncoder {
             }],
         }
     }
+}
 
-    fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
-        Ok(compress_stream(
-            self.level,
-            u32::from(self.window_log),
-            self.dictionary.as_deref(),
-            plain,
-        ))
-    }
-
-    fn resources(&self) -> GraphResources {
-        self.graph().resources()
+impl BlockEncoder for ZstdTestEncoder {
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        let graph = self.graph();
+        Ok(Encoded {
+            resources: graph.resources(),
+            graph,
+            bytes: compress_stream(
+                self.level,
+                u32::from(self.window_log),
+                self.dictionary.as_deref(),
+                plain,
+            ),
+        })
     }
 }
 
@@ -178,8 +181,8 @@ impl LzmaTestEncoder {
     }
 }
 
-impl BlockEncoder for LzmaTestEncoder {
-    fn graph(&self) -> Graph {
+impl LzmaTestEncoder {
+    pub fn graph(&self) -> Graph {
         Graph {
             steps: vec![Step {
                 primitive: PrimitiveId::Lzma,
@@ -187,14 +190,17 @@ impl BlockEncoder for LzmaTestEncoder {
             }],
         }
     }
+}
 
-    fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
+impl BlockEncoder for LzmaTestEncoder {
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
         let o = lzma_options(self.preset, self.dict_size, self.lc, self.lp, self.pb);
-        Ok(lzma_raw(&o, plain))
-    }
-
-    fn resources(&self) -> GraphResources {
-        self.graph().resources()
+        let graph = self.graph();
+        Ok(Encoded {
+            resources: graph.resources(),
+            graph,
+            bytes: lzma_raw(&o, plain),
+        })
     }
 }
 

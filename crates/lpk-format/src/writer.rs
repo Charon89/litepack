@@ -20,7 +20,7 @@ use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use crate::varint;
 use rand::RngCore;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Smallest `chunk_size` a writer accepts.
@@ -87,18 +87,25 @@ impl Chunker for FixedChunker {
     }
 }
 
-/// Turns the plain bytes of a block into encoded bytes. The decode graph it
-/// reports is what a reader runs on them: `encode` followed by the graph's
-/// decoding must give back the plain bytes.
+/// One encoded block: the bytes, the decode graph that turns them back into the
+/// plain bytes, and the decoder resources that graph needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encoded {
+    /// The decode graph of this block. The writer validates it when it closes
+    /// the block (registry, step count, parameters, record range) and records
+    /// it in the block's header.
+    pub graph: Graph,
+    /// The encoded bytes: the graph's decoding gives back the plain bytes.
+    pub bytes: Vec<u8>,
+    /// The decoder resources `graph` needs, for the envelope.
+    pub resources: GraphResources,
+}
+
+/// Turns the plain bytes of a block into encoded bytes, choosing the decode
+/// graph per block.
 pub trait BlockEncoder {
-    /// The decode graph of the blocks this encoder produces. It is fixed for
-    /// the writer's lifetime: the writer reads it once, validates it (step
-    /// count, parameters) and records it in every block.
-    fn graph(&self) -> Graph;
-    /// Encode one block's plain bytes.
-    fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError>;
-    /// The decoder resources the graph needs, for the envelope.
-    fn resources(&self) -> GraphResources;
+    /// Encode one block's plain bytes with a graph of the encoder's choice.
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError>;
 }
 
 /// The identity encoder: a one-step `store` graph.
@@ -106,21 +113,17 @@ pub trait BlockEncoder {
 pub struct StoreEncoder;
 
 impl BlockEncoder for StoreEncoder {
-    fn graph(&self) -> Graph {
-        Graph {
-            steps: vec![Step {
-                primitive: PrimitiveId::Store,
-                params: Vec::new(),
-            }],
-        }
-    }
-
-    fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
-        Ok(plain.to_vec())
-    }
-
-    fn resources(&self) -> GraphResources {
-        GraphResources::default()
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        Ok(Encoded {
+            graph: Graph {
+                steps: vec![Step {
+                    primitive: PrimitiveId::Store,
+                    params: Vec::new(),
+                }],
+            },
+            bytes: plain.to_vec(),
+            resources: GraphResources::default(),
+        })
     }
 }
 
@@ -147,7 +150,8 @@ pub struct WriterOptions {
     pub block_size: u64,
     /// The archive's identity, written to the header and the trailer.
     pub archive_id: [u8; 16],
-    /// Encodes every block and names its decode graph; [`StoreEncoder`] by default.
+    /// Encodes every block and names its decode graph (per block);
+    /// [`StoreEncoder`] by default.
     pub encoder: Box<dyn BlockEncoder>,
     /// Reconstruction records, written as one `Records` frame before the
     /// index (none: no frame). A record's id is its position; the encoder's
@@ -192,7 +196,6 @@ impl std::fmt::Debug for WriterOptions {
             .field("chunk_size", &self.chunk_size)
             .field("block_size", &self.block_size)
             .field("archive_id", &self.archive_id)
-            .field("graph", &self.encoder.graph())
             .finish()
     }
 }
@@ -254,8 +257,10 @@ pub struct Writer<W: Write> {
     records: Vec<ChunkRecord>,
     blocks: Vec<BlockLocation>,
     priors: BTreeSet<[u8; 32]>,
-    /// The encoder's graph, read once at construction.
-    graph: Graph,
+    /// Records the archive will have: a block's graph may name only those.
+    record_count: u64,
+    /// Paths of the entries added so far, to refuse one twice.
+    seen: HashSet<String>,
     pending: Vec<u8>,
     pending_chunks: u64,
     /// The first I/O error seen; every later call fails with it.
@@ -280,8 +285,9 @@ pub struct Writer<W: Write> {
     deleted: BTreeSet<String>,
     /// Chunks of this write an append took from the old table.
     reused: u64,
-    /// Window and BWT block maxima of the earlier generations' graphs.
-    old_graph: GraphResources,
+    /// Window and BWT block maxima of the earlier generations' graphs and of
+    /// this write's blocks so far.
+    graph_res: GraphResources,
     /// This generation's nonce salt (zeros when the archive is not encrypted).
     salt: [u8; 16],
     /// The generation table of the new index: the earlier generations, then this one.
@@ -310,20 +316,9 @@ fn bad_options(reason: &'static str) -> FormatError {
     FormatError::BadOptions { reason }
 }
 
-/// Check `options` the way a reader's rules need them checked; `record_count`
-/// is how many records the archive will have. Returns the encoder's graph and
-/// the recovery spool.
-fn check_options(
-    options: &WriterOptions,
-    record_count: u64,
-) -> Result<(Graph, Option<GroupEncoder>), FormatError> {
-    if options.chunk_size < MIN_CHUNK_SIZE {
-        return Err(bad_options("chunk_size below 4 KiB"));
-    }
-    if options.block_size < options.chunk_size {
-        return Err(bad_options("block_size below chunk_size"));
-    }
-    let graph = options.encoder.graph();
+/// The checks a reader makes of a block's graph: step count, parameters and
+/// the records it names (`record_count` is how many the archive will have).
+fn check_graph(graph: &Graph, record_count: u64) -> Result<(), FormatError> {
     if graph.steps.is_empty() || graph.steps.len() > MAX_STEPS {
         return Err(FormatError::BadGraph {
             reason: "step count",
@@ -332,7 +327,18 @@ fn check_options(
     for s in &graph.steps {
         s.primitive.validate_params(&s.params)?;
     }
-    graph.check_records(record_count)?;
+    graph.check_records(record_count)
+}
+
+/// Check `options` the way a reader's rules need them checked. Returns the
+/// recovery spool.
+fn check_options(options: &WriterOptions) -> Result<Option<GroupEncoder>, FormatError> {
+    if options.chunk_size < MIN_CHUNK_SIZE {
+        return Err(bad_options("chunk_size below 4 KiB"));
+    }
+    if options.block_size < options.chunk_size {
+        return Err(bad_options("block_size below chunk_size"));
+    }
     // A record the reader would refuse is refused here.
     for (i, r) in options.records.iter().enumerate() {
         if r.kind != r.body.kind() {
@@ -353,7 +359,7 @@ fn check_options(
     } else {
         None
     };
-    Ok((graph, spool))
+    Ok(spool)
 }
 
 impl<W: Write> Writer<W> {
@@ -393,7 +399,8 @@ impl<W: Write> Writer<W> {
         chunker: Box<dyn Chunker>,
         rng: &mut dyn RngCore,
     ) -> Result<Self, FormatError> {
-        let (graph, spool) = check_options(&options, options.records.len() as u64)?;
+        let spool = check_options(&options)?;
+        let record_count = options.records.len() as u64;
         let mut flags = HeaderFlags::EMPTY;
         let mut sealer = None;
         let mut slot = None;
@@ -434,7 +441,8 @@ impl<W: Write> Writer<W> {
             records: Vec::new(),
             blocks: Vec::new(),
             priors: BTreeSet::new(),
-            graph,
+            record_count,
+            seen: HashSet::new(),
             pending: Vec::new(),
             pending_chunks: 0,
             failed: None,
@@ -448,7 +456,7 @@ impl<W: Write> Writer<W> {
             base: None,
             deleted: BTreeSet::new(),
             reused: 0,
-            old_graph: GraphResources::default(),
+            graph_res: GraphResources::default(),
             salt,
             generations: vec![GenerationInfo {
                 generation: 0,
@@ -597,7 +605,7 @@ impl<W: Write> Writer<W> {
         } else {
             options.records.len() as u64
         };
-        let (graph, spool) = check_options(&options, record_count)?;
+        let spool = check_options(&options)?;
         let end = existing.raw_reader().seek(SeekFrom::End(0))?;
         let trailer_offset = end
             .checked_sub(TRAILER_FRAME_LEN)
@@ -658,7 +666,8 @@ impl<W: Write> Writer<W> {
             records,
             blocks: index.blocks.clone(),
             priors: index.priors.iter().copied().collect(),
-            graph,
+            record_count,
+            seen: HashSet::new(),
             pending: Vec::new(),
             pending_chunks: 0,
             failed: None,
@@ -672,7 +681,7 @@ impl<W: Write> Writer<W> {
             base: Some(base),
             deleted: BTreeSet::new(),
             reused: 0,
-            old_graph: GraphResources {
+            graph_res: GraphResources {
                 window: index.envelope.max_window,
                 bwt_block: index.envelope.max_bwt_block,
             },
@@ -839,13 +848,22 @@ impl<W: Write> Writer<W> {
         Ok(at)
     }
 
-    /// Check an entry (without its chunks) against the entries so far.
+    /// Check an entry (without its chunks) on its own and against the paths
+    /// added so far: the order of adds is free, a path twice is not.
     fn check(&self, entry: &Entry) -> Result<(), FormatError> {
-        check_entry(
-            entry,
-            self.entries.len() as u64,
-            self.entries.last().map(|e| e.path.as_bytes()),
-        )
+        check_entry(entry, self.entries.len() as u64, None)?;
+        if self.seen.contains(&entry.path) {
+            return Err(FormatError::DuplicateEntry {
+                path: entry.path.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Record a checked entry.
+    fn push_entry(&mut self, entry: Entry) {
+        self.seen.insert(entry.path.clone());
+        self.entries.push(entry);
     }
 
     /// Fail with the first I/O error this writer saw, if any.
@@ -877,9 +895,21 @@ impl<W: Write> Writer<W> {
             return Ok(());
         }
         let plain = std::mem::take(&mut self.pending);
-        let encoded = self.options.encoder.encode(&plain)?;
-        let graph = self.graph.clone();
+        let Encoded {
+            graph,
+            bytes: encoded,
+            resources,
+        } = self.options.encoder.encode(&plain)?;
+        if let Err(e) = check_graph(&graph, self.record_count) {
+            // The block is gone: the archive is abandoned like after an I/O error.
+            self.failed = Some((std::io::ErrorKind::InvalidData, e.to_string()));
+            return Err(e);
+        }
         self.priors.extend(graph.prior_ids());
+        self.graph_res = GraphResources {
+            window: self.graph_res.window.max(resources.window),
+            bwt_block: self.graph_res.bwt_block.max(resources.bwt_block),
+        };
         let header = BlockHeader {
             graph,
             plain_len: plain.len() as u64,
@@ -927,6 +957,15 @@ impl<W: Write> Writer<W> {
         });
         self.pending_chunks = 0;
         Ok(())
+    }
+
+    /// Close the current block now, even if it has room (nothing when it holds
+    /// no chunk): the next chunk starts a new block. The block's graph is
+    /// validated here, as when a block closes because it is full.
+    pub fn close_block(&mut self) -> Result<(), FormatError> {
+        self.check_alive()?;
+        let r = self.flush_block();
+        self.note(r)
     }
 
     fn add_chunk(&mut self, data: &[u8]) -> Result<u64, FormatError> {
@@ -1036,7 +1075,7 @@ impl<W: Write> Writer<W> {
                 break;
             }
         }
-        self.entries.push(entry);
+        self.push_entry(entry);
         Ok(())
     }
 
@@ -1057,7 +1096,7 @@ impl<W: Write> Writer<W> {
             chunks: Vec::new(),
         };
         self.check(&entry)?;
-        self.entries.push(entry);
+        self.push_entry(entry);
         Ok(())
     }
 
@@ -1079,7 +1118,7 @@ impl<W: Write> Writer<W> {
             chunks: Vec::new(),
         };
         self.check(&entry)?;
-        self.entries.push(entry);
+        self.push_entry(entry);
         Ok(())
     }
 
@@ -1099,7 +1138,8 @@ impl<W: Write> Writer<W> {
     /// The entries of the new generation: the old ones that were neither
     /// deleted nor replaced, merged with the new ones in path order.
     fn merged_entries(&mut self) -> Vec<Entry> {
-        let new = std::mem::take(&mut self.entries);
+        let mut new = std::mem::take(&mut self.entries);
+        new.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
         let Some(base) = &mut self.base else {
             return new;
         };
@@ -1159,11 +1199,7 @@ impl<W: Write> Writer<W> {
         let recs = &self.records;
         let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
         let max_plain = self.blocks.iter().map(|b| b.plain_len).max().unwrap_or(0);
-        let (g, e) = (self.graph.resources(), self.options.encoder.resources());
-        let graph = GraphResources {
-            window: g.window.max(e.window).max(self.old_graph.window),
-            bwt_block: g.bwt_block.max(e.bwt_block).max(self.old_graph.bwt_block),
-        };
+        let graph = self.graph_res;
         let mut index = Index {
             chunk_table: ChunkTableWriter::encode(recs).into(),
             merkle_root: merkle_root(&leaves),

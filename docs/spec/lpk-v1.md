@@ -1599,6 +1599,7 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `SymlinkRefused` | `path` | tool: extraction of a symlink entry (9) |
 | `UnsafePath` | `path`, `reason` | tool: extraction of a path it refuses (9) |
 | `BadOptions` | `reason` | writer: options it cannot honour (9, 13) |
+| `DuplicateEntry` | `path` | writer: the same path added twice (9) |
 | `BadChunk` | `reason` | writer: a chunker that breaks the cutting rules (9) |
 | `AppendNeedsCredentials` | - | writer: append to an encrypted archive without credentials (15) |
 | `SealFailed` | `kind`, `sequence` | writer: the cipher refused to seal (14) |
