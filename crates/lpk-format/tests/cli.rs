@@ -314,3 +314,101 @@ fn an_existing_target_is_left_untouched() {
         b"mine"
     );
 }
+
+/// An archive of `sample`'s files with 10 percent recovery in 4 KiB shards.
+fn recovering(dir: &Path) -> std::path::PathBuf {
+    let p = dir.join("r.lpk");
+    let mut o = options();
+    o.recovery = lpk_format::RecoveryOptions {
+        percent: 10,
+        shard_len: 4096,
+    };
+    let mut w = Writer::new(std::fs::File::create(&p).unwrap(), o).unwrap();
+    for (name, d) in [("a", data(3, 50_000)), ("b", data(5, 30_000))] {
+        w.add_file(name, EntryFlags::EMPTY, 0, &mut d.as_slice())
+            .unwrap();
+    }
+    w.finish().unwrap();
+    p
+}
+
+#[test]
+fn check_and_repair_on_a_damaged_archive() {
+    let t = tempfile::tempdir().unwrap();
+    let p = recovering(t.path());
+    let good = std::fs::read(&p).unwrap();
+    let (code, out, err) = cli(&["check", p.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "recovery frames: 1, unusable: 0, damaged shards: 0, repaired shards: 0\n"
+    );
+    // Damage two shards: bytes in the first and in the third shard.
+    let mut bad = good.clone();
+    bad[40] ^= 0xFF;
+    bad[32 + 2 * 4096 + 7] ^= 0x55;
+    std::fs::write(&p, &bad).unwrap();
+    let (code, out, err) = cli(&["check", p.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(out.contains("damaged shards: 2"), "{out}");
+    assert!(err.contains("damage found"), "{err}");
+    let fixed = t.path().join("fixed.lpk");
+    let (code, out, err) = cli(&["repair", p.to_str().unwrap(), fixed.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "recovery frames: 1, unusable: 0, damaged shards: 2, repaired shards: 2\n"
+    );
+    assert_eq!(std::fs::read(&fixed).unwrap(), good);
+    let (code, out, _) = cli(&["verify", fixed.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(out.starts_with("ok:"));
+    // The target is never replaced.
+    let (code, _, err) = cli(&["repair", p.to_str().unwrap(), fixed.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.starts_with("error: i/o error"), "{err}");
+}
+
+#[test]
+fn repair_exits_1_beyond_capacity_and_keeps_the_copy() {
+    let t = tempfile::tempdir().unwrap();
+    let p = recovering(t.path());
+    let mut bad = std::fs::read(&p).unwrap();
+    // 80 KB of data is about 20 shards, 10 percent is 2: damage 3.
+    for s in 0..3 {
+        bad[32 + s * 4096 + 1] ^= 0xFF;
+    }
+    std::fs::write(&p, &bad).unwrap();
+    let fixed = t.path().join("fixed.lpk");
+    let (code, _, err) = cli(&["repair", p.to_str().unwrap(), fixed.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("3 shards damaged, it can rebuild"), "{err}");
+    assert_eq!(std::fs::read(&fixed).unwrap(), bad);
+}
+
+#[test]
+fn repair_of_a_damaged_index_writes_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    let p = recovering(t.path());
+    let mut bad = std::fs::read(&p).unwrap();
+    let n = bad.len();
+    bad[n - 100] ^= 0xFF;
+    std::fs::write(&p, &bad).unwrap();
+    let fixed = t.path().join("fixed.lpk");
+    let (code, _, err) = cli(&["repair", p.to_str().unwrap(), fixed.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.starts_with("error: "), "{err}");
+    assert!(!fixed.exists());
+}
+
+#[test]
+fn check_on_an_archive_without_recovery_reports_zero_frames() {
+    let t = tempfile::tempdir().unwrap();
+    let (p, _) = sample(t.path());
+    let (code, out, _) = cli(&["check", p.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        out,
+        "recovery frames: 0, unusable: 0, damaged shards: 0, repaired shards: 0\n"
+    );
+}

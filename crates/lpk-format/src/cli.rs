@@ -6,6 +6,7 @@ use crate::entry::{Entry, EntryKind};
 use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::priors::MemoryPriors;
+use crate::recovery::{repair, RepairReport};
 use crate::trailer::TRAILER_FRAME_LEN;
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
@@ -48,6 +49,18 @@ enum Command {
     Info {
         /// The archive.
         archive: PathBuf,
+    },
+    /// Hash the data shards the recovery frames cover and report the damage; exit 1 if any.
+    Check {
+        /// The archive.
+        archive: PathBuf,
+    },
+    /// Write a copy of the archive with the damaged shards rebuilt from its recovery frames.
+    Repair {
+        /// The archive.
+        archive: PathBuf,
+        /// The repaired copy; must not exist.
+        out: PathBuf,
     },
 }
 
@@ -163,6 +176,45 @@ fn verify(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), Fo
     Ok(())
 }
 
+fn print_report(out: &mut dyn Write, r: &RepairReport) -> Result<(), FormatError> {
+    writeln!(
+        out,
+        "recovery frames: {}, unusable: {}, damaged shards: {}, repaired shards: {}",
+        r.frames, r.frames_unusable, r.shards_damaged, r.shards_repaired
+    )?;
+    Ok(())
+}
+
+fn check(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
+    let mut a = open(path, &[])?;
+    let r = a.check_recovery()?;
+    print_report(out, &r)?;
+    if r.shards_damaged > 0 || r.frames_unusable > 0 {
+        return Err(FormatError::RecoveryError {
+            reason: "damage found".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn repair_cmd(path: &Path, target: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
+    let input = File::open(path)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    let result = repair(input, file, &Resources::default());
+    match &result {
+        // The copy carries the repairs that were possible; keep it.
+        Ok(_) | Err(FormatError::Unrepairable { .. }) => {}
+        Err(_) => {
+            let _ = std::fs::remove_file(target);
+        }
+    }
+    print_report(out, &result?)
+}
+
 fn info(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), FormatError> {
     let mut a = open(path, priors)?;
     let h = *a.header();
@@ -179,6 +231,7 @@ fn info(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), Form
     writeln!(out, "chunks: {}", a.chunks().len())?;
     writeln!(out, "blocks: {}", a.index().blocks.len())?;
     writeln!(out, "records: {}", a.index().records.is_some())?;
+    writeln!(out, "recovery frames: {}", a.recovery_frames().len())?;
     writeln!(out, "priors: {}", a.priors().len())?;
     for id in a.priors() {
         writeln!(out, "prior: {}", hex(id))?;
@@ -274,6 +327,11 @@ where
         Command::Verify { archive } => verify(archive, &cli.priors, out),
         Command::Extract { archive, dir } => extract(archive, dir, &cli.priors, out),
         Command::Info { archive } => info(archive, &cli.priors, out),
+        Command::Check { archive } => check(archive, out),
+        Command::Repair {
+            archive,
+            out: target,
+        } => repair_cmd(archive, target, out),
     };
     match result {
         Ok(()) => 0,
