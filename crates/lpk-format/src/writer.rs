@@ -97,7 +97,9 @@ pub struct Encoded {
     pub graph: Graph,
     /// The encoded bytes: the graph's decoding gives back the plain bytes.
     pub bytes: Vec<u8>,
-    /// The decoder resources `graph` needs, for the envelope.
+    /// The decoder resources `graph` needs, for the envelope. The writer takes
+    /// the maximum of this and `graph.resources()`, so an encoder that reports
+    /// too little cannot make the envelope too small.
     pub resources: GraphResources,
 }
 
@@ -154,8 +156,10 @@ pub struct WriterOptions {
     /// [`StoreEncoder`] by default.
     pub encoder: Box<dyn BlockEncoder>,
     /// Reconstruction records, written as one `Records` frame before the
-    /// index (none: no frame). A record's id is its position; the encoder's
-    /// graph may only name ids below `records.len()`.
+    /// index (none: no frame). A record's id is its position; each block's
+    /// graph is checked when the block closes and may only name ids below
+    /// `records.len()` (in an append with no new records, below the existing
+    /// record count).
     pub records: Vec<Record>,
     /// Reed-Solomon recovery over the body (spec section 13): `percent` 0
     /// (the default) writes no recovery frame.
@@ -259,7 +263,8 @@ pub struct Writer<W: Write> {
     priors: BTreeSet<[u8; 32]>,
     /// Records the archive will have: a block's graph may name only those.
     record_count: u64,
-    /// Paths of the entries added so far, to refuse one twice.
+    /// Paths of the entries added so far, to refuse one twice (a second copy
+    /// of the paths: a known cost for the memory task).
     seen: HashSet<String>,
     pending: Vec<u8>,
     pending_chunks: u64,
@@ -899,16 +904,28 @@ impl<W: Write> Writer<W> {
             graph,
             bytes: encoded,
             resources,
-        } = self.options.encoder.encode(&plain)?;
+        } = match self.options.encoder.encode(&plain) {
+            Ok(e) => e,
+            Err(e) => {
+                // The block's chunks are gone: the archive is abandoned.
+                self.failed = Some((std::io::ErrorKind::InvalidData, e.to_string()));
+                return Err(e);
+            }
+        };
         if let Err(e) = check_graph(&graph, self.record_count) {
             // The block is gone: the archive is abandoned like after an I/O error.
             self.failed = Some((std::io::ErrorKind::InvalidData, e.to_string()));
             return Err(e);
         }
         self.priors.extend(graph.prior_ids());
+        let own = graph.resources();
         self.graph_res = GraphResources {
-            window: self.graph_res.window.max(resources.window),
-            bwt_block: self.graph_res.bwt_block.max(resources.bwt_block),
+            window: self.graph_res.window.max(resources.window).max(own.window),
+            bwt_block: self
+                .graph_res
+                .bwt_block
+                .max(resources.bwt_block)
+                .max(own.bwt_block),
         };
         let header = BlockHeader {
             graph,
@@ -962,6 +979,12 @@ impl<W: Write> Writer<W> {
     /// Close the current block now, even if it has room (nothing when it holds
     /// no chunk): the next chunk starts a new block. The block's graph is
     /// validated here, as when a block closes because it is full.
+    ///
+    /// Errors: the call that fails (an encoder error, a graph that fails its
+    /// check, an I/O error) returns the error's own class and abandons the
+    /// archive; every later call reports `Io` (`InvalidData`) with the same
+    /// message. The same holds for the `add_*` calls (which close a full
+    /// block) and for `finish` (which closes the last one).
     pub fn close_block(&mut self) -> Result<(), FormatError> {
         self.check_alive()?;
         let r = self.flush_block();

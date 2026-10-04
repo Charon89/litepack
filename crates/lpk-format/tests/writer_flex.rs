@@ -243,3 +243,107 @@ fn close_block_alone_writes_no_block() {
     w.close_block().unwrap();
     assert_eq!(w.finish().unwrap().blocks, 0);
 }
+
+/// Reports no resources at all for a zstd graph.
+struct UnderReporting(ZstdTestEncoder);
+
+impl BlockEncoder for UnderReporting {
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        let mut e = self.0.encode(plain)?;
+        e.resources = lpk_format::GraphResources::default();
+        Ok(e)
+    }
+}
+
+#[test]
+fn an_encoder_that_under_reports_resources_still_gives_a_readable_archive() {
+    let mut out = Vec::new();
+    let enc = UnderReporting(ZstdTestEncoder::new(3, 20, None));
+    let mut w = Writer::new(&mut out, options(Box::new(enc))).unwrap();
+    let data = pattern(4, 6000);
+    add(&mut w, "a", &data).unwrap();
+    w.finish().unwrap();
+    let mut a = open(out);
+    assert!(a.index().envelope.max_window > 0);
+    a.verify().unwrap();
+    let e = entries(&mut a).remove(0);
+    let mut got = Vec::new();
+    a.extract(&e, &mut got).unwrap();
+    assert!(got == data);
+}
+
+/// Fails on its second block.
+struct FailsOnce(usize);
+
+impl BlockEncoder for FailsOnce {
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        self.0 += 1;
+        if self.0 == 2 {
+            return Err(FormatError::ZstdError {
+                reason: "test failure".into(),
+            });
+        }
+        StoreEncoder.encode(plain)
+    }
+}
+
+#[test]
+fn an_encoder_error_abandons_the_archive() {
+    let mut out = Vec::new();
+    let mut w = Writer::new(&mut out, options(Box::new(FailsOnce(0)))).unwrap();
+    add(&mut w, "a", &pattern(1, 4096)).unwrap();
+    w.close_block().unwrap();
+    add(&mut w, "b", &pattern(2, 4096)).unwrap();
+    assert!(matches!(
+        w.close_block(),
+        Err(FormatError::ZstdError { .. })
+    ));
+    assert!(matches!(add(&mut w, "c", b"c"), Err(FormatError::Io(_))));
+    assert!(matches!(w.close_block(), Err(FormatError::Io(_))));
+    assert!(matches!(w.finish(), Err(FormatError::Io(_))));
+}
+
+#[test]
+fn a_graph_failure_surfaces_from_add_file_and_from_finish() {
+    // A block closes mid-file: block_size 8192 holds two chunks of 4096.
+    let mut out = Vec::new();
+    let mut w = Writer::new(&mut out, options(Box::new(NamesRecord))).unwrap();
+    let r = add(&mut w, "big", &pattern(1, 4 * 4096));
+    assert!(matches!(r, Err(FormatError::RecordOutOfRange { .. })));
+    assert!(matches!(w.finish(), Err(FormatError::Io(_))));
+
+    // The last block closes in finish.
+    let mut out = Vec::new();
+    let mut w = Writer::new(&mut out, options(Box::new(NamesRecord))).unwrap();
+    add(&mut w, "small", b"x").unwrap();
+    assert!(matches!(
+        w.finish(),
+        Err(FormatError::RecordOutOfRange { .. })
+    ));
+}
+
+#[test]
+fn a_sealed_archive_accepts_out_of_order_adds() {
+    use common::sealed::{seal_options, write_archive_seeded};
+    let files = vec![
+        ("s/c.txt", pattern(83, 9000)),
+        ("s/a.txt", pattern(81, 700)),
+        ("s/b.txt", pattern(82, 5000)),
+    ];
+    let bytes = write_archive_seeded(
+        seal_options(lpk_format::Suite::AesGcm, false, "pw", None),
+        &files,
+        7,
+    );
+    let creds = lpk_format::Credentials::password(b"pw".to_vec());
+    let mut a =
+        Archive::open_with(Cursor::new(bytes), &Resources::default(), Some(&creds)).unwrap();
+    a.verify().unwrap();
+    assert_eq!(paths(&mut a), ["s/a.txt", "s/b.txt", "s/c.txt"]);
+    for e in entries(&mut a) {
+        let mut got = Vec::new();
+        a.extract(&e, &mut got).unwrap();
+        let want = &files.iter().find(|(p, _)| *p == e.path).unwrap().1;
+        assert!(&got == want, "{}", e.path);
+    }
+}

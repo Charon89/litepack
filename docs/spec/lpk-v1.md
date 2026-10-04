@@ -788,8 +788,8 @@ A writer settles this by computing the index again with the length it just produ
 ### Chunks and blocks
 
 A file's bytes are cut into chunks of exactly the chunk size, the last one shorter; an empty file has no chunks.
-Chunks are numbered in the order they are written, which is the order of the entries that own them; this
-writer gives each file a run of consecutive numbers, but a reader accepts any chunk list whose indices are in
+Chunks are numbered in the order they are written; this writer gives each file a run of consecutive numbers
+(files may be added in any order, so the numbers need not follow the entry order), but a reader accepts any chunk list whose indices are in
 range and whose lengths add up to the file size. The chunk table has one record per chunk (section 5). The
 rule that chooses the cut is a property of the writer, not of the format: a reader finds each chunk's length in
 the chunk table and never assumes a size, so another way of cutting changes only the chunk boundaries. A
@@ -803,16 +803,16 @@ has the graph `[store]`; for such an archive the envelope declares `max_window` 
 `threads_hint` 0 and `decode_memory` equal to `max_block_plain`, the space of one block buffer; the encoded
 input a decoder reads beside it is not counted in `decode_memory`.
 
-A block is encoded by the writer's block encoder, which reports the decode graph of its blocks and the decoder
-resources that graph needs (they feed the envelope); the writer records the graph in every block header, checks
-it before the first block, and lists the priors it names in the index (section 10). The identity encoder
-produces the graph `[store]`.
+A block is encoded by the writer's block encoder, which reports, for each block, its decode graph and the decoder
+resources that graph needs (they feed the envelope); the writer checks each graph when its block closes, records
+it in that block's header, and lists the priors the graphs name in the index (section 10). The identity encoder
+produces the graph `[store]`. A writer may also close a block early, before it is full.
 
-A writer that meets an I/O error, on its input or its output, or a chunker that breaks the rules above, refuses
-every later call with that error: the archive being written is abandoned.
+A writer that meets an I/O error, on its input or its output, a chunker that breaks the rules above, an encoder
+error, or a graph that fails its check, refuses every later call: the archive being written is abandoned.
 
-Entries are written in strictly ascending path order (section 4). A writer refuses a path that is invalid, equal
-to the one before it or sorts before it.
+Entries are written in strictly ascending path order (section 4). A writer refuses an invalid path and a path it
+was already given (`DuplicateEntry`); it accepts entries in any order and writes the table sorted.
 
 ### Reading one block at a time
 

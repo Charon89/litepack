@@ -71,3 +71,6 @@ right after a trailer (ruling 11).
 After the independent decoder's re-run: the keyless `verify` line's `<entries>` is the entry count of a listable
 archive and `0` when the table is sealed (CONFORMANCE); the read of a previous trailer in the chain is bounded by
 the newer index's offset (section 15, "The trailer chain").
+
+2026-10-04: Section 16 gains the writer class `DuplicateEntry`; section 9 describes per-block graphs, adds in any
+order and early block close. No reader behaviour or vector byte changed.
