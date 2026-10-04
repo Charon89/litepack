@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-05, about 13:55 UTC (09:55 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-05, about 16:45 UTC (12:45 local on the measuring machine). No measurement is running.
 
 **Phase 1 is under way.** Phase 0 closed with D-08 (GO) and D-27; the Phase 1 task list is in PLAN (37 tasks).
 On `main`: E1-1…E1-13 (D-28…D-40) — the whole `.lpk` v1 format: frames, entry table, chunks and Merkle tree,
@@ -28,7 +28,9 @@ round → the format values recorded as a decision → PLAN tick with evidence �
 ## Branches in flight
 | Branch | State | What is left |
 |---|---|---|
-| `task/e1-14a-fuzz` | implementer running (brief: `fuzz/` crate with a target per reader path and a structure-aware mutator over the vectors, `fuzz.yml` manual + weekly, a local run through WSL with bugs fixed per commit, `docs/spec/CONFORMANCE.md`) | review, fix round, PR, fast-forward `main`; then E1-14b/c |
+| `task/e1-14a-fuzz` | PR #25 (draft): fuzz crate, fuzz CI job, mutation smoke test, CONFORMANCE.md, recovery and malformed vectors — code reviewed and approved | **owner's decision**: the `libfuzzer-sys` licence and whether a local WSL fuzz run is wanted (see the open points); then merge and dispatch `fuzz.yml` once |
+| `task/e1-14c-independent-decoder` | implementer running from the spec alone (`crates/lpk-check`; attests the files it read; lists every spec gap) | the gate: every vector passes; then the spec fix round and D-41 |
+| (no branch) | a read-only spec read-through (E1-14b) running on the spec of `task/e1-14a-fuzz` | its findings join the spec fix round |
 
 ## How to resume
 
@@ -42,6 +44,8 @@ round → the format values recorded as a decision → PLAN tick with evidence �
 The manual workflow `corpus-smoke.yml` has an input `run_smoke` (default on): after the corpus build it installs `zstd`, `xz-utils` and `7zip`, runs the baseline runner on four classes with one repeat, validates and uploads the results as an artifact (CI results are never committed). The green run and its summary lines are cited under the P0-5 box in PLAN. Nothing else is needed from CI for Phase 0.
 
 ## Open points for the owner
+- **Fuzzing harness licence** (E1-14a, PR #25): `libfuzzer-sys` carries NCSA alongside MIT/Apache; it is a development tool excluded from the workspace and never shipped. Allow NCSA for that one crate in a `fuzz/deny.toml` (recorded as a decision), or keep the harness unmerged.
+- **Local fuzzing through WSL**: optional; the CI job runs the fuzzers on Linux once the workflow is on `main`. A local run means installing rustup and `cargo-fuzz` for the WSL user (both would go into the removal inventory).
 - **G2 and G3 before D-08** (see the summary): decide what "2× smaller on versioned backups" means against incumbents that already deduplicate inside solid archives, and what "store at ≥ 80% of raw read" should be measured against (the current proxy is a real program reading and writing the files against an uncached raw read).
 - **Antivirus.** Windows Security Center on the measuring machine reports Defender off and a third-party product "snoozed". Each run records the state at start and end. Whether to run with the scanner fully on (with exclusions for `bench/tmp` and `bench/corpus`) or fully off is the owner's setting to change.
 - **Optional probe baselines.** `bsc` and `hdiffz` (free, from their authors' GitHub releases) are not installed; the text and dedup probes skip them unless the owner wants them installed. Without `bsc`, D-05's claim about BWT on text cannot be checked. Kanzi publishes no binaries. When `bsc` is first installed, its strongest flags must be checked against its usage text and recorded.
