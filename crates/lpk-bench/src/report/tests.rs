@@ -2157,6 +2157,58 @@ fn a_duplicate_combination_and_a_host_mismatch_are_refused() {
 }
 
 #[test]
+fn a_flag_taken_from_the_older_directory_keeps_its_citation() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    // a: rows of 7z only, its tools.json has dedup flags (zstd without rows).
+    let a = dir_under(tmp.path(), "a", &real_class_results()[..1]);
+    // b: rows of zstd, its tools.json has no dedup flags.
+    let b = dir_under(tmp.path(), "b", &zstd_results("1.5.7"));
+    let mut old = samples::tools();
+    for t in &mut old.tools {
+        t.dedup = None;
+    }
+    std::fs::write(b.join("tools.json"), render_json(&old)).expect("tools");
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
+    let zstd = inputs
+        .baseline
+        .tools
+        .tools
+        .iter()
+        .find(|t| t.id == "zstd")
+        .expect("zstd");
+    assert_eq!(zstd.dedup, Some(false));
+    let srcs = &inputs.baseline.tool_srcs["zstd"];
+    assert!(srcs.contains(&source_index(&inputs, "a/2026-10-01-testbox/tools.json")));
+    assert!(srcs.contains(&source_index(&inputs, "b/2026-10-01-testbox/tools.json")));
+    // A pooled report leaves out the single-run settings and antivirus lines.
+    let text = report_text(&inputs);
+    assert!(!text.contains("run settings:"), "{text}");
+    assert!(!text.contains("- antivirus at the start"), "{text}");
+}
+
+#[test]
+fn pool_reasons_name_the_threads_and_the_lpk_build_and_the_loader_uses_them() {
+    let mut i = inputs(&Knobs::default(), false);
+    assert!(model::pool_reasons(&i.baseline).is_empty());
+    let d = |threads: u32| model::PoolDir {
+        label: "x".into(),
+        build: i.baseline.host.git_commit.clone(),
+        tools_src: 2,
+        run_src: 3,
+        catalogue_blake3: String::new(),
+        repeats: 1,
+        long_run_s: 1,
+        threads,
+        settle_ms: 1,
+        antivirus_changed: false,
+    };
+    let (d1, d2) = (d(4), d(8));
+    i.baseline.pooled = vec![d1, d2];
+    let r = model::pool_reasons(&i.baseline);
+    assert!(r.iter().any(|r| r.contains("thread counts")), "{r:?}");
+}
+
+#[test]
 fn the_measured_lpk_build_must_be_clean_and_match_the_runner() {
     let lpk = |version: &str| crate::run::result::ToolEntry {
         id: "lpk".into(),

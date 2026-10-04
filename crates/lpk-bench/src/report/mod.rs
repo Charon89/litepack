@@ -12,7 +12,7 @@
 //!   gates, all as [`traced::Traced`] values (a number with the source files it came from).
 //! * [`render`]: the Markdown; [`mixes`]: `bench/report-mixes.toml`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -448,21 +448,20 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path, allow_unclean: bool) ->
         } else {
             (have.clone(), false)
         };
+        let earlier = srcs.clone();
         if take_next {
             srcs.clear();
             srcs.insert(next.tools_src);
         }
         if merged.dedup.is_none() {
             let (flag, from) = if take_next {
-                (have.dedup, None)
+                (have.dedup, earlier)
             } else {
-                (t.dedup, Some(next.tools_src))
+                (t.dedup, BTreeSet::from([next.tools_src]))
             };
             if flag.is_some() {
                 merged.dedup = flag;
-                if let Some(s) = from {
-                    srcs.insert(s);
-                }
+                srcs.extend(from);
             }
         }
         base.tools.tools[slot] = merged;
@@ -535,6 +534,15 @@ pub fn load(args: &ReportArgs) -> Result<Inputs> {
             &mut seen,
             &mut outside,
         )?;
+    }
+    if !args.allow_unclean {
+        let reasons = model::pool_reasons(&baseline);
+        if !reasons.is_empty() {
+            bail!(
+                "{}; use --allow-unclean to accept and mark it",
+                reasons.join("; ")
+            );
+        }
     }
     let mixes_text = read_text(&args.mixes)?;
     let mixes =

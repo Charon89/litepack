@@ -261,7 +261,8 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
         ));
     }
     let rb = brackets(&BTreeSet::from([b.run_src]));
-    s.push_str(&format!(
+    if b.pooled.len() <= 1 {
+        s.push_str(&format!(
         "- antivirus at the start of the baseline run: {} (Windows Defender real-time: {}) {}; at \
          the end: {} {}; changed during the run: {}\n",
         av_list(&h.antivirus),
@@ -271,16 +272,19 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
         rb,
         if b.run.antivirus_changed { "yes" } else { "no" }
     ));
-    s.push_str(&format!(
-        "- catalogue BLAKE3 `{}`; run settings: {} repeats requested, long-run limit {} s, \
+        s.push_str(&format!(
+            "- catalogue BLAKE3 `{}`; run settings: {} repeats requested, long-run limit {} s, \
          settle pause {} ms per 1000 files, {} threads {}\n\n",
-        b.run.catalogue_blake3,
-        b.run.repeats_requested,
-        b.run.long_run_s,
-        b.run.settle_ms_per_1000_files,
-        b.run.threads,
-        rb
-    ));
+            b.run.catalogue_blake3,
+            b.run.repeats_requested,
+            b.run.long_run_s,
+            b.run.settle_ms_per_1000_files,
+            b.run.threads,
+            rb
+        ));
+    } else {
+        s.push('\n');
+    }
 }
 
 fn baseline_per_class(s: &mut String, m: &Model, inputs: &Inputs) {

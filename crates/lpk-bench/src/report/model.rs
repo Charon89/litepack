@@ -1496,6 +1496,22 @@ pub fn unclean_reasons(i: &Inputs) -> Vec<String> {
             ));
         }
     }
+    v.extend(pool_reasons(b));
+    for p in i.probes.present() {
+        if !p.release || !crate::run::host::build_is_clean(&p.build) {
+            v.push(format!(
+                "probe {} is from a dirty, unknown or unoptimised build",
+                p.name
+            ));
+        }
+    }
+    v
+}
+
+/// Unclean reasons of the pooled runs and the measured `lpk` build: refused at load unless
+/// `--allow-unclean`, like the other unclean inputs.
+pub fn pool_reasons(b: &Baseline) -> Vec<String> {
+    let mut v = Vec::new();
     if b.pooled.iter().any(|d| d.threads != b.pooled[0].threads) {
         v.push("the pooled directories ran at different thread counts".to_string());
     }
@@ -1518,14 +1534,6 @@ pub fn unclean_reasons(i: &Inputs) -> Vec<String> {
                 )),
                 Some(_) => {}
             }
-        }
-    }
-    for p in i.probes.present() {
-        if !p.release || !crate::run::host::build_is_clean(&p.build) {
-            v.push(format!(
-                "probe {} is from a dirty, unknown or unoptimised build",
-                p.name
-            ));
         }
     }
     v
