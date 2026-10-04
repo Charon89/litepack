@@ -12,7 +12,7 @@ use crate::index::{BlockLocation, FrameLocation, Index};
 use crate::merkle::merkle_root;
 use crate::primitive::{GraphResources, PrimitiveId};
 use crate::record::{Record, RecordsWriter};
-use crate::recovery::{is_shard_cap, rs_error, Encoded, RecoveryOptions, ShardSpool};
+use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
 use crate::trailer::Trailer;
 use crate::varint;
 use std::collections::BTreeSet;
@@ -143,28 +143,20 @@ pub struct WriterOptions {
 /// byte written is also fed to it.
 struct Tee<W: Write> {
     inner: W,
-    spool: Option<ShardSpool>,
+    spool: Option<GroupEncoder>,
 }
 
 impl<W: Write> Write for Tee<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = self.inner.write(buf)?;
         if let Some(s) = &mut self.spool {
-            s.feed(&buf[..n])?;
+            s.feed(&buf[..n]).map_err(std::io::Error::other)?;
         }
         Ok(n)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
-    }
-}
-
-/// Turn the spool's cap signal into the option error it stands for.
-fn map_cap(e: FormatError) -> FormatError {
-    match e {
-        FormatError::Io(io) if is_shard_cap(&io) => bad_options("recovery shards"),
-        other => other,
     }
 }
 
@@ -225,8 +217,6 @@ pub struct Writer<W: Write> {
     failed: Option<(std::io::ErrorKind, String)>,
     /// Set after a chunker broke the rules; every later call fails with it.
     bad_chunk: Option<&'static str>,
-    /// Set when the archive outgrew the recovery shard cap.
-    bad_options: Option<&'static str>,
 }
 
 impl<W: Write> std::fmt::Debug for Writer<W> {
@@ -284,7 +274,7 @@ impl<W: Write> Writer<W> {
         }
         options.recovery.check()?;
         let spool = if options.recovery.percent > 0 {
-            Some(ShardSpool::new(options.recovery.shard_len)?)
+            Some(GroupEncoder::new(&options.recovery)?)
         } else {
             None
         };
@@ -305,17 +295,26 @@ impl<W: Write> Writer<W> {
             pending_chunks: 0,
             failed: None,
             bad_chunk: None,
-            bad_options: None,
         })
     }
 
     /// Covered bytes the writer holds in memory for recovery right now: never
     /// more than one shard (`recovery.shard_len`), whatever the archive's
-    /// size; 0 without recovery. The completed shards are hashed and spooled
-    /// to a temporary file, and only the recovery shards (`percent` of the
-    /// covered length) are in memory while the frame is written.
+    /// size; 0 without recovery. Memory rule: that shard buffer, the
+    /// encoder's work buffer for one group
+    /// ([`crate::recovery::encoder_work_bytes`]), and the recovery shards of
+    /// the finished groups (`percent` of the covered length) until their
+    /// frames are written after the covered range.
     pub fn recovery_buffered(&self) -> usize {
-        self.out.spool.as_ref().map_or(0, ShardSpool::buffered)
+        self.out.spool.as_ref().map_or(0, GroupEncoder::buffered)
+    }
+
+    /// Bytes of recovery shards held for finished groups right now.
+    pub fn recovery_held(&self) -> u64 {
+        self.out
+            .spool
+            .as_ref()
+            .map_or(0, GroupEncoder::held_recovery)
     }
 
     fn write_frame(
@@ -348,9 +347,6 @@ impl<W: Write> Writer<W> {
 
     /// Fail with the first I/O error this writer saw, if any.
     fn check_alive(&self) -> Result<(), FormatError> {
-        if let Some(reason) = self.bad_options {
-            return Err(FormatError::BadOptions { reason });
-        }
         if let Some(reason) = self.bad_chunk {
             return Err(FormatError::BadChunk { reason });
         }
@@ -362,9 +358,7 @@ impl<W: Write> Writer<W> {
 
     /// Remember an I/O error so that later calls refuse.
     fn note<T>(&mut self, r: Result<T, FormatError>) -> Result<T, FormatError> {
-        let r = r.map_err(map_cap);
         match &r {
-            Err(FormatError::BadOptions { reason }) => self.bad_options = Some(reason),
             Err(FormatError::Io(e)) => self.failed = Some((e.kind(), e.to_string())),
             Err(FormatError::BadChunk { reason }) => self.bad_chunk = Some(reason),
             _ => {}
@@ -572,50 +566,57 @@ impl<W: Write> Writer<W> {
         Ok((entry_table, records))
     }
 
-    /// Encode the spooled shards and write the `Recovery` frame (none without
-    /// recovery). The frame is written piecewise: the recovery shards stay in
-    /// the encoder and are not copied into a payload buffer.
+    /// Write one `Recovery` frame per finished group, after the covered range
+    /// (none without recovery). Each frame is written piecewise: the recovery
+    /// shards are not copied into a payload buffer.
     fn write_recovery(&mut self) -> Result<Vec<FrameLocation>, FormatError> {
         let Some(spool) = self.out.spool.take() else {
             return Ok(Vec::new());
         };
-        let Encoded { frame, mut encoder } = spool.finish(self.options.recovery.percent)?;
-        let result = encoder.encode().map_err(rs_error)?;
-        let head = frame.head_bytes();
-        let shard_total = u64::from(frame.recovery_shards) * u64::from(frame.shard_len);
-        let payload_len = head.len() as u64 + shard_total;
-        let at = FrameLocation {
-            offset: self.pos,
-            len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
-        };
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&head);
-        let w = &mut self.out;
-        w.write_all(&(FrameKind::Recovery as u16).to_le_bytes())?;
-        w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
-        varint::write(w, payload_len)?;
-        w.write_all(&head)?;
-        let mut shards = 0u32;
-        for shard in result.recovery_iter() {
-            hasher.update(shard);
-            w.write_all(shard)?;
-            shards += 1;
+        let o = self.options.recovery;
+        let groups = spool.finish()?;
+        let recovery_shards = crate::recovery::group_recovery_shards(o.group_shards, o.percent);
+        let mut cover_offset = Header::LEN as u64;
+        let mut locations = Vec::with_capacity(groups.len());
+        for g in groups {
+            let frame = RecoveryFrame {
+                cover_offset,
+                cover_len: g.cover_len,
+                shard_len: o.shard_len,
+                data_shards: g.hashes.len() as u32,
+                group_shards: o.group_shards,
+                recovery_shards,
+                shard_hashes: g.hashes,
+                recovery: Vec::new(),
+            };
+            cover_offset += g.cover_len;
+            let head = frame.head_bytes();
+            let payload_len = head.len() as u64 + g.recovery.len() as u64;
+            let at = FrameLocation {
+                offset: self.pos,
+                len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
+            };
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&head);
+            hasher.update(&g.recovery);
+            let w = &mut self.out;
+            w.write_all(&(FrameKind::Recovery as u16).to_le_bytes())?;
+            w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
+            varint::write(w, payload_len)?;
+            w.write_all(&head)?;
+            w.write_all(&g.recovery)?;
+            w.write_all(hasher.finalize().as_bytes())?;
+            self.pos += at.len;
+            locations.push(at);
         }
-        if shards != frame.recovery_shards {
-            return Err(FormatError::RecoveryError {
-                reason: "the encoder returned the wrong number of shards".to_string(),
-            });
-        }
-        w.write_all(hasher.finalize().as_bytes())?;
-        self.pos += at.len;
-        Ok(vec![at])
+        Ok(locations)
     }
 
-    /// Close the last block and write the entry table, the recovery frame, the
+    /// Close the last block and write the entry table, the recovery frames, the
     /// index and the trailer.
     pub fn finish(mut self) -> Result<WriterSummary, FormatError> {
         self.check_alive()?;
-        let (entry_table, records) = self.write_covered_tail().map_err(map_cap)?;
+        let (entry_table, records) = self.write_covered_tail()?;
         let records_len = records.map_or(0, |r| r.len);
         let recovery = self.write_recovery()?;
         let recovery_len = recovery.iter().map(|r| r.len).max().unwrap_or(0);

@@ -322,6 +322,7 @@ fn recovering(dir: &Path) -> std::path::PathBuf {
     o.recovery = lpk_format::RecoveryOptions {
         percent: 10,
         shard_len: 4096,
+        group_shards: 16,
     };
     let mut w = Writer::new(std::fs::File::create(&p).unwrap(), o).unwrap();
     for (name, d) in [("a", data(3, 50_000)), ("b", data(5, 30_000))] {
@@ -341,7 +342,7 @@ fn check_and_repair_on_a_damaged_archive() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(
         out,
-        "recovery frames: 1, unusable: 0, damaged shards: 0, repaired shards: 0\n"
+        "recovery frames: 2, unusable: 0, damaged shards: 0, repaired shards: 0\n"
     );
     // Damage two shards: bytes in the first and in the third shard.
     let mut bad = good.clone();
@@ -351,13 +352,13 @@ fn check_and_repair_on_a_damaged_archive() {
     let (code, out, err) = cli(&["check", p.to_str().unwrap()]);
     assert_eq!(code, 1);
     assert!(out.contains("damaged shards: 2"), "{out}");
-    assert!(err.contains("damage found"), "{err}");
+    assert!(err.contains("damage found: 2 shards damaged"), "{err}");
     let fixed = t.path().join("fixed.lpk");
     let (code, out, err) = cli(&["repair", p.to_str().unwrap(), fixed.to_str().unwrap()]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(
         out,
-        "recovery frames: 1, unusable: 0, damaged shards: 2, repaired shards: 2\n"
+        "recovery frames: 2, unusable: 0, damaged shards: 2, repaired shards: 2\n"
     );
     assert_eq!(std::fs::read(&fixed).unwrap(), good);
     let (code, out, _) = cli(&["verify", fixed.to_str().unwrap()]);

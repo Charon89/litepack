@@ -318,6 +318,14 @@ pub enum FormatError {
         /// Shards the frame can rebuild.
         capacity: u64,
     },
+    /// `lpk-decode check` found damage (not a library error).
+    #[error("damage found: {damaged} shards damaged, {unusable} recovery frames unusable")]
+    DamageFound {
+        /// Damaged data shards.
+        damaged: u64,
+        /// Unusable recovery frames.
+        unusable: u64,
+    },
     /// The Reed-Solomon library refused its input.
     #[error("recovery: {reason}")]
     RecoveryError {

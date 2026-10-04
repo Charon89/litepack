@@ -6,7 +6,7 @@ use crate::entry::{Entry, EntryKind};
 use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::priors::MemoryPriors;
-use crate::recovery::{repair, RepairReport};
+use crate::recovery::{repair_with_report, RepairReport};
 use crate::trailer::TRAILER_FRAME_LEN;
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
@@ -190,8 +190,9 @@ fn check(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     let r = a.check_recovery()?;
     print_report(out, &r)?;
     if r.shards_damaged > 0 || r.frames_unusable > 0 {
-        return Err(FormatError::RecoveryError {
-            reason: "damage found".to_string(),
+        return Err(FormatError::DamageFound {
+            damaged: r.shards_damaged,
+            unusable: r.frames_unusable,
         });
     }
     Ok(())
@@ -204,15 +205,17 @@ fn repair_cmd(path: &Path, target: &Path, out: &mut dyn Write) -> Result<(), For
         .write(true)
         .create_new(true)
         .open(target)?;
-    let result = repair(input, file, &Resources::default());
-    match &result {
+    match repair_with_report(input, file, &Resources::default()) {
         // The copy carries the repairs that were possible; keep it.
-        Ok(_) | Err(FormatError::Unrepairable { .. }) => {}
-        Err(_) => {
+        Ok((report, unrepairable)) => {
+            print_report(out, &report)?;
+            unrepairable.map_or(Ok(()), Err)
+        }
+        Err(e) => {
             let _ = std::fs::remove_file(target);
+            Err(e)
         }
     }
-    print_report(out, &result?)
 }
 
 fn info(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), FormatError> {

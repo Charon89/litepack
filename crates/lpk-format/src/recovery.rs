@@ -1,37 +1,53 @@
-//! Recovery frames: Reed-Solomon shards over the body of the archive, which let a
+//! Recovery frames: Reed-Solomon shards over groups of the archive body, which let a
 //! reader rebuild damaged bytes (spec section 13).
+//!
+//! Memory rules (independent of the archive size except where stated):
+//! - writer: one shard buffer, plus the encoder's work buffer for one group
+//!   ([`encoder_work_bytes`]), plus the recovery shards of every finished group
+//!   (`percent` of the covered length) until their frames are written;
+//! - repair: one shard while scanning, and for a group with damage the decoder's
+//!   buffer for one group ([`decoder_work_bytes`]).
 
 use crate::archive::Archive;
-use crate::envelope::Resources;
+use crate::envelope::{Refusal, Resources};
 use crate::error::FormatError;
 use crate::frame::FrameKind;
 use crate::header::Header;
-use reed_solomon_simd::ReedSolomonDecoder;
+use crate::index::FrameLocation;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Shard lengths are multiples of this many bytes.
 pub const SHARD_ALIGN: u32 = 64;
 /// Default shard length: 64 KiB.
 pub const DEFAULT_SHARD_LEN: u32 = 1 << 16;
-/// Most data shards a writer makes for one recovery frame.
-pub const MAX_DATA_SHARDS: u32 = 32768;
-/// Most data shards plus recovery shards in one frame.
+/// Largest shard length: 16 MiB.
+pub const MAX_SHARD_LEN: u32 = 16 << 20;
+/// Default data shards per group.
+pub const DEFAULT_GROUP_SHARDS: u32 = 1024;
+/// Most data shards in one group.
+pub const MAX_GROUP_SHARDS: u32 = 32768;
+/// Most data shards plus recovery shards in one group.
 pub const MAX_TOTAL_SHARDS: u32 = 65535;
+/// Largest `group_shards * shard_len`: 1 GiB.
+pub const MAX_GROUP_BYTES: u64 = 1 << 30;
 /// Largest recovery percentage a writer accepts.
 pub const MAX_PERCENT: u8 = 20;
 /// Bytes of a recovery payload before the shard hashes.
-pub const RECOVERY_HEAD_LEN: usize = 28;
+pub const RECOVERY_HEAD_LEN: usize = 32;
 
 const WHAT: &str = "recovery";
 
 /// Recovery settings of a writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveryOptions {
-    /// Recovery shards as a share of the data shards, in percent: 0 writes no
-    /// recovery frame, otherwise 1 to 20.
+    /// Recovery shards as a share of a group's data shards, in percent: 0
+    /// writes no recovery frame, otherwise 1 to 20.
     pub percent: u8,
-    /// Shard length in bytes: a multiple of 64, at least 64.
+    /// Shard length in bytes: a multiple of 64, at most 16 MiB.
     pub shard_len: u32,
+    /// Data shards per group (and per recovery frame): 1 to 32768.
+    pub group_shards: u32,
 }
 
 impl Default for RecoveryOptions {
@@ -39,54 +55,67 @@ impl Default for RecoveryOptions {
         RecoveryOptions {
             percent: 0,
             shard_len: DEFAULT_SHARD_LEN,
+            group_shards: DEFAULT_GROUP_SHARDS,
         }
     }
+}
+
+fn bad_opt(reason: &'static str) -> FormatError {
+    FormatError::BadOptions { reason }
+}
+
+/// `ceil(group_shards * percent / 100)`, at least 1.
+pub fn group_recovery_shards(group_shards: u32, percent: u8) -> u32 {
+    (u64::from(group_shards) * u64::from(percent))
+        .div_ceil(100)
+        .max(1) as u32
+}
+
+/// Bytes the encoder's work buffer takes for one group: `work_count *
+/// shard_len` with `work_count` the group's shards rounded up to a multiple of
+/// `next_pow2(recovery_shards)`.
+pub fn encoder_work_bytes(group_shards: u32, recovery_shards: u32, shard_len: u32) -> u64 {
+    let m = u64::from(recovery_shards.max(1).next_power_of_two());
+    u64::from(group_shards).next_multiple_of(m) * u64::from(shard_len)
+}
+
+/// Bytes the decoder's buffer takes for one group: `(next_pow2(recovery_shards)
+/// + group_shards).next_pow2() * shard_len`.
+pub fn decoder_work_bytes(group_shards: u32, recovery_shards: u32, shard_len: u32) -> u64 {
+    let m = u64::from(recovery_shards.max(1).next_power_of_two());
+    (m + u64::from(group_shards)).next_power_of_two() * u64::from(shard_len)
 }
 
 impl RecoveryOptions {
     /// Check the options a writer is given (only when `percent` is not 0).
     pub fn check(&self) -> Result<(), FormatError> {
         if self.percent > MAX_PERCENT {
-            return Err(FormatError::BadOptions {
-                reason: "recovery percent above 20",
-            });
+            return Err(bad_opt("recovery percent above 20"));
         }
-        if self.percent > 0 && (self.shard_len == 0 || !self.shard_len.is_multiple_of(SHARD_ALIGN))
-        {
-            return Err(FormatError::BadOptions {
-                reason: "recovery shard_len not a multiple of 64",
-            });
+        if self.percent == 0 {
+            return Ok(());
+        }
+        if self.shard_len == 0 || !self.shard_len.is_multiple_of(SHARD_ALIGN) {
+            return Err(bad_opt("recovery shard_len not a multiple of 64"));
+        }
+        if self.shard_len > MAX_SHARD_LEN {
+            return Err(bad_opt("recovery shard_len above 16 MiB"));
+        }
+        if self.group_shards == 0 || self.group_shards > MAX_GROUP_SHARDS {
+            return Err(bad_opt("recovery group_shards"));
+        }
+        if u64::from(self.group_shards) * u64::from(self.shard_len) > MAX_GROUP_BYTES {
+            return Err(bad_opt("recovery group above 1 GiB"));
+        }
+        let r = group_recovery_shards(self.group_shards, self.percent);
+        if u64::from(self.group_shards) + u64::from(r) > u64::from(MAX_TOTAL_SHARDS) {
+            return Err(bad_opt("recovery shards"));
         }
         Ok(())
     }
 }
 
-/// The shard counts for a cover of `cover_len` bytes: `(data_shards,
-/// recovery_shards)`. `BadOptions { reason: "recovery shards" }` when the
-/// cover needs more than 32768 data shards (or `cover_len` is 0).
-pub fn shard_geometry(
-    cover_len: u64,
-    shard_len: u32,
-    percent: u8,
-) -> Result<(u32, u32), FormatError> {
-    let bad = FormatError::BadOptions {
-        reason: "recovery shards",
-    };
-    if cover_len == 0 || shard_len == 0 || percent == 0 {
-        return Err(bad);
-    }
-    let data = cover_len.div_ceil(u64::from(shard_len));
-    if data > u64::from(MAX_DATA_SHARDS) {
-        return Err(bad);
-    }
-    let recovery = (data * u64::from(percent)).div_ceil(100).max(1);
-    if data + recovery > u64::from(MAX_TOTAL_SHARDS) {
-        return Err(bad);
-    }
-    Ok((data as u32, recovery as u32))
-}
-
-/// A decoded recovery frame payload.
+/// A decoded recovery frame payload: one group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryFrame {
     /// Absolute offset of the first covered byte.
@@ -95,11 +124,13 @@ pub struct RecoveryFrame {
     pub cover_len: u64,
     /// Length of every shard in bytes.
     pub shard_len: u32,
-    /// Number of data shards: `ceil(cover_len / shard_len)`.
+    /// Real data shards in this group: `ceil(cover_len / shard_len)`, at most `group_shards`.
     pub data_shards: u32,
+    /// Data shards the group is coded with; those after `data_shards` are implicit zero shards.
+    pub group_shards: u32,
     /// Number of recovery shards.
     pub recovery_shards: u32,
-    /// BLAKE3 of every data shard, the last one padded with zeros.
+    /// BLAKE3 of every real data shard, the last one padded with zeros.
     pub shard_hashes: Vec<[u8; 32]>,
     /// The recovery shards, `recovery_shards * shard_len` bytes.
     pub recovery: Vec<u8>,
@@ -109,15 +140,50 @@ fn bad(reason: &'static str) -> FormatError {
     FormatError::BadRecovery { reason }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn check_fields(
+    cover_offset: u64,
+    cover_len: u64,
+    shard_len: u32,
+    data_shards: u32,
+    group_shards: u32,
+    recovery_shards: u32,
+) -> Result<(), FormatError> {
+    if shard_len == 0 || !shard_len.is_multiple_of(SHARD_ALIGN) || shard_len > MAX_SHARD_LEN {
+        return Err(bad("shard_len"));
+    }
+    if cover_offset < Header::LEN as u64 {
+        return Err(bad("cover range"));
+    }
+    if group_shards == 0 || group_shards > MAX_GROUP_SHARDS {
+        return Err(bad("group_shards"));
+    }
+    if u64::from(group_shards) * u64::from(shard_len) > MAX_GROUP_BYTES {
+        return Err(bad("group size"));
+    }
+    if data_shards == 0
+        || data_shards > group_shards
+        || cover_len.div_ceil(u64::from(shard_len)) != u64::from(data_shards)
+    {
+        return Err(bad("data_shards"));
+    }
+    if recovery_shards == 0 {
+        return Err(bad("recovery_shards"));
+    }
+    if u64::from(group_shards) + u64::from(recovery_shards) > u64::from(MAX_TOTAL_SHARDS) {
+        return Err(bad("shard count"));
+    }
+    Ok(())
+}
+
 impl RecoveryFrame {
-    /// The rules that do not depend on the archive: shard length, counts,
-    /// sums and the length of the hash and shard lists.
     fn check(&self) -> Result<(), FormatError> {
         check_fields(
             self.cover_offset,
             self.cover_len,
             self.shard_len,
             self.data_shards,
+            self.group_shards,
             self.recovery_shards,
         )?;
         if self.shard_hashes.len() != self.data_shards as usize {
@@ -146,6 +212,7 @@ impl RecoveryFrame {
         out.extend_from_slice(&self.cover_len.to_le_bytes());
         out.extend_from_slice(&self.shard_len.to_le_bytes());
         out.extend_from_slice(&self.data_shards.to_le_bytes());
+        out.extend_from_slice(&self.group_shards.to_le_bytes());
         out.extend_from_slice(&self.recovery_shards.to_le_bytes());
         for h in &self.shard_hashes {
             out.extend_from_slice(h);
@@ -153,10 +220,12 @@ impl RecoveryFrame {
         out
     }
 
-    /// Parse a payload found in an archive whose index starts at
-    /// `index_offset`: every consistency rule of section 13 is checked, and
-    /// nothing is allocated beyond the payload's own length.
-    pub fn parse(payload: &[u8], index_offset: u64) -> Result<RecoveryFrame, FormatError> {
+    /// Check every rule and return the frame without its recovery bytes and
+    /// the offset where they start in `payload`.
+    fn parse_head(
+        payload: &[u8],
+        index_offset: u64,
+    ) -> Result<(RecoveryFrame, usize), FormatError> {
         if payload.len() < RECOVERY_HEAD_LEN {
             return Err(FormatError::Truncated { what: WHAT });
         }
@@ -168,12 +237,14 @@ impl RecoveryFrame {
         let cover_len = u64_at(8);
         let shard_len = u32_at(16);
         let data_shards = u32_at(20);
-        let recovery_shards = u32_at(24);
+        let group_shards = u32_at(24);
+        let recovery_shards = u32_at(28);
         check_fields(
             cover_offset,
             cover_len,
             shard_len,
             data_shards,
+            group_shards,
             recovery_shards,
         )?;
         let end = cover_offset
@@ -193,15 +264,40 @@ impl RecoveryFrame {
             .as_chunks::<32>()
             .0
             .to_vec();
-        Ok(RecoveryFrame {
-            cover_offset,
-            cover_len,
-            shard_len,
-            data_shards,
-            recovery_shards,
-            shard_hashes,
-            recovery: payload[hashes_end..].to_vec(),
-        })
+        Ok((
+            RecoveryFrame {
+                cover_offset,
+                cover_len,
+                shard_len,
+                data_shards,
+                group_shards,
+                recovery_shards,
+                shard_hashes,
+                recovery: Vec::new(),
+            },
+            hashes_end,
+        ))
+    }
+
+    /// Parse a payload found in an archive whose index starts at
+    /// `index_offset`: every consistency rule of section 13 is checked, and
+    /// nothing is allocated beyond the payload's own length.
+    pub fn parse(payload: &[u8], index_offset: u64) -> Result<RecoveryFrame, FormatError> {
+        let (mut f, at) = Self::parse_head(payload, index_offset)?;
+        f.recovery = payload[at..].to_vec();
+        Ok(f)
+    }
+
+    /// Like [`RecoveryFrame::parse`], reusing the payload's own allocation for
+    /// the recovery bytes (no second copy).
+    pub fn parse_vec(
+        mut payload: Vec<u8>,
+        index_offset: u64,
+    ) -> Result<RecoveryFrame, FormatError> {
+        let (mut f, at) = Self::parse_head(&payload, index_offset)?;
+        payload.drain(..at);
+        f.recovery = payload;
+        Ok(f)
     }
 
     /// Byte range of data shard `i` inside the archive: `(offset, len)`; the
@@ -213,85 +309,54 @@ impl RecoveryFrame {
     }
 }
 
-fn check_fields(
-    cover_offset: u64,
-    cover_len: u64,
-    shard_len: u32,
-    data_shards: u32,
-    recovery_shards: u32,
-) -> Result<(), FormatError> {
-    if shard_len == 0 || !shard_len.is_multiple_of(SHARD_ALIGN) {
-        return Err(bad("shard_len"));
-    }
-    if cover_offset < Header::LEN as u64 {
-        return Err(bad("cover range"));
-    }
-    if cover_len == 0 || cover_len.div_ceil(u64::from(shard_len)) != u64::from(data_shards) {
-        return Err(bad("data_shards"));
-    }
-    if recovery_shards == 0 {
-        return Err(bad("recovery_shards"));
-    }
-    if u64::from(data_shards) + u64::from(recovery_shards) > u64::from(MAX_TOTAL_SHARDS) {
-        return Err(bad("shard count"));
-    }
-    Ok(())
-}
-
-/// The writer found more than 32768 data shards (carried inside an
-/// `io::Error` so that it can cross `Write::write`).
-#[derive(Debug)]
-pub(crate) struct ShardCap;
-
-impl std::fmt::Display for ShardCap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("more than 32768 recovery data shards")
-    }
-}
-
-impl std::error::Error for ShardCap {}
-
-/// True when `e` is the cap error of [`ShardSpool::feed`].
-pub(crate) fn is_shard_cap(e: &std::io::Error) -> bool {
-    e.get_ref().is_some_and(|inner| inner.is::<ShardCap>())
-}
-
 pub(crate) fn rs_error(e: reed_solomon_simd::Error) -> FormatError {
     FormatError::RecoveryError {
         reason: e.to_string(),
     }
 }
 
-/// Collects the covered bytes of a stream into shards, one at a time.
-///
-/// Memory rule: this holds one shard buffer and 32 bytes per completed shard;
-/// the shards themselves go to an anonymous temporary file, because the
-/// Reed-Solomon encoder must know the number of data shards when it is created
-/// and a streaming writer learns it only when the covered range ends. At the
-/// end the file is read back once, shard by shard, into the encoder.
-pub(crate) struct ShardSpool {
+/// One finished group: what its frame needs.
+pub(crate) struct Group {
+    pub cover_len: u64,
+    pub hashes: Vec<[u8; 32]>,
+    pub recovery: Vec<u8>,
+}
+
+/// Collects the covered bytes of a stream into shards and groups; each full
+/// group is encoded at once, so no covered byte is kept beyond one shard.
+pub(crate) struct GroupEncoder {
     shard_len: usize,
+    group_shards: u32,
+    recovery_shards: u32,
     buf: Vec<u8>,
+    zero: Vec<u8>,
+    encoder: ReedSolomonEncoder,
+    in_group: u32,
+    group_bytes: u64,
     hashes: Vec<[u8; 32]>,
-    file: std::fs::File,
-    cover_len: u64,
+    done: Vec<Group>,
 }
 
-/// The result of [`ShardSpool::finish`]: the frame without its recovery bytes
-/// and the encoder that holds them.
-pub(crate) struct Encoded {
-    pub frame: RecoveryFrame,
-    pub encoder: reed_solomon_simd::ReedSolomonEncoder,
-}
-
-impl ShardSpool {
-    pub(crate) fn new(shard_len: u32) -> std::io::Result<ShardSpool> {
-        Ok(ShardSpool {
-            shard_len: shard_len as usize,
-            buf: Vec::with_capacity(shard_len as usize),
+impl GroupEncoder {
+    pub(crate) fn new(o: &RecoveryOptions) -> Result<GroupEncoder, FormatError> {
+        let recovery_shards = group_recovery_shards(o.group_shards, o.percent);
+        let shard_len = o.shard_len as usize;
+        Ok(GroupEncoder {
+            shard_len,
+            group_shards: o.group_shards,
+            recovery_shards,
+            buf: Vec::with_capacity(shard_len),
+            zero: vec![0; shard_len],
+            encoder: ReedSolomonEncoder::new(
+                o.group_shards as usize,
+                recovery_shards as usize,
+                shard_len,
+            )
+            .map_err(rs_error)?,
+            in_group: 0,
+            group_bytes: 0,
             hashes: Vec::new(),
-            file: tempfile::tempfile()?,
-            cover_len: 0,
+            done: Vec::new(),
         })
     }
 
@@ -300,22 +365,60 @@ impl ShardSpool {
         self.buf.len()
     }
 
-    fn complete(&mut self) -> std::io::Result<()> {
-        self.buf.resize(self.shard_len, 0);
-        self.hashes.push(*blake3::hash(&self.buf).as_bytes());
-        self.file.write_all(&self.buf)?;
-        self.buf.clear();
+    /// Bytes of recovery shards held for finished groups.
+    pub(crate) fn held_recovery(&self) -> u64 {
+        self.done.iter().map(|g| g.recovery.len() as u64).sum()
+    }
+
+    fn close_group(&mut self) -> Result<(), FormatError> {
+        for _ in self.in_group..self.group_shards {
+            self.encoder
+                .add_original_shard(&self.zero)
+                .map_err(rs_error)?;
+        }
+        let mut recovery = Vec::with_capacity(self.recovery_shards as usize * self.shard_len);
+        {
+            let result = self.encoder.encode().map_err(rs_error)?;
+            for s in result.recovery_iter() {
+                recovery.extend_from_slice(s);
+            }
+        }
+        self.encoder
+            .reset(
+                self.group_shards as usize,
+                self.recovery_shards as usize,
+                self.shard_len,
+            )
+            .map_err(rs_error)?;
+        self.done.push(Group {
+            cover_len: self.group_bytes,
+            hashes: std::mem::take(&mut self.hashes),
+            recovery,
+        });
+        self.in_group = 0;
+        self.group_bytes = 0;
         Ok(())
     }
 
-    pub(crate) fn feed(&mut self, mut bytes: &[u8]) -> std::io::Result<()> {
+    fn complete(&mut self) -> Result<(), FormatError> {
+        self.buf.resize(self.shard_len, 0);
+        self.hashes.push(*blake3::hash(&self.buf).as_bytes());
+        self.encoder
+            .add_original_shard(&self.buf)
+            .map_err(rs_error)?;
+        self.buf.clear();
+        self.in_group += 1;
+        if self.in_group == self.group_shards {
+            self.close_group()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn feed(&mut self, mut bytes: &[u8]) -> Result<(), FormatError> {
         while !bytes.is_empty() {
-            if self.buf.is_empty() && self.hashes.len() >= MAX_DATA_SHARDS as usize {
-                return Err(std::io::Error::other(ShardCap));
-            }
             let take = (self.shard_len - self.buf.len()).min(bytes.len());
             self.buf.extend_from_slice(&bytes[..take]);
-            self.cover_len += take as u64;
+            self.group_bytes += take as u64;
             bytes = &bytes[take..];
             if self.buf.len() == self.shard_len {
                 self.complete()?;
@@ -324,38 +427,15 @@ impl ShardSpool {
         Ok(())
     }
 
-    /// Close the covered range and encode: the geometry comes from
-    /// `percent`; the frame's `cover_offset` is the end of the header.
-    pub(crate) fn finish(mut self, percent: u8) -> Result<Encoded, FormatError> {
+    /// Close the covered range: the finished groups, in order.
+    pub(crate) fn finish(mut self) -> Result<Vec<Group>, FormatError> {
         if !self.buf.is_empty() {
             self.complete()?;
         }
-        let shard_len = self.shard_len as u32;
-        let (data, recovery) = shard_geometry(self.cover_len, shard_len, percent)?;
-        let mut encoder = reed_solomon_simd::ReedSolomonEncoder::new(
-            data as usize,
-            recovery as usize,
-            self.shard_len,
-        )
-        .map_err(rs_error)?;
-        self.file.seek(SeekFrom::Start(0))?;
-        let mut shard = vec![0u8; self.shard_len];
-        for _ in 0..data {
-            self.file.read_exact(&mut shard)?;
-            encoder.add_original_shard(&shard).map_err(rs_error)?;
+        if self.in_group > 0 {
+            self.close_group()?;
         }
-        Ok(Encoded {
-            frame: RecoveryFrame {
-                cover_offset: Header::LEN as u64,
-                cover_len: self.cover_len,
-                shard_len,
-                data_shards: data,
-                recovery_shards: recovery,
-                shard_hashes: self.hashes,
-                recovery: Vec::new(),
-            },
-            encoder,
-        })
+        Ok(self.done)
     }
 }
 
@@ -364,8 +444,8 @@ impl ShardSpool {
 pub struct RepairReport {
     /// Recovery frames the index lists.
     pub frames: u64,
-    /// Frames whose own hash (or location) failed: skipped, their coverage is
-    /// unprotected.
+    /// Frames that failed their hash, their location or a field rule: skipped,
+    /// their coverage is unprotected.
     pub frames_unusable: u64,
     /// Data shards whose hash differs from the frame's, over all usable frames.
     pub shards_damaged: u64,
@@ -389,12 +469,27 @@ fn read_shard<R: Read + Seek>(
     Ok(())
 }
 
+/// The coverage may not overlap any recovery frame (its own included).
+fn check_cover(frame: &RecoveryFrame, locations: &[FrameLocation]) -> Result<(), FormatError> {
+    let end = frame.cover_offset + frame.cover_len;
+    if locations
+        .iter()
+        .any(|l| frame.cover_offset < l.offset.saturating_add(l.len) && l.offset < end)
+    {
+        return Err(bad("cover range"));
+    }
+    Ok(())
+}
+
+type Visit<'a, R> =
+    dyn FnMut(&mut Archive<R>, usize, &RecoveryFrame, &[u32]) -> Result<u64, FormatError> + 'a;
+
 /// Walk the recovery frames: for each usable one, hash its data shards and
 /// call `visit(archive, position, frame, damaged)` with the damaged shard
 /// numbers (ascending, possibly none); `visit` returns the shards it repaired.
 fn scan<R: Read + Seek>(
     a: &mut Archive<R>,
-    mut visit: impl FnMut(&mut Archive<R>, usize, &RecoveryFrame, &[u32]) -> Result<u64, FormatError>,
+    visit: &mut Visit<'_, R>,
 ) -> Result<RepairReport, FormatError> {
     let locations = a.recovery_frames().to_vec();
     let index_at = a.trailer().index_offset;
@@ -403,8 +498,8 @@ fn scan<R: Read + Seek>(
         ..RepairReport::default()
     };
     let mut buf = Vec::new();
-    for (i, loc) in locations.into_iter().enumerate() {
-        let payload = match a.read_frame_at(loc, FrameKind::Recovery) {
+    for (i, loc) in locations.iter().enumerate() {
+        let payload = match a.read_frame_at(*loc, FrameKind::Recovery) {
             Ok(f) => f.payload,
             Err(FormatError::Io(e)) => return Err(FormatError::Io(e)),
             // A damaged frame (hash, kind or length): skipped.
@@ -413,8 +508,16 @@ fn scan<R: Read + Seek>(
                 continue;
             }
         };
-        let frame = RecoveryFrame::parse(&payload, index_at)?;
-        drop(payload);
+        let frame = match RecoveryFrame::parse_vec(payload, index_at)
+            .and_then(|f| check_cover(&f, &locations).map(|()| f))
+        {
+            Ok(f) => f,
+            // The hash passed but a rule is broken: also unusable.
+            Err(_) => {
+                report.frames_unusable += 1;
+                continue;
+            }
+        };
         let mut damaged = Vec::new();
         for s in 0..frame.data_shards {
             read_shard(a.raw_reader(), &frame, s, &mut buf)?;
@@ -437,7 +540,7 @@ fn rebuild<R: Read + Seek>(
 ) -> Result<Vec<(u32, Vec<u8>)>, FormatError> {
     let shard_len = frame.shard_len as usize;
     let mut decoder = ReedSolomonDecoder::new(
-        frame.data_shards as usize,
+        frame.group_shards as usize,
         frame.recovery_shards as usize,
         shard_len,
     )
@@ -450,6 +553,13 @@ fn rebuild<R: Read + Seek>(
                 .add_original_shard(s as usize, &buf)
                 .map_err(rs_error)?;
         }
+    }
+    // The implicit zero shards of a short last group are always intact.
+    let zero = vec![0u8; shard_len];
+    for s in frame.data_shards..frame.group_shards {
+        decoder
+            .add_original_shard(s as usize, &zero)
+            .map_err(rs_error)?;
     }
     for (j, shard) in frame
         .recovery
@@ -485,7 +595,7 @@ impl<R: Read + Seek> Archive<R> {
     /// Detect damage without repairing: hash every data shard of every usable
     /// recovery frame and count the damaged ones. `shards_repaired` is 0.
     pub fn check_recovery(&mut self) -> Result<RepairReport, FormatError> {
-        scan(self, |_, _, _, _| Ok(0))
+        scan(self, &mut |_, _, _, _| Ok(0))
     }
 }
 
@@ -494,13 +604,28 @@ impl<R: Read + Seek> Archive<R> {
 /// returned as the error `Archive::open` gives, and nothing is written). If a
 /// frame has more damaged shards than it can rebuild, the copy still carries
 /// every repair the other frames made and the first such frame is returned as
-/// [`FormatError::Unrepairable`]. Memory: one shard while scanning; a frame
-/// with damage is rebuilt with its whole covered range in the decoder.
+/// [`FormatError::Unrepairable`]. Memory: one shard while scanning; a group
+/// with damage is rebuilt in the decoder's buffer for one group
+/// ([`decoder_work_bytes`]), refused with `Refused` (field `recovery group`)
+/// when that exceeds `resources.memory`.
 pub fn repair<R: Read + Seek, W: Write + Seek>(
+    archive: R,
+    out: W,
+    resources: &Resources,
+) -> Result<RepairReport, FormatError> {
+    match repair_with_report(archive, out, resources)? {
+        (report, None) => Ok(report),
+        (_, Some(e)) => Err(e),
+    }
+}
+
+/// Like [`repair`], but an `Unrepairable` outcome is returned beside the
+/// report instead of replacing it.
+pub fn repair_with_report<R: Read + Seek, W: Write + Seek>(
     archive: R,
     mut out: W,
     resources: &Resources,
-) -> Result<RepairReport, FormatError> {
+) -> Result<(RepairReport, Option<FormatError>), FormatError> {
     let mut a = Archive::open(archive, resources)?;
     {
         let r = a.raw_reader();
@@ -509,7 +634,7 @@ pub fn repair<R: Read + Seek, W: Write + Seek>(
         std::io::copy(r, &mut out)?;
     }
     let mut unrepairable = None;
-    let report = scan(&mut a, |a, i, frame, damaged| {
+    let report = scan(&mut a, &mut |a, i, frame, damaged| {
         if damaged.is_empty() {
             return Ok(0);
         }
@@ -522,6 +647,14 @@ pub fn repair<R: Read + Seek, W: Write + Seek>(
             });
             return Ok(0);
         }
+        let needed = decoder_work_bytes(frame.group_shards, frame.recovery_shards, frame.shard_len);
+        if needed > resources.memory {
+            return Err(FormatError::Refused(Refusal {
+                field: "recovery group",
+                needed,
+                allowed: resources.memory,
+            }));
+        }
         let fixed = rebuild(a.raw_reader(), frame, damaged)?;
         for (s, bytes) in &fixed {
             let (offset, len) = frame.shard_range(*s);
@@ -531,21 +664,19 @@ pub fn repair<R: Read + Seek, W: Write + Seek>(
         Ok(fixed.len() as u64)
     })?;
     out.flush()?;
-    match unrepairable {
-        Some(e) => Err(e),
-        None => Ok(report),
-    }
+    Ok((report, unrepairable))
 }
 
 /// The Markdown table of the recovery payload, pasted verbatim into the spec.
 pub fn recovery_layout_table() -> String {
     "| Field | Size | Meaning |\n|---|---|---|\n\
      | cover_offset | 8 | absolute offset of the first covered byte (little-endian); at least the header length |\n\
-     | cover_len | 8 | number of covered bytes; the range ends at or before the index |\n\
-     | shard_len | 4 | length of every shard in bytes; a multiple of 64, not 0 |\n\
-     | data_shards | 4 | `ceil(cover_len / shard_len)` |\n\
-     | recovery_shards | 4 | number of recovery shards; at least 1; `data_shards + recovery_shards` is at most 65535 |\n\
-     | shard_hashes | data_shards * 32 | BLAKE3-256 of each data shard, the last one padded with zeros to `shard_len` |\n\
+     | cover_len | 8 | number of covered bytes; the range ends at or before the index and overlaps no recovery frame |\n\
+     | shard_len | 4 | length of every shard in bytes; a multiple of 64, not 0, at most 16777216 |\n\
+     | data_shards | 4 | real shards in this group: `ceil(cover_len / shard_len)`, at least 1, at most `group_shards` |\n\
+     | group_shards | 4 | data shards the group is coded with, 1 to 32768; shards after `data_shards` are implicit zero shards; `group_shards * shard_len` is at most 1073741824 |\n\
+     | recovery_shards | 4 | number of recovery shards; at least 1; `group_shards + recovery_shards` is at most 65535 |\n\
+     | shard_hashes | data_shards * 32 | BLAKE3-256 of each real data shard, the last one padded with zeros to `shard_len` |\n\
      | recovery | recovery_shards * shard_len | the Reed-Solomon recovery shards, in order |\n"
         .to_string()
 }
@@ -554,13 +685,14 @@ pub fn recovery_layout_table() -> String {
 mod tests {
     use super::*;
 
-    fn frame(cover_len: u64, shard_len: u32, rec: u32) -> RecoveryFrame {
+    fn frame(cover_len: u64, shard_len: u32, group: u32, rec: u32) -> RecoveryFrame {
         let data = cover_len.div_ceil(u64::from(shard_len)) as u32;
         RecoveryFrame {
             cover_offset: 32,
             cover_len,
             shard_len,
             data_shards: data,
+            group_shards: group,
             recovery_shards: rec,
             shard_hashes: (0..data).map(|i| [i as u8; 32]).collect(),
             recovery: (0..rec as usize * shard_len as usize)
@@ -579,36 +711,28 @@ mod tests {
     }
 
     #[test]
-    fn geometry_for_listed_covers() {
-        for cover in [1u64, 64, 65, 1 << 20, 100 << 20] {
+    fn recovery_shard_counts() {
+        for group in [1u32, 2, 64, 1024, 32768] {
             for percent in [1u8, 5, 20] {
-                let (d, r) = shard_geometry(cover, 65536, percent).unwrap();
-                assert_eq!(u64::from(d), cover.div_ceil(65536));
+                let r = group_recovery_shards(group, percent);
                 assert!(r >= 1);
                 assert_eq!(
                     u64::from(r),
-                    (u64::from(d) * u64::from(percent)).div_ceil(100)
+                    (u64::from(group) * u64::from(percent)).div_ceil(100).max(1)
                 );
-                assert!(d + r <= MAX_TOTAL_SHARDS);
-                let (d2, r2) = shard_geometry(cover, 64, percent).unwrap_or((0, 0));
-                if d2 > 0 {
-                    assert!(d2 <= MAX_DATA_SHARDS && r2 >= 1);
-                }
+                assert!(group + r <= MAX_TOTAL_SHARDS);
             }
         }
+        assert_eq!(group_recovery_shards(1024, 5), 52);
     }
 
     #[test]
-    fn geometry_cap_engages() {
-        assert!(shard_geometry(32768 * 64, 64, 5).is_ok());
-        assert!(matches!(
-            shard_geometry(32768 * 64 + 1, 64, 5),
-            Err(FormatError::BadOptions {
-                reason: "recovery shards"
-            })
-        ));
-        assert!(shard_geometry(100 << 20, 64, 5).is_err());
-        assert!(shard_geometry(0, 64, 5).is_err());
+    fn work_buffer_formulas() {
+        // 1024 shards, 52 recovery: next_pow2(52) = 64, 1024 is a multiple.
+        assert_eq!(encoder_work_bytes(1024, 52, 64), 1024 * 64);
+        assert_eq!(encoder_work_bytes(10, 3, 64), 12 * 64);
+        assert_eq!(decoder_work_bytes(1024, 52, 64), 2048 * 64);
+        assert_eq!(decoder_work_bytes(10, 3, 64), 16 * 64);
     }
 
     #[test]
@@ -616,113 +740,115 @@ mod tests {
         let ok = RecoveryOptions {
             percent: 5,
             shard_len: 128,
+            group_shards: 16,
         };
         assert!(ok.check().is_ok());
-        assert!(RecoveryOptions { percent: 21, ..ok }.check().is_err());
-        assert!(RecoveryOptions {
+        let no = |o: RecoveryOptions| matches!(o.check(), Err(FormatError::BadOptions { .. }));
+        assert!(no(RecoveryOptions { percent: 21, ..ok }));
+        assert!(no(RecoveryOptions {
             shard_len: 100,
+            ..ok
+        }));
+        assert!(no(RecoveryOptions { shard_len: 0, ..ok }));
+        assert!(no(RecoveryOptions {
+            shard_len: MAX_SHARD_LEN + 64,
+            ..ok
+        }));
+        assert!(no(RecoveryOptions {
+            group_shards: 0,
+            ..ok
+        }));
+        assert!(no(RecoveryOptions {
+            group_shards: 32769,
+            ..ok
+        }));
+        // 32768 shards of 64 KiB is 2 GiB.
+        assert!(no(RecoveryOptions {
+            shard_len: 65536,
+            group_shards: 32768,
+            ..ok
+        }));
+        // 1 GiB exactly is fine.
+        assert!(RecoveryOptions {
+            shard_len: 1 << 16,
+            group_shards: 16384,
             ..ok
         }
         .check()
-        .is_err());
-        assert!(RecoveryOptions { shard_len: 0, ..ok }.check().is_err());
+        .is_ok());
+        // With percent 0 nothing is looked at.
+        assert!(RecoveryOptions {
+            percent: 0,
+            shard_len: 3,
+            group_shards: 0
+        }
+        .check()
+        .is_ok());
         assert!(RecoveryOptions::default().check().is_ok());
     }
 
     #[test]
     fn round_trip() {
-        for (cover, shard, rec) in [
-            (1u64, 64u32, 1u32),
-            (64, 64, 1),
-            (65, 64, 2),
-            (1000, 128, 3),
+        for (cover, shard, group, rec) in [
+            (1u64, 64u32, 1u32, 1u32),
+            (64, 64, 4, 1),
+            (65, 64, 2, 2),
+            (1000, 128, 8, 3),
         ] {
-            let f = frame(cover, shard, rec);
+            let f = frame(cover, shard, group, rec);
             let p = f.encode().unwrap();
             assert_eq!(RecoveryFrame::parse(&p, INDEX_AT).unwrap(), f);
+            assert_eq!(RecoveryFrame::parse_vec(p, INDEX_AT).unwrap(), f);
         }
     }
 
     #[test]
     fn shard_range_of_last_shard_is_short() {
-        let f = frame(130, 64, 1);
+        let f = frame(130, 64, 4, 1);
         assert_eq!(f.shard_range(0), (32, 64));
         assert_eq!(f.shard_range(2), (32 + 128, 2));
     }
 
     #[test]
     fn every_rule_has_a_negative_test() {
-        let base = frame(200, 64, 2);
-        let good = base.encode().unwrap();
+        let good = frame(200, 64, 8, 2).encode().unwrap();
         let patch = |at: usize, v: &[u8]| {
             let mut p = good.clone();
             p[at..at + v.len()].copy_from_slice(v);
             p
         };
+        let r = |p: Vec<u8>| reason(RecoveryFrame::parse(&p, INDEX_AT));
+        assert_eq!(r(patch(16, &65u32.to_le_bytes())), "shard_len");
+        assert_eq!(r(patch(16, &0u32.to_le_bytes())), "shard_len");
         assert_eq!(
-            reason(RecoveryFrame::parse(
-                &patch(16, &65u32.to_le_bytes()),
-                INDEX_AT
-            )),
+            r(patch(16, &(MAX_SHARD_LEN + 64).to_le_bytes())),
             "shard_len"
         );
-        assert_eq!(
-            reason(RecoveryFrame::parse(
-                &patch(16, &0u32.to_le_bytes()),
-                INDEX_AT
-            )),
-            "shard_len"
-        );
-        assert_eq!(
-            reason(RecoveryFrame::parse(
-                &patch(0, &31u64.to_le_bytes()),
-                INDEX_AT
-            )),
-            "cover range"
-        );
-        assert_eq!(
-            reason(RecoveryFrame::parse(
-                &patch(20, &5u32.to_le_bytes()),
-                INDEX_AT
-            )),
-            "data_shards"
-        );
-        assert_eq!(
-            reason(RecoveryFrame::parse(
-                &patch(8, &0u64.to_le_bytes()),
-                INDEX_AT
-            )),
-            "data_shards"
-        );
-        assert_eq!(
-            reason(RecoveryFrame::parse(
-                &patch(24, &0u32.to_le_bytes()),
-                INDEX_AT
-            )),
-            "recovery_shards"
-        );
-        assert_eq!(
-            reason(RecoveryFrame::parse(
-                &patch(24, &70000u32.to_le_bytes()),
-                INDEX_AT
-            )),
-            "shard count"
-        );
-        // The range must end before the index.
+        assert_eq!(r(patch(0, &31u64.to_le_bytes())), "cover range");
+        assert_eq!(r(patch(20, &5u32.to_le_bytes())), "data_shards");
+        assert_eq!(r(patch(8, &0u64.to_le_bytes())), "data_shards");
+        // More real shards than the group has (cover 200 = 4 shards, group 3).
+        assert_eq!(r(patch(24, &3u32.to_le_bytes())), "data_shards");
+        assert_eq!(r(patch(24, &0u32.to_le_bytes())), "group_shards");
+        assert_eq!(r(patch(24, &32769u32.to_le_bytes())), "group_shards");
+        assert_eq!(r(patch(28, &0u32.to_le_bytes())), "recovery_shards");
+        assert_eq!(r(patch(28, &70000u32.to_le_bytes())), "shard count");
         assert_eq!(reason(RecoveryFrame::parse(&good, 231)), "cover range");
         assert!(RecoveryFrame::parse(&good, 232).is_ok());
+        assert_eq!(r(patch(0, &u64::MAX.to_le_bytes())), "cover range");
+        // group_shards * shard_len above 1 GiB.
+        let mut big = frame(200, 64, 8, 2);
+        big.shard_len = 1 << 20;
+        big.group_shards = 2048;
         assert_eq!(
-            reason(RecoveryFrame::parse(
-                &patch(0, &u64::MAX.to_le_bytes()),
-                INDEX_AT
-            )),
-            "cover range"
+            reason(RecoveryFrame::parse(&big.head_bytes(), INDEX_AT)),
+            "group size"
         );
     }
 
     #[test]
     fn payload_length_mismatch_and_truncation() {
-        let good = frame(200, 64, 2).encode().unwrap();
+        let good = frame(200, 64, 8, 2).encode().unwrap();
         let mut longer = good.clone();
         longer.push(0);
         assert_eq!(
@@ -741,17 +867,28 @@ mod tests {
         }
         // A huge declared count never allocates: the length check comes first.
         let mut p = good.clone();
-        p[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
-        p[8..16].copy_from_slice(&(u64::from(u32::MAX) * 64).to_le_bytes());
-        assert!(RecoveryFrame::parse(&p, u64::MAX).is_err());
+        p[20..24].copy_from_slice(&32768u32.to_le_bytes());
+        p[8..16].copy_from_slice(&(32768u64 * 64).to_le_bytes());
+        p[24..28].copy_from_slice(&32768u32.to_le_bytes());
+        assert_eq!(reason(RecoveryFrame::parse(&p, u64::MAX)), "payload length");
+    }
+
+    #[test]
+    fn cover_may_not_overlap_a_recovery_frame() {
+        let f = frame(200, 64, 8, 2);
+        let at = |offset, len| FrameLocation { offset, len };
+        assert!(check_cover(&f, &[at(232, 100)]).is_ok());
+        assert!(check_cover(&f, &[at(100, 50)]).is_err());
+        assert!(check_cover(&f, &[at(0, 40)]).is_err());
+        assert!(check_cover(&f, &[at(0, 32)]).is_ok());
     }
 
     #[test]
     fn encode_refuses_inconsistent_frames() {
-        let mut f = frame(200, 64, 2);
+        let mut f = frame(200, 64, 8, 2);
         f.shard_hashes.pop();
         assert!(f.encode().is_err());
-        let mut f = frame(200, 64, 2);
+        let mut f = frame(200, 64, 8, 2);
         f.recovery.pop();
         assert!(f.encode().is_err());
     }
