@@ -63,6 +63,10 @@ pub struct FastOptions {
     pub dictionaries: DictionaryPolicy,
     /// The entropy gate that sends incompressible blocks to `store`.
     pub gate: Gate,
+    /// Longest `Jpeg`-classed input the JPEG peel reads whole; a longer one takes the streaming
+    /// path and is counted as a `SizeCap` fallback before any byte is read. Default
+    /// [`crate::peel::LEPTON_MAX_FILE`], `lepton_jpeg`'s own file-size cap.
+    pub jpeg_max_file: u64,
 }
 
 impl Default for FastOptions {
@@ -74,6 +78,7 @@ impl Default for FastOptions {
             block_size: DEFAULT_BLOCK_SIZE,
             dictionaries: DictionaryPolicy::None,
             gate: Gate::DEFAULT,
+            jpeg_max_file: crate::peel::LEPTON_MAX_FILE,
         }
     }
 }

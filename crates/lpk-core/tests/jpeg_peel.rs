@@ -12,7 +12,10 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use lpk_core::{archive_fast, register_full_reader, Cause, FastOptions, JpegPeel, PeelStage};
+use lpk_core::peel::LEPTON_MAX_FILE;
+use lpk_core::{
+    archive_fast, register_full_reader, Cause, Fallback, FastOptions, JpegPeel, PeelStage,
+};
 use lpk_format::{Archive, EntryKind, FormatError, Resources};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -159,7 +162,95 @@ fn fallbacks_carry_the_probe_causes() {
         memory_limit: 1 << 20,
         ..JpegPeel::default()
     };
-    assert_eq!(tight.peel(&base, max).unwrap_err(), Cause::DimensionCap);
+    assert_eq!(tight.peel(&base, max).unwrap_err(), Cause::MemoryCap);
+    assert_ne!(Cause::MemoryCap.label(), Cause::DimensionCap.label());
+    // A file longer than `max_file` is refused before it is read; one at the cap is read.
+    let capped = JpegPeel {
+        max_file: 100,
+        ..JpegPeel::default()
+    };
+    assert_eq!(
+        capped.refuse_unread(101),
+        Some(Fallback::Jpeg(Cause::SizeCap))
+    );
+    assert_eq!(capped.refuse_unread(100), None);
+    assert_eq!(JpegPeel::default().max_file, LEPTON_MAX_FILE);
+}
+
+#[test]
+fn a_jpeg_over_the_file_cap_is_streamed_as_a_size_cap_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = fixture("baseline.jpg");
+    // At the cap: read and peeled. Over it: streamed, never read whole.
+    std::fs::write(dir.path().join("small.jpg"), &base).unwrap();
+    let mut t = base.clone();
+    t.extend_from_slice(&[0u8; 64]);
+    std::fs::write(dir.path().join("big.jpg"), &t).unwrap();
+    let options = FastOptions {
+        jpeg_max_file: base.len() as u64,
+        ..FastOptions::default()
+    };
+    let mut out = Vec::new();
+    let (_, fast) = archive_fast(dir.path(), &mut out, options).unwrap();
+    let p = fast.peel;
+    assert_eq!(p.peeled.files, 1, "{p:?}");
+    assert_eq!(
+        p.fallback(Cause::SizeCap),
+        lpk_core::Count {
+            files: 1,
+            bytes: t.len() as u64
+        }
+    );
+    let files = extract_all(out, true).unwrap();
+    assert!(files.iter().any(|(p, b)| p == "big.jpg" && *b == t));
+}
+
+#[test]
+fn the_header_declares_revision_1_1_whenever_the_peel_is_enabled() {
+    // No JPEG at all: the writer still writes under revision 1.1 (spec section 2).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "text\n".repeat(100)).unwrap();
+    let mut out = Vec::new();
+    let (_, fast) = archive_fast(dir.path(), &mut out, FastOptions::default()).unwrap();
+    assert_eq!(fast.peel.peeled.files, 0);
+    let a = Archive::open(Cursor::new(out.clone()), &Resources::default()).unwrap();
+    assert_eq!(a.header().version.minor, 1);
+    // A 1.0 reader extracts it: no block names a 1.1 primitive.
+    let files = extract_all(out, false).unwrap();
+    assert_eq!(files.len(), 1);
+}
+
+#[test]
+fn a_stream_not_smaller_than_the_primary_is_no_gain() {
+    // A stream padded to the primary's length after the encode: the gain gate, which runs
+    // before the verifying decode, refuses it.
+    let base = fixture("baseline.jpg");
+    let n = base.len();
+    let r = JpegPeel::default().peel_with(&base, 1 << 26, &|s| s.resize(n, 0), &|_| {});
+    assert_eq!(r.unwrap_err(), Cause::NoGain);
+}
+
+/// Two secondary images (MPF) with trailing data between and after them.
+fn with_two_secondaries() -> Vec<u8> {
+    let mut v = with_secondary();
+    v.extend_from_slice(&fixture("secondary.jpg"));
+    v.extend_from_slice(b"end");
+    v
+}
+
+#[test]
+fn two_secondary_images_peel_and_restore() {
+    let data = with_two_secondaries();
+    let plan = JpegPeel::default().peel(&data, 1 << 26).unwrap();
+    let kinds: Vec<bool> = plan.nested.iter().map(|n| n.secondary).collect();
+    assert_eq!(kinds, [false, true, false, true, false]);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("two.jpg"), &data).unwrap();
+    let mut out = Vec::new();
+    let (_, fast) = archive_fast(dir.path(), &mut out, FastOptions::default()).unwrap();
+    assert_eq!(fast.peel.peeled.files, 1);
+    let files = extract_all(out, true).unwrap();
+    assert!(files[0].1 == data);
 }
 
 #[test]

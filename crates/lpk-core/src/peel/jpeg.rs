@@ -14,14 +14,16 @@
 //! JPEG frame header can state, so no file falls back for its dimensions alone (PLAN E2-5:
 //! "dimension limit raised"); the decoder memory bound below takes over that role.
 //! `max_jpeg_file_size` is the writer's block size (capped at `u32::MAX`), because one block holds
-//! one peeled primary image. A primary whose decoder memory bound plus the block size exceeds the
-//! reader's default memory resource falls back as `dimension cap`, so a default reader never
-//! refuses an archive the peel wrote.
+//! one peeled primary image. A primary whose decoder memory allowance plus the block size exceeds
+//! the reader's default memory resource falls back as `decoder memory allowance exceeded`, so a
+//! default reader never refuses an archive the peel wrote. An input longer than
+//! [`JpegPeel::max_file`] is not read whole: it falls back as `size cap` before any byte is read.
 //!
-//! Decoder memory (the envelope's `decode_memory`): a bound computed from the image's frame
-//! header over the library's data layout, not a measurement: every component's 8x8 blocks padded
-//! to whole MCUs, 64 coefficients of 2 bytes each, plus [`MODEL_ALLOWANCE`] for the library's
-//! probability models and thread buffers.
+//! Decoder memory (the envelope's `decode_memory`): an allowance, not a bound. Its coefficient
+//! term is computed from the image's frame header over the library's data layout (every
+//! component's 8x8 blocks padded to whole MCUs, 64 coefficients of 2 bytes each); its fixed term,
+//! [`MODEL_ALLOWANCE`], stands for the library's probability models and thread buffers, which
+//! revision 1.1 does not bound (E2-5b measures them).
 
 use std::io::{Cursor, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -35,15 +37,20 @@ use lpk_format::{
     Resources, SecondaryImage,
 };
 
-use super::{NestedPart, PeelPlan, PeelStage};
+use super::{Fallback, NestedPart, PeelPlan, PeelStage};
 use crate::classify::Class;
 
 /// The `lepton_version` this peel writes into its records: the format `lepton_jpeg` 0.5 writes.
 pub const LEPTON_VERSION: u8 = 0;
 
-/// Fixed part of the decoder memory bound: the library's models and per-thread buffers. An
+/// Fixed part of the decoder memory allowance: the library's models and per-thread buffers. An
 /// allowance, not a measured figure (E2-5b measures it).
 pub const MODEL_ALLOWANCE: u64 = 64 << 20;
+
+/// The default of [`JpegPeel::max_file`]: `lepton_jpeg`'s own file-size cap, the
+/// `max_jpeg_file_size` of its `EnabledFeatures` presets (`128 * 1024 * 1024` in
+/// `src/enabled_features.rs` of lepton_jpeg 0.5.8). A library constant, not a measurement.
+pub const LEPTON_MAX_FILE: u64 = 128 * 1024 * 1024;
 
 /// The largest dimension a JPEG frame header can state.
 const MAX_DIMENSION: u32 = 65535;
@@ -60,9 +67,12 @@ pub enum Cause {
     FourComponents,
     /// Arithmetic coding.
     Arithmetic,
-    /// Over a dimension cap (here: the decoder memory bound).
+    /// The library refuses the image's dimensions (`image dimensions larger than ...`). With
+    /// the caps this peel sets (65535, the largest a frame header states) the library does not
+    /// raise it; the label stays the probe's.
     DimensionCap,
-    /// The file exceeds the library's file-size cap (here: the block size).
+    /// The file exceeds a file-size cap: the primary image is longer than one block, or the
+    /// whole input is longer than [`JpegPeel::max_file`] (refused before it is read).
     SizeCap,
     /// The decoded bytes differ from the input, or the library reports a verification error.
     VerificationMismatch,
@@ -72,11 +82,13 @@ pub enum Cause {
     NoEoi,
     /// The Lepton stream is not smaller than the primary image (the net-gain gate, D-09).
     NoGain,
+    /// The image's decoder memory allowance plus the block exceeds [`JpegPeel::memory_limit`].
+    MemoryCap,
 }
 
 impl Cause {
     /// Every cause, in report order.
-    pub const ALL: [Cause; 10] = [
+    pub const ALL: [Cause; 11] = [
         Cause::Progressive,
         Cause::ProgressiveRejected,
         Cause::FourComponents,
@@ -87,6 +99,7 @@ impl Cause {
         Cause::Other,
         Cause::NoEoi,
         Cause::NoGain,
+        Cause::MemoryCap,
     ];
 
     /// Position in [`Cause::ALL`].
@@ -107,6 +120,7 @@ impl Cause {
             Cause::Other => "other",
             Cause::NoEoi => "no EOI marker (truncated or damaged)",
             Cause::NoGain => "no gain",
+            Cause::MemoryCap => "decoder memory allowance exceeded",
         }
     }
 }
@@ -344,9 +358,12 @@ pub fn features(max_file_size: u32) -> EnabledFeatures {
 pub struct JpegPeel {
     /// Accept progressive files (the preset's value, true). Tests turn it off.
     pub progressive: bool,
-    /// Decoder memory a peeled image may need, beyond the block, before it falls back as
-    /// `dimension cap`: by default the reader's default memory resource.
+    /// Decoder memory a peeled image may need, with the block, before it falls back as
+    /// [`Cause::MemoryCap`]: by default the reader's default memory resource.
     pub memory_limit: u64,
+    /// Longest input the peel reads whole; a longer one is stored through the streaming path
+    /// and counted as [`Cause::SizeCap`] before any byte is read. Default [`LEPTON_MAX_FILE`].
+    pub max_file: u64,
 }
 
 impl Default for JpegPeel {
@@ -354,6 +371,7 @@ impl Default for JpegPeel {
         JpegPeel {
             progressive: true,
             memory_limit: DEFAULT_MEMORY,
+            max_file: LEPTON_MAX_FILE,
         }
     }
 }
@@ -425,7 +443,7 @@ impl JpegPeel {
             None => MODEL_ALLOWANCE,
         };
         if memory.saturating_add(max_part) > self.memory_limit {
-            return Err(Cause::DimensionCap);
+            return Err(Cause::MemoryCap);
         }
         let mut f = features(u32::try_from(max_part).unwrap_or(u32::MAX));
         f.progressive = self.progressive;
@@ -451,14 +469,15 @@ impl JpegPeel {
             Ok(Ok(v)) => v,
         };
         after_encode(&mut stream);
+        // The net-gain gate first: a stream that gains nothing is not worth the verifying decode.
+        if stream.len() >= primary_len {
+            return Err(Cause::NoGain);
+        }
         // Verify by re-encode: the stream must give back the primary bytes exactly.
         let mut decoded = lepton_decode(&stream, primary_len, &f, pool).map_err(fail)?;
         after_decode(&mut decoded);
         if decoded != primary {
             return Err(Cause::VerificationMismatch);
-        }
-        if stream.len() >= primary_len {
-            return Err(Cause::NoGain);
         }
         // The bytes after the primary image: secondary images and the trailing data around them.
         let mut nested = Vec::new();
@@ -511,8 +530,13 @@ impl PeelStage for JpegPeel {
         class == Class::Jpeg
     }
 
-    fn peel(&self, data: &[u8], max_part: u64) -> Result<PeelPlan, Cause> {
+    fn refuse_unread(&self, len: u64) -> Option<Fallback> {
+        (len > self.max_file).then_some(Fallback::Jpeg(Cause::SizeCap))
+    }
+
+    fn peel(&self, data: &[u8], max_part: u64) -> Result<PeelPlan, Fallback> {
         self.peel_with(data, max_part, &|_| {}, &|_| {})
+            .map_err(Fallback::Jpeg)
     }
 
     fn record(&self, plan: &PeelPlan, nested_chunks: &[Vec<u64>]) -> Record {

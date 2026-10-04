@@ -3,7 +3,7 @@
 
 pub mod jpeg;
 
-pub use jpeg::{Cause, JpegDecoder, JpegPeel, LEPTON_VERSION, MODEL_ALLOWANCE};
+pub use jpeg::{Cause, JpegDecoder, JpegPeel, LEPTON_MAX_FILE, LEPTON_VERSION, MODEL_ALLOWANCE};
 
 use lpk_format::{PrimitiveId, Record};
 
@@ -41,6 +41,61 @@ pub struct PeelPlan {
     pub original_len: u64,
 }
 
+/// Why a peel stage left an input as it is. One type for every stage: each stage's own causes
+/// are mapped into it (the JPEG peel's are [`Cause`]), so the pipeline and [`PeelSummary`] do
+/// not depend on any one stage's taxonomy. A later stage adds a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fallback {
+    /// A cause of the JPEG peel.
+    Jpeg(Cause),
+}
+
+impl Fallback {
+    /// Every fallback, in report order.
+    pub const ALL: [Fallback; Cause::ALL.len()] = {
+        let mut all = [Fallback::Jpeg(Cause::Other); Cause::ALL.len()];
+        let mut i = 0;
+        while i < all.len() {
+            all[i] = Fallback::Jpeg(Cause::ALL[i]);
+            i += 1;
+        }
+        all
+    };
+
+    /// Position in [`Fallback::ALL`].
+    pub fn index(self) -> usize {
+        match self {
+            Fallback::Jpeg(c) => c.index(),
+        }
+    }
+
+    /// The name of the stage the fallback belongs to.
+    pub fn stage(self) -> &'static str {
+        match self {
+            Fallback::Jpeg(_) => "jpeg",
+        }
+    }
+
+    /// The label, for reports.
+    pub fn label(self) -> &'static str {
+        match self {
+            Fallback::Jpeg(c) => c.label(),
+        }
+    }
+}
+
+impl From<Cause> for Fallback {
+    fn from(c: Cause) -> Self {
+        Fallback::Jpeg(c)
+    }
+}
+
+impl PartialEq<Cause> for Fallback {
+    fn eq(&self, other: &Cause) -> bool {
+        *self == Fallback::Jpeg(*other)
+    }
+}
+
 /// A peel stage. `peel` either returns a verified plan or the fallback cause; the pipeline then
 /// writes the input through the normal path and counts the cause.
 pub trait PeelStage: std::fmt::Debug + Send + Sync {
@@ -48,8 +103,14 @@ pub trait PeelStage: std::fmt::Debug + Send + Sync {
     fn name(&self) -> &'static str;
     /// True when the stage applies to inputs of `class`.
     fn applies_to(&self, class: Class) -> bool;
+    /// The fallback for an input of `len` bytes that the stage refuses before any byte of it is
+    /// read (the pipeline then streams it through the normal path); `None` to read it.
+    fn refuse_unread(&self, len: u64) -> Option<Fallback> {
+        let _ = len;
+        None
+    }
     /// Peel `data`; `max_part` is the largest peeled part the writer accepts (one block).
-    fn peel(&self, data: &[u8], max_part: u64) -> Result<PeelPlan, Cause>;
+    fn peel(&self, data: &[u8], max_part: u64) -> Result<PeelPlan, Fallback>;
     /// The record of `plan`, given the chunk lists the writer gave its nested parts (same order
     /// as `plan.nested`).
     fn record(&self, plan: &PeelPlan, nested_chunks: &[Vec<u64>]) -> Record;
@@ -71,14 +132,14 @@ pub struct PeelSummary {
     pub peeled: Count,
     /// Bytes of the peeled streams plus the nested parts of the peeled inputs (before the model).
     pub peeled_output_bytes: u64,
-    /// Inputs stored through the normal path, by cause (indexed like [`Cause::ALL`]).
-    pub fallbacks: [Count; Cause::ALL.len()],
+    /// Inputs stored through the normal path, by cause (indexed like [`Fallback::ALL`]).
+    pub fallbacks: [Count; Fallback::ALL.len()],
 }
 
 impl PeelSummary {
     /// The count of fallbacks with `cause`.
-    pub fn fallback(&self, cause: Cause) -> Count {
-        self.fallbacks[cause.index()]
+    pub fn fallback(&self, cause: impl Into<Fallback>) -> Count {
+        self.fallbacks[cause.into().index()]
     }
 
     /// All fallbacks.
@@ -89,7 +150,7 @@ impl PeelSummary {
         })
     }
 
-    pub(crate) fn note_fallback(&mut self, cause: Cause, bytes: u64) {
+    pub(crate) fn note_fallback(&mut self, cause: Fallback, bytes: u64) {
         let c = &mut self.fallbacks[cause.index()];
         c.files += 1;
         c.bytes += bytes;

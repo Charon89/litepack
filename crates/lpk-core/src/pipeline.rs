@@ -11,7 +11,6 @@
 //! Blocks are encoded one after the other; parallel encoding needs the writer to hold blocks in
 //! flight and comes with a later task.
 
-use std::collections::HashMap;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -24,7 +23,7 @@ use crate::cluster::cluster;
 use crate::error::CoreError;
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::ingest::{validate_input, walk, IngestOptions, Input};
-use crate::peel::{Cause, JpegPeel, PeelPlan, PeelStage, PeelSummary};
+use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
 use crate::store::{create_new_and_run, Counting, StoreOptions, SyncFn, OUT_BUF};
 
@@ -135,13 +134,17 @@ impl Pipeline {
         }
     }
 
-    /// The Fast pipeline, with the JPEG peel.
+    /// The Fast pipeline, with the JPEG peel (reading whole inputs up to
+    /// [`FastOptions::jpeg_max_file`]).
     pub fn fast(options: FastOptions) -> Self {
         Pipeline {
             classify: ClassifyStage {
                 ingest: options.ingest,
             },
-            peel: vec![Box::new(JpegPeel::default())],
+            peel: vec![Box::new(JpegPeel {
+                max_file: options.jpeg_max_file,
+                ..JpegPeel::default()
+            })],
             fold: None,
             model: ModelStage::Fast(options),
             seal: SealOptions::default(),
@@ -235,30 +238,12 @@ impl Pipeline {
                 wopts.block_size = options.block_size;
                 wopts.encoder = Box::new(encoder);
                 let max_part = wopts.block_size;
-                // Peel until the first success before the header exists, so that its
-                // version_minor is 1 exactly when a block uses a primitive of revision 1.1.
-                // Only the outcomes are kept (one plan at most); the files are read again below.
-                let t = Instant::now();
-                let mut pre: HashMap<String, Result<PeelPlan, Cause>> = HashMap::new();
-                let mut minor = 0;
-                'pre: for c in &clusters {
-                    let Some(stage) = peel.iter().find(|s| s.applies_to(c.class)) else {
-                        continue;
-                    };
-                    for input in &c.inputs {
-                        let data = read_all(&source, input)?;
-                        let r = stage.peel(&data, max_part);
-                        let ok = r.is_ok();
-                        pre.insert(input.path.clone(), r);
-                        if ok {
-                            minor = 1;
-                            break 'pre;
-                        }
-                    }
-                }
-                timings.peel = t.elapsed();
+                // The header's version_minor is the revision this writer writes under (spec
+                // section 2): 1 whenever a peel stage is enabled, whether or not one peels.
+                let minor = if peel.is_empty() { 0 } else { 1 };
                 let mut writer = open_writer(out, wopts, sync, minor)?;
                 let mut summary = PeelSummary::default();
+                let mut peel_time = Duration::ZERO;
                 let t = Instant::now();
                 let mut meta: Vec<&Input> = inputs
                     .iter()
@@ -280,17 +265,21 @@ impl Pipeline {
                             add_file(&mut writer, &source, input)?;
                             continue;
                         };
+                        if let Some(cause) = stage.refuse_unread(input.len) {
+                            // Too long to read whole: streamed like any file, never held.
+                            summary.note_fallback(cause, input.len);
+                            add_file(&mut writer, &source, input)?;
+                            continue;
+                        }
+                        // Each input is read once: the peel and the writer use the same bytes.
                         let tp = Instant::now();
                         let data = read_all(&source, input)?;
-                        let r = match pre.remove(&input.path) {
-                            Some(r) => r,
-                            None => stage.peel(&data, max_part),
-                        };
-                        timings.peel += tp.elapsed();
+                        let r = stage.peel(&data, max_part);
+                        peel_time += tp.elapsed();
                         match r {
                             Ok(plan) => {
-                                write_peeled(&mut writer, stage.as_ref(), input, &data, &plan)?;
                                 summary.note_peeled(&plan);
+                                write_peeled(&mut writer, stage.as_ref(), input, &data, plan)?;
                             }
                             Err(cause) => {
                                 summary.note_fallback(cause, data.len() as u64);
@@ -305,7 +294,9 @@ impl Pipeline {
                     }
                     writer.close_block()?;
                 }
-                timings.model = t.elapsed().saturating_sub(timings.peel);
+                // Only peel time spent inside the model interval is taken out of it.
+                timings.peel = peel_time;
+                timings.model = t.elapsed().saturating_sub(peel_time);
                 let t = Instant::now();
                 let written = writer.finish()?;
                 timings.seal = t.elapsed();
@@ -371,7 +362,7 @@ fn write_peeled<W: Write>(
     stage: &dyn PeelStage,
     input: &Input,
     data: &[u8],
-    plan: &PeelPlan,
+    plan: PeelPlan,
 ) -> Result<(), CoreError> {
     writer.begin_entry(&input.path, input.flags, input.mtime_ns)?;
     let mut lists = Vec::with_capacity(plan.nested.len());
@@ -379,7 +370,7 @@ fn write_peeled<W: Write>(
         let (a, b) = (p.offset as usize, (p.offset + p.len) as usize);
         lists.push(writer.add_part(p.offset, &mut &data[a..b])?);
     }
-    let id = writer.add_record(stage.record(plan, &lists))?;
+    let id = writer.add_record(stage.record(&plan, &lists))?;
     let mut params = Vec::new();
     lpk_format::varint::write(&mut params, id)?;
     let encoded = Encoded {
@@ -389,7 +380,7 @@ fn write_peeled<W: Write>(
                 params,
             }],
         },
-        bytes: plan.stream.clone(),
+        bytes: plan.stream,
         resources: GraphResources::default(),
     };
     writer.add_part_encoded(0, &data[..plan.primary_len as usize], encoded, plan.memory)?;

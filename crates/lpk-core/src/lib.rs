@@ -32,7 +32,9 @@ pub use fast::{
 pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
 pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 pub use peel::jpeg::register_full_reader;
-pub use peel::{Cause, Count, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage, PeelSummary};
+pub use peel::{
+    Cause, Count, Fallback, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage, PeelSummary,
+};
 pub use pipeline::{
     ClassifyStage, FoldStage, ModelStage, Pipeline, RunSummary, SealOptions, StageTimings,
 };

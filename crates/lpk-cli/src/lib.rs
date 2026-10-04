@@ -167,7 +167,7 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
         p.peeled_output_bytes,
         p.fallback_total().files
     );
-    for c in lpk_core::Cause::ALL {
+    for c in lpk_core::Fallback::ALL {
         let n = p.fallback(c);
         if n.files > 0 {
             let _ = writeln!(
