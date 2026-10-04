@@ -1,0 +1,43 @@
+# cargo-deny policy of the fuzzing harness (not a workspace member): the root policy (../deny.toml) plus one
+# named exception. Run inside fuzz/: cargo deny check
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "workspace"
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "MIT-0",            # MIT without the attribution clause: borrow-or-share (via jsonschema), D-25
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Zlib",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "MPL-2.0",
+]
+confidence-threshold = 0.9
+# LGPL exceptions are allowed only by crate name (we are open source, so relinking is satisfied).
+# `cabac` is required by preflate-rs (D-22, docs/LICENSING.md); any further crate needs its own recorded decision (D-25, D-26).
+exceptions = [
+  # libfuzzer-sys is "(MIT OR Apache-2.0) AND NCSA": the LLVM libFuzzer runtime it bundles is NCSA. It is a
+  # development tool that is never built into a shipped binary (D-42).
+  { crate = "libfuzzer-sys", allow = ["NCSA"] },
+  { crate = "cabac", allow = ["LGPL-3.0-or-later"] },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

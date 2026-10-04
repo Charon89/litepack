@@ -71,6 +71,8 @@ PowerArchiver command-line tools) are run as separate programs found on the mach
 bundled or redistributed, so their licences place no condition on our code; `docs/BASELINES.md` notes which
 of them need a paid or trial licence to run.
 
+| libfuzzer-sys 0.4 (fuzzing harness `fuzz/`, not a workspace member) | (MIT OR Apache-2.0) AND NCSA — NCSA allowed by a named exception in `fuzz/deny.toml` (D-42) | development tool only, never shipped | https://crates.io/crates/libfuzzer-sys |
+
 ## Patents to review (counsel, not engineers, decide)
 This is a watch-list, not a legal opinion: engineers record what each patent is about and when counsel
 must look at it. Titles, holders and dates are from Google Patents; the expiry dates are that site's
