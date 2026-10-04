@@ -42,6 +42,29 @@ fn every_vector_decodes_to_its_generated_contents() {
     }
 }
 
+/// The graph of block `i` as its `ChunkData` header says.
+fn block_graph(a: &mut Archive<Cursor<Vec<u8>>>, i: usize) -> lpk_format::Graph {
+    let b = a.index().blocks[i];
+    let at = lpk_format::FrameLocation {
+        offset: b.frame_offset,
+        len: b.frame_len,
+    };
+    let f = a
+        .read_frame_at(at, lpk_format::FrameKind::ChunkData)
+        .unwrap();
+    lpk_format::BlockHeader::parse(&f.payload, i)
+        .unwrap()
+        .0
+        .graph
+}
+
+fn lzma_params(a: &mut Archive<Cursor<Vec<u8>>>, i: usize) -> Vec<u8> {
+    let g = block_graph(a, i);
+    assert_eq!(g.steps.len(), 1);
+    assert_eq!(g.steps[0].primitive, lpk_format::PrimitiveId::Lzma);
+    g.steps[0].params.clone()
+}
+
 #[test]
 fn the_writer_is_deterministic() {
     let build = || {
@@ -71,9 +94,9 @@ fn the_window_vector_frame_declares_its_window() {
 }
 
 /// Reproduces the committed bytes; only valid with the zstd library version
-/// that wrote them, so it runs on purpose, not in the normal suite.
+/// that wrote them (for the LZMA ones, the liblzma version), so it runs on purpose, not in the normal suite.
 #[test]
-#[ignore = "bytes depend on the zstd library version"]
+#[ignore = "bytes depend on the zstd and liblzma library versions"]
 fn the_writer_reproduces_every_vector_byte_for_byte() {
     let dict = read(DICT_FILE);
     for name in VECTORS {
@@ -113,8 +136,10 @@ fn what_each_vector_exercises() {
     assert_eq!(a.index().envelope.max_window, 1 << 24);
     assert!(a.priors().is_empty());
 
-    let a = open("lzma-basic.lpk");
+    let mut a = open("lzma-basic.lpk");
     assert_eq!(a.index().blocks.len(), 1);
+    // dict_size 8 MiB, lc 3, lp 0, pb 2.
+    assert_eq!(lzma_params(&mut a, 0), [0, 0, 0x80, 0, 3, 0, 2]);
     assert_eq!(a.index().envelope.max_window, 1 << 23);
     assert!(a.priors().is_empty());
 
@@ -131,7 +156,9 @@ fn what_each_vector_exercises() {
     assert!(spans);
 
     // lc 0, lp 2, pb 0: its dictionary is 1 MiB.
-    let a = open("lzma-props.lpk");
+    let mut a = open("lzma-props.lpk");
+    // dict_size 1 MiB, lc 0, lp 2, pb 0.
+    assert_eq!(lzma_params(&mut a, 0), [0, 0, 0x10, 0, 0, 2, 0]);
     assert_eq!(a.index().envelope.max_window, 1 << 20);
     assert!(a.priors().is_empty());
 }

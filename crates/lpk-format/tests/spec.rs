@@ -222,6 +222,13 @@ fn spec_states_the_lzma_rules() {
         "`LzmaError`",
         "no prior ID",
         "- Implemented now: `store`, `zstd`, `lzma`.",
+        "in exactly one of two groups",
+        "`LZMA_LCLP_MAX`",
+        "`range coder`",
+        "is checked only when the
+   end-of-payload marker is present",
+        "never depends on the reader's
+   `max_window`",
         "`lzma-basic.lpk`",
         "`lzma-multiblock.lpk`",
         "`lzma-props.lpk`",
