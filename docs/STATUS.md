@@ -3,16 +3,23 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 17:10 UTC (13:10 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 16:50 UTC (18:50 local on the measuring machine). No measurement is running.
 
-**Epic E1 is complete and on `main`.** The `.lpk` v1 format is frozen (D-41): the specification, its pure-Rust
-reference implementation and tool, committed vectors, a conformance gate, an independent decoder written from the
-spec alone that passes it, fuzz targets with a Linux fuzz job, and the spec fix round — D-28…D-42 (D-42: the
-owner accepted NCSA for `libfuzzer-sys` in the fuzzing harness only). The first real fuzz run was dispatched on
-`main` (run 37204202840); its result goes into the PLAN note of E1-14 when it finishes.
-**Next: E2.** E2-1 (ingest) starts at once; E0-1 (the larger versioned corpus set for the restated G2) needs the
-owner's approval of its spec before it is built; E1-15 (the normative Reed-Solomon description) is a format
-revision that can be done any time by a fresh implementer.
+**Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
+(37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
+done (D-44)**: buffered reads for every size (no memory map), opens that never follow a link and verify the identity
+the walk recorded, bounded reads, a synced commit, the archive never its own input. **E0-1 (the larger versioned set)
+is half done:** the harness side is on `main` (the `backup-versions-large` spec row and lock entries, the `dedup`
+catalogue flag, the G2 rule against the non-deduplicating incumbents with zpaqfranz printed as reference); what is
+left is on the measuring machine — build `full` from a release build of `main` (the class is `full`-only; a full
+rebuild re-extracts every class from the cache, so keep the old manifest aside and check the old classes are
+identical), build the class a second time into a scratch directory for the determinism check, verify from the
+manifest that each `godot-v*` folder exceeds 256 MiB (if not, stop and go to the owner), then
+`run --tools all --profile full --classes backup-versions-large` and `probe dedup --profile full --into <that
+directory>` as detached processes, then `report` for the G2 row, commit the directory and tick E0-1.
+**E2-2 (classifier and entropy gate) is in flight** (`task/e2-2-classifier`, branched from E2-1). Then E2-3 (Fast
+tier), E2-4 (pipeline and the `lpk` CLI stub for the runner), E2-5 (JPEG peel). E1-15 (the normative Reed-Solomon
+description) is a format revision that can be done any time by a fresh implementer.
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -23,22 +30,30 @@ revision that can be done any time by a fresh implementer.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-None at the moment.
+- `task/e2-2-classifier` — E2-2, implementer running (brief: `Class` labels by magic and byte statistics; the
+  two-stage entropy gate with the sample rejecting below 7.5 bits/byte and the full pass deciding at 7.95, both
+  thresholds read off the Phase 0 report's entropy-gate tables; corpus table test and gate precision/recall test
+  against xz preset 9 ground truth, both ignored and run once per task).
 
 ## How to resume
 
-### Phase 1 — how it starts
-1. The owner reads the draft breakdown (PR #8, `docs/notes/phase1-e1-e2-draft.md`): section 1 is what the `full` numbers say about priorities; section 2 lists the twelve format details the method document leaves open, each with a proposal; sections 4–5 are the 14 E1 and 22 E2 tasks (plus E0-1, the versioned-set corpus addition D-27 needs); the last paragraph lists what the owner must settle before adoption (the spec of the versioned set; MP3 and the structured engine staying in Phase 2; one pipeline crate or several; Argon2id and recovery defaults; the pure-Rust LZMA decoder's licence).
-2. On adoption: the tasks move into `docs/PLAN.md` under Phase 1 with checkboxes (one commit), PR #8 merges, and work proceeds one task at a time as in Phase 0 (implementer in a worktree → read-only review → ticks with evidence → `main` fast-forwarded). E1-1 (frame grammar and header) is first; E2-1/E2-2 (ingest, classifier) can run alongside once E1-1's types exist.
-3. Format details become decisions as their tasks land (`D-28` onwards); the format freezes at E1-14 (the independent-decoder gate), not before.
+### Phase 1 — how it runs
+1. One task at a time from `docs/PLAN.md` (E2-2 next, then E2-3, E2-4, …): implementer in a worktree from a brief
+   with the exact values → read-only review (spec compliance and quality, benchmark honesty for harness tasks) →
+   fix rounds with rulings → a decision in `docs/DECISIONS.md` → PLAN tick with evidence → PR → CI green →
+   `main` fast-forwarded (merge `main` into the branch first).
+2. E0-1's measurement half (above) is the next long machine job; it needs the machine to itself for the baseline
+   run (zpaqfranz `-m5` on three gigabyte-sized trees is the slow part).
+3. The report takes one baseline directory. E2-22 needs either a full `--tools all` re-run that includes `lpk`, or
+   a report that merges result directories by class — decide when E2-4 gives the runner an `lpk` tool.
 - Parked from Phase 0, to pick up in the tasks named: the G3 "gate cost … share of the raw read rate" lines of the report use the probe's whole-corpus gate rates rather than the video class's own (information lines only; a report fix round); two `preflate-rs` 0.7.6 panics (`tree_predictor.rs:169`, index out of bounds) on PDF streams, caught and counted by the probe — containment and fuzzing item for E2-10 and an upstream report; WinZip and PowerArchiver still unmeasured (the D-07 fallback wording stands until the owner installs them); `bsc`/`hdiffz` not installed (D-05's BWT claim is measured in E2-15 with libsais instead).
+- Parked from E2-1 (low): on Unix a non-UTF-8 dot-name excluded by `include_hidden: false` still fails the walk; the per-file identity open on Windows costs on many-small-files trees (the speed task); the Unix-only ingest tests run on CI only.
 
 ### P0-5 — Linux CI smoke test (done)
 The manual workflow `corpus-smoke.yml` has an input `run_smoke` (default on): after the corpus build it installs `zstd`, `xz-utils` and `7zip`, runs the baseline runner on four classes with one repeat, validates and uploads the results as an artifact (CI results are never committed). The green run and its summary lines are cited under the P0-5 box in PLAN. Nothing else is needed from CI for Phase 0.
 
 ## Open points for the owner
 - **Local fuzzing through WSL**: optional; the CI job runs the fuzzers on Linux (manual and weekly). A long local run means installing rustup and `cargo-fuzz` for the WSL user (both would go into the removal inventory).
-- **G2 and G3 before D-08** (see the summary): decide what "2× smaller on versioned backups" means against incumbents that already deduplicate inside solid archives, and what "store at ≥ 80% of raw read" should be measured against (the current proxy is a real program reading and writing the files against an uncached raw read).
 - **Antivirus.** Windows Security Center on the measuring machine reports Defender off and a third-party product "snoozed". Each run records the state at start and end. Whether to run with the scanner fully on (with exclusions for `bench/tmp` and `bench/corpus`) or fully off is the owner's setting to change.
 - **Optional probe baselines.** `bsc` and `hdiffz` (free, from their authors' GitHub releases) are not installed; the text and dedup probes skip them unless the owner wants them installed. Without `bsc`, D-05's claim about BWT on text cannot be checked. Kanzi publishes no binaries. When `bsc` is first installed, its strongest flags must be checked against its usage text and recorded.
 - **WinZip and PowerArchiver.** Without their paid command-line tools the D-07 photo/document gate uses its fallback wording (best measured incumbent).
