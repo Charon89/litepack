@@ -315,9 +315,14 @@ impl Tool {
         }
         for (os, hints) in &self.hints {
             for h in hints {
-                // Hints are written with environment variables, never literal locations.
-                if !h.starts_with('%') {
-                    bail!("tool `{id}`: {os} hint `{h}` must start with an environment variable");
+                // Hints start with an environment variable, or are relative paths (this
+                // repository's own build output, resolved from the current directory); never an
+                // absolute location.
+                let absolute = h.starts_with(['/', '\\']) || h.get(1..2) == Some(":");
+                if !h.starts_with('%') && absolute {
+                    bail!(
+                        "tool `{id}`: {os} hint `{h}` must start with an environment variable or be a relative path"
+                    );
                 }
             }
         }
@@ -381,6 +386,7 @@ mod tests {
                 "zstd",
                 "xz",
                 "zpaqfranz",
+                "lpk",
                 "tsaur",
                 "wzzip",
                 "pacl"

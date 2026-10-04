@@ -125,7 +125,9 @@ updates). For comparable runs, keep the scanner state the same.
 2. The directories on `PATH`, using the executable names in the catalogue (`.exe`, `.cmd`,
    `.bat` and `.com` are tried on Windows).
 3. The catalogue's install-location hints, written with environment variables such as
-   `%ProgramFiles%`.
+   `%ProgramFiles%`, or (the `lpk` row) a path relative to the current directory, which the runner
+   records as an absolute path. `lpk` is this repository's own release build: `cargo build --release -p lpk-cli`
+   first; the recorded version carries the build hash.
 
 Then the tool is run once with its version arguments and the version is read from the output.
 
@@ -139,6 +141,7 @@ Then the tool is run once with its version arguments and the version is read fro
 | `zstd`      | Zstandard           | `winget install Meta.Zstandard`| `apt install zstd`          | external program only            |
 | `xz`        | XZ Utils            | `winget install TukaaniProject.XZUtils` | `apt install xz-utils` | external program only      |
 | `zpaqfranz` | zpaqfranz           | release from github.com/fcorbelli/zpaqfranz | same           | MIT                              |
+| `lpk`       | LitePack (this repository) | `cargo build --release -p lpk-cli` | same        | Apache-2.0 OR MIT                |
 | `tsaur`     | t-saur              | release from github.com/iulianbondari/t-saur | same          | Apache-2.0 OR MIT                |
 | `wzzip`     | WinZip command line | manual, see below              | not available               | paid licence                     |
 | `pacl`      | PowerArchiver command line | manual, see below       | not available               | paid licence                     |

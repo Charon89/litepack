@@ -226,6 +226,31 @@ compress = ["-m5"]
 extract = []
 
 [[tool]]
+id = "lpk"
+name = "LitePack"
+exe = { windows = ["lpk"], linux = ["lpk"], macos = ["lpk"] }
+hints = { windows = ["target/release/lpk.exe"], linux = ["target/release/lpk"], macos = ["target/release/lpk"] }
+version = { args = ["--version"], pattern = 'lpk (\S+ \(\S+\))' }
+extension = ".lpk"
+mode = "directory"
+layout = "flat"
+create = ["a", "{archive}", "{input}", "{settings}", "{threads}"]
+extract = ["x", "{archive}", "{outdir}", "{threads}"]
+threads = ["--threads", "{n}"]
+ratio_depends_on_threads = false
+licence = "Apache-2.0 OR MIT (this repository)"
+install = { url = "built from this repository: cargo build --release -p lpk-cli" }
+note = "This repository's own build (target/release, found relative to the current directory), measured like any other tool. The version carries the build hash. Parallel encoding is not implemented yet, so the thread count does not change the result."
+[[tool.setting]]
+id = "fast"
+compress = ["--fast"]
+extract = []
+[[tool.setting]]
+id = "store"
+compress = ["--store"]
+extract = []
+
+[[tool]]
 id = "tsaur"
 name = "t-saur"
 exe = { windows = ["tsaur"], linux = ["tsaur"], macos = ["tsaur"] }

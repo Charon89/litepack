@@ -126,7 +126,9 @@ fn find_in_hints(tool: &Tool, env: &Env) -> Option<PathBuf> {
                 .into_iter()
                 .find(|p| is_executable(p))
             {
-                return Some(p);
+                // A relative hint is relative to the current directory; the runner changes
+                // directory, so the executable is recorded by its absolute path.
+                return Some(std::path::absolute(&p).unwrap_or(p));
             }
         }
     }
@@ -444,6 +446,45 @@ mod tests {
         tool.hints_first = true;
         std::fs::remove_file(&hinted).expect("rm");
         assert!(find_executable(&tool, &env).is_some());
+    }
+
+    /// The workspace's release binary named by the catalogue's relative hint, resolved from the
+    /// workspace root (the test runs in the crate directory).
+    #[test]
+    fn the_lpk_relative_hint_resolves_to_the_release_binary() {
+        let real = include_str!("../../../../bench/tools.toml");
+        let cat = Catalogue::parse(&real.replace("\"target/release/", "\"../../target/release/"))
+            .expect("catalogue");
+        let tool = cat.get("lpk").expect("lpk row");
+        let env = fake_env(crate::run::catalogue::current_os(), Vec::new(), Vec::new());
+        let Some(path) = find_executable(tool, &env) else {
+            eprintln!(
+                "SKIPPED: target/release/lpk is not built (cargo build --release -p lpk-cli)"
+            );
+            return;
+        };
+        assert!(path.is_absolute() && path.is_file(), "{}", path.display());
+        match discover_tool(tool, &Local::default(), &env) {
+            Status::Found { version, .. } => {
+                assert!(version.starts_with(env!("CARGO_PKG_VERSION")), "{version}");
+                assert!(version.contains(" ("), "{version}");
+            }
+            Status::Skipped { reason } => panic!("found but skipped: {reason}"),
+        }
+    }
+
+    #[test]
+    fn list_tools_names_lpk_found_or_skipped() {
+        let cat = catalogue();
+        let tool = cat.get("lpk").expect("lpk row").clone();
+        let status = discover_tool(&tool, &Local::default(), &Env::current());
+        let line = list_line(&Discovered {
+            tool,
+            status,
+            local_override: false,
+        });
+        assert!(line.starts_with("lpk"), "{line}");
+        assert!(line.contains("found") || line.contains("skipped"), "{line}");
     }
 
     #[test]
