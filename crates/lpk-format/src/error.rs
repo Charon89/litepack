@@ -346,6 +346,50 @@ pub enum FormatError {
         /// The archive path.
         path: String,
     },
+    /// The archive is encrypted and no credentials were given.
+    #[error("the archive is encrypted: a password is required")]
+    PasswordRequired,
+    /// The key slot did not open with the given credentials.
+    #[error("wrong password or keyfile")]
+    WrongKey,
+    /// A sealed frame failed its authentication tag.
+    #[error("frame kind {kind} (sequence {sequence}) failed authentication")]
+    AuthenticationFailed {
+        /// Raw kind of the frame.
+        kind: u16,
+        /// Position of the frame in the archive.
+        sequence: u64,
+    },
+    /// A frame is sealed where the archive does not seal it.
+    #[error("frame kind {kind} is sealed but must not be")]
+    UnexpectedSealedFrame {
+        /// Raw kind of the frame.
+        kind: u16,
+    },
+    /// A frame is not sealed where the archive seals it.
+    #[error("frame kind {kind} must be sealed but is not")]
+    UnsealedFrame {
+        /// Raw kind of the frame.
+        kind: u16,
+    },
+    /// A key slot frame in an archive that is not encrypted, or a second one.
+    #[error("unexpected key slot frame")]
+    UnexpectedKeySlot,
+    /// An encrypted archive whose first frame is not the key slot.
+    #[error("the first frame of an encrypted archive must be the key slot")]
+    MissingKeySlot,
+    /// The key slot's fields are invalid.
+    #[error("bad key slot ({reason})")]
+    BadKeySlot {
+        /// The field at fault.
+        reason: &'static str,
+    },
+    /// Argon2 parameters outside the bounds.
+    #[error("bad argon2 parameters ({reason})")]
+    BadArgon2 {
+        /// The field at fault.
+        reason: &'static str,
+    },
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

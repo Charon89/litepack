@@ -4,7 +4,7 @@ use crate::error::{read_exact_or, FormatError};
 use crate::varint;
 use std::io::{Read, Write};
 
-/// Kind of a frame. Raw values `7..=0x7FFF` are reserved, `0x8000..` experimental.
+/// Kind of a frame. Raw values `8..=0x7FFF` are reserved, `0x8000..` experimental.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum FrameKind {
@@ -20,17 +20,20 @@ pub enum FrameKind {
     Index = 5,
     /// Trailer.
     Trailer = 6,
+    /// Key slot of an encrypted archive.
+    KeySlot = 7,
 }
 
 impl FrameKind {
     /// All known kinds in numeric order.
-    pub const ALL: [FrameKind; 6] = [
+    pub const ALL: [FrameKind; 7] = [
         FrameKind::EntryTable,
         FrameKind::ChunkData,
         FrameKind::Records,
         FrameKind::Recovery,
         FrameKind::Index,
         FrameKind::Trailer,
+        FrameKind::KeySlot,
     ];
 
     /// The kind for a raw value, if this reader knows it.
@@ -47,19 +50,24 @@ impl FrameKind {
             FrameKind::Recovery => "Recovery",
             FrameKind::Index => "Index",
             FrameKind::Trailer => "Trailer",
+            FrameKind::KeySlot => "KeySlot",
         }
     }
 }
 
-/// Frame flags. Bit 0 is `MUST_UNDERSTAND`; bits 1..=15 are reserved and must be zero.
+/// Frame flags. Bit 0 is `MUST_UNDERSTAND`, bit 1 is `SEALED`; bits 2..=15 are reserved and must be zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FrameFlags(u16);
 
 impl FrameFlags {
     /// A reader that does not know the kind must fail instead of skipping.
     pub const MUST_UNDERSTAND: FrameFlags = FrameFlags(1);
+    /// The payload is sealed (encrypted and authenticated).
+    pub const SEALED: FrameFlags = FrameFlags(2);
     /// No flags.
     pub const EMPTY: FrameFlags = FrameFlags(0);
+
+    const KNOWN: u16 = 3;
 
     /// Raw bits.
     pub fn bits(self) -> u16 {
@@ -68,8 +76,10 @@ impl FrameFlags {
 
     /// Validate raw bits; reserved bits give `ReservedFrameBits`.
     pub fn from_bits(bits: u16) -> Result<Self, FormatError> {
-        if bits & !1 != 0 {
-            return Err(FormatError::ReservedFrameBits { bits: bits & !1 });
+        if bits & !Self::KNOWN != 0 {
+            return Err(FormatError::ReservedFrameBits {
+                bits: bits & !Self::KNOWN,
+            });
         }
         Ok(FrameFlags(bits))
     }
@@ -77,6 +87,11 @@ impl FrameFlags {
     /// True when every bit of `other` is set in `self`.
     pub fn contains(self, other: FrameFlags) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    /// Union of two flag sets.
+    pub fn union(self, other: FrameFlags) -> FrameFlags {
+        FrameFlags(self.0 | other.0)
     }
 }
 
@@ -218,10 +233,12 @@ impl Frame {
 /// The Markdown table of frame flags, pasted verbatim into the spec.
 pub fn frame_flag_table() -> String {
     let mu = FrameFlags::MUST_UNDERSTAND.bits().trailing_zeros();
-    let first_reserved = mu + 1;
+    let sealed = FrameFlags::SEALED.bits().trailing_zeros();
+    let first_reserved = sealed + 1;
     format!(
         "| Bit | Name | Meaning |\n|---|---|---|\n\
          | {mu} | MUST_UNDERSTAND | a reader that does not know the kind must fail instead of skipping |\n\
+         | {sealed} | SEALED | the payload is sealed: the nonce, the ciphertext and the tag, in that order (section 14); the frame hash covers the sealed bytes |
          | {first_reserved}-15 | reserved | must be zero; a reader rejects the frame otherwise |\n"
     )
 }
@@ -279,7 +296,7 @@ mod tests {
     proptest! {
         #[test]
         fn round_trip(
-            ki in 0usize..6,
+            ki in 0usize..7,
             must in any::<bool>(),
             payload in proptest::collection::vec(any::<u8>(), 0..=65536),
         ) {
@@ -334,13 +351,13 @@ mod tests {
 
     #[test]
     fn unknown_kind_skipped_and_next_reads() {
-        let mut b = raw(7, 0, &[9u8; 300]);
+        let mut b = raw(8, 0, &[9u8; 300]);
         b.extend(encode(&sample()));
         let mut cur = &b[..];
         let l = ReadLimits::default();
         match Frame::read(&mut cur, &l).unwrap() {
             Some(ReadFrame::Unknown {
-                kind: 7,
+                kind: 8,
                 payload_len: 300,
                 flags,
             }) => assert_eq!(flags, FrameFlags::EMPTY),
@@ -364,19 +381,19 @@ mod tests {
 
     #[test]
     fn unknown_must_understand() {
-        let b = raw(7, 1, b"abc");
+        let b = raw(8, 1, b"abc");
         assert!(matches!(
             read_one(&b),
-            Err(FormatError::UnknownMustUnderstand { kind: 7 })
+            Err(FormatError::UnknownMustUnderstand { kind: 8 })
         ));
     }
 
     #[test]
     fn reserved_flag_bit() {
-        let b = raw(1, 2, b"abc");
+        let b = raw(1, 4, b"abc");
         assert!(matches!(
             read_one(&b),
-            Err(FormatError::ReservedFrameBits { bits: 2 })
+            Err(FormatError::ReservedFrameBits { bits: 4 })
         ));
     }
 
@@ -479,7 +496,8 @@ mod tests {
             assert_eq!(FrameKind::from_u16(k as u16), Some(k));
         }
         assert_eq!(FrameKind::from_u16(0), None);
-        assert_eq!(FrameKind::from_u16(7), None);
+        assert_eq!(FrameKind::from_u16(8), None);
         assert!(frame_kind_table().contains("| 6 | Trailer |"));
+        assert!(frame_kind_table().contains("| 7 | KeySlot |"));
     }
 }

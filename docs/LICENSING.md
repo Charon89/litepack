@@ -36,6 +36,8 @@ How a component is used:
 | SeqCDC and VectorCDC chunking (Udayashankar, Baba, Al-Kiswany, University of Waterloo; Middleware 2024 and FAST 2025) | our own implementation from the papers; the authors' reference code (UWASL dedup-bench) is Apache-2.0 | reference-only for the reference code | https://github.com/UWASL/dedup-bench |
 | blake3 1.8.7 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | depend | https://crates.io/crates/blake3 |
 | RustCrypto aes-gcm 0.11.1, chacha20poly1305 0.11.0, argon2 0.6.0 | aes-gcm and chacha20poly1305: Apache-2.0 OR MIT; argon2: MIT OR Apache-2.0 | depend | https://crates.io/crates/aes-gcm · https://crates.io/crates/chacha20poly1305 · https://crates.io/crates/argon2 |
+| RustCrypto hkdf 0.13.0, sha2 0.11.0 | Apache-2.0 OR MIT | depend (nonce derivation and keyfile mixing, E1-12) | https://crates.io/crates/hkdf · https://crates.io/crates/sha2 |
+| zeroize 1, rand 0.9 | zeroize: Apache-2.0 OR MIT; rand: MIT OR Apache-2.0 | depend (wiping secrets; the writer's RNG for the archive key and salt, E1-12) | https://crates.io/crates/zeroize · https://crates.io/crates/rand |
 | reed-solomon-simd 3.1.0 | MIT AND BSD-3-Clause | depend (recovery records, D-11) | https://crates.io/crates/reed-solomon-simd |
 | libsais 0.2.0 with libsais-sys (binding to the C library libsais) | crates: MIT OR Apache-2.0; libsais: Apache-2.0 | link (text BWT) — candidate; E2 chooses between this and the next row | https://crates.io/crates/libsais |
 | libsais-rs 0.2.2 (pure-Rust translation of libsais; its README calls it "LLM-mediated" and not endorsed by the original authors) | Apache-2.0 | depend (text BWT) — candidate; must be tested against the C library before it is trusted | https://crates.io/crates/libsais-rs |
