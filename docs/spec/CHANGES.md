@@ -61,6 +61,15 @@ behaviour. No test vector byte changed.
     `repair` are the recovery commands (code for the keyless path, which used to fail with `DamageFound`; sections 9,
     13, 14, CONFORMANCE item 7).
 
+13. Second reading: the recovery-list end rule qualified in section 6 as in sections 13 and 15; section 14's
+    outcomes of a modified frame (`HashMismatch`, `AuthenticationFailed`, `UnsealedFrame`, `UnexpectedSealedFrame`,
+    `WrongFrameKind`, `BadFrameLocation`); lzma at the bound: only the marker may follow, any other byte after the
+    decoder's position is `trailing input`, and `IsFinishedOK` applies after a marker only (a stated difference
+    from LzmaSpec); the key slot's kind check (`MissingKeySlot`) precedes the payload limit; the keyless walk's
+    `BadFrameLocation` `frames` for an overflowing length is stated; Repair points to the keyless path; the index
+    sequence sentence rewritten; section 11's repository sentence corrected; CONFORMANCE item 3 names the entry
+    hashes and the index root, item 8 lists the negative cases, and "3.x" means the series pinned in `Cargo.lock`.
+
 ## For the independent decoder
 
 Changes that alter an outcome it may have chosen differently: ruling 1 (hashflip extraction), ruling 2 (non-final

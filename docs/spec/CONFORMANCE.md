@@ -10,8 +10,9 @@ An independent decoder passes the gate when, for every archive in the table belo
 1. it opens the archive (with the password, keyfile and prior the table names, and no other input);
 2. it extracts every entry bit-exactly: for each line of `files` in `tests/vectors/expected.toml` the path,
    the byte length and the BLAKE3-256 of the extracted bytes are equal, in entry-table order;
-3. its `verify` is clean: every frame hash, every block's decoded length, every chunk hash, every file hash and
-   the Merkle roots check out, and it reports no error;
+3. its `verify` is clean: every frame hash, every block's decoded length, every chunk hash and the index's
+   Merkle root check out, the extracted entries match the hashes of `files` in `expected.toml`, and it reports
+   no error;
 4. its `list` output, if it has one in the reference format, is `list` of `expected.toml`; its `verify` summary,
    likewise, is `verify` (`ok: <entries> entries, <chunks> chunks, <blocks> blocks`). Only the facts matter (entry
    count, chunk count, block count); the wording of a different tool is free;
@@ -26,7 +27,12 @@ An independent decoder passes the gate when, for every archive in the table belo
    chunk touches, and its repair writes a copy whose bytes equal `recovery-groups.lpk` — a decoder without
    repair may skip the repair clause but must still report the damage. This item is about the recovery check:
    `verify` leaves recovery to `check` in every mode (spec section 9) and does not fail on a damaged recovery
-   frame.
+   frame. Spec section 13's "`reed-solomon-simd` 3.x" means that library's 3.x series as pinned in the repository's
+   `Cargo.lock` when the vectors were written;
+8. the negative cases on the positive vectors are gate items too: `zstd-dict.lpk` without its prior fails with
+   `MissingPrior`; a sealed vector with a wrong password, and `sealed-keyfile.lpk` without its keyfile, fail with
+   `WrongKey`; `sealed-listable.lpk` is listed without any password (its `list` of `expected.toml`), while
+   extracting from it without the password is `PasswordRequired`.
 
 The plain contents of the vectors are not committed; `expected.toml` gives their hashes. (They are generated
 from a xorshift pattern by `tests/common/mod.rs::pattern`; the hashes make that generator unnecessary.)

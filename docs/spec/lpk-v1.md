@@ -353,7 +353,9 @@ the generation table are `TrailingBytes` (`what` is `index`); an input that ends
 is `Truncated` and nothing is allocated for it; a `recovery_count` larger than the bytes left divided by 3 is
 `Truncated` likewise. Each recovery location follows the same location rule as the records frame and overlaps no
 block, no other recovery frame, the entry table and the records frame; the recovery frames are in ascending offset
-order and, when there are any, the last one ends at the offset of the index frame (section 13); a violation is
+order and, when there are any, the last one ends at the offset of the index frame, or, when the latest generation
+wrote no recovery frame, the last one lies before that generation's `start_offset` and ends at or before
+`previous_trailer_offset` (sections 13 and 15); a violation is
 `BadFrameLocation` with `what` `recovery`.
 
 Block rules. Blocks are in ascending `first_chunk` order and partition the chunk indices `0..n` exactly,
@@ -397,8 +399,9 @@ Parse order. A reader parses the index payload and applies the rules in this ord
 5. The entry table's location, then the records location (`BadFrameLocation`).
 6. The entry table and the records frame against the blocks and each other (`BadFrameLocation`).
 7. Each recovery location (`BadFrameLocation`, `recovery`), then their overlaps with the blocks, the entry table,
-   the records frame and each other, then their ascending order and where the last one ends (all
-   `BadFrameLocation`, `recovery`).
+   the records frame and each other, then their ascending order and where the last one ends (at the index, or,
+   when the latest generation wrote no recovery frame, before its `start_offset` and at or before
+   `previous_trailer_offset`) (all `BadFrameLocation`, `recovery`).
 8. One pass over the chunk records against the blocks (`BlockLengthMismatch`, `BlockCoverage`), then the Merkle
    root (`MerkleRootMismatch`).
 9. The envelope rules of section 7, in the order given there.
@@ -745,14 +748,20 @@ has no priors for LZMA (section 10 is about `zstd` only). The rules, in this ord
    `max_window` beyond rule 2: a decoder needs a buffer of the smaller of `dict_size` and
    the output bound (at least 1 byte), which is exactly the reach a valid stream can use.
 4. The first byte of the range coder stream must be 0, else `LzmaError` with reason `range coder`. The
-   range coder's end condition (its code value being 0 after the last symbol) is checked only when the
-   end-of-payload marker is present; a stream that ends at the output bound without a marker is not checked
-   for it, and a decoder must not refuse a marker-less stream because its final code value is not 0.
+   range coder's end condition (LzmaSpec's `IsFinishedOK`: its code value is 0) is checked only when the
+   end-of-payload marker is present: after the marker it must hold. A stream that ends at the output bound
+   without a marker is not checked for it, and a decoder must not refuse a marker-less stream because its final
+   code value is not 0. This differs from LzmaSpec, which ends a marker-less stream only when `IsFinishedOK`
+   holds and otherwise goes on to look for a marker; a v1 decoder accepts the marker-less final stream at the
+   bound without that test.
 5. In the last step the stream may end with the end-of-payload marker or without one (the test vectors carry
-   it; `.lzma` files of known size do not), and a decoder that has produced the output bound accepts either. Any input after the stream (after the marker, when there is one)
-   is `LzmaError` with reason `trailing input`; so is a stream whose symbols continue past the output bound
-   when the bound falls between two symbols. Input that ends before the output bound is reached, or a
-   marker before it, is `LzmaError` with reason `truncated`.
+   it; `.lzma` files of known size do not), and a decoder that has produced the output bound accepts either.
+   When the output bound is reached with input left, the next symbol must be the end-of-payload marker, after
+   which no input may follow; otherwise every byte after the decoder's input position at the bound is
+   `LzmaError` with reason `trailing input`. That covers bytes that would decode as further symbols starting at
+   the bound (a literal or a match after the last byte) and bytes that decode as nothing. Input after the marker
+   is `trailing input` too. Input that ends before the output bound is reached, or a marker before it, is
+   `LzmaError` with reason `truncated`.
 6. A match that crosses the output bound is `PayloadTooLarge` (`BlockLengthMismatch` on the last step); the
    decoder never writes past the bound. Any other damage is `LzmaError`; its `reason` is the decoder's own text
    and is not normative, except the reasons `range coder`, `trailing input`, `truncated` and `marker required`
@@ -900,7 +909,9 @@ does not check that. `BadPriorList` as above.
 
 The archives under `crates/lpk-format/tests/vectors/` are written by the reference writer with a zstd or an LZMA encoder
 (zstd level 3 or LZMA preset 6, chunk size 4096, archive id 0x5A repeated, entry mtime 1000). Their plain contents are generated by
-the tests from seeded patterns, so the repository holds only the archives and the dictionary:
+the tests from seeded patterns, so the repository holds the archives and their side files (the dictionary,
+the keyfile, `vectors.toml` and `expected.toml`), not the contents. These are the zstd and LZMA vectors; the others
+are listed in `docs/spec/CONFORMANCE.md`:
 
 - `zstd-basic.lpk`: three files in one block, `window_log` 20.
 - `zstd-multiblock.lpk`: three files in several blocks (block size 32 KiB), a file spanning two blocks.
@@ -1207,7 +1218,9 @@ term grows with the archive.
 ### Repair
 
 A reader repairs an archive in these steps. It opens the archive; an archive whose index cannot be read is not
-repaired and the error of the opening is the result. For each recovery frame the index lists:
+repaired and the error of the opening is the result. (Without the key of an encrypted archive the index is not read;
+the recovery frames and the generation starts come from the keyless walk of section 14, and the steps are the same.)
+For each recovery frame the index lists:
 
 1. Read the frame at its recorded location and check its hash. A frame that fails (its hash, its kind or its
    length), or that passes its hash but breaks a rule above or the coverage rule, is unusable: it is counted
@@ -1299,8 +1312,10 @@ sequence and the index's generation table (`first_sequence` ranges); the index i
 was read with. An archive that is not encrypted has zero salts.
 
 `sequence` is the position of the frame among the frames of the archive, counting every frame (sealed or not, the key
-slot included) from 0 for the first frame after the header. The index frame is the exception (and the sequence below is reserved for it): the trailer cannot
-name its position, so the index is sealed under the constant sequence 2^64 - 1, which no counted frame reaches. The index of generation `g` is sealed under `2^64 - 1 - g` (section 15), so no two generations of one archive seal an index under the same sequence. Each
+slot included) from 0 for the first frame after the header. The index frame is the exception: its trailer cannot
+name the index's position, so the index of generation `g` is sealed under the sequence `2^64 - 1 - g` (section 15)
+instead of its position. These values are reserved for indexes; no counted frame reaches them, and no two generations
+of one archive seal an index under the same sequence. Each
 (kind, sequence, generation salt) triple is unique, so no nonce is used twice under `K`; a random nonce could repeat across
 the very large number of frames an archive may hold, and a repeat under GCM or Poly1305 breaks both secrecy and
 authenticity. The sealed payload still carries the nonce; a reader recomputes it, and a payload whose stored nonce
@@ -1330,8 +1345,9 @@ encrypted or a second one). Its payload is exactly 111 bytes:
 | wrapped_key | 48 | the archive key encrypted under the KEK (32 bytes of ciphertext, then the 16-byte tag) |
 | check | 32 | BLAKE3 keyed with the archive key, of the archive id |
 
-Reading the key slot, in this order: the frame is read under a payload limit of 111 bytes (a larger `payload_len`
-is `BadKeySlot`, `length`; the other errors of section 3 apply); a slot with the `SEALED` flag is
+Reading the key slot, in this order: input that ends before the first two bytes after the header, or a kind
+there other than 7, is `MissingKeySlot`; then the frame is read under a payload limit of 111 bytes (a larger
+`payload_len` is `BadKeySlot`, `length`; the other errors of section 3 apply); a slot with the `SEALED` flag is
 `UnexpectedSealedFrame`; a payload that is not exactly 111 bytes is `BadKeySlot` (`length`); `suite` not 1 or 2 is
 `BadKeySlot` (`suite`); `kdf` not 1 is `BadKeySlot` (`kdf`); `argon2_t`, then `argon2_m_kib`, then `argon2_p`
 outside their bounds is `BadArgon2` (`t`, `m`, `p`); `keyfile_required` not 0 or 1 is `BadKeySlot`
@@ -1361,8 +1377,8 @@ password is derived. The password is the raw bytes given, with no normalisation 
    Without credentials the archive opens keyless, in these steps: the trailer is read and checked as in section 6
    (step 4); then, from the end of the key slot (sequence 1), the frame envelopes are walked: each
    frame's kind, flags and `payload_len` are read and its payload is skipped by its declared length, without being
-   read or hashed, so the sequence count continues past a damaged frame. A frame that would end past the file is
-   `Truncated` (`frames`); a key slot met again is `UnexpectedKeySlot`. The walk records every `Recovery` frame (its
+   read or hashed, so the sequence count continues past a damaged frame. A frame whose length overflows a 64-bit
+   offset is `BadFrameLocation` (`frames`); a frame that would end past the file is `Truncated` (`frames`); a key slot met again is `UnexpectedKeySlot`. The walk records every `Recovery` frame (its
    location and sequence), takes the last `EntryTable` frame as the entry table, records the end of every trailer that
    is not the last frame as a generation start, and stops at the trailer that ends the file. A listable archive
    without an `EntryTable` frame is `BadFrameLocation` (`entry table`). A keyless reader can check and repair the
@@ -1372,9 +1388,11 @@ password is derived. The password is the raw bytes given, with no normalisation 
    recovery payload, and reports that the chunks were not checked (section 9); a listable
    archive's entry table can be listed (it is not authenticated without the index); everything that needs the index or
    a sealed frame (`extract`, a sealed entry table) is `PasswordRequired`.
-3. Only then are the trailer, the index and the blocks read. A modified frame envelope or payload fails the frame hash
-   first (`HashMismatch`); a payload modified together with its frame hash fails the tag: `AuthenticationFailed` naming the
-   kind and the sequence. The entry table, whether sealed or in clear, is compared with the index's `entry_table_hash`
+3. Only then are the trailer, the index and the blocks read. A modified frame has these outcomes (section 1, "What is
+   authenticated"): a changed payload, nonce or tag fails the frame hash (`HashMismatch`), and changed together with
+   the frame hash it fails the tag (`AuthenticationFailed` naming the kind and the sequence); a cleared `SEALED` bit is
+   `UnsealedFrame`, a set one on a frame that is never sealed `UnexpectedSealedFrame`; a changed kind at a recorded
+   location is `WrongFrameKind`; a changed `payload_len` is `BadFrameLocation` or a frame error of section 3. The entry table, whether sealed or in clear, is compared with the index's `entry_table_hash`
    (`EntryTableMismatch`), so a clear table of a listable archive cannot be rewritten undetected by a reader that
    has the key.
 
