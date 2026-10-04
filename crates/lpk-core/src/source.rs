@@ -21,9 +21,12 @@ impl Source {
     /// The bytes of a file input, at most `len + 1` of them (one past the walked length, so a
     /// file that grew shows as a length mismatch without reading it all).
     ///
-    /// The path is opened without following links (Unix `O_NOFOLLOW | O_NONBLOCK`, Windows
-    /// `FILE_FLAG_OPEN_REPARSE_POINT`), and the opened object must be a regular file and the
-    /// object the walk saw; otherwise [`CoreError::ChangedWhileReading`].
+    /// Unix opens with `O_NOFOLLOW | O_NONBLOCK`. Windows opens normally (the reparse-point
+    /// flag would bypass the cloud-files, deduplication and WOF filters and read a stub instead
+    /// of the content); there the protection against a swapped link is the identity check, with
+    /// the residual that a file reached through a swapped junction is opened (read access only,
+    /// no side effect) before the check rejects it. The opened object must be a regular file
+    /// and the object the walk saw; otherwise [`CoreError::ChangedWhileReading`].
     pub fn open(&self, input: &Input) -> Result<Box<dyn Read + '_>, CoreError> {
         if input.kind != EntryKind::File {
             return Err(CoreError::io(
@@ -34,12 +37,17 @@ impl Source {
         let changed = || CoreError::ChangedWhileReading {
             path: input.source.clone(),
         };
-        let before = std::fs::symlink_metadata(&input.source)
-            .map_err(|e| CoreError::io(&input.source, e))?;
-        if !before.is_file() {
-            return Err(changed());
-        }
-        let file = open_no_follow(&input.source).map_err(|e| CoreError::io(&input.source, e))?;
+        let file = match open_no_follow(&input.source) {
+            Ok(f) => f,
+            Err(e) => {
+                // A path that is now a link, a directory or another kind of object is a change,
+                // not an I/O fault.
+                return Err(match std::fs::symlink_metadata(&input.source) {
+                    Ok(m) if !m.is_file() => changed(),
+                    _ => CoreError::io(&input.source, e),
+                });
+            }
+        };
         let md = file
             .metadata()
             .map_err(|e| CoreError::io(&input.source, e))?;
@@ -65,17 +73,7 @@ fn open_no_follow(path: &std::path::Path) -> std::io::Result<File> {
         .open(path)
 }
 
-#[cfg(windows)]
-fn open_no_follow(path: &std::path::Path) -> std::io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(unix))]
 fn open_no_follow(path: &std::path::Path) -> std::io::Result<File> {
     OpenOptions::new().read(true).open(path)
 }

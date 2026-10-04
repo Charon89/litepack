@@ -20,7 +20,8 @@ use crate::error::CoreError;
 ///
 /// With `follow_symlinks` on: (1) a directory reached a second time through a link (a cycle or
 /// a DAG of links) is not descended again, the link is recorded as a `Symlink` entry with its
-/// target bytes instead; (2) a dangling link is recorded as a `Symlink` entry; (3) a junction
+/// target bytes instead (so a directory first reached through a link and later by its real
+/// path is listed under both archive paths, bounded by the visited set, as `tar -h` does); (2) a dangling link is recorded as a `Symlink` entry; (3) a junction
 /// or directory symlink to the same volume is followed like a directory, one to another volume
 /// is recorded as a `Symlink` entry when `one_file_system` is on (the volume is the device id
 /// on Unix and the drive prefix of the canonical path on Windows).
@@ -66,7 +67,9 @@ pub struct Input {
     /// format crate's job.
     pub symlink_target: Option<Vec<u8>>,
     /// Identity of the file object the walk saw (see [`file_identity`]); `Source::open` refuses
-    /// a different object. `None` skips the check.
+    /// a different object. `None` skips the check. A process-local value, not stable across
+    /// runs; file identities on ReFS and on network file systems may not be unique or stable
+    /// (the caveat of the `same-file` crate).
     pub identity: Option<u64>,
 }
 
@@ -87,7 +90,37 @@ fn handle_id(h: &Handle) -> u64 {
 /// A 64-bit digest of an open file's identity (volume and file index on Windows, device and
 /// inode on Unix).
 pub fn file_identity(file: &File) -> std::io::Result<u64> {
-    Handle::from_file(file.try_clone()?).map(|h| handle_id(&h))
+    #[cfg(unix)]
+    {
+        Ok(dev_ino_id(&file.metadata()?))
+    }
+    #[cfg(not(unix))]
+    {
+        Handle::from_file(file.try_clone()?).map(|h| handle_id(&h))
+    }
+}
+
+#[cfg(unix)]
+fn dev_ino_id(md: &Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut s = DefaultHasher::new();
+    (md.dev(), md.ino()).hash(&mut s);
+    s.finish()
+}
+
+/// Identity of a file the walk saw: Unix takes (dev, ino) from the metadata already in hand,
+/// Windows opens a `same_file::Handle` briefly (no stable std alternative).
+fn walked_identity(path: &Path, md: &Metadata) -> Result<u64, CoreError> {
+    #[cfg(unix)]
+    {
+        let _ = path;
+        Ok(dev_ino_id(md))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = md;
+        path_identity(path)
+    }
 }
 
 fn path_identity(path: &Path) -> Result<u64, CoreError> {
@@ -108,7 +141,7 @@ pub fn walk(root: &Path, options: &IngestOptions) -> Result<Vec<Input>, CoreErro
         options,
         out: Vec::new(),
         visited: HashSet::new(),
-        root_volume: volume_key(root, &md),
+        root_volume: volume_key(root, &md).map_err(|e| CoreError::io(root, e))?,
     };
     if options.follow_symlinks {
         w.visited.insert(path_identity(root)?);
@@ -186,21 +219,23 @@ impl Walker<'_> {
         stack: &mut Vec<(PathBuf, String)>,
     ) -> Result<(), CoreError> {
         let path = join(prefix, &c.name);
+        let flags = attribute_flags(&c.md, &c.name);
+        // An excluded entry is never name-validated.
+        if !self.options.include_hidden && flags.contains(EntryFlags::HIDDEN) {
+            return Ok(());
+        }
         validate_path(&path).map_err(|reason| CoreError::UnportableName {
             path: path.clone(),
             reason: reason.to_string(),
         })?;
-        let flags = attribute_flags(&c.md, &c.name);
-        if !self.options.include_hidden && flags.contains(EntryFlags::HIDDEN) {
-            return Ok(());
-        }
         let ft = c.md.file_type();
         if ft.is_dir() {
-            let descend = !self.options.one_file_system
-                || volume_key(&c.path, &c.md) == self.root_volume
-                || self.root_volume.is_none();
+            // A plain directory is always descended, except across a Unix mount point; no
+            // path resolution is attempted that could fail and drop its contents silently.
+            let crosses =
+                self.options.one_file_system && plain_dir_crosses(&c.md, &self.root_volume);
             self.out.push(dir_input(path.clone(), &c, flags));
-            if descend {
+            if !crosses {
                 stack.push((c.path, path));
             }
             Ok(())
@@ -213,7 +248,8 @@ impl Walker<'_> {
                 Ok(m) if m.is_dir() => {
                     let other_volume = self.options.one_file_system
                         && self.root_volume.is_some()
-                        && volume_key(&c.path, &m) != self.root_volume;
+                        && volume_key(&c.path, &m).map_err(|e| CoreError::io(&c.path, e))?
+                            != self.root_volume;
                     if other_volume || !self.visited.insert(path_identity(&c.path)?) {
                         return self.push_symlink(path, &c, flags);
                     }
@@ -241,7 +277,7 @@ impl Walker<'_> {
                         len: m.len(),
                         mtime_ns: mtime_ns(&m),
                         flags,
-                        identity: Some(path_identity(&source)?),
+                        identity: Some(walked_identity(&source, &m)?),
                         source,
                         symlink_target: None,
                     });
@@ -256,7 +292,7 @@ impl Walker<'_> {
                 len: c.md.len(),
                 mtime_ns: mtime_ns(&c.md),
                 flags,
-                identity: Some(path_identity(&c.path)?),
+                identity: Some(walked_identity(&c.path, &c.md)?),
                 source: c.path,
                 symlink_target: None,
             });
@@ -345,24 +381,40 @@ fn link_bytes(p: &Path) -> Option<Vec<u8>> {
 }
 
 #[cfg(unix)]
-fn volume_key(_path: &Path, md: &Metadata) -> Option<String> {
+fn volume_key(_path: &Path, md: &Metadata) -> std::io::Result<Option<String>> {
     use std::os::unix::fs::MetadataExt;
-    Some(md.dev().to_string())
+    Ok(Some(md.dev().to_string()))
 }
 
 #[cfg(windows)]
-fn volume_key(path: &Path, _md: &Metadata) -> Option<String> {
+fn volume_key(path: &Path, _md: &Metadata) -> std::io::Result<Option<String>> {
     use std::path::Component;
-    let canon = std::fs::canonicalize(path).ok()?;
-    match canon.components().next() {
+    let canon = std::fs::canonicalize(path)?;
+    Ok(match canon.components().next() {
         Some(Component::Prefix(p)) => Some(p.as_os_str().to_string_lossy().to_uppercase()),
         _ => None,
-    }
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
-fn volume_key(_path: &Path, _md: &Metadata) -> Option<String> {
-    None
+fn volume_key(_path: &Path, _md: &Metadata) -> std::io::Result<Option<String>> {
+    Ok(None)
+}
+
+/// Unix: a plain directory on another device is a mount point and is not descended. Windows:
+/// mount points are reparse points, which Rust reports as symlinks, so a plain directory
+/// never crosses.
+#[cfg(unix)]
+fn plain_dir_crosses(md: &Metadata, root_volume: &Option<String>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    root_volume
+        .as_ref()
+        .is_some_and(|v| *v != md.dev().to_string())
+}
+
+#[cfg(not(unix))]
+fn plain_dir_crosses(_md: &Metadata, _root_volume: &Option<String>) -> bool {
+    false
 }
 
 #[cfg(windows)]
@@ -461,8 +513,8 @@ pub(crate) mod tests {
     pub(crate) fn junction(target: &Path, link: &Path) -> bool {
         std::process::Command::new("cmd")
             .args(["/c", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
+            .arg(link.to_string_lossy().replace('/', "\\"))
+            .arg(target.to_string_lossy().replace('/', "\\"))
             .output()
             .is_ok_and(|o| o.status.success())
     }
@@ -661,6 +713,34 @@ pub(crate) mod tests {
             walk(dir.path(), &IngestOptions::default()),
             Err(CoreError::SpecialFile { .. })
         ));
+    }
+
+    #[test]
+    fn a_directory_whose_path_cannot_be_canonicalized_is_still_descended() {
+        // Windows: `canonicalize` fails on a name ending in a dot (reachable only through a
+        // verbatim path); the contents must still be listed. Elsewhere this just passes.
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(root.join("foo.")).unwrap();
+        fs::write(root.join("foo.").join("f"), b"x").unwrap();
+        let got = walk(&root, &IngestOptions::default()).unwrap();
+        let paths: Vec<&str> = got.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, ["foo.", "foo./f"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_excluded_hidden_entry_is_not_name_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), ".bad\\name", 1);
+        write(dir.path(), "ok", 1);
+        let opts = IngestOptions {
+            include_hidden: false,
+            ..IngestOptions::default()
+        };
+        let got = walk(dir.path(), &opts).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(walk(dir.path(), &IngestOptions::default()).is_err());
     }
 
     #[cfg(unix)]
