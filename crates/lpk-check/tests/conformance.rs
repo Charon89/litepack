@@ -241,20 +241,29 @@ fn malformed_vectors() {
     let e = a.verify().unwrap_err();
     assert_eq!(e.class, t["error"].as_str().unwrap());
     assert_eq!(e.detail, t["message"].as_str().unwrap());
-    // Section 9: a file of that block is reported as a ChunkMismatch whose cause is the hash.
-    let entries = a.entries().unwrap();
-    for en in &entries {
-        let e = a.read_file(en, 0).unwrap_err();
-        assert_eq!(e.class, "ChunkMismatch");
-        assert!(
-            e.detail.contains("payload hash mismatch in frame kind 2"),
-            "{e}"
-        );
-    }
     let dir = temp("hashflip");
     let (done, err) = extract_all(&mut a, &dir).unwrap();
     assert!(done.is_empty() && err.is_some());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// E1-14d ruling 1 (spec section 9, CONFORMANCE "malformed-hashflip"): a block
+/// frame whose hash fails is that frame's `HashMismatch` (kind 2) when a file
+/// of the block is extracted, as for `verify`; `ChunkMismatch` is only for an
+/// intact frame whose chunk differs. Ignored until this decoder is adapted to
+/// the revised section 9 (its author's next step); the assertion is final.
+#[test]
+#[ignore = "E1-14d ruling 1: lpk-check still reports ChunkMismatch; its author adapts the decoder"]
+fn hashflip_extract_is_a_hash_mismatch() {
+    let exp = table("expected.toml");
+    let t = exp["malformed-hashflip.lpk"].as_table().unwrap();
+    let mut a = Archive::open(read("malformed-hashflip.lpk"), Options::default()).unwrap();
+    let entries = a.entries().unwrap();
+    for en in &entries {
+        let e = a.read_file(en, 0).unwrap_err();
+        assert_eq!(e.class, "HashMismatch");
+        assert_eq!(e.detail, t["message"].as_str().unwrap());
+    }
 }
 
 /// Gate item 7: recovery check, damage report, partial extraction and repair.

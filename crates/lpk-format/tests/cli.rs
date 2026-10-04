@@ -281,7 +281,11 @@ fn a_damaged_later_chunk_leaves_no_partial_file() {
     let out_dir = t.path().join("out");
     let (code, _, err) = cli(&["extract", p.to_str().unwrap(), out_dir.to_str().unwrap()]);
     assert_eq!(code, 1, "{err}");
-    assert!(err.contains("does not match"), "{err}");
+    // The damaged block frame is its own hash mismatch (spec section 9).
+    assert!(
+        err.contains("payload hash mismatch in frame kind 2"),
+        "{err}"
+    );
     let names: Vec<_> = std::fs::read_dir(&out_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())

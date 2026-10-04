@@ -45,6 +45,52 @@ impl Write for Bounded {
 pub struct LzmaDecoder;
 
 impl PrimitiveDecoder for LzmaDecoder {
+    /// A step that is not the last of its graph has only a bound, not a
+    /// length, so its stream must end with the end-of-payload marker: a
+    /// marker-less stream that reaches the bound is `LzmaError` "marker
+    /// required" (spec section 8).
+    fn decode_step(
+        &self,
+        params: &[u8],
+        input: &[u8],
+        expected_len: u64,
+        last: bool,
+        limits: &Resources,
+    ) -> Result<Vec<u8>, FormatError> {
+        if last {
+            return self.decode(params, input, expected_len, limits);
+        }
+        let (props, buffer) = setup(params, input, expected_len, limits)?;
+        match pass(props, buffer, None, input, expected_len) {
+            Ok((out, _)) => {
+                // lzma-rs also ends a marker-less stream whose input runs out
+                // cleanly. Decoded again by the length it gave, a stream with
+                // the marker leaves the marker's bytes unread; one without it
+                // consumes everything.
+                let n = out.len() as u64;
+                match pass(props, buffer, Some(n), input, expected_len) {
+                    Ok((again, used)) if again.len() as u64 == n && used == input.len() as u64 => {
+                        Err(lerr(if n == expected_len {
+                            "marker required"
+                        } else {
+                            "truncated"
+                        }))
+                    }
+                    _ => Ok(out),
+                }
+            }
+            Err(e @ FormatError::PayloadTooLarge { .. }) => Err(e),
+            Err(e) => match pass(props, buffer, Some(expected_len), input, expected_len) {
+                Ok((out, used))
+                    if out.len() as u64 == expected_len && used == input.len() as u64 =>
+                {
+                    Err(lerr("marker required"))
+                }
+                _ => Err(e),
+            },
+        }
+    }
+
     fn decode(
         &self,
         params: &[u8],
@@ -52,43 +98,7 @@ impl PrimitiveDecoder for LzmaDecoder {
         expected_len: u64,
         limits: &Resources,
     ) -> Result<Vec<u8>, FormatError> {
-        let bad = |reason| FormatError::BadParams { id: ID, reason };
-        let params: [u8; 7] = params.try_into().map_err(|_| bad("length"))?;
-        let dict_size = u32::from_le_bytes([params[0], params[1], params[2], params[3]]);
-        let (lc, lp, pb) = (params[4], params[5], params[6]);
-        if lc > 8 {
-            return Err(bad("lc"));
-        }
-        if lp > 4 {
-            return Err(bad("lp"));
-        }
-        if pb > 4 {
-            return Err(bad("pb"));
-        }
-        if lc + lp > 4 {
-            return Err(bad("lc + lp"));
-        }
-        if u64::from(dict_size) > limits.max_window {
-            return Err(FormatError::WindowTooLarge {
-                needed: u64::from(dict_size),
-                allowed: limits.max_window,
-            });
-        }
-        // The buffer is the dictionary, capped by the output: lzma-rs refuses
-        // a distance beyond the buffer, so exactly the distances beyond
-        // `dict_size` or beyond the bytes produced are refused, whatever the
-        // reader's `max_window` is (`dict_size` <= `max_window` was checked).
-        let buffer = expected_len.min(u64::from(dict_size)).max(1);
-        let buffer = u32::try_from(buffer).map_err(|_| lerr("dictionary"))?;
-        // The first byte of a range coder stream is always 0.
-        if input.first().is_some_and(|&b| b != 0) {
-            return Err(lerr("range coder"));
-        }
-        let props = LzmaProperties {
-            lc: u32::from(lc),
-            lp: u32::from(lp),
-            pb: u32::from(pb),
-        };
+        let (props, buffer) = setup(params, input, expected_len, limits)?;
         // First as a stream that ends with the end-of-payload marker (what
         // liblzma writes); a stream without one fails that pass and is
         // decoded again by its known size.
@@ -108,6 +118,54 @@ impl PrimitiveDecoder for LzmaDecoder {
             Ok((out, _)) => Ok(out),
         }
     }
+}
+
+/// Validate the parameters (in the spec's order) and the first byte, and
+/// size the dictionary buffer.
+fn setup(
+    params: &[u8],
+    input: &[u8],
+    expected_len: u64,
+    limits: &Resources,
+) -> Result<(LzmaProperties, u32), FormatError> {
+    let bad = |reason| FormatError::BadParams { id: ID, reason };
+    let params: [u8; 7] = params.try_into().map_err(|_| bad("length"))?;
+    let dict_size = u32::from_le_bytes([params[0], params[1], params[2], params[3]]);
+    let (lc, lp, pb) = (params[4], params[5], params[6]);
+    if lc > 8 {
+        return Err(bad("lc"));
+    }
+    if lp > 4 {
+        return Err(bad("lp"));
+    }
+    if pb > 4 {
+        return Err(bad("pb"));
+    }
+    if lc + lp > 4 {
+        return Err(bad("lc + lp"));
+    }
+    if u64::from(dict_size) > limits.max_window {
+        return Err(FormatError::WindowTooLarge {
+            needed: u64::from(dict_size),
+            allowed: limits.max_window,
+        });
+    }
+    // The buffer is the dictionary, capped by the output: lzma-rs refuses
+    // a distance beyond the buffer, so exactly the distances beyond
+    // `dict_size` or beyond the bytes produced are refused, whatever the
+    // reader's `max_window` is (`dict_size` <= `max_window` was checked).
+    let buffer = expected_len.min(u64::from(dict_size)).max(1);
+    let buffer = u32::try_from(buffer).map_err(|_| lerr("dictionary"))?;
+    // The first byte of a range coder stream is always 0.
+    if input.first().is_some_and(|&b| b != 0) {
+        return Err(lerr("range coder"));
+    }
+    let props = LzmaProperties {
+        lc: u32::from(lc),
+        lp: u32::from(lp),
+        pb: u32::from(pb),
+    };
+    Ok((props, buffer))
 }
 
 /// One decoding pass: with `size` the stream ends at that many bytes, without

@@ -5,6 +5,7 @@ use crate::archive::Archive;
 use crate::chunk::{fetch_and_check, resolve, ChunkSource};
 use crate::decode::decode_block;
 use crate::entry::{Entry, EntryKind, EntryTable};
+use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::frame::FrameKind;
 use crate::graph::{BlockHeader, Graph};
@@ -86,32 +87,19 @@ impl OwnedRecordsTable {
 #[derive(Debug)]
 pub struct ArchiveChunks<'a, R: Read + Seek> {
     archive: &'a mut Archive<R>,
-    /// Report a block frame's failed hash as the requested chunk's mismatch.
-    map_frame_hash: bool,
 }
 
 impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
     /// A source over `archive`.
     pub fn new(archive: &'a mut Archive<R>) -> Self {
-        ArchiveChunks {
-            archive,
-            map_frame_hash: true,
-        }
+        ArchiveChunks { archive }
     }
 
-    /// A source that reports a block frame's own error (`HashMismatch`) as is.
-    fn strict(archive: &'a mut Archive<R>) -> Self {
-        ArchiveChunks {
-            archive,
-            map_frame_hash: false,
-        }
-    }
-
-    /// Make `block` the cached block. A block frame whose hash fails is
-    /// reported as a mismatch of the requested chunk: its bytes cannot vouch
-    /// for any chunk they hold.
-    fn load(&mut self, block: usize, chunk: u64) -> Result<(), FormatError> {
-        let map_frame_hash = self.map_frame_hash;
+    /// Make `block` the cached block. A block frame whose hash fails is that
+    /// frame's `HashMismatch { kind: 2 }`, for extraction and verification
+    /// alike (spec section 9); `ChunkMismatch` is left for an intact frame
+    /// whose decoded chunk differs from its record.
+    fn load(&mut self, block: usize) -> Result<(), FormatError> {
         let a = &mut *self.archive;
         if a.cache.as_ref().is_some_and(|(b, _)| *b == block) {
             return Ok(());
@@ -127,12 +115,7 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             len: loc.frame_len,
             sequence: loc.sequence,
         };
-        let frame = match a.read_frame_at(at, FrameKind::ChunkData) {
-            Err(FormatError::HashMismatch { .. }) if map_frame_hash => {
-                return Err(FormatError::ChunkMismatch { chunk })
-            }
-            other => other?,
-        };
+        let frame = a.read_frame_at(at, FrameKind::ChunkData)?;
         // The records frame is read only for a block whose graph names a record.
         let (graph, graph_len) = Graph::parse(&frame.payload)?;
         let record_count = if graph.uses_records() {
@@ -172,13 +155,13 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
                 max,
             });
         }
-        let plain = decode_block(
-            &a.registry,
-            &header,
-            block,
-            &frame.payload[used..],
-            a.resources(),
-        )?;
+        // Every output of the graph is bounded by the archive's envelope,
+        // which open has checked against the reader's own resources.
+        let limits = Resources {
+            max_block_plain: max,
+            ..*a.resources()
+        };
+        let plain = decode_block(&a.registry, &header, block, &frame.payload[used..], &limits)?;
         a.cache = Some((block, plain));
         Ok(())
     }
@@ -194,7 +177,7 @@ impl<R: Read + Seek> ChunkSource for ArchiveChunks<'_, R> {
                     chunk: index,
                     len: self.archive.chunks().len(),
                 })?;
-        self.load(place.block, index)?;
+        self.load(place.block)?;
         let bad = FormatError::BlockLengthMismatch { block: place.block };
         let Some((_, plain)) = &self.archive.cache else {
             return Err(bad);
@@ -300,7 +283,8 @@ impl<R: Read + Seek> Archive<R> {
 
     /// Write the bytes of a file entry to `sink`, checking every chunk against
     /// the chunk table before it is written; the first mismatch is that
-    /// chunk's `ChunkMismatch` (earlier chunks have already been written, so a
+    /// chunk's `ChunkMismatch`, and a block frame that fails its hash is that
+    /// frame's `HashMismatch { kind: 2 }` (earlier chunks have already been written, so a
     /// caller writing to a file should discard it on error). Directories and
     /// symlinks write nothing.
     ///
@@ -345,7 +329,7 @@ impl<R: Read + Seek> Archive<R> {
         self.verify_records()?;
         let table = self.chunks_arc();
         let blocks = self.index().blocks.clone();
-        let mut source = ArchiveChunks::strict(self);
+        let mut source = ArchiveChunks::new(self);
         for b in &blocks {
             for c in b.first_chunk..b.first_chunk + b.chunk_count {
                 let rec = table.record(c).ok_or(FormatError::ChunkIndexOutOfRange {

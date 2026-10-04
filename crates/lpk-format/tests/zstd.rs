@@ -209,6 +209,51 @@ fn dictionary_needs_the_right_prior() {
     ));
 }
 
+/// Spec section 8, zstd rules 4 and 5 (the E1-14d rulings): the dictionary
+/// cases, empty input, and `Window_Size` of a single-segment frame.
+#[test]
+fn dictionary_id_cases_empty_input_and_single_segment_window() {
+    let dict = trained_dictionary(4);
+    let id = prior_id(&dict);
+    let data = pattern(78, 30_000);
+    let limits = Resources::default();
+    let mut store = MemoryPriors::new();
+    store.insert(dict.clone());
+    let with_prior = ZstdDecoder::new(std::sync::Arc::new(store));
+
+    // A frame without a Dictionary_ID under a step that names the prior: the
+    // prior is used.
+    let mut c = zstd::bulk::Compressor::with_dictionary(3, &dict).unwrap();
+    c.set_parameter(zstd::zstd_safe::CParameter::DictIdFlag(false))
+        .unwrap();
+    let no_id = c.compress(&data).unwrap();
+    let out = with_prior
+        .decode(&zstd_params(20, Some(id)), &no_id, 30_000, &limits)
+        .unwrap();
+    assert!(out == data);
+
+    // A frame that names a dictionary under a step whose id is zero.
+    let named = compress(3, None, Some(&dict), &data);
+    assert!(matches!(
+        with_prior.decode(&zstd_params(20, None), &named, 30_000, &limits),
+        Err(FormatError::ZstdError { .. })
+    ));
+
+    // Zero bytes of input with a non-zero expected length.
+    assert!(matches!(
+        decode_plain(b"", 1),
+        Err(FormatError::ZstdError { reason }) if reason == "truncated"
+    ));
+
+    // A single-segment frame (content size known, no window descriptor): its
+    // Window_Size is the content size, so 30 000 bytes fit window_log 15
+    // although the encoder's window was larger.
+    let single = compress(3, Some(20), None, &data);
+    assert_eq!(single[4] & 0x20, 0x20, "single-segment flag");
+    let out = dec(&zstd_params(15, None), &single, 30_000, &limits).unwrap();
+    assert!(out == data);
+}
+
 #[test]
 fn registry_with_priors_serves_the_zstd_decoder() {
     let dict = trained_dictionary(3);

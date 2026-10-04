@@ -121,6 +121,10 @@ impl PrimitiveDecoder for ZstdDecoder {
             });
         }
         let dictionary = self.dictionary(&dict)?;
+        // No frame at all cannot produce a non-empty output.
+        if input.is_empty() && expected_len > 0 {
+            return Err(zerr("truncated"));
+        }
         let dict_key = dictionary.as_ref().map(|d| d.id);
 
         let mut dec = FrameDecoder::new();

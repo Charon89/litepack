@@ -97,6 +97,77 @@ fn liblzma_writes_the_end_marker_and_a_markerless_stream_is_accepted_too() {
     }
 }
 
+/// Spec section 8 (E1-14d ruling 2): a non-final `lzma` step has only a
+/// bound; with its marker it decodes to any length within the bound, without
+/// one it is `LzmaError` "marker required" when it reaches the bound. Through
+/// `decode_block` the bound is the `max_block_plain` the caller passes (the
+/// archive's envelope).
+#[test]
+fn a_non_final_step_needs_the_marker() {
+    let p = lzma_params(1 << 23, 3, 0, 2);
+    let limits = Resources::default();
+    let data = pattern(42, 5000);
+    let with_marker = lzma_raw(&lzma_options(6, 1 << 23, 3, 0, 2), &data);
+    let out = LzmaDecoder
+        .decode_step(&p, &with_marker, 1 << 20, false, &limits)
+        .unwrap();
+    assert!(out == data);
+    // The bound is below the output: PayloadTooLarge, as for any step.
+    assert!(matches!(
+        LzmaDecoder.decode_step(&p, &with_marker, 4999, false, &limits),
+        Err(FormatError::PayloadTooLarge { .. })
+    ));
+    // Marker-less, reaching the bound exactly.
+    let bare = markerless(&data);
+    assert_eq!(
+        reason(LzmaDecoder.decode_step(&p, &bare, 5000, false, &limits)),
+        "marker required"
+    );
+    // The same stream as the last step decodes.
+    assert!(
+        LzmaDecoder
+            .decode_step(&p, &bare, 5000, true, &limits)
+            .unwrap()
+            == data
+    );
+
+    // Through decode_block: [lzma, store] with plain_len 5000.
+    let header = |enc: &[u8]| lpk_format::BlockHeader {
+        graph: lpk_format::Graph {
+            steps: vec![
+                lpk_format::Step {
+                    primitive: PrimitiveId::Lzma,
+                    params: p.clone(),
+                },
+                lpk_format::Step {
+                    primitive: PrimitiveId::Store,
+                    params: vec![],
+                },
+            ],
+        },
+        plain_len: 5000,
+        encoded_len: enc.len() as u64,
+    };
+    let envelope_bound = Resources {
+        max_block_plain: 5000,
+        ..Resources::default()
+    };
+    let r = Registry::v1();
+    let out = lpk_format::decode_block(&r, &header(&with_marker), 0, &with_marker, &envelope_bound)
+        .unwrap();
+    assert!(out == data);
+    assert_eq!(
+        reason(lpk_format::decode_block(
+            &r,
+            &header(&bare),
+            0,
+            &bare,
+            &envelope_bound
+        )),
+        "marker required"
+    );
+}
+
 #[test]
 fn window_above_the_limit_is_refused_before_reading() {
     let limits = Resources {

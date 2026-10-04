@@ -224,6 +224,29 @@ fn the_malformed_vectors_are_derived_from_zstd_basic() {
     assert!(read(HASHFLIP) == flipped);
 }
 
+/// CONFORMANCE "malformed-hashflip" and spec section 9 (E1-14d ruling 1):
+/// extracting a file of the damaged block fails with the block frame's
+/// `HashMismatch { kind: 2 }`, the same error as `verify`.
+#[test]
+fn hashflip_extraction_is_the_frame_hash_mismatch() {
+    let mut a = open(read(HASHFLIP), HASHFLIP, None);
+    let t = a.entry_table().unwrap();
+    let entries = t
+        .table()
+        .unwrap()
+        .iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(!entries.is_empty());
+    for e in &entries {
+        let mut sink = Vec::new();
+        assert!(matches!(
+            a.extract(e, &mut sink),
+            Err(lpk_format::FormatError::HashMismatch { kind: 2 })
+        ));
+    }
+}
+
 #[test]
 #[ignore = "rewrites tests/vectors/expected.toml and the malformed vectors"]
 fn regenerate() {

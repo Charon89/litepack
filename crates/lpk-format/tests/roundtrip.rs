@@ -370,8 +370,13 @@ fn corruption_fixture() -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
     (bytes, files)
 }
 
-/// Extract every file; the names of those that failed with `ChunkMismatch`.
-fn failing_files(bytes: Vec<u8>, files: &[(String, Vec<u8>)]) -> Vec<String> {
+/// Extract every file; the names of those that failed with the error `is`
+/// accepts (any other error panics).
+fn failing_files(
+    bytes: Vec<u8>,
+    files: &[(String, Vec<u8>)],
+    is: fn(&FormatError) -> bool,
+) -> Vec<String> {
     let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
     let mut failed = Vec::new();
     for e in entries_of(&mut a) {
@@ -381,7 +386,7 @@ fn failing_files(bytes: Vec<u8>, files: &[(String, Vec<u8>)]) -> Vec<String> {
                 let want = &files.iter().find(|(p, _)| *p == e.path).unwrap().1;
                 assert_eq!(&out, want, "{} extracted wrongly", e.path);
             }
-            Err(FormatError::ChunkMismatch { .. }) => failed.push(e.path.clone()),
+            Err(err) if is(&err) => failed.push(e.path.clone()),
             Err(other) => panic!("unexpected {other:?}"),
         }
     }
@@ -405,10 +410,18 @@ fn a_damaged_block_fails_only_the_files_it_holds() {
     };
     assert!(!expect.is_empty() && expect.len() < files.len());
 
-    // Frame hash left alone: the block frame itself fails its hash.
+    // Frame hash left alone: the block frame itself fails its hash, and
+    // extraction reports that frame's HashMismatch { kind: 2 } (spec section
+    // 9, E1-14d ruling 1), not a chunk's mismatch.
     let mut bad = bytes.clone();
     flip(&mut bad, victim.frame_offset + victim.frame_len - 33);
-    assert_eq!(failing_files(bad.clone(), &files), expect);
+    assert_eq!(
+        failing_files(bad.clone(), &files, |e| matches!(
+            e,
+            FormatError::HashMismatch { kind: 2 }
+        )),
+        expect
+    );
     let mut a = Archive::open(Cursor::new(bad), &Resources::default()).unwrap();
     assert!(matches!(
         a.verify(),
@@ -429,7 +442,13 @@ fn a_damaged_block_fails_only_the_files_it_holds() {
             .map(|e| e.path)
             .collect()
     };
-    assert_eq!(failing_files(bad.clone(), &files), expect_last);
+    assert_eq!(
+        failing_files(bad.clone(), &files, |e| matches!(
+            e,
+            FormatError::ChunkMismatch { .. }
+        )),
+        expect_last
+    );
     let mut a = Archive::open(Cursor::new(bad), &Resources::default()).unwrap();
     assert!(matches!(
         a.verify(),

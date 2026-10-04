@@ -15,9 +15,10 @@ pub trait PrimitiveDecoder: Send + Sync {
     /// Decode `input` with the step's `params` (already validated).
     /// `expected_len` is the most output the decoder may produce; for the last
     /// step of a block it is exactly the block's `plain_len`, for the others
-    /// `limits.max_block_plain`. A decoder must not allocate output beyond it
-    /// and reports output that would exceed it as `PayloadTooLarge`; on the
-    /// last step `decode_block` turns that into `BlockLengthMismatch`.
+    /// the archive's envelope `max_block_plain`. A decoder must not allocate
+    /// output beyond it and reports output that would exceed it as
+    /// `PayloadTooLarge`; on the last step `decode_block` turns that into
+    /// `BlockLengthMismatch`.
     fn decode(
         &self,
         params: &[u8],
@@ -25,6 +26,23 @@ pub trait PrimitiveDecoder: Send + Sync {
         expected_len: u64,
         limits: &Resources,
     ) -> Result<Vec<u8>, FormatError>;
+
+    /// Decode one step of a graph; `last` is true for the graph's last step,
+    /// whose output length is exactly `expected_len`. A step that is not the
+    /// last only has `expected_len` as a bound. The default ignores `last`;
+    /// the `lzma` decoder uses it (a non-final `lzma` step needs its
+    /// end-of-payload marker, spec section 8).
+    fn decode_step(
+        &self,
+        params: &[u8],
+        input: &[u8],
+        expected_len: u64,
+        last: bool,
+        limits: &Resources,
+    ) -> Result<Vec<u8>, FormatError> {
+        let _ = last;
+        self.decode(params, input, expected_len, limits)
+    }
 }
 
 /// The identity decoder of `store`.
@@ -149,6 +167,12 @@ impl Registry {
 /// Run the header's graph over `encoded` and return the plain bytes. `block`
 /// is the block's index in the block table, used in errors.
 ///
+/// `limits.max_block_plain` bounds the block and every intermediate output;
+/// a reader passes the archive's envelope `max_block_plain` there (which it
+/// has already checked against its own resources), so whether a block
+/// decodes does not depend on the reader's value. The other fields of
+/// `limits` are the reader's resources.
+///
 /// Before anything runs: the step count must be 1..=16 (`BadGraph`), every
 /// step's params must validate (`BadParams`), `plain_len` must be at most
 /// `limits.max_block_plain` (`PayloadTooLarge`), `encoded.len()` must equal
@@ -195,16 +219,18 @@ pub fn decode_block(
         } else {
             limits.max_block_plain
         };
-        let out =
-            match registry
-                .decoder(step.primitive)
-                .decode(&step.params, &data, expected, limits)
-            {
-                Err(FormatError::PayloadTooLarge { .. }) if i == last => {
-                    return Err(FormatError::BlockLengthMismatch { block })
-                }
-                other => other?,
-            };
+        let out = match registry.decoder(step.primitive).decode_step(
+            &step.params,
+            &data,
+            expected,
+            i == last,
+            limits,
+        ) {
+            Err(FormatError::PayloadTooLarge { .. }) if i == last => {
+                return Err(FormatError::BlockLengthMismatch { block })
+            }
+            other => other?,
+        };
         let len = out.len() as u64;
         if i == last {
             if len != header.plain_len {
