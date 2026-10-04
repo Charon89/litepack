@@ -193,8 +193,9 @@ fn the_vector_extracts_to_the_original_and_matches_its_expectations() {
     assert_eq!(a.header().version.minor, 1);
 }
 
-/// The independent 1.0 decoder (`lpk-check`, unchanged) reports `UnimplementedPrimitive` for
-/// primitive 7 on the vector.
+/// The independent decoder (`lpk-check`) in its revision 1.0 mode (`--revision-1-0`) reports
+/// `UnimplementedPrimitive` for primitive 7 on the vector; without the flag it decodes revision 1.1
+/// and `verify` prints its `ok:` line.
 #[test]
 fn lpk_check_reports_unimplemented_primitive_7() {
     let exe = std::env::current_exe().unwrap();
@@ -208,26 +209,42 @@ fn lpk_check_reports_unimplemented_primitive_7() {
             .unwrap();
         assert!(st.success());
     }
-    let out = std::process::Command::new(&bin)
-        .arg("verify")
-        .arg(vectors().join(VECTOR))
-        .output()
-        .unwrap();
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!out.status.success(), "{text}");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(&bin)
+            .args(args)
+            .arg(vectors().join(VECTOR))
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            text,
+        )
+    };
+    let (ok, _, text) = run(&["--revision-1-0", "verify"]);
+    assert!(!ok, "{text}");
     assert!(text.contains("0x0007"), "{text}");
     // The tool prints the message only; the class comes from the same decoder as a library.
     let data = std::fs::read(vectors().join(VECTOR)).unwrap();
-    let e = lpk_check::archive::Archive::open(data, lpk_check::archive::Options::default())
+    let opts = lpk_check::archive::Options {
+        revision_1_0: true,
+        ..lpk_check::archive::Options::default()
+    };
+    let e = lpk_check::archive::Archive::open(data, opts)
         .unwrap()
         .verify()
         .unwrap_err();
     assert_eq!(e.class, "UnimplementedPrimitive");
     assert!(e.to_string().contains("0x0007"), "{e}");
+    // Without the flag the independent decoder reads revision 1.1 and verifies the vector.
+    let (ok, stdout, text) = run(&["verify"]);
+    assert!(ok, "{text}");
+    assert!(stdout.starts_with("ok:"), "{text}");
 }
 
 #[test]
