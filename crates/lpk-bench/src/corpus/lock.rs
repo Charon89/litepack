@@ -291,7 +291,7 @@ mod tests {
                 );
             }
         }
-        for id in ["godot-v1", "godot-v2", "godot-v3"] {
+        for id in ["node-v1", "node-v2", "node-v3"] {
             let src = reg.sources.iter().find(|s| s.id == id).expect("source");
             assert_eq!(src.class, "backup-versions-large");
             assert_eq!(src.profiles, [Profile::Full], "{id} is full only");

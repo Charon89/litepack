@@ -1575,16 +1575,13 @@ mod tests {
             ("backup-versions/v1/data.bin", base),
             ("backup-versions/v2/data.bin", v2),
             ("backup-versions/v3/data.bin", v3),
-            ("backup-versions-large/godot-v1/data.bin", big),
-            ("backup-versions-large/godot-v2/data.bin", big2),
-            ("backup-versions-large/godot-v3/data.bin", big3),
+            ("backup-versions-large/node-v1/data.bin", big),
+            ("backup-versions-large/node-v2/data.bin", big2),
+            ("backup-versions-large/node-v3/data.bin", big3),
         ]);
         let labels = |v: &[Version]| v.iter().map(|x| x.label.clone()).collect::<Vec<_>>();
         assert_eq!(labels(&d.versions), ["v1", "v2", "v3"]);
-        assert_eq!(
-            labels(&d.versions_large),
-            ["godot-v1", "godot-v2", "godot-v3"]
-        );
+        assert_eq!(labels(&d.versions_large), ["node-v1", "node-v2", "node-v3"]);
         assert!(d.versions_large[0].delta.is_none());
         let dl = d.versions_large[1].delta.as_ref().expect("delta 2");
         assert_eq!(dl.old_tar_bytes / 100_000, 4);
