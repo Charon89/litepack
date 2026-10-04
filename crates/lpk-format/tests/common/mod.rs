@@ -111,6 +111,89 @@ impl BlockEncoder for ZstdTestEncoder {
     }
 }
 
+/// Raw LZMA1 options: `preset`, then explicit dictionary and properties.
+pub fn lzma_options(
+    preset: u32,
+    dict_size: u32,
+    lc: u8,
+    lp: u8,
+    pb: u8,
+) -> liblzma::stream::LzmaOptions {
+    let mut o = liblzma::stream::LzmaOptions::new_preset(preset).unwrap();
+    o.dict_size(dict_size)
+        .literal_context_bits(u32::from(lc))
+        .literal_position_bits(u32::from(lp))
+        .position_bits(u32::from(pb));
+    o
+}
+
+/// What liblzma's raw LZMA1 encoder emits for `data`.
+pub fn lzma_raw(opts: &liblzma::stream::LzmaOptions, data: &[u8]) -> Vec<u8> {
+    use liblzma::stream::{Action, Filters, Status, Stream};
+    let mut filters = Filters::new();
+    filters.lzma1(opts);
+    let mut s = Stream::new_raw_encoder(&filters).unwrap();
+    let mut out = Vec::with_capacity(data.len() / 2 + 64);
+    loop {
+        let consumed = usize::try_from(s.total_in()).unwrap();
+        let st = s
+            .process_vec(&data[consumed..], &mut out, Action::Finish)
+            .unwrap();
+        if st == Status::StreamEnd {
+            return out;
+        }
+        out.reserve(4096);
+    }
+}
+
+/// `lzma` params: `dict_size` LE, then `lc`, `lp`, `pb`.
+pub fn lzma_params(dict_size: u32, lc: u8, lp: u8, pb: u8) -> Vec<u8> {
+    let mut p = dict_size.to_le_bytes().to_vec();
+    p.extend_from_slice(&[lc, lp, pb]);
+    p
+}
+
+/// Encodes every block as one raw LZMA1 stream.
+pub struct LzmaTestEncoder {
+    pub preset: u32,
+    pub dict_size: u32,
+    pub lc: u8,
+    pub lp: u8,
+    pub pb: u8,
+}
+
+impl LzmaTestEncoder {
+    pub fn new(preset: u32, dict_size: u32, lc: u8, lp: u8, pb: u8) -> Self {
+        LzmaTestEncoder {
+            preset,
+            dict_size,
+            lc,
+            lp,
+            pb,
+        }
+    }
+}
+
+impl BlockEncoder for LzmaTestEncoder {
+    fn graph(&self) -> Graph {
+        Graph {
+            steps: vec![Step {
+                primitive: PrimitiveId::Lzma,
+                params: lzma_params(self.dict_size, self.lc, self.lp, self.pb),
+            }],
+        }
+    }
+
+    fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
+        let o = lzma_options(self.preset, self.dict_size, self.lc, self.lp, self.pb);
+        Ok(lzma_raw(&o, plain))
+    }
+
+    fn resources(&self) -> GraphResources {
+        self.graph().resources()
+    }
+}
+
 /// Write `files` (sorted by path) with `options`.
 pub fn write_archive(options: WriterOptions, files: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();

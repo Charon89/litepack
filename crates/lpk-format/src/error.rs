@@ -246,6 +246,12 @@ pub enum FormatError {
         /// The decoder's own text.
         reason: String,
     },
+    /// The LZMA decoder rejected its input.
+    #[error("lzma: {reason}")]
+    LzmaError {
+        /// Short reason (`truncated`, `trailing input`, or the decoder's text).
+        reason: String,
+    },
     /// The writer was given options it cannot honour.
     #[error("bad writer options ({reason})")]
     BadOptions {

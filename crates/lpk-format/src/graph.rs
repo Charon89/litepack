@@ -372,6 +372,8 @@ mod tests {
                 st(PrimitiveId::Zstd, &p)
             }),
             (any::<u32>(), 0u8..=8, 0u8..=4, 0u8..=4).prop_map(|(d, lc, lp, pb)| {
+                let lp = lp.min(4 - lc.min(4));
+                let lc = lc.min(4);
                 let mut p = d.to_le_bytes().to_vec();
                 p.extend_from_slice(&[lc, lp, pb]);
                 st(PrimitiveId::Lzma, &p)

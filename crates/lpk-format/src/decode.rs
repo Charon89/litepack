@@ -4,6 +4,7 @@
 use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::graph::{BlockHeader, MAX_STEPS};
+use crate::lzma::LzmaDecoder;
 use crate::primitive::PrimitiveId;
 use crate::priors::{NoPriors, PriorStore};
 use crate::zstd::ZstdDecoder;
@@ -80,7 +81,7 @@ impl std::fmt::Debug for Registry {
 }
 
 impl Registry {
-    /// Every v1 primitive present: `store` and `zstd` are real, the others
+    /// Every v1 primitive present: `store`, `zstd` and `lzma` are real, the others
     /// report `UnimplementedPrimitive` until a decoder is registered. The
     /// store of priors has nothing.
     pub fn v1() -> Registry {
@@ -91,13 +92,19 @@ impl Registry {
                 match p {
                     PrimitiveId::Store => Box::new(StoreDecoder),
                     PrimitiveId::Zstd => Box::new(ZstdDecoder::new(Arc::clone(&priors))),
+                    PrimitiveId::Lzma => Box::new(LzmaDecoder),
                     other => Box::new(Unimplemented(other)),
                 }
             })
             .collect();
         let implemented = PrimitiveId::ALL
             .iter()
-            .map(|&p| matches!(p, PrimitiveId::Store | PrimitiveId::Zstd))
+            .map(|&p| {
+                matches!(
+                    p,
+                    PrimitiveId::Store | PrimitiveId::Zstd | PrimitiveId::Lzma
+                )
+            })
             .collect();
         Registry {
             decoders,
@@ -273,19 +280,22 @@ mod tests {
     fn unimplemented_primitives() {
         let h = header(
             vec![Step {
-                primitive: PrimitiveId::Lzma,
-                params: vec![0, 0, 0, 1, 3, 0, 2],
+                primitive: PrimitiveId::Bwt,
+                params: vec![0, 0, 1, 0],
             }],
             5,
             5,
         );
         assert!(matches!(
             run(&h, b"hello", &Resources::default()).unwrap_err(),
-            FormatError::UnimplementedPrimitive { id: 2 }
+            FormatError::UnimplementedPrimitive { id: 3 }
         ));
         let r = Registry::v1();
         for p in PrimitiveId::ALL {
-            let real = matches!(p, PrimitiveId::Store | PrimitiveId::Zstd);
+            let real = matches!(
+                p,
+                PrimitiveId::Store | PrimitiveId::Zstd | PrimitiveId::Lzma
+            );
             assert_eq!(r.is_implemented(p), real);
             let e = r
                 .decoder(p)
@@ -296,6 +306,10 @@ mod tests {
                 PrimitiveId::Zstd => assert!(matches!(
                     e.unwrap_err(),
                     FormatError::BadParams { id: 1, .. }
+                )),
+                PrimitiveId::Lzma => assert!(matches!(
+                    e.unwrap_err(),
+                    FormatError::BadParams { id: 2, .. }
                 )),
                 _ => assert!(matches!(
                     e.unwrap_err(),

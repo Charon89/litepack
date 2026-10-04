@@ -117,6 +117,7 @@ impl PrimitiveId {
             PrimitiveId::Lzma if params[4] > 8 => Err(bad(self, "lc")),
             PrimitiveId::Lzma if params[5] > 4 => Err(bad(self, "lp")),
             PrimitiveId::Lzma if params[6] > 4 => Err(bad(self, "pb")),
+            PrimitiveId::Lzma if params[4] + params[5] > 4 => Err(bad(self, "lc + lp")),
             PrimitiveId::Bwt if params.iter().all(|&b| b == 0) => Err(bad(self, "block_size")),
             PrimitiveId::Delta if params[8] > 1 => Err(bad(self, "patch_format")),
             PrimitiveId::Base64 if params[0] > 1 => Err(bad(self, "variant")),
@@ -173,7 +174,7 @@ pub fn primitive_table() -> String {
     "| ID | Name | Parameters | Resources |\n|---|---|---|---|\n\
      | 0x0000 | `store` | none (length 0) | none |\n\
      | 0x0001 | `zstd` | `window_log: u8` (window = 2^window_log bytes; 10..=31), `dictionary: [u8; 32]` (BLAKE3 id of a prior, all zeros = none) | window = 2^window_log |\n\
-     | 0x0002 | `lzma` | `dict_size: u32` LE, `lc: u8`, `lp: u8`, `pb: u8` (the LZMA1 properties; lc <= 8, lp <= 4, pb <= 4) | window = dict_size |\n\
+     | 0x0002 | `lzma` | `dict_size: u32` LE, `lc: u8`, `lp: u8`, `pb: u8` (the LZMA1 properties; lc <= 8, lp <= 4, pb <= 4, lc + lp <= 4) | window = dict_size |\n\
      | 0x0003 | `bwt` | `block_size: u32` LE (bytes; not 0) | bwt block = block_size |\n\
      | 0x0004 | `bcj-x86` | none | none |\n\
      | 0x0005 | `bcj-arm64` | none | none |\n\
@@ -236,7 +237,8 @@ mod tests {
         ok(PrimitiveId::Store, &[]);
         ok(PrimitiveId::Zstd, &zstd(10));
         ok(PrimitiveId::Zstd, &zstd(31));
-        ok(PrimitiveId::Lzma, &[0, 0, 0, 1, 8, 4, 4]);
+        ok(PrimitiveId::Lzma, &[0, 0, 0, 1, 4, 0, 4]);
+        ok(PrimitiveId::Lzma, &[0, 0, 0, 1, 0, 4, 4]);
         ok(PrimitiveId::Bwt, &[0, 0, 0x10, 0]);
         ok(PrimitiveId::BcjX86, &[]);
         ok(PrimitiveId::BcjArm64, &[]);
@@ -267,6 +269,7 @@ mod tests {
         assert_eq!(reason(PrimitiveId::Lzma, &[0, 0, 0, 1, 9, 0, 0]), "lc");
         assert_eq!(reason(PrimitiveId::Lzma, &[0, 0, 0, 1, 0, 5, 0]), "lp");
         assert_eq!(reason(PrimitiveId::Lzma, &[0, 0, 0, 1, 0, 0, 5]), "pb");
+        assert_eq!(reason(PrimitiveId::Lzma, &[0, 0, 0, 1, 3, 2, 0]), "lc + lp");
         assert_eq!(reason(PrimitiveId::Lzma, &[0; 6]), "length");
         assert_eq!(reason(PrimitiveId::Bwt, &[0; 4]), "block_size");
         assert_eq!(reason(PrimitiveId::Bwt, &[1; 3]), "length");

@@ -17,6 +17,7 @@ pub mod frame;
 pub mod graph;
 pub mod header;
 pub mod index;
+pub mod lzma;
 pub mod magic;
 pub mod merkle;
 pub mod primitive;
@@ -57,6 +58,7 @@ pub use graph::{
     block_header_table, graph_layout_table, BlockHeader, Graph, Step, MAX_PARAMS, MAX_STEPS,
 };
 pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, HeaderFlags};
+pub use lzma::LzmaDecoder;
 pub use magic::MAGIC;
 pub use primitive::{primitive_table, GraphResources, PrimitiveId};
 pub use reader::{ArchiveChunks, OwnedEntryTable, VerifySummary};
