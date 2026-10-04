@@ -31,7 +31,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use lepton_jpeg::{
     decode_lepton, encode_lepton, EnabledFeatures, ExitCode, LeptonThreadPool, DEFAULT_THREAD_POOL,
 };
-use lpk_format::envelope::DEFAULT_MEMORY;
+use lpk_format::envelope::{Refusal, DEFAULT_MEMORY};
 use lpk_format::{
     DecodeContext, FormatError, JpegRecord, PrimitiveDecoder, PrimitiveId, Record, RecordBody,
     Resources, SecondaryImage,
@@ -570,11 +570,13 @@ impl PeelStage for JpegPeel {
 
 /// Revision 1.1's `jpeg-reconstruct` decoder: decodes the block's Lepton stream into the primary
 /// image, then assembles the original file from the record (the nested trailing chunks and the
-/// secondary images, read through the decode context) and checks `original_hash` and
-/// `original_len`. Errors: a record of another kind or an unknown `lepton_version`, a stream the
-/// library cannot decode, output longer than `primary_len`, a primary of another length, or an
-/// original that does not match are `BadRecord` (reasons `kind`, `lepton_version`,
-/// `lepton stream`, `primary_len`, `original_hash`).
+/// secondary images, read through the decode context, the trailing chunks hashed as they stream)
+/// and checks `original_hash` and `original_len`. Order of checks (spec section 8): record
+/// lookup; `kind`; `lepton_version`; `primary_len` against the step's bound; the image's memory
+/// term against `limits.memory - limits.max_block_plain` (`Refused`, field `decode_memory`);
+/// decode; the primary's length; assembly; `original_len` and `original_hash`. Errors besides
+/// `Refused` are `BadRecord` (reasons `kind`, `lepton_version`, `lepton stream`, `primary_len`,
+/// `gainmaps`, `trailing`, `original_hash`) or the chunk errors of the decode context.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JpegDecoder;
 
@@ -602,7 +604,7 @@ impl PrimitiveDecoder for JpegDecoder {
         input: &[u8],
         expected_len: u64,
         _last: bool,
-        _limits: &Resources,
+        limits: &Resources,
         ctx: &mut dyn DecodeContext,
     ) -> Result<Vec<u8>, FormatError> {
         let id = PrimitiveId::JpegReconstruct
@@ -624,7 +626,22 @@ impl PrimitiveDecoder for JpegDecoder {
             });
         }
         let max = usize::try_from(j.primary_len).map_err(|_| bad(id, "primary_len"))?;
-        let f = features(u32::MAX);
+        // Resources: the image's coefficient term, from the stream's own JPEG header, plus the
+        // fixed allowance must fit in the decode memory left after the block buffer; the
+        // library's caps are then the checked dimensions and the primary's length.
+        let frame = stream_frame(input, j.primary_len).ok_or_else(|| bad(id, "lepton stream"))?;
+        let need = memory_bound(&frame);
+        let allowance = limits.memory.saturating_sub(limits.max_block_plain);
+        if need > allowance {
+            return Err(FormatError::Refused(Refusal {
+                field: "decode_memory",
+                needed: limits.max_block_plain.saturating_add(need),
+                allowed: limits.memory,
+            }));
+        }
+        let mut f = features(u32::try_from(j.primary_len).unwrap_or(u32::MAX));
+        f.max_jpeg_width = frame.width;
+        f.max_jpeg_height = frame.height;
         let primary = lepton_decode(input, max, &f, &DEFAULT_THREAD_POOL)
             .map_err(|_| bad(id, "lepton stream"))?;
         if primary.len() as u64 != j.primary_len {
@@ -633,46 +650,117 @@ impl PrimitiveDecoder for JpegDecoder {
         let mut h = blake3::Hasher::new();
         h.update(&primary);
         let mut total = j.primary_len;
+        let overflow = || bad(id, "original_hash");
         if !j.trailing.is_empty() {
             h.update(&j.trailing);
-            total += j.trailing.len() as u64;
+            total = total
+                .checked_add(j.trailing.len() as u64)
+                .ok_or_else(overflow)?;
         } else {
-            // The nested trailing data fills the ranges the secondary images leave, in order.
-            let mut rest = Vec::new();
-            for &c in &j.nested_trailing_chunks {
-                rest.extend_from_slice(&ctx.chunk(id, c)?);
-            }
-            let mut used = 0usize;
+            // The nested trailing data fills the ranges the secondary images leave, in order;
+            // it is hashed as it streams, one chunk held at a time.
+            let mut rest = Trailing {
+                ids: j.nested_trailing_chunks.iter(),
+                buf: Vec::new(),
+                pos: 0,
+                record: id,
+            };
             for g in &j.gainmaps {
                 let gap = g
                     .offset
                     .checked_sub(total)
-                    .and_then(|d| usize::try_from(d).ok())
                     .ok_or_else(|| bad(id, "gainmaps"))?;
-                let piece = rest
-                    .get(used..used + gap)
-                    .ok_or_else(|| bad(id, "trailing"))?;
-                h.update(piece);
-                used += gap;
+                if rest.feed(ctx, &mut h, gap)? != gap {
+                    return Err(bad(id, "trailing"));
+                }
                 let mut glen = 0u64;
                 for &c in &g.chunks {
                     let b = ctx.chunk(id, c)?;
-                    glen += b.len() as u64;
+                    glen = glen.saturating_add(b.len() as u64);
                     h.update(&b);
                 }
                 if glen != g.len {
                     return Err(bad(id, "gainmaps"));
                 }
-                total = g.offset + g.len;
+                total = g
+                    .offset
+                    .checked_add(g.len)
+                    .ok_or_else(|| bad(id, "gainmaps"))?;
             }
-            h.update(&rest[used.min(rest.len())..]);
-            total += (rest.len() - used.min(rest.len())) as u64;
+            let tail = rest.feed(ctx, &mut h, u64::MAX)?;
+            total = total.checked_add(tail).ok_or_else(overflow)?;
         }
         if total != j.original_len || h.finalize().as_bytes() != &j.original_hash {
             return Err(bad(id, "original_hash"));
         }
         Ok(primary)
     }
+}
+
+/// The nested trailing chunks of a record, read one at a time through the decode context.
+struct Trailing<'a> {
+    ids: std::slice::Iter<'a, u64>,
+    buf: Vec<u8>,
+    pos: usize,
+    record: u64,
+}
+
+impl Trailing<'_> {
+    /// Hash up to `n` of the next bytes; returns how many there were.
+    fn feed(
+        &mut self,
+        ctx: &mut dyn DecodeContext,
+        h: &mut blake3::Hasher,
+        mut n: u64,
+    ) -> Result<u64, FormatError> {
+        let mut done = 0u64;
+        while n > 0 {
+            if self.pos == self.buf.len() {
+                let Some(&c) = self.ids.next() else {
+                    break;
+                };
+                self.buf = ctx.chunk(self.record, c)?;
+                self.pos = 0;
+                continue;
+            }
+            let left = self.buf.len() - self.pos;
+            let k = usize::try_from(n).map_or(left, |n| n.min(left));
+            h.update(&self.buf[self.pos..self.pos + k]);
+            self.pos += k;
+            n -= k as u64;
+            done += k as u64;
+        }
+        Ok(done)
+    }
+}
+
+/// The first frame header of the JPEG a Lepton stream holds, read from the stream's own header
+/// (lepton_jpeg 0.5's layout: a 28-byte fixed header whose bytes 24..28 are the length of the
+/// zlib-compressed header that follows; that header starts with `HDR` and a u32 LE length of
+/// the raw JPEG header, which follows SOI). `None` when the stream does not have that shape or
+/// the raw header is longer than the primary image.
+fn stream_frame(stream: &[u8], primary_len: u64) -> Option<Frame> {
+    use std::io::Read;
+    let fixed = stream.get(..28)?;
+    let compressed_len =
+        usize::try_from(u32::from_le_bytes(fixed[24..28].try_into().ok()?)).ok()?;
+    let compressed = stream.get(28..28usize.checked_add(compressed_len)?)?;
+    let mut z = flate2::read::ZlibDecoder::new(compressed);
+    let mut head = [0u8; 7];
+    z.read_exact(&mut head).ok()?;
+    if &head[..3] != b"HDR" {
+        return None;
+    }
+    let n = u64::from(u32::from_le_bytes(head[3..7].try_into().ok()?));
+    if n > primary_len {
+        return None;
+    }
+    let mut raw = vec![0xFF, 0xD8];
+    z.take(n).read_to_end(&mut raw).ok()?;
+    if raw.len() as u64 != n + 2 {
+        return None;
+    }
+    marker_scan(&raw).frame
 }
 
 /// Register the full reader's decoders (revision 1.1's `jpeg-reconstruct`) on `archive`, so its

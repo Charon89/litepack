@@ -16,7 +16,10 @@ use lpk_core::peel::LEPTON_MAX_FILE;
 use lpk_core::{
     archive_fast, register_full_reader, Cause, Fallback, FastOptions, JpegPeel, PeelStage,
 };
-use lpk_format::{Archive, EntryKind, FormatError, Resources};
+use lpk_format::{
+    Archive, Encoded, EntryFlags, EntryKind, FormatError, Graph, GraphResources, JpegRecord,
+    Record, RecordBody, Resources, Step, Utf16Record, Writer, WriterOptions,
+};
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(
@@ -228,6 +231,91 @@ fn a_stream_not_smaller_than_the_primary_is_no_gain() {
     let n = base.len();
     let r = JpegPeel::default().peel_with(&base, 1 << 26, &|s| s.resize(n, 0), &|_| {});
     assert_eq!(r.unwrap_err(), Cause::NoGain);
+}
+
+/// `with_secondary()` peeled and written as the pipeline does, with the record changed by
+/// `edit` and the block's declared decoder memory `memory` (None: the plan's).
+fn peeled_archive(edit: &dyn Fn(Record) -> Record, memory: Option<u64>) -> Vec<u8> {
+    let data = with_secondary();
+    let peel = JpegPeel::default();
+    let plan = peel.peel(&data, 1 << 20).unwrap();
+    let mut out = Vec::new();
+    let options = WriterOptions {
+        chunk_size: 4096,
+        ..WriterOptions::default()
+    };
+    let mut w = Writer::new_revision(&mut out, options, 1).unwrap();
+    w.begin_entry("p.jpg", EntryFlags::EMPTY, 0).unwrap();
+    let mut lists = Vec::new();
+    for p in &plan.nested {
+        let (a, b) = (p.offset as usize, (p.offset + p.len) as usize);
+        lists.push(w.add_part(p.offset, &mut &data[a..b]).unwrap());
+    }
+    let id = w.add_record(edit(peel.record(&plan, &lists))).unwrap();
+    let mut params = Vec::new();
+    lpk_format::varint::write(&mut params, id).unwrap();
+    let encoded = Encoded {
+        graph: Graph {
+            steps: vec![Step {
+                primitive: plan.primitive,
+                params,
+            }],
+        },
+        bytes: plan.stream.clone(),
+        resources: GraphResources::default(),
+    };
+    let primary = &data[..plan.primary_len as usize];
+    w.add_part_encoded(0, primary, encoded, memory.unwrap_or(plan.memory))
+        .unwrap();
+    w.end_entry().unwrap();
+    w.finish().unwrap();
+    out
+}
+
+fn full_verify(bytes: Vec<u8>) -> Result<(), FormatError> {
+    let mut a = Archive::open(Cursor::new(bytes), &Resources::default())?;
+    register_full_reader(&mut a);
+    a.verify().map(|_| ())
+}
+
+fn edit_jpeg(f: impl Fn(&mut JpegRecord)) -> impl Fn(Record) -> Record {
+    move |r: Record| {
+        let RecordBody::Jpeg(mut j) = r.body else {
+            unreachable!()
+        };
+        f(&mut j);
+        Record::new(RecordBody::Jpeg(j))
+    }
+}
+
+#[test]
+fn the_decoder_refuses_a_wrong_record_or_too_little_memory() {
+    full_verify(peeled_archive(&|r| r, None)).unwrap();
+    let reason = |bytes: Vec<u8>| match full_verify(bytes) {
+        Err(FormatError::BadRecord { reason, .. }) => reason,
+        other => panic!("{other:?}"),
+    };
+    let utf16 = |_: Record| {
+        Record::new(RecordBody::Utf16(Utf16Record {
+            endian: 0,
+            bom: 1,
+            original_len: 3,
+            original_hash: [0; 32],
+        }))
+    };
+    assert_eq!(reason(peeled_archive(&utf16, None)), "kind");
+    let v1 = edit_jpeg(|j| j.lepton_version = 1);
+    assert_eq!(reason(peeled_archive(&v1, None)), "lepton_version");
+    let hash = edit_jpeg(|j| j.original_hash[0] ^= 1);
+    assert_eq!(reason(peeled_archive(&hash, None)), "original_hash");
+    // A declared decode_memory below the image's term: refused, never decoded.
+    match full_verify(peeled_archive(&|r| r, Some(0))) {
+        Err(FormatError::Refused(r)) => {
+            assert_eq!(r.field, "decode_memory");
+            assert!(r.needed > r.allowed);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 /// Two secondary images (MPF) with trailing data between and after them.

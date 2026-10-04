@@ -173,9 +173,12 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             });
         }
         // Every output of the graph is bounded by the archive's envelope,
-        // which open has checked against the reader's own resources.
+        // which open has checked against the reader's own resources; so is
+        // the working memory a decoder may use (`decode_memory`, never more
+        // than the reader's resource).
         let limits = Resources {
             max_block_plain: max,
+            memory: a.index().envelope.decode_memory.min(a.resources().memory),
             ..*a.resources()
         };
         let encoded = &frame.payload[used..];
