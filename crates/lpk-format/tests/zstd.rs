@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{compress, pattern, write_archive, zstd_params, ZstdTestEncoder};
+use common::{compress, pattern, trained_dictionary, write_archive, zstd_params, ZstdTestEncoder};
 use lpk_format::{
     decode_block, prior_id, Archive, BlockHeader, FormatError, Frame, FrameFlags, FrameKind, Graph,
     MemoryPriors, PrimitiveDecoder, PrimitiveId, Registry, Resources, Step, Trailer, WriterOptions,
@@ -152,11 +152,6 @@ fn output_beyond_expected_len_is_payload_too_large() {
         decode_block(&Registry::v1(), &header, 4, &frame, &Resources::default()),
         Err(FormatError::BlockLengthMismatch { block: 4 })
     ));
-}
-
-fn trained_dictionary(seed: u64) -> Vec<u8> {
-    let samples: Vec<Vec<u8>> = (0..400).map(|i| pattern(seed * 1000 + i, 900)).collect();
-    zstd::dict::from_samples(&samples, 8 * 1024).unwrap()
 }
 
 #[test]

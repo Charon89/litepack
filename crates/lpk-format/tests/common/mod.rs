@@ -113,3 +113,76 @@ pub fn write_archive(options: WriterOptions, files: &[(&str, Vec<u8>)]) -> Vec<u
     w.finish().unwrap();
     out
 }
+
+/// A dictionary trained on 400 seeded samples of the `pattern` family.
+pub fn trained_dictionary(seed: u64) -> Vec<u8> {
+    let samples: Vec<Vec<u8>> = (0..400).map(|i| pattern(seed * 1000 + i, 900)).collect();
+    zstd::dict::from_samples(&samples, 8 * 1024).unwrap()
+}
+
+/// The committed test vectors: archive file names and what they hold. Each
+/// archive is written by the writer with the zstd test encoder, so the bytes
+/// are a function of this table, the dictionary file and the zstd library.
+pub const VECTORS: [&str; 4] = [
+    "zstd-basic.lpk",
+    "zstd-multiblock.lpk",
+    "zstd-dict.lpk",
+    "zstd-window.lpk",
+];
+
+/// The dictionary's file name, committed beside `zstd-dict.lpk`.
+pub const DICT_FILE: &str = "zstd-dict.prior";
+
+pub fn vectors_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("vectors")
+}
+
+/// The files of a vector (sorted by path) with their generated contents.
+pub fn vector_files(name: &str) -> Vec<(&'static str, Vec<u8>)> {
+    match name {
+        "zstd-basic.lpk" => vec![
+            ("a.txt", pattern(11, 300)),
+            ("b.txt", pattern(12, 5_000)),
+            ("c.txt", pattern(13, 12_000)),
+        ],
+        "zstd-multiblock.lpk" => vec![
+            ("big/one", pattern(21, 20_000)),
+            ("big/three", pattern(23, 70_000)),
+            ("big/two", pattern(22, 50_000)),
+        ],
+        "zstd-dict.lpk" => vec![
+            ("d/a", pattern(31, 900)),
+            ("d/b", pattern(32, 1_800)),
+            ("d/c", pattern(33, 2_700)),
+        ],
+        "zstd-window.lpk" => vec![("w/data", pattern(41, 300_000))],
+        other => panic!("no vector {other}"),
+    }
+}
+
+/// The writer options of a vector; `dict` is the dictionary of `zstd-dict.lpk`.
+pub fn vector_options(name: &str, dict: Option<&[u8]>) -> WriterOptions {
+    let (block_size, encoder) = match name {
+        "zstd-basic.lpk" => (1 << 20, ZstdTestEncoder::new(3, 20, None)),
+        "zstd-multiblock.lpk" => (32 * 1024, ZstdTestEncoder::new(3, 20, None)),
+        "zstd-dict.lpk" => (
+            1 << 20,
+            ZstdTestEncoder::new(3, 20, Some(dict.unwrap().to_vec())),
+        ),
+        "zstd-window.lpk" => (1 << 20, ZstdTestEncoder::new(3, 24, None)),
+        other => panic!("no vector {other}"),
+    };
+    WriterOptions {
+        chunk_size: 4096,
+        block_size,
+        archive_id: [0x5A; 16],
+        encoder: Box::new(encoder),
+    }
+}
+
+/// Build a vector's archive in memory.
+pub fn build_vector(name: &str, dict: Option<&[u8]>) -> Vec<u8> {
+    write_archive(vector_options(name, dict), &vector_files(name))
+}

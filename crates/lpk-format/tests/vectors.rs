@@ -1,0 +1,129 @@
+//! The committed zstd vectors under `tests/vectors/`: they decode to their
+//! generated contents, verify with the reference tool, and are reproduced
+//! byte for byte by the writer (regenerate on purpose with
+//! `cargo test -p lpk-format --test gen_vectors -- --ignored`).
+#![allow(clippy::unwrap_used)]
+
+mod common;
+
+use common::{build_vector, vector_files, vectors_dir, DICT_FILE, VECTORS};
+use lpk_format::{prior_id, Archive, MemoryPriors, Resources};
+use std::io::Cursor;
+
+fn read(name: &str) -> Vec<u8> {
+    std::fs::read(vectors_dir().join(name)).unwrap()
+}
+
+fn open(name: &str) -> Archive<Cursor<Vec<u8>>> {
+    let mut a = Archive::open(Cursor::new(read(name)), &Resources::default()).unwrap();
+    if name == "zstd-dict.lpk" {
+        let mut store = MemoryPriors::new();
+        store.insert(read(DICT_FILE));
+        a.set_priors(Box::new(store));
+    }
+    a
+}
+
+#[test]
+fn every_vector_decodes_to_its_generated_contents() {
+    for name in VECTORS {
+        let mut a = open(name);
+        let want = vector_files(name);
+        let table = a.entry_table().unwrap();
+        let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
+        assert_eq!(entries.len(), want.len(), "{name}");
+        for (e, (path, data)) in entries.iter().zip(&want) {
+            assert_eq!(&e.path, path, "{name}");
+            let mut got = Vec::new();
+            a.extract(e, &mut got).unwrap();
+            assert!(&got == data, "{name}: {path}");
+        }
+        a.verify().unwrap();
+    }
+}
+
+#[test]
+fn the_writer_reproduces_every_vector_byte_for_byte() {
+    let dict = read(DICT_FILE);
+    for name in VECTORS {
+        let again = build_vector(name, Some(&dict));
+        assert!(
+            again == read(name),
+            "{name} differs from the committed bytes"
+        );
+    }
+}
+
+#[test]
+fn what_each_vector_exercises() {
+    let a = open("zstd-basic.lpk");
+    assert_eq!(a.index().blocks.len(), 1);
+    assert!(a.priors().is_empty());
+
+    let a = open("zstd-multiblock.lpk");
+    assert!(a.index().blocks.len() >= 2);
+    // A file spans two blocks.
+    let spans = a.index().blocks.windows(2).any(|w| {
+        let first = w[0].first_chunk + w[0].chunk_count - 1;
+        a.chunks().locate(first).is_some()
+    });
+    assert!(spans);
+
+    let a = open("zstd-dict.lpk");
+    assert_eq!(a.index().blocks.len(), 1);
+    assert_eq!(a.priors(), &[prior_id(&read(DICT_FILE))]);
+
+    let a = open("zstd-window.lpk");
+    assert_eq!(a.index().envelope.max_window, 1 << 24);
+    assert!(a.priors().is_empty());
+}
+
+#[test]
+fn a_prior_less_reader_reports_the_dictionary_vector() {
+    let mut a = Archive::open(Cursor::new(read("zstd-dict.lpk")), &Resources::default()).unwrap();
+    assert!(matches!(
+        a.verify(),
+        Err(lpk_format::FormatError::MissingPrior { .. })
+    ));
+}
+
+fn tool(args: &[&str]) -> (i32, String, String) {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = lpk_format::cli::run(args.iter().copied(), &mut out, &mut err);
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+#[test]
+fn lpk_decode_verifies_every_vector() {
+    let dir = vectors_dir();
+    let prior = dir.join(DICT_FILE);
+    for name in VECTORS {
+        let archive = dir.join(name);
+        let mut args = vec!["lpk-decode", "verify"];
+        if name == "zstd-dict.lpk" {
+            args.extend(["--prior", prior.to_str().unwrap()]);
+        }
+        args.push(archive.to_str().unwrap());
+        let (code, out, err) = tool(&args);
+        assert_eq!((code, err.as_str()), (0, ""), "{name}");
+        assert!(out.starts_with("ok: "), "{name}: {out}");
+    }
+    // Without the prior the dictionary vector fails and says why.
+    let archive = dir.join("zstd-dict.lpk");
+    let (code, _, err) = tool(&["lpk-decode", "verify", archive.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("is not available"), "{err}");
+    // `info` lists the prior the archive needs.
+    let (code, out, _) = tool(&["lpk-decode", "info", archive.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    let id: String = prior_id(&read(DICT_FILE))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(out.contains("priors: 1"), "{out}");
+    assert!(out.contains(&format!("prior: {id}")), "{out}");
+}
