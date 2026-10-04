@@ -1186,6 +1186,14 @@ impl<W: Write> Writer<W> {
     /// `(index, from_old_table)`. A chunk of a block whose graph names a
     /// reconstruction primitive is skipped when `allow_recon` is false (a
     /// record's chunks may not lie in such a block, spec section 12).
+    ///
+    /// The old-table branch cannot tell whether an old generation's chunk lies
+    /// in a reconstruction block. An append that writes records could therefore
+    /// reference such a chunk from a record, which the writer's check at block
+    /// close cannot see today (it sees only blocks this writer closed). The
+    /// pipeline never appends with records (`add_record` is refused in an
+    /// append, and nothing else adds records to one), so that case is
+    /// unreachable from it.
     fn find_known(&self, hash: &[u8; 32], len: u64, allow_recon: bool) -> Option<(u64, bool)> {
         let same_len = |i: u64| {
             usize::try_from(i)
@@ -1244,7 +1252,17 @@ impl<W: Write> Writer<W> {
             hash,
         });
         if self.options.dedup {
-            self.own.entry(hash).or_insert(index);
+            // Prefer an index in a plain block: a chunk first seen in a reconstruction
+            // block is replaced by this plain copy, which records may name as well.
+            match self.own.get(&hash).copied() {
+                None => {
+                    self.own.insert(hash, index);
+                }
+                Some(i) if self.in_recon_block(i) => {
+                    self.own.insert(hash, index);
+                }
+                Some(_) => {}
+            }
         }
         self.pending.extend_from_slice(data);
         self.pending_chunks += 1;
@@ -1286,7 +1304,10 @@ impl<W: Write> Writer<W> {
     /// `WriterOptions::dedup`): the part then references them, nothing is
     /// written, and the chunk indices are returned. Otherwise nothing happens
     /// and `None` comes back (an empty `plain` is `None` too). Chunks in
-    /// reconstruction blocks count: the entry lists chunks without a record.
+    /// reconstruction blocks count, so the returned indices must never be named
+    /// by a reconstruction record (spec section 12, nesting): use this for a
+    /// part the entry lists plainly, without a record. A part a record names
+    /// goes through [`Writer::add_part`], which never references such chunks.
     pub fn add_part_known(
         &mut self,
         offset: u64,
@@ -1295,6 +1316,61 @@ impl<W: Write> Writer<W> {
         self.check_alive()?;
         let r = self.add_part_known_inner(offset, plain);
         self.note(r)
+    }
+
+    /// Add a regular file whose chunks (cut by the chunker) are all stored
+    /// already in this archive (needs `WriterOptions::dedup`): the entry
+    /// references them and nothing is written, and `true` comes back.
+    /// Otherwise nothing happens and the result is `false` (also for an empty
+    /// file). The path is checked as in [`Writer::add_file`].
+    pub fn add_file_if_known(
+        &mut self,
+        path: &str,
+        flags: EntryFlags,
+        mtime_ns: i64,
+        data: &[u8],
+    ) -> Result<bool, FormatError> {
+        self.check_alive()?;
+        self.no_open_entry()?;
+        let r = self.add_file_if_known_inner(path, flags, mtime_ns, data);
+        self.note(r)
+    }
+
+    fn add_file_if_known_inner(
+        &mut self,
+        path: &str,
+        flags: EntryFlags,
+        mtime_ns: i64,
+        data: &[u8],
+    ) -> Result<bool, FormatError> {
+        let mut entry = Entry {
+            kind: EntryKind::File,
+            flags,
+            path: path.to_string(),
+            mtime_ns,
+            size: data.len() as u64,
+            symlink_target: None,
+            chunks: Vec::new(),
+        };
+        self.check(&entry)?;
+        if !self.options.dedup || data.is_empty() {
+            return Ok(false);
+        }
+        let mut found = Vec::new();
+        for (a, b) in self.cut_all(data)? {
+            let part = &data[a..b];
+            let hash = *blake3::hash(part).as_bytes();
+            match self.find_known(&hash, part.len() as u64, true) {
+                Some((i, old)) => found.push((i, old, part.len() as u64)),
+                None => return Ok(false),
+            }
+        }
+        for (i, old, len) in found {
+            self.note_known(len, old);
+            entry.chunks.push(i);
+        }
+        self.push_entry(entry);
+        Ok(true)
     }
 
     fn add_part_known_inner(
