@@ -20,10 +20,12 @@ pub mod index;
 pub mod magic;
 pub mod merkle;
 pub mod primitive;
+pub mod priors;
 pub mod reader;
 pub mod trailer;
 pub mod varint;
 pub mod writer;
+pub mod zstd;
 
 pub use archive::{Archive, Diagnosis};
 pub use chunk::{
@@ -34,6 +36,7 @@ pub use index::{index_layout_table, BlockLocation, FrameLocation, Index};
 pub use merkle::{
     merkle_root, verify_proof, MerkleTree, MERKLE_EMPTY_CONTEXT, MERKLE_NODE_CONTEXT,
 };
+pub use priors::{prior_id, prior_list_table, MemoryPriors, NoPriors, PriorStore};
 pub use trailer::{trailer_layout_table, Trailer, TRAILER_FRAME_LEN, TRAILER_PAYLOAD_LEN};
 
 pub use decode::{decode_block, PrimitiveDecoder, Registry};
@@ -58,6 +61,7 @@ pub use magic::MAGIC;
 pub use primitive::{primitive_table, GraphResources, PrimitiveId};
 pub use reader::{ArchiveChunks, OwnedEntryTable, VerifySummary};
 pub use writer::{
-    Chunker, FixedChunker, Writer, WriterOptions, WriterSummary, DEFAULT_BLOCK_SIZE,
-    DEFAULT_CHUNK_SIZE, MIN_CHUNK_SIZE,
+    BlockEncoder, Chunker, FixedChunker, StoreEncoder, Writer, WriterOptions, WriterSummary,
+    DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
+pub use zstd::ZstdDecoder;

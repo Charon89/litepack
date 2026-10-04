@@ -257,6 +257,7 @@ The payload, in this order:
 | max_frame_payload | varint | envelope: largest frame payload; must admit the index's own payload and every recorded frame (section 7) |
 | decode_memory | varint | envelope: the writer's estimate of peak decoder memory per thread, in bytes |
 | threads_hint | varint | envelope: independent blocks decodable at once; 0 = no hint |
+| prior_list | variable | the prior list of section 10 (`prior_count`, then that many 32-byte IDs); follows the envelope |
 | block_count | varint | number of blocks; at most the bytes left after it divided by 5 |
 | frame_offset | varint | per block: absolute offset of the block's `ChunkData` frame |
 | frame_len | varint | per block: whole encoded length of that frame |
@@ -270,7 +271,8 @@ The payload, in this order:
 
 The chunk table is not length-prefixed: a reader walks its declared records (under the count bound of
 section 5) and continues after the last one. The six envelope varints follow the Merkle root; an input
-that ends inside them is `Truncated` (`what` is `index`). The five block fields repeat `block_count` times. Bytes after
+that ends inside them is `Truncated` (`what` is `index`). The prior list (section 10) follows the envelope and
+precedes `block_count`. The five block fields repeat `block_count` times. Bytes after
 `records_len` are `TrailingBytes` (`what` is `index`); an input that ends early is `Truncated` (`what` is
 `index`, or `chunk table` inside the table). A `block_count` larger than the bytes left divided by 5 is
 `Truncated` and nothing is allocated for it.
@@ -349,15 +351,15 @@ invalid ends the walk at once with the header's own error (section 2), not `Trun
 
 Errors of this section: `MerkleRootMismatch`, `IndexHashMismatch`, `ArchiveIdMismatch`,
 `BlockLengthMismatch`, `BlockCoverage`, `BlockOutOfRange`, `BadFrameLocation`, `WrongFrameKind`,
-`EnvelopeMismatch`, `Refused`, `NoTrailer` (the last frame is not a trailer of the fixed shape), plus `Truncated` and `TrailingBytes` with the
+`EnvelopeMismatch`, `Refused`, `BadPriorList`, `NoTrailer` (the last frame is not a trailer of the fixed shape), plus `Truncated` and `TrailingBytes` with the
 `what` strings `index`, `trailer` and `archive`.
 
 ## 7. Decode envelope
 
 Every archive states, in the index, the resources a decoder needs. A reader compares them with what the local
 machine allows before it decodes anything, and refuses with a message that names the limit unless the caller
-allows more. The envelope is six varints placed right after `merkle_root` and before `block_count` in the
-index payload (section 6):
+allows more. The envelope is six varints placed right after `merkle_root` and before the prior list and
+`block_count` in the index payload (section 6):
 
 | Field | Size | Meaning |
 |---|---|---|
@@ -504,16 +506,36 @@ step whose output length differs from `plain_len` is `BlockLengthMismatch`.
 The reference decoder knows the name, the parameter layout and the validation of all 13 primitives. Each ID is
 in exactly one of three groups:
 
-- Implemented now: `store`.
-- Added to the reference decoder by later revisions of this specification's reference implementation: `zstd`, `lzma`.
+- Implemented now: `store`, `zstd`.
+- Added to the reference decoder by later revisions of this specification's reference implementation: `lzma`.
 - Requires the full reader: `bwt`, `bcj-x86`, `bcj-arm64`, `delta`, `jpeg-reconstruct`,
   `deflate-reconstruct`, `png-filter`, `base64`, `utf16`, `container-reconstruct`.
 
 For a primitive without a decoder the reference decoder reports `UnimplementedPrimitive` with the ID, before it
 runs any step of the graph.
 
+### What the reference decoder enforces for `zstd`
+
+The reference decoder decodes a `zstd` step's input as one zstd frame or a sequence of frames (skippable
+frames are skipped) into at most the step's output bound, in steps of about 64 KiB, with a pure-Rust decoder. It
+applies these rules, in this order:
+
+1. The `window_log` must be 10..=31 (`BadParams`, `window_log`).
+2. The window the step declares, 2^`window_log` bytes, must not exceed the reader's `max_window`; otherwise
+   `WindowTooLarge` with the window needed and the window allowed. This is raised before the input is read.
+3. When `dictionary` is not all zeros the reader's store of priors (section 10) must hold a prior of that ID,
+   and the bytes it returns must hash to the ID; otherwise `MissingPrior`, raised before the input is read.
+   The prior must be a zstd dictionary (the format that begins with the magic number 0xEC30A437); other
+   bytes are a `ZstdError`.
+4. The window a frame declares in its header must not exceed 2^`window_log` (`BadParams`, `frame window exceeds
+   declared`); the decoder allocates nothing for a window before this check.
+5. Output past the step's bound is `PayloadTooLarge` (`BlockLengthMismatch` on the last step, as above); a
+   frame that is cut short, damaged, names a dictionary other than the prior, or whose content checksum (when
+   it has one) does not match the output is `ZstdError` carrying the decoder's own text.
+
 Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`, `BadParams`,
-`BlockLengthMismatch`, `PayloadTooLarge`, and `Truncated` with the `what` strings `graph` and `block header`.
+`BlockLengthMismatch`, `PayloadTooLarge`, `WindowTooLarge`, `ZstdError`, and `Truncated` with the `what` strings
+`graph` and `block header`.
 
 ## 9. Writing and reading an archive
 
@@ -555,6 +577,11 @@ size limit, so a block holds whole chunks and a chunk never spans two blocks. A 
 has the graph `[store]`; for such an archive the envelope declares `max_window` 0, `max_bwt_block` 0,
 `threads_hint` 0 and `decode_memory` equal to `max_block_plain`, the space of one block buffer; the encoded
 input a decoder reads beside it is not counted in `decode_memory`.
+
+A block is encoded by the writer's block encoder, which reports the decode graph of its blocks and the decoder
+resources that graph needs (they feed the envelope); the writer records the graph in every block header, checks
+it before the first block, and lists the priors it names in the index (section 10). The identity encoder
+produces the graph `[store]`.
 
 A writer that meets an I/O error, on its input or its output, or a chunker that breaks the rules above, refuses
 every later call with that error: the archive being written is abandoned.
@@ -598,3 +625,31 @@ that was already there is left untouched. Paths in the tool's listing have contr
 
 Errors of this section: `UnsortedEntries`, `InvalidPath`, `BadChunk`, `ChunkMismatch`, `FileSizeMismatch`,
 `ChunkIndexOutOfRange`, `SymlinkRefused`, `UnsafePath`.
+
+The tool takes `--prior <file>` (repeatable) for the priors an archive needs (section 10); `info` lists the
+IDs the index names.
+
+## 10. Priors
+
+A prior is a byte string a decoder needs besides the archive, for example a zstd dictionary (D-10). Its ID is
+the BLAKE3-256 of its bytes. A step names a prior by ID in its parameters (for `zstd`, the `dictionary` field of
+section 8; all zeros means none). The archive never contains the prior and the reader never fetches it: the
+caller gives the reader a store that maps an ID to bytes, and the reader looks nothing up anywhere else (no
+network, no file lookup).
+
+The index lists every prior the archive's blocks name, right after the envelope (section 6):
+
+| Field | Size | Meaning |
+|---|---|---|
+| prior_count | varint | number of priors the archive's blocks name; at most the bytes left after it divided by 32 |
+| prior_id | 32 | per prior: the BLAKE3-256 of the prior's bytes; ascending, unique, never all zeros |
+
+The list is the set of every non-zero ID that any block's graph names, in ascending byte order. A count larger
+than the bytes left divided by 32 is `Truncated` (`what` is `index`) and nothing is allocated for it; an ID
+that is all zeros, or that is not greater than the one before it, is `BadPriorList`. A reader can therefore say
+which priors are needed before it decodes anything.
+
+Errors of this section. `MissingPrior` with the ID: a block's graph names a prior the caller's store does not
+hold, or holds under bytes that do not hash to the ID; it is raised before the step's input is read.
+`UnlistedPrior` with the ID: a block's header names a prior the index does not list; it is raised when the
+block header is parsed, before the block is decoded. `BadPriorList` as above.

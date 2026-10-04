@@ -5,6 +5,7 @@ use crate::archive::Archive;
 use crate::entry::{Entry, EntryKind};
 use crate::envelope::Resources;
 use crate::error::FormatError;
+use crate::priors::MemoryPriors;
 use crate::trailer::TRAILER_FRAME_LEN;
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
@@ -16,6 +17,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Parser)]
 #[command(name = "lpk-decode", version, about)]
 struct Cli {
+    /// A prior file (for example a zstd dictionary) the archive needs; may be
+    /// repeated. It is matched to the archive by the BLAKE3 of its content.
+    #[arg(long = "prior", global = true, value_name = "FILE")]
+    priors: Vec<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -92,8 +97,18 @@ pub fn check_extraction_path(path: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn open(path: &Path) -> Result<Archive<File>, FormatError> {
-    Archive::open(File::open(path)?, &Resources::default())
+fn open(path: &Path, priors: &[PathBuf]) -> Result<Archive<File>, FormatError> {
+    let mut a = Archive::open(File::open(path)?, &Resources::default())?;
+    if !priors.is_empty() {
+        // The prior files are the caller's: named on the command line, each
+        // filed under the BLAKE3 of its content.
+        let mut store = MemoryPriors::new();
+        for p in priors {
+            store.insert(std::fs::read(p)?);
+        }
+        a.set_priors(Box::new(store));
+    }
+    Ok(a)
 }
 
 fn entries(a: &mut Archive<File>) -> Result<Vec<Entry>, FormatError> {
@@ -128,8 +143,8 @@ fn join_components(dir: &Path, path: &str) -> PathBuf {
     p
 }
 
-fn list(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
-    let mut a = open(path)?;
+fn list(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), FormatError> {
+    let mut a = open(path, priors)?;
     for e in entries(&mut a)? {
         let path = escape_path(&e.path);
         writeln!(out, "{}\t{}\t{}", e.kind.name(), e.size, path)?;
@@ -137,8 +152,8 @@ fn list(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn verify(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
-    let mut a = open(path)?;
+fn verify(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), FormatError> {
+    let mut a = open(path, priors)?;
     let s = a.verify()?;
     writeln!(
         out,
@@ -148,8 +163,8 @@ fn verify(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn info(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
-    let mut a = open(path)?;
+fn info(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), FormatError> {
+    let mut a = open(path, priors)?;
     let h = *a.header();
     let t = *a.trailer();
     let e = a.index().envelope;
@@ -164,6 +179,10 @@ fn info(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     writeln!(out, "chunks: {}", a.chunks().len())?;
     writeln!(out, "blocks: {}", a.index().blocks.len())?;
     writeln!(out, "records: {}", a.index().records.is_some())?;
+    writeln!(out, "priors: {}", a.priors().len())?;
+    for id in a.priors() {
+        writeln!(out, "prior: {}", hex(id))?;
+    }
     writeln!(out, "merkle root: {}", hex(&a.index().merkle_root))?;
     writeln!(out, "envelope max_window: {}", e.max_window)?;
     writeln!(out, "envelope max_bwt_block: {}", e.max_bwt_block)?;
@@ -193,8 +212,13 @@ fn extract_file(a: &mut Archive<File>, e: &Entry, target: &Path) -> Result<(), F
     result
 }
 
-fn extract(path: &Path, dir: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
-    let mut a = open(path)?;
+fn extract(
+    path: &Path,
+    dir: &Path,
+    priors: &[PathBuf],
+    out: &mut dyn Write,
+) -> Result<(), FormatError> {
+    let mut a = open(path, priors)?;
     let all = entries(&mut a)?;
     // Refuse before writing anything.
     for e in &all {
@@ -246,10 +270,10 @@ where
         }
     };
     let result = match &cli.command {
-        Command::List { archive } => list(archive, out),
-        Command::Verify { archive } => verify(archive, out),
-        Command::Extract { archive, dir } => extract(archive, dir, out),
-        Command::Info { archive } => info(archive, out),
+        Command::List { archive } => list(archive, &cli.priors, out),
+        Command::Verify { archive } => verify(archive, &cli.priors, out),
+        Command::Extract { archive, dir } => extract(archive, dir, &cli.priors, out),
+        Command::Info { archive } => info(archive, &cli.priors, out),
     };
     match result {
         Ok(()) => 0,

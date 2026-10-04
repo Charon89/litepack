@@ -7,6 +7,7 @@ use crate::error::FormatError;
 use crate::frame::{Frame, FrameKind, ReadFrame, ReadLimits};
 use crate::header::Header;
 use crate::index::{FrameLocation, Index};
+use crate::priors::PriorStore;
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -215,6 +216,20 @@ impl<R: Read + Seek> Archive<R> {
     pub fn registry_mut(&mut self) -> &mut Registry {
         self.cache = None;
         &mut self.registry
+    }
+
+    /// Use `store` for the priors blocks name (the reader never fetches any
+    /// itself). Decoders registered earlier are kept.
+    pub fn set_priors(&mut self, store: Box<dyn PriorStore>) {
+        self.cache = None;
+        let old = std::mem::replace(&mut self.registry, Registry::v1());
+        self.registry = old.with_priors(store);
+    }
+
+    /// The IDs of the priors the archive's blocks need, from the index:
+    /// ascending and unique. A tool can say which are needed before decoding.
+    pub fn priors(&self) -> &[[u8; 32]] {
+        &self.index.priors
     }
 
     /// The `EntryTable` payload, read and verified on demand; callers parse it
@@ -428,6 +443,7 @@ mod tests {
                 1 << 24,
                 2,
             ),
+            priors: vec![],
             blocks,
             entry_table: FrameLocation {
                 offset: entry_off,

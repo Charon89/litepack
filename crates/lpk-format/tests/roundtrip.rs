@@ -460,10 +460,31 @@ fn writer_refusals() {
     let mut o = small_options();
     o.block_size = 4095;
     assert!(matches!(new(o), Err(FormatError::BadOptions { .. })));
+    // An encoder whose graph does not validate is refused before the header.
+    struct BadGraph(Vec<lpk_format::Step>);
+    impl lpk_format::BlockEncoder for BadGraph {
+        fn graph(&self) -> lpk_format::Graph {
+            lpk_format::Graph {
+                steps: self.0.clone(),
+            }
+        }
+        fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
+            Ok(plain.to_vec())
+        }
+        fn resources(&self) -> lpk_format::GraphResources {
+            lpk_format::GraphResources::default()
+        }
+    }
+    let zstd_step = |params: Vec<u8>| lpk_format::Step {
+        primitive: lpk_format::PrimitiveId::Zstd,
+        params,
+    };
     let mut o = small_options();
-    o.graph.steps[0].primitive = lpk_format::PrimitiveId::Zstd;
-    o.graph.steps[0].params = vec![20; 33];
-    assert!(matches!(new(o), Err(FormatError::BadOptions { .. })));
+    o.encoder = Box::new(BadGraph(vec![zstd_step(vec![20; 5])]));
+    assert!(matches!(new(o), Err(FormatError::BadParams { id: 1, .. })));
+    let mut o = small_options();
+    o.encoder = Box::new(BadGraph(vec![]));
+    assert!(matches!(new(o), Err(FormatError::BadGraph { .. })));
 
     let mut w = new(small_options()).unwrap();
     let mut empty: &[u8] = b"";

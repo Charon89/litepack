@@ -5,6 +5,9 @@ use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::graph::{BlockHeader, MAX_STEPS};
 use crate::primitive::PrimitiveId;
+use crate::priors::{NoPriors, PriorStore};
+use crate::zstd::ZstdDecoder;
+use std::sync::Arc;
 
 /// A decoder for one primitive.
 pub trait PrimitiveDecoder: Send + Sync {
@@ -60,10 +63,12 @@ impl PrimitiveDecoder for Unimplemented {
     }
 }
 
-/// One decoder per primitive of the registry.
+/// One decoder per primitive of the registry, and the store of priors the
+/// decoders that need one look them up in.
 pub struct Registry {
     decoders: Vec<Box<dyn PrimitiveDecoder>>,
     implemented: Vec<bool>,
+    priors: Arc<dyn PriorStore>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -75,26 +80,44 @@ impl std::fmt::Debug for Registry {
 }
 
 impl Registry {
-    /// Every v1 primitive present: `store` is real, the others report
-    /// `UnimplementedPrimitive` until a decoder is registered.
+    /// Every v1 primitive present: `store` and `zstd` are real, the others
+    /// report `UnimplementedPrimitive` until a decoder is registered. The
+    /// store of priors has nothing.
     pub fn v1() -> Registry {
+        let priors: Arc<dyn PriorStore> = Arc::new(NoPriors);
         let decoders = PrimitiveId::ALL
             .iter()
             .map(|&p| -> Box<dyn PrimitiveDecoder> {
                 match p {
                     PrimitiveId::Store => Box::new(StoreDecoder),
+                    PrimitiveId::Zstd => Box::new(ZstdDecoder::new(Arc::clone(&priors))),
                     other => Box::new(Unimplemented(other)),
                 }
             })
             .collect();
         let implemented = PrimitiveId::ALL
             .iter()
-            .map(|&p| p == PrimitiveId::Store)
+            .map(|&p| matches!(p, PrimitiveId::Store | PrimitiveId::Zstd))
             .collect();
         Registry {
             decoders,
             implemented,
+            priors,
         }
+    }
+
+    /// Use `store` for priors: the zstd decoder is replaced by one that looks
+    /// in it (call this before registering a custom zstd decoder).
+    pub fn with_priors(mut self, store: Box<dyn PriorStore>) -> Registry {
+        let store: Arc<dyn PriorStore> = Arc::from(store);
+        self.decoders[PrimitiveId::Zstd as usize] = Box::new(ZstdDecoder::new(Arc::clone(&store)));
+        self.priors = store;
+        self
+    }
+
+    /// The store of priors decoders look in.
+    pub fn priors(&self) -> &dyn PriorStore {
+        self.priors.as_ref()
     }
 
     /// The decoder of `id`.
@@ -247,29 +270,32 @@ mod tests {
 
     #[test]
     fn unimplemented_primitives() {
-        let mut p = vec![20u8];
-        p.extend_from_slice(&[0; 32]);
         let h = header(
             vec![Step {
-                primitive: PrimitiveId::Zstd,
-                params: p,
+                primitive: PrimitiveId::Lzma,
+                params: vec![0, 0, 0, 1, 3, 0, 2],
             }],
             5,
             5,
         );
         assert!(matches!(
             run(&h, b"hello", &Resources::default()).unwrap_err(),
-            FormatError::UnimplementedPrimitive { id: 1 }
+            FormatError::UnimplementedPrimitive { id: 2 }
         ));
         let r = Registry::v1();
         for p in PrimitiveId::ALL {
-            assert_eq!(r.is_implemented(p), p == PrimitiveId::Store);
+            let real = matches!(p, PrimitiveId::Store | PrimitiveId::Zstd);
+            assert_eq!(r.is_implemented(p), real);
             let e = r
                 .decoder(p)
                 .decode(&[], b"", 0, &Resources::default())
                 .map(|_| ());
             match p {
                 PrimitiveId::Store => e.unwrap(),
+                PrimitiveId::Zstd => assert!(matches!(
+                    e.unwrap_err(),
+                    FormatError::BadParams { id: 1, .. }
+                )),
                 _ => assert!(matches!(
                     e.unwrap_err(),
                     FormatError::UnimplementedPrimitive { id } if id == p as u16

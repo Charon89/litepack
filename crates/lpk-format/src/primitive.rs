@@ -126,6 +126,18 @@ impl PrimitiveId {
         }
     }
 
+    /// The ID of the prior these parameters name, if any (zstd's `dictionary`
+    /// unless all zeros). The parameters are assumed valid.
+    pub fn prior(self, params: &[u8]) -> Option<[u8; 32]> {
+        match self {
+            PrimitiveId::Zstd => params
+                .get(1..33)
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .filter(|id| id.iter().any(|&b| b != 0)),
+            _ => None,
+        }
+    }
+
     /// The decoder resources this primitive needs with these parameters. The
     /// parameters are assumed valid; malformed ones yield no resources.
     pub fn resources(self, params: &[u8]) -> GraphResources {

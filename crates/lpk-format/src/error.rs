@@ -214,6 +214,38 @@ pub enum FormatError {
         /// Short reason.
         reason: &'static str,
     },
+    /// A block names a prior the caller's store does not have.
+    #[error("prior {} is not available", hex32(.id))]
+    MissingPrior {
+        /// The prior's ID (BLAKE3 of its bytes).
+        id: [u8; 32],
+    },
+    /// A block names a prior the index does not list.
+    #[error("block names prior {} which the index does not list", hex32(.id))]
+    UnlistedPrior {
+        /// The prior's ID.
+        id: [u8; 32],
+    },
+    /// The index's prior list is not ascending, unique and non-zero.
+    #[error("bad prior list ({reason})")]
+    BadPriorList {
+        /// Short reason.
+        reason: &'static str,
+    },
+    /// A decoder needs a larger window than the one declared or allowed.
+    #[error("decoder window of {needed} bytes exceeds the {allowed} allowed")]
+    WindowTooLarge {
+        /// The window asked for, in bytes.
+        needed: u64,
+        /// The window allowed, in bytes.
+        allowed: u64,
+    },
+    /// The zstd decoder rejected its input.
+    #[error("zstd: {reason}")]
+    ZstdError {
+        /// The decoder's own text.
+        reason: String,
+    },
     /// The writer was given options it cannot honour.
     #[error("bad writer options ({reason})")]
     BadOptions {
@@ -243,6 +275,10 @@ pub enum FormatError {
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+fn hex32(b: &[u8; 32]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Fill `buf` exactly, mapping a short read to `Truncated { what }`.

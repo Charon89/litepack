@@ -102,6 +102,14 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             other => other?,
         };
         let (header, used) = BlockHeader::parse(&frame.payload, block)?;
+        if let Some(id) = header
+            .graph
+            .prior_ids()
+            .into_iter()
+            .find(|id| a.index().priors.binary_search(id).is_err())
+        {
+            return Err(FormatError::UnlistedPrior { id });
+        }
         if header.plain_len != loc.plain_len {
             return Err(FormatError::BlockLengthMismatch { block });
         }

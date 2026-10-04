@@ -109,6 +109,16 @@ impl Graph {
         out
     }
 
+    /// The IDs of the priors the steps name: ascending and unique.
+    pub fn prior_ids(&self) -> Vec<[u8; 32]> {
+        let ids: std::collections::BTreeSet<[u8; 32]> = self
+            .steps
+            .iter()
+            .filter_map(|s| s.primitive.prior(&s.params))
+            .collect();
+        ids.into_iter().collect()
+    }
+
     /// The maxima of the steps' resources.
     pub fn resources(&self) -> GraphResources {
         self.steps

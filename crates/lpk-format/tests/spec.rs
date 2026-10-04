@@ -34,6 +34,7 @@ fn spec_tables_match_code() {
         lpk_format::primitive_table(),
         lpk_format::graph_layout_table(),
         lpk_format::block_header_table(),
+        lpk_format::prior_list_table(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }
@@ -174,6 +175,31 @@ fn spec_states_the_envelope_caps_and_refusal_message() {
         r.to_string(),
         "the archive needs f of 1 bytes; this reader allows 0"
     );
+}
+
+#[test]
+fn spec_states_the_zstd_and_prior_rules() {
+    let text = spec();
+    for needle in [
+        "## 10. Priors",
+        "### What the reference decoder enforces for `zstd`",
+        "`WindowTooLarge`",
+        "`MissingPrior`",
+        "`UnlistedPrior`",
+        "`BadPriorList`",
+        "`ZstdError`",
+        "frame window exceeds\n   declared",
+        "no file lookup",
+        "| prior_list | variable |",
+    ] {
+        assert!(text.contains(needle), "spec lacks {needle:?}");
+    }
+    // The prior-list table is the one in the index table's neighbour, and the
+    // index table names it.
+    let index = lpk_format::index_layout_table();
+    assert!(index.contains("prior_list"));
+    assert!(lpk_format::prior_list_table().contains("prior_count"));
+    assert!(lpk_format::prior_list_table().contains("32"));
 }
 
 #[test]

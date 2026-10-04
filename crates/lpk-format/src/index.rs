@@ -60,6 +60,9 @@ pub struct Index {
     pub merkle_root: [u8; 32],
     /// The resources a decoder needs (section 7).
     pub envelope: Envelope,
+    /// The IDs of the priors the blocks' graphs name: ascending, unique, never
+    /// all zeros (section 10).
+    pub priors: Vec<[u8; 32]>,
     /// The blocks, ascending by `first_chunk`, partitioning the chunk table.
     pub blocks: Vec<BlockLocation>,
     /// Location of the `EntryTable` frame.
@@ -146,6 +149,32 @@ fn rv(s: &mut &[u8]) -> Result<u64, FormatError> {
         Err(FormatError::Truncated { .. }) => Err(FormatError::Truncated { what: WHAT }),
         other => other,
     }
+}
+
+/// Read the prior list: a count bounded by the bytes left, then the IDs, which
+/// must ascend strictly and may not be all zeros.
+fn read_priors(s: &mut &[u8]) -> Result<Vec<[u8; 32]>, FormatError> {
+    let count = rv(s)?;
+    if count > (s.len() / 32) as u64 {
+        return Err(FormatError::Truncated { what: WHAT });
+    }
+    let mut priors: Vec<[u8; 32]> = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let (id, rest) = s
+            .split_first_chunk::<32>()
+            .ok_or(FormatError::Truncated { what: WHAT })?;
+        *s = rest;
+        if id.iter().all(|&b| b == 0) {
+            return Err(FormatError::BadPriorList { reason: "zero id" });
+        }
+        if priors.last().is_some_and(|prev| prev >= id) {
+            return Err(FormatError::BadPriorList {
+                reason: "not ascending and unique",
+            });
+        }
+        priors.push(*id);
+    }
+    Ok(priors)
 }
 
 /// Check that the blocks partition `0..table_len` and lie in the body.
@@ -237,6 +266,10 @@ impl Index {
         out.extend_from_slice(&self.chunk_table);
         out.extend_from_slice(&self.merkle_root);
         self.envelope.write(&mut out)?;
+        varint::write(&mut out, self.priors.len() as u64)?;
+        for id in &self.priors {
+            out.extend_from_slice(id);
+        }
         varint::write(&mut out, self.blocks.len() as u64)?;
         for b in &self.blocks {
             for v in [
@@ -283,6 +316,7 @@ impl Index {
         let merkle_root_stored = *root;
         s = rest;
         let envelope = Envelope::read(&mut s)?;
+        let priors = read_priors(&mut s)?;
         let count = rv(&mut s)?;
         if count > (s.len() / MIN_BLOCK_LEN) as u64 {
             return Err(FormatError::Truncated { what: WHAT });
@@ -330,6 +364,7 @@ impl Index {
                 chunk_table,
                 merkle_root: merkle_root_stored,
                 envelope,
+                priors,
                 blocks,
                 entry_table,
                 records,
@@ -363,6 +398,7 @@ pub fn index_layout_table() -> String {
          | max_frame_payload | varint | envelope: largest frame payload; must admit the index's own payload and every recorded frame (section 7) |\n\
          | decode_memory | varint | envelope: the writer's estimate of peak decoder memory per thread, in bytes |\n\
          | threads_hint | varint | envelope: independent blocks decodable at once; 0 = no hint |\n\
+         | prior_list | variable | the prior list of section 10 (`prior_count`, then that many 32-byte IDs); follows the envelope |\n\
          | block_count | varint | number of blocks; at most the bytes left after it divided by {MIN_BLOCK_LEN} |\n\
          | frame_offset | varint | per block: absolute offset of the block's `ChunkData` frame |\n\
          | frame_len | varint | per block: whole encoded length of that frame |\n\
@@ -428,6 +464,7 @@ mod tests {
                 1 << 24,
                 0,
             ),
+            priors: vec![],
             blocks,
             entry_table: FrameLocation {
                 offset: 32,
@@ -507,6 +544,10 @@ mod tests {
         let mut out = idx.chunk_table.to_vec();
         out.extend_from_slice(&idx.merkle_root);
         idx.envelope.write(&mut out).unwrap();
+        varint::write(&mut out, idx.priors.len() as u64).unwrap();
+        for id in &idx.priors {
+            out.extend_from_slice(id);
+        }
         varint::write(&mut out, idx.blocks.len() as u64).unwrap();
         for b in &idx.blocks {
             for v in [
@@ -867,7 +908,8 @@ mod tests {
     fn huge_block_count_is_bounded_by_input() {
         let mut p = table_of(&[]);
         p.extend_from_slice(&[0u8; 32]);
-        p.extend_from_slice(&[0u8; 6]);
+        // The envelope's six varints, then an empty prior list.
+        p.extend_from_slice(&[0u8; 7]);
         varint::write(&mut p, u64::MAX).unwrap();
         p.extend_from_slice(&[0u8; 20]);
         assert!(matches!(
@@ -877,7 +919,7 @@ mod tests {
         // A count the remaining bytes cannot hold at five bytes per block.
         let mut p = table_of(&[]);
         p.extend_from_slice(&[0u8; 32]);
-        p.extend_from_slice(&[0u8; 6]);
+        p.extend_from_slice(&[0u8; 7]);
         p.push(5);
         p.extend_from_slice(&[0u8; 24]);
         assert!(matches!(
@@ -979,10 +1021,58 @@ mod tests {
         assert_eq!(ci.record(999_999), Some(recs[999_999]));
     }
 
+    fn with_priors(priors: Vec<[u8; 32]>) -> Index {
+        let (_, mut idx) = three();
+        idx.priors = priors;
+        fit_envelope(&mut idx);
+        idx
+    }
+
+    #[test]
+    fn prior_list_round_trips() {
+        for priors in [vec![], vec![[1u8; 32]], vec![[1u8; 32], [2; 32], [9; 32]]] {
+            let idx = with_priors(priors.clone());
+            let bytes = idx.encode().unwrap();
+            let back = Index::parse(&bytes, IDX_AT).unwrap();
+            assert_eq!(back.priors, priors);
+            assert_eq!(back, idx);
+        }
+    }
+
+    #[test]
+    fn prior_list_must_ascend_and_be_nonzero() {
+        let reason = |priors: Vec<[u8; 32]>| match parse_err(&with_priors(priors)) {
+            FormatError::BadPriorList { reason } => reason,
+            e => panic!("unexpected {e:?}"),
+        };
+        assert_eq!(reason(vec![[2; 32], [1; 32]]), "not ascending and unique");
+        assert_eq!(reason(vec![[1; 32], [1; 32]]), "not ascending and unique");
+        assert_eq!(reason(vec![[0; 32]]), "zero id");
+        // `encode` refuses what a reader would refuse.
+        assert!(matches!(
+            with_priors(vec![[2; 32], [1; 32]]).encode(),
+            Err(FormatError::BadPriorList { .. })
+        ));
+    }
+
+    #[test]
+    fn prior_count_is_bounded_by_the_bytes_left() {
+        let mut p = table_of(&[]);
+        p.extend_from_slice(&[0u8; 32]);
+        p.extend_from_slice(&[0u8; 6]);
+        varint::write(&mut p, 2).unwrap();
+        p.extend_from_slice(&[1u8; 63]);
+        assert!(matches!(
+            Index::parse(&p, IDX_AT),
+            Err(FormatError::Truncated { what: "index" })
+        ));
+    }
+
     #[test]
     fn layout_table_lists_every_field() {
         let t = index_layout_table();
         for f in [
+            "prior_list",
             "chunk_table",
             "merkle_root",
             "block_count",

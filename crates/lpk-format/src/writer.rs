@@ -10,9 +10,10 @@ use crate::graph::{BlockHeader, Graph, Step, MAX_STEPS};
 use crate::header::{Header, HeaderFlags};
 use crate::index::{BlockLocation, FrameLocation, Index};
 use crate::merkle::merkle_root;
-use crate::primitive::PrimitiveId;
+use crate::primitive::{GraphResources, PrimitiveId};
 use crate::trailer::Trailer;
 use crate::varint;
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 
 /// Smallest `chunk_size` a writer accepts.
@@ -79,8 +80,43 @@ impl Chunker for FixedChunker {
     }
 }
 
+/// Turns the plain bytes of a block into encoded bytes. The decode graph it
+/// reports is what a reader runs on them: `encode` followed by the graph's
+/// decoding must give back the plain bytes.
+pub trait BlockEncoder {
+    /// The decode graph of the blocks this encoder produces. The writer
+    /// validates it (step count, parameters) before the first block.
+    fn graph(&self) -> Graph;
+    /// Encode one block's plain bytes.
+    fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError>;
+    /// The decoder resources the graph needs, for the envelope.
+    fn resources(&self) -> GraphResources;
+}
+
+/// The identity encoder: a one-step `store` graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreEncoder;
+
+impl BlockEncoder for StoreEncoder {
+    fn graph(&self) -> Graph {
+        Graph {
+            steps: vec![Step {
+                primitive: PrimitiveId::Store,
+                params: Vec::new(),
+            }],
+        }
+    }
+
+    fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
+        Ok(plain.to_vec())
+    }
+
+    fn resources(&self) -> GraphResources {
+        GraphResources::default()
+    }
+}
+
 /// Settings of a [`Writer`].
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterOptions {
     /// Chunk length for the fixed cut; at least [`MIN_CHUNK_SIZE`].
     pub chunk_size: u64,
@@ -89,9 +125,19 @@ pub struct WriterOptions {
     pub block_size: u64,
     /// The archive's identity, written to the header and the trailer.
     pub archive_id: [u8; 16],
-    /// The decode graph of every block. This writer has no encoder but the
-    /// identity, so every step must be `store`.
-    pub graph: Graph,
+    /// Encodes every block and names its decode graph; [`StoreEncoder`] by default.
+    pub encoder: Box<dyn BlockEncoder>,
+}
+
+impl std::fmt::Debug for WriterOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriterOptions")
+            .field("chunk_size", &self.chunk_size)
+            .field("block_size", &self.block_size)
+            .field("archive_id", &self.archive_id)
+            .field("graph", &self.encoder.graph())
+            .finish()
+    }
 }
 
 impl Default for WriterOptions {
@@ -100,12 +146,7 @@ impl Default for WriterOptions {
             chunk_size: DEFAULT_CHUNK_SIZE,
             block_size: DEFAULT_BLOCK_SIZE,
             archive_id: [0; 16],
-            graph: Graph {
-                steps: vec![Step {
-                    primitive: PrimitiveId::Store,
-                    params: Vec::new(),
-                }],
-            },
+            encoder: Box::new(StoreEncoder),
         }
     }
 }
@@ -132,6 +173,7 @@ pub struct Writer<W: Write> {
     entries: Vec<Entry>,
     records: Vec<ChunkRecord>,
     blocks: Vec<BlockLocation>,
+    priors: BTreeSet<[u8; 32]>,
     pending: Vec<u8>,
     pending_chunks: u64,
     /// The first I/O error seen; every later call fails with it.
@@ -176,19 +218,14 @@ impl<W: Write> Writer<W> {
         if options.block_size < options.chunk_size {
             return Err(bad_options("block_size below chunk_size"));
         }
-        let steps = &options.graph.steps;
-        if steps.is_empty() || steps.len() > MAX_STEPS {
+        let graph = options.encoder.graph();
+        if graph.steps.is_empty() || graph.steps.len() > MAX_STEPS {
             return Err(FormatError::BadGraph {
                 reason: "step count",
             });
         }
-        for s in steps {
+        for s in &graph.steps {
             s.primitive.validate_params(&s.params)?;
-            if s.primitive != PrimitiveId::Store {
-                return Err(bad_options(
-                    "graph needs an encoder; only store is available",
-                ));
-            }
         }
         Header::new(HeaderFlags::EMPTY, options.archive_id).write(&mut out)?;
         Ok(Writer {
@@ -199,6 +236,7 @@ impl<W: Write> Writer<W> {
             entries: Vec::new(),
             records: Vec::new(),
             blocks: Vec::new(),
+            priors: BTreeSet::new(),
             pending: Vec::new(),
             pending_chunks: 0,
             failed: None,
@@ -260,28 +298,30 @@ impl<W: Write> Writer<W> {
             return Ok(());
         }
         let plain = std::mem::take(&mut self.pending);
+        let encoded = self.options.encoder.encode(&plain)?;
+        let graph = self.options.encoder.graph();
+        self.priors.extend(graph.prior_ids());
         let header = BlockHeader {
-            graph: self.options.graph.clone(),
+            graph,
             plain_len: plain.len() as u64,
-            encoded_len: plain.len() as u64,
+            encoded_len: encoded.len() as u64,
         };
-        // The graph is all `store` (checked at construction): encoding is the
-        // identity, and the frame is written piecewise, without a copy of the block.
+        // The frame is written piecewise, without a copy of the encoded block.
         let head = header.encode();
-        let payload_len = (head.len() + plain.len()) as u64;
+        let payload_len = (head.len() + encoded.len()) as u64;
         let at = FrameLocation {
             offset: self.pos,
             len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
         };
         let mut hasher = blake3::Hasher::new();
         hasher.update(&head);
-        hasher.update(&plain);
+        hasher.update(&encoded);
         let w = &mut self.out;
         w.write_all(&(FrameKind::ChunkData as u16).to_le_bytes())?;
         w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
         varint::write(w, payload_len)?;
         w.write_all(&head)?;
-        w.write_all(&plain)?;
+        w.write_all(&encoded)?;
         w.write_all(hasher.finalize().as_bytes())?;
         self.pos += at.len;
         self.blocks.push(BlockLocation {
@@ -445,7 +485,7 @@ impl<W: Write> Writer<W> {
         let recs = &self.records;
         let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
         let max_plain = self.blocks.iter().map(|b| b.plain_len).max().unwrap_or(0);
-        let graph = self.options.graph.resources();
+        let graph = self.options.encoder.resources();
         let mut index = Index {
             chunk_table: ChunkTableWriter::encode(recs).into(),
             merkle_root: merkle_root(&leaves),
@@ -457,6 +497,7 @@ impl<W: Write> Writer<W> {
                 decode_memory: 0,
                 threads_hint: 0,
             },
+            priors: self.priors.iter().copied().collect(),
             blocks: std::mem::take(&mut self.blocks),
             entry_table,
             records: None,
