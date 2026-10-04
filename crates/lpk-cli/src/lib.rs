@@ -103,8 +103,10 @@ struct ExtractArgs {
     archive: PathBuf,
     /// The directory to extract into; created if missing.
     outdir: PathBuf,
-    /// Decode workers (default: the machine's logical cores); capped so that the decoded blocks
-    /// in flight stay within the reader's decode memory.
+    /// The total thread budget, decoders plus file writers (default: the machine's logical
+    /// cores; at most four times that). 1 decodes and writes on one thread; from 2 on,
+    /// clamp(N/4, 1, 4) threads write files and the rest decode blocks, the decoders capped so
+    /// that the decoded blocks in flight stay within the reader's decode memory.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     threads: Option<u64>,
     /// A prior file (for example a zstd dictionary) the archive needs; may be repeated.
@@ -259,6 +261,15 @@ fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             }
         }
     }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let max = u64::try_from(cores.saturating_mul(4)).unwrap_or(u64::MAX);
+    if x.threads.is_some_and(|n| n > max) {
+        let _ = writeln!(
+            err,
+            "error: --threads: at most {max} (four times the logical cores) on this machine"
+        );
+        return EXIT_USAGE;
+    }
     let opts = lpk_core::ExtractOptions {
         threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
         ..lpk_core::ExtractOptions::default()
@@ -274,7 +285,7 @@ fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             if x.verbose {
                 let _ = writeln!(
                     err,
-                    "{}: {} files, {} directories, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} files reopened",
+                    "{}: {} files, {} directories, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} nested decodes, {} files reopened",
                     x.archive.display(),
                     s.files,
                     s.directories,
@@ -286,6 +297,7 @@ fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                     s.in_flight,
                     s.writers,
                     s.blocks_decoded,
+                    s.nested_decodes,
                     s.reopened
                 );
             }

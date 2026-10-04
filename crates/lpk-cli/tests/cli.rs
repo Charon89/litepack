@@ -149,6 +149,15 @@ fn extract_threads_1_and_8_give_the_same_tree_and_v_prints_the_plan() {
         one.to_str().unwrap(),
     ]);
     assert_eq!(bad.status.code(), Some(1));
+    let huge = run(&[
+        "x",
+        "--threads",
+        "1000000",
+        arch.to_str().unwrap(),
+        one.to_str().unwrap(),
+    ]);
+    assert_eq!(huge.status.code(), Some(1), "{}", text(&huge.stderr));
+    assert!(text(&huge.stderr).contains("--threads"));
 }
 
 #[test]

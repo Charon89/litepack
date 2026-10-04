@@ -155,6 +155,13 @@ gate. JPEG files are peeled under both compressing settings. Balanced needs memo
 block size plus several times the dictionary to compress, and the block size plus the dictionary
 to extract.
 
+`lpk x --threads N` (E2-19) takes N as the extraction's total thread budget: decode workers plus
+file writers never exceed N (the thread that only hands decoded blocks on is not counted). N = 1
+decodes and writes on one thread; from N = 2 on, `clamp(N / 4, 1, 4)` threads write files and the
+rest decode blocks, the decoders further capped so that the decoded blocks in flight stay within
+the reader's decode memory. N above four times the logical cores is a usage error. The runner
+passes the same N to `lpk x` as to 7-Zip, so the extraction comparison is thread for thread.
+
 `zpaqfranz` and `tsaur` are marked `verified = false` in the catalogue: their command lines come
 from the projects' READMEs and have not been run by us. t-saur's lite builds need `--no-lepton`;
 add it in `bench/tools.local.toml` (below). If a tool's help disagrees with the catalogue, fix the
