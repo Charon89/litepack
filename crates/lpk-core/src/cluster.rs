@@ -10,7 +10,7 @@ use crate::error::CoreError;
 use crate::ingest::Input;
 use crate::source::Source;
 
-/// Which bundled dictionary suits a cluster.
+/// Which caller-supplied dictionary suits a cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DictionaryKind {
     /// No dictionary.
@@ -135,6 +135,18 @@ mod tests {
         assert_eq!(text_kind("notes.txt"), DictionaryKind::Prose);
         assert_eq!(text_kind("README"), DictionaryKind::Prose);
         assert_eq!(text_kind(".hidden"), DictionaryKind::Prose);
+    }
+
+    #[test]
+    fn a_file_that_vanished_after_the_walk_is_an_io_error_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("gone.txt"), b"abc").unwrap();
+        let inputs = walk(dir.path(), &IngestOptions::default()).unwrap();
+        std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+        match cluster(&inputs) {
+            Err(CoreError::Io { path, .. }) => assert!(path.ends_with("gone.txt")),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -73,21 +73,16 @@ of them need a paid or trial licence to run.
 
 | libfuzzer-sys 0.4 (fuzzing harness `fuzz/`, not a workspace member) | (MIT OR Apache-2.0) AND NCSA — NCSA allowed by a named exception in `fuzz/deny.toml` (D-42) | development tool only, never shipped | https://crates.io/crates/libfuzzer-sys |
 
-### Bundled dictionaries
+### Dictionaries and third-party notices
 
-`crates/lpk-core/priors/` holds three zstd dictionaries (`prose.dict`, `source.dict`, `structured.dict`),
-trained once with `zstd --train` and compiled into `lpk-core`; `priors.toml` records each one's command,
-BLAKE3 id and sample files. A dictionary is a statistical digest of its samples, not a copy of them. The
-samples come only from sources that allow redistribution without share-alike:
+No training data and no dictionary is bundled with the product. The Fast tier can use zstd dictionaries the
+caller supplies (`DictionaryPolicy::Provided`); an archive written with one needs the same file to be read,
+and nothing is shipped or trained by us.
 
-- `prose.dict`: Project Gutenberg books (public domain in the United States).
-- `source.dict`: the `facebook/zstd` repository history, offered under BSD-3-Clause OR GPL-2.0-only; we use
-  it under BSD-3-Clause, whose notice reads "Copyright (c) Meta Platforms, Inc. and affiliates" (zstd's own
-  `LICENSE` file carries the full text).
-- `structured.dict`: the NYC taxi trip CSV (NYC Open Data terms of use) and Collada (XML) models of the Kenney
-  asset kits (CC0-1.0). The corpus holds no Kenney JSON files, so XML stands in for them.
-
-Not used: enwik8 (CC-BY-SA, share-alike), Loghub (CC-BY, attribution) and Silesia.
+libzstd is a runtime dependency of `lpk-core` through `zstd-sys`, used under its BSD-3-Clause licence. That
+licence's copyright notice, conditions and disclaimer must be reproduced in the third-party notices that ship
+with binaries. FTO item: the packaging task owes a `THIRD-PARTY-NOTICES` file covering libzstd (and the other
+linked crates whose licences ask for it).
 
 ## Patents to review (counsel, not engineers, decide)
 This is a watch-list, not a legal opinion: engineers record what each patent is about and when counsel

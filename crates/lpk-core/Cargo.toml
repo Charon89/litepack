@@ -1,6 +1,6 @@
 [package]
 name = "lpk-core"
-description = "LitePack pipeline: ingest, the store path and (later) classifier, Fold, Peel, Model and Seal"
+description = "LitePack pipeline: ingest, store path, classifier, entropy gate, clustering and the Fast (zstd) tier; later Fold, Peel, Model and Seal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,6 +20,7 @@ libc = "0.2.189"
 blake3 = "1.8.7"
 liblzma = { version = "0.4.8", features = ["static"] }
 tempfile = "3.27.0"
+zstd = { version = "0.14.0", default-features = false, features = ["zdict_builder"] }
 
 [lints]
 workspace = true

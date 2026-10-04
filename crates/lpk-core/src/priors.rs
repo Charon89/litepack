@@ -1,60 +1,59 @@
-//! The bundled priors: three zstd dictionaries trained once on redistributable corpus files
-//! (`crates/lpk-core/priors/priors.toml` records the training command, the zstd version and the
-//! sample files; `docs/LICENSING.md` names the sources and their licences).
+//! Caller-supplied zstd dictionaries. No dictionary is bundled with the product: the caller
+//! hands the Fast tier a [`ProvidedDictionaries`] naming, per dictionary kind, the dictionary
+//! to use. An archive written with one names it by its BLAKE3 id (the prior id) in the zstd step.
 //!
-//! An archive written with a bundled dictionary names it by its BLAKE3 id in the zstd step. To
-//! extract such an archive outside this crate, pass the dictionary file to the format tool:
-//! `lpk-decode extract <archive> --prior crates/lpk-core/priors/prose.dict` (one `--prior` per
-//! dictionary the archive uses).
+//! To extract such an archive, give the dictionary files to the format tool, one `--prior` each:
+//! `lpk-decode extract <archive> --prior <dictionary file>`; through `lpk_format::Archive` pass
+//! the same set (it is a [`PriorStore`]) to `set_priors`.
 
 use lpk_format::{prior_id, PriorStore};
 
 use crate::cluster::DictionaryKind;
 
-static PROSE: &[u8] = include_bytes!("../priors/prose.dict");
-static SOURCE: &[u8] = include_bytes!("../priors/source.dict");
-static STRUCTURED: &[u8] = include_bytes!("../priors/structured.dict");
-
-/// The bundled dictionaries as a [`PriorStore`].
-#[derive(Debug, Clone)]
-pub struct BundledPriors {
-    entries: [(DictionaryKind, [u8; 32], &'static [u8]); 3],
+/// Dictionaries chosen by the caller, at most one per [`DictionaryKind`] other than `None`.
+#[derive(Debug, Clone, Default)]
+pub struct ProvidedDictionaries {
+    entries: Vec<(DictionaryKind, [u8; 32], Vec<u8>)>,
 }
 
-impl Default for BundledPriors {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BundledPriors {
-    /// The three bundled dictionaries with their ids.
+impl ProvidedDictionaries {
+    /// An empty set.
     pub fn new() -> Self {
-        let e = |k, b: &'static [u8]| (k, prior_id(b), b);
-        BundledPriors {
-            entries: [
-                e(DictionaryKind::Prose, PROSE),
-                e(DictionaryKind::Structured, STRUCTURED),
-                e(DictionaryKind::Source, SOURCE),
-            ],
-        }
+        Self::default()
     }
 
-    /// The dictionary of a kind, with its id; `None` for [`DictionaryKind::None`].
-    pub fn dictionary(&self, kind: DictionaryKind) -> Option<([u8; 32], &'static [u8])> {
+    /// Use `bytes` as the dictionary of `kind` (replacing an earlier one). The id is the BLAKE3
+    /// of the bytes. `DictionaryKind::None` is ignored.
+    pub fn with(mut self, kind: DictionaryKind, bytes: Vec<u8>) -> Self {
+        if kind == DictionaryKind::None {
+            return self;
+        }
+        self.entries.retain(|(k, _, _)| *k != kind);
+        self.entries.push((kind, prior_id(&bytes), bytes));
+        self
+    }
+
+    /// The dictionary of a kind with its id.
+    pub fn dictionary(&self, kind: DictionaryKind) -> Option<([u8; 32], &[u8])> {
         self.entries
             .iter()
             .find(|(k, _, _)| *k == kind)
-            .map(|(_, id, b)| (*id, *b))
+            .map(|(_, id, b)| (*id, b.as_slice()))
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (DictionaryKind, [u8; 32], &[u8])> {
+        self.entries
+            .iter()
+            .map(|(k, id, b)| (*k, *id, b.as_slice()))
     }
 }
 
-impl PriorStore for BundledPriors {
+impl PriorStore for ProvidedDictionaries {
     fn get(&self, id: &[u8; 32]) -> Option<&[u8]> {
         self.entries
             .iter()
             .find(|(_, i, _)| i == id)
-            .map(|(_, _, b)| *b)
+            .map(|(_, _, b)| b.as_slice())
     }
 }
 
@@ -62,45 +61,16 @@ impl PriorStore for BundledPriors {
 mod tests {
     use super::*;
 
-    fn hex(b: &[u8]) -> String {
-        b.iter().map(|x| format!("{x:02x}")).collect()
-    }
-
-    /// `(name, id)` pairs of the `[[dictionary]]` tables of `priors.toml`.
-    fn recorded() -> Vec<(String, String)> {
-        let text = include_str!("../priors/priors.toml");
-        let mut out = Vec::new();
-        let mut name = None;
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(v) = line.strip_prefix("name = ") {
-                name = Some(v.trim_matches('"').to_string());
-            } else if let Some(v) = line.strip_prefix("id = ") {
-                if let Some(n) = name.take() {
-                    out.push((n, v.trim_matches('"').to_string()));
-                }
-            }
-        }
-        out
-    }
-
     #[test]
-    fn ids_match_priors_toml() {
-        let p = BundledPriors::new();
-        let rec = recorded();
-        assert_eq!(rec.len(), 3);
-        for (kind, name) in [
-            (DictionaryKind::Prose, "prose"),
-            (DictionaryKind::Structured, "structured"),
-            (DictionaryKind::Source, "source"),
-        ] {
-            let (id, bytes) = p.dictionary(kind).unwrap();
-            assert_eq!(id, *blake3::hash(bytes).as_bytes());
-            let want = &rec.iter().find(|(n, _)| n == name).unwrap().1;
-            assert_eq!(&hex(&id), want, "{name}");
-            assert_eq!(p.get(&id), Some(bytes));
-        }
+    fn ids_are_the_blake3_of_the_bytes_and_none_is_ignored() {
+        let p = ProvidedDictionaries::new()
+            .with(DictionaryKind::Prose, b"abc".to_vec())
+            .with(DictionaryKind::None, b"x".to_vec());
+        let (id, bytes) = p.dictionary(DictionaryKind::Prose).unwrap();
+        assert_eq!(id, *blake3::hash(b"abc").as_bytes());
+        assert_eq!(p.get(&id), Some(bytes));
         assert!(p.dictionary(DictionaryKind::None).is_none());
         assert!(p.get(&[0; 32]).is_none());
+        assert_eq!(p.iter().count(), 1);
     }
 }

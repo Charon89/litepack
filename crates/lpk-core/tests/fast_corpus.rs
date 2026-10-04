@@ -1,8 +1,9 @@
 //! Fast tier against the corpus, run by hand (release build):
 //! `LPK_CORPUS=<path to bench/corpus/small> cargo test -p lpk-core --release --test fast_corpus -- --ignored --nocapture`
 //!
-//! Prints one row per class: raw bytes, Fast archive bytes with the bundled dictionaries and
-//! without, blocks stored by the gate and by class, and wall seconds of each run.
+//! Prints one row per class: raw bytes, the store-path archive bytes, the Fast archive bytes,
+//! the Fast blocks, blocks stored by the gate / by class / for no gain, and the wall seconds of
+//! the Fast run. No dictionary is used (the default policy).
 #![allow(clippy::unwrap_used)]
 
 use std::fs::File;
@@ -10,7 +11,7 @@ use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use lpk_core::{archive_fast, BundledPriors, DictionaryPolicy, FastOptions, FastSummary};
+use lpk_core::{archive_fast, archive_store, FastOptions, FastSummary, StoreOptions};
 use lpk_format::{Archive, EntryKind, Resources};
 
 fn walk_names(dir: &Path) -> Vec<String> {
@@ -35,19 +36,21 @@ fn walk_names(dir: &Path) -> Vec<String> {
     expected
 }
 
-/// Pack `dir`, check every file and the entry list; returns (raw bytes, archive bytes, summary,
-/// seconds).
-fn run(dir: &Path, name: &str, policy: DictionaryPolicy) -> (u64, u64, FastSummary, f64) {
+struct Fast {
+    raw: u64,
+    archive: u64,
+    blocks: u64,
+    summary: FastSummary,
+    secs: f64,
+}
+
+/// Pack `dir` with the Fast tier, check every file and the entry list.
+fn run_fast(dir: &Path, name: &str) -> Fast {
     let t0 = Instant::now();
     let mut bytes: Vec<u8> = Vec::new();
-    let options = FastOptions {
-        dictionaries: policy,
-        ..FastOptions::default()
-    };
-    let (s, fs) = archive_fast(dir, &mut bytes, options).unwrap();
+    let (s, fs) = archive_fast(dir, &mut bytes, FastOptions::default()).unwrap();
     let secs = t0.elapsed().as_secs_f64();
     let mut a = Archive::open(Cursor::new(&bytes[..]), &Resources::default()).unwrap();
-    a.set_priors(Box::new(BundledPriors::new()));
     let table = a.entry_table().unwrap();
     let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
     let got: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
@@ -67,7 +70,13 @@ fn run(dir: &Path, name: &str, policy: DictionaryPolicy) -> (u64, u64, FastSumma
         raw += out.len() as u64;
     }
     a.verify().unwrap();
-    (raw, s.archive_len, fs, secs)
+    Fast {
+        raw,
+        archive: s.archive_len,
+        blocks: a.index().blocks.len() as u64,
+        summary: fs,
+        secs,
+    }
 }
 
 #[test]
@@ -81,28 +90,36 @@ fn fast_round_trip_every_class() {
         .collect();
     classes.sort();
     assert!(!classes.is_empty());
-    println!(
-        "| class | raw B | fast+dict B | fast B (no dict) | gate/class blocks (dict) | s (dict) | s (no dict) |"
-    );
+    println!("| class | raw B | store-path B | fast B | blocks | gate/class/no-gain | s (fast) |");
     println!("|---|---|---|---|---|---|---|");
     for dir in classes {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        let (raw, with, fs, t_with) = run(&dir, &name, DictionaryPolicy::Bundled);
-        let (raw2, without, _, t_without) = run(&dir, &name, DictionaryPolicy::None);
-        assert_eq!(raw, raw2);
+        let f = run_fast(&dir, &name);
+        let mut sink = Vec::new();
+        let store = archive_store(&dir, &mut sink, StoreOptions::default())
+            .unwrap()
+            .archive_len;
+        let s = f.summary;
         println!(
-            "| {name} | {raw} | {with} | {without} | {}/{} | {t_with:.2} | {t_without:.2} |",
-            fs.stored_by_gate, fs.stored_by_class
+            "| {name} | {} | {store} | {} | {} | {}/{}/{} | {:.2} |",
+            f.raw,
+            f.archive,
+            f.blocks,
+            s.stored_by_gate,
+            s.stored_by_class,
+            s.stored_no_gain,
+            f.secs
         );
-        // Incompressible data is stored, so the archive exceeds the raw bytes only by the
-        // container's own overhead (frame headers, hashes, chunk table, entry table, index):
-        // allow 0.1 % plus 64 KiB.
+        // The Fast archive is at most the store-path archive plus 64 bytes per block (the zstd
+        // step's header is longer than store's).
         assert!(
-            with <= raw + raw / 1000 + 65536,
-            "{name}: {with} exceeds {raw} by more than the container overhead"
+            f.archive <= store + 64 * f.blocks,
+            "{name}: {} > {store} + 64 * {}",
+            f.archive,
+            f.blocks
         );
         if matches!(name.as_str(), "text-prose" | "source-git" | "logs-text") {
-            assert!(with < raw, "{name}: not smaller");
+            assert!(f.archive < f.raw, "{name}: not smaller than raw");
         }
     }
 }

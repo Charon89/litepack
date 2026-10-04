@@ -1,5 +1,5 @@
-//! The Fast tier: one zstd frame per block, a long match window, optional bundled dictionaries,
-//! and blocks that never span two clusters.
+//! The Fast tier: one zstd frame per block, a long match window, optional caller-supplied
+//! dictionaries, and blocks that never span two clusters.
 //!
 //! Files are grouped by [`cluster`] (class and dictionary kind) and fed to the writer cluster by
 //! cluster with `Writer::close_block` between them; before each cluster the pipeline tells the
@@ -7,10 +7,10 @@
 //! stores a block without trying zstd when its class is already compressed, or when the entropy
 //! gate calls the block incompressible, and falls back to `store` when zstd does not shrink it.
 //!
-//! Extracting a Fast archive needs the dictionaries it names: through `lpk_format::Archive` pass
-//! [`BundledPriors`] to `set_priors`; with the format tool, give one `--prior` per dictionary
-//! file under `crates/lpk-core/priors/`, for example
-//! `lpk-decode extract <archive> --prior crates/lpk-core/priors/prose.dict`.
+//! No dictionary is bundled; by default (`DictionaryPolicy::None`) none is used. Extracting an
+//! archive written with `DictionaryPolicy::Provided` needs the same dictionaries: through
+//! `lpk_format::Archive` pass the [`ProvidedDictionaries`] to `set_priors`; with the format tool,
+//! give one `--prior <dictionary file>` per dictionary.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -27,25 +27,27 @@ use crate::cluster::{cluster, DictionaryKind};
 use crate::error::CoreError;
 use crate::gate::Gate;
 use crate::ingest::{validate_input, walk, IngestOptions, Input};
-use crate::priors::BundledPriors;
+use crate::priors::ProvidedDictionaries;
 use crate::source::Source;
 use crate::store::{create_new_and_run, Counting, SyncFn, OUT_BUF};
 
-/// Smallest and largest `window_log` a `zstd` step may declare.
+/// Smallest and largest `window_log` a `zstd` step may declare (the format's range; libzstd's
+/// own bounds on this target are checked when the encoder is built).
 const WINDOW_LOG_RANGE: std::ops::RangeInclusive<u32> = 10..=31;
 
-/// Whether blocks may use the bundled dictionaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Which dictionaries blocks may use.
+#[derive(Debug, Clone, Default)]
 pub enum DictionaryPolicy {
-    /// Use the dictionary of the cluster's kind (prose, structured, source).
-    #[default]
-    Bundled,
     /// Never use a dictionary.
+    #[default]
     None,
+    /// Use the dictionary the caller names for the cluster's kind (a kind without one gets
+    /// none). The archive then needs the same dictionaries to be read.
+    Provided(Arc<ProvidedDictionaries>),
 }
 
 /// Settings of [`archive_fast`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FastOptions {
     /// How the tree is walked.
     pub ingest: IngestOptions,
@@ -57,7 +59,7 @@ pub struct FastOptions {
     pub window_log: u32,
     /// Plain bytes per block (the format's default).
     pub block_size: u64,
-    /// Bundled dictionaries on or off.
+    /// Caller-supplied dictionaries (default: none).
     pub dictionaries: DictionaryPolicy,
     /// The entropy gate that sends incompressible blocks to `store`.
     pub gate: Gate,
@@ -70,7 +72,7 @@ impl Default for FastOptions {
             level: 3,
             window_log: 27,
             block_size: DEFAULT_BLOCK_SIZE,
-            dictionaries: DictionaryPolicy::Bundled,
+            dictionaries: DictionaryPolicy::None,
             gate: Gate::DEFAULT,
         }
     }
@@ -131,11 +133,11 @@ pub struct ZstdEncoder {
     level: i32,
     window_log: u32,
     gate: Gate,
-    policy: DictionaryPolicy,
-    priors: BundledPriors,
     shared: Arc<Mutex<Shared>>,
-    /// One prepared compressor per dictionary kind (index of [`slot`]).
-    compressors: [Option<zstd::bulk::Compressor<'static>>; 4],
+    /// The compressor without a dictionary.
+    plain: zstd::bulk::Compressor<'static>,
+    /// One compressor per provided dictionary: kind, prior id, compressor.
+    with_dict: Vec<(DictionaryKind, [u8; 32], zstd::bulk::Compressor<'static>)>,
 }
 
 impl std::fmt::Debug for ZstdEncoder {
@@ -143,27 +145,52 @@ impl std::fmt::Debug for ZstdEncoder {
         f.debug_struct("ZstdEncoder")
             .field("level", &self.level)
             .field("window_log", &self.window_log)
-            .field("policy", &self.policy)
+            .field("dictionaries", &self.with_dict.len())
             .finish_non_exhaustive()
     }
 }
 
-fn slot(kind: DictionaryKind) -> usize {
-    match kind {
-        DictionaryKind::None => 0,
-        DictionaryKind::Prose => 1,
-        DictionaryKind::Structured => 2,
-        DictionaryKind::Source => 3,
+/// `ceil(log2(n))`, 0 for `n <= 1`.
+fn ceil_log2(n: usize) -> u32 {
+    if n <= 1 {
+        0
+    } else {
+        usize::BITS - (n - 1).leading_zeros()
     }
 }
 
+/// A compressor with the Fast tier's fixed parameters; every parameter is checked against
+/// libzstd's bounds here, so a bad option fails at construction and names the parameter.
+fn build_compressor(
+    level: i32,
+    window_log: u32,
+    dictionary: Option<&[u8]>,
+) -> Result<zstd::bulk::Compressor<'static>, CoreError> {
+    let bad = |name: &str, e: std::io::Error| CoreError::InvalidOption(format!("{name}: {e}"));
+    let mut c = match dictionary {
+        Some(d) => zstd::bulk::Compressor::with_dictionary(level, d),
+        None => zstd::bulk::Compressor::new(level),
+    }
+    .map_err(|e| bad("dictionary", e))?;
+    c.set_parameter(CParameter::WindowLog(window_log))
+        .map_err(|e| bad("window_log", e))?;
+    c.set_parameter(CParameter::EnableLongDistanceMatching(true))
+        .map_err(|e| bad("long_distance_matching", e))?;
+    // The format hashes every frame and chunk; the content size is written.
+    c.set_parameter(CParameter::ChecksumFlag(false))
+        .map_err(|e| bad("checksum", e))?;
+    c.set_parameter(CParameter::ContentSizeFlag(true))
+        .map_err(|e| bad("content_size", e))?;
+    Ok(c)
+}
+
 impl ZstdEncoder {
-    /// A new encoder and the handle that steers it. Errors when `level` or `window_log` is out
-    /// of range.
+    /// A new encoder and the handle that steers it. Errors (`InvalidOption`, naming the
+    /// parameter) when `level`, `window_log` or a dictionary is not accepted.
     pub fn new(
         level: i32,
         window_log: u32,
-        policy: DictionaryPolicy,
+        policy: &DictionaryPolicy,
         gate: Gate,
     ) -> Result<(Self, FastHandle), CoreError> {
         if !WINDOW_LOG_RANGE.contains(&window_log) {
@@ -179,6 +206,13 @@ impl ZstdEncoder {
                 range.end()
             )));
         }
+        let plain = build_compressor(level, window_log, None)?;
+        let mut with_dict = Vec::new();
+        if let DictionaryPolicy::Provided(set) = policy {
+            for (kind, id, bytes) in set.iter() {
+                with_dict.push((kind, id, build_compressor(level, window_log, Some(bytes))?));
+            }
+        }
         let shared = Arc::new(Mutex::new(Shared {
             class: Class::Other,
             dictionary: DictionaryKind::None,
@@ -188,36 +222,11 @@ impl ZstdEncoder {
             level,
             window_log,
             gate,
-            policy,
-            priors: BundledPriors::new(),
             shared: Arc::clone(&shared),
-            compressors: [None, None, None, None],
+            plain,
+            with_dict,
         };
         Ok((enc, FastHandle(shared)))
-    }
-
-    fn compressor(
-        &mut self,
-        kind: DictionaryKind,
-        dictionary: Option<&[u8]>,
-    ) -> Result<&mut zstd::bulk::Compressor<'static>, FormatError> {
-        let i = slot(kind);
-        if self.compressors[i].is_none() {
-            let mut c = match dictionary {
-                Some(d) => zstd::bulk::Compressor::with_dictionary(self.level, d)?,
-                None => zstd::bulk::Compressor::new(self.level)?,
-            };
-            c.set_parameter(CParameter::WindowLog(self.window_log))?;
-            c.set_parameter(CParameter::EnableLongDistanceMatching(true))?;
-            // The format hashes every frame and chunk; the content size is written.
-            c.set_parameter(CParameter::ChecksumFlag(false))?;
-            c.set_parameter(CParameter::ContentSizeFlag(true))?;
-            self.compressors[i] = Some(c);
-        }
-        match self.compressors[i].as_mut() {
-            Some(c) => Ok(c),
-            None => Err(FormatError::Io(std::io::Error::other("no compressor"))),
-        }
     }
 
     fn bump(&self, f: impl FnOnce(&mut FastSummary)) {
@@ -239,24 +248,23 @@ impl BlockEncoder for ZstdEncoder {
             self.bump(|s| s.stored_by_gate += 1);
             return StoreEncoder.encode(plain);
         }
-        let kind = match self.policy {
-            DictionaryPolicy::Bundled => kind,
-            DictionaryPolicy::None => DictionaryKind::None,
+        // RFC 8878: a frame whose content size is known and fits its window is written
+        // single-segment, and its Window_Size is then its content size. So a block shorter than
+        // 2^w declares w (at least 10, the smallest the step allows) and the declaration holds;
+        // a longer block declares the configured window, which libzstd honours as a maximum.
+        let declared = self.window_log.min(ceil_log2(plain.len()).max(10));
+        let (id, compressor) = match self.with_dict.iter_mut().find(|(k, _, _)| *k == kind) {
+            Some((_, id, c)) => (*id, c),
+            None => ([0u8; 32], &mut self.plain),
         };
-        let dict = self.priors.dictionary(kind);
-        let (id, kind) = match dict {
-            Some((id, _)) => (id, kind),
-            None => ([0u8; 32], DictionaryKind::None),
-        };
-        let bytes = self
-            .compressor(kind, dict.map(|(_, d)| d))?
-            .compress(plain)?;
+        compressor.set_parameter(CParameter::WindowLog(declared))?;
+        let bytes = compressor.compress(plain)?;
         if bytes.len() >= plain.len() {
             self.bump(|s| s.stored_no_gain += 1);
             return StoreEncoder.encode(plain);
         }
         self.bump(|s| s.zstd_blocks += 1);
-        let mut params = vec![self.window_log as u8];
+        let mut params = vec![declared as u8];
         params.extend_from_slice(&id);
         let graph = Graph {
             steps: vec![Step {
@@ -264,8 +272,10 @@ impl BlockEncoder for ZstdEncoder {
                 params,
             }],
         };
+        let mut resources = graph.resources();
+        resources.window = 1 << declared;
         Ok(Encoded {
-            resources: graph.resources(),
+            resources,
             graph,
             bytes,
         })
@@ -305,7 +315,7 @@ fn write_fast_inputs(
     let (encoder, handle) = ZstdEncoder::new(
         options.level,
         options.window_log,
-        options.dictionaries,
+        &options.dictionaries,
         options.gate,
     )?;
     for input in inputs {
@@ -359,16 +369,16 @@ fn write_fast_inputs(
 mod tests {
     use super::*;
     use crate::ingest::tests::{clear_readonly, make_tree};
-    use lpk_format::{prior_id, Archive, Resources};
+    use lpk_format::{Archive, Resources};
     use std::io::Cursor;
 
-    /// Compressible English-like text of exactly `len` bytes.
-    fn prose(len: usize) -> Vec<u8> {
+    /// Compressible English-like text of exactly `len` bytes, varied by `seed`.
+    fn prose_seeded(seed: u64, len: usize) -> Vec<u8> {
         const WORDS: [&str; 16] = [
             "the", "king", "of", "France", "and", "his", "army", "marched", "over", "a", "long",
             "road", "toward", "the", "sea", "while",
         ];
-        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        let mut s = 0x9E37_79B9_7F4A_7C15u64 ^ seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1;
         let mut out = Vec::with_capacity(len + 16);
         while out.len() < len {
             s ^= s << 13;
@@ -379,6 +389,10 @@ mod tests {
         }
         out.truncate(len);
         out
+    }
+
+    fn prose(len: usize) -> Vec<u8> {
+        prose_seeded(0, len)
     }
 
     fn random(len: usize) -> Vec<u8> {
@@ -393,16 +407,39 @@ mod tests {
             .collect()
     }
 
-    fn encoder(policy: DictionaryPolicy) -> (ZstdEncoder, FastHandle) {
+    /// A prose dictionary trained at test time on synthetic samples.
+    fn trained() -> Vec<u8> {
+        let samples: Vec<Vec<u8>> = (1..400).map(|i| prose_seeded(i, 900)).collect();
+        zstd::dict::from_samples(&samples, 8 * 1024).unwrap()
+    }
+
+    fn provided() -> (DictionaryPolicy, Arc<ProvidedDictionaries>) {
+        let set = Arc::new(ProvidedDictionaries::new().with(DictionaryKind::Prose, trained()));
+        (DictionaryPolicy::Provided(Arc::clone(&set)), set)
+    }
+
+    fn encoder(policy: &DictionaryPolicy) -> (ZstdEncoder, FastHandle) {
         ZstdEncoder::new(3, 27, policy, Gate::DEFAULT).unwrap()
     }
 
-    /// Read every file of an archive back with the bundled priors.
     type Extracted = (Archive<Cursor<Vec<u8>>>, Vec<(String, Vec<u8>)>);
 
-    fn extract_all(bytes: Vec<u8>) -> Extracted {
-        let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
-        a.set_priors(Box::new(BundledPriors::new()));
+    /// Read every file of an archive back; `priors` are the dictionaries it needs, if any.
+    fn extract_with(
+        bytes: Vec<u8>,
+        resources: &Resources,
+        priors: Option<Arc<ProvidedDictionaries>>,
+    ) -> Extracted {
+        let mut a = Archive::open(Cursor::new(bytes), resources).unwrap();
+        if let Some(p) = priors {
+            struct Shared(Arc<ProvidedDictionaries>);
+            impl lpk_format::PriorStore for Shared {
+                fn get(&self, id: &[u8; 32]) -> Option<&[u8]> {
+                    self.0.get(id)
+                }
+            }
+            a.set_priors(Box::new(Shared(p)));
+        }
         let table = a.entry_table().unwrap();
         let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
         let mut files = Vec::new();
@@ -416,67 +453,78 @@ mod tests {
         (a, files)
     }
 
-    #[test]
-    fn a_prose_block_uses_the_prose_dictionary_and_decodes() {
-        let data = prose(1 << 20);
-        let (enc, handle) = encoder(DictionaryPolicy::Bundled);
-        handle.set_hint(Class::Text, DictionaryKind::Prose);
+    fn extract_all(bytes: Vec<u8>) -> Extracted {
+        extract_with(bytes, &Resources::default(), None)
+    }
+
+    /// Write one file with a hand-steered encoder; returns the archive.
+    fn one_file(enc: ZstdEncoder, data: &[u8]) -> Vec<u8> {
         let wopts = WriterOptions {
             encoder: Box::new(enc),
             ..WriterOptions::default()
         };
         let mut out = Vec::new();
         let mut w = Writer::new(&mut out, wopts).unwrap();
-        w.add_file("p.txt", Default::default(), 0, &mut data.as_slice())
+        w.add_file("p.txt", Default::default(), 0, &mut &data[..])
             .unwrap();
         w.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn a_block_with_a_provided_dictionary_lists_its_id_once_and_decodes() {
+        let data = prose(1 << 20);
+        let (policy, set) = provided();
+        let (enc, handle) = encoder(&policy);
+        handle.set_hint(Class::Text, DictionaryKind::Prose);
+        let out = one_file(enc, &data);
         let s = handle.summary();
         assert_eq!(
             (s.zstd_blocks, s.stored_by_gate, s.stored_by_class),
             (1, 0, 0)
         );
         assert!(out.len() < data.len() / 2);
-        let (a, files) = extract_all(out);
-        let want = BundledPriors::new()
-            .dictionary(DictionaryKind::Prose)
-            .unwrap()
-            .0;
+        let (a, files) = extract_with(out, &Resources::default(), Some(Arc::clone(&set)));
+        let want = set.dictionary(DictionaryKind::Prose).unwrap().0;
         assert_eq!(a.priors(), &[want]);
         assert_eq!(files[0].1, data);
+        // A kind without a provided dictionary gets none.
+        let (mut enc, handle) = encoder(&policy);
+        handle.set_hint(Class::Text, DictionaryKind::Source);
+        let e = enc.encode(&data).unwrap();
+        assert!(e.graph.prior_ids().is_empty());
     }
 
     #[test]
     fn without_dictionaries_the_step_id_is_zero_and_the_frame_names_none() {
         let data = prose(1 << 20);
-        let (mut enc, handle) = encoder(DictionaryPolicy::None);
+        let (mut enc, handle) = encoder(&DictionaryPolicy::None);
         handle.set_hint(Class::Text, DictionaryKind::Prose);
         let e = enc.encode(&data).unwrap();
         assert_eq!(e.graph.steps[0].primitive, PrimitiveId::Zstd);
-        assert_eq!(e.graph.steps[0].params[0], 27);
+        assert_eq!(e.graph.steps[0].params[0], 20);
         assert_eq!(&e.graph.steps[0].params[1..], &[0u8; 32]);
         assert!(e.graph.prior_ids().is_empty());
         // Frame_Header_Descriptor bits 0..1 are Dictionary_ID_flag.
         assert_eq!(e.bytes[4] & 0b11, 0);
-        assert_eq!(e.resources.window, 1 << 27);
+        assert_eq!(e.resources.window, 1 << 20);
         // With a dictionary the frame names it and the step carries its id.
-        let (mut enc, handle) = encoder(DictionaryPolicy::Bundled);
+        let (policy, set) = provided();
+        let (mut enc, handle) = encoder(&policy);
         handle.set_hint(Class::Text, DictionaryKind::Prose);
         let e = enc.encode(&data).unwrap();
         assert_ne!(e.bytes[4] & 0b11, 0);
         assert_eq!(e.graph.prior_ids().len(), 1);
-        let id = prior_id(
-            BundledPriors::new()
-                .dictionary(DictionaryKind::Prose)
-                .unwrap()
-                .1,
+        assert_eq!(
+            e.graph.prior_ids()[0],
+            lpk_format::prior_id(set.dictionary(DictionaryKind::Prose).unwrap().1)
         );
-        assert_eq!(e.graph.prior_ids()[0], id);
     }
 
     #[test]
     fn random_blocks_are_stored_by_the_gate_and_video_by_class() {
         let data = random(1 << 20);
-        let (mut enc, handle) = encoder(DictionaryPolicy::Bundled);
+        let (mut enc, handle) = encoder(&DictionaryPolicy::None);
         handle.set_hint(Class::Other, DictionaryKind::None);
         let e = enc.encode(&data).unwrap();
         assert_eq!(e.graph.steps[0].primitive, PrimitiveId::Store);
@@ -494,10 +542,24 @@ mod tests {
     }
 
     #[test]
+    fn a_tiny_block_that_zstd_cannot_shrink_is_stored_and_counted() {
+        let (mut enc, handle) = encoder(&DictionaryPolicy::None);
+        handle.set_hint(Class::Text, DictionaryKind::Prose);
+        let e = enc.encode(b"hi there").unwrap();
+        assert_eq!(e.graph.steps[0].primitive, PrimitiveId::Store);
+        assert_eq!(e.bytes, b"hi there");
+        let s = handle.summary();
+        assert_eq!(
+            (s.stored_no_gain, s.zstd_blocks, s.stored_by_gate),
+            (1, 0, 0)
+        );
+    }
+
+    #[test]
     fn window_and_level_reach_the_frame() {
         let data = prose(1 << 20);
         let (mut enc, handle) =
-            ZstdEncoder::new(3, 12, DictionaryPolicy::None, Gate::DEFAULT).unwrap();
+            ZstdEncoder::new(3, 12, &DictionaryPolicy::None, Gate::DEFAULT).unwrap();
         handle.set_hint(Class::Text, DictionaryKind::Prose);
         let e = enc.encode(&data).unwrap();
         let fhd = e.bytes[4];
@@ -508,12 +570,47 @@ mod tests {
         assert_eq!(e.graph.steps[0].params[0], 12);
         for level in [1, 3, 19] {
             let (mut enc, handle) =
-                ZstdEncoder::new(level, 20, DictionaryPolicy::None, Gate::DEFAULT).unwrap();
+                ZstdEncoder::new(level, 20, &DictionaryPolicy::None, Gate::DEFAULT).unwrap();
             handle.set_hint(Class::Text, DictionaryKind::Prose);
             assert!(enc.encode(&data).is_ok(), "level {level}");
         }
-        assert!(ZstdEncoder::new(3, 9, DictionaryPolicy::None, Gate::DEFAULT).is_err());
-        assert!(ZstdEncoder::new(3, 32, DictionaryPolicy::None, Gate::DEFAULT).is_err());
+        let none = DictionaryPolicy::None;
+        for (level, wl, name) in [
+            (3, 9, "window_log"),
+            (3, 32, "window_log"),
+            (99, 20, "level"),
+        ] {
+            match ZstdEncoder::new(level, wl, &none, Gate::DEFAULT) {
+                Err(CoreError::InvalidOption(m)) => assert!(m.contains(name), "{m}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        // A dictionary that is not a dictionary at all still loads as raw content in libzstd,
+        // so only the parameters are rejected here.
+    }
+
+    #[test]
+    fn a_small_block_declares_a_small_window_and_decodes_under_a_small_limit() {
+        let data = prose(3000);
+        let (enc, handle) = encoder(&DictionaryPolicy::None);
+        handle.set_hint(Class::Text, DictionaryKind::Prose);
+        let out = one_file(enc, &data);
+        let mut probe = encoder(&DictionaryPolicy::None);
+        probe.1.set_hint(Class::Text, DictionaryKind::Prose);
+        let e = probe.0.encode(&data).unwrap();
+        // ceil(log2(3000)) = 12; the content fits the window, so the frame is single-segment.
+        assert_eq!(e.graph.steps[0].params[0], 12);
+        assert_eq!(e.resources.window, 1 << 12);
+        assert_ne!(e.bytes[4] & 0x20, 0, "single-segment");
+        let small = Resources {
+            max_window: 1 << 13,
+            ..Resources::default()
+        };
+        let (_, files) = extract_with(out, &small, None);
+        assert_eq!(files[0].1, data);
+        // Tiny blocks never declare less than the step's minimum of 10.
+        assert_eq!(ceil_log2(0), 0);
+        assert_eq!(ceil_log2(1025), 11);
     }
 
     /// A tree with two tiny clusters (prose and source), a directory and a random file.
@@ -544,8 +641,8 @@ mod tests {
                 "{path}"
             );
         }
-        // Two dictionaries: prose and source.
-        assert_eq!(a.priors().len(), 2);
+        // The default policy uses no dictionary.
+        assert!(a.priors().is_empty());
     }
 
     #[test]
