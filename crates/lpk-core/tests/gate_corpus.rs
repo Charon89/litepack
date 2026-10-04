@@ -19,6 +19,22 @@ const MIN_TAIL: usize = 64 << 10;
 /// Blocks held in memory at once.
 const BATCH: usize = 32;
 
+/// The `"profile"` value of the corpus manifest, read without a JSON dependency: the key appears
+/// once, at the top level, with a plain string value. The test fails when it cannot be found, so a
+/// moved or missing manifest never silently turns the profile-dependent assertions off.
+fn manifest_profile(root: &std::path::Path) -> String {
+    let text = std::fs::read_to_string(root.join("manifest.json")).expect("manifest.json");
+    let key = "\"profile\"";
+    let at = text.find(key).expect("manifest has a profile field") + key.len();
+    let rest = text[at..]
+        .trim_start()
+        .strip_prefix(':')
+        .expect("profile colon");
+    let rest = rest.trim_start().strip_prefix('"').expect("profile string");
+    let end = rest.find('"').expect("profile string end");
+    rest[..end].to_string()
+}
+
 #[derive(Default, Clone, Copy)]
 struct Counts {
     tp: u64,
@@ -92,8 +108,7 @@ fn truths(blocks: &[Vec<u8>], threads: usize) -> Vec<bool> {
 #[ignore]
 fn gate_against_xz_on_the_corpus() {
     let root = PathBuf::from(std::env::var_os("LPK_CORPUS").unwrap());
-    let full_profile = std::fs::read_to_string(root.join("manifest.json"))
-        .is_ok_and(|m| m.contains("\n  \"profile\": \"full\""));
+    let full_profile = manifest_profile(&root) == "full";
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
         .unwrap()
         .map(|e| e.unwrap().path())
