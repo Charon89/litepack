@@ -1,6 +1,6 @@
 //! `probe dedup` (PLAN P0-4): how much content-defined chunking and whole-file deduplication
-//! save on every class and on the corpus as a whole, how the unique bytes of `backup-versions`
-//! grow from version to version, and what a binary delta between consecutive versions costs
+//! save on every class and on the corpus as a whole, how the unique bytes of the versioned classes
+//! (`backup-versions` and `backup-versions-large`, each on its own) grow from version to version, and what a binary delta between consecutive versions costs
 //! next to compressing the new version alone.
 //!
 //! Chunking: FastCDC (the crate's 2020 variant, normalization level 1) with a minimum of 4 KiB,
@@ -13,7 +13,7 @@
 //! Timing: chunking is timed alone, single-threaded, on the file's bytes in memory, once for
 //! FastCDC alone (boundaries only) and once for FastCDC plus a BLAKE3 hash of every chunk.
 //!
-//! Deltas: the version folders of `backup-versions` (top-level folders of the class, in manifest
+//! Deltas: the version folders of each versioned class (top-level folders of the class, in manifest
 //! order) are tarred in process (`tarball`), and for each consecutive pair the external `zstd`
 //! (`--patch-from`, level 19, `--long=N` with N the smallest window log from 27 up that covers
 //! the larger tar, one thread) and `hdiffz`/`hpatchz` (zstd level 19 inside, one thread) make a
@@ -134,7 +134,7 @@ pub struct Delta {
     pub tools: Vec<ToolRun>,
 }
 
-/// One version folder of `backup-versions`, in manifest order.
+/// One version folder of `backup-versions` or `backup-versions-large`, in manifest order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Version {
@@ -713,9 +713,11 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
         }
         classes.push(scope.row(class));
     }
-    if ctx.class_files(VERSIONS_CLASS).is_none() {
+    if ctx.class_files(VERSIONS_CLASS).is_none() && ctx.class_files(VERSIONS_LARGE_CLASS).is_none()
+    {
         notes.push(format!(
-            "the corpus has no class `{VERSIONS_CLASS}`: no version growth and no deltas"
+            "the corpus has neither class `{VERSIONS_CLASS}` nor `{VERSIONS_LARGE_CLASS}`: no \
+             version growth and no deltas"
         ));
     }
 
@@ -832,7 +834,8 @@ pub fn render(e: &Envelope<Data>) -> String {
 
     if d.versions.is_empty() && d.versions_large.is_empty() {
         s.push_str(&format!(
-            "No versions: the corpus has no folders in class `{VERSIONS_CLASS}`.\n"
+            "No versions: the corpus has no folders in class `{VERSIONS_CLASS}` or \
+             `{VERSIONS_LARGE_CLASS}`.\n"
         ));
         return s;
     }
@@ -1554,6 +1557,60 @@ mod tests {
             notes: Vec::new(),
             data,
         }
+    }
+
+    #[test]
+    fn both_versioned_classes_are_probed_separately_and_checked() {
+        let base = noise(31, 300_000);
+        let mut v2 = base.clone();
+        v2.extend_from_slice(&noise(32, 100_000));
+        let mut v3 = v2.clone();
+        v3.extend_from_slice(&noise(33, 50_000));
+        let big = noise(34, 400_000);
+        let mut big2 = big.clone();
+        big2[1000] ^= 1;
+        let mut big3 = big2.clone();
+        big3.extend_from_slice(&noise(35, 20_000));
+        let d = run_on(&[
+            ("backup-versions/v1/data.bin", base),
+            ("backup-versions/v2/data.bin", v2),
+            ("backup-versions/v3/data.bin", v3),
+            ("backup-versions-large/godot-v1/data.bin", big),
+            ("backup-versions-large/godot-v2/data.bin", big2),
+            ("backup-versions-large/godot-v3/data.bin", big3),
+        ]);
+        let labels = |v: &[Version]| v.iter().map(|x| x.label.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(&d.versions), ["v1", "v2", "v3"]);
+        assert_eq!(
+            labels(&d.versions_large),
+            ["godot-v1", "godot-v2", "godot-v3"]
+        );
+        assert!(d.versions_large[0].delta.is_none());
+        let dl = d.versions_large[1].delta.as_ref().expect("delta 2");
+        assert_eq!(dl.old_tar_bytes / 100_000, 4);
+        assert!(dl.new_tar_bytes > 400_000 && dl.new_tar_bytes < 480_000);
+        assert!(d.versions_large[2].delta.is_some());
+        // The large tars, not the small ones: the first delta's old tar is the large v1.
+        assert_ne!(
+            dl.old_tar_bytes,
+            d.versions[1]
+                .delta
+                .as_ref()
+                .expect("small delta")
+                .old_tar_bytes
+        );
+        let e = envelope(d.clone());
+        assert_eq!(check(&e), Vec::<String>::new());
+        assert!(render(&e).contains("Versions of `backup-versions-large`"));
+        let mut bad = d;
+        bad.versions_large[1].cumulative_unique_chunk_bytes += 1;
+        let found = check(&envelope(bad));
+        assert!(
+            found
+                .iter()
+                .any(|p| p.starts_with("/data/versions_large/1/")),
+            "{found:?}"
+        );
     }
 
     #[test]
