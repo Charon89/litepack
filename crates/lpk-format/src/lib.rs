@@ -12,6 +12,7 @@ pub mod entry;
 pub mod envelope;
 pub mod error;
 pub mod frame;
+pub mod graph;
 pub mod header;
 pub mod index;
 pub mod magic;
@@ -43,6 +44,9 @@ pub use error::FormatError;
 pub use frame::{
     frame_flag_table, frame_kind_table, frame_layout_table, Frame, FrameFlags, FrameKind,
     ReadFrame, ReadLimits,
+};
+pub use graph::{
+    block_header_table, graph_layout_table, BlockHeader, Graph, Step, MAX_PARAMS, MAX_STEPS,
 };
 pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, HeaderFlags};
 pub use magic::MAGIC;
