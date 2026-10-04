@@ -504,7 +504,7 @@ step whose output length differs from `plain_len` is `BlockLengthMismatch`.
 ### What the reference decoder runs
 
 The reference decoder knows the name, the parameter layout and the validation of all 13 primitives. Each ID is
-in exactly one of three groups:
+in exactly one of two groups:
 
 - Implemented now: `store`, `zstd`, `lzma`.
 - Requires the full reader: `bwt`, `bcj-x86`, `bcj-arm64`, `delta`, `jpeg-reconstruct`,
@@ -543,20 +543,28 @@ the step's parameters, the output length is the step's output bound), decoded wi
 decoder stops when it has produced exactly the step's output bound. `lzma` parameters carry no prior ID: v1
 has no priors for LZMA (section 10 is about `zstd` only). The rules, in this order:
 
-1. `lc` <= 8, `lp` <= 4, `pb` <= 4 and `lc + lp` <= 4 (`BadParams`, `lc`, `lp`, `pb` or `lc + lp`). The last
-   limit is the one every LZMA implementation applies.
+1. `lc` <= 8, `lp` <= 4, `pb` <= 4 and `lc + lp` <= 4 (`BadParams`, `lc`, `lp`, `pb` or `lc + lp`). The
+   last limit is liblzma's `LZMA_LCLP_MAX` and bounds the table of literal probabilities (3 * 2^(`lc` + `lp`)
+   entries of 0x100 each in the reader); the LZMA SDK would accept up to 12. Under it `lc` 5 to 8 can
+   never be used, although the parameter layout allows them.
 2. `dict_size` must not exceed the reader's `max_window`; otherwise `WindowTooLarge` with the size needed and
    the size allowed, raised before the input is read.
-3. The dictionary buffer is at most the smaller of `dict_size` and the output bound (and at least 4 KiB, never
-   more than `max_window`): a distance can never reach back past the output, so a larger buffer is never
-   needed.
-4. The stream may end with the end-of-payload marker or without one: the encoder liblzma used for the test
+3. A match distance greater than `dict_size`, or greater than the number of bytes produced so far, is
+   `LzmaError` carrying the decoder's text. Whether a stream decodes never depends on the reader's
+   `max_window` beyond rule 2: the reference decoder allocates a buffer of the smaller of `dict_size` and
+   the output bound (at least 1 byte), which is exactly the reach a valid stream can use.
+4. The first byte of the range coder stream must be 0, else `LzmaError` with reason `range coder`. The
+   range coder's end condition (its code value being 0 after the last symbol) is checked only when the
+   end-of-payload marker is present; a stream that ends at the output bound without a marker is not checked
+   for it, and an independent decoder must not rely on it either way.
+5. The stream may end with the end-of-payload marker or without one: the encoder liblzma used for the test
    vectors always writes it, other writers (such as `.lzma` files of known size) do not, and a decoder that has
    produced the output bound accepts either. Any input after the stream (after the marker, when there is one)
-   is `LzmaError` with reason `trailing input`. Input that ends before the output bound is reached, or a
+   is `LzmaError` with reason `trailing input`; so is a stream whose symbols continue past the output bound
+   when the bound falls between two symbols. Input that ends before the output bound is reached, or a
    marker before it, is `LzmaError` with reason `truncated`.
-5. Output past the step's bound is `PayloadTooLarge` (`BlockLengthMismatch` on the last step); the decoder
-   never writes past the bound. Any other damage is `LzmaError` carrying the decoder's own text.
+6. A match that crosses the output bound is `PayloadTooLarge` (`BlockLengthMismatch` on the last step); the
+   decoder never writes past the bound. Any other damage is `LzmaError` carrying the decoder's own text.
 
 ## 9. Writing and reading an archive
 
