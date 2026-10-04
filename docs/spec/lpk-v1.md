@@ -1,7 +1,7 @@
 # LitePack `.lpk` format, version 1 — working draft
 
 Status: this is a working draft. The format is not frozen until the independent-decoder gate (task E1-14).
-Sections are added task by task; this revision covers conventions, the header, the frame grammar, the entry table, chunks and the Merkle tree, and the index and trailer.
+Sections are added task by task; this revision covers conventions, the header, the frame grammar, the entry table, chunks and the Merkle tree, the index and trailer, and writing and reading an archive.
 The reference reader is the `lpk-format` crate; the tables below are checked against it by a test.
 
 ## 1. Conventions
@@ -514,3 +514,70 @@ runs any step of the graph.
 
 Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`, `BadParams`,
 `BlockLengthMismatch`, `PayloadTooLarge`, and `Truncated` with the `what` strings `graph` and `block header`.
+
+## 9. Writing and reading an archive
+
+### Writing an archive as a stream
+
+An archive can be written without seeking and without reading back what was written: every offset the index
+records is a count of the bytes already written. The frames follow in this order:
+
+1. the header (section 2);
+2. zero or more `ChunkData` frames (kind 4), each holding one block;
+3. the `EntryTable` frame (kind 3);
+4. optionally the `Records` frame;
+5. the `Index` frame (kind 5), which records the location of every frame above, the chunk table and the Merkle
+   root over its hashes, and the decode envelope (section 7);
+6. the `Trailer` frame (kind 6), which locates the index.
+
+The frames of a stream-written archive have no flags set and the header flags are zero. An archive without file
+content has no blocks and an empty chunk table.
+
+The index payload states its own length through `max_frame_payload`, whose varint width depends on the value.
+A writer settles this by computing the index again with the length it just produced until the declared
+`max_frame_payload` equals the larger of the longest other frame's smallest admissible payload and the index
+payload length.
+
+### Chunks and blocks
+
+A file's bytes are cut into chunks of exactly the chunk size, the last one shorter; an empty file has no chunks.
+Chunks are numbered in the order they are written, which is the order of the entries that own them; a file's
+chunk list is a run of consecutive numbers. The chunk table has one record per chunk (section 5). The rule that
+chooses the cut is a property of the writer, not of the format: a reader finds each chunk's length in the chunk
+table and never assumes a size, so another way of cutting changes only the chunk boundaries.
+
+Chunks fill blocks in order. A writer closes the current block before the chunk that would take it past its
+size limit, so a block holds whole chunks and a chunk never spans two blocks. A block of a store-only archive
+has the graph `[store]`; for such an archive the envelope declares `max_window` 0, `max_bwt_block` 0,
+`threads_hint` 0 and `decode_memory` equal to `max_block_plain`, the space of one block buffer.
+
+Entries are written in strictly ascending path order (section 4). A writer refuses a path that is invalid, equal
+to the one before it or sorts before it.
+
+### Reading one block at a time
+
+A reader reads a chunk by finding its block in the chunk index, reading that block's frame, decoding the block
+with its graph (section 8) and cutting the chunk out of the plain bytes at the offset its predecessors in the
+block leave. It keeps the plain bytes of the block it read last, so chunks read in order decode each block once.
+Every chunk is compared with its record in the chunk table (length and BLAKE3) before its bytes are used; a
+mismatch is `ChunkMismatch` with the chunk's number. A block whose frame hash fails cannot vouch for any chunk it
+holds, so reading a chunk of it is reported as a `ChunkMismatch` of that chunk.
+
+Whole-archive verification decodes every block and compares every chunk with its record, so a chunk no entry
+uses is checked too, and then checks every file entry's chunk list and total size against the chunk table.
+
+### Extraction by the reference tool
+
+The reference tool (`lpk-decode`) extracts files and directories and applies these refusals before it writes
+anything:
+
+- a symlink entry is refused (`SymlinkRefused`); what an extractor does with links is a policy outside this
+  format;
+- a path component that is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`,
+  in any letter case, with or without an extension), that contains `:`, or that ends in a dot or a space is
+  refused (`UnsafePath`).
+
+The tool does not overwrite an existing file.
+
+Errors of this section: `UnsortedEntries`, `InvalidPath`, `ChunkMismatch`, `FileSizeMismatch`,
+`ChunkIndexOutOfRange`, `SymlinkRefused`, `UnsafePath`.
