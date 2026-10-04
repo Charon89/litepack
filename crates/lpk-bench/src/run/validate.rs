@@ -108,9 +108,13 @@ impl Schemas {
 
 fn absolute_path_regex() -> Option<regex::Regex> {
     // A path start (drive, UNC, or `/dir/`) at the start of a string, after a separator, or right
-    // after a short flag such as `-o`.
-    regex::Regex::new(r#"(?:^|[\s=,;"'(\[]|-[A-Za-z]{1,2})(?:[A-Za-z]:[\\/]|\\\\|/[^\s/*{}]+/)"#)
-        .ok()
+    // after a short flag such as `-o`. A flag is one only at the start of the string or after
+    // whitespace: a corpus-relative path such as `ja.euc-jp/LC_MESSAGES/vim.mo` carries `-jp/` and
+    // is not one (the full profile has such names).
+    regex::Regex::new(
+        r#"(?:^|[\s=,;"'(\[]|(?:^|\s)-[A-Za-z]{1,2})(?:[A-Za-z]:[\\/]|\\\\|/[^\s/*{}]+/)"#,
+    )
+    .ok()
 }
 
 pub(crate) fn scan_absolute_paths(value: &Value, pointer: &str, file: &str, out: &mut Vec<String>) {
@@ -1083,6 +1087,28 @@ mod tests {
         // The placeholders and flags of the real catalogue are fine.
         let dir = write_dir(tmp.path(), &[samples::measured()]);
         assert!(problems(&dir).is_empty());
+        // A corpus-relative path whose directory name ends in a hyphen and two letters is not a
+        // short flag followed by a path (the full profile has `ja.euc-jp/LC_MESSAGES/vim.mo`).
+        for fine in [
+            "software-installed/portablegit/usr/share/vim/vim92/lang/ja.euc-jp/LC_MESSAGES/vim.mo",
+            "photo-jpeg/commons-featured/x-y/z.jpg",
+        ] {
+            let dir = write_dir(tmp.path(), &[samples::measured()]);
+            let mut v = to_value(&samples::measured());
+            *v.pointer_mut("/tool/version").expect("pointer") = json!(fine);
+            std::fs::write(dir.join("7z-mx5-text.json"), v.to_string()).expect("write");
+            let p = problems(&dir);
+            assert!(
+                !p.iter().any(|m| m.contains("absolute path")),
+                "{fine}: {p:?}"
+            );
+        }
+        // A real short flag with a path after it still is one.
+        let dir = write_dir(tmp.path(), &[samples::measured()]);
+        let mut v = to_value(&samples::measured());
+        *v.pointer_mut("/tool/version").expect("pointer") = json!("rar -oD:\\tmp\\x");
+        std::fs::write(dir.join("7z-mx5-text.json"), v.to_string()).expect("write");
+        assert!(problems(&dir).iter().any(|m| m.contains("absolute path")));
     }
 
     #[test]

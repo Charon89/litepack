@@ -1,0 +1,442 @@
+{
+  "build": "78bc9601a767",
+  "build_profile": {
+    "allow_debug_build": false,
+    "debug_assertions": false,
+    "opt_level": "3",
+    "profile": "release"
+  },
+  "corpus": {
+    "manifest_blake3": "37fd79b4563887d48932715918eaf72e24b1bc8fe7588fd27a280e2fcc4a0cf0",
+    "private": false,
+    "profile": "full"
+  },
+  "data": {
+    "classes": [
+      {
+        "class": "text-prose",
+        "content_bytes": 360144217,
+        "files": 63,
+        "present": true,
+        "runs": [
+          {
+            "compressor": "xz",
+            "failed": null,
+            "measured": {
+              "compress_process": null,
+              "compress_seconds": 216.6949766,
+              "compressed_bytes": 85990780,
+              "decompress_process": null,
+              "decompress_seconds": 3.4737965,
+              "verified": true
+            },
+            "setting": "preset 9, 1 thread",
+            "skipped": null,
+            "timing": "in-process"
+          },
+          {
+            "compressor": "zstd",
+            "failed": null,
+            "measured": {
+              "compress_process": null,
+              "compress_seconds": 146.1135731,
+              "compressed_bytes": 93357523,
+              "decompress_process": null,
+              "decompress_seconds": 0.4266599,
+              "verified": true
+            },
+            "setting": "level 19, library defaults, 1 thread",
+            "skipped": null,
+            "timing": "in-process"
+          },
+          {
+            "compressor": "xz-cli",
+            "failed": null,
+            "measured": {
+              "compress_process": {
+                "kernel_cpu_seconds": 9.609375,
+                "peak_rss_bytes": 711225344,
+                "user_cpu_seconds": 177.390625
+              },
+              "compress_seconds": 193.2477693,
+              "compressed_bytes": 85990780,
+              "decompress_process": {
+                "kernel_cpu_seconds": 0.390625,
+                "peak_rss_bytes": 72617984,
+                "user_cpu_seconds": 1.890625
+              },
+              "decompress_seconds": 2.4396279,
+              "verified": true
+            },
+            "setting": "-9 -T1 -c (stdin IN, stdout OUT)",
+            "skipped": null,
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "zstd-cli",
+            "failed": null,
+            "measured": {
+              "compress_process": {
+                "kernel_cpu_seconds": 3.21875,
+                "peak_rss_bytes": 247058432,
+                "user_cpu_seconds": 161.640625
+              },
+              "compress_seconds": 169.117076,
+              "compressed_bytes": 93385189,
+              "decompress_process": {
+                "kernel_cpu_seconds": 0.09375,
+                "peak_rss_bytes": 17264640,
+                "user_cpu_seconds": 0.34375
+              },
+              "decompress_seconds": 0.3237042,
+              "verified": true
+            },
+            "setting": "-19 -T1 -q -f -o OUT IN",
+            "skipped": null,
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "bsc",
+            "failed": null,
+            "measured": null,
+            "setting": "e IN OUT -b256 -t -T (flags from documentation, not run)",
+            "skipped": "not installed",
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "kanzi",
+            "failed": null,
+            "measured": null,
+            "setting": "-c -f -i IN -o OUT -j 1 -l 9 -b 64m (flags from documentation, not run)",
+            "skipped": "not installed",
+            "timing": "process-wall"
+          }
+        ],
+        "tar_bytes": 360192000
+      },
+      {
+        "class": "logs-text",
+        "content_bytes": 2686418017,
+        "files": 11,
+        "present": true,
+        "runs": [
+          {
+            "compressor": "xz",
+            "failed": null,
+            "measured": {
+              "compress_process": null,
+              "compress_seconds": 777.2668972,
+              "compressed_bytes": 142238004,
+              "decompress_process": null,
+              "decompress_seconds": 7.2474354,
+              "verified": true
+            },
+            "setting": "preset 9, 1 thread",
+            "skipped": null,
+            "timing": "in-process"
+          },
+          {
+            "compressor": "zstd",
+            "failed": null,
+            "measured": {
+              "compress_process": null,
+              "compress_seconds": 984.8120879,
+              "compressed_bytes": 143986040,
+              "decompress_process": null,
+              "decompress_seconds": 1.1506133,
+              "verified": true
+            },
+            "setting": "level 19, library defaults, 1 thread",
+            "skipped": null,
+            "timing": "in-process"
+          },
+          {
+            "compressor": "xz-cli",
+            "failed": null,
+            "measured": {
+              "compress_process": {
+                "kernel_cpu_seconds": 25.484375,
+                "peak_rss_bytes": 711249920,
+                "user_cpu_seconds": 613.125
+              },
+              "compress_seconds": 663.772338,
+              "compressed_bytes": 142238004,
+              "decompress_process": {
+                "kernel_cpu_seconds": 1.6875,
+                "peak_rss_bytes": 72617984,
+                "user_cpu_seconds": 4.40625
+              },
+              "decompress_seconds": 6.3323518,
+              "verified": true
+            },
+            "setting": "-9 -T1 -c (stdin IN, stdout OUT)",
+            "skipped": null,
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "zstd-cli",
+            "failed": null,
+            "measured": {
+              "compress_process": {
+                "kernel_cpu_seconds": 25.484375,
+                "peak_rss_bytes": 232521728,
+                "user_cpu_seconds": 923.125
+              },
+              "compress_seconds": 982.0698586,
+              "compressed_bytes": 143727579,
+              "decompress_process": {
+                "kernel_cpu_seconds": 0.71875,
+                "peak_rss_bytes": 17195008,
+                "user_cpu_seconds": 0.78125
+              },
+              "decompress_seconds": 0.8269682,
+              "verified": true
+            },
+            "setting": "-19 -T1 -q -f -o OUT IN",
+            "skipped": null,
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "bsc",
+            "failed": null,
+            "measured": null,
+            "setting": "e IN OUT -b256 -t -T (flags from documentation, not run)",
+            "skipped": "not installed",
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "kanzi",
+            "failed": null,
+            "measured": null,
+            "setting": "-c -f -i IN -o OUT -j 1 -l 9 -b 64m (flags from documentation, not run)",
+            "skipped": "not installed",
+            "timing": "process-wall"
+          }
+        ],
+        "tar_bytes": 2686427648
+      },
+      {
+        "class": "small-files",
+        "content_bytes": 50016512,
+        "files": 20000,
+        "present": true,
+        "runs": [
+          {
+            "compressor": "xz",
+            "failed": null,
+            "measured": {
+              "compress_process": null,
+              "compress_seconds": 14.2344407,
+              "compressed_bytes": 4143460,
+              "decompress_process": null,
+              "decompress_seconds": 0.2260966,
+              "verified": true
+            },
+            "setting": "preset 9, 1 thread",
+            "skipped": null,
+            "timing": "in-process"
+          },
+          {
+            "compressor": "zstd",
+            "failed": null,
+            "measured": {
+              "compress_process": null,
+              "compress_seconds": 16.7822939,
+              "compressed_bytes": 4617950,
+              "decompress_process": null,
+              "decompress_seconds": 0.0351945,
+              "verified": true
+            },
+            "setting": "level 19, library defaults, 1 thread",
+            "skipped": null,
+            "timing": "in-process"
+          },
+          {
+            "compressor": "xz-cli",
+            "failed": null,
+            "measured": {
+              "compress_process": {
+                "kernel_cpu_seconds": 0.703125,
+                "peak_rss_bytes": 641703936,
+                "user_cpu_seconds": 10.765625
+              },
+              "compress_seconds": 12.1028239,
+              "compressed_bytes": 4143460,
+              "decompress_process": {
+                "kernel_cpu_seconds": 0.078125,
+                "peak_rss_bytes": 71299072,
+                "user_cpu_seconds": 0.109375
+              },
+              "decompress_seconds": 0.2022777,
+              "verified": true
+            },
+            "setting": "-9 -T1 -c (stdin IN, stdout OUT)",
+            "skipped": null,
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "zstd-cli",
+            "failed": null,
+            "measured": {
+              "compress_process": {
+                "kernel_cpu_seconds": 0.5,
+                "peak_rss_bytes": 160407552,
+                "user_cpu_seconds": 14.34375
+              },
+              "compress_seconds": 15.06922,
+              "compressed_bytes": 4587810,
+              "decompress_process": {
+                "kernel_cpu_seconds": 0.046875,
+                "peak_rss_bytes": 17076224,
+                "user_cpu_seconds": 0.015625
+              },
+              "decompress_seconds": 0.0349092,
+              "verified": true
+            },
+            "setting": "-19 -T1 -q -f -o OUT IN",
+            "skipped": null,
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "bsc",
+            "failed": null,
+            "measured": null,
+            "setting": "e IN OUT -b256 -t -T (flags from documentation, not run)",
+            "skipped": "not installed",
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "kanzi",
+            "failed": null,
+            "measured": null,
+            "setting": "-c -f -i IN -o OUT -j 1 -l 9 -b 64m (flags from documentation, not run)",
+            "skipped": "not installed",
+            "timing": "process-wall"
+          }
+        ],
+        "tar_bytes": 65761280
+      },
+      {
+        "class": "backup-versions",
+        "content_bytes": 25541629,
+        "files": 1974,
+        "present": true,
+        "runs": [
+          {
+            "compressor": "xz",
+            "failed": null,
+            "measured": {
+              "compress_process": null,
+              "compress_seconds": 5.4202683,
+              "compressed_bytes": 1877364,
+              "decompress_process": null,
+              "decompress_seconds": 0.0858407,
+              "verified": true
+            },
+            "setting": "preset 9, 1 thread",
+            "skipped": null,
+            "timing": "in-process"
+          },
+          {
+            "compressor": "zstd",
+            "failed": null,
+            "measured": {
+              "compress_process": null,
+              "compress_seconds": 6.1402386,
+              "compressed_bytes": 5511230,
+              "decompress_process": null,
+              "decompress_seconds": 0.0188329,
+              "verified": true
+            },
+            "setting": "level 19, library defaults, 1 thread",
+            "skipped": null,
+            "timing": "in-process"
+          },
+          {
+            "compressor": "xz-cli",
+            "failed": null,
+            "measured": {
+              "compress_process": {
+                "kernel_cpu_seconds": 0.34375,
+                "peak_rss_bytes": 317108224,
+                "user_cpu_seconds": 3.828125
+              },
+              "compress_seconds": 4.3504051,
+              "compressed_bytes": 1877364,
+              "decompress_process": {
+                "kernel_cpu_seconds": 0.015625,
+                "peak_rss_bytes": 32620544,
+                "user_cpu_seconds": 0.046875
+              },
+              "decompress_seconds": 0.0680911,
+              "verified": true
+            },
+            "setting": "-9 -T1 -c (stdin IN, stdout OUT)",
+            "skipped": null,
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "zstd-cli",
+            "failed": null,
+            "measured": {
+              "compress_process": {
+                "kernel_cpu_seconds": 0.171875,
+                "peak_rss_bytes": 125259776,
+                "user_cpu_seconds": 5.265625
+              },
+              "compress_seconds": 5.5477679,
+              "compressed_bytes": 5513231,
+              "decompress_process": {
+                "kernel_cpu_seconds": 0.015625,
+                "peak_rss_bytes": 17260544,
+                "user_cpu_seconds": 0.015625
+              },
+              "decompress_seconds": 0.0214308,
+              "verified": true
+            },
+            "setting": "-19 -T1 -q -f -o OUT IN",
+            "skipped": null,
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "bsc",
+            "failed": null,
+            "measured": null,
+            "setting": "e IN OUT -b256 -t -T (flags from documentation, not run)",
+            "skipped": "not installed",
+            "timing": "process-wall"
+          },
+          {
+            "compressor": "kanzi",
+            "failed": null,
+            "measured": null,
+            "setting": "-c -f -i IN -o OUT -j 1 -l 9 -b 64m (flags from documentation, not run)",
+            "skipped": "not installed",
+            "timing": "process-wall"
+          }
+        ],
+        "tar_bytes": 27096576
+      }
+    ],
+    "skipped": [
+      {
+        "reason": "XWRT is GPL-2.0 and no permissively licensed implementation of a word-replacement pre-pass was found; not written here",
+        "what": "xwrt-style word-replacement pre-pass"
+      }
+    ]
+  },
+  "date": "2026-10-04T00:42:03Z",
+  "elapsed_seconds": 4248.3460491,
+  "format_version": 1,
+  "host": "megatron",
+  "libraries": {
+    "liblzma": "liblzma 5.8.4 (bundled by liblzma-sys 0.4.9; generic C build, no SIMD or unaligned-access paths)",
+    "libzstd": "1.5.7",
+    "xz-cli": "xz (XZ Utils) 5.8.4",
+    "zstd-cli": "*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***"
+  },
+  "library_threads": 1,
+  "notes": [],
+  "probe": "text",
+  "threads": 24
+}

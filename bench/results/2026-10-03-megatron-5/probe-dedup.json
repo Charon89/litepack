@@ -1,0 +1,346 @@
+{
+  "build": "78bc9601a767",
+  "build_profile": {
+    "allow_debug_build": false,
+    "debug_assertions": false,
+    "opt_level": "3",
+    "profile": "release"
+  },
+  "corpus": {
+    "manifest_blake3": "37fd79b4563887d48932715918eaf72e24b1bc8fe7588fd27a280e2fcc4a0cf0",
+    "private": false,
+    "profile": "full"
+  },
+  "data": {
+    "chunking": {
+      "algorithm": "fastcdc v2020, normalization level 1, per file",
+      "avg_bytes": 65536,
+      "chunk_hash": "blake3",
+      "max_bytes": 524288,
+      "min_bytes": 4096
+    },
+    "classes": [
+      {
+        "bytes": 34975551,
+        "cdc_hash_seconds": 0.0180564,
+        "cdc_seconds": 0.0102469,
+        "chunks": 509,
+        "class": "archives-nested",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 14,
+        "unique_chunk_bytes": 34499242,
+        "unique_chunks": 502
+      },
+      {
+        "bytes": 157896311,
+        "cdc_hash_seconds": 0.07761180000000001,
+        "cdc_seconds": 0.046193500000000005,
+        "chunks": 2153,
+        "class": "audio",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 21,
+        "unique_chunk_bytes": 157896311,
+        "unique_chunks": 2153
+      },
+      {
+        "bytes": 25541629,
+        "cdc_hash_seconds": 0.015546999999999976,
+        "cdc_seconds": 0.007011700000000089,
+        "chunks": 2119,
+        "class": "backup-versions",
+        "dup_bytes": 16066597,
+        "dup_files": 1302,
+        "files": 1974,
+        "unique_chunk_bytes": 9299674,
+        "unique_chunks": 729
+      },
+      {
+        "bytes": 419430400,
+        "cdc_hash_seconds": 0.1913586,
+        "cdc_seconds": 0.12505729999999998,
+        "chunks": 5700,
+        "class": "encrypted-random",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 2,
+        "unique_chunk_bytes": 419430400,
+        "unique_chunks": 5700
+      },
+      {
+        "bytes": 52470892,
+        "cdc_hash_seconds": 0.02401609999999982,
+        "cdc_seconds": 0.011531600000000041,
+        "chunks": 4928,
+        "class": "game-assets",
+        "dup_bytes": 401736,
+        "dup_files": 499,
+        "files": 4660,
+        "unique_chunk_bytes": 52030976,
+        "unique_chunks": 4421
+      },
+      {
+        "bytes": 2686418017,
+        "cdc_hash_seconds": 1.3176796,
+        "cdc_seconds": 0.8251363,
+        "chunks": 25727,
+        "class": "logs-text",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 11,
+        "unique_chunk_bytes": 2671078555,
+        "unique_chunks": 25496
+      },
+      {
+        "bytes": 286816945,
+        "cdc_hash_seconds": 0.1628452,
+        "cdc_seconds": 0.08972909999999999,
+        "chunks": 3906,
+        "class": "model-weights",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 2,
+        "unique_chunk_bytes": 286816945,
+        "unique_chunks": 3906
+      },
+      {
+        "bytes": 2114690575,
+        "cdc_hash_seconds": 1.1417585000000012,
+        "cdc_seconds": 0.6412760000000002,
+        "chunks": 28883,
+        "class": "office-pdf",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 2334,
+        "unique_chunk_bytes": 2084191951,
+        "unique_chunks": 28377
+      },
+      {
+        "bytes": 8258908517,
+        "cdc_hash_seconds": 4.387428999999999,
+        "cdc_seconds": 2.493446500000003,
+        "chunks": 113441,
+        "class": "photo-jpeg",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 3055,
+        "unique_chunk_bytes": 8258908517,
+        "unique_chunks": 113441
+      },
+      {
+        "bytes": 550674750,
+        "cdc_hash_seconds": 0.2565666000000001,
+        "cdc_seconds": 0.1559718000000001,
+        "chunks": 7863,
+        "class": "photo-jpeg-edited",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 600,
+        "unique_chunk_bytes": 550674750,
+        "unique_chunks": 7863
+      },
+      {
+        "bytes": 537693574,
+        "cdc_hash_seconds": 0.2599967000000079,
+        "cdc_seconds": 0.1577340000000009,
+        "chunks": 7727,
+        "class": "photo-raw-png",
+        "dup_bytes": 54004,
+        "dup_files": 80,
+        "files": 1016,
+        "unique_chunk_bytes": 537639570,
+        "unique_chunks": 7647
+      },
+      {
+        "bytes": 50016512,
+        "cdc_hash_seconds": 0.027480600000000046,
+        "cdc_seconds": 0.0037972999999995923,
+        "chunks": 20037,
+        "class": "small-files",
+        "dup_bytes": 1260154,
+        "dup_files": 1961,
+        "files": 20000,
+        "unique_chunk_bytes": 48756358,
+        "unique_chunks": 18076
+      },
+      {
+        "bytes": 437043701,
+        "cdc_hash_seconds": 0.21206280000000555,
+        "cdc_seconds": 0.12226210000000588,
+        "chunks": 14501,
+        "class": "software-installed",
+        "dup_bytes": 105137349,
+        "dup_files": 1508,
+        "files": 9671,
+        "unique_chunk_bytes": 329308991,
+        "unique_chunks": 11654
+      },
+      {
+        "bytes": 35365500,
+        "cdc_hash_seconds": 0.019911899999999993,
+        "cdc_seconds": 0.01039369999999991,
+        "chunks": 1091,
+        "class": "source-git",
+        "dup_bytes": 1459,
+        "dup_files": 7,
+        "files": 663,
+        "unique_chunk_bytes": 35364041,
+        "unique_chunks": 1089
+      },
+      {
+        "bytes": 360144217,
+        "cdc_hash_seconds": 0.1879762,
+        "cdc_seconds": 0.10936560000000001,
+        "chunks": 4685,
+        "class": "text-prose",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 63,
+        "unique_chunk_bytes": 360144217,
+        "unique_chunks": 4685
+      },
+      {
+        "bytes": 959731214,
+        "cdc_hash_seconds": 0.5122992,
+        "cdc_seconds": 0.2911806,
+        "chunks": 12829,
+        "class": "video",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 4,
+        "unique_chunk_bytes": 959731214,
+        "unique_chunks": 12829
+      },
+      {
+        "bytes": 2155872426,
+        "cdc_hash_seconds": 1.1823197,
+        "cdc_seconds": 0.6608444,
+        "chunks": 22507,
+        "class": "vm-image",
+        "dup_bytes": 0,
+        "dup_files": 0,
+        "files": 4,
+        "unique_chunk_bytes": 1858288402,
+        "unique_chunks": 21396
+      }
+    ],
+    "corpus": {
+      "bytes": 19123690731,
+      "cdc_hash_seconds": 9.99491589999912,
+      "cdc_seconds": 5.761178400001943,
+      "chunks": 278606,
+      "class": "(corpus)",
+      "dup_bytes": 131442300,
+      "dup_files": 6010,
+      "files": 44094,
+      "unique_chunk_bytes": 18635413083,
+      "unique_chunks": 269068
+    },
+    "versions": [
+      {
+        "bytes": 8510359,
+        "cumulative_unique_chunk_bytes": 8508900,
+        "cumulative_unique_chunks": 704,
+        "delta": null,
+        "files": 658,
+        "label": "v1",
+        "new_unique_chunk_bytes": 8508900,
+        "new_unique_chunks_zstd19_bytes": 1868839
+      },
+      {
+        "bytes": 8510359,
+        "cumulative_unique_chunk_bytes": 8556601,
+        "cumulative_unique_chunks": 709,
+        "delta": {
+          "new_alone_zstd19_bytes": 1886652,
+          "new_alone_zstd19_long_bytes": 1886107,
+          "new_tar_bytes": 9029120,
+          "old_tar_bytes": 9029120,
+          "tools": [
+            {
+              "apply_seconds": 0.0148498,
+              "create_seconds": 1.9064839,
+              "failed": null,
+              "patch_bytes": 1397,
+              "settings": "level 19, --long=27, 1 thread",
+              "skipped": null,
+              "tool": "zstd --patch-from",
+              "verified": true
+            },
+            {
+              "apply_seconds": null,
+              "create_seconds": null,
+              "failed": null,
+              "patch_bytes": null,
+              "settings": "zstd level 19 inside, 1 thread",
+              "skipped": "hdiffz: not installed",
+              "tool": "hdiffz",
+              "verified": false
+            }
+          ],
+          "window_covers_input": true,
+          "window_log": 27
+        },
+        "files": 658,
+        "label": "v2",
+        "new_unique_chunk_bytes": 47701,
+        "new_unique_chunks_zstd19_bytes": 9627
+      },
+      {
+        "bytes": 8520911,
+        "cumulative_unique_chunk_bytes": 9299674,
+        "cumulative_unique_chunks": 729,
+        "delta": {
+          "new_alone_zstd19_bytes": 1888736,
+          "new_alone_zstd19_long_bytes": 1888502,
+          "new_tar_bytes": 9040384,
+          "old_tar_bytes": 9029120,
+          "tools": [
+            {
+              "apply_seconds": 0.0158317,
+              "create_seconds": 2.1198943,
+              "failed": null,
+              "patch_bytes": 4529,
+              "settings": "level 19, --long=27, 1 thread",
+              "skipped": null,
+              "tool": "zstd --patch-from",
+              "verified": true
+            },
+            {
+              "apply_seconds": null,
+              "create_seconds": null,
+              "failed": null,
+              "patch_bytes": null,
+              "settings": "zstd level 19 inside, 1 thread",
+              "skipped": "hdiffz: not installed",
+              "tool": "hdiffz",
+              "verified": false
+            }
+          ],
+          "window_covers_input": true,
+          "window_log": 27
+        },
+        "files": 658,
+        "label": "v3",
+        "new_unique_chunk_bytes": 743073,
+        "new_unique_chunks_zstd19_bytes": 122424
+      }
+    ]
+  },
+  "date": "2026-10-04T00:41:20Z",
+  "elapsed_seconds": 43.5032676,
+  "format_version": 1,
+  "host": "megatron",
+  "libraries": {
+    "fastcdc": "5.0.0",
+    "libzstd": "1.5.7",
+    "zstd (command line)": "1.5.7"
+  },
+  "library_threads": 1,
+  "notes": [
+    "hdiffz/hpatchz: skipped: hdiffz: not installed"
+  ],
+  "probe": "dedup",
+  "threads": 24
+}

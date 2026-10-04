@@ -1,0 +1,108 @@
+{
+  "class": "office-pdf",
+  "corpus": {
+    "class_bytes": 2114690575,
+    "class_files": 2334,
+    "manifest_blake3": "37fd79b4563887d48932715918eaf72e24b1bc8fe7588fd27a280e2fcc4a0cf0",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 1376087612,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 43.546875,
+      "peak_job_memory_bytes": 23731654656,
+      "peak_memory_bytes": 22575587328,
+      "peak_process_commit_bytes": 23731654656,
+      "timed_out": false,
+      "user_cpu_seconds": 6399.296875,
+      "wall_seconds": 388.501295
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 62.359375,
+      "peak_job_memory_bytes": 21471670272,
+      "peak_memory_bytes": 20737822720,
+      "peak_process_commit_bytes": 21471670272,
+      "timed_out": false,
+      "user_cpu_seconds": 6441.3125,
+      "wall_seconds": 401.5689911
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 1376087612,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 43.546875,
+        "peak_job_memory_bytes": 23731654656,
+        "peak_memory_bytes": 22575587328,
+        "peak_process_commit_bytes": 23731654656,
+        "timed_out": false,
+        "user_cpu_seconds": 6399.296875,
+        "wall_seconds": 388.501295
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 62.359375,
+        "peak_job_memory_bytes": 21471670272,
+        "peak_memory_bytes": 20737822720,
+        "peak_process_commit_bytes": 21471670272,
+        "timed_out": false,
+        "user_cpu_seconds": 6441.3125,
+        "wall_seconds": 401.5689911
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "repeats_short": "the first repeat's compress plus extract wall time reached --long-run-s (120 s): not repeated",
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../tmp/run2544/c112/a.zpaq",
+      "office-pdf",
+      "-m5",
+      "-t24",
+      "-noeta"
+    ],
+    "extract_args": [
+      "x",
+      "a.zpaq",
+      "-to",
+      "x/",
+      "-t24",
+      "-noeta"
+    ],
+    "id": "m5"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "zpaqfranz",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "65.4"
+  },
+  "verification": {
+    "files_checked": 2334,
+    "files_ok": 2334,
+    "verified": true
+  }
+}

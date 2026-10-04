@@ -1,0 +1,86 @@
+{
+  "build": "78bc9601a767",
+  "build_profile": {
+    "allow_debug_build": false,
+    "debug_assertions": false,
+    "opt_level": "3",
+    "profile": "release"
+  },
+  "corpus": {
+    "manifest_blake3": "37fd79b4563887d48932715918eaf72e24b1bc8fe7588fd27a280e2fcc4a0cf0",
+    "private": false,
+    "profile": "full"
+  },
+  "data": {
+    "class": "model-weights",
+    "files": [
+      {
+        "bytes": 269060552,
+        "dtypes": [
+          {
+            "byte_planes": {
+              "compress_seconds": 55.62587859999997,
+              "compressed_bytes": 181045408,
+              "decompress_seconds": 0.13396239999999998,
+              "plane_compressed_bytes": [
+                134511650,
+                46533758
+              ]
+            },
+            "dtype": "BF16",
+            "element_bytes": 2,
+            "original_bytes": 269030016,
+            "plain": {
+              "compress_seconds": 49.74767420000002,
+              "compressed_bytes": 209319186,
+              "decompress_seconds": 0.31252870000000016
+            },
+            "rotated_planes": {
+              "compress_seconds": 54.902365,
+              "compressed_bytes": 179482350,
+              "decompress_seconds": 0.3148822000000002,
+              "plane_compressed_bytes": [
+                134510421,
+                44971929
+              ]
+            },
+            "tensors": 272
+          }
+        ],
+        "header_bytes": 30536,
+        "index": 1,
+        "other_bytes": 0,
+        "other_tensors": 0,
+        "path": "model-weights/smollm2-135m/model.safetensors",
+        "tensors": 272,
+        "whole_file_compressed_bytes": 207333630
+      }
+    ],
+    "manifest_files": 2,
+    "not_parsed": [
+      {
+        "bytes": 17756393,
+        "index": 0,
+        "path": "model-weights/bert-tiny/pytorch_model.bin",
+        "reason": "not safetensors: ZIP archive (PyTorch checkpoint)"
+      }
+    ],
+    "zstd": {
+      "level": 19,
+      "long_distance_matching": true,
+      "threads": 1,
+      "window_log": 27
+    }
+  },
+  "date": "2026-10-04T01:52:51Z",
+  "elapsed_seconds": 295.3762277,
+  "format_version": 1,
+  "host": "megatron",
+  "libraries": {
+    "libzstd": "1.5.7"
+  },
+  "library_threads": 1,
+  "notes": [],
+  "probe": "weights",
+  "threads": 24
+}

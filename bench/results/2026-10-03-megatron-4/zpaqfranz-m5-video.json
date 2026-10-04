@@ -1,0 +1,108 @@
+{
+  "class": "video",
+  "corpus": {
+    "class_bytes": 959731214,
+    "class_files": 4,
+    "manifest_blake3": "37fd79b4563887d48932715918eaf72e24b1bc8fe7588fd27a280e2fcc4a0cf0",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 957208597,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 24.1875,
+      "peak_job_memory_bytes": 13613944832,
+      "peak_memory_bytes": 13368365056,
+      "peak_process_commit_bytes": 13613944832,
+      "timed_out": false,
+      "user_cpu_seconds": 3417.4375,
+      "wall_seconds": 248.0604316
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 44.828125,
+      "peak_job_memory_bytes": 12502454272,
+      "peak_memory_bytes": 12399411200,
+      "peak_process_commit_bytes": 12502454272,
+      "timed_out": false,
+      "user_cpu_seconds": 3671.46875,
+      "wall_seconds": 267.8413618
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 957208597,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 24.1875,
+        "peak_job_memory_bytes": 13613944832,
+        "peak_memory_bytes": 13368365056,
+        "peak_process_commit_bytes": 13613944832,
+        "timed_out": false,
+        "user_cpu_seconds": 3417.4375,
+        "wall_seconds": 248.0604316
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 44.828125,
+        "peak_job_memory_bytes": 12502454272,
+        "peak_memory_bytes": 12399411200,
+        "peak_process_commit_bytes": 12502454272,
+        "timed_out": false,
+        "user_cpu_seconds": 3671.46875,
+        "wall_seconds": 267.8413618
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "repeats_short": "the first repeat's compress plus extract wall time reached --long-run-s (120 s): not repeated",
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../tmp/run2544/c224/a.zpaq",
+      "video",
+      "-m5",
+      "-t24",
+      "-noeta"
+    ],
+    "extract_args": [
+      "x",
+      "a.zpaq",
+      "-to",
+      "x/",
+      "-t24",
+      "-noeta"
+    ],
+    "id": "m5"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "zpaqfranz",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "65.4"
+  },
+  "verification": {
+    "files_checked": 4,
+    "files_ok": 4,
+    "verified": true
+  }
+}
