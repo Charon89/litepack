@@ -3,16 +3,16 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-05, about 01:05 UTC (21:05 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-05, about 03:45 UTC (23:45 local on the measuring machine). No measurement is running.
 
 **Phase 1 is under way.** Phase 0 closed with D-08 (GO) and D-27; the Phase 1 task list is in PLAN (37 tasks).
-On `main`: E1-1 frame grammar (D-28), E1-2 entry table (D-29), E1-3 chunk table and Merkle tree (D-30), E1-4
-index and trailer (D-31), E1-5 decode envelope (D-32), E1-6 primitive registry and decode graph (D-33), E1-7
-streaming writer, extraction with verification and the `lpk-decode` tool (D-34), E1-8 zstd in the reference
-decoder with priors by id and test vectors (D-35), E1-9 LZMA in the reference decoder (D-36). In progress:
-E1-10 reconstruction record types on `task/e1-10-records`. Each task runs as in Phase 0: implementer in a
-worktree from a brief with exact values → read-only review → fix round → the format values recorded as a
-decision → PLAN tick with evidence → PR → `main` fast-forwarded (merge `main` into the branch first).
+On `main`: E1-1…E1-10 (D-28…D-37): frames, entry table, chunks and Merkle tree, index and trailer, decode
+envelope, primitive registry and decode graph, the streaming writer with extraction and the `lpk-decode` tool,
+zstd and LZMA in the pure-Rust reference decoder with committed test vectors, and the reconstruction record
+types. In progress: E1-11 recovery frames on `task/e1-11-recovery`; then E1-12 encryption, E1-13 journal, E1-14
+fuzzing and the independent-decoder gate. Each task runs as in Phase 0: implementer in a worktree from a brief
+with exact values → read-only review → fix round → the format values recorded as a decision → PLAN tick with
+evidence → PR → `main` fast-forwarded (merge `main` into the branch first).
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -25,7 +25,7 @@ decision → PLAN tick with evidence → PR → `main` fast-forwarded (merge `ma
 ## Branches in flight
 | Branch | State | What is left |
 |---|---|---|
-| `task/e1-10-records` | implementer running (brief: the `Records` frame, six record bodies with their verification targets, record ids in the reconstruction primitives' params, the range check at block-header parse) | review, fix round, D-37, tick, PR, fast-forward `main` |
+| `task/e1-11-recovery` | implementer running (brief: Reed-Solomon recovery frames over 64-byte-multiple shards with per-shard hashes, incremental encoding in the writer, `repair` writing a repaired copy, `lpk-decode check`/`repair`) | review, fix round, D-38, tick, PR, fast-forward `main` |
 
 ## How to resume
 
