@@ -44,15 +44,8 @@ fn ultra_bytes(class: &str) -> Option<u64> {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/results/2026-10-03-megatron");
     let text = std::fs::read_to_string(root.join(format!("7z-ultra-{class}.json"))).ok()?;
-    let rest = &text[text.find("\"median\"")?..];
-    let key = "\"archive_bytes\"";
-    let rest = &rest[rest.find(key)? + key.len()..];
-    let digits: String = rest
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().ok()
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v["median"]["archive_bytes"].as_u64()
 }
 
 #[test]
@@ -60,9 +53,9 @@ fn ultra_bytes(class: &str) -> Option<u64> {
 fn balanced_round_trip_four_classes() {
     let root = PathBuf::from(std::env::var_os("LPK_CORPUS").unwrap());
     println!(
-        "| class | raw B | balanced B | fast B | 7z ultra B (committed) | lzma/zstd/gate/class/no-gain | sample B | s compress | s extract |"
+        "| class | raw B | balanced B | fast B | 7z ultra B (committed) | lzma/zstd/gate/class/no-gain | sample B | s compress | payload B | s extract (per-entry, path order) |"
     );
-    println!("|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
     for name in ["text-prose", "logs-text", "office-pdf", "source-git"] {
         let dir = root.join(name);
         let t0 = Instant::now();
@@ -96,9 +89,10 @@ fn balanced_round_trip_four_classes() {
             raw += out.len() as u64;
         }
         a.verify().unwrap();
+        let payload: u64 = a.index().blocks.iter().map(|b| b.frame_len).sum();
         let ultra = ultra_bytes(name).map_or("n/a".to_string(), |v| v.to_string());
         println!(
-            "| {name} | {raw} | {} | {fast_len} | {ultra} | {}/{}/{}/{}/{} | {} | {compress:.2} | {extract:.2} |",
+            "| {name} | {raw} | {} | {fast_len} | {ultra} | {}/{}/{}/{}/{} | {} | {compress:.2} | {payload} | {extract:.2} |",
             s.archive_len,
             b.lzma_blocks,
             b.zstd_blocks,

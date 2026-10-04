@@ -24,6 +24,7 @@ libc = "0.2.189"
 [dev-dependencies]
 blake3 = "1.8.7"
 lpk-check = { path = "../lpk-check", version = "0.0.1" }
+serde_json = "1.0.151"
 tempfile = "3.27.0"
 zstd = { version = "0.14.0", default-features = false, features = ["zdict_builder"] }
 

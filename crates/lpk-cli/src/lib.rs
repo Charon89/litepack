@@ -62,7 +62,8 @@ struct AddArgs {
     #[arg(long, conflicts_with_all = ["store", "balanced"])]
     fast: bool,
     /// The Balanced tier (LZMA with a large dictionary, or zstd --ultra --long per block by a
-    /// trial on a sample).
+    /// trial on a sample). Memory: about the block size plus several times the dictionary to
+    /// compress; the block size plus the dictionary to extract.
     #[arg(long, conflicts_with = "store")]
     balanced: bool,
     /// Store every block without compression.
@@ -82,7 +83,7 @@ struct AddArgs {
     #[arg(long, value_name = "BYTES", requires = "balanced")]
     dict_size: Option<u32>,
     /// Use no dictionaries (what the Fast tier does today: none is bundled).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "balanced")]
     no_dictionaries: bool,
     /// Print the counts and the stage times to stderr.
     #[arg(short, long)]
@@ -128,7 +129,7 @@ fn add(a: &AddArgs, err: &mut dyn Write) -> i32 {
             o.zstd_level = l;
         }
         if let Some(w) = a.window_log {
-            o.zstd_window_log = w;
+            o.zstd_window_log = Some(w);
         }
         if let Some(d) = a.dict_size {
             o.dict_size = d;
@@ -182,10 +183,9 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
     if let Some(b) = s.balanced {
         let _ = writeln!(
             err,
-            "blocks: {} lzma, {} zstd, {} stored by gate, {} stored by class, {} stored without              gain; trial sample bytes {}; liblzma encoder memory {} bytes (the library's figure)",
+            "blocks: {} lzma, {} zstd, {} stored by class, {} stored without gain; trial sample bytes {}; encoder memory about {} bytes (approximate: liblzma LZMA2 encoder query at one thread, not measured)",
             b.lzma_blocks,
             b.zstd_blocks,
-            b.stored_by_gate,
             b.stored_by_class,
             b.stored_no_gain,
             b.sample_bytes,

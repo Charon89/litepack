@@ -23,6 +23,7 @@ use crate::balanced::{BalancedEncoder, BalancedHandle, BalancedOptions, Balanced
 use crate::classify::Class;
 use crate::cluster::{cluster, DictionaryKind};
 use crate::error::CoreError;
+use crate::fast::stored_by_class;
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::ingest::{validate_input, walk, IngestOptions, Input};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
@@ -233,7 +234,7 @@ impl Pipeline {
         let mut wopts = seal.writer;
         let source = Source::new();
         match (model, prepared) {
-            (ModelStage::Store, _) | (_, Prepared::Store) => {
+            (ModelStage::Store, Prepared::Store) => {
                 let mut writer = open_writer(out, wopts, sync, 0)?;
                 let t = Instant::now();
                 for input in &inputs {
@@ -259,9 +260,10 @@ impl Pipeline {
                 })
             }
             (model, prepared) => {
-                let (encoder, block_size, steer, finish): (
+                let (encoder, block_size, soft, steer, finish): (
                     Box<dyn lpk_format::BlockEncoder>,
                     u64,
+                    Option<u64>,
                     Steer,
                     Finish,
                 ) = match (model, prepared) {
@@ -270,6 +272,7 @@ impl Pipeline {
                         (
                             Box::new(e),
                             o.block_size,
+                            None,
                             Box::new(move |c, d| h.set_hint(c, d)),
                             Box::new(move |peel| {
                                 let mut f = h2.summary();
@@ -283,6 +286,10 @@ impl Pipeline {
                         (
                             Box::new(e),
                             o.block_size,
+                            Some(
+                                o.min_block_before_boundary
+                                    .unwrap_or(u64::from(o.dict_size) / 2),
+                            ),
                             Box::new(move |c, d| h.set_hint(c, d)),
                             Box::new(move |peel| {
                                 let mut b = h2.summary();
@@ -301,7 +308,12 @@ impl Pipeline {
                     validate_input(input)?;
                 }
                 let t = Instant::now();
-                let clusters = cluster(&inputs)?;
+                let mut clusters = cluster(&inputs)?;
+                if soft.is_some() {
+                    // Compressible clusters first, stored-by-class last (stable), so an open
+                    // block is never forced closed by a stored cluster.
+                    clusters.sort_by_key(|c| stored_by_class(c.class));
+                }
                 timings.classify = t.elapsed();
                 wopts.block_size = block_size;
                 wopts.encoder = encoder;
@@ -325,10 +337,20 @@ impl Pipeline {
                         add_symlink(&mut writer, input)?;
                     }
                 }
-                for c in &clusters {
-                    steer(c.class, c.dictionary);
+                // Plain bytes fed since the last block boundary (approximate across the
+                // writer's own size splits).
+                let mut in_block = 0u64;
+                for (i, c) in clusters.iter().enumerate() {
+                    if in_block == 0 {
+                        // A block takes the hint of its first cluster.
+                        steer(c.class, c.dictionary);
+                    }
                     let stage = peel.iter().find(|s| s.applies_to(c.class));
                     for input in &c.inputs {
+                        in_block += input.len;
+                        if in_block >= block_size {
+                            in_block %= block_size;
+                        }
                         let Some(stage) = stage else {
                             add_file(&mut writer, &source, input)?;
                             continue;
@@ -360,7 +382,15 @@ impl Pipeline {
                             }
                         }
                     }
-                    writer.close_block()?;
+                    let next_stored = clusters.get(i + 1).is_none_or(|n| stored_by_class(n.class));
+                    let close = match soft {
+                        None => true,
+                        Some(min) => in_block >= min || stored_by_class(c.class) || next_stored,
+                    };
+                    if close {
+                        writer.close_block()?;
+                        in_block = 0;
+                    }
                 }
                 // Only peel time spent inside the model interval is taken out of it.
                 timings.peel = peel_time;

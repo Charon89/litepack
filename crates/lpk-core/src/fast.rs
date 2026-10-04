@@ -218,6 +218,11 @@ impl ZstdEncoder {
                 "window_log {window_log} is outside 10..=31"
             )));
         }
+        if 1u64 << window_log > lpk_format::DEFAULT_MAX_WINDOW {
+            return Err(CoreError::InvalidOption(format!(
+                "window_log {window_log} is above the reader's default max_window (256 MiB, log2 28)"
+            )));
+        }
         let range = zstd::compression_level_range();
         if !range.contains(&level) {
             return Err(CoreError::InvalidOption(format!(

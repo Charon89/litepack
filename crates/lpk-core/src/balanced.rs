@@ -1,17 +1,26 @@
 //! The Balanced tier: one raw LZMA1 stream per block (liblzma, a large dictionary), with zstd
 //! `--ultra --long` as the alternative a trial on a sample of the block can prefer.
 //!
-//! Files are grouped by [`crate::cluster::cluster`] exactly as in the Fast tier and the pipeline
-//! tells the encoder, through a [`BalancedHandle`], the class and dictionary kind of what
-//! follows. For each block the encoder stores it without a trial when its class is already
-//! compressed or the entropy gate calls it incompressible; otherwise both candidates compress a
-//! sample (the first `sample_len` bytes of the block, or all of it when shorter), the candidate
-//! with the smaller sample output (`lzma` on a tie) encodes the block, and a winner whose output
-//! is not smaller than the plain bytes falls back to `store`.
+//! Files are grouped by [`crate::cluster::cluster`] with a soft boundary: compressible clusters
+//! are fed first and the stored-by-class clusters last, and a block closes at a cluster change
+//! only once it holds `min_block_before_boundary` bytes (default half the dictionary); a block
+//! takes the hint of its first cluster and stored-by-class data never joins an LZMA or zstd
+//! block. The pipeline tells the encoder, through a [`BalancedHandle`], the class of what
+//! follows. There is no entropy gate in this tier: a block is stored only by the class rule or
+//! because the winner's output is not smaller than the plain bytes.
 //!
-//! The `lzma` step declares the dictionary size the encoder was built with (the reader allocates
-//! it); the default, 64 MiB, is the dictionary the 7-Zip Ultra catalogue row uses, so a parity
-//! check compares like with like. No filters (BCJ waits for a format revision).
+//! The trial is like for like: the zstd window defaults to the LZMA dictionary's log2, and the
+//! sample is four stripes (at 0, 1/4, 1/2 and 3/4 of the block, each a quarter of `sample_len`,
+//! or the whole block when shorter) compressed separately by each candidate, the outputs summed;
+//! the smaller sum encodes the block, `lzma` on a tie.
+//!
+//! The `lzma` step declares the dictionary the encoder used: the configured one, or the next
+//! power of two above the block's length when that is smaller. The default configured
+//! dictionary, 64 MiB, is the one the 7-Zip Ultra catalogue row uses, so a parity check compares
+//! like with like. No filters (BCJ waits for a format revision).
+//!
+//! Memory, qualitatively: compressing needs about the block size plus several times the
+//! dictionary; extracting needs the block size plus the dictionary.
 
 use std::io::Write;
 use std::path::Path;
@@ -46,14 +55,16 @@ pub struct BalancedOptions {
     pub dict_size: u32,
     /// zstd level of the alternative candidate (default 22, `--ultra`).
     pub zstd_level: i32,
-    /// log2 of the zstd window, 10 to 31 (default 27, `--long=27`).
-    pub zstd_window_log: u32,
-    /// Plain bytes the trial compresses per block (default 4 MiB).
+    /// log2 of the zstd window, 10 to 28 (the reader's default `max_window` is 256 MiB).
+    /// `None` (the default) is the log2 of `dict_size`, so both candidates reach the same distance.
+    pub zstd_window_log: Option<u32>,
+    /// Plain bytes the trial compresses per block, in four stripes (default 4 MiB).
     pub sample_len: usize,
     /// Plain bytes per block (default 256 MiB).
     pub block_size: u64,
-    /// The entropy gate that sends incompressible blocks to `store`.
-    pub gate: Gate,
+    /// A block closes at a cluster change only once it holds this many bytes. `None` (the
+    /// default) is half of `dict_size`.
+    pub min_block_before_boundary: Option<u64>,
     /// Longest `Jpeg`-classed input the JPEG peel reads whole (see `FastOptions`).
     pub jpeg_max_file: u64,
 }
@@ -64,10 +75,10 @@ impl Default for BalancedOptions {
             ingest: IngestOptions::default(),
             dict_size: 64 << 20,
             zstd_level: 22,
-            zstd_window_log: 27,
+            zstd_window_log: None,
             sample_len: 4 << 20,
             block_size: 256 << 20,
-            gate: Gate::DEFAULT,
+            min_block_before_boundary: None,
             jpeg_max_file: crate::peel::LEPTON_MAX_FILE,
         }
     }
@@ -80,7 +91,7 @@ pub struct BalancedSummary {
     pub lzma_blocks: u64,
     /// Blocks coded with zstd.
     pub zstd_blocks: u64,
-    /// Blocks stored because the gate called them incompressible.
+    /// Always zero in this tier (it has no entropy gate); kept so the counts match the Fast tier's.
     pub stored_by_gate: u64,
     /// Blocks stored without a trial because their class is already compressed.
     pub stored_by_class: u64,
@@ -88,9 +99,8 @@ pub struct BalancedSummary {
     pub stored_no_gain: u64,
     /// Plain bytes the trials fed to each candidate.
     pub sample_bytes: u64,
-    /// liblzma's own figure for its encoder memory with these options (its multithreaded-encoder
-    /// query with one thread: the safe API has no raw-encoder query); 0 when the query failed.
-    /// Reported, not measured.
+    /// Approximate: liblzma's LZMA2 encoder memory query at one thread for these options (the
+    /// safe API has no raw LZMA1 query); 0 when the query failed. Reported, not measured.
     pub lzma_encoder_memory: u64,
     /// What the peel stages did before the encoder saw the blocks (set by the pipeline).
     pub peel: crate::peel::PeelSummary,
@@ -148,8 +158,15 @@ impl LzmaEncoder {
         self.dict_size
     }
 
-    fn graph(&self) -> Graph {
-        let mut params = self.dict_size.to_le_bytes().to_vec();
+    /// The dictionary used for `len` plain bytes: the configured one, or the next power of two
+    /// above `len` (at least 4 KiB) when that is smaller.
+    fn dict_for(&self, len: usize) -> u32 {
+        let need = (len as u64).next_power_of_two().max(1 << 12);
+        u32::try_from(need.min(u64::from(self.dict_size))).unwrap_or(self.dict_size)
+    }
+
+    fn graph(&self, dict: u32) -> Graph {
+        let mut params = dict.to_le_bytes().to_vec();
         params.extend_from_slice(&[self.lc, self.lp, self.pb]);
         Graph {
             steps: vec![Step {
@@ -159,11 +176,8 @@ impl LzmaEncoder {
         }
     }
 
-    /// The raw stream (end marker included) for `plain`. A dictionary larger than the data
-    /// needs is shrunk for the encoder only; the stream decodes under the declared one.
-    fn compress(&self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
-        let need = (plain.len() as u64).next_power_of_two().max(1 << 12);
-        let dict = u32::try_from(need.min(u64::from(self.dict_size))).unwrap_or(self.dict_size);
+    /// The raw stream (end marker included) for `plain` with dictionary `dict`.
+    fn compress(&self, plain: &[u8], dict: u32) -> Result<Vec<u8>, FormatError> {
         let o = self.options(dict)?;
         let mut filters = Filters::new();
         filters.lzma1(&o);
@@ -196,8 +210,8 @@ impl LzmaEncoder {
         Ok(o)
     }
 
-    /// liblzma's figure for the memory of an encoder with these options (see
-    /// [`BalancedSummary::lzma_encoder_memory`]); 0 when the options are refused.
+    /// Approximate: liblzma's LZMA2 encoder memory query at one thread for the configured
+    /// dictionary (see [`BalancedSummary::lzma_encoder_memory`]); 0 when the options are refused.
     pub fn memory_usage(&self) -> u64 {
         let Ok(o) = self.options(self.dict_size) else {
             return 0;
@@ -207,17 +221,19 @@ impl LzmaEncoder {
         MtStreamBuilder::new()
             .filters(filters)
             .threads(1)
+            .block_size(4096)
             .memusage()
     }
 }
 
 impl BlockEncoder for LzmaEncoder {
     fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
-        let graph = self.graph();
+        let dict = self.dict_for(plain.len());
+        let graph = self.graph(dict);
         Ok(Encoded {
             resources: graph.resources(),
             graph,
-            bytes: self.compress(plain)?,
+            bytes: self.compress(plain, dict)?,
         })
     }
 }
@@ -256,7 +272,6 @@ impl BalancedHandle {
 pub struct BalancedEncoder {
     lzma: LzmaEncoder,
     zstd: ZstdEncoder,
-    gate: Gate,
     sample_len: usize,
     shared: Arc<Mutex<Shared>>,
 }
@@ -279,12 +294,16 @@ impl BalancedEncoder {
             return Err(CoreError::InvalidOption("sample_len is 0".into()));
         }
         let lzma = LzmaEncoder::with_dict(o.dict_size)?;
-        let (zstd, zhandle) = ZstdEncoder::new(
-            o.zstd_level,
-            o.zstd_window_log,
-            &DictionaryPolicy::None,
-            o.gate,
-        )?;
+        if u64::from(o.dict_size) > lpk_format::DEFAULT_MAX_WINDOW {
+            return Err(CoreError::InvalidOption(format!(
+                "dict_size {} is above the reader's default max_window ({})",
+                o.dict_size,
+                lpk_format::DEFAULT_MAX_WINDOW
+            )));
+        }
+        let window_log = o.zstd_window_log.unwrap_or(o.dict_size.ilog2());
+        let (zstd, zhandle) =
+            ZstdEncoder::new(o.zstd_level, window_log, &DictionaryPolicy::None, Gate::OFF)?;
         let shared = Arc::new(Mutex::new(Shared {
             class: Class::Other,
             summary: BalancedSummary {
@@ -295,7 +314,6 @@ impl BalancedEncoder {
         let enc = BalancedEncoder {
             lzma,
             zstd,
-            gate: o.gate,
             sample_len: o.sample_len,
             shared: Arc::clone(&shared),
         };
@@ -325,21 +343,34 @@ impl BlockEncoder for BalancedEncoder {
             self.bump(|s| s.stored_by_class += 1);
             return StoreEncoder.encode(plain);
         }
-        if self.gate.is_incompressible(plain) {
-            self.bump(|s| s.stored_by_gate += 1);
-            return StoreEncoder.encode(plain);
-        }
+        // Four stripes (the whole block when it fits the sample), each compressed separately
+        // by each candidate; the zstd encoder's own no-gain store counts as the stripe's length.
         let whole = plain.len() <= self.sample_len;
-        let sample = &plain[..plain.len().min(self.sample_len)];
-        self.bump(|s| s.sample_bytes += sample.len() as u64);
-        let l = self.lzma.encode(sample)?;
-        // The zstd encoder falls back to store on no gain; its output is then the sample itself,
-        // which is what the comparison should see.
-        let z = self.zstd.encode(sample)?;
-        let zstd = zstd_wins(l.bytes.len(), z.bytes.len());
+        let stripes: Vec<&[u8]> = if whole {
+            vec![plain]
+        } else {
+            let q = self.sample_len / 4;
+            (0..4)
+                .map(|i| {
+                    let at = plain.len() / 4 * i;
+                    &plain[at..plain.len().min(at + q)]
+                })
+                .collect()
+        };
+        let (mut l_len, mut z_len) = (0usize, 0usize);
+        let mut first = None;
+        for st in &stripes {
+            let l = self.lzma.encode(st)?;
+            let z = self.zstd.encode(st)?;
+            l_len += l.bytes.len();
+            z_len += z.bytes.len();
+            first.get_or_insert((l, z));
+            self.bump(|s| s.sample_bytes += st.len() as u64);
+        }
+        let zstd = zstd_wins(l_len, z_len);
         let winner = match (whole, zstd) {
-            (true, true) => z,
-            (true, false) => l,
+            (true, true) => first.map(|(_, z)| z).ok_or_else(|| io_err("no stripe"))?,
+            (true, false) => first.map(|(l, _)| l).ok_or_else(|| io_err("no stripe"))?,
             (false, true) => self.zstd.encode(plain)?,
             (false, false) => self.lzma.encode(plain)?,
         };
@@ -473,10 +504,10 @@ mod tests {
         assert_eq!(e.graph.steps[0].primitive, PrimitiveId::Lzma);
         assert_eq!(
             e.graph.steps[0].params,
-            [0, 0, 0, 1, 3, 0, 2],
-            "dict_size 16 MiB LE, lc 3, lp 0, pb 2"
+            [0, 0, 0x40, 0, 3, 0, 2],
+            "3 MiB of data: the next power of two, 4 MiB, LE; lc 3, lp 0, pb 2"
         );
-        assert_eq!(e.resources.window, 1 << 24);
+        assert_eq!(e.resources.window, 1 << 22);
         assert!(e.bytes.len() < data.len() / 2);
         let (out, s) = write_one(
             &BalancedOptions {
@@ -516,7 +547,7 @@ mod tests {
             Err(CoreError::InvalidOption(_))
         ));
         let bad = BalancedOptions {
-            zstd_window_log: 40,
+            zstd_window_log: Some(40),
             ..BalancedOptions::default()
         };
         assert!(BalancedEncoder::new(&bad).is_err());
@@ -535,6 +566,7 @@ mod tests {
         let repeated: Vec<u8> = unit.iter().cycle().take(unit.len() * 6).copied().collect();
         let opts = BalancedOptions {
             dict_size: 4096,
+            zstd_window_log: Some(20),
             ..BalancedOptions::default()
         };
         let (out, s) = write_one(&opts, Class::Text, &repeated);
@@ -574,8 +606,10 @@ mod tests {
         let opts = BalancedOptions::default();
         let (_, s) = write_one(&opts, Class::Video, &prose_seeded(5, 1 << 16));
         assert_eq!((s.stored_by_class, s.sample_bytes), (1, 0));
+        // No entropy gate in this tier: random bytes are tried, and stored for no gain.
         let (_, s) = write_one(&opts, Class::Other, &random(1 << 20));
-        assert_eq!((s.stored_by_gate, s.sample_bytes), (1, 0));
+        assert_eq!((s.stored_by_gate, s.stored_no_gain), (0, 1));
+        assert!(s.sample_bytes > 0);
         let (mut enc, h) = BalancedEncoder::new(&opts).unwrap();
         h.set_hint(Class::Text, DictionaryKind::Prose);
         let e = enc.encode(b"hi there").unwrap();
@@ -601,11 +635,15 @@ mod tests {
         let mut out = Vec::new();
         let (ws, s) = archive_balanced(dir.path(), &mut out, opts).unwrap();
         assert_eq!(ws.entries, 4);
-        assert_eq!(s.lzma_blocks + s.zstd_blocks, 2);
-        assert!(s.lzma_blocks > 0, "{s:?}");
+        // The prose-like and source clusters share one block (soft boundary); the random file
+        // is stored, in a block of its own.
+        assert_eq!(s.lzma_blocks + s.zstd_blocks, 1, "{s:?}");
+        assert_eq!(s.stored_by_class + s.stored_no_gain, 1, "{s:?}");
         let mut a = Archive::open(Cursor::new(&out[..]), &Resources::default()).unwrap();
+        assert_eq!(a.index().blocks.len(), 2);
         let env = a.index().envelope;
-        assert_eq!(env.max_window, 1 << 22);
+        // The declared window is the dictionary used: the next power of two above the block.
+        assert_eq!(env.max_window, 1 << 16);
         assert_eq!(env.max_block_plain, 100_000, "the largest block written");
         let table = a.entry_table().unwrap();
         let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
@@ -616,14 +654,58 @@ mod tests {
         }
         // A reader whose limit is below the declared window refuses.
         let small = Resources {
-            max_window: 1 << 20,
+            max_window: 1 << 15,
             ..Resources::default()
         };
-        let refused = Archive::open(Cursor::new(&out[..]), &small).is_err() || {
-            let mut a = Archive::open(Cursor::new(&out[..]), &small).unwrap();
-            a.verify().is_err()
+        match Archive::open(Cursor::new(&out[..]), &small) {
+            Err(e) => assert!(e.to_string().contains("max_window"), "{e}"),
+            Ok(_) => panic!("opened under a small max_window"),
+        }
+    }
+
+    #[test]
+    fn a_boundary_waits_for_the_minimum_and_stored_clusters_come_last() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        let blocks = |min: Option<u64>| {
+            let opts = BalancedOptions {
+                dict_size: 1 << 22,
+                min_block_before_boundary: min,
+                ..BalancedOptions::default()
+            };
+            let mut out = Vec::new();
+            archive_balanced(dir.path(), &mut out, opts).unwrap();
+            let a = Archive::open(Cursor::new(&out[..]), &Resources::default()).unwrap();
+            a.index().blocks.len()
         };
-        assert!(refused);
+        // Default minimum (half the dictionary): prose and source merge, the stored file follows.
+        assert_eq!(blocks(None), 2);
+        // A minimum of one byte: every cluster is its own block again.
+        assert_eq!(blocks(Some(1)), 3);
+    }
+
+    #[test]
+    fn a_dictionary_or_window_the_default_reader_refuses_is_refused_at_construction() {
+        let o = BalancedOptions {
+            dict_size: 1 << 29,
+            ..BalancedOptions::default()
+        };
+        match BalancedEncoder::new(&o) {
+            Err(CoreError::InvalidOption(m)) => {
+                assert!(m.contains("dict_size") && m.contains("max_window"), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+        let o = BalancedOptions {
+            zstd_window_log: Some(29),
+            ..BalancedOptions::default()
+        };
+        assert!(matches!(
+            BalancedEncoder::new(&o),
+            Err(CoreError::InvalidOption(_))
+        ));
+        // The zstd window follows the dictionary by default.
+        assert!(BalancedEncoder::new(&BalancedOptions::default()).is_ok());
     }
 
     #[test]

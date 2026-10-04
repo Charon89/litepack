@@ -1434,6 +1434,7 @@ dependencies = [
  "lpk-check",
  "lpk-format",
  "same-file",
+ "serde_json",
  "tempfile",
  "thiserror",
  "zstd",

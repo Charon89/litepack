@@ -148,9 +148,12 @@ Then the tool is run once with its version arguments and the version is read fro
 
 The `lpk` row has three settings: `fast` (`--fast`, zstd with a long window), `balanced`
 (`--balanced`: raw LZMA1 blocks with a 64 MiB dictionary, the dictionary the 7-Zip Ultra row uses,
-or zstd `--ultra --long` for a block where a trial on a 4 MiB sample prefers it) and `store`
-(`--store`). Blocks never span two clusters and JPEG files are peeled under both compressing
-settings.
+or zstd `--ultra --long` for a block where a trial on a 4 MiB sample, taken as four stripes,
+prefers it) and `store` (`--store`). The Fast tier closes a block at every cluster change; the
+Balanced tier closes one only once it holds half the dictionary, and runs without the entropy
+gate. JPEG files are peeled under both compressing settings. Balanced needs memory of about the
+block size plus several times the dictionary to compress, and the block size plus the dictionary
+to extract.
 
 `zpaqfranz` and `tsaur` are marked `verified = false` in the catalogue: their command lines come
 from the projects' READMEs and have not been run by us. t-saur's lite builds need `--no-lepton`;

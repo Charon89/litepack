@@ -39,6 +39,12 @@ impl Gate {
         full_threshold: 7.95,
     };
 
+    /// A gate that never calls a block incompressible (the Balanced tier runs without one).
+    pub const OFF: Gate = Gate {
+        sample_reject: 0.0,
+        full_threshold: f64::INFINITY,
+    };
+
     /// True when `block` is judged incompressible. Blocks shorter than the sample head skip the
     /// sample; an empty block is compressible.
     pub fn is_incompressible(&self, block: &[u8]) -> bool {
