@@ -8,8 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-lpk-format = { path = "../lpk-format" }
-lpk-mmap-sys = { path = "../lpk-mmap-sys" }
+lpk-format = { path = "../lpk-format", version = "0.0.1" }
+lpk-mmap-sys = { path = "../lpk-mmap-sys", version = "0.0.1" }
 thiserror = "2.0.21"
 walkdir = "2.5.0"
 
