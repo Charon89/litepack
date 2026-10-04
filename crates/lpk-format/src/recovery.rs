@@ -1,15 +1,17 @@
-//! Recovery frames: Reed-Solomon shards over groups of the archive body, which let a
-//! reader rebuild damaged bytes (spec section 13).
+//! Recovery frames: Reed-Solomon shards over groups of whole frames of the archive
+//! body, which let a reader rebuild damaged bytes (spec section 13).
 //!
-//! Memory rules (independent of the archive size except where stated):
-//! - writer: one shard buffer, plus the encoder's work buffer for one group
-//!   ([`encoder_work_bytes`]), plus the recovery shards of every finished group
-//!   (`percent` of the covered length) until their frames are written;
+//! Memory rules (independent of the archive size):
+//! - writer: the shards of the open group (at most `group_shards * shard_len`
+//!   bytes, the data actually written), then that group's encoder
+//!   ([`encoder_work_bytes`]) and its recovery shards (`recovery_shards *
+//!   shard_len`), which are held only until the group's frame is written right
+//!   after the group;
 //! - repair: one shard while scanning, and for a group with damage the decoder's
-//!   buffer for one group ([`decoder_work_bytes`]).
+//!   buffer for that group ([`decoder_work_bytes`]).
 
 use crate::archive::Archive;
-use crate::envelope::{Refusal, Resources};
+use crate::envelope::{Refusal, Resources, DEFAULT_MEMORY};
 use crate::error::FormatError;
 use crate::frame::FrameKind;
 use crate::header::Header;
@@ -111,6 +113,10 @@ impl RecoveryOptions {
         if u64::from(self.group_shards) + u64::from(r) > u64::from(MAX_TOTAL_SHARDS) {
             return Err(bad_opt("recovery shards"));
         }
+        // A full group must be repairable within the default memory limit.
+        if decoder_work_bytes(self.group_shards, r, self.shard_len) > DEFAULT_MEMORY {
+            return Err(bad_opt("repair memory"));
+        }
         Ok(())
     }
 }
@@ -171,6 +177,10 @@ fn check_fields(
         return Err(bad("recovery_shards"));
     }
     if u64::from(group_shards) + u64::from(recovery_shards) > u64::from(MAX_TOTAL_SHARDS) {
+        return Err(bad("shard count"));
+    }
+    // The coding library's own limits on the shard counts.
+    if !ReedSolomonDecoder::supports(group_shards as usize, recovery_shards as usize) {
         return Err(bad("shard count"));
     }
     Ok(())
@@ -318,52 +328,38 @@ pub(crate) fn rs_error(e: reed_solomon_simd::Error) -> FormatError {
 /// One finished group: what its frame needs.
 pub(crate) struct Group {
     pub cover_len: u64,
+    /// Shards the group is coded with (the real ones: no padding is needed).
+    pub group_shards: u32,
+    pub recovery_shards: u32,
     pub hashes: Vec<[u8; 32]>,
     pub recovery: Vec<u8>,
 }
 
-/// Collects the bytes of the frames of the current group into shards and adds
-/// them to the group's encoder; the writer closes the group between frames.
-/// No covered byte is kept beyond one shard.
+/// Collects the bytes of the frames of the open group; the writer closes the
+/// group between frames, and only then is its encoder built, sized by the data
+/// actually written.
 pub(crate) struct GroupEncoder {
     shard_len: usize,
-    group_shards: u32,
-    recovery_shards: u32,
-    buf: Vec<u8>,
-    zero: Vec<u8>,
-    encoder: ReedSolomonEncoder,
-    in_group: u32,
-    group_bytes: u64,
-    hashes: Vec<[u8; 32]>,
+    cap_bytes: usize,
+    percent: u8,
+    data: Vec<u8>,
     peak_recovery: u64,
 }
 
 impl GroupEncoder {
-    pub(crate) fn new(o: &RecoveryOptions) -> Result<GroupEncoder, FormatError> {
-        let recovery_shards = group_recovery_shards(o.group_shards, o.percent);
-        let shard_len = o.shard_len as usize;
-        Ok(GroupEncoder {
-            shard_len,
-            group_shards: o.group_shards,
-            recovery_shards,
-            buf: Vec::with_capacity(shard_len),
-            zero: vec![0; shard_len],
-            encoder: ReedSolomonEncoder::new(
-                o.group_shards as usize,
-                recovery_shards as usize,
-                shard_len,
-            )
-            .map_err(rs_error)?,
-            in_group: 0,
-            group_bytes: 0,
-            hashes: Vec::new(),
+    pub(crate) fn new(o: &RecoveryOptions) -> GroupEncoder {
+        GroupEncoder {
+            shard_len: o.shard_len as usize,
+            cap_bytes: o.group_shards as usize * o.shard_len as usize,
+            percent: o.percent,
+            data: Vec::new(),
             peak_recovery: 0,
-        })
+        }
     }
 
-    /// Covered bytes held in memory right now (at most one shard).
+    /// Bytes of the open group held in memory (at most one group).
     pub(crate) fn buffered(&self) -> usize {
-        self.buf.len()
+        self.data.len()
     }
 
     /// Most bytes of recovery shards held at once so far (one group's).
@@ -373,75 +369,53 @@ impl GroupEncoder {
 
     /// Bytes of the open group so far.
     pub(crate) fn group_bytes(&self) -> u64 {
-        self.group_bytes
+        self.data.len() as u64
     }
 
-    fn complete(&mut self) -> Result<(), FormatError> {
-        if self.in_group >= self.group_shards {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+        if self.data.len() + bytes.len() > self.cap_bytes {
             return Err(FormatError::BadOptions {
                 reason: "group smaller than a block",
             });
         }
-        self.buf.resize(self.shard_len, 0);
-        self.hashes.push(*blake3::hash(&self.buf).as_bytes());
-        self.encoder
-            .add_original_shard(&self.buf)
-            .map_err(rs_error)?;
-        self.buf.clear();
-        self.in_group += 1;
+        self.data.extend_from_slice(bytes);
         Ok(())
     }
 
-    pub(crate) fn feed(&mut self, mut bytes: &[u8]) -> Result<(), FormatError> {
-        while !bytes.is_empty() {
-            let take = (self.shard_len - self.buf.len()).min(bytes.len());
-            self.buf.extend_from_slice(&bytes[..take]);
-            self.group_bytes += take as u64;
-            bytes = &bytes[take..];
-            if self.buf.len() == self.shard_len {
-                self.complete()?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Close the open group: pad it with zero shards and encode. `None` when
-    /// the group is empty.
+    /// Close the open group: hash its shards (the last padded with zeros) and
+    /// encode them. `None` when the group is empty.
     pub(crate) fn end_group(&mut self) -> Result<Option<Group>, FormatError> {
-        if !self.buf.is_empty() {
-            self.complete()?;
-        }
-        if self.in_group == 0 {
+        if self.data.is_empty() {
             return Ok(None);
         }
-        for _ in self.in_group..self.group_shards {
-            self.encoder
-                .add_original_shard(&self.zero)
-                .map_err(rs_error)?;
+        let cover_len = self.data.len() as u64;
+        self.data
+            .resize(self.data.len().next_multiple_of(self.shard_len), 0);
+        let shards = self.data.len() / self.shard_len;
+        let recovery_shards = group_recovery_shards(shards as u32, self.percent);
+        let mut encoder = ReedSolomonEncoder::new(shards, recovery_shards as usize, self.shard_len)
+            .map_err(rs_error)?;
+        let mut hashes = Vec::with_capacity(shards);
+        for s in self.data.chunks_exact(self.shard_len) {
+            hashes.push(*blake3::hash(s).as_bytes());
+            encoder.add_original_shard(s).map_err(rs_error)?;
         }
-        let mut recovery = Vec::with_capacity(self.recovery_shards as usize * self.shard_len);
+        let mut recovery = Vec::with_capacity(recovery_shards as usize * self.shard_len);
         {
-            let result = self.encoder.encode().map_err(rs_error)?;
+            let result = encoder.encode().map_err(rs_error)?;
             for s in result.recovery_iter() {
                 recovery.extend_from_slice(s);
             }
         }
         self.peak_recovery = self.peak_recovery.max(recovery.len() as u64);
-        self.encoder
-            .reset(
-                self.group_shards as usize,
-                self.recovery_shards as usize,
-                self.shard_len,
-            )
-            .map_err(rs_error)?;
-        let g = Group {
-            cover_len: self.group_bytes,
-            hashes: std::mem::take(&mut self.hashes),
+        self.data.clear();
+        Ok(Some(Group {
+            cover_len,
+            group_shards: shards as u32,
+            recovery_shards,
+            hashes,
             recovery,
-        };
-        self.in_group = 0;
-        self.group_bytes = 0;
-        Ok(Some(g))
+        }))
     }
 }
 
@@ -848,6 +822,10 @@ mod tests {
         assert_eq!(r(patch(24, &32769u32.to_le_bytes())), "group_shards");
         assert_eq!(r(patch(28, &0u32.to_le_bytes())), "recovery_shards");
         assert_eq!(r(patch(28, &70000u32.to_le_bytes())), "shard count");
+        // Inside our bounds (sum 65000) but outside the coding library's.
+        let mut lib = patch(24, &32000u32.to_le_bytes());
+        lib[28..32].copy_from_slice(&33000u32.to_le_bytes());
+        assert_eq!(r(lib), "shard count");
         assert_eq!(reason(RecoveryFrame::parse(&good, 231)), "cover range");
         assert!(RecoveryFrame::parse(&good, 232).is_ok());
         assert_eq!(r(patch(0, &u64::MAX.to_le_bytes())), "cover range");

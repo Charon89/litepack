@@ -124,9 +124,14 @@ fn recovery_frames_sit_between_the_data_frames_they_cover() {
         assert_eq!(f.cover_offset, prev_end, "frame {k}");
         assert_eq!(f.cover_offset + f.cover_len, loc.offset, "frame {k}");
         assert!(f.cover_len <= u64::from(GROUP * SHARD));
-        assert_eq!(f.group_shards, GROUP);
-        assert_eq!(f.recovery_shards, 2); // ceil(16 * 10 / 100)
+        // The group is coded with the shards actually written, no padding.
         assert_eq!(u64::from(f.data_shards), f.cover_len.div_ceil(4096));
+        assert_eq!(f.group_shards, f.data_shards);
+        assert!(f.data_shards <= GROUP);
+        assert_eq!(
+            f.recovery_shards,
+            lpk_format::group_recovery_shards(f.data_shards, 10)
+        );
         // The data frames inside the range tile it; none straddles an end.
         let inside: Vec<&FrameLocation> = data
             .iter()
@@ -161,8 +166,9 @@ fn recovery_frames_sit_between_the_data_frames_they_cover() {
             assert_eq!(f.shard_hashes[i as usize], *blake3::hash(&s).as_bytes());
             shards.push(s);
         }
-        shards.resize(GROUP as usize, vec![0; SHARD as usize]);
-        let want = reed_solomon_simd::encode(GROUP as usize, 2, &shards).unwrap();
+        let want =
+            reed_solomon_simd::encode(f.data_shards as usize, f.recovery_shards as usize, &shards)
+                .unwrap();
         let got: Vec<&[u8]> = f.recovery.chunks(SHARD as usize).collect();
         assert_eq!(got.len(), want.len());
         for (g, w) in got.iter().zip(&want) {
@@ -192,6 +198,15 @@ fn bad_options_are_refused() {
     refused(&|o| {
         o.recovery.group_shards = 32768;
         o.recovery.shard_len = 65536;
+    });
+    // A full group whose decoder buffer would need more than 2 GiB (about 2.5 GB).
+    refused(&|o| {
+        o.recovery = RecoveryOptions {
+            percent: 20,
+            shard_len: 38336,
+            group_shards: 28000,
+        };
+        o.block_size = 1 << 20;
     });
     // A block (here 64 KiB) does not fit in a group of 16 * 4096 bytes.
     refused(&|o| o.block_size = 64 * 1024);
@@ -252,14 +267,14 @@ fn the_writer_holds_at_most_one_group_of_buffers() {
         // The open group never exceeds its capacity.
         assert!(w.recovery_group_bytes() <= group_bytes);
     }
-    assert!(peak_shard <= 1 << 16, "peak {peak_shard}");
+    assert!(peak_shard <= group_bytes as usize, "peak {peak_shard}");
     let summary = w.finish().unwrap();
     // At most one group's recovery shards were ever held, finish included.
-    assert_eq!(summary.recovery_peak, 5 << 16);
-    // The encoder's work buffer is one group's, whatever the archive's size.
+    assert_eq!(summary.recovery_peak, 4 << 16); // 17 shards per block group, ceil(17 * 20 / 100) = 4
+                                                // The encoder's work buffer is one group's, whatever the archive's size.
     assert_eq!(
-        lpk_format::encoder_work_bytes(24, 5, 1 << 16),
-        24 << 16 // 24 is already a multiple of next_pow2(5) = 8
+        lpk_format::encoder_work_bytes(17, 4, 1 << 16),
+        20 << 16 // 17 rounded up to a multiple of next_pow2(4) = 4
     );
     assert!(summary.archive_len > 20 << 20);
     let mut a = open(&sink);
@@ -462,7 +477,8 @@ fn a_group_the_decoder_cannot_fit_in_memory_is_refused() {
     let frames = frames_of(&good);
     let mut bad = good.clone();
     smash_shard(&mut bad, &frames[0], 0);
-    let needed = lpk_format::decoder_work_bytes(GROUP, 2, SHARD);
+    let needed =
+        lpk_format::decoder_work_bytes(frames[0].group_shards, frames[0].recovery_shards, SHARD);
     let tight = Resources {
         memory: needed - 1,
         ..Resources::default()

@@ -287,7 +287,7 @@ impl<W: Write> Writer<W> {
             return Err(bad_options("group smaller than a block"));
         }
         let spool = if options.recovery.percent > 0 {
-            Some(GroupEncoder::new(&options.recovery)?)
+            Some(GroupEncoder::new(&options.recovery))
         } else {
             None
         };
@@ -313,12 +313,12 @@ impl<W: Write> Writer<W> {
         })
     }
 
-    /// Covered bytes the writer holds in memory for recovery right now: never
-    /// more than one shard (`recovery.shard_len`), whatever the archive's
-    /// size; 0 without recovery. Memory rule: that shard buffer, the
-    /// encoder's work buffer for one group
-    /// ([`crate::recovery::encoder_work_bytes`]) and that group's recovery
-    /// shards while its frame is written; independent of the archive's size.
+    /// Covered bytes the writer holds in memory for recovery right now: the
+    /// open group's, never more than `group_shards * shard_len`, whatever the
+    /// archive's size; 0 without recovery. Memory rule: those bytes, then the
+    /// group's encoder ([`crate::recovery::encoder_work_bytes`]) and its
+    /// recovery shards (`recovery_shards * shard_len`) while its frame is
+    /// written; independent of the archive's size.
     pub fn recovery_buffered(&self) -> usize {
         self.out.spool.as_ref().map_or(0, GroupEncoder::buffered)
     }
@@ -367,8 +367,8 @@ impl<W: Write> Writer<W> {
             cover_len: g.cover_len,
             shard_len: o.shard_len,
             data_shards: g.hashes.len() as u32,
-            group_shards: o.group_shards,
-            recovery_shards: crate::recovery::group_recovery_shards(o.group_shards, o.percent),
+            group_shards: g.group_shards,
+            recovery_shards: g.recovery_shards,
             shard_hashes: g.hashes,
             recovery: Vec::new(),
         };

@@ -929,8 +929,10 @@ than `group_shards * shard_len` bytes; the last group closes before the index, s
 when recovery is on. A single frame longer than a group cannot be written (`BadOptions`, `reason` `group smaller
 than a block`; the reference writer also refuses at the start a `block_size` plus 4096 above that length).
 The group's bytes are cut into shards of `shard_len` bytes (the last padded with zeros; the padding is never
-stored). A group is coded as if it had `group_shards` data shards: the shards after the real ones are implicit
-all-zero shards, never written, and a reader pads in the same way.
+stored). The frame's `group_shards` is the number of data shards the group is coded with. The reference writer
+sizes it by the data actually written (`group_shards` equals `data_shards`, no padding); a reader accepts a frame
+whose `group_shards` is larger, in which case the shards after the real ones are implicit all-zero shards, never
+written, and the reader pads in the same way.
 
 A reader checks the tiling: the index lists the recovery frames in ascending order and the last ends where the
 index starts (`BadFrameLocation`, `what` `recovery`), and each frame's range starts where the previous frame ends
@@ -941,9 +943,13 @@ and ends where the frame itself starts (`BadRecovery`, `reason` `coverage`).
 `shard_len` is a multiple of 64, not 0 and at most 16777216 (16 MiB). `group_shards` is 1 to 32768 and
 `group_shards * shard_len` is at most 1073741824 (1 GiB). `data_shards`, the real shards of a group, is
 `ceil(cover_len / shard_len)` and between 1 and `group_shards`. `recovery_shards` is at least 1 and
-`group_shards + recovery_shards` is at most 65535. The reference writer takes `recovery_shards =
-ceil(group_shards * percent / 100)` (at least 1) with `percent` from 1 to 20 (0 means no recovery frames); its
-defaults are `shard_len` 65536 and `group_shards` 2048 (128 MiB, so that the default 64 MiB block fits). It refuses options outside these bounds (`BadOptions`).
+`group_shards + recovery_shards` is at most 65535, and the pair must be one the coding library supports (a frame
+that is not is `BadRecovery`, `reason` `shard count`). The reference writer takes `recovery_shards =
+ceil(group_shards * percent / 100)` (at least 1) from the frame's own `group_shards`, with `percent` from 1 to 20
+(0 means no recovery frames). Its options are `percent`, `shard_len` (default 65536) and `group_shards`, the most
+shards a group may take (default 2048: 128 MiB, so that the default 64 MiB block fits). It refuses options outside
+these bounds, and options whose full group would need more than the default decoder memory limit (2 GiB) to
+repair (`BadOptions`, `reason` `repair memory`).
 
 ### Payload
 
@@ -971,13 +977,14 @@ index's list; the repairing reader checks it and counts a frame that breaks it a
 
 ### Writing and memory
 
-A writer feeds the bytes of the open group to a one-shard buffer, hashes each shard when it completes and adds it
-to the group's encoder, which is built up front with `group_shards` originals and `recovery_shards`. When the group
-closes the writer pads it with zero shards, encodes it and writes its frame at once; it does not keep covered
-bytes and uses no temporary file. The index lists the frames and `max_frame_payload` admits them (section 7).
-Memory rule: one shard buffer; the encoder's work buffer for one group, `work_count * shard_len` bytes where
-`work_count` is `group_shards` rounded up to a multiple of `next_pow2(recovery_shards)`; and that group's recovery
-shards (`recovery_shards * shard_len`) while its frame is written. All of it is independent of the archive's size.
+A writer keeps the bytes of the open group (at most `group_shards * shard_len`). When the group closes it cuts
+them into shards, hashes each, builds the encoder for exactly that many data shards and the group's
+`recovery_shards`, encodes, and writes the frame at once; nothing is kept after that and no temporary file is used.
+The index lists the frames and `max_frame_payload` admits them (section 7). Memory rule: the open group's bytes;
+the encoder's work buffer for that group, `work_count * shard_len` bytes where `work_count` is the group's shards
+rounded up to a multiple of `next_pow2(recovery_shards)`; and the group's recovery shards, `recovery_shards *
+shard_len` bytes, held until the frame is written. A small archive therefore costs in proportion to its size, and
+no term grows with the archive.
 
 ### Repair
 
