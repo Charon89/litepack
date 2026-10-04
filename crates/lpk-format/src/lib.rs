@@ -31,7 +31,7 @@ pub mod varint;
 pub mod writer;
 pub mod zstd;
 
-pub use archive::{Archive, Diagnosis};
+pub use archive::{generation_rules_table, rollback, Archive, Diagnosis, Generation};
 pub use chunk::{
     chunk_record_table, verify_file, verify_range, ChunkIndex, ChunkIter, ChunkLookup, ChunkPlace,
     ChunkRecord, ChunkSource, ChunkTable, ChunkTableWriter, MIN_CHUNK_RECORD_LEN,
@@ -43,6 +43,7 @@ pub use merkle::{
 pub use priors::{prior_id, prior_list_table, MemoryPriors, NoPriors, PriorStore};
 pub use trailer::{trailer_layout_table, Trailer, TRAILER_FRAME_LEN, TRAILER_PAYLOAD_LEN};
 
+pub use crypto::index_sequence;
 pub use crypto::{
     associated_data, derive_nonce, key_slot_table, sealing_rule, sealing_rules_table, ArchiveKey,
     Argon2Params, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE, KEY_SLOT_LEN,

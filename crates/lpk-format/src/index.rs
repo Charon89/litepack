@@ -350,7 +350,7 @@ impl Index {
         Ok(out)
     }
 
-    /// Parse and validate an index payload found at `index_offset`: the block
+    /// Parse and validate an index payload of generation 0 found at `index_offset`: the block
     /// count is bounded by the bytes left, the blocks must partition the chunk
     /// table, lie between the header and the index, and carry the right
     /// lengths, the envelope must agree with the block table and the payload
@@ -366,6 +366,18 @@ impl Index {
     pub fn parse_with_chunks(
         payload: &[u8],
         index_offset: u64,
+    ) -> Result<(Index, ChunkIndex), FormatError> {
+        Self::parse_with_chunks_in(payload, index_offset, 0)
+    }
+
+    /// [`Index::parse_with_chunks`] for the index of generation `generation`.
+    /// In generation 0 the last recovery frame ends where the index starts;
+    /// a later generation written without recovery lists the earlier ones, so
+    /// the last one then ends somewhere before.
+    pub fn parse_with_chunks_in(
+        payload: &[u8],
+        index_offset: u64,
+        generation: u64,
     ) -> Result<(Index, ChunkIndex), FormatError> {
         let (table, used) = ChunkTable::parse_prefix(payload)?;
         let mut s = &payload[used..];
@@ -440,6 +452,7 @@ impl Index {
         // where the index's offset is known (`encode` passes `u64::MAX`).
         let ascending = recovery.windows(2).all(|w| w[0].offset < w[1].offset);
         let ends_at_index = index_offset == u64::MAX
+            || generation > 0
             || recovery
                 .last()
                 .is_none_or(|l| l.offset.saturating_add(l.len) == index_offset);

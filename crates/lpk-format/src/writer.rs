@@ -1,9 +1,10 @@
 //! Writing an archive as a stream (spec section 9): header, `ChunkData` blocks,
 //! entry table, index, trailer. The writer never seeks and never reads back.
 
+use crate::archive::Archive;
 use crate::chunk::{ChunkRecord, ChunkTableWriter};
 use crate::crypto::{
-    sealing_rule, ArchiveKey, Argon2Params, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE,
+    index_sequence, sealing_rule, ArchiveKey, Argon2Params, Credentials, KeySlot, Sealer, Suite,
 };
 use crate::entry::{check_entry, Entry, EntryFlags, EntryKind, EntryTableWriter};
 use crate::envelope::{ArchiveSizes, Envelope};
@@ -16,11 +17,11 @@ use crate::merkle::merkle_root;
 use crate::primitive::{GraphResources, PrimitiveId};
 use crate::record::{Record, RecordsWriter};
 use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
-use crate::trailer::Trailer;
+use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use crate::varint;
 use rand::RngCore;
-use std::collections::BTreeSet;
-use std::io::{Read, Write};
+use std::collections::{BTreeSet, HashMap};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Smallest `chunk_size` a writer accepts.
 pub const MIN_CHUNK_SIZE: u64 = 4096;
@@ -223,6 +224,24 @@ pub struct WriterSummary {
     pub archive_len: u64,
     /// Most bytes of recovery shards held at once (one group's; 0 without recovery).
     pub recovery_peak: u64,
+    /// The generation written: 0 for [`Writer::new`], one more than the
+    /// archive's for [`Writer::append`].
+    pub generation: u64,
+    /// Chunks this write added to the chunk table (all of them in generation 0).
+    pub new_chunks: u64,
+    /// Chunks an append found in the old chunk table and referenced instead of
+    /// writing (always 0 outside [`Writer::append`]).
+    pub reused_chunks: u64,
+}
+
+/// What an append starts from: the previous generation, read from the archive.
+struct Base {
+    generation: u64,
+    trailer_offset: u64,
+    chunks: u64,
+    by_hash: HashMap<[u8; 32], u64>,
+    entries: Vec<Entry>,
+    records: Option<FrameLocation>,
 }
 
 /// Builds an archive in one pass over a stream of entries.
@@ -253,6 +272,16 @@ pub struct Writer<W: Write> {
     seq: u64,
     /// BLAKE3 of the payload of the frame written last, as stored.
     last_hash: [u8; 32],
+    /// True when the entry table of an encrypted archive is in clear (section 14).
+    listable: bool,
+    /// The previous generation (an append), or none.
+    base: Option<Base>,
+    /// Paths an append removes from the entry table.
+    deleted: BTreeSet<String>,
+    /// Chunks of this write an append took from the old table.
+    reused: u64,
+    /// Window and BWT block maxima of the earlier generations' graphs.
+    old_graph: GraphResources,
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -273,6 +302,52 @@ impl<W: Write> std::fmt::Debug for Writer<W> {
 
 fn bad_options(reason: &'static str) -> FormatError {
     FormatError::BadOptions { reason }
+}
+
+/// Check `options` the way a reader's rules need them checked; `record_count`
+/// is how many records the archive will have. Returns the encoder's graph and
+/// the recovery spool.
+fn check_options(
+    options: &WriterOptions,
+    record_count: u64,
+) -> Result<(Graph, Option<GroupEncoder>), FormatError> {
+    if options.chunk_size < MIN_CHUNK_SIZE {
+        return Err(bad_options("chunk_size below 4 KiB"));
+    }
+    if options.block_size < options.chunk_size {
+        return Err(bad_options("block_size below chunk_size"));
+    }
+    let graph = options.encoder.graph();
+    if graph.steps.is_empty() || graph.steps.len() > MAX_STEPS {
+        return Err(FormatError::BadGraph {
+            reason: "step count",
+        });
+    }
+    for s in &graph.steps {
+        s.primitive.validate_params(&s.params)?;
+    }
+    graph.check_records(record_count)?;
+    // A record the reader would refuse is refused here.
+    for (i, r) in options.records.iter().enumerate() {
+        if r.kind != r.body.kind() {
+            return Err(bad_options("record kind"));
+        }
+        Record::parse(r.kind, &r.encode(), i as u64)?;
+    }
+    options.recovery.check()?;
+    // A block (plus its frame's overhead) must fit in one group.
+    if options.recovery.percent > 0
+        && options.block_size.saturating_add(4096)
+            > u64::from(options.recovery.group_shards) * u64::from(options.recovery.shard_len)
+    {
+        return Err(bad_options("group smaller than a block"));
+    }
+    let spool = if options.recovery.percent > 0 {
+        Some(GroupEncoder::new(&options.recovery))
+    } else {
+        None
+    };
+    Ok((graph, spool))
 }
 
 impl<W: Write> Writer<W> {
@@ -312,42 +387,7 @@ impl<W: Write> Writer<W> {
         chunker: Box<dyn Chunker>,
         rng: &mut dyn RngCore,
     ) -> Result<Self, FormatError> {
-        if options.chunk_size < MIN_CHUNK_SIZE {
-            return Err(bad_options("chunk_size below 4 KiB"));
-        }
-        if options.block_size < options.chunk_size {
-            return Err(bad_options("block_size below chunk_size"));
-        }
-        let graph = options.encoder.graph();
-        if graph.steps.is_empty() || graph.steps.len() > MAX_STEPS {
-            return Err(FormatError::BadGraph {
-                reason: "step count",
-            });
-        }
-        for s in &graph.steps {
-            s.primitive.validate_params(&s.params)?;
-        }
-        graph.check_records(options.records.len() as u64)?;
-        // A record the reader would refuse is refused here.
-        for (i, r) in options.records.iter().enumerate() {
-            if r.kind != r.body.kind() {
-                return Err(bad_options("record kind"));
-            }
-            Record::parse(r.kind, &r.encode(), i as u64)?;
-        }
-        options.recovery.check()?;
-        // A block (plus its frame's overhead) must fit in one group.
-        if options.recovery.percent > 0
-            && options.block_size.saturating_add(4096)
-                > u64::from(options.recovery.group_shards) * u64::from(options.recovery.shard_len)
-        {
-            return Err(bad_options("group smaller than a block"));
-        }
-        let spool = if options.recovery.percent > 0 {
-            Some(GroupEncoder::new(&options.recovery))
-        } else {
-            None
-        };
+        let (graph, spool) = check_options(&options, options.records.len() as u64)?;
         let mut flags = HeaderFlags::EMPTY;
         let mut sealer = None;
         let mut slot = None;
@@ -369,6 +409,7 @@ impl<W: Write> Writer<W> {
             )?);
             sealer = Some(Sealer::new(seal.suite, key, options.archive_id));
         }
+        let listable = options.seal.as_ref().is_some_and(|s| s.listable);
         Header::new(flags, options.archive_id).write(&mut out)?;
         // The covered range starts right after the header.
         let out = Tee { inner: out, spool };
@@ -391,6 +432,11 @@ impl<W: Write> Writer<W> {
             sealer,
             seq: 0,
             last_hash: [0; 32],
+            listable,
+            base: None,
+            deleted: BTreeSet::new(),
+            reused: 0,
+            old_graph: GraphResources::default(),
         };
         if let Some(slot) = slot {
             // The key slot is the first frame, in clear.
@@ -403,6 +449,133 @@ impl<W: Write> Writer<W> {
             w.pos += frame.encoded_len();
             w.seq += 1;
         }
+        Ok(w)
+    }
+
+    /// Start the next generation of `existing` (spec section 15): `out` is the
+    /// same file opened for writing and positioned at its end (the archive's
+    /// length is where the new frames start). The new frames, index and
+    /// trailer are appended after the previous trailer; the new index lists the
+    /// whole archive, so [`Writer::finish`] needs nothing from the old file.
+    ///
+    /// `add_file`, `add_directory` and `add_symlink` add entries (a path that
+    /// already exists is replaced; the paths of this call stay in sorted
+    /// order among themselves), [`Writer::delete_path`] removes one. A chunk
+    /// whose BLAKE3 and length match a chunk of the old table is referenced
+    /// instead of written; chunks within the appended data are not deduplicated
+    /// against each other. `options.archive_id` and `options.seal` are ignored
+    /// (the archive's own are kept); an encrypted archive needs `credentials`
+    /// (and `existing` opened with them: [`FormatError::AppendNeedsCredentials`]).
+    /// `options.records` replaces the records frame when non-empty (it must keep
+    /// the old records at their positions); empty keeps the old frame.
+    ///
+    /// Memory: the old chunk table's hashes (`HashMap`, 32 bytes of key and 8 of
+    /// value per chunk), its records (`ChunkRecord`, 40 bytes per chunk) and
+    /// the old entries are held until `finish`.
+    pub fn append<R: Read + Seek>(
+        existing: Archive<R>,
+        out: W,
+        options: WriterOptions,
+        credentials: Option<&Credentials>,
+    ) -> Result<Self, FormatError> {
+        let size = usize::try_from(options.chunk_size).map_err(|_| bad_options("chunk_size"))?;
+        Self::append_with_chunker(
+            existing,
+            out,
+            options,
+            credentials,
+            Box::new(FixedChunker::new(size)),
+        )
+    }
+
+    /// [`Writer::append`] with another chunker.
+    pub fn append_with_chunker<R: Read + Seek>(
+        mut existing: Archive<R>,
+        out: W,
+        mut options: WriterOptions,
+        credentials: Option<&Credentials>,
+        chunker: Box<dyn Chunker>,
+    ) -> Result<Self, FormatError> {
+        if existing.is_keyless() || (existing.is_encrypted() && credentials.is_none()) {
+            return Err(FormatError::AppendNeedsCredentials);
+        }
+        options.archive_id = existing.header().archive_id;
+        options.seal = None;
+        let record_count = if options.records.is_empty() {
+            existing.record_count()?
+        } else {
+            options.records.len() as u64
+        };
+        let (graph, spool) = check_options(&options, record_count)?;
+        let end = existing.raw_reader().seek(SeekFrom::End(0))?;
+        let trailer_offset = end
+            .checked_sub(TRAILER_FRAME_LEN)
+            .ok_or(FormatError::NoTrailer)?;
+        let generation = existing.trailer().generation;
+        let entries = {
+            let t = existing.entry_table()?;
+            t.table()?.iter().collect::<Result<Vec<_>, _>>()?
+        };
+        let table = existing.chunks();
+        let mut records = Vec::new();
+        for i in 0..table.len() {
+            records.push(table.record(i).ok_or(FormatError::ChunkIndexOutOfRange {
+                chunk: i,
+                len: table.len(),
+            })?);
+        }
+        let by_hash = table.by_hash();
+        let index = existing.index();
+        // Frames of one archive are numbered by position: the old index and the
+        // old trailer follow the last frame the index lists.
+        let last = index
+            .blocks
+            .iter()
+            .map(|b| b.sequence)
+            .chain([index.entry_table.sequence])
+            .chain(index.records.map(|r| r.sequence))
+            .chain(index.recovery.iter().map(|f| f.sequence))
+            .max()
+            .unwrap_or(0);
+        let seq = last
+            .checked_add(3)
+            .ok_or(FormatError::BadOptions { reason: "sequence" })?;
+        let base = Base {
+            generation,
+            trailer_offset,
+            chunks: records.len() as u64,
+            by_hash,
+            entries,
+            records: index.records,
+        };
+        let w = Writer {
+            out: Tee { inner: out, spool },
+            chunker,
+            pos: end,
+            entries: Vec::new(),
+            records,
+            blocks: index.blocks.clone(),
+            priors: index.priors.iter().copied().collect(),
+            graph,
+            pending: Vec::new(),
+            pending_chunks: 0,
+            failed: None,
+            bad_chunk: None,
+            recovery_locs: index.recovery.clone(),
+            cover_start: end,
+            sealer: existing.sealer().cloned(),
+            seq,
+            last_hash: [0; 32],
+            listable: existing.is_listable(),
+            base: Some(base),
+            deleted: BTreeSet::new(),
+            reused: 0,
+            old_graph: GraphResources {
+                window: index.envelope.max_window,
+                bwt_block: index.envelope.max_bwt_block,
+            },
+            options,
+        };
         Ok(w)
     }
 
@@ -419,7 +592,7 @@ impl<W: Write> Writer<W> {
     }
 
     fn listable(&self) -> bool {
-        self.options.seal.as_ref().is_some_and(|s| s.listable)
+        self.listable
     }
 
     /// Covered bytes the writer holds in memory for recovery right now: the
@@ -639,6 +812,20 @@ impl<W: Write> Writer<W> {
 
     fn add_chunk(&mut self, data: &[u8]) -> Result<u64, FormatError> {
         let len = data.len() as u64;
+        // An append reuses a chunk of the old table with the same hash and length.
+        if let Some(base) = &self.base {
+            let hash = *blake3::hash(data).as_bytes();
+            if let Some(&old) = base.by_hash.get(&hash) {
+                let same_len = usize::try_from(old)
+                    .ok()
+                    .and_then(|i| self.records.get(i))
+                    .is_some_and(|r| r.plain_len == len);
+                if same_len {
+                    self.reused += 1;
+                    return Ok(old);
+                }
+            }
+        }
         if self.pending_chunks > 0 && self.pending.len() as u64 + len > self.options.block_size {
             self.flush_block()?;
         }
@@ -777,17 +964,56 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
+    /// Append only: remove `path` from the entry table of the new generation
+    /// (an exact path; a directory's children are removed one by one). The
+    /// chunks of a removed file stay in the chunk table, unreferenced. A path
+    /// that is also added in this call keeps the new entry.
+    pub fn delete_path(&mut self, path: &str) -> Result<(), FormatError> {
+        self.check_alive()?;
+        if self.base.is_none() {
+            return Err(bad_options("delete_path outside an append"));
+        }
+        self.deleted.insert(path.to_string());
+        Ok(())
+    }
+
+    /// The entries of the new generation: the old ones that were neither
+    /// deleted nor replaced, merged with the new ones in path order.
+    fn merged_entries(&mut self) -> Vec<Entry> {
+        let new = std::mem::take(&mut self.entries);
+        let Some(base) = &mut self.base else {
+            return new;
+        };
+        let old = std::mem::take(&mut base.entries);
+        let mut out = Vec::with_capacity(old.len() + new.len());
+        let mut new = new.into_iter().peekable();
+        for e in old {
+            while let Some(n) = new.next_if(|n| n.path.as_bytes() < e.path.as_bytes()) {
+                out.push(n);
+            }
+            if let Some(n) = new.next_if(|n| n.path == e.path) {
+                out.push(n);
+            } else if !self.deleted.contains(&e.path) {
+                out.push(e);
+            }
+        }
+        out.extend(new);
+        out
+    }
+
     /// The last block, the entry table and the records frame: the end of the
     /// range recovery covers.
     fn write_covered_tail(
         &mut self,
     ) -> Result<(FrameLocation, [u8; 32], Option<FrameLocation>), FormatError> {
         self.flush_block()?;
+        self.entries = self.merged_entries();
         let table = EntryTableWriter::encode(&self.entries)?;
         let entry_table = self.write_frame(FrameKind::EntryTable, table)?;
         let entry_hash = self.last_hash;
         let records = if self.options.records.is_empty() {
-            None
+            // An append keeps the old records frame when it has none of its own.
+            self.base.as_ref().and_then(|b| b.records)
         } else {
             let payload = RecordsWriter::encode(&self.options.records);
             Some(self.write_frame(FrameKind::Records, payload)?)
@@ -816,8 +1042,8 @@ impl<W: Write> Writer<W> {
         let max_plain = self.blocks.iter().map(|b| b.plain_len).max().unwrap_or(0);
         let (g, e) = (self.graph.resources(), self.options.encoder.resources());
         let graph = GraphResources {
-            window: g.window.max(e.window),
-            bwt_block: g.bwt_block.max(e.bwt_block),
+            window: g.window.max(e.window).max(self.old_graph.window),
+            bwt_block: g.bwt_block.max(e.bwt_block).max(self.old_graph.bwt_block),
         };
         let mut index = Index {
             chunk_table: ChunkTableWriter::encode(recs).into(),
@@ -865,10 +1091,15 @@ impl<W: Write> Writer<W> {
         };
         // The index is sealed under a fixed sequence: the trailer cannot name
         // its position. The trailer's hash covers the payload as stored.
+        let generation = self.base.as_ref().map_or(0, |b| b.generation + 1);
         let (flags, payload) = match &self.sealer {
             Some(s) => (
                 FrameFlags::SEALED,
-                s.seal(&payload, FrameKind::Index as u16, INDEX_SEQUENCE)?,
+                s.seal(
+                    &payload,
+                    FrameKind::Index as u16,
+                    index_sequence(generation),
+                )?,
             ),
             None => (FrameFlags::EMPTY, payload),
         };
@@ -878,18 +1109,23 @@ impl<W: Write> Writer<W> {
             index_offset: at.offset,
             index_len: at.len,
             index_hash,
-            generation: 0,
+            generation,
             archive_id: self.options.archive_id,
+            previous_trailer_offset: self.base.as_ref().map_or(0, |b| b.trailer_offset),
         }
         .write(&mut self.out)?;
-        self.pos += crate::trailer::TRAILER_FRAME_LEN;
+        self.pos += TRAILER_FRAME_LEN;
         self.out.flush()?;
+        let old_chunks = self.base.as_ref().map_or(0, |b| b.chunks);
         Ok(WriterSummary {
             entries: self.entries.len() as u64,
             chunks: self.records.len() as u64,
             blocks: index.blocks.len() as u64,
             archive_len: self.pos,
             recovery_peak,
+            generation,
+            new_chunks: self.records.len() as u64 - old_chunks,
+            reused_chunks: self.reused,
         })
     }
 }

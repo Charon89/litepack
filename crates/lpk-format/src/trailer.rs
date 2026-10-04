@@ -5,9 +5,9 @@ use crate::frame::{Frame, FrameFlags, FrameKind};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Length of the trailer payload in bytes.
-pub const TRAILER_PAYLOAD_LEN: usize = 72;
+pub const TRAILER_PAYLOAD_LEN: usize = 80;
 /// Length of the whole trailer frame: kind (2), flags (2), payload length
-/// varint (1), payload (72) and hash (32).
+/// varint (1), payload (80) and hash (32).
 pub const TRAILER_FRAME_LEN: u64 = 2 + 2 + 1 + TRAILER_PAYLOAD_LEN as u64 + 32;
 
 const FRAME_LEN: usize = TRAILER_FRAME_LEN as usize;
@@ -23,10 +23,13 @@ pub struct Trailer {
     pub index_len: u64,
     /// BLAKE3-256 of the index frame's payload.
     pub index_hash: [u8; 32],
-    /// 0 for an archive written in one go; later appends increment it.
+    /// 0 for the first write; every append adds one.
     pub generation: u64,
     /// Must equal the header's `archive_id`.
     pub archive_id: [u8; 16],
+    /// Absolute offset of the previous generation's trailer frame; 0 for
+    /// generation 0 (spec section 15).
+    pub previous_trailer_offset: u64,
 }
 
 impl Trailer {
@@ -37,6 +40,7 @@ impl Trailer {
         p.extend_from_slice(&self.index_hash);
         p.extend_from_slice(&self.generation.to_le_bytes());
         p.extend_from_slice(&self.archive_id);
+        p.extend_from_slice(&self.previous_trailer_offset.to_le_bytes());
         p
     }
 
@@ -80,6 +84,7 @@ impl Trailer {
             index_hash,
             generation: u(48),
             archive_id,
+            previous_trailer_offset: u(72),
         })
     }
 
@@ -91,7 +96,13 @@ impl Trailer {
         if archive_len < TRAILER_FRAME_LEN {
             return Err(FormatError::NoTrailer);
         }
-        r.seek(SeekFrom::Start(archive_len - TRAILER_FRAME_LEN))?;
+        Self::read_at(r, archive_len - TRAILER_FRAME_LEN)
+    }
+
+    /// Read the trailer frame that starts at `offset`; the errors are those of
+    /// [`Trailer::read_tail`].
+    pub fn read_at(r: &mut (impl Read + Seek), offset: u64) -> Result<Trailer, FormatError> {
+        r.seek(SeekFrom::Start(offset))?;
         let mut b = [0u8; FRAME_LEN];
         read_exact_or(r, &mut b, "trailer")?;
         Self::parse_frame(&b)
@@ -105,8 +116,9 @@ pub fn trailer_layout_table() -> String {
          | 0 | 8 | index_offset | absolute offset of the index frame (u64, little-endian) |\n\
          | 8 | 8 | index_len | whole encoded length of the index frame (u64) |\n\
          | 16 | 32 | index_hash | BLAKE3-256 of the index frame's payload |\n\
-         | 48 | 8 | generation | 0 for an archive written in one go (u64) |\n\
-         | 56 | 16 | archive_id | must equal the header's archive_id |\n",
+         | 48 | 8 | generation | 0 for the first write, one more for every append (u64) |\n\
+         | 56 | 16 | archive_id | must equal the header's archive_id |\n\
+         | 72 | 8 | previous_trailer_offset | absolute offset of the previous generation's trailer frame; 0 for generation 0 (u64) |\n",
     )
 }
 
@@ -122,6 +134,7 @@ mod tests {
             index_hash: [7; 32],
             generation: 3,
             archive_id: [9; 16],
+            previous_trailer_offset: 777,
         }
     }
 
@@ -133,8 +146,8 @@ mod tests {
 
     #[test]
     fn constants_and_round_trip() {
-        assert_eq!(TRAILER_FRAME_LEN, 109);
-        assert_eq!(TRAILER_PAYLOAD_LEN, 72);
+        assert_eq!(TRAILER_FRAME_LEN, 117);
+        assert_eq!(TRAILER_PAYLOAD_LEN, 80);
         let t = sample();
         let b = bytes(&t);
         assert_eq!(b.len() as u64, TRAILER_FRAME_LEN);
@@ -169,7 +182,7 @@ mod tests {
     #[test]
     fn flipped_hash_and_payload_bytes() {
         let b = bytes(&sample());
-        for at in [HASH_AT, HASH_AT + 31, PAYLOAD_AT, PAYLOAD_AT + 40] {
+        for at in [HASH_AT, HASH_AT + 31, PAYLOAD_AT, PAYLOAD_AT + 75] {
             let mut x = b.clone();
             x[at] ^= 1;
             let n = x.len() as u64;
@@ -201,9 +214,9 @@ mod tests {
     fn short_input() {
         let b = bytes(&sample());
         let short = &b[1..];
-        assert_eq!(short.len(), 108);
+        assert_eq!(short.len(), 116);
         assert!(matches!(
-            Trailer::read_tail(&mut Cursor::new(short.to_vec()), 108),
+            Trailer::read_tail(&mut Cursor::new(short.to_vec()), 116),
             Err(FormatError::NoTrailer)
         ));
         assert!(matches!(
@@ -216,6 +229,7 @@ mod tests {
     fn layout_table_offsets_add_up() {
         let t = trailer_layout_table();
         assert!(t.contains("| 56 | 16 | archive_id |"));
-        assert_eq!(8 + 8 + 32 + 8 + 16, TRAILER_PAYLOAD_LEN);
+        assert!(t.contains("| 72 | 8 | previous_trailer_offset |"));
+        assert_eq!(8 + 8 + 32 + 8 + 16 + 8, TRAILER_PAYLOAD_LEN);
     }
 }

@@ -342,6 +342,7 @@ fn with_index(archive: &[u8], index: lpk_format::Index) -> Vec<u8> {
         index_hash: hash,
         generation: 0,
         archive_id: header.archive_id,
+        previous_trailer_offset: 0,
     }
     .write(&mut out)
     .unwrap();

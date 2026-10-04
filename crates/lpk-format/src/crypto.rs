@@ -27,6 +27,13 @@ pub const KDF_ARGON2ID: u8 = 1;
 /// reaches.
 pub const INDEX_SEQUENCE: u64 = u64::MAX;
 
+/// The sequence the index of generation `generation` is sealed under:
+/// `INDEX_SEQUENCE - generation`, so no two generations' indexes share a nonce
+/// (spec section 15).
+pub fn index_sequence(generation: u64) -> u64 {
+    INDEX_SEQUENCE.saturating_sub(generation)
+}
+
 /// Largest `t` a reader accepts.
 pub const MAX_ARGON2_T: u32 = 64;
 /// Largest `p` a reader accepts.

@@ -173,6 +173,25 @@ pub enum FormatError {
     /// The last bytes of the archive are not a trailer frame.
     #[error("no trailer at the end of the archive")]
     NoTrailer,
+    /// Rollback named a generation the archive does not have.
+    #[error("no generation {requested} in the archive (latest is {latest})")]
+    NoSuchGeneration {
+        /// The generation asked for.
+        requested: u64,
+        /// The archive's latest generation.
+        latest: u64,
+    },
+    /// Appending to an encrypted archive needs the credentials.
+    #[error("appending to an encrypted archive needs the password")]
+    AppendNeedsCredentials,
+    /// The trailer chain's generation numbers do not fall by one.
+    #[error("trailer chain: expected generation {expected}, found {found}")]
+    GenerationMismatch {
+        /// The number the chain should have had.
+        expected: u64,
+        /// The number the trailer carries.
+        found: u64,
+    },
     /// A recorded frame location is out of range or its length is wrong.
     #[error("bad frame location for {what}")]
     BadFrameLocation {

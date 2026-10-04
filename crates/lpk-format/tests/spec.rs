@@ -40,6 +40,7 @@ fn spec_tables_match_code() {
         lpk_format::recovery_layout_table(),
         lpk_format::key_slot_table(),
         lpk_format::sealing_rules_table(),
+        lpk_format::generation_rules_table(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }
@@ -303,13 +304,13 @@ fn spec_states_the_record_rules() {
 #[test]
 fn spec_states_the_trailer_constants() {
     let text = spec();
-    assert_eq!(lpk_format::TRAILER_PAYLOAD_LEN, 72);
-    assert_eq!(lpk_format::TRAILER_FRAME_LEN, 109);
-    assert!(text.contains("fixed 72-byte payload"));
-    assert!(text.contains("= 109 bytes"));
-    assert!(text.contains("(141 bytes)"));
+    assert_eq!(lpk_format::TRAILER_PAYLOAD_LEN, 80);
+    assert_eq!(lpk_format::TRAILER_FRAME_LEN, 117);
+    assert!(text.contains("fixed 80-byte payload"));
+    assert!(text.contains("= 117 bytes"));
+    assert!(text.contains("(149 bytes)"));
     assert_eq!(
         lpk_format::Header::LEN as u64 + lpk_format::TRAILER_FRAME_LEN,
-        141
+        149
     );
 }

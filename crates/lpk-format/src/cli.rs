@@ -72,6 +72,14 @@ enum Command {
         /// The archive.
         archive: PathBuf,
     },
+    /// Truncate the archive to the end of an earlier generation (an append is undone;
+    /// the file is changed in place, no password is needed).
+    Rollback {
+        /// The archive.
+        archive: PathBuf,
+        /// The generation to keep (0 is the first write; `info` shows the latest).
+        generation: u64,
+    },
     /// Write a copy of the archive with the damaged shards rebuilt from its recovery frames.
     Repair {
         /// The archive.
@@ -305,6 +313,21 @@ fn repair_cmd(
     }
 }
 
+fn rollback_cmd(path: &Path, generation: u64, out: &mut dyn Write) -> Result<(), FormatError> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let g = crate::archive::rollback(&mut file, generation)?;
+    writeln!(
+        out,
+        "rolled back to generation {}: {} bytes",
+        g.generation,
+        g.end()
+    )?;
+    Ok(())
+}
+
 fn info(
     path: &Path,
     priors: &[PathBuf],
@@ -336,6 +359,7 @@ fn info(
         writeln!(out, "keyfile required: {}", slot.keyfile_required)?;
     }
     writeln!(out, "generation: {}", t.generation)?;
+    writeln!(out, "chain length: {}", a.history()?.len())?;
     writeln!(out, "length: {archive_len} bytes")?;
     if let Some(n) = entries {
         writeln!(out, "entries: {n}")?;
@@ -453,6 +477,10 @@ where
         Command::Extract { archive, dir } => extract(archive, dir, &cli.priors, &keys, out),
         Command::Info { archive } => info(archive, &cli.priors, &keys, out),
         Command::Check { archive } => check(archive, &keys, out),
+        Command::Rollback {
+            archive,
+            generation,
+        } => rollback_cmd(archive, *generation, out),
         Command::Repair {
             archive,
             out: target,

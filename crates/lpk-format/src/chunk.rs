@@ -430,6 +430,20 @@ impl ChunkIndex {
         })
     }
 
+    /// Chunk index by BLAKE3, for deduplication (spec section 15). When several
+    /// chunks share a hash the first one wins. Built on demand, one pass over
+    /// the table; the map holds 32 bytes of key and 8 of value per distinct
+    /// hash, plus the map's overhead.
+    pub fn by_hash(&self) -> std::collections::HashMap<[u8; 32], u64> {
+        let mut map = std::collections::HashMap::with_capacity(self.record_off.len());
+        for i in 0..self.len() {
+            if let Some(r) = self.record(i) {
+                map.entry(r.hash).or_insert(i);
+            }
+        }
+        map
+    }
+
     /// The block and the offset within the block of `chunk`; `None` past the end.
     pub fn locate(&self, chunk: u64) -> Option<ChunkPlace> {
         let i = usize::try_from(chunk).ok()?;

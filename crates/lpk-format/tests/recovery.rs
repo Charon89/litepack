@@ -635,6 +635,7 @@ mod hand_built {
             index_hash: hash,
             generation: 0,
             archive_id: id,
+            previous_trailer_offset: 0,
         }
         .write(&mut bytes)
         .unwrap();

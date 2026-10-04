@@ -16,6 +16,7 @@ use crate::error::FormatError;
 use crate::frame::FrameKind;
 use crate::header::Header;
 use crate::index::FrameLocation;
+use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -452,22 +453,35 @@ fn read_shard<R: Read + Seek>(
 /// Each frame covers exactly the bytes written since the previous recovery
 /// frame (or the header): they start where the previous frame ends and end
 /// where this frame starts. This also keeps the ranges ascending, disjoint,
-/// clear of every recovery frame and tiling the data frames.
-fn check_cover(
+/// clear of every recovery frame and tiling the data frames. The first frame
+/// of a later generation (spec section 15) starts right after an earlier
+/// generation's trailer instead: the old index and trailer are not covered.
+fn check_cover<R: Read + Seek>(
     frame: &RecoveryFrame,
     i: usize,
     locations: &[FrameLocation],
+    r: &mut R,
 ) -> Result<(), FormatError> {
-    let start = match i.checked_sub(1) {
+    let prev_end = match i.checked_sub(1) {
         None => Header::LEN as u64,
         Some(p) => locations[p].offset.saturating_add(locations[p].len),
     };
-    if frame.cover_offset != start
-        || frame.cover_offset.saturating_add(frame.cover_len) != locations[i].offset
-    {
+    if frame.cover_offset.saturating_add(frame.cover_len) != locations[i].offset {
         return Err(bad("coverage"));
     }
-    Ok(())
+    if frame.cover_offset == prev_end {
+        return Ok(());
+    }
+    let after_trailer = frame.cover_offset > prev_end
+        && frame
+            .cover_offset
+            .checked_sub(TRAILER_FRAME_LEN)
+            .is_some_and(|at| Trailer::read_at(r, at).is_ok());
+    if after_trailer {
+        Ok(())
+    } else {
+        Err(bad("coverage"))
+    }
 }
 
 type Visit<'a, R> =
@@ -498,7 +512,7 @@ fn scan<R: Read + Seek>(
             }
         };
         let frame = match RecoveryFrame::parse_vec(payload, index_at)
-            .and_then(|f| check_cover(&f, i, &locations).map(|()| f))
+            .and_then(|f| check_cover(&f, i, &locations, a.raw_reader()).map(|()| f))
         {
             Ok(f) => f,
             // The hash passed but a rule is broken: also unusable.
@@ -893,19 +907,43 @@ mod tests {
             len,
             sequence: 0,
         };
-        assert!(check_cover(&f, 0, &[at(232, 100)]).is_ok());
+        assert!(check_cover(
+            &f,
+            0,
+            &[at(232, 100)],
+            &mut std::io::Cursor::new(vec![0u8; 1000])
+        )
+        .is_ok());
         for bad_locs in [[at(233, 100)], [at(231, 100)], [at(100, 50)]] {
             assert!(matches!(
-                check_cover(&f, 0, &bad_locs),
+                check_cover(&f, 0, &bad_locs, &mut std::io::Cursor::new(vec![0u8; 1000])),
                 Err(FormatError::BadRecovery { reason: "coverage" })
             ));
         }
         // Frame 1 starts where frame 0's location ends.
         let mut g = frame(200, 64, 8, 2);
         g.cover_offset = 332;
-        assert!(check_cover(&g, 1, &[at(232, 100), at(532, 100)]).is_ok());
-        assert!(check_cover(&g, 1, &[at(232, 99), at(532, 100)]).is_err());
-        assert!(check_cover(&f, 1, &[at(0, 40), at(232, 100)]).is_err());
+        assert!(check_cover(
+            &g,
+            1,
+            &[at(232, 100), at(532, 100)],
+            &mut std::io::Cursor::new(vec![0u8; 1000])
+        )
+        .is_ok());
+        assert!(check_cover(
+            &g,
+            1,
+            &[at(232, 99), at(532, 100)],
+            &mut std::io::Cursor::new(vec![0u8; 1000])
+        )
+        .is_err());
+        assert!(check_cover(
+            &f,
+            1,
+            &[at(0, 40), at(232, 100)],
+            &mut std::io::Cursor::new(vec![0u8; 1000])
+        )
+        .is_err());
     }
 
     #[test]

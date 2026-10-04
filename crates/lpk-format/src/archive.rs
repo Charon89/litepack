@@ -2,7 +2,7 @@
 
 use crate::chunk::{ChunkIndex, ChunkTableWriter};
 use crate::crypto::{
-    sealing_rule, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE, KEY_SLOT_LEN,
+    index_sequence, sealing_rule, Credentials, KeySlot, Sealer, Suite, KEY_SLOT_LEN,
 };
 use crate::decode::Registry;
 use crate::envelope::{Envelope, Refusal, Resources};
@@ -13,7 +13,7 @@ use crate::index::{FrameLocation, Index};
 use crate::merkle::merkle_root;
 use crate::priors::PriorStore;
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 /// An opened archive: header, trailer, index and the chunk index are in
@@ -54,11 +54,83 @@ pub struct Diagnosis {
     pub ends_at: u64,
     /// True when a trailer frame was read.
     pub trailer_seen: bool,
+    /// Offset just after the last trailer frame read (0 when none was): the
+    /// end of the last complete generation, where a rollback truncates.
+    pub last_trailer_end: u64,
     /// Why the walk stopped: `Truncated { what: "trailer" }` for a clean
     /// truncation, the frame's own error for corruption, `TrailingBytes {
     /// what: "archive" }` for bytes after a trailer; `None` when the input
     /// ends exactly after a trailer.
     pub error: Option<FormatError>,
+}
+
+/// One generation of the trailer chain (spec section 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Generation {
+    /// The generation number: 0 for the first write.
+    pub generation: u64,
+    /// Absolute offset of this generation's trailer frame.
+    pub trailer_offset: u64,
+    /// Absolute offset of this generation's index frame.
+    pub index_offset: u64,
+    /// BLAKE3-256 of the index frame's payload, from the trailer.
+    pub index_hash: [u8; 32],
+}
+
+impl Generation {
+    /// The generation `t` describes, whose trailer frame is at `trailer_offset`.
+    pub(crate) fn of(t: &Trailer, trailer_offset: u64) -> Generation {
+        Generation {
+            generation: t.generation,
+            trailer_offset,
+            index_offset: t.index_offset,
+            index_hash: t.index_hash,
+        }
+    }
+
+    /// Offset just after this generation's trailer: the archive's length when
+    /// it is the latest.
+    pub fn end(&self) -> u64 {
+        self.trailer_offset + TRAILER_FRAME_LEN
+    }
+}
+
+/// Walk the trailer chain from `trailer` (the frame at `offset`) back to
+/// generation 0, newest first. Every step checks the archive id, that the
+/// generation falls by one, that the previous trailer lies before the index
+/// and that each index frame ends where its trailer starts.
+pub(crate) fn walk_chain<R: Read + Seek>(
+    reader: &mut R,
+    archive_id: [u8; 16],
+    mut trailer: Trailer,
+    mut offset: u64,
+) -> Result<Vec<Generation>, FormatError> {
+    let mut out = Vec::new();
+    loop {
+        if trailer.index_offset.checked_add(trailer.index_len) != Some(offset) {
+            return Err(FormatError::BadFrameLocation { what: "index" });
+        }
+        out.push(Generation::of(&trailer, offset));
+        if trailer.generation == 0 {
+            return Ok(out);
+        }
+        let prev = trailer.previous_trailer_offset;
+        if prev.saturating_add(TRAILER_FRAME_LEN) > trailer.index_offset {
+            return Err(FormatError::BadFrameLocation { what: "trailer" });
+        }
+        let t = Trailer::read_at(reader, prev)?;
+        if t.archive_id != archive_id {
+            return Err(FormatError::ArchiveIdMismatch);
+        }
+        if t.generation != trailer.generation - 1 {
+            return Err(FormatError::GenerationMismatch {
+                expected: trailer.generation - 1,
+                found: t.generation,
+            });
+        }
+        trailer = t;
+        offset = prev;
+    }
 }
 
 /// Counts the bytes handed out, which is the logical read position.
@@ -206,7 +278,10 @@ fn read_key_slot<R: Read + Seek>(reader: &mut R) -> Result<(KeySlot, u64), Forma
 /// sequence 1) to the trailer, skipping payloads by their declared length
 /// without reading them. Returns the entry table's location (the first
 /// `EntryTable` frame) and the locations of the recovery frames; a frame whose
-/// payload is damaged is still skipped, the sequence count continuing.
+/// payload is damaged is still skipped, the sequence count continuing. An
+/// archive with several generations has several entry tables and trailers: the
+/// last entry table is the current one, the walk runs to the last trailer, and
+/// the recovery frames of every generation are returned.
 fn walk_envelopes<R: Read + Seek>(
     reader: &mut R,
     start: u64,
@@ -235,7 +310,7 @@ fn walk_envelopes<R: Read + Seek>(
             return Err(trunc);
         }
         match FrameKind::from_u16(kind) {
-            Some(FrameKind::EntryTable) if entry.is_none() => {
+            Some(FrameKind::EntryTable) => {
                 entry = Some(FrameLocation {
                     offset: pos,
                     len: frame_len,
@@ -248,7 +323,8 @@ fn walk_envelopes<R: Read + Seek>(
                 sequence,
             }),
             Some(FrameKind::KeySlot) => return Err(FormatError::UnexpectedKeySlot),
-            Some(FrameKind::Trailer) => return Ok((entry, recovery)),
+            // The last trailer ends the file; an earlier one ends a generation.
+            Some(FrameKind::Trailer) if end == file_len => return Ok((entry, recovery)),
             _ => {}
         }
         pos = end;
@@ -400,7 +476,7 @@ impl<R: Read + Seek> Archive<R> {
         let at = FrameLocation {
             offset: trailer.index_offset,
             len: trailer.index_len,
-            sequence: INDEX_SEQUENCE,
+            sequence: index_sequence(trailer.generation),
         };
         if !at.fits_below(len - TRAILER_FRAME_LEN) {
             return Err(FormatError::BadFrameLocation { what: "index" });
@@ -410,8 +486,15 @@ impl<R: Read + Seek> Archive<R> {
         if blake3::hash(&raw.payload).as_bytes() != &trailer.index_hash {
             return Err(FormatError::IndexHashMismatch);
         }
-        let frame = unseal(sealer.as_ref(), encrypted, listable, raw, INDEX_SEQUENCE)?;
-        let (index, chunks) = Index::parse_with_chunks(&frame.payload, trailer.index_offset)?;
+        let frame = unseal(
+            sealer.as_ref(),
+            encrypted,
+            listable,
+            raw,
+            index_sequence(trailer.generation),
+        )?;
+        let (index, chunks) =
+            Index::parse_with_chunks_in(&frame.payload, trailer.index_offset, trailer.generation)?;
         index
             .envelope
             .check(resources)
@@ -497,6 +580,29 @@ impl<R: Read + Seek> Archive<R> {
     /// The trailer.
     pub fn trailer(&self) -> &Trailer {
         &self.trailer
+    }
+
+    /// The generation this archive was opened at: 0 for the first write, one
+    /// more for every append.
+    pub fn generation(&self) -> u64 {
+        self.trailer.generation
+    }
+
+    /// The trailer chain, newest first: this generation, then each earlier one
+    /// down to generation 0. The chain is read from the file (one trailer
+    /// frame per generation); an earlier trailer that is damaged, names
+    /// another archive or breaks the numbering is an error.
+    pub fn history(&mut self) -> Result<Vec<Generation>, FormatError> {
+        let len = self.reader.seek(SeekFrom::End(0))?;
+        let at = len
+            .checked_sub(TRAILER_FRAME_LEN)
+            .ok_or(FormatError::NoTrailer)?;
+        walk_chain(&mut self.reader, self.header.archive_id, self.trailer, at)
+    }
+
+    /// The archive's sealer (none for a plain or keyless archive).
+    pub(crate) fn sealer(&self) -> Option<&Sealer> {
+        self.sealer.as_ref()
     }
 
     /// The index.
@@ -608,6 +714,7 @@ impl<R: Read + Seek> Archive<R> {
             frames_ok: 0,
             ends_at: 0,
             trailer_seen: false,
+            last_trailer_end: 0,
             error: None,
         };
         if let Err(e) = reader.seek(SeekFrom::Start(0)) {
@@ -628,6 +735,9 @@ impl<R: Read + Seek> Archive<R> {
         let encrypted = header.flags.contains(HeaderFlags::ENCRYPTED);
         let listable = header.flags.contains(HeaderFlags::LISTABLE);
         d.ends_at = r.n;
+        // True for the first frame after a trailer: bytes there that are not a
+        // frame are trailing garbage, not an interrupted append.
+        let mut first_after_trailer = false;
         loop {
             let start = r.n;
             match Frame::read(&mut r, limits) {
@@ -668,28 +778,27 @@ impl<R: Read + Seek> Archive<R> {
                     d.ends_at = r.n;
                     let is_trailer =
                         matches!(&f, ReadFrame::Known(k) if k.kind == FrameKind::Trailer);
+                    first_after_trailer = false;
                     if is_trailer {
                         d.trailer_seen = true;
-                        let mut one = [0u8; 1];
-                        loop {
-                            match r.read(&mut one) {
-                                Ok(0) => break,
-                                Ok(_) => {
-                                    d.error = Some(FormatError::TrailingBytes { what: "archive" });
-                                    break;
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                                Err(e) => {
-                                    d.error = Some(e.into());
-                                    break;
-                                }
+                        d.last_trailer_end = r.n;
+                        // More bytes after a trailer are the next generation.
+                        match r.inner.fill_buf() {
+                            Ok([]) => return d,
+                            Ok(_) => first_after_trailer = true,
+                            Err(e) => {
+                                d.error = Some(e.into());
+                                return d;
                             }
                         }
-                        return d;
                     }
                 }
                 Err(FormatError::Truncated { .. }) => {
                     d.error = Some(FormatError::Truncated { what: "trailer" });
+                    return d;
+                }
+                Err(_) if first_after_trailer => {
+                    d.error = Some(FormatError::TrailingBytes { what: "archive" });
                     return d;
                 }
                 Err(e) => {
@@ -699,6 +808,72 @@ impl<R: Read + Seek> Archive<R> {
             }
         }
     }
+}
+
+/// The Markdown table of the generation rules, pasted verbatim into the spec
+/// (section 15).
+pub fn generation_rules_table() -> String {
+    String::from(
+        "| Rule | Value |\n|---|---|\n\
+         | generation number | 0 for the first write; an append writes the previous number plus one |\n\
+         | trailer length | 117 bytes (payload 80), the same for every generation |\n\
+         | previous_trailer_offset | offset of the previous generation's trailer frame; 0 in generation 0 |\n\
+         | index | complete: every chunk, block, recovery frame and prior of every generation |\n\
+         | entry table | complete: the entries of the new generation, in sorted order |\n\
+         | frame sequence | frames are numbered by position in the file; a new generation continues after the previous trailer |\n\
+         | index sequence | 2^64 - 1 - generation |\n\
+         | deduplication | a new chunk with the BLAKE3 and length of a chunk of the old table is referenced, not written |\n\
+         | recovery | a generation's recovery frames cover only its own data frames |\n\
+         | commit | the append is committed when the last byte of the new trailer is written |\n\
+         | rollback | truncate the file to the end of an earlier generation's trailer |\n",
+    )
+}
+
+/// Roll the archive in `file` back to `generation`: truncate the file to the
+/// end of that generation's trailer (spec section 15). No credentials are
+/// needed, nothing is decrypted. The file's last complete trailer is found
+/// from the tail, or by walking the frames when the tail is not a trailer (an
+/// append that was cut short), so rolling back to the latest generation
+/// repairs a half-appended file. The chain is checked on the way: every
+/// trailer on it must verify, name this archive and number the generations
+/// down by one. Asking for a generation above the latest is
+/// `NoSuchGeneration`. Returns the generation the file now ends with.
+pub fn rollback(file: &mut std::fs::File, generation: u64) -> Result<Generation, FormatError> {
+    let len = file.seek(SeekFrom::End(0))?;
+    file.seek(SeekFrom::Start(0))?;
+    let header = Header::read(&mut *file)?;
+    let (latest, at) = match Trailer::read_tail(&mut *file, len) {
+        Ok(t) => (t, len - TRAILER_FRAME_LEN),
+        Err(
+            FormatError::NoTrailer
+            | FormatError::HashMismatch { .. }
+            | FormatError::Truncated { .. },
+        ) => {
+            let mut r = &mut *file;
+            let d = Archive::<&mut std::fs::File>::walk(&mut r, &ReadLimits::default(), None);
+            if d.last_trailer_end < TRAILER_FRAME_LEN {
+                return Err(d.error.unwrap_or(FormatError::NoTrailer));
+            }
+            let at = d.last_trailer_end - TRAILER_FRAME_LEN;
+            (Trailer::read_at(&mut *file, at)?, at)
+        }
+        Err(e) => return Err(e),
+    };
+    if latest.archive_id != header.archive_id {
+        return Err(FormatError::ArchiveIdMismatch);
+    }
+    let chain = walk_chain(&mut *file, header.archive_id, latest, at)?;
+    let target = chain
+        .iter()
+        .find(|g| g.generation == generation)
+        .copied()
+        .ok_or(FormatError::NoSuchGeneration {
+            requested: generation,
+            latest: latest.generation,
+        })?;
+    file.set_len(target.end())?;
+    file.sync_all()?;
+    Ok(target)
 }
 
 #[cfg(test)]
@@ -853,6 +1028,7 @@ mod tests {
             index_hash,
             generation: 0,
             archive_id: ID,
+            previous_trailer_offset: 0,
         };
         trailer.write(&mut bytes).unwrap();
         Built {
