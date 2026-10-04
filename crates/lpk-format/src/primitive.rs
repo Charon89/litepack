@@ -108,6 +108,18 @@ impl PrimitiveId {
         )
     }
 
+    /// The format revision (the header's `version_minor`) that specifies this
+    /// primitive's decoding: 1 for `jpeg-reconstruct` (revision 1.1), 0 for
+    /// the primitives of revision 1.0 and for those no revision decodes yet.
+    /// A writer refuses a graph that names a primitive of a revision above the
+    /// archive's `version_minor` (spec section 2).
+    pub fn revision(self) -> u16 {
+        match self {
+            PrimitiveId::JpegReconstruct => 1,
+            _ => 0,
+        }
+    }
+
     /// The exact parameter length of the primitive in bytes; `None` for the
     /// reconstruction primitives, whose single varint `record_id` is 1 to 10 bytes.
     pub fn params_len(self) -> Option<usize> {

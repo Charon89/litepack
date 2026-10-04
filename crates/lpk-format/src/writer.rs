@@ -11,7 +11,7 @@ use crate::envelope::{ArchiveSizes, Envelope};
 use crate::error::FormatError;
 use crate::frame::{Frame, FrameFlags, FrameKind};
 use crate::graph::{BlockHeader, Graph, Step, MAX_STEPS};
-use crate::header::{Header, HeaderFlags};
+use crate::header::{FormatVersion, Header, HeaderFlags};
 use crate::index::{BlockLocation, FrameLocation, GenerationInfo, Index};
 use crate::merkle::merkle_root;
 use crate::primitive::{GraphResources, PrimitiveId};
@@ -241,6 +241,13 @@ pub struct WriterSummary {
     pub reused_chunks: u64,
 }
 
+/// A file entry being written in parts (see [`Writer::begin_entry`]).
+struct OpenEntry {
+    entry: Entry,
+    /// Per part: its offset in the file, its length and its chunks.
+    parts: Vec<(u64, u64, Vec<u64>)>,
+}
+
 /// What an append starts from: the previous generation, read from the archive.
 struct Base {
     generation: u64,
@@ -299,6 +306,14 @@ pub struct Writer<W: Write> {
     generations: Vec<GenerationInfo>,
     /// Called before the trailer is written, to put the data on disk (section 15).
     sync: Option<Box<dyn FnMut() -> std::io::Result<()>>>,
+    /// The header's `version_minor`: a block's graph may name only primitives
+    /// of this revision or an earlier one.
+    version_minor: u16,
+    /// Largest decoder working memory beyond the block buffer that a block
+    /// written with [`Writer::add_part_encoded`] declared.
+    extra_memory: u64,
+    /// The file entry being written in parts, if any.
+    open: Option<OpenEntry>,
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -322,8 +337,10 @@ fn bad_options(reason: &'static str) -> FormatError {
 }
 
 /// The checks a reader makes of a block's graph: step count, parameters and
-/// the records it names (`record_count` is how many the archive will have).
-fn check_graph(graph: &Graph, record_count: u64) -> Result<(), FormatError> {
+/// the records it names (`record_count` is how many the archive will have);
+/// then the writer's own: every primitive belongs to a revision no later than
+/// the archive's `version_minor` (`BadOptions`, `version_minor`).
+fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(), FormatError> {
     if graph.steps.is_empty() || graph.steps.len() > MAX_STEPS {
         return Err(FormatError::BadGraph {
             reason: "step count",
@@ -332,7 +349,24 @@ fn check_graph(graph: &Graph, record_count: u64) -> Result<(), FormatError> {
     for s in &graph.steps {
         s.primitive.validate_params(&s.params)?;
     }
-    graph.check_records(record_count)
+    graph.check_records(record_count)?;
+    if graph
+        .steps
+        .iter()
+        .any(|s| s.primitive.revision() > version_minor)
+    {
+        return Err(bad_options("version_minor"));
+    }
+    Ok(())
+}
+
+/// A record the reader would refuse is refused here (`record` is its id).
+fn check_record(r: &Record, record: u64) -> Result<(), FormatError> {
+    if r.kind != r.body.kind() {
+        return Err(bad_options("record kind"));
+    }
+    Record::parse(r.kind, &r.encode(), record)?;
+    Ok(())
 }
 
 /// Check `options` the way a reader's rules need them checked. Returns the
@@ -344,12 +378,8 @@ fn check_options(options: &WriterOptions) -> Result<Option<GroupEncoder>, Format
     if options.block_size < options.chunk_size {
         return Err(bad_options("block_size below chunk_size"));
     }
-    // A record the reader would refuse is refused here.
     for (i, r) in options.records.iter().enumerate() {
-        if r.kind != r.body.kind() {
-            return Err(bad_options("record kind"));
-        }
-        Record::parse(r.kind, &r.encode(), i as u64)?;
+        check_record(r, i as u64)?;
     }
     options.recovery.check()?;
     // A block (plus its frame's overhead) must fit in one group.
@@ -399,11 +429,47 @@ impl<W: Write> Writer<W> {
 
     /// [`Writer::with_chunker`] with the RNG of [`Writer::new_with_rng`].
     pub fn with_chunker_and_rng(
-        mut out: W,
+        out: W,
         options: WriterOptions,
         chunker: Box<dyn Chunker>,
         rng: &mut dyn RngCore,
     ) -> Result<Self, FormatError> {
+        Self::start(out, options, chunker, rng, FormatVersion::CURRENT.minor)
+    }
+
+    /// Like [`Writer::new`], writing `version_minor` into the header: 0 (what
+    /// every other constructor writes) or 1, which lets blocks name the
+    /// primitives of revision 1.1 (`jpeg-reconstruct`, spec section 2). The
+    /// header is written first and never rewritten, so the caller declares the
+    /// revision before any block exists; a block whose graph names a primitive
+    /// of a later revision than declared is refused (`BadOptions`,
+    /// `version_minor`), and so is a value above [`FormatVersion::LATEST`]'s
+    /// minor.
+    pub fn new_revision(
+        out: W,
+        options: WriterOptions,
+        version_minor: u16,
+    ) -> Result<Self, FormatError> {
+        let size = usize::try_from(options.chunk_size).map_err(|_| bad_options("chunk_size"))?;
+        Self::start(
+            out,
+            options,
+            Box::new(FixedChunker::new(size)),
+            &mut rand::rng(),
+            version_minor,
+        )
+    }
+
+    fn start(
+        mut out: W,
+        options: WriterOptions,
+        chunker: Box<dyn Chunker>,
+        rng: &mut dyn RngCore,
+        version_minor: u16,
+    ) -> Result<Self, FormatError> {
+        if version_minor > FormatVersion::LATEST.minor {
+            return Err(bad_options("version_minor"));
+        }
         let spool = check_options(&options)?;
         let record_count = options.records.len() as u64;
         let mut flags = HeaderFlags::EMPTY;
@@ -434,7 +500,7 @@ impl<W: Write> Writer<W> {
         if sealer.is_some() {
             rng.fill_bytes(&mut salt);
         }
-        Header::new(flags, options.archive_id).write(&mut out)?;
+        Header::with_minor(flags, options.archive_id, version_minor).write(&mut out)?;
         // The covered range starts right after the header.
         let out = Tee { inner: out, spool };
         let mut w = Writer {
@@ -470,6 +536,9 @@ impl<W: Write> Writer<W> {
                 salt,
             }],
             sync: None,
+            version_minor,
+            extra_memory: 0,
+            open: None,
         };
         if let Some(slot) = slot {
             // The key slot is the first frame, in clear.
@@ -655,6 +724,11 @@ impl<W: Write> Writer<W> {
             first_sequence: seq,
             salt,
         });
+        let version_minor = existing.header().version.minor;
+        let extra_memory = index
+            .envelope
+            .decode_memory
+            .saturating_sub(index.envelope.max_block_plain);
         let base = Base {
             generation,
             trailer_offset,
@@ -693,6 +767,9 @@ impl<W: Write> Writer<W> {
             salt,
             generations,
             sync: None,
+            version_minor,
+            extra_memory,
+            open: None,
             options,
         };
         Ok(w)
@@ -896,15 +973,25 @@ impl<W: Write> Writer<W> {
     }
 
     fn flush_block(&mut self) -> Result<(), FormatError> {
+        self.flush_block_with(None)
+    }
+
+    /// Close the pending block; `given` is its encoding when the caller made
+    /// it ([`Writer::add_part_encoded`]), else the encoder is asked.
+    fn flush_block_with(&mut self, given: Option<Encoded>) -> Result<(), FormatError> {
         if self.pending_chunks == 0 {
             return Ok(());
         }
         let plain = std::mem::take(&mut self.pending);
+        let encoded = match given {
+            Some(e) => Ok(e),
+            None => self.options.encoder.encode(&plain),
+        };
         let Encoded {
             graph,
             bytes: encoded,
             resources,
-        } = match self.options.encoder.encode(&plain) {
+        } = match encoded {
             Ok(e) => e,
             Err(e) => {
                 // The block's chunks are gone: the archive is abandoned.
@@ -912,7 +999,7 @@ impl<W: Write> Writer<W> {
                 return Err(e);
             }
         };
-        if let Err(e) = check_graph(&graph, self.record_count) {
+        if let Err(e) = check_graph(&graph, self.record_count, self.version_minor) {
             // The block is gone: the archive is abandoned like after an I/O error.
             self.failed = Some((std::io::ErrorKind::InvalidData, e.to_string()));
             return Err(e);
@@ -1033,8 +1120,205 @@ impl<W: Write> Writer<W> {
         data: &mut dyn Read,
     ) -> Result<(), FormatError> {
         self.check_alive()?;
+        self.no_open_entry()?;
         let r = self.add_file_inner(path, flags, mtime_ns, data);
         self.note(r)
+    }
+
+    /// Refuse a call that needs no entry to be open.
+    fn no_open_entry(&self) -> Result<(), FormatError> {
+        if self.open.is_some() {
+            return Err(bad_options("an entry is open"));
+        }
+        Ok(())
+    }
+
+    /// Start a file entry written in parts: [`Writer::add_part`] and
+    /// [`Writer::add_part_encoded`] add its bytes part by part, in any order
+    /// (each part names its offset in the file), with blocks closing between
+    /// them as they would for any chunks; [`Writer::end_entry`] lists the
+    /// chunks in file order. The path is checked here as in
+    /// [`Writer::add_file`]. Until `end_entry`, the other `add_*` calls and
+    /// `finish` are refused (`BadOptions`, `an entry is open`).
+    pub fn begin_entry(
+        &mut self,
+        path: &str,
+        flags: EntryFlags,
+        mtime_ns: i64,
+    ) -> Result<(), FormatError> {
+        self.check_alive()?;
+        self.no_open_entry()?;
+        let entry = Entry {
+            kind: EntryKind::File,
+            flags,
+            path: path.to_string(),
+            mtime_ns,
+            size: 0,
+            symlink_target: None,
+            chunks: Vec::new(),
+        };
+        self.check(&entry)?;
+        self.open = Some(OpenEntry {
+            entry,
+            parts: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Add the part of the open entry that starts at `offset` in the file: its
+    /// bytes are read to the end, cut into chunks and appended to the current
+    /// block, like a file's. Returns the part's chunk indices in order (in an
+    /// append, a chunk of the old table may be referenced instead of written).
+    pub fn add_part(&mut self, offset: u64, data: &mut dyn Read) -> Result<Vec<u64>, FormatError> {
+        self.check_alive()?;
+        let r = self.add_part_inner(offset, data);
+        self.note(r)
+    }
+
+    fn add_part_inner(
+        &mut self,
+        offset: u64,
+        data: &mut dyn Read,
+    ) -> Result<Vec<u64>, FormatError> {
+        if self.open.is_none() {
+            return Err(bad_options("no entry is open"));
+        }
+        let mut chunks = Vec::new();
+        let len = self.chunk_stream(data, &mut chunks)?;
+        if let Some(o) = &mut self.open {
+            o.parts.push((offset, len, chunks.clone()));
+        }
+        Ok(chunks)
+    }
+
+    /// Add the part of the open entry that starts at `offset` as a block of
+    /// its own whose encoding the caller made: the current block is closed,
+    /// `plain` is cut into chunks (never deduplicated against an old table),
+    /// and those chunks form one block written with `encoded`, whose graph is
+    /// checked as an encoder's would be (including the records added so far
+    /// and the archive's `version_minor`). `memory` is the decoder working
+    /// memory the block needs beyond its plain buffer; the envelope's
+    /// `decode_memory` is `max_block_plain` plus the largest such figure.
+    /// `plain` must not be empty and at most `block_size` long (`BadOptions`,
+    /// `encoded part length`). Returns the part's chunk indices.
+    pub fn add_part_encoded(
+        &mut self,
+        offset: u64,
+        plain: &[u8],
+        encoded: Encoded,
+        memory: u64,
+    ) -> Result<Vec<u64>, FormatError> {
+        self.check_alive()?;
+        let r = self.add_part_encoded_inner(offset, plain, encoded, memory);
+        self.note(r)
+    }
+
+    fn add_part_encoded_inner(
+        &mut self,
+        offset: u64,
+        plain: &[u8],
+        encoded: Encoded,
+        memory: u64,
+    ) -> Result<Vec<u64>, FormatError> {
+        if self.open.is_none() {
+            return Err(bad_options("no entry is open"));
+        }
+        if plain.is_empty() || plain.len() as u64 > self.options.block_size {
+            return Err(bad_options("encoded part length"));
+        }
+        self.flush_block()?;
+        let chunk_size = self.options.chunk_size as usize;
+        self.chunker.reset();
+        let cuts = self.chunker.feed(plain, true);
+        let mut start = 0usize;
+        let mut chunks = Vec::with_capacity(cuts.len());
+        for cut in cuts {
+            if cut <= start || cut > plain.len() {
+                return Err(FormatError::BadChunk {
+                    reason: "cut positions",
+                });
+            }
+            if cut - start > chunk_size {
+                return Err(FormatError::BadChunk {
+                    reason: "chunk longer than chunk_size",
+                });
+            }
+            let data = &plain[start..cut];
+            chunks.push(self.records.len() as u64);
+            self.records.push(ChunkRecord {
+                plain_len: data.len() as u64,
+                hash: *blake3::hash(data).as_bytes(),
+            });
+            self.pending.extend_from_slice(data);
+            self.pending_chunks += 1;
+            start = cut;
+        }
+        if start != plain.len() {
+            return Err(FormatError::BadChunk {
+                reason: "bytes left uncut at eof",
+            });
+        }
+        self.flush_block_with(Some(encoded))?;
+        self.extra_memory = self.extra_memory.max(memory);
+        if let Some(o) = &mut self.open {
+            o.parts.push((offset, plain.len() as u64, chunks.clone()));
+        }
+        Ok(chunks)
+    }
+
+    /// Finish the open entry: its parts, sorted by offset, must cover the file
+    /// from 0 without a gap or an overlap (`BadOptions`, `entry parts`); the
+    /// entry's chunk list is theirs in that order and its size their sum.
+    pub fn end_entry(&mut self) -> Result<(), FormatError> {
+        self.check_alive()?;
+        let r = self.end_entry_inner();
+        self.note(r)
+    }
+
+    fn end_entry_inner(&mut self) -> Result<(), FormatError> {
+        let Some(OpenEntry {
+            mut entry,
+            mut parts,
+        }) = self.open.take()
+        else {
+            return Err(bad_options("no entry is open"));
+        };
+        parts.sort_by_key(|p| p.0);
+        let mut at = 0u64;
+        for (offset, len, chunks) in parts {
+            if offset != at {
+                return Err(bad_options("entry parts"));
+            }
+            at = at.checked_add(len).ok_or(bad_options("entry parts"))?;
+            entry.chunks.extend(chunks);
+        }
+        entry.size = at;
+        self.push_entry(entry);
+        Ok(())
+    }
+
+    /// Add a reconstruction record while writing; returns its id, its
+    /// position in the `Records` frame after the records of
+    /// `WriterOptions::records`. A block closed from now on may name it. The
+    /// record is checked as `WriterOptions::records` are (`BadOptions`
+    /// `record kind`, or the record's parse error). Refused in an append
+    /// (`BadOptions`, `add_record in an append`): old blocks name records by
+    /// position.
+    pub fn add_record(&mut self, record: Record) -> Result<u64, FormatError> {
+        self.check_alive()?;
+        if self.base.is_some() {
+            return Err(bad_options("add_record in an append"));
+        }
+        let id = self.options.records.len() as u64;
+        check_record(&record, id)?;
+        self.options.records.push(record);
+        self.record_count = id + 1;
+        Ok(id)
+    }
+
+    /// The header's `version_minor` of this archive.
+    pub fn version_minor(&self) -> u16 {
+        self.version_minor
     }
 
     fn add_file_inner(
@@ -1054,7 +1338,22 @@ impl<W: Write> Writer<W> {
             chunks: Vec::new(),
         };
         self.check(&entry)?;
+        let mut chunks = Vec::new();
+        entry.size = self.chunk_stream(data, &mut chunks)?;
+        entry.chunks = chunks;
+        self.push_entry(entry);
+        Ok(())
+    }
+
+    /// Read `data` to the end and cut it into chunks appended to the current
+    /// block (their indices pushed to `chunks`); returns the bytes read.
+    fn chunk_stream(
+        &mut self,
+        data: &mut dyn Read,
+        chunks: &mut Vec<u64>,
+    ) -> Result<u64, FormatError> {
         let chunk_size = self.options.chunk_size as usize;
+        let mut size = 0u64;
         // Read a block's worth at a time: besides the pending block, at most
         // the held-back tail plus one segment is in memory.
         let per_segment = self.options.block_size;
@@ -1079,7 +1378,7 @@ impl<W: Write> Writer<W> {
                     });
                 }
                 let i = self.add_chunk(&buf[start..cut])?;
-                entry.chunks.push(i);
+                chunks.push(i);
                 start = cut;
             }
             if eof && start != buf.len() {
@@ -1093,13 +1392,12 @@ impl<W: Write> Writer<W> {
                     reason: "held back more than chunk_size",
                 });
             }
-            entry.size += n as u64;
+            size += n as u64;
             if eof {
                 break;
             }
         }
-        self.push_entry(entry);
-        Ok(())
+        Ok(size)
     }
 
     /// Add a directory.
@@ -1109,6 +1407,7 @@ impl<W: Write> Writer<W> {
         flags: EntryFlags,
         mtime_ns: i64,
     ) -> Result<(), FormatError> {
+        self.no_open_entry()?;
         let entry = Entry {
             kind: EntryKind::Directory,
             flags,
@@ -1131,6 +1430,7 @@ impl<W: Write> Writer<W> {
         mtime_ns: i64,
         target: &[u8],
     ) -> Result<(), FormatError> {
+        self.no_open_entry()?;
         let entry = Entry {
             kind: EntryKind::Symlink,
             flags,
@@ -1207,6 +1507,7 @@ impl<W: Write> Writer<W> {
     /// index and the trailer.
     pub fn finish(mut self) -> Result<WriterSummary, FormatError> {
         self.check_alive()?;
+        self.no_open_entry()?;
         let (entry_table, entry_table_hash, records) = self.write_covered_tail()?;
         let records_len = records.map_or(0, |r| r.len);
         // The last group closes before the index.
@@ -1257,7 +1558,7 @@ impl<W: Write> Writer<W> {
                     recovery_len,
                 },
                 graph,
-                max_plain,
+                max_plain.saturating_add(self.extra_memory),
                 0,
             );
             let payload = index.encode()?;

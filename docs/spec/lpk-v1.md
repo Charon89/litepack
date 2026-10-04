@@ -57,7 +57,7 @@ The header is fixed at 32 bytes at offset 0.
 |---|---|---|---|
 | 0 | 8 | magic | `0x89 0x4C 0x50 0x4B 0x0D 0x0A 0x1A 0x0A` (`\x89LPK\r\n\x1a\n`) |
 | 8 | 2 | version_major | 1 |
-| 10 | 2 | version_minor | 0 for this draft |
+| 10 | 2 | version_minor | 0, or 1 when a block's graph names a primitive of revision 1.1 |
 | 12 | 4 | flags | see below |
 | 16 | 16 | archive_id | 16 random bytes chosen by the writer |
 
