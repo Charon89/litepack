@@ -217,10 +217,27 @@ impl Frame {
 
 /// The Markdown table of frame flags, pasted verbatim into the spec.
 pub fn frame_flag_table() -> String {
-    String::from(
+    let mu = FrameFlags::MUST_UNDERSTAND.bits().trailing_zeros();
+    let first_reserved = mu + 1;
+    format!(
         "| Bit | Name | Meaning |\n|---|---|---|\n\
-         | 0 | MUST_UNDERSTAND | a reader that does not know the kind must fail instead of skipping |\n\
-         | 1-15 | reserved | must be zero; a reader rejects the frame otherwise |\n",
+         | {mu} | MUST_UNDERSTAND | a reader that does not know the kind must fail instead of skipping |\n\
+         | {first_reserved}-15 | reserved | must be zero; a reader rejects the frame otherwise |\n"
+    )
+}
+
+/// The Markdown table of the frame layout, pasted verbatim into the spec.
+pub fn frame_layout_table() -> String {
+    format!(
+        "| Field | Size | Meaning |\n|---|---|---|\n\
+         | kind | {} | frame kind (see below) |\n\
+         | flags | {} | frame flags (see below) |\n\
+         | payload_len | varint | length of the payload in bytes |\n\
+         | payload | payload_len | the frame content |\n\
+         | hash | {} | BLAKE3-256 of the payload bytes only |\n",
+        std::mem::size_of::<u16>(),
+        std::mem::size_of::<u16>(),
+        blake3::OUT_LEN
     )
 }
 

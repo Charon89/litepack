@@ -60,11 +60,14 @@ impl HeaderFlags {
 
 /// The Markdown table of header flags, pasted verbatim into the spec.
 pub fn header_flag_table() -> String {
-    String::from(
+    let enc = HeaderFlags::ENCRYPTED.bits().trailing_zeros();
+    let list = HeaderFlags::LISTABLE.bits().trailing_zeros();
+    let first_reserved = 32 - HeaderFlags::KNOWN.leading_zeros();
+    format!(
         "| Bit | Name | Meaning |\n|---|---|---|\n\
-         | 0 | ENCRYPTED | the archive content is encrypted |\n\
-         | 1 | LISTABLE | the archive can be listed without the key |\n\
-         | 2-31 | reserved | must be zero; a reader rejects the header otherwise |\n",
+         | {enc} | ENCRYPTED | the archive content is encrypted |\n\
+         | {list} | LISTABLE | the archive can be listed without the key |\n\
+         | {first_reserved}-31 | reserved | must be zero; a reader rejects the header otherwise |\n"
     )
 }
 
