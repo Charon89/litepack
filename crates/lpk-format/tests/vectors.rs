@@ -1,4 +1,4 @@
-//! The committed zstd vectors under `tests/vectors/`: they decode to their
+//! The committed zstd and LZMA vectors under `tests/vectors/`: they decode to their
 //! generated contents, verify with the reference tool, and are reproduced
 //! byte for byte by the writer (regenerate on purpose with
 //! `cargo test -p lpk-format --test gen_vectors -- --ignored`).
@@ -111,6 +111,28 @@ fn what_each_vector_exercises() {
 
     let a = open("zstd-window.lpk");
     assert_eq!(a.index().envelope.max_window, 1 << 24);
+    assert!(a.priors().is_empty());
+
+    let a = open("lzma-basic.lpk");
+    assert_eq!(a.index().blocks.len(), 1);
+    assert_eq!(a.index().envelope.max_window, 1 << 23);
+    assert!(a.priors().is_empty());
+
+    let mut a = open("lzma-multiblock.lpk");
+    assert!(a.index().blocks.len() >= 2);
+    let table = a.entry_table().unwrap();
+    let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
+    let spans = a.index().blocks.iter().skip(1).any(|b| {
+        entries.iter().any(|e| {
+            e.chunks.iter().any(|&c| c < b.first_chunk)
+                && e.chunks.iter().any(|&c| c >= b.first_chunk)
+        })
+    });
+    assert!(spans);
+
+    // lc 0, lp 2, pb 0: its dictionary is 1 MiB.
+    let a = open("lzma-props.lpk");
+    assert_eq!(a.index().envelope.max_window, 1 << 20);
     assert!(a.priors().is_empty());
 }
 

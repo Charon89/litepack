@@ -218,13 +218,17 @@ pub fn trained_dictionary(seed: u64) -> Vec<u8> {
 }
 
 /// The committed test vectors: archive file names and what they hold. Each
-/// archive is written by the writer with the zstd test encoder, so the bytes
-/// are a function of this table, the dictionary file and the zstd library.
-pub const VECTORS: [&str; 4] = [
+/// archive is written by the writer with the zstd or LZMA test encoder, so the
+/// bytes are a function of this table, the dictionary file and the zstd and
+/// liblzma library versions.
+pub const VECTORS: [&str; 7] = [
     "zstd-basic.lpk",
     "zstd-multiblock.lpk",
     "zstd-dict.lpk",
     "zstd-window.lpk",
+    "lzma-basic.lpk",
+    "lzma-multiblock.lpk",
+    "lzma-props.lpk",
 ];
 
 /// The dictionary's file name, committed beside `zstd-dict.lpk`.
@@ -255,27 +259,43 @@ pub fn vector_files(name: &str) -> Vec<(&'static str, Vec<u8>)> {
             ("d/c", pattern(33, 2_700)),
         ],
         "zstd-window.lpk" => vec![("w/data", pattern(41, 300_000))],
+        "lzma-basic.lpk" => vec![
+            ("a.txt", pattern(51, 300)),
+            ("b.txt", pattern(52, 5_000)),
+            ("c.txt", pattern(53, 12_000)),
+        ],
+        "lzma-multiblock.lpk" => vec![
+            ("big/one", pattern(61, 20_000)),
+            ("big/three", pattern(63, 70_000)),
+            ("big/two", pattern(62, 50_000)),
+        ],
+        "lzma-props.lpk" => vec![("p/a", pattern(71, 2_000)), ("p/b", pattern(72, 30_000))],
         other => panic!("no vector {other}"),
     }
 }
 
 /// The writer options of a vector; `dict` is the dictionary of `zstd-dict.lpk`.
 pub fn vector_options(name: &str, dict: Option<&[u8]>) -> WriterOptions {
+    let lzma = |p, d, lc, lp, pb| -> Box<dyn BlockEncoder> {
+        Box::new(LzmaTestEncoder::new(p, d, lc, lp, pb))
+    };
+    let zstd = |l, w, d| -> Box<dyn BlockEncoder> { Box::new(ZstdTestEncoder::new(l, w, d)) };
     let (block_size, encoder) = match name {
-        "zstd-basic.lpk" => (1 << 20, ZstdTestEncoder::new(3, 20, None)),
-        "zstd-multiblock.lpk" => (32 * 1024, ZstdTestEncoder::new(3, 20, None)),
-        "zstd-dict.lpk" => (
-            1 << 20,
-            ZstdTestEncoder::new(3, 20, Some(dict.unwrap().to_vec())),
-        ),
-        "zstd-window.lpk" => (1 << 20, ZstdTestEncoder::new(3, 24, None)),
+        "zstd-basic.lpk" => (1 << 20, zstd(3, 20, None)),
+        "zstd-multiblock.lpk" => (32 * 1024, zstd(3, 20, None)),
+        "zstd-dict.lpk" => (1 << 20, zstd(3, 20, Some(dict.unwrap().to_vec()))),
+        "zstd-window.lpk" => (1 << 20, zstd(3, 24, None)),
+        // Preset 6 and its 8 MiB dictionary, lc 3, lp 0, pb 2.
+        "lzma-basic.lpk" => (1 << 20, lzma(6, 1 << 23, 3, 0, 2)),
+        "lzma-multiblock.lpk" => (32 * 1024, lzma(6, 1 << 23, 3, 0, 2)),
+        "lzma-props.lpk" => (1 << 20, lzma(6, 1 << 20, 0, 2, 0)),
         other => panic!("no vector {other}"),
     };
     WriterOptions {
         chunk_size: 4096,
         block_size,
         archive_id: [0x5A; 16],
-        encoder: Box::new(encoder),
+        encoder,
     }
 }
 
