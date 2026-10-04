@@ -21,6 +21,11 @@ fn regenerate_vectors() {
         std::fs::write(dir.join(name), common::sealed::build_sealed_vector(name)).unwrap();
     }
     std::fs::write(
+        dir.join(common::journal::JOURNAL_VECTOR),
+        &common::journal::build_journal(&|| common::journal::options(0), None).0[2],
+    )
+    .unwrap();
+    std::fs::write(
         dir.join(common::sealed::SEALED_KEYFILE),
         common::sealed::sealed_keyfile_bytes(),
     )

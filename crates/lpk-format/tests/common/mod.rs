@@ -8,6 +8,7 @@ use lpk_format::{
 };
 use std::io::Write;
 
+pub mod journal;
 pub mod sealed;
 
 /// Deterministic, moderately compressible bytes: words drawn from a small
