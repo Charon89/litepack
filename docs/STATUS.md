@@ -3,12 +3,12 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 06:30 UTC (02:30 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 08:15 UTC (04:15 local on the measuring machine). No measurement is running.
 
-**Phase 0 is complete** (D-08: GO, with gates G2 and G3 restated by D-27; every Phase 0 box in PLAN is ticked).
-**Next: Phase 1.** Its first two epics have a draft breakdown ready for the owner's reading (PR #8,
-`docs/notes/phase1-e1-e2-draft.md`, re-cut from the `full` report); once adopted it moves into PLAN and
-E1-1 (the frame grammar of the `.lpk` format) starts.
+**Phase 1 is under way.** Phase 0 closed with D-08 (GO) and D-27; the Phase 1 task list is in PLAN (37 tasks).
+E1-1 (frame grammar, D-28) is on `main`; E1-2 (entry table) is being implemented on `task/e1-2-entry-table`.
+Each task runs as in Phase 0: implementer in a worktree from a brief with exact values → read-only review →
+fix round → the format values recorded as a decision → PLAN tick with evidence → PR → `main` fast-forwarded.
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -19,7 +19,9 @@ E1-1 (the frame grammar of the `.lpk` format) starts.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-None. Everything is on `main` (`78bc960` or later); the main checkout of the measuring machine is on `main` with a clean release build of its head in `target/release/`.
+| Branch | State | What is left |
+|---|---|---|
+| `task/e1-2-entry-table` | implementer running (brief in the orchestrator's scratchpad: sorted unique paths, kinds file/directory/symlink, flags, `mtime_ns`, chunk indices, streaming reader) | review, fix round, D-29, tick, PR, fast-forward `main` |
 
 ## How to resume
 
