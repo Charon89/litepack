@@ -523,8 +523,8 @@ An archive can be written without seeking and without reading back what was writ
 records is a count of the bytes already written. The frames follow in this order:
 
 1. the header (section 2);
-2. zero or more `ChunkData` frames (kind 4), each holding one block;
-3. the `EntryTable` frame (kind 3);
+2. zero or more `ChunkData` frames (kind 2), each holding one block;
+3. the `EntryTable` frame (kind 1);
 4. optionally the `Records` frame;
 5. the `Index` frame (kind 5), which records the location of every frame above, the chunk table and the Merkle
    root over its hashes, and the decode envelope (section 7);
@@ -541,15 +541,23 @@ payload length.
 ### Chunks and blocks
 
 A file's bytes are cut into chunks of exactly the chunk size, the last one shorter; an empty file has no chunks.
-Chunks are numbered in the order they are written, which is the order of the entries that own them; a file's
-chunk list is a run of consecutive numbers. The chunk table has one record per chunk (section 5). The rule that
-chooses the cut is a property of the writer, not of the format: a reader finds each chunk's length in the chunk
-table and never assumes a size, so another way of cutting changes only the chunk boundaries.
+Chunks are numbered in the order they are written, which is the order of the entries that own them; this
+writer gives each file a run of consecutive numbers, but a reader accepts any chunk list whose indices are in
+range and whose lengths add up to the file size. The chunk table has one record per chunk (section 5). The
+rule that chooses the cut is a property of the writer, not of the format: a reader finds each chunk's length in
+the chunk table and never assumes a size, so another way of cutting changes only the chunk boundaries. A
+writer's chunker is fed the bytes of one file as a stream and may hold back a tail of at most one chunk; the
+chunker starts afresh for each file, so a chunk never holds bytes of two files, and no chunk is longer than the
+chunk size.
 
 Chunks fill blocks in order. A writer closes the current block before the chunk that would take it past its
 size limit, so a block holds whole chunks and a chunk never spans two blocks. A block of a store-only archive
 has the graph `[store]`; for such an archive the envelope declares `max_window` 0, `max_bwt_block` 0,
-`threads_hint` 0 and `decode_memory` equal to `max_block_plain`, the space of one block buffer.
+`threads_hint` 0 and `decode_memory` equal to `max_block_plain`, the space of one block buffer; the encoded
+input a decoder reads beside it is not counted in `decode_memory`.
+
+A writer that meets an I/O error, on its input or its output, refuses every later call with that error: the
+archive being written is abandoned.
 
 Entries are written in strictly ascending path order (section 4). A writer refuses a path that is invalid, equal
 to the one before it or sorts before it.
@@ -561,10 +569,15 @@ with its graph (section 8) and cutting the chunk out of the plain bytes at the o
 block leave. It keeps the plain bytes of the block it read last, so chunks read in order decode each block once.
 Every chunk is compared with its record in the chunk table (length and BLAKE3) before its bytes are used; a
 mismatch is `ChunkMismatch` with the chunk's number. A block whose frame hash fails cannot vouch for any chunk it
-holds, so reading a chunk of it is reported as a `ChunkMismatch` of that chunk.
+holds, so when a file is extracted, reading a chunk of that block is reported as a `ChunkMismatch` of that
+chunk.
 
 Whole-archive verification decodes every block and compares every chunk with its record, so a chunk no entry
-uses is checked too, and then checks every file entry's chunk list and total size against the chunk table.
+uses is checked too; a block whose frame hash fails is reported as that frame's `HashMismatch`. It then checks
+every file entry's chunk list and total size against the chunk table, which needs no block reads.
+
+Only the block read last is kept, so a chunk list that alternates between chunks of two blocks makes every
+reference read and decode a whole block; a reader of untrusted archives needs a decode budget.
 
 ### Extraction by the reference tool
 
@@ -573,11 +586,15 @@ anything:
 
 - a symlink entry is refused (`SymlinkRefused`); what an extractor does with links is a policy outside this
   format;
-- a path component that is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`,
-  in any letter case, with or without an extension), that contains `:`, or that ends in a dot or a space is
-  refused (`UnsafePath`).
+- a path component that is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `COM` followed
+  by a superscript 1, 2 or 3, `LPT1` to `LPT9`, `LPT` followed by a superscript 1, 2 or 3, `CONIN$`, `CONOUT$`),
+  compared in any letter case on the part before the first dot with its trailing spaces removed, so that
+  `con .txt` is refused as well as `CON.txt`; a component that contains `:`; or one that ends in a dot or a space
+  is refused (`UnsafePath`).
 
-The tool does not overwrite an existing file.
+The tool does not overwrite an existing file and reuses existing directories. Each file is written under a
+temporary name beside its target and renamed into place when complete; a file that cannot be finished is
+removed. Paths in the tool's listing have control characters escaped.
 
-Errors of this section: `UnsortedEntries`, `InvalidPath`, `ChunkMismatch`, `FileSizeMismatch`,
+Errors of this section: `UnsortedEntries`, `InvalidPath`, `BadChunk`, `ChunkMismatch`, `FileSizeMismatch`,
 `ChunkIndexOutOfRange`, `SymlinkRefused`, `UnsafePath`.

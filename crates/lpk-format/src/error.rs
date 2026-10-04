@@ -220,6 +220,12 @@ pub enum FormatError {
         /// Short reason.
         reason: &'static str,
     },
+    /// A chunker broke the cutting rules.
+    #[error("bad chunker output ({reason})")]
+    BadChunk {
+        /// Short reason.
+        reason: &'static str,
+    },
     /// An entry path is not safe to extract on this platform.
     #[error("unsafe path {path:?} ({reason})")]
     UnsafePath {

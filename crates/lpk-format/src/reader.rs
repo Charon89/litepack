@@ -2,7 +2,7 @@
 //! one-block cache, extraction and whole-archive verification (spec section 9).
 
 use crate::archive::Archive;
-use crate::chunk::{verify_file, ChunkRecord, ChunkSource};
+use crate::chunk::{fetch_and_check, resolve, ChunkSource};
 use crate::decode::decode_block;
 use crate::entry::{Entry, EntryKind, EntryTable};
 use crate::error::FormatError;
@@ -55,18 +55,32 @@ impl OwnedEntryTable {
 #[derive(Debug)]
 pub struct ArchiveChunks<'a, R: Read + Seek> {
     archive: &'a mut Archive<R>,
+    /// Report a block frame's failed hash as the requested chunk's mismatch.
+    map_frame_hash: bool,
 }
 
 impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
     /// A source over `archive`.
     pub fn new(archive: &'a mut Archive<R>) -> Self {
-        ArchiveChunks { archive }
+        ArchiveChunks {
+            archive,
+            map_frame_hash: true,
+        }
+    }
+
+    /// A source that reports a block frame's own error (`HashMismatch`) as is.
+    fn strict(archive: &'a mut Archive<R>) -> Self {
+        ArchiveChunks {
+            archive,
+            map_frame_hash: false,
+        }
     }
 
     /// Make `block` the cached block. A block frame whose hash fails is
     /// reported as a mismatch of the requested chunk: its bytes cannot vouch
     /// for any chunk they hold.
     fn load(&mut self, block: usize, chunk: u64) -> Result<(), FormatError> {
+        let map_frame_hash = self.map_frame_hash;
         let a = &mut *self.archive;
         if a.cache.as_ref().is_some_and(|(b, _)| *b == block) {
             return Ok(());
@@ -82,7 +96,7 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             len: loc.frame_len,
         };
         let frame = match a.read_frame_at(at, FrameKind::ChunkData) {
-            Err(FormatError::HashMismatch { .. }) => {
+            Err(FormatError::HashMismatch { .. }) if map_frame_hash => {
                 return Err(FormatError::ChunkMismatch { chunk })
             }
             other => other?,
@@ -135,13 +149,6 @@ impl<R: Read + Seek> ChunkSource for ArchiveChunks<'_, R> {
     }
 }
 
-fn check_chunk(data: &[u8], index: u64, rec: &ChunkRecord) -> Result<(), FormatError> {
-    if data.len() as u64 != rec.plain_len || blake3::hash(data).as_bytes() != &rec.hash {
-        return Err(FormatError::ChunkMismatch { chunk: index });
-    }
-    Ok(())
-}
-
 impl<R: Read + Seek> Archive<R> {
     /// The entry table, read and hash-checked (`HashMismatch` when damaged).
     pub fn entry_table(&mut self) -> Result<OwnedEntryTable, FormatError> {
@@ -152,33 +159,23 @@ impl<R: Read + Seek> Archive<R> {
 
     /// Write the bytes of a file entry to `sink`, checking every chunk against
     /// the chunk table before it is written; the first mismatch is that
-    /// chunk's `ChunkMismatch` (earlier chunks have already been written).
-    /// Directories and symlinks write nothing.
+    /// chunk's `ChunkMismatch` (earlier chunks have already been written, so a
+    /// caller writing to a file should discard it on error). Directories and
+    /// symlinks write nothing.
+    ///
+    /// Open item: only the block read last is cached, so a hostile chunk list
+    /// that alternates between chunks of two blocks makes every reference
+    /// read, hash and decode a whole block. A decode budget is needed before
+    /// untrusted archives are extracted.
     pub fn extract(&mut self, entry: &Entry, sink: &mut dyn Write) -> Result<(), FormatError> {
         if entry.kind != EntryKind::File {
             return Ok(());
         }
         let table = self.chunks_arc();
-        let mut recs = Vec::with_capacity(entry.chunks.len().min(1 << 16));
-        let mut total = Some(0u64);
-        for &c in &entry.chunks {
-            let r = table.record(c).ok_or(FormatError::ChunkIndexOutOfRange {
-                chunk: c,
-                len: table.len(),
-            })?;
-            total = total.and_then(|t| t.checked_add(r.plain_len));
-            recs.push(r);
-        }
-        if total != Some(entry.size) {
-            return Err(FormatError::FileSizeMismatch {
-                expected: entry.size,
-                found: total.unwrap_or(u64::MAX),
-            });
-        }
+        let recs = resolve(&entry.chunks, entry.size, &*table)?;
         let mut source = ArchiveChunks::new(self);
         for (&c, r) in entry.chunks.iter().zip(&recs) {
-            let data = source.chunk(c)?;
-            check_chunk(&data, c, r)?;
+            let data = fetch_and_check(&mut source, c, r)?;
             sink.write_all(&data)?;
         }
         Ok(())
@@ -186,29 +183,28 @@ impl<R: Read + Seek> Archive<R> {
 
     /// Check the whole archive without writing anything: every block is
     /// decoded and every chunk compared with its table record (so a chunk the
-    /// entries do not use is checked too), then every entry's chunk list and
-    /// sizes are verified with [`verify_file`]. The Merkle root and the index
-    /// were checked when the archive was opened.
+    /// entries do not use is checked too; a block frame that fails its hash is
+    /// reported as `HashMismatch`), then every file entry's chunk list and
+    /// size are checked against the chunk table, which needs no block reads.
+    /// The Merkle root and the index were checked when the archive was opened.
     pub fn verify(&mut self) -> Result<VerifySummary, FormatError> {
         let table = self.chunks_arc();
         let blocks = self.index().blocks.clone();
-        let mut source = ArchiveChunks::new(self);
+        let mut source = ArchiveChunks::strict(self);
         for b in &blocks {
             for c in b.first_chunk..b.first_chunk + b.chunk_count {
                 let rec = table.record(c).ok_or(FormatError::ChunkIndexOutOfRange {
                     chunk: c,
                     len: table.len(),
                 })?;
-                let data = source.chunk(c)?;
-                check_chunk(&data, c, &rec)?;
+                fetch_and_check(&mut source, c, &rec)?;
             }
         }
         let entries = self.entry_table()?;
-        let mut source = ArchiveChunks::new(self);
         for e in entries.table()?.iter() {
             let e = e?;
             if e.kind == EntryKind::File {
-                verify_file(&e.chunks, e.size, &*table, &mut source)?;
+                resolve(&e.chunks, e.size, &*table)?;
             }
         }
         Ok(VerifySummary {

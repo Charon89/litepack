@@ -240,7 +240,7 @@ fn lookup_chunk<L: ChunkLookup + ?Sized>(table: &L, c: u64) -> Result<ChunkRecor
 /// Resolve every chunk index of a file to its record and check that the
 /// lengths add up to `file_len`; a sum that overflows `u64` is reported as
 /// `FileSizeMismatch` with `found` = `u64::MAX`.
-fn resolve<L: ChunkLookup + ?Sized>(
+pub(crate) fn resolve<L: ChunkLookup + ?Sized>(
     chunks: &[u64],
     file_len: u64,
     table: &L,
@@ -258,16 +258,16 @@ fn resolve<L: ChunkLookup + ?Sized>(
     }
 }
 
-fn fetch_and_check(
+pub(crate) fn fetch_and_check(
     source: &mut dyn ChunkSource,
     index: u64,
     rec: &ChunkRecord,
-) -> Result<(), FormatError> {
+) -> Result<Vec<u8>, FormatError> {
     let data = source.chunk(index)?;
     if data.len() as u64 != rec.plain_len || blake3::hash(&data).as_bytes() != &rec.hash {
         return Err(FormatError::ChunkMismatch { chunk: index });
     }
-    Ok(())
+    Ok(data)
 }
 
 /// Verify a whole file: indices in range, summed `plain_len` equal to

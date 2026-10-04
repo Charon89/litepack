@@ -46,18 +46,20 @@ enum Command {
     },
 }
 
-const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+const RESERVED: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
 
 fn is_reserved_device(component: &str) -> bool {
-    // Windows ignores everything from the first dot on.
+    // Windows ignores everything from the first dot on, and the spaces before it.
     let stem = component.split('.').next().unwrap_or(component);
-    let upper = stem.to_ascii_uppercase();
+    let upper = stem.trim_end_matches([' ', '.']).to_uppercase();
     if RESERVED.contains(&upper.as_str()) {
         return true;
     }
     for prefix in ["COM", "LPT"] {
         if let Some(d) = upper.strip_prefix(prefix) {
-            if matches!(d.as_bytes(), [b'1'..=b'9']) {
+            let mut it = d.chars();
+            if let (Some('1'..='9' | '\u{B9}' | '\u{B2}' | '\u{B3}'), None) = (it.next(), it.next())
+            {
                 return true;
             }
         }
@@ -67,8 +69,10 @@ fn is_reserved_device(component: &str) -> bool {
 
 /// The extraction tool's path policy on top of the format's path rules: a
 /// component may not be a Windows device name (`CON`, `PRN`, `AUX`, `NUL`,
-/// `COM1`-`COM9`, `LPT1`-`LPT9`, in any case, with or without an extension),
-/// contain `:`, or end in a dot or a space.
+/// `COM1`-`COM9`, `COM` with a superscript 1, 2 or 3, `LPT1`-`LPT9`, `LPT`
+/// with a superscript 1, 2 or 3, `CONIN$`, `CONOUT$`; in any case, with or
+/// without an extension, and with spaces before the extension), contain `:`,
+/// or end in a dot or a space.
 pub fn check_extraction_path(path: &str) -> Result<(), FormatError> {
     let unsafe_path = |reason| FormatError::UnsafePath {
         path: path.to_string(),
@@ -101,10 +105,34 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Control characters (newlines included) as Rust-style escapes, so one entry is one line.
+fn escape_path(p: &str) -> String {
+    p.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// `dir` with the archive path's components pushed one at a time (a `/` inside
+/// one `join` argument is not converted under a `\\?\` prefix on Windows).
+fn join_components(dir: &Path, path: &str) -> PathBuf {
+    let mut p = dir.to_path_buf();
+    for c in path.split('/') {
+        p.push(c);
+    }
+    p
+}
+
 fn list(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     let mut a = open(path)?;
     for e in entries(&mut a)? {
-        writeln!(out, "{}\t{}\t{}", e.kind.name(), e.size, e.path)?;
+        let path = escape_path(&e.path);
+        writeln!(out, "{}\t{}\t{}", e.kind.name(), e.size, path)?;
     }
     Ok(())
 }
@@ -146,6 +174,35 @@ fn info(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     Ok(())
 }
 
+/// Write one file next to its final name and rename it into place when it is
+/// complete; on any error the partial file is removed. An existing file or link
+/// at the target is an error (nothing is overwritten).
+fn extract_file(a: &mut Archive<File>, e: &Entry, target: &Path) -> Result<(), FormatError> {
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists).into());
+    }
+    let mut name = target.file_name().unwrap_or_default().to_os_string();
+    name.push(".lpk-partial");
+    let tmp = target.with_file_name(name);
+    let result = (|| -> Result<(), FormatError> {
+        let mut w = BufWriter::new(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?,
+        );
+        a.extract(e, &mut w)?;
+        w.flush()?;
+        drop(w);
+        std::fs::rename(&tmp, target)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn extract(path: &Path, dir: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     let mut a = open(path)?;
     let all = entries(&mut a)?;
@@ -161,7 +218,7 @@ fn extract(path: &Path, dir: &Path, out: &mut dyn Write) -> Result<(), FormatErr
     std::fs::create_dir_all(dir)?;
     let (mut files, mut dirs) = (0u64, 0u64);
     for e in &all {
-        let target = dir.join(&e.path);
+        let target = join_components(dir, &e.path);
         match e.kind {
             EntryKind::Directory => {
                 std::fs::create_dir_all(&target)?;
@@ -171,15 +228,7 @@ fn extract(path: &Path, dir: &Path, out: &mut dyn Write) -> Result<(), FormatErr
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                // Never overwrite: an existing file or link at the target is an error.
-                let mut w = BufWriter::new(
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&target)?,
-                );
-                a.extract(e, &mut w)?;
-                w.flush()?;
+                extract_file(&mut a, e, &target)?;
                 files += 1;
             }
             EntryKind::Symlink => {}

@@ -12,6 +12,7 @@ use crate::index::{BlockLocation, FrameLocation, Index};
 use crate::merkle::merkle_root;
 use crate::primitive::PrimitiveId;
 use crate::trailer::Trailer;
+use crate::varint;
 use std::io::{Read, Write};
 
 /// Smallest `chunk_size` a writer accepts.
@@ -21,27 +22,60 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 1 << 20;
 /// Default `block_size`: 64 MiB.
 pub const DEFAULT_BLOCK_SIZE: u64 = 1 << 26;
 
-/// Cuts a run of file bytes into chunks.
+/// Cuts the bytes of one file into chunks, as a stream.
 ///
-/// The writer hands the chunker consecutive segments of one file, each a
-/// whole number of `chunk_size` bytes long except the last (which ends the
-/// file); the returned slices must tile the segment, in order, without gaps
-/// or empty pieces.
+/// The writer feeds the bytes of a file in consecutive pieces. The chunker
+/// answers with cut positions measured in the stream of bytes it has been fed
+/// and not yet cut (the held-back tail of earlier calls followed by `bytes`);
+/// they must be strictly increasing and at most the length of that stream.
+/// The writer keeps the bytes after the last cut and counts them in the next
+/// call. Rules the writer enforces (`BadChunk` otherwise): no chunk is longer
+/// than `chunk_size`, the held-back tail is at most `chunk_size`, and when
+/// `eof` is true every byte is cut. The writer calls [`Chunker::reset`]
+/// before each file, so chunks never cross files.
 pub trait Chunker {
-    /// Cut `data` into consecutive non-empty slices that cover it exactly.
-    fn chunks<'a>(&mut self, data: &'a [u8]) -> Vec<&'a [u8]>;
+    /// Take the next `bytes` of the file (`eof` marks the last call, possibly
+    /// with no bytes) and return the cut positions.
+    fn feed(&mut self, bytes: &[u8], eof: bool) -> Vec<usize>;
+    /// Forget everything about the previous file.
+    fn reset(&mut self);
 }
 
 /// Cuts into pieces of exactly `size` bytes, the last one shorter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FixedChunker {
-    /// Piece length in bytes; at least 1.
-    pub size: usize,
+    size: usize,
+    held: usize,
+}
+
+impl FixedChunker {
+    /// A chunker with pieces of `size` bytes (at least 1).
+    pub fn new(size: usize) -> Self {
+        FixedChunker {
+            size: size.max(1),
+            held: 0,
+        }
+    }
 }
 
 impl Chunker for FixedChunker {
-    fn chunks<'a>(&mut self, data: &'a [u8]) -> Vec<&'a [u8]> {
-        data.chunks(self.size.max(1)).collect()
+    fn feed(&mut self, bytes: &[u8], eof: bool) -> Vec<usize> {
+        let total = self.held + bytes.len();
+        let mut cuts: Vec<usize> = (1..=total / self.size).map(|k| k * self.size).collect();
+        let last = cuts.last().copied().unwrap_or(0);
+        if eof {
+            if last < total {
+                cuts.push(total);
+            }
+            self.held = 0;
+        } else {
+            self.held = total - last;
+        }
+        cuts
+    }
+
+    fn reset(&mut self) {
+        self.held = 0;
     }
 }
 
@@ -100,6 +134,8 @@ pub struct Writer<W: Write> {
     blocks: Vec<BlockLocation>,
     pending: Vec<u8>,
     pending_chunks: u64,
+    /// The first I/O error seen; every later call fails with it.
+    failed: Option<(std::io::ErrorKind, String)>,
 }
 
 impl<W: Write> std::fmt::Debug for Writer<W> {
@@ -122,11 +158,11 @@ impl<W: Write> Writer<W> {
     /// the header.
     pub fn new(out: W, options: WriterOptions) -> Result<Self, FormatError> {
         let size = usize::try_from(options.chunk_size).map_err(|_| bad_options("chunk_size"))?;
-        Self::with_chunker(out, options, Box::new(FixedChunker { size }))
+        Self::with_chunker(out, options, Box::new(FixedChunker::new(size)))
     }
 
-    /// Like [`Writer::new`] with another chunker (the `chunk_size` option still
-    /// sets the segment length the chunker is fed).
+    /// Like [`Writer::new`] with another chunker (`chunk_size` is still the
+    /// longest chunk and tail the writer accepts from it).
     pub fn with_chunker(
         mut out: W,
         options: WriterOptions,
@@ -163,6 +199,7 @@ impl<W: Write> Writer<W> {
             blocks: Vec::new(),
             pending: Vec::new(),
             pending_chunks: 0,
+            failed: None,
         })
     }
 
@@ -194,6 +231,22 @@ impl<W: Write> Writer<W> {
         )
     }
 
+    /// Fail with the first I/O error this writer saw, if any.
+    fn check_alive(&self) -> Result<(), FormatError> {
+        match &self.failed {
+            Some((kind, msg)) => Err(FormatError::Io(std::io::Error::new(*kind, msg.clone()))),
+            None => Ok(()),
+        }
+    }
+
+    /// Remember an I/O error so that later calls refuse.
+    fn note<T>(&mut self, r: Result<T, FormatError>) -> Result<T, FormatError> {
+        if let Err(FormatError::Io(e)) = &r {
+            self.failed = Some((e.kind(), e.to_string()));
+        }
+        r
+    }
+
     fn flush_block(&mut self) -> Result<(), FormatError> {
         if self.pending_chunks == 0 {
             return Ok(());
@@ -204,10 +257,25 @@ impl<W: Write> Writer<W> {
             plain_len: plain.len() as u64,
             encoded_len: plain.len() as u64,
         };
-        // The graph is all `store` (checked at construction): encoding is the identity.
-        let mut payload = header.encode();
-        payload.extend_from_slice(&plain);
-        let at = self.write_frame(FrameKind::ChunkData, payload)?;
+        // The graph is all `store` (checked at construction): encoding is the
+        // identity, and the frame is written piecewise, without a copy of the block.
+        let head = header.encode();
+        let payload_len = (head.len() + plain.len()) as u64;
+        let at = FrameLocation {
+            offset: self.pos,
+            len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
+        };
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&head);
+        hasher.update(&plain);
+        let w = &mut self.out;
+        w.write_all(&(FrameKind::ChunkData as u16).to_le_bytes())?;
+        w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
+        varint::write(w, payload_len)?;
+        w.write_all(&head)?;
+        w.write_all(&plain)?;
+        w.write_all(hasher.finalize().as_bytes())?;
+        self.pos += at.len;
         self.blocks.push(BlockLocation {
             frame_offset: at.offset,
             frame_len: at.len,
@@ -235,10 +303,21 @@ impl<W: Write> Writer<W> {
     }
 
     /// Add a regular file: its bytes are read to the end, cut into chunks and
-    /// appended to the current block. A failed read leaves the chunks read so
-    /// far in the archive without an entry; the caller should then abandon the
-    /// writer.
+    /// appended to the current block. After an I/O error (from the input or
+    /// the output) the writer refuses every further call with that error.
     pub fn add_file(
+        &mut self,
+        path: &str,
+        flags: EntryFlags,
+        mtime_ns: i64,
+        data: &mut dyn Read,
+    ) -> Result<(), FormatError> {
+        self.check_alive()?;
+        let r = self.add_file_inner(path, flags, mtime_ns, data);
+        self.note(r)
+    }
+
+    fn add_file_inner(
         &mut self,
         path: &str,
         flags: EntryFlags,
@@ -255,29 +334,47 @@ impl<W: Write> Writer<W> {
             chunks: Vec::new(),
         };
         self.check(&entry)?;
-        // Whole chunks per segment, so a fixed cut never splits a chunk across reads.
-        let per_segment =
-            (self.options.block_size / self.options.chunk_size) * self.options.chunk_size;
-        // The buffer grows with the file: a small file does not pay for a whole block.
+        let chunk_size = self.options.chunk_size as usize;
+        // Read a block's worth at a time: besides the pending block, at most
+        // the held-back tail plus one segment is in memory.
+        let per_segment = self.options.block_size;
+        self.chunker.reset();
+        // The held-back tail, then the newly read bytes; grows with the file.
         let mut buf: Vec<u8> = Vec::new();
         loop {
-            buf.clear();
+            let before = buf.len();
             let n = Read::take(&mut *data, per_segment).read_to_end(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            let segment = &buf[..n];
-            let cuts = self.chunker.chunks(segment);
-            if cuts.iter().map(|c| c.len()).sum::<usize>() != n || cuts.iter().any(|c| c.is_empty())
-            {
-                return Err(bad_options("chunker did not tile its input"));
-            }
-            for piece in cuts {
-                let i = self.add_chunk(piece)?;
+            let eof = (n as u64) < per_segment;
+            let cuts = self.chunker.feed(&buf[before..], eof);
+            let mut start = 0usize;
+            for cut in cuts {
+                if cut <= start || cut > buf.len() {
+                    return Err(FormatError::BadChunk {
+                        reason: "cut positions",
+                    });
+                }
+                if cut - start > chunk_size {
+                    return Err(FormatError::BadChunk {
+                        reason: "chunk longer than chunk_size",
+                    });
+                }
+                let i = self.add_chunk(&buf[start..cut])?;
                 entry.chunks.push(i);
+                start = cut;
+            }
+            if eof && start != buf.len() {
+                return Err(FormatError::BadChunk {
+                    reason: "bytes left uncut at eof",
+                });
+            }
+            buf.drain(..start);
+            if buf.len() > chunk_size {
+                return Err(FormatError::BadChunk {
+                    reason: "held back more than chunk_size",
+                });
             }
             entry.size += n as u64;
-            if (n as u64) < per_segment {
+            if eof {
                 break;
             }
         }
@@ -330,6 +427,7 @@ impl<W: Write> Writer<W> {
 
     /// Close the last block and write the entry table, the index and the trailer.
     pub fn finish(mut self) -> Result<WriterSummary, FormatError> {
+        self.check_alive()?;
         self.flush_block()?;
         let table = EntryTableWriter::encode(&self.entries)?;
         let entry_table = self.write_frame(FrameKind::EntryTable, table)?;

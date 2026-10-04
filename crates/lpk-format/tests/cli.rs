@@ -122,7 +122,10 @@ fn verify_reports_the_first_error_with_exit_1() {
     let (code, out, err) = cli(&["verify", p.to_str().unwrap()]);
     assert_eq!(code, 1);
     assert!(out.is_empty());
-    assert!(err.starts_with("error: chunk 0 does not match"), "{err}");
+    assert!(
+        err.starts_with("error: payload hash mismatch in frame kind 2"),
+        "{err}"
+    );
 
     let (code, _, err) = cli(&["verify", t.path().join("missing.lpk").to_str().unwrap()]);
     assert_eq!(code, 1);
@@ -186,7 +189,19 @@ fn extract_refuses_unsafe_paths_and_symlinks_before_writing() {
 #[test]
 fn extraction_path_rules() {
     for ok in [
-        "a/b", "console", "com10", "com0", "aux_x", "nul2", "a.b/c.d", ".hidden",
+        "a/b",
+        "console",
+        "com10",
+        "com0",
+        "aux_x",
+        "nul2",
+        "a.b/c.d",
+        ".hidden",
+        "con x.txt",
+        "com\u{b9}0",
+        "lpt\u{b9}\u{b2}",
+        "conin",
+        "conout$x",
     ] {
         check_extraction_path(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
     }
@@ -207,6 +222,17 @@ fn extraction_path_rules() {
         "a.",
         "a /b",
         "b ",
+        "con .txt",
+        "NUL .log",
+        "nul  .tar.gz",
+        "COM\u{b9}",
+        "com\u{b2}.txt",
+        "LPT\u{b3}",
+        "lpt\u{b9}.x",
+        "CONIN$",
+        "conout$",
+        "CONOUT$.txt",
+        "d/conin$ .x",
     ] {
         assert!(
             matches!(
@@ -226,4 +252,49 @@ fn usage_errors() {
     let (code, out, _) = cli(&["--help"]);
     assert_eq!(code, 0);
     assert!(out.contains("verify"));
+}
+
+#[test]
+fn a_damaged_later_chunk_leaves_no_partial_file() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("d.lpk");
+    make(
+        &p,
+        &[],
+        &[("a.txt", data(1, 100)), ("big", data(9, 60_000))],
+        &[],
+    )
+    .unwrap();
+    // Damage the last block, which holds the end of `big`.
+    let (off, len) = {
+        let a = lpk_format::Archive::open(
+            std::fs::File::open(&p).unwrap(),
+            &lpk_format::Resources::default(),
+        )
+        .unwrap();
+        let b = *a.index().blocks.last().unwrap();
+        (b.frame_offset, b.frame_len)
+    };
+    let mut bytes = std::fs::read(&p).unwrap();
+    bytes[(off + len / 2) as usize] ^= 0xFF;
+    std::fs::write(&p, &bytes).unwrap();
+    let out_dir = t.path().join("out");
+    let (code, _, err) = cli(&["extract", p.to_str().unwrap(), out_dir.to_str().unwrap()]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("does not match"), "{err}");
+    let names: Vec<_> = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["a.txt"], "no big and no big.lpk-partial");
+}
+
+#[test]
+fn list_escapes_control_characters() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("c.lpk");
+    make(&p, &[], &[("a\nb\u{1b}c", data(1, 5))], &[]).unwrap();
+    let (code, out, _) = cli(&["list", p.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert_eq!(out, "File\t5\ta\\nb\\u{1b}c\n");
 }

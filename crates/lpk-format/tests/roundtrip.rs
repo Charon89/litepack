@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
 use lpk_format::{
-    Archive, ChunkSource, Chunker, Entry, EntryFlags, EntryKind, FormatError, Resources, Writer,
-    WriterOptions, WriterSummary,
+    Archive, ChunkSource, Chunker, Entry, EntryFlags, EntryKind, FixedChunker, FormatError,
+    Resources, Writer, WriterOptions, WriterSummary,
 };
 use std::cell::Cell;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -234,32 +234,111 @@ fn empty_archives_and_archives_without_chunks() {
     a.verify().unwrap();
 }
 
-/// Cuts every 5000 bytes: a stand-in for a content-defined chunker.
-struct Every5000;
-
-impl Chunker for Every5000 {
-    fn chunks<'a>(&mut self, data: &'a [u8]) -> Vec<&'a [u8]> {
-        data.chunks(5000).collect()
+#[test]
+fn a_tail_is_carried_across_segments() {
+    // Segments are 16 KiB (the block size); 3000-byte chunks do not divide it,
+    // so a chunk spans the end of the first segment.
+    let mut rng = Rng(5);
+    let data = rng.bytes(31_000);
+    let sink = Shared(Rc::new(std::cell::RefCell::new(Vec::new())));
+    let mut w = Writer::with_chunker(
+        sink.clone(),
+        small_options(),
+        Box::new(FixedChunker::new(3000)),
+    )
+    .unwrap();
+    w.add_file("f", EntryFlags::EMPTY, 0, &mut data.as_slice())
+        .unwrap();
+    // The chunker holds state per file: the next file starts afresh.
+    let other = rng.bytes(3500);
+    w.add_file("g", EntryFlags::EMPTY, 0, &mut other.as_slice())
+        .unwrap();
+    let s = w.finish().unwrap();
+    assert_eq!(s.chunks, 11 + 2);
+    let bytes = sink.0.borrow().clone();
+    let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
+    let lens: Vec<u64> = (0..13)
+        .map(|i| a.chunks().record(i).unwrap().plain_len)
+        .collect();
+    assert_eq!(lens[..10], [3000; 10]);
+    assert_eq!(lens[10..], [1000, 3000, 500]);
+    let es = entries_of(&mut a);
+    for (e, want) in es.iter().zip([&data, &other]) {
+        let mut out = Vec::new();
+        a.extract(e, &mut out).unwrap();
+        assert_eq!(&out, want);
     }
+    a.verify().unwrap();
+}
+
+/// A chunker that misbehaves in a chosen way.
+struct Rogue(&'static str);
+
+impl Chunker for Rogue {
+    fn feed(&mut self, bytes: &[u8], eof: bool) -> Vec<usize> {
+        let n = bytes.len();
+        match self.0 {
+            // One chunk of the whole input.
+            "oversize" => {
+                if n > 0 {
+                    vec![n]
+                } else {
+                    vec![]
+                }
+            }
+            // Never cuts.
+            "hoard" => vec![],
+            // Cuts at the end only when told it is the end... of nothing.
+            "uncut at eof" => {
+                if eof {
+                    vec![]
+                } else {
+                    vec![n.min(4096)]
+                }
+            }
+            "not increasing" => vec![10, 10],
+            "past the end" => vec![n + 1],
+            "zero" => vec![0],
+            _ => vec![],
+        }
+    }
+    fn reset(&mut self) {}
 }
 
 #[test]
-fn another_chunker_plugs_in() {
-    let mut rng = Rng(5);
-    let data = rng.bytes(30_000);
-    let sink = Shared(Rc::new(std::cell::RefCell::new(Vec::new())));
-    let mut w = Writer::with_chunker(sink.clone(), small_options(), Box::new(Every5000)).unwrap();
-    w.add_file("f", EntryFlags::EMPTY, 0, &mut data.as_slice())
+fn chunkers_that_break_the_rules_are_refused() {
+    let data = vec![1u8; 30_000];
+    // Longer than chunk_size (4096).
+    let mut w = Writer::with_chunker(
+        WriteOnly(Vec::new()),
+        small_options(),
+        Box::new(FixedChunker::new(5000)),
+    )
+    .unwrap();
+    assert!(matches!(
+        w.add_file("f", EntryFlags::EMPTY, 0, &mut data.as_slice()),
+        Err(FormatError::BadChunk { .. })
+    ));
+    for rule in [
+        "oversize",
+        "hoard",
+        "uncut at eof",
+        "not increasing",
+        "past the end",
+        "zero",
+    ] {
+        let mut w = Writer::with_chunker(
+            WriteOnly(Vec::new()),
+            small_options(),
+            Box::new(Rogue(rule)),
+        )
         .unwrap();
-    let s = w.finish().unwrap();
-    // The chunker is fed segments of 16 KiB: 5000 * 3 + 1384, then 5000 * 2 + 3616.
-    assert_eq!(s.chunks, 7);
-    let bytes = sink.0.borrow().clone();
-    let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
-    let es = entries_of(&mut a);
-    let mut out = Vec::new();
-    a.extract(&es[0], &mut out).unwrap();
-    assert_eq!(out, data);
+        let r = w.add_file("f", EntryFlags::EMPTY, 0, &mut data.as_slice());
+        assert!(
+            matches!(r, Err(FormatError::BadChunk { .. })),
+            "{rule}: {r:?}"
+        );
+    }
 }
 
 fn flip(bytes: &mut [u8], at: u64) {
@@ -333,7 +412,7 @@ fn a_damaged_block_fails_only_the_files_it_holds() {
     let mut a = Archive::open(Cursor::new(bad), &Resources::default()).unwrap();
     assert!(matches!(
         a.verify(),
-        Err(FormatError::ChunkMismatch { chunk }) if chunk == victim.first_chunk
+        Err(FormatError::HashMismatch { kind }) if kind == 2
     ));
 
     // Frame hash recomputed: the chunk hash catches it.
@@ -431,10 +510,46 @@ impl Read for Failing {
 }
 
 #[test]
-fn a_failing_input_is_an_io_error() {
+fn a_failing_input_is_an_io_error_and_poisons_the_writer() {
     let mut w = Writer::new(WriteOnly(Vec::new()), small_options()).unwrap();
     let r = w.add_file("f", EntryFlags::EMPTY, 0, &mut Failing(10_000));
     assert!(matches!(r, Err(FormatError::Io(_))));
+    let mut empty: &[u8] = b"";
+    assert!(matches!(
+        w.add_file("g", EntryFlags::EMPTY, 0, &mut empty),
+        Err(FormatError::Io(e)) if e.to_string().contains("boom")
+    ));
+    assert!(matches!(w.finish(), Err(FormatError::Io(_))));
+}
+
+/// An output that fails after some bytes.
+struct FailingOut(usize);
+
+impl Write for FailingOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0 == 0 {
+            return Err(std::io::Error::other("disk full"));
+        }
+        let n = buf.len().min(self.0);
+        self.0 -= n;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn an_output_error_poisons_the_writer() {
+    let mut w = Writer::new(FailingOut(40), small_options()).unwrap();
+    let data = vec![2u8; 100_000];
+    let r = w.add_file("f", EntryFlags::EMPTY, 0, &mut data.as_slice());
+    assert!(matches!(r, Err(FormatError::Io(_))), "{r:?}");
+    let mut empty: &[u8] = b"";
+    assert!(matches!(
+        w.add_file("g", EntryFlags::EMPTY, 0, &mut empty),
+        Err(FormatError::Io(e)) if e.to_string().contains("disk full")
+    ));
 }
 
 #[test]
