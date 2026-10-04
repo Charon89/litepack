@@ -179,6 +179,15 @@ pub enum FormatError {
         /// Which frame.
         what: &'static str,
     },
+    /// The archive declares more than this reader allows (spec section 7).
+    #[error("{0}")]
+    Refused(crate::envelope::Refusal),
+    /// An envelope field contradicts the block table or the index length.
+    #[error("decode envelope field {field} does not match the archive")]
+    EnvelopeMismatch {
+        /// The envelope field.
+        field: &'static str,
+    },
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

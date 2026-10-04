@@ -9,6 +9,7 @@
 pub mod archive;
 pub mod chunk;
 pub mod entry;
+pub mod envelope;
 pub mod error;
 pub mod frame;
 pub mod header;
@@ -32,6 +33,10 @@ pub use trailer::{trailer_layout_table, Trailer, TRAILER_FRAME_LEN, TRAILER_PAYL
 pub use entry::{
     entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,
     Entry, EntryFlags, EntryIter, EntryKind, EntryTable, EntryTableWriter, MIN_ENTRY_LEN,
+};
+pub use envelope::{
+    envelope_layout_table, resources_default_table, Envelope, Refusal, Resources,
+    DEFAULT_MAX_BWT_BLOCK, DEFAULT_MAX_WINDOW,
 };
 pub use error::FormatError;
 pub use frame::{
