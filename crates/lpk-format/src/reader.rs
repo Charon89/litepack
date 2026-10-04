@@ -102,6 +102,18 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             other => other?,
         };
         let (header, used) = BlockHeader::parse(&frame.payload, block)?;
+        let need = header.graph.resources();
+        let env = &a.index().envelope;
+        if need.window > env.max_window {
+            return Err(FormatError::EnvelopeMismatch {
+                field: "max_window",
+            });
+        }
+        if need.bwt_block > env.max_bwt_block {
+            return Err(FormatError::EnvelopeMismatch {
+                field: "max_bwt_block",
+            });
+        }
         if let Some(id) = header
             .graph
             .prior_ids()

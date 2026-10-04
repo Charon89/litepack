@@ -45,7 +45,21 @@ pub fn compress(level: i32, window_log: Option<u32>, dict: Option<&[u8]>, data: 
     c.compress(data).unwrap()
 }
 
-/// `zstd` params: `window_log` and the prior id (zeros = none).
+/// Compress `data` with the streaming encoder and no pledged size, so the
+/// frame header declares the window (`window_log`) instead of a content size.
+pub fn compress_stream(level: i32, window_log: u32, dict: Option<&[u8]>, data: &[u8]) -> Vec<u8> {
+    let mut e = match dict {
+        Some(d) => zstd::stream::write::Encoder::with_dictionary(Vec::new(), level, d).unwrap(),
+        None => zstd::stream::write::Encoder::new(Vec::new(), level).unwrap(),
+    };
+    e.include_checksum(true).unwrap();
+    e.set_parameter(zstd::zstd_safe::CParameter::WindowLog(window_log))
+        .unwrap();
+    e.write_all(data).unwrap();
+    e.finish().unwrap()
+}
+
+/// `zstd` params:`window_log` and the prior id (zeros = none).
 pub fn zstd_params(window_log: u8, prior: Option<[u8; 32]>) -> Vec<u8> {
     let mut p = vec![window_log];
     p.extend_from_slice(&prior.unwrap_or([0; 32]));
@@ -84,9 +98,9 @@ impl BlockEncoder for ZstdTestEncoder {
     }
 
     fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError> {
-        Ok(compress(
+        Ok(compress_stream(
             self.level,
-            Some(u32::from(self.window_log)),
+            u32::from(self.window_log),
             self.dictionary.as_deref(),
             plain,
         ))

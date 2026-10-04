@@ -43,6 +43,37 @@ fn every_vector_decodes_to_its_generated_contents() {
 }
 
 #[test]
+fn the_writer_is_deterministic() {
+    let build = || {
+        common::write_archive(
+            lpk_format::WriterOptions {
+                chunk_size: 4096,
+                block_size: 16 * 1024,
+                archive_id: [9; 16],
+                ..lpk_format::WriterOptions::default()
+            },
+            &vector_files("zstd-multiblock.lpk"),
+        )
+    };
+    assert!(build() == build());
+}
+
+#[test]
+fn the_window_vector_frame_declares_its_window() {
+    use lpk_format::BlockEncoder;
+    let plain = &vector_files("zstd-window.lpk")[0].1;
+    let frame = common::ZstdTestEncoder::new(3, 24, None)
+        .encode(plain)
+        .unwrap();
+    // Magic (4), descriptor (not single-segment), window descriptor: 2^24.
+    assert_eq!(frame[4] & 0x20, 0);
+    assert_eq!(frame[5], 0x70);
+}
+
+/// Reproduces the committed bytes; only valid with the zstd library version
+/// that wrote them, so it runs on purpose, not in the normal suite.
+#[test]
+#[ignore = "bytes depend on the zstd library version"]
 fn the_writer_reproduces_every_vector_byte_for_byte() {
     let dict = read(DICT_FILE);
     for name in VECTORS {
@@ -62,10 +93,15 @@ fn what_each_vector_exercises() {
 
     let a = open("zstd-multiblock.lpk");
     assert!(a.index().blocks.len() >= 2);
-    // A file spans two blocks.
-    let spans = a.index().blocks.windows(2).any(|w| {
-        let first = w[0].first_chunk + w[0].chunk_count - 1;
-        a.chunks().locate(first).is_some()
+    // Some file's chunk list crosses a block boundary.
+    let mut a = a;
+    let table = a.entry_table().unwrap();
+    let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
+    let spans = a.index().blocks.iter().skip(1).any(|b| {
+        entries.iter().any(|e| {
+            e.chunks.iter().any(|&c| c < b.first_chunk)
+                && e.chunks.iter().any(|&c| c >= b.first_chunk)
+        })
     });
     assert!(spans);
 

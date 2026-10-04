@@ -219,7 +219,8 @@ impl<R: Read + Seek> Archive<R> {
     }
 
     /// Use `store` for the priors blocks name (the reader never fetches any
-    /// itself). Decoders registered earlier are kept.
+    /// itself). Decoders registered earlier are kept, except the zstd decoder,
+    /// which is replaced (register a custom zstd decoder after this call).
     pub fn set_priors(&mut self, store: Box<dyn PriorStore>) {
         self.cache = None;
         let old = std::mem::replace(&mut self.registry, Registry::v1());

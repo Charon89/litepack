@@ -107,7 +107,8 @@ impl Registry {
     }
 
     /// Use `store` for priors: the zstd decoder is replaced by one that looks
-    /// in it (call this before registering a custom zstd decoder).
+    /// in it, so a custom zstd decoder registered earlier is lost (register it
+    /// after this call). Other decoders are kept.
     pub fn with_priors(mut self, store: Box<dyn PriorStore>) -> Registry {
         let store: Arc<dyn PriorStore> = Arc::from(store);
         self.decoders[PrimitiveId::Zstd as usize] = Box::new(ZstdDecoder::new(Arc::clone(&store)));

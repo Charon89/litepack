@@ -45,7 +45,10 @@ impl ZstdDecoder {
         ZstdDecoder { priors }
     }
 
-    /// The dictionary a step names, checked against its ID, or `None`.
+    /// The dictionary a step names, checked against its ID, or `None`. Each
+    /// call re-hashes the prior and parses its tables (ruzstd's `Dictionary`
+    /// cannot be cloned, so it is not cached): a cost per block, small next to
+    /// decoding a block.
     fn dictionary(&self, id: &[u8; 32]) -> Result<Option<Dictionary>, FormatError> {
         if id.iter().all(|&b| b == 0) {
             return Ok(None);
@@ -79,7 +82,17 @@ fn drain(dec: &mut FrameDecoder, out: &mut Vec<u8>, max: u64) -> Result<(), Form
             return Err(FormatError::PayloadTooLarge { len, max });
         }
         match dec.collect() {
-            Some(chunk) if !chunk.is_empty() => out.extend_from_slice(&chunk),
+            Some(chunk) if !chunk.is_empty() => {
+                let need = out.len() + chunk.len();
+                if out.capacity() < need {
+                    // Grow by an eighth (at least 64 KiB), never past `max`:
+                    // capacity stays within `max`, copies stay amortised.
+                    let step = (out.len() / 8).max(STEP).max(chunk.len());
+                    let cap = (out.len() + step).min(max.try_into().unwrap_or(usize::MAX));
+                    out.reserve_exact(cap.max(need) - out.len());
+                }
+                out.extend_from_slice(&chunk);
+            }
             _ => break,
         }
     }

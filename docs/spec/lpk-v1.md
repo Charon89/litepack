@@ -666,6 +666,9 @@ the tests from seeded patterns, so the repository holds only the archives and th
   `zstd-dict.prior`, and the index lists its BLAKE3-256.
 - `zstd-window.lpk`: one block whose parameters declare `window_log` 24.
 
-The tests check that each archive decodes to its generated contents, that `lpk-decode verify` accepts it (with
-`--prior tests/vectors/zstd-dict.prior` for the dictionary one), and that the writer reproduces the committed
-bytes exactly. To regenerate them on purpose: `cargo test -p lpk-format --test gen_vectors -- --ignored`.
+The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts
+it (with `--prior tests/vectors/zstd-dict.prior` for the dictionary one). The vectors are not a normative
+encoding: regenerating them reproduces the committed bytes only with the same zstd library version, which an
+ignored test checks on purpose. To regenerate them: `cargo test -p lpk-format --test gen_vectors -- --ignored`.
+The frame of `zstd-window.lpk` is written without a declared content size, so its header declares the 2^24
+window.

@@ -84,8 +84,9 @@ impl Chunker for FixedChunker {
 /// reports is what a reader runs on them: `encode` followed by the graph's
 /// decoding must give back the plain bytes.
 pub trait BlockEncoder {
-    /// The decode graph of the blocks this encoder produces. The writer
-    /// validates it (step count, parameters) before the first block.
+    /// The decode graph of the blocks this encoder produces. It is fixed for
+    /// the writer's lifetime: the writer reads it once, validates it (step
+    /// count, parameters) and records it in every block.
     fn graph(&self) -> Graph;
     /// Encode one block's plain bytes.
     fn encode(&mut self, plain: &[u8]) -> Result<Vec<u8>, FormatError>;
@@ -174,6 +175,8 @@ pub struct Writer<W: Write> {
     records: Vec<ChunkRecord>,
     blocks: Vec<BlockLocation>,
     priors: BTreeSet<[u8; 32]>,
+    /// The encoder's graph, read once at construction.
+    graph: Graph,
     pending: Vec<u8>,
     pending_chunks: u64,
     /// The first I/O error seen; every later call fails with it.
@@ -237,6 +240,7 @@ impl<W: Write> Writer<W> {
             records: Vec::new(),
             blocks: Vec::new(),
             priors: BTreeSet::new(),
+            graph,
             pending: Vec::new(),
             pending_chunks: 0,
             failed: None,
@@ -299,14 +303,15 @@ impl<W: Write> Writer<W> {
         }
         let plain = std::mem::take(&mut self.pending);
         let encoded = self.options.encoder.encode(&plain)?;
-        let graph = self.options.encoder.graph();
+        let graph = self.graph.clone();
         self.priors.extend(graph.prior_ids());
         let header = BlockHeader {
             graph,
             plain_len: plain.len() as u64,
             encoded_len: encoded.len() as u64,
         };
-        // The frame is written piecewise, without a copy of the encoded block.
+        // The frame is written piecewise, without a second copy of the encoded
+        // block (the identity encoder still copies the plain block once).
         let head = header.encode();
         let payload_len = (head.len() + encoded.len()) as u64;
         let at = FrameLocation {
@@ -485,7 +490,11 @@ impl<W: Write> Writer<W> {
         let recs = &self.records;
         let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
         let max_plain = self.blocks.iter().map(|b| b.plain_len).max().unwrap_or(0);
-        let graph = self.options.encoder.resources();
+        let (g, e) = (self.graph.resources(), self.options.encoder.resources());
+        let graph = GraphResources {
+            window: g.window.max(e.window),
+            bwt_block: g.bwt_block.max(e.bwt_block),
+        };
         let mut index = Index {
             chunk_table: ChunkTableWriter::encode(recs).into(),
             merkle_root: merkle_root(&leaves),

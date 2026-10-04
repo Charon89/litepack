@@ -364,3 +364,69 @@ fn a_block_naming_an_unlisted_prior_is_refused_at_its_header() {
         Err(FormatError::UnlistedPrior { id: m }) if m == id
     ));
 }
+
+#[test]
+fn a_block_needing_more_than_the_envelope_is_a_mismatch() {
+    let bytes = write_archive(
+        options(ZstdTestEncoder::new(3, 24, None)),
+        &[("f", pattern(1, 10_000))],
+    );
+    let a = Archive::open(Cursor::new(bytes.clone()), &Resources::default()).unwrap();
+    assert_eq!(a.index().envelope.max_window, 1 << 24);
+    let mut index = a.index().clone();
+    index.envelope.max_window = 1 << 20;
+    let mut a = Archive::open(
+        Cursor::new(with_index(&bytes, index)),
+        &Resources::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        a.verify(),
+        Err(FormatError::EnvelopeMismatch {
+            field: "max_window"
+        })
+    ));
+}
+
+mod hostile {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn tight() -> Resources {
+        Resources {
+            max_window: 1 << 16,
+            max_block_plain: 20_000,
+            ..Resources::default()
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn random_bytes_never_panic(input in proptest::collection::vec(any::<u8>(), 0..2000)) {
+            let _ = dec(&zstd_params(16, None), &input, 10_000, &tight());
+        }
+
+        #[test]
+        fn mutated_frames_never_panic(
+            seed in any::<u64>(),
+            len in 0usize..6000,
+            muts in proptest::collection::vec((any::<usize>(), any::<u8>()), 0..6),
+            cut in proptest::option::of(any::<usize>()),
+        ) {
+            let data = pattern(seed, len);
+            let mut frame = compress(3, Some(16), None, &data);
+            for (at, v) in muts {
+                let n = frame.len();
+                frame[at % n] ^= v | 1;
+            }
+            if let Some(c) = cut {
+                frame.truncate(c % (frame.len() + 1));
+            }
+            if let Ok(out) = dec(&zstd_params(16, None), &frame, 10_000, &tight()) {
+                prop_assert!(out.len() <= 10_000);
+            }
+        }
+    }
+}
