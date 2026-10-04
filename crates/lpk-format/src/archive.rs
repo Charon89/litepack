@@ -1,6 +1,7 @@
 //! Opening an archive from its tail, and diagnosing a damaged one (spec section 6).
 
 use crate::chunk::ChunkIndex;
+use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::frame::{Frame, FrameKind, ReadFrame, ReadLimits};
 use crate::header::Header;
@@ -14,6 +15,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 pub struct Archive<R: Read + Seek> {
     reader: R,
     limits: ReadLimits,
+    resources: Resources,
     header: Header,
     trailer: Trailer,
     index: Index,
@@ -100,7 +102,17 @@ impl<R: Read + Seek> Archive<R> {
     /// tail is not a valid trailer the frames are walked from the start
     /// ([`Archive::diagnose`]) and the error says whether the archive is cut
     /// short or damaged.
-    pub fn open(mut reader: R, limits: ReadLimits) -> Result<Self, FormatError> {
+    ///
+    /// `resources` is what this machine allows a decoder: until the index is
+    /// read the frame payload limit is `resources.max_frame_payload`; once it
+    /// is read, the declared envelope is compared with `resources` and an
+    /// archive that needs more is `Refused` before any block is read. After
+    /// that the limit is the smaller of the envelope's `max_frame_payload` and
+    /// `resources.max_frame_payload`.
+    pub fn open(mut reader: R, resources: &Resources) -> Result<Self, FormatError> {
+        let mut limits = ReadLimits {
+            max_payload: resources.max_frame_payload,
+        };
         let len = reader.seek(SeekFrom::End(0))?;
         if len < Header::LEN as u64 + TRAILER_FRAME_LEN {
             return Err(Self::fallback_error(reader, &limits));
@@ -131,9 +143,18 @@ impl<R: Read + Seek> Archive<R> {
             return Err(FormatError::IndexHashMismatch);
         }
         let (index, chunks) = Index::parse_with_chunks(&frame.payload, trailer.index_offset)?;
+        index
+            .envelope
+            .check(resources)
+            .map_err(FormatError::Refused)?;
+        limits.max_payload = index
+            .envelope
+            .max_frame_payload
+            .min(resources.max_frame_payload);
         Ok(Archive {
             reader,
             limits,
+            resources: *resources,
             header,
             trailer,
             index,
@@ -145,6 +166,16 @@ impl<R: Read + Seek> Archive<R> {
         Self::diagnose(reader, limits)
             .error
             .unwrap_or(FormatError::NoTrailer)
+    }
+
+    /// The resources this reader was opened with.
+    pub fn resources(&self) -> &Resources {
+        &self.resources
+    }
+
+    /// The frame payload limit in force for reads after the index.
+    pub fn limits(&self) -> &ReadLimits {
+        &self.limits
     }
 
     /// The header.
@@ -256,6 +287,7 @@ impl<R: Read + Seek> Archive<R> {
 mod tests {
     use super::*;
     use crate::chunk::{ChunkRecord, ChunkTableWriter};
+    use crate::envelope::Envelope;
     use crate::frame::FrameFlags;
     use crate::header::HeaderFlags;
     use crate::index::BlockLocation;
@@ -340,25 +372,27 @@ mod tests {
             },
         ];
         let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
+        let blocks = vec![
+            BlockLocation {
+                frame_offset: chunk1_off,
+                frame_len: c1.len() as u64,
+                first_chunk: 0,
+                chunk_count: 2,
+                plain_len: 30,
+            },
+            BlockLocation {
+                frame_offset: chunk2_off,
+                frame_len: c2.len() as u64,
+                first_chunk: 2,
+                chunk_count: 2,
+                plain_len: 40,
+            },
+        ];
         let index = Index {
             chunk_table: ChunkTableWriter::encode(&recs),
             merkle_root: merkle_root(&leaves),
-            blocks: vec![
-                BlockLocation {
-                    frame_offset: chunk1_off,
-                    frame_len: c1.len() as u64,
-                    first_chunk: 0,
-                    chunk_count: 2,
-                    plain_len: 30,
-                },
-                BlockLocation {
-                    frame_offset: chunk2_off,
-                    frame_len: c2.len() as u64,
-                    first_chunk: 2,
-                    chunk_count: 2,
-                    plain_len: 40,
-                },
-            ],
+            envelope: Envelope::for_blocks(&blocks, 1000, 1 << 20, 1 << 16, 1 << 24, 2),
+            blocks,
             entry_table: FrameLocation {
                 offset: entry_off,
                 len: e.len() as u64,
@@ -391,13 +425,14 @@ mod tests {
     }
 
     fn open(bytes: Vec<u8>) -> Result<Archive<Cursor<Vec<u8>>>, FormatError> {
-        Archive::open(Cursor::new(bytes), ReadLimits::default())
+        Archive::open(Cursor::new(bytes), &Resources::default())
     }
 
     fn diag(bytes: Vec<u8>) -> Diagnosis {
         Archive::diagnose(Cursor::new(bytes), &ReadLimits::default())
     }
 
+    #[derive(Debug)]
     struct CountRead {
         inner: Cursor<Vec<u8>>,
         read: Rc<Cell<u64>>,
@@ -426,7 +461,7 @@ mod tests {
             inner: Cursor::new(b.bytes.clone()),
             read: Rc::clone(&read),
         };
-        let a = Archive::open(r, ReadLimits::default()).unwrap();
+        let a = Archive::open(r, &Resources::default()).unwrap();
         let body = 2 * BLOCK_PAYLOAD as u64;
         assert!(read.get() < body / 10, "read {} of {total}", read.get());
         assert_eq!(a.header().archive_id, ID);
@@ -437,6 +472,128 @@ mod tests {
         assert_eq!((p.block, p.offset_in_block, p.plain_len), (1, 0, 40));
         let p = a.chunks().locate(1).unwrap();
         assert_eq!((p.block, p.offset_in_block, p.plain_len), (0, 10, 20));
+    }
+
+    fn counted(bytes: &[u8]) -> (CountRead, Rc<Cell<u64>>) {
+        let read = Rc::new(Cell::new(0));
+        let r = CountRead {
+            inner: Cursor::new(bytes.to_vec()),
+            read: Rc::clone(&read),
+        };
+        (r, read)
+    }
+
+    #[test]
+    fn an_envelope_above_the_local_resources_is_refused_before_any_block_is_read() {
+        let b = build();
+        let body = 2 * BLOCK_PAYLOAD as u64;
+        let env = b.index.envelope;
+        type Tweak = fn(&mut Resources, &Envelope);
+        let cases: [(Tweak, &str, u64, u64); 5] = [
+            (
+                |r, e| r.max_window = e.max_window - 1,
+                "max_window",
+                1 << 20,
+                (1 << 20) - 1,
+            ),
+            (
+                |r, e| r.max_bwt_block = e.max_bwt_block - 1,
+                "max_bwt_block",
+                1 << 16,
+                (1 << 16) - 1,
+            ),
+            (
+                |r, e| r.max_block_plain = e.max_block_plain - 1,
+                "max_block_plain",
+                40,
+                39,
+            ),
+            (
+                |r, e| r.max_frame_payload = e.max_frame_payload - 1,
+                "max_frame_payload",
+                BLOCK_PAYLOAD as u64,
+                BLOCK_PAYLOAD as u64 - 1,
+            ),
+            (
+                |r, e| r.memory = e.decode_memory - 1,
+                "decode_memory",
+                1 << 24,
+                (1 << 24) - 1,
+            ),
+        ];
+        for (tweak, field, needed, allowed) in cases {
+            let mut res = Resources::default();
+            tweak(&mut res, &env);
+            let (r, read) = counted(&b.bytes);
+            let e = Archive::open(r, &res).unwrap_err();
+            match e {
+                FormatError::Refused(ref f) => {
+                    assert_eq!((f.field, f.needed, f.allowed), (field, needed, allowed));
+                }
+                other => panic!("{field}: {other:?}"),
+            }
+            assert!(e.to_string().contains(field), "{e}");
+            assert!(read.get() < body / 10, "{field}: read {}", read.get());
+        }
+    }
+
+    #[test]
+    fn larger_resources_open_it_and_the_limits_follow_the_minimum_rule() {
+        let b = build();
+        let env = b.index.envelope;
+        assert_eq!(env.max_frame_payload, BLOCK_PAYLOAD as u64);
+        // Exactly the declared values are enough.
+        let exact = Resources {
+            max_window: env.max_window,
+            max_bwt_block: env.max_bwt_block,
+            max_block_plain: env.max_block_plain,
+            max_frame_payload: env.max_frame_payload,
+            memory: env.decode_memory,
+        };
+        let a = Archive::open(Cursor::new(b.bytes.clone()), &exact).unwrap();
+        assert_eq!(a.resources(), &exact);
+        assert_eq!(a.limits().max_payload, BLOCK_PAYLOAD as u64);
+        // Generous resources: the limit drops to the envelope's value.
+        let mut a = open(b.bytes.clone()).unwrap();
+        assert_eq!(a.resources(), &Resources::default());
+        assert_eq!(
+            a.limits().max_payload,
+            env.max_frame_payload
+                .min(Resources::default().max_frame_payload)
+        );
+        assert_eq!(a.limits().max_payload, BLOCK_PAYLOAD as u64);
+        // Blocks read with the derived limit.
+        let blk = a.index().blocks[0];
+        a.read_frame_at(
+            FrameLocation {
+                offset: blk.frame_offset,
+                len: blk.frame_len,
+            },
+            FrameKind::ChunkData,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_frame_limit_while_reading_the_index_is_the_local_one() {
+        let b = build();
+        let idx_payload = b.index.encode().unwrap().len() as u64;
+        let res = Resources {
+            max_frame_payload: idx_payload - 1,
+            ..Resources::default()
+        };
+        let e = Archive::open(Cursor::new(b.bytes.clone()), &res).unwrap_err();
+        assert!(matches!(e, FormatError::PayloadTooLarge { .. }), "{e:?}");
+        let res = Resources {
+            max_frame_payload: idx_payload,
+            ..Resources::default()
+        };
+        // The index fits but the blocks do not: refused by the envelope.
+        let e = Archive::open(Cursor::new(b.bytes.clone()), &res).unwrap_err();
+        assert!(
+            matches!(e, FormatError::Refused(ref f) if f.field == "max_frame_payload"),
+            "{e:?}"
+        );
     }
 
     #[test]

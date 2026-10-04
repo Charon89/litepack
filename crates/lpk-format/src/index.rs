@@ -1,7 +1,8 @@
-//! The index frame payload: chunk table, Merkle root, block table and the
-//! locations of the entry table and records frames (spec section 6).
+//! The index frame payload: chunk table, Merkle root, decode envelope, block table and
+//! the locations of the entry table and records frames (spec sections 6 and 7).
 
 use crate::chunk::{ChunkIndex, ChunkTable};
+use crate::envelope::Envelope;
 use crate::error::FormatError;
 use crate::header::Header;
 use crate::merkle::merkle_root;
@@ -56,6 +57,8 @@ pub struct Index {
     pub chunk_table: Vec<u8>,
     /// Merkle root over the chunk table's hashes.
     pub merkle_root: [u8; 32],
+    /// The resources a decoder needs (section 7).
+    pub envelope: Envelope,
     /// The blocks, ascending by `first_chunk`, partitioning the chunk table.
     pub blocks: Vec<BlockLocation>,
     /// Location of the `EntryTable` frame.
@@ -232,6 +235,7 @@ impl Index {
         let mut out = Vec::with_capacity(self.chunk_table.len() + 32 + 16 + self.blocks.len() * 20);
         out.extend_from_slice(&self.chunk_table);
         out.extend_from_slice(&self.merkle_root);
+        self.envelope.write(&mut out)?;
         varint::write(&mut out, self.blocks.len() as u64)?;
         for b in &self.blocks {
             for v in [
@@ -256,7 +260,8 @@ impl Index {
     /// Parse and validate an index payload found at `index_offset`: the block
     /// count is bounded by the bytes left, the blocks must partition the chunk
     /// table, lie between the header and the index, and carry the right
-    /// lengths, and the stored Merkle root must match the table.
+    /// lengths, the envelope must agree with the block table and the payload
+    /// length, and the stored Merkle root must match the table.
     pub fn parse(payload: &[u8], index_offset: u64) -> Result<Index, FormatError> {
         Self::parse_with_chunks(payload, index_offset).map(|(index, _)| index)
     }
@@ -276,6 +281,7 @@ impl Index {
             .ok_or(FormatError::Truncated { what: WHAT })?;
         let merkle_root_stored = *root;
         s = rest;
+        let envelope = Envelope::read(&mut s)?;
         let count = rv(&mut s)?;
         if count > (s.len() / MIN_BLOCK_LEN) as u64 {
             return Err(FormatError::Truncated { what: WHAT });
@@ -317,10 +323,12 @@ impl Index {
         if merkle_root(&leaves) != merkle_root_stored {
             return Err(FormatError::MerkleRootMismatch);
         }
+        envelope.validate(&blocks, payload.len() as u64)?;
         Ok((
             Index {
                 chunk_table,
                 merkle_root: merkle_root_stored,
+                envelope,
                 blocks,
                 entry_table,
                 records,
@@ -349,6 +357,12 @@ pub fn index_layout_table() -> String {
         "| Field | Size | Meaning |\n|---|---|---|\n\
          | chunk_table | variable | the chunk table of section 5 (count, then the records) |\n\
          | merkle_root | 32 | the Merkle root over the chunk table's hashes |\n\
+         | max_window | varint | the decode envelope of section 7: largest match-finder window, in bytes |\n\
+         | max_bwt_block | varint | envelope: largest BWT block, in bytes (0 when none) |\n\
+         | max_block_plain | varint | envelope: largest block `plain_len`; must equal the maximum over the block table |\n\
+         | max_frame_payload | varint | envelope: largest frame payload; at least the index's own payload and every block's |\n\
+         | decode_memory | varint | envelope: the writer's estimate of peak decoder memory per thread, in bytes |\n\
+         | threads_hint | varint | envelope: independent blocks decodable at once; 0 = no hint |\n\
          | block_count | varint | number of blocks; at most the bytes left after it divided by {MIN_BLOCK_LEN} |\n\
          | frame_offset | varint | per block: absolute offset of the block's `ChunkData` frame |\n\
          | frame_len | varint | per block: whole encoded length of that frame |\n\
@@ -400,6 +414,7 @@ mod tests {
         Index {
             chunk_table: table_of(recs),
             merkle_root: merkle_root(&leaves),
+            envelope: Envelope::for_blocks(&blocks, 1 << 40, 1 << 20, 0, 1 << 24, 0),
             blocks,
             entry_table: FrameLocation {
                 offset: 32,
@@ -448,6 +463,7 @@ mod tests {
         // Same layout as `encode`, without validation.
         let mut out = idx.chunk_table.clone();
         out.extend_from_slice(&idx.merkle_root);
+        idx.envelope.write(&mut out).unwrap();
         varint::write(&mut out, idx.blocks.len() as u64).unwrap();
         for b in &idx.blocks {
             for v in [
@@ -696,9 +712,75 @@ mod tests {
     }
 
     #[test]
+    fn truncation_inside_the_envelope() {
+        let (_, idx) = three();
+        let p = idx.encode().unwrap();
+        let start = idx.chunk_table.len() + 32;
+        let mut env = Vec::new();
+        idx.envelope.write(&mut env).unwrap();
+        for cut in start..start + env.len() {
+            let e = Index::parse(&p[..cut], IDX_AT).unwrap_err();
+            assert!(
+                matches!(e, FormatError::Truncated { what: "index" }),
+                "cut {cut}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_understating_the_blocks_is_a_mismatch() {
+        let (_, idx) = three();
+        // The three() blocks: plain 5, 16, 1; frames of 80 bytes (payload 43).
+        assert_eq!(idx.envelope.max_block_plain, 16);
+        assert_eq!(idx.envelope.max_frame_payload, 1 << 40);
+        for (tweak, field) in [
+            (
+                (|i: &mut Index| i.envelope.max_block_plain = 15) as fn(&mut Index),
+                "max_block_plain",
+            ),
+            (|i| i.envelope.max_block_plain = 17, "max_block_plain"),
+            (|i| i.envelope.max_frame_payload = 42, "max_frame_payload"),
+            // Smaller than the index's own payload.
+            (|i| i.envelope.max_frame_payload = 100, "max_frame_payload"),
+        ] {
+            let mut i = idx.clone();
+            tweak(&mut i);
+            let e = parse_err(&i);
+            assert!(
+                matches!(e, FormatError::EnvelopeMismatch { field: f } if f == field),
+                "{field}: {e:?}"
+            );
+            assert!(matches!(
+                i.encode(),
+                Err(FormatError::EnvelopeMismatch { .. })
+            ));
+        }
+        // The payload length itself is the bound (both values are two-byte varints).
+        let mut i = idx.clone();
+        i.envelope.max_frame_payload = 1000;
+        let len = encode_unchecked(&i).len() as u64;
+        assert!((128..1000).contains(&len));
+        i.envelope.max_frame_payload = len;
+        Index::parse(&encode_unchecked(&i), IDX_AT).unwrap();
+        i.envelope.max_frame_payload = len - 1;
+        assert!(matches!(
+            parse_err(&i),
+            FormatError::EnvelopeMismatch {
+                field: "max_frame_payload"
+            }
+        ));
+        // The writer's own derivation parses.
+        let mut i = idx.clone();
+        i.envelope = Envelope::for_blocks(&i.blocks, len, 1, 2, 3, 4);
+        assert_eq!(i.envelope.max_block_plain, 16);
+        i.encode().unwrap();
+    }
+
+    #[test]
     fn huge_block_count_is_bounded_by_input() {
         let mut p = table_of(&[]);
         p.extend_from_slice(&[0u8; 32]);
+        p.extend_from_slice(&[0u8; 6]);
         varint::write(&mut p, u64::MAX).unwrap();
         p.extend_from_slice(&[0u8; 20]);
         assert!(matches!(
@@ -708,6 +790,7 @@ mod tests {
         // A count the remaining bytes cannot hold at five bytes per block.
         let mut p = table_of(&[]);
         p.extend_from_slice(&[0u8; 32]);
+        p.extend_from_slice(&[0u8; 6]);
         p.push(5);
         p.extend_from_slice(&[0u8; 24]);
         assert!(matches!(

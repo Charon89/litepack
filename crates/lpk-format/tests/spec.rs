@@ -29,6 +29,8 @@ fn spec_tables_match_code() {
         lpk_format::chunk_record_table(),
         lpk_format::index_layout_table(),
         lpk_format::trailer_layout_table(),
+        lpk_format::envelope_layout_table(),
+        lpk_format::resources_default_table(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }
@@ -39,6 +41,27 @@ fn spec_tables_match_code() {
         .join(" ");
     assert_eq!(magic, "0x89 0x4C 0x50 0x4B 0x0D 0x0A 0x1A 0x0A");
     assert!(text.contains(&magic));
+}
+
+#[test]
+fn spec_states_the_envelope_caps_and_refusal_message() {
+    let text = spec();
+    assert_eq!(lpk_format::DEFAULT_MAX_WINDOW, 268_435_456);
+    assert_eq!(lpk_format::DEFAULT_MAX_BWT_BLOCK, 67_108_864);
+    assert!(text.contains("`max_window` at most 268435456 bytes (256 MiB)"));
+    assert!(text.contains("`max_bwt_block` at most 67108864 bytes (64 MiB)"));
+    assert!(
+        text.contains("the archive needs <field> of <needed> bytes; this reader allows\n<allowed>")
+    );
+    let r = lpk_format::Refusal {
+        field: "f",
+        needed: 1,
+        allowed: 0,
+    };
+    assert_eq!(
+        r.to_string(),
+        "the archive needs f of 1 bytes; this reader allows 0"
+    );
 }
 
 #[test]
