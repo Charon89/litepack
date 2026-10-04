@@ -231,12 +231,45 @@ fn container(len: u64, chunks: Vec<u64>) -> Record {
 
 #[test]
 fn verify_checks_the_chunks_a_record_names() {
+    // The writer refuses a block whose record names a chunk outside the earlier
+    // blocks (spec section 12), so the archive is written naming record 1 (no
+    // chunks) and the block's record id is patched to 0, with the frame hash
+    // recomputed.
     let check = |len: u64, chunks: Vec<u64>| {
-        let bytes = recon_archive(
+        let mut o = options(vec![container(len, chunks.clone())]);
+        o.encoder = Box::new(Recon {
+            primitive: PrimitiveId::ContainerReconstruct,
+            record: 0,
+        });
+        let mut w = Writer::new(Vec::new(), o).unwrap();
+        w.add_file(
+            "a",
+            lpk_format::EntryFlags::EMPTY,
+            1_000,
+            &mut &pattern(1, 5000)[..],
+        )
+        .unwrap();
+        assert!(matches!(
+            w.finish(),
+            Err(FormatError::BadRecord {
+                record: 0,
+                reason: "chunk order"
+            })
+        ));
+        let mut bytes = recon_archive(
             PrimitiveId::ContainerReconstruct,
-            0,
-            vec![container(len, chunks)],
+            1,
+            vec![container(len, chunks), utf16(1)],
         );
+        let loc = open(bytes.clone()).index().blocks[0];
+        let off = loc.frame_offset as usize;
+        let mut rest = &bytes[off + 4..];
+        let plen = lpk_format::varint::read(&mut rest).unwrap() as usize;
+        let payload_at = off + 4 + (bytes[off + 4..].len() - rest.len());
+        assert_eq!(bytes[payload_at + 5], 1);
+        bytes[payload_at + 5] = 0;
+        let hash = *blake3::hash(&bytes[payload_at..payload_at + plen]).as_bytes();
+        bytes[payload_at + plen..payload_at + plen + 32].copy_from_slice(&hash);
         open(bytes).verify().unwrap_err()
     };
     // Chunk 99 does not exist (the archive has two chunks).

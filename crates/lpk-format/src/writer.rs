@@ -314,6 +314,14 @@ pub struct Writer<W: Write> {
     extra_memory: u64,
     /// The file entry being written in parts, if any.
     open: Option<OpenEntry>,
+    /// `(first_chunk, chunk_count)` of the blocks this writer closed whose graph
+    /// names a reconstruction primitive, in order: a record may not name their
+    /// chunks (spec section 12, nesting).
+    recon_blocks: Vec<(u64, u64)>,
+    /// Tests only: skip the record chunk checks at block close, to build the
+    /// archives the reader must refuse.
+    #[cfg(test)]
+    unchecked_records: bool,
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -439,12 +447,16 @@ impl<W: Write> Writer<W> {
 
     /// Like [`Writer::new`], writing `version_minor` into the header: 0 (what
     /// every other constructor writes) or 1, which lets blocks name the
-    /// primitives of revision 1.1 (`jpeg-reconstruct`, spec section 2). The
-    /// header is written first and never rewritten, so the caller declares the
-    /// revision before any block exists; a block whose graph names a primitive
-    /// of a later revision than declared is refused (`BadOptions`,
-    /// `version_minor`), and so is a value above [`FormatVersion::LATEST`]'s
-    /// minor.
+    /// primitives of revision 1.1 (`jpeg-reconstruct`). The minor is the
+    /// revision the writer writes under, not a fact about the blocks (spec
+    /// section 2): an archive declared 1 may use no 1.1 primitive at all.
+    ///
+    /// The caller's obligation: the header is written first and never
+    /// rewritten, so the caller declares, before any block exists, a revision
+    /// no earlier than that of every primitive it will use. A block whose graph
+    /// names a primitive of a later revision than declared is refused
+    /// (`BadOptions`, `version_minor`, abandoning the archive), and so is a
+    /// value above [`FormatVersion::LATEST`]'s minor.
     pub fn new_revision(
         out: W,
         options: WriterOptions,
@@ -539,6 +551,9 @@ impl<W: Write> Writer<W> {
             version_minor,
             extra_memory: 0,
             open: None,
+            recon_blocks: Vec::new(),
+            #[cfg(test)]
+            unchecked_records: false,
         };
         if let Some(slot) = slot {
             // The key slot is the first frame, in clear.
@@ -770,6 +785,9 @@ impl<W: Write> Writer<W> {
             version_minor,
             extra_memory,
             open: None,
+            recon_blocks: Vec::new(),
+            #[cfg(test)]
+            unchecked_records: false,
             options,
         };
         Ok(w)
@@ -999,11 +1017,15 @@ impl<W: Write> Writer<W> {
                 return Err(e);
             }
         };
-        if let Err(e) = check_graph(&graph, self.record_count, self.version_minor) {
+        let first_chunk = self.records.len() as u64 - self.pending_chunks;
+        let checked = check_graph(&graph, self.record_count, self.version_minor)
+            .and_then(|()| self.check_record_chunks(&graph, first_chunk));
+        if let Err(e) = checked {
             // The block is gone: the archive is abandoned like after an I/O error.
             self.failed = Some((std::io::ErrorKind::InvalidData, e.to_string()));
             return Err(e);
         }
+        let recon = graph.uses_records();
         self.priors.extend(graph.prior_ids());
         let own = graph.resources();
         self.graph_res = GraphResources {
@@ -1054,12 +1076,57 @@ impl<W: Write> Writer<W> {
         self.blocks.push(BlockLocation {
             frame_offset: at.offset,
             frame_len: at.len,
-            first_chunk: self.records.len() as u64 - self.pending_chunks,
+            first_chunk,
             chunk_count: self.pending_chunks,
             plain_len: plain.len() as u64,
             sequence: at.sequence,
         });
+        if recon {
+            self.recon_blocks.push((first_chunk, self.pending_chunks));
+        }
         self.pending_chunks = 0;
+        Ok(())
+    }
+
+    /// The reader's rules for the chunks of the records a closing block's
+    /// graph names (spec section 12), for the records this writer holds: every
+    /// chunk lies in an earlier block (`BadRecord`, `chunk order`) whose graph
+    /// names no reconstruction primitive (`BadRecord`, `nested record`). An
+    /// append that does not restate the old records cannot see their chunk
+    /// lists and leaves them to the reader.
+    fn check_record_chunks(&self, graph: &Graph, first_chunk: u64) -> Result<(), FormatError> {
+        #[cfg(test)]
+        if self.unchecked_records {
+            return Ok(());
+        }
+        for s in &graph.steps {
+            let Some(record) = s.primitive.record_id(&s.params) else {
+                continue;
+            };
+            let Some(r) = usize::try_from(record)
+                .ok()
+                .and_then(|i| self.options.records.get(i))
+            else {
+                continue;
+            };
+            for (chunks, _) in r.chunk_groups() {
+                for &c in chunks {
+                    if c >= first_chunk {
+                        return Err(FormatError::BadRecord {
+                            record,
+                            reason: "chunk order",
+                        });
+                    }
+                    let i = self.recon_blocks.partition_point(|&(f, _)| f <= c);
+                    if i > 0 && c - self.recon_blocks[i - 1].0 < self.recon_blocks[i - 1].1 {
+                        return Err(FormatError::BadRecord {
+                            record,
+                            reason: "nested record",
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1661,5 +1728,150 @@ impl Writer<std::fs::File> {
         let sync_handle = out.try_clone()?;
         Ok(Self::append(existing, out, options, credentials)?
             .with_sync(Box::new(move || sync_handle.sync_data())))
+    }
+}
+
+#[cfg(test)]
+mod record_rule_tests {
+    //! The reader-side refusals of the record chunk rules (spec section 12),
+    //! through archives the writer refuses unless told not to check.
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::decode::{DecodeContext, PrimitiveDecoder};
+    use crate::envelope::Resources;
+    use crate::record::{JpegRecord, RecordBody};
+    use std::io::Cursor;
+
+    /// A stand-in `jpeg-reconstruct`: the stream is the primary reversed; it
+    /// reads every nested trailing chunk through the context.
+    struct Reverse;
+
+    impl PrimitiveDecoder for Reverse {
+        fn decode(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: u64,
+            _: &Resources,
+        ) -> Result<Vec<u8>, FormatError> {
+            Err(FormatError::UnimplementedPrimitive { id: 7 })
+        }
+
+        fn decode_in(
+            &self,
+            params: &[u8],
+            input: &[u8],
+            _: u64,
+            _: bool,
+            _: &Resources,
+            ctx: &mut dyn DecodeContext,
+        ) -> Result<Vec<u8>, FormatError> {
+            let id = u64::from(params[0]);
+            let RecordBody::Jpeg(j) = ctx.record(id)?.body else {
+                return Err(FormatError::UnimplementedPrimitive { id: 7 });
+            };
+            for &c in &j.nested_trailing_chunks {
+                ctx.chunk(id, c)?;
+            }
+            Ok(input.iter().rev().copied().collect())
+        }
+    }
+
+    fn options() -> WriterOptions {
+        WriterOptions {
+            chunk_size: 4096,
+            block_size: 16384,
+            ..WriterOptions::default()
+        }
+    }
+
+    fn record(original_len: u64, primary_len: u64, chunks: Vec<u64>) -> Record {
+        Record::new(RecordBody::Jpeg(JpegRecord {
+            original_len,
+            primary_len,
+            trailing: Vec::new(),
+            nested_trailing_chunks: chunks,
+            gainmaps: Vec::new(),
+            lepton_version: 0,
+            original_hash: [0; 32],
+        }))
+    }
+
+    fn encoded(record: u8, primary: &[u8]) -> Encoded {
+        Encoded {
+            graph: Graph {
+                steps: vec![Step {
+                    primitive: PrimitiveId::JpegReconstruct,
+                    params: vec![record],
+                }],
+            },
+            bytes: primary.iter().rev().copied().collect(),
+            resources: GraphResources::default(),
+        }
+    }
+
+    /// Two peeled files; the second's record names `second_chunks`. File 1's
+    /// primary is chunk 0 (block 0, a reconstruction block); file 2's primary
+    /// is chunk 1 (block 1); a trailing part after it is chunk 2 (block 2).
+    fn archive(second_chunks: Vec<u64>, checked: bool) -> Result<Vec<u8>, FormatError> {
+        let p = vec![7u8; 1000];
+        let mut out = Vec::new();
+        let mut w = Writer::new_revision(&mut out, options(), 1)?;
+        w.unchecked_records = !checked;
+        w.begin_entry("a", EntryFlags::EMPTY, 0)?;
+        let id = w.add_record(record(1000, 1000, Vec::new()))?;
+        w.add_part_encoded(0, &p, encoded(id as u8, &p), 0)?;
+        w.end_entry()?;
+        w.begin_entry("b", EntryFlags::EMPTY, 0)?;
+        let rest = if second_chunks == [0] { 1000 } else { 100 };
+        let id = w.add_record(record(1000 + rest, 1000, second_chunks))?;
+        w.add_part_encoded(0, &p, encoded(id as u8, &p), 0)?;
+        w.add_part(1000, &mut &[1u8; 100][..])?;
+        w.end_entry()?;
+        w.finish()?;
+        Ok(out)
+    }
+
+    fn reader_error(bytes: Vec<u8>) -> FormatError {
+        let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
+        a.registry_mut()
+            .register(PrimitiveId::JpegReconstruct, Box::new(Reverse));
+        a.verify().unwrap_err()
+    }
+
+    #[test]
+    fn a_later_chunk_is_refused_by_the_writer_and_the_reader() {
+        assert!(matches!(
+            archive(vec![2], true),
+            Err(FormatError::BadRecord {
+                record: 1,
+                reason: "chunk order"
+            })
+        ));
+        assert!(matches!(
+            reader_error(archive(vec![2], false).unwrap()),
+            FormatError::BadRecord {
+                record: 1,
+                reason: "chunk order"
+            }
+        ));
+    }
+
+    #[test]
+    fn a_chunk_in_a_reconstruction_block_is_refused_by_the_writer_and_the_reader() {
+        assert!(matches!(
+            archive(vec![0], true),
+            Err(FormatError::BadRecord {
+                record: 1,
+                reason: "nested record"
+            })
+        ));
+        assert!(matches!(
+            reader_error(archive(vec![0], false).unwrap()),
+            FormatError::BadRecord {
+                record: 1,
+                reason: "nested record"
+            }
+        ));
     }
 }

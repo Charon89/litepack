@@ -235,7 +235,9 @@ fn version_minor_rules() {
             reason: "version_minor"
         })
     ));
-    // Minor 1 declared but no 1.1 primitive used: still written as declared.
+    // Minor 1 declared but no 1.1 primitive used: the minor is the writer's
+    // revision, not a fact about the blocks (spec section 2), so it is written
+    // as declared.
     let mut out = Vec::new();
     let mut w = Writer::new_revision(&mut out, options(), 1).unwrap();
     assert_eq!(w.version_minor(), 1);
@@ -277,9 +279,10 @@ fn add_record_ids_follow_the_options_records_and_bound_the_graphs() {
 }
 
 #[test]
-fn a_record_chunk_in_a_later_block_is_a_chunk_order_error() {
-    // The trailing part is written after the primary's block: verify refuses
-    // the archive and the decode context refuses the chunk.
+fn the_writer_refuses_a_record_chunk_in_a_later_block() {
+    // The record names a chunk that is not yet written when the primary's block
+    // closes: the writer refuses the block and abandons the archive (the
+    // reader-side refusal is tested in lpk-format's writer unit tests).
     let primary = bytes(3, 5_000);
     let trailing = bytes(4, 300);
     let original = [primary.clone(), trailing.clone()].concat();
@@ -296,26 +299,12 @@ fn a_record_chunk_in_a_later_block_is_a_chunk_order_error() {
         bytes: primary.iter().rev().copied().collect(),
         resources: GraphResources::default(),
     };
-    w.add_part_encoded(0, &primary, e, 0).unwrap();
-    w.add_part(5_000, &mut &trailing[..]).unwrap();
-    w.end_entry().unwrap();
-    w.finish().unwrap();
-    let mut a = open(out);
-    a.registry_mut()
-        .register(PrimitiveId::JpegReconstruct, Box::new(Reverse));
     assert!(matches!(
-        a.verify(),
+        w.add_part_encoded(0, &primary, e, 0),
         Err(FormatError::BadRecord {
             reason: "chunk order",
             ..
         })
     ));
-    let e = entries(&mut a).remove(0);
-    assert!(matches!(
-        extract(&mut a, &e),
-        Err(FormatError::BadRecord {
-            reason: "chunk order",
-            ..
-        })
-    ));
+    assert!(w.add_part(5_000, &mut &trailing[..]).is_err());
 }

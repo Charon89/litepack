@@ -87,12 +87,18 @@ impl OwnedRecordsTable {
 #[derive(Debug)]
 pub struct ArchiveChunks<'a, R: Read + Seek> {
     archive: &'a mut Archive<R>,
+    /// Set while a reconstruction step reads the chunks of this record: a block
+    /// whose graph names a reconstruction primitive is then refused.
+    nested_for: Option<u64>,
 }
 
 impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
     /// A source over `archive`.
     pub fn new(archive: &'a mut Archive<R>) -> Self {
-        ArchiveChunks { archive }
+        ArchiveChunks {
+            archive,
+            nested_for: None,
+        }
     }
 
     /// Make `block` the cached block. A block frame whose hash fails is that
@@ -118,6 +124,17 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
         let frame = a.read_frame_at(at, FrameKind::ChunkData)?;
         // The records frame is read only for a block whose graph names a record.
         let (graph, graph_len) = Graph::parse(&frame.payload)?;
+        // Nesting (spec section 12): a chunk a record names lies in a block whose
+        // graph names no reconstruction primitive. (The cache never holds such a
+        // block here: loading one clears the cache before its step runs.)
+        if let Some(record) = self.nested_for {
+            if graph.uses_records() {
+                return Err(FormatError::BadRecord {
+                    record,
+                    reason: "nested record",
+                });
+            }
+        }
         let record_count = if graph.uses_records() {
             a.record_count()?
         } else {
@@ -229,7 +246,10 @@ impl<R: Read + Seek> DecodeContext for ArchiveContext<'_, R> {
                 chunk: index,
                 len: table.len(),
             })?;
-        let mut source = ArchiveChunks::new(&mut *self.archive);
+        let mut source = ArchiveChunks {
+            archive: &mut *self.archive,
+            nested_for: Some(record),
+        };
         fetch_and_check(&mut source, index, &rec)
     }
 }
