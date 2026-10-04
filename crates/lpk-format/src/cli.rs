@@ -2,11 +2,12 @@
 //! the tests both call.
 
 use crate::archive::Archive;
+use crate::crypto::Credentials;
 use crate::entry::{Entry, EntryKind};
 use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::priors::MemoryPriors;
-use crate::recovery::{repair_with_report, RepairReport};
+use crate::recovery::{repair_with_credentials, RepairReport};
 use crate::trailer::TRAILER_FRAME_LEN;
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
@@ -22,6 +23,21 @@ struct Cli {
     /// repeated. It is matched to the archive by the BLAKE3 of its content.
     #[arg(long = "prior", global = true, value_name = "FILE")]
     priors: Vec<PathBuf>,
+    /// The password of an encrypted archive (visible in the process list; prefer
+    /// `--password-file`).
+    #[arg(
+        long,
+        global = true,
+        value_name = "STR",
+        conflicts_with = "password_file"
+    )]
+    password: Option<String>,
+    /// A file holding the password; one trailing newline is not part of it.
+    #[arg(long, global = true, value_name = "PATH")]
+    password_file: Option<PathBuf>,
+    /// The keyfile of an archive that uses one as a second factor.
+    #[arg(long, global = true, value_name = "PATH")]
+    keyfile: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -110,8 +126,47 @@ pub fn check_extraction_path(path: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn open(path: &Path, priors: &[PathBuf]) -> Result<Archive<File>, FormatError> {
-    let mut a = Archive::open(File::open(path)?, &Resources::default())?;
+/// The key material the command line gave for an encrypted archive.
+#[derive(Debug, Default)]
+struct Keys {
+    credentials: Option<Credentials>,
+}
+
+fn credentials(cli: &Cli) -> Result<Keys, FormatError> {
+    let password = match (&cli.password, &cli.password_file) {
+        (Some(p), _) => Some(p.clone().into_bytes()),
+        (None, Some(f)) => {
+            let mut b = std::fs::read(f)?;
+            if b.ends_with(b"\n") {
+                b.pop();
+                if b.ends_with(b"\r") {
+                    b.pop();
+                }
+            }
+            Some(b)
+        }
+        (None, None) => None,
+    };
+    let keyfile = match &cli.keyfile {
+        Some(f) => Some(std::fs::read(f)?),
+        None => None,
+    };
+    let credentials = match (password, keyfile) {
+        (None, None) => None,
+        (p, keyfile) => Some(Credentials {
+            password: p.unwrap_or_default(),
+            keyfile,
+        }),
+    };
+    Ok(Keys { credentials })
+}
+
+fn open(path: &Path, priors: &[PathBuf], keys: &Keys) -> Result<Archive<File>, FormatError> {
+    let mut a = Archive::open_with(
+        File::open(path)?,
+        &Resources::default(),
+        keys.credentials.as_ref(),
+    )?;
     if !priors.is_empty() {
         // The prior files are the caller's: named on the command line, each
         // filed under the BLAKE3 of its content.
@@ -156,8 +211,13 @@ fn join_components(dir: &Path, path: &str) -> PathBuf {
     p
 }
 
-fn list(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), FormatError> {
-    let mut a = open(path, priors)?;
+fn list(
+    path: &Path,
+    priors: &[PathBuf],
+    keys: &Keys,
+    out: &mut dyn Write,
+) -> Result<(), FormatError> {
+    let mut a = open(path, priors, keys)?;
     for e in entries(&mut a)? {
         let path = escape_path(&e.path);
         writeln!(out, "{}\t{}\t{}", e.kind.name(), e.size, path)?;
@@ -165,14 +225,27 @@ fn list(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), Form
     Ok(())
 }
 
-fn verify(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), FormatError> {
-    let mut a = open(path, priors)?;
+fn verify(
+    path: &Path,
+    priors: &[PathBuf],
+    keys: &Keys,
+    out: &mut dyn Write,
+) -> Result<(), FormatError> {
+    let mut a = open(path, priors, keys)?;
     let s = a.verify()?;
-    writeln!(
-        out,
-        "ok: {} entries, {} chunks, {} blocks",
-        s.entries, s.chunks, s.blocks
-    )?;
+    if s.chunks_checked {
+        writeln!(
+            out,
+            "ok: {} entries, {} chunks, {} blocks",
+            s.entries, s.chunks, s.blocks
+        )?;
+    } else {
+        writeln!(
+            out,
+            "ok (frame hashes and recovery frames only, chunks not checked without the password): {} entries",
+            s.entries
+        )?;
+    }
     Ok(())
 }
 
@@ -185,8 +258,8 @@ fn print_report(out: &mut dyn Write, r: &RepairReport) -> Result<(), FormatError
     Ok(())
 }
 
-fn check(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
-    let mut a = open(path, &[])?;
+fn check(path: &Path, keys: &Keys, out: &mut dyn Write) -> Result<(), FormatError> {
+    let mut a = open(path, &[], keys)?;
     let r = a.check_recovery()?;
     print_report(out, &r)?;
     if r.shards_damaged > 0 || r.frames_unusable > 0 {
@@ -198,14 +271,24 @@ fn check(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn repair_cmd(path: &Path, target: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
+fn repair_cmd(
+    path: &Path,
+    target: &Path,
+    keys: &Keys,
+    out: &mut dyn Write,
+) -> Result<(), FormatError> {
     let input = File::open(path)?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .open(target)?;
-    match repair_with_report(input, file, &Resources::default()) {
+    match repair_with_credentials(
+        input,
+        file,
+        &Resources::default(),
+        keys.credentials.as_ref(),
+    ) {
         // The copy carries the repairs that were possible; keep it.
         Ok((report, unrepairable)) => {
             print_report(out, &report)?;
@@ -218,8 +301,13 @@ fn repair_cmd(path: &Path, target: &Path, out: &mut dyn Write) -> Result<(), For
     }
 }
 
-fn info(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), FormatError> {
-    let mut a = open(path, priors)?;
+fn info(
+    path: &Path,
+    priors: &[PathBuf],
+    keys: &Keys,
+    out: &mut dyn Write,
+) -> Result<(), FormatError> {
+    let mut a = open(path, priors, keys)?;
     let h = *a.header();
     let t = *a.trailer();
     let e = a.index().envelope;
@@ -228,9 +316,24 @@ fn info(path: &Path, priors: &[PathBuf], out: &mut dyn Write) -> Result<(), Form
     writeln!(out, "format: {}.{}", h.version.major, h.version.minor)?;
     writeln!(out, "header flags: {:#x}", h.flags.bits())?;
     writeln!(out, "archive id: {}", hex(&h.archive_id))?;
+    if let (Some(suite), Some(slot)) = (a.suite(), a.key_slot()) {
+        writeln!(out, "encrypted: yes")?;
+        writeln!(out, "listable: {}", a.is_listable())?;
+        writeln!(out, "suite: {}", suite.name())?;
+        writeln!(
+            out,
+            "argon2id: t={} m_kib={} p={}",
+            slot.argon2.t, slot.argon2.m_kib, slot.argon2.p
+        )?;
+        writeln!(out, "keyfile required: {}", slot.keyfile_required)?;
+    }
     writeln!(out, "generation: {}", t.generation)?;
     writeln!(out, "length: {archive_len} bytes")?;
     writeln!(out, "entries: {entries}")?;
+    if a.is_listing_only() {
+        writeln!(out, "index: sealed (a password is required)")?;
+        return Ok(());
+    }
     writeln!(out, "chunks: {}", a.chunks().len())?;
     writeln!(out, "blocks: {}", a.index().blocks.len())?;
     writeln!(out, "records: {}", a.index().records.is_some())?;
@@ -272,9 +375,10 @@ fn extract(
     path: &Path,
     dir: &Path,
     priors: &[PathBuf],
+    keys: &Keys,
     out: &mut dyn Write,
 ) -> Result<(), FormatError> {
-    let mut a = open(path, priors)?;
+    let mut a = open(path, priors, keys)?;
     let all = entries(&mut a)?;
     // Refuse before writing anything.
     for e in &all {
@@ -325,16 +429,23 @@ where
             return code;
         }
     };
+    let keys = match credentials(&cli) {
+        Ok(k) => k,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return 1;
+        }
+    };
     let result = match &cli.command {
-        Command::List { archive } => list(archive, &cli.priors, out),
-        Command::Verify { archive } => verify(archive, &cli.priors, out),
-        Command::Extract { archive, dir } => extract(archive, dir, &cli.priors, out),
-        Command::Info { archive } => info(archive, &cli.priors, out),
-        Command::Check { archive } => check(archive, out),
+        Command::List { archive } => list(archive, &cli.priors, &keys, out),
+        Command::Verify { archive } => verify(archive, &cli.priors, &keys, out),
+        Command::Extract { archive, dir } => extract(archive, dir, &cli.priors, &keys, out),
+        Command::Info { archive } => info(archive, &cli.priors, &keys, out),
+        Command::Check { archive } => check(archive, &keys, out),
         Command::Repair {
             archive,
             out: target,
-        } => repair_cmd(archive, target, out),
+        } => repair_cmd(archive, target, &keys, out),
     };
     match result {
         Ok(()) => 0,

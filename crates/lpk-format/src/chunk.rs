@@ -838,6 +838,7 @@ mod tests {
             first_chunk: 0,
             chunk_count: n,
             plain_len: n,
+            sequence: 0,
         };
         ChunkIndex::build(ChunkTableWriter::encode(&recs), &[block]).unwrap()
     }
@@ -874,6 +875,7 @@ mod tests {
             first_chunk: 0,
             chunk_count: count,
             plain_len: plain,
+            sequence: 0,
         };
         let mut p = ChunkTableWriter::encode(&recs);
         assert!(ChunkIndex::build(p.clone(), &[block(2, 3)]).is_ok());

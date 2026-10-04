@@ -48,6 +48,7 @@ fn block_graph(a: &mut Archive<Cursor<Vec<u8>>>, i: usize) -> lpk_format::Graph 
     let at = lpk_format::FrameLocation {
         offset: b.frame_offset,
         len: b.frame_len,
+        sequence: b.sequence,
     };
     let f = a
         .read_frame_at(at, lpk_format::FrameKind::ChunkData)

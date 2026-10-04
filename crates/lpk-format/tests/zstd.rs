@@ -256,6 +256,7 @@ fn options(encoder: ZstdTestEncoder) -> WriterOptions {
         encoder: Box::new(encoder),
         records: Vec::new(),
         recovery: Default::default(),
+        seal: None,
     }
 }
 

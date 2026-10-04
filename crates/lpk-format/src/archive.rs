@@ -1,12 +1,16 @@
 //! Opening an archive from its tail, and diagnosing a damaged one (spec section 6).
 
-use crate::chunk::ChunkIndex;
+use crate::chunk::{ChunkIndex, ChunkTableWriter};
+use crate::crypto::{
+    sealing_rule, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE, KEY_SLOT_LEN,
+};
 use crate::decode::Registry;
-use crate::envelope::Resources;
+use crate::envelope::{Envelope, Refusal, Resources};
 use crate::error::FormatError;
-use crate::frame::{Frame, FrameKind, ReadFrame, ReadLimits};
-use crate::header::Header;
+use crate::frame::{Frame, FrameFlags, FrameKind, ReadFrame, ReadLimits};
+use crate::header::{Header, HeaderFlags};
 use crate::index::{FrameLocation, Index};
+use crate::merkle::merkle_root;
 use crate::priors::PriorStore;
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -29,6 +33,14 @@ pub struct Archive<R: Read + Seek> {
     /// Number of records, read from the `Records` frame the first time a
     /// block names a record (0 without a frame).
     pub(crate) record_count: Option<u64>,
+    /// Opens sealed frames; `None` for an archive that is not encrypted and for
+    /// a listable one opened without credentials.
+    sealer: Option<Sealer>,
+    /// The key slot of an encrypted archive.
+    key_slot: Option<KeySlot>,
+    /// True for a listable archive opened without credentials: only the entry
+    /// table is available, the index is sealed.
+    listing_only: bool,
 }
 
 /// What a forward walk over the frames found.
@@ -95,6 +107,27 @@ fn read_frame_at_impl<R: Read + Seek>(
     }
 }
 
+/// Check a frame's `SEALED` flag against the archive's sealing rules.
+fn check_sealing(encrypted: bool, listable: bool, frame: &Frame) -> Result<(), FormatError> {
+    let kind = frame.kind as u16;
+    let sealed = frame.flags.contains(FrameFlags::SEALED);
+    if frame.kind == FrameKind::KeySlot && !encrypted {
+        return Err(FormatError::UnexpectedKeySlot);
+    }
+    if !encrypted {
+        return if sealed {
+            Err(FormatError::UnexpectedSealedFrame { kind })
+        } else {
+            Ok(())
+        };
+    }
+    match sealing_rule(kind, listable) {
+        Some(true) if !sealed => Err(FormatError::UnsealedFrame { kind }),
+        Some(false) if sealed => Err(FormatError::UnexpectedSealedFrame { kind }),
+        _ => Ok(()),
+    }
+}
+
 /// The name a frame of this kind goes by in `BadFrameLocation`.
 fn frame_what(kind: FrameKind) -> &'static str {
     match kind {
@@ -102,6 +135,121 @@ fn frame_what(kind: FrameKind) -> &'static str {
         FrameKind::EntryTable => "entry table",
         FrameKind::Records => "records",
         other => other.name(),
+    }
+}
+
+/// Open a frame read from disk: check its `SEALED` flag against the rules and
+/// open the payload when it is sealed.
+fn unseal(
+    sealer: Option<&Sealer>,
+    encrypted: bool,
+    listable: bool,
+    frame: Frame,
+    sequence: u64,
+) -> Result<Frame, FormatError> {
+    check_sealing(encrypted, listable, &frame)?;
+    if !frame.flags.contains(FrameFlags::SEALED) {
+        return Ok(frame);
+    }
+    let sealer = sealer.ok_or(FormatError::PasswordRequired)?;
+    let payload = sealer.open(
+        &frame.payload,
+        frame.kind as u16,
+        sequence,
+        frame.payload.len() as u64,
+    )?;
+    Ok(Frame {
+        kind: frame.kind,
+        flags: FrameFlags::EMPTY,
+        payload,
+    })
+}
+
+/// Read the key slot frame that must follow the header; returns it parsed and
+/// the offset after it. Nothing beyond the key slot is read.
+fn read_key_slot<R: Read + Seek>(reader: &mut R) -> Result<(KeySlot, u64), FormatError> {
+    reader.seek(SeekFrom::Start(Header::LEN as u64))?;
+    let mut kind = [0u8; 2];
+    match reader.read_exact(&mut kind) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(FormatError::MissingKeySlot)
+        }
+        Err(e) => return Err(e.into()),
+    }
+    if u16::from_le_bytes(kind) != FrameKind::KeySlot as u16 {
+        return Err(FormatError::MissingKeySlot);
+    }
+    reader.seek(SeekFrom::Start(Header::LEN as u64))?;
+    let limits = ReadLimits {
+        max_payload: KEY_SLOT_LEN as u64,
+    };
+    let frame = match Frame::read(&mut *reader, &limits) {
+        Ok(Some(ReadFrame::Known(f))) => f,
+        Ok(_) => return Err(FormatError::MissingKeySlot),
+        Err(FormatError::PayloadTooLarge { .. }) => {
+            return Err(FormatError::BadKeySlot { reason: "length" })
+        }
+        Err(e) => return Err(e),
+    };
+    if frame.flags.contains(FrameFlags::SEALED) {
+        return Err(FormatError::UnexpectedSealedFrame {
+            kind: FrameKind::KeySlot as u16,
+        });
+    }
+    let end = Header::LEN as u64 + frame.encoded_len();
+    Ok((KeySlot::parse(&frame.payload)?, end))
+}
+
+/// Walk the frame envelopes from `start` (the first frame after the key slot,
+/// sequence 1) to the entry table, skipping payloads without reading them.
+fn find_entry_table<R: Read + Seek>(
+    reader: &mut R,
+    start: u64,
+    file_len: u64,
+) -> Result<FrameLocation, FormatError> {
+    let mut pos = start;
+    let mut sequence = 1u64;
+    loop {
+        let trunc = FormatError::Truncated {
+            what: "entry table",
+        };
+        if pos.saturating_add(5) > file_len {
+            return Err(trunc);
+        }
+        reader.seek(SeekFrom::Start(pos))?;
+        let mut head = [0u8; 4];
+        reader.read_exact(&mut head)?;
+        let kind = u16::from_le_bytes([head[0], head[1]]);
+        let payload_len = crate::varint::read(&mut *reader)?;
+        let frame_len = (4 + crate::varint::len(payload_len) as u64)
+            .checked_add(payload_len)
+            .and_then(|n| n.checked_add(32))
+            .ok_or(FormatError::BadFrameLocation {
+                what: "entry table",
+            })?;
+        let end = pos.saturating_add(frame_len);
+        if end > file_len {
+            return Err(trunc);
+        }
+        match FrameKind::from_u16(kind) {
+            Some(FrameKind::EntryTable) => {
+                return Ok(FrameLocation {
+                    offset: pos,
+                    len: frame_len,
+                    sequence,
+                })
+            }
+            Some(FrameKind::KeySlot) => return Err(FormatError::UnexpectedKeySlot),
+            Some(FrameKind::Trailer) => {
+                return Err(FormatError::BadFrameLocation {
+                    what: "entry table",
+                })
+            }
+            _ => {}
+        }
+        pos = end;
+        sequence += 1;
     }
 }
 
@@ -118,7 +266,25 @@ impl<R: Read + Seek> Archive<R> {
     /// archive that needs more is `Refused` before any block is read. After
     /// that the limit is the smaller of the envelope's `max_frame_payload` and
     /// `resources.max_frame_payload`.
-    pub fn open(mut reader: R, resources: &Resources) -> Result<Self, FormatError> {
+    pub fn open(reader: R, resources: &Resources) -> Result<Self, FormatError> {
+        Self::open_with(reader, resources, None)
+    }
+
+    /// Like [`Archive::open`], with the credentials of an encrypted archive
+    /// (spec section 14). For an encrypted archive the key slot is read right
+    /// after the header and opened first: a wrong password is `WrongKey` before
+    /// any other frame is read, and a key slot whose Argon2 memory exceeds
+    /// `resources.memory` is `Refused` (field `argon2_m`) before it is derived.
+    /// Without credentials an encrypted archive is `PasswordRequired`, except a
+    /// listable one, which opens for listing only: the entry table can be read,
+    /// `extract` fails with `PasswordRequired`, and `verify` checks every
+    /// frame's hash and the recovery frames only. Credentials given for an
+    /// archive that is not encrypted are ignored.
+    pub fn open_with(
+        mut reader: R,
+        resources: &Resources,
+        credentials: Option<&Credentials>,
+    ) -> Result<Self, FormatError> {
         let mut limits = ReadLimits {
             max_payload: resources.max_frame_payload,
         };
@@ -128,6 +294,41 @@ impl<R: Read + Seek> Archive<R> {
         }
         reader.seek(SeekFrom::Start(0))?;
         let header = Header::read(&mut reader)?;
+        let encrypted = header.flags.contains(HeaderFlags::ENCRYPTED);
+        let listable = header.flags.contains(HeaderFlags::LISTABLE);
+        let mut sealer = None;
+        let mut key_slot = None;
+        let mut listing_only = false;
+        let mut after_slot = Header::LEN as u64;
+        if encrypted {
+            let (slot, end) = read_key_slot(&mut reader)?;
+            after_slot = end;
+            match credentials {
+                Some(c) => {
+                    let needed = u64::from(slot.argon2.m_kib) * 1024;
+                    if needed > resources.memory {
+                        return Err(FormatError::Refused(Refusal {
+                            field: "argon2_m",
+                            needed,
+                            allowed: resources.memory,
+                        }));
+                    }
+                    let key = slot.unwrap(&header.archive_id, c)?;
+                    sealer = Some(Sealer::new(slot.suite, key, header.archive_id));
+                }
+                None if listable => listing_only = true,
+                None => return Err(FormatError::PasswordRequired),
+            }
+            key_slot = Some(slot);
+        } else {
+            let mut kind = [0u8; 2];
+            reader.seek(SeekFrom::Start(Header::LEN as u64))?;
+            if reader.read_exact(&mut kind).is_ok()
+                && u16::from_le_bytes(kind) == FrameKind::KeySlot as u16
+            {
+                return Err(FormatError::UnexpectedKeySlot);
+            }
+        }
         let trailer = match Trailer::read_tail(&mut reader, len) {
             Ok(t) => t,
             Err(
@@ -140,17 +341,56 @@ impl<R: Read + Seek> Archive<R> {
         if trailer.archive_id != header.archive_id {
             return Err(FormatError::ArchiveIdMismatch);
         }
+        if listing_only {
+            let entry_table = find_entry_table(&mut reader, after_slot, len)?;
+            let index = Index {
+                chunk_table: ChunkTableWriter::encode(&[]).into(),
+                merkle_root: merkle_root(&[]),
+                envelope: Envelope {
+                    max_window: 0,
+                    max_bwt_block: 0,
+                    max_block_plain: 0,
+                    max_frame_payload: resources.max_frame_payload,
+                    decode_memory: 0,
+                    threads_hint: 0,
+                },
+                priors: Vec::new(),
+                blocks: Vec::new(),
+                entry_table,
+                records: None,
+                recovery: Vec::new(),
+            };
+            let chunks = index.chunk_index()?;
+            return Ok(Archive {
+                reader,
+                limits,
+                resources: *resources,
+                header,
+                trailer,
+                index,
+                chunks: Arc::new(chunks),
+                registry: Registry::v1(),
+                cache: None,
+                record_count: None,
+                sealer: None,
+                key_slot,
+                listing_only: true,
+            });
+        }
         let at = FrameLocation {
             offset: trailer.index_offset,
             len: trailer.index_len,
+            sequence: INDEX_SEQUENCE,
         };
         if !at.fits_below(len - TRAILER_FRAME_LEN) {
             return Err(FormatError::BadFrameLocation { what: "index" });
         }
-        let frame = read_frame_at_impl(&mut reader, &limits, at, FrameKind::Index)?;
-        if blake3::hash(&frame.payload).as_bytes() != &trailer.index_hash {
+        let raw = read_frame_at_impl(&mut reader, &limits, at, FrameKind::Index)?;
+        // The trailer's hash covers the payload as stored: the sealed bytes.
+        if blake3::hash(&raw.payload).as_bytes() != &trailer.index_hash {
             return Err(FormatError::IndexHashMismatch);
         }
+        let frame = unseal(sealer.as_ref(), encrypted, listable, raw, INDEX_SEQUENCE)?;
         let (index, chunks) = Index::parse_with_chunks(&frame.payload, trailer.index_offset)?;
         index
             .envelope
@@ -171,7 +411,45 @@ impl<R: Read + Seek> Archive<R> {
             registry: Registry::v1(),
             cache: None,
             record_count: None,
+            sealer,
+            key_slot,
+            listing_only: false,
         })
+    }
+
+    /// True when the archive is encrypted.
+    pub fn is_encrypted(&self) -> bool {
+        self.header.flags.contains(HeaderFlags::ENCRYPTED)
+    }
+
+    /// True when the archive's entry table is in clear.
+    pub fn is_listable(&self) -> bool {
+        self.header.flags.contains(HeaderFlags::LISTABLE)
+    }
+
+    /// The cipher suite of an encrypted archive.
+    pub fn suite(&self) -> Option<Suite> {
+        self.key_slot.as_ref().map(|k| k.suite)
+    }
+
+    /// The key slot of an encrypted archive.
+    pub fn key_slot(&self) -> Option<&KeySlot> {
+        self.key_slot.as_ref()
+    }
+
+    /// True for a listable archive opened without credentials: the index is
+    /// sealed, so only the entry table is available.
+    pub fn is_listing_only(&self) -> bool {
+        self.listing_only
+    }
+
+    /// Fail with `PasswordRequired` when only the entry table is available.
+    pub(crate) fn need_index(&self) -> Result<(), FormatError> {
+        if self.listing_only {
+            Err(FormatError::PasswordRequired)
+        } else {
+            Ok(())
+        }
     }
 
     fn fallback_error(reader: R, limits: &ReadLimits) -> FormatError {
@@ -208,6 +486,12 @@ impl<R: Read + Seek> Archive<R> {
     /// The underlying reader, for the recovery scan.
     pub(crate) fn raw_reader(&mut self) -> &mut R {
         &mut self.reader
+    }
+
+    /// Replace the recovery frame list of a listing-only archive with the
+    /// frames a walk found.
+    pub(crate) fn set_recovery_frames(&mut self, frames: Vec<FrameLocation>) {
+        self.index.recovery = frames;
     }
 
     /// Locations of the `Recovery` frames, as the index lists them.
@@ -255,20 +539,43 @@ impl<R: Read + Seek> Archive<R> {
     }
 
     /// Read and verify the frame at `at`: its kind must be `expected` and its
-    /// whole encoded length must be `at.len`.
+    /// whole encoded length must be `at.len`. A sealed frame is opened with
+    /// the archive key (`at.sequence` names its position); the payload
+    /// returned is the plain one.
     pub fn read_frame_at(
         &mut self,
         at: FrameLocation,
         expected: FrameKind,
     ) -> Result<Frame, FormatError> {
-        read_frame_at_impl(&mut self.reader, &self.limits, at, expected)
+        let raw = read_frame_at_impl(&mut self.reader, &self.limits, at, expected)?;
+        unseal(
+            self.sealer.as_ref(),
+            self.is_encrypted(),
+            self.is_listable(),
+            raw,
+            at.sequence,
+        )
     }
 
     /// Walk the frames from the header forward and report where and why the
     /// walk stopped. A walk that reaches the end of the input, or an
     /// incomplete frame, without having seen a trailer ends in
     /// `Truncated { what: "trailer" }`.
+    ///
+    /// The walk also applies the sealing rules that need no key: the key slot
+    /// is the first frame of an encrypted archive and appears nowhere else,
+    /// and every frame's `SEALED` flag is the one the rules give its kind.
     pub fn diagnose(mut reader: R, limits: &ReadLimits) -> Diagnosis {
+        Self::walk(&mut reader, limits, None)
+    }
+
+    /// [`Archive::diagnose`] over a borrowed reader; the locations of the
+    /// recovery frames seen are pushed to `recovery` when it is given.
+    pub(crate) fn walk(
+        reader: &mut R,
+        limits: &ReadLimits,
+        mut recovery: Option<&mut Vec<FrameLocation>>,
+    ) -> Diagnosis {
         let mut d = Diagnosis {
             frames_ok: 0,
             ends_at: 0,
@@ -283,18 +590,52 @@ impl<R: Read + Seek> Archive<R> {
             inner: BufReader::new(reader),
             n: 0,
         };
-        if let Err(e) = Header::read(&mut r) {
-            d.error = Some(e);
-            return d;
-        }
+        let header = match Header::read(&mut r) {
+            Ok(h) => h,
+            Err(e) => {
+                d.error = Some(e);
+                return d;
+            }
+        };
+        let encrypted = header.flags.contains(HeaderFlags::ENCRYPTED);
+        let listable = header.flags.contains(HeaderFlags::LISTABLE);
         d.ends_at = r.n;
         loop {
+            let start = r.n;
             match Frame::read(&mut r, limits) {
                 Ok(None) => {
                     d.error = Some(FormatError::Truncated { what: "trailer" });
                     return d;
                 }
                 Ok(Some(f)) => {
+                    let sequence = d.frames_ok;
+                    let rules = match &f {
+                        ReadFrame::Known(k) => {
+                            let first_ok =
+                                !encrypted || sequence > 0 || k.kind == FrameKind::KeySlot;
+                            if !first_ok {
+                                Err(FormatError::MissingKeySlot)
+                            } else if k.kind == FrameKind::KeySlot && sequence > 0 {
+                                Err(FormatError::UnexpectedKeySlot)
+                            } else {
+                                check_sealing(encrypted, listable, k)
+                            }
+                        }
+                        ReadFrame::Unknown { .. } => Ok(()),
+                    };
+                    if let Err(e) = rules {
+                        d.error = Some(e);
+                        return d;
+                    }
+                    if let (Some(list), ReadFrame::Known(k)) = (recovery.as_deref_mut(), &f) {
+                        if k.kind == FrameKind::Recovery {
+                            list.push(FrameLocation {
+                                offset: start,
+                                len: r.n - start,
+                                sequence,
+                            });
+                        }
+                    }
                     d.frames_ok += 1;
                     d.ends_at = r.n;
                     let is_trailer =
@@ -432,6 +773,7 @@ mod tests {
                 first_chunk: 0,
                 chunk_count: 2,
                 plain_len: 30,
+                sequence: 0,
             },
             BlockLocation {
                 frame_offset: chunk2_off,
@@ -439,6 +781,7 @@ mod tests {
                 first_chunk: 2,
                 chunk_count: 2,
                 plain_len: 40,
+                sequence: 0,
             },
         ];
         let index = Index {
@@ -464,6 +807,7 @@ mod tests {
             entry_table: FrameLocation {
                 offset: entry_off,
                 len: e.len() as u64,
+                sequence: 0,
             },
             records: None,
             recovery: vec![],
@@ -637,6 +981,7 @@ mod tests {
             FrameLocation {
                 offset: blk.frame_offset,
                 len: blk.frame_len,
+                sequence: 0,
             },
             FrameKind::ChunkData,
         )
@@ -694,6 +1039,7 @@ mod tests {
                 FrameLocation {
                     offset: blk.frame_offset,
                     len: blk.frame_len,
+                    sequence: 0,
                 },
                 FrameKind::ChunkData,
             )
@@ -704,7 +1050,8 @@ mod tests {
             a.read_frame_at(
                 FrameLocation {
                     offset: at.offset,
-                    len: at.len + 1
+                    len: at.len + 1,
+                    sequence: 0,
                 },
                 FrameKind::EntryTable
             ),
@@ -715,7 +1062,8 @@ mod tests {
             .read_frame_at(
                 FrameLocation {
                     offset: at.offset + 1,
-                    len: at.len
+                    len: at.len,
+                    sequence: 0,
                 },
                 FrameKind::EntryTable
             )

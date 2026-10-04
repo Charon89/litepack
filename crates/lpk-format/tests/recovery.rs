@@ -112,6 +112,7 @@ fn recovery_frames_sit_between_the_data_frames_they_cover() {
         .map(|b| FrameLocation {
             offset: b.frame_offset,
             len: b.frame_len,
+            sequence: b.sequence,
         })
         .collect();
     data.push(ix.entry_table);
@@ -563,6 +564,7 @@ mod hand_built {
         let rec0 = FrameLocation {
             offset: bytes.len() as u64,
             len: r0.len() as u64,
+            sequence: 0,
         };
         bytes.extend_from_slice(&r0);
         let rec_off = bytes.len() as u64;
@@ -573,6 +575,7 @@ mod hand_built {
         let rec1 = FrameLocation {
             offset: bytes.len() as u64,
             len: r1.len() as u64,
+            sequence: 0,
         };
         bytes.extend_from_slice(&r1);
         let locs = vec![rec0, rec1];
@@ -593,10 +596,12 @@ mod hand_built {
             entry_table: FrameLocation {
                 offset: entry_off,
                 len: e.len() as u64,
+                sequence: 0,
             },
             records: Some(FrameLocation {
                 offset: rec_off,
                 len: r.len() as u64,
+                sequence: 0,
             }),
             recovery: locs.clone(),
         };

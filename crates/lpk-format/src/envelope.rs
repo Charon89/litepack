@@ -514,6 +514,7 @@ mod tests {
             first_chunk: 0,
             chunk_count: 1,
             plain_len,
+            sequence: 0,
         }
     }
 
@@ -531,7 +532,11 @@ mod tests {
     }
 
     fn floc(len: u64) -> FrameLocation {
-        FrameLocation { offset: 40, len }
+        FrameLocation {
+            offset: 40,
+            len,
+            sequence: 0,
+        }
     }
 
     #[test]

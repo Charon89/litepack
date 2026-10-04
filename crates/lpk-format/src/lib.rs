@@ -1,6 +1,6 @@
 //! LitePack `.lpk` container format: header, varints, the hashed frame grammar, the entry
 //! table, the chunk table and the Merkle tree with file and range verification, and the
-//! index, trailer and archive opener.
+//! index, trailer and archive opener, and encryption (key slot, sealed frames).
 //!
 //! This is the reference reader side of the format; see `docs/spec/lpk-v1.md`.
 #![forbid(unsafe_code)]
@@ -43,6 +43,10 @@ pub use merkle::{
 pub use priors::{prior_id, prior_list_table, MemoryPriors, NoPriors, PriorStore};
 pub use trailer::{trailer_layout_table, Trailer, TRAILER_FRAME_LEN, TRAILER_PAYLOAD_LEN};
 
+pub use crypto::{
+    associated_data, derive_nonce, key_slot_table, sealing_rule, sealing_rules_table, ArchiveKey,
+    Argon2Params, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE, KEY_SLOT_LEN,
+};
 pub use decode::{decode_block, PrimitiveDecoder, Registry};
 pub use entry::{
     entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,
@@ -72,12 +76,12 @@ pub use record::{
 };
 pub use recovery::{
     decoder_work_bytes, encoder_work_bytes, group_recovery_shards, recovery_layout_table, repair,
-    repair_with_report, RecoveryFrame, RecoveryOptions, RepairReport, DEFAULT_GROUP_SHARDS,
-    DEFAULT_SHARD_LEN, MAX_GROUP_BYTES, MAX_GROUP_SHARDS, MAX_PERCENT, MAX_SHARD_LEN,
-    MAX_TOTAL_SHARDS, SHARD_ALIGN,
+    repair_with_credentials, repair_with_report, RecoveryFrame, RecoveryOptions, RepairReport,
+    DEFAULT_GROUP_SHARDS, DEFAULT_SHARD_LEN, MAX_GROUP_BYTES, MAX_GROUP_SHARDS, MAX_PERCENT,
+    MAX_SHARD_LEN, MAX_TOTAL_SHARDS, SHARD_ALIGN,
 };
 pub use writer::{
-    BlockEncoder, Chunker, FixedChunker, StoreEncoder, Writer, WriterOptions, WriterSummary,
-    DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, MIN_CHUNK_SIZE,
+    BlockEncoder, Chunker, FixedChunker, SealOptions, StoreEncoder, Writer, WriterOptions,
+    WriterSummary, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
 pub use zstd::ZstdDecoder;

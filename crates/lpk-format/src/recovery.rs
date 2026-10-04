@@ -584,6 +584,13 @@ impl<R: Read + Seek> Archive<R> {
     /// Detect damage without repairing: hash every data shard of every usable
     /// recovery frame and count the damaged ones. `shards_repaired` is 0.
     pub fn check_recovery(&mut self) -> Result<RepairReport, FormatError> {
+        self.need_index()?;
+        self.scan_recovery_frames()
+    }
+
+    /// [`Archive::check_recovery`] without the key check, over whatever
+    /// recovery frame list the archive holds.
+    pub(crate) fn scan_recovery_frames(&mut self) -> Result<RepairReport, FormatError> {
         scan(self, &mut |_, _, _, _| Ok(0))
     }
 }
@@ -612,10 +619,24 @@ pub fn repair<R: Read + Seek, W: Write + Seek>(
 /// report instead of replacing it.
 pub fn repair_with_report<R: Read + Seek, W: Write + Seek>(
     archive: R,
-    mut out: W,
+    out: W,
     resources: &Resources,
 ) -> Result<(RepairReport, Option<FormatError>), FormatError> {
-    let mut a = Archive::open(archive, resources)?;
+    repair_with_credentials(archive, out, resources, None)
+}
+
+/// Like [`repair_with_report`] for an encrypted archive: the index, which
+/// lists the recovery frames, is sealed, so the credentials are needed to open
+/// it (the repair itself works on the sealed bytes and never decrypts a
+/// frame). A listable archive given no credentials is `PasswordRequired`.
+pub fn repair_with_credentials<R: Read + Seek, W: Write + Seek>(
+    archive: R,
+    mut out: W,
+    resources: &Resources,
+    credentials: Option<&crate::crypto::Credentials>,
+) -> Result<(RepairReport, Option<FormatError>), FormatError> {
+    let mut a = Archive::open_with(archive, resources, credentials)?;
+    a.need_index()?;
     {
         let r = a.raw_reader();
         r.seek(SeekFrom::Start(0))?;
@@ -869,7 +890,11 @@ mod tests {
     #[test]
     fn cover_must_tile_the_frames_between_recovery_frames() {
         let f = frame(200, 64, 8, 2); // covers 32..232
-        let at = |offset, len| FrameLocation { offset, len };
+        let at = |offset, len| FrameLocation {
+            offset,
+            len,
+            sequence: 0,
+        };
         assert!(check_cover(&f, 0, &[at(232, 100)]).is_ok());
         for bad_locs in [[at(233, 100)], [at(231, 100)], [at(100, 50)]] {
             assert!(matches!(

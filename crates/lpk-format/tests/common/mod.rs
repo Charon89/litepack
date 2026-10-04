@@ -298,6 +298,7 @@ pub fn vector_options(name: &str, dict: Option<&[u8]>) -> WriterOptions {
         encoder,
         records: Vec::new(),
         recovery: Default::default(),
+        seal: None,
     }
 }
 

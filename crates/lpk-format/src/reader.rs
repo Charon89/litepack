@@ -21,6 +21,10 @@ pub struct VerifySummary {
     pub chunks: u64,
     /// `ChunkData` blocks.
     pub blocks: u64,
+    /// True when every chunk was decoded and compared with the chunk table;
+    /// false for an archive opened without credentials, where only the frame
+    /// hashes and the recovery frames were checked.
+    pub chunks_checked: bool,
 }
 
 /// The entry table payload, read and hash-checked; owns its bytes so the
@@ -121,6 +125,7 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
         let at = FrameLocation {
             offset: loc.frame_offset,
             len: loc.frame_len,
+            sequence: loc.sequence,
         };
         let frame = match a.read_frame_at(at, FrameKind::ChunkData) {
             Err(FormatError::HashMismatch { .. }) if map_frame_hash => {
@@ -251,6 +256,7 @@ impl<R: Read + Seek> Archive<R> {
             let at = FrameLocation {
                 offset: loc.frame_offset,
                 len: loc.frame_len,
+                sequence: loc.sequence,
             };
             let frame = self.read_frame_at(at, FrameKind::ChunkData)?;
             let (graph, _) = Graph::parse(&frame.payload)?;
@@ -306,6 +312,7 @@ impl<R: Read + Seek> Archive<R> {
         if entry.kind != EntryKind::File {
             return Ok(());
         }
+        self.need_index()?;
         let table = self.chunks_arc();
         let recs = resolve(&entry.chunks, entry.size, &*table)?;
         let mut source = ArchiveChunks::new(self);
@@ -327,7 +334,14 @@ impl<R: Read + Seek> Archive<R> {
     /// checked first (spec section 12): the frame and body hashes, the field
     /// rules, the chunk indices and sums, the block order, and the record ids
     /// of every block graph.
+    ///
+    /// A listable archive opened without credentials ([`Archive::open_with`])
+    /// cannot decode anything: `verify` then hashes every frame, checks the
+    /// recovery frames' shards and reports `chunks_checked: false`.
     pub fn verify(&mut self) -> Result<VerifySummary, FormatError> {
+        if self.is_listing_only() {
+            return self.verify_frames_only();
+        }
         self.verify_records()?;
         let table = self.chunks_arc();
         let blocks = self.index().blocks.clone();
@@ -352,6 +366,32 @@ impl<R: Read + Seek> Archive<R> {
             entries: entries.len(),
             chunks: table.len(),
             blocks: blocks.len() as u64,
+            chunks_checked: true,
+        })
+    }
+
+    /// `verify` without a key: every frame's hash, then the recovery frames.
+    fn verify_frames_only(&mut self) -> Result<VerifySummary, FormatError> {
+        let limits = *self.limits();
+        let mut recovery = Vec::new();
+        let d = Self::walk(self.raw_reader(), &limits, Some(&mut recovery));
+        if let Some(e) = d.error {
+            return Err(e);
+        }
+        self.set_recovery_frames(recovery);
+        let r = self.scan_recovery_frames()?;
+        if r.shards_damaged > 0 || r.frames_unusable > 0 {
+            return Err(FormatError::DamageFound {
+                damaged: r.shards_damaged,
+                unusable: r.frames_unusable,
+            });
+        }
+        let entries = self.entry_table()?;
+        Ok(VerifySummary {
+            entries: entries.len(),
+            chunks: 0,
+            blocks: 0,
+            chunks_checked: false,
         })
     }
 }

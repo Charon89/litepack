@@ -12,8 +12,10 @@ use std::sync::Arc;
 const WHAT: &str = "index";
 /// Smallest encoded frame: kind, flags, a one-byte length and the hash.
 const MIN_FRAME_LEN: u64 = 4 + 1 + 32;
-/// Smallest encoded block record: five one-byte varints.
-const MIN_BLOCK_LEN: usize = 5;
+/// Smallest encoded block record: six one-byte varints.
+const MIN_BLOCK_LEN: usize = 6;
+/// Smallest encoded recovery location: three one-byte varints.
+const MIN_LOCATION_LEN: usize = 3;
 
 /// Where one `ChunkData` block is and which chunks it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +30,8 @@ pub struct BlockLocation {
     pub chunk_count: u64,
     /// Sum of the `plain_len` of the block's chunks.
     pub plain_len: u64,
+    /// Position of the block's frame among the archive's frames (section 14).
+    pub sequence: u64,
 }
 
 /// Where a frame is: absolute offset and whole encoded length.
@@ -37,6 +41,9 @@ pub struct FrameLocation {
     pub offset: u64,
     /// Whole encoded length of the frame.
     pub len: u64,
+    /// Position of the frame among the archive's frames, counted from the key
+    /// slot or the first frame (section 14).
+    pub sequence: u64,
 }
 
 impl FrameLocation {
@@ -191,6 +198,7 @@ fn validate_blocks(
         let loc = FrameLocation {
             offset: b.frame_offset,
             len: b.frame_len,
+            sequence: b.sequence,
         };
         if !loc.fits_below(index_offset) {
             return Err(FormatError::BlockOutOfRange { block: i });
@@ -248,6 +256,7 @@ fn check_recovery_disjoint(
                 FrameLocation {
                     offset: b.frame_offset,
                     len: b.frame_len,
+                    sequence: b.sequence,
                 },
             )
         });
@@ -272,6 +281,7 @@ fn check_disjoint(
         let loc = FrameLocation {
             offset: b.frame_offset,
             len: b.frame_len,
+            sequence: b.sequence,
         };
         if overlaps(loc, entry) {
             return Err(FormatError::BadFrameLocation {
@@ -310,19 +320,27 @@ impl Index {
                 b.first_chunk,
                 b.chunk_count,
                 b.plain_len,
+                b.sequence,
             ] {
                 varint::write(&mut out, v)?;
             }
         }
         varint::write(&mut out, self.entry_table.offset)?;
         varint::write(&mut out, self.entry_table.len)?;
-        let rec = self.records.unwrap_or(FrameLocation { offset: 0, len: 0 });
+        varint::write(&mut out, self.entry_table.sequence)?;
+        let rec = self.records.unwrap_or(FrameLocation {
+            offset: 0,
+            len: 0,
+            sequence: 0,
+        });
         varint::write(&mut out, rec.offset)?;
         varint::write(&mut out, rec.len)?;
+        varint::write(&mut out, rec.sequence)?;
         varint::write(&mut out, self.recovery.len() as u64)?;
         for f in &self.recovery {
             varint::write(&mut out, f.offset)?;
             varint::write(&mut out, f.len)?;
+            varint::write(&mut out, f.sequence)?;
         }
         Self::parse(&out, u64::MAX)?;
         Ok(out)
@@ -366,18 +384,21 @@ impl Index {
                 first_chunk: rv(&mut s)?,
                 chunk_count: rv(&mut s)?,
                 plain_len: rv(&mut s)?,
+                sequence: rv(&mut s)?,
             });
         }
         let entry_table = FrameLocation {
             offset: rv(&mut s)?,
             len: rv(&mut s)?,
+            sequence: rv(&mut s)?,
         };
         let rec = FrameLocation {
             offset: rv(&mut s)?,
             len: rv(&mut s)?,
+            sequence: rv(&mut s)?,
         };
         let recovery_count = rv(&mut s)?;
-        if recovery_count > (s.len() / 2) as u64 {
+        if recovery_count > (s.len() / MIN_LOCATION_LEN) as u64 {
             return Err(FormatError::Truncated { what: WHAT });
         }
         let mut recovery = Vec::with_capacity(recovery_count as usize);
@@ -385,6 +406,7 @@ impl Index {
             recovery.push(FrameLocation {
                 offset: rv(&mut s)?,
                 len: rv(&mut s)?,
+                sequence: rv(&mut s)?,
             });
         }
         if !s.is_empty() {
@@ -393,7 +415,7 @@ impl Index {
 
         validate_blocks(&blocks, table.len(), index_offset)?;
         let entry_table = check_location(entry_table, index_offset, "entry table")?;
-        let records = if rec.offset == 0 && rec.len == 0 {
+        let records = if rec.offset == 0 && rec.len == 0 && rec.sequence == 0 {
             None
         } else {
             Some(check_location(rec, index_offset, "records")?)
@@ -474,7 +496,7 @@ pub fn index_layout_table() -> String {
          | entry_table_len | varint | whole encoded length of that frame |\n\
          | records_offset | varint | absolute offset of the `Records` frame; 0 when there is none |\n\
          | records_len | varint | whole encoded length of that frame; 0 when there is none |\n\
-         | recovery_count | varint | number of `Recovery` frames (section 13); at most the bytes left after it divided by 2 |\n\
+         | recovery_count | varint | number of `Recovery` frames (section 13); at most the bytes left after it divided by {MIN_LOCATION_LEN} |\n\
          | recovery_offset | varint | per recovery frame: absolute offset of the frame |\n\
          | recovery_len | varint | per recovery frame: whole encoded length of that frame |\n"
     )
@@ -511,6 +533,7 @@ mod tests {
                 first_chunk: first,
                 chunk_count: c,
                 plain_len: plain,
+                sequence: 0,
             });
             first += c;
         }
@@ -538,6 +561,7 @@ mod tests {
             entry_table: FrameLocation {
                 offset: 32,
                 len: 60,
+                sequence: 0,
             },
             records: None,
             recovery: vec![],
@@ -600,6 +624,7 @@ mod tests {
                 Some(FrameLocation {
                     offset: 500,
                     len: 50,
+                    sequence: 0,
                 }),
             ] {
                 idx.records = records;
@@ -617,10 +642,12 @@ mod tests {
             FrameLocation {
                 offset: 600,
                 len: 90,
+                sequence: 0,
             },
             FrameLocation {
                 offset: 9910,
                 len: 90,
+                sequence: 0,
             },
         ];
         fit_envelope(&mut idx);
@@ -694,20 +721,31 @@ mod tests {
                 b.first_chunk,
                 b.chunk_count,
                 b.plain_len,
+                b.sequence,
             ] {
                 varint::write(&mut out, v).unwrap();
             }
         }
-        for v in [idx.entry_table.offset, idx.entry_table.len] {
+        for v in [
+            idx.entry_table.offset,
+            idx.entry_table.len,
+            idx.entry_table.sequence,
+        ] {
             varint::write(&mut out, v).unwrap();
         }
-        let r = idx.records.unwrap_or(FrameLocation { offset: 0, len: 0 });
+        let r = idx.records.unwrap_or(FrameLocation {
+            offset: 0,
+            len: 0,
+            sequence: 0,
+        });
         varint::write(&mut out, r.offset).unwrap();
         varint::write(&mut out, r.len).unwrap();
+        varint::write(&mut out, r.sequence).unwrap();
         varint::write(&mut out, idx.recovery.len() as u64).unwrap();
         for f in &idx.recovery {
             varint::write(&mut out, f.offset).unwrap();
             varint::write(&mut out, f.len).unwrap();
+            varint::write(&mut out, f.sequence).unwrap();
         }
         out
     }
@@ -832,12 +870,17 @@ mod tests {
         idx.records = Some(FrameLocation {
             offset: IDX_AT,
             len: 40,
+            sequence: 0,
         });
         assert!(matches!(
             parse_err(&idx),
             FormatError::BadFrameLocation { what: "records" }
         ));
-        idx.records = Some(FrameLocation { offset: 0, len: 40 });
+        idx.records = Some(FrameLocation {
+            offset: 0,
+            len: 40,
+            sequence: 0,
+        });
         assert!(matches!(
             parse_err(&idx),
             FormatError::BadFrameLocation { what: "records" }
@@ -882,6 +925,7 @@ mod tests {
         idx.records = Some(FrameLocation {
             offset: idx.blocks[2].frame_offset,
             len: 80,
+            sequence: 0,
         });
         assert!(matches!(
             parse_err(&idx),
@@ -1010,6 +1054,7 @@ mod tests {
         idx.entry_table = FrameLocation {
             offset: 5000,
             len: 4000,
+            sequence: 0,
         };
         let stale = idx.envelope;
         assert!(matches!(
@@ -1035,6 +1080,7 @@ mod tests {
         idx.records = Some(FrameLocation {
             offset: 5000,
             len: 4000,
+            sequence: 0,
         });
         assert!(matches!(
             parse_err(&idx),

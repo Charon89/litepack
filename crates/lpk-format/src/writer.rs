@@ -2,6 +2,9 @@
 //! entry table, index, trailer. The writer never seeks and never reads back.
 
 use crate::chunk::{ChunkRecord, ChunkTableWriter};
+use crate::crypto::{
+    sealing_rule, ArchiveKey, Argon2Params, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE,
+};
 use crate::entry::{check_entry, Entry, EntryFlags, EntryKind, EntryTableWriter};
 use crate::envelope::{ArchiveSizes, Envelope};
 use crate::error::FormatError;
@@ -15,6 +18,7 @@ use crate::record::{Record, RecordsWriter};
 use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
 use crate::trailer::Trailer;
 use crate::varint;
+use rand::RngCore;
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 
@@ -119,6 +123,20 @@ impl BlockEncoder for StoreEncoder {
     }
 }
 
+/// Encryption settings of a [`Writer`] (spec section 14).
+#[derive(Debug, Clone)]
+pub struct SealOptions {
+    /// Cipher suite.
+    pub suite: Suite,
+    /// Argon2id cost; checked against the bounds.
+    pub argon2: Argon2Params,
+    /// Write the entry table in clear, so the archive can be listed without
+    /// the key.
+    pub listable: bool,
+    /// The password, and the keyfile when there is one.
+    pub credentials: Credentials,
+}
+
 /// Settings of a [`Writer`].
 pub struct WriterOptions {
     /// Chunk length for the fixed cut; at least [`MIN_CHUNK_SIZE`].
@@ -137,6 +155,10 @@ pub struct WriterOptions {
     /// Reed-Solomon recovery over the body (spec section 13): `percent` 0
     /// (the default) writes no recovery frame.
     pub recovery: RecoveryOptions,
+    /// Encrypt the archive (none: plain). The archive key and the Argon2 salt
+    /// come from the RNG the writer is given ([`Writer::new_with_rng`]), the
+    /// thread's RNG otherwise.
+    pub seal: Option<SealOptions>,
 }
 
 /// The output with the recovery spool beside it: while the spool is set, every
@@ -164,6 +186,7 @@ impl std::fmt::Debug for WriterOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WriterOptions")
             .field("recovery", &self.recovery)
+            .field("seal", &self.seal)
             .field("records", &self.records.len())
             .field("chunk_size", &self.chunk_size)
             .field("block_size", &self.block_size)
@@ -182,6 +205,7 @@ impl Default for WriterOptions {
             encoder: Box::new(StoreEncoder),
             records: Vec::new(),
             recovery: RecoveryOptions::default(),
+            seal: None,
         }
     }
 }
@@ -223,6 +247,15 @@ pub struct Writer<W: Write> {
     recovery_locs: Vec<FrameLocation>,
     /// Offset where the open recovery group starts.
     cover_start: u64,
+    /// Seals the payloads (none: plain archive).
+    sealer: Option<Sealer>,
+    /// Position of the next frame among the archive's frames (section 14).
+    seq: u64,
+}
+
+/// Whole encoded length of a frame with a payload of `payload_len` bytes.
+fn frame_len(payload_len: u64) -> u64 {
+    4 + varint::len(payload_len) as u64 + payload_len + 32
 }
 
 impl<W: Write> std::fmt::Debug for Writer<W> {
@@ -251,9 +284,31 @@ impl<W: Write> Writer<W> {
     /// Like [`Writer::new`] with another chunker (`chunk_size` is still the
     /// longest chunk and tail the writer accepts from it).
     pub fn with_chunker(
+        out: W,
+        options: WriterOptions,
+        chunker: Box<dyn Chunker>,
+    ) -> Result<Self, FormatError> {
+        Self::with_chunker_and_rng(out, options, chunker, &mut rand::rng())
+    }
+
+    /// Like [`Writer::new`], drawing the archive key and the Argon2 salt of an
+    /// encrypted archive from `rng` (a seeded one makes the output
+    /// reproducible; use an operating system RNG for real archives).
+    pub fn new_with_rng(
+        out: W,
+        options: WriterOptions,
+        rng: &mut dyn RngCore,
+    ) -> Result<Self, FormatError> {
+        let size = usize::try_from(options.chunk_size).map_err(|_| bad_options("chunk_size"))?;
+        Self::with_chunker_and_rng(out, options, Box::new(FixedChunker::new(size)), rng)
+    }
+
+    /// [`Writer::with_chunker`] with the RNG of [`Writer::new_with_rng`].
+    pub fn with_chunker_and_rng(
         mut out: W,
         options: WriterOptions,
         chunker: Box<dyn Chunker>,
+        rng: &mut dyn RngCore,
     ) -> Result<Self, FormatError> {
         if options.chunk_size < MIN_CHUNK_SIZE {
             return Err(bad_options("chunk_size below 4 KiB"));
@@ -291,10 +346,30 @@ impl<W: Write> Writer<W> {
         } else {
             None
         };
-        Header::new(HeaderFlags::EMPTY, options.archive_id).write(&mut out)?;
+        let mut flags = HeaderFlags::EMPTY;
+        let mut sealer = None;
+        let mut slot = None;
+        if let Some(seal) = &options.seal {
+            seal.argon2.validate()?;
+            flags = HeaderFlags::ENCRYPTED;
+            if seal.listable {
+                flags = flags.union(HeaderFlags::LISTABLE);
+            }
+            let key = ArchiveKey::generate(rng);
+            slot = Some(KeySlot::create(
+                seal.suite,
+                seal.argon2,
+                &seal.credentials,
+                &options.archive_id,
+                &key,
+                rng,
+            )?);
+            sealer = Some(Sealer::new(seal.suite, key, options.archive_id));
+        }
+        Header::new(flags, options.archive_id).write(&mut out)?;
         // The covered range starts right after the header.
         let out = Tee { inner: out, spool };
-        Ok(Writer {
+        let mut w = Writer {
             out,
             options,
             chunker,
@@ -310,7 +385,37 @@ impl<W: Write> Writer<W> {
             bad_chunk: None,
             recovery_locs: Vec::new(),
             cover_start: Header::LEN as u64,
-        })
+            sealer,
+            seq: 0,
+        };
+        if let Some(slot) = slot {
+            // The key slot is the first frame, in clear.
+            let frame = Frame {
+                kind: FrameKind::KeySlot,
+                flags: FrameFlags::EMPTY,
+                payload: slot.encode(),
+            };
+            frame.write(&mut w.out)?;
+            w.pos += frame.encoded_len();
+            w.seq += 1;
+        }
+        Ok(w)
+    }
+
+    /// Bytes sealing adds to a payload (0 for a plain archive).
+    fn overhead(&self) -> u64 {
+        self.sealer
+            .as_ref()
+            .map_or(0, |s| s.suite().overhead() as u64)
+    }
+
+    /// True when a frame of `kind` is sealed in this archive.
+    fn seals(&self, kind: FrameKind) -> bool {
+        self.sealer.is_some() && sealing_rule(kind as u16, self.listable()) == Some(true)
+    }
+
+    fn listable(&self) -> bool {
+        self.options.seal.as_ref().is_some_and(|s| s.listable)
     }
 
     /// Covered bytes the writer holds in memory for recovery right now: the
@@ -376,7 +481,8 @@ impl<W: Write> Writer<W> {
         let payload_len = head.len() as u64 + g.recovery.len() as u64;
         let at = FrameLocation {
             offset: self.pos,
-            len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
+            len: frame_len(payload_len),
+            sequence: self.seq,
         };
         let mut hasher = blake3::Hasher::new();
         hasher.update(&head);
@@ -389,6 +495,7 @@ impl<W: Write> Writer<W> {
         w.write_all(&g.recovery)?;
         w.write_all(hasher.finalize().as_bytes())?;
         self.pos += at.len;
+        self.seq += 1;
         self.cover_start = self.pos;
         self.recovery_locs.push(at);
         Ok(())
@@ -399,20 +506,40 @@ impl<W: Write> Writer<W> {
         kind: FrameKind,
         payload: Vec<u8>,
     ) -> Result<FrameLocation, FormatError> {
+        let sealed = self.seals(kind);
+        let wire_len = payload.len() as u64 + if sealed { self.overhead() } else { 0 };
+        if matches!(kind, FrameKind::EntryTable | FrameKind::Records) {
+            self.make_room(frame_len(wire_len))?;
+        }
+        // The sequence is read after `make_room`, which may write a recovery frame.
+        let sequence = self.seq;
+        let (flags, payload) = match (&self.sealer, sealed) {
+            (Some(s), true) => (FrameFlags::SEALED, s.seal(&payload, kind as u16, sequence)?),
+            _ => (FrameFlags::EMPTY, payload),
+        };
+        self.write_wire_frame(kind, flags, payload)
+    }
+
+    /// Write a frame whose payload is already as it goes to disk.
+    fn write_wire_frame(
+        &mut self,
+        kind: FrameKind,
+        flags: FrameFlags,
+        payload: Vec<u8>,
+    ) -> Result<FrameLocation, FormatError> {
         let frame = Frame {
             kind,
-            flags: FrameFlags::EMPTY,
+            flags,
             payload,
         };
-        if matches!(kind, FrameKind::EntryTable | FrameKind::Records) {
-            self.make_room(frame.encoded_len())?;
-        }
         let at = FrameLocation {
             offset: self.pos,
             len: frame.encoded_len(),
+            sequence: self.seq,
         };
         frame.write(&mut self.out)?;
         self.pos += at.len;
+        self.seq += 1;
         Ok(at)
     }
 
@@ -465,29 +592,41 @@ impl<W: Write> Writer<W> {
         // The frame is written piecewise, without a second copy of the encoded
         // block (the identity encoder still copies the plain block once).
         let head = header.encode();
-        let payload_len = (head.len() + encoded.len()) as u64;
-        self.make_room(4 + varint::len(payload_len) as u64 + payload_len + 32)?;
-        let at = FrameLocation {
-            offset: self.pos,
-            len: 4 + varint::len(payload_len) as u64 + payload_len + 32,
+        let plain_payload_len = (head.len() + encoded.len()) as u64;
+        let payload_len = plain_payload_len + self.overhead();
+        self.make_room(frame_len(payload_len))?;
+        let at = if let Some(sealer) = &self.sealer {
+            let mut payload = head;
+            payload.extend_from_slice(&encoded);
+            let sealed = sealer.seal(&payload, FrameKind::ChunkData as u16, self.seq)?;
+            self.write_wire_frame(FrameKind::ChunkData, FrameFlags::SEALED, sealed)?
+        } else {
+            let at = FrameLocation {
+                offset: self.pos,
+                len: frame_len(payload_len),
+                sequence: self.seq,
+            };
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&head);
+            hasher.update(&encoded);
+            let w = &mut self.out;
+            w.write_all(&(FrameKind::ChunkData as u16).to_le_bytes())?;
+            w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
+            varint::write(w, payload_len)?;
+            w.write_all(&head)?;
+            w.write_all(&encoded)?;
+            w.write_all(hasher.finalize().as_bytes())?;
+            self.pos += at.len;
+            self.seq += 1;
+            at
         };
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&head);
-        hasher.update(&encoded);
-        let w = &mut self.out;
-        w.write_all(&(FrameKind::ChunkData as u16).to_le_bytes())?;
-        w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
-        varint::write(w, payload_len)?;
-        w.write_all(&head)?;
-        w.write_all(&encoded)?;
-        w.write_all(hasher.finalize().as_bytes())?;
-        self.pos += at.len;
         self.blocks.push(BlockLocation {
             frame_offset: at.offset,
             frame_len: at.len,
             first_chunk: self.records.len() as u64 - self.pending_chunks,
             chunk_count: self.pending_chunks,
             plain_len: plain.len() as u64,
+            sequence: at.sequence,
         });
         self.pending_chunks = 0;
         Ok(())
@@ -694,6 +833,7 @@ impl<W: Write> Writer<W> {
         // The envelope names the index's own payload length, which depends on
         // the envelope's varints. Starting from an upper bound the length can
         // only fall, so this settles within a few rounds.
+        let overhead = self.overhead();
         let mut guess = u64::MAX;
         let payload = loop {
             index.envelope = Envelope::for_archive(
@@ -709,14 +849,24 @@ impl<W: Write> Writer<W> {
                 0,
             );
             let payload = index.encode()?;
-            let len = payload.len() as u64;
+            // The envelope names the payload as stored: sealed, when sealing.
+            let len = payload.len() as u64 + overhead;
             if index.envelope.max_frame_payload == len.max(frames_max(&index)) {
                 break payload;
             }
             guess = len;
         };
+        // The index is sealed under a fixed sequence: the trailer cannot name
+        // its position. The trailer's hash covers the payload as stored.
+        let (flags, payload) = match &self.sealer {
+            Some(s) => (
+                FrameFlags::SEALED,
+                s.seal(&payload, FrameKind::Index as u16, INDEX_SEQUENCE)?,
+            ),
+            None => (FrameFlags::EMPTY, payload),
+        };
         let index_hash = *blake3::hash(&payload).as_bytes();
-        let at = self.write_frame(FrameKind::Index, payload)?;
+        let at = self.write_wire_frame(FrameKind::Index, flags, payload)?;
         Trailer {
             index_offset: at.offset,
             index_len: at.len,
