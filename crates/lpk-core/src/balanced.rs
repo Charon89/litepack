@@ -290,8 +290,9 @@ impl BalancedEncoder {
     /// A new encoder and the handle that steers it; every option is checked here
     /// (`InvalidOption`).
     pub fn new(o: &BalancedOptions) -> Result<(Self, BalancedHandle), CoreError> {
-        if o.sample_len == 0 {
-            return Err(CoreError::InvalidOption("sample_len is 0".into()));
+        if o.sample_len < 4 {
+            // Four stripes of a quarter each: anything shorter gives empty stripes.
+            return Err(CoreError::InvalidOption("sample_len is below 4".into()));
         }
         let lzma = LzmaEncoder::with_dict(o.dict_size)?;
         if u64::from(o.dict_size) > lpk_format::DEFAULT_MAX_WINDOW {

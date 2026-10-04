@@ -76,7 +76,7 @@ struct AddArgs {
     /// zstd level (of the Fast tier, or of the Balanced tier's zstd candidate; default 22 there).
     #[arg(long, value_name = "L", conflicts_with = "store")]
     level: Option<i32>,
-    /// log2 of the zstd match window, 10 to 31.
+    /// log2 of the zstd match window, 10 to 28 (the reader's default limit caps it).
     #[arg(long, value_name = "W", conflicts_with = "store")]
     window_log: Option<u32>,
     /// The Balanced tier's LZMA dictionary in bytes (default 64 MiB).

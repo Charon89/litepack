@@ -48,7 +48,8 @@ impl Gate {
     /// True when `block` is judged incompressible. Blocks shorter than the sample head skip the
     /// sample; an empty block is compressible.
     pub fn is_incompressible(&self, block: &[u8]) -> bool {
-        if block.is_empty() {
+        if block.is_empty() || self.full_threshold == f64::INFINITY {
+            // An infinite threshold (`Gate::OFF`) never fires: skip the entropy passes.
             return false;
         }
         if block.len() >= SAMPLE_HEAD && sampled_entropy(block) < self.sample_reject {

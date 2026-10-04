@@ -52,7 +52,7 @@ pub struct FastOptions {
     pub ingest: IngestOptions,
     /// zstd compression level. The default, 3, is the setting the Phase 0 G4 proxy measured.
     pub level: i32,
-    /// log2 of the match window in bytes, 10 to 31: how far back the encoder may match. The
+    /// log2 of the match window in bytes, 10 to 28 (the reader's default `max_window` caps it): how far back the encoder may match. The
     /// default, 27, is the window of the catalogue's zstd row (`--long=27`). It is the maximum
     /// of the window each block declares (a block shorter than the window declares a smaller
     /// one), not a memory figure the decoder reserves up front.
