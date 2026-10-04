@@ -137,7 +137,9 @@ fn timeout_kills_whole_tree() {
     assert!(m.timed_out, "{m:?}");
     assert_eq!(m.exit_code, None);
     assert!(m.descendants_killed, "{m:?}");
-    assert!(m.wall >= Duration::from_millis(1500), "{m:?}");
+    // The timeout fires on the OS timer's granularity, so the wall time can land
+    // a few milliseconds under the limit (a CI runner measured 1.49986 s once).
+    assert!(m.wall >= Duration::from_millis(1480), "{m:?}");
     assert!(
         started.exists(),
         "grandchild never started: the tree kill was not exercised"
