@@ -16,8 +16,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lpk_format::{
-    BlockEncoder, Encoded, EntryKind, FormatError, Graph, PrimitiveId, Step, StoreEncoder, Writer,
-    WriterOptions, WriterSummary, DEFAULT_BLOCK_SIZE,
+    BlockEncoder, Encoded, FormatError, Graph, PrimitiveId, Step, StoreEncoder, WriterSummary,
+    DEFAULT_BLOCK_SIZE,
 };
 use std::io::Write;
 use zstd::zstd_safe::CParameter;
@@ -321,7 +321,7 @@ pub fn archive_fast_file(
 mod tests {
     use super::*;
     use crate::ingest::tests::{clear_readonly, make_tree};
-    use lpk_format::{Archive, Resources};
+    use lpk_format::{Archive, EntryKind, Resources, Writer, WriterOptions};
     use std::io::Cursor;
 
     /// Compressible English-like text of exactly `len` bytes, varied by `seed`.

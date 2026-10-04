@@ -137,7 +137,7 @@ impl Pipeline {
     pub fn fast(options: FastOptions) -> Self {
         Pipeline {
             classify: ClassifyStage {
-                ingest: options.ingest.clone(),
+                ingest: options.ingest,
             },
             peel: Vec::new(),
             fold: None,
@@ -173,7 +173,7 @@ impl Pipeline {
     /// the file exists. The walk time then includes creating the file.
     pub fn run_file(self, root: &Path, archive_path: &Path) -> Result<RunSummary, CoreError> {
         let prepared = self.prepare()?;
-        let ingest = self.classify.ingest.clone();
+        let ingest = self.classify.ingest;
         let start = Instant::now();
         create_new_and_run(root, archive_path, &ingest, |inputs, file, sync| {
             self.run_inputs(inputs, file, Some(sync), prepared, start.elapsed())
@@ -343,7 +343,9 @@ mod tests {
             window_log: 40,
             ..FastOptions::default()
         };
-        let e = Pipeline::fast(opts).run_file(dir.path(), &arch).unwrap_err();
+        let e = Pipeline::fast(opts)
+            .run_file(dir.path(), &arch)
+            .unwrap_err();
         assert!(matches!(e, CoreError::InvalidOption(_)));
         assert!(!arch.exists());
     }

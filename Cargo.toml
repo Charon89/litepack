@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/lpk-bench",
   "crates/lpk-check",
+  "crates/lpk-cli",
   "crates/lpk-core",
   "crates/lpk-format",
   "crates/lpk-procstat-sys",

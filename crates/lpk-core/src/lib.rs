@@ -31,7 +31,8 @@ pub use fast::{
 pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
 pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 pub use pipeline::{
-    ClassifyStage, FoldStage, ModelStage, PeelStage, Pipeline, RunSummary, SealOptions, StageTimings,
+    ClassifyStage, FoldStage, ModelStage, PeelStage, Pipeline, RunSummary, SealOptions,
+    StageTimings,
 };
 pub use priors::ProvidedDictionaries;
 pub use source::Source;

@@ -1411,6 +1411,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpk-cli"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "clap",
+ "lpk-core",
+ "lpk-format",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
 name = "lpk-core"
 version = "0.0.1"
 dependencies = [

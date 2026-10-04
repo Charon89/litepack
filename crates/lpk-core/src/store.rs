@@ -78,7 +78,9 @@ pub fn archive_store_file(
     archive_path: &Path,
     options: StoreOptions,
 ) -> Result<WriterSummary, CoreError> {
-    Ok(Pipeline::store(options).run_file(root, archive_path)?.writer)
+    Ok(Pipeline::store(options)
+        .run_file(root, archive_path)?
+        .writer)
 }
 
 /// Create `archive_path` (create-new), walk `root` leaving the new file out of the inputs, and
