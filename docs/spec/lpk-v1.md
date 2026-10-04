@@ -1287,7 +1287,8 @@ complete generation: rolling back to the latest complete generation removes the 
 
 An append is committed when the last byte of the new trailer is written, and the data it commits must be on disk first:
 a writer that can sync (`Writer::append_file` opens the file for appending and syncs with `sync_data`) flushes and syncs
-everything before the trailer, and one over a bare `Write` should be given a sync hook (`Writer::with_sync`). Until the
+everything before the trailer and syncs again after it, and one over a bare `Write` should be given a sync hook
+(`Writer::with_sync`). Until the
 trailer is complete the last valid trailer is the old one, but it is no longer at the end of the file, so opening fails
 through the diagnosis walk of section 6 with `Truncated` (`what` `trailer`). The walk continues past trailers, so it
 reports the cut and the offset after the last complete trailer. `Writer::append` with a bare writer trusts the caller

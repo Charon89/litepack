@@ -684,10 +684,11 @@ impl<W: Write> Writer<W> {
         Ok(w)
     }
 
-    /// Call `sync` before the trailer is written, after everything else of the
-    /// generation has been flushed: it must put the data on disk (for a file,
-    /// `sync_data`). The trailer commits the generation (spec section 15), so
-    /// a writer that can sync should; one over a plain `Write` cannot.
+    /// Call `sync` once before the trailer is written, after everything else of
+    /// the generation has been flushed, and once more after it: it must put the
+    /// data on disk (for a file, `sync_data`). The trailer commits the generation
+    /// (spec section 15), so a writer that can sync should; one over a plain
+    /// `Write` cannot.
     pub fn with_sync(mut self, sync: Box<dyn FnMut() -> std::io::Result<()>>) -> Self {
         self.sync = Some(sync);
         self
@@ -1245,6 +1246,10 @@ impl<W: Write> Writer<W> {
         trailer.write(&mut self.out)?;
         self.pos += TRAILER_FRAME_LEN;
         self.out.flush()?;
+        // ... and the commit itself is made durable the same way.
+        if let Some(sync) = &mut self.sync {
+            sync()?;
+        }
         let old_chunks = self.base.as_ref().map_or(0, |b| b.chunks);
         Ok(WriterSummary {
             entries: self.entries.len() as u64,
