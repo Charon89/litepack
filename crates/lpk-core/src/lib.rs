@@ -16,6 +16,7 @@ pub mod error;
 pub mod fast;
 pub mod gate;
 pub mod ingest;
+pub mod peel;
 pub mod pipeline;
 pub mod priors;
 pub mod source;
@@ -30,9 +31,10 @@ pub use fast::{
 };
 pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
 pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
+pub use peel::jpeg::register_full_reader;
+pub use peel::{Cause, Count, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage, PeelSummary};
 pub use pipeline::{
-    ClassifyStage, FoldStage, ModelStage, PeelStage, Pipeline, RunSummary, SealOptions,
-    StageTimings,
+    ClassifyStage, FoldStage, ModelStage, Pipeline, RunSummary, SealOptions, StageTimings,
 };
 pub use priors::ProvidedDictionaries;
 pub use source::Source;

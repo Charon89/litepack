@@ -1427,6 +1427,7 @@ name = "lpk-core"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "lepton_jpeg",
  "libc",
  "liblzma",
  "lpk-format",

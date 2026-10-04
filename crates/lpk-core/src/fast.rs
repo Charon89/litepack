@@ -89,6 +89,8 @@ pub struct FastSummary {
     pub stored_by_class: u64,
     /// Blocks stored because the zstd frame was not smaller than the plain bytes.
     pub stored_no_gain: u64,
+    /// What the peel stages did before the encoder saw the blocks (set by the pipeline).
+    pub peel: crate::peel::PeelSummary,
 }
 
 #[derive(Debug)]

@@ -1,32 +1,32 @@
 //! The pipeline: the fixed stage order `classify -> peel -> fold -> model -> seal` as a struct,
 //! and the one code path that turns a directory tree into an archive.
 //!
-//! Only `classify`, `model` and `seal` do work today. Peel (turn one input stream into a peeled
-//! stream plus a reconstruction record) and Fold (deduplicate and delta across streams; it runs
-//! on the peeled streams, never on the raw inputs) are empty traits the later tasks fill.
+//! Peel (turn one input stream into a peeled stream plus a reconstruction record; the JPEG peel
+//! is the first, [`crate::peel`]) runs in the Fast model on the inputs of the classes a stage
+//! applies to; Fold (deduplicate and delta across streams; it runs on the peeled streams, never
+//! on the raw inputs) is an empty trait a later task fills.
 //! [`archive_store`](crate::archive_store) and [`archive_fast`](crate::archive_fast) are thin
 //! fronts over [`Pipeline::run`].
 //!
 //! Blocks are encoded one after the other; parallel encoding needs the writer to hold blocks in
 //! flight and comes with a later task.
 
-use std::io::{BufWriter, Write};
+use std::collections::HashMap;
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use lpk_format::{EntryKind, Writer, WriterOptions, WriterSummary};
+use lpk_format::{
+    Encoded, EntryKind, Graph, GraphResources, Step, Writer, WriterOptions, WriterSummary,
+};
 
 use crate::cluster::cluster;
 use crate::error::CoreError;
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::ingest::{validate_input, walk, IngestOptions, Input};
+use crate::peel::{Cause, JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
 use crate::store::{create_new_and_run, Counting, StoreOptions, SyncFn, OUT_BUF};
-
-/// A peel stage turns one input stream (a file whose bytes are an already-compressed container,
-/// for example a Deflate stream inside a PDF) into a peeled stream plus a reconstruction record
-/// that restores the original bit for bit. No implementation exists yet.
-pub trait PeelStage: std::fmt::Debug + Send + Sync {}
 
 /// A fold stage deduplicates and deltas across streams. It runs on the peeled streams (the
 /// output of the peel stages), so duplicates hidden inside containers are found. No
@@ -67,7 +67,7 @@ pub struct StageTimings {
     pub walk: Duration,
     /// Classifying and clustering.
     pub classify: Duration,
-    /// Peel stages (none yet).
+    /// Peel stages (reading the inputs they apply to, peeling, verifying).
     pub peel: Duration,
     /// The fold stage (none yet).
     pub fold: Duration,
@@ -84,6 +84,8 @@ pub struct RunSummary {
     pub writer: WriterSummary,
     /// The Fast encoder's counts (`None` for the store model).
     pub fast: Option<FastSummary>,
+    /// What the peel stages did (empty for the store model, which does not peel).
+    pub peel: PeelSummary,
     /// Wall time per stage.
     pub timings: StageTimings,
 }
@@ -92,7 +94,7 @@ pub struct RunSummary {
 pub struct Pipeline {
     /// Walk and classify.
     pub classify: ClassifyStage,
-    /// Peel stages, applied in order (none yet).
+    /// Peel stages: the first that applies to an input's class peels it (Fast model only).
     pub peel: Vec<Box<dyn PeelStage>>,
     /// The fold stage (none yet).
     pub fold: Option<Box<dyn FoldStage>>,
@@ -133,13 +135,13 @@ impl Pipeline {
         }
     }
 
-    /// The Fast pipeline.
+    /// The Fast pipeline, with the JPEG peel.
     pub fn fast(options: FastOptions) -> Self {
         Pipeline {
             classify: ClassifyStage {
                 ingest: options.ingest,
             },
-            peel: Vec::new(),
+            peel: vec![Box::new(JpegPeel::default())],
             fold: None,
             model: ModelStage::Fast(options),
             seal: SealOptions::default(),
@@ -193,12 +195,14 @@ impl Pipeline {
             walk: walk_time,
             ..StageTimings::default()
         };
-        let Pipeline { model, seal, .. } = self;
+        let Pipeline {
+            model, seal, peel, ..
+        } = self;
         let mut wopts = seal.writer;
         let source = Source::new();
         match (model, prepared) {
             (ModelStage::Store, _) => {
-                let mut writer = open_writer(out, wopts, sync)?;
+                let mut writer = open_writer(out, wopts, sync, 0)?;
                 let t = Instant::now();
                 for input in &inputs {
                     validate_input(input)?;
@@ -217,6 +221,7 @@ impl Pipeline {
                 Ok(RunSummary {
                     writer,
                     fast: None,
+                    peel: PeelSummary::default(),
                     timings,
                 })
             }
@@ -229,7 +234,31 @@ impl Pipeline {
                 timings.classify = t.elapsed();
                 wopts.block_size = options.block_size;
                 wopts.encoder = Box::new(encoder);
-                let mut writer = open_writer(out, wopts, sync)?;
+                let max_part = wopts.block_size;
+                // Peel until the first success before the header exists, so that its
+                // version_minor is 1 exactly when a block uses a primitive of revision 1.1.
+                // Only the outcomes are kept (one plan at most); the files are read again below.
+                let t = Instant::now();
+                let mut pre: HashMap<String, Result<PeelPlan, Cause>> = HashMap::new();
+                let mut minor = 0;
+                'pre: for c in &clusters {
+                    let Some(stage) = peel.iter().find(|s| s.applies_to(c.class)) else {
+                        continue;
+                    };
+                    for input in &c.inputs {
+                        let data = read_all(&source, input)?;
+                        let r = stage.peel(&data, max_part);
+                        let ok = r.is_ok();
+                        pre.insert(input.path.clone(), r);
+                        if ok {
+                            minor = 1;
+                            break 'pre;
+                        }
+                    }
+                }
+                timings.peel = t.elapsed();
+                let mut writer = open_writer(out, wopts, sync, minor)?;
+                let mut summary = PeelSummary::default();
                 let t = Instant::now();
                 let mut meta: Vec<&Input> = inputs
                     .iter()
@@ -245,18 +274,47 @@ impl Pipeline {
                 }
                 for c in &clusters {
                     handle.set_hint(c.class, c.dictionary);
+                    let stage = peel.iter().find(|s| s.applies_to(c.class));
                     for input in &c.inputs {
-                        add_file(&mut writer, &source, input)?;
+                        let Some(stage) = stage else {
+                            add_file(&mut writer, &source, input)?;
+                            continue;
+                        };
+                        let tp = Instant::now();
+                        let data = read_all(&source, input)?;
+                        let r = match pre.remove(&input.path) {
+                            Some(r) => r,
+                            None => stage.peel(&data, max_part),
+                        };
+                        timings.peel += tp.elapsed();
+                        match r {
+                            Ok(plan) => {
+                                write_peeled(&mut writer, stage.as_ref(), input, &data, &plan)?;
+                                summary.note_peeled(&plan);
+                            }
+                            Err(cause) => {
+                                summary.note_fallback(cause, data.len() as u64);
+                                writer.add_file(
+                                    &input.path,
+                                    input.flags,
+                                    input.mtime_ns,
+                                    &mut &data[..],
+                                )?;
+                            }
+                        }
                     }
                     writer.close_block()?;
                 }
-                timings.model = t.elapsed();
+                timings.model = t.elapsed().saturating_sub(timings.peel);
                 let t = Instant::now();
-                let summary = writer.finish()?;
+                let written = writer.finish()?;
                 timings.seal = t.elapsed();
+                let mut fast = handle.summary();
+                fast.peel = summary;
                 Ok(RunSummary {
-                    writer: summary,
-                    fast: Some(handle.summary()),
+                    writer: written,
+                    fast: Some(fast),
+                    peel: summary,
                     timings,
                 })
             }
@@ -273,8 +331,10 @@ fn open_writer<W: Write>(
     out: W,
     wopts: WriterOptions,
     sync: Option<SyncFn>,
+    version_minor: u16,
 ) -> Result<OutWriter<W>, CoreError> {
-    let mut writer = Writer::new(BufWriter::with_capacity(OUT_BUF, out), wopts)?;
+    let mut writer =
+        Writer::new_revision(BufWriter::with_capacity(OUT_BUF, out), wopts, version_minor)?;
     if let Some(sync) = sync {
         writer = writer.with_sync(sync);
     }
@@ -284,6 +344,56 @@ fn open_writer<W: Write>(
 fn add_symlink<W: Write>(writer: &mut OutWriter<W>, input: &Input) -> Result<(), CoreError> {
     let target = input.symlink_target.as_deref().unwrap_or_default();
     writer.add_symlink(&input.path, input.flags, input.mtime_ns, target)?;
+    Ok(())
+}
+
+/// Read a whole input (a file a peel stage applies to); a length that changed since the walk is
+/// `ChangedWhileReading`.
+fn read_all(source: &Source, input: &Input) -> Result<Vec<u8>, CoreError> {
+    let mut data = Vec::with_capacity(usize::try_from(input.len).unwrap_or(0));
+    source
+        .open(input)?
+        .read_to_end(&mut data)
+        .map_err(|e| CoreError::io(&input.source, e))?;
+    if data.len() as u64 != input.len {
+        return Err(CoreError::ChangedWhileReading {
+            path: input.source.clone(),
+        });
+    }
+    Ok(data)
+}
+
+/// Write a peeled input (spec section 9, revision 1.1): the nested parts first, through the
+/// model, so their chunks lie in lower blocks; then the record; then the peeled part as a block
+/// of its own whose graph names the record.
+fn write_peeled<W: Write>(
+    writer: &mut OutWriter<W>,
+    stage: &dyn PeelStage,
+    input: &Input,
+    data: &[u8],
+    plan: &PeelPlan,
+) -> Result<(), CoreError> {
+    writer.begin_entry(&input.path, input.flags, input.mtime_ns)?;
+    let mut lists = Vec::with_capacity(plan.nested.len());
+    for p in &plan.nested {
+        let (a, b) = (p.offset as usize, (p.offset + p.len) as usize);
+        lists.push(writer.add_part(p.offset, &mut &data[a..b])?);
+    }
+    let id = writer.add_record(stage.record(plan, &lists))?;
+    let mut params = Vec::new();
+    lpk_format::varint::write(&mut params, id)?;
+    let encoded = Encoded {
+        graph: Graph {
+            steps: vec![Step {
+                primitive: plan.primitive,
+                params,
+            }],
+        },
+        bytes: plan.stream.clone(),
+        resources: GraphResources::default(),
+    };
+    writer.add_part_encoded(0, &data[..plan.primary_len as usize], encoded, plan.memory)?;
+    writer.end_entry()?;
     Ok(())
 }
 
@@ -316,7 +426,7 @@ mod tests {
         make_tree(dir.path());
         let mut out = Vec::new();
         let p = Pipeline::fast(FastOptions::default());
-        assert!(p.peel.is_empty() && p.fold.is_none());
+        assert!(p.peel.len() == 1 && p.fold.is_none());
         let s = p.run(dir.path(), &mut out).unwrap();
         assert_eq!(s.writer.archive_len, out.len() as u64);
         let fast = s.fast.unwrap();
@@ -324,7 +434,8 @@ mod tests {
         let t = s.timings;
         assert!(t.walk > Duration::ZERO && t.model > Duration::ZERO);
         assert!(t.seal > Duration::ZERO);
-        assert_eq!((t.peel, t.fold), (Duration::ZERO, Duration::ZERO));
+        assert_eq!(t.fold, Duration::ZERO);
+        assert_eq!(s.peel, PeelSummary::default());
         let mut out = Vec::new();
         let s = Pipeline::store(StoreOptions::default())
             .run(dir.path(), &mut out)
