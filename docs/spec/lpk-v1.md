@@ -505,7 +505,7 @@ The reference decoder knows the name, the parameter layout and the validation of
 in exactly one of three groups:
 
 - Implemented now: `store`.
-- Added to the reference decoder by later tasks (E1-8 and E1-9): `zstd`, `lzma`.
+- Added to the reference decoder by later revisions of this specification's reference implementation: `zstd`, `lzma`.
 - Requires the full reader: `bwt`, `bcj-x86`, `bcj-arm64`, `delta`, `jpeg-reconstruct`,
   `deflate-reconstruct`, `png-filter`, `base64`, `utf16`, `container-reconstruct`.
 
