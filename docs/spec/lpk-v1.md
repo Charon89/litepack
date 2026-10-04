@@ -1,7 +1,7 @@
 # LitePack `.lpk` format, version 1 — working draft
 
 Status: this is a working draft. The format is not frozen until the independent-decoder gate (task E1-14).
-Sections are added task by task; this revision covers conventions, the header and the frame grammar.
+Sections are added task by task; this revision covers conventions, the header, the frame grammar and the entry table.
 The reference reader is the `lpk-format` crate; the tables below are checked against it by a test.
 
 ## 1. Conventions
@@ -89,3 +89,66 @@ Input that ends exactly at a frame boundary is a clean end.
 
 Reader limits: a reader enforces a maximum payload length (the reference default is 1 GiB for now). A
 `payload_len` above the limit is an error, raised before any payload byte is read or allocated.
+
+## 4. Entry table
+
+The payload of a frame of kind EntryTable lists the archive's entries.
+
+| Field | Size | Meaning |
+|---|---|---|
+| entry_count | varint | number of entries that follow |
+| entries | | `entry_count` entries, sorted by path |
+
+Order: entries are sorted by path bytes ascending, comparing unsigned bytes (so UTF-8 byte order, not
+locale order), with no duplicate paths. A reader that meets a path that is not strictly greater than the
+previous one fails with `UnsortedEntries`, naming the entry index (counted from 0).
+
+One entry:
+
+| Field | Size | Present | Meaning |
+|---|---|---|---|
+| kind | 1 | always | entry kind (see below); an unknown value is `UnsupportedEntryKind` |
+| flags | 2 | always | entry flags (see below) |
+| path_len | varint | always | length of the path in bytes, 1 to 65535 |
+| path | path_len | always | the path, see the path rules |
+| mtime_ns | 8 | always | signed 64-bit nanoseconds since 1970-01-01T00:00:00Z; the minimum `i64` value means unknown |
+| size | varint | always | file: byte length; directory: 0; symlink: length of the target in bytes |
+| target_len | varint | symlink only | must equal size |
+| target | target_len | symlink only | the link target: any bytes except NUL, 1 to 65535 bytes |
+| chunk_count | varint | file only | number of chunk indices |
+| chunks | chunk_count varints | file only | indices into the archive chunk list (defined with the chunk frames) |
+
+A directory or a symlink has no chunk list. An empty file has `size` 0 and `chunk_count` 0.
+
+Entry kinds:
+
+| Value | Name |
+|---|---|
+| 0 | File |
+| 1 | Directory |
+| 2 | Symlink |
+
+Entry flags:
+
+| Bit | Name | Meaning |
+|---|---|---|
+| 0 | EXECUTABLE | the file is executable |
+| 1 | HIDDEN | the entry is hidden |
+| 2 | READ_ONLY | the entry is read-only |
+| 3 | SYSTEM | the entry is a system file |
+| 4-15 | reserved | must be zero; a reader rejects the entry otherwise |
+
+Path rules: a path is UTF-8 with `/` as the separator, 1 to 65535 bytes long. It has no leading or
+trailing `/`, no empty component, no component equal to `.` or `..`, and contains no `\` and no NUL byte.
+A violation is `InvalidPath` with the entry index and one of these reasons: "empty", "not utf-8",
+"leading slash", "backslash", "nul", "dot component", "empty component", "trailing slash", "too long".
+A bad symlink target (empty, longer than 65535 bytes, containing NUL, or `target_len` different from
+`size`) is `InvalidPath` with the reason "symlink target". Paths are compared as bytes and are not
+normalised; a reader does not alter case or Unicode form.
+
+Errors: the payload ending inside the table is `Truncated` for "entry table"; bytes left after the last
+entry are `TrailingBytes` for "entry table". Counts and lengths are checked against the bytes that remain
+before anything is allocated.
+
+Reading: a reader first reads only `entry_count`; entries are then decoded one after another as a
+stream, so a table of any size can be walked without holding all entries in memory.

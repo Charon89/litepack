@@ -4,15 +4,21 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod entry;
 pub mod error;
 pub mod frame;
 pub mod header;
 pub mod magic;
 pub mod varint;
 
+pub use entry::{
+    entry_flag_table, entry_kind_table, validate_path, Entry, EntryFlags, EntryIter, EntryKind,
+    EntryTable, EntryTableWriter,
+};
 pub use error::FormatError;
 pub use frame::{
-    frame_flag_table, frame_kind_table, Frame, FrameFlags, FrameKind, ReadFrame, ReadLimits,
+    frame_flag_table, frame_kind_table, frame_layout_table, Frame, FrameFlags, FrameKind,
+    ReadFrame, ReadLimits,
 };
 pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, HeaderFlags};
 pub use magic::MAGIC;

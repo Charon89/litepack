@@ -17,10 +17,13 @@ fn spec() -> String {
 fn spec_tables_match_code() {
     let text = spec();
     for table in [
+        lpk_format::frame_layout_table(),
         lpk_format::frame_kind_table(),
         lpk_format::frame_flag_table(),
         lpk_format::header_flag_table(),
         lpk_format::header_byte_table(),
+        lpk_format::entry_kind_table(),
+        lpk_format::entry_flag_table(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }

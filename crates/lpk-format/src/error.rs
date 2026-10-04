@@ -59,6 +59,42 @@ pub enum FormatError {
         /// The limit in force.
         max: u64,
     },
+    /// Entry paths are not strictly ascending.
+    #[error("entry {index} is out of order or a duplicate")]
+    UnsortedEntries {
+        /// Index of the offending entry.
+        index: u64,
+    },
+    /// Entry kind byte not known to this reader.
+    #[error("entry {index}: unsupported kind {kind}")]
+    UnsupportedEntryKind {
+        /// The raw kind.
+        kind: u8,
+        /// Index of the entry.
+        index: u64,
+    },
+    /// Reserved entry flag bits are set.
+    #[error("entry {index}: reserved flag bits {bits:#x}")]
+    ReservedEntryBits {
+        /// The offending bits.
+        bits: u16,
+        /// Index of the entry.
+        index: u64,
+    },
+    /// An entry path (or symlink target) is invalid.
+    #[error("entry {index}: invalid path ({reason})")]
+    InvalidPath {
+        /// Index of the entry.
+        index: u64,
+        /// Short reason.
+        reason: &'static str,
+    },
+    /// Bytes remain after the last item of a payload.
+    #[error("trailing bytes after {what}")]
+    TrailingBytes {
+        /// Which payload.
+        what: &'static str,
+    },
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
