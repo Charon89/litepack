@@ -3,19 +3,15 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 16:45 UTC (12:45 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 13:40 UTC (09:40 local on the measuring machine). No measurement is running.
 
-**Phase 1 is under way.** Phase 0 closed with D-08 (GO) and D-27; the Phase 1 task list is in PLAN (37 tasks).
-On `main`: E1-1…E1-13 (D-28…D-40) — the whole `.lpk` v1 format: frames, entry table, chunks and Merkle tree,
-index and trailer, decode envelope, primitive registry and decode graph, the streaming writer with extraction
-and the `lpk-decode` tool, zstd and LZMA in the pure-Rust reference decoder with committed test vectors,
-reconstruction records, Reed-Solomon recovery in interleaved groups, encryption, and generations with rollback.
-In progress: E1-14 in three parts — (a) fuzz targets, a Linux fuzz job and a local WSL run plus the conformance
-document (`task/e1-14a-fuzz`); then (b) a spec read-through by a reviewer who has not seen the code and (c) an
-independent decoder written from the spec and the vectors alone — the gate that freezes format v1 (D-41).
-Each task runs as in Phase 0: implementer in a worktree from a brief with exact values → read-only review → fix
-round → the format values recorded as a decision → PLAN tick with evidence → PR → `main` fast-forwarded (merge
-`main` into the branch first).
+**Epic E1 is complete on its branch and waits for one decision of the owner.** All fourteen E1 tasks are done:
+the `.lpk` v1 format, its pure-Rust reference implementation, committed vectors, fuzz targets, a conformance
+gate, an independent decoder written from the spec alone that passes it, and the spec fix round — D-28…D-41,
+with D-41 freezing format v1. Everything up to E1-13 is on `main`; E1-14 is PR #26 (draft) from
+`task/e1-14c-adapt`, held because the fuzzing harness's `libfuzzer-sys` carries the NCSA licence (see the open
+points). After the merge: dispatch `fuzz.yml` once, then E2 starts (E0-1 needs the owner's corpus spec; E2-1
+ingest can start at once).
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -28,9 +24,7 @@ round → the format values recorded as a decision → PLAN tick with evidence �
 ## Branches in flight
 | Branch | State | What is left |
 |---|---|---|
-| `task/e1-14a-fuzz` | PR #25 (draft): fuzz crate, fuzz CI job, mutation smoke test, CONFORMANCE.md, recovery and malformed vectors — code reviewed and approved | **owner's decision**: the `libfuzzer-sys` licence and whether a local WSL fuzz run is wanted (see the open points); then merge and dispatch `fuzz.yml` once |
-| `task/e1-14c-independent-decoder` | implementer running from the spec alone (`crates/lpk-check`; attests the files it read; lists every spec gap) | the gate: every vector passes; then the spec fix round and D-41 |
-| (no branch) | a read-only spec read-through (E1-14b) running on the spec of `task/e1-14a-fuzz` | its findings join the spec fix round |
+| `task/e1-14c-adapt` | PR #26 (draft): the whole E1-14 — fuzz crate and CI job, mutation smoke test, CONFORMANCE.md and vectors, `crates/lpk-check` (independent decoder, 16/16 vectors), the spec fix round (82 findings applied, `docs/spec/CHANGES.md`), D-41, E1-15 added | **owner's decision** on the `libfuzzer-sys` licence; then merge, dispatch `fuzz.yml` once, and start E2 |
 
 ## How to resume
 
