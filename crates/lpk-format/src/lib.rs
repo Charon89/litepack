@@ -8,6 +8,7 @@
 
 pub mod archive;
 pub mod chunk;
+pub mod decode;
 pub mod entry;
 pub mod envelope;
 pub mod error;
@@ -32,6 +33,7 @@ pub use merkle::{
 };
 pub use trailer::{trailer_layout_table, Trailer, TRAILER_FRAME_LEN, TRAILER_PAYLOAD_LEN};
 
+pub use decode::{decode_block, PrimitiveDecoder, Registry};
 pub use entry::{
     entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,
     Entry, EntryFlags, EntryIter, EntryKind, EntryTable, EntryTableWriter, MIN_ENTRY_LEN,
