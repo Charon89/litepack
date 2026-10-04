@@ -482,3 +482,288 @@ fn mutations_never_panic_or_pass() {
         }
     }
 }
+
+// ---- Revision 1.1: `jpeg-peel.lpk` (CONFORMANCE "jpeg-peel.lpk", spec section 8) ----
+
+const JPEG: &str = "jpeg-peel.lpk";
+
+fn jpeg_path() -> String {
+    vectors().join(JPEG).display().to_string()
+}
+
+/// The payload range of the frame at `offset`.
+fn payload_range(d: &[u8], offset: usize) -> std::ops::Range<usize> {
+    let f = lpk_check::wire::parse_frame(d, offset, u64::MAX).unwrap();
+    f.end - 32 - f.payload.len()..f.end - 32
+}
+
+/// Rewrites the 32-byte hash of the frame at `offset` after its payload was changed in place.
+fn rehash_frame(d: &mut [u8], offset: usize) {
+    let p = payload_range(d, offset);
+    let h = blake3::hash(&d[p.clone()]);
+    d[p.end..p.end + 32].copy_from_slice(h.as_bytes());
+}
+
+/// Changes byte `at_from_end` (counted back from the body's end) of record 0's body, then
+/// recomputes its `body_hash` and the `Records` frame hash.
+fn patch_record_body(at_from_end: usize, f: impl Fn(u8) -> u8) -> Vec<u8> {
+    let mut d = read(JPEG);
+    let a = Archive::open(d.clone(), Options::default()).unwrap();
+    let off = a.index.records.unwrap().offset as usize;
+    let p = payload_range(&d, off);
+    // record_count (1 byte), kind, flags, body_len (varint), body, body_hash.
+    let mut pos = p.start + 5;
+    let (mut len, mut shift) = (0usize, 0);
+    loop {
+        let b = d[pos];
+        pos += 1;
+        len |= usize::from(b & 0x7F) << shift;
+        shift += 7;
+        if b & 0x80 == 0 {
+            break;
+        }
+    }
+    let body = pos..pos + len;
+    let i = body.end - at_from_end;
+    d[i] = f(d[i]);
+    let h = blake3::hash(&d[body.clone()]);
+    d[body.end..body.end + 32].copy_from_slice(h.as_bytes());
+    rehash_frame(&mut d, off);
+    d
+}
+
+fn verify_class(d: Vec<u8>) -> (String, String) {
+    let mut a = Archive::open(d, Options::default()).unwrap();
+    let e = a.verify().unwrap_err();
+    (e.class.to_string(), e.detail)
+}
+
+/// A revision 1.1 decoder: `files` and `verify` of `expected-1.1.toml`, by the library and the
+/// tool; `list` and `info` of `expected.toml` (the same facts for every revision).
+#[test]
+fn jpeg_peel_revision_1_1() {
+    let exp = table("expected-1.1.toml");
+    let t = exp[JPEG].as_table().unwrap();
+    let files = strings(&t["files"]);
+    let mut a = Archive::open(read(JPEG), Options::default()).unwrap();
+    assert_eq!(a.header.version_minor, 1);
+    assert_eq!(decoded_lines(&mut a).unwrap(), files);
+    let s = a.verify().unwrap();
+    assert_eq!(
+        format!(
+            "ok: {} entries, {} chunks, {} blocks\n",
+            s.entries, s.chunks, s.blocks
+        ),
+        t["verify"].as_str().unwrap()
+    );
+    let (code, out, err) = bin(&["verify".into(), jpeg_path()]);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, t["verify"].as_str().unwrap()),
+        "{err}"
+    );
+    // Extraction to disk, by the library and by the tool.
+    for tool in [false, true] {
+        let dir = temp(&format!("jpeg-{tool}"));
+        if tool {
+            let (code, _, err) = bin(&["extract".into(), jpeg_path(), dir.display().to_string()]);
+            assert_eq!(code, 0, "{err}");
+        } else {
+            let mut a = Archive::open(read(JPEG), Options::default()).unwrap();
+            let (done, err) = extract_all(&mut a, &dir).unwrap();
+            assert!(err.is_none() && done.len() == 1);
+        }
+        for line in &files {
+            let mut it = line.split(' ');
+            let (p, size, h) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let b = std::fs::read(dir.join(p)).unwrap();
+            assert_eq!(b.len().to_string(), size);
+            assert_eq!(blake3::hash(&b).to_hex().as_str(), h);
+            assert_eq!(&b[..2], &[0xFF, 0xD8], "a JPEG");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let old = table("expected.toml");
+    let t0 = old[JPEG].as_table().unwrap();
+    for (cmd, key) in [("list", "list"), ("info", "info")] {
+        let (code, out, err) = bin(&[cmd.into(), jpeg_path()]);
+        assert_eq!(
+            (code, out.as_str()),
+            (0, t0[key].as_str().unwrap()),
+            "{err}"
+        );
+    }
+    // No recovery frames: `check` finds nothing to scan.
+    let (code, out, _) = bin(&["check".into(), jpeg_path()]);
+    assert_eq!(
+        (code, out.as_str()),
+        (
+            0,
+            "recovery frames: 0, unusable: 0, damaged shards: 0, repaired shards: 0\n"
+        )
+    );
+}
+
+/// The `expected.toml` keys of a revision 1.0 reader, by this decoder in its 1.0 mode: it opens,
+/// lists and reports `UnimplementedPrimitive` 7 from `verify` and from extracting `photo.jpg`.
+#[test]
+fn jpeg_peel_revision_1_0_mode() {
+    let exp = table("expected.toml");
+    let t = exp[JPEG].as_table().unwrap();
+    let o = Options {
+        revision_1_0: true,
+        ..Options::default()
+    };
+    let mut a = Archive::open(read(JPEG), o).unwrap();
+    let e = a.verify().unwrap_err();
+    assert_eq!(e.class, t["error_1_0"].as_str().unwrap());
+    assert_eq!(e.detail, t["message_1_0"].as_str().unwrap());
+    let entries = a.entries().unwrap();
+    let e = a.read_file(&entries[0]).unwrap_err();
+    assert_eq!(e.class, "UnimplementedPrimitive");
+    let (code, out, err) = bin(&["--revision-1-0".into(), "verify".into(), jpeg_path()]);
+    assert_eq!(i64::from(code), t["verify_exit_1_0"].as_integer().unwrap());
+    assert_eq!(err, t["verify_stderr_1_0"].as_str().unwrap());
+    assert!(out.is_empty());
+    let (code, out, _) = bin(&["--revision-1-0".into(), "list".into(), jpeg_path()]);
+    assert_eq!((code, out.as_str()), (0, t["list"].as_str().unwrap()));
+}
+
+/// Section 8 check 5: the memory term computed from the Lepton stream's own header is the one the
+/// writer declared (`decode_memory` = `max_block_plain` + term + the fixed term, one image).
+#[test]
+fn jpeg_peel_memory_term() {
+    let d = read(JPEG);
+    let a = Archive::open(d.clone(), Options::default()).unwrap();
+    let records = a.records().unwrap();
+    let lpk_check::record::Body::Jpeg(j) = &records[0].body else {
+        panic!("a jpeg record")
+    };
+    let bl = a.index.blocks[1];
+    let f = lpk_check::wire::parse_frame(&d, bl.frame_offset as usize, u64::MAX).unwrap();
+    let h = lpk_check::block::parse_block(f.payload, &mut || Ok(1)).unwrap();
+    assert_eq!(h.steps, vec![lpk_check::block::Prim::Jpeg { record_id: 0 }]);
+    assert_eq!(h.plain_len, j.primary_len);
+    let frame = lpk_check::jpeg::stream_frame(0, h.encoded, j.primary_len).unwrap();
+    let env = a.index.envelope;
+    assert_eq!(
+        env.max_block_plain + frame.memory_term() + lpk_check::jpeg::FIXED_TERM,
+        env.decode_memory
+    );
+    // A reader whose memory is below the declared decode_memory refuses at open (section 7).
+    let mut o = Options::default();
+    o.resources.memory = env.decode_memory - 1;
+    let e = Archive::open(d, o).unwrap_err();
+    assert_eq!(e.class, "Refused");
+    assert!(e.detail.contains("decode_memory"));
+}
+
+/// Section 2's version rule: any minor is accepted and the blocks decide; a primitive this reader
+/// does not run is `UnimplementedPrimitive` with its id, before any step runs.
+#[test]
+fn later_minor_and_unknown_reconstruction() {
+    let mut d = read(JPEG);
+    d[10..12].copy_from_slice(&7u16.to_le_bytes());
+    let mut a = Archive::open(d, Options::default()).unwrap();
+    assert_eq!(a.verify().unwrap().blocks, 2);
+    // A 1.0 archive is decoded as before, whatever its minor says.
+    let mut d = read("zstd-basic.lpk");
+    d[10..12].copy_from_slice(&1u16.to_le_bytes());
+    Archive::open(d, Options::default())
+        .unwrap()
+        .verify()
+        .unwrap();
+    // The jpeg block's primitive changed to deflate-reconstruct (0x0008), frame hash recomputed.
+    let mut d = read(JPEG);
+    let a = Archive::open(d.clone(), Options::default()).unwrap();
+    let off = a.index.blocks[1].frame_offset as usize;
+    let p = payload_range(&d, off);
+    assert_eq!(&d[p.start..p.start + 3], &[1, 7, 0]);
+    d[p.start + 1] = 8;
+    rehash_frame(&mut d, off);
+    assert_eq!(
+        verify_class(d),
+        (
+            "UnimplementedPrimitive".into(),
+            "primitive 0x0008 is not implemented by this reader".into()
+        )
+    );
+}
+
+/// Section 8 checks 3, 6 and 8 on mutated copies (hashes recomputed so the damage reaches the step).
+#[test]
+fn jpeg_reconstruct_negative_cases() {
+    // lepton_version (the byte before original_hash) set to 1.
+    let d = patch_record_body(33, |_| 1);
+    assert_eq!(
+        verify_class(d),
+        ("BadRecord".into(), "bad record 0: lepton_version".into())
+    );
+    // original_hash changed.
+    let d = patch_record_body(1, |b| b ^ 1);
+    assert_eq!(
+        verify_class(d),
+        ("BadRecord".into(), "bad record 0: original_hash".into())
+    );
+    // A byte of the Lepton stream changed: the library refuses it, or the output differs.
+    let d0 = read(JPEG);
+    let a = Archive::open(d0.clone(), Options::default()).unwrap();
+    let off = a.index.blocks[1].frame_offset as usize;
+    let p = payload_range(&d0, off);
+    // Payload offsets: 10 is in `encoded_len`, 11 the stream's magic, 40 its zlib header data.
+    for (at, want) in [
+        (10, "BlockLengthMismatch"),
+        (11, "BadRecord"),
+        (40, "BadRecord"),
+        ((p.end - p.start) / 2, "BadRecord"),
+    ] {
+        let mut d = d0.clone();
+        d[p.start + at] ^= 0x10;
+        rehash_frame(&mut d, off);
+        let (class, detail) = verify_class(d);
+        assert_eq!(class, want, "payload byte {at}: {detail}");
+    }
+    // A byte near the stream's end that the library does not use: the output is the same and
+    // `original_hash` holds, so the copy verifies and extracts the original bytes.
+    let mut d = d0.clone();
+    d[p.end - 5] ^= 0x10;
+    rehash_frame(&mut d, off);
+    let mut m = Archive::open(d, Options::default()).unwrap();
+    let want = strings(&table("expected-1.1.toml")[JPEG]["files"]);
+    assert_eq!(decoded_lines(&mut m).unwrap(), want);
+    // The lower block damaged: extraction of the peeled file reports that frame's HashMismatch.
+    let mut d = d0.clone();
+    let b0 = a.index.blocks[0];
+    d[(b0.frame_offset + b0.frame_len / 2) as usize] ^= 1;
+    let mut a = Archive::open(d, Options::default()).unwrap();
+    let entries = a.entries().unwrap();
+    assert_eq!(a.read_file(&entries[0]).unwrap_err().class, "HashMismatch");
+}
+
+/// Robustness on the revision 1.1 vector: bit flips (every 11th byte) never panic or verify clean.
+#[test]
+fn jpeg_mutations_never_panic_or_pass() {
+    let data = read(JPEG);
+    let mut flag_bytes = Vec::new();
+    let mut pos = 32;
+    while pos < data.len() {
+        let f = lpk_check::wire::parse_frame(&data, pos, u64::MAX).unwrap();
+        flag_bytes.push(pos + 2);
+        pos = f.end;
+    }
+    for i in (0..data.len())
+        .step_by(11)
+        .filter(|i| !(10..12).contains(i))
+    {
+        let mut m = data.clone();
+        let bit = 1u8 << (i % 8);
+        m[i] ^= bit;
+        if let Ok(mut a) = Archive::open(m, Options::default()) {
+            let harmless = bit == 1 && flag_bytes.contains(&i);
+            assert!(
+                a.verify().is_err() || harmless,
+                "flip at {i} verified clean"
+            );
+        }
+    }
+}
