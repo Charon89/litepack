@@ -735,7 +735,7 @@ impl Trailing<'_> {
 }
 
 /// The first frame header of the JPEG a Lepton stream holds, read from the stream's own header
-/// (lepton_jpeg 0.5's layout: a 28-byte fixed header whose bytes 24..28 are the length of the
+/// (the layout lepton_jpeg 0.5.8 writes, spec section 8: a 28-byte fixed header whose bytes 24..28 are the length of the
 /// zlib-compressed header that follows; that header starts with `HDR` and a u32 LE length of
 /// the raw JPEG header, which follows SOI). `None` when the stream does not have that shape or
 /// the raw header is longer than the primary image.

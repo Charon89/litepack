@@ -10,7 +10,8 @@ rust-version.workspace = true
 [dependencies]
 blake3 = "1.8.7"
 flate2 = "1.1.10"
-lepton_jpeg = "0.5.8"
+# Pinned: the jpeg-reconstruct decoder reads the stream header layout of 0.5.8 (spec section 8).
+lepton_jpeg = "=0.5.8"
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
 same-file = "1.0.6"
 thiserror = "2.0.21"

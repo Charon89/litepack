@@ -733,9 +733,9 @@ The step's input is one Lepton stream and its output is the primary image of the
   `lepton_version` is 0 (`BadRecord`, `lepton_version`); (4) `primary_len` against the step's output bound
   (`PayloadTooLarge`; on a one-step graph the bound is the block's `plain_len`, and a `primary_len` that differs
   from it is observed as `BlockLengthMismatch` when the step's output length is compared, section 8 "Bounds");
-  (5) resources: the frame header of the JPEG is read from the stream's own header and the image's memory term is
-  compared with the decode memory left after `max_block_plain` (`Refused`, field `decode_memory`; a stream whose
-  header cannot be read is `lepton stream`); (6) the stream is decoded (`BadRecord`, `lepton stream` when the
+  (5) resources: the frame header of the JPEG is read from the stream's own header (layout below) and the image's
+  memory term is compared with the decode memory left after `max_block_plain` (`Refused`, field `decode_memory`;
+  a stream whose header layout is not recognised is `BadRecord`, `lepton stream`, and is not decoded); (6) the stream is decoded (`BadRecord`, `lepton stream` when the
   library refuses it or its output would exceed `primary_len`; `primary_len` when the output is shorter);
   (7) assembly, in file order: per secondary image, the nested trailing bytes before it (`BadRecord`, `gainmaps`
   when its offset lies before the bytes already assembled; `trailing` when the nested trailing data ends before
@@ -744,6 +744,28 @@ The step's input is one Lepton stream and its output is the primary image of the
   the chunk's own checks (section 9: `ChunkIndexOutOfRange`, the block's errors, `ChunkMismatch`); (8) the
   assembled length is `original_len` and its BLAKE3-256 `original_hash` (`BadRecord`, `original_hash`, also for a
   length that would overflow 64 bits).
+- The stream header read in check (5), in the layout `lepton_jpeg` 0.5.8 writes (only what the check reads):
+  1. Bytes 0..28 of the stream are a fixed header. Its bytes 24..28 are a u32 LE, `compressed_len`.
+  2. Bytes 28..28+`compressed_len` are a zlib stream (RFC 1950).
+  3. Decompressed, that stream begins with the 3 bytes `HDR` and a u32 LE, `raw_len`. After them come `raw_len`
+     bytes of raw JPEG header: the original JPEG's marker segments from the first marker after SOI, without the
+     SOI.
+  4. The decoder prefixes SOI (`FF D8`) to those bytes and finds the first frame header (the first segment with
+     marker `C0`-`C3`, `C5`-`CB` or `CD`-`CF`). It walks marker segments by their big-endian length fields; after an SOS
+     segment it skips entropy-coded data up to the next marker other than `FF 00` and `RST0`-`RST7`. The frame
+     header's height (bytes 1..3), width (bytes 3..5) and per-component sampling factors (from byte 6 on, 3 bytes
+     per component, the high and low nibbles of the second byte) give the memory term.
+
+  The layout is not recognised when:
+  - the stream is shorter than 28 + `compressed_len` bytes;
+  - the zlib data does not inflate to at least 7 bytes;
+  - the first 3 decompressed bytes are not `HDR`;
+  - `raw_len` exceeds the record's `primary_len`;
+  - fewer than `raw_len` bytes follow;
+  - no frame header is found.
+
+  In each of these cases the step fails with `BadRecord` `lepton stream` before the stream is decoded. Later
+  `lepton_jpeg` releases are not assumed to keep this layout; the reference pins 0.5.8.
 - Resources: memory per image, declared by the envelope's `decode_memory` (section 7). The reference writer
   declares `max_block_plain` plus, for the largest peeled image, an allowance: a coefficient term computed from the
   image's frame header over the library's data layout (each component's 8x8 blocks, padded to whole MCUs, times
