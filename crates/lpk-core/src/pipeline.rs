@@ -58,7 +58,8 @@ pub enum ModelStage {
 /// of the `Fast` options wins.
 #[derive(Debug, Default)]
 pub struct SealOptions {
-    /// The writer's settings.
+    /// The writer's settings. `chunk_size` and `dedup` are set by the fold stage when there is
+    /// one (see [`Pipeline::fold`]) and are used as given only without it.
     pub writer: WriterOptions,
 }
 
@@ -100,7 +101,9 @@ pub struct Pipeline {
     pub classify: ClassifyStage,
     /// Peel stages: the first that applies to an input's class peels it (Fast model only).
     pub peel: Vec<Box<dyn PeelStage>>,
-    /// The fold stage (chunker and dedup); `None` keeps the writer's fixed chunker, no dedup.
+    /// The fold stage (chunker and dedup); `None` keeps the writer's fixed chunker, no dedup. A
+    /// fold stage sets the writer's `chunk_size` (the longest chunk its chunker makes), so the
+    /// `chunk_size` of [`SealOptions`] is overridden whenever this is `Some`.
     pub fold: Option<Box<dyn FoldStage>>,
     /// How blocks are coded.
     pub model: ModelStage,
@@ -365,12 +368,31 @@ impl Pipeline {
                         // Each input is read once: the peel and the writer use the same bytes.
                         let tp = Instant::now();
                         let data = read_all(&source, input)?;
+                        // Dedup: a file whose chunks are all stored already is never peeled.
+                        if writer.add_file_if_known(
+                            &input.path,
+                            input.flags,
+                            input.mtime_ns,
+                            &data,
+                        )? {
+                            summary.note_deduplicated(input.len);
+                            peel_time += tp.elapsed();
+                            continue;
+                        }
                         let r = stage.peel(&data, max_part);
                         peel_time += tp.elapsed();
                         match r {
                             Ok(plan) => {
-                                summary.note_peeled(&plan);
-                                write_peeled(&mut writer, stage.as_ref(), input, &data, plan)?;
+                                let sizes = (
+                                    plan.stream.len() as u64,
+                                    plan.primary_len,
+                                    plan.original_len,
+                                );
+                                if write_peeled(&mut writer, stage.as_ref(), input, &data, plan)? {
+                                    summary.note_deduplicated(sizes.2);
+                                } else {
+                                    summary.note_peeled(sizes.0, sizes.1, sizes.2);
+                                }
                             }
                             Err(cause) => {
                                 summary.note_fallback(cause, data.len() as u64);
@@ -462,7 +484,10 @@ fn read_all(source: &Source, input: &Input) -> Result<Vec<u8>, CoreError> {
     Ok(data)
 }
 
-/// Write a peeled input (spec section 9, revision 1.1): the nested parts first, through the
+/// Write a peeled input; true when its primary part was stored already (dedup) and the entry
+/// lists those chunks with no record and no block of its own.
+///
+/// (spec section 9, revision 1.1): the nested parts first, through the
 /// model, so their chunks lie in lower blocks; then the record; then the peeled part as a block
 /// of its own whose graph names the record.
 fn write_peeled<W: Write>(
@@ -471,7 +496,7 @@ fn write_peeled<W: Write>(
     input: &Input,
     data: &[u8],
     plan: PeelPlan,
-) -> Result<(), CoreError> {
+) -> Result<bool, CoreError> {
     writer.begin_entry(&input.path, input.flags, input.mtime_ns)?;
     // Dedup: a primary part whose chunks are all stored already needs no block and no record
     // (the entry lists those chunks); the nested parts go through the normal path.
@@ -484,7 +509,7 @@ fn write_peeled<W: Write>(
             writer.add_part(p.offset, &mut &data[a..b])?;
         }
         writer.end_entry()?;
-        return Ok(());
+        return Ok(true);
     }
     let mut lists = Vec::with_capacity(plan.nested.len());
     for p in &plan.nested {
@@ -506,7 +531,7 @@ fn write_peeled<W: Write>(
     };
     writer.add_part_encoded(0, &data[..plan.primary_len as usize], encoded, plan.memory)?;
     writer.end_entry()?;
-    Ok(())
+    Ok(false)
 }
 
 fn add_file<W: Write>(

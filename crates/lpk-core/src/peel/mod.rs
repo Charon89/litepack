@@ -132,6 +132,9 @@ pub struct PeelSummary {
     pub peeled: Count,
     /// Bytes of the peeled streams plus the nested parts of the peeled inputs (before the model).
     pub peeled_output_bytes: u64,
+    /// Inputs whose whole content was stored already (fold dedup): never peeled, so counted
+    /// here and in no other bucket.
+    pub deduplicated: Count,
     /// Inputs stored through the normal path, by cause (indexed like [`Fallback::ALL`]).
     pub fallbacks: [Count; Fallback::ALL.len()],
 }
@@ -156,10 +159,15 @@ impl PeelSummary {
         c.bytes += bytes;
     }
 
-    pub(crate) fn note_peeled(&mut self, plan: &PeelPlan) {
+    pub(crate) fn note_deduplicated(&mut self, bytes: u64) {
+        self.deduplicated.files += 1;
+        self.deduplicated.bytes += bytes;
+    }
+
+    /// A peeled input: its stream length, the peeled part's length and the input's length.
+    pub(crate) fn note_peeled(&mut self, stream_len: u64, primary_len: u64, original_len: u64) {
         self.peeled.files += 1;
-        self.peeled.bytes += plan.original_len;
-        self.peeled_output_bytes +=
-            plan.stream.len() as u64 + (plan.original_len - plan.primary_len);
+        self.peeled.bytes += original_len;
+        self.peeled_output_bytes += stream_len + (original_len - primary_len);
     }
 }

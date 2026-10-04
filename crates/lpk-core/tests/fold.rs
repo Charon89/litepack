@@ -168,9 +168,12 @@ fn identical_jpegs_need_no_lepton_block_and_no_record() {
     let mut p = Pipeline::fast(FastOptions::default());
     p.fold = None;
     let (off, s_off) = run(p, dir.path());
-    // Every input is peeled in both runs; with dedup the copies write no record.
-    assert_eq!(s_on.peel.peeled.files, 5);
+    // Without dedup every input is peeled; with it only the first of each kind is, and the
+    // copies (whole-file or primary-only) are counted as deduplicated and never as peeled.
+    assert_eq!(s_on.peel.peeled.files, 2);
+    assert_eq!(s_on.peel.deduplicated.files, 3);
     assert_eq!(s_off.peel.peeled.files, 5);
+    assert_eq!(s_off.peel.deduplicated.files, 0);
     assert_eq!(records_of(&off), 5);
     assert_eq!(records_of(&on), 2);
     assert!(s_on.writer.blocks < s_off.writer.blocks);
@@ -183,6 +186,23 @@ fn identical_jpegs_need_no_lepton_block_and_no_record() {
     assert_eq!(by("a1.jpg"), by("a2.jpg"));
     assert_eq!(by("a1.jpg"), by("a3.jpg"));
     assert_eq!(by("c1.jpg"), by("c2.jpg"));
-    check(&on, dir.path(), 5, false);
-    check(&off, dir.path(), 5, false);
+    check(&on, dir.path(), 5, true);
+    check(&off, dir.path(), 5, true);
+}
+
+/// A trailing part equal to an earlier file's primary image must not be taken from the
+/// reconstruction block that holds it: a record may not name such chunks (spec section 12).
+#[test]
+fn a_nested_part_equal_to_a_peeled_primary_is_stored_plainly() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = fixture("baseline.jpg");
+    std::fs::write(dir.path().join("a.jpg"), &base).unwrap();
+    // A different image first, then the baseline file's bytes after its EOI: the record of
+    // z.jpg names that nested part, whose bytes equal a.jpg's chunks in a reconstruction block.
+    let mut z = fixture("progressive.jpg");
+    z.extend_from_slice(&base);
+    std::fs::write(dir.path().join("z.jpg"), z).unwrap();
+    let (on, s) = run(Pipeline::fast(FastOptions::default()), dir.path());
+    assert_eq!(s.peel.peeled.files, 2, "{:?}", s.peel);
+    check(&on, dir.path(), 2, true);
 }
