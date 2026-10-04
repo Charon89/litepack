@@ -158,8 +158,21 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
     }
     if b.pooled.len() > 1 {
         s.push_str("- results directories (rows pooled):\n");
-        for (label, build) in &b.pooled {
-            s.push_str(&format!("  - `{label}`, build `{build}`\n"));
+        for d in &b.pooled {
+            s.push_str(&format!(
+                "  - `{}`, build `{}`: catalogue BLAKE3 `{}`, {} repeats, long-run limit {} s, {} \
+                 threads, settle pause {} ms per 1000 files, antivirus state changed during the \
+                 run: {} {}\n",
+                d.label,
+                d.build,
+                d.catalogue_blake3,
+                d.repeats,
+                d.long_run_s,
+                d.threads,
+                d.settle_ms,
+                d.antivirus_changed,
+                brackets(&BTreeSet::from([d.run_src]))
+            ));
         }
         s.push_str(
             "- rules: rows may come from several runs of the same corpus on the same machine, and \
@@ -207,20 +220,31 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
             unclean.join("; ")
         ));
     }
+    let pooled = !b.tool_srcs.is_empty();
     let tools: Vec<String> = b
         .tools
         .tools
         .iter()
-        .map(|t| match (&t.status[..], &t.version) {
-            ("found", Some(v)) => format!("{} {}", t.name, v),
-            _ => format!("{} (skipped)", t.name),
+        .map(|t| {
+            let text = match (&t.status[..], &t.version) {
+                ("found", Some(v)) => format!("{} {}", t.name, v),
+                _ => format!("{} (skipped)", t.name),
+            };
+            match b.tool_srcs.get(&t.id) {
+                Some(srcs) if pooled => format!("{text} {}", brackets(srcs)),
+                _ => text,
+            }
         })
         .collect();
-    s.push_str(&format!(
-        "- tools: {} {}\n",
-        tools.join(", "),
-        brackets(&BTreeSet::from([b.tools_src]))
-    ));
+    if pooled {
+        s.push_str(&format!("- tools: {}\n", tools.join(", ")));
+    } else {
+        s.push_str(&format!(
+            "- tools: {} {}\n",
+            tools.join(", "),
+            brackets(&BTreeSet::from([b.tools_src]))
+        ));
+    }
     let mut libs: Vec<String> = Vec::new();
     for p in inputs.probes.present() {
         for (k, v) in &p.libraries {

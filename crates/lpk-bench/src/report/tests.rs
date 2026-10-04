@@ -536,6 +536,7 @@ fn inputs(k: &Knobs, with_probes: bool) -> Inputs {
             run_src: 3,
             results: res,
             pooled: vec![],
+            tool_srcs: Default::default(),
         },
         probes,
         mixes: mixes::Mixes::parse(MIXES).expect("mixes"),
@@ -1977,10 +1978,18 @@ fn two_directories_are_pooled_with_each_rows_own_source() {
     let text = report_text(&inputs);
     assert!(text.contains("results directories (rows pooled)"));
     assert!(text.contains("the comparison is still per class"));
-    assert!(
-        text.contains(&format!("[{second}]")),
-        "the pooled row cites its own file"
-    );
+    let row_of = |setting: &str| -> String {
+        text.lines()
+            .skip_while(|l| !l.starts_with("## 2."))
+            .take_while(|l| !l.starts_with("## 3."))
+            .find(|l| l.starts_with('|') && l.contains(setting))
+            .unwrap_or_else(|| panic!("no table row for {setting}"))
+            .to_string()
+    };
+    let (ultra, mx5) = (row_of("ultra"), row_of("mx5"));
+    assert!(ultra.contains(&format!("[{second}]")), "{ultra}");
+    assert!(!ultra.contains(&format!("[{first}]")), "{ultra}");
+    assert!(mx5.contains(&format!("[{first}]")), "{mx5}");
 }
 
 #[test]
@@ -2008,4 +2017,172 @@ fn a_dedup_conflict_in_the_merged_tools_is_refused() {
     std::fs::write(c.join("tools.json"), render_json(&tools)).expect("tools");
     let err = load(&pooled_args(tmp.path(), vec![a, c])).expect_err("dedup");
     assert!(format!("{err:#}").contains("dedup"), "{err:#}");
+}
+
+fn source_index(inputs: &Inputs, suffix: &str) -> usize {
+    inputs
+        .sources
+        .iter()
+        .position(|s| s.ends_with(suffix))
+        .map(|p| p + 1)
+        .unwrap_or_else(|| panic!("no source ending in {suffix}: {:?}", inputs.sources))
+}
+
+#[test]
+fn a_directory_without_dedup_flags_pools_and_takes_the_flag_from_the_other() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let mut old = samples::tools();
+    for t in &mut old.tools {
+        t.dedup = None;
+    }
+    std::fs::write(a.join("tools.json"), render_json(&old)).expect("tools");
+    let b = dir_under(tmp.path(), "b", &second_results());
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
+    let seven = inputs
+        .baseline
+        .tools
+        .tools
+        .iter()
+        .find(|t| t.id == "7z")
+        .expect("7z");
+    assert_eq!(seven.dedup, Some(false));
+    let srcs = &inputs.baseline.tool_srcs["7z"];
+    assert!(srcs.contains(&source_index(&inputs, "b/2026-10-01-testbox/tools.json")));
+    assert!(srcs.contains(&source_index(&inputs, "a/2026-10-01-testbox/tools.json")));
+}
+
+/// Results of tool `zstd` (setting `3`, audio) at `version`.
+fn zstd_results(version: &str) -> Vec<ToolResult> {
+    let mut r = samples::measured();
+    r.class = "audio".into();
+    r.tool.id = "zstd".into();
+    r.tool.version = Some(version.into());
+    r.setting.id = "3".into();
+    vec![r]
+}
+
+fn set_tool_version(dir: &Path, id: &str, version: &str) {
+    let mut tools: ToolsFile =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("tools.json")).expect("read"))
+            .expect("parse");
+    for t in &mut tools.tools {
+        if t.id == id {
+            t.version = Some(version.into());
+        }
+    }
+    std::fs::write(dir.join("tools.json"), render_json(&tools)).expect("tools");
+}
+
+#[test]
+fn a_merged_tool_is_cited_to_the_directory_that_holds_its_rows() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    // a: rows of 7z only; its tools.json also lists zstd 1.5.7 (no rows here).
+    let a = dir_under(tmp.path(), "a", &real_class_results()[..1]);
+    let b = dir_under(tmp.path(), "b", &zstd_results("1.5.8"));
+    set_tool_version(&b, "zstd", "1.5.8");
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
+    let zstd = inputs
+        .baseline
+        .tools
+        .tools
+        .iter()
+        .find(|t| t.id == "zstd")
+        .expect("zstd");
+    assert_eq!(zstd.version.as_deref(), Some("1.5.8"));
+    let b_tools = source_index(&inputs, "b/2026-10-01-testbox/tools.json");
+    assert!(inputs.baseline.tool_srcs["zstd"].contains(&b_tools));
+    let text = report_text(&inputs);
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("- tools:"))
+        .expect("tools line");
+    assert!(
+        line.contains(&format!("Zstandard 1.5.8 [{b_tools}")),
+        "{line}"
+    );
+}
+
+#[test]
+fn rows_of_one_tool_at_two_versions_are_refused() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let b = dir_under(tmp.path(), "b", &second_results());
+    set_tool_version(&b, "7z", "27.00");
+    let err = load(&pooled_args(tmp.path(), vec![a, b])).expect_err("versions");
+    assert!(format!("{err:#}").contains("version"), "{err:#}");
+}
+
+#[test]
+fn run_settings_are_listed_per_directory_and_differing_threads_are_marked() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let mut r = second_results();
+    r[0].threads = 8;
+    let b = dir_under(tmp.path(), "b", &r);
+    let inputs = load(&pooled_args(tmp.path(), vec![a.clone(), b.clone()])).expect("pooled");
+    let text = report_text(&inputs);
+    let a_run = source_index(&inputs, "a/2026-10-01-testbox/run.json");
+    let b_run = source_index(&inputs, "b/2026-10-01-testbox/run.json");
+    assert!(text.contains(&format!("4 threads, settle pause")), "{text}");
+    assert!(text.contains(&format!("8 threads, settle pause")), "{text}");
+    assert!(text.contains(&format!("[{a_run}]")) && text.contains(&format!("[{b_run}]")));
+    assert!(unclean_reasons(&inputs)
+        .iter()
+        .any(|r| r.contains("thread counts")));
+    // Without --allow-unclean the pool itself refuses on the thread count.
+    let mut sources = Sources::default();
+    let mut outside = Vec::new();
+    let mut base = load_baseline(&a, &mut sources, &mut outside).expect("a");
+    let first = pool_dir("a".into(), &base);
+    base.pooled.push(first);
+    let next = load_baseline(&b, &mut sources, &mut outside).expect("b");
+    let err = pool(&mut base, next, &b, false).expect_err("threads");
+    assert!(format!("{err:#}").contains("threads"), "{err:#}");
+}
+
+#[test]
+fn a_duplicate_combination_and_a_host_mismatch_are_refused() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let same = dir_under(tmp.path(), "b", &real_class_results());
+    let err = load(&pooled_args(tmp.path(), vec![a.clone(), same])).expect_err("duplicate");
+    assert!(format!("{err:#}").contains("also in an earlier"), "{err:#}");
+    let other = dir_under(tmp.path(), "c", &second_results());
+    let mut host = samples::host();
+    host.host = "otherbox".into();
+    std::fs::write(other.join("host.json"), render_json(&host)).expect("host");
+    let err = load(&pooled_args(tmp.path(), vec![a, other])).expect_err("host");
+    assert!(format!("{err:#}").contains("otherbox"), "{err:#}");
+}
+
+#[test]
+fn the_measured_lpk_build_must_be_clean_and_match_the_runner() {
+    let lpk = |version: &str| crate::run::result::ToolEntry {
+        id: "lpk".into(),
+        name: "LitePack".into(),
+        status: "found".into(),
+        reason: None,
+        version: Some(version.into()),
+        catalogue_verified: true,
+        manual: false,
+        local_override: false,
+        dedup: Some(false),
+    };
+    let reasons = |version: &str| {
+        let mut i = inputs(&Knobs::default(), false);
+        let runner = i.baseline.host.git_commit.clone();
+        i.baseline
+            .tools
+            .tools
+            .push(lpk(&version.replace("RUNNER", &runner)));
+        unclean_reasons(&i)
+            .into_iter()
+            .filter(|r| r.contains("lpk"))
+            .collect::<Vec<_>>()
+    };
+    assert!(reasons("0.0.1+RUNNER").is_empty());
+    assert!(reasons("0.0.1+abcdef012345-dirty")[0].contains("dirty or unknown"));
+    assert!(reasons("0.0.1+unknown")[0].contains("dirty or unknown"));
+    assert!(reasons("0.0.1+abcdef012345")[0].contains("differs from the runner's build"));
 }

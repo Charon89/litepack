@@ -80,6 +80,22 @@ impl Probes {
     }
 }
 
+/// One pooled results directory: its label, build and the run settings that shape the numbers.
+#[derive(Debug, Clone)]
+pub struct PoolDir {
+    pub label: String,
+    /// The runner's `git_commit` of the directory.
+    pub build: String,
+    pub tools_src: SourceId,
+    pub run_src: SourceId,
+    pub catalogue_blake3: String,
+    pub repeats: u32,
+    pub long_run_s: u64,
+    pub threads: u32,
+    pub settle_ms: u64,
+    pub antivirus_changed: bool,
+}
+
 #[derive(Debug)]
 pub struct Baseline {
     /// Name of the results directory (`<date>-<host>[-<n>]`).
@@ -91,8 +107,10 @@ pub struct Baseline {
     pub run: RunFile,
     pub run_src: SourceId,
     pub results: Vec<(ToolResult, SourceId)>,
-    /// Every pooled results directory: (label, build). Empty for a single directory.
-    pub pooled: Vec<(String, String)>,
+    /// Every pooled results directory. Empty for a single directory.
+    pub pooled: Vec<PoolDir>,
+    /// Pooled runs only: the source files each merged `tools.json` entry came from.
+    pub tool_srcs: BTreeMap<String, std::collections::BTreeSet<SourceId>>,
 }
 
 #[derive(Debug)]
@@ -1469,6 +1487,38 @@ pub fn unclean_reasons(i: &Inputs) -> Vec<String> {
     }
     if b.host.dirty_build_allowed || !crate::run::host::build_is_clean(&b.host.git_commit) {
         v.push("the baseline was run from a dirty or unknown build".to_string());
+    }
+    for d in &b.pooled {
+        if !crate::run::host::build_is_clean(&d.build) {
+            v.push(format!(
+                "`{}` was run from a dirty or unknown build",
+                d.label
+            ));
+        }
+    }
+    if b.pooled.iter().any(|d| d.threads != b.pooled[0].threads) {
+        v.push("the pooled directories ran at different thread counts".to_string());
+    }
+    // The measured lpk build: its hash must be clean and the runner's own build (one workspace).
+    if let Some(t) = b.tools.tools.iter().find(|t| t.id == "lpk") {
+        if let (true, Some(version)) = (t.status == "found", &t.version) {
+            let hash = version.split_once('+').map(|(_, h)| h);
+            let runner = b
+                .tool_srcs
+                .get("lpk")
+                .and_then(|srcs| b.pooled.iter().find(|d| srcs.contains(&d.tools_src)))
+                .map_or(b.host.git_commit.as_str(), |d| d.build.as_str());
+            match hash {
+                None => v.push(format!("the lpk version `{version}` carries no build hash")),
+                Some(h) if h.ends_with("-dirty") || h == "unknown" => {
+                    v.push(format!("the measured lpk build `{h}` is dirty or unknown"));
+                }
+                Some(h) if h != runner => v.push(format!(
+                    "the measured lpk build `{h}` differs from the runner's build `{runner}`"
+                )),
+                Some(_) => {}
+            }
+        }
     }
     for p in i.probes.present() {
         if !p.release || !crate::run::host::build_is_clean(&p.build) {

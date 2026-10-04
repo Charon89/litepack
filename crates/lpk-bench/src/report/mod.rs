@@ -222,6 +222,7 @@ fn load_baseline(dir: &Path, sources: &mut Sources, outside: &mut Vec<String>) -
         run_src,
         results,
         pooled: vec![],
+        tool_srcs: BTreeMap::new(),
     })
 }
 
@@ -345,9 +346,32 @@ fn load_baseline_checked(
     Ok(b)
 }
 
+fn pool_dir(label: String, b: &Baseline) -> model::PoolDir {
+    model::PoolDir {
+        label,
+        build: b.host.git_commit.clone(),
+        tools_src: b.tools_src,
+        run_src: b.run_src,
+        catalogue_blake3: b.run.catalogue_blake3.clone(),
+        repeats: b.run.repeats_requested,
+        long_run_s: b.run.long_run_s,
+        threads: b.run.threads,
+        settle_ms: b.run.settle_ms_per_1000_files,
+        antivirus_changed: b.run.antivirus_changed,
+    }
+}
+
+/// Does `b` hold a result row of tool `id`?
+fn has_rows(b: &[(ToolResult, SourceId)], id: &str) -> bool {
+    b.iter().any(|(r, _)| r.tool.id == id)
+}
+
 /// Pool `next` into `base`: same corpus manifest and host required; rows keep their own source
-/// ids; `tools.json` entries are merged (a tool in both must agree on `dedup`).
-fn pool(base: &mut Baseline, next: Baseline, dir: &Path) -> Result<()> {
+/// ids. `tools.json` entries are merged: a tool's entry (and version) comes from the directory
+/// that holds its rows, two directories with rows of one tool must agree on the version, a
+/// `dedup` of `None` is unknown and takes the other side's flag, and `Some(a)` against
+/// `Some(b)` is refused. Every merged entry keeps the source files it came from.
+fn pool(base: &mut Baseline, next: Baseline, dir: &Path, allow_unclean: bool) -> Result<()> {
     let name = dir.display();
     let (Some((first, _)), Some((other, _))) = (base.results.first(), next.results.first()) else {
         bail!("{name}: no results to pool");
@@ -367,23 +391,81 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path) -> Result<()> {
             base.host.host
         );
     }
+    if !allow_unclean && next.run.threads != base.pooled[0].threads {
+        bail!(
+            "{name}: ran at {} threads, the first directory at {}; use --allow-unclean to accept \
+             and mark it",
+            next.run.threads,
+            base.pooled[0].threads
+        );
+    }
+    let pd = pool_dir(dir_label(dir).0, &next);
+    let (base_rows, next_rows): (Vec<String>, Vec<String>) = (
+        base.tools
+            .tools
+            .iter()
+            .filter(|t| has_rows(&base.results, &t.id))
+            .map(|t| t.id.clone())
+            .collect(),
+        next.tools
+            .tools
+            .iter()
+            .filter(|t| has_rows(&next.results, &t.id))
+            .map(|t| t.id.clone())
+            .collect(),
+    );
     for t in next.tools.tools {
-        match base.tools.tools.iter_mut().find(|b| b.id == t.id) {
-            Some(b) => {
-                if b.dedup != t.dedup {
-                    bail!(
-                        "{name}: tool `{}` has dedup {:?} here and {:?} in another directory",
-                        t.id,
-                        t.dedup,
-                        b.dedup
-                    );
-                }
-                if b.status != "found" && t.status == "found" {
-                    *b = t;
+        let (in_base, in_next) = (base_rows.contains(&t.id), next_rows.contains(&t.id));
+        let Some(slot) = base.tools.tools.iter().position(|b| b.id == t.id) else {
+            base.tool_srcs
+                .entry(t.id.clone())
+                .or_default()
+                .insert(next.tools_src);
+            base.tools.tools.push(t);
+            continue;
+        };
+        let have = base.tools.tools[slot].clone();
+        if in_base && in_next && have.version != t.version {
+            bail!(
+                "{name}: tool `{}` has rows at version {:?} here and {:?} in an earlier directory",
+                t.id,
+                t.version,
+                have.version
+            );
+        }
+        if have.dedup.is_some() && t.dedup.is_some() && have.dedup != t.dedup {
+            bail!(
+                "{name}: tool `{}` has dedup {:?} here and {:?} in another directory",
+                t.id,
+                t.dedup,
+                have.dedup
+            );
+        }
+        let id = t.id.clone();
+        let srcs = base.tool_srcs.entry(id).or_default();
+        let (mut merged, take_next) = if in_next && !in_base {
+            (t.clone(), true)
+        } else {
+            (have.clone(), false)
+        };
+        if take_next {
+            srcs.clear();
+            srcs.insert(next.tools_src);
+        }
+        if merged.dedup.is_none() {
+            let (flag, from) = if take_next {
+                (have.dedup, None)
+            } else {
+                (t.dedup, Some(next.tools_src))
+            };
+            if flag.is_some() {
+                merged.dedup = flag;
+                if let Some(s) = from {
+                    srcs.insert(s);
                 }
             }
-            None => base.tools.tools.push(t),
         }
+        base.tools.tools[slot] = merged;
     }
     for c in next.run.combinations {
         if base
@@ -412,8 +494,7 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path) -> Result<()> {
         .min(next.run.settle_ms_per_1000_files);
     base.run.antivirus_changed |= next.run.antivirus_changed;
     base.host.dirty_build_allowed |= next.host.dirty_build_allowed;
-    base.pooled
-        .push((dir_label(dir).0, next.host.git_commit.clone()));
+    base.pooled.push(pd);
     base.results.extend(next.results);
     Ok(())
 }
@@ -428,12 +509,18 @@ pub fn load(args: &ReportArgs) -> Result<Inputs> {
     let mut baseline =
         load_baseline_checked(first_dir, args.allow_unclean, &mut sources, &mut outside)?;
     if !more.is_empty() {
-        baseline
-            .pooled
-            .push((dir_label(first_dir).0, baseline.host.git_commit.clone()));
+        let first = pool_dir(dir_label(first_dir).0, &baseline);
+        baseline.pooled.push(first);
+        for t in &baseline.tools.tools {
+            baseline
+                .tool_srcs
+                .entry(t.id.clone())
+                .or_default()
+                .insert(baseline.tools_src);
+        }
         for dir in more {
             let next = load_baseline_checked(dir, args.allow_unclean, &mut sources, &mut outside)?;
-            pool(&mut baseline, next, dir)?;
+            pool(&mut baseline, next, dir, args.allow_unclean)?;
         }
     }
     let mut probes = Probes::default();
