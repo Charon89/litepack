@@ -33,6 +33,8 @@ pub struct Archive<R: Read + Seek> {
     /// Number of records, read from the `Records` frame the first time a
     /// block names a record (0 without a frame).
     pub(crate) record_count: Option<u64>,
+    /// Blocks this reader has decoded (one-block cache misses, nested reads included).
+    pub(crate) decodes: u64,
     /// Opens sealed frames; `None` for an archive that is not encrypted and for
     /// a listable one opened without credentials.
     sealer: Option<Sealer>,
@@ -539,6 +541,7 @@ impl<R: Read + Seek> Archive<R> {
                 registry: Registry::v1(),
                 cache: None,
                 record_count: None,
+                decodes: 0,
                 sealer: None,
                 key_slot,
                 keyless: true,
@@ -594,6 +597,7 @@ impl<R: Read + Seek> Archive<R> {
             registry: Registry::v1(),
             cache: None,
             record_count: None,
+            decodes: 0,
             sealer,
             key_slot,
             keyless: false,
@@ -731,10 +735,18 @@ impl<R: Read + Seek> Archive<R> {
             registry: self.registry.clone(),
             cache: None,
             record_count: self.record_count,
+            decodes: 0,
             sealer: self.sealer.clone(),
             key_slot: self.key_slot.clone(),
             keyless: self.keyless,
         }
+    }
+
+    /// How many blocks this reader has decoded so far: every miss of the
+    /// one-block cache, the blocks a reconstruction step reads its record's
+    /// chunks from included (a fork starts at zero).
+    pub fn decode_count(&self) -> u64 {
+        self.decodes
     }
 
     /// The chunk indices of block `block` (`first_chunk..first_chunk +

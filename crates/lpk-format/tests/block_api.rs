@@ -77,6 +77,8 @@ fn every_block_decodes_to_its_chunks_through_a_fork() {
         }
         joined.extend_from_slice(&plain);
     }
+    assert_eq!(f.decode_count(), n as u64);
+    assert_eq!(a.decode_count(), 0);
     // Without dedup, the blocks in order are the files in order.
     assert_eq!(joined, all);
     assert!(a.block_chunks(n).is_none());

@@ -182,6 +182,7 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             ..*a.resources()
         };
         let encoded = &frame.payload[used..];
+        a.decodes += 1;
         let plain = if header.graph.uses_records() {
             // The decoder may read the chunks its record names, from blocks
             // with lower indices, through the archive itself; those blocks
