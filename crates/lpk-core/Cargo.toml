@@ -1,0 +1,21 @@
+[package]
+name = "lpk-core"
+description = "LitePack pipeline: ingest, the store path and (later) classifier, Fold, Peel, Model and Seal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lpk-format = { path = "../lpk-format" }
+lpk-mmap-sys = { path = "../lpk-mmap-sys" }
+thiserror = "2.0.21"
+walkdir = "2.5.0"
+
+[dev-dependencies]
+blake3 = "1.8.7"
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "lpk-mmap-sys"
+description = "Read-only memory map of a file: the one place lpk-core needs unsafe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+memmap2 = "0.9.11"
+
+# `*-sys` crates may use `unsafe` (CLAUDE.md), so this cannot inherit the workspace table (which
+# forbids it). Everything else mirrors the workspace table.
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[dev-dependencies]
+tempfile = "3.27.0"
