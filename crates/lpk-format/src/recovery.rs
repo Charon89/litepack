@@ -233,6 +233,129 @@ fn check_fields(
     Ok(())
 }
 
+/// The writer found more than 32768 data shards (carried inside an
+/// `io::Error` so that it can cross `Write::write`).
+#[derive(Debug)]
+pub(crate) struct ShardCap;
+
+impl std::fmt::Display for ShardCap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("more than 32768 recovery data shards")
+    }
+}
+
+impl std::error::Error for ShardCap {}
+
+/// True when `e` is the cap error of [`ShardSpool::feed`].
+pub(crate) fn is_shard_cap(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<ShardCap>())
+}
+
+pub(crate) fn rs_error(e: reed_solomon_simd::Error) -> FormatError {
+    FormatError::RecoveryError {
+        reason: e.to_string(),
+    }
+}
+
+/// Collects the covered bytes of a stream into shards, one at a time.
+///
+/// Memory rule: this holds one shard buffer and 32 bytes per completed shard;
+/// the shards themselves go to an anonymous temporary file, because the
+/// Reed-Solomon encoder must know the number of data shards when it is created
+/// and a streaming writer learns it only when the covered range ends. At the
+/// end the file is read back once, shard by shard, into the encoder.
+pub(crate) struct ShardSpool {
+    shard_len: usize,
+    buf: Vec<u8>,
+    hashes: Vec<[u8; 32]>,
+    file: std::fs::File,
+    cover_len: u64,
+}
+
+/// The result of [`ShardSpool::finish`]: the frame without its recovery bytes
+/// and the encoder that holds them.
+pub(crate) struct Encoded {
+    pub frame: RecoveryFrame,
+    pub encoder: reed_solomon_simd::ReedSolomonEncoder,
+}
+
+impl ShardSpool {
+    pub(crate) fn new(shard_len: u32) -> std::io::Result<ShardSpool> {
+        Ok(ShardSpool {
+            shard_len: shard_len as usize,
+            buf: Vec::with_capacity(shard_len as usize),
+            hashes: Vec::new(),
+            file: tempfile::tempfile()?,
+            cover_len: 0,
+        })
+    }
+
+    /// Covered bytes held in memory right now (at most one shard).
+    pub(crate) fn buffered(&self) -> usize {
+        self.buf.len()
+    }
+
+    fn complete(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+        self.buf.resize(self.shard_len, 0);
+        self.hashes.push(*blake3::hash(&self.buf).as_bytes());
+        self.file.write_all(&self.buf)?;
+        self.buf.clear();
+        Ok(())
+    }
+
+    pub(crate) fn feed(&mut self, mut bytes: &[u8]) -> std::io::Result<()> {
+        while !bytes.is_empty() {
+            if self.buf.is_empty() && self.hashes.len() >= MAX_DATA_SHARDS as usize {
+                return Err(std::io::Error::other(ShardCap));
+            }
+            let take = (self.shard_len - self.buf.len()).min(bytes.len());
+            self.buf.extend_from_slice(&bytes[..take]);
+            self.cover_len += take as u64;
+            bytes = &bytes[take..];
+            if self.buf.len() == self.shard_len {
+                self.complete()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Close the covered range and encode: the geometry comes from
+    /// `percent`; the frame's `cover_offset` is the end of the header.
+    pub(crate) fn finish(mut self, percent: u8) -> Result<Encoded, FormatError> {
+        use std::io::{Read, Seek, SeekFrom};
+        if !self.buf.is_empty() {
+            self.complete()?;
+        }
+        let shard_len = self.shard_len as u32;
+        let (data, recovery) = shard_geometry(self.cover_len, shard_len, percent)?;
+        let mut encoder = reed_solomon_simd::ReedSolomonEncoder::new(
+            data as usize,
+            recovery as usize,
+            self.shard_len,
+        )
+        .map_err(rs_error)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut shard = vec![0u8; self.shard_len];
+        for _ in 0..data {
+            self.file.read_exact(&mut shard)?;
+            encoder.add_original_shard(&shard).map_err(rs_error)?;
+        }
+        Ok(Encoded {
+            frame: RecoveryFrame {
+                cover_offset: Header::LEN as u64,
+                cover_len: self.cover_len,
+                shard_len,
+                data_shards: data,
+                recovery_shards: recovery,
+                shard_hashes: self.hashes,
+                recovery: Vec::new(),
+            },
+            encoder,
+        })
+    }
+}
+
 /// The Markdown table of the recovery payload, pasted verbatim into the spec.
 pub fn recovery_layout_table() -> String {
     "| Field | Size | Meaning |\n|---|---|---|\n\

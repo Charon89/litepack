@@ -255,6 +255,7 @@ fn options(encoder: ZstdTestEncoder) -> WriterOptions {
         archive_id: [3; 16],
         encoder: Box::new(encoder),
         records: Vec::new(),
+        recovery: Default::default(),
     }
 }
 

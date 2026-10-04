@@ -205,6 +205,11 @@ impl<R: Read + Seek> Archive<R> {
         &self.index
     }
 
+    /// Locations of the `Recovery` frames, as the index lists them.
+    pub fn recovery_frames(&self) -> &[FrameLocation] {
+        &self.index.recovery
+    }
+
     /// Constant-time access to the chunk table.
     pub fn chunks(&self) -> &ChunkIndex {
         &self.chunks
