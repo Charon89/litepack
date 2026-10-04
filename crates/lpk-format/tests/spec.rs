@@ -314,3 +314,57 @@ fn spec_states_the_trailer_constants() {
         165
     );
 }
+
+/// The E1-14d fix round: the rulings whose text the reference reader's
+/// behaviour now depends on, and the error catalogue naming every class.
+#[test]
+fn spec_states_the_fix_round_rules() {
+    let text = spec();
+    for needle in [
+        "### What is authenticated",
+        "`BadHeaderFlags`",
+        "`marker required`",
+        "RFC 8878",
+        "`lzma-specification.txt`",
+        "Frame_Content_Size",
+        "end exactly where the trailer starts",
+        "`previous_trailer_offset`",
+        "`first start_offset`",
+        "`salt not zero`",
+        "is exactly 111 bytes",
+        "`conflicting name`",
+        "`reed-solomon-simd` library, version 3.x",
+        "with the reason `coverage`",
+        "## 16. Error catalogue",
+    ] {
+        assert!(text.contains(needle), "spec lacks {needle:?}");
+    }
+    assert_eq!(lpk_format::KEY_SLOT_LEN, 111);
+    let catalogue = &text[text.find("## 16. Error catalogue").unwrap()..];
+    let source = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("error.rs"),
+    )
+    .unwrap();
+    // Every variant of FormatError: a line `    Name {`, `    Name,` or `    Name(`.
+    let mut seen = 0;
+    for line in source.lines() {
+        let l = line.strip_prefix("    ").unwrap_or("");
+        let name: String = l
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        let rest = &l[name.len()..];
+        let is_variant = name.starts_with(|c: char| c.is_ascii_uppercase())
+            && (rest.starts_with(" {") || rest.starts_with(',') || rest.starts_with('('));
+        if is_variant {
+            seen += 1;
+            assert!(
+                catalogue.contains(&format!("| `{name}` |")),
+                "catalogue lacks {name}"
+            );
+        }
+    }
+    assert!(seen > 60, "found {seen} variants");
+}
