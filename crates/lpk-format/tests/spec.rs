@@ -106,14 +106,17 @@ fn primitive_table_lists_every_id_and_name() {
     z[0] = 31;
     assert_eq!(P::Zstd.resources(&z).window, 1 << 31);
     assert!(row(P::Zstd).contains("window = 2^window_log"));
-    for (i, max, name) in [(4, 8, "lc"), (5, 4, "lp"), (6, 4, "pb")] {
+    // The row's own limits; `lc + lp <= 4` is what bounds lc below 8.
+    for (i, max, name, doc) in [(4, 4, "lc", 8), (5, 4, "lp", 4), (6, 4, "pb", 4)] {
         let mut l = vec![0u8; 7];
         l[i] = max;
         P::Lzma.validate_params(&l).unwrap();
-        l[i] = max + 1;
+        l[i] = doc + 1;
         assert!(P::Lzma.validate_params(&l).is_err(), "{name}");
-        assert!(row(P::Lzma).contains(&format!("{name} <= {max}")));
+        assert!(row(P::Lzma).contains(&format!("{name} <= {doc}")));
     }
+    assert!(row(P::Lzma).contains("lc + lp <= 4"));
+    assert!(P::Lzma.validate_params(&[0, 0, 0, 0, 2, 3, 0]).is_err());
     let l = [0x78, 0x56, 0x34, 0x12, 0, 0, 0];
     assert_eq!(P::Lzma.resources(&l).window, 0x1234_5678);
     assert!(row(P::Lzma).contains("window = dict_size"));
@@ -203,6 +206,29 @@ fn spec_states_the_zstd_and_prior_rules() {
     assert!(index.contains("prior_list"));
     assert!(lpk_format::prior_list_table().contains("prior_count"));
     assert!(lpk_format::prior_list_table().contains("32"));
+}
+
+#[test]
+fn spec_states_the_lzma_rules() {
+    let text = spec();
+    for needle in [
+        "### What the reference decoder enforces for `lzma`",
+        "raw LZMA1 stream",
+        "`lc + lp` <= 4",
+        "`BadParams`, `lc`, `lp`, `pb` or `lc + lp`",
+        "end-of-payload marker",
+        "`trailing input`",
+        "`truncated`",
+        "`LzmaError`",
+        "no prior ID",
+        "- Implemented now: `store`, `zstd`, `lzma`.",
+        "`lzma-basic.lpk`",
+        "`lzma-multiblock.lpk`",
+        "`lzma-props.lpk`",
+    ] {
+        assert!(text.contains(needle), "spec lacks {needle:?}");
+    }
+    assert!(lpk_format::primitive_table().contains("lc + lp <= 4"));
 }
 
 #[test]

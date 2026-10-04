@@ -29,6 +29,7 @@ How a component is used:
 | zstd 0.14.0, zstd-safe 8.0.0, zstd-sys 2.1.0 (bundles libzstd 1.5.7) | crates: BSD-3-Clause; libzstd: BSD-3-Clause OR GPL-2.0-only, used under BSD-3-Clause | depend | https://crates.io/crates/zstd |
 | liblzma 0.4.8, liblzma-sys 0.4.9 (bundles XZ Utils 5.8.4 liblzma) | crates: MIT OR Apache-2.0; liblzma: 0BSD | depend, statically linked | https://crates.io/crates/liblzma |
 | ruzstd 0.9.0 | MIT | depend, sandbox (decode of untrusted input) | https://crates.io/crates/ruzstd |
+| lzma-rs 0.3.0 | MIT | depend, sandbox (decode of untrusted input; pure Rust, E1-9) | https://crates.io/crates/lzma-rs |
 | brotli 9.0.0 (Dropbox) | BSD-3-Clause AND MIT | depend (ZIP/HTTP interop) | https://crates.io/crates/brotli |
 | fastcdc 5.0.0 | MIT | depend (chunking) | https://crates.io/crates/fastcdc |
 | gearhash 0.1.4 | MIT OR Apache-2.0 | depend (chunking) | https://crates.io/crates/gearhash |
