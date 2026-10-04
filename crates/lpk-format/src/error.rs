@@ -188,6 +188,32 @@ pub enum FormatError {
         /// The envelope field.
         field: &'static str,
     },
+    /// A decode graph names a primitive ID that is not in the registry.
+    #[error("unknown primitive {id:#06x}")]
+    UnknownPrimitive {
+        /// The primitive ID.
+        id: u16,
+    },
+    /// The primitive is in the registry but this reader cannot run it.
+    #[error("primitive {id:#06x} is not implemented by this reader")]
+    UnimplementedPrimitive {
+        /// The primitive ID.
+        id: u16,
+    },
+    /// A decode graph is malformed.
+    #[error("bad decode graph ({reason})")]
+    BadGraph {
+        /// Short reason.
+        reason: &'static str,
+    },
+    /// A primitive's parameters do not match its layout.
+    #[error("primitive {id:#06x}: bad parameters ({reason})")]
+    BadParams {
+        /// The primitive ID.
+        id: u16,
+        /// Short reason.
+        reason: &'static str,
+    },
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

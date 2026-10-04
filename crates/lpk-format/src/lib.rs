@@ -16,6 +16,7 @@ pub mod header;
 pub mod index;
 pub mod magic;
 pub mod merkle;
+pub mod primitive;
 pub mod trailer;
 pub mod varint;
 
@@ -45,3 +46,4 @@ pub use frame::{
 };
 pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, HeaderFlags};
 pub use magic::MAGIC;
+pub use primitive::{primitive_table, GraphResources, PrimitiveId};
