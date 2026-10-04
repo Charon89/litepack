@@ -3,12 +3,15 @@
 //! mutations to apply to it, so the fuzzer starts from a valid archive and every
 //! reader path is reached before the first damaged byte is.
 //!
-//! Layout: byte 0 = flags and vector (bits 0..4 vector index, bit 7 = truncate the
-//! archive at the first mutation's offset); then 5-byte records: offset (u32 LE,
-//! taken modulo the archive length) and the value XORed into that byte (0 is
-//! replaced by 0xFF so every record changes something).
+//! Layout: byte 0 = flags and vector. The low four bits (mask 0x0F) pick the vector,
+//! taken modulo the number of vectors (13); bit 7 truncates the archive at the first
+//! mutation's offset; bit 6 appends the input's trailing bytes (those after the last
+//! whole record) to the archive. Then 5-byte records: offset (u32 LE, taken modulo the
+//! archive length) and the value XORed into that byte (0 is replaced by 0xFF so every
+//! record changes something).
 use libfuzzer_sys::fuzz_target;
-use lpk_format::{repair, Archive, Credentials, Resources};
+use lpk_format::{repair, Archive, Credentials};
+use lpk_format_fuzz::{exercise, key_slot_too_costly, tight};
 use std::io::Cursor;
 
 macro_rules! vector {
@@ -20,7 +23,7 @@ macro_rules! vector {
 /// (bytes, password, keyfile)
 type Vector = (&'static [u8], Option<&'static str>, Option<&'static [u8]>);
 
-fn vectors() -> [Vector; 12] {
+fn vectors() -> [Vector; 13] {
     let key: &'static [u8] = vector!("sealed-keyfile.key");
     [
         (vector!("zstd-basic.lpk"), None, None),
@@ -39,35 +42,8 @@ fn vectors() -> [Vector; 12] {
             Some(key),
         ),
         (vector!("journal-3gen.lpk"), None, None),
+        (vector!("recovery-groups.lpk"), None, None),
     ]
-}
-
-fn tight() -> Resources {
-    Resources {
-        max_window: 1 << 24,
-        max_bwt_block: 1 << 20,
-        max_block_plain: 1 << 22,
-        max_frame_payload: 1 << 22,
-        memory: 1 << 26,
-    }
-}
-
-fn open_and_extract(bytes: &[u8], creds: Option<&Credentials>) {
-    let Ok(mut a) = Archive::open_with(Cursor::new(bytes.to_vec()), &tight(), creds) else {
-        return;
-    };
-    let _ = a.verify();
-    let _ = a.history();
-    let Ok(table) = a.entry_table() else {
-        return;
-    };
-    let Ok(t) = table.table() else {
-        return;
-    };
-    let entries: Vec<_> = t.iter().filter_map(Result::ok).collect();
-    for e in entries {
-        let _ = a.extract(&e, &mut std::io::sink());
-    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -78,7 +54,8 @@ fuzz_target!(|data: &[u8]| {
     let (orig, password, keyfile) = table[usize::from(first & 0x0F) % table.len()];
     let mut bytes = orig.to_vec();
     let mut first_offset = None;
-    for rec in rest.chunks_exact(5).take(64) {
+    let (records, tail) = rest.as_chunks::<5>();
+    for rec in records.iter().take(64) {
         let off = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]) as usize % bytes.len();
         first_offset.get_or_insert(off);
         bytes[off] ^= if rec[4] == 0 { 0xFF } else { rec[4] };
@@ -88,13 +65,20 @@ fuzz_target!(|data: &[u8]| {
             bytes.truncate(off);
         }
     }
+    if first & 0x40 != 0 {
+        bytes.extend_from_slice(tail);
+    }
+    // A mutated key slot may ask for a costly Argon2: skip those inputs.
+    if key_slot_too_costly(&bytes) {
+        return;
+    }
 
     let creds = password.map(|p| Credentials {
         password: p.as_bytes().to_vec(),
         keyfile: keyfile.map(<[u8]>::to_vec),
     });
-    open_and_extract(&bytes, creds.as_ref());
-    open_and_extract(&bytes, None);
+    exercise(&bytes, creds.as_ref());
+    exercise(&bytes, None);
 
     // Keyless recovery: scan and repair into memory.
     if let Ok(mut a) = Archive::open_with(Cursor::new(bytes.clone()), &tight(), None) {

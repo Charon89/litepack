@@ -24,21 +24,37 @@ jobs:
   fuzz:
     name: fuzz all targets (ubuntu-24.04)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # 15 targets x at most 1200 s, plus the builds.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
+      - name: Validate the time per target
+        env:
+          SECONDS_INPUT: ${{ inputs.seconds || '120' }}
+        run: |
+          case "$SECONDS_INPUT" in
+            ''|*[!0-9]*) echo "seconds must be digits" >&2; exit 1 ;;
+          esac
+          if [ "$SECONDS_INPUT" -lt 1 ] || [ "$SECONDS_INPUT" -gt 1200 ]; then
+            echo "seconds must be 1..1200" >&2; exit 1
+          fi
+          echo "FUZZ_SECONDS=$SECONDS_INPUT" >> "$GITHUB_ENV"
       - name: Nightly toolchain
         run: rustup toolchain install "$LPK_FUZZ_TOOLCHAIN" --profile minimal
       - name: cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Build every target
         working-directory: fuzz
         run: cargo "+$LPK_FUZZ_TOOLCHAIN" fuzz build
       - name: Run every target
-        run: fuzz/run.sh -t "${{ inputs.seconds || '120' }}"
-      - name: Upload crash artifacts
+        run: bash fuzz/run.sh -t "$FUZZ_SECONDS"
+      - name: Failing targets
         if: failure()
-        uses: actions/upload-artifact@v4
+        run: |
+          grep -l -E "ERROR: libFuzzer|panicked|SUMMARY" fuzz/artifacts/logs/*.log 2>/dev/null || true
+      - name: Upload artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts

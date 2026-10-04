@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Run every fuzz target (or the ones named) for a bounded time.
-#   fuzz/run.sh [-t SECONDS] [target ...]
+#   bash fuzz/run.sh [-t SECONDS] [target ...]
 # Needs Linux (or WSL), a nightly toolchain and cargo-fuzz; see fuzz/README.md.
 # The corpus grows under fuzz/corpus/<target> (git-ignored); fuzz/seeds/<target> and the
-# committed test vectors are read as extra seed directories.
-set -euo pipefail
+# committed test vectors are read as extra seed directories. The full log of each target is
+# fuzz/artifacts/logs/<target>.log; a failing target does not stop the others, the script
+# lists the failures and exits 1 at the end.
+set -uo pipefail
 cd "$(dirname "$0")"
 
 secs=60
@@ -19,18 +21,28 @@ archive_open archive_mutate"
 targets="${*:-$all}"
 toolchain="${LPK_FUZZ_TOOLCHAIN:-nightly}"
 vectors="../crates/lpk-format/tests/vectors"
+failed=""
 
+mkdir -p artifacts/logs
 for t in $targets; do
   mkdir -p "corpus/$t"
   extra=""
   # archive_mutate reads the vectors itself; its input is a mutation list, not an archive.
   if [ "$t" != "archive_mutate" ]; then extra="$vectors"; fi
   echo "== $t (${secs}s)"
-  cargo "+$toolchain" fuzz run "$t" "corpus/$t" "seeds/$t" $extra -- \
-    -max_total_time="$secs" -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 2>&1 | tail -n 12
-  # tail hides the exit code; libFuzzer leaves a crash file under artifacts/<target>.
-  if ls "artifacts/$t"/crash-* "artifacts/$t"/oom-* "artifacts/$t"/timeout-* >/dev/null 2>&1; then
-    echo "CRASH in $t: see fuzz/artifacts/$t" >&2
-    exit 1
+  # shellcheck disable=SC2086
+  if cargo "+$toolchain" fuzz run "$t" "corpus/$t" "seeds/$t" $extra -- \
+    -max_total_time="$secs" -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 \
+    >"artifacts/logs/$t.log" 2>&1; then
+    grep -E "stat::number_of_executed_units|Done [0-9]+ runs" "artifacts/logs/$t.log" | tail -n 2
+  else
+    echo "FAILED: $t (log: fuzz/artifacts/logs/$t.log)" >&2
+    tail -n 30 "artifacts/logs/$t.log" >&2
+    failed="$failed $t"
   fi
 done
+
+if [ -n "$failed" ]; then
+  echo "failing targets:$failed" >&2
+  exit 1
+fi

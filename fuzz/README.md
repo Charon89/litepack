@@ -18,7 +18,9 @@ are untouched. `cargo-fuzz` is Unix-only: use Linux, or WSL on Windows.
 | `archive_open` | `Archive::open_with` (keyless and with a password) + `verify` + extract every entry |
 | `archive_mutate` | structure-aware: byte mutations of a committed vector (every family, including sealed and journal), then open, verify, extract, `check_recovery`, `repair` |
 
-Seeds: `seeds/<target>/` (hand-made minimal inputs); the committed vectors under
+Seeds: `seeds/<target>/` (real payloads cut from the vectors by `cargo test -p lpk-format --test gen_vectors --
+--ignored regenerate_fuzz_seeds`, plus a few hand-made minimal inputs; `archive_mutate` has one unmutated
+1-byte seed per vector); full logs of a run: `artifacts/logs/<target>.log`; the committed vectors under
 `crates/lpk-format/tests/vectors/` are read as an extra seed directory by `run.sh`
 (`archive_mutate` embeds them). The corpus that grows lives in `corpus/<target>/` (git-ignored).
 
@@ -28,8 +30,8 @@ Seeds: `seeds/<target>/` (hand-made minimal inputs); the committed vectors under
 rustup toolchain install nightly          # cargo-fuzz needs nightly
 cargo install cargo-fuzz --locked
 export CARGO_TARGET_DIR=~/lpk-fuzz-target # under WSL: keep the build off /mnt (slow)
-fuzz/run.sh -t 60                         # every target for 60 s
-fuzz/run.sh -t 600 archive_mutate         # one target for 10 min
+bash fuzz/run.sh -t 60                    # every target for 60 s
+bash fuzz/run.sh -t 600 archive_mutate    # one target for 10 min
 cargo +nightly fuzz run archive_mutate    # by hand, from fuzz/
 ```
 
