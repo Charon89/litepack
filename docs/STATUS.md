@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 20:20 UTC (16:20 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 16:20 UTC (12:20 local on the measuring machine). No measurement is running.
 
 **Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
 (37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
@@ -22,12 +22,21 @@ minutes from the cache), amend the CORPUS.md row (owner-approved), then `run --t
 backup-versions-large` and `probe dedup --profile full --into <that directory>` as detached processes, `report`
 for the G2 row, commit the directory and tick E0-1.
 **E2-2 (classifier and entropy gate) is done (D-45); E2-3 (the Fast tier) is done (D-46 writer API, D-47 the tier —
-no bundled dictionaries, BCJ waits for a format revision).** Next E2-4 (pipeline struct, the `lpk` CLI, the
-catalogue row, the report reading several result directories), then E2-5 (JPEG peel). Every peel/fold/model
-primitive beyond store/zstd/lzma needs a format revision first: the frozen v1 forbids a writer to emit
-primitives 3 to 12 until their decoding is specified (spec section 8), so E2-5, E2-7+, E2-10, E2-15, E2-16,
-E2-17 each start with a spec revision, vectors and the independent decoder's update. E1-15 (the normative Reed-Solomon
-description) is a format revision that can be done any time by a fresh implementer.
+no bundled dictionaries, BCJ waits for a format revision); E2-4 (pipeline struct, the `lpk` tool, the catalogue row,
+the pooled report) is done (D-48).** The first real `lpk` rows exist: `bench/results/2026-10-04-megatron` (`small`,
+`lpk/fast` and `lpk/store`, every extraction verified) and the pooled report
+`bench/reports/phase1-2026-10-04-small-lpk.md` next to the committed incumbents. What they say, for the speed tasks:
+`lpk/fast` reaches `zstd/3`'s sizes but runs single-threaded; extraction of many-small-file classes is far below the
+store path's because files are extracted in entry order across blocks (decode each block once — E2-19); the Fast
+tier's store throughput on `video` is about a third of the `store` control's (E2-18, G3 as restated in D-27). Parallel
+block encoding (E2-4b, a writer extension) comes before or with E2-19.
+**Next: E2-5 (JPEG peel).** It needs the first format revision: the frozen v1 forbids a writer to emit primitives 3 to
+12 until their decoding is specified (spec section 8), so E2-5 starts with a spec revision for `jpeg-reconstruct`
+(decoding by citation of the Lepton format as `lepton_jpeg` implements it, a vector, the reference "full reader" hooks
+in `lpk-format` for reconstruction primitives, the independent decoder's update by its author, `CHANGES.md`); the same
+process then serves E2-9 (delta), E2-10/11 (deflate, container), E2-15 (bwt), E2-16 (png-filter), E2-17 (base64, utf16).
+Revision-free tasks that could run meanwhile: E2-6 (Balanced tier, LZMA is in v1), E2-7/E2-8 (Fold dedup and
+ordering), E2-12/13/14 (seal), E2-18/19/20 (speed, memory).
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -43,7 +52,7 @@ None at the moment.
 ## How to resume
 
 ### Phase 1 — how it runs
-1. One task at a time from `docs/PLAN.md` (E2-4 next, then E2-5, …): implementer in a worktree from a brief
+1. One task at a time from `docs/PLAN.md` (E2-5 next, with its format revision first): implementer in a worktree from a brief
    with the exact values → read-only review (spec compliance and quality, benchmark honesty for harness tasks) →
    fix rounds with rulings → a decision in `docs/DECISIONS.md` → PLAN tick with evidence → PR → CI green →
    `main` fast-forwarded (merge `main` into the branch first).

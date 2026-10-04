@@ -1,0 +1,152 @@
+{
+  "class": "office-pdf",
+  "corpus": {
+    "class_bytes": 267862151,
+    "class_files": 166,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 147330071,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.1875,
+      "peak_job_memory_bytes": 196960256,
+      "peak_memory_bytes": 141709312,
+      "peak_process_commit_bytes": 196960256,
+      "timed_out": false,
+      "user_cpu_seconds": 0.96875,
+      "wall_seconds": 1.2128751
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.453125,
+      "peak_job_memory_bytes": 269475840,
+      "peak_memory_bytes": 265428992,
+      "peak_process_commit_bytes": 269475840,
+      "timed_out": false,
+      "user_cpu_seconds": 3.5,
+      "wall_seconds": 5.1147975
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 147330071,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.1875,
+        "peak_job_memory_bytes": 196952064,
+        "peak_memory_bytes": 141709312,
+        "peak_process_commit_bytes": 196952064,
+        "timed_out": false,
+        "user_cpu_seconds": 0.96875,
+        "wall_seconds": 1.2126295
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.453125,
+        "peak_job_memory_bytes": 269438976,
+        "peak_memory_bytes": 265396224,
+        "peak_process_commit_bytes": 269438976,
+        "timed_out": false,
+        "user_cpu_seconds": 3.5,
+        "wall_seconds": 5.1147975
+      }
+    },
+    {
+      "archive_bytes": 147330071,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.296875,
+        "peak_job_memory_bytes": 196960256,
+        "peak_memory_bytes": 141692928,
+        "peak_process_commit_bytes": 196960256,
+        "timed_out": false,
+        "user_cpu_seconds": 0.875,
+        "wall_seconds": 1.2128751
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.671875,
+        "peak_job_memory_bytes": 269475840,
+        "peak_memory_bytes": 265428992,
+        "peak_process_commit_bytes": 269475840,
+        "timed_out": false,
+        "user_cpu_seconds": 3.296875,
+        "wall_seconds": 5.0949098
+      }
+    },
+    {
+      "archive_bytes": 147330071,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.15625,
+        "peak_job_memory_bytes": 196976640,
+        "peak_memory_bytes": 142336000,
+        "peak_process_commit_bytes": 196976640,
+        "timed_out": false,
+        "user_cpu_seconds": 0.984375,
+        "wall_seconds": 1.2159894
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.375,
+        "peak_job_memory_bytes": 269725696,
+        "peak_memory_bytes": 265658368,
+        "peak_process_commit_bytes": 269725696,
+        "timed_out": false,
+        "user_cpu_seconds": 3.5625,
+        "wall_seconds": 5.1265704
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../tmp/run82020/c15/a.lpk",
+      "office-pdf",
+      "--fast",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "fast"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+bee53ffd9ff8"
+  },
+  "verification": {
+    "files_checked": 166,
+    "files_ok": 166,
+    "verified": true
+  }
+}
