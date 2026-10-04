@@ -548,6 +548,42 @@ commit = "d9c0c7e2cf8a8bf9fb98d3bee546dcf8dc9ac59a"
 mode = "export"
 
 [[source]]
+id = "godot-v1"
+class = "backup-versions-large"
+licence = "MIT"
+origin = "godotengine/godot at tag 4.2-stable (46dc277917a93cbf601bbcf0d27d00f6feeec0d5), working tree exported with git; the folder is godot-v1 (source ids are unique, so the class does not reuse v1..v3)"
+profiles = ["full"]
+optional = true
+kind = "git-repo"
+repo = "https://github.com/godotengine/godot"
+commit = "46dc277917a93cbf601bbcf0d27d00f6feeec0d5"
+mode = "export"
+
+[[source]]
+id = "godot-v2"
+class = "backup-versions-large"
+licence = "MIT"
+origin = "godotengine/godot at tag 4.3-stable (77dcf97d82cbfe4e4615475fa52ca03da645dbd8), working tree exported with git; the folder is godot-v2 (source ids are unique, so the class does not reuse v1..v3)"
+profiles = ["full"]
+optional = true
+kind = "git-repo"
+repo = "https://github.com/godotengine/godot"
+commit = "77dcf97d82cbfe4e4615475fa52ca03da645dbd8"
+mode = "export"
+
+[[source]]
+id = "godot-v3"
+class = "backup-versions-large"
+licence = "MIT"
+origin = "godotengine/godot at tag 4.4-stable (4c311cbee68c0b66ff8ebb8b0defdd9979dd2a41), working tree exported with git; the folder is godot-v3 (source ids are unique, so the class does not reuse v1..v3)"
+profiles = ["full"]
+optional = true
+kind = "git-repo"
+repo = "https://github.com/godotengine/godot"
+commit = "4c311cbee68c0b66ff8ebb8b0defdd9979dd2a41"
+mode = "export"
+
+[[source]]
 id = "zstd-history-small"
 class = "source-git"
 licence = "BSD-3-Clause OR GPL-2.0-only"

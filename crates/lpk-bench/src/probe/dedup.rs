@@ -1,6 +1,6 @@
 //! `probe dedup` (PLAN P0-4): how much content-defined chunking and whole-file deduplication
-//! save on every class and on the corpus as a whole, how the unique bytes of `backup-versions`
-//! grow from version to version, and what a binary delta between consecutive versions costs
+//! save on every class and on the corpus as a whole, how the unique bytes of the versioned classes
+//! (`backup-versions` and `backup-versions-large`, each on its own) grow from version to version, and what a binary delta between consecutive versions costs
 //! next to compressing the new version alone.
 //!
 //! Chunking: FastCDC (the crate's 2020 variant, normalization level 1) with a minimum of 4 KiB,
@@ -13,7 +13,7 @@
 //! Timing: chunking is timed alone, single-threaded, on the file's bytes in memory, once for
 //! FastCDC alone (boundaries only) and once for FastCDC plus a BLAKE3 hash of every chunk.
 //!
-//! Deltas: the version folders of `backup-versions` (top-level folders of the class, in manifest
+//! Deltas: the version folders of each versioned class (top-level folders of the class, in manifest
 //! order) are tarred in process (`tarball`), and for each consecutive pair the external `zstd`
 //! (`--patch-from`, level 19, `--long=N` with N the smallest window log from 27 up that covers
 //! the larger tar, one thread) and `hdiffz`/`hpatchz` (zstd level 19 inside, one thread) make a
@@ -40,6 +40,9 @@ pub const NAME: &str = "dedup";
 
 /// The class whose folders are versions.
 pub const VERSIONS_CLASS: &str = "backup-versions";
+/// The larger versioned class (D-43: three Godot releases); handled exactly like
+/// [`VERSIONS_CLASS`], its results in `Data::versions_large`.
+pub const VERSIONS_LARGE_CLASS: &str = "backup-versions-large";
 /// The row label of the whole corpus (not a class name: classes are folder names).
 pub const CORPUS_ROW: &str = "(corpus)";
 
@@ -131,7 +134,7 @@ pub struct Delta {
     pub tools: Vec<ToolRun>,
 }
 
-/// One version folder of `backup-versions`, in manifest order.
+/// One version folder of `backup-versions` or `backup-versions-large`, in manifest order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Version {
@@ -158,6 +161,9 @@ pub struct Data {
     pub classes: Vec<Row>,
     pub corpus: Row,
     pub versions: Vec<Version>,
+    /// The same for class `backup-versions-large` (absent in older result files).
+    #[serde(default)]
+    pub versions_large: Vec<Version>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -601,15 +607,50 @@ pub fn delta(
 // ---------------------------------------------------------------------------------------------
 // The probe
 
+/// Fill in the deltas between consecutive versions of `class` (tars built in process).
+fn deltas_of(
+    ctx: &Ctx<'_>,
+    class: &str,
+    versions: &mut [Version],
+    folders: &[Option<String>],
+    tools: &Tools,
+    notes: &mut Vec<String>,
+) -> Result<()> {
+    let mut prev_tar: Option<Vec<u8>> = None;
+    for (i, version) in versions.iter_mut().enumerate() {
+        let Some(folder) = folders.get(i).cloned().flatten() else {
+            notes.push(format!(
+                "{class} version {}: files at the class root, no folder to tar; no delta",
+                i + 1
+            ));
+            prev_tar = None;
+            continue;
+        };
+        let tar = tar_bytes_relative(ctx, class, &folder)?;
+        if let Some(old) = &prev_tar {
+            let work = ctx.scratch_dir("delta")?;
+            version.delta = Some(
+                delta(tools, &work, ctx.tool_timeout, old, &tar)
+                    .with_context(|| format!("delta of {class} version {}", i + 1))?,
+            );
+        }
+        prev_tar = Some(tar);
+    }
+    Ok(())
+}
+
 pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     let mut classes = Vec::new();
     let mut corpus = Scope::default();
     let mut versions: Vec<Version> = Vec::new();
     let mut folders: Vec<Option<String>> = Vec::new();
+    let mut versions_large: Vec<Version> = Vec::new();
+    let mut folders_large: Vec<Option<String>> = Vec::new();
     let mut notes = Vec::new();
     for (class, entry) in &ctx.corpus.manifest.classes {
         let mut scope = Scope::default();
-        let is_versions = class == VERSIONS_CLASS;
+        let is_versions = class == VERSIONS_CLASS || class == VERSIONS_LARGE_CLASS;
+        let large = class == VERSIONS_LARGE_CLASS;
         let mut acc = VersionsAcc::default();
         let mut one = |f: &crate::corpus::manifest::ManifestFile,
                        acc: Option<&mut VersionsAcc>|
@@ -653,10 +694,18 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
                 for f in &g.files {
                     one(f, Some(&mut acc))?;
                 }
-                folders.push(acc.folder.clone());
+                if large {
+                    folders_large.push(acc.folder.clone());
+                } else {
+                    folders.push(acc.folder.clone());
+                }
                 acc.finish()?;
             }
-            versions = std::mem::take(&mut acc.done);
+            if large {
+                versions_large = std::mem::take(&mut acc.done);
+            } else {
+                versions = std::mem::take(&mut acc.done);
+            }
         } else {
             for f in &entry.files {
                 one(f, None)?;
@@ -664,9 +713,11 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
         }
         classes.push(scope.row(class));
     }
-    if ctx.class_files(VERSIONS_CLASS).is_none() {
+    if ctx.class_files(VERSIONS_CLASS).is_none() && ctx.class_files(VERSIONS_LARGE_CLASS).is_none()
+    {
         notes.push(format!(
-            "the corpus has no class `{VERSIONS_CLASS}`: no version growth and no deltas"
+            "the corpus has neither class `{VERSIONS_CLASS}` nor `{VERSIONS_LARGE_CLASS}`: no \
+             version growth and no deltas"
         ));
     }
 
@@ -688,26 +739,22 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     if let Err(why) = &tools.hdiff {
         notes.push(format!("hdiffz/hpatchz: skipped: {why}"));
     }
-    let mut prev_tar: Option<Vec<u8>> = None;
-    for i in 0..versions.len() {
-        let Some(folder) = folders[i].clone() else {
-            notes.push(format!(
-                "version {}: files at the class root, no folder to tar; no delta",
-                i + 1
-            ));
-            prev_tar = None;
-            continue;
-        };
-        let tar = tar_bytes_relative(ctx, VERSIONS_CLASS, &folder)?;
-        if let Some(old) = &prev_tar {
-            let work = ctx.scratch_dir("delta")?;
-            versions[i].delta = Some(
-                delta(&tools, &work, ctx.tool_timeout, old, &tar)
-                    .with_context(|| format!("delta of version {}", i + 1))?,
-            );
-        }
-        prev_tar = Some(tar);
-    }
+    deltas_of(
+        ctx,
+        VERSIONS_CLASS,
+        &mut versions,
+        &folders,
+        &tools,
+        &mut notes,
+    )?;
+    deltas_of(
+        ctx,
+        VERSIONS_LARGE_CLASS,
+        &mut versions_large,
+        &folders_large,
+        &tools,
+        &mut notes,
+    )?;
 
     let mut out = Output::new(
         Data {
@@ -715,6 +762,7 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
             classes,
             corpus: corpus.row(CORPUS_ROW),
             versions,
+            versions_large,
         },
         1,
     )
@@ -784,19 +832,32 @@ pub fn render(e: &Envelope<Data>) -> String {
     ));
     s.push('\n');
 
-    if d.versions.is_empty() {
+    if d.versions.is_empty() && d.versions_large.is_empty() {
         s.push_str(&format!(
-            "No versions: the corpus has no folders in class `{VERSIONS_CLASS}`.\n"
+            "No versions: the corpus has no folders in class `{VERSIONS_CLASS}` or \
+             `{VERSIONS_LARGE_CLASS}`.\n"
         ));
         return s;
     }
+    render_versions(&mut s, VERSIONS_CLASS, &d.versions);
+    if !d.versions.is_empty() && !d.versions_large.is_empty() {
+        s.push('\n');
+    }
+    render_versions(&mut s, VERSIONS_LARGE_CLASS, &d.versions_large);
+    s
+}
+
+/// The growth table and the delta table of one versioned class (nothing when it has no version).
+fn render_versions(s: &mut String, class: &str, versions: &[Version]) {
+    if versions.is_empty() {
+        return;
+    }
     s.push_str(&format!(
-        "Versions of `{VERSIONS_CLASS}` (top-level folders, in natural order: runs of digits \
+        "Versions of `{class}` (top-level folders, in natural order: runs of digits \
          compare as numbers, so v2 comes before v10): unique chunk bytes after adding each version in turn, and zstd level 19 (library defaults) of the \
          chunks that are new in that version.\n\n"
     ));
-    let rows: Vec<Vec<String>> = d
-        .versions
+    let rows: Vec<Vec<String>> = versions
         .iter()
         .enumerate()
         .map(|(i, v)| {
@@ -835,7 +896,7 @@ pub fn render(e: &Envelope<Data>) -> String {
          program run, with the program's own start-up.\n\n",
     );
     let mut rows = Vec::new();
-    for (i, v) in d.versions.iter().enumerate() {
+    for (i, v) in versions.iter().enumerate() {
         let Some(dl) = &v.delta else { continue };
         for t in &dl.tools {
             let mut status = match (&t.skipped, &t.failed) {
@@ -886,7 +947,6 @@ pub fn render(e: &Envelope<Data>) -> String {
         ],
         &rows,
     ));
-    s
 }
 
 fn row_rules(r: &Row, at: &str, p: &mut Vec<String>) {
@@ -1007,12 +1067,31 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
         }
     }
 
-    // Versions.
-    let class_row = d.classes.iter().find(|r| r.class == VERSIONS_CLASS);
+    version_rules(e, VERSIONS_CLASS, "versions", &d.versions, &mut p);
+    version_rules(
+        e,
+        VERSIONS_LARGE_CLASS,
+        "versions_large",
+        &d.versions_large,
+        &mut p,
+    );
+    p
+}
+
+/// The rules of one versioned class's growth and delta records.
+fn version_rules(
+    e: &Envelope<Data>,
+    class: &str,
+    field: &str,
+    versions: &[Version],
+    p: &mut Vec<String>,
+) {
+    let d = &e.data;
+    let class_row = d.classes.iter().find(|r| r.class == class);
     let mut prev_cum = 0u64;
     let mut prev_chunks = 0u64;
-    for (i, v) in d.versions.iter().enumerate() {
-        let at = format!("/data/versions/{i}");
+    for (i, v) in versions.iter().enumerate() {
+        let at = format!("/data/{field}/{i}");
         if v.cumulative_unique_chunk_bytes != prev_cum + v.new_unique_chunk_bytes {
             p.push(format!(
                 "{at}/cumulative_unique_chunk_bytes: not the previous cumulative plus the new bytes"
@@ -1044,8 +1123,8 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
         match (&v.delta, i) {
             (Some(_), 0) => p.push(format!("{at}/delta: the first version has no predecessor")),
             (Some(dl), _) => {
-                delta_rules(dl, &format!("{at}/delta"), &mut p);
-                if let Some(prev) = i.checked_sub(1).and_then(|j| d.versions[j].delta.as_ref()) {
+                delta_rules(dl, &format!("{at}/delta"), p);
+                if let Some(prev) = i.checked_sub(1).and_then(|j| versions[j].delta.as_ref()) {
                     if dl.old_tar_bytes != prev.new_tar_bytes {
                         p.push(format!(
                             "{at}/delta/old_tar_bytes: differs from the previous version's \
@@ -1057,39 +1136,38 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
             (None, _) => {}
         }
     }
-    if d.versions.is_empty() && class_row.is_some_and(|r| r.files > 0) {
+    if versions.is_empty() && class_row.is_some_and(|r| r.files > 0) {
         p.push(format!(
-            "/data/versions: empty although class `{VERSIONS_CLASS}` has files"
+            "/data/{field}: empty although class `{class}` has files"
         ));
     }
-    match (class_row, d.versions.is_empty()) {
+    match (class_row, versions.is_empty()) {
         (Some(r), false) => {
             if prev_chunks != r.unique_chunks {
                 p.push(format!(
-                    "/data/versions: the last cumulative unique chunks differ from class \
-                     `{VERSIONS_CLASS}`"
+                    "/data/{field}: the last cumulative unique chunks differ from class \
+                     `{class}`"
                 ));
             }
-            let files: u64 = d.versions.iter().map(|v| v.files).sum();
-            let bytes: u64 = d.versions.iter().map(|v| v.bytes).sum();
+            let files: u64 = versions.iter().map(|v| v.files).sum();
+            let bytes: u64 = versions.iter().map(|v| v.bytes).sum();
             if files != r.files || bytes != r.bytes {
                 p.push(format!(
-                    "/data/versions: files and bytes do not add up to class `{VERSIONS_CLASS}`"
+                    "/data/{field}: files and bytes do not add up to class `{class}`"
                 ));
             }
             if prev_cum != r.unique_chunk_bytes {
                 p.push(format!(
-                    "/data/versions: the last cumulative unique chunk bytes differ from class \
-                     `{VERSIONS_CLASS}`"
+                    "/data/{field}: the last cumulative unique chunk bytes differ from class \
+                     `{class}`"
                 ));
             }
         }
         (None, false) => p.push(format!(
-            "/data/versions: versions without a class `{VERSIONS_CLASS}` row"
+            "/data/{field}: versions without a class `{class}` row"
         )),
         _ => {}
     }
-    p
 }
 
 /// The tools every delta lists, in this order.
@@ -1479,6 +1557,60 @@ mod tests {
             notes: Vec::new(),
             data,
         }
+    }
+
+    #[test]
+    fn both_versioned_classes_are_probed_separately_and_checked() {
+        let base = noise(31, 300_000);
+        let mut v2 = base.clone();
+        v2.extend_from_slice(&noise(32, 100_000));
+        let mut v3 = v2.clone();
+        v3.extend_from_slice(&noise(33, 50_000));
+        let big = noise(34, 400_000);
+        let mut big2 = big.clone();
+        big2[1000] ^= 1;
+        let mut big3 = big2.clone();
+        big3.extend_from_slice(&noise(35, 20_000));
+        let d = run_on(&[
+            ("backup-versions/v1/data.bin", base),
+            ("backup-versions/v2/data.bin", v2),
+            ("backup-versions/v3/data.bin", v3),
+            ("backup-versions-large/godot-v1/data.bin", big),
+            ("backup-versions-large/godot-v2/data.bin", big2),
+            ("backup-versions-large/godot-v3/data.bin", big3),
+        ]);
+        let labels = |v: &[Version]| v.iter().map(|x| x.label.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(&d.versions), ["v1", "v2", "v3"]);
+        assert_eq!(
+            labels(&d.versions_large),
+            ["godot-v1", "godot-v2", "godot-v3"]
+        );
+        assert!(d.versions_large[0].delta.is_none());
+        let dl = d.versions_large[1].delta.as_ref().expect("delta 2");
+        assert_eq!(dl.old_tar_bytes / 100_000, 4);
+        assert!(dl.new_tar_bytes > 400_000 && dl.new_tar_bytes < 480_000);
+        assert!(d.versions_large[2].delta.is_some());
+        // The large tars, not the small ones: the first delta's old tar is the large v1.
+        assert_ne!(
+            dl.old_tar_bytes,
+            d.versions[1]
+                .delta
+                .as_ref()
+                .expect("small delta")
+                .old_tar_bytes
+        );
+        let e = envelope(d.clone());
+        assert_eq!(check(&e), Vec::<String>::new());
+        assert!(render(&e).contains("Versions of `backup-versions-large`"));
+        let mut bad = d;
+        bad.versions_large[1].cumulative_unique_chunk_bytes += 1;
+        let found = check(&envelope(bad));
+        assert!(
+            found
+                .iter()
+                .any(|p| p.starts_with("/data/versions_large/1/")),
+            "{found:?}"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 Purpose: a reproducible, redistributable-by-recipe corpus that mirrors what people actually archive, so every size/speed claim is measured, never estimated. The builder downloads public sources and derives the rest; nothing private is ever included in the public profile. A `--private <dir>` mode measures the user's own folders locally with the same class scheme.
 
-Profiles: `small` (1–2 GB, for iteration and CI) and `full` (10–20 GB, for the Phase 0 report). Every source is pinned by URL + BLAKE3 in `corpus.lock`; a rebuild must produce a byte-identical `manifest.json`.
+Profiles: `small` (1–2 GB, for iteration and CI) and `full` (about 20–25 GB, for the Phase 0 report). Every source is pinned by URL + BLAKE3 in `corpus.lock`; a rebuild must produce a byte-identical `manifest.json`.
 
 | Class | What | Public source (licence) — small / full | Derived variants |
 |---|---|---|---|
@@ -10,6 +10,7 @@ Profiles: `small` (1–2 GB, for iteration and CI) and `full` (10–20 GB, for t
 | `photo-raw-png` | Lossless images: PNG screenshots/UI, PNG photos, BMP/TIFF | Kenney.nl asset packs (CC0) PNG textures/UI; CLIC 2021 / DIV2K PNG samples (research use); convert 50 JPEGs to PNG and BMP locally | — |
 | `office-pdf` | PDF, DOCX, XLSX, PPTX, DOC/XLS/PPT | Digital Corpora GovDocs1 threads (public US government documents; small: 1 thread ≈ 1,000 files; full: 5 threads); arXiv PDFs (CC-BY subset) | `office-versions`: open 30 DOCX/XLSX via LibreOffice headless (if available) and re-save with small text edits (3 versions each) |
 | `source-git` | A source tree with full git history | `git clone` of a permissively licensed mid-size repo (e.g., facebook/zstd, BSD) incl. `.git`; small: shallow 200 commits; full: full history | `backup-v1/v2/v3`: working-tree snapshots at 3 commits ~1 month apart |
+| `backup-versions-large` | Three working-tree snapshots of a large project, as folders `godot-v1`, `godot-v2`, `godot-v3` (profile `full` only; D-43) | `godotengine/godot` at tags `4.2-stable`, `4.3-stable`, `4.4-stable`, exported like `backup-versions` (git export, no `.git`), pinned by commit in `corpus.lock`. The folders are named `godot-v1`, `godot-v2`, `godot-v3` because source ids are unique across classes. Premise: each snapshot is expected to exceed the largest incumbent dictionary window (256 MiB, WinRAR `-md256m` in `bench/tools.toml`); the build's manifest verifies it and the report refuses to evaluate G2 if a version is smaller | The class gate G2 is evaluated on: estimate against the best measured tool that does not deduplicate across files (`dedup` flag in `bench/tools.toml`); deduplicating tools are printed as reference only |
 | `software-installed` | Installed application bits (PE, DLLs, resources) | Python embeddable package for Windows (PSF, ~25 MB); Git for Windows portable (GPL — used as *test data only*, never linked); 7-Zip extra console package | — |
 | `game-assets` | Textures, audio, models, scripts | Kenney.nl "All-in-1" style CC0 packs (PNG/OGG/OBJ/JSON) | — |
 | `logs-text` | Server/app logs, CSV, JSON lines | Loghub (LogPai) datasets: Apache, HDFS, Linux, Windows (research use); NYC taxi CSV sample (public domain) | `small-files`: 20,000 files < 8 KB cut from the logs/JSON (the small-file case) |
