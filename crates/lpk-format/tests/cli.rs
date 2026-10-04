@@ -298,3 +298,19 @@ fn list_escapes_control_characters() {
     assert_eq!(code, 0);
     assert_eq!(out, "File\t5\ta\\nb\\u{1b}c\n");
 }
+
+#[test]
+fn an_existing_target_is_left_untouched() {
+    let t = tempfile::tempdir().unwrap();
+    let (p, _) = sample(t.path());
+    let out_dir = t.path().join("out");
+    std::fs::create_dir_all(out_dir.join("docs")).unwrap();
+    std::fs::write(out_dir.join("docs").join("a.txt"), b"mine").unwrap();
+    let (code, _, err) = cli(&["extract", p.to_str().unwrap(), out_dir.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.starts_with("error: i/o error"), "{err}");
+    assert_eq!(
+        std::fs::read(out_dir.join("docs").join("a.txt")).unwrap(),
+        b"mine"
+    );
+}

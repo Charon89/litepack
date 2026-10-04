@@ -136,6 +136,8 @@ pub struct Writer<W: Write> {
     pending_chunks: u64,
     /// The first I/O error seen; every later call fails with it.
     failed: Option<(std::io::ErrorKind, String)>,
+    /// Set after a chunker broke the rules; every later call fails with it.
+    bad_chunk: Option<&'static str>,
 }
 
 impl<W: Write> std::fmt::Debug for Writer<W> {
@@ -200,6 +202,7 @@ impl<W: Write> Writer<W> {
             pending: Vec::new(),
             pending_chunks: 0,
             failed: None,
+            bad_chunk: None,
         })
     }
 
@@ -233,6 +236,9 @@ impl<W: Write> Writer<W> {
 
     /// Fail with the first I/O error this writer saw, if any.
     fn check_alive(&self) -> Result<(), FormatError> {
+        if let Some(reason) = self.bad_chunk {
+            return Err(FormatError::BadChunk { reason });
+        }
         match &self.failed {
             Some((kind, msg)) => Err(FormatError::Io(std::io::Error::new(*kind, msg.clone()))),
             None => Ok(()),
@@ -241,8 +247,10 @@ impl<W: Write> Writer<W> {
 
     /// Remember an I/O error so that later calls refuse.
     fn note<T>(&mut self, r: Result<T, FormatError>) -> Result<T, FormatError> {
-        if let Err(FormatError::Io(e)) = &r {
-            self.failed = Some((e.kind(), e.to_string()));
+        match &r {
+            Err(FormatError::Io(e)) => self.failed = Some((e.kind(), e.to_string())),
+            Err(FormatError::BadChunk { reason }) => self.bad_chunk = Some(reason),
+            _ => {}
         }
         r
     }
@@ -304,7 +312,9 @@ impl<W: Write> Writer<W> {
 
     /// Add a regular file: its bytes are read to the end, cut into chunks and
     /// appended to the current block. After an I/O error (from the input or
-    /// the output) the writer refuses every further call with that error.
+    /// the output) or a `BadChunk` the archive is abandoned: chunks already
+    /// added have no entry, and the writer refuses every further call with
+    /// that error.
     pub fn add_file(
         &mut self,
         path: &str,

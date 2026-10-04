@@ -646,3 +646,24 @@ fn corpus_round_trip() {
         );
     }
 }
+
+#[test]
+fn a_bad_chunk_abandons_the_writer() {
+    let data = vec![1u8; 30_000];
+    let mut w = Writer::with_chunker(
+        WriteOnly(Vec::new()),
+        small_options(),
+        Box::new(Rogue("oversize")),
+    )
+    .unwrap();
+    assert!(matches!(
+        w.add_file("f", EntryFlags::EMPTY, 0, &mut data.as_slice()),
+        Err(FormatError::BadChunk { .. })
+    ));
+    let mut empty: &[u8] = b"";
+    assert!(matches!(
+        w.add_file("g", EntryFlags::EMPTY, 0, &mut empty),
+        Err(FormatError::BadChunk { .. })
+    ));
+    assert!(matches!(w.finish(), Err(FormatError::BadChunk { .. })));
+}

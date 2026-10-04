@@ -174,31 +174,21 @@ fn info(path: &Path, out: &mut dyn Write) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Write one file next to its final name and rename it into place when it is
-/// complete; on any error the partial file is removed. An existing file or link
-/// at the target is an error (nothing is overwritten).
+/// Create the file at `target` (never replacing anything: `create_new`) and
+/// write the entry into it. If this call created the file and cannot finish it,
+/// the file is removed; a file that was already there is never touched.
 fn extract_file(a: &mut Archive<File>, e: &Entry, target: &Path) -> Result<(), FormatError> {
-    if std::fs::symlink_metadata(target).is_ok() {
-        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists).into());
-    }
-    let mut name = target.file_name().unwrap_or_default().to_os_string();
-    name.push(".lpk-partial");
-    let tmp = target.with_file_name(name);
-    let result = (|| -> Result<(), FormatError> {
-        let mut w = BufWriter::new(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?,
-        );
-        a.extract(e, &mut w)?;
-        w.flush()?;
-        drop(w);
-        std::fs::rename(&tmp, target)?;
-        Ok(())
-    })();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    let mut w = BufWriter::new(file);
+    let result = a
+        .extract(e, &mut w)
+        .and_then(|()| w.flush().map_err(FormatError::from));
+    drop(w);
     if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(target);
     }
     result
 }

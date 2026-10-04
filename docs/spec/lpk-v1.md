@@ -556,8 +556,8 @@ has the graph `[store]`; for such an archive the envelope declares `max_window` 
 `threads_hint` 0 and `decode_memory` equal to `max_block_plain`, the space of one block buffer; the encoded
 input a decoder reads beside it is not counted in `decode_memory`.
 
-A writer that meets an I/O error, on its input or its output, refuses every later call with that error: the
-archive being written is abandoned.
+A writer that meets an I/O error, on its input or its output, or a chunker that breaks the rules above, refuses
+every later call with that error: the archive being written is abandoned.
 
 Entries are written in strictly ascending path order (section 4). A writer refuses a path that is invalid, equal
 to the one before it or sorts before it.
@@ -592,9 +592,9 @@ anything:
   `con .txt` is refused as well as `CON.txt`; a component that contains `:`; or one that ends in a dot or a space
   is refused (`UnsafePath`).
 
-The tool does not overwrite an existing file and reuses existing directories. Each file is written under a
-temporary name beside its target and renamed into place when complete; a file that cannot be finished is
-removed. Paths in the tool's listing have control characters escaped.
+The tool does not overwrite an existing file and reuses existing directories. Each file is created with
+"create new" semantics at its final path; a file the tool created and could not finish is removed, and a file
+that was already there is left untouched. Paths in the tool's listing have control characters escaped.
 
 Errors of this section: `UnsortedEntries`, `InvalidPath`, `BadChunk`, `ChunkMismatch`, `FileSizeMismatch`,
 `ChunkIndexOutOfRange`, `SymlinkRefused`, `UnsafePath`.
