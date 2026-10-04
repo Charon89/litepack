@@ -1,0 +1,14 @@
+# Test passwords of the sealed vectors (not secrets).
+
+["sealed-aes.lpk"]
+password = "correct horse"
+
+["sealed-xchacha.lpk"]
+password = "battery staple"
+
+["sealed-listable.lpk"]
+password = "list me"
+
+["sealed-keyfile.lpk"]
+password = "two factors"
+keyfile = "sealed-keyfile.key"

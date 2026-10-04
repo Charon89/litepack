@@ -8,6 +8,8 @@ use lpk_format::{
 };
 use std::io::Write;
 
+pub mod sealed;
+
 /// Deterministic, moderately compressible bytes: words drawn from a small
 /// vocabulary by a xorshift generator.
 pub fn pattern(seed: u64, len: usize) -> Vec<u8> {

@@ -17,4 +17,13 @@ fn regenerate_vectors() {
         let bytes = build_vector(name, Some(&dict));
         std::fs::write(dir.join(name), bytes).unwrap();
     }
+    for name in common::sealed::SEALED_VECTORS {
+        std::fs::write(dir.join(name), common::sealed::build_sealed_vector(name)).unwrap();
+    }
+    std::fs::write(
+        dir.join(common::sealed::SEALED_KEYFILE),
+        common::sealed::sealed_keyfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("vectors.toml"), common::sealed::vectors_toml()).unwrap();
 }
