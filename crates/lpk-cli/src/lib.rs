@@ -85,6 +85,11 @@ struct AddArgs {
     /// Use no dictionaries (what the Fast tier does today: none is bundled).
     #[arg(long, conflicts_with = "balanced")]
     no_dictionaries: bool,
+    /// Do not deduplicate chunks (the Fast and Balanced tiers cut files with content-defined
+    /// chunking and store each distinct chunk once by default, across files and within a file).
+    /// This also returns to the fixed 1 MiB cut.
+    #[arg(long)]
+    no_dedup: bool,
     /// Print the counts and the stage times to stderr.
     #[arg(short, long)]
     verbose: bool,
@@ -121,7 +126,7 @@ fn core_exit(e: &CoreError) -> i32 {
 }
 
 fn add(a: &AddArgs, err: &mut dyn Write) -> i32 {
-    let pipeline = if a.store {
+    let mut pipeline = if a.store {
         Pipeline::store(StoreOptions::default())
     } else if a.balanced {
         let mut o = BalancedOptions::default();
@@ -148,6 +153,9 @@ fn add(a: &AddArgs, err: &mut dyn Write) -> i32 {
         }
         Pipeline::fast(o)
     };
+    if a.no_dedup {
+        pipeline.fold = None;
+    }
     match pipeline.run_file(&a.input, &a.archive) {
         Ok(s) => {
             if a.verbose {
@@ -192,7 +200,17 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
             b.lzma_encoder_memory
         );
     }
+    let _ = writeln!(
+        err,
+        "dedup: {} chunks and {} bytes referenced instead of stored ({} new chunks in the table, {} reused from an earlier generation)",
+        s.writer.deduped_chunks, s.writer.deduped_bytes, s.writer.new_chunks, s.writer.reused_chunks
+    );
     let p = &s.peel;
+    let _ = writeln!(
+        err,
+        "deduplicated whole: {} files ({} bytes), never peeled; peeled but the peeled part was already stored: {} files ({} bytes)",
+        p.deduplicated.files, p.deduplicated.bytes, p.primary_deduplicated.files, p.primary_deduplicated.bytes
+    );
     let _ = writeln!(
         err,
         "peel: {} files peeled ({} bytes in, {} bytes out), {} stored as-is",

@@ -2,8 +2,8 @@
 //! table's order), the store path (those inputs written with the writer's default store graph),
 //! the classifier and the entropy gate, clustering by class, and the Fast tier (zstd with a long
 //! window, optional caller-supplied dictionaries, one block per cluster) and the Balanced tier
-//! (LZMA or zstd per block by a trial on a sample). Fold, Peel, Model and
-//! Seal build on these names later.
+//! (LZMA or zstd per block by a trial on a sample). Fold (chunking and
+//! global dedup), Peel, Model and Seal build on these names later.
 //!
 //! Files are read through a plain `File` for every size, so every read failure is a
 //! [`CoreError::Io`] and never a process fault; a memory-mapped path may return when a measured
@@ -16,6 +16,7 @@ pub mod classify;
 pub mod cluster;
 pub mod error;
 pub mod fast;
+pub mod fold;
 pub mod gate;
 pub mod ingest;
 pub mod peel;
@@ -35,15 +36,14 @@ pub use fast::{
     archive_fast, archive_fast_file, DictionaryPolicy, FastHandle, FastOptions, FastSummary,
     ZstdEncoder,
 };
+pub use fold::{ChunkerKind, Dedup, FastCdcChunker, FoldOptions, FoldStage};
 pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
 pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 pub use peel::jpeg::register_full_reader;
 pub use peel::{
     Cause, Count, Fallback, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage, PeelSummary,
 };
-pub use pipeline::{
-    ClassifyStage, FoldStage, ModelStage, Pipeline, RunSummary, SealOptions, StageTimings,
-};
+pub use pipeline::{ClassifyStage, ModelStage, Pipeline, RunSummary, SealOptions, StageTimings};
 pub use priors::ProvidedDictionaries;
 pub use source::Source;
 pub use store::{archive_store, archive_store_file, write_inputs, StoreOptions};

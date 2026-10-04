@@ -340,6 +340,7 @@ fn registry_has_it_and_the_writer_round_trips() {
             records: Vec::new(),
             recovery: Default::default(),
             seal: None,
+            dedup: false,
         },
         &files,
     );
