@@ -182,6 +182,9 @@ fn spec_states_the_zstd_and_prior_rules() {
     let text = spec();
     for needle in [
         "## 10. Priors",
+        "## 11. Test vectors",
+        "gen_vectors -- --ignored",
+        "`zstd-dict.prior`",
         "### What the reference decoder enforces for `zstd`",
         "`WindowTooLarge`",
         "`MissingPrior`",
