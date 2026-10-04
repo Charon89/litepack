@@ -45,6 +45,17 @@ pub enum CoreError {
     /// An option outside the range the format or the encoder accepts.
     #[error("invalid option: {0}")]
     InvalidOption(String),
+    /// A block an extraction needs failed to decode or to check (`ChunkMismatch`, a damaged
+    /// frame, ...); names the block and the first file with a chunk in it.
+    #[error("block {block} (first file {path:?}): {source}")]
+    Decode {
+        /// The block's index in the block table.
+        block: usize,
+        /// The archive path of the first file placed in the block.
+        path: String,
+        /// The reader's error.
+        source: lpk_format::FormatError,
+    },
     /// An extraction's internal step failed (a decode worker stopped without a result).
     #[error("extraction: {0}")]
     Extract(&'static str),

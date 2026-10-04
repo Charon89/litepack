@@ -156,7 +156,9 @@ fn files_span_blocks_and_deduplicated_chunks_land_at_their_offsets() {
         assert_eq!(s.blocks_needed, blocks);
         // The dedup file's chunks are placed again: more placements than stored chunks.
         assert!(s.placements > a.chunks().len(), "{s:?}");
-        assert_eq!(s.workers, n.min(blocks as usize), "{s:?}");
+        let decoders = if n == 1 { 1 } else { n - (n / 4).clamp(1, 4) };
+        assert_eq!(s.workers, decoders.min(blocks as usize), "{s:?}");
+        assert!(s.workers + s.writers <= n.max(2), "{s:?}");
     }
 }
 
@@ -196,6 +198,7 @@ fn ten_thousand_small_files_decode_each_block_once() {
         .unwrap();
         assert_eq!(s.files, 10_000);
         assert_eq!(s.blocks_decoded, blocks, "{s:?}");
+        assert_eq!(s.nested_decodes, 0, "{s:?}");
         assert_eq!(s.blocks_needed, blocks, "{s:?}");
         let t = tree(&out);
         assert_eq!(t, expect(&files));
@@ -236,6 +239,10 @@ fn peeled_jpegs_next_to_plain_files_through_the_pool() {
         let s = extract(&bytes, &out, &threads(n)).unwrap();
         assert_eq!(tree(&out), want, "threads {n}");
         assert_eq!(s.blocks_decoded, s.blocks_needed);
+        println!(
+            "threads {n}: {} blocks decoded, {} nested decodes",
+            s.blocks_decoded, s.nested_decodes
+        );
     }
     // The same through a file on disk (each worker opens it again).
     let w = tempfile::tempdir().unwrap();
@@ -274,7 +281,7 @@ fn a_corrupted_chunk_fails_with_chunk_mismatch_and_leaves_no_partial_file() {
         let out = d.path().join("out");
         let e = extract(&bad, &out, &threads(n)).unwrap_err();
         assert!(
-            matches!(e, CoreError::Format(FormatError::ChunkMismatch { chunk }) if chunk == last),
+            matches!(&e, CoreError::Decode { block: 2, path, source: FormatError::ChunkMismatch { chunk } } if *chunk == last && !path.is_empty()),
             "{e:?}"
         );
         // Whatever is left is complete and right; the files of the damaged block are gone.
@@ -297,7 +304,7 @@ fn the_memory_bound_reduces_the_pool() {
         (1, 1),
         (cost, 1),
         (2 * cost + 1, 2),
-        (u64::MAX, blocks.min(8)),
+        (u64::MAX, blocks.min(6)),
     ] {
         let d = tempfile::tempdir().unwrap();
         let out = d.path().join("out");
@@ -408,6 +415,11 @@ impl ExtractPolicy for Recording {
         self.0.lock().unwrap().push(format!("overwrite {name}"));
         Ok(())
     }
+    fn linked_parent(&self, dir: &Path) -> Result<(), FormatError> {
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        self.0.lock().unwrap().push(format!("linked {name}"));
+        Ok(())
+    }
     fn device(&self, path: &str) -> Result<(), FormatError> {
         self.0.lock().unwrap().push(format!("device {path}"));
         Ok(())
@@ -464,4 +476,146 @@ fn modification_times_are_restored() {
         assert_eq!(std::fs::read(dir.join("big.bin")).unwrap(), big);
         assert_eq!(std::fs::read(dir.join("unknown")).unwrap(), b"u");
     }
+}
+
+/// A store decoder that panics on its `at`-th call (counting from one).
+struct PanicStore {
+    calls: std::sync::atomic::AtomicUsize,
+    at: usize,
+}
+
+impl lpk_format::PrimitiveDecoder for PanicStore {
+    fn decode(
+        &self,
+        _params: &[u8],
+        input: &[u8],
+        _expected_len: u64,
+        _limits: &Resources,
+    ) -> Result<Vec<u8>, FormatError> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        assert!(n != self.at, "test decoder panics on call {n}");
+        Ok(input.to_vec())
+    }
+}
+
+#[test]
+fn a_panicking_decoder_stops_the_pool_cleans_up_and_resumes_the_panic() {
+    let files = mixed();
+    let bytes = pack(&files, options());
+    let want = expect(&files);
+    for n in [1, 4, 8] {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (b, o) = (bytes.clone(), out.clone());
+        std::thread::spawn(move || {
+            let r = std::panic::catch_unwind(|| {
+                let mut a = Archive::open(Cursor::new(b.clone()), &Resources::default()).unwrap();
+                a.registry_mut().register(
+                    lpk_format::PrimitiveId::Store,
+                    Box::new(PanicStore {
+                        calls: std::sync::atomic::AtomicUsize::new(0),
+                        at: 4,
+                    }),
+                );
+                extract_archive(
+                    &mut a,
+                    || Ok(Cursor::new(b.clone())),
+                    &o,
+                    &DefaultPolicy,
+                    &threads(n),
+                )
+            });
+            let _ = tx.send(r.is_err());
+        });
+        let panicked = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the extraction hung");
+        assert!(panicked, "threads {n}: the panic was not resumed");
+        for (p, h) in tree(&out) {
+            assert_eq!(
+                want.get(&p),
+                Some(&h),
+                "threads {n}: {p} is partial or wrong"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_writer_error_fails_the_extraction_and_cleans_up() {
+    let files = mixed();
+    let bytes = pack(&files, options());
+    let a = Archive::open(Cursor::new(bytes.clone()), &Resources::default()).unwrap();
+    let last = a.index().blocks.len() - 1;
+    // c.txt is the last file written: its chunk lies in the last block.
+    let mut a = a;
+    let entries: Vec<Entry> = a
+        .entry_table()
+        .unwrap()
+        .table()
+        .unwrap()
+        .iter()
+        .map(|e| e.unwrap())
+        .filter(|e| e.path == "c.txt")
+        .collect();
+    assert_eq!(a.chunks().locate(entries[0].chunks[0]).unwrap().block, last);
+    let want = expect(&files);
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("c.txt"), b"mine").unwrap();
+    let p = Recording::default();
+    let e = extract_with(&bytes, &out, &threads(8), &p).unwrap_err();
+    assert!(
+        matches!(&e, CoreError::Io { path, source } if path.ends_with("c.txt") && source.kind() == std::io::ErrorKind::AlreadyExists),
+        "{e:?}"
+    );
+    assert_eq!(std::fs::read(out.join("c.txt")).unwrap(), b"mine");
+    for (p, h) in tree(&out) {
+        if p != "c.txt" {
+            assert_eq!(want.get(&p), Some(&h), "{p} is partial or wrong");
+        }
+    }
+}
+
+#[test]
+fn a_linked_parent_is_refused() {
+    let files = mixed();
+    let bytes = pack(&files, options());
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    let elsewhere = d.path().join("elsewhere");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let link = out.join("a");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&elsewhere)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !made {
+            println!("SKIPPED: mklink /J refused on this machine");
+            return;
+        }
+    }
+    let e = extract(&bytes, &out, &threads(4)).unwrap_err();
+    assert!(
+        matches!(
+            &e,
+            CoreError::Format(FormatError::UnsafePath {
+                reason: "linked parent",
+                ..
+            })
+        ),
+        "{e:?}"
+    );
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    assert!(!out.join("c.txt").exists());
 }
