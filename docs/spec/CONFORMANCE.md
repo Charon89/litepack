@@ -62,7 +62,8 @@ Every line ends with LF. A failing command prints `error: <message>` on stderr a
 - `list`: one line per entry, `<Kind>\t<size>\t<path>` with `Kind` one of `File`, `Directory`, `Symlink`, control
   characters in the path escaped.
 - `verify`: `ok: <entries> entries, <chunks> chunks, <blocks> blocks`; without the key,
-  `ok (frame hashes only, chunks not checked without the password): <entries> entries`.
+  `ok (frame hashes only, chunks not checked without the password): <entries> entries`, where `<entries>` is the
+  entry count when the entry table is readable (a listable archive) and `0` when it is sealed.
 - `check` and `repair`: `recovery frames: <n>, unusable: <n>, damaged shards: <n>, repaired shards: <n>`; `check`
   exits 1 with `error: damage found: <n> shards damaged, <n> recovery frames unusable` on stderr when it finds
   damage.
