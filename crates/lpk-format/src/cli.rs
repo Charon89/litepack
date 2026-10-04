@@ -135,6 +135,45 @@ pub fn check_extraction_path(path: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
+/// The device rule of [`check_extraction_path`] alone: a component may not be
+/// a Windows device name (the same list, matched the same way). Refused with
+/// `UnsafePath` and the reason "reserved device name".
+pub fn check_reserved_device(path: &str) -> Result<(), FormatError> {
+    if path.split('/').any(is_reserved_device) {
+        return Err(FormatError::UnsafePath {
+            path: path.to_string(),
+            reason: "reserved device name",
+        });
+    }
+    Ok(())
+}
+
+/// The tool extracts no symlink: a symlink entry is `SymlinkRefused`, any
+/// other entry passes.
+pub fn refuse_symlink(entry: &Entry) -> Result<(), FormatError> {
+    if entry.kind == EntryKind::Symlink {
+        return Err(FormatError::SymlinkRefused {
+            path: entry.path.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// The tool never replaces anything: a file target that already exists (a
+/// file, a directory, a symlink, even a dangling one) is an I/O error of kind
+/// `AlreadyExists`, the error the tool's create-new open reports. Checking
+/// first lets an extraction refuse before it writes anything; the open stays
+/// create-new.
+pub fn check_no_overwrite(target: &Path) -> Result<(), FormatError> {
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(FormatError::from(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{}: already exists", target.display()),
+        )));
+    }
+    Ok(())
+}
+
 /// Refuse a path one of whose parents is an entry that is not a directory
 /// (such as a file `a` beside `a/b`): `UnsafePath` with the reason
 /// "conflicting name", before anything is written. Missing parent
@@ -458,11 +497,7 @@ fn extract(
     let all = entries(&mut a)?;
     // Refuse before writing anything.
     for e in &all {
-        if e.kind == EntryKind::Symlink {
-            return Err(FormatError::SymlinkRefused {
-                path: e.path.clone(),
-            });
-        }
+        refuse_symlink(e)?;
         check_extraction_path(&e.path)?;
     }
     check_conflicting_names(&all)?;

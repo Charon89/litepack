@@ -442,3 +442,45 @@ fn check_on_an_archive_without_recovery_reports_zero_frames() {
         "recovery frames: 0, unusable: 0, damaged shards: 0, repaired shards: 0\n"
     );
 }
+
+#[test]
+fn the_policy_rules_are_callable_one_by_one() {
+    use lpk_format::cli::{check_no_overwrite, check_reserved_device, refuse_symlink};
+    use lpk_format::{Entry, EntryKind};
+    assert!(check_reserved_device("a/b.txt").is_ok());
+    assert!(check_reserved_device("a:b").is_ok());
+    for bad in ["CON", "a/nul.txt", "com1", "LPT9.x/y"] {
+        assert!(matches!(
+            check_reserved_device(bad),
+            Err(FormatError::UnsafePath {
+                reason: "reserved device name",
+                ..
+            })
+        ));
+    }
+    let mut e = Entry {
+        kind: EntryKind::Symlink,
+        flags: EntryFlags::EMPTY,
+        path: "l".into(),
+        mtime_ns: 0,
+        size: 1,
+        symlink_target: Some(b"x".to_vec()),
+        chunks: Vec::new(),
+    };
+    assert!(matches!(
+        refuse_symlink(&e),
+        Err(FormatError::SymlinkRefused { .. })
+    ));
+    e.kind = EntryKind::File;
+    e.symlink_target = None;
+    assert!(refuse_symlink(&e).is_ok());
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("f");
+    assert!(check_no_overwrite(&p).is_ok());
+    std::fs::write(&p, b"x").unwrap();
+    assert!(matches!(
+        check_no_overwrite(&p),
+        Err(FormatError::Io(ref e)) if e.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+    assert!(check_no_overwrite(d.path()).is_err());
+}

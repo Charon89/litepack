@@ -397,6 +397,46 @@ impl<R: Read + Seek> Archive<R> {
         Ok(())
     }
 
+    /// Decode block `block` and return its plain bytes, every chunk of the
+    /// block checked against the chunk table first: the first chunk whose
+    /// length or BLAKE3 differs is that chunk's `ChunkMismatch`, a block frame
+    /// that fails its hash is `HashMismatch { kind: 2 }`. The checks and the
+    /// decode are exactly those of [`Archive::extract`] (the envelope, the
+    /// priors, the records and the nesting rule of revision 1.1, the chunks a
+    /// record names read through this archive); the plain bytes are handed to
+    /// the caller and not kept in the one-block cache. A chunk `c` of the
+    /// block lies at its `ChunkIndex::locate(c).offset_in_block`.
+    pub fn decode_block_checked(&mut self, block: usize) -> Result<Vec<u8>, FormatError> {
+        self.need_index()?;
+        let range = self
+            .block_chunks(block)
+            .ok_or(FormatError::BlockCoverage { block })?;
+        ArchiveChunks::new(self).load(block)?;
+        let plain = match self.cache.take() {
+            Some((b, plain)) if b == block => plain,
+            _ => return Err(FormatError::BlockLengthMismatch { block }),
+        };
+        let table = self.chunks_arc();
+        for c in range {
+            let len = table.len();
+            let rec = table
+                .record(c)
+                .ok_or(FormatError::ChunkIndexOutOfRange { chunk: c, len })?;
+            let place = table
+                .locate(c)
+                .ok_or(FormatError::ChunkIndexOutOfRange { chunk: c, len })?;
+            let data = usize::try_from(place.offset_in_block)
+                .ok()
+                .and_then(|s| Some(s..s.checked_add(usize::try_from(rec.plain_len).ok()?)?))
+                .and_then(|r| plain.get(r))
+                .ok_or(FormatError::BlockLengthMismatch { block })?;
+            if blake3::hash(data).as_bytes() != &rec.hash {
+                return Err(FormatError::ChunkMismatch { chunk: c });
+            }
+        }
+        Ok(plain)
+    }
+
     /// Check the whole archive without writing anything: every block is
     /// decoded and every chunk compared with its table record (so a chunk the
     /// entries do not use is checked too; a block frame that fails its hash is

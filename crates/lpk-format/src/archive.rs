@@ -712,6 +712,39 @@ impl<R: Read + Seek> Archive<R> {
         Arc::clone(&self.chunks)
     }
 
+    /// A second reader of the same archive over `reader` (another handle on
+    /// the same bytes): the opened state — header, trailer, index, chunk
+    /// table (shared), key, limits and the registry with every decoder
+    /// registered so far (shared) — is copied, nothing is read again and no
+    /// check is repeated; the block cache starts empty. A parallel extraction
+    /// gives each decode worker one. The caller vouches that `reader` holds
+    /// the bytes this archive was opened from.
+    pub fn fork<R2: Read + Seek>(&self, reader: R2) -> Archive<R2> {
+        Archive {
+            reader,
+            limits: self.limits,
+            resources: self.resources,
+            header: self.header,
+            trailer: self.trailer,
+            index: self.index.clone(),
+            chunks: Arc::clone(&self.chunks),
+            registry: self.registry.clone(),
+            cache: None,
+            record_count: self.record_count,
+            sealer: self.sealer.clone(),
+            key_slot: self.key_slot.clone(),
+            keyless: self.keyless,
+        }
+    }
+
+    /// The chunk indices of block `block` (`first_chunk..first_chunk +
+    /// chunk_count` of its block location); `None` past the end of the block
+    /// table.
+    pub fn block_chunks(&self, block: usize) -> Option<std::ops::Range<u64>> {
+        let b = self.index.blocks.get(block)?;
+        Some(b.first_chunk..b.first_chunk.saturating_add(b.chunk_count))
+    }
+
     /// The registry of primitive decoders blocks are decoded with; register
     /// further decoders here before reading.
     pub fn registry_mut(&mut self) -> &mut Registry {

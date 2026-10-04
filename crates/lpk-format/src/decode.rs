@@ -142,9 +142,11 @@ impl PrimitiveDecoder for Unimplemented {
 }
 
 /// One decoder per primitive of the registry, and the store of priors the
-/// decoders that need one look them up in.
+/// decoders that need one look them up in. Cloning shares the decoders (a
+/// parallel reader gives each worker its own registry over the same ones).
+#[derive(Clone)]
 pub struct Registry {
-    decoders: Vec<Box<dyn PrimitiveDecoder>>,
+    decoders: Vec<Arc<dyn PrimitiveDecoder>>,
     implemented: Vec<bool>,
     priors: Arc<dyn PriorStore>,
 }
@@ -165,12 +167,12 @@ impl Registry {
         let priors: Arc<dyn PriorStore> = Arc::new(NoPriors);
         let decoders = PrimitiveId::ALL
             .iter()
-            .map(|&p| -> Box<dyn PrimitiveDecoder> {
+            .map(|&p| -> Arc<dyn PrimitiveDecoder> {
                 match p {
-                    PrimitiveId::Store => Box::new(StoreDecoder),
-                    PrimitiveId::Zstd => Box::new(ZstdDecoder::new(Arc::clone(&priors))),
-                    PrimitiveId::Lzma => Box::new(LzmaDecoder),
-                    other => Box::new(Unimplemented(other)),
+                    PrimitiveId::Store => Arc::new(StoreDecoder),
+                    PrimitiveId::Zstd => Arc::new(ZstdDecoder::new(Arc::clone(&priors))),
+                    PrimitiveId::Lzma => Arc::new(LzmaDecoder),
+                    other => Arc::new(Unimplemented(other)),
                 }
             })
             .collect();
@@ -195,7 +197,7 @@ impl Registry {
     /// after this call). Other decoders are kept.
     pub fn with_priors(mut self, store: Box<dyn PriorStore>) -> Registry {
         let store: Arc<dyn PriorStore> = Arc::from(store);
-        self.decoders[PrimitiveId::Zstd as usize] = Box::new(ZstdDecoder::new(Arc::clone(&store)));
+        self.decoders[PrimitiveId::Zstd as usize] = Arc::new(ZstdDecoder::new(Arc::clone(&store)));
         self.priors = store;
         self
     }
@@ -207,7 +209,7 @@ impl Registry {
     pub fn nested(&self) -> Registry {
         let mut r = Registry::v1();
         r.decoders[PrimitiveId::Zstd as usize] =
-            Box::new(ZstdDecoder::new(Arc::clone(&self.priors)));
+            Arc::new(ZstdDecoder::new(Arc::clone(&self.priors)));
         r.priors = Arc::clone(&self.priors);
         r
     }
@@ -230,7 +232,7 @@ impl Registry {
 
     /// Replace the decoder of `id` (how the zstd and LZMA decoders plug in).
     pub fn register(&mut self, id: PrimitiveId, decoder: Box<dyn PrimitiveDecoder>) {
-        self.decoders[id as usize] = decoder;
+        self.decoders[id as usize] = Arc::from(decoder);
         self.implemented[id as usize] = true;
     }
 }
