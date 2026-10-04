@@ -51,6 +51,9 @@ One TOML table per vector, named by the file name in quotes (`["zstd-basic.lpk"]
 | `shards_repaired_by_repair` | integer | the same | shards `repair` rebuilds |
 | `repaired_copy_equals` | string | the same | the vector whose bytes the repaired copy equals |
 | `check_stdout`, `check_stderr`, `check_exit` | string, string, integer | the same | the stdout, stderr and exit code of `lpk-decode check` |
+| `info` | string | `jpeg-peel.lpk` | the stdout of `lpk-decode info` |
+| `error_1_0`, `message_1_0` | string | `jpeg-peel.lpk` | the error class a revision 1.0 reader's `verify` reports (`UnimplementedPrimitive`) and the reference reader's message (informative) |
+| `verify_exit_1_0`, `verify_stderr_1_0` | integer, string | `jpeg-peel.lpk` | the exit code and stderr of `lpk-decode verify` (a 1.0 reader) |
 
 A decoder needs only `files`, `latest_generation`, `files_at_generation_<g>`, `error` and the recovery counts; the
 stdout strings matter only to a decoder that prints the reference formats.
@@ -93,6 +96,7 @@ Graph = the block graph of the data blocks. Recovery = recovery frames present. 
 | `malformed-truncated.lpk` | zstd | no | 1 | nothing | not a valid archive: see below |
 | `malformed-hashflip.lpk` | zstd | no | 1 | nothing | not a valid archive: see below |
 | `malformed-recovery-damaged.lpk` | store | yes | 1 | nothing | one damaged data shard: `check` reports it, `repair` restores `recovery-groups.lpk` |
+| `jpeg-peel.lpk` | zstd/store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 1 | a revision 1.1 reader | a peeled JPEG: the primary image as a Lepton stream in a block of its own, an MPF secondary image and trailing data as nested chunks in a lower block, one `jpeg` record; see below |
 
 The passwords and the keyfile are also in `tests/vectors/vectors.toml` (test values, not secrets). The four sealed
 vectors (`sealed-*`) decode to the same three files.
@@ -103,8 +107,16 @@ Recovery expectations (`expected.toml`): for `recovery-groups.lpk` `check` print
 reports 1 damaged shard and exits 1, and `repair` writes a copy that is byte-identical to `recovery-groups.lpk`
 (1 shard repaired). The other vectors carry no recovery frames, so `check` finds nothing to scan on them.
 
-The vectors do not exercise the reconstruction primitives (7 to 12), which have no decoder in v1 yet; a decoder that
-meets one reports `UnimplementedPrimitive` and does not guess.
+Apart from `jpeg-peel.lpk`, the vectors do not exercise the reconstruction primitives (7 to 12); a decoder that
+meets one it does not run reports `UnimplementedPrimitive` and does not guess.
+
+`jpeg-peel.lpk` (revision 1.1). A revision 1.0 decoder MUST open it, list it (`list` in `expected.toml`), print
+`info` (`format: 1.1`, `records: true`), and report `UnimplementedPrimitive` with the ID 7 from `verify` and from
+extracting `photo.jpg` (`error_1_0`, `message_1_0`, `verify_exit_1_0`, `verify_stderr_1_0`); it never writes a
+partial file. A revision 1.1 decoder MUST extract `photo.jpg` to the bytes whose size and BLAKE3-256 are given in
+`expected-1.1.toml` (key `files`) and `verify` it (`verify`, the stdout of the full reader's `verify`); the primary
+image is the Lepton stream's decoding, and the record's `original_hash` is checked over the assembled file
+(spec section 8). `expected-1.1.toml` is checked by `cargo test -p lpk-core --test jpeg_vector`.
 
 ## Malformed vectors
 

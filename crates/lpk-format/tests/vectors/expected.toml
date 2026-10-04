@@ -133,6 +133,14 @@ list = "File\t6000\tr/a.txt\nFile\t9000\tr/b.txt\nFile\t15000\tr/c.txt\n"
 verify = "ok: 3 entries, 9 chunks, 9 blocks\n"
 check = "recovery frames: 3, unusable: 0, damaged shards: 0, repaired shards: 0\n"
 
+["jpeg-peel.lpk"]
+list = "File\t19559\tphoto.jpg\n"
+info = "format: 1.1\nheader flags: 0x0\narchive id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\ngeneration: 0\nchain length: 1\nlength: 16992 bytes\nentries: 1\nchunks: 8\nblocks: 2\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 57249adf29806c5fdc05610377948180f23f0f79c6afdbc496eb06d2cd4e5527\nenvelope max_window: 0\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 17422\nenvelope max_frame_payload: 13952\nenvelope decode_memory: 67273742\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0007 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0007 is not implemented by this reader\n"
+
 ["malformed-truncated.lpk"]
 error = "Truncated"
 message = "input truncated in trailer"

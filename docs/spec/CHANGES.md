@@ -74,3 +74,17 @@ the newer index's offset (section 15, "The trailer chain").
 
 2026-10-04: Section 16 gains the writer class `DuplicateEntry`; section 9 describes per-block graphs, adds in any
 order and early block close. No reader behaviour or vector byte changed.
+
+## 2026-10-04 — revision 1.1: jpeg-reconstruct decoding
+
+1. `version_minor` 1 marks an archive one of whose blocks names a primitive of revision 1.1; a 1.0 reader accepts it
+   and reports `UnimplementedPrimitive` (7) on those blocks (section 2; code: the writer refuses a 1.1 primitive in a
+   minor-0 archive).
+2. `jpeg-reconstruct` decodes one Lepton stream (`lepton_jpeg` 0.5.x, `lepton_version` 0) into the primary image;
+   the original is assembled from the record and checked against `original_len` and `original_hash`; errors are
+   `BadRecord` with the reasons `kind`, `lepton_version`, `lepton stream`, `primary_len`, `original_hash`, `chunk
+   order`; `decode_memory` covers the writer's computed bound (section 8).
+3. How the reference writer lays out a peeled JPEG: nested parts first, then the record, then the primary image as a
+   block of its own (section 9, informative).
+4. New vector `jpeg-peel.lpk` with `expected.toml` (1.0 reader: list, info, `UnimplementedPrimitive`) and
+   `expected-1.1.toml` (full reader: files, verify). No byte of an earlier vector changed.

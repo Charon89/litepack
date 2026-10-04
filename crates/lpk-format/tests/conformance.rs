@@ -17,6 +17,9 @@ use std::io::Cursor;
 
 const TRUNCATED: &str = "malformed-truncated.lpk";
 const HASHFLIP: &str = "malformed-hashflip.lpk";
+/// The revision 1.1 vector, written by lpk-core's JPEG peel (its full-reader expectations are
+/// in `expected-1.1.toml`, checked by lpk-core's `tests/jpeg_vector.rs`).
+const JPEG_VECTOR: &str = "jpeg-peel.lpk";
 
 fn read(name: &str) -> Vec<u8> {
     std::fs::read(vectors_dir().join(name)).unwrap()
@@ -156,6 +159,24 @@ fn render() -> String {
             }
         }
     }
+    // A 1.0 reader on the revision 1.1 vector: it lists and describes the archive and reports
+    // `UnimplementedPrimitive` (id 7) for the peeled block.
+    let p = dir.join(JPEG_VECTOR);
+    let p = p.to_str().unwrap();
+    writeln!(s, "\n[\"{JPEG_VECTOR}\"]").unwrap();
+    for cmd in ["list", "info"] {
+        let (code, out, err) = cli(&["lpk-decode", cmd, p]);
+        assert_eq!((code, err.as_str()), (0, ""), "{JPEG_VECTOR} {cmd}");
+        writeln!(s, "{cmd} = {out:?}").unwrap();
+    }
+    let err = open(read(JPEG_VECTOR), JPEG_VECTOR, None)
+        .verify()
+        .unwrap_err();
+    writeln!(s, "error_1_0 = {:?}", variant(&err)).unwrap();
+    writeln!(s, "message_1_0 = {:?}", err.to_string()).unwrap();
+    let (code, _, err) = cli(&["lpk-decode", "verify", p]);
+    writeln!(s, "verify_exit_1_0 = {code}").unwrap();
+    writeln!(s, "verify_stderr_1_0 = {err:?}").unwrap();
     let (truncated, flipped) = malformed();
     for (name, bytes) in [(TRUNCATED, truncated), (HASHFLIP, flipped)] {
         let err = match Archive::open(Cursor::new(bytes), &Resources::default()) {
@@ -235,6 +256,7 @@ fn every_frame_of_every_vector_is_accounted_for() {
     names.extend(SEALED_VECTORS);
     names.push(JOURNAL_VECTOR);
     names.push(RECOVERY_VECTOR);
+    names.push(JPEG_VECTOR);
     for name in names {
         let bytes = read(name);
         let mut a = open(bytes.clone(), name, creds_of(name).as_ref());
