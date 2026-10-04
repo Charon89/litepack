@@ -70,8 +70,8 @@ pub use record::{
     RecordsTable, RecordsWriter, SecondaryImage, Utf16Record, RECORD_COUNT_BOUND,
 };
 pub use recovery::{
-    recovery_layout_table, shard_geometry, RecoveryFrame, RecoveryOptions, DEFAULT_SHARD_LEN,
-    MAX_DATA_SHARDS, MAX_PERCENT, MAX_TOTAL_SHARDS, SHARD_ALIGN,
+    recovery_layout_table, repair, shard_geometry, RecoveryFrame, RecoveryOptions, RepairReport,
+    DEFAULT_SHARD_LEN, MAX_DATA_SHARDS, MAX_PERCENT, MAX_TOTAL_SHARDS, SHARD_ALIGN,
 };
 pub use writer::{
     BlockEncoder, Chunker, FixedChunker, StoreEncoder, Writer, WriterOptions, WriterSummary,

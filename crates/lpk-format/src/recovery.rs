@@ -1,8 +1,13 @@
 //! Recovery frames: Reed-Solomon shards over the body of the archive, which let a
 //! reader rebuild damaged bytes (spec section 13).
 
+use crate::archive::Archive;
+use crate::envelope::Resources;
 use crate::error::FormatError;
+use crate::frame::FrameKind;
 use crate::header::Header;
+use reed_solomon_simd::ReedSolomonDecoder;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Shard lengths are multiples of this many bytes.
 pub const SHARD_ALIGN: u32 = 64;
@@ -296,7 +301,6 @@ impl ShardSpool {
     }
 
     fn complete(&mut self) -> std::io::Result<()> {
-        use std::io::Write;
         self.buf.resize(self.shard_len, 0);
         self.hashes.push(*blake3::hash(&self.buf).as_bytes());
         self.file.write_all(&self.buf)?;
@@ -323,7 +327,6 @@ impl ShardSpool {
     /// Close the covered range and encode: the geometry comes from
     /// `percent`; the frame's `cover_offset` is the end of the header.
     pub(crate) fn finish(mut self, percent: u8) -> Result<Encoded, FormatError> {
-        use std::io::{Read, Seek, SeekFrom};
         if !self.buf.is_empty() {
             self.complete()?;
         }
@@ -353,6 +356,184 @@ impl ShardSpool {
             },
             encoder,
         })
+    }
+}
+
+/// What a recovery scan found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RepairReport {
+    /// Recovery frames the index lists.
+    pub frames: u64,
+    /// Frames whose own hash (or location) failed: skipped, their coverage is
+    /// unprotected.
+    pub frames_unusable: u64,
+    /// Data shards whose hash differs from the frame's, over all usable frames.
+    pub shards_damaged: u64,
+    /// Shards rebuilt and written to the repaired copy.
+    pub shards_repaired: u64,
+}
+
+/// Read data shard `i` of `frame` from `r`, zero-padded to `shard_len`.
+fn read_shard<R: Read + Seek>(
+    r: &mut R,
+    frame: &RecoveryFrame,
+    i: u32,
+    buf: &mut Vec<u8>,
+) -> Result<(), FormatError> {
+    let (offset, len) = frame.shard_range(i);
+    r.seek(SeekFrom::Start(offset))?;
+    buf.clear();
+    buf.resize(len, 0);
+    r.read_exact(buf)?;
+    buf.resize(frame.shard_len as usize, 0);
+    Ok(())
+}
+
+/// Walk the recovery frames: for each usable one, hash its data shards and
+/// call `visit(archive, position, frame, damaged)` with the damaged shard
+/// numbers (ascending, possibly none); `visit` returns the shards it repaired.
+fn scan<R: Read + Seek>(
+    a: &mut Archive<R>,
+    mut visit: impl FnMut(&mut Archive<R>, usize, &RecoveryFrame, &[u32]) -> Result<u64, FormatError>,
+) -> Result<RepairReport, FormatError> {
+    let locations = a.recovery_frames().to_vec();
+    let index_at = a.trailer().index_offset;
+    let mut report = RepairReport {
+        frames: locations.len() as u64,
+        ..RepairReport::default()
+    };
+    let mut buf = Vec::new();
+    for (i, loc) in locations.into_iter().enumerate() {
+        let payload = match a.read_frame_at(loc, FrameKind::Recovery) {
+            Ok(f) => f.payload,
+            Err(FormatError::Io(e)) => return Err(FormatError::Io(e)),
+            // A damaged frame (hash, kind or length): skipped.
+            Err(_) => {
+                report.frames_unusable += 1;
+                continue;
+            }
+        };
+        let frame = RecoveryFrame::parse(&payload, index_at)?;
+        drop(payload);
+        let mut damaged = Vec::new();
+        for s in 0..frame.data_shards {
+            read_shard(a.raw_reader(), &frame, s, &mut buf)?;
+            if blake3::hash(&buf).as_bytes() != &frame.shard_hashes[s as usize] {
+                damaged.push(s);
+            }
+        }
+        report.shards_damaged += damaged.len() as u64;
+        report.shards_repaired += visit(a, i, &frame, &damaged)?;
+    }
+    Ok(report)
+}
+
+/// Rebuild the damaged shards of `frame`: the shard number and its bytes
+/// (padded), each checked against the frame's hash.
+fn rebuild<R: Read + Seek>(
+    r: &mut R,
+    frame: &RecoveryFrame,
+    damaged: &[u32],
+) -> Result<Vec<(u32, Vec<u8>)>, FormatError> {
+    let shard_len = frame.shard_len as usize;
+    let mut decoder = ReedSolomonDecoder::new(
+        frame.data_shards as usize,
+        frame.recovery_shards as usize,
+        shard_len,
+    )
+    .map_err(rs_error)?;
+    let mut buf = Vec::new();
+    for s in 0..frame.data_shards {
+        if damaged.binary_search(&s).is_err() {
+            read_shard(r, frame, s, &mut buf)?;
+            decoder
+                .add_original_shard(s as usize, &buf)
+                .map_err(rs_error)?;
+        }
+    }
+    for (j, shard) in frame
+        .recovery
+        .chunks_exact(shard_len)
+        .take(damaged.len())
+        .enumerate()
+    {
+        decoder.add_recovery_shard(j, shard).map_err(rs_error)?;
+    }
+    let result = decoder.decode().map_err(rs_error)?;
+    let mut fixed = Vec::with_capacity(damaged.len());
+    for (idx, bytes) in result.restored_original_iter() {
+        let ok = frame
+            .shard_hashes
+            .get(idx)
+            .is_some_and(|h| blake3::hash(bytes).as_bytes() == h);
+        if !ok {
+            return Err(FormatError::RecoveryError {
+                reason: "a rebuilt shard does not match its hash".to_string(),
+            });
+        }
+        fixed.push((idx as u32, bytes.to_vec()));
+    }
+    if fixed.len() != damaged.len() {
+        return Err(FormatError::RecoveryError {
+            reason: "the decoder rebuilt the wrong number of shards".to_string(),
+        });
+    }
+    Ok(fixed)
+}
+
+impl<R: Read + Seek> Archive<R> {
+    /// Detect damage without repairing: hash every data shard of every usable
+    /// recovery frame and count the damaged ones. `shards_repaired` is 0.
+    pub fn check_recovery(&mut self) -> Result<RepairReport, FormatError> {
+        scan(self, |_, _, _, _| Ok(0))
+    }
+}
+
+/// Copy the archive `archive` to `out`, repairing what the recovery frames
+/// can rebuild (spec section 13). The archive must open (a damaged index is
+/// returned as the error `Archive::open` gives, and nothing is written). If a
+/// frame has more damaged shards than it can rebuild, the copy still carries
+/// every repair the other frames made and the first such frame is returned as
+/// [`FormatError::Unrepairable`]. Memory: one shard while scanning; a frame
+/// with damage is rebuilt with its whole covered range in the decoder.
+pub fn repair<R: Read + Seek, W: Write + Seek>(
+    archive: R,
+    mut out: W,
+    resources: &Resources,
+) -> Result<RepairReport, FormatError> {
+    let mut a = Archive::open(archive, resources)?;
+    {
+        let r = a.raw_reader();
+        r.seek(SeekFrom::Start(0))?;
+        out.seek(SeekFrom::Start(0))?;
+        std::io::copy(r, &mut out)?;
+    }
+    let mut unrepairable = None;
+    let report = scan(&mut a, |a, i, frame, damaged| {
+        if damaged.is_empty() {
+            return Ok(0);
+        }
+        let capacity = u64::from(frame.recovery_shards);
+        if damaged.len() as u64 > capacity {
+            unrepairable.get_or_insert(FormatError::Unrepairable {
+                frame: i,
+                damaged: damaged.len() as u64,
+                capacity,
+            });
+            return Ok(0);
+        }
+        let fixed = rebuild(a.raw_reader(), frame, damaged)?;
+        for (s, bytes) in &fixed {
+            let (offset, len) = frame.shard_range(*s);
+            out.seek(SeekFrom::Start(offset))?;
+            out.write_all(&bytes[..len])?;
+        }
+        Ok(fixed.len() as u64)
+    })?;
+    out.flush()?;
+    match unrepairable {
+        Some(e) => Err(e),
+        None => Ok(report),
     }
 }
 

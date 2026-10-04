@@ -205,6 +205,11 @@ impl<R: Read + Seek> Archive<R> {
         &self.index
     }
 
+    /// The underlying reader, for the recovery scan.
+    pub(crate) fn raw_reader(&mut self) -> &mut R {
+        &mut self.reader
+    }
+
     /// Locations of the `Recovery` frames, as the index lists them.
     pub fn recovery_frames(&self) -> &[FrameLocation] {
         &self.index.recovery
