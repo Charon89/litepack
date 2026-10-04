@@ -135,6 +135,31 @@ pub fn check_extraction_path(path: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
+/// Refuse a path one of whose parents is an entry that is not a directory
+/// (such as a file `a` beside `a/b`): `UnsafePath` with the reason
+/// "conflicting name", before anything is written. Missing parent
+/// directories are created by the extraction.
+pub fn check_conflicting_names(entries: &[Entry]) -> Result<(), FormatError> {
+    let not_dirs: std::collections::HashSet<&str> = entries
+        .iter()
+        .filter(|e| e.kind != EntryKind::Directory)
+        .map(|e| e.path.as_str())
+        .collect();
+    for e in entries {
+        let conflict = e
+            .path
+            .match_indices('/')
+            .any(|(i, _)| not_dirs.contains(&e.path[..i]));
+        if conflict {
+            return Err(FormatError::UnsafePath {
+                path: e.path.clone(),
+                reason: "conflicting name",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The key material the command line gave for an encrypted archive.
 #[derive(Debug, Default)]
 struct Keys {
@@ -427,6 +452,7 @@ fn extract(
         }
         check_extraction_path(&e.path)?;
     }
+    check_conflicting_names(&all)?;
     std::fs::create_dir_all(dir)?;
     let (mut files, mut dirs) = (0u64, 0u64);
     for e in &all {

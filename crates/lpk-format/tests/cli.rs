@@ -244,6 +244,31 @@ fn extraction_path_rules() {
     }
 }
 
+/// Spec section 9 (E1-14d, M18): a file `a` beside `a/b` is refused before
+/// anything is written; a file whose parent directory has no entry is
+/// extracted, its parents created.
+#[test]
+fn conflicting_names_are_refused_and_missing_parents_created() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("c.lpk");
+    make(&p, &[], &[("a", data(1, 10)), ("a/b", data(2, 10))], &[]).unwrap();
+    let out_dir = t.path().join("out");
+    let (code, _, err) = cli(&["extract", p.to_str().unwrap(), out_dir.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("conflicting name"), "{err}");
+    assert!(!out_dir.exists());
+
+    let p = t.path().join("m.lpk");
+    make(&p, &[], &[("x/y/z.txt", data(3, 10))], &[]).unwrap();
+    let out_dir = t.path().join("out2");
+    let (code, _, err) = cli(&["extract", p.to_str().unwrap(), out_dir.to_str().unwrap()]);
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert_eq!(
+        std::fs::read(out_dir.join("x").join("y").join("z.txt")).unwrap(),
+        data(3, 10)
+    );
+}
+
 #[test]
 fn usage_errors() {
     let (code, _, err) = cli(&["frobnicate"]);
