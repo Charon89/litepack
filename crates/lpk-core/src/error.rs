@@ -42,6 +42,9 @@ pub enum CoreError {
         /// The file.
         path: PathBuf,
     },
+    /// An option outside the range the format or the encoder accepts.
+    #[error("invalid option: {0}")]
+    InvalidOption(String),
     /// The root given to a walk is not a directory.
     #[error("{}: not a directory", path.display())]
     NotADirectory {

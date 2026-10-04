@@ -11,7 +11,7 @@ use crate::ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 use crate::source::Source;
 
 /// Output buffer: writes reach the file in large sequential pieces.
-const OUT_BUF: usize = 4 << 20;
+pub(crate) const OUT_BUF: usize = 4 << 20;
 
 /// Settings of [`archive_store`].
 #[derive(Debug, Default)]
@@ -23,9 +23,9 @@ pub struct StoreOptions {
 }
 
 /// Counts what passes through a reader.
-struct Counting<R> {
-    inner: R,
-    n: u64,
+pub(crate) struct Counting<R> {
+    pub(crate) inner: R,
+    pub(crate) n: u64,
 }
 
 impl<R: Read> Read for Counting<R> {
@@ -100,6 +100,21 @@ pub fn archive_store_file(
     archive_path: &Path,
     options: StoreOptions,
 ) -> Result<WriterSummary, CoreError> {
+    let ingest = options.ingest;
+    create_new_and_run(root, archive_path, &ingest, |inputs, file, sync| {
+        write_inputs(&inputs, file, options, Some(sync))
+    })
+}
+
+/// Create `archive_path` (create-new), walk `root` leaving the new file out of the inputs, and
+/// run `f` with the inputs, the file and a data-sync hook. A failure removes the file. Shared by
+/// the store and Fast paths.
+pub(crate) fn create_new_and_run<T>(
+    root: &Path,
+    archive_path: &Path,
+    ingest: &IngestOptions,
+    f: impl FnOnce(Vec<Input>, std::fs::File, SyncFn) -> Result<T, CoreError>,
+) -> Result<T, CoreError> {
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -110,10 +125,10 @@ pub fn archive_store_file(
         let sync_file = file
             .try_clone()
             .map_err(|e| CoreError::io(archive_path, e))?;
-        let mut inputs = walk(root, &options.ingest)?;
+        let mut inputs = walk(root, ingest)?;
         inputs.retain(|i| i.identity != Some(own_id));
         let sync: SyncFn = Box::new(move || sync_file.sync_data());
-        write_inputs(&inputs, file, options, Some(sync))
+        f(inputs, file, sync)
     })();
     if r.is_err() {
         let _ = std::fs::remove_file(archive_path);

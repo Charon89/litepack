@@ -11,6 +11,7 @@ rust-version.workspace = true
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
 same-file = "1.0.6"
 thiserror = "2.0.21"
+zstd = { version = "0.14.0", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
