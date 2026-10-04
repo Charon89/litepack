@@ -26,6 +26,9 @@ pub struct Archive<R: Read + Seek> {
     pub(crate) registry: Registry,
     /// The most recently decoded block: its index and plain bytes.
     pub(crate) cache: Option<(usize, Vec<u8>)>,
+    /// Number of records, read from the `Records` frame the first time a
+    /// block names a record (0 without a frame).
+    pub(crate) record_count: Option<u64>,
 }
 
 /// What a forward walk over the frames found.
@@ -167,6 +170,7 @@ impl<R: Read + Seek> Archive<R> {
             chunks: Arc::new(chunks),
             registry: Registry::v1(),
             cache: None,
+            record_count: None,
         })
     }
 

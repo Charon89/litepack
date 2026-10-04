@@ -214,6 +214,44 @@ pub enum FormatError {
         /// Short reason.
         reason: &'static str,
     },
+    /// A reconstruction record has a kind this reader does not know.
+    #[error("record {record}: unknown record kind {kind}")]
+    UnknownRecordKind {
+        /// The raw kind.
+        kind: u16,
+        /// Id of the record (its position in the frame).
+        record: u64,
+    },
+    /// Reserved record flag bits are set.
+    #[error("record {record}: reserved flag bits {bits:#x}")]
+    ReservedRecordBits {
+        /// The offending bits.
+        bits: u16,
+        /// Id of the record.
+        record: u64,
+    },
+    /// A record's body does not match its `body_hash`.
+    #[error("record {record} does not match its hash")]
+    RecordHashMismatch {
+        /// Id of the record.
+        record: u64,
+    },
+    /// A block names a record id the `Records` frame does not have.
+    #[error("record id {record} out of range (the archive has {count})")]
+    RecordOutOfRange {
+        /// The id asked for.
+        record: u64,
+        /// Number of records in the archive.
+        count: u64,
+    },
+    /// A record's body breaks its layout.
+    #[error("record {record}: bad record ({reason})")]
+    BadRecord {
+        /// Id of the record.
+        record: u64,
+        /// The field at fault.
+        reason: &'static str,
+    },
     /// A block names a prior the caller's store does not have.
     #[error("prior {} is not available", hex32(.id))]
     MissingPrior {

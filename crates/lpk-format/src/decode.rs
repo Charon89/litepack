@@ -418,7 +418,10 @@ mod tests {
         let h = header(
             vec![
                 step(PrimitiveId::BcjX86),
-                step(PrimitiveId::JpegReconstruct),
+                Step {
+                    primitive: PrimitiveId::JpegReconstruct,
+                    params: vec![0],
+                },
             ],
             2,
             2,

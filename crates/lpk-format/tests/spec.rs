@@ -35,6 +35,8 @@ fn spec_tables_match_code() {
         lpk_format::graph_layout_table(),
         lpk_format::block_header_table(),
         lpk_format::prior_list_table(),
+        lpk_format::record_kind_table(),
+        lpk_format::record_layout_tables(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }
@@ -72,15 +74,22 @@ fn primitive_table_lists_every_id_and_name() {
         (P::BcjX86, 0),
         (P::BcjArm64, 0),
         (P::Delta, 9),
-        (P::JpegReconstruct, 0),
-        (P::DeflateReconstruct, 0),
-        (P::PngFilter, 0),
-        (P::Base64, 3),
-        (P::Utf16, 2),
-        (P::ContainerReconstruct, 0),
     ];
+    for p in [
+        P::JpegReconstruct,
+        P::DeflateReconstruct,
+        P::PngFilter,
+        P::Base64,
+        P::Utf16,
+        P::ContainerReconstruct,
+    ] {
+        assert_eq!(p.params_len(), None, "{}", p.name());
+        p.validate_params(&[0]).unwrap();
+        assert!(p.validate_params(&[]).is_err());
+        assert!(row(p).contains("`record_id: varint`"), "{}", p.name());
+    }
     for (p, len) in lens {
-        assert_eq!(p.params_len(), len, "{}", p.name());
+        assert_eq!(p.params_len(), Some(len), "{}", p.name());
         let mut ok = vec![0u8; len];
         if p == P::Zstd {
             ok[0] = 10;
@@ -124,20 +133,15 @@ fn primitive_table_lists_every_id_and_name() {
     assert_eq!(P::Bwt.resources(&b).bwt_block, 0x1234_5678);
     assert!(P::Bwt.validate_params(&[0; 4]).is_err());
     assert!(row(P::Bwt).contains("bwt block = block_size"));
-    for (p, at, max, len) in [
-        (P::Delta, 8, 1, 9),
-        (P::Base64, 0, 1, 3),
-        (P::Utf16, 0, 1, 2),
-        (P::Utf16, 1, 1, 2),
-    ] {
-        let mut v = vec![0u8; len];
-        v[at] = max;
-        p.validate_params(&v).unwrap();
-        v[at] = max + 1;
-        assert!(p.validate_params(&v).is_err());
+    {
+        let mut v = vec![0u8; 9];
+        v[8] = 1;
+        P::Delta.validate_params(&v).unwrap();
+        v[8] = 2;
+        assert!(P::Delta.validate_params(&v).is_err());
     }
     for p in P::ALL {
-        let mut v = vec![0u8; p.params_len()];
+        let mut v = vec![0u8; p.params_len().unwrap_or(1)];
         if p == P::Zstd {
             v[0] = 20;
         }
@@ -236,6 +240,61 @@ fn spec_states_the_lzma_rules() {
         assert!(text.contains(needle), "spec lacks {needle:?}");
     }
     assert!(lpk_format::primitive_table().contains("lc + lp <= 4"));
+}
+
+#[test]
+fn spec_states_the_record_rules() {
+    let text = spec();
+    for needle in [
+        "## 12. Reconstruction records",
+        "### The `Records` frame (kind 3)",
+        "### What each body verifies",
+        "### What the reference decoder does with records",
+        "`RecordOutOfRange`",
+        "`UnknownRecordKind`",
+        "`ReservedRecordBits`",
+        "`RecordHashMismatch`",
+        "`BadRecord`",
+        "divided by 5",
+        "it applies none",
+        "its record count is 0",
+        "`record_id`",
+    ] {
+        assert!(text.contains(needle), "spec lacks {needle:?}");
+    }
+    // Every kind and every body field appears in the rendered tables.
+    let kinds = lpk_format::record_kind_table();
+    for k in lpk_format::RecordKind::ALL {
+        assert!(kinds.contains(&format!("| {} | `{}` |", k as u16, k.name())));
+        assert!(kinds.contains(k.primitive().name()));
+    }
+    let layouts = lpk_format::record_layout_tables();
+    for field in [
+        "record_count",
+        "body_hash",
+        "primary_len",
+        "nested_trailing_chunks",
+        "gainmap_count",
+        "lepton_version",
+        "corrections",
+        "library",
+        "bit_depth",
+        "color_type",
+        "interlace",
+        "filters",
+        "line_ending",
+        "padding",
+        "endian",
+        "bom",
+        "framing",
+        "member_count",
+    ] {
+        assert!(
+            layouts.contains(&format!("| {field} |")),
+            "tables lack {field}"
+        );
+    }
+    assert_eq!(lpk_format::RECORD_COUNT_BOUND, 5);
 }
 
 #[test]

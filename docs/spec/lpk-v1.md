@@ -442,18 +442,22 @@ data. The registry gives each primitive a 16-bit ID, a name, a parameter layout 
 | 0x0004 | `bcj-x86` | none | none |
 | 0x0005 | `bcj-arm64` | none | none |
 | 0x0006 | `delta` | `base_chunk: u64` LE (the chunk the patch applies to), `patch_format: u8` (0 = zstd patch, 1 = suffix-array patch) | none |
-| 0x0007 | `jpeg-reconstruct` | none (the record is in the `Records` frame) | memory per image, declared by `decode_memory` |
-| 0x0008 | `deflate-reconstruct` | none | none |
-| 0x0009 | `png-filter` | none | none |
-| 0x000A | `base64` | `variant: u8` (0 standard, 1 url-safe), `line_len: u16` LE (0 = no line breaks) | none |
-| 0x000B | `utf16` | `endian: u8` (0 LE, 1 BE), `bom: u8` (0 none, 1 present) | none |
-| 0x000C | `container-reconstruct` | none | none |
+| 0x0007 | `jpeg-reconstruct` | `record_id: varint` (the record in the `Records` frame, section 12) | memory per image, declared by `decode_memory` |
+| 0x0008 | `deflate-reconstruct` | `record_id: varint` | none |
+| 0x0009 | `png-filter` | `record_id: varint` | none |
+| 0x000A | `base64` | `record_id: varint` | none |
+| 0x000B | `utf16` | `record_id: varint` | none |
+| 0x000C | `container-reconstruct` | `record_id: varint` | none |
 | 0x000D..=0x7FFF | reserved for later versions of this spec | - | - |
 | 0x8000..=0xFFFF | experimental; a conforming writer never emits them | - | - |
 
 `params` is a byte string whose length is stated in the graph; its length must be exactly the layout's length
-(0 for a primitive without parameters). Violating a layout's rules, such as a `window_log` of 9 or 32, an `lc`
-of 9 or a `variant` of 2, is `BadParams` carrying the ID and a short reason.
+(0 for a primitive without parameters). The six reconstruction primitives (7 to 12) are the exception: their
+`params` are one canonical varint, the `record_id` (1 to 10 bytes, nothing after it); the record itself holds
+what earlier drafts put in the parameters of `base64` and `utf16` (section 12). Violating a layout's rules, such
+as a `window_log` of 9 or 32, an `lc` of 9, a `patch_format` of 2, or a `record_id` that is empty, not a
+canonical varint or followed by other bytes (reason `record_id`), is `BadParams` carrying the ID and a short
+reason.
 
 ### The decode graph
 
@@ -710,3 +714,163 @@ encoding: regenerating them reproduces the committed bytes only with the same zs
 ignored test checks on purpose. To regenerate them: `cargo test -p lpk-format --test gen_vectors -- --ignored`.
 The frame of `zstd-window.lpk` is written without a declared content size, so its header declares the 2^24
 window.
+
+## 12. Reconstruction records
+
+A reconstruction primitive (7 to 12 of section 8) rebuilds the original bytes of a peeled stream (a JPEG, a Deflate
+stream, a PNG's filter bytes, a Base64 or UTF-16 text, a container) from the decoded form. The side information it
+needs is kept in one **record** per peeled stream, and all records of an archive live in one frame of kind 3, the
+`Records` frame. The index (section 6) gives the frame's location; an archive with no peeled stream has no
+`Records` frame and its record count is 0. Every peel is verified at compression time by re-encoding; a stream
+whose peel does not reproduce the original bytes is stored as it was, so a record is never a guess.
+
+### How a block refers to a record
+
+The `params` of a reconstruction primitive are one varint, the `record_id` (section 8). A record's id is its
+position in the frame, counted from 0. When a block header is parsed, every `record_id` a step names must be below
+the archive's record count, otherwise `RecordOutOfRange` with the id and the count. An archive without a `Records`
+frame has count 0, so every id is out of range. The check needs the count only: a reader that decodes a block whose
+graph names no record never reads the `Records` frame.
+
+### The `Records` frame (kind 3)
+
+The payload is a `record_count` and the records in ascending id order. Each record carries the primitive it
+belongs to, its body and the hash of the body, so a record verifies on its own, without the rest of the frame.
+The payload's own hash is the frame hash of section 3.
+
+Integers written `u8`, `u16`, `u32`, `u64` below are fixed width, little endian; counts, lengths and chunk
+indices are varints. `bytes` is a varint length followed by that many bytes. `chunk list` is a varint count
+followed by that many varint chunk indices (section 5).
+
+| Kind | Name | Primitive |
+|---|---|---|
+| 7 | `jpeg` | `jpeg-reconstruct` (0x0007) |
+| 8 | `deflate` | `deflate-reconstruct` (0x0008) |
+| 9 | `png-filter` | `png-filter` (0x0009) |
+| 10 | `base64` | `base64` (0x000A) |
+| 11 | `utf16` | `utf16` (0x000B) |
+| 12 | `container` | `container-reconstruct` (0x000C) |
+
+**Records frame payload**
+
+| Field | Size | Meaning |
+|---|---|---|
+| record_count | varint | number of records; at most the remaining bytes divided by 5 |
+| records | variable | per record, in ascending id order (the id is the position, from 0): the fields below |
+| kind | u16 LE | the primitive the record belongs to: 7 to 12 (section 12 kind table) |
+| flags | u16 LE | reserved, must be 0 |
+| body_len | varint | length of `body`; at most the bytes that remain |
+| body | body_len bytes | the record body of the kind |
+| body_hash | 32 | BLAKE3-256 of `body` |
+
+**jpeg body (kind 7)**
+
+| Field | Size | Meaning |
+|---|---|---|
+| original_len | u64 LE | byte length of the JPEG file |
+| primary_len | u64 LE | bytes of the primary image up to and including its EOI; at most `original_len` |
+| trailing | bytes | the data after the EOI as stored: the raw bytes, or empty when they were peeled as a nested stream |
+| nested_trailing_chunks | chunk list | the chunks holding the peeled trailing data; empty when `trailing` is not empty |
+| gainmap_count | varint | number of secondary images |
+| offset | u64 LE | per secondary image: position inside the original file |
+| len | u64 LE | per secondary image: length; `offset + len` is at most `original_len` |
+| chunks | chunk list | per secondary image: the chunks holding it |
+| lepton_version | u8 | the Lepton format revision the stream was written with (0 for the version lepton_jpeg 0.5 writes) |
+| original_hash | 32 | BLAKE3-256 of the whole original file |
+
+**deflate body (kind 8)**
+
+| Field | Size | Meaning |
+|---|---|---|
+| original_len | u64 LE | compressed byte length of the Deflate stream |
+| plain_len | u64 LE | its decompressed length |
+| corrections | bytes | preflate-rs's correction data |
+| library | u8 | 0 = preflate-rs 0.7 format; no other value |
+| original_hash | 32 | BLAKE3-256 of the original compressed stream |
+
+**png-filter body (kind 9)**
+
+| Field | Size | Meaning |
+|---|---|---|
+| width | u32 LE | image width in pixels |
+| height | u32 LE | image height in pixels |
+| bit_depth | u8 | 1, 2, 4, 8 or 16 |
+| color_type | u8 | 0, 2, 3, 4 or 6 |
+| interlace | u8 | 0 none, 1 Adam7 |
+| filters | bytes | one filter byte per scanline, in order; for interlaced images per pass in PNG's order |
+| original_hash | 32 | BLAKE3-256 of the filtered scanline bytes (the Deflate-decoded IDAT data) |
+
+**base64 body (kind 10)**
+
+| Field | Size | Meaning |
+|---|---|---|
+| variant | u8 | 0 standard, 1 url-safe |
+| line_len | u16 LE | characters per line; 0 = no line breaks |
+| line_ending | u8 | 0 LF, 1 CRLF, 2 none |
+| padding | u8 | 0 none, 1 `=` |
+| original_len | u64 LE | length of the encoded text |
+| original_hash | 32 | BLAKE3-256 of the encoded text |
+
+**utf16 body (kind 11)**
+
+| Field | Size | Meaning |
+|---|---|---|
+| endian | u8 | 0 little endian, 1 big endian |
+| bom | u8 | 0 no byte order mark, 1 present |
+| original_len | u64 LE | length of the UTF-16 text in bytes |
+| original_hash | 32 | BLAKE3-256 of the UTF-16 text |
+
+**container body (kind 12)**
+
+| Field | Size | Meaning |
+|---|---|---|
+| format | u8 | 0 ZIP, 1 PDF, 2 gzip, 3 TAR; other values are reserved |
+| original_len | u64 LE | byte length of the container |
+| framing | bytes | the verbatim bytes of the container that are not member data (ZIP: every local header, extra field, data descriptor, the central directory and the end record; PDF: object headers and xref; gzip: header and trailer; TAR: the headers) |
+| member_count | varint | number of members |
+| offset | u64 LE | per member: position in the original |
+| len | u64 LE | per member: length in the original; `offset + len` is at most `original_len` |
+| chunks | chunk list | per member: the chunks holding its data as stored, after any nested peel |
+| original_hash | 32 | per member: BLAKE3-256 of the member's bytes in the original |
+
+Rules. Records are decoded as a stream. A `record_count` larger than the bytes after it divided by 5 (rounded
+down) is `Truncated` for "records", raised when the count is read. A payload that ends inside a record, a
+`body_len` larger than the bytes that remain, a byte string or count that the bytes remaining of the body cannot
+hold, are `Truncated` for "records". Bytes left after the last record are `TrailingBytes` for "records"; bytes
+left in a body after its last field are `TrailingBytes` for "record body". A `kind` outside 7 to 12 is
+`UnknownRecordKind` with the kind and the id, raised as soon as the kind is read; non-zero `flags` are
+`ReservedRecordBits`. A body whose BLAKE3 differs from `body_hash` is `RecordHashMismatch` with the id, checked
+before the body is looked at. Within a body, a `u8` that is outside its list of values (a `library` other than 0,
+a `bit_depth` outside 1, 2, 4, 8, 16, a `color_type` outside 0, 2, 3, 4, 6, an `interlace`, `variant`, `padding`,
+`endian` or `bom` above 1, a `line_ending` above 2, a container `format` above 3) is `BadRecord` with the id and
+the field's name as `reason`. So are these inconsistencies: a JPEG `primary_len` above `original_len`
+(`primary_len`); a JPEG with both raw `trailing` bytes and `nested_trailing_chunks` (`nested_trailing_chunks`);
+a secondary image or member whose `offset + len` overflows or exceeds `original_len` (`gainmaps`, `members`).
+The first error ends the walk, and asking for record `n` walks from the start, so the first error among records
+`0` to `n` is the one reported.
+
+### What each body verifies
+
+`original_hash` is the verification target of the inversion: after a reconstruction primitive rebuilds the
+original bytes, they must hash to it (and have `original_len` bytes where the record states a length).
+
+- jpeg: the whole original JPEG file, primary image, trailing data and secondary images included.
+- deflate: the original compressed Deflate stream, not its decompressed form.
+- png-filter: the filtered scanline bytes, that is the Deflate-decoded IDAT data, not the PNG file.
+- base64, utf16: the original encoded text.
+- container: each member's bytes in the original (`offset`, `len`); the framing carries no hash of its own,
+  the container as a whole is covered by the chunk hashes and the Merkle tree of section 5.
+
+### What the reference decoder does with records
+
+The reference decoder parses, validates and hashes records (the frame hash, every `body_hash`, every field rule
+above) and checks the record ids of every block header it parses; it applies none. A block whose graph names a
+reconstruction primitive is reported as `UnimplementedPrimitive` (section 8), as before. Applying records needs the
+JPEG and Deflate libraries of the full reader.
+
+Writing. A writer given records writes them as one `Records` frame after the entry table and before the index, and
+sets the index's `records_offset` and `records_len`; the envelope's `max_frame_payload` admits the frame (section 7).
+The reference writer refuses an encoder whose graph names a record id it was not given (`RecordOutOfRange`).
+
+Errors of this section: `UnknownRecordKind`, `ReservedRecordBits`, `RecordHashMismatch`, `RecordOutOfRange`,
+`BadRecord`, and `Truncated` and `TrailingBytes` as above.

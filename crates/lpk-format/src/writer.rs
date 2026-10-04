@@ -11,6 +11,7 @@ use crate::header::{Header, HeaderFlags};
 use crate::index::{BlockLocation, FrameLocation, Index};
 use crate::merkle::merkle_root;
 use crate::primitive::{GraphResources, PrimitiveId};
+use crate::record::{Record, RecordsWriter};
 use crate::trailer::Trailer;
 use crate::varint;
 use std::collections::BTreeSet;
@@ -128,11 +129,16 @@ pub struct WriterOptions {
     pub archive_id: [u8; 16],
     /// Encodes every block and names its decode graph; [`StoreEncoder`] by default.
     pub encoder: Box<dyn BlockEncoder>,
+    /// Reconstruction records, written as one `Records` frame before the
+    /// index (none: no frame). A record's id is its position; the encoder's
+    /// graph may only name ids below `records.len()`.
+    pub records: Vec<Record>,
 }
 
 impl std::fmt::Debug for WriterOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WriterOptions")
+            .field("records", &self.records.len())
             .field("chunk_size", &self.chunk_size)
             .field("block_size", &self.block_size)
             .field("archive_id", &self.archive_id)
@@ -148,6 +154,7 @@ impl Default for WriterOptions {
             block_size: DEFAULT_BLOCK_SIZE,
             archive_id: [0; 16],
             encoder: Box::new(StoreEncoder),
+            records: Vec::new(),
         }
     }
 }
@@ -230,6 +237,7 @@ impl<W: Write> Writer<W> {
         for s in &graph.steps {
             s.primitive.validate_params(&s.params)?;
         }
+        graph.check_records(options.records.len() as u64)?;
         Header::new(HeaderFlags::EMPTY, options.archive_id).write(&mut out)?;
         Ok(Writer {
             out,
@@ -486,6 +494,13 @@ impl<W: Write> Writer<W> {
         self.flush_block()?;
         let table = EntryTableWriter::encode(&self.entries)?;
         let entry_table = self.write_frame(FrameKind::EntryTable, table)?;
+        let records = if self.options.records.is_empty() {
+            None
+        } else {
+            let payload = RecordsWriter::encode(&self.options.records);
+            Some(self.write_frame(FrameKind::Records, payload)?)
+        };
+        let records_len = records.map_or(0, |r| r.len);
 
         let recs = &self.records;
         let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
@@ -509,7 +524,7 @@ impl<W: Write> Writer<W> {
             priors: self.priors.iter().copied().collect(),
             blocks: std::mem::take(&mut self.blocks),
             entry_table,
-            records: None,
+            records,
         };
         // The envelope names the index's own payload length, which depends on
         // the envelope's varints. Starting from an upper bound the length can
@@ -521,7 +536,7 @@ impl<W: Write> Writer<W> {
                 ArchiveSizes {
                     index_payload_len: guess,
                     entry_table_len: entry_table.len,
-                    records_len: 0,
+                    records_len,
                 },
                 graph,
                 max_plain,
@@ -562,7 +577,7 @@ fn frames_max(index: &Index) -> u64 {
         ArchiveSizes {
             index_payload_len: 0,
             entry_table_len: index.entry_table.len,
-            records_len: 0,
+            records_len: index.records.map_or(0, |r| r.len),
         },
         crate::primitive::GraphResources::default(),
         0,

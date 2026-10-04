@@ -254,6 +254,7 @@ fn options(encoder: ZstdTestEncoder) -> WriterOptions {
         block_size: 32 * 1024,
         archive_id: [3; 16],
         encoder: Box::new(encoder),
+        records: Vec::new(),
     }
 }
 

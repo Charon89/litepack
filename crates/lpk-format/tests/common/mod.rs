@@ -296,6 +296,7 @@ pub fn vector_options(name: &str, dict: Option<&[u8]>) -> WriterOptions {
         block_size,
         archive_id: [0x5A; 16],
         encoder,
+        records: Vec::new(),
     }
 }
 

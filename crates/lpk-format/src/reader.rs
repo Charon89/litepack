@@ -7,8 +7,9 @@ use crate::decode::decode_block;
 use crate::entry::{Entry, EntryKind, EntryTable};
 use crate::error::FormatError;
 use crate::frame::FrameKind;
-use crate::graph::BlockHeader;
+use crate::graph::{BlockHeader, Graph};
 use crate::index::FrameLocation;
+use crate::record::RecordsTable;
 use std::io::{Read, Seek, Write};
 
 /// What [`Archive::verify`] checked.
@@ -45,6 +46,32 @@ impl OwnedEntryTable {
     /// table was read, so this does not fail in practice).
     pub fn table(&self) -> Result<EntryTable<'_>, FormatError> {
         EntryTable::parse(&self.payload)
+    }
+}
+
+/// The `Records` frame payload, read and hash-checked; owns its bytes so the
+/// archive can be used while records are walked.
+#[derive(Debug, Clone)]
+pub struct OwnedRecordsTable {
+    payload: Vec<u8>,
+    count: u64,
+}
+
+impl OwnedRecordsTable {
+    /// Number of records declared.
+    pub fn len(&self) -> u64 {
+        self.count
+    }
+
+    /// True when there are no records.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The parsed table over the owned bytes (the count was checked when the
+    /// table was read, so this does not fail in practice).
+    pub fn table(&self) -> Result<RecordsTable<'_>, FormatError> {
+        RecordsTable::parse(&self.payload)
     }
 }
 
@@ -101,7 +128,13 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             }
             other => other?,
         };
-        let (header, used) = BlockHeader::parse(&frame.payload, block)?;
+        // The records frame is read only for a block whose graph names a record.
+        let record_count = if Graph::parse(&frame.payload)?.0.uses_records() {
+            a.record_count()?
+        } else {
+            0
+        };
+        let (header, used) = BlockHeader::parse(&frame.payload, block, record_count)?;
         let need = header.graph.resources();
         let env = &a.index().envelope;
         if need.window > env.max_window {
@@ -170,6 +203,28 @@ impl<R: Read + Seek> ChunkSource for ArchiveChunks<'_, R> {
 }
 
 impl<R: Read + Seek> Archive<R> {
+    /// The `Records` frame, read and hash-checked (`HashMismatch` when
+    /// damaged); `None` when the index lists no records frame. The records
+    /// themselves are checked when the table is walked.
+    pub fn records(&mut self) -> Result<Option<OwnedRecordsTable>, FormatError> {
+        let Some(at) = self.index().records else {
+            return Ok(None);
+        };
+        let payload = self.read_frame_at(at, FrameKind::Records)?.payload;
+        let count = RecordsTable::parse(&payload)?.len();
+        Ok(Some(OwnedRecordsTable { payload, count }))
+    }
+
+    /// Number of records (0 without a `Records` frame), cached.
+    pub(crate) fn record_count(&mut self) -> Result<u64, FormatError> {
+        if let Some(n) = self.record_count {
+            return Ok(n);
+        }
+        let n = self.records()?.map_or(0, |t| t.len());
+        self.record_count = Some(n);
+        Ok(n)
+    }
+
     /// The entry table, read and hash-checked (`HashMismatch` when damaged).
     pub fn entry_table(&mut self) -> Result<OwnedEntryTable, FormatError> {
         let payload = self.entries()?;

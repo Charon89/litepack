@@ -52,7 +52,7 @@ fn block_graph(a: &mut Archive<Cursor<Vec<u8>>>, i: usize) -> lpk_format::Graph 
     let f = a
         .read_frame_at(at, lpk_format::FrameKind::ChunkData)
         .unwrap();
-    lpk_format::BlockHeader::parse(&f.payload, i)
+    lpk_format::BlockHeader::parse(&f.payload, i, 0)
         .unwrap()
         .0
         .graph

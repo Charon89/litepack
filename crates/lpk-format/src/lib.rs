@@ -23,6 +23,7 @@ pub mod merkle;
 pub mod primitive;
 pub mod priors;
 pub mod reader;
+pub mod record;
 pub mod trailer;
 pub mod varint;
 pub mod writer;
@@ -61,7 +62,12 @@ pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, He
 pub use lzma::LzmaDecoder;
 pub use magic::MAGIC;
 pub use primitive::{primitive_table, GraphResources, PrimitiveId};
-pub use reader::{ArchiveChunks, OwnedEntryTable, VerifySummary};
+pub use reader::{ArchiveChunks, OwnedEntryTable, OwnedRecordsTable, VerifySummary};
+pub use record::{
+    record_kind_table, record_layout_tables, Base64Record, ContainerMember, ContainerRecord,
+    DeflateRecord, JpegRecord, PngFilterRecord, Record, RecordBody, RecordKind, RecordsIter,
+    RecordsTable, RecordsWriter, SecondaryImage, Utf16Record, RECORD_COUNT_BOUND,
+};
 pub use writer::{
     BlockEncoder, Chunker, FixedChunker, StoreEncoder, Writer, WriterOptions, WriterSummary,
     DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, MIN_CHUNK_SIZE,

@@ -266,6 +266,7 @@ fn registry_has_it_and_the_writer_round_trips() {
             block_size: 32 * 1024,
             archive_id: [4; 16],
             encoder: Box::new(LzmaTestEncoder::new(6, 1 << 20, 3, 0, 2)),
+            records: Vec::new(),
         },
         &files,
     );

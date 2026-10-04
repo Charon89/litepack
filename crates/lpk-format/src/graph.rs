@@ -109,6 +109,26 @@ impl Graph {
         out
     }
 
+    /// True when a step names a record (a reconstruction primitive).
+    pub fn uses_records(&self) -> bool {
+        self.steps.iter().any(|s| s.primitive.is_reconstruction())
+    }
+
+    /// Check that every record id the steps name is below `record_count`.
+    pub fn check_records(&self, record_count: u64) -> Result<(), FormatError> {
+        for s in &self.steps {
+            if let Some(record) = s.primitive.record_id(&s.params) {
+                if record >= record_count {
+                    return Err(FormatError::RecordOutOfRange {
+                        record,
+                        count: record_count,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The IDs of the priors the steps name: ascending and unique.
     pub fn prior_ids(&self) -> Vec<[u8; 32]> {
         let ids: std::collections::BTreeSet<[u8; 32]> = self
@@ -147,8 +167,16 @@ impl BlockHeader {
     /// its length, so the encoded bytes are `payload[used..]`. `encoded_len`
     /// must equal the payload length minus the header; a difference is
     /// `BlockLengthMismatch`; `block` is the block's index in the block table.
-    pub fn parse(payload: &[u8], block: usize) -> Result<(BlockHeader, usize), FormatError> {
+    /// `record_count` is the number of records in the archive's `Records`
+    /// frame (0 without one); a reconstruction step naming a record id at or
+    /// above it is `RecordOutOfRange`, raised right after the graph is parsed.
+    pub fn parse(
+        payload: &[u8],
+        block: usize,
+        record_count: u64,
+    ) -> Result<(BlockHeader, usize), FormatError> {
         let (graph, mut pos) = Graph::parse(payload)?;
+        graph.check_records(record_count)?;
         let plain_len = rv(payload, &mut pos, HEADER)?;
         let encoded_len = rv(payload, &mut pos, HEADER)?;
         if encoded_len != (payload.len() - pos) as u64 {
@@ -341,26 +369,69 @@ mod tests {
         let mut payload = h.encode();
         let hl = payload.len();
         payload.extend_from_slice(b"abc");
-        let (back, used) = BlockHeader::parse(&payload, 5).unwrap();
+        let (back, used) = BlockHeader::parse(&payload, 5, 0).unwrap();
         assert_eq!(back, h);
         assert_eq!(used, hl);
         assert_eq!(&payload[used..], b"abc");
         payload.push(0);
         assert!(matches!(
-            BlockHeader::parse(&payload, 5).unwrap_err(),
+            BlockHeader::parse(&payload, 5, 0).unwrap_err(),
             FormatError::BlockLengthMismatch { block: 5 }
         ));
         payload.truncate(payload.len() - 2);
         assert!(matches!(
-            BlockHeader::parse(&payload, 5).unwrap_err(),
+            BlockHeader::parse(&payload, 5, 0).unwrap_err(),
             FormatError::BlockLengthMismatch { block: 5 }
         ));
         assert!(matches!(
-            BlockHeader::parse(&h.graph.encode(), 5).unwrap_err(),
+            BlockHeader::parse(&h.graph.encode(), 5, 0).unwrap_err(),
             FormatError::Truncated {
                 what: "block header"
             }
         ));
+    }
+
+    #[test]
+    fn record_ids_are_checked_against_the_count() {
+        for prim in [
+            PrimitiveId::JpegReconstruct,
+            PrimitiveId::DeflateReconstruct,
+            PrimitiveId::PngFilter,
+            PrimitiveId::Base64,
+            PrimitiveId::Utf16,
+            PrimitiveId::ContainerReconstruct,
+        ] {
+            let h = BlockHeader {
+                graph: Graph {
+                    steps: vec![st(prim, &[2])],
+                },
+                plain_len: 0,
+                encoded_len: 0,
+            };
+            assert!(h.graph.uses_records());
+            let payload = h.encode();
+            // With no records frame the count is 0: every id is out of range.
+            for count in [0, 1, 2] {
+                assert!(matches!(
+                    BlockHeader::parse(&payload, 0, count).unwrap_err(),
+                    FormatError::RecordOutOfRange { record: 2, count: c } if c == count
+                ));
+            }
+            assert_eq!(BlockHeader::parse(&payload, 0, 3).unwrap().0, h);
+        }
+        assert!(!Graph {
+            steps: vec![store()]
+        }
+        .uses_records());
+        // A store block never looks at the count.
+        let h = BlockHeader {
+            graph: Graph {
+                steps: vec![store()],
+            },
+            plain_len: 0,
+            encoded_len: 0,
+        };
+        BlockHeader::parse(&h.encode(), 0, 0).unwrap();
     }
 
     fn arb_step() -> impl Strategy<Value = Step> {
@@ -386,16 +457,11 @@ mod tests {
                 p.push(f);
                 st(PrimitiveId::Delta, &p)
             }),
-            Just(st(PrimitiveId::JpegReconstruct, &[])),
-            Just(st(PrimitiveId::DeflateReconstruct, &[])),
-            Just(st(PrimitiveId::PngFilter, &[])),
-            (0u8..=1, any::<u16>()).prop_map(|(v, l)| {
-                let mut p = vec![v];
-                p.extend_from_slice(&l.to_le_bytes());
-                st(PrimitiveId::Base64, &p)
+            (7u16..=12, any::<u64>()).prop_map(|(p, id)| {
+                let mut v = Vec::new();
+                varint::write(&mut v, id).unwrap();
+                st(PrimitiveId::from_u16(p).unwrap(), &v)
             }),
-            (0u8..=1, 0u8..=1).prop_map(|(e, b)| st(PrimitiveId::Utf16, &[e, b])),
-            Just(st(PrimitiveId::ContainerReconstruct, &[])),
         ]
     }
 
@@ -412,7 +478,7 @@ mod tests {
         #[test]
         fn parse_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
             let _ = Graph::parse(&bytes);
-            let _ = BlockHeader::parse(&bytes, 0);
+            let _ = BlockHeader::parse(&bytes, 0, 3);
         }
     }
 }
