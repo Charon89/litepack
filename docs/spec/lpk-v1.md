@@ -598,8 +598,8 @@ data. The registry gives each primitive a 16-bit ID, a name, a parameter layout 
 
 `params` is a byte string whose length is stated in the graph; its length must be exactly the layout's length
 (0 for a primitive without parameters). The six reconstruction primitives (7 to 12) are the exception: their
-`params` are one canonical varint, the `record_id` (1 to 10 bytes, nothing after it); the record itself holds
-what earlier drafts put in the parameters of `base64` and `utf16` (section 12). Violating a layout's rules, such
+`params` are one canonical varint, the `record_id` (1 to 10 bytes, nothing after it); the record (section 12)
+holds the rest of what the primitive needs. Violating a layout's rules, such
 as a `window_log` of 9 or 32, an `lc` of 9, a `patch_format` of 2, or a `record_id` that is empty, not a
 canonical varint or followed by other bytes (reason `record_id`), is `BadParams` carrying the ID and a short
 reason. A `params` whose length differs from the layout's is `BadParams` with the reason `length`.
@@ -1105,10 +1105,19 @@ Errors of this section: `UnknownRecordKind`, `ReservedRecordBits`, `RecordHashMi
 
 ## 13. Recovery
 
-`Recovery` frames (kind 4) let a reader rebuild damaged bytes of the archive: Reed-Solomon over fixed-size shards
-in GF(2^16), the construction of the `reed-solomon-simd` library (Leopard-RS). The covered bytes are cut into
+`Recovery` frames (kind 4) let a reader rebuild damaged bytes of the archive. The covered bytes are cut into
 groups of data shards and each group has its own frame, so the memory a writer or a repairing reader needs depends
 on the group, not on the archive. The index lists every frame (section 6).
+
+The code. Version 1 defines the Reed-Solomon code by reference: a systematic erasure code over GF(2^16), the
+Leopard-RS construction as implemented by the `reed-solomon-simd` library, version 3.x, with its 64-byte shard
+interleave (each shard's bytes are coded in 64-byte units, which is why `shard_len` is a multiple of 64). The
+recovery shards of a frame are those that library's encoder produces for the frame's `group_shards` data shards
+(the real ones followed by the implicit zero shards) and its `recovery_shards`. Which pairs of counts are allowed is
+that library's `ReedSolomonDecoder::supports(group_shards, recovery_shards)`. A normative description of the field,
+its basis and the shard layout, independent of the library, is planned for a later revision; until then an
+independent decoder MUST report damage from the shard hashes (which need no Reed-Solomon code) and MAY leave repair
+out.
 
 ### Coverage and groups
 
@@ -1116,7 +1125,8 @@ A group is a run of whole data frames (`ChunkData`, `EntryTable`, `Records`) wri
 `Recovery` frame is written immediately after them and covers exactly their bytes: `cover_offset` is the end of
 the previous recovery frame (offset 32, the end of the header, for the first) and `cover_offset + cover_len` is
 the offset of the recovery frame itself. So each recovery frame covers the frames written since the previous
-recovery frame (or the header), and no recovery frame is covered by any group. The index and the trailer are not
+recovery frame (or the header), and no recovery frame is covered by any group. In an encrypted archive the key slot
+is the first frame after the header, so the first group covers it and its bytes count towards that group. The index and the trailer are not
 covered: the trailer holds the index hash, which authenticates the index, and a damaged index is not repaired by
 this version. A writer closes a group, and writes its frame, when the next data frame would make the group longer
 than `group_shards * shard_len` bytes; the last group closes before the index, so every data frame is covered
@@ -1128,26 +1138,30 @@ sizes it by the data actually written (`group_shards` equals `data_shards`, no p
 whose `group_shards` is larger, in which case the shards after the real ones are implicit all-zero shards, never
 written, and the reader pads in the same way.
 
-A reader checks the tiling: the index lists the recovery frames in ascending order and, in generation 0, the last
-ends where the index starts, or, when the latest generation wrote no recovery frame, ends at or before the previous
-trailer's offset (`BadFrameLocation`, `what` `recovery`), and each frame's range ends where the frame itself starts
-and starts where the previous frame ends (`BadRecovery`, `reason` `coverage`). The one exception is the first frame
-of a later generation (section 15): its range starts at that generation's `start_offset` from the index's generation
-table, which the trailer's index hash authenticates, because the old index and trailer are not covered. No byte of
-an uncovered old trailer is read to decide this.
+The tiling has two parts, checked at different times. When the index is parsed (section 6): the recovery locations
+ascend and the last one ends where the index starts, or, when the latest generation wrote no recovery frame, it lies
+before that generation's `start_offset` and ends at or before the previous trailer's offset (`BadFrameLocation`,
+`what` `recovery`). Opening an archive reads no recovery payload. When `check` or `repair` reads a frame (below),
+the frame's range must end where the frame itself starts and start where the previous recovery frame ends (offset 32
+for the first); a frame that breaks this is not an error: it is counted as unusable, with the reason `coverage`. The
+one exception is the first frame of a later generation (section 15): its range starts at a `start_offset` of the
+index's generation table that lies after the previous recovery frame's end, because the old index and trailer are
+not covered. A frame belongs to the generation in whose range of the generation table its offset lies; no byte of
+an uncovered old trailer is read to decide this. `BadRecovery` is the class of a recovery payload that breaks the
+rules of the payload below, and inside `check` and `repair` it too only makes the frame unusable.
 
 ### Geometry and bounds
 
 `shard_len` is a multiple of 64, not 0 and at most 16777216 (16 MiB). `group_shards` is 1 to 32768 and
 `group_shards * shard_len` is at most 1073741824 (1 GiB). `data_shards`, the real shards of a group, is
 `ceil(cover_len / shard_len)` and between 1 and `group_shards`. `recovery_shards` is at least 1 and
-`group_shards + recovery_shards` is at most 65535, and the pair must be one the coding library supports (a frame
+`group_shards + recovery_shards` is at most 65535, and the pair must be one the code supports (above; a frame
 that is not is `BadRecovery`, `reason` `shard count`). The reference writer takes `recovery_shards =
 ceil(group_shards * percent / 100)` (at least 1) from the frame's own `group_shards`, with `percent` from 1 to 20
 (0 means no recovery frames). Its options are `percent`, `shard_len` (default 65536) and `group_shards`, the most
 shards a group may take (default 2048: 128 MiB, so that the default 64 MiB block fits). It refuses options outside
-these bounds, and options whose full group would need more than the default decoder memory limit (2 GiB) to
-repair (`BadOptions`, `reason` `repair memory`).
+these bounds, and options whose full group would need more than the default `memory` resource of section 7
+(2147483648 bytes) to repair (`BadOptions`, `reason` `repair memory`).
 
 ### Payload
 
@@ -1169,8 +1183,8 @@ least 32 and the range ends at or before the index [`cover range`]; `group_shard
 `group_shards * shard_len` within 1 GiB [`group size`]; `data_shards` as above [`data_shards`]; `recovery_shards` at
 least 1 [`recovery_shards`]; the sum at most 65535 [`shard count`]; the payload's length exactly 32 plus
 `data_shards * 32` plus `recovery_shards * shard_len` [`payload length`]. A payload shorter than the 32 fixed
-bytes is `Truncated` (`what` is `recovery`). The length is checked before anything is allocated, so a declared
-count never allocates more than the payload holds. That a frame's coverage overlaps no recovery frame needs the
+bytes is `Truncated` (`what` is `recovery`). The rules are checked in the order listed, and the length before
+anything is allocated, so a declared count never allocates more than the payload holds. That a frame's coverage overlaps no recovery frame needs the
 index's list; the repairing reader checks it and counts a frame that breaks it as unusable.
 
 ### Writing and memory
@@ -1196,9 +1210,11 @@ repaired and the error of the opening is the result. For each recovery frame the
 2. Cut the group's range into shards and hash each one (the last padded with zeros). A shard whose hash differs
    from the frame's `shard_hashes` entry is damaged. This locates damage shard by shard without decoding.
 3. When the number of damaged shards is at most `recovery_shards`, rebuild them: give the decoder every intact
-   data shard, the implicit zero shards and as many recovery shards as there are damaged data shards, and take the
-   rebuilt shards back. Every rebuilt shard must match its `shard_hashes` entry, otherwise the result is
-   `RecoveryError`.
+   data shard, the implicit zero shards and at least as many recovery shards as there are damaged data shards, and
+   take the rebuilt shards back. Any such set of recovery shards gives the same result; a decoder may give all of
+   them (the reference reader gives the first ones, as many as there are damaged shards). Recovery shards carry no
+   hash of their own: a damaged recovery shard makes the frame fail its frame hash, and the frame is unusable.
+   Every rebuilt shard must match its `shard_hashes` entry, otherwise the result is `RecoveryError`.
 4. Write the rebuilt bytes (without the padding) at their place in the copy.
 
 When more shards are damaged than a frame can rebuild, nothing is rebuilt for that frame (`Unrepairable`, with the
@@ -1212,17 +1228,20 @@ reader refuses a group whose buffer would exceed its memory limit before rebuild
 group`).
 
 Detection without repair is the same scan without steps 3 and 4: counts of the frames, of the unusable frames and
-of the damaged shards. `lpk-decode check <archive>` prints these counts and exits 1 if a shard is damaged or a
-frame is unusable; `lpk-decode repair <archive> <out>` writes the repaired copy to a file that must not exist,
-prints the report and exits 1 on an error, keeping the copy when the error is `Unrepairable`.
+of the damaged shards. `lpk-decode check <archive>` prints these counts and exits 1 (`DamageFound`) if a shard is
+damaged or a frame is unusable; `lpk-decode repair <archive> <out>` writes the repaired copy to a file that must not
+exist, prints the report and exits 1 on an error, keeping the copy when the error is `Unrepairable`. The exact output
+lines are given in `docs/spec/CONFORMANCE.md`. Whole-archive verification with the key (section 9) does not read the
+recovery frames, so a damaged recovery frame does not make it fail; `check` reports it.
 
 ### What is not covered
 
 The header, the index frame and the trailer are not covered. Damage there is not repaired: damage to the index or
 trailer makes the archive fail to open, and the error is the one that opening gives.
 
-Errors of this section: `BadRecovery`, `Unrepairable`, `RecoveryError`, `DamageFound` (the tool's `check`),
-`Refused`, `BadFrameLocation` (with `what` `recovery`), `Truncated`.
+Errors of this section: `BadRecovery`, `Unrepairable`, `RecoveryError`, `DamageFound` (the tool's `check`, and
+`verify` without the key), `Refused` (field `recovery group`), `BadFrameLocation` (with `what` `recovery`),
+`Truncated` (`recovery`).
 
 ## 14. Encryption
 
@@ -1257,7 +1276,9 @@ the table. The header, the key slot, the recovery frames and the trailer are nev
 
 Frame flag bit 1, `SEALED`, is set on exactly the frames that are sealed. A sealed payload is
 `nonce | ciphertext | tag`: the nonce (12 or 24 bytes), the ciphertext (as long as the plain payload) and the 16-byte
-tag. The reader checks the flag against the table before it opens anything: a sealed frame where the table says no
+tag. Opening a sealed payload, in this order: a payload shorter than the nonce plus the tag is `AuthenticationFailed`;
+a stored nonce that differs from the derived one (below) is `AuthenticationFailed`; then the tag is checked
+(`AuthenticationFailed`). The error names the kind and the sequence. The reader checks the flag against the table before it opens anything: a sealed frame where the table says no
 (and any sealed frame of an archive that is not encrypted) is `UnexpectedSealedFrame`; an unsealed frame where the table
 says yes is `UnsealedFrame`. A frame of unknown kind is skipped as in section 3 and is not subject to the table.
 
@@ -1278,8 +1299,8 @@ slot included) from 0 for the first frame after the header. The index frame is t
 name its position, so the index is sealed under the constant sequence 2^64 - 1, which no counted frame reaches. The index of generation `g` is sealed under `2^64 - 1 - g` (section 15), so no two generations of one archive seal an index under the same sequence. Each
 (kind, sequence, generation salt) triple is unique, so no nonce is used twice under `K`; a random nonce could repeat across
 the very large number of frames an archive may hold, and a repeat under GCM or Poly1305 breaks both secrecy and
-authenticity. The sealed payload still carries the nonce; a reader recomputes it and rejects a payload whose stored nonce
-differs.
+authenticity. The sealed payload still carries the nonce; a reader recomputes it, and a payload whose stored nonce
+differs is `AuthenticationFailed`.
 
 The associated data of every sealed frame is `"LitePack lpk v1 AD" || archive_id (16) || kind (u16 LE) || sequence
 (u64 LE) || payload_len (u64 LE)`, where `payload_len` is the frame's own `payload_len` field, the length of the
@@ -1291,7 +1312,7 @@ the recovery frames each carry a `sequence`.
 
 An encrypted archive's first frame after the header is the key slot, in clear; no other key slot may appear
 (`MissingKeySlot` when the first frame is another kind, `UnexpectedKeySlot` for a key slot in an archive that is not
-encrypted or a second one). Its payload:
+encrypted or a second one). Its payload is exactly 111 bytes:
 
 | Field | Size | Meaning |
 |---|---|---|
@@ -1305,10 +1326,19 @@ encrypted or a second one). Its payload:
 | wrapped_key | 48 | the archive key encrypted under the KEK (32 bytes of ciphertext, then the 16-byte tag) |
 | check | 32 | BLAKE3 keyed with the archive key, of the archive id |
 
-The key encryption key, the KEK, is `Argon2id(password, salt, t, m, p)` with version 0x13 and a 32-byte output. With a
+Reading the key slot, in this order: the frame is read under a payload limit of 111 bytes (a larger `payload_len`
+is `BadKeySlot`, `length`; the other errors of section 3 apply); a slot with the `SEALED` flag is
+`UnexpectedSealedFrame`; a payload that is not exactly 111 bytes is `BadKeySlot` (`length`); `suite` not 1 or 2 is
+`BadKeySlot` (`suite`); `kdf` not 1 is `BadKeySlot` (`kdf`); `argon2_t`, then `argon2_m_kib`, then `argon2_p`
+outside their bounds is `BadArgon2` (`t`, `m`, `p`); `keyfile_required` not 0 or 1 is `BadKeySlot`
+(`keyfile_required`).
+
+The key encryption key, the KEK, is Argon2id (RFC 9106, version 0x13) of the password bytes with the slot's 16-byte
+salt, `t` passes, `m` KiB of memory and `p` lanes, no secret and no associated data, and a 32-byte output. With a
 keyfile (`keyfile_required` is 1) it is `HKDF-SHA256(ikm = argon2_output || BLAKE3-256(keyfile bytes), salt = salt,
-info = "LitePack lpk v1 keyfile")` with a 32-byte output. `wrapped_key` is `K` encrypted with the suite under the KEK, the all-zero nonce (safe
-because every KEK is used once: the salt is fresh per archive) and the associated data `"LitePack lpk v1 keywrap" ||
+info = "LitePack lpk v1 keyfile")` with a 32-byte output. A keyfile given when `keyfile_required` is 0 is ignored. `wrapped_key` is `K` encrypted with the suite under the
+KEK, the all-zero nonce of the suite's length (12 or 24 zero bytes; safe because every KEK is used once: the salt
+is fresh per archive) and the associated data `"LitePack lpk v1 keywrap" ||
 archive_id || header_flags (u32 LE)`: the header flags are bound, so a flipped `ENCRYPTED` or `LISTABLE` bit fails at the key slot. `check` is `BLAKE3-256` keyed with `K` of the `archive_id`, a second and cheap way to tell a right key from a
 wrong one.
 
@@ -1323,12 +1353,20 @@ password is derived. The password is the raw bytes given, with no normalisation 
    `BadKeySlot` or `BadArgon2`.
 2. The key slot is opened with the credentials. A wrong password, a wrong or missing keyfile and a damaged wrapped key
    are all `WrongKey`; after unwrapping, the reader also compares `check` with the BLAKE3-256 of the archive id keyed
-   with the unwrapped key, and a mismatch is `WrongKey`. No other frame has been read. Without credentials the archive
-   opens keyless: the reader finds the recovery frames (and, in a listable archive, the entry table) by walking the frame
-   envelopes, skipping each payload by its declared length (the sequence count continues past a damaged frame), because the
-   index is sealed. A keyless reader can check and repair the archive with the recovery frames of section 13, which work on
-   the sealed bytes; `verify` hashes every frame, checks the recovery frames and reports that the chunks were not
-   checked; a listable archive's entry table can be listed (it is not authenticated without the index); everything that needs
+   with the unwrapped key, and a mismatch is `WrongKey`. No frame after the key slot has been read.
+   Without credentials the archive opens keyless, in these steps: the trailer is read and checked as in section 6
+   (step 4); then, from the end of the key slot (sequence 1), the frame envelopes are walked: each
+   frame's kind, flags and `payload_len` are read and its payload is skipped by its declared length, without being
+   read or hashed, so the sequence count continues past a damaged frame. A frame that would end past the file is
+   `Truncated` (`frames`); a key slot met again is `UnexpectedKeySlot`. The walk records every `Recovery` frame (its
+   location and sequence), takes the last `EntryTable` frame as the entry table, records the end of every trailer that
+   is not the last frame as a generation start, and stops at the trailer that ends the file. A listable archive
+   without an `EntryTable` frame is `BadFrameLocation` (`entry table`). A keyless reader can check and repair the
+   archive with the recovery frames (section 13), which work on the sealed bytes, assigning frames to generations by
+   offset against the generation starts it found. Its `verify` walks every frame as the diagnosis walk does (section
+   6; the frame hashes and the sealing rules), then scans the recovery frames and fails with `DamageFound` when a
+   shard is damaged or a recovery frame is unusable, and otherwise reports that the chunks were not checked; a listable
+   archive's entry table can be listed (it is not authenticated without the index); everything that needs the index or
    a sealed frame (`extract`, a sealed entry table) is `PasswordRequired`.
 3. Only then are the trailer, the index and the blocks read. A modified frame envelope or payload fails the frame hash
    first (`HashMismatch`); a payload modified together with its frame hash fails the tag: `AuthenticationFailed` naming the
@@ -1340,7 +1378,8 @@ The reference tool takes the password with `--password-file` (one trailing newli
 (for tests), and a keyfile with `--keyfile`; `list` works on a listable archive without either.
 
 Errors of this section: `PasswordRequired`, `WrongKey`, `AuthenticationFailed`, `UnexpectedSealedFrame`, `UnsealedFrame`,
-`UnexpectedKeySlot`, `MissingKeySlot`, `BadKeySlot`, `BadArgon2`, `Refused` (field `argon2_m`), `EntryTableMismatch`.
+`UnexpectedKeySlot`, `MissingKeySlot`, `BadKeySlot`, `BadArgon2`, `Refused` (field `argon2_m`), `EntryTableMismatch`,
+`DamageFound`, `Truncated` (`frames`).
 
 ### Test vectors
 
@@ -1352,8 +1391,8 @@ committed under `crates/lpk-format/tests/vectors/`; their test passwords are in 
 
 An archive grows by appending. Each write is a generation: generation 0 is the archive as first written (sections 6 and
 9), and an append adds generation `g + 1` after the trailer of generation `g`. Nothing before that trailer is
-rewritten, so every earlier trailer stays valid and "undo the append" is a truncation. The method document's rule
-is zpaq's: append-only updates with deduplication against what is already stored; rollback is truncation.
+rewritten, so every earlier trailer stays valid and "undo the append" is a truncation: append-only updates with
+deduplication against what is already stored.
 
 | Rule | Value |
 |---|---|
@@ -1392,9 +1431,12 @@ checks below:
   `BadRecord` for a changed one, `RecordOutOfRange` for a missing one), because old blocks name records by position.
 - The generation table (after the recovery list) has one entry per generation, 0 to the latest, in order: the
   generation number, the `start_offset` of its first frame (the end of the header for generation 0, the end of the
-  previous trailer for the others), the `first_sequence` of that frame and the generation's `salt`. Offsets and
-  sequences ascend strictly (`BadGenerationTable` otherwise). A reader that opened the archive at the trailer of
-  generation `g` requires `g + 1` entries whose last one carries `g` and the trailer's salt.
+  previous trailer for the others), the `first_sequence` of that frame and the generation's `salt`. The rules and
+  their `BadGenerationTable` reasons are in section 6: when the index is parsed, `generation` equals the position,
+  the first entry starts at offset 32 with `first_sequence` 0, and offsets and sequences ascend strictly; when the
+  archive is opened at the trailer of generation `g`, the table has `g + 1` entries, the last one carries the
+  trailer's salt and (for `g` above 0) starts at `previous_trailer_offset + 133`, and a plain archive's salts are
+  all zero. The last entry's `generation` is then `g`.
 
 A trailer whose `generation` is larger than the file length divided by 133 is refused (`BadTrailer`); a writer that
 would pass the largest `u64` refuses too.
@@ -1417,17 +1459,21 @@ without them) and seals with that key.
 
 ### The trailer chain
 
-`previous_trailer_offset` is 0 in generation 0. From the last trailer a reader walks back: the trailer at the offset
-must verify, lie before the index of the trailer that names it (`BadFrameLocation`, `what` `trailer`, for an offset at or
-after that index), carry the archive's id and a generation number one lower (`ArchiveIdMismatch`, `GenerationMismatch`),
-and each index frame must end exactly where its own trailer starts. `Archive::history` returns the chain, newest first:
-each generation's number, trailer offset, index offset and index hash. `lpk-decode info` prints the chain length, or
-the chain error when an old trailer is damaged (the archive itself still opens at its last trailer).
+`previous_trailer_offset` is 0 in generation 0. Opening checks only the last trailer (section 6), with the generation
+table tying it to the start of its generation. Walking the chain back (the reference reader's history, and rollback)
+applies these checks to each trailer from the last one down, in this order: its index must end exactly where it starts
+(`BadFrameLocation`, `index`); at generation 0 its `previous_trailer_offset` must be 0 (`BadTrailer`,
+`previous_trailer_offset`) and the walk ends; otherwise the previous trailer frame (133 bytes) must end at or before
+its index (`BadFrameLocation`, `trailer`); it is read as a trailer of the fixed shape (`NoTrailer`), with a valid hash
+(`HashMismatch`), not cut short (`Truncated`, `trailer`); it must carry the header's archive id (`ArchiveIdMismatch`) and
+the generation number one lower (`GenerationMismatch` with the expected and the found number). The chain lists, newest
+first, each generation's number, trailer offset, index offset and index hash. `lpk-decode info` prints the chain length,
+or the chain error when an old trailer is damaged (the archive itself still opens at its last trailer).
 
 ### Deduplication against the old table
 
-`Writer::append` builds a map from BLAKE3 to chunk number over the old chunk table (the first chunk wins for a repeated
-hash; about 40 bytes per chunk in memory, which the writer holds until it finishes). A new chunk whose BLAKE3 and length
+The reference writer's append builds a map from BLAKE3 to chunk number over the old chunk table (the first chunk wins
+for a repeated hash; the map is held until the append finishes). A new chunk whose BLAKE3 and length
 match an old chunk is referenced by its old number and not written; any other chunk goes to a new block. Chunks inside
 the appended data are not deduplicated against each other, and a one-shot writer does not deduplicate at all; content
 defined chunking and full deduplication come with the writer's later tasks.
@@ -1442,32 +1488,113 @@ latest generation wrote no recovery frames (section 13).
 
 ### Without the key
 
-A reader without credentials (sections 6 and 14) finds the frames by walking their envelopes. The walk passes
-every trailer that is not the last one (a trailer ends a generation, not the file), records the end of each as a
-generation start, takes the last `EntryTable` frame as the current table and lists the recovery frames of every
+A reader without credentials finds the frames by walking their envelopes, step by step as section 14 describes. The
+walk passes every trailer that is not the last one (a trailer ends a generation, not the file), records the end of each
+as a generation start, takes the last `EntryTable` frame as the current table and lists the recovery frames of every
 generation.
 
 ### Rollback
 
-`lpk-decode rollback <archive> <generation>` (the library function `rollback`) truncates the file to the end of the
+`lpk-decode rollback <archive> <generation>` truncates the file to the end of the
 named generation's trailer. The last complete trailer is found from the end of the file, or, when the end is not a
 trailer, by walking the frames (with a frame length limit of the file's length); the chain is verified back to
 generation 0 and the named generation must be on it (`NoSuchGeneration` with the requested and the latest number
 otherwise). No credentials are needed. The file after a rollback is byte-identical to the archive as it was when that
 generation was written. After a cut append the diagnosis (`Diagnosis.last_trailer_end`) and `rollback` name the last
-complete generation: rolling back to the latest complete generation removes the broken tail.
+complete generation (the diagnosis reports the offset after the last complete trailer): rolling back to the latest
+complete generation removes the broken tail.
 
 ### The commit rule and a half-written append
 
 An append is committed when the last byte of the new trailer is written, and the data it commits must be on disk first:
-a writer that can sync (`Writer::append_file` opens the file for appending and syncs with `sync_data`) flushes and syncs
-everything before the trailer and syncs again after it, and one over a bare `Write` should be given a sync hook
-(`Writer::with_sync`). Until the
+a writer flushes and syncs everything before the trailer to stable storage and syncs again after it. Until the
 trailer is complete the last valid trailer is the old one, but it is no longer at the end of the file, so opening fails
 through the diagnosis walk of section 6 with `Truncated` (`what` `trailer`). The walk continues past trailers, so it
-reports the cut and the offset after the last complete trailer. `Writer::append` with a bare writer trusts the caller
-that the output is positioned at the end of the archive. `lpk-decode info` prints the generation and the length of the
-chain.
+reports the cut and the offset after the last complete trailer. `lpk-decode info` prints the generation and the length
+of the chain.
 
 Errors of this section: `NoSuchGeneration`, `AppendNeedsCredentials`, `GenerationMismatch`, `BadGenerationTable`,
 `BadTrailer`, plus those of sections 6, 12, 13 and 14.
+
+## 16. Error catalogue
+
+Every error class, its fields and where it is raised. The class (with the `reason`, `what` or `field` string where the
+text names one) is normative; the message text is not. "Reader" classes come from reading an archive; "writer" and
+"tool" classes are given for completeness.
+
+| Class | Fields | Raised by (section) |
+|---|---|---|
+| `BadMagic` | - | header: the first 8 bytes are not the magic (2) |
+| `UnsupportedMajor` | `found` | header: `version_major` is not 1 (2) |
+| `ReservedHeaderBits` | `bits` | header: a reserved flag bit is set (2) |
+| `BadHeaderFlags` | `bits` | header: `LISTABLE` without `ENCRYPTED` (2) |
+| `ReservedFrameBits` | `bits` | frame: a reserved flag bit is set (3) |
+| `InvalidKind` | - | frame: kind 0 (3) |
+| `NonCanonicalVarint` | - | any varint not in its shortest form (1, 3, 5) |
+| `VarintTooLong` | - | any varint that continues past ten bytes (1, 3) |
+| `Truncated` | `what`: `header`, `frame header`, `payload`, `hash`, `entry table`, `chunk table`, `index`, `trailer`, `graph`, `block header`, `records`, `record body`, `recovery`, `frames` | input or a payload ends inside the named part (2 to 15) |
+| `HashMismatch` | `kind` | a frame's payload does not match its hash (3, 6, 9) |
+| `UnknownMustUnderstand` | `kind` | an unknown kind with MUST_UNDERSTAND (3) |
+| `PayloadTooLarge` | `len`, `max` | a `payload_len` above the frame limit (3); a block `plain_len` or an intermediate output above `max_block_plain`, a non-final step's output past its bound (8) |
+| `UnsortedEntries` | `index` | entry table: a path not greater than the previous one (4) |
+| `UnsupportedEntryKind` | `kind`, `index` | entry table: an unknown entry kind (4) |
+| `ReservedEntryBits` | `bits`, `index` | entry table: a reserved entry flag bit (4) |
+| `InvalidPath` | `index`, `reason` | entry table: the path rules and the symlink target (4) |
+| `InconsistentEntry` | `index`, `reason` | entry table: "directory size" (reader); other reasons are writer refusals (4) |
+| `TrailingBytes` | `what`: `entry table`, `chunk table`, `index`, `records`, `record body`, `archive` | bytes left after the last item of a payload, or broken bytes after a trailer (4 to 6, 12) |
+| `ChunkMismatch` | `chunk` | an intact block yields a chunk that differs from its record (5, 9) |
+| `ChunkIndexOutOfRange` | `chunk`, `len` | a chunk index not below the chunk count (5, 12) |
+| `FileSizeMismatch` | `expected`, `found` | a file's chunks do not add up to its size (5) |
+| `RangeOutOfFile` | `offset`, `len`, `file_len` | a byte range outside the file (5) |
+| `MerkleRootMismatch` | - | index: stored root differs from the recomputed one (6) |
+| `IndexHashMismatch` | - | the index payload does not match the trailer's `index_hash` (6) |
+| `ArchiveIdMismatch` | - | a trailer's `archive_id` differs from the header's (6, 15) |
+| `BlockLengthMismatch` | `block` | block lengths: index records against the chunk table, the block header, the last step's output (6, 8) |
+| `BlockCoverage` | `block` | the blocks do not partition the chunk table, or frames out of order (6) |
+| `BlockOutOfRange` | `block` | a block frame outside the body (6) |
+| `WrongFrameKind` | `expected`, `found` | a recorded location holds another kind (6) |
+| `NoTrailer` | - | the walk ends on a trailer of the wrong shape; an old trailer of the wrong shape (6, 15) |
+| `BadGenerationTable` | `reason`: `generation`, `first start_offset`, `first first_sequence`, `order`, `count`, `salt`, `start_offset`, `salt not zero` | the generation table (6, 15) |
+| `BadTrailer` | `reason`: `generation`, `previous_trailer_offset` | trailer fields out of range (6, 15) |
+| `GenerationMismatch` | `expected`, `found` | trailer chain: a generation number not one lower (15) |
+| `BadFrameLocation` | `what`: `index`, `entry table`, `records`, `recovery`, `trailer`, `ChunkData`, `Recovery`, `frames` | a recorded location out of range, overlapping, or not matching the frame there (6, 13, 14, 15) |
+| `EnvelopeMismatch` | `field` | the envelope against the archive, or a block graph against the envelope (7, 9) |
+| `Refused` | `field`, `needed`, `allowed` | the archive needs more than the reader allows: an envelope field, `argon2_m`, `recovery group` (7, 13, 14) |
+| `UnknownPrimitive` | `id` | a primitive ID not in the registry (8) |
+| `UnimplementedPrimitive` | `id` | a primitive the reader does not run (8) |
+| `BadGraph` | `reason`: `step count`, `step flags`, `params length` | the decode graph (8) |
+| `BadParams` | `id`, `reason` | a primitive's parameters break its layout; `frame window exceeds declared` (8) |
+| `WindowTooLarge` | `needed`, `allowed` | a step's window above the reader's `max_window` (8) |
+| `ZstdError` | `reason` | a `zstd` step's input (8) |
+| `LzmaError` | `reason` | an `lzma` step's input (8) |
+| `MissingPrior` | `id` | a prior the caller's store does not hold (8, 10) |
+| `UnlistedPrior` | `id` | a block names a prior the index does not list (10) |
+| `BadPriorList` | `reason`: `zero id`, `not ascending and unique` | the index's prior list (10) |
+| `UnknownRecordKind` | `kind`, `record` | records: a kind outside 7 to 12 (12) |
+| `ReservedRecordBits` | `bits`, `record` | records: non-zero record flags (12) |
+| `RecordHashMismatch` | `record` | records: a body that does not match `body_hash` (12) |
+| `RecordOutOfRange` | `record`, `count` | a block names a record the archive does not have (12) |
+| `BadRecord` | `record`, `reason` | a record body breaks its rules (12) |
+| `BadRecovery` | `reason` | a recovery payload breaks its rules (13) |
+| `Unrepairable` | `frame`, `damaged`, `capacity` | repair: more damaged shards than a frame can rebuild (13) |
+| `RecoveryError` | `reason` | repair: a rebuilt shard does not match its hash (13) |
+| `DamageFound` | `damaged`, `unusable` | `check`, and `verify` without the key, found damage (13, 14) |
+| `PasswordRequired` | - | a sealed frame or the index is needed without credentials (14) |
+| `WrongKey` | - | the key slot does not open with the credentials (14) |
+| `AuthenticationFailed` | `kind`, `sequence` | a sealed payload: too short, wrong nonce, or wrong tag (14) |
+| `UnexpectedSealedFrame` | `kind` | a sealed frame where the rules say clear (14) |
+| `UnsealedFrame` | `kind` | a clear frame where the rules say sealed (14) |
+| `UnexpectedKeySlot` | - | a key slot in a plain archive, or a second one (6, 14) |
+| `MissingKeySlot` | - | an encrypted archive whose first frame is not the key slot (14) |
+| `BadKeySlot` | `reason`: `length`, `suite`, `kdf`, `keyfile_required` | the key slot payload (14) |
+| `BadArgon2` | `reason`: `t`, `m`, `p` | Argon2 parameters out of bounds (14) |
+| `EntryTableMismatch` | - | the entry table does not match `entry_table_hash` (6, 14) |
+| `NoSuchGeneration` | `requested`, `latest` | rollback to a generation that is not on the chain (15) |
+| `SymlinkRefused` | `path` | tool: extraction of a symlink entry (9) |
+| `UnsafePath` | `path`, `reason` | tool: extraction of a path it refuses (9) |
+| `BadOptions` | `reason` | writer: options it cannot honour (9, 13) |
+| `BadChunk` | `reason` | writer: a chunker that breaks the cutting rules (9) |
+| `AppendNeedsCredentials` | - | writer: append to an encrypted archive without credentials (15) |
+| `SealFailed` | `kind`, `sequence` | writer: the cipher refused to seal (14) |
+| `Io` | the I/O error | any read or write that fails below the format |
+
