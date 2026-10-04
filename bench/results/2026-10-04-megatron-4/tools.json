@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "store",
+      "local_override": false,
+      "manual": false,
+      "name": "tar (store, control)",
+      "status": "found",
+      "version": "bsdtar 3.8.8"
+    },
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "7z",
+      "local_override": false,
+      "manual": false,
+      "name": "7-Zip",
+      "status": "found",
+      "version": "26.03"
+    },
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "rar",
+      "local_override": false,
+      "manual": false,
+      "name": "WinRAR (rar)",
+      "status": "found",
+      "version": "7.00"
+    },
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "zstd",
+      "local_override": true,
+      "manual": false,
+      "name": "Zstandard",
+      "status": "found",
+      "version": "1.5.7"
+    },
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "xz",
+      "local_override": true,
+      "manual": false,
+      "name": "XZ Utils",
+      "status": "found",
+      "version": "5.8.4"
+    },
+    {
+      "catalogue_verified": true,
+      "dedup": true,
+      "id": "zpaqfranz",
+      "local_override": true,
+      "manual": false,
+      "name": "zpaqfranz",
+      "status": "found",
+      "version": "65.4"
+    },
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "lpk",
+      "local_override": false,
+      "manual": false,
+      "name": "LitePack",
+      "status": "found",
+      "version": "0.0.1+2be966ed1cff"
+    },
+    {
+      "catalogue_verified": false,
+      "dedup": true,
+      "id": "tsaur",
+      "local_override": false,
+      "manual": false,
+      "name": "t-saur",
+      "reason": "not installed",
+      "status": "skipped"
+    },
+    {
+      "catalogue_verified": false,
+      "dedup": false,
+      "id": "wzzip",
+      "local_override": false,
+      "manual": true,
+      "name": "WinZip command line",
+      "reason": "manual (see docs/BASELINES.md)",
+      "status": "skipped"
+    },
+    {
+      "catalogue_verified": false,
+      "dedup": false,
+      "id": "pacl",
+      "local_override": false,
+      "manual": true,
+      "name": "PowerArchiver command line",
+      "reason": "manual (see docs/BASELINES.md)",
+      "status": "skipped"
+    }
+  ]
+}
