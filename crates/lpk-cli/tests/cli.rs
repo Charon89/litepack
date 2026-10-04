@@ -321,3 +321,36 @@ fn balanced_flags_are_exclusive_and_checked() {
     let h = run(&["a", "--help"]);
     assert!(text(&h.stdout).contains("--balanced"));
 }
+
+#[test]
+fn dedup_is_on_by_default_and_no_dedup_turns_it_off() {
+    let src = tempfile::tempdir().unwrap();
+    let big = random(300_000);
+    fs::write(src.path().join("one.bin"), &big).unwrap();
+    fs::write(src.path().join("two.bin"), &big).unwrap();
+    fs::write(src.path().join("note.txt"), prose(4, 20_000)).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let (on, off) = (work.path().join("on.lpk"), work.path().join("off.lpk"));
+    let s = src.path().to_str().unwrap();
+    let a = run(&["a", on.to_str().unwrap(), s, "-v"]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let msg = text(&a.stderr);
+    assert!(msg.contains("dedup: "), "{msg}");
+    assert!(!msg.contains("dedup: 0 chunks"), "{msg}");
+    let b = run(&["a", off.to_str().unwrap(), s, "--no-dedup", "-v"]);
+    assert_eq!(b.status.code(), Some(0), "{}", text(&b.stderr));
+    assert!(text(&b.stderr).contains("dedup: 0 chunks and 0 bytes"));
+    let (n_on, n_off) = (
+        fs::metadata(&on).unwrap().len(),
+        fs::metadata(&off).unwrap().len(),
+    );
+    assert!(n_on + 250_000 < n_off, "{n_on} {n_off}");
+    for (arch, name) in [(&on, "out-on"), (&off, "out-off")] {
+        let out = work.path().join(name);
+        let x = run(&["x", arch.to_str().unwrap(), out.to_str().unwrap()]);
+        assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+        assert_eq!(tree_hash(&out), tree_hash(src.path()));
+        let t = run(&["t", arch.to_str().unwrap()]);
+        assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    }
+}

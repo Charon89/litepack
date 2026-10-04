@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 blake3 = "1.8.7"
+fastcdc = "5.0.0"
 flate2 = "1.1.10"
 # Pinned: the jpeg-reconstruct decoder reads the stream header layout of 0.5.8 (spec section 8).
 lepton_jpeg = "=0.5.8"

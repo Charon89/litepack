@@ -4,7 +4,8 @@
 //! Peel (turn one input stream into a peeled stream plus a reconstruction record; the JPEG peel
 //! is the first, [`crate::peel`]) runs in the Fast model on the inputs of the classes a stage
 //! applies to; Fold (deduplicate and delta across streams; it runs on the peeled streams, never
-//! on the raw inputs) is an empty trait a later task fills.
+//! on the raw inputs) installs its chunker and dedup in the writer ([`crate::fold`]; the Fast and
+//! Balanced pipelines run [`Dedup`] by default).
 //! [`archive_store`](crate::archive_store) and [`archive_fast`](crate::archive_fast) are thin
 //! fronts over [`Pipeline::run`].
 //!
@@ -25,15 +26,11 @@ use crate::cluster::{cluster, DictionaryKind};
 use crate::error::CoreError;
 use crate::fast::stored_by_class;
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
+use crate::fold::{Dedup, FoldStage};
 use crate::ingest::{validate_input, walk, IngestOptions, Input};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
 use crate::store::{create_new_and_run, Counting, StoreOptions, SyncFn, OUT_BUF};
-
-/// A fold stage deduplicates and deltas across streams. It runs on the peeled streams (the
-/// output of the peel stages), so duplicates hidden inside containers are found. No
-/// implementation exists yet.
-pub trait FoldStage: std::fmt::Debug + Send + Sync {}
 
 /// The classify stage: how the tree is walked; the classifier and the clustering run on what the
 /// walk found (when the model stage wants them).
@@ -74,7 +71,7 @@ pub struct StageTimings {
     pub classify: Duration,
     /// Peel stages (reading the inputs they apply to, peeling, verifying).
     pub peel: Duration,
-    /// The fold stage (none yet).
+    /// The fold stage (zero: its work is done inside the writer's calls, counted in `model`).
     pub fold: Duration,
     /// Reading the files and encoding blocks (the writer's `add_*` calls).
     pub model: Duration,
@@ -103,7 +100,7 @@ pub struct Pipeline {
     pub classify: ClassifyStage,
     /// Peel stages: the first that applies to an input's class peels it (Fast model only).
     pub peel: Vec<Box<dyn PeelStage>>,
-    /// The fold stage (none yet).
+    /// The fold stage (chunker and dedup); `None` keeps the writer's fixed chunker, no dedup.
     pub fold: Option<Box<dyn FoldStage>>,
     /// How blocks are coded.
     pub model: ModelStage,
@@ -157,7 +154,7 @@ impl Pipeline {
                 max_file: options.jpeg_max_file,
                 ..JpegPeel::default()
             })],
-            fold: None,
+            fold: Some(Box::new(Dedup::default())),
             model: ModelStage::Fast(options),
             seal: SealOptions::default(),
         }
@@ -173,7 +170,7 @@ impl Pipeline {
                 max_file: options.jpeg_max_file,
                 ..JpegPeel::default()
             })],
-            fold: None,
+            fold: Some(Box::new(Dedup::default())),
             model: ModelStage::Balanced(options),
             seal: SealOptions::default(),
         }
@@ -229,13 +226,17 @@ impl Pipeline {
             ..StageTimings::default()
         };
         let Pipeline {
-            model, seal, peel, ..
+            model,
+            seal,
+            peel,
+            fold,
+            ..
         } = self;
         let mut wopts = seal.writer;
         let source = Source::new();
         match (model, prepared) {
             (ModelStage::Store, Prepared::Store) => {
-                let mut writer = open_writer(out, wopts, sync, 0)?;
+                let mut writer = open_writer(out, wopts, sync, 0, fold.as_deref())?;
                 let t = Instant::now();
                 for input in &inputs {
                     validate_input(input)?;
@@ -321,7 +322,7 @@ impl Pipeline {
                 // The header's version_minor is the revision this writer writes under (spec
                 // section 2): 1 whenever a peel stage is enabled, whether or not one peels.
                 let minor = if peel.is_empty() { 0 } else { 1 };
-                let mut writer = open_writer(out, wopts, sync, minor)?;
+                let mut writer = open_writer(out, wopts, sync, minor, fold.as_deref())?;
                 let mut summary = PeelSummary::default();
                 let mut peel_time = Duration::ZERO;
                 let t = Instant::now();
@@ -420,12 +421,19 @@ type OutWriter<W> = Writer<BufWriter<W>>;
 
 fn open_writer<W: Write>(
     out: W,
-    wopts: WriterOptions,
+    mut wopts: WriterOptions,
     sync: Option<SyncFn>,
     version_minor: u16,
+    fold: Option<&dyn FoldStage>,
 ) -> Result<OutWriter<W>, CoreError> {
-    let mut writer =
-        Writer::new_revision(BufWriter::with_capacity(OUT_BUF, out), wopts, version_minor)?;
+    let out = BufWriter::with_capacity(OUT_BUF, out);
+    let mut writer = match fold {
+        Some(f) => {
+            let chunker = f.install(&mut wopts)?;
+            Writer::new_revision_with_chunker(out, wopts, version_minor, chunker)?
+        }
+        None => Writer::new_revision(out, wopts, version_minor)?,
+    };
     if let Some(sync) = sync {
         writer = writer.with_sync(sync);
     }
@@ -465,6 +473,19 @@ fn write_peeled<W: Write>(
     plan: PeelPlan,
 ) -> Result<(), CoreError> {
     writer.begin_entry(&input.path, input.flags, input.mtime_ns)?;
+    // Dedup: a primary part whose chunks are all stored already needs no block and no record
+    // (the entry lists those chunks); the nested parts go through the normal path.
+    if writer
+        .add_part_known(0, &data[..plan.primary_len as usize])?
+        .is_some()
+    {
+        for p in &plan.nested {
+            let (a, b) = (p.offset as usize, (p.offset + p.len) as usize);
+            writer.add_part(p.offset, &mut &data[a..b])?;
+        }
+        writer.end_entry()?;
+        return Ok(());
+    }
     let mut lists = Vec::with_capacity(plan.nested.len());
     for p in &plan.nested {
         let (a, b) = (p.offset as usize, (p.offset + p.len) as usize);
@@ -517,7 +538,7 @@ mod tests {
         make_tree(dir.path());
         let mut out = Vec::new();
         let p = Pipeline::fast(FastOptions::default());
-        assert!(p.peel.len() == 1 && p.fold.is_none());
+        assert!(p.peel.len() == 1 && p.fold.is_some());
         let s = p.run(dir.path(), &mut out).unwrap();
         assert_eq!(s.writer.archive_len, out.len() as u64);
         let fast = s.fast.unwrap();

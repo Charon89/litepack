@@ -492,6 +492,17 @@ impl<W: Write> Writer<W> {
         )
     }
 
+    /// [`Writer::new_revision`] with another chunker (`chunk_size` is still the
+    /// longest chunk and tail the writer accepts from it).
+    pub fn new_revision_with_chunker(
+        out: W,
+        options: WriterOptions,
+        version_minor: u16,
+        chunker: Box<dyn Chunker>,
+    ) -> Result<Self, FormatError> {
+        Self::start(out, options, chunker, &mut rand::rng(), version_minor)
+    }
+
     fn start(
         mut out: W,
         options: WriterOptions,

@@ -63,6 +63,8 @@ fn build() -> Vec<u8> {
     std::fs::write(&p, photo()).unwrap();
     set_mtime(&p);
     let mut pipeline = Pipeline::fast(FastOptions::default());
+    // The committed vector is the fixed 4096-byte cut: no fold stage.
+    pipeline.fold = None;
     pipeline.seal.writer.chunk_size = 4096;
     pipeline.seal.writer.archive_id = [0x5A; 16];
     let mut out = Vec::new();

@@ -1429,6 +1429,7 @@ name = "lpk-core"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "fastcdc",
  "flate2",
  "lepton_jpeg",
  "libc",
