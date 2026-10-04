@@ -593,7 +593,10 @@ to the one before it or sorts before it.
 
 A reader reads a chunk by finding its block in the chunk index, reading that block's frame, decoding the block
 with its graph (section 8) and cutting the chunk out of the plain bytes at the offset its predecessors in the
-block leave. It keeps the plain bytes of the block it read last, so chunks read in order decode each block once.
+block leave. Before decoding, the block's graph is checked against the envelope (section 7): a graph whose
+resources need a window above `max_window` or a BWT block above `max_bwt_block` is `EnvelopeMismatch` with that
+field, raised when the block header is parsed. It keeps the plain bytes of the block it read last, so chunks
+read in order decode each block once.
 Every chunk is compared with its record in the chunk table (length and BLAKE3) before its bytes are used; a
 mismatch is `ChunkMismatch` with the chunk's number. A block whose frame hash fails cannot vouch for any chunk it
 holds, so when a file is extracted, reading a chunk of that block is reported as a `ChunkMismatch` of that
