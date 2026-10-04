@@ -28,6 +28,7 @@ fn list_tools_prints_one_line_per_catalogue_tool() {
         "zstd",
         "xz",
         "zpaqfranz",
+        "lpk",
         "tsaur",
         "wzzip",
         "pacl",
