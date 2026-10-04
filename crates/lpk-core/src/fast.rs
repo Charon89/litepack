@@ -53,9 +53,10 @@ pub struct FastOptions {
     pub ingest: IngestOptions,
     /// zstd compression level. The default, 3, is the setting the Phase 0 G4 proxy measured.
     pub level: i32,
-    /// log2 of the match window in bytes, 10 to 31. The default, 27, is the window of the
-    /// catalogue's zstd row (`--long=27`); the decoder is told this number and reserves that
-    /// much memory.
+    /// log2 of the match window in bytes, 10 to 31: how far back the encoder may match. The
+    /// default, 27, is the window of the catalogue's zstd row (`--long=27`). It is the maximum
+    /// of the window each block declares (a block shorter than the window declares a smaller
+    /// one), not a memory figure the decoder reserves up front.
     pub window_log: u32,
     /// Plain bytes per block (the format's default).
     pub block_size: u64,
@@ -167,6 +168,15 @@ fn build_compressor(
     dictionary: Option<&[u8]>,
 ) -> Result<zstd::bulk::Compressor<'static>, CoreError> {
     let bad = |name: &str, e: std::io::Error| CoreError::InvalidOption(format!("{name}: {e}"));
+    if let Some(d) = dictionary {
+        // Raw bytes without zstd's dictionary magic would load as raw content and the frame
+        // would then not name a dictionary the reader accepts.
+        if d.get(..4) != Some(&[0x37, 0xA4, 0x30, 0xEC]) {
+            return Err(CoreError::InvalidOption(
+                "dictionary: missing the zstd dictionary magic".into(),
+            ));
+        }
+    }
     let mut c = match dictionary {
         Some(d) => zstd::bulk::Compressor::with_dictionary(level, d),
         None => zstd::bulk::Compressor::new(level),
@@ -181,6 +191,10 @@ fn build_compressor(
         .map_err(|e| bad("checksum", e))?;
     c.set_parameter(CParameter::ContentSizeFlag(true))
         .map_err(|e| bad("content_size", e))?;
+    if dictionary.is_some() {
+        // A malformed dictionary with the magic fails here, before any output exists.
+        c.compress(b"").map_err(|e| bad("dictionary", e))?;
+    }
     Ok(c)
 }
 
@@ -272,10 +286,8 @@ impl BlockEncoder for ZstdEncoder {
                 params,
             }],
         };
-        let mut resources = graph.resources();
-        resources.window = 1 << declared;
         Ok(Encoded {
-            resources,
+            resources: graph.resources(),
             graph,
             bytes,
         })
@@ -300,6 +312,13 @@ pub fn archive_fast_file(
     archive_path: &Path,
     options: FastOptions,
 ) -> Result<(WriterSummary, FastSummary), CoreError> {
+    // Validate the options (including provided dictionaries) before the output file exists.
+    ZstdEncoder::new(
+        options.level,
+        options.window_log,
+        &options.dictionaries,
+        options.gate,
+    )?;
     let ingest = options.ingest;
     create_new_and_run(root, archive_path, &ingest, |inputs, file, sync| {
         write_fast_inputs(&inputs, file, options, Some(sync))
@@ -587,6 +606,34 @@ mod tests {
         }
         // A dictionary that is not a dictionary at all still loads as raw content in libzstd,
         // so only the parameters are rejected here.
+    }
+
+    #[test]
+    fn a_provided_dictionary_is_validated_before_any_output_exists() {
+        let raw = DictionaryPolicy::Provided(Arc::new(
+            ProvidedDictionaries::new().with(DictionaryKind::Prose, b"just some bytes".to_vec()),
+        ));
+        match ZstdEncoder::new(3, 20, &raw, Gate::DEFAULT) {
+            Err(CoreError::InvalidOption(m)) => assert!(m.contains("dictionary"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // Magic present but nothing after it.
+        let hollow = DictionaryPolicy::Provided(Arc::new(ProvidedDictionaries::new().with(
+            DictionaryKind::Prose,
+            vec![0x37, 0xA4, 0x30, 0xEC, 1, 2, 3, 4],
+        )));
+        assert!(ZstdEncoder::new(3, 20, &hollow, Gate::DEFAULT).is_err());
+        let (good, _) = provided();
+        assert!(ZstdEncoder::new(3, 20, &good, Gate::DEFAULT).is_ok());
+        // archive_fast_file refuses before it creates the file.
+        let dir = tempfile::tempdir().unwrap();
+        let arch = dir.path().join("out.lpk");
+        let options = FastOptions {
+            dictionaries: raw,
+            ..FastOptions::default()
+        };
+        assert!(archive_fast_file(dir.path(), &arch, options).is_err());
+        assert!(!arch.exists());
     }
 
     #[test]
