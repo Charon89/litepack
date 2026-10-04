@@ -29,7 +29,12 @@ pub enum Prim {
         /// Position bits.
         pb: u8,
     },
-    /// A known primitive this decoder does not run (bwt, bcj, delta, reconstruction).
+    /// 0x0007 `jpeg-reconstruct` (revision 1.1).
+    Jpeg {
+        /// The record in the `Records` frame.
+        record_id: u64,
+    },
+    /// A known primitive this decoder does not run (bwt, bcj, delta, the other reconstructions).
     Unimplemented(u16),
 }
 
@@ -55,6 +60,10 @@ pub struct BlockHeader<'a> {
     pub plain_len: u64,
     /// The encoded bytes.
     pub encoded: &'a [u8],
+    /// Whether the graph names a reconstruction primitive (7 to 12).
+    pub reconstruction: bool,
+    /// The record ids the graph names.
+    pub record_ids: Vec<u64>,
 }
 
 fn bad_params(id: u16, reason: &str) -> Error {
@@ -171,7 +180,11 @@ pub fn parse_block<'a>(
                     return Err(bad_params(id, "record_id"));
                 }
                 record_ids.push(rid);
-                Prim::Unimplemented(id)
+                if id == 0x0007 {
+                    Prim::Jpeg { record_id: rid }
+                } else {
+                    Prim::Unimplemented(id)
+                }
             }
         };
         steps.push(prim);
@@ -201,6 +214,8 @@ pub fn parse_block<'a>(
         bwt_block,
         plain_len,
         encoded,
+        reconstruction: !record_ids.is_empty(),
+        record_ids,
     })
 }
 
@@ -213,9 +228,23 @@ pub struct DecodeCtx<'a> {
     pub max_window: u64,
     /// The envelope's `max_block_plain` (bounds every intermediate output, section 8).
     pub max_block_plain: u64,
+    /// Whether `jpeg-reconstruct` runs (a revision 1.1 reader); false emulates revision 1.0.
+    pub jpeg: bool,
 }
 
-fn too_large(last: bool, what: &str) -> Error {
+/// Runs a `jpeg-reconstruct` step: record id, the step's input, its output bound, whether it is
+/// the last step; returns the step's output (the primary image).
+pub type Reconstruct<'r> = dyn FnMut(u64, &[u8], u64, bool) -> Result<Vec<u8>> + 'r;
+
+/// The `UnimplementedPrimitive` error.
+pub fn unimplemented(id: u16) -> Error {
+    Error::new(
+        "UnimplementedPrimitive",
+        format!("primitive {id:#06x} is not implemented by this reader"),
+    )
+}
+
+pub fn too_large(last: bool, what: &str) -> Error {
     if last {
         Error::new(
             "BlockLengthMismatch",
@@ -230,7 +259,11 @@ fn too_large(last: bool, what: &str) -> Error {
 }
 
 /// Decodes a block whose header has been checked; returns exactly `plain_len` bytes.
-pub fn decode(h: &BlockHeader<'_>, ctx: &DecodeCtx<'_>) -> Result<Vec<u8>> {
+pub fn decode(
+    h: &BlockHeader<'_>,
+    ctx: &DecodeCtx<'_>,
+    recon: &mut Reconstruct<'_>,
+) -> Result<Vec<u8>> {
     if h.plain_len > ctx.max_block_plain {
         return Err(Error::new(
             "PayloadTooLarge",
@@ -239,11 +272,10 @@ pub fn decode(h: &BlockHeader<'_>, ctx: &DecodeCtx<'_>) -> Result<Vec<u8>> {
     }
     // Check the whole graph before any step runs.
     for s in &h.steps {
-        if let Prim::Unimplemented(id) = s {
-            return Err(Error::new(
-                "UnimplementedPrimitive",
-                format!("primitive {id:#06x} has no decoder here"),
-            ));
+        match s {
+            Prim::Unimplemented(id) => return Err(unimplemented(*id)),
+            Prim::Jpeg { .. } if !ctx.jpeg => return Err(unimplemented(0x0007)),
+            _ => {}
         }
     }
     let mut data: Vec<u8> = h.encoded.to_vec();
@@ -272,6 +304,7 @@ pub fn decode(h: &BlockHeader<'_>, ctx: &DecodeCtx<'_>) -> Result<Vec<u8>> {
                 lp,
                 pb,
             } => lzma(&data, *dict_size, *lc, *lp, *pb, bound, last, ctx)?,
+            Prim::Jpeg { record_id } => recon(*record_id, &data, bound, last)?,
             Prim::Unimplemented(_) => return Err(Error::new("Internal", "unreachable")),
         };
     }
