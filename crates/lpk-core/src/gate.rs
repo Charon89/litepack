@@ -91,7 +91,7 @@ fn merge(h: &[[u64; 256]; 4]) -> [u64; 256] {
     out
 }
 
-fn entropy_of(counts: &[u64; 256]) -> f64 {
+pub(crate) fn entropy_of(counts: &[u64; 256]) -> f64 {
     let total: u64 = counts.iter().sum();
     if total == 0 {
         return 0.0;
@@ -169,7 +169,11 @@ pub(crate) mod tests {
             // Skips the sample below 4 KiB; at 4 KiB the sample is the block itself.
             assert!(!is_incompressible(&vec![7u8; n]), "{n}");
             let r = xorshift(3, n);
-            assert_eq!(is_incompressible(&r), entropy(&r) >= 7.95, "{n}");
+            assert_eq!(
+                is_incompressible(&r),
+                entropy(&r) >= Gate::DEFAULT.full_threshold,
+                "{n}"
+            );
         }
         let r = xorshift(3, SAMPLE_HEAD);
         assert_eq!(sampled_entropy(&r), entropy(&r));
