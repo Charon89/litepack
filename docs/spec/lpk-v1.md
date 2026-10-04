@@ -983,8 +983,9 @@ them into shards, hashes each, builds the encoder for exactly that many data sha
 The index lists the frames and `max_frame_payload` admits them (section 7). Memory rule: the open group's bytes;
 the encoder's work buffer for that group, `work_count * shard_len` bytes where `work_count` is the group's shards
 rounded up to a multiple of `next_pow2(recovery_shards)`; and the group's recovery shards, `recovery_shards *
-shard_len` bytes, held until the frame is written. A small archive therefore costs in proportion to its size, and
-no term grows with the archive.
+shard_len` bytes, held until the frame is written. The three coexist at the moment a group is encoded, so the
+writer's peak is their sum for one group. A small archive therefore costs in proportion to its size, and no
+term grows with the archive.
 
 ### Repair
 

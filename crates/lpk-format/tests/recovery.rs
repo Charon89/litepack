@@ -270,8 +270,9 @@ fn the_writer_holds_at_most_one_group_of_buffers() {
     assert!(peak_shard <= group_bytes as usize, "peak {peak_shard}");
     let summary = w.finish().unwrap();
     // At most one group's recovery shards were ever held, finish included.
-    assert_eq!(summary.recovery_peak, 4 << 16); // 17 shards per block group, ceil(17 * 20 / 100) = 4
-                                                // The encoder's work buffer is one group's, whatever the archive's size.
+    // 17 shards per block group, ceil(17 * 20 / 100) = 4
+    assert_eq!(summary.recovery_peak, 4 << 16);
+    // The encoder's work buffer is one group's, whatever the archive's size.
     assert_eq!(
         lpk_format::encoder_work_bytes(17, 4, 1 << 16),
         20 << 16 // 17 rounded up to a multiple of next_pow2(4) = 4
