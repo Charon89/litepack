@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 16:20 UTC (12:20 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 22:40 UTC (18:40 local on the measuring machine). No measurement is running.
 
 **Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
 (37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
@@ -30,13 +30,17 @@ the pooled report) is done (D-48).** The first real `lpk` rows exist: `bench/res
 store path's because files are extracted in entry order across blocks (decode each block once — E2-19); the Fast
 tier's store throughput on `video` is about a third of the `store` control's (E2-18, G3 as restated in D-27). Parallel
 block encoding (E2-4b, a writer extension) comes before or with E2-19.
-**Next: E2-5 (JPEG peel).** It needs the first format revision: the frozen v1 forbids a writer to emit primitives 3 to
-12 until their decoding is specified (spec section 8), so E2-5 starts with a spec revision for `jpeg-reconstruct`
-(decoding by citation of the Lepton format as `lepton_jpeg` implements it, a vector, the reference "full reader" hooks
-in `lpk-format` for reconstruction primitives, the independent decoder's update by its author, `CHANGES.md`); the same
-process then serves E2-9 (delta), E2-10/11 (deflate, container), E2-15 (bwt), E2-16 (png-filter), E2-17 (base64, utf16).
-Revision-free tasks that could run meanwhile: E2-6 (Balanced tier, LZMA is in v1), E2-7/E2-8 (Fold dedup and
-ordering), E2-12/13/14 (seal), E2-18/19/20 (speed, memory).
+**E2-5 (JPEG peel) is nearly done:** the first format revision (1.1, `jpeg-reconstruct`; D-49 the revision process,
+D-50 the peel), the peel in `lpk-core`, the independent decoder updated from the text alone (all 17 vectors) and
+its fifteen clarifications written back. Measured on `small` (`bench/results/2026-10-04-megatron-2`, report
+`bench/reports/phase1-2026-10-04-small-jpeg.md`): the real `lpk/fast` rows on the two JPEG classes reproduce the Phase 0
+estimate within the container overhead and sit below every incumbent; extraction is single-threaded Lepton, far
+below the incumbents' rate, so the acceptance's "parallel decode" clause stays open until E2-19. **E2-6 (Balanced
+tier) is in review** (`task/e2-6-balanced`): on `small` it is below 7-Zip Ultra on `logs-text`, a hair above on
+`text-prose`, and above on `office-pdf` and `source-git` for two reasons the review is weighing — the entropy gate
+stored a whole PDF block that 7-Zip compresses, and small classes are split into cold LZMA streams at every cluster
+boundary. Then E2-7/E2-8 (Fold), E2-12/13/14 (seal), E2-18/19/20 (speed, memory); the revision process (D-49)
+serves E2-9 (delta), E2-10/11 (deflate, container), E2-15 (bwt), E2-16 (png-filter), E2-17 (base64, utf16).
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -52,7 +56,7 @@ None at the moment.
 ## How to resume
 
 ### Phase 1 — how it runs
-1. One task at a time from `docs/PLAN.md` (E2-5 next, with its format revision first): implementer in a worktree from a brief
+1. One task at a time from `docs/PLAN.md` (E2-6 in review; E2-7 next): implementer in a worktree from a brief
    with the exact values → read-only review (spec compliance and quality, benchmark honesty for harness tasks) →
    fix rounds with rulings → a decision in `docs/DECISIONS.md` → PLAN tick with evidence → PR → CI green →
    `main` fast-forwarded (merge `main` into the branch first).
