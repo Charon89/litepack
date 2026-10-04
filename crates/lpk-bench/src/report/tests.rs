@@ -809,6 +809,56 @@ fn g1_uses_the_best_incumbent_when_it_is_not_7_zip_ultra() {
     assert_eq!(verdict_of(&i, "G1"), Verdict::Fail);
 }
 
+/// The subject tool (`lpk`) measured on `class` with an archive smaller than every incumbent's.
+fn add_subject_tool(i: &mut Inputs, class: &str, bytes: u64) {
+    i.baseline.tools.tools.push(crate::run::result::ToolEntry {
+        id: SUBJECT_TOOL.into(),
+        name: "LitePack".into(),
+        status: "found".into(),
+        reason: None,
+        version: Some("0.0.1+abcdefabcdef".into()),
+        catalogue_verified: true,
+        manual: false,
+        local_override: false,
+        dedup: Some(false),
+    });
+    i.baseline.results.push((
+        result(SUBJECT_TOOL, "fast", class, 9_100_000, bytes, 50.0, 100.0),
+        1,
+    ));
+    i.baseline
+        .run
+        .combinations
+        .push(crate::run::result::RunCombination {
+            tool: SUBJECT_TOOL.into(),
+            setting: "fast".into(),
+            class: class.into(),
+            outcome: "measured".into(),
+        });
+}
+
+/// `lpk` rows pooled next to the incumbents never define "the best measured incumbent", so a
+/// winning `lpk` row cannot turn G1 into a failure against itself.
+#[test]
+fn the_subject_tool_is_never_the_best_incumbent() {
+    let mut i = inputs(&Knobs::default(), true);
+    let before = verdict_of(&i, "G1");
+    add_subject_tool(&mut i, "photo-jpeg", 1_000_000);
+    let first = rows(&i.baseline);
+    let best = best_incumbent(&first, "photo-jpeg").expect("an incumbent");
+    assert!(!best.name.starts_with(SUBJECT_TOOL), "{}", best.name);
+    add_subject_tool(&mut i, "photo-jpeg-edited", 1_000);
+    add_subject_tool(&mut i, "office-pdf", 1_000);
+    let all = rows(&i.baseline);
+    let combined = best_single(&all, &G1_CLASSES).expect("a combined best");
+    assert!(
+        !combined.name.starts_with(SUBJECT_TOOL),
+        "{}",
+        combined.name
+    );
+    assert_eq!(verdict_of(&i, "G1"), before);
+}
+
 #[test]
 fn g2_passes_and_fails_around_half_of_the_best_incumbent() {
     // Best incumbent 8.0 MB; the estimate (a) is 3.0 + 0.5 + last.
