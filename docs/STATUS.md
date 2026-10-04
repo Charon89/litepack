@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 16:00 UTC (12:00 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 20:20 UTC (16:20 local on the measuring machine). No measurement is running.
 
 **Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
 (37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
@@ -21,8 +21,12 @@ re-pin the three sources in `bench/corpus-sources.toml` and `bench/corpus.lock` 
 minutes from the cache), amend the CORPUS.md row (owner-approved), then `run --tools all --profile full --classes
 backup-versions-large` and `probe dedup --profile full --into <that directory>` as detached processes, `report`
 for the G2 row, commit the directory and tick E0-1.
-**E2-2 (classifier and entropy gate) is done (D-45).** Next E2-3 (Fast tier), E2-4 (pipeline and the `lpk` CLI stub for
-the runner), E2-5 (JPEG peel). E1-15 (the normative Reed-Solomon
+**E2-2 (classifier and entropy gate) is done (D-45); E2-3 (the Fast tier) is done (D-46 writer API, D-47 the tier —
+no bundled dictionaries, BCJ waits for a format revision).** Next E2-4 (pipeline struct, the `lpk` CLI, the
+catalogue row, the report reading several result directories), then E2-5 (JPEG peel). Every peel/fold/model
+primitive beyond store/zstd/lzma needs a format revision first: the frozen v1 forbids a writer to emit
+primitives 3 to 12 until their decoding is specified (spec section 8), so E2-5, E2-7+, E2-10, E2-15, E2-16,
+E2-17 each start with a spec revision, vectors and the independent decoder's update. E1-15 (the normative Reed-Solomon
 description) is a format revision that can be done any time by a fresh implementer.
 
 ## Summary
@@ -39,7 +43,7 @@ None at the moment.
 ## How to resume
 
 ### Phase 1 — how it runs
-1. One task at a time from `docs/PLAN.md` (E2-3 next, then E2-4, E2-5, …): implementer in a worktree from a brief
+1. One task at a time from `docs/PLAN.md` (E2-4 next, then E2-5, …): implementer in a worktree from a brief
    with the exact values → read-only review (spec compliance and quality, benchmark honesty for harness tasks) →
    fix rounds with rulings → a decision in `docs/DECISIONS.md` → PLAN tick with evidence → PR → CI green →
    `main` fast-forwarded (merge `main` into the branch first).
