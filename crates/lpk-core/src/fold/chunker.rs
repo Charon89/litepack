@@ -19,8 +19,9 @@ pub const MAX_CHUNK: usize = 512 * 1024;
 /// A cut depends only on the bytes from the start of its chunk up to the maximum chunk size
 /// away, so the chunker cuts a chunk as soon as that many bytes are known and holds back less
 /// than the maximum; at `eof` everything is cut. The result equals the crate's iterator over
-/// the whole file, however the bytes are split into calls. Memory: a copy of the held-back
-/// bytes (under the maximum chunk size) plus the bytes of the current call.
+/// the whole file, however the bytes are split into calls. Memory: the held-back bytes (under
+/// the maximum chunk size) are copied; the bytes of a call are cut in place and only their
+/// uncut tail (under the maximum) is copied.
 #[derive(Debug, Clone)]
 pub struct FastCdcChunker {
     min: usize,
@@ -75,25 +76,42 @@ impl FastCdcChunker {
 
 impl Chunker for FastCdcChunker {
     fn feed(&mut self, bytes: &[u8], eof: bool) -> Vec<usize> {
-        self.held.extend_from_slice(bytes);
         let mut cuts = Vec::new();
-        let mut start = 0usize;
-        {
-            let cdc = FastCDC::new(&self.held, self.min, self.avg, self.max);
-            loop {
-                let remaining = self.held.len() - start;
-                if remaining == 0 || (!eof && remaining < self.max) {
-                    break;
-                }
-                let (_, end) = cdc.cut(start, remaining);
-                cuts.push(end);
-                start = end;
+        // Stream position where `held` starts.
+        let mut base = 0usize;
+        let mut off = 0usize;
+        // First the held-back tail: top it up to the maximum with the new bytes and cut.
+        while !self.held.is_empty() {
+            let take = self
+                .max
+                .saturating_sub(self.held.len())
+                .min(bytes.len() - off);
+            self.held.extend_from_slice(&bytes[off..off + take]);
+            off += take;
+            if self.held.len() < self.max && !(eof && off == bytes.len()) {
+                return cuts;
             }
+            let (_, end) =
+                FastCDC::new(&self.held, self.min, self.avg, self.max).cut(0, self.held.len());
+            cuts.push(base + end);
+            base += end;
+            self.held.drain(..end);
         }
-        if eof {
-            self.held.clear();
-        } else {
-            self.held.drain(..start);
+        // Then the rest of the call, in place.
+        let rest = &bytes[off..];
+        let cdc = FastCDC::new(rest, self.min, self.avg, self.max);
+        let mut start = 0usize;
+        loop {
+            let remaining = rest.len() - start;
+            if remaining == 0 || (!eof && remaining < self.max) {
+                break;
+            }
+            let (_, end) = cdc.cut(start, remaining);
+            cuts.push(base + end);
+            start = end;
+        }
+        if !eof {
+            self.held.extend_from_slice(&rest[start..]);
         }
         cuts
     }
