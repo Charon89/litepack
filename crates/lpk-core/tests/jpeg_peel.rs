@@ -98,9 +98,11 @@ fn the_fast_pipeline_peels_jpegs_and_the_full_reader_restores_them() {
     let (_, fast) = archive_fast(dir.path(), &mut out, FastOptions::default()).unwrap();
     let p = fast.peel;
     // Baseline, secondary and progressive peel; the trailing file's primary image is the
-    // baseline's, so it deduplicates (counted apart); CMYK and truncated fall back.
+    // baseline's, so after its peel the peeled part is found already stored (counted apart,
+    // never as peeled); CMYK and truncated fall back.
     assert_eq!(p.peeled.files, 3, "{p:?}");
-    assert_eq!(p.deduplicated.files, 1, "{p:?}");
+    assert_eq!(p.deduplicated.files, 0, "{p:?}");
+    assert_eq!(p.primary_deduplicated.files, 1, "{p:?}");
     assert_eq!(p.fallback(Cause::FourComponents).files, 1, "{p:?}");
     assert_eq!(p.fallback(Cause::NoEoi).files, 1, "{p:?}");
     assert_eq!(p.fallback_total().files, 2);

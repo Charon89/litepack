@@ -168,12 +168,17 @@ fn identical_jpegs_need_no_lepton_block_and_no_record() {
     let mut p = Pipeline::fast(FastOptions::default());
     p.fold = None;
     let (off, s_off) = run(p, dir.path());
-    // Without dedup every input is peeled; with it only the first of each kind is, and the
-    // copies (whole-file or primary-only) are counted as deduplicated and never as peeled.
+    // Without dedup every input is peeled; with it only the first of each kind is, the whole-file
+    // copies are deduplicated before the peel, and a copy whose peeled part alone is already
+    // stored is counted as primary-deduplicated — never as peeled.
     assert_eq!(s_on.peel.peeled.files, 2);
-    assert_eq!(s_on.peel.deduplicated.files, 3);
+    assert_eq!(
+        s_on.peel.deduplicated.files + s_on.peel.primary_deduplicated.files,
+        3
+    );
     assert_eq!(s_off.peel.peeled.files, 5);
     assert_eq!(s_off.peel.deduplicated.files, 0);
+    assert_eq!(s_off.peel.primary_deduplicated.files, 0);
     assert_eq!(records_of(&off), 5);
     assert_eq!(records_of(&on), 2);
     assert!(s_on.writer.blocks < s_off.writer.blocks);

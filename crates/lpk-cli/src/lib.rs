@@ -208,8 +208,8 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
     let p = &s.peel;
     let _ = writeln!(
         err,
-        "deduplicated whole: {} files ({} bytes), never peeled",
-        p.deduplicated.files, p.deduplicated.bytes
+        "deduplicated whole: {} files ({} bytes), never peeled; peeled but the peeled part was already stored: {} files ({} bytes)",
+        p.deduplicated.files, p.deduplicated.bytes, p.primary_deduplicated.files, p.primary_deduplicated.bytes
     );
     let _ = writeln!(
         err,

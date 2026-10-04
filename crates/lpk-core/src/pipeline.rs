@@ -389,7 +389,7 @@ impl Pipeline {
                                     plan.original_len,
                                 );
                                 if write_peeled(&mut writer, stage.as_ref(), input, &data, plan)? {
-                                    summary.note_deduplicated(sizes.2);
+                                    summary.note_primary_deduplicated(sizes.2);
                                 } else {
                                     summary.note_peeled(sizes.0, sizes.1, sizes.2);
                                 }
