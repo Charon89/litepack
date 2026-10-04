@@ -532,6 +532,7 @@ impl<W: Write> Writer<W> {
             blocks: std::mem::take(&mut self.blocks),
             entry_table,
             records,
+            recovery: Vec::new(),
         };
         // The envelope names the index's own payload length, which depends on
         // the envelope's varints. Starting from an upper bound the length can
@@ -544,6 +545,7 @@ impl<W: Write> Writer<W> {
                     index_payload_len: guess,
                     entry_table_len: entry_table.len,
                     records_len,
+                    recovery_len: 0,
                 },
                 graph,
                 max_plain,
@@ -585,6 +587,7 @@ fn frames_max(index: &Index) -> u64 {
             index_payload_len: 0,
             entry_table_len: index.entry_table.len,
             records_len: index.records.map_or(0, |r| r.len),
+            recovery_len: 0,
         },
         crate::primitive::GraphResources::default(),
         0,

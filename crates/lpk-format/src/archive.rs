@@ -440,6 +440,7 @@ mod tests {
                     index_payload_len: 1000,
                     entry_table_len: e.len() as u64,
                     records_len: 0,
+                    recovery_len: 0,
                 },
                 crate::primitive::GraphResources {
                     window: 1 << 20,
@@ -455,6 +456,7 @@ mod tests {
                 len: e.len() as u64,
             },
             records: None,
+            recovery: vec![],
         };
         let payload = index.encode().unwrap();
         let index_hash = *blake3::hash(&payload).as_bytes();

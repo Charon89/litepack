@@ -69,6 +69,8 @@ pub struct Index {
     pub entry_table: FrameLocation,
     /// Location of the `Records` frame, if any.
     pub records: Option<FrameLocation>,
+    /// Locations of the `Recovery` frames, in the order written (section 13).
+    pub recovery: Vec<FrameLocation>,
 }
 
 /// Cursor that assigns chunks, in order, to blocks and checks each block's
@@ -230,6 +232,36 @@ fn overlaps(a: FrameLocation, b: FrameLocation) -> bool {
     a.offset < b.offset.saturating_add(b.len) && b.offset < a.offset.saturating_add(a.len)
 }
 
+/// The recovery frames overlap no block, the entry table, the records frame
+/// and each other.
+fn check_recovery_disjoint(
+    blocks: &[BlockLocation],
+    entry: FrameLocation,
+    records: Option<FrameLocation>,
+    recovery: &[FrameLocation],
+) -> Result<(), FormatError> {
+    let bad = FormatError::BadFrameLocation { what: "recovery" };
+    for (i, r) in recovery.iter().enumerate() {
+        let hits_block = blocks.iter().any(|b| {
+            overlaps(
+                *r,
+                FrameLocation {
+                    offset: b.frame_offset,
+                    len: b.frame_len,
+                },
+            )
+        });
+        if hits_block
+            || overlaps(*r, entry)
+            || records.is_some_and(|x| overlaps(*r, x))
+            || recovery[..i].iter().any(|o| overlaps(*r, *o))
+        {
+            return Err(bad);
+        }
+    }
+    Ok(())
+}
+
 /// The entry-table and records frames overlap no block and each other.
 fn check_disjoint(
     blocks: &[BlockLocation],
@@ -287,6 +319,11 @@ impl Index {
         let rec = self.records.unwrap_or(FrameLocation { offset: 0, len: 0 });
         varint::write(&mut out, rec.offset)?;
         varint::write(&mut out, rec.len)?;
+        varint::write(&mut out, self.recovery.len() as u64)?;
+        for f in &self.recovery {
+            varint::write(&mut out, f.offset)?;
+            varint::write(&mut out, f.len)?;
+        }
         Self::parse(&out, u64::MAX)?;
         Ok(out)
     }
@@ -339,6 +376,17 @@ impl Index {
             offset: rv(&mut s)?,
             len: rv(&mut s)?,
         };
+        let recovery_count = rv(&mut s)?;
+        if recovery_count > (s.len() / 2) as u64 {
+            return Err(FormatError::Truncated { what: WHAT });
+        }
+        let mut recovery = Vec::with_capacity(recovery_count as usize);
+        for _ in 0..recovery_count {
+            recovery.push(FrameLocation {
+                offset: rv(&mut s)?,
+                len: rv(&mut s)?,
+            });
+        }
         if !s.is_empty() {
             return Err(FormatError::TrailingBytes { what: WHAT });
         }
@@ -352,6 +400,10 @@ impl Index {
         };
 
         check_disjoint(&blocks, entry_table, records)?;
+        for r in &recovery {
+            check_location(*r, index_offset, "recovery")?;
+        }
+        check_recovery_disjoint(&blocks, entry_table, records, &recovery)?;
 
         let chunk_table: Arc<[u8]> = Arc::from(&payload[..used]);
         let (chunks, leaves) = ChunkIndex::build_with_leaves(Arc::clone(&chunk_table), &blocks)?;
@@ -359,6 +411,7 @@ impl Index {
             return Err(FormatError::MerkleRootMismatch);
         }
         envelope.validate(&blocks, entry_table, records, payload.len() as u64)?;
+        envelope.validate_recovery(&recovery)?;
         Ok((
             Index {
                 chunk_table,
@@ -368,6 +421,7 @@ impl Index {
                 blocks,
                 entry_table,
                 records,
+                recovery,
             },
             chunks,
         ))
@@ -408,7 +462,10 @@ pub fn index_layout_table() -> String {
          | entry_table_offset | varint | absolute offset of the `EntryTable` frame |\n\
          | entry_table_len | varint | whole encoded length of that frame |\n\
          | records_offset | varint | absolute offset of the `Records` frame; 0 when there is none |\n\
-         | records_len | varint | whole encoded length of that frame; 0 when there is none |\n"
+         | records_len | varint | whole encoded length of that frame; 0 when there is none |\n\
+         | recovery_count | varint | number of `Recovery` frames (section 13); at most the bytes left after it divided by 2 |\n\
+         | recovery_offset | varint | per recovery frame: absolute offset of the frame |\n\
+         | recovery_len | varint | per recovery frame: whole encoded length of that frame |\n"
     )
 }
 
@@ -456,6 +513,7 @@ mod tests {
                     index_payload_len: 0,
                     entry_table_len: 60,
                     records_len: 0,
+                    recovery_len: 0,
                 },
                 crate::primitive::GraphResources {
                     window: 1 << 20,
@@ -471,6 +529,7 @@ mod tests {
                 len: 60,
             },
             records: None,
+            recovery: vec![],
         };
         fit_envelope(&mut idx);
         idx
@@ -487,6 +546,7 @@ mod tests {
                     index_payload_len: len,
                     entry_table_len: idx.entry_table.len,
                     records_len: idx.records.map_or(0, |r| r.len),
+                    recovery_len: idx.recovery.iter().map(|r| r.len).max().unwrap_or(0),
                 },
                 crate::primitive::GraphResources {
                     window: idx.envelope.max_window,
@@ -539,6 +599,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recovery_locations_round_trip_and_rules() {
+        let (_, mut idx) = three();
+        idx.recovery = vec![
+            FrameLocation {
+                offset: 600,
+                len: 90,
+            },
+            FrameLocation {
+                offset: 700,
+                len: 90,
+            },
+        ];
+        fit_envelope(&mut idx);
+        let p = idx.encode().unwrap();
+        assert_eq!(Index::parse(&p, IDX_AT).unwrap(), idx);
+        // Overlapping a block (block 0 is at 100..180) or each other.
+        let mut o = idx.clone();
+        o.recovery[0].offset = 150;
+        assert!(matches!(
+            parse_err(&o),
+            FormatError::BadFrameLocation { what: "recovery" }
+        ));
+        let mut o = idx.clone();
+        o.recovery[1].offset = 650;
+        assert!(matches!(
+            parse_err(&o),
+            FormatError::BadFrameLocation { what: "recovery" }
+        ));
+        // Past the index, or before the header.
+        let mut o = idx.clone();
+        o.recovery[1].offset = IDX_AT;
+        assert!(matches!(
+            parse_err(&o),
+            FormatError::BadFrameLocation { what: "recovery" }
+        ));
+        // Too long for max_frame_payload.
+        let mut o = idx.clone();
+        o.recovery[1].len = 5000;
+        o.recovery[1].offset = 800;
+        assert!(matches!(
+            parse_err(&o),
+            FormatError::EnvelopeMismatch {
+                field: "max_frame_payload"
+            }
+        ));
+        // A count larger than the bytes left.
+        let mut bytes = encode_unchecked(&idx);
+        let n = bytes.len();
+        bytes.truncate(n - 4);
+        bytes.extend_from_slice(&[9, 1]);
+        assert!(Index::parse(&bytes, IDX_AT).is_err());
+    }
+
     fn encode_unchecked(idx: &Index) -> Vec<u8> {
         // Same layout as `encode`, without validation.
         let mut out = idx.chunk_table.to_vec();
@@ -566,6 +680,11 @@ mod tests {
         let r = idx.records.unwrap_or(FrameLocation { offset: 0, len: 0 });
         varint::write(&mut out, r.offset).unwrap();
         varint::write(&mut out, r.len).unwrap();
+        varint::write(&mut out, idx.recovery.len() as u64).unwrap();
+        for f in &idx.recovery {
+            varint::write(&mut out, f.offset).unwrap();
+            varint::write(&mut out, f.len).unwrap();
+        }
         out
     }
 

@@ -51,6 +51,8 @@ pub struct ArchiveSizes {
     pub entry_table_len: u64,
     /// Whole encoded length of the records frame; 0 when there is none.
     pub records_len: u64,
+    /// Largest whole encoded length among the recovery frames; 0 when there are none.
+    pub recovery_len: u64,
 }
 
 /// What the local machine allows a decoder.
@@ -211,11 +213,12 @@ impl Envelope {
             index_payload_len,
             entry_table_len,
             records_len,
+            recovery_len,
         } = sizes;
         let frames = blocks
             .iter()
             .map(|b| b.frame_len)
-            .chain([entry_table_len, records_len])
+            .chain([entry_table_len, records_len, recovery_len])
             .map(min_payload_for)
             .max()
             .unwrap_or(0);
@@ -226,6 +229,20 @@ impl Envelope {
             max_frame_payload: frames.max(index_payload_len),
             decode_memory,
             threads_hint,
+        }
+    }
+
+    /// Every recovery frame is admissible under `max_frame_payload`.
+    pub(crate) fn validate_recovery(&self, recovery: &[FrameLocation]) -> Result<(), FormatError> {
+        if recovery
+            .iter()
+            .all(|r| frame_len_admissible(r.len, self.max_frame_payload))
+        {
+            Ok(())
+        } else {
+            Err(FormatError::EnvelopeMismatch {
+                field: "max_frame_payload",
+            })
         }
     }
 
@@ -266,7 +283,7 @@ pub fn envelope_layout_table() -> String {
      | max_window | varint | largest match-finder window (dictionary) any block needs, in bytes |\n\
      | max_bwt_block | varint | largest BWT block any block needs, in bytes; 0 when no BWT is used |\n\
      | max_block_plain | varint | largest `plain_len` of any block; must equal the maximum over the block table |\n\
-     | max_frame_payload | varint | largest frame payload in the archive; must admit the index's own payload and every recorded frame (blocks, entry table, records) |\n\
+     | max_frame_payload | varint | largest frame payload in the archive; must admit the index's own payload and every recorded frame (blocks, entry table, records, recovery) |\n\
      | decode_memory | varint | the writer's estimate of peak decoder memory for one decoding thread, in bytes |\n\
      | threads_hint | varint | independent blocks a reader may decode at once within `decode_memory` times this; 0 = no hint; at most 4294967295 |\n"
         .to_string()
@@ -505,6 +522,7 @@ mod tests {
             index_payload_len,
             entry_table_len,
             records_len,
+            recovery_len: 0,
         }
     }
 

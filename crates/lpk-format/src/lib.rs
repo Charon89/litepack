@@ -24,6 +24,7 @@ pub mod primitive;
 pub mod priors;
 pub mod reader;
 pub mod record;
+pub mod recovery;
 pub mod trailer;
 pub mod varint;
 pub mod writer;
@@ -67,6 +68,10 @@ pub use record::{
     record_kind_table, record_layout_tables, Base64Record, ContainerMember, ContainerRecord,
     DeflateRecord, JpegRecord, PngFilterRecord, Record, RecordBody, RecordKind, RecordsIter,
     RecordsTable, RecordsWriter, SecondaryImage, Utf16Record, RECORD_COUNT_BOUND,
+};
+pub use recovery::{
+    recovery_layout_table, shard_geometry, RecoveryFrame, RecoveryOptions, DEFAULT_SHARD_LEN,
+    MAX_DATA_SHARDS, MAX_PERCENT, MAX_TOTAL_SHARDS, SHARD_ALIGN,
 };
 pub use writer::{
     BlockEncoder, Chunker, FixedChunker, StoreEncoder, Writer, WriterOptions, WriterSummary,

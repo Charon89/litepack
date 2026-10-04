@@ -268,14 +268,20 @@ The payload, in this order:
 | entry_table_len | varint | whole encoded length of that frame |
 | records_offset | varint | absolute offset of the `Records` frame; 0 when there is none |
 | records_len | varint | whole encoded length of that frame; 0 when there is none |
+| recovery_count | varint | number of `Recovery` frames (section 13); at most the bytes left after it divided by 2 |
+| recovery_offset | varint | per recovery frame: absolute offset of the frame |
+| recovery_len | varint | per recovery frame: whole encoded length of that frame |
 
 The chunk table is not length-prefixed: a reader walks its declared records (under the count bound of
 section 5) and continues after the last one. The six envelope varints follow the Merkle root; an input
 that ends inside them is `Truncated` (`what` is `index`). The prior list (section 10) follows the envelope and
 precedes `block_count`. The five block fields repeat `block_count` times. Bytes after
-`records_len` are `TrailingBytes` (`what` is `index`); an input that ends early is `Truncated` (`what` is
-`index`, or `chunk table` inside the table). A `block_count` larger than the bytes left divided by 5 is
-`Truncated` and nothing is allocated for it.
+the last recovery location are `TrailingBytes` (`what` is `index`); an input that ends early is `Truncated`
+(`what` is `index`, or `chunk table` inside the table). A `block_count` larger than the bytes left divided by 5
+is `Truncated` and nothing is allocated for it; a `recovery_count` larger than the bytes left divided by 2 is
+`Truncated` likewise. Each recovery location follows the same location rule as the records frame and overlaps no
+block, no other recovery frame, the entry table and the records frame; a violation is `BadFrameLocation` with
+`what` `recovery`.
 
 Block rules. Blocks are in ascending `first_chunk` order and partition the chunk indices `0..n` exactly,
 contiguously and without overlap, where `n` is the chunk table's count: the first block starts at 0, each
@@ -366,7 +372,7 @@ allows more. The envelope is six varints placed right after `merkle_root` and be
 | max_window | varint | largest match-finder window (dictionary) any block needs, in bytes |
 | max_bwt_block | varint | largest BWT block any block needs, in bytes; 0 when no BWT is used |
 | max_block_plain | varint | largest `plain_len` of any block; must equal the maximum over the block table |
-| max_frame_payload | varint | largest frame payload in the archive; must admit the index's own payload and every recorded frame (blocks, entry table, records) |
+| max_frame_payload | varint | largest frame payload in the archive; must admit the index's own payload and every recorded frame (blocks, entry table, records, recovery) |
 | decode_memory | varint | the writer's estimate of peak decoder memory for one decoding thread, in bytes |
 | threads_hint | varint | independent blocks a reader may decode at once within `decode_memory` times this; 0 = no hint; at most 4294967295 |
 

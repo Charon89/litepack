@@ -302,6 +302,28 @@ pub enum FormatError {
         /// Short reason.
         reason: &'static str,
     },
+    /// A recovery frame's fields contradict each other or the archive.
+    #[error("bad recovery frame ({reason})")]
+    BadRecovery {
+        /// The field at fault.
+        reason: &'static str,
+    },
+    /// More shards are damaged than a recovery frame can rebuild.
+    #[error("recovery frame {frame}: {damaged} shards damaged, it can rebuild {capacity}")]
+    Unrepairable {
+        /// Position of the frame in the index's list.
+        frame: usize,
+        /// Damaged data shards in its coverage.
+        damaged: u64,
+        /// Shards the frame can rebuild.
+        capacity: u64,
+    },
+    /// The Reed-Solomon library refused its input.
+    #[error("recovery: {reason}")]
+    RecoveryError {
+        /// The library's own text.
+        reason: String,
+    },
     /// An entry path is not safe to extract on this platform.
     #[error("unsafe path {path:?} ({reason})")]
     UnsafePath {
