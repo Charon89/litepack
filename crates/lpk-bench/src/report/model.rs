@@ -1169,9 +1169,10 @@ fn gate2(m: &Model, probes: &Probes) -> GateRow {
             // D-43's premise: every version exceeds the largest incumbent window.
             let mut too_small = false;
             if let Some(pf) = &probes.dedup {
+                // A constant of the catalogue, not a measured value: no source index.
                 numbers.push(format!(
-                    "largest incumbent window: {}",
-                    Traced::from_u64(LARGEST_INCUMBENT_WINDOW_BYTES, pf.src).show(bytes_s)
+                    "largest incumbent window: {} (WinRAR -md256m in bench/tools.toml)",
+                    bytes_s(LARGEST_INCUMBENT_WINDOW_BYTES as f64)
                 ));
                 const ORDINALS: [&str; 6] =
                     ["first", "second", "third", "fourth", "fifth", "sixth"];

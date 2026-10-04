@@ -972,6 +972,44 @@ fn g2_checks_that_every_version_exceeds_the_largest_incumbent_window() {
     }
 }
 
+/// The window constant is a reading of the committed catalogue, so it must not drift from it: the
+/// largest `-md<N>m` of any WinRAR setting in `bench/tools.toml` is the constant, and no other
+/// window flag in the catalogue (zstd `--long=<log2>`) is larger.
+#[test]
+fn largest_incumbent_window_constant_matches_the_committed_catalogue() {
+    let cat = crate::run::catalogue::Catalogue::parse(include_str!("../../../../bench/tools.toml"))
+        .expect("catalogue");
+    let mut largest_md = 0u64;
+    let mut largest_long = 0u64;
+    for tool in &cat.tools {
+        for setting in &tool.settings {
+            for arg in &setting.compress {
+                if let Some(mib) = arg
+                    .strip_prefix("-md")
+                    .and_then(|s| s.strip_suffix('m'))
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    largest_md = largest_md.max(mib * 1024 * 1024);
+                }
+                if let Some(log2) = arg
+                    .strip_prefix("--long=")
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    largest_long = largest_long.max(1u64 << log2);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        largest_md, LARGEST_INCUMBENT_WINDOW_BYTES,
+        "WinRAR -md changed in tools.toml"
+    );
+    assert!(
+        largest_long <= LARGEST_INCUMBENT_WINDOW_BYTES,
+        "a zstd --long window exceeds the constant"
+    );
+}
+
 #[test]
 fn g2_is_not_evaluable_when_only_dedup_tools_measured_the_class() {
     let mut i = inputs(&Knobs::default(), true);
