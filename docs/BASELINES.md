@@ -176,6 +176,11 @@ list as executed (thread argument filled in, paths shown relative) plus the sett
 settings run at the machine's thread count, as a user would run them; each result records
 whether the thread count changes the archive size for that tool (`ratio_depends_on_threads`).
 
+The catalogue flag `dedup = true` (default false; set on `zpaqfranz` and `tsaur`) marks a tool that
+deduplicates across files. It is recorded per tool in `tools.json`. Since D-43 the report compares
+gate G2 against the best tool without the flag and prints the flagged tools' best rows on the same
+class as "reference, not compared".
+
 WinRAR's settings keep its default non-solid mode (`m3`, `best`, `best-rr3`) and add `best-solid`
 (`-s`) as its strongest sensible configuration; `best-rr3` differs from `best` only by the
 recovery record. The `store` tool uses the Windows System32 bsdtar (its hint is tried before
