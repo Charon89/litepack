@@ -135,6 +135,7 @@ fn add_refuses_an_existing_archive_and_extract_refuses_to_overwrite() {
 
 fn first_block_primitive(path: &Path) -> lpk_format::PrimitiveId {
     let mut a = Archive::open(fs::File::open(path).unwrap(), &Resources::default()).unwrap();
+    lpk_core::register_full_reader(&mut a);
     let b = a.index().blocks[0];
     let at = lpk_format::FrameLocation {
         offset: b.frame_offset,

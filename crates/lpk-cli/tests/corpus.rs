@@ -82,6 +82,7 @@ fn cli_round_trip_every_class() {
         let want = walk(&dir);
         assert_eq!(walk(&out), want, "{name}: extracted tree differs");
         let mut ar = Archive::open(File::open(&arch).unwrap(), &Resources::default()).unwrap();
+        lpk_core::register_full_reader(&mut ar);
         let entries = ar.entry_table().unwrap().table().unwrap().iter().count();
         assert_eq!(entries, want.len(), "{name}: entry count");
         let files = want.iter().filter(|(_, h)| h.is_some()).count();

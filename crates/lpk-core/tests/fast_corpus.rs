@@ -51,6 +51,7 @@ fn run_fast(dir: &Path, name: &str) -> Fast {
     let (s, fs) = archive_fast(dir, &mut bytes, FastOptions::default()).unwrap();
     let secs = t0.elapsed().as_secs_f64();
     let mut a = Archive::open(Cursor::new(&bytes[..]), &Resources::default()).unwrap();
+    lpk_core::register_full_reader(&mut a);
     let table = a.entry_table().unwrap();
     let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
     let got: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
