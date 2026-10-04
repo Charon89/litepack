@@ -3,12 +3,13 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 08:15 UTC (04:15 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 11:00 UTC (07:00 local on the measuring machine). No measurement is running.
 
 **Phase 1 is under way.** Phase 0 closed with D-08 (GO) and D-27; the Phase 1 task list is in PLAN (37 tasks).
-E1-1 (frame grammar, D-28) is on `main`; E1-2 (entry table) is being implemented on `task/e1-2-entry-table`.
-Each task runs as in Phase 0: implementer in a worktree from a brief with exact values → read-only review →
-fix round → the format values recorded as a decision → PLAN tick with evidence → PR → `main` fast-forwarded.
+On `main`: E1-1 frame grammar (D-28), E1-2 entry table (D-29), E1-3 chunk table and Merkle tree (D-30). In
+progress: E1-4 index and trailer on `task/e1-4-index-trailer`. Each task runs as in Phase 0: implementer in a
+worktree from a brief with exact values → read-only review → fix round → the format values recorded as a
+decision → PLAN tick with evidence → PR → `main` fast-forwarded (merge `main` into the branch first).
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -21,7 +22,7 @@ fix round → the format values recorded as a decision → PLAN tick with eviden
 ## Branches in flight
 | Branch | State | What is left |
 |---|---|---|
-| `task/e1-2-entry-table` | implementer running (brief in the orchestrator's scratchpad: sorted unique paths, kinds file/directory/symlink, flags, `mtime_ns`, chunk indices, streaming reader) | review, fix round, D-29, tick, PR, fast-forward `main` |
+| `task/e1-4-index-trailer` | implementer running (brief: index payload with chunk table, Merkle root, block table and frame locations; fixed 109-byte trailer; open from the tail; truncated-versus-corrupt diagnosis; O(1) chunk index) | review, fix round, D-31, tick, PR, fast-forward `main` |
 
 ## How to resume
 
