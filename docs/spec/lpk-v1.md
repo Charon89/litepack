@@ -980,7 +980,8 @@ the tests from seeded patterns, so the repository holds only the archives and th
 - `lzma-props.lpk`: the non-default properties lc 0, lp 2, pb 0 with a 1 MiB dictionary.
 - `jpeg-peel.lpk` (revision 1.1): one JPEG with an MPF marker, a secondary image and trailing data, peeled; written
   by `lpk-core`'s pipeline (`cargo test -p lpk-core --test jpeg_vector -- --ignored` regenerates it), and the same
-  `lepton_jpeg` version is needed to reproduce its bytes.
+  `lepton_jpeg` version and the same `flate2` backend (the library deflates its stream header; the workspace
+  build, which the committed bytes come from, uses the zlib backend) are needed to reproduce its bytes.
 
 The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts
 it (with `--prior tests/vectors/zstd-dict.prior` for the dictionary one). The full list of vectors, including the

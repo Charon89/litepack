@@ -115,9 +115,58 @@ fn render() -> String {
     s
 }
 
+/// The vector is committed as the workspace build writes it (`cargo nextest run --workspace`,
+/// what CI runs). `lepton_jpeg` deflates its stream header with `flate2`, whose backend Cargo
+/// unifies across the build: in the workspace `lpk-bench` enables the zlib backend, while
+/// `lpk-core` built alone gets `miniz_oxide`, and the two write different (equally valid) zlib
+/// bytes. So a build with the other backend gets a structural check instead of byte identity:
+/// the same Merkle root (the chunk table hashes the original bytes), the same record, the same
+/// nested block, and the same extracted file.
 #[test]
 fn the_vector_regenerates_identically() {
-    assert!(std::fs::read(vectors().join(VECTOR)).unwrap() == build());
+    let committed = std::fs::read(vectors().join(VECTOR)).unwrap();
+    let built = build();
+    if committed == built {
+        return;
+    }
+    eprintln!("jpeg-peel.lpk differs from this build's (flate2 backend?): structural check");
+    let open = |b: Vec<u8>| {
+        let mut a = Archive::open(Cursor::new(b), &Resources::default()).unwrap();
+        register_full_reader(&mut a);
+        a
+    };
+    let (mut a, mut b) = (open(committed.clone()), open(built.clone()));
+    assert_eq!(a.index().merkle_root, b.index().merkle_root);
+    let rec = |x: &mut Archive<Cursor<Vec<u8>>>| {
+        x.records()
+            .unwrap()
+            .unwrap()
+            .table()
+            .unwrap()
+            .get(0)
+            .unwrap()
+    };
+    assert_eq!(rec(&mut a), rec(&mut b));
+    let first = |x: &Archive<Cursor<Vec<u8>>>, bytes: &[u8]| {
+        let l = x.index().blocks[0];
+        bytes[l.frame_offset as usize..(l.frame_offset + l.frame_len) as usize].to_vec()
+    };
+    assert!(first(&a, &committed) == first(&b, &built));
+    for x in [&mut a, &mut b] {
+        x.verify().unwrap();
+        let e = x
+            .entry_table()
+            .unwrap()
+            .table()
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .unwrap();
+        let mut got = Vec::new();
+        x.extract(&e, &mut got).unwrap();
+        assert!(got == photo());
+    }
 }
 
 #[test]
