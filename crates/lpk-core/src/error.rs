@@ -45,6 +45,9 @@ pub enum CoreError {
     /// An option outside the range the format or the encoder accepts.
     #[error("invalid option: {0}")]
     InvalidOption(String),
+    /// An extraction's internal step failed (a decode worker stopped without a result).
+    #[error("extraction: {0}")]
+    Extract(&'static str),
     /// The root given to a walk is not a directory.
     #[error("{}: not a directory", path.display())]
     NotADirectory {

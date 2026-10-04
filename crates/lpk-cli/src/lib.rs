@@ -1,9 +1,11 @@
 //! The `lpk` command line: `a` creates an archive from a directory, `x` extracts, `t` tests.
 //!
-//! Extraction and testing go through the reference tool's code (`lpk_format::cli::run_with`), so
-//! the extraction refusals (unsafe paths, devices, symlinks, existing files) are the format's own;
-//! every archive it opens gets `lpk-core`'s full reader (revision 1.1's `jpeg-reconstruct`), so
-//! peeled files extract and verify.
+//! Extraction goes through `lpk-core`'s block-ordered engine (`lpk_core::extract_file`: each
+//! needed block decoded once, blocks decoded in parallel under a memory bound) with the default
+//! policy, which calls the format tool's own refusals (unsafe paths, devices, symlinks, existing
+//! files). Testing goes through the reference tool's code (`lpk_format::cli::run_with`). Both use
+//! `lpk-core`'s full reader (revision 1.1's `jpeg-reconstruct`), so peeled files extract and
+//! verify.
 //! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation. Nothing is ever prompted;
 //! progress goes to stderr and only with `-v`.
 #![forbid(unsafe_code)]
@@ -101,12 +103,16 @@ struct ExtractArgs {
     archive: PathBuf,
     /// The directory to extract into; created if missing.
     outdir: PathBuf,
-    /// Worker threads. Accepted and ignored; decoding is sequential for now.
-    #[arg(long, value_name = "N")]
-    threads: Option<usize>,
+    /// Decode workers (default: the machine's logical cores); capped so that the decoded blocks
+    /// in flight stay within the reader's decode memory.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    threads: Option<u64>,
     /// A prior file (for example a zstd dictionary) the archive needs; may be repeated.
     #[arg(long = "prior", value_name = "FILE")]
     priors: Vec<PathBuf>,
+    /// Print the plan's counts and the pool size to stderr.
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Debug, Args)]
@@ -242,6 +248,60 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
     );
 }
 
+fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let mut priors = Vec::with_capacity(x.priors.len());
+    for p in &x.priors {
+        match std::fs::read(p) {
+            Ok(b) => priors.push(b),
+            Err(e) => {
+                let _ = writeln!(err, "error: {}: {e}", p.display());
+                return EXIT_FAILED;
+            }
+        }
+    }
+    let opts = lpk_core::ExtractOptions {
+        threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+        ..lpk_core::ExtractOptions::default()
+    };
+    match lpk_core::extract_file(
+        &x.archive,
+        &x.outdir,
+        &priors,
+        &lpk_core::DefaultPolicy,
+        &opts,
+    ) {
+        Ok(s) => {
+            if x.verbose {
+                let _ = writeln!(
+                    err,
+                    "{}: {} files, {} directories, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight; {} blocks decoded, {} files reopened",
+                    x.archive.display(),
+                    s.files,
+                    s.directories,
+                    s.bytes,
+                    s.placements,
+                    s.blocks_needed,
+                    s.blocks,
+                    s.workers,
+                    s.in_flight,
+                    s.blocks_decoded,
+                    s.reopened
+                );
+            }
+            let _ = writeln!(
+                out,
+                "extracted {} files, {} directories",
+                s.files, s.directories
+            );
+            EXIT_OK
+        }
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            EXIT_FAILED
+        }
+    }
+}
+
 /// Run the reference tool with `sub` (`extract` or `verify`) and the prior files; its summary
 /// goes to `out`, its error line to `err`, and any failure is exit 2.
 fn reference(
@@ -295,9 +355,7 @@ where
     };
     match &cli.command {
         Command::Add(a) => add(a, err),
-        Command::Extract(x) => {
-            reference("extract", &x.archive, Some(&x.outdir), &x.priors, out, err)
-        }
+        Command::Extract(x) => extract(x, out, err),
         Command::Test(t) => reference("verify", &t.archive, None, &t.priors, out, err),
     }
 }

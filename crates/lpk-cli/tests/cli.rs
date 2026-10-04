@@ -102,6 +102,56 @@ fn add_extract_test_round_trip_is_bit_exact() {
 }
 
 #[test]
+fn extract_threads_1_and_8_give_the_same_tree_and_v_prints_the_plan() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("t.lpk");
+    let a = run(&["a", arch.to_str().unwrap(), src.path().to_str().unwrap()]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let one = work.path().join("one");
+    let eight = work.path().join("eight");
+    let x1 = run(&[
+        "x",
+        "--threads",
+        "1",
+        "-v",
+        arch.to_str().unwrap(),
+        one.to_str().unwrap(),
+    ]);
+    assert_eq!(x1.status.code(), Some(0), "{}", text(&x1.stderr));
+    assert!(
+        text(&x1.stderr).contains("pool: 1 workers"),
+        "{}",
+        text(&x1.stderr)
+    );
+    let x8 = run(&[
+        "x",
+        "--threads",
+        "8",
+        "-v",
+        arch.to_str().unwrap(),
+        eight.to_str().unwrap(),
+    ]);
+    assert_eq!(x8.status.code(), Some(0), "{}", text(&x8.stderr));
+    assert!(
+        text(&x8.stderr).contains("blocks decoded"),
+        "{}",
+        text(&x8.stderr)
+    );
+    assert_eq!(tree_hash(&one), tree_hash(&eight));
+    assert_eq!(tree_hash(&one), tree_hash(src.path()));
+    let bad = run(&[
+        "x",
+        "--threads",
+        "0",
+        arch.to_str().unwrap(),
+        one.to_str().unwrap(),
+    ]);
+    assert_eq!(bad.status.code(), Some(1));
+}
+
+#[test]
 fn add_refuses_an_existing_archive_and_extract_refuses_to_overwrite() {
     let src = tempfile::tempdir().unwrap();
     make_tree(src.path());
