@@ -830,7 +830,7 @@ followed by that many varint chunk indices (section 5).
 | member_count | varint | number of members |
 | offset | u64 LE | per member: position in the original |
 | len | u64 LE | per member: length in the original; members ascend and do not overlap, and `offset + len` is at most `original_len` |
-| chunks | chunk list | per member: the chunks holding its data as stored, after any nested peel |
+| chunks | chunk list | per member: the chunks whose plain bytes are the member's original bytes (a nested peel of a member is undone when those chunks are decoded, so their plain lengths add up to `len`) |
 | original_hash | 32 | after the last member: BLAKE3-256 of the whole original container |
 
 Rules. Records are decoded as a stream. A `record_count` larger than the bytes after it divided by 5 (rounded
