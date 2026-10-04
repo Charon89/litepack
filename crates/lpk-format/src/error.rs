@@ -135,6 +135,50 @@ pub enum FormatError {
         /// Length of the file.
         file_len: u64,
     },
+    /// The Merkle root stored in the index differs from the one recomputed.
+    #[error("index Merkle root does not match the chunk table")]
+    MerkleRootMismatch,
+    /// The index frame's payload hash differs from the trailer's `index_hash`.
+    #[error("index hash does not match the trailer")]
+    IndexHashMismatch,
+    /// The trailer's `archive_id` differs from the header's.
+    #[error("trailer archive id differs from the header's")]
+    ArchiveIdMismatch,
+    /// A block's `plain_len` differs from the sum over its chunks.
+    #[error("block {block}: plain length does not match its chunks")]
+    BlockLengthMismatch {
+        /// Index into the block table.
+        block: usize,
+    },
+    /// The blocks do not partition the chunk table.
+    #[error("block {block}: chunk range does not continue the previous block")]
+    BlockCoverage {
+        /// Index into the block table (one past the end when blocks run short).
+        block: usize,
+    },
+    /// A block's frame lies outside the area between the header and the index.
+    #[error("block {block}: frame location out of range")]
+    BlockOutOfRange {
+        /// Index into the block table.
+        block: usize,
+    },
+    /// A located frame has another kind than expected.
+    #[error("expected frame kind {expected}, found {found}")]
+    WrongFrameKind {
+        /// The kind asked for.
+        expected: u16,
+        /// The kind found.
+        found: u16,
+    },
+    /// The last bytes of the archive are not a trailer frame.
+    #[error("no trailer at the end of the archive")]
+    NoTrailer,
+    /// A recorded frame location is out of range or its length is wrong.
+    #[error("bad frame location for {what}")]
+    BadFrameLocation {
+        /// Which frame.
+        what: &'static str,
+    },
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

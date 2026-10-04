@@ -1,0 +1,716 @@
+//! The index frame payload: chunk table, Merkle root, block table and the
+//! locations of the entry table and records frames (spec section 6).
+
+use crate::chunk::{ChunkIndex, ChunkTable};
+use crate::error::FormatError;
+use crate::header::Header;
+use crate::merkle::merkle_root;
+use crate::varint;
+
+const WHAT: &str = "index";
+/// Smallest encoded frame: kind, flags, a one-byte length and the hash.
+const MIN_FRAME_LEN: u64 = 4 + 1 + 32;
+/// Smallest encoded block record: five one-byte varints.
+const MIN_BLOCK_LEN: usize = 5;
+
+/// Where one `ChunkData` block is and which chunks it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockLocation {
+    /// Absolute offset of the block's frame (its `kind` field).
+    pub frame_offset: u64,
+    /// Whole encoded length of the block's frame.
+    pub frame_len: u64,
+    /// Index of the first chunk the block holds.
+    pub first_chunk: u64,
+    /// Number of chunks the block holds.
+    pub chunk_count: u64,
+    /// Sum of the `plain_len` of the block's chunks.
+    pub plain_len: u64,
+}
+
+/// Where a frame is: absolute offset and whole encoded length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLocation {
+    /// Absolute offset of the frame's `kind` field.
+    pub offset: u64,
+    /// Whole encoded length of the frame.
+    pub len: u64,
+}
+
+impl FrameLocation {
+    /// True when the frame lies at or after the header and ends no later than `limit`.
+    pub(crate) fn fits_below(&self, limit: u64) -> bool {
+        self.offset >= Header::LEN as u64
+            && self.len >= MIN_FRAME_LEN
+            && self
+                .offset
+                .checked_add(self.len)
+                .is_some_and(|e| e <= limit)
+    }
+}
+
+/// The decoded index payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Index {
+    /// The chunk table payload, exactly as encoded (section 5).
+    pub chunk_table: Vec<u8>,
+    /// Merkle root over the chunk table's hashes.
+    pub merkle_root: [u8; 32],
+    /// The blocks, ascending by `first_chunk`, partitioning the chunk table.
+    pub blocks: Vec<BlockLocation>,
+    /// Location of the `EntryTable` frame.
+    pub entry_table: FrameLocation,
+    /// Location of the `Records` frame, if any.
+    pub records: Option<FrameLocation>,
+}
+
+/// Cursor that assigns chunks, in order, to blocks and checks each block's
+/// chunk count and `plain_len` as the walk leaves it.
+pub(crate) struct BlockWalk<'a> {
+    blocks: &'a [BlockLocation],
+    block: usize,
+    seen: u64,
+    acc: u64,
+}
+
+impl<'a> BlockWalk<'a> {
+    pub(crate) fn new(blocks: &'a [BlockLocation]) -> Self {
+        BlockWalk {
+            blocks,
+            block: 0,
+            seen: 0,
+            acc: 0,
+        }
+    }
+
+    fn close(&mut self) -> Result<(), FormatError> {
+        if let Some(b) = self.blocks.get(self.block) {
+            if self.seen != b.chunk_count {
+                return Err(FormatError::BlockCoverage { block: self.block });
+            }
+            if self.acc != b.plain_len {
+                return Err(FormatError::BlockLengthMismatch { block: self.block });
+            }
+        }
+        self.block += 1;
+        self.seen = 0;
+        self.acc = 0;
+        Ok(())
+    }
+
+    /// Account for chunk number `chunk`; returns its block and the sum of the
+    /// `plain_len` of the chunks before it in that block.
+    pub(crate) fn advance(
+        &mut self,
+        chunk: u64,
+        plain_len: u64,
+    ) -> Result<(usize, u64), FormatError> {
+        while self
+            .blocks
+            .get(self.block)
+            .is_some_and(|b| chunk >= b.first_chunk.saturating_add(b.chunk_count))
+        {
+            self.close()?;
+        }
+        let block = self.block;
+        let b = self
+            .blocks
+            .get(block)
+            .ok_or(FormatError::BlockCoverage { block })?;
+        if chunk < b.first_chunk {
+            return Err(FormatError::BlockCoverage { block });
+        }
+        let at = self.acc;
+        self.acc = at
+            .checked_add(plain_len)
+            .ok_or(FormatError::BlockLengthMismatch { block })?;
+        self.seen += 1;
+        Ok((block, at))
+    }
+
+    /// Close the blocks after the last chunk.
+    pub(crate) fn finish(mut self) -> Result<(), FormatError> {
+        while self.block < self.blocks.len() {
+            self.close()?;
+        }
+        Ok(())
+    }
+}
+
+fn rv(s: &mut &[u8]) -> Result<u64, FormatError> {
+    match varint::read(s) {
+        Err(FormatError::Truncated { .. }) => Err(FormatError::Truncated { what: WHAT }),
+        other => other,
+    }
+}
+
+/// Check that the blocks partition `0..table_len` and lie in the body.
+fn validate_blocks(
+    blocks: &[BlockLocation],
+    table_len: u64,
+    index_offset: u64,
+) -> Result<(), FormatError> {
+    let mut next = 0u64;
+    for (i, b) in blocks.iter().enumerate() {
+        let loc = FrameLocation {
+            offset: b.frame_offset,
+            len: b.frame_len,
+        };
+        if !loc.fits_below(index_offset) {
+            return Err(FormatError::BlockOutOfRange { block: i });
+        }
+        if b.first_chunk != next || (b.chunk_count == 0 && table_len > 0) {
+            return Err(FormatError::BlockCoverage { block: i });
+        }
+        next = next
+            .checked_add(b.chunk_count)
+            .filter(|n| *n <= table_len)
+            .ok_or(FormatError::BlockCoverage { block: i })?;
+    }
+    if next != table_len {
+        return Err(FormatError::BlockCoverage {
+            block: blocks.len(),
+        });
+    }
+    Ok(())
+}
+
+fn check_location(
+    loc: FrameLocation,
+    index_offset: u64,
+    what: &'static str,
+) -> Result<FrameLocation, FormatError> {
+    if loc.fits_below(index_offset) {
+        Ok(loc)
+    } else {
+        Err(FormatError::BadFrameLocation { what })
+    }
+}
+
+impl Index {
+    /// Encode the payload. The rules a reader applies are checked first
+    /// (except the upper bound on frame offsets, which depends on where the
+    /// index is written), so an `Index` that encodes also parses.
+    pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
+        ChunkTable::parse(&self.chunk_table)?.validate()?;
+        let mut out = Vec::with_capacity(self.chunk_table.len() + 32 + 16 + self.blocks.len() * 20);
+        out.extend_from_slice(&self.chunk_table);
+        out.extend_from_slice(&self.merkle_root);
+        varint::write(&mut out, self.blocks.len() as u64)?;
+        for b in &self.blocks {
+            for v in [
+                b.frame_offset,
+                b.frame_len,
+                b.first_chunk,
+                b.chunk_count,
+                b.plain_len,
+            ] {
+                varint::write(&mut out, v)?;
+            }
+        }
+        varint::write(&mut out, self.entry_table.offset)?;
+        varint::write(&mut out, self.entry_table.len)?;
+        let rec = self.records.unwrap_or(FrameLocation { offset: 0, len: 0 });
+        varint::write(&mut out, rec.offset)?;
+        varint::write(&mut out, rec.len)?;
+        Self::parse(&out, u64::MAX)?;
+        Ok(out)
+    }
+
+    /// Parse and validate an index payload found at `index_offset`: the block
+    /// count is bounded by the bytes left, the blocks must partition the chunk
+    /// table, lie between the header and the index, and carry the right
+    /// lengths, and the stored Merkle root must match the table.
+    pub fn parse(payload: &[u8], index_offset: u64) -> Result<Index, FormatError> {
+        let (table, used) = ChunkTable::parse_prefix(payload)?;
+        let mut s = &payload[used..];
+        let (root, rest) = s
+            .split_first_chunk::<32>()
+            .ok_or(FormatError::Truncated { what: WHAT })?;
+        let merkle_root_stored = *root;
+        s = rest;
+        let count = rv(&mut s)?;
+        if count > (s.len() / MIN_BLOCK_LEN) as u64 {
+            return Err(FormatError::Truncated { what: WHAT });
+        }
+        let mut blocks = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            blocks.push(BlockLocation {
+                frame_offset: rv(&mut s)?,
+                frame_len: rv(&mut s)?,
+                first_chunk: rv(&mut s)?,
+                chunk_count: rv(&mut s)?,
+                plain_len: rv(&mut s)?,
+            });
+        }
+        let entry_table = FrameLocation {
+            offset: rv(&mut s)?,
+            len: rv(&mut s)?,
+        };
+        let rec = FrameLocation {
+            offset: rv(&mut s)?,
+            len: rv(&mut s)?,
+        };
+        if !s.is_empty() {
+            return Err(FormatError::TrailingBytes { what: WHAT });
+        }
+
+        validate_blocks(&blocks, table.len(), index_offset)?;
+        let entry_table = check_location(entry_table, index_offset, "entry table")?;
+        let records = if rec.offset == 0 && rec.len == 0 {
+            None
+        } else {
+            Some(check_location(rec, index_offset, "records")?)
+        };
+
+        let mut leaves = Vec::with_capacity(table.len() as usize);
+        let mut walk = BlockWalk::new(&blocks);
+        for (i, r) in table.iter().enumerate() {
+            let r = r?;
+            walk.advance(i as u64, r.plain_len)?;
+            leaves.push(r.hash);
+        }
+        walk.finish()?;
+        if merkle_root(&leaves) != merkle_root_stored {
+            return Err(FormatError::MerkleRootMismatch);
+        }
+        Ok(Index {
+            chunk_table: payload[..used].to_vec(),
+            merkle_root: merkle_root_stored,
+            blocks,
+            entry_table,
+            records,
+        })
+    }
+
+    /// Build the random-access chunk index in one pass over the table. The
+    /// result holds its own copy of the table bytes.
+    pub fn chunk_index(&self) -> Result<ChunkIndex, FormatError> {
+        let n = ChunkTable::parse(&self.chunk_table)?.len();
+        validate_blocks(&self.blocks, n, u64::MAX)?;
+        ChunkIndex::build(self.chunk_table.clone(), &self.blocks)
+    }
+}
+
+/// The Markdown table of the index payload, pasted verbatim into the spec.
+pub fn index_layout_table() -> String {
+    format!(
+        "| Field | Size | Meaning |\n|---|---|---|\n\
+         | chunk_table | variable | the chunk table of section 5 (count, then the records) |\n\
+         | merkle_root | 32 | the Merkle root over the chunk table's hashes |\n\
+         | block_count | varint | number of blocks; at most the bytes left after it divided by {MIN_BLOCK_LEN} |\n\
+         | frame_offset | varint | per block: absolute offset of the block's `ChunkData` frame |\n\
+         | frame_len | varint | per block: whole encoded length of that frame |\n\
+         | first_chunk | varint | per block: index of the first chunk the block holds |\n\
+         | chunk_count | varint | per block: number of chunks the block holds |\n\
+         | plain_len | varint | per block: sum of the `plain_len` of its chunks |\n\
+         | entry_table_offset | varint | absolute offset of the `EntryTable` frame |\n\
+         | entry_table_len | varint | whole encoded length of that frame |\n\
+         | records_offset | varint | absolute offset of the `Records` frame; 0 when there is none |\n\
+         | records_len | varint | whole encoded length of that frame; 0 when there is none |\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::{ChunkRecord, ChunkTableWriter};
+
+    fn rec(plain_len: u64, b: u8) -> ChunkRecord {
+        ChunkRecord {
+            plain_len,
+            hash: [b; 32],
+        }
+    }
+
+    fn table_of(recs: &[ChunkRecord]) -> Vec<u8> {
+        ChunkTableWriter::encode(recs)
+    }
+
+    /// An index over `recs` split into blocks of the given chunk counts.
+    fn make(recs: &[ChunkRecord], counts: &[u64]) -> Index {
+        let mut blocks = Vec::new();
+        let mut first = 0u64;
+        for (i, &c) in counts.iter().enumerate() {
+            let plain: u64 = recs[first as usize..(first + c) as usize]
+                .iter()
+                .map(|r| r.plain_len)
+                .sum();
+            blocks.push(BlockLocation {
+                frame_offset: 100 + i as u64 * 100,
+                frame_len: 80,
+                first_chunk: first,
+                chunk_count: c,
+                plain_len: plain,
+            });
+            first += c;
+        }
+        let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
+        Index {
+            chunk_table: table_of(recs),
+            merkle_root: merkle_root(&leaves),
+            blocks,
+            entry_table: FrameLocation {
+                offset: 32,
+                len: 60,
+            },
+            records: None,
+        }
+    }
+
+    const IDX_AT: u64 = 10_000;
+
+    fn three() -> (Vec<ChunkRecord>, Index) {
+        let recs = vec![rec(5, 1), rec(0, 2), rec(7, 3), rec(9, 4), rec(1, 5)];
+        let idx = make(&recs, &[2, 2, 1]);
+        (recs, idx)
+    }
+
+    #[test]
+    fn round_trip_zero_one_three_blocks() {
+        let cases: [(Vec<ChunkRecord>, Vec<u64>); 4] = [
+            (vec![], vec![]),
+            (vec![], vec![0]),
+            (vec![rec(3, 1), rec(4, 2)], vec![2]),
+            (
+                vec![rec(5, 1), rec(0, 2), rec(7, 3), rec(9, 4)],
+                vec![1, 2, 1],
+            ),
+        ];
+        for (recs, counts) in cases {
+            let mut idx = make(&recs, &counts);
+            for records in [
+                None,
+                Some(FrameLocation {
+                    offset: 500,
+                    len: 50,
+                }),
+            ] {
+                idx.records = records;
+                let p = idx.encode().unwrap();
+                assert_eq!(Index::parse(&p, IDX_AT).unwrap(), idx);
+            }
+        }
+    }
+
+    fn encode_unchecked(idx: &Index) -> Vec<u8> {
+        // Same layout as `encode`, without validation.
+        let mut out = idx.chunk_table.clone();
+        out.extend_from_slice(&idx.merkle_root);
+        varint::write(&mut out, idx.blocks.len() as u64).unwrap();
+        for b in &idx.blocks {
+            for v in [
+                b.frame_offset,
+                b.frame_len,
+                b.first_chunk,
+                b.chunk_count,
+                b.plain_len,
+            ] {
+                varint::write(&mut out, v).unwrap();
+            }
+        }
+        for v in [idx.entry_table.offset, idx.entry_table.len] {
+            varint::write(&mut out, v).unwrap();
+        }
+        let r = idx.records.unwrap_or(FrameLocation { offset: 0, len: 0 });
+        varint::write(&mut out, r.offset).unwrap();
+        varint::write(&mut out, r.len).unwrap();
+        out
+    }
+
+    fn parse_err(idx: &Index) -> FormatError {
+        Index::parse(&encode_unchecked(idx), IDX_AT).unwrap_err()
+    }
+
+    #[test]
+    fn length_mismatch() {
+        let (_, mut idx) = three();
+        idx.blocks[1].plain_len += 1;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockLengthMismatch { block: 1 }
+        ));
+        assert!(matches!(
+            idx.encode(),
+            Err(FormatError::BlockLengthMismatch { block: 1 })
+        ));
+        assert!(matches!(
+            idx.chunk_index(),
+            Err(FormatError::BlockLengthMismatch { block: 1 })
+        ));
+    }
+
+    #[test]
+    fn gap_and_overlap() {
+        let (_, mut idx) = three();
+        // Gap: block 1 starts one chunk late, block 2 shrinks to still end at the table's end.
+        idx.blocks[1].first_chunk = 3;
+        idx.blocks[1].chunk_count = 1;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockCoverage { block: 1 }
+        ));
+        // Overlap: block 2 starts inside block 1.
+        let (_, mut idx) = three();
+        idx.blocks[2].first_chunk = 3;
+        idx.blocks[2].chunk_count = 2;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockCoverage { block: 2 }
+        ));
+        // Blocks run short of the table.
+        let (_, mut idx) = three();
+        idx.blocks.pop();
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockCoverage { block: 2 }
+        ));
+        // Blocks run past the table.
+        let (_, mut idx) = three();
+        idx.blocks[2].chunk_count = 2;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockCoverage { block: 2 }
+        ));
+        // No blocks at all although chunks exist.
+        let (_, mut idx) = three();
+        idx.blocks.clear();
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockCoverage { block: 0 }
+        ));
+    }
+
+    #[test]
+    fn empty_block_with_chunks_present() {
+        let (recs, _) = three();
+        let mut idx = make(&recs, &[2, 2, 1]);
+        idx.blocks[1].chunk_count = 0;
+        idx.blocks[1].plain_len = 0;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockCoverage { block: 1 }
+        ));
+    }
+
+    #[test]
+    fn frame_offset_bounds() {
+        let (_, mut idx) = three();
+        idx.blocks[0].frame_offset = Header::LEN as u64 - 1;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockOutOfRange { block: 0 }
+        ));
+        let (_, mut idx) = three();
+        idx.blocks[2].frame_offset = IDX_AT - 79;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockOutOfRange { block: 2 }
+        ));
+        // Exactly touching the index is fine; overflow is out of range.
+        idx.blocks[2].frame_offset = IDX_AT - 80;
+        Index::parse(&encode_unchecked(&idx), IDX_AT).unwrap();
+        idx.blocks[2].frame_offset = u64::MAX;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockOutOfRange { block: 2 }
+        ));
+        // A frame shorter than the smallest frame cannot be a frame.
+        let (_, mut idx) = three();
+        idx.blocks[1].frame_len = MIN_FRAME_LEN - 1;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockOutOfRange { block: 1 }
+        ));
+    }
+
+    #[test]
+    fn entry_and_records_locations() {
+        let (_, mut idx) = three();
+        idx.entry_table.offset = 0;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BadFrameLocation {
+                what: "entry table"
+            }
+        ));
+        let (_, mut idx) = three();
+        idx.records = Some(FrameLocation {
+            offset: IDX_AT,
+            len: 40,
+        });
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BadFrameLocation { what: "records" }
+        ));
+        idx.records = Some(FrameLocation { offset: 0, len: 40 });
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BadFrameLocation { what: "records" }
+        ));
+    }
+
+    #[test]
+    fn merkle_root_mismatch() {
+        let (_, mut idx) = three();
+        idx.merkle_root[0] ^= 1;
+        assert!(matches!(parse_err(&idx), FormatError::MerkleRootMismatch));
+        assert!(matches!(idx.encode(), Err(FormatError::MerkleRootMismatch)));
+    }
+
+    #[test]
+    fn trailing_and_truncated() {
+        let (_, idx) = three();
+        let mut p = idx.encode().unwrap();
+        p.push(0);
+        assert!(matches!(
+            Index::parse(&p, IDX_AT),
+            Err(FormatError::TrailingBytes { what: "index" })
+        ));
+        let p = idx.encode().unwrap();
+        for cut in [1usize, 3, 6] {
+            let e = Index::parse(&p[..p.len() - cut], IDX_AT).unwrap_err();
+            assert!(
+                matches!(e, FormatError::Truncated { what: "index" }),
+                "cut {cut}: {e:?}"
+            );
+        }
+        // Cut right after the Merkle root.
+        let used = idx.chunk_table.len() + 32;
+        assert!(matches!(
+            Index::parse(&p[..used], IDX_AT),
+            Err(FormatError::Truncated { what: "index" })
+        ));
+        assert!(matches!(
+            Index::parse(&p[..used - 1], IDX_AT),
+            Err(FormatError::Truncated { what: "index" })
+        ));
+    }
+
+    #[test]
+    fn huge_block_count_is_bounded_by_input() {
+        let mut p = table_of(&[]);
+        p.extend_from_slice(&[0u8; 32]);
+        varint::write(&mut p, u64::MAX).unwrap();
+        p.extend_from_slice(&[0u8; 20]);
+        assert!(matches!(
+            Index::parse(&p, IDX_AT),
+            Err(FormatError::Truncated { what: "index" })
+        ));
+        // A count the remaining bytes cannot hold at five bytes per block.
+        let mut p = table_of(&[]);
+        p.extend_from_slice(&[0u8; 32]);
+        p.push(5);
+        p.extend_from_slice(&[0u8; 24]);
+        assert!(matches!(
+            Index::parse(&p, IDX_AT),
+            Err(FormatError::Truncated { what: "index" })
+        ));
+    }
+
+    #[test]
+    fn encode_rejects_a_table_with_trailing_bytes() {
+        let (_, mut idx) = three();
+        idx.chunk_table.push(0);
+        assert!(matches!(
+            idx.encode(),
+            Err(FormatError::TrailingBytes {
+                what: "chunk table"
+            })
+        ));
+    }
+
+    #[test]
+    fn chunk_index_matches_table_for_every_record() {
+        let recs: Vec<ChunkRecord> = (0..1000u64)
+            .map(|i| rec(if i % 7 == 0 { 0 } else { i * 3 }, (i % 251) as u8))
+            .collect();
+        let idx = make(&recs, &[300, 1, 400, 299]);
+        let ci = idx.chunk_index().unwrap();
+        let t = ChunkTable::parse(&idx.chunk_table).unwrap();
+        assert_eq!(ci.len(), 1000);
+        for i in 0..1000u64 {
+            assert_eq!(ci.record(i), t.get(i).unwrap(), "chunk {i}");
+        }
+        assert_eq!(ci.record(1000), None);
+        assert_eq!(ci.locate(1000), None);
+    }
+
+    #[test]
+    fn locate_first_middle_last_of_each_block() {
+        let recs: Vec<ChunkRecord> = (0..10u64).map(|i| rec(i % 4, i as u8)).collect();
+        let idx = make(&recs, &[3, 4, 3]);
+        let ci = idx.chunk_index().unwrap();
+        for (bi, b) in idx.blocks.iter().enumerate() {
+            let last = b.first_chunk + b.chunk_count - 1;
+            let mid = b.first_chunk + b.chunk_count / 2;
+            for c in [b.first_chunk, mid, last] {
+                let before: u64 = recs[b.first_chunk as usize..c as usize]
+                    .iter()
+                    .map(|r| r.plain_len)
+                    .sum();
+                let p = ci.locate(c).unwrap();
+                assert_eq!(p.block, bi);
+                assert_eq!(p.offset_in_block, before);
+                assert_eq!(p.plain_len, recs[c as usize].plain_len);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_length_chunks_share_offsets() {
+        let recs = vec![rec(0, 1), rec(0, 2), rec(5, 3), rec(0, 4), rec(2, 5)];
+        let idx = make(&recs, &[5]);
+        let ci = idx.chunk_index().unwrap();
+        let offs: Vec<u64> = (0..5)
+            .map(|c| ci.locate(c).unwrap().offset_in_block)
+            .collect();
+        assert_eq!(offs, vec![0, 0, 0, 5, 5]);
+    }
+
+    #[test]
+    fn chunk_index_of_empty_table() {
+        let idx = make(&[], &[0]);
+        let ci = idx.chunk_index().unwrap();
+        assert!(ci.is_empty());
+        assert_eq!(ci.locate(0), None);
+    }
+
+    #[test]
+    fn scale_million_chunks_in_thousand_blocks() {
+        let recs: Vec<ChunkRecord> = (0..1_000_000u64)
+            .map(|i| rec(i % 1000 + 1, (i % 251) as u8))
+            .collect();
+        let mut idx = make(&recs, &[1000; 1000]);
+        for (i, b) in idx.blocks.iter_mut().enumerate() {
+            b.frame_offset = 100 + i as u64 * 100;
+        }
+        let p = idx.encode().unwrap();
+        let big = 1u64 << 40;
+        let parsed = Index::parse(&p, big).unwrap();
+        assert_eq!(parsed.blocks.len(), 1000);
+        let ci = parsed.chunk_index().unwrap();
+        assert_eq!(ci.len(), 1_000_000);
+        let last = ci.locate(999_999).unwrap();
+        assert_eq!(last.block, 999);
+        assert_eq!(last.plain_len, 1000);
+        let before: u64 = (0..999u64).map(|k| k + 1).sum();
+        assert_eq!(last.offset_in_block, before);
+        assert_eq!(ci.record(999_999), Some(recs[999_999]));
+    }
+
+    #[test]
+    fn layout_table_lists_every_field() {
+        let t = index_layout_table();
+        for f in [
+            "chunk_table",
+            "merkle_root",
+            "block_count",
+            "frame_offset",
+            "entry_table_offset",
+            "records_len",
+        ] {
+            assert!(t.contains(f), "{f}");
+        }
+    }
+}

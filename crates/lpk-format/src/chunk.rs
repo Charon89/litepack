@@ -1,6 +1,7 @@
 //! The chunk table and chunk verification (spec section 5).
 
 use crate::error::FormatError;
+use crate::index::{BlockLocation, BlockWalk};
 use crate::varint;
 
 const WHAT: &str = "chunk table";
@@ -68,6 +69,27 @@ impl<'a> ChunkTable<'a> {
         })
     }
 
+    /// Parse a table that is followed by other bytes: walk the declared
+    /// records and return the table over exactly those bytes and their
+    /// length. The count bound of `parse` applies, so the walk is bounded by
+    /// the input.
+    pub fn parse_prefix(payload: &'a [u8]) -> Result<(ChunkTable<'a>, usize), FormatError> {
+        let whole = Self::parse(payload)?;
+        let mut it = whole.iter();
+        for _ in 0..whole.count {
+            it.next_record()?;
+        }
+        let used = payload.len() - it.rest.len();
+        Ok((
+            ChunkTable {
+                payload: &payload[..used],
+                body: whole.body,
+                count: whole.count,
+            },
+            used,
+        ))
+    }
+
     /// Number of records declared.
     pub fn len(&self) -> u64 {
         self.count
@@ -89,7 +111,7 @@ impl<'a> ChunkTable<'a> {
     }
 
     /// The record at `index`, or `None` past the end. Walks the table from
-    /// the start, so it is linear in `index`.
+    /// the start, so it is linear in `index`; use a [`ChunkIndex`] for random access.
     pub fn get(&self, index: u64) -> Result<Option<ChunkRecord>, FormatError> {
         if index >= self.count {
             return Ok(None);
@@ -163,35 +185,75 @@ impl Iterator for ChunkIter<'_> {
 
 /// Supplier of original chunk bytes by chunk index. E1-4 and the extractor
 /// implement it over `ChunkData` frames.
+///
+/// An implementation must bound its allocation by the chunk's `plain_len`
+/// from the chunk table (look it up with [`ChunkIndex::record`]) and fail
+/// rather than produce more bytes than that; the verifiers compare the length
+/// only after the bytes exist.
 pub trait ChunkSource {
     /// The original (decoded) bytes of chunk `index`.
     fn chunk(&mut self, index: u64) -> Result<Vec<u8>, FormatError>;
 }
 
+/// Something that resolves a chunk index to its record: a [`ChunkTable`]
+/// (linear per lookup) or a [`ChunkIndex`] (constant per lookup).
+pub trait ChunkLookup {
+    /// Number of chunks.
+    fn count(&self) -> u64;
+    /// The record of chunk `index`, `None` past the end.
+    fn lookup(&self, index: u64) -> Result<Option<ChunkRecord>, FormatError>;
+}
+
+impl ChunkLookup for ChunkTable<'_> {
+    fn count(&self) -> u64 {
+        self.len()
+    }
+    fn lookup(&self, index: u64) -> Result<Option<ChunkRecord>, FormatError> {
+        self.get(index)
+    }
+}
+
+impl ChunkLookup for ChunkIndex {
+    fn count(&self) -> u64 {
+        self.len()
+    }
+    fn lookup(&self, index: u64) -> Result<Option<ChunkRecord>, FormatError> {
+        Ok(self.record(index))
+    }
+}
+
+fn size_mismatch(file_len: u64, total: Option<u64>) -> FormatError {
+    FormatError::FileSizeMismatch {
+        expected: file_len,
+        found: total.unwrap_or(u64::MAX),
+    }
+}
+
+fn lookup_chunk<L: ChunkLookup + ?Sized>(table: &L, c: u64) -> Result<ChunkRecord, FormatError> {
+    table.lookup(c)?.ok_or(FormatError::ChunkIndexOutOfRange {
+        chunk: c,
+        len: table.count(),
+    })
+}
+
 /// Resolve every chunk index of a file to its record and check that the
 /// lengths add up to `file_len`; a sum that overflows `u64` is reported as
 /// `FileSizeMismatch` with `found` = `u64::MAX`.
-fn resolve(
+fn resolve<L: ChunkLookup + ?Sized>(
     chunks: &[u64],
     file_len: u64,
-    table: &ChunkTable<'_>,
+    table: &L,
 ) -> Result<Vec<ChunkRecord>, FormatError> {
     let mut recs = Vec::with_capacity(chunks.len().min(1 << 16));
     let mut total = Some(0u64);
     for &c in chunks {
-        let r = table.get(c)?.ok_or(FormatError::ChunkIndexOutOfRange {
-            chunk: c,
-            len: table.len(),
-        })?;
+        let r = lookup_chunk(table, c)?;
         total = total.and_then(|t| t.checked_add(r.plain_len));
         recs.push(r);
     }
     match total {
         Some(t) if t == file_len => Ok(recs),
-        found => Err(FormatError::FileSizeMismatch {
-            expected: file_len,
-            found: found.unwrap_or(u64::MAX),
-        }),
+        found => Err(size_mismatch(file_len, found)),
     }
 }
 
@@ -209,10 +271,10 @@ fn fetch_and_check(
 
 /// Verify a whole file: indices in range, summed `plain_len` equal to
 /// `file_len`, then every chunk fetched and compared with its table hash.
-pub fn verify_file(
+pub fn verify_file<L: ChunkLookup + ?Sized>(
     chunks: &[u64],
     file_len: u64,
-    table: &ChunkTable<'_>,
+    table: &L,
     source: &mut dyn ChunkSource,
 ) -> Result<(), FormatError> {
     let recs = resolve(chunks, file_len, table)?;
@@ -225,12 +287,16 @@ pub fn verify_file(
 /// Verify bytes `[offset, offset + len)` of a file by fetching and hashing
 /// only the chunks that overlap the range. Check order: range against
 /// `file_len`, chunk indices, size sum, then the overlapping chunks in order.
-pub fn verify_range(
+///
+/// One pass resolves the file's chunk list (one lookup per entry, constant
+/// per entry with a [`ChunkIndex`]) and keeps only the records that overlap
+/// the range.
+pub fn verify_range<L: ChunkLookup + ?Sized>(
     chunks: &[u64],
     file_len: u64,
     offset: u64,
     len: u64,
-    table: &ChunkTable<'_>,
+    table: &L,
     source: &mut dyn ChunkSource,
 ) -> Result<(), FormatError> {
     let end = match offset.checked_add(len) {
@@ -243,22 +309,118 @@ pub fn verify_range(
             })
         }
     };
-    let recs = resolve(chunks, file_len, table)?;
-    if len == 0 {
-        return Ok(());
-    }
+    let mut total = Some(0u64);
     let mut start = 0u64;
-    for (&c, r) in chunks.iter().zip(&recs) {
-        if start >= end {
-            break;
-        }
-        let stop = start + r.plain_len;
-        if r.plain_len > 0 && stop > offset {
-            fetch_and_check(source, c, r)?;
+    let mut hits: Vec<(u64, ChunkRecord)> = Vec::new();
+    for &c in chunks {
+        let r = lookup_chunk(table, c)?;
+        let stop = start.saturating_add(r.plain_len);
+        if len > 0 && r.plain_len > 0 && start < end && stop > offset {
+            hits.push((c, r));
         }
         start = stop;
+        total = total.and_then(|t| t.checked_add(r.plain_len));
+    }
+    match total {
+        Some(t) if t == file_len => {}
+        found => return Err(size_mismatch(file_len, found)),
+    }
+    for (c, r) in &hits {
+        fetch_and_check(source, *c, r)?;
     }
     Ok(())
+}
+
+/// Where a chunk lives: its block and its place in the block's plain bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkPlace {
+    /// Index into the block table.
+    pub block: usize,
+    /// Sum of the `plain_len` of the chunks before this one in its block.
+    pub offset_in_block: u64,
+    /// This chunk's `plain_len`.
+    pub plain_len: u64,
+}
+
+/// Random access to the chunk table, built in one pass.
+///
+/// Memory: 16 bytes per chunk (the record's byte offset and the cumulative
+/// plain offset within its block), 8 bytes per block, plus one copy of the
+/// chunk table's encoded bytes (the records are decoded on demand).
+#[derive(Debug, Clone)]
+pub struct ChunkIndex {
+    payload: Vec<u8>,
+    record_off: Vec<u64>,
+    plain_off: Vec<u64>,
+    block_first: Vec<u64>,
+}
+
+impl ChunkIndex {
+    /// One pass over the table `payload`, checking it against `blocks`
+    /// (coverage and each block's `plain_len`).
+    pub(crate) fn build(payload: Vec<u8>, blocks: &[BlockLocation]) -> Result<Self, FormatError> {
+        let (record_off, plain_off) = {
+            let table = ChunkTable::parse(&payload)?;
+            let n = table.len() as usize;
+            let mut record_off = Vec::with_capacity(n);
+            let mut plain_off = Vec::with_capacity(n);
+            let mut walk = BlockWalk::new(blocks);
+            let mut it = table.iter();
+            for i in 0..table.len() {
+                let at = payload.len() - it.rest.len();
+                let rec = it.next_record()?;
+                let (_, within) = walk.advance(i, rec.plain_len)?;
+                record_off.push(at as u64);
+                plain_off.push(within);
+            }
+            if !it.rest.is_empty() {
+                return Err(FormatError::TrailingBytes { what: WHAT });
+            }
+            walk.finish()?;
+            (record_off, plain_off)
+        };
+        Ok(ChunkIndex {
+            payload,
+            record_off,
+            plain_off,
+            block_first: blocks.iter().map(|b| b.first_chunk).collect(),
+        })
+    }
+
+    /// Number of chunks.
+    pub fn len(&self) -> u64 {
+        self.record_off.len() as u64
+    }
+
+    /// True when there are no chunks.
+    pub fn is_empty(&self) -> bool {
+        self.record_off.is_empty()
+    }
+
+    /// The record of `chunk`, in constant time; `None` past the end.
+    pub fn record(&self, chunk: u64) -> Option<ChunkRecord> {
+        let at = *self.record_off.get(usize::try_from(chunk).ok()?)?;
+        let mut s = self.payload.get(usize::try_from(at).ok()?..)?;
+        let plain_len = varint::read(&mut s).ok()?;
+        let (hash, _) = s.split_first_chunk::<HASH_LEN>()?;
+        Some(ChunkRecord {
+            plain_len,
+            hash: *hash,
+        })
+    }
+
+    /// The block and the offset within the block of `chunk`; `None` past the end.
+    pub fn locate(&self, chunk: u64) -> Option<ChunkPlace> {
+        let i = usize::try_from(chunk).ok()?;
+        let offset_in_block = *self.plain_off.get(i)?;
+        let plain_len = self.record(chunk)?.plain_len;
+        let block = self.block_first.partition_point(|&f| f <= chunk);
+        Some(ChunkPlace {
+            block: block.checked_sub(1)?,
+            offset_in_block,
+            plain_len,
+        })
+    }
 }
 
 /// The Markdown table of one chunk record, pasted verbatim into the spec.
@@ -628,5 +790,95 @@ mod tests {
             };
             prop_assert_eq!(got, Some(holder as u64));
         }
+    }
+
+    /// Chunks whose bytes are derived from their index, counting fetches.
+    struct Counting {
+        fetched: Vec<u64>,
+    }
+
+    impl ChunkSource for Counting {
+        fn chunk(&mut self, index: u64) -> Result<Vec<u8>, FormatError> {
+            self.fetched.push(index);
+            Ok(vec![(index % 251) as u8])
+        }
+    }
+
+    fn one_byte_index(n: u64) -> ChunkIndex {
+        let recs: Vec<ChunkRecord> = (0..n)
+            .map(|i| ChunkRecord {
+                plain_len: 1,
+                hash: *blake3::hash(&[(i % 251) as u8]).as_bytes(),
+            })
+            .collect();
+        let block = BlockLocation {
+            frame_offset: 32,
+            frame_len: 40,
+            first_chunk: 0,
+            chunk_count: n,
+            plain_len: n,
+        };
+        ChunkIndex::build(ChunkTableWriter::encode(&recs), &[block]).unwrap()
+    }
+
+    #[test]
+    fn range_with_chunk_index_fetches_only_the_overlap() {
+        let n = 100_000u64;
+        let ci = one_byte_index(n);
+        let chunks: Vec<u64> = (0..n).collect();
+        let mut s = Counting { fetched: vec![] };
+        verify_range(&chunks, n, 50_000, 10, &ci, &mut s).unwrap();
+        assert_eq!(s.fetched, (50_000..50_010).collect::<Vec<u64>>());
+        // The same answers as the linear table on a small file.
+        let small = one_byte_index(20);
+        let small_chunks: Vec<u64> = (0..20).collect();
+        let mut s = Counting { fetched: vec![] };
+        verify_range(&small_chunks, 20, 3, 4, &small, &mut s).unwrap();
+        assert_eq!(s.fetched, vec![3, 4, 5, 6]);
+        // Errors keep their order with an index too.
+        let e = verify_range(&[0, 20], 21, 0, 1, &small, &mut s).unwrap_err();
+        assert!(matches!(
+            e,
+            FormatError::ChunkIndexOutOfRange { chunk: 20, len: 20 }
+        ));
+        verify_file(&small_chunks, 20, &small, &mut s).unwrap();
+    }
+
+    #[test]
+    fn chunk_index_rejects_trailing_bytes_and_short_blocks() {
+        let recs = [rec(1, 1), rec(2, 2)];
+        let block = |count: u64, plain: u64| BlockLocation {
+            frame_offset: 32,
+            frame_len: 40,
+            first_chunk: 0,
+            chunk_count: count,
+            plain_len: plain,
+        };
+        let mut p = ChunkTableWriter::encode(&recs);
+        assert!(ChunkIndex::build(p.clone(), &[block(2, 3)]).is_ok());
+        assert!(matches!(
+            ChunkIndex::build(p.clone(), &[block(2, 4)]),
+            Err(FormatError::BlockLengthMismatch { block: 0 })
+        ));
+        assert!(matches!(
+            ChunkIndex::build(p.clone(), &[block(1, 1)]),
+            Err(FormatError::BlockCoverage { .. })
+        ));
+        p.push(0);
+        assert!(matches!(
+            ChunkIndex::build(p, &[block(2, 3)]),
+            Err(FormatError::TrailingBytes { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_prefix_stops_after_the_records() {
+        let mut p = ChunkTableWriter::encode(&[rec(1, 1), rec(2, 2)]);
+        let n = p.len();
+        p.extend_from_slice(b"rest");
+        let (t, used) = ChunkTable::parse_prefix(&p).unwrap();
+        assert_eq!((used, t.len()), (n, 2));
+        t.validate().unwrap();
+        assert_eq!(&p[used..], b"rest");
     }
 }
