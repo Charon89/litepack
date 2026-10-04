@@ -7,8 +7,49 @@ use crate::graph::{BlockHeader, MAX_STEPS};
 use crate::lzma::LzmaDecoder;
 use crate::primitive::PrimitiveId;
 use crate::priors::{NoPriors, PriorStore};
+use crate::record::Record;
 use crate::zstd::ZstdDecoder;
 use std::sync::Arc;
+
+/// What a reconstruction decoder may ask the reader for while one block is
+/// decoded: the archive's records and the plain bytes of the chunks a record
+/// names (spec sections 8 and 12).
+pub trait DecodeContext {
+    /// The index of the block being decoded.
+    fn block(&self) -> usize;
+    /// The record `id` of the archive's `Records` frame, hash-checked and
+    /// parsed (`RecordOutOfRange` when there is no such record).
+    fn record(&mut self, id: u64) -> Result<Record, FormatError>;
+    /// The plain bytes of chunk `index`, compared with the chunk table, for
+    /// record `record`. The chunk must lie in a block with a lower index than
+    /// the block being decoded (`BadRecord`, `chunk order`), so a record never
+    /// needs the block rebuilt from it.
+    fn chunk(&mut self, record: u64, index: u64) -> Result<Vec<u8>, FormatError>;
+}
+
+/// The context of a decode that has no archive behind it: every request fails.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoContext;
+
+impl DecodeContext for NoContext {
+    fn block(&self) -> usize {
+        0
+    }
+
+    fn record(&mut self, id: u64) -> Result<Record, FormatError> {
+        Err(FormatError::RecordOutOfRange {
+            record: id,
+            count: 0,
+        })
+    }
+
+    fn chunk(&mut self, _record: u64, index: u64) -> Result<Vec<u8>, FormatError> {
+        Err(FormatError::ChunkIndexOutOfRange {
+            chunk: index,
+            len: 0,
+        })
+    }
+}
 
 /// A decoder for one primitive.
 pub trait PrimitiveDecoder: Send + Sync {
@@ -42,6 +83,24 @@ pub trait PrimitiveDecoder: Send + Sync {
     ) -> Result<Vec<u8>, FormatError> {
         let _ = last;
         self.decode(params, input, expected_len, limits)
+    }
+
+    /// Decode one step with access to the archive (`ctx`): the records and the
+    /// chunks a reconstruction primitive needs. The default ignores `ctx` and
+    /// calls [`PrimitiveDecoder::decode_step`], so the 1.0 decoders are
+    /// unchanged; a reconstruction decoder (revision 1.1's `jpeg-reconstruct`)
+    /// overrides it.
+    fn decode_in(
+        &self,
+        params: &[u8],
+        input: &[u8],
+        expected_len: u64,
+        last: bool,
+        limits: &Resources,
+        ctx: &mut dyn DecodeContext,
+    ) -> Result<Vec<u8>, FormatError> {
+        let _ = ctx;
+        self.decode_step(params, input, expected_len, last, limits)
     }
 }
 
@@ -141,6 +200,18 @@ impl Registry {
         self
     }
 
+    /// The 1.0 registry over the same store of priors: `store`, `zstd` and
+    /// `lzma`, every other primitive unimplemented. The reference reader
+    /// decodes the blocks holding a record's chunks with it, so a
+    /// reconstruction decoder never runs inside another (one level).
+    pub fn nested(&self) -> Registry {
+        let mut r = Registry::v1();
+        r.decoders[PrimitiveId::Zstd as usize] =
+            Box::new(ZstdDecoder::new(Arc::clone(&self.priors)));
+        r.priors = Arc::clone(&self.priors);
+        r
+    }
+
     /// The store of priors decoders look in.
     pub fn priors(&self) -> &dyn PriorStore {
         self.priors.as_ref()
@@ -188,6 +259,20 @@ pub fn decode_block(
     encoded: &[u8],
     limits: &Resources,
 ) -> Result<Vec<u8>, FormatError> {
+    decode_block_in(registry, header, block, encoded, limits, &mut NoContext)
+}
+
+/// [`decode_block`] with the archive behind it: every step runs through
+/// [`PrimitiveDecoder::decode_in`] with `ctx`, so a reconstruction decoder
+/// can read its record and the chunks the record names.
+pub fn decode_block_in(
+    registry: &Registry,
+    header: &BlockHeader,
+    block: usize,
+    encoded: &[u8],
+    limits: &Resources,
+    ctx: &mut dyn DecodeContext,
+) -> Result<Vec<u8>, FormatError> {
     let steps = &header.graph.steps;
     if steps.is_empty() || steps.len() > MAX_STEPS {
         return Err(FormatError::BadGraph {
@@ -219,12 +304,13 @@ pub fn decode_block(
         } else {
             limits.max_block_plain
         };
-        let out = match registry.decoder(step.primitive).decode_step(
+        let out = match registry.decoder(step.primitive).decode_in(
             &step.params,
             &data,
             expected,
             i == last,
             limits,
+            ctx,
         ) {
             Err(FormatError::PayloadTooLarge { .. }) if i == last => {
                 return Err(FormatError::BlockLengthMismatch { block })

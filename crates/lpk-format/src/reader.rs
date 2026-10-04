@@ -3,14 +3,14 @@
 
 use crate::archive::Archive;
 use crate::chunk::{fetch_and_check, resolve, ChunkSource};
-use crate::decode::decode_block;
+use crate::decode::{decode_block, decode_block_in, DecodeContext};
 use crate::entry::{Entry, EntryKind, EntryTable};
 use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::frame::FrameKind;
 use crate::graph::{BlockHeader, Graph};
 use crate::index::FrameLocation;
-use crate::record::RecordsTable;
+use crate::record::{Record, RecordsTable};
 use std::io::{Read, Seek, Write};
 
 /// What [`Archive::verify`] checked.
@@ -161,9 +161,76 @@ impl<'a, R: Read + Seek> ArchiveChunks<'a, R> {
             max_block_plain: max,
             ..*a.resources()
         };
-        let plain = decode_block(&a.registry, &header, block, &frame.payload[used..], &limits)?;
+        let encoded = &frame.payload[used..];
+        let plain = if header.graph.uses_records() {
+            // The decoder may read the chunks its record names, from blocks
+            // with lower indices, through the archive itself; those blocks
+            // are decoded with the 1.0 registry (one level), so the archive's
+            // own registry is set aside meanwhile and always put back.
+            let nested = a.registry.nested();
+            let registry = std::mem::replace(&mut a.registry, nested);
+            let mut ctx = ArchiveContext {
+                archive: &mut *a,
+                block,
+            };
+            let r = decode_block_in(&registry, &header, block, encoded, &limits, &mut ctx);
+            a.registry = registry;
+            a.cache = None;
+            r?
+        } else {
+            decode_block(&a.registry, &header, block, encoded, &limits)?
+        };
         a.cache = Some((block, plain));
         Ok(())
+    }
+}
+
+/// The [`DecodeContext`] of a block of an archive: records from its
+/// `Records` frame, chunks through its blocks.
+struct ArchiveContext<'a, R: Read + Seek> {
+    archive: &'a mut Archive<R>,
+    block: usize,
+}
+
+impl<R: Read + Seek> DecodeContext for ArchiveContext<'_, R> {
+    fn block(&self) -> usize {
+        self.block
+    }
+
+    fn record(&mut self, id: u64) -> Result<Record, FormatError> {
+        let count = self.archive.record_count()?;
+        let owned = self
+            .archive
+            .records()?
+            .ok_or(FormatError::RecordOutOfRange { record: id, count })?;
+        owned
+            .table()?
+            .get(id)?
+            .ok_or(FormatError::RecordOutOfRange { record: id, count })
+    }
+
+    fn chunk(&mut self, record: u64, index: u64) -> Result<Vec<u8>, FormatError> {
+        let table = self.archive.chunks_arc();
+        let place = table
+            .locate(index)
+            .ok_or(FormatError::ChunkIndexOutOfRange {
+                chunk: index,
+                len: table.len(),
+            })?;
+        if place.block >= self.block {
+            return Err(FormatError::BadRecord {
+                record,
+                reason: "chunk order",
+            });
+        }
+        let rec = table
+            .record(index)
+            .ok_or(FormatError::ChunkIndexOutOfRange {
+                chunk: index,
+                len: table.len(),
+            })?;
+        let mut source = ArchiveChunks::new(&mut *self.archive);
+        fetch_and_check(&mut source, index, &rec)
     }
 }
 

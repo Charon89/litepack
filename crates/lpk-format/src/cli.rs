@@ -160,10 +160,17 @@ pub fn check_conflicting_names(entries: &[Entry]) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// The key material the command line gave for an encrypted archive.
+/// Called on every archive the tool opens, after the priors are set: how a
+/// full reader registers the decoders this crate does not have (see
+/// [`run_with`]).
+pub type OpenHook = fn(&mut Archive<File>);
+
+/// The key material the command line gave for an encrypted archive, and the
+/// hook every opened archive goes through.
 #[derive(Debug, Default)]
 struct Keys {
     credentials: Option<Credentials>,
+    hook: Option<OpenHook>,
 }
 
 fn credentials(cli: &mut Cli) -> Result<Keys, FormatError> {
@@ -195,7 +202,10 @@ fn credentials(cli: &mut Cli) -> Result<Keys, FormatError> {
             keyfile,
         }),
     };
-    Ok(Keys { credentials })
+    Ok(Keys {
+        credentials,
+        hook: None,
+    })
 }
 
 fn open(path: &Path, priors: &[PathBuf], keys: &Keys) -> Result<Archive<File>, FormatError> {
@@ -212,6 +222,9 @@ fn open(path: &Path, priors: &[PathBuf], keys: &Keys) -> Result<Archive<File>, F
             store.insert(std::fs::read(p)?);
         }
         a.set_priors(Box::new(store));
+    }
+    if let Some(hook) = keys.hook {
+        hook(&mut a);
     }
     Ok(a)
 }
@@ -483,6 +496,26 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    run_inner(args, out, err, None)
+}
+
+/// [`run`] with `hook` applied to every archive the tool opens (after the
+/// priors): a full reader registers its decoders there (for example revision
+/// 1.1's `jpeg-reconstruct`), and the tool's own policy (extraction refusals,
+/// listing, verification, exit status) stays as it is.
+pub fn run_with<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write, hook: OpenHook) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_inner(args, out, err, Some(hook))
+}
+
+fn run_inner<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write, hook: Option<OpenHook>) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     let mut cli = match Cli::try_parse_from(args) {
         Ok(c) => c,
         Err(e) => {
@@ -494,7 +527,7 @@ where
         }
     };
     let keys = match credentials(&mut cli) {
-        Ok(k) => k,
+        Ok(k) => Keys { hook, ..k },
         Err(e) => {
             let _ = writeln!(err, "error: {e}");
             return 1;

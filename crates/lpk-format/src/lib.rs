@@ -48,7 +48,9 @@ pub use crypto::{
     associated_data, derive_nonce, key_slot_table, sealing_rule, sealing_rules_table, ArchiveKey,
     Argon2Params, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE, KEY_SLOT_LEN,
 };
-pub use decode::{decode_block, PrimitiveDecoder, Registry};
+pub use decode::{
+    decode_block, decode_block_in, DecodeContext, NoContext, PrimitiveDecoder, Registry,
+};
 pub use entry::{
     entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,
     Entry, EntryFlags, EntryIter, EntryKind, EntryTable, EntryTableWriter, MIN_ENTRY_LEN,
