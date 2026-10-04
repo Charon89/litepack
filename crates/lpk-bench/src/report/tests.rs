@@ -959,10 +959,12 @@ fn g2_checks_that_every_version_exceeds_the_largest_incumbent_window() {
         .numbers
         .iter()
         .any(|n| n.starts_with("first version of the class: 314572800 bytes")));
-    assert!(g
+    // The window is a catalogue constant: stated in the rules text, never a traced number.
+    assert!(!g
         .numbers
         .iter()
-        .any(|n| n.starts_with("largest incumbent window: 268435456 bytes")));
+        .any(|n| n.contains("largest incumbent window")));
+    assert!(report_text(&i).contains("256 MiB (WinRAR -md256m in bench/tools.toml)"));
     if let Some(pf) = i.probes.dedup.as_mut() {
         pf.env.data.versions_large[1].bytes = LARGEST_INCUMBENT_WINDOW_BYTES - 1;
     }

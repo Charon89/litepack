@@ -630,7 +630,8 @@ pub const RULES: [(&str, &str); 6] = [
          patches of the later versions (probe dedup); the report names which was used. Gate G2 \
          is evaluated on backup-versions-large only (D-43), against the best tool x setting that \
          the catalogue does not flag `dedup`; deduplicating tools are printed as reference, not \
-         compared",
+         compared; every version of the class must exceed the largest incumbent dictionary \
+         window, 256 MiB (WinRAR -md256m in bench/tools.toml), else G2 is not evaluable",
     ),
     (
         "text-prose, logs-text, small-files",
@@ -1168,12 +1169,9 @@ fn gate2(m: &Model, probes: &Probes) -> GateRow {
             }
             // D-43's premise: every version exceeds the largest incumbent window.
             let mut too_small = false;
+            // The window itself is a catalogue constant, not a measured value: it is stated in
+            // the rules paragraph, and only the measured version sizes appear here.
             if let Some(pf) = &probes.dedup {
-                // A constant of the catalogue, not a measured value: no source index.
-                numbers.push(format!(
-                    "largest incumbent window: {} (WinRAR -md256m in bench/tools.toml)",
-                    bytes_s(LARGEST_INCUMBENT_WINDOW_BYTES as f64)
-                ));
                 const ORDINALS: [&str; 6] =
                     ["first", "second", "third", "fourth", "fifth", "sixth"];
                 for (n, ver) in pf.env.data.versions_large.iter().enumerate() {
