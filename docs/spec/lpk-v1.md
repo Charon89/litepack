@@ -80,7 +80,10 @@ Revisions. Version 1 grows by revisions that add the decoding of primitives the 
 `jpeg-reconstruct`") and nothing else. `version_minor` is the revision the writer wrote under, a declaration and
 not a fact about the archive's blocks: the archive may use any primitive of that revision or an earlier one, and
 none of a later one (section 8). A reader does not infer from the minor which primitives occur; it checks the
-primitives of each block as section 8 says. So a writer of revision 1.1 writes 1 whether or not any block names
+primitives of each block as section 8 says, and never consults the minor to decide what to decode: an archive of
+minor 0 whose block names `jpeg-reconstruct` (which a conforming writer does not produce) is decoded by a revision
+1.1 reader, or refused with `UnimplementedPrimitive` (7) by a reader without that decoder, exactly like an archive
+of minor 1. So a writer of revision 1.1 writes 1 whether or not any block names
 a primitive of revision 1.1 (informative: the reference pipeline writes 1 whenever its JPEG peel is enabled). A
 reader of revision 1.0 accepts an archive of minor 1 (any minor), lists it,
 verifies its frames and records, and reports `UnimplementedPrimitive` with the ID 7 for every block whose graph
@@ -621,8 +624,10 @@ Primitives 3 to 12. Revision 1.0 gives `bwt`, `bcj-x86`, `bcj-arm64`, `delta` an
 primitives an ID, a parameter layout and their resources, but no decoding. Revision 1.1 specifies the decoding of
 `jpeg-reconstruct` (below). A writer MUST NOT emit a primitive whose decoding no revision up to the archive's
 `version_minor` specifies, and a reader MUST report `UnimplementedPrimitive` with the ID for a graph that names a
-primitive it does not run, before it runs any step (it still validates their parameters as above). The decoding
-of the others is specified by later revisions.
+primitive it does not run, before it runs any step (it still validates their parameters as above). Whether a
+reader runs a primitive depends on the reader alone, never on the archive's `version_minor` (section 2): a block
+naming `jpeg-reconstruct` in an archive of minor 0 is decoded, or refused with `UnimplementedPrimitive`, exactly as
+in an archive of minor 1. The decoding of the others is specified by later revisions.
 
 ### The decode graph
 
@@ -679,8 +684,9 @@ Order of checks for a block, from its frame to its first step:
 2. The graph is parsed: `step_count` (`BadGraph`, `step count`), then per step the primitive ID
    (`UnknownPrimitive`), the step flags (`BadGraph`, `step flags`), `params_len` (`BadGraph`, `params length`),
    the params bytes and their layout (`BadParams`); input that ends inside the graph is `Truncated` (`graph`).
-3. When the graph names a reconstruction primitive, the archive's record count is read (the `Records` frame, with
-   its own errors, section 12) and every `record_id` must be below it (`RecordOutOfRange`).
+3. When the graph names a reconstruction primitive, the archive's record count is read (the `Records` frame and
+   the count only, with their own errors; no record is examined, section 12) and every `record_id` must be below
+   it (`RecordOutOfRange`).
 4. `plain_len` and `encoded_len` (`Truncated`, `block header`); `encoded_len` must equal the bytes that follow
    (`BlockLengthMismatch`).
 5. The graph's resources against the envelope: a window above `max_window`, then a BWT block above
@@ -712,7 +718,11 @@ The step's input is one Lepton stream and its output is the primary image of the
 
 - The codec is defined by the library: the stream format is the one `lepton_jpeg`, the Rust port of Dropbox's
   Lepton (<https://github.com/microsoft/lepton_jpeg_rust>, Apache-2.0), versions 0.5.x, writes and decodes with its
-  `compat_lepton_vector_write` settings (16-bit DC and predictor arithmetic). The upstream project
+  `compat_lepton_vector_write` settings (16-bit DC and predictor arithmetic). Writing and decoding both use that
+  preset; the library's `compat_lepton_vector_read` preset (which differs in `reject_dqts_with_zeros`, the size
+  limits and `accept_invalid_dht`) is not used. Of the preset only the size limits are changed: when decoding, the
+  largest file is the record's `primary_len` (at most 2^32 - 1) and the largest width and height are those of the
+  frame header read in check (5) below. The upstream project
   (<https://github.com/dropbox/lepton>) is its origin but publishes no standalone format document, so the library
   version range is the definition, normatively by citation as section 8 cites RFC 8878 for `zstd`; a conforming
   decoder may use that library to decode the stream (D-49).
@@ -720,6 +730,9 @@ The step's input is one Lepton stream and its output is the primary image of the
   (what `lepton_jpeg` 0.5 writes) is the only value of revision 1.1. The stream carries its own header (magic,
   version byte, sizes), which the library checks when it decodes; a stream whose header it refuses is
   `lepton stream`.
+- A Lepton stream is not canonical: bytes the library ignores may differ without changing the decoded image, so
+  two different streams may decode to the same primary image. The output is guaranteed by `original_hash` and the
+  chunk hashes, never by the stream bytes.
 - One block holds exactly one Lepton stream, because a graph applies to the whole block: the block's `plain_len`
   is the record's `primary_len` and its chunk records are those of the primary image's bytes.
 - After decoding, the decoder MUST assemble the original file as section 12 states (the primary image; then either
@@ -730,31 +743,56 @@ The step's input is one Lepton stream and its output is the primary image of the
   12, "Nesting"). The step's output is the primary image only.
 - Order of checks inside the step, exactly as the reference performs them: (1) the record is looked up by its id
   (the errors of the `Records` frame, section 12); (2) its kind is `jpeg` (`BadRecord`, `kind`); (3) its
-  `lepton_version` is 0 (`BadRecord`, `lepton_version`); (4) `primary_len` against the step's output bound
-  (`PayloadTooLarge`; on a one-step graph the bound is the block's `plain_len`, and a `primary_len` that differs
-  from it is observed as `BlockLengthMismatch` when the step's output length is compared, section 8 "Bounds");
+  `lepton_version` is 0 (`BadRecord`, `lepton_version`); (4) `primary_len` against the step's output bound: on a
+  step that is not the last, a `primary_len` above the bound (`max_block_plain`) is `PayloadTooLarge`; on the last
+  step a `primary_len` that differs from the block's `plain_len` is `BlockLengthMismatch` (a larger one here, a
+  smaller one only when the step's output length is compared after check (8), section 8 "Bounds");
   (5) resources: the frame header of the JPEG is read from the stream's own header (layout below) and the image's
-  memory term is compared with the decode memory left after `max_block_plain` (`Refused`, field `decode_memory`;
+  term (its coefficient term plus the fixed term, counted once per image, "Resources" below) is compared with the
+  decode memory left after `max_block_plain` (`Refused`, field `decode_memory`;
   a stream whose header layout is not recognised is `BadRecord`, `lepton stream`, and is not decoded); (6) the stream is decoded (`BadRecord`, `lepton stream` when the
   library refuses it or its output would exceed `primary_len`; `primary_len` when the output is shorter);
-  (7) assembly, in file order: per secondary image, the nested trailing bytes before it (`BadRecord`, `gainmaps`
-  when its offset lies before the bytes already assembled; `trailing` when the nested trailing data ends before
-  that offset), then its chunks (`gainmaps` when their lengths do not add up to its `len`); then the rest of the
-  nested trailing data. Each chunk is fetched in that order with the chunk order and nesting checks above, then
-  the chunk's own checks (section 9: `ChunkIndexOutOfRange`, the block's errors, `ChunkMismatch`); (8) the
+  (7) assembly, in file order. When `trailing` is not empty it follows the primary image. Otherwise the nested
+  trailing data is one byte stream, the nested trailing chunks' bytes in order, cut at the secondary images'
+  offsets (a chunk may straddle an offset): per secondary image, the nested trailing bytes before it (`BadRecord`,
+  `gainmaps` when its offset lies before the bytes already assembled; `trailing` when the nested trailing data
+  ends before that offset), then its chunks (`gainmaps` when their lengths do not add up to its `len`); then all
+  the rest of the nested trailing data (nested trailing data that is longer or shorter than the bytes it must fill
+  shows in check (8), as `original_hash`). Each chunk is fetched in that order, with these checks in this order:
+  its index is below the chunk count (`ChunkIndexOutOfRange`); its block has a lower index than the block being
+  decoded (`BadRecord`, `chunk order`); that block's frame is read and its graph parsed (steps 1 and 2 of "Order
+  of checks for a block"); the graph names no reconstruction primitive (`BadRecord`, `nested record`); the rest
+  of that block's checks and its decoding (steps 3 to 8 and the steps' own errors; when the previous chunk came
+  from the same block, its frame, graph and decoding are not repeated); the chunk's bytes against its chunk record (`ChunkMismatch`, section
+  9); (8) the
   assembled length is `original_len` and its BLAKE3-256 `original_hash` (`BadRecord`, `original_hash`, also for a
-  length that would overflow 64 bits).
+  length that would overflow 64 bits). Whole-archive verification checks the chunk indices, sums and order before
+  it decodes any block (section 12), so there these reasons of check (7) arise only for what it does not check;
+  extraction runs the step without that pass.
 - The stream header read in check (5), in the layout `lepton_jpeg` 0.5.8 writes (only what the check reads):
   1. Bytes 0..28 of the stream are a fixed header. Its bytes 24..28 are a u32 LE, `compressed_len`.
-  2. Bytes 28..28+`compressed_len` are a zlib stream (RFC 1950).
+  2. Bytes 28..28+`compressed_len` are a zlib stream: its format is that of RFC 1950 (zlib) with the compressed
+     data of RFC 1951 (Deflate), normatively by citation as section 8 cites RFC 8878 for `zstd`. A decoder inflates
+     exactly 7 + `raw_len` bytes (item 3) and no further: the Adler-32 check value and whatever the stream holds
+     after those bytes are not checked. Damage that keeps the inflation from producing those bytes (an invalid zlib
+     header, invalid Deflate data, or the end of the `compressed_len` bytes before them) is `lepton stream`.
   3. Decompressed, that stream begins with the 3 bytes `HDR` and a u32 LE, `raw_len`. After them come `raw_len`
      bytes of raw JPEG header: the original JPEG's marker segments from the first marker after SOI, without the
      SOI.
   4. The decoder prefixes SOI (`FF D8`) to those bytes and finds the first frame header (the first segment with
-     marker `C0`-`C3`, `C5`-`CB` or `CD`-`CF`). It walks marker segments by their big-endian length fields; after an SOS
-     segment it skips entropy-coded data up to the next marker other than `FF 00` and `RST0`-`RST7`. The frame
-     header's height (bytes 1..3), width (bytes 3..5) and per-component sampling factors (from byte 6 on, 3 bytes
-     per component, the high and low nibbles of the second byte) give the memory term.
+     marker `C0`-`C3`, `C5`-`CB` or `CD`-`CF`) by this walk, starting after the SOI. At each step a byte `FF` is
+     expected; any run of `FF` bytes is fill and is skipped, and the byte after the run is the marker. TEM (`01`),
+     `RST0`-`RST7` (`D0`-`D7`) and a further SOI (`D8`) stand alone (no length) and are skipped. Any other marker is
+     followed by a big-endian u16 length that counts itself, and its segment's content is the length minus 2 bytes
+     after it. After an SOS segment the walk skips entropy-coded data up to the next `FF` that is not followed by
+     `00`, `D0`-`D7` or `FF` (in a run `FF FF` the last `FF` is the one examined). The walk ends without a frame
+     header at: EOI (`D9`); a marker byte `00`; a byte other than `FF` where a marker is expected; a length below 2;
+     a segment that runs past the end of the data; the end of the data. Offsets in the frame header count from
+     the first byte of the segment's content, after the two-byte length: the precision P at 0, the height Y at
+     1..3 and the width X at 3..5 (big-endian), the number of components `Nf` at 5, then 3 bytes per component, the
+     second of which holds the horizontal sampling factor h (high nibble) and the vertical one v (low nibble). A
+     frame header whose content is shorter than 6 bytes ends the walk without a frame header; a component whose
+     sampling byte lies past the content is not counted.
 
   The layout is not recognised when:
   - the stream is shorter than 28 + `compressed_len` bytes;
@@ -766,15 +804,19 @@ The step's input is one Lepton stream and its output is the primary image of the
 
   In each of these cases the step fails with `BadRecord` `lepton stream` before the stream is decoded. Later
   `lepton_jpeg` releases are not assumed to keep this layout; the reference pins 0.5.8.
-- Resources: memory per image, declared by the envelope's `decode_memory` (section 7). The reference writer
-  declares `max_block_plain` plus, for the largest peeled image, an allowance: a coefficient term computed from the
-  image's frame header over the library's data layout (each component's 8x8 blocks, padded to whole MCUs, times
-  128 bytes: 64 coefficients of 2 bytes) plus a fixed term of 67108864 bytes (64 MiB) for the library's models and
-  thread buffers. Revision 1.1 states no bound on the library's working set; the fixed term is not measured (task
-  E2-5b measures it). A decoder compares the image's term (the same computation) with the archive's
-  `decode_memory`, never above its own memory resource, minus `max_block_plain`, and refuses an image whose term
-  exceeds it with `Refused` (field `decode_memory`, the class `Archive::open` uses for an envelope the reader
-  cannot meet, section 7), without decoding it.
+- Resources: memory per image, declared by the envelope's `decode_memory` (section 7). An image's term is its
+  coefficient term plus a fixed term of 67108864 bytes (64 MiB) for the library's models and thread buffers,
+  counted once per image. The coefficient term follows the library's data layout: with Hmax and Vmax the largest
+  h and v over the counted components (at least 1), each component has ceil(X / (8·Hmax))·h ×
+  ceil(Y / (8·Vmax))·v blocks of 8x8, and the term is the sum over the components times 128 bytes (64
+  coefficients of 2 bytes); a component with a sampling factor of 0 adds no blocks (the term does not refuse it;
+  the library decides in check (6)). The reference writer declares `max_block_plain` plus the term of the largest
+  peeled image. Revision 1.1 states no bound on the library's working set, and the fixed term is not measured; no
+  revision bounds it yet, and a later revision may state a bound after measurement. A decoder compares the image's
+  term (the same computation, fixed term included) with the archive's `decode_memory`, never above its own memory
+  resource, minus `max_block_plain`, and refuses an image whose term exceeds it with `Refused` (field
+  `decode_memory`, the class `Archive::open` uses for an envelope the reader cannot meet, section 7), without
+  decoding it.
 
 ### Normative decoders
 
@@ -1167,11 +1209,19 @@ the field's name as `reason`. So are these inconsistencies: a JPEG `primary_len`
 (`primary_len`); a JPEG with both raw `trailing` bytes and `nested_trailing_chunks` (`nested_trailing_chunks`);
 a secondary image or member whose `offset + len` overflows or exceeds `original_len`, that is out of order, overlaps
 another or (for a secondary image) starts before `primary_len` (`gainmaps`, `members`); the sums of the assembly rules
-below that do not hold (`trailing`, `gainmaps`, `original_len`); a base64 `line_len` of 0 with a `line_ending`
+below that do not hold, one reason each: a JPEG with raw `trailing` bytes and a secondary image (`gainmaps`); a
+JPEG whose raw `trailing` length is not `original_len - primary_len` (`trailing`); a JPEG with neither raw
+`trailing` bytes nor nested trailing chunks whose secondary images' lengths do not add up to `original_len -
+primary_len` (`gainmaps`); a container whose members' lengths and framing do not add up to `original_len`
+(`original_len`); a base64 `line_len` of 0 with a `line_ending`
 other than 2, or a `line_len` above 0 with `line_ending` 2 (`line_ending`); a non-interlaced png-filter record
 whose `filters` are not `height` bytes long (`filters`).
 The first error ends the walk, and asking for record `n` walks from the start, so the first error among records
-`0` to `n` is the one reported.
+`0` to `n` is the one reported. Three depths of reading, exactly: reading the record count reads the `Records`
+frame (its frame hash, `HashMismatch`) and the `record_count` with its bound above (`Truncated`), and examines no
+record, so no `body_hash` and no field rule; looking up record `n` walks records `0` to `n`, each with its kind,
+flags, `body_len`, `body_hash` and then its field rules; `verify` walks every record the same way, then the bytes
+after the last one (`TrailingBytes`).
 
 ### What each body verifies
 
@@ -1201,7 +1251,12 @@ original bytes, they must hash to it (and have `original_len` bytes where the re
   record names lies in a block with a strictly lower index than every block whose graph names that record, so
   a record never needs the block that is being rebuilt from it and two blocks never need each other. The
   chunk sums above and this order are checked by whole-archive verification (`BadRecord` with `reason`
-  `chunk lengths` or `chunk order`), which knows the blocks and the chunk table; parsing a record cannot.
+  `chunk lengths` or `chunk order`), which knows the blocks and the chunk table; parsing a record cannot. The
+  sums it checks, each `chunk lengths` when it does not hold: each secondary image's or member's `chunks` against
+  its `len`, and, for a JPEG without raw `trailing` bytes, the `nested_trailing_chunks` against `original_len -
+  primary_len - sum(secondary len)` exactly. (A reconstruction step that meets a nested sum that does not hold
+  reports it as section 8 says: `trailing` when the data ends before a secondary image, otherwise
+  `original_hash`.)
 - Nesting. Every chunk a record names lies in a block whose graph names no reconstruction primitive, so a
   reconstruction step reads plain blocks only and never recurses. A violation is `BadRecord` with `reason`
   `nested record`, raised at the reconstruction step when it reads that chunk (section 8). A writer refuses to
@@ -1218,7 +1273,13 @@ JPEG and Deflate libraries of the full reader; revision 1.1's full reader applie
 nesting rule above are plain blocks (the reference full reader refuses any other with `nested record`). Whole-archive
 verification (section 9), whenever the index lists a
 `Records` frame, reads it and walks every record (a damaged frame is `HashMismatch`), checks the chunk indices,
-chunk sums and block order above, and checks the record ids of every block graph, all before it decodes a block.
+chunk sums and block order above, and checks the record ids of every block graph, all before it decodes a block,
+in this order: after the walk of every record, per record in id order and per chunk group in the order of the body (secondary images or
+members, then the nested trailing chunks), every index of the group (`ChunkIndexOutOfRange`) and then the group's
+sum (`chunk lengths`); then, per block in index order, its frame is read and its graph parsed, every `record_id`
+of the graph is checked against the record count (`RecordOutOfRange`), and then, per step that names a record,
+every chunk of that record must lie in an earlier block (`chunk order`). Nesting is not part of this pass; it is
+checked when a reconstruction step reads the chunk (section 8).
 
 Writing. A writer given records writes them as one `Records` frame after the entry table and before the index, and
 sets the index's `records_offset` and `records_len`; the envelope's `max_frame_payload` admits the frame (section 7).

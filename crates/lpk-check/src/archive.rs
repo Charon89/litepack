@@ -8,6 +8,7 @@ use crate::entries::{parse_entry_table, Entry, EntryKind};
 use crate::error::{Error, Result};
 use crate::index::{parse_index, Index};
 use crate::journal;
+use crate::record::{self, bad_record, Body, JpegRecord, Record};
 use crate::wire::{
     kind, parse_frame, parse_header, read_recorded, trailer_ending_at, Frame, Header, Trailer,
     HEADER_LEN, MIN_FRAME_LEN, TRAILER_FRAME_LEN,
@@ -51,6 +52,8 @@ pub struct Options {
     pub priors: HashMap<[u8; 32], Vec<u8>>,
     /// Resources.
     pub resources: Resources,
+    /// Behave as a revision 1.0 reader: `jpeg-reconstruct` is `UnimplementedPrimitive`.
+    pub revision_1_0: bool,
 }
 
 impl Options {
@@ -390,16 +393,239 @@ impl Archive {
         parse_entry_table(&plain)
     }
 
-    /// The number of records (0 without a `Records` frame).
-    pub fn record_count(&self) -> Result<u64> {
+    /// The plain payload of the `Records` frame, when the index lists one.
+    fn records_payload(&self) -> Result<Option<Vec<u8>>> {
         match self.index.records {
-            None => Ok(0),
+            None => Ok(None),
             Some(l) => {
                 let f = self.recorded(l.offset, l.len, kind::RECORDS, "records")?;
-                let plain = self.unseal(&f, l.sequence)?;
-                Ok(parse_records(&plain)? as u64)
+                Ok(Some(self.unseal(&f, l.sequence)?))
             }
         }
+    }
+
+    /// The number of records (0 without a `Records` frame): the frame's structure and every
+    /// `body_hash` are checked.
+    pub fn record_count(&self) -> Result<u64> {
+        match self.records_payload()? {
+            None => Ok(0),
+            Some(p) => Ok(record::walk(&p, false, None)?.count),
+        }
+    }
+
+    /// Every record, every body under its field rules (whole-archive verification).
+    pub fn records(&self) -> Result<Vec<Record>> {
+        match self.records_payload()? {
+            None => Ok(Vec::new()),
+            Some(p) => Ok(record::walk(&p, true, None)?.records),
+        }
+    }
+
+    /// Record `id`, walking from the start (section 12).
+    fn record(&self, id: u64) -> Result<Record> {
+        let p = self.records_payload()?.unwrap_or_default();
+        let w = if p.is_empty() {
+            None
+        } else {
+            Some(record::walk(&p, true, Some(id))?)
+        };
+        let count = w.as_ref().map_or(0, |w| w.count);
+        w.and_then(|mut w| w.records.pop())
+            .filter(|_| id < count)
+            .ok_or_else(|| {
+                Error::new(
+                    "RecordOutOfRange",
+                    format!("record {id} out of range (count {count})"),
+                )
+            })
+    }
+
+    /// Parses block `b`'s header (order of checks 1 to 4 of section 8) and returns whether its
+    /// graph names a reconstruction primitive, and the record ids it names.
+    fn block_graph(&self, b: usize) -> Result<(bool, Vec<u64>)> {
+        let bl = self.index.blocks[b];
+        let f = self.recorded(bl.frame_offset, bl.frame_len, kind::CHUNK_DATA, "ChunkData")?;
+        let plain = self.unseal(&f, bl.sequence)?;
+        let h = block::parse_block(&plain, &mut || self.record_count())?;
+        Ok((h.reconstruction, h.record_ids))
+    }
+
+    /// One chunk a record names, read for the reconstruction of block `b` (section 8 check 7):
+    /// the chunk order and nesting checks, then the chunk's own checks. `cache` holds the plain
+    /// bytes of the block read last.
+    fn record_chunk(
+        &self,
+        id: u64,
+        b: usize,
+        i: u64,
+        cache: &mut Option<(usize, Vec<u8>)>,
+    ) -> Result<Vec<u8>> {
+        let n = self.index.chunks.len() as u64;
+        if i >= n {
+            return Err(Error::new(
+                "ChunkIndexOutOfRange",
+                format!("chunk index {i} out of range ({n})"),
+            ));
+        }
+        let iu = i as usize;
+        let cb = self.index.chunk_block[iu];
+        if cb >= b {
+            return Err(bad_record(id, "chunk order"));
+        }
+        if cache.as_ref().map(|c| c.0) != Some(cb) {
+            let (recon, _) = self.block_graph(cb)?;
+            if recon {
+                return Err(bad_record(id, "nested record"));
+            }
+            *cache = Some((cb, self.block_plain(cb)?));
+        }
+        let rec = self.index.chunks[iu];
+        let off = self.index.chunk_offset[iu] as usize;
+        let bytes = cache
+            .as_ref()
+            .and_then(|c| c.1.get(off..off + rec.plain_len as usize))
+            .filter(|s| blake3::hash(s).as_bytes() == &rec.hash)
+            .ok_or_else(|| Error::new("ChunkMismatch", format!("chunk {i} mismatch")))?;
+        Ok(bytes.to_vec())
+    }
+
+    /// A `jpeg-reconstruct` step of block `b` (section 8, checks 1 to 8).
+    fn jpeg_step(
+        &self,
+        b: usize,
+        id: u64,
+        stream: &[u8],
+        bound: u64,
+        last: bool,
+    ) -> Result<Vec<u8>> {
+        // (1) and (2).
+        let r = self.record(id)?;
+        let Body::Jpeg(j) = r.body else {
+            return Err(bad_record(id, "kind"));
+        };
+        // (3).
+        if j.lepton_version != 0 {
+            return Err(bad_record(id, "lepton_version"));
+        }
+        // (4).
+        if j.primary_len > bound {
+            return Err(block::too_large(last, "jpeg-reconstruct"));
+        }
+        // (5).
+        let frame = crate::jpeg::stream_frame(id, stream, j.primary_len)?;
+        let env = self.index.envelope;
+        crate::jpeg::check_memory(
+            frame.memory_term(),
+            env.decode_memory,
+            self.opts.resources.memory,
+            env.max_block_plain,
+        )?;
+        // (6).
+        let primary = crate::jpeg::decode(id, stream, j.primary_len)?;
+        // (7) and (8).
+        self.assemble_check(b, id, &j, &primary)?;
+        Ok(primary)
+    }
+
+    /// Check 7 (assembly in file order) and check 8 (`original_len`, `original_hash`).
+    fn assemble_check(&self, b: usize, id: u64, j: &JpegRecord, primary: &[u8]) -> Result<()> {
+        let mut h = blake3::Hasher::new();
+        h.update(primary);
+        let mut len = primary.len() as u64;
+        if j.trailing.is_empty() {
+            let mut cache = None;
+            // The nested trailing data, fetched chunk by chunk as it is needed.
+            let mut nested = j.nested_trailing_chunks.iter();
+            let mut pending: Vec<u8> = Vec::new();
+            for g in &j.gainmaps {
+                if g.offset < len {
+                    return Err(bad_record(id, "gainmaps"));
+                }
+                while len + (pending.len() as u64) < g.offset {
+                    let Some(&c) = nested.next() else {
+                        return Err(bad_record(id, "trailing"));
+                    };
+                    pending.extend(self.record_chunk(id, b, c, &mut cache)?);
+                }
+                let need = (g.offset - len) as usize;
+                h.update(&pending[..need]);
+                pending.drain(..need);
+                len = g.offset;
+                // Bytes of nested trailing data fetched past the offset follow the image.
+                let mut glen = 0u64;
+                for &c in &g.chunks {
+                    let bytes = self.record_chunk(id, b, c, &mut cache)?;
+                    glen += bytes.len() as u64;
+                    h.update(&bytes);
+                }
+                if glen != g.len {
+                    return Err(bad_record(id, "gainmaps"));
+                }
+                len += glen;
+            }
+            h.update(&pending);
+            len += pending.len() as u64;
+            for &c in nested {
+                let bytes = self.record_chunk(id, b, c, &mut cache)?;
+                len = len.saturating_add(bytes.len() as u64);
+                h.update(&bytes);
+            }
+        } else {
+            h.update(&j.trailing);
+            len += j.trailing.len() as u64;
+        }
+        if len != j.original_len || h.finalize().as_bytes() != &j.original_hash {
+            return Err(bad_record(id, "original_hash"));
+        }
+        Ok(())
+    }
+
+    /// The record checks of whole-archive verification (section 12): every record walked, the
+    /// chunk indices and sums, the record ids of every block graph and the block order.
+    fn verify_records(&self) -> Result<()> {
+        if self.index.records.is_none() {
+            return Ok(());
+        }
+        let records = self.records()?;
+        let n = self.index.chunks.len() as u64;
+        for (id, r) in records.iter().enumerate() {
+            for (list, want) in r.chunk_lists() {
+                let mut sum = 0u64;
+                for &c in list {
+                    if c >= n {
+                        return Err(Error::new(
+                            "ChunkIndexOutOfRange",
+                            format!("chunk index {c} out of range ({n})"),
+                        ));
+                    }
+                    sum = sum.saturating_add(self.index.chunks[c as usize].plain_len);
+                }
+                if sum != want {
+                    return Err(bad_record(id as u64, "chunk lengths"));
+                }
+            }
+        }
+        // The first block whose graph names each record.
+        let mut first = vec![usize::MAX; records.len()];
+        for b in 0..self.index.blocks.len() {
+            let (_, ids) = self.block_graph(b)?;
+            for id in ids {
+                if let Some(f) = first.get_mut(id as usize) {
+                    *f = (*f).min(b);
+                }
+            }
+        }
+        for (id, r) in records.iter().enumerate() {
+            for (list, _) in r.chunk_lists() {
+                if list
+                    .iter()
+                    .any(|&c| self.index.chunk_block[c as usize] >= first[id])
+                {
+                    return Err(bad_record(id as u64, "chunk order"));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Decodes block `b` to its plain bytes, in the order of checks of section 8.
@@ -444,8 +670,12 @@ impl Archive {
             priors: &self.opts.priors,
             max_window: self.opts.resources.max_window,
             max_block_plain: env.max_block_plain,
+            jpeg: !self.opts.revision_1_0,
         };
-        block::decode(&h, &ctx)
+        let mut recon = |id: u64, input: &[u8], bound: u64, last: bool| {
+            self.jpeg_step(b, id, input, bound, last)
+        };
+        block::decode(&h, &ctx, &mut recon)
     }
 
     /// The bytes of chunk `i`, checked against the chunk table. A block whose frame fails keeps
@@ -521,7 +751,7 @@ impl Archive {
     /// chunk list; recovery is left to `check`. The trailer chain is walked too (an addition of
     /// this decoder; the spec does not list it among `verify`'s checks).
     pub fn verify(&mut self) -> Result<VerifySummary> {
-        self.record_count()?;
+        self.verify_records()?;
         let entries = self.entries()?;
         for b in 0..self.index.blocks.len() {
             let plain = self.block_plain(b)?;
@@ -548,42 +778,4 @@ impl Archive {
             blocks: self.index.blocks.len(),
         })
     }
-}
-
-/// Parses a `Records` payload (section 12): structure and every `body_hash`; returns the count.
-/// Body fields are not interpreted (no reconstruction primitive runs in this decoder).
-pub fn parse_records(payload: &[u8]) -> Result<usize> {
-    let mut c = crate::wire::Cursor::new(payload, "records");
-    let n = c.count(5)?;
-    for id in 0..n {
-        let k = c.u16()?;
-        if !(7..=12).contains(&k) {
-            return Err(Error::new(
-                "UnknownRecordKind",
-                format!("record {id} has unknown kind {k}"),
-            ));
-        }
-        if c.u16()? != 0 {
-            return Err(Error::new(
-                "ReservedRecordBits",
-                format!("record {id} flags"),
-            ));
-        }
-        let len = c.varint()?;
-        if len > c.remaining() as u64 {
-            return Err(Error::truncated("records"));
-        }
-        let body = c.bytes(len as usize)?;
-        let h: [u8; 32] = c.array()?;
-        if blake3::hash(body).as_bytes() != &h {
-            return Err(Error::new(
-                "RecordHashMismatch",
-                format!("record {id} body hash mismatch"),
-            ));
-        }
-    }
-    if c.remaining() != 0 {
-        return Err(Error::trailing("records"));
-    }
-    Ok(n as usize)
 }

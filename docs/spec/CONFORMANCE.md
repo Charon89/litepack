@@ -119,7 +119,9 @@ meets one it does not run reports `UnimplementedPrimitive` and does not guess.
   tool's `verify` exit code and stderr `verify_exit_1_0` and `verify_stderr_1_0`. The vector does not exercise
   whether a failed extraction leaves a partial file (that is the extraction policy of spec section 9); no key
   checks it.
-- A revision 1.1 decoder reads `expected-1.1.toml` instead. It MUST extract `photo.jpg` to the bytes whose path,
+- A revision 1.1 decoder reads `expected-1.1.toml` for what differs from a revision 1.0 reader, the keys `files`
+  and `verify`, which is all that file holds; the keys `list` and `info` of `expected.toml` apply to it as well
+  (they are facts of the archive, the same for every revision). It MUST extract `photo.jpg` to the bytes whose path,
   size and BLAKE3-256 are the key `files` (in entry-table order) and `verify` the vector (key `verify`, the stdout
   of the reference full reader's `verify`, exit code 0); the primary image is the Lepton stream's decoding, and the
   record's `original_hash` is checked over the assembled file (spec section 8). `expected-1.1.toml` is checked by

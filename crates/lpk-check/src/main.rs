@@ -23,6 +23,9 @@ struct Cli {
     /// A prior (repeatable); matched by its BLAKE3.
     #[arg(long, global = true)]
     prior: Vec<PathBuf>,
+    /// Behave as a revision 1.0 reader (`jpeg-reconstruct` is not run).
+    #[arg(long, global = true)]
+    revision_1_0: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -37,6 +40,8 @@ enum Cmd {
     Extract { archive: PathBuf, dir: PathBuf },
     /// Recovery report.
     Check { archive: PathBuf },
+    /// Header, trailer, index and envelope facts.
+    Info { archive: PathBuf },
     /// Write a repaired copy to a new file.
     Repair { archive: PathBuf, out: PathBuf },
     /// Write a copy truncated to a generation.
@@ -52,7 +57,10 @@ fn read(p: &Path) -> Result<Vec<u8>, Error> {
 }
 
 fn options(cli: &Cli) -> Result<Options, Error> {
-    let mut o = Options::default();
+    let mut o = Options {
+        revision_1_0: cli.revision_1_0,
+        ..Options::default()
+    };
     if let Some(p) = &cli.password {
         o.password = Some(p.as_bytes().to_vec());
     }
@@ -84,6 +92,54 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     f.write_all(bytes)
         .and_then(|()| f.sync_all())
         .map_err(|e| Error::io("write output", &e))
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The `info` lines of the reference format (CONFORMANCE "Output formats").
+fn info(data: Vec<u8>, opts: &Options) -> Result<String, Error> {
+    use std::fmt::Write;
+    let len = data.len();
+    let chain = journal::history(&data).map(|c| c.len());
+    let a = Archive::open(data, opts.clone())?;
+    let entries = a.entries()?.len();
+    let (h, ix, env) = (&a.header, &a.index, a.index.envelope);
+    let mut s = String::new();
+    let mut line = |t: String| {
+        let _ = writeln!(s, "{t}");
+    };
+    line(format!("format: 1.{}", h.version_minor));
+    line(format!("header flags: {:#x}", h.flags));
+    line(format!("archive id: {}", hex(&h.archive_id)));
+    line(format!("generation: {}", a.trailer.generation));
+    line(match chain {
+        Ok(n) => format!("chain length: {n}"),
+        Err(e) => format!("chain: error: {e}"),
+    });
+    line(format!("length: {len} bytes"));
+    line(format!("entries: {entries}"));
+    line(format!("chunks: {}", ix.chunks.len()));
+    line(format!("blocks: {}", ix.blocks.len()));
+    line(format!("records: {}", ix.records.is_some()));
+    line(format!("recovery frames: {}", ix.recovery.len()));
+    line(format!("priors: {}", ix.priors.len()));
+    for p in &ix.priors {
+        line(format!("prior: {}", hex(p)));
+    }
+    line(format!("merkle root: {}", hex(&ix.merkle_root)));
+    for (k, v) in [
+        ("max_window", env.max_window),
+        ("max_bwt_block", env.max_bwt_block),
+        ("max_block_plain", env.max_block_plain),
+        ("max_frame_payload", env.max_frame_payload),
+        ("decode_memory", env.decode_memory),
+        ("threads_hint", env.threads_hint),
+    ] {
+        line(format!("envelope {k}: {v}"));
+    }
+    Ok(s)
 }
 
 fn run(cli: &Cli) -> Result<u8, Error> {
@@ -131,6 +187,10 @@ fn run(cli: &Cli) -> Result<u8, Error> {
                 Some(e) => Err(e),
                 None => Ok(0),
             }
+        }
+        Cmd::Info { archive } => {
+            print!("{}", info(read(archive)?, &opts)?);
+            Ok(0)
         }
         Cmd::Check { archive } | Cmd::Repair { archive, .. } => {
             let data = read(archive)?;

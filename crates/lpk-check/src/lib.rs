@@ -13,8 +13,10 @@ pub mod error;
 pub mod extract;
 pub mod index;
 pub mod journal;
+pub mod jpeg;
 pub mod keyless;
 pub mod merkle;
+pub mod record;
 pub mod recovery;
 pub mod wire;
 

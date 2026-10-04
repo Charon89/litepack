@@ -25,6 +25,8 @@ argon2 = "0.6"
 hkdf = "0.13"
 sha2 = "0.11"
 reed-solomon-simd = "3.1"
+lepton_jpeg = "=0.5.8"
+flate2 = "1.1.10"
 clap = { version = "4.6", features = ["derive"] }
 
 [dev-dependencies]
