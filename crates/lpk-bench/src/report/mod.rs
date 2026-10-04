@@ -40,9 +40,10 @@ pub const DEFAULT_MIXES: &str = "bench/report-mixes.toml";
 
 #[derive(Debug, Args)]
 pub struct ReportArgs {
-    /// A baseline results directory written by `lpk-bench run` (`<date>-<host>[-<n>]`)
-    #[arg(long, value_name = "DIR")]
-    pub results: PathBuf,
+    /// A baseline results directory written by `lpk-bench run` (`<date>-<host>[-<n>]`); repeatable: rows of several
+    /// directories of the same corpus on the same host are pooled
+    #[arg(long, value_name = "DIR", required = true)]
+    pub results: Vec<PathBuf>,
     /// A directory with probe files written by `lpk-bench probe` (repeatable; optional: a missing
     /// probe leaves its sections and estimates marked not available)
     #[arg(long, value_name = "DIR")]
@@ -220,6 +221,7 @@ fn load_baseline(dir: &Path, sources: &mut Sources, outside: &mut Vec<String>) -
         run,
         run_src,
         results,
+        pooled: vec![],
     })
 }
 
@@ -309,33 +311,130 @@ fn load_probes_dir(
     Ok(())
 }
 
+/// Load one results directory and apply the cleanliness rules of a baseline (settle pause,
+/// location, a clean build) unless `allow_unclean`.
+fn load_baseline_checked(
+    dir: &Path,
+    allow_unclean: bool,
+    sources: &mut Sources,
+    outside: &mut Vec<String>,
+) -> Result<Baseline> {
+    let before = outside.len();
+    let b = load_baseline(dir, sources, outside)?;
+    if !allow_unclean && b.run.settle_ms_per_1000_files == 0 {
+        bail!(
+            "{}: run.json has no settle pause (settle_ms_per_1000_files is 0 or absent; D-21 rules \
+             such baselines out for the report); use --allow-unclean to accept and mark it",
+            dir.display()
+        );
+    }
+    if !allow_unclean && outside.len() > before {
+        bail!(
+            "{}: not under bench/results; use --allow-unclean to accept and mark it",
+            dir.display()
+        );
+    }
+    if !allow_unclean && (b.host.dirty_build_allowed || !build_is_clean(&b.host.git_commit)) {
+        bail!(
+            "{}: the baseline was run from build `{}` (dirty or unknown); use --allow-unclean to \
+             accept and mark it",
+            dir.display(),
+            b.host.git_commit
+        );
+    }
+    Ok(b)
+}
+
+/// Pool `next` into `base`: same corpus manifest and host required; rows keep their own source
+/// ids; `tools.json` entries are merged (a tool in both must agree on `dedup`).
+fn pool(base: &mut Baseline, next: Baseline, dir: &Path) -> Result<()> {
+    let name = dir.display();
+    let (Some((first, _)), Some((other, _))) = (base.results.first(), next.results.first()) else {
+        bail!("{name}: no results to pool");
+    };
+    if other.corpus.manifest_blake3 != first.corpus.manifest_blake3 {
+        bail!(
+            "{name}: corpus manifest BLAKE3 {} differs from the first directory's {}; pooled \
+             directories must measure the same corpus",
+            other.corpus.manifest_blake3,
+            first.corpus.manifest_blake3
+        );
+    }
+    if next.host.host != base.host.host {
+        bail!(
+            "{name}: taken on host `{}`, the first directory on `{}`; a report needs one machine",
+            next.host.host,
+            base.host.host
+        );
+    }
+    for t in next.tools.tools {
+        match base.tools.tools.iter_mut().find(|b| b.id == t.id) {
+            Some(b) => {
+                if b.dedup != t.dedup {
+                    bail!(
+                        "{name}: tool `{}` has dedup {:?} here and {:?} in another directory",
+                        t.id,
+                        t.dedup,
+                        b.dedup
+                    );
+                }
+                if b.status != "found" && t.status == "found" {
+                    *b = t;
+                }
+            }
+            None => base.tools.tools.push(t),
+        }
+    }
+    for c in next.run.combinations {
+        if base
+            .run
+            .combinations
+            .iter()
+            .any(|b| (&b.tool, &b.setting, &b.class) == (&c.tool, &c.setting, &c.class))
+        {
+            bail!(
+                "{name}: combination {}/{}/{} is also in an earlier directory",
+                c.tool,
+                c.setting,
+                c.class
+            );
+        }
+        base.run.combinations.push(c);
+    }
+    for class in next.run.classes {
+        if !base.run.classes.contains(&class) {
+            base.run.classes.push(class);
+        }
+    }
+    base.run.settle_ms_per_1000_files = base
+        .run
+        .settle_ms_per_1000_files
+        .min(next.run.settle_ms_per_1000_files);
+    base.run.antivirus_changed |= next.run.antivirus_changed;
+    base.host.dirty_build_allowed |= next.host.dirty_build_allowed;
+    base.pooled
+        .push((dir_label(dir).0, next.host.git_commit.clone()));
+    base.results.extend(next.results);
+    Ok(())
+}
+
 /// Read and validate every input.
 pub fn load(args: &ReportArgs) -> Result<Inputs> {
     let mut sources = Sources::default();
     let mut outside = Vec::new();
-    let baseline = load_baseline(&args.results, &mut sources, &mut outside)?;
-    if !args.allow_unclean && baseline.run.settle_ms_per_1000_files == 0 {
-        bail!(
-            "{}: run.json has no settle pause (settle_ms_per_1000_files is 0 or absent; D-21 rules \
-             such baselines out for the report); use --allow-unclean to accept and mark it",
-            args.results.display()
-        );
-    }
-    if !args.allow_unclean && !outside.is_empty() {
-        bail!(
-            "{}: not under bench/results; use --allow-unclean to accept and mark it",
-            args.results.display()
-        );
-    }
-    if !args.allow_unclean
-        && (baseline.host.dirty_build_allowed || !build_is_clean(&baseline.host.git_commit))
-    {
-        bail!(
-            "{}: the baseline was run from build `{}` (dirty or unknown); use --allow-unclean to \
-             accept and mark it",
-            args.results.display(),
-            baseline.host.git_commit
-        );
+    let Some((first_dir, more)) = args.results.split_first() else {
+        bail!("no --results directory given");
+    };
+    let mut baseline =
+        load_baseline_checked(first_dir, args.allow_unclean, &mut sources, &mut outside)?;
+    if !more.is_empty() {
+        baseline
+            .pooled
+            .push((dir_label(first_dir).0, baseline.host.git_commit.clone()));
+        for dir in more {
+            let next = load_baseline_checked(dir, args.allow_unclean, &mut sources, &mut outside)?;
+            pool(&mut baseline, next, dir)?;
+        }
     }
     let mut probes = Probes::default();
     let mut seen = BTreeMap::new();

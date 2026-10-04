@@ -91,6 +91,8 @@ pub struct Baseline {
     pub run: RunFile,
     pub run_src: SourceId,
     pub results: Vec<(ToolResult, SourceId)>,
+    /// Every pooled results directory: (label, build). Empty for a single directory.
+    pub pooled: Vec<(String, String)>,
 }
 
 #[derive(Debug)]

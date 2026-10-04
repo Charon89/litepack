@@ -156,6 +156,16 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
             brackets(&BTreeSet::from([*src]))
         ));
     }
+    if b.pooled.len() > 1 {
+        s.push_str("- results directories (rows pooled):\n");
+        for (label, build) in &b.pooled {
+            s.push_str(&format!("  - `{label}`, build `{build}`\n"));
+        }
+        s.push_str(
+            "- rules: rows may come from several runs of the same corpus on the same machine, and \
+             the comparison is still per class.\n",
+        );
+    }
     let h = &b.host;
     s.push_str(&format!(
         "- host `{}`: {}, {} logical cores, {} bytes RAM, {} {} {}\n",

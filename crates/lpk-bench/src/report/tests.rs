@@ -535,6 +535,7 @@ fn inputs(k: &Knobs, with_probes: bool) -> Inputs {
             run,
             run_src: 3,
             results: res,
+            pooled: vec![],
         },
         probes,
         mixes: mixes::Mixes::parse(MIXES).expect("mixes"),
@@ -1330,7 +1331,7 @@ fn a_valid_directory_loads_and_the_command_writes_the_report() {
     .expect("mixes");
     let out = tmp.path().join("out").join("r.md");
     let args = ReportArgs {
-        results: dir.clone(),
+        results: vec![dir.clone()],
         probes: vec![],
         mixes,
         out: Some(out.clone()),
@@ -1364,7 +1365,7 @@ fn a_directory_that_does_not_validate_is_refused() {
     let dir = write_baseline(tmp.path(), &real_class_results());
     let mixes = mixes_file(tmp.path());
     let args = |d: &Path| ReportArgs {
-        results: d.to_path_buf(),
+        results: vec![d.to_path_buf()],
         probes: vec![],
         mixes: mixes.clone(),
         out: Some(tmp.path().join("r.md")),
@@ -1456,7 +1457,7 @@ fn probe_files_load_through_the_validator_and_must_match_host_and_corpus() {
     )
     .expect("mixes");
     let args = |results: std::path::PathBuf, allow: bool| ReportArgs {
-        results,
+        results: vec![results],
         probes: vec![probe_dir.clone()],
         mixes: mixes.clone(),
         out: None,
@@ -1531,7 +1532,7 @@ fn settle_zero_and_directories_outside_bench_results_are_refused_unless_allowed(
     )
     .expect("mixes");
     let args = |allow: bool| ReportArgs {
-        results: dir.clone(),
+        results: vec![dir.clone()],
         probes: vec![],
         mixes: mixes.clone(),
         out: None,
@@ -1628,7 +1629,7 @@ fn a_mixes_file_outside_the_repository_marks_the_report_and_the_console_line() {
     )
     .expect("mixes");
     let args = ReportArgs {
-        results: dir,
+        results: vec![dir],
         probes: vec![],
         mixes,
         out: None,
@@ -1907,4 +1908,104 @@ fn the_known_classes_come_from_the_corpus_registry() {
     ] {
         assert!(known.contains(c), "{c}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Several results directories
+
+/// A second directory of the same corpus: one more setting of the sample tool.
+fn second_results() -> Vec<ToolResult> {
+    let mut r = samples::measured();
+    r.class = "audio".into();
+    r.setting.id = "ultra".into();
+    vec![r]
+}
+
+fn pooled_args(tmp: &Path, dirs: Vec<std::path::PathBuf>) -> ReportArgs {
+    let mixes = tmp.join("m.toml");
+    std::fs::write(
+        &mixes,
+        "[[mix]]\nname = \"only\"\nweights = { audio = 100 }\n",
+    )
+    .expect("mixes");
+    ReportArgs {
+        results: dirs,
+        probes: vec![],
+        mixes,
+        out: None,
+        allow_unclean: true,
+    }
+}
+
+/// A results directory named like the others, under its own parent `name`.
+fn dir_under(tmp: &Path, name: &str, results: &[ToolResult]) -> std::path::PathBuf {
+    let root = tmp.join(name);
+    std::fs::create_dir_all(&root).expect("root");
+    write_baseline(&root, results)
+}
+
+#[test]
+fn two_directories_are_pooled_with_each_rows_own_source() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let b = dir_under(tmp.path(), "b", &second_results());
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
+    let base = &inputs.baseline;
+    assert_eq!(base.results.len(), 4);
+    assert_eq!(base.pooled.len(), 2);
+    assert_eq!(rows(base).len(), 4);
+    let source_of = |name: &str| -> usize {
+        base.results
+            .iter()
+            .find(|(r, _)| r.file_name() == name)
+            .map(|(_, s)| *s)
+            .expect("row")
+    };
+    let first = source_of("7z-mx5-audio.json");
+    let second = source_of("7z-ultra-audio.json");
+    assert_ne!(first, second);
+    assert!(
+        inputs.sources[first - 1].starts_with("a/"),
+        "{:?}",
+        inputs.sources
+    );
+    assert!(
+        inputs.sources[second - 1].starts_with("b/"),
+        "{:?}",
+        inputs.sources
+    );
+    let text = report_text(&inputs);
+    assert!(text.contains("results directories (rows pooled)"));
+    assert!(text.contains("the comparison is still per class"));
+    assert!(
+        text.contains(&format!("[{second}]")),
+        "the pooled row cites its own file"
+    );
+}
+
+#[test]
+fn a_manifest_mismatch_is_refused() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let mut r = second_results();
+    r[0].corpus.manifest_blake3 = "0".repeat(64);
+    let c = dir_under(tmp.path(), "c", &r);
+    let err = load(&pooled_args(tmp.path(), vec![a, c])).expect_err("mismatch");
+    assert!(format!("{err:#}").contains("manifest"), "{err:#}");
+}
+
+#[test]
+fn a_dedup_conflict_in_the_merged_tools_is_refused() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let c = dir_under(tmp.path(), "c", &second_results());
+    let mut tools = samples::tools();
+    for t in &mut tools.tools {
+        if t.id == "7z" {
+            t.dedup = Some(true);
+        }
+    }
+    std::fs::write(c.join("tools.json"), render_json(&tools)).expect("tools");
+    let err = load(&pooled_args(tmp.path(), vec![a, c])).expect_err("dedup");
+    assert!(format!("{err:#}").contains("dedup"), "{err:#}");
 }
