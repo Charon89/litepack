@@ -346,7 +346,12 @@ pub struct ChunkPlace {
 ///
 /// Memory: 16 bytes per chunk (the record's byte offset and the cumulative
 /// plain offset within its block), 8 bytes per block, plus one copy of the
-/// chunk table's encoded bytes (the records are decoded on demand).
+/// chunk table's encoded bytes, which is at least 33 bytes per chunk (the
+/// records are decoded on demand). An opened archive also keeps the table's
+/// bytes in `Index::chunk_table`, a second copy of the same size. While an
+/// index is parsed, the Merkle leaves add a temporary 32 bytes per chunk.
+/// In all, an opened archive holds at least 82 bytes per chunk, and at most
+/// 114 bytes per chunk while it is being opened.
 #[derive(Debug, Clone)]
 pub struct ChunkIndex {
     payload: Vec<u8>,
@@ -359,11 +364,21 @@ impl ChunkIndex {
     /// One pass over the table `payload`, checking it against `blocks`
     /// (coverage and each block's `plain_len`).
     pub(crate) fn build(payload: Vec<u8>, blocks: &[BlockLocation]) -> Result<Self, FormatError> {
-        let (record_off, plain_off) = {
+        Self::build_with_leaves(payload, blocks).map(|(ci, _)| ci)
+    }
+
+    /// Like `build`, and also return every record's hash in order (the
+    /// leaves of the Merkle tree), collected in the same pass.
+    pub(crate) fn build_with_leaves(
+        payload: Vec<u8>,
+        blocks: &[BlockLocation],
+    ) -> Result<(Self, Vec<[u8; 32]>), FormatError> {
+        let (record_off, plain_off, leaves) = {
             let table = ChunkTable::parse(&payload)?;
             let n = table.len() as usize;
             let mut record_off = Vec::with_capacity(n);
             let mut plain_off = Vec::with_capacity(n);
+            let mut leaves = Vec::with_capacity(n);
             let mut walk = BlockWalk::new(blocks);
             let mut it = table.iter();
             for i in 0..table.len() {
@@ -372,19 +387,21 @@ impl ChunkIndex {
                 let (_, within) = walk.advance(i, rec.plain_len)?;
                 record_off.push(at as u64);
                 plain_off.push(within);
+                leaves.push(rec.hash);
             }
             if !it.rest.is_empty() {
                 return Err(FormatError::TrailingBytes { what: WHAT });
             }
             walk.finish()?;
-            (record_off, plain_off)
+            (record_off, plain_off, leaves)
         };
-        Ok(ChunkIndex {
+        let ci = ChunkIndex {
             payload,
             record_off,
             plain_off,
             block_first: blocks.iter().map(|b| b.first_chunk).collect(),
-        })
+        };
+        Ok((ci, leaves))
     }
 
     /// Number of chunks.

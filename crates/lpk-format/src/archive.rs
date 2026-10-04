@@ -57,30 +57,40 @@ fn read_frame_at_impl<R: Read + Seek>(
     at: FrameLocation,
     expected: FrameKind,
 ) -> Result<Frame, FormatError> {
+    let what = frame_what(expected);
+    let bad = FormatError::BadFrameLocation { what };
     reader.seek(SeekFrom::Start(at.offset))?;
-    let mut buffered = BufReader::new(&mut *reader);
-    match Frame::read(&mut buffered, limits)? {
-        None => Err(FormatError::Truncated {
-            what: "frame header",
-        }),
-        Some(ReadFrame::Unknown { kind, .. }) => Err(FormatError::WrongFrameKind {
+    // Nothing past the recorded length is read, whatever the frame claims.
+    let mut limited = BufReader::new(&mut *reader).take(at.len);
+    let mut kind = [0u8; 2];
+    match limited.read_exact(&mut kind) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(bad),
+        Err(e) => return Err(e.into()),
+    }
+    let found = u16::from_le_bytes(kind);
+    if found != expected as u16 {
+        return Err(FormatError::WrongFrameKind {
             expected: expected as u16,
-            found: kind,
-        }),
-        Some(ReadFrame::Known(f)) => {
-            if f.kind != expected {
-                return Err(FormatError::WrongFrameKind {
-                    expected: expected as u16,
-                    found: f.kind as u16,
-                });
-            }
-            if f.encoded_len() != at.len {
-                return Err(FormatError::BadFrameLocation {
-                    what: "frame length",
-                });
-            }
-            Ok(f)
-        }
+            found,
+        });
+    }
+    let mut rest = (&kind[..]).chain(&mut limited);
+    match Frame::read(&mut rest, limits) {
+        Ok(Some(ReadFrame::Known(f))) if f.encoded_len() == at.len => Ok(f),
+        Ok(_) => Err(bad),
+        Err(FormatError::Truncated { .. }) => Err(bad),
+        Err(e) => Err(e),
+    }
+}
+
+/// The name a frame of this kind goes by in `BadFrameLocation`.
+fn frame_what(kind: FrameKind) -> &'static str {
+    match kind {
+        FrameKind::Index => "index",
+        FrameKind::EntryTable => "entry table",
+        FrameKind::Records => "records",
+        other => other.name(),
     }
 }
 
@@ -120,8 +130,7 @@ impl<R: Read + Seek> Archive<R> {
         if blake3::hash(&frame.payload).as_bytes() != &trailer.index_hash {
             return Err(FormatError::IndexHashMismatch);
         }
-        let index = Index::parse(&frame.payload, trailer.index_offset)?;
-        let chunks = index.chunk_index()?;
+        let (index, chunks) = Index::parse_with_chunks(&frame.payload, trailer.index_offset)?;
         Ok(Archive {
             reader,
             limits,
@@ -517,8 +526,29 @@ mod tests {
         let bytes = with_trailer(&b, |t| t.index_offset = b.chunk1_off);
         assert!(matches!(
             open(bytes),
-            Err(FormatError::WrongFrameKind { .. } | FormatError::BadFrameLocation { .. })
+            Err(FormatError::WrongFrameKind {
+                expected: 5,
+                found: 2
+            })
         ));
+        for (offset, len) in [
+            (u64::MAX, b.trailer.index_len),
+            (b.trailer.index_offset, u64::MAX),
+            (u64::MAX - 10, 20),
+            (b.trailer_off, b.trailer.index_len),
+        ] {
+            let bytes = with_trailer(&b, |t| {
+                t.index_offset = offset;
+                t.index_len = len;
+            });
+            assert!(
+                matches!(
+                    open(bytes),
+                    Err(FormatError::BadFrameLocation { what: "index" })
+                ),
+                "{offset} {len}"
+            );
+        }
         // A flipped byte inside the index frame is a frame hash failure.
         let mut bytes = b.bytes.clone();
         bytes[b.index_off as usize + 8] ^= 1;
@@ -526,6 +556,53 @@ mod tests {
             open(bytes),
             Err(FormatError::HashMismatch { kind: 5 })
         ));
+    }
+
+    #[test]
+    fn a_damaged_length_field_is_not_a_truncation() {
+        let b = build();
+        for bit in [0u8, 1, 3] {
+            let mut bytes = b.bytes.clone();
+            bytes[b.index_off as usize + 4] ^= 1 << bit;
+            let e = open(bytes).unwrap_err();
+            assert!(
+                !matches!(e, FormatError::Truncated { .. }),
+                "bit {bit}: {e:?}"
+            );
+        }
+        // A frame that claims more than its recorded length is a bad location.
+        let mut bytes = b.bytes.clone();
+        bytes[b.entry_off as usize + 4] = 100;
+        let mut a = open(bytes).unwrap();
+        assert!(matches!(
+            a.entries(),
+            Err(FormatError::BadFrameLocation {
+                what: "entry table"
+            })
+        ));
+    }
+
+    #[test]
+    fn a_trailer_of_the_wrong_shape_is_no_trailer() {
+        let b = build();
+        let mut bytes = b.bytes[..b.trailer_off as usize].to_vec();
+        Frame {
+            kind: FrameKind::Trailer,
+            flags: FrameFlags::MUST_UNDERSTAND,
+            payload: vec![0; 72],
+        }
+        .write(&mut bytes)
+        .unwrap();
+        assert!(matches!(open(bytes), Err(FormatError::NoTrailer)));
+        let mut bytes = b.bytes[..b.trailer_off as usize].to_vec();
+        Frame {
+            kind: FrameKind::Trailer,
+            flags: FrameFlags::EMPTY,
+            payload: vec![0; 70],
+        }
+        .write(&mut bytes)
+        .unwrap();
+        assert!(matches!(open(bytes), Err(FormatError::NoTrailer)));
     }
 
     #[test]

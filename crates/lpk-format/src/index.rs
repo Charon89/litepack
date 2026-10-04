@@ -151,6 +151,7 @@ fn validate_blocks(
     index_offset: u64,
 ) -> Result<(), FormatError> {
     let mut next = 0u64;
+    let mut prev_end = 0u64;
     for (i, b) in blocks.iter().enumerate() {
         let loc = FrameLocation {
             offset: b.frame_offset,
@@ -159,6 +160,11 @@ fn validate_blocks(
         if !loc.fits_below(index_offset) {
             return Err(FormatError::BlockOutOfRange { block: i });
         }
+        // Frames ascend and do not overlap; an empty block is the only block.
+        if b.frame_offset < prev_end || (table_len == 0 && i > 0) {
+            return Err(FormatError::BlockCoverage { block: i });
+        }
+        prev_end = b.frame_offset + b.frame_len;
         if b.first_chunk != next || (b.chunk_count == 0 && table_len > 0) {
             return Err(FormatError::BlockCoverage { block: i });
         }
@@ -185,6 +191,36 @@ fn check_location(
     } else {
         Err(FormatError::BadFrameLocation { what })
     }
+}
+
+fn overlaps(a: FrameLocation, b: FrameLocation) -> bool {
+    a.offset < b.offset.saturating_add(b.len) && b.offset < a.offset.saturating_add(a.len)
+}
+
+/// The entry-table and records frames overlap no block and each other.
+fn check_disjoint(
+    blocks: &[BlockLocation],
+    entry: FrameLocation,
+    records: Option<FrameLocation>,
+) -> Result<(), FormatError> {
+    for b in blocks {
+        let loc = FrameLocation {
+            offset: b.frame_offset,
+            len: b.frame_len,
+        };
+        if overlaps(loc, entry) {
+            return Err(FormatError::BadFrameLocation {
+                what: "entry table",
+            });
+        }
+        if records.is_some_and(|r| overlaps(loc, r)) {
+            return Err(FormatError::BadFrameLocation { what: "records" });
+        }
+    }
+    if records.is_some_and(|r| overlaps(entry, r)) {
+        return Err(FormatError::BadFrameLocation { what: "records" });
+    }
+    Ok(())
 }
 
 impl Index {
@@ -222,6 +258,17 @@ impl Index {
     /// table, lie between the header and the index, and carry the right
     /// lengths, and the stored Merkle root must match the table.
     pub fn parse(payload: &[u8], index_offset: u64) -> Result<Index, FormatError> {
+        Self::parse_with_chunks(payload, index_offset).map(|(index, _)| index)
+    }
+
+    /// Like [`Index::parse`], and also return the chunk index. After the
+    /// table's end has been found, one pass over the records checks the block
+    /// lengths, collects the hashes for the Merkle root and builds the chunk
+    /// index.
+    pub fn parse_with_chunks(
+        payload: &[u8],
+        index_offset: u64,
+    ) -> Result<(Index, ChunkIndex), FormatError> {
         let (table, used) = ChunkTable::parse_prefix(payload)?;
         let mut s = &payload[used..];
         let (root, rest) = s
@@ -263,28 +310,32 @@ impl Index {
             Some(check_location(rec, index_offset, "records")?)
         };
 
-        let mut leaves = Vec::with_capacity(table.len() as usize);
-        let mut walk = BlockWalk::new(&blocks);
-        for (i, r) in table.iter().enumerate() {
-            let r = r?;
-            walk.advance(i as u64, r.plain_len)?;
-            leaves.push(r.hash);
-        }
-        walk.finish()?;
+        check_disjoint(&blocks, entry_table, records)?;
+
+        let chunk_table = payload[..used].to_vec();
+        let (chunks, leaves) = ChunkIndex::build_with_leaves(chunk_table.clone(), &blocks)?;
         if merkle_root(&leaves) != merkle_root_stored {
             return Err(FormatError::MerkleRootMismatch);
         }
-        Ok(Index {
-            chunk_table: payload[..used].to_vec(),
-            merkle_root: merkle_root_stored,
-            blocks,
-            entry_table,
-            records,
-        })
+        Ok((
+            Index {
+                chunk_table,
+                merkle_root: merkle_root_stored,
+                blocks,
+                entry_table,
+                records,
+            },
+            chunks,
+        ))
     }
 
-    /// Build the random-access chunk index in one pass over the table. The
-    /// result holds its own copy of the table bytes.
+    /// Build the random-access chunk index in one pass over the table.
+    ///
+    /// Memory: see [`ChunkIndex`]; the result holds its own copy of the table
+    /// bytes, so with this `Index` a table costs two copies of its encoded
+    /// form (at least 33 bytes per chunk each) plus the chunk index's 16 bytes
+    /// per chunk. `parse_with_chunks` additionally holds a temporary 32 bytes
+    /// per chunk for the Merkle leaves.
     pub fn chunk_index(&self) -> Result<ChunkIndex, FormatError> {
         let n = ChunkTable::parse(&self.chunk_table)?.len();
         validate_blocks(&self.blocks, n, u64::MAX)?;
@@ -548,6 +599,63 @@ mod tests {
             parse_err(&idx),
             FormatError::BadFrameLocation { what: "records" }
         ));
+    }
+
+    #[test]
+    fn frames_ascend_and_do_not_overlap() {
+        // Block 1 starts inside block 0's frame.
+        let (_, mut idx) = three();
+        idx.blocks[1].frame_offset = idx.blocks[0].frame_offset + 10;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockCoverage { block: 1 }
+        ));
+        // Blocks out of order.
+        let (_, mut idx) = three();
+        idx.blocks.swap(0, 2);
+        idx.blocks[0].first_chunk = 0;
+        idx.blocks[2].first_chunk = 4;
+        let e = parse_err(&idx);
+        assert!(
+            matches!(e, FormatError::BlockCoverage { block: 1 }),
+            "{e:?}"
+        );
+        // The entry table over a block, records over the entry table.
+        let (_, mut idx) = three();
+        idx.entry_table.offset = idx.blocks[1].frame_offset + 5;
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BadFrameLocation {
+                what: "entry table"
+            }
+        ));
+        let (_, mut idx) = three();
+        idx.records = Some(idx.entry_table);
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BadFrameLocation { what: "records" }
+        ));
+        idx.records = Some(idx.entry_table);
+        idx.records = Some(FrameLocation {
+            offset: idx.blocks[2].frame_offset,
+            len: 80,
+        });
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BadFrameLocation { what: "records" }
+        ));
+    }
+
+    #[test]
+    fn at_most_one_empty_block_and_only_without_chunks() {
+        let mut idx = make(&[], &[0, 0]);
+        assert!(matches!(
+            parse_err(&idx),
+            FormatError::BlockCoverage { block: 1 }
+        ));
+        assert!(idx.encode().is_err());
+        idx.blocks.pop();
+        idx.encode().unwrap();
     }
 
     #[test]

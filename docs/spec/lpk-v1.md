@@ -278,7 +278,13 @@ frame must start at or after the end of the header (offset 32), be at least as l
 and end no later than the offset of the index frame itself, otherwise `BlockOutOfRange` with the block
 number; a sum that overflows is out of range. The `EntryTable` frame and the `Records` frame (when
 `records_offset` and `records_len` are not both 0) follow the same location rule; a violation is
-`BadFrameLocation` naming the frame. The stored `merkle_root` must equal the root recomputed from the chunk
+`BadFrameLocation` naming the frame. The smallest frame is 37 bytes (4 for kind and flags, 1 for the shortest
+`payload_len`, 32 for the hash): every recorded location, including the index's, must be at least that long.
+Frame locations do not overlap: the blocks' frames are in strictly ascending `frame_offset` order, each
+starting at or after the end of the previous one (otherwise `BlockCoverage` with the later block's number),
+and the `EntryTable` and `Records` frames overlap no block and each other (otherwise `BadFrameLocation`
+naming that frame). An empty block is the only block of an archive without chunks; a second block of such an
+archive is `BlockCoverage`. The stored `merkle_root` must equal the root recomputed from the chunk
 table's hashes, otherwise `MerkleRootMismatch`. A chunk's place is its block and the sum of the `plain_len`
 of the chunks before it in that block.
 
@@ -300,6 +306,10 @@ end of the header and end no later than the start of the trailer, otherwise `Bad
 
 ### Opening an archive
 
+Every read of a recorded frame is bounded by the recorded length: nothing past `offset + len` is read, and a
+frame that is cut by that bound, or whose own encoded size differs from the recorded length, is
+`BadFrameLocation` naming the frame (`index`, `entry table` or `records`). The kind is checked first.
+
 1. If the input is shorter than the header plus the trailer frame (141 bytes), go to the diagnosis below.
 2. Read the 32-byte header (errors of section 2 apply).
 3. Read the last 109 bytes. They must be a frame of kind 6, empty flags, payload length 72, with a valid hash;
@@ -309,8 +319,9 @@ end of the header and end no later than the start of the trailer, otherwise `Bad
    found kind), its hash must verify (otherwise `HashMismatch`), its encoded length must equal `index_len`
    (otherwise `BadFrameLocation`), and the BLAKE3 of its payload must equal the trailer's `index_hash`
    (otherwise `IndexHashMismatch`).
-5. Parse the index under the rules above, building the chunk index (record offsets and cumulative plain
-   offsets) in one pass over the chunk table.
+5. Parse the index under the rules above. The reader walks the chunk table once to find where it ends, then
+   makes one pass over its records that checks the block lengths, gathers the hashes for the Merkle root and
+   builds the chunk index (record offsets and cumulative plain offsets).
 6. The entry table is read only when asked: the frame at the recorded location must be of kind 1 and have
    the recorded length, and its hash must verify.
 
@@ -322,9 +333,12 @@ ends exactly at a frame boundary, or inside a frame, without a trailer frame hav
 cut short: `Truncated` with `what` set to `trailer`. If a frame fails its hash, the error is that frame's
 `HashMismatch` (or whatever error the frame grammar gives). If a trailer frame is read and bytes follow it,
 the error is `TrailingBytes` with `what` set to `archive`. The walk also reports how many frames verified and
-the offset just after the last good frame, so a repair tool knows where the readable part ends.
+the offset just after the last good frame, so a repair tool knows where the readable part ends. Two edge
+cases: if the walk ends on a trailer frame that is not of the fixed shape (flags not empty, or a payload that is
+not 72 bytes) with nothing after it, the error is `NoTrailer`; and a header that is shorter than 32 bytes or
+invalid ends the walk at once with the header's own error (section 2), not `Truncated` with `what` `trailer`.
 
 Errors of this section: `MerkleRootMismatch`, `IndexHashMismatch`, `ArchiveIdMismatch`,
 `BlockLengthMismatch`, `BlockCoverage`, `BlockOutOfRange`, `BadFrameLocation`, `WrongFrameKind`,
-`NoTrailer` (internal: the tail is not a trailer frame), plus `Truncated` and `TrailingBytes` with the
+`NoTrailer` (the last frame is not a trailer of the fixed shape), plus `Truncated` and `TrailingBytes` with the
 `what` strings `index`, `trailer` and `archive`.
