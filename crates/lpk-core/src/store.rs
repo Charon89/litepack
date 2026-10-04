@@ -63,7 +63,7 @@ pub fn write_inputs(
         inputs.to_vec(),
         out,
         sync,
-        None,
+        crate::pipeline::Prepared::Store,
         std::time::Duration::ZERO,
     )?;
     Ok(s.writer)

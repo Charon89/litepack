@@ -12,6 +12,7 @@ blake3 = "1.8.7"
 flate2 = "1.1.10"
 # Pinned: the jpeg-reconstruct decoder reads the stream header layout of 0.5.8 (spec section 8).
 lepton_jpeg = "=0.5.8"
+liblzma = { version = "0.4.8", features = ["static", "parallel"] }
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
 same-file = "1.0.6"
 thiserror = "2.0.21"
@@ -22,7 +23,6 @@ libc = "0.2.189"
 
 [dev-dependencies]
 blake3 = "1.8.7"
-liblzma = { version = "0.4.8", features = ["static"] }
 lpk-check = { path = "../lpk-check", version = "0.0.1" }
 tempfile = "3.27.0"
 zstd = { version = "0.14.0", default-features = false, features = ["zdict_builder"] }

@@ -272,3 +272,52 @@ fn prior_files_are_layered_over_the_defaults() {
     assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
     assert_eq!(tree_hash(&out_s), tree_hash(src.path()));
 }
+
+#[test]
+fn balanced_round_trips_bit_exact_and_uses_lzma() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    fs::write(src.path().join("big.txt"), prose(9, 400_000)).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("b.lpk");
+    let out = work.path().join("out");
+    let a = run(&[
+        "a",
+        arch.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        "--balanced",
+        "--dict-size",
+        "1048576",
+        "-v",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    assert!(text(&a.stderr).contains("lzma"), "{}", text(&a.stderr));
+    let x = run(&["x", arch.to_str().unwrap(), out.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(src.path()));
+    let t = run(&["t", arch.to_str().unwrap()]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    assert!(text(&t.stdout).starts_with("ok: "));
+}
+
+#[test]
+fn balanced_flags_are_exclusive_and_checked() {
+    let src = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("t.lpk");
+    let (a, s) = (arch.to_str().unwrap(), src.path().to_str().unwrap());
+    for extra in [
+        &["--balanced", "--fast"][..],
+        &["--balanced", "--store"][..],
+        &["--dict-size", "1048576"][..],
+        &["--balanced", "--dict-size", "10"][..],
+        &["--balanced", "--window-log", "40"][..],
+    ] {
+        let mut args = vec!["a", a, s];
+        args.extend_from_slice(extra);
+        assert_eq!(run(&args).status.code(), Some(1), "{extra:?}");
+        assert!(!arch.exists());
+    }
+    let h = run(&["a", "--help"]);
+    assert!(text(&h.stdout).contains("--balanced"));
+}

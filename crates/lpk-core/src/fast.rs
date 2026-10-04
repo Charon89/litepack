@@ -128,7 +128,7 @@ impl FastHandle {
 }
 
 /// Classes stored without trying to compress them.
-fn stored_by_class(class: Class) -> bool {
+pub(crate) fn stored_by_class(class: Class) -> bool {
     matches!(
         class,
         Class::HighEntropy | Class::Video | Class::Compressed | Class::Jpeg | Class::Png

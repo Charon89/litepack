@@ -247,6 +247,10 @@ id = "fast"
 compress = ["--fast"]
 extract = []
 [[tool.setting]]
+id = "balanced"
+compress = ["--balanced"]
+extract = []
+[[tool.setting]]
 id = "store"
 compress = ["--store"]
 extract = []

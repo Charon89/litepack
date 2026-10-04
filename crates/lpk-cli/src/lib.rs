@@ -13,7 +13,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
-use lpk_core::{CoreError, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions};
+use lpk_core::{
+    BalancedOptions, CoreError, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions,
+};
 
 /// Exit code: success.
 pub const EXIT_OK: i32 = 0;
@@ -57,8 +59,12 @@ struct AddArgs {
     /// The directory whose contents are archived.
     input: PathBuf,
     /// The Fast tier (zstd with a long window; the default).
-    #[arg(long, conflicts_with = "store")]
+    #[arg(long, conflicts_with_all = ["store", "balanced"])]
     fast: bool,
+    /// The Balanced tier (LZMA with a large dictionary, or zstd --ultra --long per block by a
+    /// trial on a sample).
+    #[arg(long, conflicts_with = "store")]
+    balanced: bool,
     /// Store every block without compression.
     #[arg(long)]
     store: bool,
@@ -66,12 +72,15 @@ struct AddArgs {
     /// next task.
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
-    /// zstd level of the Fast tier.
+    /// zstd level (of the Fast tier, or of the Balanced tier's zstd candidate; default 22 there).
     #[arg(long, value_name = "L", conflicts_with = "store")]
     level: Option<i32>,
-    /// log2 of the Fast tier's match window, 10 to 31.
+    /// log2 of the zstd match window, 10 to 31.
     #[arg(long, value_name = "W", conflicts_with = "store")]
     window_log: Option<u32>,
+    /// The Balanced tier's LZMA dictionary in bytes (default 64 MiB).
+    #[arg(long, value_name = "BYTES", requires = "balanced")]
+    dict_size: Option<u32>,
     /// Use no dictionaries (what the Fast tier does today: none is bundled).
     #[arg(long)]
     no_dictionaries: bool,
@@ -113,6 +122,18 @@ fn core_exit(e: &CoreError) -> i32 {
 fn add(a: &AddArgs, err: &mut dyn Write) -> i32 {
     let pipeline = if a.store {
         Pipeline::store(StoreOptions::default())
+    } else if a.balanced {
+        let mut o = BalancedOptions::default();
+        if let Some(l) = a.level {
+            o.zstd_level = l;
+        }
+        if let Some(w) = a.window_log {
+            o.zstd_window_log = w;
+        }
+        if let Some(d) = a.dict_size {
+            o.dict_size = d;
+        }
+        Pipeline::balanced(o)
     } else {
         let mut o = FastOptions::default();
         if let Some(l) = a.level {
@@ -156,6 +177,19 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
             err,
             "blocks: {} zstd, {} stored by gate, {} stored by class, {} stored without gain",
             f.zstd_blocks, f.stored_by_gate, f.stored_by_class, f.stored_no_gain
+        );
+    }
+    if let Some(b) = s.balanced {
+        let _ = writeln!(
+            err,
+            "blocks: {} lzma, {} zstd, {} stored by gate, {} stored by class, {} stored without              gain; trial sample bytes {}; liblzma encoder memory {} bytes (the library's figure)",
+            b.lzma_blocks,
+            b.zstd_blocks,
+            b.stored_by_gate,
+            b.stored_by_class,
+            b.stored_no_gain,
+            b.sample_bytes,
+            b.lzma_encoder_memory
         );
     }
     let p = &s.peel;

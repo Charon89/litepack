@@ -19,7 +19,9 @@ use lpk_format::{
     Encoded, EntryKind, Graph, GraphResources, Step, Writer, WriterOptions, WriterSummary,
 };
 
-use crate::cluster::cluster;
+use crate::balanced::{BalancedEncoder, BalancedHandle, BalancedOptions, BalancedSummary};
+use crate::classify::Class;
+use crate::cluster::{cluster, DictionaryKind};
 use crate::error::CoreError;
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::ingest::{validate_input, walk, IngestOptions, Input};
@@ -48,6 +50,9 @@ pub enum ModelStage {
     /// The Fast tier: classes, clusters, zstd with a long window. (Balanced comes later.) The
     /// `ingest` field of the options is not used here; the classify stage's is.
     Fast(FastOptions),
+    /// The Balanced tier: the Fast tier's classes and clusters, LZMA or zstd per block by a trial
+    /// on a sample. The `ingest` field of the options is not used here either.
+    Balanced(BalancedOptions),
 }
 
 /// The seal stage: the writer's settings (chunking, block size, recovery, encryption). The
@@ -83,6 +88,8 @@ pub struct RunSummary {
     pub writer: WriterSummary,
     /// The Fast encoder's counts (`None` for the store model).
     pub fast: Option<FastSummary>,
+    /// The Balanced encoder's counts (`None` unless the Balanced model ran).
+    pub balanced: Option<BalancedSummary>,
     /// What the peel stages did (empty for the store model, which does not peel).
     pub peel: PeelSummary,
     /// Wall time per stage.
@@ -116,7 +123,11 @@ impl std::fmt::Debug for Pipeline {
 }
 
 /// An encoder built (and validated) before any output exists.
-type Prepared = Option<(ZstdEncoder, FastHandle)>;
+pub(crate) enum Prepared {
+    Store,
+    Fast(ZstdEncoder, FastHandle),
+    Balanced(BalancedEncoder, BalancedHandle),
+}
 
 impl Pipeline {
     /// The store pipeline with the writer settings of `options`.
@@ -151,16 +162,34 @@ impl Pipeline {
         }
     }
 
+    /// The Balanced pipeline, with the JPEG peel.
+    pub fn balanced(options: BalancedOptions) -> Self {
+        Pipeline {
+            classify: ClassifyStage {
+                ingest: options.ingest,
+            },
+            peel: vec![Box::new(JpegPeel {
+                max_file: options.jpeg_max_file,
+                ..JpegPeel::default()
+            })],
+            fold: None,
+            model: ModelStage::Balanced(options),
+            seal: SealOptions::default(),
+        }
+    }
+
     /// Validate the options and build the encoder, before any output exists.
     fn prepare(&self) -> Result<Prepared, CoreError> {
         match &self.model {
-            ModelStage::Store => Ok(None),
-            ModelStage::Fast(o) => Ok(Some(ZstdEncoder::new(
-                o.level,
-                o.window_log,
-                &o.dictionaries,
-                o.gate,
-            )?)),
+            ModelStage::Store => Ok(Prepared::Store),
+            ModelStage::Fast(o) => {
+                let (e, h) = ZstdEncoder::new(o.level, o.window_log, &o.dictionaries, o.gate)?;
+                Ok(Prepared::Fast(e, h))
+            }
+            ModelStage::Balanced(o) => {
+                let (e, h) = BalancedEncoder::new(o)?;
+                Ok(Prepared::Balanced(e, h))
+            }
         }
     }
 
@@ -204,7 +233,7 @@ impl Pipeline {
         let mut wopts = seal.writer;
         let source = Source::new();
         match (model, prepared) {
-            (ModelStage::Store, _) => {
+            (ModelStage::Store, _) | (_, Prepared::Store) => {
                 let mut writer = open_writer(out, wopts, sync, 0)?;
                 let t = Instant::now();
                 for input in &inputs {
@@ -224,19 +253,58 @@ impl Pipeline {
                 Ok(RunSummary {
                     writer,
                     fast: None,
+                    balanced: None,
                     peel: PeelSummary::default(),
                     timings,
                 })
             }
-            (ModelStage::Fast(options), Some((encoder, handle))) => {
+            (model, prepared) => {
+                let (encoder, block_size, steer, finish): (
+                    Box<dyn lpk_format::BlockEncoder>,
+                    u64,
+                    Steer,
+                    Finish,
+                ) = match (model, prepared) {
+                    (ModelStage::Fast(o), Prepared::Fast(e, h)) => {
+                        let h2 = h.clone();
+                        (
+                            Box::new(e),
+                            o.block_size,
+                            Box::new(move |c, d| h.set_hint(c, d)),
+                            Box::new(move |peel| {
+                                let mut f = h2.summary();
+                                f.peel = peel;
+                                (Some(f), None)
+                            }),
+                        )
+                    }
+                    (ModelStage::Balanced(o), Prepared::Balanced(e, h)) => {
+                        let h2 = h.clone();
+                        (
+                            Box::new(e),
+                            o.block_size,
+                            Box::new(move |c, d| h.set_hint(c, d)),
+                            Box::new(move |peel| {
+                                let mut b = h2.summary();
+                                b.peel = peel;
+                                (None, Some(b))
+                            }),
+                        )
+                    }
+                    _ => {
+                        return Err(CoreError::InvalidOption(
+                            "the model needs a prepared encoder of its own tier".into(),
+                        ))
+                    }
+                };
                 for input in &inputs {
                     validate_input(input)?;
                 }
                 let t = Instant::now();
                 let clusters = cluster(&inputs)?;
                 timings.classify = t.elapsed();
-                wopts.block_size = options.block_size;
-                wopts.encoder = Box::new(encoder);
+                wopts.block_size = block_size;
+                wopts.encoder = encoder;
                 let max_part = wopts.block_size;
                 // The header's version_minor is the revision this writer writes under (spec
                 // section 2): 1 whenever a peel stage is enabled, whether or not one peels.
@@ -258,7 +326,7 @@ impl Pipeline {
                     }
                 }
                 for c in &clusters {
-                    handle.set_hint(c.class, c.dictionary);
+                    steer(c.class, c.dictionary);
                     let stage = peel.iter().find(|s| s.applies_to(c.class));
                     for input in &c.inputs {
                         let Some(stage) = stage else {
@@ -300,21 +368,23 @@ impl Pipeline {
                 let t = Instant::now();
                 let written = writer.finish()?;
                 timings.seal = t.elapsed();
-                let mut fast = handle.summary();
-                fast.peel = summary;
+                let (fast, balanced) = finish(summary);
                 Ok(RunSummary {
                     writer: written,
-                    fast: Some(fast),
+                    fast,
+                    balanced,
                     peel: summary,
                     timings,
                 })
             }
-            (ModelStage::Fast(_), None) => Err(CoreError::InvalidOption(
-                "the Fast model needs a prepared encoder".into(),
-            )),
         }
     }
 }
+
+/// Tells the encoder the class and dictionary kind of the next cluster.
+type Steer = Box<dyn Fn(Class, DictionaryKind)>;
+/// Reads the encoder's counts once the peel summary is known.
+type Finish = Box<dyn Fn(PeelSummary) -> (Option<FastSummary>, Option<BalancedSummary>)>;
 
 type OutWriter<W> = Writer<BufWriter<W>>;
 

@@ -1,7 +1,8 @@
 //! The LitePack pipeline. It holds ingest (a directory tree to the format's inputs, in the entry
 //! table's order), the store path (those inputs written with the writer's default store graph),
 //! the classifier and the entropy gate, clustering by class, and the Fast tier (zstd with a long
-//! window, optional caller-supplied dictionaries, one block per cluster). Fold, Peel, Model and
+//! window, optional caller-supplied dictionaries, one block per cluster) and the Balanced tier
+//! (LZMA or zstd per block by a trial on a sample). Fold, Peel, Model and
 //! Seal build on these names later.
 //!
 //! Files are read through a plain `File` for every size, so every read failure is a
@@ -10,6 +11,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod balanced;
 pub mod classify;
 pub mod cluster;
 pub mod error;
@@ -22,6 +24,10 @@ pub mod priors;
 pub mod source;
 pub mod store;
 
+pub use balanced::{
+    archive_balanced, archive_balanced_file, BalancedEncoder, BalancedHandle, BalancedOptions,
+    BalancedSummary, LzmaEncoder,
+};
 pub use classify::{classify, Class, Features};
 pub use cluster::{cluster, Cluster, DictionaryKind};
 pub use error::CoreError;

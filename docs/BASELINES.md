@@ -146,6 +146,12 @@ Then the tool is run once with its version arguments and the version is read fro
 | `wzzip`     | WinZip command line | manual, see below              | not available               | paid licence                     |
 | `pacl`      | PowerArchiver command line | manual, see below       | not available               | paid licence                     |
 
+The `lpk` row has three settings: `fast` (`--fast`, zstd with a long window), `balanced`
+(`--balanced`: raw LZMA1 blocks with a 64 MiB dictionary, the dictionary the 7-Zip Ultra row uses,
+or zstd `--ultra --long` for a block where a trial on a 4 MiB sample prefers it) and `store`
+(`--store`). Blocks never span two clusters and JPEG files are peeled under both compressing
+settings.
+
 `zpaqfranz` and `tsaur` are marked `verified = false` in the catalogue: their command lines come
 from the projects' READMEs and have not been run by us. t-saur's lite builds need `--no-lepton`;
 add it in `bench/tools.local.toml` (below). If a tool's help disagrees with the catalogue, fix the
