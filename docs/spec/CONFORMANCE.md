@@ -1,7 +1,7 @@
 # `.lpk` v1 conformance: what an independent decoder must do
 
 For an implementer who has only `docs/spec/lpk-v1.md` and `crates/lpk-format/tests/vectors/`. This is the
-checklist of task E1-14 part (c). It states no performance figures.
+checklist an independent decoder is held to before the format is frozen. It states no performance figures.
 
 ## What "decodes all vectors" means
 
@@ -20,7 +20,7 @@ An independent decoder passes the gate when, for every archive in the table belo
    generation's trailer) it reads exactly `files_at_generation_0` and `files_at_generation_1`; the rollback is
    done on a copy;
 6. for `malformed-truncated.lpk` and `malformed-hashflip.lpk` it fails with the error class below and extracts
-   nothing from them;
+   nothing from them (the negative cases are gate items, as binding as the positive ones);
 7. recovery (spec section 13) is part of the gate: on `recovery-groups.lpk` its recovery check reports no damage;
    on `malformed-recovery-damaged.lpk` it reports exactly one damaged shard, extracts every file that no damaged
    chunk touches, and its repair writes a copy whose bytes equal `recovery-groups.lpk` — a decoder without
@@ -29,6 +29,44 @@ An independent decoder passes the gate when, for every archive in the table belo
 The plain contents of the vectors are not committed; `expected.toml` gives their hashes. (They are generated
 from a xorshift pattern by `tests/common/mod.rs::pattern`; the hashes make that generator unnecessary.)
 `expected.toml` is checked against the reference reader by `cargo test -p lpk-format --test conformance`.
+
+### The schema of `expected.toml`
+
+One TOML table per vector, named by the file name in quotes (`["zstd-basic.lpk"]`). The keys:
+
+| Key | Type | Present for | Meaning |
+|---|---|---|---|
+| `files` | array of strings | every vector that opens | one string per entry, in entry-table order: `<path> <size> <blake3>`, the path as stored, the extracted byte length in decimal and the BLAKE3-256 of the extracted bytes in lowercase hex; a directory has size 0 and the hash of no bytes |
+| `list` | string | the same | the stdout of `lpk-decode list` (see below) |
+| `verify` | string | the same | the stdout of `lpk-decode verify` |
+| `check` | string | `recovery-groups.lpk` | the stdout of `lpk-decode check` |
+| `latest_generation` | integer | `journal-3gen.lpk` | the generation of the last trailer |
+| `files_at_generation_<g>` | array of strings | `journal-3gen.lpk` | `files` after a rollback to generation `<g>`, for each `<g>` below `latest_generation` |
+| `error` | string | `malformed-*` without `recovery` | the error class |
+| `message` | string | the same | the reference reader's message (informative) |
+| `recovery_frames` | integer | `malformed-recovery-damaged.lpk` | recovery frames the index lists |
+| `shards_damaged` | integer | the same | damaged data shards `check` reports |
+| `shards_repaired_by_repair` | integer | the same | shards `repair` rebuilds |
+| `repaired_copy_equals` | string | the same | the vector whose bytes the repaired copy equals |
+| `check_stdout`, `check_stderr`, `check_exit` | string, string, integer | the same | the stdout, stderr and exit code of `lpk-decode check` |
+
+A decoder needs only `files`, `latest_generation`, `files_at_generation_<g>`, `error` and the recovery counts; the
+stdout strings matter only to a decoder that prints the reference formats.
+
+### Output formats of the reference tool
+
+Every line ends with LF. A failing command prints `error: <message>` on stderr and exits 1; a usage error exits 2.
+
+- `list`: one line per entry, `<Kind>\t<size>\t<path>` with `Kind` one of `File`, `Directory`, `Symlink`, control
+  characters in the path escaped.
+- `verify`: `ok: <entries> entries, <chunks> chunks, <blocks> blocks`; without the key,
+  `ok (frame hashes and recovery frames only, chunks not checked without the password): <entries> entries`.
+- `check` and `repair`: `recovery frames: <n>, unusable: <n>, damaged shards: <n>, repaired shards: <n>`; `check`
+  exits 1 with `error: damage found: <n> shards damaged, <n> recovery frames unusable` on stderr when it finds
+  damage.
+- `info`: `key: value` lines; among them `format: <major>.<minor>`, `generation: <g>`, `chain length: <n>` (or
+  `chain: error: <message>`), `entries: <n>`, `chunks: <n>`, `blocks: <n>`, `recovery frames: <n>`, `prior: <hex>`
+  per prior, and the envelope as `envelope <field>: <value>`. Only the facts matter to another tool.
 
 ## The vectors
 
@@ -73,10 +111,13 @@ the derivation, so they cannot drift).
 | Archive | Derivation | Required outcome |
 |---|---|---|
 | `malformed-truncated.lpk` | the last 100 bytes removed | open fails: `Truncated` ("input truncated in trailer"); nothing is extracted |
-| `malformed-hashflip.lpk` | one bit flipped in the middle of the first block's frame | open succeeds (the damage is in the body); `verify`, and extracting any file of that block, fails with `HashMismatch` ("payload hash mismatch in frame kind 2", the `ChunkData` frame) |
+| `malformed-hashflip.lpk` | one bit flipped in the middle of the first block's frame | open succeeds (the damage is in the body); `verify`, and extracting any file of that block, fails with `HashMismatch` of kind 2 ("payload hash mismatch in frame kind 2", the `ChunkData` frame), never `ChunkMismatch` (spec section 9) |
 
 A decoder may name the errors differently; the class matters: a cut-off file is reported as truncated, a changed
 byte as a hash mismatch, and never as success or as a crash.
+
+Old generations are a gate item too: reading `journal-3gen.lpk` after a rollback (item 5) proves that a decoder opens
+an earlier generation exactly as it opens a one-shot archive.
 
 ## Priors, passwords, keys
 
