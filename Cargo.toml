@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/lpk-bench", "crates/lpk-format", "crates/lpk-procstat-sys"]
+# cargo-fuzz crate: built with nightly on Linux only (fuzz/README.md).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.1"

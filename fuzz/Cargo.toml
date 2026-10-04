@@ -1,0 +1,125 @@
+# Fuzz targets of lpk-format (cargo-fuzz / libFuzzer). Not a workspace member: see ../Cargo.toml.
+[package]
+name = "lpk-format-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lpk-format = { version = "0.0.1", path = "../crates/lpk-format" }
+
+# An empty table detaches this crate from the root workspace.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "frame_read"
+path = "fuzz_targets/frame_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header_read"
+path = "fuzz_targets/header_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "varint_read"
+path = "fuzz_targets/varint_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "entry_table"
+path = "fuzz_targets/entry_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_table"
+path = "fuzz_targets/chunk_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "records_table"
+path = "fuzz_targets/records_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_parse"
+path = "fuzz_targets/index_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trailer_read_tail"
+path = "fuzz_targets/trailer_read_tail.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block_header_and_decode"
+path = "fuzz_targets/block_header_and_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zstd_decode"
+path = "fuzz_targets/zstd_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lzma_decode"
+path = "fuzz_targets/lzma_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recovery_frame"
+path = "fuzz_targets/recovery_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_slot"
+path = "fuzz_targets/key_slot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_open"
+path = "fuzz_targets/archive_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_mutate"
+path = "fuzz_targets/archive_mutate.rs"
+test = false
+doc = false
+bench = false
