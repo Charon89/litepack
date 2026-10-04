@@ -1250,7 +1250,9 @@ name = "lpk-format"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "clap",
  "proptest",
+ "tempfile",
  "thiserror",
 ]
 

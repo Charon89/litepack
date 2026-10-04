@@ -3,6 +3,7 @@
 use crate::error::FormatError;
 use crate::index::{BlockLocation, BlockWalk};
 use crate::varint;
+use std::sync::Arc;
 
 const WHAT: &str = "chunk table";
 /// Length of a chunk hash in bytes.
@@ -347,15 +348,14 @@ pub struct ChunkPlace {
 /// Memory: 16 bytes per chunk (the record's byte offset and the cumulative
 /// plain offset within its block), 8 bytes per block, plus one copy of the
 /// chunk table's encoded bytes, which is at least 33 bytes per chunk (the
-/// records are decoded on demand). An opened archive also keeps the table's
-/// bytes in `Index::chunk_table`, a second copy of the same size. While an
-/// index is parsed, the Merkle leaves add a temporary 32 bytes per chunk.
-/// In all, an opened archive holds at least 82 bytes per chunk, and at least
-/// 114 bytes per chunk while it is being opened (`Archive::open` also holds
-/// the index frame's payload, a third copy of the table, until parsing ends).
+/// records are decoded on demand). `Index::chunk_table` shares that copy (an
+/// `Arc`), so an opened archive holds one copy, at least 49 bytes per chunk.
+/// While an index is parsed, the Merkle leaves add a temporary 32 bytes per
+/// chunk, and `Archive::open` holds the index frame's payload, a second copy
+/// of the table, until parsing ends: at least 114 bytes per chunk while opening.
 #[derive(Debug, Clone)]
 pub struct ChunkIndex {
-    payload: Vec<u8>,
+    payload: Arc<[u8]>,
     record_off: Vec<u64>,
     plain_off: Vec<u64>,
     block_first: Vec<u64>,
@@ -364,14 +364,17 @@ pub struct ChunkIndex {
 impl ChunkIndex {
     /// One pass over the table `payload`, checking it against `blocks`
     /// (coverage and each block's `plain_len`).
-    pub(crate) fn build(payload: Vec<u8>, blocks: &[BlockLocation]) -> Result<Self, FormatError> {
-        Self::build_with_leaves(payload, blocks).map(|(ci, _)| ci)
+    pub(crate) fn build(
+        payload: impl Into<Arc<[u8]>>,
+        blocks: &[BlockLocation],
+    ) -> Result<Self, FormatError> {
+        Self::build_with_leaves(payload.into(), blocks).map(|(ci, _)| ci)
     }
 
     /// Like `build`, and also return every record's hash in order (the
     /// leaves of the Merkle tree), collected in the same pass.
     pub(crate) fn build_with_leaves(
-        payload: Vec<u8>,
+        payload: Arc<[u8]>,
         blocks: &[BlockLocation],
     ) -> Result<(Self, Vec<[u8; 32]>), FormatError> {
         let (record_off, plain_off, leaves) = {

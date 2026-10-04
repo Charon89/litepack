@@ -3,6 +3,7 @@
 
 use crate::error::FormatError;
 use crate::index::{BlockLocation, FrameLocation};
+use crate::primitive::GraphResources;
 use crate::varint;
 use std::fmt;
 use std::io::{Read, Write};
@@ -39,6 +40,17 @@ pub struct Envelope {
     pub decode_memory: u64,
     /// Independent blocks that may be decoded at once (0 = no hint).
     pub threads_hint: u32,
+}
+
+/// The lengths of the archive's non-block frames, as `Envelope::for_archive` takes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ArchiveSizes {
+    /// Payload length of the index frame.
+    pub index_payload_len: u64,
+    /// Whole encoded length of the entry table frame.
+    pub entry_table_len: u64,
+    /// Whole encoded length of the records frame; 0 when there is none.
+    pub records_len: u64,
 }
 
 /// What the local machine allows a decoder.
@@ -183,22 +195,23 @@ impl Envelope {
     }
 
     /// An envelope whose `max_block_plain` and `max_frame_payload` are computed
-    /// from the archive's frames: the blocks, the entry table (`entry_table_len`,
-    /// its whole encoded length), the records frame (`records_len`, 0 when
-    /// there is none) and the index's own payload length; the other fields are
+    /// from the archive's frames: the blocks, the entry table, the records frame
+    /// and the index's own payload length (see [`ArchiveSizes`]); `max_window`
+    /// and `max_bwt_block` are the graphs' maxima (`graph`), the other fields
     /// the writer's. `max_frame_payload` is the smallest value that admits
     /// every recorded frame length and the index payload.
-    #[allow(clippy::too_many_arguments)]
     pub fn for_archive(
         blocks: &[BlockLocation],
-        index_payload_len: u64,
-        entry_table_len: u64,
-        records_len: u64,
-        max_window: u64,
-        max_bwt_block: u64,
+        sizes: ArchiveSizes,
+        graph: GraphResources,
         decode_memory: u64,
         threads_hint: u32,
     ) -> Envelope {
+        let ArchiveSizes {
+            index_payload_len,
+            entry_table_len,
+            records_len,
+        } = sizes;
         let frames = blocks
             .iter()
             .map(|b| b.frame_len)
@@ -207,8 +220,8 @@ impl Envelope {
             .max()
             .unwrap_or(0);
         Envelope {
-            max_window,
-            max_bwt_block,
+            max_window: graph.window,
+            max_bwt_block: graph.bwt_block,
             max_block_plain: blocks.iter().map(|b| b.plain_len).max().unwrap_or(0),
             max_frame_payload: frames.max(index_payload_len),
             decode_memory,
@@ -487,6 +500,18 @@ mod tests {
         }
     }
 
+    fn sz(index_payload_len: u64, entry_table_len: u64, records_len: u64) -> ArchiveSizes {
+        ArchiveSizes {
+            index_payload_len,
+            entry_table_len,
+            records_len,
+        }
+    }
+
+    fn gr(window: u64, bwt_block: u64) -> GraphResources {
+        GraphResources { window, bwt_block }
+    }
+
     fn floc(len: u64) -> FrameLocation {
         FrameLocation { offset: 40, len }
     }
@@ -494,7 +519,7 @@ mod tests {
     #[test]
     fn for_archive_takes_the_maxima() {
         let blocks = [block(137, 50), block(1037, 20), block(537, 90)];
-        let e = Envelope::for_archive(&blocks, 10, 40, 0, 7, 8, 9, 2);
+        let e = Envelope::for_archive(&blocks, sz(10, 40, 0), gr(7, 8), 9, 2);
         assert_eq!(e.max_block_plain, 90);
         assert_eq!(e.max_frame_payload, 1037 - 36 - 2);
         assert_eq!(
@@ -507,13 +532,13 @@ mod tests {
             (7, 8, 9, 2)
         );
         // The index payload, the entry table or the records frame can be the largest.
-        let e = Envelope::for_archive(&blocks, 5000, 40, 0, 0, 0, 0, 0);
+        let e = Envelope::for_archive(&blocks, sz(5000, 40, 0), gr(0, 0), 0, 0);
         assert_eq!(e.max_frame_payload, 5000);
-        let e = Envelope::for_archive(&blocks, 10, 3000, 40, 0, 0, 0, 0);
+        let e = Envelope::for_archive(&blocks, sz(10, 3000, 40), gr(0, 0), 0, 0);
         assert_eq!(e.max_frame_payload, 3000 - 36 - 2);
-        let e = Envelope::for_archive(&blocks, 10, 40, 4000, 0, 0, 0, 0);
+        let e = Envelope::for_archive(&blocks, sz(10, 40, 4000), gr(0, 0), 0, 0);
         assert_eq!(e.max_frame_payload, 4000 - 36 - 2);
-        let e = Envelope::for_archive(&[], 77, 40, 0, 0, 0, 0, 0);
+        let e = Envelope::for_archive(&[], sz(77, 40, 0), gr(0, 0), 0, 0);
         assert_eq!((e.max_block_plain, e.max_frame_payload), (0, 77));
         e.validate(&[], floc(40), None, 77).unwrap();
     }
@@ -528,7 +553,7 @@ mod tests {
     #[test]
     fn validate_rules() {
         let blocks = [block(137, 50), block(1037, 90)];
-        let good = Envelope::for_archive(&blocks, 100, 200, 0, 1, 1, 1, 1);
+        let good = Envelope::for_archive(&blocks, sz(100, 200, 0), gr(1, 1), 1, 1);
         good.validate(&blocks, floc(200), None, 100).unwrap();
         // Overstating the frame payload is allowed; the plain maximum is exact.
         let mut e = good;

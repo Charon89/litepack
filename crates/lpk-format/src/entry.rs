@@ -147,6 +147,44 @@ fn check_target(target: &[u8], size: u64, index: u64) -> Result<(), FormatError>
     Ok(())
 }
 
+/// The rules the encoder and the stream writer apply to entry `index` given the
+/// path of the entry before it: path, order, and the consistency of the fields.
+pub(crate) fn check_entry(e: &Entry, index: u64, prev: Option<&[u8]>) -> Result<(), FormatError> {
+    validate_path(&e.path).map_err(|reason| FormatError::InvalidPath { index, reason })?;
+    if let Some(p) = prev {
+        if p >= e.path.as_bytes() {
+            return Err(FormatError::UnsortedEntries { index });
+        }
+    }
+    let inconsistent = |reason| FormatError::InconsistentEntry { index, reason };
+    match e.kind {
+        EntryKind::Symlink => {
+            let t = e
+                .symlink_target
+                .as_deref()
+                .ok_or_else(|| inconsistent("symlink without target"))?;
+            check_target(t, e.size, index)?;
+            if !e.chunks.is_empty() {
+                return Err(inconsistent("symlink has chunks"));
+            }
+        }
+        EntryKind::File | EntryKind::Directory => {
+            if e.symlink_target.is_some() {
+                return Err(inconsistent("target on non-symlink"));
+            }
+            if e.kind == EntryKind::Directory {
+                if e.size != 0 {
+                    return Err(inconsistent("directory size"));
+                }
+                if !e.chunks.is_empty() {
+                    return Err(inconsistent("directory has chunks"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Encoder of the entry table payload.
 #[derive(Debug)]
 pub struct EntryTableWriter;
@@ -159,40 +197,8 @@ impl EntryTableWriter {
         varint::write(&mut out, entries.len() as u64)?;
         let mut prev: Option<&[u8]> = None;
         for (i, e) in entries.iter().enumerate() {
-            let index = i as u64;
-            validate_path(&e.path).map_err(|reason| FormatError::InvalidPath { index, reason })?;
-            if let Some(p) = prev {
-                if p >= e.path.as_bytes() {
-                    return Err(FormatError::UnsortedEntries { index });
-                }
-            }
+            check_entry(e, i as u64, prev)?;
             prev = Some(e.path.as_bytes());
-            let inconsistent = |reason| FormatError::InconsistentEntry { index, reason };
-            match e.kind {
-                EntryKind::Symlink => {
-                    let t = e
-                        .symlink_target
-                        .as_deref()
-                        .ok_or_else(|| inconsistent("symlink without target"))?;
-                    check_target(t, e.size, index)?;
-                    if !e.chunks.is_empty() {
-                        return Err(inconsistent("symlink has chunks"));
-                    }
-                }
-                EntryKind::File | EntryKind::Directory => {
-                    if e.symlink_target.is_some() {
-                        return Err(inconsistent("target on non-symlink"));
-                    }
-                    if e.kind == EntryKind::Directory {
-                        if e.size != 0 {
-                            return Err(inconsistent("directory size"));
-                        }
-                        if !e.chunks.is_empty() {
-                            return Err(inconsistent("directory has chunks"));
-                        }
-                    }
-                }
-            }
             out.push(e.kind as u8);
             out.extend_from_slice(&e.flags.bits().to_le_bytes());
             varint::write(&mut out, e.path.len() as u64)?;

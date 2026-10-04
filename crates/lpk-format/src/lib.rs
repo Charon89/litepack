@@ -19,8 +19,10 @@ pub mod index;
 pub mod magic;
 pub mod merkle;
 pub mod primitive;
+pub mod reader;
 pub mod trailer;
 pub mod varint;
+pub mod writer;
 
 pub use archive::{Archive, Diagnosis};
 pub use chunk::{
@@ -39,7 +41,7 @@ pub use entry::{
     Entry, EntryFlags, EntryIter, EntryKind, EntryTable, EntryTableWriter, MIN_ENTRY_LEN,
 };
 pub use envelope::{
-    envelope_layout_table, resources_default_table, Envelope, Refusal, Resources,
+    envelope_layout_table, resources_default_table, ArchiveSizes, Envelope, Refusal, Resources,
     DEFAULT_MAX_BWT_BLOCK, DEFAULT_MAX_WINDOW,
 };
 pub use error::FormatError;
@@ -53,3 +55,8 @@ pub use graph::{
 pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, HeaderFlags};
 pub use magic::MAGIC;
 pub use primitive::{primitive_table, GraphResources, PrimitiveId};
+pub use reader::{ArchiveChunks, OwnedEntryTable, VerifySummary};
+pub use writer::{
+    Chunker, FixedChunker, Writer, WriterOptions, WriterSummary, DEFAULT_BLOCK_SIZE,
+    DEFAULT_CHUNK_SIZE, MIN_CHUNK_SIZE,
+};

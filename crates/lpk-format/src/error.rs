@@ -214,6 +214,26 @@ pub enum FormatError {
         /// Short reason.
         reason: &'static str,
     },
+    /// The writer was given options it cannot honour.
+    #[error("bad writer options ({reason})")]
+    BadOptions {
+        /// Short reason.
+        reason: &'static str,
+    },
+    /// An entry path is not safe to extract on this platform.
+    #[error("unsafe path {path:?} ({reason})")]
+    UnsafePath {
+        /// The archive path.
+        path: String,
+        /// Short reason.
+        reason: &'static str,
+    },
+    /// The extraction tool does not create symbolic links.
+    #[error("symlink entry {path:?} refused")]
+    SymlinkRefused {
+        /// The archive path.
+        path: String,
+    },
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

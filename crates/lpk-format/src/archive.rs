@@ -1,6 +1,7 @@
 //! Opening an archive from its tail, and diagnosing a damaged one (spec section 6).
 
 use crate::chunk::ChunkIndex;
+use crate::decode::Registry;
 use crate::envelope::Resources;
 use crate::error::FormatError;
 use crate::frame::{Frame, FrameKind, ReadFrame, ReadLimits};
@@ -8,6 +9,7 @@ use crate::header::Header;
 use crate::index::{FrameLocation, Index};
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 /// An opened archive: header, trailer, index and the chunk index are in
 /// memory; the body is read only on request.
@@ -19,7 +21,10 @@ pub struct Archive<R: Read + Seek> {
     header: Header,
     trailer: Trailer,
     index: Index,
-    chunks: ChunkIndex,
+    chunks: Arc<ChunkIndex>,
+    pub(crate) registry: Registry,
+    /// The most recently decoded block: its index and plain bytes.
+    pub(crate) cache: Option<(usize, Vec<u8>)>,
 }
 
 /// What a forward walk over the frames found.
@@ -158,7 +163,9 @@ impl<R: Read + Seek> Archive<R> {
             header,
             trailer,
             index,
-            chunks,
+            chunks: Arc::new(chunks),
+            registry: Registry::v1(),
+            cache: None,
         })
     }
 
@@ -196,6 +203,18 @@ impl<R: Read + Seek> Archive<R> {
     /// Constant-time access to the chunk table.
     pub fn chunks(&self) -> &ChunkIndex {
         &self.chunks
+    }
+
+    /// The chunk index, shared (for readers that also borrow the archive mutably).
+    pub(crate) fn chunks_arc(&self) -> Arc<ChunkIndex> {
+        Arc::clone(&self.chunks)
+    }
+
+    /// The registry of primitive decoders blocks are decoded with; register
+    /// further decoders here before reading.
+    pub fn registry_mut(&mut self) -> &mut Registry {
+        self.cache = None;
+        &mut self.registry
     }
 
     /// The `EntryTable` payload, read and verified on demand; callers parse it
@@ -393,15 +412,19 @@ mod tests {
             },
         ];
         let index = Index {
-            chunk_table: ChunkTableWriter::encode(&recs),
+            chunk_table: ChunkTableWriter::encode(&recs).into(),
             merkle_root: merkle_root(&leaves),
             envelope: Envelope::for_archive(
                 &blocks,
-                1000,
-                e.len() as u64,
-                0,
-                1 << 20,
-                1 << 16,
+                crate::envelope::ArchiveSizes {
+                    index_payload_len: 1000,
+                    entry_table_len: e.len() as u64,
+                    records_len: 0,
+                },
+                crate::primitive::GraphResources {
+                    window: 1 << 20,
+                    bwt_block: 1 << 16,
+                },
                 1 << 24,
                 2,
             ),

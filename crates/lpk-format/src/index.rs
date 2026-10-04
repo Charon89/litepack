@@ -7,6 +7,7 @@ use crate::error::FormatError;
 use crate::header::Header;
 use crate::merkle::merkle_root;
 use crate::varint;
+use std::sync::Arc;
 
 const WHAT: &str = "index";
 /// Smallest encoded frame: kind, flags, a one-byte length and the hash.
@@ -54,7 +55,7 @@ impl FrameLocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Index {
     /// The chunk table payload, exactly as encoded (section 5).
-    pub chunk_table: Vec<u8>,
+    pub chunk_table: Arc<[u8]>,
     /// Merkle root over the chunk table's hashes.
     pub merkle_root: [u8; 32],
     /// The resources a decoder needs (section 7).
@@ -318,8 +319,8 @@ impl Index {
 
         check_disjoint(&blocks, entry_table, records)?;
 
-        let chunk_table = payload[..used].to_vec();
-        let (chunks, leaves) = ChunkIndex::build_with_leaves(chunk_table.clone(), &blocks)?;
+        let chunk_table: Arc<[u8]> = Arc::from(&payload[..used]);
+        let (chunks, leaves) = ChunkIndex::build_with_leaves(Arc::clone(&chunk_table), &blocks)?;
         if merkle_root(&leaves) != merkle_root_stored {
             return Err(FormatError::MerkleRootMismatch);
         }
@@ -339,15 +340,14 @@ impl Index {
 
     /// Build the random-access chunk index in one pass over the table.
     ///
-    /// Memory: see [`ChunkIndex`]; the result holds its own copy of the table
-    /// bytes, so with this `Index` a table costs two copies of its encoded
-    /// form (at least 33 bytes per chunk each) plus the chunk index's 16 bytes
-    /// per chunk. `parse_with_chunks` additionally holds a temporary 32 bytes
-    /// per chunk for the Merkle leaves.
+    /// Memory: see [`ChunkIndex`]; the result shares the table bytes with this
+    /// `Index` (an `Arc`), so it adds only the chunk index's 16 bytes per
+    /// chunk. `parse_with_chunks` additionally holds a temporary 32 bytes per
+    /// chunk for the Merkle leaves.
     pub fn chunk_index(&self) -> Result<ChunkIndex, FormatError> {
         let n = ChunkTable::parse(&self.chunk_table)?.len();
         validate_blocks(&self.blocks, n, u64::MAX)?;
-        ChunkIndex::build(self.chunk_table.clone(), &self.blocks)
+        ChunkIndex::build(Arc::clone(&self.chunk_table), &self.blocks)
     }
 }
 
@@ -412,9 +412,22 @@ mod tests {
         }
         let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
         let mut idx = Index {
-            chunk_table: table_of(recs),
+            chunk_table: table_of(recs).into(),
             merkle_root: merkle_root(&leaves),
-            envelope: Envelope::for_archive(&blocks, 0, 60, 0, 1 << 20, 0, 1 << 24, 0),
+            envelope: Envelope::for_archive(
+                &blocks,
+                crate::envelope::ArchiveSizes {
+                    index_payload_len: 0,
+                    entry_table_len: 60,
+                    records_len: 0,
+                },
+                crate::primitive::GraphResources {
+                    window: 1 << 20,
+                    bwt_block: 0,
+                },
+                1 << 24,
+                0,
+            ),
             blocks,
             entry_table: FrameLocation {
                 offset: 32,
@@ -433,11 +446,15 @@ mod tests {
             let len = encode_unchecked(idx).len() as u64;
             let e = Envelope::for_archive(
                 &idx.blocks,
-                len,
-                idx.entry_table.len,
-                idx.records.map_or(0, |r| r.len),
-                idx.envelope.max_window,
-                idx.envelope.max_bwt_block,
+                crate::envelope::ArchiveSizes {
+                    index_payload_len: len,
+                    entry_table_len: idx.entry_table.len,
+                    records_len: idx.records.map_or(0, |r| r.len),
+                },
+                crate::primitive::GraphResources {
+                    window: idx.envelope.max_window,
+                    bwt_block: idx.envelope.max_bwt_block,
+                },
                 idx.envelope.decode_memory,
                 idx.envelope.threads_hint,
             );
@@ -487,7 +504,7 @@ mod tests {
 
     fn encode_unchecked(idx: &Index) -> Vec<u8> {
         // Same layout as `encode`, without validation.
-        let mut out = idx.chunk_table.clone();
+        let mut out = idx.chunk_table.to_vec();
         out.extend_from_slice(&idx.merkle_root);
         idx.envelope.write(&mut out).unwrap();
         varint::write(&mut out, idx.blocks.len() as u64).unwrap();
@@ -872,7 +889,9 @@ mod tests {
     #[test]
     fn encode_rejects_a_table_with_trailing_bytes() {
         let (_, mut idx) = three();
-        idx.chunk_table.push(0);
+        let mut t = idx.chunk_table.to_vec();
+        t.push(0);
+        idx.chunk_table = t.into();
         assert!(matches!(
             idx.encode(),
             Err(FormatError::TrailingBytes {
