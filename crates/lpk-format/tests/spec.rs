@@ -31,6 +31,9 @@ fn spec_tables_match_code() {
         lpk_format::trailer_layout_table(),
         lpk_format::envelope_layout_table(),
         lpk_format::resources_default_table(),
+        lpk_format::primitive_table(),
+        lpk_format::graph_layout_table(),
+        lpk_format::block_header_table(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }
@@ -41,6 +44,17 @@ fn spec_tables_match_code() {
         .join(" ");
     assert_eq!(magic, "0x89 0x4C 0x50 0x4B 0x0D 0x0A 0x1A 0x0A");
     assert!(text.contains(&magic));
+}
+
+#[test]
+fn primitive_table_lists_every_id_and_name() {
+    let table = lpk_format::primitive_table();
+    for p in lpk_format::PrimitiveId::ALL {
+        let row = format!("| 0x{:04X} | `{}` |", p as u16, p.name());
+        assert!(table.contains(&row), "table lacks {row}");
+    }
+    assert_eq!(lpk_format::MAX_STEPS, 16);
+    assert_eq!(lpk_format::MAX_PARAMS, 256);
 }
 
 #[test]

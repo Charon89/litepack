@@ -423,3 +423,84 @@ Frame limit. While the index is read, the largest accepted `payload_len` (sectio
 reader's.
 
 Errors of this section: `EnvelopeMismatch`, `Refused`, and `Truncated` with `what` `index`.
+
+## 8. Primitives and the decode graph
+
+Nothing executable is stored in an archive. A block's decoding is described by a short graph of primitives
+taken from a fixed registry; a reader that meets a primitive ID it does not know stops before it reads any
+data. The registry gives each primitive a 16-bit ID, a name, a parameter layout and the resources it needs
+(they feed the envelope of section 7):
+
+| ID | Name | Parameters | Resources |
+|---|---|---|---|
+| 0x0000 | `store` | none (length 0) | none |
+| 0x0001 | `zstd` | `window_log: u8` (window = 2^window_log bytes; 10..=31), `dictionary: [u8; 32]` (BLAKE3 id of a prior, all zeros = none) | window = 2^window_log |
+| 0x0002 | `lzma` | `dict_size: u32` LE, `lc: u8`, `lp: u8`, `pb: u8` (the LZMA1 properties; lc <= 8, lp <= 4, pb <= 4) | window = dict_size |
+| 0x0003 | `bwt` | `block_size: u32` LE (bytes; not 0) | bwt block = block_size |
+| 0x0004 | `bcj-x86` | none | none |
+| 0x0005 | `bcj-arm64` | none | none |
+| 0x0006 | `delta` | `base_chunk: u64` LE (the chunk the patch applies to), `patch_format: u8` (0 = zstd patch, 1 = suffix-array patch) | none |
+| 0x0007 | `jpeg-reconstruct` | none (the record is in the `Records` frame) | memory per image, declared by `decode_memory` |
+| 0x0008 | `deflate-reconstruct` | none | none |
+| 0x0009 | `png-filter` | none | none |
+| 0x000A | `base64` | `variant: u8` (0 standard, 1 url-safe), `line_len: u16` LE (0 = no line breaks) | none |
+| 0x000B | `utf16` | `endian: u8` (0 LE, 1 BE), `bom: u8` (0 none, 1 present) | none |
+| 0x000C | `container-reconstruct` | none | none |
+| 0x000D..=0x7FFF | reserved for later versions of this spec | - | - |
+| 0x8000..=0xFFFF | experimental; a conforming writer never emits them | - | - |
+
+`params` is a byte string whose length is stated in the graph; its length must be exactly the layout's length
+(0 for a primitive without parameters). Violating a layout's rules, such as a `window_log` of 9 or 32, an `lc`
+of 9 or a `variant` of 2, is `BadParams` carrying the ID and a short reason.
+
+### The decode graph
+
+A graph is a linear chain in version 1; the encoding leaves room for a graph with fan-in in a later version.
+
+| Field | Size | Meaning |
+|---|---|---|
+| step_count | varint | number of steps, 1..=16 |
+| primitive | u16 LE | per step: the primitive ID (section 8 registry) |
+| flags | u8 | per step: bit 0 `MUST_UNDERSTAND` is reserved and must be 0 in v1; all other bits must be 0 |
+| params_len | varint | per step: length of `params`, at most 256 |
+| params | params_len bytes | per step: the parameters, laid out as the primitive defines |
+
+A step count of 0 or above 16 is `BadGraph` with `reason` `step count`; a non-zero `flags` is `BadGraph` with
+`step flags`; a `params_len` above 256 is `BadGraph` with `params length`.
+
+Order of application. Steps are applied in the order written, to decode: the encoded bytes go into the first
+step's decoder, its output into the second step's, and the last output is the block's plain bytes. A writer that
+compressed with `bcj-x86` and then with `lzma` therefore writes the graph `[lzma, bcj-x86]`. An intermediate
+output larger than the reader's `max_block_plain` is `PayloadTooLarge`.
+
+Unknown IDs. A primitive ID that is not in the table is `UnknownPrimitive`, raised as soon as the ID is read
+while the graph is parsed, before any later byte of the graph or any encoded byte is looked at; a graph that is
+truncated right after an unknown ID still reports the unknown ID. A known primitive whose parameters fail their
+layout is `BadParams`, raised at the same point of the parse.
+
+### The `ChunkData` block header
+
+The payload of a `ChunkData` frame (kind 2) starts with this header, followed by the encoded bytes:
+
+| Field | Size | Meaning |
+|---|---|---|
+| graph | variable | the decode graph (step_count and the steps) |
+| plain_len | varint | length of the block's plain bytes; must equal the block table's `plain_len` |
+| encoded_len | varint | number of bytes that follow; must equal the payload length minus the header |
+| encoded | encoded_len bytes | the encoded bytes |
+
+A block with the graph `[store]` has `encoded_len == plain_len` and its encoded bytes are its plain bytes. An
+`encoded_len` that differs from the bytes present, a `plain_len` that differs from the block table's, or a last
+step whose output length differs from `plain_len` is `BlockLengthMismatch`.
+
+### What the reference decoder runs
+
+The reference decoder (this crate) implements `store` itself. For every other ID it knows the name, the
+parameter layout and the validation, and asks the registered decoder to run it; unless a decoder is registered
+it reports `UnimplementedPrimitive` with the ID. The zstd and LZMA decoders are plugged in by the container
+reader; the reconstruction primitives (`jpeg-reconstruct`, `deflate-reconstruct`, `png-filter`,
+`container-reconstruct`) are applied by the full reader, so the reference decoder reports them as
+`UnimplementedPrimitive`.
+
+Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`, `BadParams`,
+`BlockLengthMismatch`, `PayloadTooLarge`, and `Truncated` with the `what` strings `graph` and `block header`.

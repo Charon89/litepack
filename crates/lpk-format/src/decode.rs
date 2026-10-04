@@ -63,6 +63,14 @@ pub struct Registry {
     decoders: Vec<Box<dyn PrimitiveDecoder>>,
 }
 
+impl std::fmt::Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registry")
+            .field("primitives", &self.decoders.len())
+            .finish()
+    }
+}
+
 impl Registry {
     /// Every v1 primitive present: `store` is real, the others report
     /// `UnimplementedPrimitive` until a decoder is registered.
