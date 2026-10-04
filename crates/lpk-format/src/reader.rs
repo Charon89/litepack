@@ -320,8 +320,9 @@ impl<R: Read + Seek> Archive<R> {
     /// of every block graph.
     ///
     /// An encrypted archive opened without credentials ([`Archive::open_with`])
-    /// cannot decode anything: `verify` then hashes every frame, checks the
-    /// recovery frames' shards and reports `chunks_checked: false`.
+    /// cannot decode anything: `verify` then hashes every frame but the
+    /// recovery frames and reports `chunks_checked: false`. In neither mode
+    /// does `verify` read a recovery payload; `check` and `repair` do.
     pub fn verify(&mut self) -> Result<VerifySummary, FormatError> {
         if self.is_keyless() {
             return self.verify_frames_only();
@@ -354,19 +355,15 @@ impl<R: Read + Seek> Archive<R> {
         })
     }
 
-    /// `verify` without a key: every frame's hash, then the recovery frames.
+    /// `verify` without a key: the hash of every frame except the recovery
+    /// frames, and the sealing rules (the key slot first and once). Recovery
+    /// is left to `check` in every mode (spec section 9): no recovery payload
+    /// is parsed and a damaged recovery frame does not fail.
     fn verify_frames_only(&mut self) -> Result<VerifySummary, FormatError> {
         let limits = *self.limits();
-        let d = Self::walk(self.raw_reader(), &limits, None);
+        let d = Self::walk_with(self.raw_reader(), &limits, None, true);
         if let Some(e) = d.error {
             return Err(e);
-        }
-        let r = self.scan_recovery_frames()?;
-        if r.shards_damaged > 0 || r.frames_unusable > 0 {
-            return Err(FormatError::DamageFound {
-                damaged: r.shards_damaged,
-                unusable: r.frames_unusable,
-            });
         }
         // A sealed entry table cannot be counted without the key.
         let entries = if self.is_listable() {

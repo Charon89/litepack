@@ -405,7 +405,7 @@ impl<R: Read + Seek> Archive<R> {
     /// Without credentials an encrypted archive opens keyless: the frames are
     /// found by walking their envelopes, so recovery (`check_recovery`,
     /// `repair`) and `verify` work on the sealed bytes (`verify` checks every
-    /// frame's hash and the recovery frames only); a listable archive's entry
+    /// frame's hash but the recovery frames' only); a listable archive's entry
     /// table can be read; everything that needs the index or a sealed frame
     /// (`extract`, the chunk table, a sealed entry table) is `PasswordRequired`. Credentials given for an
     /// archive that is not encrypted are ignored.
@@ -792,7 +792,19 @@ impl<R: Read + Seek> Archive<R> {
     pub(crate) fn walk(
         reader: &mut R,
         limits: &ReadLimits,
+        recovery: Option<&mut Vec<FrameLocation>>,
+    ) -> Diagnosis {
+        Self::walk_with(reader, limits, recovery, false)
+    }
+
+    /// [`Archive::walk`]; with `skip_recovery_hash` a `Recovery` frame whose
+    /// hash fails is passed over like a good frame (recovery is `check`'s
+    /// business, not `verify`'s; spec section 9).
+    pub(crate) fn walk_with(
+        reader: &mut R,
+        limits: &ReadLimits,
         mut recovery: Option<&mut Vec<FrameLocation>>,
+        skip_recovery_hash: bool,
     ) -> Diagnosis {
         let mut d = Diagnosis {
             frames_ok: 0,
@@ -880,6 +892,15 @@ impl<R: Read + Seek> Archive<R> {
                 Err(FormatError::Truncated { .. }) => {
                     d.error = Some(FormatError::Truncated { what: "trailer" });
                     return d;
+                }
+                // The whole frame was read before its hash failed, so the
+                // walk goes on after it.
+                Err(FormatError::HashMismatch { kind })
+                    if skip_recovery_hash && kind == FrameKind::Recovery as u16 =>
+                {
+                    d.frames_ok += 1;
+                    d.ends_at = r.n;
+                    first_after_trailer = false;
                 }
                 Err(_) if first_after_trailer => {
                     d.error = Some(FormatError::TrailingBytes { what: "archive" });

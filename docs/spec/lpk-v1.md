@@ -831,8 +831,13 @@ differs from its record.
 Whole-archive verification first walks the `Records` frame when the index lists one (section 12), then decodes
 every block and compares every chunk with its record, so a chunk no entry uses is checked too; a block whose frame
 hash fails is that frame's `HashMismatch`. It then checks every file entry's chunk list and total size against the
-chunk table, which needs no block reads. Verification with the key does not read the recovery frames; `check`
-(section 13) does. Verification without the key is described in section 14.
+chunk table, which needs no block reads.
+
+Verification and recovery. `verify` leaves recovery to `check` in every mode: with the key it checks the frame hashes
+of the frames it reads, the chunks, the entries and the records; without the key it checks the frame hashes of every
+frame but the recovery frames and the sealing rules (the key slot's place and shape), and reports that the chunks were
+not checked (section 14). Neither reads a recovery payload, and neither fails on a damaged recovery frame or shard.
+`check` and `repair` (section 13) are the recovery commands.
 
 Only the block read last is kept, so a chunk list that alternates between chunks of two blocks makes every
 reference read and decode a whole block; a reader of untrusted archives needs a decode budget.
@@ -1231,16 +1236,15 @@ Detection without repair is the same scan without steps 3 and 4: counts of the f
 of the damaged shards. `lpk-decode check <archive>` prints these counts and exits 1 (`DamageFound`) if a shard is
 damaged or a frame is unusable; `lpk-decode repair <archive> <out>` writes the repaired copy to a file that must not
 exist, prints the report and exits 1 on an error, keeping the copy when the error is `Unrepairable`. The exact output
-lines are given in `docs/spec/CONFORMANCE.md`. Whole-archive verification with the key (section 9) does not read the
-recovery frames, so a damaged recovery frame does not make it fail; `check` reports it.
+lines are given in `docs/spec/CONFORMANCE.md`. `verify` never reads a recovery payload, with or without the key
+(section 9), so a damaged recovery frame does not make it fail; `check` reports it.
 
 ### What is not covered
 
 The header, the index frame and the trailer are not covered. Damage there is not repaired: damage to the index or
 trailer makes the archive fail to open, and the error is the one that opening gives.
 
-Errors of this section: `BadRecovery`, `Unrepairable`, `RecoveryError`, `DamageFound` (the tool's `check`, and
-`verify` without the key), `Refused` (field `recovery group`), `BadFrameLocation` (with `what` `recovery`),
+Errors of this section: `BadRecovery`, `Unrepairable`, `RecoveryError`, `DamageFound` (the tool's `check`), `Refused` (field `recovery group`), `BadFrameLocation` (with `what` `recovery`),
 `Truncated` (`recovery`).
 
 ## 14. Encryption
@@ -1364,8 +1368,8 @@ password is derived. The password is the raw bytes given, with no normalisation 
    without an `EntryTable` frame is `BadFrameLocation` (`entry table`). A keyless reader can check and repair the
    archive with the recovery frames (section 13), which work on the sealed bytes, assigning frames to generations by
    offset against the generation starts it found. Its `verify` walks every frame as the diagnosis walk does (section
-   6; the frame hashes and the sealing rules), then scans the recovery frames and fails with `DamageFound` when a
-   shard is damaged or a recovery frame is unusable, and otherwise reports that the chunks were not checked; a listable
+   6; the frame hashes and the sealing rules), except that a recovery frame whose hash fails is passed over, reads no
+   recovery payload, and reports that the chunks were not checked (section 9); a listable
    archive's entry table can be listed (it is not authenticated without the index); everything that needs the index or
    a sealed frame (`extract`, a sealed entry table) is `PasswordRequired`.
 3. Only then are the trailer, the index and the blocks read. A modified frame envelope or payload fails the frame hash
@@ -1379,7 +1383,7 @@ The reference tool takes the password with `--password-file` (one trailing newli
 
 Errors of this section: `PasswordRequired`, `WrongKey`, `AuthenticationFailed`, `UnexpectedSealedFrame`, `UnsealedFrame`,
 `UnexpectedKeySlot`, `MissingKeySlot`, `BadKeySlot`, `BadArgon2`, `Refused` (field `argon2_m`), `EntryTableMismatch`,
-`DamageFound`, `Truncated` (`frames`).
+`Truncated` (`frames`).
 
 ### Test vectors
 
@@ -1578,7 +1582,7 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `BadRecovery` | `reason` | a recovery payload breaks its rules (13) |
 | `Unrepairable` | `frame`, `damaged`, `capacity` | repair: more damaged shards than a frame can rebuild (13) |
 | `RecoveryError` | `reason` | repair: a rebuilt shard does not match its hash (13) |
-| `DamageFound` | `damaged`, `unusable` | `check`, and `verify` without the key, found damage (13, 14) |
+| `DamageFound` | `damaged`, `unusable` | tool: `check` found damage (13) |
 | `PasswordRequired` | - | a sealed frame or the index is needed without credentials (14) |
 | `WrongKey` | - | the key slot does not open with the credentials (14) |
 | `AuthenticationFailed` | `kind`, `sequence` | a sealed payload: too short, wrong nonce, or wrong tag (14) |

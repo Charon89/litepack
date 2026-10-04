@@ -24,7 +24,9 @@ An independent decoder passes the gate when, for every archive in the table belo
 7. recovery (spec section 13) is part of the gate: on `recovery-groups.lpk` its recovery check reports no damage;
    on `malformed-recovery-damaged.lpk` it reports exactly one damaged shard, extracts every file that no damaged
    chunk touches, and its repair writes a copy whose bytes equal `recovery-groups.lpk` — a decoder without
-   repair may skip the repair clause but must still report the damage.
+   repair may skip the repair clause but must still report the damage. This item is about the recovery check:
+   `verify` leaves recovery to `check` in every mode (spec section 9) and does not fail on a damaged recovery
+   frame.
 
 The plain contents of the vectors are not committed; `expected.toml` gives their hashes. (They are generated
 from a xorshift pattern by `tests/common/mod.rs::pattern`; the hashes make that generator unnecessary.)
@@ -60,7 +62,7 @@ Every line ends with LF. A failing command prints `error: <message>` on stderr a
 - `list`: one line per entry, `<Kind>\t<size>\t<path>` with `Kind` one of `File`, `Directory`, `Symlink`, control
   characters in the path escaped.
 - `verify`: `ok: <entries> entries, <chunks> chunks, <blocks> blocks`; without the key,
-  `ok (frame hashes and recovery frames only, chunks not checked without the password): <entries> entries`.
+  `ok (frame hashes only, chunks not checked without the password): <entries> entries`.
 - `check` and `repair`: `recovery frames: <n>, unusable: <n>, damaged shards: <n>, repaired shards: <n>`; `check`
   exits 1 with `error: damage found: <n> shards damaged, <n> recovery frames unusable` on stderr when it finds
   damage.

@@ -279,7 +279,7 @@ fn verify(
     } else {
         writeln!(
             out,
-            "ok (frame hashes and recovery frames only, chunks not checked without the password): {} entries",
+            "ok (frame hashes only, chunks not checked without the password): {} entries",
             s.entries
         )?;
     }

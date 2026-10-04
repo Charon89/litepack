@@ -55,6 +55,12 @@ behaviour. No test vector byte changed.
     primitives 3 to 12 are reserved: a v1 writer must not emit them and a v1 reader reports
     `UnimplementedPrimitive`.
 
+12. `verify` leaves recovery to `check` in every mode: with the key it checks frame hashes, chunks, entries and
+    records; without the key the frame hashes of every frame but the recovery frames and the sealing rules, reporting
+    `chunks_checked: false`; neither reads a recovery payload or fails on a damaged recovery frame; `check` and
+    `repair` are the recovery commands (code for the keyless path, which used to fail with `DamageFound`; sections 9,
+    13, 14, CONFORMANCE item 7).
+
 ## For the independent decoder
 
 Changes that alter an outcome it may have chosen differently: ruling 1 (hashflip extraction), ruling 2 (non-final

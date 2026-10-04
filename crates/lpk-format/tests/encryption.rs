@@ -599,6 +599,26 @@ fn keyless_verify_of_a_listable_archive_with_recovery_frames() {
     assert_eq!(k.check_recovery().unwrap().frames_unusable, 0);
 }
 
+/// Spec section 9 (E1-14d, verify and recovery): `verify` leaves recovery to
+/// `check` in every mode. A damaged recovery frame fails neither verify with
+/// the key nor verify without it; `check` reports it.
+#[test]
+fn verify_does_not_fail_on_a_damaged_recovery_frame() {
+    let bytes = write_archive_seeded(recovery_options(false), &sealed_files(), SEED);
+    let a = open_with(&bytes, Some(&creds("pw"))).unwrap();
+    let loc = a.recovery_frames()[0];
+    drop(a);
+    let mut damaged = bytes.clone();
+    // A byte inside the recovery shards, past the 32 fixed bytes and the hashes.
+    damaged[(loc.offset + loc.len - 40) as usize] ^= 0xFF;
+    let mut k = open_with(&damaged, None).unwrap();
+    assert!(!k.verify().unwrap().chunks_checked);
+    assert_eq!(k.check_recovery().unwrap().frames_unusable, 1);
+    let mut a = open_with(&damaged, Some(&creds("pw"))).unwrap();
+    assert!(a.verify().unwrap().chunks_checked);
+    assert_eq!(a.check_recovery().unwrap().frames_unusable, 1);
+}
+
 /// Rewrite the frame at `loc` in `bytes` with a new payload of the same length.
 fn replace_payload(bytes: &mut [u8], loc: &FrameLocation, payload: &[u8]) {
     let (start, len) = payload_span(loc);
