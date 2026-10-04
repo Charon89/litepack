@@ -1,7 +1,7 @@
 # LitePack `.lpk` format, version 1 — working draft
 
 Status: this is a working draft. The format is not frozen until the independent-decoder gate (task E1-14).
-Sections are added task by task; this revision covers conventions, the header, the frame grammar and the entry table.
+Sections are added task by task; this revision covers conventions, the header, the frame grammar, the entry table, chunks and the Merkle tree, and the index and trailer.
 The reference reader is the `lpk-format` crate; the tables below are checked against it by a test.
 
 ## 1. Conventions
@@ -236,3 +236,95 @@ Test vectors (checked by the crate's tests, in hexadecimal): the root of an empt
 
 Errors of this section: `ChunkMismatch`, `ChunkIndexOutOfRange`, `FileSizeMismatch`, `RangeOutOfFile`, plus
 `Truncated`, `TrailingBytes` and `NonCanonicalVarint` for the table.
+
+## 6. Index and trailer
+
+The index locates every block of chunk data and authenticates the chunk table; the trailer is a fixed-size
+frame at the very end of the archive that finds and authenticates the index. A reader opens an archive from
+its head and its tail without reading the body.
+
+### The index frame (kind 5)
+
+The payload, in this order:
+
+| Field | Size | Meaning |
+|---|---|---|
+| chunk_table | variable | the chunk table of section 5 (count, then the records) |
+| merkle_root | 32 | the Merkle root over the chunk table's hashes |
+| block_count | varint | number of blocks; at most the bytes left after it divided by 5 |
+| frame_offset | varint | per block: absolute offset of the block's `ChunkData` frame |
+| frame_len | varint | per block: whole encoded length of that frame |
+| first_chunk | varint | per block: index of the first chunk the block holds |
+| chunk_count | varint | per block: number of chunks the block holds |
+| plain_len | varint | per block: sum of the `plain_len` of its chunks |
+| entry_table_offset | varint | absolute offset of the `EntryTable` frame |
+| entry_table_len | varint | whole encoded length of that frame |
+| records_offset | varint | absolute offset of the `Records` frame; 0 when there is none |
+| records_len | varint | whole encoded length of that frame; 0 when there is none |
+
+The chunk table is not length-prefixed: a reader walks its declared records (under the count bound of
+section 5) and continues after the last one. The five block fields repeat `block_count` times. Bytes after
+`records_len` are `TrailingBytes` (`what` is `index`); an input that ends early is `Truncated` (`what` is
+`index`, or `chunk table` inside the table). A `block_count` larger than the bytes left divided by 5 is
+`Truncated` and nothing is allocated for it.
+
+Block rules. Blocks are in ascending `first_chunk` order and partition the chunk indices `0..n` exactly,
+contiguously and without overlap, where `n` is the chunk table's count: the first block starts at 0, each
+next block starts where the previous one ended, and the last ends at `n`; anything else is `BlockCoverage`
+with the number of the offending block (the number of blocks when they stop short of `n`). A block may have
+`chunk_count` 0 only when the archive has no chunks. Each block's `plain_len` must equal the sum of its
+chunks' `plain_len` in the chunk table, otherwise `BlockLengthMismatch` with the block number. A block's
+frame must start at or after the end of the header (offset 32), be at least as long as the smallest frame,
+and end no later than the offset of the index frame itself, otherwise `BlockOutOfRange` with the block
+number; a sum that overflows is out of range. The `EntryTable` frame and the `Records` frame (when
+`records_offset` and `records_len` are not both 0) follow the same location rule; a violation is
+`BadFrameLocation` naming the frame. The stored `merkle_root` must equal the root recomputed from the chunk
+table's hashes, otherwise `MerkleRootMismatch`. A chunk's place is its block and the sum of the `plain_len`
+of the chunks before it in that block.
+
+### The trailer frame (kind 6)
+
+The trailer is written with empty frame flags and has a fixed 72-byte payload:
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 8 | index_offset | absolute offset of the index frame (u64, little-endian) |
+| 8 | 8 | index_len | whole encoded length of the index frame (u64) |
+| 16 | 32 | index_hash | BLAKE3-256 of the index frame's payload |
+| 48 | 8 | generation | 0 for an archive written in one go (u64) |
+| 56 | 16 | archive_id | must equal the header's archive_id |
+
+The whole trailer frame is `kind` (2) + `flags` (2) + `payload_len` varint (1 byte, the value 72) + payload
+(72) + hash (32) = 109 bytes, and it is the last thing in the archive. The index must lie at or after the
+end of the header and end no later than the start of the trailer, otherwise `BadFrameLocation` (`index`).
+
+### Opening an archive
+
+1. If the input is shorter than the header plus the trailer frame (141 bytes), go to the diagnosis below.
+2. Read the 32-byte header (errors of section 2 apply).
+3. Read the last 109 bytes. They must be a frame of kind 6, empty flags, payload length 72, with a valid hash;
+   if they are not, go to the diagnosis below. A trailer whose `archive_id` differs from the header's is
+   `ArchiveIdMismatch`.
+4. Read the frame at `index_offset`. Its kind must be 5 (otherwise `WrongFrameKind` with the expected and the
+   found kind), its hash must verify (otherwise `HashMismatch`), its encoded length must equal `index_len`
+   (otherwise `BadFrameLocation`), and the BLAKE3 of its payload must equal the trailer's `index_hash`
+   (otherwise `IndexHashMismatch`).
+5. Parse the index under the rules above, building the chunk index (record offsets and cumulative plain
+   offsets) in one pass over the chunk table.
+6. The entry table is read only when asked: the frame at the recorded location must be of kind 1 and have
+   the recorded length, and its hash must verify.
+
+### Truncated versus corrupt
+
+When the tail is not a valid trailer, the reader walks the frames forward from the end of the header, under
+the read limits of section 3, skipping unknown kinds as there. If every frame it reads verifies and the input
+ends exactly at a frame boundary, or inside a frame, without a trailer frame having been read, the archive is
+cut short: `Truncated` with `what` set to `trailer`. If a frame fails its hash, the error is that frame's
+`HashMismatch` (or whatever error the frame grammar gives). If a trailer frame is read and bytes follow it,
+the error is `TrailingBytes` with `what` set to `archive`. The walk also reports how many frames verified and
+the offset just after the last good frame, so a repair tool knows where the readable part ends.
+
+Errors of this section: `MerkleRootMismatch`, `IndexHashMismatch`, `ArchiveIdMismatch`,
+`BlockLengthMismatch`, `BlockCoverage`, `BlockOutOfRange`, `BadFrameLocation`, `WrongFrameKind`,
+`NoTrailer` (internal: the tail is not a trailer frame), plus `Truncated` and `TrailingBytes` with the
+`what` strings `index`, `trailer` and `archive`.

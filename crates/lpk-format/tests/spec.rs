@@ -27,6 +27,8 @@ fn spec_tables_match_code() {
         lpk_format::entry_kind_table(),
         lpk_format::entry_flag_table(),
         lpk_format::chunk_record_table(),
+        lpk_format::index_layout_table(),
+        lpk_format::trailer_layout_table(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }
@@ -37,4 +39,18 @@ fn spec_tables_match_code() {
         .join(" ");
     assert_eq!(magic, "0x89 0x4C 0x50 0x4B 0x0D 0x0A 0x1A 0x0A");
     assert!(text.contains(&magic));
+}
+
+#[test]
+fn spec_states_the_trailer_constants() {
+    let text = spec();
+    assert_eq!(lpk_format::TRAILER_PAYLOAD_LEN, 72);
+    assert_eq!(lpk_format::TRAILER_FRAME_LEN, 109);
+    assert!(text.contains("fixed 72-byte payload"));
+    assert!(text.contains("= 109 bytes"));
+    assert!(text.contains("(141 bytes)"));
+    assert_eq!(
+        lpk_format::Header::LEN as u64 + lpk_format::TRAILER_FRAME_LEN,
+        141
+    );
 }
