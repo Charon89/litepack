@@ -1,0 +1,152 @@
+{
+  "class": "office-pdf",
+  "corpus": {
+    "class_bytes": 267862151,
+    "class_files": 166,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 147330071,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.265625,
+      "peak_job_memory_bytes": 196751360,
+      "peak_memory_bytes": 141815808,
+      "peak_process_commit_bytes": 196751360,
+      "timed_out": false,
+      "user_cpu_seconds": 0.96875,
+      "wall_seconds": 1.329826
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.4375,
+      "peak_job_memory_bytes": 269721600,
+      "peak_memory_bytes": 265687040,
+      "peak_process_commit_bytes": 269721600,
+      "timed_out": false,
+      "user_cpu_seconds": 3.375,
+      "wall_seconds": 5.0601379
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 147330071,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.21875,
+        "peak_job_memory_bytes": 196751360,
+        "peak_memory_bytes": 141758464,
+        "peak_process_commit_bytes": 196751360,
+        "timed_out": false,
+        "user_cpu_seconds": 1.125,
+        "wall_seconds": 1.4580205
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.375,
+        "peak_job_memory_bytes": 269717504,
+        "peak_memory_bytes": 265687040,
+        "peak_process_commit_bytes": 269717504,
+        "timed_out": false,
+        "user_cpu_seconds": 3.484375,
+        "wall_seconds": 5.0601379
+      }
+    },
+    {
+      "archive_bytes": 147330071,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.265625,
+        "peak_job_memory_bytes": 195923968,
+        "peak_memory_bytes": 142532608,
+        "peak_process_commit_bytes": 195923968,
+        "timed_out": false,
+        "user_cpu_seconds": 0.96875,
+        "wall_seconds": 1.3016996
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.4375,
+        "peak_job_memory_bytes": 269721600,
+        "peak_memory_bytes": 265637888,
+        "peak_process_commit_bytes": 269721600,
+        "timed_out": false,
+        "user_cpu_seconds": 3.328125,
+        "wall_seconds": 5.0340018
+      }
+    },
+    {
+      "archive_bytes": 147330071,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.40625,
+        "peak_job_memory_bytes": 196751360,
+        "peak_memory_bytes": 141815808,
+        "peak_process_commit_bytes": 196751360,
+        "timed_out": false,
+        "user_cpu_seconds": 0.859375,
+        "wall_seconds": 1.329826
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.546875,
+        "peak_job_memory_bytes": 270446592,
+        "peak_memory_bytes": 265748480,
+        "peak_process_commit_bytes": 270446592,
+        "timed_out": false,
+        "user_cpu_seconds": 3.375,
+        "wall_seconds": 5.0748643
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../tmp/run61552/c22/a.lpk",
+      "office-pdf",
+      "--fast",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "fast"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+9344c44d507c"
+  },
+  "verification": {
+    "files_checked": 166,
+    "files_ok": 166,
+    "verified": true
+  }
+}

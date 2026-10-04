@@ -364,10 +364,14 @@ pub struct Incumbent {
     pub bytes: Traced,
 }
 
-/// The smallest archive among the measured rows of the class; the value carries the sources of
-/// every row compared.
+/// The tool the gates judge: never an incumbent. Its rows are shown next to the incumbents and
+/// compared with them, but they never define "the best measured incumbent" (D-23, D-48).
+pub const SUBJECT_TOOL: &str = "lpk";
+
+/// The smallest archive among the measured incumbent rows of the class (every tool but
+/// [`SUBJECT_TOOL`]); the value carries the sources of every row compared.
 pub fn best_incumbent(rows: &[Row], class: &str) -> Option<Incumbent> {
-    best_incumbent_where(rows, class, |_| true)
+    best_incumbent_where(rows, class, |t| t != SUBJECT_TOOL)
 }
 
 /// [`best_incumbent`] over the rows whose tool id `keep` accepts.
@@ -741,6 +745,10 @@ pub fn best_single(rows: &[Row], classes: &[&str]) -> Option<Incumbent> {
     let mut best: Option<(String, Traced, bool)> = None;
     let mut seen = std::collections::BTreeSet::new();
     for (t, s) in settings(rows) {
+        if t == SUBJECT_TOOL {
+            // The subject's rows are compared with the incumbents, never counted as one.
+            continue;
+        }
         let mut parts = Vec::new();
         let mut single = false;
         for c in classes {
@@ -1176,7 +1184,8 @@ fn gate2(m: &Model, probes: &Probes) -> GateRow {
                 .collect();
             refs.sort_unstable();
             refs.dedup();
-            let compared = best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t));
+            let compared =
+                best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t) && t != SUBJECT_TOOL);
             if m.dedup_known {
                 numbers.push(format!(
                     "tools treated as deduplicating: {}",
