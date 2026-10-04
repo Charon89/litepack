@@ -258,10 +258,11 @@ impl<W: Write> Writer<W> {
         // Whole chunks per segment, so a fixed cut never splits a chunk across reads.
         let per_segment =
             (self.options.block_size / self.options.chunk_size) * self.options.chunk_size;
-        let mut buf =
-            vec![0u8; usize::try_from(per_segment).map_err(|_| bad_options("block_size"))?];
+        // The buffer grows with the file: a small file does not pay for a whole block.
+        let mut buf: Vec<u8> = Vec::new();
         loop {
-            let n = fill(data, &mut buf)?;
+            buf.clear();
+            let n = Read::take(&mut *data, per_segment).read_to_end(&mut buf)?;
             if n == 0 {
                 break;
             }
@@ -276,7 +277,7 @@ impl<W: Write> Writer<W> {
                 entry.chunks.push(i);
             }
             entry.size += n as u64;
-            if n < buf.len() {
+            if (n as u64) < per_segment {
                 break;
             }
         }
@@ -410,18 +411,4 @@ fn frames_max(index: &Index) -> u64 {
         0,
     )
     .max_frame_payload
-}
-
-/// Read until `buf` is full or the input ends; returns the bytes read.
-fn fill(r: &mut dyn Read, buf: &mut [u8]) -> Result<usize, FormatError> {
-    let mut n = 0;
-    while n < buf.len() {
-        match r.read(&mut buf[n..]) {
-            Ok(0) => break,
-            Ok(k) => n += k,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(n)
 }
