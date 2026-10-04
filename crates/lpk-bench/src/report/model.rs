@@ -347,9 +347,21 @@ pub struct Incumbent {
 /// The smallest archive among the measured rows of the class; the value carries the sources of
 /// every row compared.
 pub fn best_incumbent(rows: &[Row], class: &str) -> Option<Incumbent> {
+    best_incumbent_where(rows, class, |_| true)
+}
+
+/// [`best_incumbent`] over the rows whose tool id `keep` accepts.
+pub fn best_incumbent_where(
+    rows: &[Row],
+    class: &str,
+    keep: impl Fn(&str) -> bool,
+) -> Option<Incumbent> {
     let mut best: Option<(&Row, &Measured)> = None;
     let mut all: Vec<&Traced> = Vec::new();
-    for r in rows.iter().filter(|r| r.class == class) {
+    for r in rows
+        .iter()
+        .filter(|r| r.class == class && keep(r.tool.as_str()))
+    {
         if let Some(m) = r.measured() {
             all.push(&m.size_bytes);
             if best.is_none_or(|(_, b)| m.size_bytes.value < b.size_bytes.value) {
@@ -462,11 +474,15 @@ fn deflate_est(p: &Probes, class: &str, cb: &Traced) -> Result<Est, String> {
 
 const PATCH_TOOL: &str = "zstd --patch-from";
 
-fn backup_est(p: &Probes, cb: &Traced) -> Result<Est, String> {
+fn backup_est(p: &Probes, class: &str, cb: &Traced) -> Result<Est, String> {
     let pf = p.dedup.as_ref().ok_or("probe dedup is not available")?;
-    let versions = &pf.env.data.versions;
+    let versions = if class == dedup::VERSIONS_LARGE_CLASS {
+        &pf.env.data.versions_large
+    } else {
+        &pf.env.data.versions
+    };
     if versions.is_empty() {
-        return Err("probe dedup found no version folder".into());
+        return Err(format!("probe dedup found no version folder of {class}"));
     }
     let total: u64 = versions.iter().map(|v| v.bytes).sum();
     let a: u64 = versions
@@ -608,10 +624,13 @@ pub const RULES: [(&str, &str); 6] = [
          corrections added, whole file compressed",
     ),
     (
-        "backup-versions",
+        "backup-versions, backup-versions-large",
         "the smaller of (a) the sum over versions of the new unique chunks compressed with zstd \
          level 19 (version 1 whole) and (b) version 1 at zstd level 19 plus the zstd --patch-from \
-         patches of the later versions (probe dedup); the report names which was used",
+         patches of the later versions (probe dedup); the report names which was used. Gate G2 \
+         is evaluated on backup-versions-large only (D-43), against the best tool x setting that \
+         the catalogue does not flag `dedup`; deduplicating tools are printed as reference, not \
+         compared",
     ),
     (
         "text-prose, logs-text, small-files",
@@ -631,7 +650,7 @@ pub const RULES: [(&str, &str); 6] = [
 ];
 
 /// Classes with a probe-based or stored rule; the rest claim no gain.
-pub const RULED: [&str; 14] = [
+pub const RULED: [&str; 15] = [
     "photo-jpeg",
     "photo-jpeg-edited",
     "office-pdf",
@@ -640,6 +659,7 @@ pub const RULED: [&str; 14] = [
     "game-assets",
     "photo-raw-png",
     "backup-versions",
+    "backup-versions-large",
     "text-prose",
     "logs-text",
     "small-files",
@@ -658,7 +678,7 @@ pub fn estimate(
         "photo-jpeg" | "photo-jpeg-edited" => jpeg_est(probes, class, cb),
         "office-pdf" | "archives-nested" | "software-installed" | "game-assets"
         | "photo-raw-png" => deflate_est(probes, class, cb),
-        "backup-versions" => backup_est(probes, cb),
+        "backup-versions" | "backup-versions-large" => backup_est(probes, class, cb),
         "text-prose" | "logs-text" | "small-files" => text_est(probes, class, cb),
         "model-weights" => weights_est(probes, class, cb),
         "video" | "encrypted-random" => Ok(Est {
@@ -842,6 +862,8 @@ fn mix_ratio(
 #[derive(Debug)]
 pub struct Model {
     pub rows: Vec<Row>,
+    /// Ids of the tools the catalogue flags `dedup = true` (recorded in `tools.json`).
+    pub dedup_tools: std::collections::BTreeSet<String>,
     pub classes: Vec<ClassView>,
     pub mixes: Vec<MixView>,
 }
@@ -907,8 +929,17 @@ impl Model {
                 }
             })
             .collect();
+        let dedup_tools = inputs
+            .baseline
+            .tools
+            .tools
+            .iter()
+            .filter(|t| t.dedup)
+            .map(|t| t.id.clone())
+            .collect();
         Model {
             rows,
+            dedup_tools,
             classes,
             mixes,
         }
@@ -954,6 +985,8 @@ pub struct GateRow {
 pub const G1_VS_BEST_PCT: f64 = 90.0;
 pub const G1_VS_ULTRA_PCT: f64 = 85.0;
 pub const G2_VS_BEST_PCT: f64 = 50.0;
+/// The class gate G2 is evaluated on (D-43).
+pub const G2_CLASS: &str = "backup-versions-large";
 pub const G3_MIN_PCT: f64 = 80.0;
 
 /// `a <= limit% of b`, exactly for byte counts.
@@ -1089,35 +1122,66 @@ fn gate1(m: &Model) -> GateRow {
 
 fn gate2(m: &Model) -> GateRow {
     let title = format!(
-        "G2 versioned backup: on backup-versions, estimate at most {G2_VS_BEST_PCT:.0}% of the best \
-         measured incumbent"
+        "G2 versioned backup (D-43): on {G2_CLASS}, estimate at most {G2_VS_BEST_PCT:.0}% of the \
+         best measured tool x setting among the tools that do not deduplicate across files"
     );
     let mut numbers = Vec::new();
-    let verdict = match m.class("backup-versions") {
-        None => Verdict::NotEvaluable("class backup-versions is not in the corpus".into()),
-        Some(v) => match (&v.est, &v.best) {
-            (Err(e), _) => Verdict::NotEvaluable(format!("estimate: {e}")),
-            (_, None) => Verdict::NotEvaluable("no measured incumbent".into()),
-            (Ok(e), Some(b)) => {
-                numbers.push(format!("estimate: {}", e.bytes.show(bytes_s)));
-                numbers.push(format!(
-                    "best incumbent ({}): {}",
-                    b.name,
-                    b.bytes.show(bytes_s)
-                ));
-                numbers.push(format!(
-                    "estimate / best incumbent: {}",
-                    ratio_pct(&e.bytes, &b.bytes).show(pct1)
-                ));
-                if within(e.bytes.value, b.bytes.value, G2_VS_BEST_PCT) {
-                    Verdict::Pass
-                } else {
-                    Verdict::Fail
+    let is_dedup = |t: &str| m.dedup_tools.contains(t);
+    let verdict = match m.class(G2_CLASS) {
+        None => Verdict::NotEvaluable(format!(
+            "class {G2_CLASS} is not in the baseline directory (G2 is not evaluated on \
+             backup-versions any more)"
+        )),
+        Some(v) => {
+            // Deduplicating tools' best rows: reference only.
+            let mut refs: Vec<&str> = m
+                .rows
+                .iter()
+                .filter(|r| r.class == G2_CLASS && is_dedup(&r.tool))
+                .map(|r| r.tool.as_str())
+                .collect();
+            refs.sort_unstable();
+            refs.dedup();
+            let compared = best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t));
+            let verdict = match (&v.est, &compared) {
+                (Err(e), _) => Verdict::NotEvaluable(format!("estimate: {e}")),
+                (_, None) => Verdict::NotEvaluable(
+                    "no measured incumbent among the tools not flagged dedup".into(),
+                ),
+                (Ok(e), Some(b)) => {
+                    numbers.push(format!("estimate: {}", e.bytes.show(bytes_s)));
+                    numbers.push(format!(
+                        "best incumbent, not deduplicating ({}): {}",
+                        b.name,
+                        b.bytes.show(bytes_s)
+                    ));
+                    numbers.push(format!(
+                        "estimate / best incumbent: {}",
+                        ratio_pct(&e.bytes, &b.bytes).show(pct1)
+                    ));
+                    if within(e.bytes.value, b.bytes.value, G2_VS_BEST_PCT) {
+                        Verdict::Pass
+                    } else {
+                        Verdict::Fail
+                    }
+                }
+            };
+            for t in refs {
+                match best_incumbent_where(&m.rows, G2_CLASS, |x| x == t) {
+                    Some(b) => numbers.push(format!(
+                        "reference, not compared (deduplicating tool {}): {}",
+                        b.name,
+                        b.bytes.show(bytes_s)
+                    )),
+                    None => numbers.push(format!(
+                        "reference, not compared (deduplicating tool {t}): no measured row"
+                    )),
                 }
             }
-        },
+            verdict
+        }
     };
-    let notes = problem_rows(&m.rows, &["backup-versions"])
+    let notes = problem_rows(&m.rows, &[G2_CLASS])
         .map(|p| format!("G2 inputs, {p}"))
         .into_iter()
         .collect();

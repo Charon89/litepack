@@ -299,6 +299,10 @@ pub struct ToolEntry {
     pub manual: bool,
     /// `bench/tools.local.toml` overrode this tool on this machine.
     pub local_override: bool,
+    /// The catalogue flags the tool as deduplicating across files (D-43); absent in results
+    /// written before that.
+    #[serde(default)]
+    pub dedup: bool,
 }
 
 /// `tools.json`: every catalogue tool, found or skipped, and the version used. The executable
@@ -328,6 +332,7 @@ impl ToolsFile {
                     catalogue_verified: d.tool.verified,
                     manual: d.tool.manual,
                     local_override: d.local_override,
+                    dedup: d.tool.dedup,
                 }
             })
             .collect();
@@ -597,6 +602,7 @@ pub mod samples {
             catalogue_verified: true,
             manual: false,
             local_override: false,
+            dedup: matches!(id, "zpaqfranz" | "tsaur"),
         };
         ToolsFile {
             schema_version: SCHEMA_VERSION,
@@ -675,6 +681,35 @@ pub mod samples {
 mod tests {
     use super::samples::*;
     use super::*;
+
+    #[test]
+    fn tools_json_records_the_dedup_flag_and_old_files_default_to_false() {
+        let cat =
+            crate::run::catalogue::Catalogue::parse(include_str!("../../../../bench/tools.toml"))
+                .expect("catalogue");
+        let found: Vec<Discovered> = ["zpaqfranz", "zstd"]
+            .iter()
+            .map(|id| Discovered {
+                tool: cat.get(id).expect("tool").clone(),
+                status: Status::Skipped {
+                    reason: "not installed".into(),
+                },
+                local_override: false,
+            })
+            .collect();
+        let file = ToolsFile::from_discovered(&found);
+        assert!(file.tools[0].dedup && !file.tools[1].dedup);
+        let text = render(&file);
+        assert!(text.contains("\"dedup\": true") && text.contains("\"dedup\": false"));
+        let back: ToolsFile = serde_json::from_str(&text).expect("round trip");
+        assert_eq!(back, file);
+        let old = text
+            .replace(",\n      \"dedup\": true", "")
+            .replace(",\n      \"dedup\": false", "");
+        assert!(!old.contains("dedup"));
+        let parsed: ToolsFile = serde_json::from_str(&old).expect("old file");
+        assert!(parsed.tools.iter().all(|t| !t.dedup));
+    }
 
     #[test]
     fn medians_use_the_middle_value() {
