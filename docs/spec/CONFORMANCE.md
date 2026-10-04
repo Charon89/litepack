@@ -19,7 +19,12 @@ An independent decoder passes the gate when, for every archive in the table belo
    rollback to generation 0 and to generation 1 (spec section 15: truncate the file to the end of that
    generation's trailer) it reads exactly `files_at_generation_0` and `files_at_generation_1`; the rollback is
    done on a copy;
-6. for each malformed vector it fails with the error class below, and it extracts nothing from them.
+6. for `malformed-truncated.lpk` and `malformed-hashflip.lpk` it fails with the error class below and extracts
+   nothing from them;
+7. recovery (spec section 13) is part of the gate: on `recovery-groups.lpk` its recovery check reports no damage;
+   on `malformed-recovery-damaged.lpk` it reports exactly one damaged shard, extracts every file that no damaged
+   chunk touches, and its repair writes a copy whose bytes equal `recovery-groups.lpk` — a decoder without
+   repair may skip the repair clause but must still report the damage.
 
 The plain contents of the vectors are not committed; `expected.toml` gives their hashes. (They are generated
 from a xorshift pattern by `tests/common/mod.rs::pattern`; the hashes make that generator unnecessary.)

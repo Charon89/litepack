@@ -28,7 +28,7 @@ Seeds: `seeds/<target>/` (real payloads cut from the vectors by `cargo test -p l
 
 ```sh
 rustup toolchain install nightly          # cargo-fuzz needs nightly
-cargo install cargo-fuzz --locked
+cargo install cargo-fuzz --locked --version 0.13.2
 export CARGO_TARGET_DIR=~/lpk-fuzz-target # under WSL: keep the build off /mnt (slow)
 bash fuzz/run.sh -t 60                    # every target for 60 s
 bash fuzz/run.sh -t 600 archive_mutate    # one target for 10 min
