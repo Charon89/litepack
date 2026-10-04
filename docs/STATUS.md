@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 19:24 UTC (15:24 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 23:04 UTC (19:04 local on the measuring machine). No measurement is running.
 
 **Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
 (37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
@@ -37,9 +37,15 @@ its fifteen clarifications written back. Measured on `small` (`bench/results/202
 estimate within the container overhead and sit below every incumbent; extraction is single-threaded Lepton, far
 below the incumbents' rate, so the acceptance's "parallel decode" clause stays open until E2-19. **E2-6 (Balanced tier) is done (D-51)**: on `small` it is below 7-Zip Ultra on `logs-text` and a tenth or two of a
 percentage point above on `text-prose` and `office-pdf` (near-parity, recorded as such); behind on `source-git` and
-`software-installed` (file ordering, BCJ). **E0-1's source is now `nodejs/node` (D-52, owner's decision)**: the re-pin
-is on `task/e0-1-node`; next on the measuring machine: rebuild `full` twice, check each version above 256 MiB, run
-the baseline on the class and `probe dedup`, report, commit, tick. All three `lpk` tiers are measured on every class
+`software-installed` (file ordering, BCJ). **E0-1 is measured on `nodejs/node` v22/v23/v24 (D-52) and waits for two owner decisions:** the G2 estimate on that set
+is 100.3% of 7-Zip Ultra (`bench/reports/phase1-2026-10-04-full-versioned.md`) because major releases six months
+apart share little at chunk level — a backup-like series (consecutive patch releases of one line, weeks apart) is the
+honest model for the gate; and the Windows `tar` crashes on nine node file names outside the BMP or in CJK, so the
+`store`, zstd and xz rows are missing until those names are excluded from the export (or another tar is used).
+**E2-7 (Fold: CDC chunking and dedup) is in its fix round** — the acceptance came out equal to the probe's figure.
+**E2-19 (extraction performance) moves up next:** `lpk/fast` took 3107 s to extract the versioned class and
+`lpk/balanced` timed out, the one-block cache over 127153 files; every speed figure of `lpk` is unusable until it is
+fixed. All three `lpk` tiers are measured on every class
 of `small` (`bench/reports/phase1-2026-10-04-small-tiers.md`); the report never counts `lpk` as an incumbent.
 Then E2-7/E2-8 (Fold), E2-12/13/14 (seal), E2-18/19/20 (speed, memory); the revision process (D-49)
 serves E2-9 (delta), E2-10/11 (deflate, container), E2-15 (bwt), E2-16 (png-filter), E2-17 (base64, utf16).

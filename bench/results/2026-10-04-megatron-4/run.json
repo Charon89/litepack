@@ -1,0 +1,142 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "af1c06215149ab80ff5c0a133aff1715b8601aeae9895333de1e0be3d3720913",
+  "classes": [
+    "backup-versions-large"
+  ],
+  "combinations": [
+    {
+      "class": "backup-versions-large",
+      "outcome": "failed",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "failed",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "failed",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "failed",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "failed",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "failed",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "failed",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}
