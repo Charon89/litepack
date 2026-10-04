@@ -8,9 +8,9 @@ The reference reader is the `lpk-format` crate; the tables below are checked aga
 
 - Byte order: every fixed-width integer is little-endian.
 - Varint: unsigned LEB128 for a `u64`, seven bits per byte, low group first, the high bit of a byte
-  meaning "more bytes follow". At most 10 bytes. Readers require the canonical (shortest) form: a final
-  continuation group that is all zeros (for example `0x80 0x00`) is an error, and so is an eleventh byte
-  or a tenth byte carrying more than one bit.
+  meaning "more bytes follow". At most 10 bytes. Readers require the canonical (shortest) form: the last
+  byte of a multi-byte varint must not be `0x00` (so `0x80 0x00` is an error), and a tenth byte, if
+  present, must be exactly `0x01`; a varint that continues past ten bytes is an error.
 - Hash: BLAKE3-256 (32 bytes, default output).
 - Sizes: all lengths are in bytes.
 
@@ -28,6 +28,10 @@ The header is fixed at 32 bytes at offset 0.
 
 The magic follows the PNG pattern: a non-ASCII lead byte, the name, CR LF to catch line-ending
 conversion, SUB to stop the DOS `type` command, and LF.
+
+A reader checks the header in this order: the length (input shorter than 32 bytes is the error
+`Truncated { what: "header" }`), the magic (a mismatch is the error `BadMagic`), the major version, and
+only then the flags, because a future major version may redefine them.
 
 Version rule: a reader accepts `version_major` 1 and any `version_minor`; any other major version is
 an error.

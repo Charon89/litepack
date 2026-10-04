@@ -16,7 +16,14 @@ fn spec() -> String {
 #[test]
 fn spec_tables_match_code() {
     let text = spec();
-    assert!(text.contains(&lpk_format::frame_kind_table()));
+    for table in [
+        lpk_format::frame_kind_table(),
+        lpk_format::frame_flag_table(),
+        lpk_format::header_flag_table(),
+        lpk_format::header_byte_table(),
+    ] {
+        assert!(text.contains(&table), "spec lacks table:\n{table}");
+    }
     let magic = lpk_format::MAGIC
         .iter()
         .map(|b| format!("0x{b:02X}"))

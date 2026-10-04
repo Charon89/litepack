@@ -92,6 +92,22 @@ mod tests {
     }
 
     #[test]
+    fn tenth_byte_zero_is_non_canonical() {
+        let mut bytes = vec![0xFFu8; 9];
+        bytes.push(0x00);
+        let e = read(&mut bytes.as_slice()).unwrap_err();
+        assert!(matches!(e, FormatError::NonCanonicalVarint));
+    }
+
+    #[test]
+    fn tenth_byte_0x81_too_long() {
+        let mut bytes = vec![0xFFu8; 9];
+        bytes.push(0x81);
+        let e = read(&mut bytes.as_slice()).unwrap_err();
+        assert!(matches!(e, FormatError::VarintTooLong));
+    }
+
+    #[test]
     fn truncated() {
         let e = read(&mut [0x80u8].as_slice()).unwrap_err();
         assert!(matches!(e, FormatError::Truncated { what: "varint" }));

@@ -58,6 +58,35 @@ impl HeaderFlags {
     }
 }
 
+/// The Markdown table of header flags, pasted verbatim into the spec.
+pub fn header_flag_table() -> String {
+    String::from(
+        "| Bit | Name | Meaning |\n|---|---|---|\n\
+         | 0 | ENCRYPTED | the archive content is encrypted |\n\
+         | 1 | LISTABLE | the archive can be listed without the key |\n\
+         | 2-31 | reserved | must be zero; a reader rejects the header otherwise |\n",
+    )
+}
+
+/// The Markdown byte table of the header, pasted verbatim into the spec.
+pub fn header_byte_table() -> String {
+    let magic = MAGIC
+        .iter()
+        .map(|b| format!("0x{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let v = FormatVersion::CURRENT;
+    format!(
+        "| Offset | Size | Field | Value / meaning |\n|---|---|---|---|\n\
+         | 0 | 8 | magic | `{magic}` (`\\x89LPK\\r\\n\\x1a\\n`) |\n\
+         | 8 | 2 | version_major | {} |\n\
+         | 10 | 2 | version_minor | {} for this draft |\n\
+         | 12 | 4 | flags | see below |\n\
+         | 16 | 16 | archive_id | 16 random bytes chosen by the writer |\n",
+        v.major, v.minor
+    )
+}
+
 /// The file header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -96,13 +125,12 @@ impl Header {
 
     /// Read and validate a header.
     pub fn read(r: &mut impl Read) -> Result<Self, FormatError> {
-        let mut magic = [0u8; 8];
-        read_exact_or(r, &mut magic, "magic")?;
-        if magic != MAGIC {
+        let mut all = [0u8; Self::LEN];
+        read_exact_or(r, &mut all, "header")?;
+        if all[0..8] != MAGIC {
             return Err(FormatError::BadMagic);
         }
-        let mut rest = [0u8; Self::LEN - 8];
-        read_exact_or(r, &mut rest, "header")?;
+        let rest = &all[8..];
         let major = u16::from_le_bytes([rest[0], rest[1]]);
         let minor = u16::from_le_bytes([rest[2], rest[3]]);
         let flag_bits = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
@@ -175,11 +203,20 @@ mod tests {
     }
 
     #[test]
+    fn major_checked_before_flags() {
+        let mut b = bytes(&sample());
+        b[8] = 2;
+        b[12] |= 0b100;
+        let e = Header::read(&mut b.as_slice()).unwrap_err();
+        assert!(matches!(e, FormatError::UnsupportedMajor { found: 2 }));
+    }
+
+    #[test]
     fn truncated() {
         let b = bytes(&sample());
         let e = Header::read(&mut &b[..31]).unwrap_err();
         assert!(matches!(e, FormatError::Truncated { what: "header" }));
         let e = Header::read(&mut &b[..3]).unwrap_err();
-        assert!(matches!(e, FormatError::Truncated { what: "magic" }));
+        assert!(matches!(e, FormatError::Truncated { what: "header" }));
     }
 }

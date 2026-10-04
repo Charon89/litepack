@@ -38,7 +38,7 @@ impl FrameKind {
         Self::ALL.iter().copied().find(|c| *c as u16 == k)
     }
 
-    /// Stable lower-case name used in the spec.
+    /// Stable CamelCase name used in the spec.
     pub fn name(self) -> &'static str {
         match self {
             FrameKind::EntryTable => "EntryTable",
@@ -123,6 +123,7 @@ impl Default for ReadLimits {
 }
 
 const HASH_LEN: usize = 32;
+const READ_CHUNK: usize = 64 * 1024;
 
 impl Frame {
     /// Write the frame, hashing the payload.
@@ -177,15 +178,21 @@ impl Frame {
 
         let mut hasher = blake3::Hasher::new();
         let mut payload = Vec::new();
+        let mut scratch = Vec::new();
         let mut remaining = len;
-        let mut buf = vec![0u8; 64 * 1024];
         while remaining > 0 {
-            let want = remaining.min(buf.len() as u64) as usize;
-            read_exact_or(r, &mut buf[..want], "payload")?;
-            hasher.update(&buf[..want]);
-            if known.is_some() {
-                payload.extend_from_slice(&buf[..want]);
-            }
+            let want = remaining.min(READ_CHUNK as u64) as usize;
+            // Buffers grow by at most one chunk per step, never by the declared length.
+            let chunk: &mut [u8] = if known.is_some() {
+                let start = payload.len();
+                payload.resize(start + want, 0);
+                &mut payload[start..]
+            } else {
+                scratch.resize(want, 0);
+                &mut scratch[..]
+            };
+            read_exact_or(r, chunk, "payload")?;
+            hasher.update(chunk);
             remaining -= want as u64;
         }
         let mut hash = [0u8; HASH_LEN];
@@ -206,6 +213,15 @@ impl Frame {
             },
         }))
     }
+}
+
+/// The Markdown table of frame flags, pasted verbatim into the spec.
+pub fn frame_flag_table() -> String {
+    String::from(
+        "| Bit | Name | Meaning |\n|---|---|---|\n\
+         | 0 | MUST_UNDERSTAND | a reader that does not know the kind must fail instead of skipping |\n\
+         | 1-15 | reserved | must be zero; a reader rejects the frame otherwise |\n",
+    )
 }
 
 /// The Markdown table of frame kinds, pasted verbatim into the spec.
@@ -362,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn huge_declared_len_does_not_allocate() {
+    fn huge_declared_len_over_limit() {
         let mut b = Vec::new();
         b.extend_from_slice(&2u16.to_le_bytes());
         b.extend_from_slice(&0u16.to_le_bytes());
@@ -370,6 +386,38 @@ mod tests {
         assert!(matches!(
             read_one(&b),
             Err(FormatError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn huge_declared_len_within_limit_is_bounded_by_input() {
+        for kind in [2u16, 0x9000] {
+            let mut b = Vec::new();
+            b.extend_from_slice(&kind.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes());
+            varint::write(&mut b, 1 << 40).unwrap();
+            b.extend_from_slice(&[1, 2, 3]);
+            let limits = ReadLimits {
+                max_payload: u64::MAX,
+            };
+            let start = std::time::Instant::now();
+            let e = Frame::read(&mut &b[..], &limits).unwrap_err();
+            assert!(matches!(e, FormatError::Truncated { what: "payload" }));
+            assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn cut_inside_multibyte_length() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.push(0x80); // continuation byte, then end of input
+        assert!(matches!(
+            read_one(&b),
+            Err(FormatError::Truncated {
+                what: "frame header"
+            })
         ));
     }
 

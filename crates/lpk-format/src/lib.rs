@@ -11,6 +11,8 @@ pub mod magic;
 pub mod varint;
 
 pub use error::FormatError;
-pub use frame::{frame_kind_table, Frame, FrameFlags, FrameKind, ReadFrame, ReadLimits};
-pub use header::{FormatVersion, Header, HeaderFlags};
+pub use frame::{
+    frame_flag_table, frame_kind_table, Frame, FrameFlags, FrameKind, ReadFrame, ReadLimits,
+};
+pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, HeaderFlags};
 pub use magic::MAGIC;
