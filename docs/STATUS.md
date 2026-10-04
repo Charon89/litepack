@@ -3,14 +3,16 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-05, about 07:45 UTC (03:45 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-05, about 13:55 UTC (09:55 local on the measuring machine). No measurement is running.
 
 **Phase 1 is under way.** Phase 0 closed with D-08 (GO) and D-27; the Phase 1 task list is in PLAN (37 tasks).
-On `main`: E1-1…E1-11 (D-28…D-38): frames, entry table, chunks and Merkle tree, index and trailer, decode
-envelope, primitive registry and decode graph, the streaming writer with extraction and the `lpk-decode` tool,
-zstd and LZMA in the pure-Rust reference decoder with committed test vectors, the reconstruction record types,
-and Reed-Solomon recovery in interleaved groups with repair. In progress: E1-12 encryption on
-`task/e1-12-encryption`; then E1-13 journal and E1-14 fuzzing and the independent-decoder gate, which closes E1.
+On `main`: E1-1…E1-13 (D-28…D-40) — the whole `.lpk` v1 format: frames, entry table, chunks and Merkle tree,
+index and trailer, decode envelope, primitive registry and decode graph, the streaming writer with extraction
+and the `lpk-decode` tool, zstd and LZMA in the pure-Rust reference decoder with committed test vectors,
+reconstruction records, Reed-Solomon recovery in interleaved groups, encryption, and generations with rollback.
+In progress: E1-14 in three parts — (a) fuzz targets, a Linux fuzz job and a local WSL run plus the conformance
+document (`task/e1-14a-fuzz`); then (b) a spec read-through by a reviewer who has not seen the code and (c) an
+independent decoder written from the spec and the vectors alone — the gate that freezes format v1 (D-41).
 Each task runs as in Phase 0: implementer in a worktree from a brief with exact values → read-only review → fix
 round → the format values recorded as a decision → PLAN tick with evidence → PR → `main` fast-forwarded (merge
 `main` into the branch first).
@@ -26,7 +28,7 @@ round → the format values recorded as a decision → PLAN tick with evidence �
 ## Branches in flight
 | Branch | State | What is left |
 |---|---|---|
-| `task/e1-12-encryption` | implementer running (brief: AES-256-GCM / XChaCha20-Poly1305 sealed payloads with derived nonces and associated data, a key-slot frame with Argon2id and an optional keyfile, listable mode, wrong password refused at the key slot, committed vectors) | review, fix round, D-39, tick, PR, fast-forward `main` |
+| `task/e1-14a-fuzz` | implementer running (brief: `fuzz/` crate with a target per reader path and a structure-aware mutator over the vectors, `fuzz.yml` manual + weekly, a local run through WSL with bugs fixed per commit, `docs/spec/CONFORMANCE.md`) | review, fix round, PR, fast-forward `main`; then E1-14b/c |
 
 ## How to resume
 
