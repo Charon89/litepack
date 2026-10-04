@@ -1468,8 +1468,10 @@ table tying it to the start of its generation. Walking the chain back (the refer
 applies these checks to each trailer from the last one down, in this order: its index must end exactly where it starts
 (`BadFrameLocation`, `index`); at generation 0 its `previous_trailer_offset` must be 0 (`BadTrailer`,
 `previous_trailer_offset`) and the walk ends; otherwise the previous trailer frame (133 bytes) must end at or before
-its index (`BadFrameLocation`, `trailer`); it is read as a trailer of the fixed shape (`NoTrailer`), with a valid hash
-(`HashMismatch`), not cut short (`Truncated`, `trailer`); it must carry the header's archive id (`ArchiveIdMismatch`) and
+its index (`BadFrameLocation`, `trailer`) — that bound is also the bound of the read: the 133 bytes at the offset are
+read as a recorded frame location, so a frame that would run past the newer index is `BadFrameLocation` before its
+shape is judged; it is read as a trailer of the fixed shape (`NoTrailer`), with a valid hash (`HashMismatch`), not
+cut short (`Truncated`, `trailer`); it must carry the header's archive id (`ArchiveIdMismatch`) and
 the generation number one lower (`GenerationMismatch` with the expected and the found number). The chain lists, newest
 first, each generation's number, trailer offset, index offset and index hash. `lpk-decode info` prints the chain length,
 or the chain error when an old trailer is damaged (the archive itself still opens at its last trailer).

@@ -67,3 +67,7 @@ Changes that alter an outcome it may have chosen differently: ruling 1 (hashflip
 lzma marker), ruling 5 (`BadHeaderFlags`), ruling 7 (key slot before trailer; `BadFrameLocation` versus
 `HashMismatch` order), ruling 10 (new generation-table and trailer rules), and `TrailingBytes` for a hash failure
 right after a trailer (ruling 11).
+
+After the independent decoder's re-run: the keyless `verify` line's `<entries>` is the entry count of a listable
+archive and `0` when the table is sealed (CONFORMANCE); the read of a previous trailer in the chain is bounded by
+the newer index's offset (section 15, "The trailer chain").
