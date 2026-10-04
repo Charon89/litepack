@@ -219,7 +219,8 @@
         "version": { "$ref": "#/$defs/text", "description": "Version read from the tool; present exactly when status is found." },
         "catalogue_verified": { "type": "boolean", "description": "False when the catalogue's command lines come from documentation nobody has run." },
         "manual": { "type": "boolean", "description": "True for tools the owner licenses and configures by hand." },
-        "local_override": { "type": "boolean", "description": "True when bench/tools.local.toml overrode this tool on this machine." }
+        "local_override": { "type": "boolean", "description": "True when bench/tools.local.toml overrode this tool on this machine." },
+        "dedup": { "type": "boolean", "description": "True when the catalogue flags the tool as deduplicating across files (D-43); absent in results written before that, meaning false." }
       },
       "if": { "properties": { "status": { "const": "found" } } },
       "then": { "required": ["version"], "not": { "required": ["reason"] } },

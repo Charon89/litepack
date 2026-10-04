@@ -273,6 +273,33 @@ impl Drop for RunLock {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_committed_lock_pins_every_source_of_the_committed_registry_for_each_profile() {
+        use super::super::registry::{Profile, Registry};
+        let reg = Registry::parse(include_str!("../../../../bench/corpus-sources.toml"))
+            .expect("registry");
+        let lock = Lock::parse(include_str!("../../../../bench/corpus.lock")).expect("lock");
+        for s in &reg.sources {
+            if s.spec.is_derived() {
+                continue;
+            }
+            for p in &s.profiles {
+                assert!(
+                    !lock.entries(*p, &s.id).is_empty(),
+                    "source `{}` has no lock entry for profile {p:?}",
+                    s.id
+                );
+            }
+        }
+        for id in ["godot-v1", "godot-v2", "godot-v3"] {
+            let src = reg.sources.iter().find(|s| s.id == id).expect("source");
+            assert_eq!(src.class, "backup-versions-large");
+            assert_eq!(src.profiles, [Profile::Full], "{id} is full only");
+            assert_eq!(lock.entries(Profile::Full, id).len(), 1, "{id}");
+            assert!(lock.entries(Profile::Small, id).is_empty(), "{id}");
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn save_waits_for_a_temporary_file_held_without_sharing() {

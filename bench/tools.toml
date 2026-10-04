@@ -41,6 +41,9 @@
 #                   true when the thread count changes the archive size, not only the speed.
 #                   Copied into every result. Unknown for manual tools: the owner sets it in
 #                   bench/tools.local.toml.
+#   dedup           true when the tool deduplicates across files (default false; D-43). Gate G2
+#                   is compared against the best tool without this flag; flagged tools' best
+#                   rows are printed as reference only. Recorded in `tools.json`.
 #
 # Working-directory rules. CREATE (every directory-mode tool and the tar step of tar-stream
 # tools): the runner executes the tool with its working directory set to the parent of the class
@@ -209,6 +212,7 @@ create = ["a", "{archive}", "{input}", "{settings}", "{threads}", "-noeta"]
 extract = ["x", "{archive}", "-to", "{outdir}/", "{threads}", "-noeta"]
 threads = ["-t{n}"]
 ratio_depends_on_threads = false
+dedup = true
 licence = "MIT"
 install = { url = "https://github.com/fcorbelli/zpaqfranz" }
 note = "Run against zpaqfranz 65.4 (create, extract, compare). `-t N` as two arguments is not accepted; `-t4` is. Archive size did not change with the thread count at -m1 in a check on a source-code sample; -m5 was not checked."
@@ -232,6 +236,7 @@ create = ["pack", "{archive}", "{input}", "{settings}", "{threads}"]
 extract = ["unpack", "{archive}", "{outdir}", "{threads}"]
 threads = ["--jobs", "{n}"]
 ratio_depends_on_threads = false
+dedup = true
 licence = "Apache-2.0 OR MIT"
 install = { url = "https://github.com/iulianbondari/t-saur" }
 verified = false

@@ -107,6 +107,10 @@ pub struct Tool {
     /// The thread count changes the archive size, not only the speed.
     #[serde(default)]
     pub ratio_depends_on_threads: bool,
+    /// The tool deduplicates across files (D-43): the report compares gate G2 against the best
+    /// tool without this flag and prints the flagged tools as reference only.
+    #[serde(default)]
+    pub dedup: bool,
     pub licence: String,
     #[serde(default)]
     pub install: Install,
@@ -415,6 +419,22 @@ mod tests {
         assert_eq!(args("best"), ["-m5", "-md256m"]);
         assert_eq!(args("best-solid"), ["-m5", "-md256m", "-s"]);
         assert_eq!(args("best-rr3"), ["-m5", "-md256m", "-rr3%"]);
+    }
+
+    #[test]
+    fn dedup_flag_is_parsed_defaults_to_false_and_is_set_on_the_dedup_tools() {
+        let cat = Catalogue::parse(REAL).expect("catalogue");
+        for (id, dedup) in [
+            ("zpaqfranz", true),
+            ("tsaur", true),
+            ("7z", false),
+            ("rar", false),
+            ("zstd", false),
+            ("xz", false),
+            ("store", false),
+        ] {
+            assert_eq!(cat.get(id).expect("tool").dedup, dedup, "{id}");
+        }
     }
 
     #[test]

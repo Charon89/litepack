@@ -17,6 +17,8 @@ use crate::run::result::samples;
 use crate::run::result::{render as render_json, Sample, ToolResult};
 
 const MB: u64 = 1_000_000;
+/// A version of the large class: above the 256 MiB window (D-43 premise).
+const LARGE_VERSION_BYTES: u64 = 300 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures
@@ -47,7 +49,7 @@ fn result(
 }
 
 /// (class, class bytes, [store, 7z/ultra, 7z/mx5, zstd/3] archive bytes).
-const CLASSES: [(&str, u64, [u64; 4]); 7] = [
+const CLASSES: [(&str, u64, [u64; 4]); 8] = [
     (
         "photo-jpeg",
         10 * MB,
@@ -66,6 +68,11 @@ const CLASSES: [(&str, u64, [u64; 4]); 7] = [
     (
         "backup-versions",
         30 * MB,
+        [30_000_100, 8_000_000, 9_000_000, 12_000_000],
+    ),
+    (
+        "backup-versions-large",
+        LARGE_VERSION_BYTES * 3,
         [30_000_100, 8_000_000, 9_000_000, 12_000_000],
     ),
     (
@@ -289,6 +296,11 @@ fn dedup_data(last_new: u64, patches: Option<(u64, u64)>) -> dedup::Data {
         Some((a, b)) => (Some(a), Some(b)),
         None => (None, None),
     };
+    let versions = vec![
+        version("v1", 3 * MB, None),
+        version("v2", 500_000, Some(p2)),
+        version("v3", last_new, Some(p3)),
+    ];
     dedup::Data {
         chunking: dedup::Chunking {
             algorithm: "fastcdc".into(),
@@ -297,13 +309,16 @@ fn dedup_data(last_new: u64, patches: Option<(u64, u64)>) -> dedup::Data {
             max_bytes: 524_288,
             chunk_hash: "blake3".into(),
         },
-        classes: vec![row("backup-versions")],
+        classes: vec![row("backup-versions"), row("backup-versions-large")],
         corpus: row("(corpus)"),
-        versions: vec![
-            version("v1", 3 * MB, None),
-            version("v2", 500_000, Some(p2)),
-            version("v3", last_new, Some(p3)),
-        ],
+        versions: versions.clone(),
+        versions_large: versions
+            .into_iter()
+            .map(|v| dedup::Version {
+                bytes: LARGE_VERSION_BYTES,
+                ..v
+            })
+            .collect(),
     }
 }
 
@@ -804,6 +819,214 @@ fn g2_passes_and_fails_around_half_of_the_best_incumbent() {
     };
     assert_eq!(at(500_000), Verdict::Pass, "exactly half");
     assert_eq!(at(500_001), Verdict::Fail);
+}
+
+/// A deduplicating tool `zpaqfranz/m5` that beats every other tool on `class` (2 MB).
+fn add_dedup_tool(i: &mut Inputs, class: &str) {
+    i.baseline.tools.tools.push(crate::run::result::ToolEntry {
+        id: "zpaqfranz".into(),
+        name: "zpaqfranz".into(),
+        status: "found".into(),
+        reason: None,
+        version: Some("65.4".into()),
+        catalogue_verified: true,
+        manual: false,
+        local_override: false,
+        dedup: Some(true),
+    });
+    i.baseline.results.push((
+        result(
+            "zpaqfranz",
+            "m5",
+            class,
+            LARGE_VERSION_BYTES * 3,
+            2_000_000,
+            5.0,
+            2.0,
+        ),
+        1,
+    ));
+    i.baseline
+        .run
+        .combinations
+        .push(crate::run::result::RunCombination {
+            tool: "zpaqfranz".into(),
+            setting: "m5".into(),
+            class: class.into(),
+            outcome: "measured".into(),
+        });
+}
+
+#[test]
+fn g2_compares_against_the_best_tool_that_does_not_deduplicate() {
+    let mut i = inputs(&Knobs::default(), true);
+    add_dedup_tool(&mut i, "backup-versions-large");
+    let g = gate(&i, "G2");
+    // The dedup tool's 2 MB would make the 3.5 MB estimate fail; the compared 8 MB passes it.
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    assert!(g.title.contains("D-43") && g.title.contains("backup-versions-large"));
+    assert!(
+        g.numbers
+            .iter()
+            .any(|n| n.starts_with("best incumbent, not deduplicating (7z/ultra): 8000000")),
+        "{:?}",
+        g.numbers
+    );
+    assert!(
+        g.numbers
+            .iter()
+            .any(|n| n.starts_with("estimate / best incumbent: 50.0%")),
+        "{:?}",
+        g.numbers
+    );
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("tools treated as deduplicating: zpaqfranz")));
+    assert!(
+        g.numbers
+            .iter()
+            .any(|n| n
+                .starts_with("reference, not compared (deduplicating tool zpaqfranz/m5): 2000000")),
+        "{:?}",
+        g.numbers
+    );
+    // The other classes' best incumbent is still the overall best, dedup tools included.
+    let m = Model::build(&i);
+    let best = m
+        .class("backup-versions-large")
+        .and_then(|c| c.best.as_ref());
+    assert!(best.is_some_and(|b| b.name.starts_with("zpaqfranz/m5")));
+    // The rule text is in the rendered report.
+    let text = report_text(&i);
+    assert!(text.contains("deduplicating tools are printed as reference, not compared"));
+    assert!(text.contains("reference, not compared (deduplicating tool zpaqfranz/m5)"));
+}
+
+#[test]
+fn g2_is_not_evaluable_without_the_large_class_even_when_backup_versions_exists() {
+    let mut i = inputs(&Knobs::default(), true);
+    i.baseline
+        .run
+        .classes
+        .retain(|c| c != "backup-versions-large");
+    i.baseline
+        .results
+        .retain(|(r, _)| r.class != "backup-versions-large");
+    i.baseline
+        .run
+        .combinations
+        .retain(|c| c.class != "backup-versions-large");
+    assert!(i
+        .baseline
+        .run
+        .classes
+        .contains(&"backup-versions".to_string()));
+    match verdict_of(&i, "G2") {
+        Verdict::NotEvaluable(why) => assert!(why.contains("backup-versions-large"), "{why}"),
+        v => panic!("expected not evaluable, got {v:?}"),
+    }
+}
+
+#[test]
+fn g2_is_not_evaluable_when_tools_json_has_no_dedup_flags_and_names_none_when_none() {
+    let mut i = inputs(&Knobs::default(), true);
+    for t in &mut i.baseline.tools.tools {
+        t.dedup = None;
+    }
+    match verdict_of(&i, "G2") {
+        Verdict::NotEvaluable(why) => assert!(why.contains("predates D-43"), "{why}"),
+        v => panic!("expected not evaluable, got {v:?}"),
+    }
+    // Flags present but none set: evaluated, and the line says "none".
+    for t in &mut i.baseline.tools.tools {
+        t.dedup = Some(false);
+    }
+    let g = gate(&i, "G2");
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n == "tools treated as deduplicating: none"));
+}
+
+#[test]
+fn g2_checks_that_every_version_exceeds_the_largest_incumbent_window() {
+    let mut i = inputs(&Knobs::default(), true);
+    let g = gate(&i, "G2");
+    assert_eq!(g.verdict, Verdict::Pass);
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("first version of the class: 314572800 bytes")));
+    // The window is a catalogue constant: stated in the rules text, never a traced number.
+    assert!(!g
+        .numbers
+        .iter()
+        .any(|n| n.contains("largest incumbent window")));
+    assert!(report_text(&i).contains("256 MiB (WinRAR -md256m in bench/tools.toml)"));
+    if let Some(pf) = i.probes.dedup.as_mut() {
+        pf.env.data.versions_large[1].bytes = LARGEST_INCUMBENT_WINDOW_BYTES - 1;
+    }
+    match verdict_of(&i, "G2") {
+        Verdict::NotEvaluable(why) => assert!(why.contains("smaller than the largest"), "{why}"),
+        v => panic!("expected not evaluable, got {v:?}"),
+    }
+}
+
+/// The window constant is a reading of the committed catalogue, so it must not drift from it: the
+/// largest `-md<N>m` of any WinRAR setting in `bench/tools.toml` is the constant, and no other
+/// window flag in the catalogue (zstd `--long=<log2>`) is larger.
+#[test]
+fn largest_incumbent_window_constant_matches_the_committed_catalogue() {
+    let cat = crate::run::catalogue::Catalogue::parse(include_str!("../../../../bench/tools.toml"))
+        .expect("catalogue");
+    let mut largest_md = 0u64;
+    let mut largest_long = 0u64;
+    for tool in &cat.tools {
+        for setting in &tool.settings {
+            for arg in &setting.compress {
+                if let Some(mib) = arg
+                    .strip_prefix("-md")
+                    .and_then(|s| s.strip_suffix('m'))
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    largest_md = largest_md.max(mib * 1024 * 1024);
+                }
+                if let Some(log2) = arg
+                    .strip_prefix("--long=")
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    largest_long = largest_long.max(1u64 << log2);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        largest_md, LARGEST_INCUMBENT_WINDOW_BYTES,
+        "WinRAR -md changed in tools.toml"
+    );
+    assert!(
+        largest_long <= LARGEST_INCUMBENT_WINDOW_BYTES,
+        "a zstd --long window exceeds the constant"
+    );
+}
+
+#[test]
+fn g2_is_not_evaluable_when_only_dedup_tools_measured_the_class() {
+    let mut i = inputs(&Knobs::default(), true);
+    add_dedup_tool(&mut i, "backup-versions-large");
+    i.baseline
+        .results
+        .retain(|(r, _)| r.class != "backup-versions-large" || r.tool.id == "zpaqfranz");
+    i.baseline
+        .run
+        .combinations
+        .retain(|c| c.class != "backup-versions-large" || c.tool == "zpaqfranz");
+    match verdict_of(&i, "G2") {
+        Verdict::NotEvaluable(why) => assert!(why.contains("not flagged dedup"), "{why}"),
+        v => panic!("expected not evaluable, got {v:?}"),
+    }
 }
 
 #[test]
@@ -1516,7 +1739,7 @@ fn a_mixes_file_without_a_final_newline_keeps_the_code_fence_intact() {
 #[test]
 fn g1_and_g2_name_failed_and_skipped_rows_of_their_classes() {
     let mut i = inputs(&Knobs::default(), true);
-    set_row(&mut i, "zstd", "3", "backup-versions", |r| {
+    set_row(&mut i, "zstd", "3", "backup-versions-large", |r| {
         r.median = None;
         r.failed = samples::failed().failed;
     });
@@ -1536,11 +1759,11 @@ fn g1_and_g2_name_failed_and_skipped_rows_of_their_classes() {
     assert!(
         g2.notes
             .iter()
-            .any(|n| n.contains("failed: zstd/3 on backup-versions")),
+            .any(|n| n.contains("failed: zstd/3 on backup-versions-large")),
         "{:?}",
         g2.notes
     );
-    assert!(report_text(&i).contains("- G2 inputs, failed: zstd/3 on backup-versions"));
+    assert!(report_text(&i).contains("- G2 inputs, failed: zstd/3 on backup-versions-large"));
 }
 
 #[test]
@@ -1675,8 +1898,13 @@ fn partial_coverage_counts_as_stored_and_over_coverage_is_refused() {
 #[test]
 fn the_known_classes_come_from_the_corpus_registry() {
     let known = mixes::known_classes();
-    assert_eq!(known.len(), 17);
-    for c in ["video", "backup-versions", "photo-jpeg-edited"] {
+    assert_eq!(known.len(), 18);
+    for c in [
+        "video",
+        "backup-versions",
+        "backup-versions-large",
+        "photo-jpeg-edited",
+    ] {
         assert!(known.contains(c), "{c}");
     }
 }
