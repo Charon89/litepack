@@ -556,7 +556,7 @@ has no priors for LZMA (section 10 is about `zstd` only). The rules, in this ord
 4. The first byte of the range coder stream must be 0, else `LzmaError` with reason `range coder`. The
    range coder's end condition (its code value being 0 after the last symbol) is checked only when the
    end-of-payload marker is present; a stream that ends at the output bound without a marker is not checked
-   for it, and an independent decoder must not rely on it either way.
+   for it, and a decoder must not refuse a marker-less stream because its final code value is not 0.
 5. The stream may end with the end-of-payload marker or without one: the encoder liblzma used for the test
    vectors always writes it, other writers (such as `.lzma` files of known size) do not, and a decoder that has
    produced the output bound accepts either. Any input after the stream (after the marker, when there is one)
