@@ -1,0 +1,22 @@
+{
+  "class": "source-git",
+  "corpus": {
+    "class_bytes": 35365500,
+    "class_files": 663,
+    "manifest_blake3": "37fd79b4563887d48932715918eaf72e24b1bc8fe7588fd27a280e2fcc4a0cf0",
+    "profile": "full"
+  },
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [],
+    "extract_args": [],
+    "id": "default"
+  },
+  "skipped": "not installed",
+  "threads": 24,
+  "tool": {
+    "id": "tsaur",
+    "mode": "directory",
+    "ratio_depends_on_threads": false
+  }
+}

@@ -1,0 +1,155 @@
+{
+  "class": "software-installed",
+  "corpus": {
+    "class_bytes": 437043701,
+    "class_files": 9671,
+    "manifest_blake3": "37fd79b4563887d48932715918eaf72e24b1bc8fe7588fd27a280e2fcc4a0cf0",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 70783072,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 3.0,
+      "peak_job_memory_bytes": 5973856256,
+      "peak_memory_bytes": 3033468928,
+      "peak_process_commit_bytes": 5973856256,
+      "timed_out": false,
+      "user_cpu_seconds": 110.28125,
+      "wall_seconds": 85.8437524
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.78125,
+      "peak_job_memory_bytes": 343367680,
+      "peak_memory_bytes": 348803072,
+      "peak_process_commit_bytes": 343367680,
+      "timed_out": false,
+      "user_cpu_seconds": 2.0,
+      "wall_seconds": 3.5499093
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 70783072,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 3.0,
+        "peak_job_memory_bytes": 5973741568,
+        "peak_memory_bytes": 3033366528,
+        "peak_process_commit_bytes": 5973741568,
+        "timed_out": false,
+        "user_cpu_seconds": 113.953125,
+        "wall_seconds": 87.5188799
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.796875,
+        "peak_job_memory_bytes": 343363584,
+        "peak_memory_bytes": 348798976,
+        "peak_process_commit_bytes": 343363584,
+        "timed_out": false,
+        "user_cpu_seconds": 2.0,
+        "wall_seconds": 3.661047
+      }
+    },
+    {
+      "archive_bytes": 70783072,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 3.75,
+        "peak_job_memory_bytes": 5973860352,
+        "peak_memory_bytes": 3033468928,
+        "peak_process_commit_bytes": 5973860352,
+        "timed_out": false,
+        "user_cpu_seconds": 110.28125,
+        "wall_seconds": 85.8437524
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.609375,
+        "peak_job_memory_bytes": 343375872,
+        "peak_memory_bytes": 348803072,
+        "peak_process_commit_bytes": 343375872,
+        "timed_out": false,
+        "user_cpu_seconds": 2.109375,
+        "wall_seconds": 3.5499093
+      }
+    },
+    {
+      "archive_bytes": 70783072,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 2.828125,
+        "peak_job_memory_bytes": 5973856256,
+        "peak_memory_bytes": 3033468928,
+        "peak_process_commit_bytes": 5973856256,
+        "timed_out": false,
+        "user_cpu_seconds": 94.59375,
+        "wall_seconds": 71.8787993
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.78125,
+        "peak_job_memory_bytes": 343367680,
+        "peak_memory_bytes": 348803072,
+        "peak_process_commit_bytes": 343367680,
+        "timed_out": false,
+        "user_cpu_seconds": 1.75,
+        "wall_seconds": 3.3936452
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "-bd",
+      "-y",
+      "-mx9",
+      "-mqs",
+      "-mmt=24",
+      "../../tmp/run2544/c171/a.7z",
+      "software-installed"
+    ],
+    "extract_args": [
+      "x",
+      "-bd",
+      "-y",
+      "-mmt=24",
+      "-ox",
+      "a.7z"
+    ],
+    "id": "ultra"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "7z",
+    "mode": "directory",
+    "ratio_depends_on_threads": true,
+    "version": "26.03"
+  },
+  "verification": {
+    "files_checked": 9671,
+    "files_ok": 9671,
+    "verified": true
+  }
+}
