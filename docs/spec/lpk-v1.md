@@ -587,6 +587,7 @@ records is a count of the bytes already written. The frames follow in this order
 2. zero or more `ChunkData` frames (kind 2), each holding one block;
 3. the `EntryTable` frame (kind 1);
 4. optionally the `Records` frame;
+   optionally one `Recovery` frame (section 13) after it;
 5. the `Index` frame (kind 5), which records the location of every frame above, the chunk table and the Merkle
    root over its hashes, and the decode envelope (section 7);
 6. the `Trailer` frame (kind 6), which locates the index.
@@ -905,3 +906,94 @@ record that does not parse under the rules above, and a record whose `kind` diff
 
 Errors of this section: `UnknownRecordKind`, `ReservedRecordBits`, `RecordHashMismatch`, `RecordOutOfRange`,
 `BadRecord`, and `Truncated` and `TrailingBytes` as above.
+
+## 13. Recovery
+
+A `Recovery` frame (kind 4) lets a reader rebuild damaged bytes of the archive: Reed-Solomon over fixed-size shards
+in GF(2^16), the construction of the `reed-solomon-simd` library (Leopard-RS). An archive may have any number
+of recovery frames; the index lists them (section 6).
+
+### Coverage
+
+A recovery frame covers one contiguous byte range of the archive, `[cover_offset, cover_offset + cover_len)`. The
+reference writer makes it the range from the end of the header (offset 32) to the end of the last frame before
+the recovery frame: every `ChunkData` frame, the `EntryTable` frame and the `Records` frame, if any. The index and
+the trailer are not covered: the trailer holds the index hash, which authenticates the index, and a damaged index
+is not repaired by this version.
+
+### Shards
+
+The covered range is cut into `data_shards` shards of `shard_len` bytes; the last shard is padded with zeros to
+`shard_len` (the padding is never stored in the archive). `shard_len` is a multiple of 64 and not 0; the
+reference writer's default is 65536 and it is a writer option. `data_shards` is `ceil(cover_len / shard_len)`.
+`recovery_shards` is chosen by the writer, at least 1, and the reference writer takes `ceil(data_shards * percent /
+100)` with `percent` from 1 to 20 (0 means no recovery frame). The writer refuses more than 32768 data shards
+(`BadOptions`, `reason` `recovery shards`) and a `percent` above 20; a frame has at most 65535 shards in all
+(`data_shards + recovery_shards`). The shards are coded in GF(2^16) as the `reed-solomon-simd` encoder does, with
+`data_shards` original shards and `recovery_shards` recovery shards of `shard_len` bytes each.
+
+### Payload
+
+The payload is, in this order:
+
+| Field | Size | Meaning |
+|---|---|---|
+| cover_offset | 8 | absolute offset of the first covered byte (little-endian); at least the header length |
+| cover_len | 8 | number of covered bytes; the range ends at or before the index |
+| shard_len | 4 | length of every shard in bytes; a multiple of 64, not 0 |
+| data_shards | 4 | `ceil(cover_len / shard_len)` |
+| recovery_shards | 4 | number of recovery shards; at least 1; `data_shards + recovery_shards` is at most 65535 |
+| shard_hashes | data_shards * 32 | BLAKE3-256 of each data shard, the last one padded with zeros to `shard_len` |
+| recovery | recovery_shards * shard_len | the Reed-Solomon recovery shards, in order |
+
+Consistency rules, each a `BadRecovery` with the `reason` in brackets: `shard_len` is a multiple of 64 and not 0
+[`shard_len`]; `cover_offset` is at least 32 and the range ends at or before the index [`cover range`]; the
+cover is not empty and `data_shards` equals `ceil(cover_len / shard_len)` [`data_shards`]; `recovery_shards` is at
+least 1 [`recovery_shards`]; `data_shards + recovery_shards` is at most 65535 [`shard count`]; the payload's
+length is exactly 28 plus `data_shards * 32` plus `recovery_shards * shard_len` [`payload length`]. A payload
+shorter than the 28 fixed bytes is `Truncated` (`what` is `recovery`). The length is checked before anything
+is allocated, so a declared count never allocates more than the payload holds.
+
+### Writing
+
+A writer holds one shard buffer, hashes each shard when it completes, and feeds the coded shards to the encoder in
+order. The encoder needs `data_shards` when it is created, and a stream writer learns it only when the covered
+range ends, so the reference writer spools the completed shards to an anonymous temporary file and reads them back
+once into the encoder at the end; memory is one shard buffer, 32 bytes per shard and the recovery shards
+(`percent` of the covered length at most). The writer then writes the `Recovery` frame after the `Records` frame
+(or the entry table) and before the index, and records its location in the index; `max_frame_payload` admits it
+(section 7).
+
+### Repair
+
+A reader repairs an archive in these steps. It opens the archive; an archive whose index cannot be read is not
+repaired and the error of the opening is the result. For each recovery frame the index lists:
+
+1. Read the frame at its recorded location and check its hash. A frame that fails (its hash, its kind or its length)
+   is unusable: it is counted and skipped, and its coverage is not protected by it. A frame that passes its hash but
+   breaks a rule above is an error (`BadRecovery`).
+2. Cut the covered range into shards and hash each one (the last padded with zeros). A shard whose hash differs
+   from the frame's `shard_hashes` entry is damaged. This locates damage shard by shard without decoding.
+3. When the number of damaged shards is at most `recovery_shards`, rebuild them: give the decoder every intact data
+   shard and as many recovery shards as there are damaged data shards, and take the rebuilt shards back. Every
+   rebuilt shard must match its `shard_hashes` entry, otherwise the result is `RecoveryError`.
+4. Write the rebuilt bytes (without the padding) at their place in the copy.
+
+When more shards are damaged than the frame can rebuild, nothing is rebuilt for that frame (`Unrepairable`, with
+the frame's position in the index's list, the damaged count and the capacity). The reader goes on with the other
+frames, the copy carries every repair that was possible, and the first `Unrepairable` is the result. A frame that is
+itself damaged does not change the data it covers: no repair is attempted from a frame that fails its hash.
+
+Detection without repair is the same scan without step 3 and 4: a count of the frames, of the unusable frames and
+of the damaged shards. `lpk-decode check <archive>` prints these counts and exits 1 if a shard is damaged or a
+frame is unusable; `lpk-decode repair <archive> <out>` writes the repaired copy to a file that must not exist and
+exits 1 on an error, keeping the copy only when the error is `Unrepairable`.
+
+### What is not covered
+
+The header, the index frame and the trailer are not covered. Damage there is not repaired: damage to the index or
+trailer makes the archive fail to open, and the error is the one that opening gives. Recovery frames do not cover
+each other, and a frame lying inside another frame's range is repaired like any other bytes.
+
+Errors of this section: `BadRecovery`, `Unrepairable`, `RecoveryError`, `BadFrameLocation` (with `what` `recovery`),
+`Truncated`.

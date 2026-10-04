@@ -37,6 +37,7 @@ fn spec_tables_match_code() {
         lpk_format::prior_list_table(),
         lpk_format::record_kind_table(),
         lpk_format::record_layout_tables(),
+        lpk_format::recovery_layout_table(),
     ] {
         assert!(text.contains(&table), "spec lacks table:\n{table}");
     }
