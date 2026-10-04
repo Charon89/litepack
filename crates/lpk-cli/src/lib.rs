@@ -21,7 +21,7 @@ pub const EXIT_USAGE: i32 = 1;
 pub const EXIT_FAILED: i32 = 2;
 
 /// The version line's payload: crate version and build hash.
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LPK_GIT_COMMIT"), ")");
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("LPK_GIT_COMMIT"));
 
 #[derive(Debug, Parser)]
 #[command(
@@ -60,8 +60,8 @@ struct AddArgs {
     /// Store every block without compression.
     #[arg(long)]
     store: bool,
-    /// Worker threads. Accepted and recorded; parallel encoding comes with the next task, so
-    /// the archive is the same for any value.
+    /// Worker threads: accepted and ignored (shown with -v); parallel encoding comes with the
+    /// next task.
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
     /// zstd level of the Fast tier.
@@ -84,7 +84,7 @@ struct ExtractArgs {
     archive: PathBuf,
     /// The directory to extract into; created if missing.
     outdir: PathBuf,
-    /// Worker threads. Accepted and recorded; decoding is sequential for now.
+    /// Worker threads. Accepted and ignored; decoding is sequential for now.
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
     /// A prior file (for example a zstd dictionary) the archive needs; may be repeated.
@@ -178,10 +178,12 @@ fn reference(
 ) -> i32 {
     let mut args: Vec<OsString> = vec!["lpk".into()];
     for p in priors {
-        args.push("--prior".into());
-        args.push(p.into());
+        let mut a = OsString::from("--prior=");
+        a.push(p);
+        args.push(a);
     }
     args.push(sub.into());
+    args.push("--".into());
     args.push(archive.into());
     if let Some(d) = outdir {
         args.push(d.into());

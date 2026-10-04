@@ -176,14 +176,37 @@ fn store_and_fast_graphs_differ_in_the_block_table() {
 }
 
 #[test]
+fn paths_starting_with_a_dash_work_for_x_and_t() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("-a.lpk");
+    let a = run(&["a", arch.to_str().unwrap(), src.path().to_str().unwrap()]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    // Relative names starting with `-`, after `--`, in the archive's directory.
+    let x = Command::new(env!("CARGO_BIN_EXE_lpk"))
+        .current_dir(work.path())
+        .args(["x", "--", "-a.lpk", "-out"])
+        .output()
+        .unwrap();
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&work.path().join("-out")), tree_hash(src.path()));
+    let t = Command::new(env!("CARGO_BIN_EXE_lpk"))
+        .current_dir(work.path())
+        .args(["t", "--", "-a.lpk"])
+        .output()
+        .unwrap();
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+}
+
+#[test]
 fn version_matches_the_catalogue_pattern() {
     let v = run(&["--version"]);
     assert_eq!(v.status.code(), Some(0));
     let t = text(&v.stdout);
     let rest = t.trim().strip_prefix("lpk ").unwrap();
-    let (ver, hash) = rest.split_once(" (").unwrap();
+    let (ver, hash) = rest.split_once('+').unwrap();
     assert_eq!(ver, env!("CARGO_PKG_VERSION"));
-    let hash = hash.strip_suffix(')').unwrap();
     assert!(!hash.is_empty() && !hash.contains(' '), "{t}");
 }
 

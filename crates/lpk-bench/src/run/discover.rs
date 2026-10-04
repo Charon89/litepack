@@ -467,7 +467,7 @@ mod tests {
         match discover_tool(tool, &Local::default(), &env) {
             Status::Found { version, .. } => {
                 assert!(version.starts_with(env!("CARGO_PKG_VERSION")), "{version}");
-                assert!(version.contains(" ("), "{version}");
+                assert!(version.contains('+'), "{version}");
             }
             Status::Skipped { reason } => panic!("found but skipped: {reason}"),
         }
