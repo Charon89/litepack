@@ -3,15 +3,16 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 13:40 UTC (09:40 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 17:10 UTC (13:10 local on the measuring machine). No measurement is running.
 
-**Epic E1 is complete on its branch and waits for one decision of the owner.** All fourteen E1 tasks are done:
-the `.lpk` v1 format, its pure-Rust reference implementation, committed vectors, fuzz targets, a conformance
-gate, an independent decoder written from the spec alone that passes it, and the spec fix round — D-28…D-41,
-with D-41 freezing format v1. Everything up to E1-13 is on `main`; E1-14 is PR #26 (draft) from
-`task/e1-14c-adapt`, held because the fuzzing harness's `libfuzzer-sys` carries the NCSA licence (see the open
-points). After the merge: dispatch `fuzz.yml` once, then E2 starts (E0-1 needs the owner's corpus spec; E2-1
-ingest can start at once).
+**Epic E1 is complete and on `main`.** The `.lpk` v1 format is frozen (D-41): the specification, its pure-Rust
+reference implementation and tool, committed vectors, a conformance gate, an independent decoder written from the
+spec alone that passes it, fuzz targets with a Linux fuzz job, and the spec fix round — D-28…D-42 (D-42: the
+owner accepted NCSA for `libfuzzer-sys` in the fuzzing harness only). The first real fuzz run was dispatched on
+`main` (run 37204202840); its result goes into the PLAN note of E1-14 when it finishes.
+**Next: E2.** E2-1 (ingest) starts at once; E0-1 (the larger versioned corpus set for the restated G2) needs the
+owner's approval of its spec before it is built; E1-15 (the normative Reed-Solomon description) is a format
+revision that can be done any time by a fresh implementer.
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -22,9 +23,7 @@ ingest can start at once).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-| Branch | State | What is left |
-|---|---|---|
-| `task/e1-14c-adapt` | PR #26 (draft): the whole E1-14 — fuzz crate and CI job, mutation smoke test, CONFORMANCE.md and vectors, `crates/lpk-check` (independent decoder, 16/16 vectors), the spec fix round (82 findings applied, `docs/spec/CHANGES.md`), D-41, E1-15 added | **owner's decision** on the `libfuzzer-sys` licence; then merge, dispatch `fuzz.yml` once, and start E2 |
+None at the moment.
 
 ## How to resume
 
@@ -38,8 +37,7 @@ ingest can start at once).
 The manual workflow `corpus-smoke.yml` has an input `run_smoke` (default on): after the corpus build it installs `zstd`, `xz-utils` and `7zip`, runs the baseline runner on four classes with one repeat, validates and uploads the results as an artifact (CI results are never committed). The green run and its summary lines are cited under the P0-5 box in PLAN. Nothing else is needed from CI for Phase 0.
 
 ## Open points for the owner
-- **Fuzzing harness licence** (E1-14a, PR #25): `libfuzzer-sys` carries NCSA alongside MIT/Apache; it is a development tool excluded from the workspace and never shipped. Allow NCSA for that one crate in a `fuzz/deny.toml` (recorded as a decision), or keep the harness unmerged.
-- **Local fuzzing through WSL**: optional; the CI job runs the fuzzers on Linux once the workflow is on `main`. A local run means installing rustup and `cargo-fuzz` for the WSL user (both would go into the removal inventory).
+- **Local fuzzing through WSL**: optional; the CI job runs the fuzzers on Linux (manual and weekly). A long local run means installing rustup and `cargo-fuzz` for the WSL user (both would go into the removal inventory).
 - **G2 and G3 before D-08** (see the summary): decide what "2× smaller on versioned backups" means against incumbents that already deduplicate inside solid archives, and what "store at ≥ 80% of raw read" should be measured against (the current proxy is a real program reading and writing the files against an uncached raw read).
 - **Antivirus.** Windows Security Center on the measuring machine reports Defender off and a third-party product "snoozed". Each run records the state at start and end. Whether to run with the scanner fully on (with exclusions for `bench/tmp` and `bench/corpus`) or fully off is the owner's setting to change.
 - **Optional probe baselines.** `bsc` and `hdiffz` (free, from their authors' GitHub releases) are not installed; the text and dedup probes skip them unless the owner wants them installed. Without `bsc`, D-05's claim about BWT on text cannot be checked. Kanzi publishes no binaries. When `bsc` is first installed, its strongest flags must be checked against its usage text and recorded.
