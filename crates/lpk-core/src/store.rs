@@ -1,14 +1,14 @@
 //! The store path: walk a tree and write it with the writer's default (store) graph.
 
 use std::fs::OpenOptions;
-use std::io::{BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 
-use lpk_format::{EntryKind, Writer, WriterOptions, WriterSummary};
+use lpk_format::{WriterOptions, WriterSummary};
 
 use crate::error::CoreError;
-use crate::ingest::{file_identity, validate_input, walk, IngestOptions, Input};
-use crate::source::Source;
+use crate::ingest::{file_identity, walk, IngestOptions, Input};
+use crate::pipeline::Pipeline;
 
 /// Output buffer: writes reach the file in large sequential pieces.
 pub(crate) const OUT_BUF: usize = 4 << 20;
@@ -39,7 +39,8 @@ impl<R: Read> Read for Counting<R> {
 /// Called before the trailer is written and once after it: puts the data on disk.
 pub type SyncFn = Box<dyn FnMut() -> std::io::Result<()>>;
 
-/// Walk `root` and write every entry to `out` in order, streaming file bytes.
+/// Walk `root` and write every entry to `out` in order, streaming file bytes (a front over
+/// [`Pipeline::run`] with the store model).
 ///
 /// Takes `options` by value because `WriterOptions` owns its encoder and is not `Clone`.
 pub fn archive_store(
@@ -47,8 +48,7 @@ pub fn archive_store(
     out: impl Write,
     options: StoreOptions,
 ) -> Result<WriterSummary, CoreError> {
-    let inputs = walk(root, &options.ingest)?;
-    write_inputs(&inputs, out, options, None)
+    Ok(Pipeline::store(options).run(root, out)?.writer)
 }
 
 /// Write already-walked inputs (in entry-table order) with the store path. `sync`, when given,
@@ -59,36 +59,14 @@ pub fn write_inputs(
     options: StoreOptions,
     sync: Option<SyncFn>,
 ) -> Result<WriterSummary, CoreError> {
-    let source = Source::new();
-    let mut writer = Writer::new(BufWriter::with_capacity(OUT_BUF, out), options.writer)?;
-    if let Some(sync) = sync {
-        writer = writer.with_sync(sync);
-    }
-    for input in inputs {
-        validate_input(input)?;
-        match input.kind {
-            EntryKind::Directory => {
-                writer.add_directory(&input.path, input.flags, input.mtime_ns)?;
-            }
-            EntryKind::Symlink => {
-                let target = input.symlink_target.as_deref().unwrap_or_default();
-                writer.add_symlink(&input.path, input.flags, input.mtime_ns, target)?;
-            }
-            EntryKind::File => {
-                let mut r = Counting {
-                    inner: source.open(input)?,
-                    n: 0,
-                };
-                writer.add_file(&input.path, input.flags, input.mtime_ns, &mut r)?;
-                if r.n != input.len {
-                    return Err(CoreError::ChangedWhileReading {
-                        path: input.source.clone(),
-                    });
-                }
-            }
-        }
-    }
-    Ok(writer.finish()?)
+    let s = Pipeline::store(options).run_inputs(
+        inputs.to_vec(),
+        out,
+        sync,
+        None,
+        std::time::Duration::ZERO,
+    )?;
+    Ok(s.writer)
 }
 
 /// Like [`archive_store`], writing to a new file at `archive_path` (create-new: an existing
@@ -100,10 +78,7 @@ pub fn archive_store_file(
     archive_path: &Path,
     options: StoreOptions,
 ) -> Result<WriterSummary, CoreError> {
-    let ingest = options.ingest;
-    create_new_and_run(root, archive_path, &ingest, |inputs, file, sync| {
-        write_inputs(&inputs, file, options, Some(sync))
-    })
+    Ok(Pipeline::store(options).run_file(root, archive_path)?.writer)
 }
 
 /// Create `archive_path` (create-new), walk `root` leaving the new file out of the inputs, and
@@ -140,7 +115,7 @@ pub(crate) fn create_new_and_run<T>(
 mod tests {
     use super::*;
     use crate::ingest::tests::{clear_readonly, file_link, make_tree, plain_input, skip};
-    use lpk_format::{Archive, Resources};
+    use lpk_format::{Archive, EntryKind, Resources};
     use std::io::Cursor;
     use std::path::Path;
 

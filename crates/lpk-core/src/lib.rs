@@ -16,6 +16,7 @@ pub mod error;
 pub mod fast;
 pub mod gate;
 pub mod ingest;
+pub mod pipeline;
 pub mod priors;
 pub mod source;
 pub mod store;
@@ -29,6 +30,9 @@ pub use fast::{
 };
 pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
 pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
+pub use pipeline::{
+    ClassifyStage, FoldStage, ModelStage, PeelStage, Pipeline, RunSummary, SealOptions, StageTimings,
+};
 pub use priors::ProvidedDictionaries;
 pub use source::Source;
 pub use store::{archive_store, archive_store_file, write_inputs, StoreOptions};

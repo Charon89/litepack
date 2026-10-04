@@ -19,17 +19,16 @@ use lpk_format::{
     BlockEncoder, Encoded, EntryKind, FormatError, Graph, PrimitiveId, Step, StoreEncoder, Writer,
     WriterOptions, WriterSummary, DEFAULT_BLOCK_SIZE,
 };
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use zstd::zstd_safe::CParameter;
 
 use crate::classify::Class;
-use crate::cluster::{cluster, DictionaryKind};
+use crate::cluster::DictionaryKind;
 use crate::error::CoreError;
 use crate::gate::Gate;
-use crate::ingest::{validate_input, walk, IngestOptions, Input};
+use crate::ingest::IngestOptions;
+use crate::pipeline::Pipeline;
 use crate::priors::ProvidedDictionaries;
-use crate::source::Source;
-use crate::store::{create_new_and_run, Counting, SyncFn, OUT_BUF};
 
 /// Smallest and largest `window_log` a `zstd` step may declare (the format's range; libzstd's
 /// own bounds on this target are checked when the encoder is built).
@@ -294,94 +293,28 @@ impl BlockEncoder for ZstdEncoder {
     }
 }
 
-/// Walk `root` and write it with the Fast tier to `out`.
+/// Walk `root` and write it with the Fast tier to `out` (a front over
+/// [`Pipeline::run`]).
 pub fn archive_fast(
     root: &Path,
     out: impl Write,
     options: FastOptions,
 ) -> Result<(WriterSummary, FastSummary), CoreError> {
-    let inputs = walk(root, &options.ingest)?;
-    write_fast_inputs(&inputs, out, options, None)
+    let s = Pipeline::fast(options).run(root, out)?;
+    Ok((s.writer, s.fast.unwrap_or_default()))
 }
 
 /// Like [`archive_fast`], writing to a new file at `archive_path` with the guarantees of
 /// `archive_store_file`: create-new, the output left out of its own archive, data synced before
-/// the trailer, a failed write removes the file.
+/// the trailer, a failed write removes the file. Options (including provided dictionaries) are
+/// validated before the output file exists.
 pub fn archive_fast_file(
     root: &Path,
     archive_path: &Path,
     options: FastOptions,
 ) -> Result<(WriterSummary, FastSummary), CoreError> {
-    // Validate the options (including provided dictionaries) before the output file exists.
-    ZstdEncoder::new(
-        options.level,
-        options.window_log,
-        &options.dictionaries,
-        options.gate,
-    )?;
-    let ingest = options.ingest;
-    create_new_and_run(root, archive_path, &ingest, |inputs, file, sync| {
-        write_fast_inputs(&inputs, file, options, Some(sync))
-    })
-}
-
-fn write_fast_inputs(
-    inputs: &[Input],
-    out: impl Write,
-    options: FastOptions,
-    sync: Option<SyncFn>,
-) -> Result<(WriterSummary, FastSummary), CoreError> {
-    let (encoder, handle) = ZstdEncoder::new(
-        options.level,
-        options.window_log,
-        &options.dictionaries,
-        options.gate,
-    )?;
-    for input in inputs {
-        validate_input(input)?;
-    }
-    let clusters = cluster(inputs)?;
-    let source = Source::new();
-    let wopts = WriterOptions {
-        block_size: options.block_size,
-        encoder: Box::new(encoder),
-        ..WriterOptions::default()
-    };
-    let mut writer = Writer::new(BufWriter::with_capacity(OUT_BUF, out), wopts)?;
-    if let Some(sync) = sync {
-        writer = writer.with_sync(sync);
-    }
-    let mut meta: Vec<&Input> = inputs
-        .iter()
-        .filter(|i| i.kind != EntryKind::File)
-        .collect();
-    meta.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-    for input in meta {
-        if input.kind == EntryKind::Directory {
-            writer.add_directory(&input.path, input.flags, input.mtime_ns)?;
-        } else {
-            let target = input.symlink_target.as_deref().unwrap_or_default();
-            writer.add_symlink(&input.path, input.flags, input.mtime_ns, target)?;
-        }
-    }
-    for c in &clusters {
-        handle.set_hint(c.class, c.dictionary);
-        for input in &c.inputs {
-            let mut r = Counting {
-                inner: source.open(input)?,
-                n: 0,
-            };
-            writer.add_file(&input.path, input.flags, input.mtime_ns, &mut r)?;
-            if r.n != input.len {
-                return Err(CoreError::ChangedWhileReading {
-                    path: input.source.clone(),
-                });
-            }
-        }
-        writer.close_block()?;
-    }
-    let summary = writer.finish()?;
-    Ok((summary, handle.summary()))
+    let s = Pipeline::fast(options).run_file(root, archive_path)?;
+    Ok((s.writer, s.fast.unwrap_or_default()))
 }
 
 #[cfg(test)]
