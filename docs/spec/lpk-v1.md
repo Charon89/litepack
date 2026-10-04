@@ -61,7 +61,8 @@ Frame flags:
 | Bit | Name | Meaning |
 |---|---|---|
 | 0 | MUST_UNDERSTAND | a reader that does not know the kind must fail instead of skipping |
-| 1-15 | reserved | must be zero; a reader rejects the frame otherwise |
+| 1 | SEALED | the payload is sealed: the nonce, the ciphertext and the tag, in that order (section 14); the frame hash covers the sealed bytes |
+         | 2-15 | reserved | must be zero; a reader rejects the frame otherwise |
 
 Frame kinds:
 
@@ -73,8 +74,9 @@ Frame kinds:
 | 4 | Recovery |
 | 5 | Index |
 | 6 | Trailer |
+| 7 | KeySlot |
 
-Kind 0 is invalid. Kinds 7 to 0x7FFF are reserved for later versions of this specification. Kinds 0x8000 to
+Kind 0 is invalid. Kinds 8 to 0x7FFF are reserved for later versions of this specification. Kinds 0x8000 to
 0xFFFF are experimental and are never written by the reference writer.
 
 Unknown kinds: a reader meeting a kind it does not know fails if MUST_UNDERSTAND is set. Otherwise it
@@ -258,7 +260,7 @@ The payload, in this order:
 | decode_memory | varint | envelope: the writer's estimate of peak decoder memory per thread, in bytes |
 | threads_hint | varint | envelope: independent blocks decodable at once; 0 = no hint |
 | prior_list | variable | the prior list of section 10 (`prior_count`, then that many 32-byte IDs); follows the envelope |
-| block_count | varint | number of blocks; at most the bytes left after it divided by 5 |
+| block_count | varint | number of blocks; at most the bytes left after it divided by 6 |
 | frame_offset | varint | per block: absolute offset of the block's `ChunkData` frame |
 | frame_len | varint | per block: whole encoded length of that frame |
 | first_chunk | varint | per block: index of the first chunk the block holds |
@@ -268,17 +270,17 @@ The payload, in this order:
 | entry_table_len | varint | whole encoded length of that frame |
 | records_offset | varint | absolute offset of the `Records` frame; 0 when there is none |
 | records_len | varint | whole encoded length of that frame; 0 when there is none |
-| recovery_count | varint | number of `Recovery` frames (section 13); at most the bytes left after it divided by 2 |
+| recovery_count | varint | number of `Recovery` frames (section 13); at most the bytes left after it divided by 3 |
 | recovery_offset | varint | per recovery frame: absolute offset of the frame |
 | recovery_len | varint | per recovery frame: whole encoded length of that frame |
 
 The chunk table is not length-prefixed: a reader walks its declared records (under the count bound of
 section 5) and continues after the last one. The six envelope varints follow the Merkle root; an input
 that ends inside them is `Truncated` (`what` is `index`). The prior list (section 10) follows the envelope and
-precedes `block_count`. The five block fields repeat `block_count` times. Bytes after
+precedes `block_count`. The six block fields repeat `block_count` times. Bytes after
 the last recovery location are `TrailingBytes` (`what` is `index`); an input that ends early is `Truncated`
-(`what` is `index`, or `chunk table` inside the table). A `block_count` larger than the bytes left divided by 5
-is `Truncated` and nothing is allocated for it; a `recovery_count` larger than the bytes left divided by 2 is
+(`what` is `index`, or `chunk table` inside the table). A `block_count` larger than the bytes left divided by 6
+is `Truncated` and nothing is allocated for it; a `recovery_count` larger than the bytes left divided by 3 is
 `Truncated` likewise. Each recovery location follows the same location rule as the records frame and overlaps no
 block, no other recovery frame, the entry table and the records frame; the recovery frames are in ascending offset
 order and, when there are any, the last one ends at the offset of the index frame (section 13); a violation is
@@ -1026,3 +1028,116 @@ trailer makes the archive fail to open, and the error is the one that opening gi
 Errors of this section: `BadRecovery`, `Unrepairable`, `RecoveryError`, `DamageFound` (the tool's `check`),
 `Refused`, `BadFrameLocation` (with `what` `recovery`), `Truncated`.
 
+## 14. Encryption
+
+An archive is encrypted when the header flag `ENCRYPTED` is set. Encryption seals the payloads of frames; the
+frame envelope (kind, flags, length, hash) stays in clear, and the frame hash is the BLAKE3-256 of the payload as
+stored, that is, of the sealed bytes. A reader therefore verifies integrity and skips frames without a key, and
+recovery (section 13) works on the sealed bytes.
+
+### Cipher suites
+
+| Suite | Cipher | Key | Nonce | Tag |
+|---|---|---|---|---|
+| 1 | AES-256-GCM (default) | 32 | 12 | 16 |
+| 2 | XChaCha20-Poly1305 | 32 | 24 | 16 |
+
+### What is sealed
+
+Which frames are sealed, by kind:
+
+| Kind | Name | Sealed in an encrypted archive |
+|---|---|---|
+| 1 | EntryTable | yes; no in a listable archive |
+| 2 | ChunkData | yes |
+| 3 | Records | yes |
+| 4 | Recovery | no |
+| 5 | Index | yes |
+| 6 | Trailer | no |
+| 7 | KeySlot | no |
+
+In a listable archive (header flag `LISTABLE`) the `EntryTable` frame is written in clear and everything else is as in
+the table. The header, the key slot, the recovery frames and the trailer are never sealed.
+
+Frame flag bit 1, `SEALED`, is set on exactly the frames that are sealed. A sealed payload is
+`nonce | ciphertext | tag`: the nonce (12 or 24 bytes), the ciphertext (as long as the plain payload) and the 16-byte
+tag. The reader checks the flag against the table before it opens anything: a sealed frame where the table says no
+(and any sealed frame of an archive that is not encrypted) is `UnexpectedSealedFrame`; an unsealed frame where the table
+says yes is `UnsealedFrame`. A frame of unknown kind is skipped as in section 3 and is not subject to the table.
+
+### The archive key, nonces and associated data
+
+The writer draws a random 32-byte archive key `K`. Every sealed frame is encrypted with `K` directly. Nonces are
+derived, never random:
+
+`nonce = HKDF-SHA256(ikm = K, salt = archive_id, info = "LitePack lpk v1 nonce" || kind (u16 LE) || sequence (u64 LE))`,
+cut to the nonce length of the suite (the first 12 or 24 bytes of the output).
+
+`sequence` is the position of the frame among the frames of the archive, counting every frame (sealed or not, the key
+slot included) from 0 for the first frame after the header. The index frame is the exception: the trailer cannot
+name its position, so the index is sealed under the constant sequence 2^64 - 1, which no counted frame reaches. Each
+(kind, sequence) pair is unique in an archive, so no nonce is used twice under `K`; a random nonce could repeat across
+the very large number of frames an archive may hold, and a repeat under GCM or Poly1305 breaks both secrecy and
+authenticity. The sealed payload still carries the nonce; a reader recomputes it and rejects a payload whose stored nonce
+differs.
+
+The associated data of every sealed frame is `"LitePack lpk v1 AD" || archive_id (16) || kind (u16 LE) || sequence
+(u64 LE) || payload_len (u64 LE)`, where `payload_len` is the frame's own `payload_len` field, the length of the
+sealed payload. A sealed frame moved to another position, another archive or another kind therefore fails its tag. The
+index records the sequence of every frame it locates (section 6): the block table, the entry table, the records frame and
+the recovery frames each carry a `sequence`.
+
+### The key slot (kind 7)
+
+An encrypted archive's first frame after the header is the key slot, in clear; no other key slot may appear
+(`MissingKeySlot` when the first frame is another kind, `UnexpectedKeySlot` for a key slot in an archive that is not
+encrypted or a second one). Its payload:
+
+| Field | Size | Meaning |
+|---|---|---|
+| suite | 1 | cipher suite: 1 = AES-256-GCM, 2 = XChaCha20-Poly1305 |
+| kdf | 1 | key derivation: 1 = Argon2id |
+| argon2_t | 4 | Argon2 passes, little-endian; 1 to 64 |
+| argon2_m_kib | 4 | Argon2 memory in KiB, little-endian; at least 8192 |
+| argon2_p | 4 | Argon2 lanes, little-endian; 1 to 64 |
+| salt | 16 | Argon2 salt |
+| keyfile_required | 1 | 0 or 1: a keyfile is mixed into the key derivation |
+| wrapped_key | 48 | the archive key encrypted under the KEK (32 bytes of ciphertext, then the 16-byte tag) |
+| check | 32 | BLAKE3 keyed with the archive key, of the archive id |
+
+The key encryption key, the KEK, is `Argon2id(password, salt, t, m, p)` with version 0x13 and a 32-byte output. With a
+keyfile (`keyfile_required` is 1) it is `HKDF-SHA256(ikm = argon2_output || BLAKE3-256(keyfile bytes), salt = salt,
+info = "LitePack lpk v1 keyfile")`. `wrapped_key` is `K` encrypted with the suite under the KEK, the all-zero nonce (safe
+because every KEK is used once: the salt is fresh per archive) and the associated data `"LitePack lpk v1 keywrap" ||
+archive_id`. `check` is `BLAKE3-256` keyed with `K` of the `archive_id`, a second and cheap way to tell a right key from a
+wrong one.
+
+Argon2 parameters: the writer's default is `t = 3`, `m = 65536` KiB, `p = 4` (RFC 9106's second recommendation) and it
+accepts others within `t >= 1`, `m >= 8192`, `p >= 1`. A reader additionally refuses `t > 64` and `p > 64` (`BadArgon2`),
+and a key slot whose `m` times 1024 exceeds the reader's memory resource is `Refused` (field `argon2_m`), before the
+password is derived.
+
+### Order of checks and outcomes
+
+1. The header is read; with `ENCRYPTED` set the key slot is read next, before any other frame. A damaged key slot is
+   `BadKeySlot` or `BadArgon2`.
+2. The key slot is opened with the credentials. A wrong password, a wrong or missing keyfile and a damaged wrapped key
+   are all `WrongKey`; no other frame has been read. Without credentials the archive is `PasswordRequired`, except a
+   listable archive, which opens for listing: the reader finds the entry table by walking the frame envelopes (the
+   index is sealed), `extract` is `PasswordRequired`, and `verify` hashes every frame and checks the recovery frames, and
+   reports that the chunks were not checked.
+3. Only then are the trailer, the index and the blocks read. A modified frame envelope or payload fails the frame hash
+   first (`HashMismatch`); a payload modified together with its frame hash fails the tag: `AuthenticationFailed` naming the
+   kind and the sequence.
+
+The reference tool takes the password with `--password-file` (one trailing newline is not part of it) or `--password`
+(for tests), and a keyfile with `--keyfile`; `list` works on a listable archive without either.
+
+Errors of this section: `PasswordRequired`, `WrongKey`, `AuthenticationFailed`, `UnexpectedSealedFrame`, `UnsealedFrame`,
+`UnexpectedKeySlot`, `MissingKeySlot`, `BadKeySlot`, `BadArgon2`, `Refused` (field `argon2_m`).
+
+### Test vectors
+
+`sealed-aes.lpk`, `sealed-xchacha.lpk`, `sealed-listable.lpk` and `sealed-keyfile.lpk` (with `sealed-keyfile.key`) are
+committed under `crates/lpk-format/tests/vectors/`; their test passwords are in `vectors.toml`. They use Argon2 `t = 1`,
+`m = 8192`, `p = 1` and are written with a seeded random generator, so regenerating them gives the same bytes.
