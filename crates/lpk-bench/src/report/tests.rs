@@ -2124,8 +2124,8 @@ fn run_settings_are_listed_per_directory_and_differing_threads_are_marked() {
     let text = report_text(&inputs);
     let a_run = source_index(&inputs, "a/2026-10-01-testbox/run.json");
     let b_run = source_index(&inputs, "b/2026-10-01-testbox/run.json");
-    assert!(text.contains(&format!("4 threads, settle pause")), "{text}");
-    assert!(text.contains(&format!("8 threads, settle pause")), "{text}");
+    assert!(text.contains("4 threads, settle pause"), "{text}");
+    assert!(text.contains("8 threads, settle pause"), "{text}");
     assert!(text.contains(&format!("[{a_run}]")) && text.contains(&format!("[{b_run}]")));
     assert!(unclean_reasons(&inputs)
         .iter()
