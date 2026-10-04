@@ -60,10 +60,9 @@ fn strings(v: &Value) -> Vec<String> {
 /// `path size blake3` of every file entry, decoded in entry-table order.
 fn decoded_lines(a: &mut Archive) -> Result<Vec<String>, lpk_check::Error> {
     let entries = a.entries()?;
-    let rc = a.record_count()?;
     let mut out = Vec::new();
     for e in &entries {
-        let b = a.read_file(e, rc)?;
+        let b = a.read_file(e)?;
         out.push(format!(
             "{} {} {}",
             e.path,
@@ -250,17 +249,15 @@ fn malformed_vectors() {
 /// E1-14d ruling 1 (spec section 9, CONFORMANCE "malformed-hashflip"): a block
 /// frame whose hash fails is that frame's `HashMismatch` (kind 2) when a file
 /// of the block is extracted, as for `verify`; `ChunkMismatch` is only for an
-/// intact frame whose chunk differs. Ignored until this decoder is adapted to
-/// the revised section 9 (its author's next step); the assertion is final.
+/// intact frame whose chunk differs.
 #[test]
-#[ignore = "E1-14d ruling 1: lpk-check still reports ChunkMismatch; its author adapts the decoder"]
 fn hashflip_extract_is_a_hash_mismatch() {
     let exp = table("expected.toml");
     let t = exp["malformed-hashflip.lpk"].as_table().unwrap();
     let mut a = Archive::open(read("malformed-hashflip.lpk"), Options::default()).unwrap();
     let entries = a.entries().unwrap();
     for en in &entries {
-        let e = a.read_file(en, 0).unwrap_err();
+        let e = a.read_file(en).unwrap_err();
         assert_eq!(e.class, "HashMismatch");
         assert_eq!(e.detail, t["message"].as_str().unwrap());
     }
@@ -312,7 +309,7 @@ fn recovery_vectors() {
                 .iter()
                 .any(|d| b.frame_offset < d.end && d.start < b.frame_offset + b.frame_len)
         });
-        match a.read_file(en, 0) {
+        match a.read_file(en) {
             Ok(b) => {
                 assert!(!touched, "{} extracted although damaged", en.path);
                 assert_eq!(
@@ -381,23 +378,73 @@ fn needs_are_enforced() {
         (code, out.as_str()),
         (0, exp["sealed-listable.lpk"]["list"].as_str().unwrap())
     );
+    let none = Options::default();
     assert_eq!(
-        keyless::list(&read("sealed-listable.lpk")).unwrap().len(),
+        keyless::list(&read("sealed-listable.lpk"), &none)
+            .unwrap()
+            .len(),
         3
     );
     assert_eq!(
-        keyless::list(&read("sealed-aes.lpk"))
+        keyless::list(&read("sealed-aes.lpk"), &none)
             .map_err(|e| e.class)
             .err(),
         Some("PasswordRequired")
     );
     let dir = temp("listable");
-    let (code, _, err) = bin(&["extract".into(), path, dir.display().to_string()]);
+    let (code, _, err) = bin(&["extract".into(), path.clone(), dir.display().to_string()]);
     assert_eq!(code, 1);
     assert!(err.contains("password"), "{err}");
-    // Keyless verification hashes every frame.
-    let w = keyless::walk(&read("sealed-aes.lpk")).unwrap();
-    assert_eq!(w.bad_hashes, 0);
+    // Keyless verify (CONFORMANCE output formats): frame hashes only.
+    let (code, out, err) = bin(&["verify".into(), path]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "ok (frame hashes only, chunks not checked without the password): 3 entries\n"
+    );
+    for v in ["sealed-aes.lpk", "sealed-xchacha.lpk", "sealed-keyfile.lpk"] {
+        let (frames, entries) = keyless::verify(&read(v), &none).unwrap();
+        assert!(frames > 0 && entries.is_none());
+        let w = keyless::walk(&read(v), &none).unwrap();
+        assert!(w.recovery.is_empty() && w.generations.len() == 1);
+    }
+}
+
+/// Revised section 2: LISTABLE without ENCRYPTED is `BadHeaderFlags`; section 6 step 3: a key
+/// slot in a plain archive is `UnexpectedKeySlot`; the index must end where the trailer starts.
+#[test]
+fn stricter_open_rules() {
+    let mut d = read("zstd-basic.lpk");
+    d[12] = 2;
+    assert_eq!(
+        Archive::open(d, Options::default())
+            .map_err(|e| e.class)
+            .err(),
+        Some("BadHeaderFlags")
+    );
+    let mut d = read("zstd-basic.lpk");
+    d[32] = 7;
+    d[33] = 0;
+    assert_eq!(
+        Archive::open(d, Options::default())
+            .map_err(|e| e.class)
+            .err(),
+        Some("UnexpectedKeySlot")
+    );
+    // A trailer whose index_len leaves a gap before the trailer (trailer hash recomputed).
+    let mut d = read("zstd-basic.lpk");
+    let t = d.len() - 133;
+    let p = t + 5;
+    let il = u64::from_le_bytes(d[p + 8..p + 16].try_into().unwrap());
+    d[p + 8..p + 16].copy_from_slice(&(il - 1).to_le_bytes());
+    let h = blake3::hash(&d[p..p + 96]);
+    d[p + 96..p + 128].copy_from_slice(h.as_bytes());
+    assert_eq!(
+        Archive::open(d, Options::default())
+            .map_err(|e| e.class)
+            .err(),
+        Some("BadFrameLocation")
+    );
 }
 
 /// Robustness (CONFORMANCE.md "Fuzz and robustness"): every single-bit flip and many truncations

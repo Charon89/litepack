@@ -47,8 +47,21 @@ pub struct KeySlot {
 /// The key slot payload length.
 pub const KEY_SLOT_LEN: usize = 111;
 
-/// Parses a key slot payload; `memory` is the reader's memory resource in bytes.
-pub fn parse_key_slot(payload: &[u8], memory: u64) -> Result<KeySlot> {
+/// `Refused` (field `argon2_m`) when the slot's Argon2 memory exceeds the reader's `memory`;
+/// checked only when credentials are given (section 6 step 3).
+pub fn check_argon2_memory(slot: &KeySlot, memory: u64) -> Result<()> {
+    let need = u64::from(slot.m_kib) * 1024;
+    if need > memory {
+        return Err(Error::new(
+            "Refused",
+            format!("the archive needs argon2_m of {need} bytes; this reader allows {memory}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Parses a key slot payload in the order of section 14 ("Reading the key slot").
+pub fn parse_key_slot(payload: &[u8]) -> Result<KeySlot> {
     let bad = |r: &str| Error::new("BadKeySlot", format!("bad key slot: {r}"));
     if payload.len() != KEY_SLOT_LEN {
         return Err(bad("length"));
@@ -62,9 +75,19 @@ pub fn parse_key_slot(payload: &[u8], memory: u64) -> Result<KeySlot> {
     if c.u8()? != 1 {
         return Err(bad("kdf"));
     }
+    let argon = |r: &str| Error::new("BadArgon2", format!("argon2 parameter out of bounds: {r}"));
     let t = c.u32()?;
     let m_kib = c.u32()?;
     let p = c.u32()?;
+    if !(1..=64).contains(&t) {
+        return Err(argon("t"));
+    }
+    if m_kib < 8192 {
+        return Err(argon("m"));
+    }
+    if !(1..=64).contains(&p) {
+        return Err(argon("p"));
+    }
     let salt = c.array()?;
     let keyfile_required = match c.u8()? {
         0 => false,
@@ -73,18 +96,6 @@ pub fn parse_key_slot(payload: &[u8], memory: u64) -> Result<KeySlot> {
     };
     let wrapped = c.array()?;
     let check = c.array()?;
-    if !(1..=64).contains(&t) || m_kib < 8192 || !(1..=64).contains(&p) {
-        return Err(Error::new("BadArgon2", "argon2 parameters out of bounds"));
-    }
-    if u64::from(m_kib) * 1024 > memory {
-        return Err(Error::new(
-            "Refused",
-            format!(
-                "the archive needs argon2_m of {} bytes; this reader allows {memory}",
-                u64::from(m_kib) * 1024
-            ),
-        ));
-    }
     Ok(KeySlot {
         suite,
         t,

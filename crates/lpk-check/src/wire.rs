@@ -137,6 +137,12 @@ pub fn read_varint(buf: &[u8], pos: &mut usize, what: &str) -> Result<u64> {
         };
         *pos += 1;
         if i == 9 {
+            if b & 0x80 != 0 {
+                return Err(Error::new(
+                    "VarintTooLong",
+                    format!("varint in {what} continues past ten bytes"),
+                ));
+            }
             if b != 0x01 {
                 return Err(Error::new(
                     "NonCanonicalVarint",
@@ -157,7 +163,7 @@ pub fn read_varint(buf: &[u8], pos: &mut usize, what: &str) -> Result<u64> {
         }
     }
     Err(Error::new(
-        "NonCanonicalVarint",
+        "VarintTooLong",
         format!("varint in {what} is longer than ten bytes"),
     ))
 }
@@ -206,7 +212,7 @@ pub fn parse_header(data: &[u8]) -> Result<Header> {
     let major = u16::from_le_bytes([data[8], data[9]]);
     if major != 1 {
         return Err(Error::new(
-            "UnsupportedVersion",
+            "UnsupportedMajor",
             format!("unsupported major version {major}"),
         ));
     }
@@ -216,6 +222,12 @@ pub fn parse_header(data: &[u8]) -> Result<Header> {
         return Err(Error::new(
             "ReservedHeaderBits",
             format!("reserved header flags set: {flags:#x}"),
+        ));
+    }
+    if flags & HF_LISTABLE != 0 && flags & HF_ENCRYPTED == 0 {
+        return Err(Error::new(
+            "BadHeaderFlags",
+            "header flag LISTABLE without ENCRYPTED",
         ));
     }
     let mut archive_id = [0u8; 16];
@@ -271,7 +283,8 @@ impl Frame<'_> {
 }
 
 /// Parses the frame at `offset` of `data` without failing on a bad hash (the caller decides).
-/// The input ends at `data.len()`; `limit` is the largest accepted `payload_len`.
+/// The input ends at `data.len()`; `limit` is the largest accepted `payload_len`. The checks
+/// follow the order of section 3 ("Reading a frame") up to the hash, which the caller checks.
 pub fn parse_frame(data: &[u8], offset: usize, limit: u64) -> Result<Frame<'_>> {
     let mut pos = offset;
     if data.len() < offset || data.len() - offset < 4 {
@@ -280,20 +293,26 @@ pub fn parse_frame(data: &[u8], offset: usize, limit: u64) -> Result<Frame<'_>> 
     let kind = u16::from_le_bytes([data[pos], data[pos + 1]]);
     let flags = u16::from_le_bytes([data[pos + 2], data[pos + 3]]);
     pos += 4;
-    let payload_len = read_varint(data, &mut pos, "frame header")?;
-    if kind == 0 {
-        return Err(Error::new("BadFrameKind", "frame kind 0 is invalid"));
-    }
     if flags & !(FF_MUST_UNDERSTAND | FF_SEALED) != 0 {
         return Err(Error::new(
             "ReservedFrameBits",
             format!("reserved frame flags {flags:#x} in frame kind {kind}"),
         ));
     }
+    if kind == 0 {
+        return Err(Error::new("InvalidKind", "frame kind 0 is invalid"));
+    }
+    let payload_len = read_varint(data, &mut pos, "frame header")?;
     if payload_len > limit {
         return Err(Error::new(
             "PayloadTooLarge",
             format!("payload of {payload_len} bytes exceeds the limit {limit}"),
+        ));
+    }
+    if kind > kind::KEY_SLOT && flags & FF_MUST_UNDERSTAND != 0 {
+        return Err(Error::new(
+            "UnknownMustUnderstand",
+            format!("unknown frame kind {kind} must be understood"),
         ));
     }
     let left = (data.len() - pos) as u64;
@@ -317,6 +336,47 @@ pub fn parse_frame(data: &[u8], offset: usize, limit: u64) -> Result<Frame<'_>> 
         end: pos,
         hash_ok,
     })
+}
+
+/// Reads a frame at a location the index or the trailer records (section 6 "Reading a recorded
+/// frame"): nothing past `offset + len` is read; a length too short for the kind, a cut frame and a
+/// frame shorter than its location are `BadFrameLocation` naming `what`; the kind is checked
+/// first, the hash before the length.
+pub fn read_recorded<'a>(
+    data: &'a [u8],
+    offset: u64,
+    len: u64,
+    want: u16,
+    what: &str,
+    limit: u64,
+) -> Result<Frame<'a>> {
+    let end = offset
+        .checked_add(len)
+        .filter(|e| *e <= data.len() as u64)
+        .ok_or_else(|| Error::bad_location(what))? as usize;
+    let off = offset as usize;
+    if len < 2 {
+        return Err(Error::bad_location(what));
+    }
+    let k = u16::from_le_bytes([data[off], data[off + 1]]);
+    if k != want {
+        return Err(Error::new(
+            "WrongFrameKind",
+            format!("expected frame kind {want}, found {k}"),
+        ));
+    }
+    let f = parse_frame(&data[..end], off, limit).map_err(|e| {
+        if e.class == "Truncated" {
+            Error::bad_location(what)
+        } else {
+            e
+        }
+    })?;
+    f.check_hash()?;
+    if f.end != end {
+        return Err(Error::bad_location(what));
+    }
+    Ok(f)
 }
 
 /// The trailer payload (section 6).
@@ -396,6 +456,12 @@ mod tests {
         let bad = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
         assert!(read_varint(&bad, &mut p, "t").is_err());
         p = 0;
+        let long = [0xFF; 11];
+        assert_eq!(
+            read_varint(&long, &mut p, "t").map_err(|e| e.class),
+            Err("VarintTooLong")
+        );
+        p = 0;
         assert_eq!(
             read_varint(&[0x80], &mut p, "x").map_err(|e| e.class),
             Err("Truncated")
@@ -417,11 +483,16 @@ mod tests {
         h[8] = 2;
         assert_eq!(
             parse_header(&h).map_err(|e| e.class),
-            Err("UnsupportedVersion")
+            Err("UnsupportedMajor")
         );
         h[8] = 1;
         h[12] = 4;
-        assert!(parse_header(&h).is_err());
+        assert_eq!(
+            parse_header(&h).map_err(|e| e.class),
+            Err("ReservedHeaderBits")
+        );
+        h[12] = 2;
+        assert_eq!(parse_header(&h).map_err(|e| e.class), Err("BadHeaderFlags"));
         h[12] = 3;
         let hd = parse_header(&h);
         assert!(hd.is_ok_and(|x| x.encrypted() && x.listable()));

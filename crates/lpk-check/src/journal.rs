@@ -2,8 +2,8 @@
 
 use crate::error::{Error, Result};
 use crate::wire::{
-    is_trailer_shape, parse_frame, parse_header, trailer_ending_at, Trailer, HEADER_LEN,
-    TRAILER_FRAME_LEN,
+    is_trailer_shape, parse_frame, parse_header, parse_trailer, trailer_ending_at, Trailer,
+    HEADER_LEN, TRAILER_FRAME_LEN,
 };
 
 /// One generation of the chain.
@@ -46,14 +46,15 @@ pub fn history(data: &[u8]) -> Result<Vec<GenInfo>> {
     let end = last_trailer_end(data).ok_or_else(|| Error::new("NoTrailer", "no trailer found"))?;
     let (mut off, mut t) =
         trailer_ending_at(data, end).ok_or_else(|| Error::new("NoTrailer", "no trailer found"))?;
+    if t.archive_id != header.archive_id {
+        return Err(Error::new(
+            "ArchiveIdMismatch",
+            "trailer archive id differs",
+        ));
+    }
     let mut out = Vec::new();
     loop {
-        if t.archive_id != header.archive_id {
-            return Err(Error::new(
-                "ArchiveIdMismatch",
-                "trailer archive id differs",
-            ));
-        }
+        // Section 15 "The trailer chain", in its order.
         if t.index_offset.checked_add(t.index_len) != Some(off as u64) {
             return Err(Error::bad_location("index"));
         }
@@ -66,19 +67,42 @@ pub fn history(data: &[u8]) -> Result<Vec<GenInfo>> {
             if t.previous_trailer_offset != 0 {
                 return Err(Error::new(
                     "BadTrailer",
-                    "bad trailer: previous offset in generation 0",
+                    "bad trailer: previous_trailer_offset",
                 ));
             }
             return Ok(out);
         }
         let prev = t.previous_trailer_offset;
-        if prev >= t.index_offset || prev < HEADER_LEN as u64 {
+        let prev_end_ok = prev >= HEADER_LEN as u64
+            && prev
+                .checked_add(TRAILER_FRAME_LEN as u64)
+                .is_some_and(|e| e <= t.index_offset);
+        if !prev_end_ok {
             return Err(Error::bad_location("trailer"));
         }
         let prev = prev as usize;
-        let (poff, pt) = trailer_ending_at(data, prev + TRAILER_FRAME_LEN)
-            .ok_or_else(|| Error::new("BadTrailer", "bad trailer: previous trailer"))?;
-        if pt.generation + 1 != t.generation {
+        let f = parse_frame(&data[..t.index_offset as usize], prev, 96).map_err(|e| {
+            if e.class == "Truncated" {
+                Error::truncated("trailer")
+            } else {
+                Error::new("NoTrailer", format!("previous trailer: {e}"))
+            }
+        })?;
+        if !is_trailer_shape(&f) {
+            return Err(Error::new(
+                "NoTrailer",
+                "previous trailer has the wrong shape",
+            ));
+        }
+        f.check_hash()?;
+        let (poff, pt) = (prev, parse_trailer(f.payload)?);
+        if pt.archive_id != header.archive_id {
+            return Err(Error::new(
+                "ArchiveIdMismatch",
+                "trailer archive id differs",
+            ));
+        }
+        if pt.generation.checked_add(1) != Some(t.generation) {
             return Err(Error::new(
                 "GenerationMismatch",
                 format!(

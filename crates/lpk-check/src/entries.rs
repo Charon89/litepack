@@ -74,16 +74,14 @@ pub fn path_problem(p: &[u8]) -> Option<&'static str> {
     if s.contains('\0') {
         return Some("nul");
     }
-    let comps: Vec<&str> = s.split('/').collect();
-    let last = comps.len() - 1;
-    for (i, c) in comps.iter().enumerate() {
+    if s.ends_with('/') {
+        return Some("trailing slash");
+    }
+    for c in s.split('/') {
         if c.is_empty() {
-            if i == last {
-                return Some("trailing slash");
-            }
             return Some("empty component");
         }
-        if *c == "." || *c == ".." {
+        if c == "." || c == ".." {
             return Some("dot component");
         }
     }
@@ -198,6 +196,10 @@ mod tests {
         assert_eq!(path_problem(b"a\0b"), Some("nul"));
         assert_eq!(path_problem(&[0xFF]), Some("not utf-8"));
         assert_eq!(path_problem(b"a/b.txt"), None);
+        // The spec's own examples of the order (section 4).
+        assert_eq!(path_problem(b"/a\\b"), Some("leading slash"));
+        assert_eq!(path_problem(b"a//.."), Some("empty component"));
+        assert_eq!(path_problem(b"a//"), Some("trailing slash"));
     }
 
     fn dir(path: &[u8]) -> Vec<u8> {

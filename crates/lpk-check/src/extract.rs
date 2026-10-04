@@ -65,13 +65,35 @@ pub fn escape(s: &str) -> String {
         .collect()
 }
 
+/// Refuses an entry one of whose parent paths is an entry that is not a directory
+/// (`UnsafePath`, reason `conflicting name`, section 9).
+pub fn check_conflicts(entries: &[Entry]) -> Result<()> {
+    let kinds: std::collections::HashMap<&str, EntryKind> =
+        entries.iter().map(|e| (e.path.as_str(), e.kind)).collect();
+    for e in entries {
+        for (i, _) in e.path.match_indices('/') {
+            let parent = &e.path[..i];
+            if kinds
+                .get(parent)
+                .is_some_and(|k| *k != EntryKind::Directory)
+            {
+                return Err(Error::new(
+                    "UnsafePath",
+                    format!("unsafe path {}: conflicting name", escape(&e.path)),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Extracts one entry into `dir` ("create new", no overwrite, a partial file removed).
-pub fn extract_entry(a: &mut Archive, e: &Entry, dir: &Path, record_count: u64) -> Result<()> {
+pub fn extract_entry(a: &mut Archive, e: &Entry, dir: &Path) -> Result<()> {
     let target = target_path(dir, e)?;
     if e.kind == EntryKind::Directory {
         return fs::create_dir_all(&target).map_err(|x| Error::io("create directory", &x));
     }
-    let bytes = a.read_file(e, record_count)?;
+    let bytes = a.read_file(e)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|x| Error::io("create directory", &x))?;
     }
@@ -95,11 +117,11 @@ pub fn extract_all(a: &mut Archive, dir: &Path) -> Result<(Vec<String>, Option<E
     for e in &entries {
         target_path(dir, e)?;
     }
-    let rc = a.record_count()?;
+    check_conflicts(&entries)?;
     let mut done = Vec::new();
     let mut first = None;
     for e in &entries {
-        match extract_entry(a, e, dir, rc) {
+        match extract_entry(a, e, dir) {
             Ok(()) => done.push(e.path.clone()),
             Err(x) => {
                 first.get_or_insert(x);

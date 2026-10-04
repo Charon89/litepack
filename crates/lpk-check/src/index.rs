@@ -147,6 +147,13 @@ fn chunk_table(c: &mut Cursor<'_>) -> Result<Vec<ChunkRec>> {
 /// Parses an index payload (plain bytes) of a frame at `index_offset` and checks the rules of
 /// sections 6, 7 and 10.
 pub fn parse_index(payload: &[u8], index_offset: u64) -> Result<Index> {
+    let gen_err = |reason: &str| {
+        Error::new(
+            "BadGenerationTable",
+            format!("bad generation table: {reason}"),
+        )
+    };
+    // Parse order 1 and 2: the fields, with their count bounds and per-entry rules.
     let mut c = Cursor::new(payload, WHAT);
     let chunks = chunk_table(&mut c)?;
     let merkle_root = c.array()?;
@@ -168,10 +175,13 @@ pub fn parse_index(payload: &[u8], index_offset: u64) -> Result<Index> {
     let mut priors: Vec<[u8; 32]> = Vec::with_capacity(np as usize);
     for _ in 0..np {
         let id: [u8; 32] = c.array()?;
-        if id == [0; 32] || priors.last().is_some_and(|p| id <= *p) {
+        if id == [0; 32] {
+            return Err(Error::new("BadPriorList", "bad prior list: zero id"));
+        }
+        if priors.last().is_some_and(|p| id <= *p) {
             return Err(Error::new(
                 "BadPriorList",
-                "prior list not ascending or zero id",
+                "bad prior list: not ascending and unique",
             ));
         }
         priors.push(id);
@@ -202,39 +212,135 @@ pub fn parse_index(payload: &[u8], index_offset: u64) -> Result<Index> {
         recovery.push(loc(&mut c)?);
     }
     let ng = c.count(19)?;
-    let mut generations = Vec::with_capacity(ng as usize);
-    for _ in 0..ng {
-        generations.push(GenEntry {
+    let mut generations: Vec<GenEntry> = Vec::with_capacity(ng as usize);
+    for i in 0..ng {
+        let g = GenEntry {
             generation: c.varint()?,
             start_offset: c.varint()?,
             first_sequence: c.varint()?,
             salt: c.array()?,
-        });
+        };
+        if g.generation != i {
+            return Err(gen_err("generation"));
+        }
+        if i == 0 && g.start_offset != HEADER_LEN as u64 {
+            return Err(gen_err("first start_offset"));
+        }
+        if i == 0 && g.first_sequence != 0 {
+            return Err(gen_err("first first_sequence"));
+        }
+        if let Some(p) = generations.last() {
+            if g.start_offset <= p.start_offset || g.first_sequence <= p.first_sequence {
+                return Err(gen_err("order"));
+            }
+        }
+        generations.push(g);
     }
+    // 3. Trailing bytes.
     if c.remaining() != 0 {
         return Err(Error::trailing(WHAT));
     }
 
-    // Block rules (section 6).
+    // 4. Block rules: location, frame order and the single empty block, chunk range, short stop.
     let n = chunks.len() as u64;
-    let mut chunk_block = vec![0usize; chunks.len()];
-    let mut chunk_offset = vec![0u64; chunks.len()];
     let mut next = 0u64;
     let mut prev_end = 0u64;
+    let coverage = |b: usize| Error::new("BlockCoverage", format!("block {b} breaks coverage"));
     for (b, bl) in blocks.iter().enumerate() {
-        if bl.first_chunk != next || (bl.chunk_count == 0 && (n != 0 || b > 0)) {
+        let fl = Loc {
+            offset: bl.frame_offset,
+            len: bl.frame_len,
+            sequence: bl.sequence,
+        };
+        if !location_ok(&fl, index_offset) {
             return Err(Error::new(
-                "BlockCoverage",
-                format!("block {b} breaks coverage"),
+                "BlockOutOfRange",
+                format!("block {b} out of range"),
             ));
         }
-        let end = bl
+        if bl.frame_offset < prev_end {
+            return Err(coverage(b));
+        }
+        if bl.chunk_count == 0 && (n != 0 || b > 0) {
+            return Err(coverage(b));
+        }
+        prev_end = fl.end();
+        if bl.first_chunk != next {
+            return Err(coverage(b));
+        }
+        next = bl
             .first_chunk
             .checked_add(bl.chunk_count)
             .filter(|e| *e <= n)
-            .ok_or_else(|| Error::new("BlockCoverage", format!("block {b} breaks coverage")))?;
+            .ok_or_else(|| coverage(b))?;
+    }
+    if next != n {
+        return Err(coverage(blocks.len()));
+    }
+
+    // 5 and 6. The entry table and records locations, then against the blocks and each other.
+    if !location_ok(&entry_table, index_offset) {
+        return Err(Error::bad_location("entry table"));
+    }
+    if let Some(r) = &records {
+        if !location_ok(r, index_offset) {
+            return Err(Error::bad_location("records"));
+        }
+    }
+    let block_ranges: Vec<(u64, u64)> = blocks
+        .iter()
+        .map(|b| (b.frame_offset, b.frame_offset + b.frame_len))
+        .collect();
+    let et = (entry_table.offset, entry_table.end());
+    if block_ranges.iter().any(|r| overlaps(*r, et)) {
+        return Err(Error::bad_location("entry table"));
+    }
+    if let Some(r) = &records {
+        let rr = (r.offset, r.end());
+        if block_ranges.iter().any(|b| overlaps(*b, rr)) || overlaps(rr, et) {
+            return Err(Error::bad_location("records"));
+        }
+    }
+
+    // 7. Recovery locations, overlaps, order and where the last one ends.
+    for rl in &recovery {
+        if !location_ok(rl, index_offset) {
+            return Err(Error::bad_location("recovery"));
+        }
+    }
+    for (i, rl) in recovery.iter().enumerate() {
+        let rr = (rl.offset, rl.end());
+        let bad = block_ranges.iter().any(|b| overlaps(*b, rr))
+            || overlaps(rr, et)
+            || records.is_some_and(|r| overlaps(rr, (r.offset, r.end())))
+            || recovery
+                .iter()
+                .enumerate()
+                .any(|(j, o)| j != i && overlaps(rr, (o.offset, o.end())));
+        if bad {
+            return Err(Error::bad_location("recovery"));
+        }
+    }
+    if recovery.windows(2).any(|w| w[1].offset < w[0].end()) {
+        return Err(Error::bad_location("recovery"));
+    }
+    if let Some(last) = recovery.last() {
+        let ok = last.end() == index_offset
+            || (generations.len() > 1
+                && generations.last().is_some_and(|g| {
+                    last.offset < g.start_offset && last.end() <= g.start_offset.saturating_sub(133)
+                }));
+        if !ok {
+            return Err(Error::bad_location("recovery"));
+        }
+    }
+
+    // 8. One pass over the chunk records against the blocks, then the Merkle root.
+    let mut chunk_block = vec![0usize; chunks.len()];
+    let mut chunk_offset = vec![0u64; chunks.len()];
+    for (b, bl) in blocks.iter().enumerate() {
         let mut sum = 0u64;
-        for i in bl.first_chunk..end {
+        for i in bl.first_chunk..bl.first_chunk + bl.chunk_count {
             let i = i as usize;
             chunk_block[i] = b;
             chunk_offset[i] = sum;
@@ -251,92 +357,13 @@ pub fn parse_index(payload: &[u8], index_offset: u64) -> Result<Index> {
                 ),
             ));
         }
-        let fl = Loc {
-            offset: bl.frame_offset,
-            len: bl.frame_len,
-            sequence: bl.sequence,
-        };
-        if !location_ok(&fl, index_offset) {
-            return Err(Error::new(
-                "BlockOutOfRange",
-                format!("block {b} out of range"),
-            ));
-        }
-        if bl.frame_offset < prev_end {
-            return Err(Error::new("BlockCoverage", format!("block {b} overlaps")));
-        }
-        prev_end = fl.end();
-        next = end;
     }
-    if next != n {
-        return Err(Error::new(
-            "BlockCoverage",
-            format!("block {} breaks coverage", blocks.len()),
-        ));
-    }
-
-    let block_ranges: Vec<(u64, u64)> = blocks
-        .iter()
-        .map(|b| (b.frame_offset, b.frame_offset + b.frame_len))
-        .collect();
-    let et = (entry_table.offset, entry_table.end());
-    if !location_ok(&entry_table, index_offset) || block_ranges.iter().any(|r| overlaps(*r, et)) {
-        return Err(Error::bad_location("entry table"));
-    }
-    if let Some(r) = &records {
-        let rr = (r.offset, r.end());
-        if !location_ok(r, index_offset)
-            || block_ranges.iter().any(|b| overlaps(*b, rr))
-            || overlaps(rr, et)
-        {
-            return Err(Error::bad_location("records"));
-        }
-    }
-    let mut prev_rec_end = 0u64;
-    for rl in &recovery {
-        let rr = (rl.offset, rl.end());
-        let bad = !location_ok(rl, index_offset)
-            || rl.offset < prev_rec_end
-            || block_ranges.iter().any(|b| overlaps(*b, rr))
-            || overlaps(rr, et)
-            || records.is_some_and(|r| overlaps(rr, (r.offset, r.end())));
-        if bad {
-            return Err(Error::bad_location("recovery"));
-        }
-        prev_rec_end = rl.end();
-    }
-    // The last recovery frame ends at the index, or (latest generation without recovery) at or
-    // before the previous trailer.
-    if let Some(last) = recovery.last() {
-        let ok = last.end() == index_offset
-            || (generations.len() > 1
-                && generations
-                    .last()
-                    .is_some_and(|g| last.end() <= g.start_offset.saturating_sub(133)));
-        if !ok {
-            return Err(Error::bad_location("recovery"));
-        }
-    }
-
-    // Generation table ordering (section 15).
-    for (i, g) in generations.iter().enumerate() {
-        let bad_order = i > 0
-            && (g.start_offset <= generations[i - 1].start_offset
-                || g.first_sequence <= generations[i - 1].first_sequence);
-        if g.generation != i as u64 || bad_order || (i == 0 && g.start_offset != HEADER_LEN as u64)
-        {
-            return Err(Error::new(
-                "BadGenerationTable",
-                format!("generation table entry {i} is out of order"),
-            ));
-        }
-    }
-
     let hashes: Vec<[u8; 32]> = chunks.iter().map(|c| c.hash).collect();
     if merkle::root(&hashes) != merkle_root {
         return Err(Error::new("MerkleRootMismatch", "merkle root mismatch"));
     }
 
+    // 9. The envelope rules of section 7.
     let max_plain = blocks.iter().map(|b| b.plain_len).max().unwrap_or(0);
     if envelope.max_block_plain != max_plain {
         return Err(Error::new(

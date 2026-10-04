@@ -65,7 +65,10 @@ fn bad_params(id: u16, reason: &str) -> Error {
 }
 
 /// Parses the block header of a `ChunkData` payload; `record_count` bounds the record ids.
-pub fn parse_block(payload: &[u8], record_count: u64) -> Result<BlockHeader<'_>> {
+pub fn parse_block<'a>(
+    payload: &'a [u8],
+    record_count: &mut dyn FnMut() -> Result<u64>,
+) -> Result<BlockHeader<'a>> {
     let mut c = Cursor::new(payload, "graph");
     let n = c.varint()?;
     if n == 0 || n > 16 {
@@ -73,6 +76,7 @@ pub fn parse_block(payload: &[u8], record_count: u64) -> Result<BlockHeader<'_>>
     }
     let mut steps = Vec::with_capacity(n as usize);
     let mut bwt_block = 0u64;
+    let mut record_ids = Vec::new();
     for _ in 0..n {
         let id = c.u16()?;
         if id > 0x000C {
@@ -94,7 +98,7 @@ pub fn parse_block(payload: &[u8], record_count: u64) -> Result<BlockHeader<'_>>
             if p.len() == len {
                 Ok(())
             } else {
-                Err(bad_params(id, "params length"))
+                Err(bad_params(id, "length"))
             }
         };
         let prim = match id {
@@ -166,16 +170,21 @@ pub fn parse_block(payload: &[u8], record_count: u64) -> Result<BlockHeader<'_>>
                 if pos != p.len() {
                     return Err(bad_params(id, "record_id"));
                 }
-                if rid >= record_count {
-                    return Err(Error::new(
-                        "RecordOutOfRange",
-                        format!("record {rid} out of range (count {record_count})"),
-                    ));
-                }
+                record_ids.push(rid);
                 Prim::Unimplemented(id)
             }
         };
         steps.push(prim);
+    }
+    // Section 8 order step 3: record ids after the whole graph, before the block header fields.
+    if !record_ids.is_empty() {
+        let count = record_count()?;
+        if let Some(rid) = record_ids.iter().find(|r| **r >= count) {
+            return Err(Error::new(
+                "RecordOutOfRange",
+                format!("record {rid} out of range (count {count})"),
+            ));
+        }
     }
     c.set_what("block header");
     let plain_len = c.varint()?;
@@ -202,7 +211,7 @@ pub struct DecodeCtx<'a> {
     pub priors: &'a HashMap<[u8; 32], Vec<u8>>,
     /// The reader's `max_window`.
     pub max_window: u64,
-    /// The reader's `max_block_plain`.
+    /// The envelope's `max_block_plain` (bounds every intermediate output, section 8).
     pub max_block_plain: u64,
 }
 
@@ -310,6 +319,9 @@ fn zstd(
         dict_id = Some(d.id);
         dec.add_dict(d).map_err(|e| zerr(&e))?;
     }
+    if input.is_empty() && bound > 0 {
+        return Err(Error::new("ZstdError", "zstd: truncated"));
+    }
     let mut out: Vec<u8> = Vec::new();
     let mut src = input;
     while !src.is_empty() {
@@ -410,36 +422,49 @@ fn lzma(
     stream.push(props);
     stream.extend_from_slice(&dict_size.to_le_bytes());
     stream.extend_from_slice(input);
-    let run = |size: Option<u64>| -> (std::result::Result<(), String>, Bounded, u64) {
-        let mut w = Bounded {
-            buf: Vec::new(),
-            limit: bound,
-            overflow: false,
+    let run =
+        |size: Option<u64>| -> (std::result::Result<(), lzma_rs::error::Error>, Bounded, u64) {
+            let mut w = Bounded {
+                buf: Vec::new(),
+                limit: bound,
+                overflow: false,
+            };
+            let opts = Options {
+                unpacked_size: UnpackedSize::UseProvided(size),
+                memlimit: None,
+                allow_incomplete: false,
+            };
+            let mut rd = std::io::Cursor::new(&stream[..]);
+            let r = lzma_rs::lzma_decompress_with_options(&mut rd, &mut w, &opts);
+            let consumed = rd.position();
+            (r, w, consumed)
         };
-        let opts = Options {
-            unpacked_size: UnpackedSize::UseProvided(size),
-            memlimit: None,
-            allow_incomplete: false,
-        };
-        let mut rd = std::io::Cursor::new(&stream[..]);
-        let r = lzma_rs::lzma_decompress_with_options(&mut rd, &mut w, &opts)
-            .map_err(|e| e.to_string());
-        let consumed = rd.position();
-        (r, w, consumed)
-    };
+    let lzerr = |reason: &str| Error::new("LzmaError", format!("lzma: {reason}"));
+    let is_eof = |e: &lzma_rs::error::Error| matches!(e, lzma_rs::error::Error::IoError(x) if x.kind() == std::io::ErrorKind::UnexpectedEof);
     // With the end-of-payload marker (what liblzma writes).
     let (r, w, _) = run(None);
     if r.is_ok() && !w.overflow {
         return Ok(w.buf);
     }
-    // Without the marker: stop at the output bound; all input must be used.
+    if !last {
+        // A step that is not the last has only a bound: its stream must carry the marker.
+        let reached = w.overflow || w.buf.len() as u64 == bound;
+        return Err(match r {
+            _ if reached => lzerr("marker required"),
+            Err(ref e) if is_eof(e) => lzerr("truncated"),
+            Err(e) => lzerr(&e.to_string()),
+            Ok(()) => lzerr("marker required"),
+        });
+    }
+    // Last step without the marker: stop at the output bound; all input must be used.
     let (r2, w2, consumed) = run(Some(bound));
     if w2.overflow {
         return Err(too_large(last, "lzma"));
     }
     match r2 {
         Ok(()) if consumed == stream.len() as u64 => Ok(w2.buf),
-        Ok(()) => Err(Error::new("LzmaError", "lzma: trailing input")),
-        Err(e) => Err(Error::new("LzmaError", format!("lzma: {e}"))),
+        Ok(()) => Err(lzerr("trailing input")),
+        Err(ref e) if is_eof(e) => Err(lzerr("truncated")),
+        Err(e) => Err(lzerr(&e.to_string())),
     }
 }

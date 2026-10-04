@@ -95,7 +95,7 @@ fn run(cli: &Cli) -> Result<u8, Error> {
         Cmd::List { archive } => {
             let data = read(archive)?;
             let entries = if keyless_encrypted(&data) {
-                keyless::list(&data)?
+                keyless::list(&data, &opts)?
             } else {
                 Archive::open(data, opts.clone())?.entries()?
             };
@@ -107,14 +107,11 @@ fn run(cli: &Cli) -> Result<u8, Error> {
         Cmd::Verify { archive } => {
             let data = read(archive)?;
             if keyless_encrypted(&data) {
-                let w = keyless::walk(&data)?;
-                let rep = keyless::recovery_scan(&data, None, opts.resources.memory)?;
-                if w.bad_hashes > 0 || rep.damaged > 0 || rep.unusable > 0 {
-                    return Err(Error::new("DamageFound", "damaged frames found"));
-                }
+                // Spec problem: `<entries>` of a non-listable archive is not defined; 0 is printed.
+                let (_, entries) = keyless::verify(&data, &opts)?;
                 println!(
-                    "ok: {} frames verified; chunks not checked (no password)",
-                    w.frames
+                    "ok (frame hashes only, chunks not checked without the password): {} entries",
+                    entries.unwrap_or(0)
                 );
                 return Ok(0);
             }
@@ -141,7 +138,7 @@ fn run(cli: &Cli) -> Result<u8, Error> {
             let want_repair = matches!(cli.cmd, Cmd::Repair { .. });
             let rep_target = if want_repair { Some(&mut copy) } else { None };
             let rep = if keyless_encrypted(&data) {
-                keyless::recovery_scan(&data, rep_target, opts.resources.memory)?
+                keyless::recovery_scan(&data, &opts, rep_target)?
             } else {
                 let a = Archive::open(data.clone(), opts.clone())?;
                 recovery::scan(
