@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-05, about 16:45 UTC (12:45 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-04, about 16:45 UTC (12:45 local on the measuring machine). No measurement is running.
 
 **Phase 1 is under way.** Phase 0 closed with D-08 (GO) and D-27; the Phase 1 task list is in PLAN (37 tasks).
 On `main`: E1-1…E1-13 (D-28…D-40) — the whole `.lpk` v1 format: frames, entry table, chunks and Merkle tree,
