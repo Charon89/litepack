@@ -41,8 +41,8 @@ fn extract_every_class_block_ordered() {
         .collect();
     classes.sort();
     assert!(!classes.is_empty());
-    println!("| class | files | MB | blocks | workers | old s | new s | new MB/s | old/new |");
-    println!("|---|---|---|---|---|---|---|---|---|");
+    println!("| class | files | MB | blocks | workers+writers | nested | old s | new s | new MB/s | old/new |");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
     for dir in classes {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         let work = tempfile::tempdir().unwrap();
@@ -91,9 +91,11 @@ fn extract_every_class_block_ordered() {
         assert_eq!(s.blocks_decoded, s.blocks_needed, "{name}");
         let mb = s.bytes as f64 / 1e6;
         println!(
-            "| {name} | {files} | {mb:.1} | {} | {} | {old_secs:.2} | {new_secs:.2} | {:.0} | {:.1} |",
+            "| {name} | {files} | {mb:.1} | {} | {}+{} | {} | {old_secs:.2} | {new_secs:.2} | {:.0} | {:.1} |",
             s.blocks,
             s.workers,
+            s.writers,
+            s.nested_decodes,
             mb / new_secs.max(1e-9),
             old_secs / new_secs.max(1e-9)
         );
