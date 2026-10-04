@@ -470,8 +470,14 @@ A step count of 0 or above 16 is `BadGraph` with `reason` `step count`; a non-ze
 
 Order of application. Steps are applied in the order written, to decode: the encoded bytes go into the first
 step's decoder, its output into the second step's, and the last output is the block's plain bytes. A writer that
-compressed with `bcj-x86` and then with `lzma` therefore writes the graph `[lzma, bcj-x86]`. An intermediate
-output larger than the reader's `max_block_plain` is `PayloadTooLarge`.
+compressed with `bcj-x86` and then with `lzma` therefore writes the graph `[lzma, bcj-x86]`.
+
+Bounds. Every intermediate output is bounded by the reader's `max_block_plain`; a larger one is
+`PayloadTooLarge`. The last step must produce exactly `plain_len` bytes; any other length, including a decoder
+that would produce more, is `BlockLengthMismatch`. A block whose `plain_len` exceeds `max_block_plain` is
+`PayloadTooLarge`, raised before any decoding. Before the first step runs, a reader checks the whole graph:
+the step count, every step's parameters, and that every primitive is one it can run (otherwise
+`UnimplementedPrimitive`); no step runs when a later one cannot.
 
 Unknown IDs. A primitive ID that is not in the table is `UnknownPrimitive`, raised as soon as the ID is read
 while the graph is parsed, before any later byte of the graph or any encoded byte is looked at; a graph that is
@@ -495,12 +501,16 @@ step whose output length differs from `plain_len` is `BlockLengthMismatch`.
 
 ### What the reference decoder runs
 
-The reference decoder (this crate) implements `store` itself. For every other ID it knows the name, the
-parameter layout and the validation, and asks the registered decoder to run it; unless a decoder is registered
-it reports `UnimplementedPrimitive` with the ID. The zstd and LZMA decoders are plugged in by the container
-reader; the reconstruction primitives (`jpeg-reconstruct`, `deflate-reconstruct`, `png-filter`,
-`container-reconstruct`) are applied by the full reader, so the reference decoder reports them as
-`UnimplementedPrimitive`.
+The reference decoder knows the name, the parameter layout and the validation of all 13 primitives. Each ID is
+in exactly one of three groups:
+
+- Implemented now: `store`.
+- Added to the reference decoder by later tasks (E1-8 and E1-9): `zstd`, `lzma`.
+- Requires the full reader: `bwt`, `bcj-x86`, `bcj-arm64`, `delta`, `jpeg-reconstruct`,
+  `deflate-reconstruct`, `png-filter`, `base64`, `utf16`, `container-reconstruct`.
+
+For a primitive without a decoder the reference decoder reports `UnimplementedPrimitive` with the ID, before it
+runs any step of the graph.
 
 Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`, `BadParams`,
 `BlockLengthMismatch`, `PayloadTooLarge`, and `Truncated` with the `what` strings `graph` and `block header`.

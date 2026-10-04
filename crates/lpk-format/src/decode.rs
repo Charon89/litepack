@@ -3,7 +3,7 @@
 
 use crate::envelope::Resources;
 use crate::error::FormatError;
-use crate::graph::BlockHeader;
+use crate::graph::{BlockHeader, MAX_STEPS};
 use crate::primitive::PrimitiveId;
 
 /// A decoder for one primitive.
@@ -11,7 +11,9 @@ pub trait PrimitiveDecoder: Send + Sync {
     /// Decode `input` with the step's `params` (already validated).
     /// `expected_len` is the most output the decoder may produce; for the last
     /// step of a block it is exactly the block's `plain_len`, for the others
-    /// `limits.max_block_plain`. A decoder must not allocate output beyond it.
+    /// `limits.max_block_plain`. A decoder must not allocate output beyond it
+    /// and reports output that would exceed it as `PayloadTooLarge`; on the
+    /// last step `decode_block` turns that into `BlockLengthMismatch`.
     fn decode(
         &self,
         params: &[u8],
@@ -61,6 +63,7 @@ impl PrimitiveDecoder for Unimplemented {
 /// One decoder per primitive of the registry.
 pub struct Registry {
     decoders: Vec<Box<dyn PrimitiveDecoder>>,
+    implemented: Vec<bool>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -84,7 +87,14 @@ impl Registry {
                 }
             })
             .collect();
-        Registry { decoders }
+        let implemented = PrimitiveId::ALL
+            .iter()
+            .map(|&p| p == PrimitiveId::Store)
+            .collect();
+        Registry {
+            decoders,
+            implemented,
+        }
     }
 
     /// The decoder of `id`.
@@ -93,24 +103,45 @@ impl Registry {
         self.decoders[id as usize].as_ref()
     }
 
+    /// True when `id` has a real decoder (`store`, and every one registered).
+    pub fn is_implemented(&self, id: PrimitiveId) -> bool {
+        self.implemented[id as usize]
+    }
+
     /// Replace the decoder of `id` (how the zstd and LZMA decoders plug in).
     pub fn register(&mut self, id: PrimitiveId, decoder: Box<dyn PrimitiveDecoder>) {
         self.decoders[id as usize] = decoder;
+        self.implemented[id as usize] = true;
     }
 }
 
-/// Run the header's graph over `encoded` and return the plain bytes.
+/// Run the header's graph over `encoded` and return the plain bytes. `block`
+/// is the block's index in the block table, used in errors.
 ///
-/// Checks: `plain_len` at most `limits.max_block_plain` (`PayloadTooLarge`);
-/// `encoded.len()` equal to `encoded_len` and the last step's output length
-/// equal to `plain_len` (`BlockLengthMismatch`, `block` 0); an intermediate
-/// output larger than `limits.max_block_plain` is `PayloadTooLarge`.
+/// Before anything runs: the step count must be 1..=16 (`BadGraph`), every
+/// step's params must validate (`BadParams`), `plain_len` must be at most
+/// `limits.max_block_plain` (`PayloadTooLarge`), `encoded.len()` must equal
+/// `encoded_len` (`BlockLengthMismatch`), and every step's primitive must be
+/// implemented (`UnimplementedPrimitive`). Then the steps run in order: an
+/// intermediate output larger than `limits.max_block_plain` is
+/// `PayloadTooLarge`; the last step must produce exactly `plain_len`
+/// (`BlockLengthMismatch`, also when the decoder reports too much output).
 pub fn decode_block(
     registry: &Registry,
     header: &BlockHeader,
+    block: usize,
     encoded: &[u8],
     limits: &Resources,
 ) -> Result<Vec<u8>, FormatError> {
+    let steps = &header.graph.steps;
+    if steps.is_empty() || steps.len() > MAX_STEPS {
+        return Err(FormatError::BadGraph {
+            reason: "step count",
+        });
+    }
+    for step in steps {
+        step.primitive.validate_params(&step.params)?;
+    }
     if header.plain_len > limits.max_block_plain {
         return Err(FormatError::PayloadTooLarge {
             len: header.plain_len,
@@ -118,23 +149,35 @@ pub fn decode_block(
         });
     }
     if encoded.len() as u64 != header.encoded_len {
-        return Err(FormatError::BlockLengthMismatch { block: 0 });
+        return Err(FormatError::BlockLengthMismatch { block });
     }
-    let last = header.graph.steps.len().saturating_sub(1);
+    if let Some(step) = steps.iter().find(|s| !registry.is_implemented(s.primitive)) {
+        return Err(FormatError::UnimplementedPrimitive {
+            id: step.primitive as u16,
+        });
+    }
+    let last = steps.len() - 1;
     let mut data = std::borrow::Cow::Borrowed(encoded);
-    for (i, step) in header.graph.steps.iter().enumerate() {
+    for (i, step) in steps.iter().enumerate() {
         let expected = if i == last {
             header.plain_len
         } else {
             limits.max_block_plain
         };
-        let out = registry
-            .decoder(step.primitive)
-            .decode(&step.params, &data, expected, limits)?;
+        let out =
+            match registry
+                .decoder(step.primitive)
+                .decode(&step.params, &data, expected, limits)
+            {
+                Err(FormatError::PayloadTooLarge { .. }) if i == last => {
+                    return Err(FormatError::BlockLengthMismatch { block })
+                }
+                other => other?,
+            };
         let len = out.len() as u64;
         if i == last {
             if len != header.plain_len {
-                return Err(FormatError::BlockLengthMismatch { block: 0 });
+                return Err(FormatError::BlockLengthMismatch { block });
             }
         } else if len > limits.max_block_plain {
             return Err(FormatError::PayloadTooLarge {
@@ -151,12 +194,18 @@ pub fn decode_block(
 mod tests {
     use super::*;
     use crate::graph::{Graph, Step};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
-    fn store() -> Step {
+    fn step(p: PrimitiveId) -> Step {
         Step {
-            primitive: PrimitiveId::Store,
+            primitive: p,
             params: vec![],
         }
+    }
+
+    fn store() -> Step {
+        step(PrimitiveId::Store)
     }
 
     fn header(steps: Vec<Step>, plain: u64, enc: u64) -> BlockHeader {
@@ -167,46 +216,37 @@ mod tests {
         }
     }
 
+    fn run(h: &BlockHeader, data: &[u8], limits: &Resources) -> Result<Vec<u8>, FormatError> {
+        decode_block(&Registry::v1(), h, 7, data, limits)
+    }
+
     #[test]
     fn store_is_identity() {
-        let r = Registry::v1();
         let h = header(vec![store()], 5, 5);
-        let out = decode_block(&r, &h, b"hello", &Resources::default()).unwrap();
-        assert_eq!(out, b"hello");
+        assert_eq!(run(&h, b"hello", &Resources::default()).unwrap(), b"hello");
     }
 
     #[test]
     fn two_store_steps() {
-        let r = Registry::v1();
         let h = header(vec![store(), store()], 5, 5);
-        let out = decode_block(&r, &h, b"hello", &Resources::default()).unwrap();
-        assert_eq!(out, b"hello");
+        assert_eq!(run(&h, b"hello", &Resources::default()).unwrap(), b"hello");
     }
 
     #[test]
-    fn plain_len_mismatch() {
-        let r = Registry::v1();
+    fn plain_len_mismatch_names_the_block() {
         let limits = Resources::default();
-        let h = header(vec![store()], 6, 5);
-        assert!(matches!(
-            decode_block(&r, &h, b"hello", &limits).unwrap_err(),
-            FormatError::BlockLengthMismatch { .. }
-        ));
-        let h = header(vec![store()], 4, 5);
-        assert!(matches!(
-            decode_block(&r, &h, b"hello", &limits).unwrap_err(),
-            FormatError::PayloadTooLarge { len: 5, max: 4 }
-        ));
-        let h = header(vec![store()], 5, 4);
-        assert!(matches!(
-            decode_block(&r, &h, b"hello", &limits).unwrap_err(),
-            FormatError::BlockLengthMismatch { .. }
-        ));
+        // Too short, too long (the decoder says PayloadTooLarge), wrong encoded_len.
+        for (plain, enc) in [(6, 5), (4, 5), (5, 4)] {
+            let h = header(vec![store()], plain, enc);
+            assert!(matches!(
+                run(&h, b"hello", &limits).unwrap_err(),
+                FormatError::BlockLengthMismatch { block: 7 }
+            ));
+        }
     }
 
     #[test]
     fn unimplemented_primitives() {
-        let r = Registry::v1();
         let mut p = vec![20u8];
         p.extend_from_slice(&[0; 32]);
         let h = header(
@@ -218,10 +258,12 @@ mod tests {
             5,
         );
         assert!(matches!(
-            decode_block(&r, &h, b"hello", &Resources::default()).unwrap_err(),
+            run(&h, b"hello", &Resources::default()).unwrap_err(),
             FormatError::UnimplementedPrimitive { id: 1 }
         ));
+        let r = Registry::v1();
         for p in PrimitiveId::ALL {
+            assert_eq!(r.is_implemented(p), p == PrimitiveId::Store);
             let e = r
                 .decoder(p)
                 .decode(&[], b"", 0, &Resources::default())
@@ -237,24 +279,114 @@ mod tests {
     }
 
     #[test]
-    fn output_above_max_block_plain() {
-        let r = Registry::v1();
+    fn plain_len_above_max_block_plain_is_refused_first() {
         let small = Resources {
             max_block_plain: 4,
             ..Resources::default()
         };
-        // The declared plain length is already above the limit.
         let h = header(vec![store(), store()], 8, 8);
         assert!(matches!(
-            decode_block(&r, &h, &[0; 8], &small).unwrap_err(),
+            run(&h, &[0; 8], &small).unwrap_err(),
             FormatError::PayloadTooLarge { len: 8, max: 4 }
         ));
-        // An intermediate output above the limit.
-        let h = header(vec![store(), store()], 4, 8);
+    }
+
+    /// Ignores `expected_len` and returns `n` bytes.
+    struct Over(usize);
+    impl PrimitiveDecoder for Over {
+        fn decode(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: u64,
+            _: &Resources,
+        ) -> Result<Vec<u8>, FormatError> {
+            Ok(vec![0; self.0])
+        }
+    }
+
+    #[test]
+    fn intermediate_output_above_max_block_plain() {
+        let small = Resources {
+            max_block_plain: 4,
+            ..Resources::default()
+        };
+        let mut r = Registry::v1();
+        r.register(PrimitiveId::BcjX86, Box::new(Over(9)));
+        let h = header(vec![step(PrimitiveId::BcjX86), store()], 4, 2);
         assert!(matches!(
-            decode_block(&r, &h, &[0; 8], &small).unwrap_err(),
-            FormatError::PayloadTooLarge { max: 4, .. }
+            decode_block(&r, &h, 0, b"ab", &small).unwrap_err(),
+            FormatError::PayloadTooLarge { len: 9, max: 4 }
         ));
+        // On the last step the same over-production is a length mismatch.
+        let h = header(vec![store(), step(PrimitiveId::BcjX86)], 4, 2);
+        assert!(matches!(
+            decode_block(&r, &h, 3, b"ab", &small).unwrap_err(),
+            FormatError::BlockLengthMismatch { block: 3 }
+        ));
+    }
+
+    #[test]
+    fn header_is_validated_before_running() {
+        let limits = Resources::default();
+        let h = header(vec![], 0, 0);
+        assert!(matches!(
+            run(&h, b"", &limits).unwrap_err(),
+            FormatError::BadGraph {
+                reason: "step count"
+            }
+        ));
+        let h = header(vec![store(); 17], 0, 0);
+        assert!(matches!(
+            run(&h, b"", &limits).unwrap_err(),
+            FormatError::BadGraph { .. }
+        ));
+        let h = header(
+            vec![Step {
+                primitive: PrimitiveId::Zstd,
+                params: vec![],
+            }],
+            0,
+            0,
+        );
+        assert!(matches!(
+            run(&h, b"", &limits).unwrap_err(),
+            FormatError::BadParams { id: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn unimplemented_later_step_is_found_before_running() {
+        struct Flag(Arc<AtomicBool>);
+        impl PrimitiveDecoder for Flag {
+            fn decode(
+                &self,
+                _: &[u8],
+                input: &[u8],
+                _: u64,
+                _: &Resources,
+            ) -> Result<Vec<u8>, FormatError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(input.to_vec())
+            }
+        }
+        let ran = Arc::new(AtomicBool::new(false));
+        let mut r = Registry::v1();
+        r.register(PrimitiveId::BcjX86, Box::new(Flag(ran.clone())));
+        assert!(r.is_implemented(PrimitiveId::BcjX86));
+        let h = header(
+            vec![
+                step(PrimitiveId::BcjX86),
+                step(PrimitiveId::JpegReconstruct),
+            ],
+            2,
+            2,
+        );
+        assert!(matches!(
+            decode_block(&r, &h, 0, b"ab", &Resources::default()).unwrap_err(),
+            FormatError::UnimplementedPrimitive { id: 7 }
+        ));
+        assert!(!ran.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -273,19 +405,9 @@ mod tests {
         }
         let mut r = Registry::v1();
         r.register(PrimitiveId::BcjX86, Box::new(Upper));
-        let h = header(
-            vec![
-                Step {
-                    primitive: PrimitiveId::BcjX86,
-                    params: vec![],
-                },
-                store(),
-            ],
-            2,
-            2,
-        );
+        let h = header(vec![step(PrimitiveId::BcjX86), store()], 2, 2);
         assert_eq!(
-            decode_block(&r, &h, b"ab", &Resources::default()).unwrap(),
+            decode_block(&r, &h, 0, b"ab", &Resources::default()).unwrap(),
             b"AB"
         );
     }

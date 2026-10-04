@@ -94,8 +94,8 @@ impl PrimitiveId {
         }
     }
 
-    /// The exact parameter length of the primitive.
-    fn params_len(self) -> usize {
+    /// The exact parameter length of the primitive, in bytes.
+    pub fn params_len(self) -> usize {
         match self {
             PrimitiveId::Zstd => 33,
             PrimitiveId::Lzma => 7,

@@ -136,14 +136,13 @@ impl BlockHeader {
     /// Parse the header at the start of a `ChunkData` payload; returns it and
     /// its length, so the encoded bytes are `payload[used..]`. `encoded_len`
     /// must equal the payload length minus the header; a difference is
-    /// `BlockLengthMismatch` (with `block` 0: the header does not know its
-    /// place in the block table, the caller that does may replace it).
-    pub fn parse(payload: &[u8]) -> Result<(BlockHeader, usize), FormatError> {
+    /// `BlockLengthMismatch`; `block` is the block's index in the block table.
+    pub fn parse(payload: &[u8], block: usize) -> Result<(BlockHeader, usize), FormatError> {
         let (graph, mut pos) = Graph::parse(payload)?;
         let plain_len = rv(payload, &mut pos, HEADER)?;
         let encoded_len = rv(payload, &mut pos, HEADER)?;
         if encoded_len != (payload.len() - pos) as u64 {
-            return Err(FormatError::BlockLengthMismatch { block: 0 });
+            return Err(FormatError::BlockLengthMismatch { block });
         }
         Ok((
             BlockHeader {
@@ -332,22 +331,22 @@ mod tests {
         let mut payload = h.encode();
         let hl = payload.len();
         payload.extend_from_slice(b"abc");
-        let (back, used) = BlockHeader::parse(&payload).unwrap();
+        let (back, used) = BlockHeader::parse(&payload, 5).unwrap();
         assert_eq!(back, h);
         assert_eq!(used, hl);
         assert_eq!(&payload[used..], b"abc");
         payload.push(0);
         assert!(matches!(
-            BlockHeader::parse(&payload).unwrap_err(),
-            FormatError::BlockLengthMismatch { .. }
+            BlockHeader::parse(&payload, 5).unwrap_err(),
+            FormatError::BlockLengthMismatch { block: 5 }
         ));
         payload.truncate(payload.len() - 2);
         assert!(matches!(
-            BlockHeader::parse(&payload).unwrap_err(),
-            FormatError::BlockLengthMismatch { .. }
+            BlockHeader::parse(&payload, 5).unwrap_err(),
+            FormatError::BlockLengthMismatch { block: 5 }
         ));
         assert!(matches!(
-            BlockHeader::parse(&h.graph.encode()).unwrap_err(),
+            BlockHeader::parse(&h.graph.encode(), 5).unwrap_err(),
             FormatError::Truncated {
                 what: "block header"
             }
@@ -401,7 +400,7 @@ mod tests {
         #[test]
         fn parse_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
             let _ = Graph::parse(&bytes);
-            let _ = BlockHeader::parse(&bytes);
+            let _ = BlockHeader::parse(&bytes, 0);
         }
     }
 }
