@@ -58,7 +58,7 @@ The header is fixed at 32 bytes at offset 0.
 |---|---|---|---|
 | 0 | 8 | magic | `0x89 0x4C 0x50 0x4B 0x0D 0x0A 0x1A 0x0A` (`\x89LPK\r\n\x1a\n`) |
 | 8 | 2 | version_major | 1 |
-| 10 | 2 | version_minor | 0, or 1 when a block's graph names a primitive of revision 1.1 |
+| 10 | 2 | version_minor | the revision the writer wrote under: 0, or 1 for revision 1.1 (see "Revisions") |
 | 12 | 4 | flags | see below |
 | 16 | 16 | archive_id | 16 random bytes chosen by the writer |
 
@@ -77,10 +77,12 @@ Version rule: a reader accepts `version_major` 1 and any `version_minor`; any ot
 Revisions. Version 1 grows by revisions that add the decoding of primitives the registry already lists (section
 8); a revision never changes the meaning of a byte an earlier revision defines. Revision 1.0 decodes `store`,
 `zstd` and `lzma`. Revision 1.1 (minor 1) adds the decoding of `jpeg-reconstruct` (0x0007, section 8 "Decoding
-`jpeg-reconstruct`") and nothing else. A writer sets `version_minor` to 1 when any block's graph names a primitive
-of revision 1.1, and to 0 otherwise; the header is written before any block, so a writer that cannot know yet
-declares 1 only when it will write such a block (informative: the reference pipeline peels until its first
-success before it writes the header). A reader of revision 1.0 accepts such an archive (any minor), lists it,
+`jpeg-reconstruct`") and nothing else. `version_minor` is the revision the writer wrote under, a declaration and
+not a fact about the archive's blocks: the archive may use any primitive of that revision or an earlier one, and
+none of a later one (section 8). A reader does not infer from the minor which primitives occur; it checks the
+primitives of each block as section 8 says. So a writer of revision 1.1 writes 1 whether or not any block names
+a primitive of revision 1.1 (informative: the reference pipeline writes 1 whenever its JPEG peel is enabled). A
+reader of revision 1.0 accepts an archive of minor 1 (any minor), lists it,
 verifies its frames and records, and reports `UnimplementedPrimitive` with the ID 7 for every block whose graph
 names `jpeg-reconstruct`, exactly as for any primitive it does not run.
 
@@ -708,30 +710,49 @@ archive, and the `lpk` tool extracts and tests through it).
 The step's input is one Lepton stream and its output is the primary image of the JPEG file its record describes
 (section 12): `primary_len` bytes ending with the primary image's EOI marker.
 
-- The stream format is the one written by `lepton_jpeg`, the Rust port of Dropbox's Lepton
-  (<https://github.com/microsoft/lepton_jpeg_rust>), versions 0.5.x, and described by the upstream Lepton project
-  (<https://github.com/dropbox/lepton>, its format description and reference implementation). The record's
-  `lepton_version` names the revision of that format: 0 is what `lepton_jpeg` 0.5 writes, the only value of
-  revision 1.1. A decoder decodes the stream with that format's decoder, normatively by citation as section 8
-  cites RFC 8878 for `zstd`; the stream is written with the library's `compat_lepton_vector_write` settings (16-bit
-  DC and predictor arithmetic), which its decoder must use.
+- The codec is defined by the library: the stream format is the one `lepton_jpeg`, the Rust port of Dropbox's
+  Lepton (<https://github.com/microsoft/lepton_jpeg_rust>, Apache-2.0), versions 0.5.x, writes and decodes with its
+  `compat_lepton_vector_write` settings (16-bit DC and predictor arithmetic). The upstream project
+  (<https://github.com/dropbox/lepton>) is its origin but publishes no standalone format document, so the library
+  version range is the definition, normatively by citation as section 8 cites RFC 8878 for `zstd`; a conforming
+  decoder may use that library to decode the stream (D-49).
+- `lepton_version` is the record's own field, not a byte of the stream: it names the revision of the codec, and 0
+  (what `lepton_jpeg` 0.5 writes) is the only value of revision 1.1. The stream carries its own header (magic,
+  version byte, sizes), which the library checks when it decodes; a stream whose header it refuses is
+  `lepton stream`.
 - One block holds exactly one Lepton stream, because a graph applies to the whole block: the block's `plain_len`
   is the record's `primary_len` and its chunk records are those of the primary image's bytes.
 - After decoding, the decoder MUST assemble the original file as section 12 states (the primary image; then either
   the raw `trailing` bytes, or the secondary images at their offsets with the nested trailing data filling the
   ranges between and after them, in order) and check it: its length is `original_len` and its BLAKE3-256 is
-  `original_hash`. The chunks the record names lie in blocks with lower indices than the block being decoded; a
-  chunk that does not is `BadRecord` with reason `chunk order`. The step's output is the primary image only.
-- Errors: a record of another kind than `jpeg`, or a `lepton_version` other than 0, is `BadRecord` (reasons `kind`,
-  `lepton_version`); a stream the decoder cannot decode, or whose output would exceed `primary_len`, is `BadRecord`
-  (`lepton stream`); an output of another length is `BadRecord` (`primary_len`); an assembled original whose length
-  or hash differs is `BadRecord` (`original_hash`); a `primary_len` above the step's output bound is
-  `PayloadTooLarge`.
+  `original_hash`. Every chunk the record names lies in a block with a lower index than the block being decoded
+  (`BadRecord`, `chunk order`) whose graph names no reconstruction primitive (`BadRecord`, `nested record`; section
+  12, "Nesting"). The step's output is the primary image only.
+- Order of checks inside the step, exactly as the reference performs them: (1) the record is looked up by its id
+  (the errors of the `Records` frame, section 12); (2) its kind is `jpeg` (`BadRecord`, `kind`); (3) its
+  `lepton_version` is 0 (`BadRecord`, `lepton_version`); (4) `primary_len` against the step's output bound
+  (`PayloadTooLarge`; on a one-step graph the bound is the block's `plain_len`, and a `primary_len` that differs
+  from it is observed as `BlockLengthMismatch` when the step's output length is compared, section 8 "Bounds");
+  (5) resources: the frame header of the JPEG is read from the stream's own header and the image's memory term is
+  compared with the decode memory left after `max_block_plain` (`Refused`, field `decode_memory`; a stream whose
+  header cannot be read is `lepton stream`); (6) the stream is decoded (`BadRecord`, `lepton stream` when the
+  library refuses it or its output would exceed `primary_len`; `primary_len` when the output is shorter);
+  (7) assembly, in file order: per secondary image, the nested trailing bytes before it (`BadRecord`, `gainmaps`
+  when its offset lies before the bytes already assembled; `trailing` when the nested trailing data ends before
+  that offset), then its chunks (`gainmaps` when their lengths do not add up to its `len`); then the rest of the
+  nested trailing data. Each chunk is fetched in that order with the chunk order and nesting checks above, then
+  the chunk's own checks (section 9: `ChunkIndexOutOfRange`, the block's errors, `ChunkMismatch`); (8) the
+  assembled length is `original_len` and its BLAKE3-256 `original_hash` (`BadRecord`, `original_hash`, also for a
+  length that would overflow 64 bits).
 - Resources: memory per image, declared by the envelope's `decode_memory` (section 7). The reference writer
-  declares `max_block_plain` plus, for the largest peeled image, a bound computed from its frame header over the
-  library's data layout: each component's 8x8 blocks, padded to whole MCUs, times 128 bytes (64 coefficients of 2
-  bytes), plus a fixed allowance of 67108864 bytes (64 MiB) for the library's models and thread buffers. It is a
-  computed bound, not a measured maximum and not a figure the library publishes; a writer may declare more.
+  declares `max_block_plain` plus, for the largest peeled image, an allowance: a coefficient term computed from the
+  image's frame header over the library's data layout (each component's 8x8 blocks, padded to whole MCUs, times
+  128 bytes: 64 coefficients of 2 bytes) plus a fixed term of 67108864 bytes (64 MiB) for the library's models and
+  thread buffers. Revision 1.1 states no bound on the library's working set; the fixed term is not measured (task
+  E2-5b measures it). A decoder compares the image's term (the same computation) with the archive's
+  `decode_memory`, never above its own memory resource, minus `max_block_plain`, and refuses an image whose term
+  exceeds it with `Refused` (field `decode_memory`, the class `Archive::open` uses for an envelope the reader
+  cannot meet, section 7), without decoding it.
 
 ### Normative decoders
 
@@ -870,7 +891,7 @@ entry whose parts it writes in this order, while the entry's chunk list is in fi
    after them, written plainly or through the model like any chunks. Their chunks lie in blocks with lower indices
    than the primary's block, because the primary's block is closed after them.
 2. The record (section 12), added to the `Records` frame once those chunk indices are known: `trailing` empty,
-   `nested_trailing_chunks` the trailing runs' chunks in order, one secondary image per peeled secondary, and
+   `nested_trailing_chunks` the trailing runs' chunks in order, one secondary image entry per secondary image, and
    `original_hash` of the whole file. The `Records` frame is still one frame before the index.
 3. The primary image as a block of its own: the graph `[jpeg-reconstruct {record_id}]`, the Lepton stream as its
    encoded bytes, and `plain_len` and chunk records those of the primary image's bytes, so the chunk table hashes
@@ -1159,6 +1180,11 @@ original bytes, they must hash to it (and have `original_len` bytes where the re
   a record never needs the block that is being rebuilt from it and two blocks never need each other. The
   chunk sums above and this order are checked by whole-archive verification (`BadRecord` with `reason`
   `chunk lengths` or `chunk order`), which knows the blocks and the chunk table; parsing a record cannot.
+- Nesting. Every chunk a record names lies in a block whose graph names no reconstruction primitive, so a
+  reconstruction step reads plain blocks only and never recurses. A violation is `BadRecord` with `reason`
+  `nested record`, raised at the reconstruction step when it reads that chunk (section 8). A writer refuses to
+  close a block whose graph names a record that breaks the chunk order or this rule, as it refuses any graph
+  a reader would refuse.
 
 ### What the reference decoder does with records
 
@@ -1166,8 +1192,8 @@ The reference decoder parses, validates and hashes records (the frame hash, ever
 above) and checks the record ids of every block header it parses; it applies none. A block whose graph names a
 reconstruction primitive is reported as `UnimplementedPrimitive` (section 8), as before. Applying records needs the
 JPEG and Deflate libraries of the full reader; revision 1.1's full reader applies `jpeg` records (section 8,
-"Decoding `jpeg-reconstruct`"), reading the chunks a record names through the archive's blocks (informative: the
-reference full reader decodes those blocks with the revision 1.0 primitives only, one level). Whole-archive
+"Decoding `jpeg-reconstruct`"), reading the chunks a record names through the archive's blocks, which by the
+nesting rule above are plain blocks (the reference full reader refuses any other with `nested record`). Whole-archive
 verification (section 9), whenever the index lists a
 `Records` frame, reads it and walks every record (a damaged frame is `HashMismatch`), checks the chunk indices,
 chunk sums and block order above, and checks the record ids of every block graph, all before it decodes a block.

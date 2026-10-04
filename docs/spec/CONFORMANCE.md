@@ -110,13 +110,20 @@ reports 1 damaged shard and exits 1, and `repair` writes a copy that is byte-ide
 Apart from `jpeg-peel.lpk`, the vectors do not exercise the reconstruction primitives (7 to 12); a decoder that
 meets one it does not run reports `UnimplementedPrimitive` and does not guess.
 
-`jpeg-peel.lpk` (revision 1.1). A revision 1.0 decoder MUST open it, list it (`list` in `expected.toml`), print
-`info` (`format: 1.1`, `records: true`), and report `UnimplementedPrimitive` with the ID 7 from `verify` and from
-extracting `photo.jpg` (`error_1_0`, `message_1_0`, `verify_exit_1_0`, `verify_stderr_1_0`); it never writes a
-partial file. A revision 1.1 decoder MUST extract `photo.jpg` to the bytes whose size and BLAKE3-256 are given in
-`expected-1.1.toml` (key `files`) and `verify` it (`verify`, the stdout of the full reader's `verify`); the primary
-image is the Lepton stream's decoding, and the record's `original_hash` is checked over the assembled file
-(spec section 8). `expected-1.1.toml` is checked by `cargo test -p lpk-core --test jpeg_vector`.
+`jpeg-peel.lpk` (revision 1.1). Which expectations apply depends on the decoder's revision:
+
+- A revision 1.0 decoder reads the `["jpeg-peel.lpk"]` table of `expected.toml`. It MUST open the vector, list it
+  (key `list`), print `info` (key `info`: `format: 1.1`, `records: true`), and report `UnimplementedPrimitive`
+  with the ID 7 from `verify` and from extracting `photo.jpg`: the class is the key `error_1_0` (not `error`,
+  which the table does not have, because the vector is valid), the message `message_1_0`, and the reference
+  tool's `verify` exit code and stderr `verify_exit_1_0` and `verify_stderr_1_0`. The vector does not exercise
+  whether a failed extraction leaves a partial file (that is the extraction policy of spec section 9); no key
+  checks it.
+- A revision 1.1 decoder reads `expected-1.1.toml` instead. It MUST extract `photo.jpg` to the bytes whose path,
+  size and BLAKE3-256 are the key `files` (in entry-table order) and `verify` the vector (key `verify`, the stdout
+  of the reference full reader's `verify`, exit code 0); the primary image is the Lepton stream's decoding, and the
+  record's `original_hash` is checked over the assembled file (spec section 8). `expected-1.1.toml` is checked by
+  `cargo test -p lpk-core --test jpeg_vector`.
 
 ## Malformed vectors
 

@@ -77,13 +77,17 @@ order and early block close. No reader behaviour or vector byte changed.
 
 ## 2026-10-04 — revision 1.1: jpeg-reconstruct decoding
 
-1. `version_minor` 1 marks an archive one of whose blocks names a primitive of revision 1.1; a 1.0 reader accepts it
-   and reports `UnimplementedPrimitive` (7) on those blocks (section 2; code: the writer refuses a 1.1 primitive in a
-   minor-0 archive).
+1. `version_minor` is the revision the writer wrote under (1 for revision 1.1, whether or not a block names a 1.1
+   primitive); a reader checks primitives per block; a 1.0 reader accepts a minor-1 archive and reports
+   `UnimplementedPrimitive` (7) on the blocks that name `jpeg-reconstruct` (section 2; code: the writer refuses a 1.1
+   primitive in a minor-0 archive).
 2. `jpeg-reconstruct` decodes one Lepton stream (`lepton_jpeg` 0.5.x, `lepton_version` 0) into the primary image;
    the original is assembled from the record and checked against `original_len` and `original_hash`; errors are
-   `BadRecord` with the reasons `kind`, `lepton_version`, `lepton stream`, `primary_len`, `original_hash`, `chunk
-   order`; `decode_memory` covers the writer's computed bound (section 8).
+   `BadRecord` with the reasons `kind`, `lepton_version`, `lepton stream`, `primary_len`, `gainmaps`, `trailing`,
+   `original_hash`, `chunk order`, `nested record`, in a stated order of checks; the codec is defined by the
+   library version range; `decode_memory` is an allowance (computed coefficient term plus an unmeasured fixed
+   term) and an image whose term exceeds what the archive declares is `Refused` (section 8). Nesting is normative
+   and the writer refuses chunk-order and nesting violations (section 12).
 3. How the reference writer lays out a peeled JPEG: nested parts first, then the record, then the primary image as a
    block of its own (section 9, informative).
 4. New vector `jpeg-peel.lpk` with `expected.toml` (1.0 reader: list, info, `UnimplementedPrimitive`) and

@@ -89,7 +89,7 @@ pub fn header_byte_table() -> String {
         "| Offset | Size | Field | Value / meaning |\n|---|---|---|---|\n\
          | 0 | 8 | magic | `{magic}` (`\\x89LPK\\r\\n\\x1a\\n`) |\n\
          | 8 | 2 | version_major | {} |\n\
-         | 10 | 2 | version_minor | {}, or {} when a block's graph names a primitive of revision 1.1 |\n\
+         | 10 | 2 | version_minor | the revision the writer wrote under: {}, or {} for revision 1.1 (see \"Revisions\") |\n\
          | 12 | 4 | flags | see below |\n\
          | 16 | 16 | archive_id | 16 random bytes chosen by the writer |\n",
         v.major,
