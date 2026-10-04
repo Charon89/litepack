@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use lpk_core::{classify, walk, Class, IngestOptions, Source};
+use lpk_core::classify::SAMPLE_LEN;
+use lpk_core::{classify, walk, Class, Features, IngestOptions, Source};
 use lpk_format::EntryKind;
 
 /// The classes an extension may take; `None` means not asserted.
@@ -49,11 +50,17 @@ fn expected(class_dir: &str, rel: &str) -> Option<Vec<Class>> {
 /// after a `gethostbyname error for` line, so the head is not valid UTF-8; the classifier is
 /// right to say `Other` for them and the extension is wrong to promise text.
 fn excepted(class_dir: &str, rel: &str, got: Class, head: &[u8]) -> bool {
+    // The same span `classify` takes its statistics from.
+    let f = Features::of(&head[..head.len().min(SAMPLE_LEN)]);
     class_dir == "small-files"
         && rel.ends_with(".log")
         && got == Class::Other
-        && std::str::from_utf8(head).is_err_and(|e| e.error_len().is_some())
+        && !f.utf8_valid
+        && f.nul_ratio == 0.0
 }
+
+/// Files reviewed as exceptions in fix round 1 of E2-2; growth is noticed.
+const REVIEWED_EXCEPTIONS: u64 = 27;
 
 #[derive(Default)]
 struct Row {
@@ -101,6 +108,7 @@ fn classifier_agrees_with_the_extension_table() {
             } else if excepted(&name, &i.path, got, &buf) {
                 row.agreed += 1;
                 row.excepted += 1;
+                println!("EXCEPTED {name}/{}", i.path);
             } else {
                 row.disagreed += 1;
                 total_bad += 1;
@@ -130,4 +138,9 @@ fn classifier_agrees_with_the_extension_table() {
         println!("DISAGREE {s}");
     }
     assert_eq!(total_bad, 0, "disagreements with the expectation table");
+    let excepted_total: u64 = rows.values().map(|r| r.excepted).sum();
+    assert!(
+        excepted_total <= REVIEWED_EXCEPTIONS,
+        "{excepted_total} excepted files, {REVIEWED_EXCEPTIONS} were reviewed"
+    );
 }
