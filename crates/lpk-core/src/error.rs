@@ -24,7 +24,19 @@ pub enum CoreError {
         /// Why (the format's reason string, or "not utf-8", or "special file").
         reason: String,
     },
-    /// A file's length differed from what was read while archiving it.
+    /// A FIFO, socket, device or other entry that is not a file, directory or symlink.
+    #[error("{}: special file", path.display())]
+    SpecialFile {
+        /// The entry.
+        path: PathBuf,
+    },
+    /// Two inputs with the same archive path.
+    #[error("duplicate archive path {path:?}")]
+    DuplicatePath {
+        /// The path.
+        path: String,
+    },
+    /// A file's length (or identity, or kind) differed from what was read while archiving it.
     #[error("{}: changed while reading", path.display())]
     ChangedWhileReading {
         /// The file.

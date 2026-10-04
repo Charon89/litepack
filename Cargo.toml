@@ -5,7 +5,6 @@ members = [
   "crates/lpk-check",
   "crates/lpk-core",
   "crates/lpk-format",
-  "crates/lpk-mmap-sys",
   "crates/lpk-procstat-sys",
 ]
 # cargo-fuzz crate: built with nightly on Linux only (fuzz/README.md).

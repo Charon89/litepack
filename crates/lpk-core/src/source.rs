@@ -1,33 +1,29 @@
-//! Source: open an input's bytes, through a memory map for large files.
+//! Source: open an input's bytes through a plain file, never following a link.
 
-use std::fs::File;
-use std::io::{BufReader, Cursor, Read};
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 
 use lpk_format::EntryKind;
-use lpk_mmap_sys::Mapped;
 
 use crate::error::CoreError;
-use crate::ingest::{IngestOptions, Input};
-
-/// Buffer of the plain file reader.
-const BUF: usize = 256 << 10;
+use crate::ingest::{file_identity, Input};
 
 /// Opens the content of file inputs.
-#[derive(Debug, Clone, Copy)]
-pub struct Source {
-    mmap_threshold: u64,
-}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Source;
 
 impl Source {
-    /// A source using the options' `mmap_threshold`.
-    pub fn new(options: &IngestOptions) -> Self {
-        Source {
-            mmap_threshold: options.mmap_threshold,
-        }
+    /// A source.
+    pub fn new() -> Self {
+        Source
     }
 
-    /// The bytes of a file input: a read-only memory map when `input.len` is at least the
-    /// threshold, a buffered file otherwise. Both yield the same bytes.
+    /// The bytes of a file input, at most `len + 1` of them (one past the walked length, so a
+    /// file that grew shows as a length mismatch without reading it all).
+    ///
+    /// The path is opened without following links (Unix `O_NOFOLLOW | O_NONBLOCK`, Windows
+    /// `FILE_FLAG_OPEN_REPARSE_POINT`), and the opened object must be a regular file and the
+    /// object the walk saw; otherwise [`CoreError::ChangedWhileReading`].
     pub fn open(&self, input: &Input) -> Result<Box<dyn Read + '_>, CoreError> {
         if input.kind != EntryKind::File {
             return Err(CoreError::io(
@@ -35,51 +31,147 @@ impl Source {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
             ));
         }
-        let file = File::open(&input.source).map_err(|e| CoreError::io(&input.source, e))?;
-        if input.len > 0 && input.len >= self.mmap_threshold {
-            let map = Mapped::map(&file).map_err(|e| CoreError::io(&input.source, e))?;
-            Ok(Box::new(Cursor::new(map)))
-        } else {
-            Ok(Box::new(BufReader::with_capacity(BUF, file)))
+        let changed = || CoreError::ChangedWhileReading {
+            path: input.source.clone(),
+        };
+        let before = std::fs::symlink_metadata(&input.source)
+            .map_err(|e| CoreError::io(&input.source, e))?;
+        if !before.is_file() {
+            return Err(changed());
         }
+        let file = open_no_follow(&input.source).map_err(|e| CoreError::io(&input.source, e))?;
+        let md = file
+            .metadata()
+            .map_err(|e| CoreError::io(&input.source, e))?;
+        if !md.is_file() {
+            return Err(changed());
+        }
+        if let Some(id) = input.identity {
+            let now = file_identity(&file).map_err(|e| CoreError::io(&input.source, e))?;
+            if now != id {
+                return Err(changed());
+            }
+        }
+        Ok(Box::new(file.take(input.len.saturating_add(1))))
     }
+}
+
+#[cfg(unix)]
+fn open_no_follow(path: &std::path::Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_no_follow(path: &std::path::Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_no_follow(path: &std::path::Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).open(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::tests::{clear_readonly, file_link, make_tree, skip};
     use crate::ingest::{walk, IngestOptions};
 
     #[test]
-    fn mmap_and_buffered_yield_identical_bytes() {
+    fn open_yields_the_files_bytes_on_both_sides_of_1_mib() {
         let dir = tempfile::tempdir().unwrap();
-        crate::ingest::tests::make_tree(dir.path());
-        let opts = IngestOptions::default();
-        let inputs = walk(dir.path(), &opts).unwrap();
-        let mapped = Source::new(&opts);
-        let buffered = Source::new(&IngestOptions {
-            mmap_threshold: u64::MAX,
-            ..opts
-        });
+        make_tree(dir.path());
+        let inputs = walk(dir.path(), &IngestOptions::default()).unwrap();
         let mut checked = 0;
         for i in inputs.iter().filter(|i| i.kind == EntryKind::File) {
             let want = std::fs::read(&i.source).unwrap();
-            for s in [&mapped, &buffered] {
-                let mut got = Vec::new();
-                s.open(i).unwrap().read_to_end(&mut got).unwrap();
-                assert_eq!(got, want, "{}", i.path);
-            }
+            let mut got = Vec::new();
+            Source::new()
+                .open(i)
+                .unwrap()
+                .read_to_end(&mut got)
+                .unwrap();
+            assert_eq!(got, want, "{}", i.path);
             checked += 1;
         }
         assert!(checked >= 12);
+        clear_readonly(&dir.path().join("ro.txt"));
+    }
+
+    #[test]
+    fn reads_stop_one_byte_past_the_walked_length() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), vec![1u8; 100]).unwrap();
+        let mut inputs = walk(dir.path(), &IngestOptions::default()).unwrap();
+        inputs[0].len = 10;
+        let mut got = Vec::new();
+        Source::new()
+            .open(&inputs[0])
+            .unwrap()
+            .read_to_end(&mut got)
+            .unwrap();
+        assert_eq!(got.len(), 11);
     }
 
     #[test]
     fn opening_a_directory_input_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("d")).unwrap();
-        let opts = IngestOptions::default();
-        let inputs = walk(dir.path(), &opts).unwrap();
-        assert!(Source::new(&opts).open(&inputs[0]).is_err());
+        let inputs = walk(dir.path(), &IngestOptions::default()).unwrap();
+        assert!(Source::new().open(&inputs[0]).is_err());
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_directory_is_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), b"abc").unwrap();
+        let inputs = walk(dir.path(), &IngestOptions::default()).unwrap();
+        std::fs::remove_file(dir.path().join("f")).unwrap();
+        std::fs::create_dir(dir.path().join("f")).unwrap();
+        assert!(matches!(
+            Source::new().open(&inputs[0]),
+            Err(CoreError::ChangedWhileReading { .. })
+        ));
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_symlink_is_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"abc").unwrap();
+        std::fs::write(dir.path().join("f"), b"abc").unwrap();
+        let inputs = walk(dir.path(), &IngestOptions::default()).unwrap();
+        std::fs::remove_file(dir.path().join("f")).unwrap();
+        if !file_link(&outside.path().join("secret"), &dir.path().join("f")) {
+            skip("cannot create symlinks without privilege");
+            return;
+        }
+        assert!(matches!(
+            Source::new().open(&inputs[0]),
+            Err(CoreError::ChangedWhileReading { .. })
+        ));
+    }
+
+    #[test]
+    fn a_file_replaced_by_another_file_is_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), b"abc").unwrap();
+        std::fs::write(dir.path().join("g"), b"abc").unwrap();
+        let inputs = walk(dir.path(), &IngestOptions::default()).unwrap();
+        std::fs::remove_file(dir.path().join("f")).unwrap();
+        std::fs::rename(dir.path().join("g"), dir.path().join("f")).unwrap();
+        assert!(matches!(
+            Source::new().open(&inputs[0]),
+            Err(CoreError::ChangedWhileReading { .. })
+        ));
     }
 }
