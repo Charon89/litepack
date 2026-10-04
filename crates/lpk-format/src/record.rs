@@ -585,7 +585,8 @@ pub struct ContainerMember {
     pub offset: u64,
     /// Length in the original.
     pub len: u64,
-    /// The chunks holding the member's data as stored, after any nested peel.
+    /// The chunks whose plain bytes are the member's original bytes (a nested peel is undone
+    /// when they are decoded), so their plain lengths add up to `len`.
     pub chunks: Vec<u64>,
 }
 
@@ -1045,7 +1046,7 @@ pub fn record_layout_tables() -> String {
 | member_count | varint | number of members |\n\
 | offset | u64 LE | per member: position in the original |\n\
 | len | u64 LE | per member: length in the original; members ascend and do not overlap, and `offset + len` is at most `original_len` |\n\
-| chunks | chunk list | per member: the chunks holding its data as stored, after any nested peel |\n\
+| chunks | chunk list | per member: the chunks whose plain bytes are the member's original bytes (a nested peel of a member is undone when those chunks are decoded, so their plain lengths add up to `len`) |\n\
 | original_hash | 32 | after the last member: BLAKE3-256 of the whole original container |\n"
         .to_string()
 }
