@@ -74,6 +74,9 @@ pub struct Index {
     pub blocks: Vec<BlockLocation>,
     /// Location of the `EntryTable` frame.
     pub entry_table: FrameLocation,
+    /// BLAKE3-256 of the entry table's payload as stored (the sealed bytes when
+    /// the table is sealed): the index authenticates the table.
+    pub entry_table_hash: [u8; 32],
     /// Location of the `Records` frame, if any.
     pub records: Option<FrameLocation>,
     /// Locations of the `Recovery` frames, in the order written (section 13).
@@ -328,6 +331,7 @@ impl Index {
         varint::write(&mut out, self.entry_table.offset)?;
         varint::write(&mut out, self.entry_table.len)?;
         varint::write(&mut out, self.entry_table.sequence)?;
+        out.extend_from_slice(&self.entry_table_hash);
         let rec = self.records.unwrap_or(FrameLocation {
             offset: 0,
             len: 0,
@@ -392,6 +396,11 @@ impl Index {
             len: rv(&mut s)?,
             sequence: rv(&mut s)?,
         };
+        let (hash, rest) = s
+            .split_first_chunk::<32>()
+            .ok_or(FormatError::Truncated { what: WHAT })?;
+        let entry_table_hash = *hash;
+        s = rest;
         let rec = FrameLocation {
             offset: rv(&mut s)?,
             len: rv(&mut s)?,
@@ -453,6 +462,7 @@ impl Index {
                 priors,
                 blocks,
                 entry_table,
+                entry_table_hash,
                 records,
                 recovery,
             },
@@ -492,13 +502,18 @@ pub fn index_layout_table() -> String {
          | first_chunk | varint | per block: index of the first chunk the block holds |\n\
          | chunk_count | varint | per block: number of chunks the block holds |\n\
          | plain_len | varint | per block: sum of the `plain_len` of its chunks |\n\
+         | sequence | varint | per block: position of the block's frame among the archive's frames (section 14) |\n\
          | entry_table_offset | varint | absolute offset of the `EntryTable` frame |\n\
          | entry_table_len | varint | whole encoded length of that frame |\n\
+         | entry_table_sequence | varint | position of that frame among the archive's frames |\n\
+         | entry_table_hash | 32 | BLAKE3-256 of the entry table's payload as stored (the sealed bytes when sealed) |\n\
          | records_offset | varint | absolute offset of the `Records` frame; 0 when there is none |\n\
          | records_len | varint | whole encoded length of that frame; 0 when there is none |\n\
+         | records_sequence | varint | position of that frame among the archive's frames; 0 when there is none |\n\
          | recovery_count | varint | number of `Recovery` frames (section 13); at most the bytes left after it divided by {MIN_LOCATION_LEN} |\n\
          | recovery_offset | varint | per recovery frame: absolute offset of the frame |\n\
-         | recovery_len | varint | per recovery frame: whole encoded length of that frame |\n"
+         | recovery_len | varint | per recovery frame: whole encoded length of that frame |\n\
+         | recovery_sequence | varint | per recovery frame: position of that frame among the archive's frames |\n"
     )
 }
 
@@ -563,6 +578,7 @@ mod tests {
                 len: 60,
                 sequence: 0,
             },
+            entry_table_hash: [0; 32],
             records: None,
             recovery: vec![],
         };
@@ -733,6 +749,7 @@ mod tests {
         ] {
             varint::write(&mut out, v).unwrap();
         }
+        out.extend_from_slice(&idx.entry_table_hash);
         let r = idx.records.unwrap_or(FrameLocation {
             offset: 0,
             len: 0,

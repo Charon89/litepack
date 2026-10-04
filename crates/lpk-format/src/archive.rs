@@ -38,9 +38,10 @@ pub struct Archive<R: Read + Seek> {
     sealer: Option<Sealer>,
     /// The key slot of an encrypted archive.
     key_slot: Option<KeySlot>,
-    /// True for a listable archive opened without credentials: only the entry
-    /// table is available, the index is sealed.
-    listing_only: bool,
+    /// True for an encrypted archive opened without credentials: the index is
+    /// sealed, so only the frame envelopes, the recovery frames and (when
+    /// listable) the entry table are available.
+    keyless: bool,
 }
 
 /// What a forward walk over the frames found.
@@ -202,14 +203,19 @@ fn read_key_slot<R: Read + Seek>(reader: &mut R) -> Result<(KeySlot, u64), Forma
 }
 
 /// Walk the frame envelopes from `start` (the first frame after the key slot,
-/// sequence 1) to the entry table, skipping payloads without reading them.
-fn find_entry_table<R: Read + Seek>(
+/// sequence 1) to the trailer, skipping payloads by their declared length
+/// without reading them. Returns the entry table's location (the first
+/// `EntryTable` frame) and the locations of the recovery frames; a frame whose
+/// payload is damaged is still skipped, the sequence count continuing.
+fn walk_envelopes<R: Read + Seek>(
     reader: &mut R,
     start: u64,
     file_len: u64,
-) -> Result<FrameLocation, FormatError> {
+) -> Result<(Option<FrameLocation>, Vec<FrameLocation>), FormatError> {
     let mut pos = start;
     let mut sequence = 1u64;
+    let mut entry = None;
+    let mut recovery = Vec::new();
     loop {
         let trunc = FormatError::Truncated {
             what: "entry table",
@@ -233,19 +239,20 @@ fn find_entry_table<R: Read + Seek>(
             return Err(trunc);
         }
         match FrameKind::from_u16(kind) {
-            Some(FrameKind::EntryTable) => {
-                return Ok(FrameLocation {
+            Some(FrameKind::EntryTable) if entry.is_none() => {
+                entry = Some(FrameLocation {
                     offset: pos,
                     len: frame_len,
                     sequence,
-                })
+                });
             }
+            Some(FrameKind::Recovery) => recovery.push(FrameLocation {
+                offset: pos,
+                len: frame_len,
+                sequence,
+            }),
             Some(FrameKind::KeySlot) => return Err(FormatError::UnexpectedKeySlot),
-            Some(FrameKind::Trailer) => {
-                return Err(FormatError::BadFrameLocation {
-                    what: "entry table",
-                })
-            }
+            Some(FrameKind::Trailer) => return Ok((entry, recovery)),
             _ => {}
         }
         pos = end;
@@ -275,10 +282,12 @@ impl<R: Read + Seek> Archive<R> {
     /// after the header and opened first: a wrong password is `WrongKey` before
     /// any other frame is read, and a key slot whose Argon2 memory exceeds
     /// `resources.memory` is `Refused` (field `argon2_m`) before it is derived.
-    /// Without credentials an encrypted archive is `PasswordRequired`, except a
-    /// listable one, which opens for listing only: the entry table can be read,
-    /// `extract` fails with `PasswordRequired`, and `verify` checks every
-    /// frame's hash and the recovery frames only. Credentials given for an
+    /// Without credentials an encrypted archive opens keyless: the frames are
+    /// found by walking their envelopes, so recovery (`check_recovery`,
+    /// `repair`) and `verify` work on the sealed bytes (`verify` checks every
+    /// frame's hash and the recovery frames only); a listable archive's entry
+    /// table can be read; everything that needs the index or a sealed frame
+    /// (`extract`, the chunk table, a sealed entry table) is `PasswordRequired`. Credentials given for an
     /// archive that is not encrypted are ignored.
     pub fn open_with(
         mut reader: R,
@@ -298,7 +307,7 @@ impl<R: Read + Seek> Archive<R> {
         let listable = header.flags.contains(HeaderFlags::LISTABLE);
         let mut sealer = None;
         let mut key_slot = None;
-        let mut listing_only = false;
+        let mut keyless = false;
         let mut after_slot = Header::LEN as u64;
         if encrypted {
             let (slot, end) = read_key_slot(&mut reader)?;
@@ -313,11 +322,10 @@ impl<R: Read + Seek> Archive<R> {
                             allowed: resources.memory,
                         }));
                     }
-                    let key = slot.unwrap(&header.archive_id, c)?;
+                    let key = slot.unwrap(&header.archive_id, header.flags.bits(), c)?;
                     sealer = Some(Sealer::new(slot.suite, key, header.archive_id));
                 }
-                None if listable => listing_only = true,
-                None => return Err(FormatError::PasswordRequired),
+                None => keyless = true,
             }
             key_slot = Some(slot);
         } else {
@@ -341,8 +349,23 @@ impl<R: Read + Seek> Archive<R> {
         if trailer.archive_id != header.archive_id {
             return Err(FormatError::ArchiveIdMismatch);
         }
-        if listing_only {
-            let entry_table = find_entry_table(&mut reader, after_slot, len)?;
+        if keyless {
+            let (entry_table, recovery) = walk_envelopes(&mut reader, after_slot, len)?;
+            // A listable archive's clear entry table must be there; a sealed one
+            // cannot be read without the key and its location is not needed.
+            let entry_table = match entry_table {
+                Some(l) => l,
+                None if listable => {
+                    return Err(FormatError::BadFrameLocation {
+                        what: "entry table",
+                    })
+                }
+                None => FrameLocation {
+                    offset: 0,
+                    len: 0,
+                    sequence: 0,
+                },
+            };
             let index = Index {
                 chunk_table: ChunkTableWriter::encode(&[]).into(),
                 merkle_root: merkle_root(&[]),
@@ -357,8 +380,9 @@ impl<R: Read + Seek> Archive<R> {
                 priors: Vec::new(),
                 blocks: Vec::new(),
                 entry_table,
+                entry_table_hash: [0; 32],
                 records: None,
-                recovery: Vec::new(),
+                recovery,
             };
             let chunks = index.chunk_index()?;
             return Ok(Archive {
@@ -374,7 +398,7 @@ impl<R: Read + Seek> Archive<R> {
                 record_count: None,
                 sealer: None,
                 key_slot,
-                listing_only: true,
+                keyless: true,
             });
         }
         let at = FrameLocation {
@@ -413,7 +437,7 @@ impl<R: Read + Seek> Archive<R> {
             record_count: None,
             sealer,
             key_slot,
-            listing_only: false,
+            keyless: false,
         })
     }
 
@@ -437,15 +461,16 @@ impl<R: Read + Seek> Archive<R> {
         self.key_slot.as_ref()
     }
 
-    /// True for a listable archive opened without credentials: the index is
-    /// sealed, so only the entry table is available.
-    pub fn is_listing_only(&self) -> bool {
-        self.listing_only
+    /// True for an encrypted archive opened without credentials: the index is
+    /// sealed, so only the frame envelopes, the recovery frames and (when
+    /// listable) the entry table are available.
+    pub fn is_keyless(&self) -> bool {
+        self.keyless
     }
 
     /// Fail with `PasswordRequired` when only the entry table is available.
     pub(crate) fn need_index(&self) -> Result<(), FormatError> {
-        if self.listing_only {
+        if self.keyless {
             Err(FormatError::PasswordRequired)
         } else {
             Ok(())
@@ -486,12 +511,6 @@ impl<R: Read + Seek> Archive<R> {
     /// The underlying reader, for the recovery scan.
     pub(crate) fn raw_reader(&mut self) -> &mut R {
         &mut self.reader
-    }
-
-    /// Replace the recovery frame list of a listing-only archive with the
-    /// frames a walk found.
-    pub(crate) fn set_recovery_frames(&mut self, frames: Vec<FrameLocation>) {
-        self.index.recovery = frames;
     }
 
     /// Locations of the `Recovery` frames, as the index lists them.
@@ -535,7 +554,20 @@ impl<R: Read + Seek> Archive<R> {
     /// with `EntryTable::parse`.
     pub fn entries(&mut self) -> Result<Vec<u8>, FormatError> {
         let at = self.index.entry_table;
-        Ok(self.read_frame_at(at, FrameKind::EntryTable)?.payload)
+        let raw = read_frame_at_impl(&mut self.reader, &self.limits, at, FrameKind::EntryTable)?;
+        // The index (when we have it) vouches for the table as stored; a keyless
+        // reader has no index and the table is unauthenticated.
+        if !self.keyless && blake3::hash(&raw.payload).as_bytes() != &self.index.entry_table_hash {
+            return Err(FormatError::EntryTableMismatch);
+        }
+        let frame = unseal(
+            self.sealer.as_ref(),
+            self.is_encrypted(),
+            self.is_listable(),
+            raw,
+            at.sequence,
+        )?;
+        Ok(frame.payload)
     }
 
     /// Read and verify the frame at `at`: its kind must be `expected` and its
@@ -732,6 +764,7 @@ mod tests {
             .write(&mut bytes)
             .unwrap();
         let entry_off = bytes.len() as u64;
+        let entry_hash = *blake3::hash(&entry_payload).as_bytes();
         let e = frame_bytes(FrameKind::EntryTable, entry_payload);
         bytes.extend_from_slice(&e);
         let placeholder = |seed: u8| -> Vec<u8> {
@@ -809,6 +842,7 @@ mod tests {
                 len: e.len() as u64,
                 sequence: 0,
             },
+            entry_table_hash: entry_hash,
             records: None,
             recovery: vec![],
         };

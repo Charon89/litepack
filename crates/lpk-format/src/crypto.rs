@@ -167,7 +167,7 @@ impl Argon2Params {
 }
 
 /// A password and an optional keyfile; the bytes are wiped when it is dropped.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Credentials {
     /// The password bytes.
     pub password: Vec<u8>,
@@ -212,7 +212,7 @@ impl Drop for Credentials {
 impl ZeroizeOnDrop for Credentials {}
 
 /// The 32-byte archive key; wiped when dropped.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ArchiveKey([u8; KEY_LEN]);
 
 impl std::fmt::Debug for ArchiveKey {
@@ -296,9 +296,13 @@ pub fn associated_data(
     v
 }
 
-fn wrap_ad(archive_id: &[u8; 16]) -> Vec<u8> {
+/// `"LitePack lpk v1 keywrap" || archive_id || header_flags (u32 LE)`: the
+/// header flags are bound, so a flipped `ENCRYPTED` or `LISTABLE` bit fails at
+/// the key slot.
+fn wrap_ad(archive_id: &[u8; 16], header_flags: u32) -> Vec<u8> {
     let mut v = WRAP_AD_PREFIX.to_vec();
     v.extend_from_slice(archive_id);
+    v.extend_from_slice(&header_flags.to_le_bytes());
     v
 }
 
@@ -366,6 +370,7 @@ impl KeySlot {
         argon2: Argon2Params,
         creds: &Credentials,
         archive_id: &[u8; 16],
+        header_flags: u32,
         key: &ArchiveKey,
         rng: &mut dyn RngCore,
     ) -> Result<KeySlot, FormatError> {
@@ -375,7 +380,13 @@ impl KeySlot {
         let keyfile_required = creds.keyfile.is_some();
         let mut kek = derive_kek(&argon2, &salt, creds, keyfile_required)?;
         let zero = vec![0u8; suite.nonce_len()];
-        let wrapped = aead_encrypt(suite, &kek, &zero, &wrap_ad(archive_id), &key.0);
+        let wrapped = aead_encrypt(
+            suite,
+            &kek,
+            &zero,
+            &wrap_ad(archive_id, header_flags),
+            &key.0,
+        );
         kek.zeroize();
         let wrapped = wrapped.map_err(|_| FormatError::BadKeySlot { reason: "wrap" })?;
         let wrapped_key: [u8; KEY_LEN + TAG_LEN] = wrapped
@@ -449,6 +460,7 @@ impl KeySlot {
     pub fn unwrap(
         &self,
         archive_id: &[u8; 16],
+        header_flags: u32,
         creds: &Credentials,
     ) -> Result<ArchiveKey, FormatError> {
         let mut kek = derive_kek(&self.argon2, &self.salt, creds, self.keyfile_required)?;
@@ -457,7 +469,7 @@ impl KeySlot {
             self.suite,
             &kek,
             &zero,
-            &wrap_ad(archive_id),
+            &wrap_ad(archive_id, header_flags),
             &self.wrapped_key,
         );
         kek.zeroize();
@@ -503,7 +515,7 @@ impl Sealer {
         let sealed_len = (payload.len() + nl + TAG_LEN) as u64;
         let ad = associated_data(&self.archive_id, kind, sequence, sealed_len);
         let ct = aead_encrypt(self.suite, &self.key.0, &nonce, &ad, payload)
-            .map_err(|()| FormatError::AuthenticationFailed { kind, sequence })?;
+            .map_err(|()| FormatError::SealFailed { kind, sequence })?;
         let mut out = nonce;
         out.extend_from_slice(&ct);
         Ok(out)
@@ -655,20 +667,21 @@ mod tests {
         for suite in [Suite::AesGcm, Suite::XChaCha] {
             let key = ArchiveKey::generate(&mut Counter(1));
             let creds = Credentials::password(b"hunter2".to_vec());
-            let slot = KeySlot::create(suite, small(), &creds, &ID, &key, &mut Counter(9)).unwrap();
+            let slot =
+                KeySlot::create(suite, small(), &creds, &ID, 1, &key, &mut Counter(9)).unwrap();
             let bytes = slot.encode();
             assert_eq!(bytes.len(), KEY_SLOT_LEN);
             assert_eq!(KeySlot::parse(&bytes).unwrap(), slot);
-            assert!(slot.unwrap(&ID, &creds).unwrap() == key);
+            assert!(slot.unwrap(&ID, 1, &creds).unwrap().0 == key.0);
             assert!(key.check(&ID, &slot));
             let wrong = Credentials::password(b"hunter3".to_vec());
             assert!(matches!(
-                slot.unwrap(&ID, &wrong),
+                slot.unwrap(&ID, 1, &wrong),
                 Err(FormatError::WrongKey)
             ));
             // The archive id is bound.
             assert!(matches!(
-                slot.unwrap(&[8; 16], &creds),
+                slot.unwrap(&[8; 16], 1, &creds),
                 Err(FormatError::WrongKey)
             ));
         }
@@ -681,13 +694,26 @@ mod tests {
             password: b"pw".to_vec(),
             keyfile: Some(b"file-bytes".to_vec()),
         };
-        let slot =
-            KeySlot::create(Suite::AesGcm, small(), &creds, &ID, &key, &mut Counter(3)).unwrap();
+        let slot = KeySlot::create(
+            Suite::AesGcm,
+            small(),
+            &creds,
+            &ID,
+            1,
+            &key,
+            &mut Counter(3),
+        )
+        .unwrap();
         assert!(slot.keyfile_required);
-        assert!(slot.unwrap(&ID, &creds).unwrap() == key);
+        assert!(slot.unwrap(&ID, 1, &creds).unwrap().0 == key.0);
+        // The header flags are bound.
+        assert!(matches!(
+            slot.unwrap(&ID, 3, &creds),
+            Err(FormatError::WrongKey)
+        ));
         let no_file = Credentials::password(b"pw".to_vec());
         assert!(matches!(
-            slot.unwrap(&ID, &no_file),
+            slot.unwrap(&ID, 1, &no_file),
             Err(FormatError::WrongKey)
         ));
         let other = Credentials {
@@ -695,7 +721,7 @@ mod tests {
             keyfile: Some(b"other".to_vec()),
         };
         assert!(matches!(
-            slot.unwrap(&ID, &other),
+            slot.unwrap(&ID, 1, &other),
             Err(FormatError::WrongKey)
         ));
     }
@@ -704,9 +730,17 @@ mod tests {
     fn key_slot_parse_rules() {
         let key = ArchiveKey::generate(&mut Counter(2));
         let creds = Credentials::password(b"pw".to_vec());
-        let good = KeySlot::create(Suite::AesGcm, small(), &creds, &ID, &key, &mut Counter(3))
-            .unwrap()
-            .encode();
+        let good = KeySlot::create(
+            Suite::AesGcm,
+            small(),
+            &creds,
+            &ID,
+            1,
+            &key,
+            &mut Counter(3),
+        )
+        .unwrap()
+        .encode();
         let with = |f: &dyn Fn(&mut Vec<u8>)| {
             let mut b = good.clone();
             f(&mut b);
@@ -746,7 +780,7 @@ mod tests {
         let mut bad = KeySlot::parse(&good).unwrap();
         bad.wrapped_key[0] ^= 1;
         assert!(matches!(
-            bad.unwrap(&ID, &creds),
+            bad.unwrap(&ID, 1, &creds),
             Err(FormatError::WrongKey)
         ));
     }

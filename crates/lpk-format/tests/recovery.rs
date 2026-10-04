@@ -598,6 +598,7 @@ mod hand_built {
                 len: e.len() as u64,
                 sequence: 0,
             },
+            entry_table_hash: [0; 32],
             records: Some(FrameLocation {
                 offset: rec_off,
                 len: r.len() as u64,

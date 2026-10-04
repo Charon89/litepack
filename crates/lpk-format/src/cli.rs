@@ -14,6 +14,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// Reference decoder for `.lpk` archives.
 #[derive(Debug, Parser)]
@@ -132,9 +133,12 @@ struct Keys {
     credentials: Option<Credentials>,
 }
 
-fn credentials(cli: &Cli) -> Result<Keys, FormatError> {
-    let password = match (&cli.password, &cli.password_file) {
-        (Some(p), _) => Some(p.clone().into_bytes()),
+fn credentials(cli: &mut Cli) -> Result<Keys, FormatError> {
+    // The password string is moved out of the parsed arguments into a wiping
+    // wrapper; the bytes handed on live in `Credentials`, which wipes them too.
+    let given: Option<Zeroizing<String>> = cli.password.take().map(Zeroizing::new);
+    let password = match (&given, &cli.password_file) {
+        (Some(p), _) => Some(p.as_bytes().to_vec()),
         (None, Some(f)) => {
             let mut b = std::fs::read(f)?;
             if b.ends_with(b"\n") {
@@ -311,7 +315,11 @@ fn info(
     let h = *a.header();
     let t = *a.trailer();
     let e = a.index().envelope;
-    let entries = a.entry_table()?.len();
+    let entries = if a.is_keyless() && !a.is_listable() {
+        None
+    } else {
+        Some(a.entry_table()?.len())
+    };
     let archive_len = t.index_offset + t.index_len + TRAILER_FRAME_LEN;
     writeln!(out, "format: {}.{}", h.version.major, h.version.minor)?;
     writeln!(out, "header flags: {:#x}", h.flags.bits())?;
@@ -329,9 +337,12 @@ fn info(
     }
     writeln!(out, "generation: {}", t.generation)?;
     writeln!(out, "length: {archive_len} bytes")?;
-    writeln!(out, "entries: {entries}")?;
-    if a.is_listing_only() {
+    if let Some(n) = entries {
+        writeln!(out, "entries: {n}")?;
+    }
+    if a.is_keyless() {
         writeln!(out, "index: sealed (a password is required)")?;
+        writeln!(out, "recovery frames: {}", a.recovery_frames().len())?;
         return Ok(());
     }
     writeln!(out, "chunks: {}", a.chunks().len())?;
@@ -419,7 +430,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(args) {
+    let mut cli = match Cli::try_parse_from(args) {
         Ok(c) => c,
         Err(e) => {
             let code = if e.use_stderr() { 2 } else { 0 };
@@ -429,7 +440,7 @@ where
             return code;
         }
     };
-    let keys = match credentials(&cli) {
+    let keys = match credentials(&mut cli) {
         Ok(k) => k,
         Err(e) => {
             let _ = writeln!(err, "error: {e}");

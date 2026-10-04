@@ -238,7 +238,7 @@ pub fn frame_flag_table() -> String {
     format!(
         "| Bit | Name | Meaning |\n|---|---|---|\n\
          | {mu} | MUST_UNDERSTAND | a reader that does not know the kind must fail instead of skipping |\n\
-         | {sealed} | SEALED | the payload is sealed: the nonce, the ciphertext and the tag, in that order (section 14); the frame hash covers the sealed bytes |
+         | {sealed} | SEALED | the payload is sealed: the nonce, the ciphertext and the tag, in that order (section 14); the frame hash covers the sealed bytes |\n\
          | {first_reserved}-15 | reserved | must be zero; a reader rejects the frame otherwise |\n"
     )
 }

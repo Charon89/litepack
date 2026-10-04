@@ -339,7 +339,7 @@ impl<R: Read + Seek> Archive<R> {
     /// cannot decode anything: `verify` then hashes every frame, checks the
     /// recovery frames' shards and reports `chunks_checked: false`.
     pub fn verify(&mut self) -> Result<VerifySummary, FormatError> {
-        if self.is_listing_only() {
+        if self.is_keyless() {
             return self.verify_frames_only();
         }
         self.verify_records()?;
@@ -373,12 +373,10 @@ impl<R: Read + Seek> Archive<R> {
     /// `verify` without a key: every frame's hash, then the recovery frames.
     fn verify_frames_only(&mut self) -> Result<VerifySummary, FormatError> {
         let limits = *self.limits();
-        let mut recovery = Vec::new();
-        let d = Self::walk(self.raw_reader(), &limits, Some(&mut recovery));
+        let d = Self::walk(self.raw_reader(), &limits, None);
         if let Some(e) = d.error {
             return Err(e);
         }
-        self.set_recovery_frames(recovery);
         let r = self.scan_recovery_frames()?;
         if r.shards_damaged > 0 || r.frames_unusable > 0 {
             return Err(FormatError::DamageFound {
@@ -386,9 +384,14 @@ impl<R: Read + Seek> Archive<R> {
                 unusable: r.frames_unusable,
             });
         }
-        let entries = self.entry_table()?;
+        // A sealed entry table cannot be counted without the key.
+        let entries = if self.is_listable() {
+            self.entry_table()?.len()
+        } else {
+            0
+        };
         Ok(VerifySummary {
-            entries: entries.len(),
+            entries,
             chunks: 0,
             blocks: 0,
             chunks_checked: false,

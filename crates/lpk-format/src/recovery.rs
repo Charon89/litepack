@@ -584,7 +584,6 @@ impl<R: Read + Seek> Archive<R> {
     /// Detect damage without repairing: hash every data shard of every usable
     /// recovery frame and count the damaged ones. `shards_repaired` is 0.
     pub fn check_recovery(&mut self) -> Result<RepairReport, FormatError> {
-        self.need_index()?;
         self.scan_recovery_frames()
     }
 
@@ -636,7 +635,6 @@ pub fn repair_with_credentials<R: Read + Seek, W: Write + Seek>(
     credentials: Option<&crate::crypto::Credentials>,
 ) -> Result<(RepairReport, Option<FormatError>), FormatError> {
     let mut a = Archive::open_with(archive, resources, credentials)?;
-    a.need_index()?;
     {
         let r = a.raw_reader();
         r.seek(SeekFrom::Start(0))?;

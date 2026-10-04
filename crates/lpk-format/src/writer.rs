@@ -251,6 +251,8 @@ pub struct Writer<W: Write> {
     sealer: Option<Sealer>,
     /// Position of the next frame among the archive's frames (section 14).
     seq: u64,
+    /// BLAKE3 of the payload of the frame written last, as stored.
+    last_hash: [u8; 32],
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -361,6 +363,7 @@ impl<W: Write> Writer<W> {
                 seal.argon2,
                 &seal.credentials,
                 &options.archive_id,
+                flags.bits(),
                 &key,
                 rng,
             )?);
@@ -387,6 +390,7 @@ impl<W: Write> Writer<W> {
             cover_start: Header::LEN as u64,
             sealer,
             seq: 0,
+            last_hash: [0; 32],
         };
         if let Some(slot) = slot {
             // The key slot is the first frame, in clear.
@@ -537,6 +541,7 @@ impl<W: Write> Writer<W> {
             len: frame.encoded_len(),
             sequence: self.seq,
         };
+        self.last_hash = *blake3::hash(&frame.payload).as_bytes();
         frame.write(&mut self.out)?;
         self.pos += at.len;
         self.seq += 1;
@@ -776,24 +781,25 @@ impl<W: Write> Writer<W> {
     /// range recovery covers.
     fn write_covered_tail(
         &mut self,
-    ) -> Result<(FrameLocation, Option<FrameLocation>), FormatError> {
+    ) -> Result<(FrameLocation, [u8; 32], Option<FrameLocation>), FormatError> {
         self.flush_block()?;
         let table = EntryTableWriter::encode(&self.entries)?;
         let entry_table = self.write_frame(FrameKind::EntryTable, table)?;
+        let entry_hash = self.last_hash;
         let records = if self.options.records.is_empty() {
             None
         } else {
             let payload = RecordsWriter::encode(&self.options.records);
             Some(self.write_frame(FrameKind::Records, payload)?)
         };
-        Ok((entry_table, records))
+        Ok((entry_table, entry_hash, records))
     }
 
     /// Close the last block and write the entry table, the recovery frames, the
     /// index and the trailer.
     pub fn finish(mut self) -> Result<WriterSummary, FormatError> {
         self.check_alive()?;
-        let (entry_table, records) = self.write_covered_tail()?;
+        let (entry_table, entry_table_hash, records) = self.write_covered_tail()?;
         let records_len = records.map_or(0, |r| r.len);
         // The last group closes before the index.
         self.close_group()?;
@@ -827,6 +833,7 @@ impl<W: Write> Writer<W> {
             priors: self.priors.iter().copied().collect(),
             blocks: std::mem::take(&mut self.blocks),
             entry_table,
+            entry_table_hash,
             records,
             recovery,
         };

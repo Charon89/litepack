@@ -162,14 +162,17 @@ fn keyfile_rules() {
 
 #[test]
 fn password_required_and_listable_mode() {
+    // A sealed archive opens keyless, but nothing in it can be read.
     let sealed = build(Suite::AesGcm, false, None);
+    let mut k = open_with(&sealed, None).unwrap();
+    assert!(k.is_keyless() && !k.is_listable());
     assert!(matches!(
-        open_with(&sealed, None),
+        k.entry_table(),
         Err(FormatError::PasswordRequired)
     ));
     let bytes = build(Suite::XChaCha, true, None);
     let mut a = open_with(&bytes, None).unwrap();
-    assert!(a.is_listing_only() && a.is_listable());
+    assert!(a.is_keyless() && a.is_listable());
     let table = a.entry_table().unwrap();
     let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
     assert_eq!(entries.len(), 3);
@@ -184,7 +187,7 @@ fn password_required_and_listable_mode() {
     assert_eq!(s.entries, 3);
     // Opened with the password the same archive extracts.
     let mut a = open_with(&bytes, Some(&creds("pw"))).unwrap();
-    assert!(!a.is_listing_only());
+    assert!(!a.is_keyless());
     assert_contents(&mut a);
 }
 
@@ -222,7 +225,7 @@ fn nonces_are_unique_across_many_frames() {
     let key = a
         .key_slot()
         .unwrap()
-        .unwrap(&[0x6B; 16], &creds("pw"))
+        .unwrap(&[0x6B; 16], 1, &creds("pw"))
         .unwrap();
     let mut locs: Vec<(u16, FrameLocation)> = a
         .index()
@@ -472,9 +475,12 @@ fn lpk_decode_with_passwords() {
     ]);
     assert_eq!((code, err.as_str()), (0, ""));
     assert!(out.starts_with("ok: 3 entries"), "{out}");
-    let (code, _, err) = tool(&["lpk-decode", "verify", &p("sealed-aes.lpk")]);
+    let (code, _, err) = tool(&["lpk-decode", "list", &p("sealed-aes.lpk")]);
     assert_eq!(code, 1);
     assert!(err.contains("password is required"), "{err}");
+    let (code, out, _) = tool(&["lpk-decode", "verify", &p("sealed-aes.lpk")]);
+    assert_eq!(code, 0);
+    assert!(out.contains("chunks not checked"), "{out}");
     let (code, _, err) = tool(&[
         "lpk-decode",
         "list",
@@ -520,4 +526,163 @@ fn lpk_decode_with_passwords() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("extracted 3 files"), "{out}");
     assert!(std::fs::read(dest.join("s").join("b.txt")).unwrap() == sealed_files()[1].1);
+}
+
+fn recovery_options(listable: bool) -> WriterOptions {
+    let mut o = seal_options(Suite::AesGcm, listable, "pw", None);
+    o.recovery = RecoveryOptions {
+        percent: 20,
+        shard_len: 4096,
+        group_shards: 16,
+    };
+    o
+}
+
+#[test]
+fn keyless_check_verify_and_repair_of_a_non_listable_archive() {
+    let bytes = write_archive_seeded(recovery_options(false), &sealed_files(), SEED);
+    let a = open_with(&bytes, Some(&creds("pw"))).unwrap();
+    let frames = a.recovery_frames().len();
+    assert!(frames > 0);
+    let loc = block_loc(&a, 0);
+    drop(a);
+    // Intact: keyless verify and check pass.
+    let mut k = open_with(&bytes, None).unwrap();
+    assert!(k.is_keyless());
+    assert_eq!(k.recovery_frames().len(), frames);
+    let s = k.verify().unwrap();
+    assert!(!s.chunks_checked);
+    assert_eq!(k.check_recovery().unwrap().shards_damaged, 0);
+    // Damaged: keyless check sees it, verify fails, repair rebuilds it.
+    let mut damaged = bytes.clone();
+    for i in 0..300 {
+        damaged[loc.offset as usize + 50 + i] ^= 0xFF;
+    }
+    let mut k = open_with(&damaged, None).unwrap();
+    assert!(k.check_recovery().unwrap().shards_damaged >= 1);
+    assert!(k.verify().is_err());
+    let mut fixed = Cursor::new(Vec::new());
+    let (report, unrepairable) = repair_with_credentials(
+        Cursor::new(damaged),
+        &mut fixed,
+        &Resources::default(),
+        None,
+    )
+    .unwrap();
+    assert!(unrepairable.is_none() && report.shards_repaired >= 1);
+    assert!(fixed.get_ref() == &bytes);
+    let mut a = open_with(fixed.get_ref(), Some(&creds("pw"))).unwrap();
+    assert_contents(&mut a);
+    // The CLI does the same without a password.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("a.lpk");
+    std::fs::write(&path, &bytes).unwrap();
+    let (code, out, err) = tool(&["lpk-decode", "check", path.to_str().unwrap()]);
+    assert_eq!((code, err.as_str()), (0, ""), "{out}");
+}
+
+#[test]
+fn keyless_verify_of_a_listable_archive_with_recovery_frames() {
+    let bytes = write_archive_seeded(recovery_options(true), &sealed_files(), SEED);
+    let mut k = open_with(&bytes, None).unwrap();
+    assert!(!k.recovery_frames().is_empty());
+    let s = k.verify().unwrap();
+    assert!(!s.chunks_checked);
+    assert_eq!(s.entries, 3);
+    assert_eq!(k.check_recovery().unwrap().frames_unusable, 0);
+}
+
+/// Rewrite the frame at `loc` in `bytes` with a new payload of the same length.
+fn replace_payload(bytes: &mut [u8], loc: &FrameLocation, payload: &[u8]) {
+    let (start, len) = payload_span(loc);
+    assert_eq!(payload.len(), len);
+    bytes[start..start + len].copy_from_slice(payload);
+    let h = blake3::hash(payload);
+    bytes[start + len..start + len + 32].copy_from_slice(h.as_bytes());
+}
+
+#[test]
+fn the_entry_table_is_authenticated_by_the_index() {
+    // Listable: rewriting the clear table (with a fresh frame hash) is caught.
+    let bytes = build(Suite::AesGcm, true, None);
+    let a = open_with(&bytes, Some(&creds("pw"))).unwrap();
+    let loc = a.index().entry_table;
+    let (start, len) = payload_span(&loc);
+    let mut t = bytes.clone();
+    let mut payload = t[start..start + len].to_vec();
+    let last = payload.len() - 1;
+    payload[last] ^= 1;
+    replace_payload(&mut t, &loc, &payload);
+    let mut a = open_with(&t, Some(&creds("pw"))).unwrap();
+    assert!(matches!(
+        a.entry_table(),
+        Err(FormatError::EntryTableMismatch)
+    ));
+    assert!(matches!(a.verify(), Err(FormatError::EntryTableMismatch)));
+}
+
+#[test]
+fn flipping_a_header_flag_fails_at_the_key_slot() {
+    // Set LISTABLE on a sealed archive and put a clear table of the same
+    // length in place: the key slot binds the flags, so the password fails.
+    let bytes = build(Suite::AesGcm, false, None);
+    let a = open_with(&bytes, Some(&creds("pw"))).unwrap();
+    let loc = a.index().entry_table;
+    let (_, len) = payload_span(&loc);
+    let mut t = bytes.clone();
+    t[12] |= 2;
+    replace_payload(&mut t, &loc, &vec![0u8; len]);
+    assert!(matches!(
+        open_with(&t, Some(&creds("pw"))),
+        Err(FormatError::WrongKey)
+    ));
+    // And clearing LISTABLE on a listable archive.
+    let bytes = build(Suite::AesGcm, true, None);
+    let mut t = bytes.clone();
+    t[12] &= !2;
+    assert!(matches!(
+        open_with(&t, Some(&creds("pw"))),
+        Err(FormatError::WrongKey)
+    ));
+}
+
+#[test]
+fn a_recorded_sequence_that_differs_from_the_real_one_fails_the_tag() {
+    let bytes = build(Suite::AesGcm, false, None);
+    let a = open_with(&bytes, Some(&creds("pw"))).unwrap();
+    let key = a
+        .key_slot()
+        .unwrap()
+        .unwrap(&[0x6B; 16], 1, &creds("pw"))
+        .unwrap();
+    let mut index = a.index().clone();
+    let real = index.blocks[1].sequence;
+    index.blocks[1].sequence = real + 1;
+    let plain = index.encode().unwrap();
+    let sealer = lpk_format::Sealer::new(Suite::AesGcm, key, [0x6B; 16]);
+    let sealed = sealer
+        .seal(&plain, FrameKind::Index as u16, lpk_format::INDEX_SEQUENCE)
+        .unwrap();
+    let t = a.trailer();
+    let idx_loc = FrameLocation {
+        offset: t.index_offset,
+        len: t.index_len,
+        sequence: 0,
+    };
+    let mut forged = bytes.clone();
+    replace_payload(&mut forged, &idx_loc, &sealed);
+    let trailer = lpk_format::Trailer {
+        index_hash: *blake3::hash(&sealed).as_bytes(),
+        ..*t
+    };
+    let cut = (t.index_offset + t.index_len) as usize;
+    forged.truncate(cut);
+    trailer.write(&mut forged).unwrap();
+    let mut a = open_with(&forged, Some(&creds("pw"))).unwrap();
+    match a.verify() {
+        Err(FormatError::AuthenticationFailed { kind, sequence }) => {
+            assert_eq!((kind, sequence), (2, real + 1));
+        }
+        other => panic!("{other:?}"),
+    }
 }

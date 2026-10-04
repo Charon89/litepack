@@ -390,6 +390,17 @@ pub enum FormatError {
         /// The field at fault.
         reason: &'static str,
     },
+    /// The entry table frame does not match the hash the index records.
+    #[error("entry table does not match the index")]
+    EntryTableMismatch,
+    /// The cipher refused to seal a payload.
+    #[error("sealing frame kind {kind} (sequence {sequence}) failed")]
+    SealFailed {
+        /// Raw kind of the frame.
+        kind: u16,
+        /// Position of the frame in the archive.
+        sequence: u64,
+    },
     /// An underlying I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
