@@ -94,7 +94,7 @@ fn every_order_round_trips_and_the_layouts_differ() {
         );
         // Similarity: the larger of the pair first, its partner right after, then the stranger.
         assert_eq!(ss.ordering.groups, 1, "balanced {balanced}");
-        assert_eq!(ss.ordering.files_sketched, 3);
+        assert_eq!(ss.ordering.files_sketched, 4);
         assert!(ss.ordering.bytes_read >= 4_000_000);
         assert!(
             fs["c.txt"] < fs["a.txt"] && fs["a.txt"] < fs["b.txt"],

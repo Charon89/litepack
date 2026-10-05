@@ -93,9 +93,9 @@ struct AddArgs {
     #[arg(long)]
     no_dedup: bool,
     /// How files are ordered inside a cluster before they are written: `similarity` (the
-    /// default: by extension, with near-duplicate files, found by sketches of their chunk
-    /// hashes, placed next to each other; reads the files once more), `extension` (7-Zip's
-    /// order) or `none` (path order). Ignored with --no-dedup and --store.
+    /// default: path order, with near-duplicate files, found by sketches of their content,
+    /// moved next to each other; reads the files once more), `extension` (7-Zip's order) or
+    /// `none` (path order). Ignored with --no-dedup and --store.
     #[arg(long, value_enum, value_name = "ORDER", default_value = "similarity")]
     ordering: OrderingArg,
     /// Print the counts and the stage times to stderr.

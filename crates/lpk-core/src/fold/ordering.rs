@@ -1,34 +1,31 @@
 //! File order inside a cluster (E2-8, D-12: files are ordered, chunks are not).
 //!
-//! Three orders: [`Ordering::None`] keeps the path order of the clustering; [`Ordering::Extension`]
-//! sorts by extension (lower-cased), then file name, then path, the order 7-Zip uses for solid
-//! archives; [`Ordering::Similarity`] starts from the extension order and puts near-duplicate
-//! files next to each other.
+//! Three orders: [`Ordering::None`] keeps the path order of the clustering (directory locality);
+//! [`Ordering::Extension`] sorts by extension (lower-cased), then file name, then path, the order
+//! 7-Zip uses for solid archives; [`Ordering::Similarity`] keeps the path order and moves each
+//! group of near-duplicate files next to the group's first member.
 //!
-//! The similarity feature is computed from the file's chunk hashes: the Fold chunker cuts the
-//! file, BLAKE3 hashes each chunk (the same chunks the writer stores), and the first eight bytes
-//! of each digest enter a min-hash sketch. The sketch keeps the smallest value per seed over
-//! [`SKETCH_HASHES`] seeds; each super-feature is a hash of [`HASHES_PER_FEATURE`] consecutive
-//! minima, [`SUPER_FEATURES`] in all. Grouping several minima makes a match need a high chunk
-//! overlap (few false pairs); several super-features give a near-duplicate several chances to
-//! match (few missed pairs). Two files that share one super-feature value are one group; the
-//! group is written together, largest first, at the place of its first member in extension
-//! order. A file with fewer than [`MIN_CHUNKS`] chunks is not sketched: a sketch of one or two
-//! chunks is the file's whole hash set, and such small files sort by extension only.
+//! The similarity feature is a content-shingle sketch that works at any file size from 48 bytes:
+//! a rolling gear hash over a [`WINDOW`]-byte window is sampled where a multiplicative mix of it
+//! has its top [`SAMPLE_BITS`] bits zero (about one position in sixty-four, content-defined, so an
+//! insertion changes no sample but those near it); the sampled window hashes enter
+//! [`SKETCH_HASHES`] min-hashes under as many seeds; each super-feature hashes
+//! [`HASHES_PER_FEATURE`] consecutive minima, [`SUPER_FEATURES`] in all. Four minima per feature
+//! need a high overlap of shingles (few false pairs); three features give a near-duplicate three
+//! chances to match (few missed pairs). Two files sharing a super-feature value are one group,
+//! written together largest first at the place of the group's first member. A file shorter than
+//! the window, or with no sampled position, is not sketched.
 //!
-//! The pass reads and chunks each sketched candidate once more than the writer does. Chunk
-//! hashes are held per file (one 64-bit minimum per seed is all that is kept, the chunk hashes
-//! themselves are dropped as they are made), the sketches of one cluster live until the cluster
-//! is ordered. Ordering never changes what deduplicates: that is content-addressed in the writer.
+//! The pass reads every candidate file once more than the writer does; only the twelve minima of
+//! the file in hand are kept (the window ring is 48 bytes), the sketches of one cluster live until
+//! it is ordered. Ordering never changes what deduplicates: that is content-addressed in the
+//! writer.
 
 use std::cmp;
 use std::collections::HashMap;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
-use lpk_format::Chunker;
-
-use super::chunker::MIN_CHUNK;
 use crate::error::CoreError;
 use crate::ingest::Input;
 use crate::source::Source;
@@ -39,12 +36,12 @@ pub const SKETCH_HASHES: usize = 12;
 pub const SUPER_FEATURES: usize = 3;
 /// Minima hashed together into one super-feature.
 pub const HASHES_PER_FEATURE: usize = SKETCH_HASHES / SUPER_FEATURES;
-/// Fewest chunks a file needs to be sketched; below it the file sorts by extension only.
-pub const MIN_CHUNKS: usize = 4;
-/// Files shorter than this cannot hold [`MIN_CHUNKS`] chunks of the smallest size and are not read.
-pub const MIN_SKETCH_LEN: u64 = (MIN_CHUNKS * MIN_CHUNK) as u64;
+/// The shingle: bytes under the rolling hash.
+pub const WINDOW: usize = 48;
+/// A window is sampled when this many top bits of its mixed hash are zero (one in sixty-four).
+pub const SAMPLE_BITS: u32 = 6;
 /// The bytes read per call while sketching.
-const SEGMENT: u64 = 1 << 20;
+const SEGMENT: usize = 64 * 1024;
 
 /// How files are ordered inside a cluster.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -53,7 +50,7 @@ pub enum Ordering {
     None,
     /// Extension (lower-cased), then name, then path.
     Extension,
-    /// The extension order with near-duplicate files adjacent.
+    /// Path order with each near-duplicate group moved next to its first member.
     #[default]
     Similarity,
 }
@@ -72,9 +69,9 @@ impl Ordering {
 /// What the similarity pass did and cost.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct OrderingSummary {
-    /// Files that got a sketch (enough chunks).
+    /// Files that got a sketch.
     pub files_sketched: u64,
-    /// Bytes the pass read (every candidate, sketched or not).
+    /// Bytes the pass read.
     pub bytes_read: u64,
     /// Groups of two or more near-duplicate files placed together.
     pub groups: u64,
@@ -96,77 +93,61 @@ fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-struct SketchBuilder {
-    mins: [u64; SKETCH_HASHES],
-    chunks: usize,
-}
-
-impl SketchBuilder {
-    fn new() -> Self {
-        SketchBuilder {
-            mins: [u64::MAX; SKETCH_HASHES],
-            chunks: 0,
-        }
-    }
-
-    fn add(&mut self, digest: &[u8; 32]) {
-        let mut b = [0u8; 8];
-        b.copy_from_slice(&digest[..8]);
-        let h = u64::from_le_bytes(b);
-        for (i, m) in self.mins.iter_mut().enumerate() {
-            let v = mix(h ^ mix(i as u64 + 1));
-            if v < *m {
-                *m = v;
-            }
-        }
-        self.chunks += 1;
-    }
-
-    fn finish(self) -> Option<Sketch> {
-        if self.chunks < MIN_CHUNKS {
-            return None;
-        }
-        let mut features = [0u64; SUPER_FEATURES];
-        for (j, f) in features.iter_mut().enumerate() {
-            let mut acc = mix(j as u64 + 0x5EED);
-            for m in &self.mins[j * HASHES_PER_FEATURE..(j + 1) * HASHES_PER_FEATURE] {
-                acc = mix(acc ^ m);
-            }
-            *f = acc;
-        }
-        Some(Sketch { features })
-    }
-}
-
-/// The sketch of the stream `reader`, cut by `chunker`; `None` when it has fewer than
-/// [`MIN_CHUNKS`] chunks or the chunker's cuts are not usable. `bytes_read` grows by what was read.
+/// The sketch of the stream `reader`; `None` when it is shorter than the window or no window is
+/// sampled. `bytes_read` grows by what was read.
 pub fn sketch_stream(
     reader: &mut dyn Read,
-    chunker: &mut dyn Chunker,
     bytes_read: &mut u64,
 ) -> std::io::Result<Option<Sketch>> {
-    chunker.reset();
-    let mut b = SketchBuilder::new();
-    let mut buf: Vec<u8> = Vec::new();
+    let mut gear = [0u64; 256];
+    for (i, g) in gear.iter_mut().enumerate() {
+        *g = mix(i as u64 + 0x6EA2);
+    }
+    let seeds: [u64; SKETCH_HASHES] = std::array::from_fn(|i| mix(i as u64 + 1));
+    let mut mins = [u64::MAX; SKETCH_HASHES];
+    let mut sampled = 0u64;
+    let mut ring = [0u8; WINDOW];
+    let (mut h, mut pos) = (0u64, 0usize);
+    let mut buf = vec![0u8; SEGMENT];
     loop {
-        let before = buf.len();
-        let n = Read::take(&mut *reader, SEGMENT).read_to_end(&mut buf)?;
-        *bytes_read += n as u64;
-        let eof = (n as u64) < SEGMENT;
-        let cuts = chunker.feed(&buf[before..], eof);
-        let mut start = 0usize;
-        for cut in cuts {
-            if cut <= start || cut > buf.len() {
-                return Ok(None);
-            }
-            b.add(blake3::hash(&buf[start..cut]).as_bytes());
-            start = cut;
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
         }
-        buf.drain(..start);
-        if eof {
-            return Ok(b.finish());
+        *bytes_read += n as u64;
+        for &b in &buf[..n] {
+            // h covers the last WINDOW bytes: the byte of age WINDOW is taken out.
+            h = (h << 1).wrapping_add(gear[b as usize]);
+            let slot = pos % WINDOW;
+            if pos >= WINDOW {
+                h = h.wrapping_sub(gear[ring[slot] as usize] << WINDOW);
+            }
+            ring[slot] = b;
+            pos += 1;
+            if pos >= WINDOW && h.wrapping_mul(0xFF51_AFD7_ED55_8CCD) >> (64 - SAMPLE_BITS) == 0 {
+                let w = mix(h);
+                sampled += 1;
+                for (m, seed) in mins.iter_mut().zip(&seeds) {
+                    let v = mix(w ^ seed);
+                    if v < *m {
+                        *m = v;
+                    }
+                }
+            }
         }
     }
+    if sampled == 0 {
+        return Ok(None);
+    }
+    let mut features = [0u64; SUPER_FEATURES];
+    for (j, f) in features.iter_mut().enumerate() {
+        let mut acc = mix(j as u64 + 0x5EED);
+        for m in &mins[j * HASHES_PER_FEATURE..(j + 1) * HASHES_PER_FEATURE] {
+            acc = mix(acc ^ m);
+        }
+        *f = acc;
+    }
+    Ok(Some(Sketch { features }))
 }
 
 /// Sort by extension (lower-cased; none sorts first), then file name (lower-cased), then path.
@@ -190,8 +171,8 @@ fn find(parent: &mut [usize], mut x: usize) -> usize {
 }
 
 /// Place files whose sketches share a super-feature next to each other. `inputs` is in the base
-/// (extension) order and keeps it for files without a match; a group goes where its first member
-/// stood, largest file first (then base order). Returns the new order and the group count.
+/// order and keeps it for files without a match; a group goes where its first member stood,
+/// largest file first (then base order). Returns the new order and the group count.
 pub fn similarity_order(inputs: Vec<Input>, sketches: &[Option<Sketch>]) -> (Vec<Input>, u64) {
     let n = inputs.len();
     let mut parent: Vec<usize> = (0..n).collect();
@@ -248,32 +229,32 @@ pub fn order_cluster(
     mode: Ordering,
     sketch: bool,
     source: &Source,
-    chunker: &mut dyn Chunker,
     summary: &mut OrderingSummary,
 ) -> Result<Vec<Input>, CoreError> {
-    if mode == Ordering::None {
-        return Ok(inputs);
-    }
     let t = Instant::now();
-    extension_order(&mut inputs);
-    if mode == Ordering::Similarity && sketch {
-        let mut sketches = Vec::with_capacity(inputs.len());
-        for input in &inputs {
-            if input.len < MIN_SKETCH_LEN {
-                sketches.push(None);
-                continue;
+    match mode {
+        Ordering::None => return Ok(inputs),
+        Ordering::Extension => extension_order(&mut inputs),
+        Ordering::Similarity if sketch => {
+            let mut sketches = Vec::with_capacity(inputs.len());
+            for input in &inputs {
+                if input.len < WINDOW as u64 {
+                    sketches.push(None);
+                    continue;
+                }
+                let mut r = source.open(input)?;
+                let s = sketch_stream(&mut r, &mut summary.bytes_read)
+                    .map_err(|e| CoreError::io(&input.source, e))?;
+                if s.is_some() {
+                    summary.files_sketched += 1;
+                }
+                sketches.push(s);
             }
-            let mut r = source.open(input)?;
-            let s = sketch_stream(&mut r, chunker, &mut summary.bytes_read)
-                .map_err(|e| CoreError::io(&input.source, e))?;
-            if s.is_some() {
-                summary.files_sketched += 1;
-            }
-            sketches.push(s);
+            let (ordered, groups) = similarity_order(inputs, &sketches);
+            inputs = ordered;
+            summary.groups += groups;
         }
-        let (ordered, groups) = similarity_order(inputs, &sketches);
-        inputs = ordered;
-        summary.groups += groups;
+        Ordering::Similarity => {}
     }
     summary.seconds += t.elapsed().as_secs_f64();
     Ok(inputs)
@@ -287,7 +268,6 @@ pub fn seconds(s: &OrderingSummary) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fold::chunker::FastCdcChunker;
     use lpk_format::{EntryFlags, EntryKind};
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -305,6 +285,26 @@ mod tests {
         v
     }
 
+    /// Log-like lines: a fixed vocabulary with a varying number and a user id.
+    fn log_lines(seed: u64, lines: usize) -> Vec<u8> {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut out = String::new();
+        for i in 0..lines {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            out.push_str(&format!(
+                "2026-10-04 12:{:02}:{:02} INFO request {} served by worker-{} in {} ms\n",
+                i / 60 % 60,
+                i % 60,
+                x % 100_000,
+                x >> 40 & 7,
+                x >> 20 & 255
+            ));
+        }
+        out.into_bytes()
+    }
+
     fn input(path: &str, len: u64) -> Input {
         Input {
             path: path.into(),
@@ -318,14 +318,13 @@ mod tests {
         }
     }
 
-    fn chunker() -> FastCdcChunker {
-        FastCdcChunker::new(MIN_CHUNK, super::super::AVG_CHUNK, super::super::MAX_CHUNK).unwrap()
+    fn sketch(data: &[u8]) -> Option<Sketch> {
+        let mut n = 0;
+        sketch_stream(&mut Cursor::new(data), &mut n).unwrap()
     }
 
-    fn sketch(data: &[u8]) -> Option<Sketch> {
-        let mut c = chunker();
-        let mut n = 0;
-        sketch_stream(&mut Cursor::new(data), &mut c, &mut n).unwrap()
+    fn shared(a: &Sketch, b: &Sketch) -> usize {
+        a.features.iter().filter(|f| b.features.contains(f)).count()
     }
 
     fn paths(v: &[Input]) -> Vec<&str> {
@@ -347,54 +346,97 @@ mod tests {
             paths(&v),
             [".hidden", "m/README", "a/a.c", "b/a.txt", "a/b.txt", "z/b.TXT"]
         );
-        // ties on extension and name fall back to the path
         let mut v = vec![input("y/f.txt", 1), input("x/f.txt", 1)];
         extension_order(&mut v);
         assert_eq!(paths(&v), ["x/f.txt", "y/f.txt"]);
     }
 
     #[test]
-    fn sketch_is_deterministic_and_content_only() {
-        let a = noise(1, 1 << 20);
+    fn identical_content_shares_all_features_and_unrelated_none() {
+        let a = noise(1, 300_000);
         let s1 = sketch(&a).unwrap();
         assert_eq!(s1, sketch(&a).unwrap());
-        assert_ne!(s1, sketch(&noise(2, 1 << 20)).unwrap());
+        assert_eq!(shared(&s1, &sketch(&a).unwrap()), SUPER_FEATURES);
+        assert_eq!(shared(&s1, &sketch(&noise(2, 300_000)).unwrap()), 0);
+        // the same at a size of a few hundred bytes
+        let t = log_lines(1, 8);
+        assert_eq!(sketch(&t), sketch(&t));
+        assert!(sketch(&noise(5, WINDOW - 1)).is_none());
     }
 
     #[test]
-    fn near_duplicates_share_a_super_feature_and_a_stranger_does_not() {
-        let a = noise(7, 3 << 20);
-        let mut b = a.clone();
-        for x in &mut b[1_500_000..1_500_100] {
+    fn a_modified_copy_shares_a_super_feature() {
+        // a few hundred bytes with one changed line
+        let a = log_lines(3, 40);
+        let mut lines: Vec<&[u8]> = a.split_inclusive(|b| *b == b'\n').collect();
+        let changed = b"2026-10-04 13:00:00 WARN something else entirely happened here\n";
+        lines[20] = changed;
+        let b: Vec<u8> = lines.concat();
+        let (sa, sb) = (sketch(&a).unwrap(), sketch(&b).unwrap());
+        assert!(shared(&sa, &sb) >= 1);
+        // a larger file with a few changed bytes
+        let big = noise(7, 3 << 20);
+        let mut big2 = big.clone();
+        for x in &mut big2[1_500_000..1_500_100] {
             *x ^= 0xFF;
         }
-        let (sa, sb) = (sketch(&a).unwrap(), sketch(&b).unwrap());
-        assert!(sa.features.iter().any(|f| sb.features.contains(f)));
-        let sc = sketch(&noise(99, 3 << 20)).unwrap();
-        assert!(!sa.features.iter().any(|f| sc.features.contains(f)));
-
-        // Extension order a, b, c has the stranger between the pair; similarity closes the gap.
-        let inputs = vec![input("a.bin", 10), input("b.bin", 30), input("c.bin", 20)];
-        let sk = vec![Some(sa), Some(sc), Some(sb)];
-        let (out, groups) = similarity_order(inputs, &sk);
-        assert_eq!(groups, 1);
-        // a and c are the pair (largest first: c, then a); b keeps its place after them.
-        assert_eq!(paths(&out), ["c.bin", "a.bin", "b.bin"]);
+        assert!(shared(&sketch(&big).unwrap(), &sketch(&big2).unwrap()) >= 1);
     }
 
     #[test]
-    fn small_files_are_not_sketched() {
-        assert!(sketch(&noise(3, 10_000)).is_none());
-        // Three chunks' worth (about) is still below the threshold: a 12 KiB file at most.
-        assert!(sketch(&noise(3, 3 * MIN_CHUNK)).is_none());
-        let src = Source::new();
-        let mut c = chunker();
-        let mut s = OrderingSummary::default();
-        let v = vec![input("tiny.bin", MIN_SKETCH_LEN - 1)];
-        let out = order_cluster(v, Ordering::Similarity, true, &src, &mut c, &mut s).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(s.bytes_read, 0);
-        assert_eq!(s.files_sketched, 0);
+    fn a_log_family_groups_and_strangers_do_not() {
+        // five rotations of one log: each file drops the first lines and gains new ones
+        let base = log_lines(11, 400);
+        let lines: Vec<&[u8]> = base.split_inclusive(|b| *b == b'\n').collect();
+        let family: Vec<Vec<u8>> = (0..5)
+            .map(|k| {
+                let mut v = lines[k * 4..].concat();
+                v.extend_from_slice(&log_lines(100 + k as u64, 4));
+                v
+            })
+            .collect();
+        let sk: Vec<Option<Sketch>> = family.iter().map(|d| sketch(d)).collect();
+        let stranger = sketch(&log_lines(999, 400)).unwrap();
+        let hits = (1..5)
+            .filter(|&i| shared(sk[0].as_ref().unwrap(), sk[i].as_ref().unwrap()) > 0)
+            .count();
+        assert!(hits >= 3, "{hits}");
+        assert_eq!(shared(sk[0].as_ref().unwrap(), &stranger), 0);
+    }
+
+    #[test]
+    fn group_placement_keeps_path_order_and_moves_the_group() {
+        let a = Sketch {
+            features: [1, 2, 3],
+        };
+        let b = Sketch {
+            features: [7, 8, 9],
+        };
+        let c = Sketch {
+            features: [3, 4, 5],
+        }; // shares 3 with a
+        let inputs = vec![
+            input("a.bin", 10),
+            input("b.bin", 30),
+            input("c.bin", 20),
+            input("d.bin", 5),
+        ];
+        let (out, groups) = similarity_order(inputs, &[Some(a), Some(b), Some(c), None]);
+        assert_eq!(groups, 1);
+        // the group {a, c} at a's place, c (larger) first; b and d keep their order
+        assert_eq!(paths(&out), ["c.bin", "a.bin", "b.bin", "d.bin"]);
+        // no matches: unchanged
+        let inputs = vec![input("a", 1), input("b", 2)];
+        let (out, groups) = similarity_order(
+            inputs,
+            &[
+                Some(a),
+                Some(Sketch {
+                    features: [10, 11, 12],
+                }),
+            ],
+        );
+        assert_eq!((paths(&out), groups), (vec!["a", "b"], 0));
     }
 
     #[test]
@@ -406,52 +448,37 @@ mod tests {
         std::fs::write(dir.path().join("a.bin"), &a).unwrap();
         std::fs::write(dir.path().join("b.dat"), noise(6, 2 << 20)).unwrap();
         std::fs::write(dir.path().join("c.exe"), &b).unwrap();
+        std::fs::write(dir.path().join("d.tiny"), b"short").unwrap();
         let inputs =
             crate::ingest::walk(dir.path(), &crate::ingest::IngestOptions::default()).unwrap();
+        let mut inputs: Vec<Input> = inputs
+            .into_iter()
+            .filter(|i| i.kind == EntryKind::File)
+            .collect();
+        inputs.sort_by(|a, b| a.path.cmp(&b.path));
         let src = Source::new();
-        let mut c = chunker();
 
         let mut s = OrderingSummary::default();
-        let none =
-            order_cluster(inputs.clone(), Ordering::None, true, &src, &mut c, &mut s).unwrap();
+        let none = order_cluster(inputs.clone(), Ordering::None, true, &src, &mut s).unwrap();
         assert_eq!(s, OrderingSummary::default());
-        assert_eq!(none.len(), 3);
+        assert_eq!(paths(&none), ["a.bin", "b.dat", "c.exe", "d.tiny"]);
 
         let mut s = OrderingSummary::default();
-        let ext = order_cluster(
-            inputs.clone(),
-            Ordering::Extension,
-            true,
-            &src,
-            &mut c,
-            &mut s,
-        )
-        .unwrap();
+        let ext = order_cluster(inputs.clone(), Ordering::Extension, true, &src, &mut s).unwrap();
         assert_eq!(s.bytes_read, 0);
-        assert_eq!(paths(&ext), ["a.bin", "b.dat", "c.exe"]);
+        assert_eq!(paths(&ext), ["a.bin", "b.dat", "c.exe", "d.tiny"]);
 
         let mut s = OrderingSummary::default();
-        let sim = order_cluster(
-            inputs.clone(),
-            Ordering::Similarity,
-            true,
-            &src,
-            &mut c,
-            &mut s,
-        )
-        .unwrap();
+        let sim = order_cluster(inputs.clone(), Ordering::Similarity, true, &src, &mut s).unwrap();
         assert_eq!(s.files_sketched, 3);
         assert_eq!(s.bytes_read, 6 << 20);
         assert_eq!(s.groups, 1);
-        assert_eq!(paths(&sim).len(), 3);
-        // the pair is adjacent: b.dat is not between a.bin and c.exe
-        let pos = |p: &str| paths(&sim).iter().position(|x| *x == p).unwrap();
-        assert_eq!(pos("a.bin").abs_diff(pos("c.exe")), 1);
+        // c and a are the pair, equal size: base order, so a then c; b follows, d last
+        assert_eq!(paths(&sim), ["a.bin", "c.exe", "b.dat", "d.tiny"]);
 
-        // not allowed to sketch: the extension order, nothing read
         let mut s = OrderingSummary::default();
-        let off = order_cluster(inputs, Ordering::Similarity, false, &src, &mut c, &mut s).unwrap();
-        assert_eq!(paths(&off), paths(&ext));
+        let off = order_cluster(inputs, Ordering::Similarity, false, &src, &mut s).unwrap();
+        assert_eq!(paths(&off), paths(&none));
         assert_eq!(s.bytes_read, 0);
     }
 }

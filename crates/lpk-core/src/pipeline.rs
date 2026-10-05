@@ -327,22 +327,14 @@ impl Pipeline {
                 let mut ordering_summary = OrderingSummary::default();
                 if let Some(f) = fold.as_deref().filter(|f| f.ordering() != Ordering::None) {
                     let mode = f.ordering();
-                    // A second chunker of the writer's kind, to sketch with.
-                    let mut chunker = f.install(&mut WriterOptions::default())?;
                     for c in &mut clusters {
                         // Stored and peeled clusters are only sorted: reading them again would
                         // cost more than ordering can give.
                         let sketch = !stored_by_class(c.class)
                             && !peel.iter().any(|s| s.applies_to(c.class));
                         let inputs = std::mem::take(&mut c.inputs);
-                        c.inputs = order_cluster(
-                            inputs,
-                            mode,
-                            sketch,
-                            &source,
-                            chunker.as_mut(),
-                            &mut ordering_summary,
-                        )?;
+                        c.inputs =
+                            order_cluster(inputs, mode, sketch, &source, &mut ordering_summary)?;
                     }
                     timings.fold = seconds(&ordering_summary);
                 }
