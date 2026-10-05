@@ -1,5 +1,5 @@
-//! File ordering inside clusters (E2-8) through the Fast and Balanced pipelines: every order
-//! round-trips to the same tree, and the orders lay the files out differently.
+//! File ordering inside clusters (E2-8) through the Fast and Balanced pipelines: both orders
+//! round-trip to the same tree, and the orders lay the files out differently.
 #![allow(clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
@@ -7,8 +7,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use lpk_core::{
-    register_full_reader, BalancedOptions, Dedup, FastOptions, FoldOptions, Ordering, Pipeline,
-    RunSummary,
+    register_full_reader, BalancedOptions, Dedup, FastOptions, FileOrder, FoldOptions, Pipeline,
 };
 use lpk_format::{Archive, EntryKind, Resources};
 
@@ -26,20 +25,16 @@ fn letters(seed: u64, len: usize) -> Vec<u8> {
     v
 }
 
-/// `a.txt` is the base, `b.txt` is unrelated, `c.txt` is `a.txt` with a changed start and a
-/// longer tail: in extension order `b` sits between the pair.
+/// Text files whose path order (a/z.txt, b/a.md, c/m.txt) differs from the extension order
+/// (b/a.md first, then the .txt files by name).
 fn make_tree(root: &Path) {
-    let a = letters(1, 1_500_000);
-    let mut c = a.clone();
-    c[..64].copy_from_slice(&letters(9, 64));
-    c.extend_from_slice(&letters(10, 200_000));
-    std::fs::write(root.join("a.txt"), &a).unwrap();
-    std::fs::write(root.join("b.txt"), letters(2, 1_500_000)).unwrap();
-    std::fs::write(root.join("c.txt"), &c).unwrap();
-    std::fs::write(root.join("d.txt"), letters(3, 2_000)).unwrap();
+    for (dir, name, seed) in [("a", "z.txt", 1), ("b", "a.md", 2), ("c", "m.TXT", 3)] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+        std::fs::write(root.join(dir).join(name), letters(seed, 300_000)).unwrap();
+    }
 }
 
-fn pipeline(balanced: bool, ordering: Ordering) -> Pipeline {
+fn pipeline(balanced: bool, ordering: FileOrder) -> Pipeline {
     let mut p = if balanced {
         Pipeline::balanced(BalancedOptions::default())
     } else {
@@ -73,57 +68,28 @@ fn first_chunks(bytes: &[u8], dir: &Path) -> BTreeMap<String, u64> {
     out
 }
 
-fn run(balanced: bool, ordering: Ordering, dir: &Path) -> (Vec<u8>, RunSummary) {
+fn run(balanced: bool, ordering: FileOrder, dir: &Path) -> Vec<u8> {
     let mut out = Vec::new();
-    let s = pipeline(balanced, ordering).run(dir, &mut out).unwrap();
-    (out, s)
+    pipeline(balanced, ordering).run(dir, &mut out).unwrap();
+    out
 }
 
 #[test]
-fn every_order_round_trips_and_the_layouts_differ() {
+fn both_orders_round_trip_and_the_layouts_differ() {
     let dir = tempfile::tempdir().unwrap();
     make_tree(dir.path());
     for balanced in [false, true] {
-        let (sim, ss) = run(balanced, Ordering::Similarity, dir.path());
-        let (ext, se) = run(balanced, Ordering::Extension, dir.path());
-        let (none, sn) = run(balanced, Ordering::None, dir.path());
-        let (fs, fe, fnn) = (
-            first_chunks(&sim, dir.path()),
-            first_chunks(&ext, dir.path()),
-            first_chunks(&none, dir.path()),
-        );
-        // Similarity: the larger of the pair first, its partner right after, then the stranger.
-        assert_eq!(ss.ordering.groups, 1, "balanced {balanced}");
-        assert_eq!(ss.ordering.files_sketched, 4);
-        assert!(ss.ordering.bytes_read >= 4_000_000);
-        assert!(
-            fs["c.txt"] < fs["a.txt"] && fs["a.txt"] < fs["b.txt"],
-            "{fs:?}"
-        );
-        // Extension and path order agree here: a, b, c.
-        assert!(
-            fe["a.txt"] < fe["b.txt"] && fe["b.txt"] < fe["c.txt"],
-            "{fe:?}"
-        );
-        assert_eq!(fe, fnn);
-        assert_ne!(fs, fe);
-        // Only similarity reads files again.
-        assert_eq!(se.ordering.bytes_read, 0);
-        assert_eq!(sn.ordering, Default::default());
-        // Dedup is by content: the same bytes were found redundant under every order.
-        assert!(ss.writer.deduped_bytes > 1_000_000);
-        assert!(se.writer.deduped_bytes > 1_000_000);
+        let none = first_chunks(&run(balanced, FileOrder::None, dir.path()), dir.path());
+        let ext = first_chunks(&run(balanced, FileOrder::Extension, dir.path()), dir.path());
+        // Path order: a/z.txt, b/a.md, c/m.TXT.
+        assert!(none["a/z.txt"] < none["b/a.md"] && none["b/a.md"] < none["c/m.TXT"]);
+        // Extension order: a.md, then m.TXT, then z.txt.
+        assert!(ext["b/a.md"] < ext["c/m.TXT"] && ext["c/m.TXT"] < ext["a/z.txt"]);
+        assert_ne!(none, ext);
     }
 }
 
 #[test]
-fn the_default_fold_orders_by_similarity() {
-    assert_eq!(FoldOptions::default().ordering, Ordering::Similarity);
-    let dir = tempfile::tempdir().unwrap();
-    make_tree(dir.path());
-    let mut out = Vec::new();
-    let s = Pipeline::fast(FastOptions::default())
-        .run(dir.path(), &mut out)
-        .unwrap();
-    assert_eq!(s.ordering.groups, 1);
+fn the_default_fold_keeps_path_order() {
+    assert_eq!(FoldOptions::default().ordering, FileOrder::None);
 }

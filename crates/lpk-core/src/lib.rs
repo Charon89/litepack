@@ -40,9 +40,7 @@ pub use fast::{
     archive_fast, archive_fast_file, DictionaryPolicy, FastHandle, FastOptions, FastSummary,
     ZstdEncoder,
 };
-pub use fold::{
-    ChunkerKind, Dedup, FastCdcChunker, FoldOptions, FoldStage, Ordering, OrderingSummary,
-};
+pub use fold::{ChunkerKind, Dedup, FastCdcChunker, FileOrder, FoldOptions, FoldStage};
 pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
 pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 pub use peel::jpeg::register_full_reader;

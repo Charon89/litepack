@@ -387,13 +387,13 @@ fn ordering_values_are_checked_and_verbose_reports_the_pass() {
     let help = text(&h.stdout);
     assert!(help.contains("--ordering"), "{help}");
     assert!(
-        help.contains("similarity") && help.contains("extension"),
+        help.contains("extension") && !help.contains("similarity"),
         "{help}"
     );
     let src = tempfile::tempdir().unwrap();
     make_tree(src.path());
     let work = tempfile::tempdir().unwrap();
-    for (i, order) in ["none", "extension", "similarity"].iter().enumerate() {
+    for (i, order) in ["none", "extension"].iter().enumerate() {
         let arch = work.path().join(format!("{i}.lpk"));
         let a = run(&[
             "a",
@@ -405,7 +405,7 @@ fn ordering_values_are_checked_and_verbose_reports_the_pass() {
         ]);
         assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
         assert!(
-            text(&a.stderr).contains(&format!("ordering ({order}): ")),
+            text(&a.stderr).contains(&format!("ordering: {order}\n")),
             "{}",
             text(&a.stderr)
         );
@@ -424,6 +424,30 @@ fn ordering_values_are_checked_and_verbose_reports_the_pass() {
     ]);
     assert_eq!(bad.status.code(), Some(1));
     assert!(!arch.exists());
+    // similarity is not an order; an ignored mode is never printed
+    let sim = run(&[
+        "a",
+        arch.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        "--ordering",
+        "similarity",
+    ]);
+    assert_eq!(sim.status.code(), Some(1));
+    for extra in ["--no-dedup", "--store"] {
+        let arch = work.path().join("ignored.lpk");
+        let a = run(&[
+            "a",
+            arch.to_str().unwrap(),
+            src.path().to_str().unwrap(),
+            "--ordering",
+            "extension",
+            extra,
+            "-v",
+        ]);
+        assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+        assert!(!text(&a.stderr).contains("ordering:"), "{extra}");
+        fs::remove_file(&arch).unwrap();
+    }
 }
 
 #[test]

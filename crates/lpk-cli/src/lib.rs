@@ -92,11 +92,10 @@ struct AddArgs {
     /// This also returns to the fixed 1 MiB cut.
     #[arg(long)]
     no_dedup: bool,
-    /// How files are ordered inside a cluster before they are written: `similarity` (the
-    /// default: path order, with near-duplicate files, found by sketches of their content,
-    /// moved next to each other; reads the files once more), `extension` (7-Zip's order) or
-    /// `none` (path order). Ignored with --no-dedup and --store.
-    #[arg(long, value_enum, value_name = "ORDER", default_value = "similarity")]
+    /// How files are ordered inside a cluster before they are written: `none` (the default:
+    /// path order, which keeps directory locality) or `extension` (by extension, then name, the
+    /// order 7-Zip uses for solid archives). Ignored with --no-dedup and --store.
+    #[arg(long, value_enum, value_name = "ORDER", default_value = "none")]
     ordering: OrderingArg,
     /// Print the counts and the stage times to stderr.
     #[arg(short, long)]
@@ -107,21 +106,13 @@ struct AddArgs {
 enum OrderingArg {
     None,
     Extension,
-    Similarity,
 }
 
-impl OrderingArg {
-    fn name(self) -> &'static str {
-        lpk_core::Ordering::from(self).name()
-    }
-}
-
-impl From<OrderingArg> for lpk_core::Ordering {
+impl From<OrderingArg> for lpk_core::FileOrder {
     fn from(o: OrderingArg) -> Self {
         match o {
-            OrderingArg::None => lpk_core::Ordering::None,
-            OrderingArg::Extension => lpk_core::Ordering::Extension,
-            OrderingArg::Similarity => lpk_core::Ordering::Similarity,
+            OrderingArg::None => lpk_core::FileOrder::None,
+            OrderingArg::Extension => lpk_core::FileOrder::Extension,
         }
     }
 }
@@ -247,16 +238,14 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
         "dedup: {} chunks and {} bytes referenced instead of stored ({} new chunks in the table, {} reused from an earlier generation)",
         s.writer.deduped_chunks, s.writer.deduped_bytes, s.writer.new_chunks, s.writer.reused_chunks
     );
-    let o = &s.ordering;
-    let _ = writeln!(
-        err,
-        "ordering ({}): {} files sketched, {} bytes read, {} groups, {:.3} seconds",
-        a.ordering.name(),
-        o.files_sketched,
-        o.bytes_read,
-        o.groups,
-        o.seconds
-    );
+    // Only a mode that was applied: --store and --no-dedup have no fold stage to order by.
+    if !a.store && !a.no_dedup {
+        let _ = writeln!(
+            err,
+            "ordering: {}",
+            lpk_core::FileOrder::from(a.ordering).name()
+        );
+    }
     let p = &s.peel;
     let _ = writeln!(
         err,
