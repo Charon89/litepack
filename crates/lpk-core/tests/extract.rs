@@ -619,3 +619,41 @@ fn a_linked_parent_is_refused() {
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     assert!(!out.join("c.txt").exists());
 }
+
+#[test]
+fn a_panic_in_the_dispatcher_does_not_hang_and_cleans_up() {
+    let files = mixed();
+    let bytes = pack(&files, options());
+    let want = expect(&files);
+    for n in [4, 8] {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (b, o) = (bytes.clone(), out.clone());
+        std::thread::spawn(move || {
+            let r = std::panic::catch_unwind(|| {
+                extract(
+                    &b,
+                    &o,
+                    &ExtractOptions {
+                        threads: Some(n),
+                        panic_in_dispatch_at: Some(3),
+                        ..ExtractOptions::default()
+                    },
+                )
+            });
+            let _ = tx.send(r.is_err());
+        });
+        let panicked = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the extraction hung");
+        assert!(panicked, "threads {n}: the panic was not resumed");
+        for (p, h) in tree(&out) {
+            assert_eq!(
+                want.get(&p),
+                Some(&h),
+                "threads {n}: {p} is partial or wrong"
+            );
+        }
+    }
+}

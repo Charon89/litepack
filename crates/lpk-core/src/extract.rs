@@ -136,6 +136,11 @@ pub struct ExtractOptions {
     pub memory: Option<u64>,
     /// Most files open at once (at least one); also caps the writers.
     pub max_open_files: usize,
+    /// Test hook: the dispatcher panics before handing on the `n`-th needed block (0-based), so
+    /// a test can check that a panic on the calling thread neither hangs nor leaves a partial
+    /// file. Always `None` outside tests.
+    #[doc(hidden)]
+    pub panic_in_dispatch_at: Option<usize>,
 }
 
 impl Default for ExtractOptions {
@@ -144,6 +149,7 @@ impl Default for ExtractOptions {
             threads: None,
             memory: None,
             max_open_files: 128,
+            panic_in_dispatch_at: None,
         }
     }
 }
@@ -276,16 +282,9 @@ fn io(path: &Path, e: std::io::Error) -> CoreError {
     CoreError::io(path, e)
 }
 
-/// A symlink, or on Windows any reparse point (a junction included).
+/// A symlink; on Windows std reports symlinks and junctions (mount points) as symlinks, while
+/// other reparse points (cloud placeholders, dedup files) are not links and are not refused.
 fn is_link(meta: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return true;
-        }
-    }
     meta.file_type().is_symlink()
 }
 
@@ -713,6 +712,7 @@ where
                         per_block,
                         pool,
                         max_open: opts.max_open_files,
+                        panic_at: opts.panic_in_dispatch_at,
                         decoded: &decoded,
                         reads: &reads,
                         decode_error: &decode_error,
@@ -785,6 +785,7 @@ struct Run<'a, R: Read + Seek> {
     per_block: Vec<Vec<Place>>,
     pool: Pool,
     max_open: usize,
+    panic_at: Option<usize>,
     decoded: &'a AtomicU64,
     reads: &'a AtomicU64,
     decode_error: &'a (dyn Fn(usize, FormatError) -> CoreError + Sync),
@@ -807,6 +808,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         per_block,
         pool,
         max_open,
+        panic_at,
         decoded,
         reads,
         decode_error,
@@ -915,7 +917,24 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         drop(tx);
         let r = match spawn_error {
             Some(e) => Err(FormatError::from(e).into()),
-            None => dispatch(&rx, needed, split, &senders, permits, decode_error),
+            // The dispatcher is this thread: a panic here must not unwind into the scope while
+            // the workers wait for permits, so it is caught, cancels, and is resumed after the
+            // joins and the cleanup like a worker's.
+            None => catch_unwind(AssertUnwindSafe(|| {
+                dispatch(
+                    &rx,
+                    needed,
+                    split,
+                    &senders,
+                    permits,
+                    decode_error,
+                    panic_at,
+                )
+            }))
+            .unwrap_or_else(|p| {
+                keep(panic, p);
+                Err(CoreError::Extract("the dispatcher stopped"))
+            }),
         };
         // On failure stop whatever still runs (on success the decoders have ended and the
         // writers drain their queues); then join every thread.
@@ -962,9 +981,14 @@ fn dispatch<'p>(
     senders: &[mpsc::Sender<Arc<Held<'p>>>],
     permits: &'p Permits,
     decode_error: &dyn Fn(usize, FormatError) -> CoreError,
+    panic_at: Option<usize>,
 ) -> Result<(), CoreError> {
     let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     for (want, &b) in needed.iter().enumerate() {
+        assert!(
+            panic_at != Some(want),
+            "test hook: dispatcher panics at block {want}"
+        );
         let plain = loop {
             if let Some(p) = pending.remove(&want) {
                 break p;
