@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-04, about 23:04 UTC (19:04 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-05, about 00:05 UTC (2026-10-04, 20:05 local on the measuring machine). No measurement is running.
 
 **Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
 (37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
@@ -42,10 +42,12 @@ is 100.3% of 7-Zip Ultra (`bench/reports/phase1-2026-10-04-full-versioned.md`) b
 apart share little at chunk level — a backup-like series (consecutive patch releases of one line, weeks apart) is the
 honest model for the gate; and the Windows `tar` crashes on nine node file names outside the BMP or in CJK, so the
 `store`, zstd and xz rows are missing until those names are excluded from the export (or another tar is used).
-**E2-7 (Fold: CDC chunking and dedup) is in its fix round** — the acceptance came out equal to the probe's figure.
-**E2-19 (extraction performance) moves up next:** `lpk/fast` took 3107 s to extract the versioned class and
-`lpk/balanced` timed out, the one-block cache over 127153 files; every speed figure of `lpk` is unusable until it is
-fixed. All three `lpk` tiers are measured on every class
+**E2-7 (Fold: CDC chunking and dedup) is done (D-53)** — the acceptance came out equal to the probe's figure.
+**E2-19 (extraction performance) is done (D-54), pulled forward:** block-ordered, every block decoded once by a
+parallel pool under a memory bound, any failure cleaned up; on `small` the classes that used to re-decode blocks
+extract tens of times faster; the G4 reading by the runner is the next measurement. E2-5's last clause (parallel JPEG
+decode) is met by it. **Next: E2-8 (file ordering), then E2-12/13/14 (seal), E2-18 (video target), E2-20 (memory);
+the revision process (D-49) serves E2-9, E2-10/11, E2-15, E2-16, E2-17.** All three `lpk` tiers are measured on every class
 of `small` (`bench/reports/phase1-2026-10-04-small-tiers.md`); the report never counts `lpk` as an incumbent.
 Then E2-7/E2-8 (Fold), E2-12/13/14 (seal), E2-18/19/20 (speed, memory); the revision process (D-49)
 serves E2-9 (delta), E2-10/11 (deflate, container), E2-15 (bwt), E2-16 (png-filter), E2-17 (base64, utf16).
@@ -64,7 +66,7 @@ None at the moment.
 ## How to resume
 
 ### Phase 1 — how it runs
-1. One task at a time from `docs/PLAN.md` (E2-7 next; E0-1's measurement half in parallel on this machine): implementer in a worktree from a brief
+1. One task at a time from `docs/PLAN.md` (E2-8 next; E0-1's re-measurement once the owner answers): implementer in a worktree from a brief
    with the exact values → read-only review (spec compliance and quality, benchmark honesty for harness tasks) →
    fix rounds with rulings → a decision in `docs/DECISIONS.md` → PLAN tick with evidence → PR → CI green →
    `main` fast-forwarded (merge `main` into the branch first).
