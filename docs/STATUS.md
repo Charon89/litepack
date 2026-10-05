@@ -3,58 +3,47 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-05, about 01:35 UTC (2026-10-04, 21:35 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-05, about 01:42 UTC (2026-10-04, 21:42 local on the measuring machine). No measurement is running.
+The owner stopped on the evening of 2026-10-04 and continues on Wednesday 2026-10-07.
 
-**Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
-(37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
-done (D-44)**: buffered reads for every size (no memory map), opens that never follow a link and verify the identity
-the walk recorded, bounded reads, a synced commit, the archive never its own input. **E0-1 (the larger versioned set) is waiting for the owner:** the harness side is on `main` (the `backup-versions-large`
-spec row and lock entries, the `dedup` catalogue flag, the G2 rule against the non-deduplicating incumbents with
-zpaqfranz printed as reference, the 256 MiB premise checked per version). The class was built (the `full` rebuild
-kept the seventeen old classes byte-identical; a second build of the class was identical), **but the godot working
-trees are 173, 196 and 245 MiB — all under WinRAR's 256 MiB window**, so D-43's premise fails and the report would
-print G2 as not evaluable. Measured alternatives (shallow clones, deleted afterwards): `nodejs/node` at v22.0.0,
-v23.0.0, v24.0.0 is about 535–543 MiB per version (MIT; the recommendation); `llvm/llvm-project` at llvmorg-19.1.7
-is about 1.6 GiB (would need the runner's per-step timeout raised for zpaqfranz). Once the owner picks the source:
-re-pin the three sources in `bench/corpus-sources.toml` and `bench/corpus.lock` (`corpus build --profile full
---update-lock --only backup-versions-large`, then a plain `full` build twice — the last rebuild took seven
-minutes from the cache), amend the CORPUS.md row (owner-approved), then `run --tools all --profile full --classes
-backup-versions-large` and `probe dedup --profile full --into <that directory>` as detached processes, `report`
-for the G2 row, commit the directory and tick E0-1.
-**E2-2 (classifier and entropy gate) is done (D-45); E2-3 (the Fast tier) is done (D-46 writer API, D-47 the tier —
-no bundled dictionaries, BCJ waits for a format revision); E2-4 (pipeline struct, the `lpk` tool, the catalogue row,
-the pooled report) is done (D-48).** The first real `lpk` rows exist: `bench/results/2026-10-04-megatron` (`small`,
-`lpk/fast` and `lpk/store`, every extraction verified) and the pooled report
-`bench/reports/phase1-2026-10-04-small-lpk.md` next to the committed incumbents. What they say, for the speed tasks:
-`lpk/fast` reaches `zstd/3`'s sizes but runs single-threaded; extraction of many-small-file classes is far below the
-store path's because files are extracted in entry order across blocks (decode each block once — E2-19); the Fast
-tier's store throughput on `video` is about a third of the `store` control's (E2-18, G3 as restated in D-27). Parallel
-block encoding (E2-4b, a writer extension) comes before or with E2-19.
-**E2-5 (JPEG peel) is nearly done:** the first format revision (1.1, `jpeg-reconstruct`; D-49 the revision process,
-D-50 the peel), the peel in `lpk-core`, the independent decoder updated from the text alone (all 17 vectors) and
-its fifteen clarifications written back. Measured on `small` (`bench/results/2026-10-04-megatron-2`, report
-`bench/reports/phase1-2026-10-04-small-jpeg.md`): the real `lpk/fast` rows on the two JPEG classes reproduce the Phase 0
-estimate within the container overhead and sit below every incumbent; extraction is single-threaded Lepton, far
-below the incumbents' rate, so the acceptance's "parallel decode" clause stays open until E2-19. **E2-6 (Balanced tier) is done (D-51)**: on `small` it is below 7-Zip Ultra on `logs-text` and a tenth or two of a
-percentage point above on `text-prose` and `office-pdf` (near-parity, recorded as such); behind on `source-git` and
-`software-installed` (file ordering, BCJ). **E0-1 is measured on `nodejs/node` v22/v23/v24 (D-52) and waits for two owner decisions:** the G2 estimate on that set
-is 100.3% of 7-Zip Ultra (`bench/reports/phase1-2026-10-04-full-versioned.md`) because major releases six months
-apart share little at chunk level — a backup-like series (consecutive patch releases of one line, weeks apart) is the
-honest model for the gate; and the Windows `tar` crashes on nine node file names outside the BMP or in CJK, so the
-`store`, zstd and xz rows are missing until those names are excluded from the export (or another tar is used).
-**E2-7 (Fold: CDC chunking and dedup) is done (D-53)** — the acceptance came out equal to the probe's figure.
-**E2-19 (extraction performance) is done (D-54), pulled forward:** block-ordered, every block decoded once by a
-parallel pool under a memory bound, any failure cleaned up; on `small` the classes that used to re-decode blocks
-extract tens of times faster; measured by the runner (`bench/reports/phase1-2026-10-04-small-extract.md`), `lpk/fast`
-now extracts faster than 7-Zip `-mx5` on every class but the JPEG ones, where Lepton decoding is the limit. E2-5's last clause (parallel JPEG
-decode) is met by it. **E2-8 (file ordering) is done with a negative result (D-55):** path order stays the default, extension order is an
-option; the similarity sketch is not merged — no gain on `small` and `docs/LICENSING.md`'s US 9,798,731 row needs
-counsel first (it also gates E2-9, deltas). **Next: E2-12/13/14 (seal through the pipeline), E2-4b + E2-18 (parallel
-encoding, the video target), E2-20 (memory); the revision process (D-49) serves E2-10/11, E2-15, E2-16, E2-17; E2-9
-waits for counsel and the owner's versioned-set choice.** All three `lpk` tiers are measured on every class
-of `small` (`bench/reports/phase1-2026-10-04-small-tiers.md`); the report never counts `lpk` as an incumbent.
-Then E2-7/E2-8 (Fold), E2-12/13/14 (seal), E2-18/19/20 (speed, memory); the revision process (D-49)
-serves E2-9 (delta), E2-10/11 (deflate, container), E2-15 (bwt), E2-16 (png-filter), E2-17 (base64, utf16).
+**Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
+E2's twenty-two tasks, done and on `main`: E2-1 ingest, E2-2 classifier and gate, E2-3 Fast tier, E2-4 pipeline
+and the `lpk` tool with the pooled report, E2-5 JPEG peel (with the independent decoder passing all seventeen
+vectors), E2-6 Balanced tier, E2-7 chunk dedup, E2-8 file ordering (negative result), E2-19 the extraction engine
+(decisions D-44 to D-55). E0-1 is measured on `nodejs/node` and waits for the owner (below). Every `lpk` number
+lives in `bench/reports/phase1-2026-10-04-*.md` with its results directory; the latest overall `small` picture is
+`phase1-2026-10-04-small-extract.md`: the JPEG classes about 77% of their bytes against 94–97% for every incumbent;
+Balanced at or within a few tenths of a percent of 7-Zip Ultra on the text classes, behind on installed software
+and source trees; `lpk/fast` extracting faster than 7-Zip `-mx5` on every class but the JPEG ones; compression
+still single-threaded.
+
+**How to resume (in this order).**
+1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list; the next task is **E2-12/13/14 (seal
+   through the pipeline: encryption, recovery records, journal)** — its brief is `docs/notes/e2-12-14-seal-brief.md`
+   and an implementer's design notes with one blocker are `docs/notes/e2-12-14-seal-resume.md` (the format's
+   writer refuses `add_record` in an append, so a peeled JPEG cannot join an appended generation without a small
+   writer addition — decide option 1 of that note (allow records after the old ones; a reference change, no byte
+   change) unless the owner prefers unpeeled appends). No code of those tasks exists yet.
+2. Then E2-4b (parallel block encoding: a writer extension holding blocks in flight) and E2-18 (the video target:
+   `lpk/fast` writes `video` at about a third of the `store` control's rate; G3 as restated in D-27 needs 80%),
+   E2-20 (memory and the envelope), then the revision-gated peels E2-10/11 (Deflate and containers — the largest
+   remaining size win on office, PDF and installed software), E2-15, E2-16, E2-17 (D-49 process), then E2-21/22.
+3. E2-9 (deltas) waits for two things from the owner (below).
+4. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
+   recorded rulings → a `D-NN` → PLAN tick with evidence → PR → CI green → `main` fast-forwarded (merge `main`
+   into the branch first; squash only when a branch commit message carries figures).
+
+**Open for the owner (asked on 2026-10-04, unanswered):**
+- **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
+  (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
+  consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
+  the 256 MiB window. "patch releases" → re-pin (sources, lock, CORPUS row, D-NN), rebuild `full` twice, re-run the
+  baseline on the class and `probe dedup` (about three hours of machine time), report; "keep" → tick E0-1 as is.
+- **Nine file names.** The Windows `tar` crashes on node's emoji and CJK test-file names, so the `store` control and
+  the tar-stream tools (zstd, xz) have no rows on the class. Recommended: exclude names outside ASCII from this
+  class's export (nine of 127153 files), re-run the three tools.
+- **Counsel on US 9,798,731** (`docs/LICENSING.md`, sketch-based similarity clustering with deltas): gates E2-9
+  (deltas) and any return of the similarity sketch (E2-8, D-55).
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -65,21 +54,19 @@ serves E2-9 (delta), E2-10/11 (deflate, container), E2-15 (bwt), E2-16 (png-filt
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-None at the moment.
+None. Every task branch is merged and deleted; the E2-8 branch's unmerged sketch commits (3be4d83, b599566) are
+referenced from D-55 and remain in the repository's history through the merged branch.
 
 ## How to resume
 
 ### Phase 1 — how it runs
-1. One task at a time from `docs/PLAN.md` (E2-12/13/14 next; E0-1's re-measurement once the owner answers): implementer in a worktree from a brief
-   with the exact values → read-only review (spec compliance and quality, benchmark honesty for harness tasks) →
-   fix rounds with rulings → a decision in `docs/DECISIONS.md` → PLAN tick with evidence → PR → CI green →
-   `main` fast-forwarded (merge `main` into the branch first).
-2. E0-1's measurement half (above) is the next long machine job; it needs the machine to itself for the baseline
-   run (zpaqfranz `-m5` on three gigabyte-sized trees is the slow part).
-3. The report takes one baseline directory. E2-22 needs either a full `--tools all` re-run that includes `lpk`, or
-   a report that merges result directories by class — decide when E2-4 gives the runner an `lpk` tool.
-- Parked from Phase 0, to pick up in the tasks named: the G3 "gate cost … share of the raw read rate" lines of the report use the probe's whole-corpus gate rates rather than the video class's own (information lines only; a report fix round); two `preflate-rs` 0.7.6 panics (`tree_predictor.rs:169`, index out of bounds) on PDF streams, caught and counted by the probe — containment and fuzzing item for E2-10 and an upstream report; WinZip and PowerArchiver still unmeasured (the D-07 fallback wording stands until the owner installs them); `bsc`/`hdiffz` not installed (D-05's BWT claim is measured in E2-15 with libsais instead).
-- Parked from E2-1 (low): on Unix a non-UTF-8 dot-name excluded by `include_hidden: false` still fails the walk; the per-file identity open on Windows costs on many-small-files trees (the speed task); the Unix-only ingest tests run on CI only.
+See "How to resume" above. Parked items, to pick up in the tasks named:
+- From Phase 0: the G3 "gate cost … share of the raw read rate" lines of the report use the probe's whole-corpus gate rates (information lines only); two `preflate-rs` 0.7.6 panics on PDF streams, caught and counted by the probe — containment and fuzzing item for E2-10; WinZip and PowerArchiver unmeasured (the D-07 fallback wording stands); `bsc`/`hdiffz` not installed.
+- From E2-1 (low): on Unix a non-UTF-8 dot-name excluded by `include_hidden: false` still fails the walk; the per-file identity open on Windows costs on many-small-files trees; the Unix-only ingest tests run on CI only.
+- From E2-5: the `decode_memory` fixed term of `jpeg-reconstruct` is an allowance, not measured (E2-20); the Lepton stream bytes depend on the zlib backend (vector checked structurally under another backend, byte-identically in CI).
+- From E2-6: `text-prose` and `office-pdf` a tenth or two of a percent above 7-Zip Ultra (the coder); `source-git` and `software-installed` behind (ordering gave nothing on `small`; BCJ waits for a format revision).
+- From E2-19: opening relative to a verified directory handle is the stronger parent-chain rule (E3/E6); flags and directory times are not restored (as the format tool); the writer thread count is unmeasured on `full` and on HDDs.
+- The report takes one baseline directory per corpus per run; E2-22 pools directories (D-48) — a combination measured twice is refused, so each `lpk` run on a class supersedes by a new directory, never by overwriting.
 
 ### P0-5 — Linux CI smoke test (done)
 The manual workflow `corpus-smoke.yml` has an input `run_smoke` (default on): after the corpus build it installs `zstd`, `xz-utils` and `7zip`, runs the baseline runner on four classes with one repeat, validates and uploads the results as an artifact (CI results are never committed). The green run and its summary lines are cited under the P0-5 box in PLAN. Nothing else is needed from CI for Phase 0.
