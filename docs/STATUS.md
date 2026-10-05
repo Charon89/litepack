@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-05, about 00:43 UTC (2026-10-04, 20:43 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-05, about 01:35 UTC (2026-10-04, 21:35 local on the measuring machine). No measurement is running.
 
 **Epic E1 is complete and on `main`; E2 has started.** The `.lpk` v1 format is frozen (D-41). The first CI fuzz run
 (37204202840, 120 s per target, fifteen targets) was clean. **E2-1 (ingest and the store path of `lpk-core`) is
@@ -47,8 +47,11 @@ honest model for the gate; and the Windows `tar` crashes on nine node file names
 parallel pool under a memory bound, any failure cleaned up; on `small` the classes that used to re-decode blocks
 extract tens of times faster; measured by the runner (`bench/reports/phase1-2026-10-04-small-extract.md`), `lpk/fast`
 now extracts faster than 7-Zip `-mx5` on every class but the JPEG ones, where Lepton decoding is the limit. E2-5's last clause (parallel JPEG
-decode) is met by it. **Next: E2-8 (file ordering), then E2-12/13/14 (seal), E2-18 (video target), E2-20 (memory);
-the revision process (D-49) serves E2-9, E2-10/11, E2-15, E2-16, E2-17.** All three `lpk` tiers are measured on every class
+decode) is met by it. **E2-8 (file ordering) is done with a negative result (D-55):** path order stays the default, extension order is an
+option; the similarity sketch is not merged — no gain on `small` and `docs/LICENSING.md`'s US 9,798,731 row needs
+counsel first (it also gates E2-9, deltas). **Next: E2-12/13/14 (seal through the pipeline), E2-4b + E2-18 (parallel
+encoding, the video target), E2-20 (memory); the revision process (D-49) serves E2-10/11, E2-15, E2-16, E2-17; E2-9
+waits for counsel and the owner's versioned-set choice.** All three `lpk` tiers are measured on every class
 of `small` (`bench/reports/phase1-2026-10-04-small-tiers.md`); the report never counts `lpk` as an incumbent.
 Then E2-7/E2-8 (Fold), E2-12/13/14 (seal), E2-18/19/20 (speed, memory); the revision process (D-49)
 serves E2-9 (delta), E2-10/11 (deflate, container), E2-15 (bwt), E2-16 (png-filter), E2-17 (base64, utf16).
@@ -67,7 +70,7 @@ None at the moment.
 ## How to resume
 
 ### Phase 1 — how it runs
-1. One task at a time from `docs/PLAN.md` (E2-8 next; E0-1's re-measurement once the owner answers): implementer in a worktree from a brief
+1. One task at a time from `docs/PLAN.md` (E2-12/13/14 next; E0-1's re-measurement once the owner answers): implementer in a worktree from a brief
    with the exact values → read-only review (spec compliance and quality, benchmark honesty for harness tasks) →
    fix rounds with rulings → a decision in `docs/DECISIONS.md` → PLAN tick with evidence → PR → CI green →
    `main` fast-forwarded (merge `main` into the branch first).

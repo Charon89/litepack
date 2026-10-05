@@ -1,0 +1,127 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "7148e9e498ae0e964005f8c1471892489ad183c816d756845684d86c90157a67",
+  "classes": [
+    "software-installed",
+    "game-assets",
+    "small-files",
+    "source-git"
+  ],
+  "combinations": [
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "balanced-extension",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "balanced-extension",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "balanced-extension",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "balanced-extension",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}
