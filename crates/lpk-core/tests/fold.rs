@@ -130,6 +130,7 @@ fn fixed_chunks_and_bad_chunker_options() {
     p.fold = Some(Box::new(Dedup::new(FoldOptions {
         dedup: true,
         chunker: ChunkerKind::Fixed(65_536),
+        ..FoldOptions::default()
     })));
     let (out, s) = run(p, dir.path());
     assert!(s.writer.deduped_bytes >= 700_000);
@@ -143,6 +144,7 @@ fn fixed_chunks_and_bad_chunker_options() {
             avg: 65_536,
             max: 524_288,
         },
+        ..FoldOptions::default()
     })));
     let e = p.run(dir.path(), Vec::new()).unwrap_err();
     assert!(matches!(e, lpk_core::CoreError::InvalidOption(_)));

@@ -251,6 +251,10 @@ id = "balanced"
 compress = ["--balanced"]
 extract = []
 [[tool.setting]]
+id = "balanced-unordered"
+compress = ["--balanced", "--ordering", "none"]
+extract = []
+[[tool.setting]]
 id = "store"
 compress = ["--store"]
 extract = []

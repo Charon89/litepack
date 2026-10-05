@@ -26,7 +26,8 @@ use crate::cluster::{cluster, DictionaryKind};
 use crate::error::CoreError;
 use crate::fast::stored_by_class;
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
-use crate::fold::{Dedup, FoldStage};
+use crate::fold::ordering::{order_cluster, seconds};
+use crate::fold::{Dedup, FoldStage, Ordering, OrderingSummary};
 use crate::ingest::{validate_input, walk, IngestOptions, Input};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
@@ -72,7 +73,8 @@ pub struct StageTimings {
     pub classify: Duration,
     /// Peel stages (reading the inputs they apply to, peeling, verifying).
     pub peel: Duration,
-    /// The fold stage (zero: its work is done inside the writer's calls, counted in `model`).
+    /// The fold stage's ordering pass (the chunking and dedup are done inside the writer's
+    /// calls, counted in `model`).
     pub fold: Duration,
     /// Reading the files and encoding blocks (the writer's `add_*` calls).
     pub model: Duration,
@@ -91,6 +93,8 @@ pub struct RunSummary {
     pub balanced: Option<BalancedSummary>,
     /// What the peel stages did (empty for the store model, which does not peel).
     pub peel: PeelSummary,
+    /// What the file-ordering pass did and cost (zero when ordering is off or there is no fold).
+    pub ordering: OrderingSummary,
     /// Wall time per stage.
     pub timings: StageTimings,
 }
@@ -260,6 +264,7 @@ impl Pipeline {
                     fast: None,
                     balanced: None,
                     peel: PeelSummary::default(),
+                    ordering: OrderingSummary::default(),
                     timings,
                 })
             }
@@ -319,6 +324,28 @@ impl Pipeline {
                     clusters.sort_by_key(|c| stored_by_class(c.class));
                 }
                 timings.classify = t.elapsed();
+                let mut ordering_summary = OrderingSummary::default();
+                if let Some(f) = fold.as_deref().filter(|f| f.ordering() != Ordering::None) {
+                    let mode = f.ordering();
+                    // A second chunker of the writer's kind, to sketch with.
+                    let mut chunker = f.install(&mut WriterOptions::default())?;
+                    for c in &mut clusters {
+                        // Stored and peeled clusters are only sorted: reading them again would
+                        // cost more than ordering can give.
+                        let sketch = !stored_by_class(c.class)
+                            && !peel.iter().any(|s| s.applies_to(c.class));
+                        let inputs = std::mem::take(&mut c.inputs);
+                        c.inputs = order_cluster(
+                            inputs,
+                            mode,
+                            sketch,
+                            &source,
+                            chunker.as_mut(),
+                            &mut ordering_summary,
+                        )?;
+                    }
+                    timings.fold = seconds(&ordering_summary);
+                }
                 wopts.block_size = block_size;
                 wopts.encoder = encoder;
                 let max_part = wopts.block_size;
@@ -427,6 +454,7 @@ impl Pipeline {
                     fast,
                     balanced,
                     peel: summary,
+                    ordering: ordering_summary,
                     timings,
                 })
             }
@@ -571,7 +599,8 @@ mod tests {
         let t = s.timings;
         assert!(t.walk > Duration::ZERO && t.model > Duration::ZERO);
         assert!(t.seal > Duration::ZERO);
-        assert_eq!(t.fold, Duration::ZERO);
+        // The fold time is the ordering pass (the dedup itself runs inside the writer).
+        assert_eq!(t.fold, seconds(&s.ordering));
         assert_eq!(s.peel, PeelSummary::default());
         let mut out = Vec::new();
         let s = Pipeline::store(StoreOptions::default())

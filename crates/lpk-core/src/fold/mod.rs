@@ -4,8 +4,10 @@
 //! stage chooses the chunker and switches the writer's dedup on.
 
 pub mod chunker;
+pub mod ordering;
 
 pub use chunker::{FastCdcChunker, AVG_CHUNK, MAX_CHUNK, MIN_CHUNK};
+pub use ordering::{Ordering, OrderingSummary};
 
 use lpk_format::{Chunker, FixedChunker, WriterOptions};
 
@@ -45,6 +47,8 @@ pub struct FoldOptions {
     pub dedup: bool,
     /// How files are cut into chunks.
     pub chunker: ChunkerKind,
+    /// How files are ordered inside a cluster before they are written (default: by similarity).
+    pub ordering: Ordering,
 }
 
 impl Default for FoldOptions {
@@ -52,6 +56,7 @@ impl Default for FoldOptions {
         FoldOptions {
             dedup: true,
             chunker: ChunkerKind::default(),
+            ordering: Ordering::default(),
         }
     }
 }
@@ -64,6 +69,10 @@ pub trait FoldStage: std::fmt::Debug + Send + Sync {
     fn name(&self) -> &'static str;
     /// Adjust the writer's settings (`chunk_size`, `dedup`) and return the chunker it uses.
     fn install(&self, options: &mut WriterOptions) -> Result<Box<dyn Chunker>, CoreError>;
+    /// How the files of a cluster are ordered before they are written (default: path order).
+    fn ordering(&self) -> Ordering {
+        Ordering::None
+    }
 }
 
 /// The first fold stage: chunking and global dedup.
@@ -83,6 +92,10 @@ impl Dedup {
 impl FoldStage for Dedup {
     fn name(&self) -> &'static str {
         "dedup"
+    }
+
+    fn ordering(&self) -> Ordering {
+        self.options.ordering
     }
 
     fn install(&self, options: &mut WriterOptions) -> Result<Box<dyn Chunker>, CoreError> {

@@ -146,7 +146,7 @@ Then the tool is run once with its version arguments and the version is read fro
 | `wzzip`     | WinZip command line | manual, see below              | not available               | paid licence                     |
 | `pacl`      | PowerArchiver command line | manual, see below       | not available               | paid licence                     |
 
-The `lpk` row has three settings: `fast` (`--fast`, zstd with a long window), `balanced`
+The `lpk` row has four settings (the fourth is the control of E2-8, below): `fast` (`--fast`, zstd with a long window), `balanced`
 (`--balanced`: raw LZMA1 blocks with a 64 MiB dictionary, the dictionary the 7-Zip Ultra row uses,
 or zstd `--ultra --long` for a block where a trial on a 4 MiB sample, taken as four stripes,
 prefers it) and `store` (`--store`). The Fast tier closes a block at every cluster change; the
@@ -154,6 +154,12 @@ Balanced tier closes one only once it holds half the dictionary, and runs withou
 gate. JPEG files are peeled under both compressing settings. Balanced needs memory of about the
 block size plus several times the dictionary to compress, and the block size plus the dictionary
 to extract.
+
+`balanced-unordered` (`--balanced --ordering none`) is the control row of the file-ordering task
+(E2-8): the same as `balanced` except that the files of a cluster are written in path order, not in
+the extension-and-similarity order (`lpk a --ordering similarity`, the default of every compressing
+setting). The two rows are measured in one run on the same classes; the difference is what the
+ordering buys, and the ordering's own cost shows in `lpk a -v`.
 
 `lpk x --threads N` (E2-19) takes N as the extraction's total thread budget: decode workers plus
 file writers never exceed N (the thread that only hands decoded blocks on is not counted). N = 1

@@ -382,6 +382,51 @@ fn balanced_flags_are_exclusive_and_checked() {
 }
 
 #[test]
+fn ordering_values_are_checked_and_verbose_reports_the_pass() {
+    let h = run(&["a", "--help"]);
+    let help = text(&h.stdout);
+    assert!(help.contains("--ordering"), "{help}");
+    assert!(
+        help.contains("similarity") && help.contains("extension"),
+        "{help}"
+    );
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    for (i, order) in ["none", "extension", "similarity"].iter().enumerate() {
+        let arch = work.path().join(format!("{i}.lpk"));
+        let a = run(&[
+            "a",
+            arch.to_str().unwrap(),
+            src.path().to_str().unwrap(),
+            "--ordering",
+            order,
+            "-v",
+        ]);
+        assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+        assert!(
+            text(&a.stderr).contains(&format!("ordering ({order}): ")),
+            "{}",
+            text(&a.stderr)
+        );
+        let out = work.path().join(format!("out{i}"));
+        let x = run(&["x", arch.to_str().unwrap(), out.to_str().unwrap()]);
+        assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+        assert_eq!(tree_hash(&out), tree_hash(src.path()));
+    }
+    let arch = work.path().join("bad.lpk");
+    let bad = run(&[
+        "a",
+        arch.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        "--ordering",
+        "alphabet",
+    ]);
+    assert_eq!(bad.status.code(), Some(1));
+    assert!(!arch.exists());
+}
+
+#[test]
 fn dedup_is_on_by_default_and_no_dedup_turns_it_off() {
     let src = tempfile::tempdir().unwrap();
     let big = random(300_000);

@@ -92,9 +92,38 @@ struct AddArgs {
     /// This also returns to the fixed 1 MiB cut.
     #[arg(long)]
     no_dedup: bool,
+    /// How files are ordered inside a cluster before they are written: `similarity` (the
+    /// default: by extension, with near-duplicate files, found by sketches of their chunk
+    /// hashes, placed next to each other; reads the files once more), `extension` (7-Zip's
+    /// order) or `none` (path order). Ignored with --no-dedup and --store.
+    #[arg(long, value_enum, value_name = "ORDER", default_value = "similarity")]
+    ordering: OrderingArg,
     /// Print the counts and the stage times to stderr.
     #[arg(short, long)]
     verbose: bool,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum OrderingArg {
+    None,
+    Extension,
+    Similarity,
+}
+
+impl OrderingArg {
+    fn name(self) -> &'static str {
+        lpk_core::Ordering::from(self).name()
+    }
+}
+
+impl From<OrderingArg> for lpk_core::Ordering {
+    fn from(o: OrderingArg) -> Self {
+        match o {
+            OrderingArg::None => lpk_core::Ordering::None,
+            OrderingArg::Extension => lpk_core::Ordering::Extension,
+            OrderingArg::Similarity => lpk_core::Ordering::Similarity,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -163,6 +192,11 @@ fn add(a: &AddArgs, err: &mut dyn Write) -> i32 {
     };
     if a.no_dedup {
         pipeline.fold = None;
+    } else if pipeline.fold.is_some() {
+        pipeline.fold = Some(Box::new(lpk_core::Dedup::new(lpk_core::FoldOptions {
+            ordering: a.ordering.into(),
+            ..lpk_core::FoldOptions::default()
+        })));
     }
     match pipeline.run_file(&a.input, &a.archive) {
         Ok(s) => {
@@ -212,6 +246,16 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
         err,
         "dedup: {} chunks and {} bytes referenced instead of stored ({} new chunks in the table, {} reused from an earlier generation)",
         s.writer.deduped_chunks, s.writer.deduped_bytes, s.writer.new_chunks, s.writer.reused_chunks
+    );
+    let o = &s.ordering;
+    let _ = writeln!(
+        err,
+        "ordering ({}): {} files sketched, {} bytes read, {} groups, {:.3} seconds",
+        a.ordering.name(),
+        o.files_sketched,
+        o.bytes_read,
+        o.groups,
+        o.seconds
     );
     let p = &s.peel;
     let _ = writeln!(
