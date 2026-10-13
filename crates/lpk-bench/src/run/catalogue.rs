@@ -402,6 +402,16 @@ mod tests {
         assert_eq!(settings("zstd"), ["3", "19", "ultra22-long27"]);
         assert_eq!(settings("xz"), ["6", "9"]);
         assert_eq!(settings("zpaqfranz"), ["m1", "m5"]);
+        assert_eq!(
+            settings("lpk"),
+            [
+                "fast",
+                "balanced",
+                "balanced-extension",
+                "store",
+                "fast-encrypted"
+            ]
+        );
         assert_eq!(settings("tsaur"), ["default", "max"]);
         for id in ["wzzip", "pacl"] {
             let t = cat.get(id).expect("manual tool");

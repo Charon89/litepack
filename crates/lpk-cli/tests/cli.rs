@@ -482,3 +482,176 @@ fn dedup_is_on_by_default_and_no_dedup_turns_it_off() {
         assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
     }
 }
+
+// ---- E2-12: encryption through the tool ----
+
+/// `a` with a password file (CRLF-terminated: the newline is not part of it) and a keyfile,
+/// listable; `x` and `t` with the literal password and the keyfile; `t` without the key checks
+/// the frame hashes only; the archive records the suite and the listable flag.
+#[test]
+fn encrypted_round_trip_with_password_file_keyfile_and_listable() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("e.lpk");
+    let out = work.path().join("out");
+    let pw_file = work.path().join("pw.txt");
+    fs::write(&pw_file, b"open sesame\r\n").unwrap();
+    let keyfile = work.path().join("key.bin");
+    fs::write(&keyfile, random(1000)).unwrap();
+    let a = run(&[
+        "a",
+        arch.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        "--password-file",
+        pw_file.to_str().unwrap(),
+        "--keyfile",
+        keyfile.to_str().unwrap(),
+        "--listable",
+        "--suite",
+        "xchacha20-poly1305",
+        "-v",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let msg = text(&a.stderr);
+    assert!(
+        msg.contains("encrypted: XChaCha20-Poly1305, listable"),
+        "{msg}"
+    );
+    assert!(!msg.contains("sesame"), "{msg}");
+    let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
+    assert!(archive.is_encrypted() && archive.is_listable() && archive.is_keyless());
+    assert_eq!(archive.suite(), Some(lpk_format::Suite::XChaCha));
+    assert!(archive.key_slot().unwrap().keyfile_required);
+    drop(archive);
+    // Without the key: the entry table lists, the hashes verify, nothing extracts.
+    let t = run(&["t", arch.to_str().unwrap()]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    assert!(
+        text(&t.stdout).starts_with("ok (frame hashes only"),
+        "{}",
+        text(&t.stdout)
+    );
+    let x = run(&["x", arch.to_str().unwrap(), out.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(2));
+    assert!(!out.exists());
+    // With the key, in the other password form.
+    let x = run(&[
+        "x",
+        arch.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "--password",
+        "open sesame",
+        "--keyfile",
+        keyfile.to_str().unwrap(),
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(src.path()));
+    let t = run(&[
+        "t",
+        arch.to_str().unwrap(),
+        "--password-file",
+        pw_file.to_str().unwrap(),
+        "--keyfile",
+        keyfile.to_str().unwrap(),
+    ]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    assert!(text(&t.stdout).starts_with("ok: "), "{}", text(&t.stdout));
+}
+
+#[test]
+fn a_wrong_or_missing_password_leaves_no_output_and_is_never_echoed() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("e.lpk");
+    let a = run(&[
+        "a",
+        arch.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        "--password",
+        "hunter2",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
+    assert!(archive.is_encrypted() && !archive.is_listable());
+    assert_eq!(archive.suite(), Some(lpk_format::Suite::AesGcm));
+    drop(archive);
+    let out = work.path().join("nested/out");
+    for extra in [vec!["--password", "hunter3"], vec![]] {
+        let mut args = vec!["x", arch.to_str().unwrap(), out.to_str().unwrap()];
+        args.extend(extra);
+        let x = run(&args);
+        assert_eq!(x.status.code(), Some(2), "{}", text(&x.stderr));
+        assert!(!out.exists() && !out.parent().unwrap().exists());
+        let err = text(&x.stderr);
+        assert!(err.starts_with("error: "), "{err}");
+        assert!(!err.contains("hunter"), "{err}");
+    }
+    // `t` with the wrong password is refused at the key slot too.
+    let t = run(&["t", arch.to_str().unwrap(), "--password", "hunter3"]);
+    assert_eq!(t.status.code(), Some(2));
+    assert!(!text(&t.stderr).contains("hunter"));
+    // A missing password file is a failed operation, not a usage error.
+    let gone = work.path().join("no-such-file");
+    let x = run(&[
+        "x",
+        arch.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "--password-file",
+        gone.to_str().unwrap(),
+    ]);
+    assert_eq!(x.status.code(), Some(2), "{}", text(&x.stderr));
+    assert!(!out.exists());
+    let x = run(&[
+        "x",
+        arch.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "--password",
+        "hunter2",
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(src.path()));
+}
+
+#[test]
+fn encryption_flags_are_checked() {
+    let src = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("e.lpk");
+    let s = src.path().to_str().unwrap();
+    for extra in [
+        vec!["--listable"],
+        vec!["--suite", "aes-256-gcm"],
+        vec!["--password", "a", "--password-file", "b"],
+        vec!["--password", "a", "--suite", "rot13"],
+    ] {
+        let mut args = vec!["a", arch.to_str().unwrap(), s];
+        args.extend(extra.iter());
+        let r = run(&args);
+        assert_eq!(r.status.code(), Some(1), "{extra:?}: {}", text(&r.stderr));
+        assert!(!arch.exists(), "{extra:?}");
+    }
+    // A keyfile alone is a credential (an empty password).
+    let keyfile = work.path().join("key.bin");
+    fs::write(&keyfile, random(64)).unwrap();
+    make_tree(src.path());
+    let a = run(&[
+        "a",
+        arch.to_str().unwrap(),
+        s,
+        "--keyfile",
+        keyfile.to_str().unwrap(),
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let out = work.path().join("out");
+    let x = run(&[
+        "x",
+        arch.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "--keyfile",
+        keyfile.to_str().unwrap(),
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(src.path()));
+}

@@ -51,7 +51,15 @@ fn extract_every_class_block_ordered() {
 
         let new = work.path().join("new");
         let t0 = Instant::now();
-        let s = extract_file(&arch, &new, &[], &DefaultPolicy, &ExtractOptions::default()).unwrap();
+        let s = extract_file(
+            &arch,
+            &new,
+            &[],
+            None,
+            &DefaultPolicy,
+            &ExtractOptions::default(),
+        )
+        .unwrap();
         let new_secs = t0.elapsed().as_secs_f64();
 
         let old = work.path().join("old");

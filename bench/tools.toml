@@ -236,7 +236,7 @@ extension = ".lpk"
 mode = "directory"
 layout = "flat"
 create = ["a", "{archive}", "{input}", "{settings}", "{threads}"]
-extract = ["x", "{archive}", "{outdir}", "{threads}"]
+extract = ["x", "{archive}", "{outdir}", "{settings}", "{threads}"]
 threads = ["--threads", "{n}"]
 ratio_depends_on_threads = false
 licence = "Apache-2.0 OR MIT (this repository)"
@@ -258,6 +258,13 @@ extract = []
 id = "store"
 compress = ["--store"]
 extract = []
+# The Fast tier sealed with a password (AES-256-GCM, Argon2id at the format's default cost):
+# the cost of encryption against the `fast` row. The password is a benchmark credential only,
+# not a secret: it is the same on every machine and in every result file.
+[[tool.setting]]
+id = "fast-encrypted"
+compress = ["--fast", "--password", "lpk-bench-password"]
+extract = ["--password", "lpk-bench-password"]
 
 [[tool]]
 id = "tsaur"

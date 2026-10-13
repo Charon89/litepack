@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lpk_format::{cli, Archive, Entry, EntryKind, FormatError, MemoryPriors};
+use lpk_format::{cli, Archive, Credentials, Entry, EntryKind, FormatError, MemoryPriors};
 
 use crate::CoreError;
 
@@ -645,6 +645,11 @@ where
     R: Read + Seek + Send,
     F: Fn() -> std::io::Result<R>,
 {
+    // An encrypted archive opened without its key has no index to plan from: refused here,
+    // before `plan` creates the output directory, so nothing is written.
+    if archive.is_keyless() {
+        return Err(CoreError::Format(FormatError::PasswordRequired));
+    }
     let Plan {
         shared,
         per_block,
@@ -1023,16 +1028,19 @@ fn dispatch<'p>(
 
 /// Open the archive file at `path` with the full reader (revision 1.1's `jpeg-reconstruct`) and
 /// the given prior files' contents, and extract it under `dir` (each decode worker opens the
-/// file again).
+/// file again). `credentials` open an encrypted archive: a wrong password is `WrongKey` at the
+/// key slot and a missing one `PasswordRequired`, both before any output file or directory
+/// exists; credentials given for a plain archive are ignored.
 pub fn extract_file(
     path: &Path,
     dir: &Path,
     priors: &[Vec<u8>],
+    credentials: Option<&Credentials>,
     policy: &dyn ExtractPolicy,
     opts: &ExtractOptions,
 ) -> Result<ExtractSummary, CoreError> {
     let file = File::open(path).map_err(|e| io(path, e))?;
-    let mut a = Archive::open(file, &lpk_format::Resources::default())?;
+    let mut a = Archive::open_with(file, &lpk_format::Resources::default(), credentials)?;
     if !priors.is_empty() {
         let mut store = MemoryPriors::new();
         for p in priors {

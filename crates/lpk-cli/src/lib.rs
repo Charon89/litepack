@@ -6,6 +6,11 @@
 //! files). Testing goes through the reference tool's code (`lpk_format::cli::run_with`). Both use
 //! `lpk-core`'s full reader (revision 1.1's `jpeg-reconstruct`), so peeled files extract and
 //! verify.
+//! Encryption: `--password`, `--password-file` and `--keyfile` are read here for `a` and `x`
+//! (the format tool's rules: one trailing newline is not part of a password file; a keyfile
+//! alone means an empty password) and passed through to the reference tool for `t`. A
+//! password is never printed or logged. `x` opens the key slot before anything
+//! is written: a wrong or missing password leaves no output directory.
 //! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation. Nothing is ever prompted;
 //! progress goes to stderr and only with `-v`.
 #![forbid(unsafe_code)]
@@ -18,6 +23,7 @@ use clap::{Args, Parser, Subcommand};
 use lpk_core::{
     BalancedOptions, CoreError, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions,
 };
+use lpk_format::{Argon2Params, Credentials, Suite};
 
 /// Exit code: success.
 pub const EXIT_OK: i32 = 0;
@@ -53,6 +59,101 @@ enum Command {
     #[command(name = "t")]
     Test(TestArgs),
 }
+
+/// The key material of an encrypted archive; `a` seals with it, every other command opens
+/// with it. Either a password (one of the two forms) or a keyfile or both.
+#[derive(Debug, Args)]
+#[group(id = "credential", multiple = true)]
+struct CredentialArgs {
+    /// The password. Visible in the process list and the shell history; prefer
+    /// --password-file.
+    #[arg(long, value_name = "STR", conflicts_with = "password_file")]
+    password: Option<String>,
+    /// A file holding the password; one trailing newline is not part of it.
+    #[arg(long, value_name = "PATH")]
+    password_file: Option<PathBuf>,
+    /// A keyfile as a second factor (alone: the password is empty).
+    #[arg(long, value_name = "PATH")]
+    keyfile: Option<PathBuf>,
+}
+
+impl CredentialArgs {
+    /// True when any credential was given.
+    fn given(&self) -> bool {
+        self.password.is_some() || self.password_file.is_some() || self.keyfile.is_some()
+    }
+
+    /// The credentials, read as the format tool reads them (the password moves out of the
+    /// parsed arguments into `Credentials`, which wipes it on drop). `None` when nothing was
+    /// given.
+    fn take(&mut self) -> Result<Option<Credentials>, String> {
+        let password = match (self.password.take(), &self.password_file) {
+            (Some(p), _) => Some(p.into_bytes()),
+            (None, Some(f)) => {
+                let mut b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
+                if b.ends_with(b"\n") {
+                    b.pop();
+                    if b.ends_with(b"\r") {
+                        b.pop();
+                    }
+                }
+                Some(b)
+            }
+            (None, None) => None,
+        };
+        let keyfile = match &self.keyfile {
+            Some(f) => Some(std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?),
+            None => None,
+        };
+        Ok(match (password, keyfile) {
+            (None, None) => None,
+            (p, keyfile) => Some(Credentials {
+                password: p.unwrap_or_default(),
+                keyfile,
+            }),
+        })
+    }
+
+    /// The same credentials as global arguments of the reference tool (`--password=STR`,
+    /// `--password-file=PATH`, `--keyfile=PATH`), which applies the same rules itself.
+    fn reference_args(&self) -> Vec<OsString> {
+        let mut v = Vec::new();
+        if let Some(p) = &self.password {
+            v.push(OsString::from(format!("--password={p}")));
+        }
+        for (flag, path) in [
+            ("--password-file=", &self.password_file),
+            ("--keyfile=", &self.keyfile),
+        ] {
+            if let Some(path) = path {
+                let mut a = OsString::from(flag);
+                a.push(path);
+                v.push(a);
+            }
+        }
+        v
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum SuiteArg {
+    #[value(name = "aes-256-gcm")]
+    Aes256Gcm,
+    #[value(name = "xchacha20-poly1305")]
+    XChaCha20Poly1305,
+}
+
+impl From<SuiteArg> for Suite {
+    fn from(s: SuiteArg) -> Self {
+        match s {
+            SuiteArg::Aes256Gcm => Suite::AesGcm,
+            SuiteArg::XChaCha20Poly1305 => Suite::XChaCha,
+        }
+    }
+}
+
+/// The format's default suite (D-39: AES-256-GCM).
+const DEFAULT_SUITE: Suite = Suite::AesGcm;
 
 #[derive(Debug, Args)]
 struct AddArgs {
@@ -97,6 +198,16 @@ struct AddArgs {
     /// order 7-Zip uses for solid archives). Ignored with --no-dedup and --store.
     #[arg(long, value_enum, value_name = "ORDER", default_value = "none")]
     ordering: OrderingArg,
+    /// Encrypt the archive with these (AEAD per frame; the key is derived with Argon2id at the
+    /// format's default cost).
+    #[command(flatten)]
+    credentials: CredentialArgs,
+    /// The cipher suite of an encrypted archive (default aes-256-gcm).
+    #[arg(long, value_enum, value_name = "SUITE", requires = "credential")]
+    suite: Option<SuiteArg>,
+    /// Leave the entry table in clear, so the encrypted archive lists without the key.
+    #[arg(long, requires = "credential")]
+    listable: bool,
     /// Print the counts and the stage times to stderr.
     #[arg(short, long)]
     verbose: bool,
@@ -132,6 +243,9 @@ struct ExtractArgs {
     /// A prior file (for example a zstd dictionary) the archive needs; may be repeated.
     #[arg(long = "prior", value_name = "FILE")]
     priors: Vec<PathBuf>,
+    /// The key material of an encrypted archive; checked before anything is written.
+    #[command(flatten)]
+    credentials: CredentialArgs,
     /// Print the plan's counts and the pool size to stderr.
     #[arg(short, long)]
     verbose: bool,
@@ -144,6 +258,10 @@ struct TestArgs {
     /// A prior file (for example a zstd dictionary) the archive needs; may be repeated.
     #[arg(long = "prior", value_name = "FILE")]
     priors: Vec<PathBuf>,
+    /// The key material of an encrypted archive; without it only the frame hashes (and the
+    /// recovery shards) of such an archive are checked.
+    #[command(flatten)]
+    credentials: CredentialArgs,
 }
 
 fn core_exit(e: &CoreError) -> i32 {
@@ -153,7 +271,14 @@ fn core_exit(e: &CoreError) -> i32 {
     }
 }
 
-fn add(a: &AddArgs, err: &mut dyn Write) -> i32 {
+fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
+    let credentials = match a.credentials.take() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return EXIT_FAILED;
+        }
+    };
     let mut pipeline = if a.store {
         Pipeline::store(StoreOptions::default())
     } else if a.balanced {
@@ -188,6 +313,14 @@ fn add(a: &AddArgs, err: &mut dyn Write) -> i32 {
             ordering: a.ordering.into(),
             ..lpk_core::FoldOptions::default()
         })));
+    }
+    if let Some(credentials) = credentials {
+        pipeline.seal.writer.seal = Some(lpk_format::SealOptions {
+            suite: a.suite.map_or(DEFAULT_SUITE, Suite::from),
+            argon2: Argon2Params::default(),
+            listable: a.listable,
+            credentials,
+        });
     }
     match pipeline.run_file(&a.input, &a.archive) {
         Ok(s) => {
@@ -272,6 +405,14 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
             );
         }
     }
+    if a.credentials.given() {
+        let _ = writeln!(
+            err,
+            "encrypted: {}{}",
+            a.suite.map_or(DEFAULT_SUITE, Suite::from).name(),
+            if a.listable { ", listable" } else { "" }
+        );
+    }
     let _ = writeln!(
         err,
         "stage seconds: walk {:.3}, classify {:.3}, peel {:.3}, model {:.3}, seal {:.3}",
@@ -283,7 +424,14 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
     );
 }
 
-fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let credentials = match x.credentials.take() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return EXIT_FAILED;
+        }
+    };
     let mut priors = Vec::with_capacity(x.priors.len());
     for p in &x.priors {
         match std::fs::read(p) {
@@ -311,6 +459,7 @@ fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         &x.archive,
         &x.outdir,
         &priors,
+        credentials.as_ref(),
         &lpk_core::DefaultPolicy,
         &opts,
     ) {
@@ -348,13 +497,14 @@ fn extract(x: &ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     }
 }
 
-/// Run the reference tool with `sub` (`extract` or `verify`) and the prior files; its summary
-/// goes to `out`, its error line to `err`, and any failure is exit 2.
+/// Run the reference tool with `sub` (`verify`), the prior files, the
+/// credentials and the positional paths; its summary goes to `out`, its error line to `err`,
+/// and any failure is exit 2.
 fn reference(
     sub: &str,
-    archive: &Path,
-    outdir: Option<&Path>,
     priors: &[PathBuf],
+    credentials: &CredentialArgs,
+    paths: &[&Path],
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
@@ -364,12 +514,10 @@ fn reference(
         a.push(p);
         args.push(a);
     }
+    args.extend(credentials.reference_args());
     args.push(sub.into());
     args.push("--".into());
-    args.push(archive.into());
-    if let Some(d) = outdir {
-        args.push(d.into());
-    }
+    args.extend(paths.iter().map(OsString::from));
     match lpk_format::cli::run_with(
         args,
         out,
@@ -399,9 +547,9 @@ where
             return EXIT_OK;
         }
     };
-    match &cli.command {
-        Command::Add(a) => add(a, err),
-        Command::Extract(x) => extract(x, out, err),
-        Command::Test(t) => reference("verify", &t.archive, None, &t.priors, out, err),
+    match cli.command {
+        Command::Add(mut a) => add(&mut a, err),
+        Command::Extract(mut x) => extract(&mut x, out, err),
+        Command::Test(t) => reference("verify", &t.priors, &t.credentials, &[&t.archive], out, err),
     }
 }

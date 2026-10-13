@@ -249,7 +249,7 @@ fn peeled_jpegs_next_to_plain_files_through_the_pool() {
     let arch = w.path().join("j.lpk");
     std::fs::write(&arch, &bytes).unwrap();
     let out = w.path().join("out");
-    extract_file(&arch, &out, &[], &DefaultPolicy, &threads(4)).unwrap();
+    extract_file(&arch, &out, &[], None, &DefaultPolicy, &threads(4)).unwrap();
     assert_eq!(tree(&out), want);
 }
 
