@@ -8,11 +8,12 @@
 mod common;
 
 use common::journal::{build_journal, options as journal_options, JOURNAL_VECTOR};
+use common::sealed::seal_options;
 use common::{pattern, vectors_dir, write_archive};
 use lpk_format::{
-    Archive, DecodeContext, DeflateRecord, Encoded, EntryFlags, FormatError, Graph, GraphResources,
-    JpegRecord, PrimitiveDecoder, PrimitiveId, Record, RecordBody, Resources, Step, Utf16Record,
-    Writer, WriterOptions,
+    Archive, Credentials, DecodeContext, DeflateRecord, Encoded, EntryFlags, FixedChunker,
+    FormatError, Graph, GraphResources, JpegRecord, PrimitiveDecoder, PrimitiveId, Record,
+    RecordBody, Resources, Step, Suite, Utf16Record, Writer, WriterOptions,
 };
 use std::io::Cursor;
 
@@ -106,7 +107,12 @@ impl PrimitiveDecoder for Reverse {
 }
 
 fn open(bytes: &[u8]) -> Archive<Cursor<Vec<u8>>> {
-    let mut a = Archive::open(Cursor::new(bytes.to_vec()), &Resources::default()).unwrap();
+    open_with(bytes, None)
+}
+
+fn open_with(bytes: &[u8], creds: Option<&Credentials>) -> Archive<Cursor<Vec<u8>>> {
+    let mut a =
+        Archive::open_with(Cursor::new(bytes.to_vec()), &Resources::default(), creds).unwrap();
     a.registry_mut()
         .register(PrimitiveId::JpegReconstruct, Box::new(Reverse));
     a
@@ -141,9 +147,18 @@ fn append(
     opts: WriterOptions,
     f: impl FnOnce(&mut Writer<&mut Vec<u8>>) -> Result<(), FormatError>,
 ) -> Result<Vec<u8>, FormatError> {
-    let a = open(old);
+    append_with(old, opts, None, f)
+}
+
+fn append_with(
+    old: &[u8],
+    opts: WriterOptions,
+    creds: Option<&Credentials>,
+    f: impl FnOnce(&mut Writer<&mut Vec<u8>>) -> Result<(), FormatError>,
+) -> Result<Vec<u8>, FormatError> {
+    let a = open_with(old, creds);
     let mut tail = Vec::new();
-    let mut w = Writer::append(a, &mut tail, opts, None)?;
+    let mut w = Writer::append(a, &mut tail, opts, creds)?;
     f(&mut w)?;
     w.finish()?;
     let mut all = old.to_vec();
@@ -155,8 +170,14 @@ fn append(
 /// (`p`, chunk 0) is block 0, a reconstruction block naming record 0; entry
 /// `z` (`q`, chunk 1) is block 1, a plain block.
 fn gen0_with_recon_block(p: &[u8], q: &[u8]) -> Vec<u8> {
+    gen0_with_recon_block_opts(p, q, options())
+}
+
+fn gen0_with_recon_block_opts(p: &[u8], q: &[u8], opts: WriterOptions) -> Vec<u8> {
+    let creds = opts.seal.as_ref().map(|s| s.credentials.clone());
     let mut out = Vec::new();
-    let mut w = Writer::new_revision(&mut out, options(), 1).unwrap();
+    let chunker = Box::new(FixedChunker::new(4096));
+    let mut w = Writer::new_revision_with_chunker(&mut out, opts, 1, chunker).unwrap();
     w.begin_entry("a", EntryFlags::EMPTY, 0).unwrap();
     let id = w
         .add_record(jpeg(p.len() as u64, p.len() as u64, Vec::new()))
@@ -166,10 +187,71 @@ fn gen0_with_recon_block(p: &[u8], q: &[u8]) -> Vec<u8> {
     w.end_entry().unwrap();
     w.add_file("z", EntryFlags::EMPTY, 0, &mut &q[..]).unwrap();
     w.finish().unwrap();
-    let a = open(&out);
+    let a = open_with(&out, creds.as_ref());
     assert_eq!(a.index().blocks.len(), 2);
     assert_eq!(a.chunks().len(), 2);
     out
+}
+
+/// The nesting rules over an encrypted archive: the old block's graph is read
+/// through the archive key (the frame unsealed), with the same outcomes as in
+/// a plain archive.
+#[test]
+fn sealed_old_reconstruction_blocks_are_read_through_the_key() {
+    let (p, q) = (vec![7u8; 1000], pattern(3, 900));
+    let opts = || WriterOptions {
+        block_size: 16 * 1024,
+        ..seal_options(Suite::AesGcm, false, "nested", None)
+    };
+    let creds = opts().seal.unwrap().credentials;
+    let g0 = gen0_with_recon_block_opts(&p, &q, opts());
+    assert!(open_with(&g0, Some(&creds)).is_encrypted());
+    // A record part equal to chunk 0 (a reconstruction block) is stored anew;
+    // one equal to chunk 1 (a plain block) is referenced.
+    let seen = std::cell::Cell::new((Vec::new(), Vec::new()));
+    let g1 = append_with(&g0, opts(), Some(&creds), |w| {
+        w.begin_entry("b", EntryFlags::EMPTY, 0)?;
+        let again = w.add_part(1000, &mut &p[..])?;
+        let reused = w.add_part(2000, &mut &q[..])?;
+        seen.set((again.clone(), reused.clone()));
+        let id = w.add_record(jpeg(2900, 1000, [again, reused].concat()))?;
+        w.add_part_encoded(0, &p, encoded(id, &p), 0)?;
+        w.end_entry()
+    })
+    .unwrap();
+    assert_eq!(seen.into_inner(), (vec![2], vec![1]));
+    let mut a = open_with(&g1, Some(&creds));
+    assert_eq!(a.chunks().len(), 4);
+    a.verify().unwrap();
+    let t = a.entry_table().unwrap();
+    let b = t
+        .table()
+        .unwrap()
+        .iter()
+        .map(|e| e.unwrap())
+        .nth(1)
+        .unwrap();
+    let mut got = Vec::new();
+    a.extract(&b, &mut got).unwrap();
+    assert_eq!(got, [p.clone(), p.clone(), q].concat());
+    // A record naming chunk 0 is refused when the block that names it closes.
+    let e = append_with(&g0, opts(), Some(&creds), |w| {
+        w.begin_entry("b", EntryFlags::EMPTY, 0)?;
+        let id = w.add_record(jpeg(2000, 1000, vec![0]))?;
+        w.add_part_encoded(0, &p, encoded(id, &p), 0)?;
+        w.end_entry()
+    })
+    .unwrap_err();
+    assert!(
+        matches!(
+            e,
+            FormatError::BadRecord {
+                record: 1,
+                reason: "nested record"
+            }
+        ),
+        "{e:?}"
+    );
 }
 
 #[test]

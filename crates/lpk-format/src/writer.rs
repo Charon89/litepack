@@ -654,16 +654,25 @@ impl<W: Write> Writer<W> {
     /// must restate every old record unchanged (`BadRecord`, `changed by an
     /// append`; `RecordOutOfRange` when one is missing) and is written as the
     /// new frame. An append that adds no record keeps the old frame's location.
+    /// Loading the old records parses the old `Records` table here: an archive
+    /// whose records frame is damaged, or holds a record this writer cannot
+    /// represent, is refused by this call rather than at `finish`.
+    ///
+    /// `existing` stays open and is read lazily between writes (see Memory),
+    /// so its reader must not share a file position with `out`: a handle of
+    /// its own on the same file (as [`Writer::append_file`] opens) is fine, a
+    /// clone of `out`'s handle is not.
     ///
     /// Memory: the old chunk table's hashes (`HashMap`, 32 bytes of key and 8 of
     /// value per chunk), its records (`ChunkRecord`, 40 bytes per chunk), the
     /// old entries and the old `Records` table (parsed) are held until
-    /// `finish`. `existing` stays open: a record part that would reference an
-    /// old chunk, or a closing block whose graph names a record with an old
-    /// chunk, reads that chunk's old block frame to learn whether the block's
-    /// graph names a reconstruction primitive (spec section 12); the answer is
-    /// cached per old block (`HashMap`, one entry per block read), so no old
-    /// block is read twice and none is read when no record is involved.
+    /// `finish`; so is `existing` itself (boxed), whose `Index` and chunk index
+    /// stay resident next to them. It is read when a record part would
+    /// reference an old chunk, or a closing block's graph names a record with
+    /// an old chunk: that chunk's old block frame is read to learn whether the
+    /// block's graph names a reconstruction primitive (spec section 12); the
+    /// answer is cached per old block (`HashMap`, one entry per block read), so
+    /// no old block is read twice and none is read when no record is involved.
     pub fn append<R: Read + Seek + 'static>(
         existing: Archive<R>,
         out: W,
@@ -1295,15 +1304,20 @@ impl<W: Write> Writer<W> {
         if c >= base.chunks {
             return Ok(false);
         }
-        let b = self.blocks.partition_point(|b| b.first_chunk <= c);
-        let Some(loc) = b
-            .checked_sub(1)
-            .and_then(|b| self.blocks.get(b))
-            .filter(|loc| c - loc.first_chunk < loc.chunk_count)
+        // The block whose range starts at or before `c`: the last one when the
+        // table runs short (reported, as the reader does, as the block that
+        // fails to cover the chunk).
+        let block = self
+            .blocks
+            .partition_point(|b| b.first_chunk <= c)
+            .saturating_sub(1);
+        let Some(loc) = self
+            .blocks
+            .get(block)
+            .filter(|loc| c >= loc.first_chunk && c - loc.first_chunk < loc.chunk_count)
         else {
-            return Err(FormatError::BlockCoverage { block: b });
+            return Err(FormatError::BlockCoverage { block });
         };
-        let block = b - 1;
         if let Some(&known) = base.recon.get(&block) {
             return Ok(known);
         }

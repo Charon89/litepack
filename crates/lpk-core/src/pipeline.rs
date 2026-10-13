@@ -209,9 +209,11 @@ impl Pipeline {
     /// 15): `out` is the same archive opened for writing and positioned at its end
     /// ([`Writer::append`]'s contract; the caller syncs). A path that exists is replaced. The
     /// stages run as in [`run`](Self::run) (a peeled file's record joins the archive's records);
-    /// `existing` must be open with `credentials` when it is encrypted. The archive's own
-    /// revision applies: a pipeline with a peel stage needs a header `version_minor` of at least
-    /// 1 (`BadOptions`, `version_minor`, before anything is written).
+    /// `existing` must be open with `credentials` when it is encrypted, and its reader is read
+    /// lazily between writes (old block graphs, [`Writer::append`]), so it must not share a file
+    /// position with `out`: a separately opened handle on the same file is fine. The archive's
+    /// own revision applies: a pipeline with a peel stage needs a header `version_minor` of at
+    /// least 1 (`BadOptions`, `version_minor`, before anything is written).
     pub fn append<R: Read + Seek + 'static, W: Write>(
         self,
         root: &Path,

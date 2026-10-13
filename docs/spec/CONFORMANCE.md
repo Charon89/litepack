@@ -96,7 +96,7 @@ Graph = the block graph of the data blocks. Recovery = recovery frames present. 
 | `malformed-truncated.lpk` | zstd | no | 1 | nothing | not a valid archive: see below |
 | `malformed-hashflip.lpk` | zstd | no | 1 | nothing | not a valid archive: see below |
 | `malformed-recovery-damaged.lpk` | store | yes | 1 | nothing | one damaged data shard: `check` reports it, `repair` restores `recovery-groups.lpk` |
-| `jpeg-peel.lpk` | zstd/store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 1 | a revision 1.1 reader | a peeled JPEG: the primary image as a Lepton stream in a block of its own, an MPF secondary image and trailing data as nested chunks in a lower block, one `jpeg` record; see below |
+| `jpeg-peel.lpk` | store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 1 | a revision 1.1 reader | a peeled JPEG: the primary image as a Lepton stream in a block of its own, an MPF secondary image and trailing data as nested chunks in a lower block, one `jpeg` record; see below |
 | `journal-record.lpk` | store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 2 | a revision 1.1 reader | generation 0 holds a store-encoded text file; generation 1 is an append that adds a peeled JPEG (as in `jpeg-peel.lpk`): an appended generation's `Records` frame restates the old records (none here) and adds one, and the appended blocks name a record by its position in that frame |
 
 The passwords and the keyfile are also in `tests/vectors/vectors.toml` (test values, not secrets). The four sealed
