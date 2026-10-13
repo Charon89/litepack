@@ -3,14 +3,18 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-05, about 01:42 UTC (2026-10-04, 21:42 local on the measuring machine). No measurement is running.
-The owner stopped on the evening of 2026-10-04 and continues on Wednesday 2026-10-07.
+Last updated: 2026-10-13, about 23:54 UTC (2026-10-13, 19:54 local on the measuring machine). No measurement is running at the time of this commit (the E2-12 row is launched after the merge, see below).
+The owner asked on 2026-10-13 for the work to continue until midnight; this is the state at the end of that evening.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
 E2's twenty-two tasks, done and on `main`: E2-1 ingest, E2-2 classifier and gate, E2-3 Fast tier, E2-4 pipeline
-and the `lpk` tool with the pooled report, E2-5 JPEG peel (with the independent decoder passing all seventeen
+and the `lpk` tool with the pooled report, E2-5 JPEG peel (with the independent decoder passing all eighteen
 vectors), E2-6 Balanced tier, E2-7 chunk dedup, E2-8 file ordering (negative result), E2-19 the extraction engine
-(decisions D-44 to D-55). E0-1 is measured on `nodejs/node` and waits for the owner (below). Every `lpk` number
+(decisions D-44 to D-55), and from 2026-10-13: E2-13 recovery records and E2-14 the journal (a negative result on
+its size clause, D-59) with the format's records-in-appends change they needed (D-56, PR #46); E2-12 encryption is
+built, reviewed and merged (D-57) and is ticked once its measured runner row (`fast-encrypted` against `fast`)
+is committed — see "How to resume". `cargo deny` is green again after the `ruzstd` advisory bump (PR #45).
+E0-1 is measured on `nodejs/node` and waits for the owner (below). Every `lpk` number
 lives in `bench/reports/phase1-2026-10-04-*.md` with its results directory; the latest overall `small` picture is
 `phase1-2026-10-04-small-extract.md`: the JPEG classes about 77% of their bytes against 94–97% for every incumbent;
 Balanced at or within a few tenths of a percent of 7-Zip Ultra on the text classes, behind on installed software
@@ -18,20 +22,31 @@ and source trees; `lpk/fast` extracting faster than 7-Zip `-mx5` on every class 
 still single-threaded.
 
 **How to resume (in this order).**
-1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list; the next task is **E2-12/13/14 (seal
-   through the pipeline: encryption, recovery records, journal)** — its brief is `docs/notes/e2-12-14-seal-brief.md`
-   and an implementer's design notes with one blocker are `docs/notes/e2-12-14-seal-resume.md` (the format's
-   writer refuses `add_record` in an append, so a peeled JPEG cannot join an appended generation without a small
-   writer addition — decide option 1 of that note (allow records after the old ones; a reference change, no byte
-   change) unless the owner prefers unpeeled appends). No code of those tasks exists yet.
+1. `git pull --ff-only`; `cargo build --release -p lpk-cli -p lpk-bench`. **The E2-12 row.** On the evening of
+   2026-10-13 the `lpk` tool's five settings (`store`, `fast`, `balanced`, `balanced-extension`, `fast-encrypted`)
+   were to be measured on `small` (3 repeats) by the detached script `target/acceptance/e2-12-run.sh` on the
+   measuring machine (status in `target/acceptance/e2-12-run-status.log`, last line `== DONE` when finished;
+   about an hour; it must run on an idle machine, never with a build going). If its results directory
+   `bench/results/<date>-megatron*` exists and the log says `validate exit 0`: `cargo run --release -p lpk-bench
+   -- report --results bench/results/<dir> --probes bench/results/2026-10-03-megatron-3`, write the report under
+   `bench/reports/phase1-<date>-small-seal.md`, commit the directory and the report (`feat(bench): ...`), tick
+   E2-12 in PLAN citing the `fast-encrypted` row against `fast` (D-57 names the row). If no directory exists,
+   launch the script detached (`Start-Process bash.exe target/acceptance/e2-12-run.sh` with a hidden window) on
+   an idle machine and do the same when it finishes.
 2. Then E2-4b (parallel block encoding: a writer extension holding blocks in flight) and E2-18 (the video target:
    `lpk/fast` writes `video` at about a third of the `store` control's rate; G3 as restated in D-27 needs 80%),
    E2-20 (memory and the envelope), then the revision-gated peels E2-10/11 (Deflate and containers — the largest
    remaining size win on office, PDF and installed software), E2-15, E2-16, E2-17 (D-49 process), then E2-21/22.
-3. E2-9 (deltas) waits for two things from the owner (below).
+3. E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
+   chunk in an appended generation is coded without its previous version in the window.
 4. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
    recorded rulings → a `D-NN` → PLAN tick with evidence → PR → CI green → `main` fast-forwarded (merge `main`
-   into the branch first; squash only when a branch commit message carries figures).
+   into the branch first; squash only when a branch commit message carries figures). Learned on 2026-10-13: the
+   harness gives every subagent its own worktree `.claude/worktrees/agent-<id>` on a branch `worktree-agent-<id>`
+   cut from `main`, whatever worktree the dispatch names — an implementer continuing a task branch must first
+   `git merge --ff-only <task branch>` (so keep the task branch a descendant of `main`), and the orchestrator
+   merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
+   limits on tasks of this size and are resumed with a short step list.
 
 **Open for the owner (asked on 2026-10-04, unanswered):**
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
@@ -66,6 +81,10 @@ See "How to resume" above. Parked items, to pick up in the tasks named:
 - From E2-5: the `decode_memory` fixed term of `jpeg-reconstruct` is an allowance, not measured (E2-20); the Lepton stream bytes depend on the zlib backend (vector checked structurally under another backend, byte-identically in CI).
 - From E2-6: `text-prose` and `office-pdf` a tenth or two of a percent above 7-Zip Ultra (the coder); `source-git` and `software-installed` behind (ordering gave nothing on `small`; BCJ waits for a format revision).
 - From E2-19: opening relative to a verified directory handle is the stronger parent-chain rule (E3/E6); flags and directory times are not restored (as the format tool); the writer thread count is unmeasured on `full` and on HDDs.
+- From E2-12: `lpk t|check|repair|rollback|info` hand the password to the format tool as an argument string that is not wiped, and the clap `String` lives until exit (no `zeroize` in lpk-cli; the format tool wipes its own copy) — a task that touches `lpk-format` should re-export `Zeroizing` or add a `run_with_credentials` entry point; the format tool accepts an unneeded `--keyfile` on a password-only archive.
+- From the records change (D-56): the append constructors require `R: 'static` (the old archive is boxed into the writer); an append over an archive with an unparsable `Records` frame is refused at open; the tests' with/without pre-loading comparison is against the committed vector; `Pipeline::append` (opener-based) is the shared target `append_file` builds on.
+- From E2-13: the product's default recovery percentage is undecided (0 for now).
+- From E2-14: the size cost of a changed chunk in an appended generation (D-59) is E2-9's; an append reads the old entry table's paths into memory for the snapshot deletion.
 - The report takes one baseline directory per corpus per run; E2-22 pools directories (D-48) — a combination measured twice is refused, so each `lpk` run on a class supersedes by a new directory, never by overwriting.
 
 ### P0-5 — Linux CI smoke test (done)
