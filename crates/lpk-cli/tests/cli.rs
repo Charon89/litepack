@@ -943,6 +943,69 @@ fn a_half_written_append_is_recovered_by_rollback_through_the_binary() {
 }
 
 #[test]
+fn an_appended_generation_gets_its_own_recovery_frames() {
+    let src = tempfile::tempdir().unwrap();
+    make_versions(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("j.lpk");
+    let archive = arch.to_str().unwrap();
+    let a = run(&[
+        "a",
+        archive,
+        src.path().join("v1").to_str().unwrap(),
+        "--recovery",
+        "5",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let c = run(&["check", archive]);
+    assert_eq!(c.status.code(), Some(0), "{}", text(&c.stderr));
+    assert!(
+        text(&c.stdout).starts_with("recovery frames: 1,"),
+        "{}",
+        text(&c.stdout)
+    );
+    // The same bounds as `a`.
+    let bad = run(&[
+        "append",
+        archive,
+        src.path().join("v2").to_str().unwrap(),
+        "--recovery",
+        "21",
+    ]);
+    assert_eq!(bad.status.code(), Some(1));
+    let p = run(&[
+        "append",
+        archive,
+        src.path().join("v2").to_str().unwrap(),
+        "--recovery",
+        "5",
+        "-v",
+    ]);
+    assert_eq!(p.status.code(), Some(0), "{}", text(&p.stderr));
+    assert!(
+        text(&p.stderr).contains("recovery: 5 percent"),
+        "{}",
+        text(&p.stderr)
+    );
+    // Both generations are covered: one frame each.
+    let c = run(&["check", archive]);
+    assert_eq!(c.status.code(), Some(0), "{}", text(&c.stderr));
+    assert!(
+        text(&c.stdout).starts_with("recovery frames: 2,"),
+        "{}",
+        text(&c.stdout)
+    );
+    let t = run(&["t", archive]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    let i = run(&["info", archive]);
+    assert!(
+        text(&i.stdout).contains("recovery frames: 2\n"),
+        "{}",
+        text(&i.stdout)
+    );
+}
+
+#[test]
 fn an_encrypted_archive_appends_with_its_password_only() {
     let src = tempfile::tempdir().unwrap();
     make_versions(src.path());

@@ -325,6 +325,11 @@ struct AppendArgs {
     /// with the archive's key); checked before anything is written.
     #[command(flatten)]
     credentials: CredentialArgs,
+    /// Recovery records for the new generation as a percentage of its data, 0 (none, the
+    /// default) to 20, as for `a`.
+    #[arg(long, value_name = "PERCENT", default_value_t = 0,
+          value_parser = clap::value_parser!(u8).range(0..=i64::from(lpk_format::MAX_PERCENT)))]
+    recovery: u8,
     /// Print the counts and the stage times to stderr.
     #[arg(short, long)]
     verbose: bool,
@@ -464,11 +469,12 @@ fn append(a: &mut AppendArgs, err: &mut dyn Write) -> i32 {
             return EXIT_FAILED;
         }
     };
-    let pipeline = build_pipeline(&a.tier);
+    let mut pipeline = build_pipeline(&a.tier);
+    pipeline.seal.writer.recovery.percent = a.recovery;
     match pipeline.append_file(&a.input, &a.archive, credentials.as_ref()) {
         Ok(s) => {
             if a.verbose {
-                report(err, &a.archive, &a.tier, None, 0, &s);
+                report(err, &a.archive, &a.tier, None, a.recovery, &s);
             }
             EXIT_OK
         }

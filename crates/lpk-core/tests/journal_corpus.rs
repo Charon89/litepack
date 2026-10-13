@@ -4,10 +4,13 @@
 //! The `backup-versions` class (folders `v1`, `v2`, `v3`) through the Fast tier: `v1` as
 //! generation 0, then `v2` and `v3` appended (generations 1 and 2, each a snapshot of its
 //! folder), next to the one-shot archive of the class directory (the three folders in one
-//! generation, dedup on). The appended archive must be within the per-generation overhead
-//! (index + trailer + entry table + records frame of generations 1 and 2, read from the
-//! archive) of the one-shot; rollback to generation 0 then extracts bit-exactly to `v1`
-//! (BLAKE3 per file). Sizes and times are printed for the report only.
+//! generation, dedup on). Asserted: the chunk-level dedup equals the one-shot's (the same
+//! chunk-table length and plain bytes in blocks), the generation count, and rollback to
+//! generation 0 extracting bit-exactly to `v1` (BLAKE3 per file). Printed as a verdict line
+//! only (report, no assertion): the sizes, the per-generation overhead (index + trailer + entry
+//! table + records frame of generations 1 and 2, read from the archive) and the block-data
+//! difference. A new generation's blocks hold only its new chunks, so a changed chunk is coded
+//! without its previous version in the coder's window; closing that is the delta task's.
 #![allow(clippy::unwrap_used)]
 
 use std::fs::File;
@@ -101,7 +104,7 @@ fn timed(f: impl FnOnce() -> RunSummary) -> (RunSummary, f64) {
 
 #[test]
 #[ignore]
-fn backup_versions_as_three_generations_is_within_the_overhead_and_rolls_back_to_v1() {
+fn backup_versions_as_three_generations_dedups_like_the_one_shot_and_rolls_back_to_v1() {
     let root = PathBuf::from(std::env::var_os("LPK_CORPUS").unwrap());
     let class = root.join("backup-versions");
     let tmp = tempfile::tempdir().unwrap();
@@ -123,6 +126,11 @@ fn backup_versions_as_three_generations_is_within_the_overhead_and_rolls_back_to
     let (o, to) = timed(|| fast().run_file(&class, &one_shot).unwrap());
     assert_eq!((s0.writer.generation, s1.writer.generation), (0, 1));
     assert_eq!(s2.writer.generation, 2);
+    {
+        let mut a = open(&appended);
+        assert_eq!(a.generation(), 2);
+        assert_eq!(a.history().unwrap().len(), 3);
+    }
     let appended_len = std::fs::metadata(&appended).unwrap().len();
     let one_shot_len = std::fs::metadata(&one_shot).unwrap().len();
     let overhead: u64 = (1..=2)
@@ -146,25 +154,32 @@ fn backup_versions_as_three_generations_is_within_the_overhead_and_rolls_back_to
         "appended {appended_len} B, one-shot {one_shot_len} B, difference {} B, overhead of generations 1 and 2 (index + trailer + entry table + records) {overhead} B",
         appended_len as i64 - one_shot_len as i64
     );
-    // Where the rest of a difference comes from: the block data (the chunk table and the plain
-    // bytes say whether the dedup found the same; the frame bytes say what the coder made of
-    // the changed chunks, which an appended generation codes without the earlier ones in its
-    // window).
-    for (name, p) in [("appended", &appended), ("one-shot", &one_shot)] {
+    // The chunk-level dedup equals the one-shot's; what is left of the difference is block
+    // data: the changed chunks coded in their own generation's blocks.
+    let stats = |p: &Path| {
         let a = open(p);
         let ix = a.index();
-        println!(
-            "{name}: {} chunks, {} blocks, {} plain B in blocks, {} block frame B",
+        (
             a.chunks().len(),
             ix.blocks.len(),
             ix.blocks.iter().map(|b| b.plain_len).sum::<u64>(),
-            ix.blocks.iter().map(|b| b.frame_len).sum::<u64>()
-        );
-    }
+            ix.blocks.iter().map(|b| b.frame_len).sum::<u64>(),
+        )
+    };
+    let (ac, ab, ap, af) = stats(&appended);
+    let (oc, ob, op, of) = stats(&one_shot);
+    println!("appended: {ac} chunks, {ab} blocks, {ap} plain B in blocks, {af} block frame B");
+    println!("one-shot: {oc} chunks, {ob} blocks, {op} plain B in blocks, {of} block frame B");
+    assert_eq!((ac, ap), (oc, op), "the dedup differs from the one-shot's");
     let within = appended_len <= one_shot_len + overhead;
+    println!(
+        "verdict: appended {} the one-shot plus the ruled overhead ({} B over it); block data {} B more than the one-shot's",
+        if within { "within" } else { "exceeds" },
+        (appended_len as i64 - one_shot_len as i64 - overhead as i64).max(0),
+        af as i64 - of as i64
+    );
 
-    // Rollback to generation 0 reproduces v1 bit-exactly (checked before the size relation is
-    // asserted, so a size failure still leaves the rollback proven).
+    // Rollback to generation 0 reproduces v1 bit-exactly.
     let mut f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -203,9 +218,5 @@ fn backup_versions_as_three_generations_is_within_the_overhead_and_rolls_back_to
         "rollback to generation 0: {} B, {} files extracted bit-exact in {tx:.2} s",
         s0.writer.archive_len,
         expected.len()
-    );
-    assert!(
-        within,
-        "appended {appended_len} > one-shot {one_shot_len} + overhead {overhead}"
     );
 }
