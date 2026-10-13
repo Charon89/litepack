@@ -243,13 +243,15 @@ impl Pipeline {
     /// Like [`append`](Self::append), on the archive at `archive_path` in place, with the
     /// guarantees of [`run_file`](Self::run_file): the archive is left out of its own walk
     /// (by file identity, when `root` holds it), the data is synced before the new trailer,
-    /// and a failed append truncates the file back to its original length, so the archive
-    /// stays at the generation it had. The new generation is a snapshot of `root` (spec
-    /// section 15): every path of the old entry table that `root` no longer has is deleted
-    /// from the entry table (its chunks stay), the rest is replaced or kept. An encrypted
-    /// archive needs its `credentials` (a keyless open is refused with
-    /// `AppendNeedsCredentials`, a wrong password with `WrongKey`, both before the file is
-    /// opened for writing). Invalid options are refused before anything is touched.
+    /// and a failed append (an error, or a panic in a stage, which is re-raised) cuts the file
+    /// back to its original length, so the archive stays at the generation it had; when that
+    /// cut itself fails the error is [`CoreError::AppendLeftCut`], naming both causes and the
+    /// length a rollback restores. The new generation is a snapshot of `root` (spec section
+    /// 15): every path of the old entry table that `root` no longer has is deleted from the
+    /// entry table (its chunks stay), the rest is replaced or kept. An encrypted archive needs
+    /// its `credentials` (a keyless open is refused with `AppendNeedsCredentials`, a wrong
+    /// password with `WrongKey`, both before the file is opened for writing). Invalid options
+    /// are refused before anything is touched.
     pub fn append_file(
         self,
         root: &Path,
@@ -273,14 +275,16 @@ impl Pipeline {
             .iter()
             .map(|e| e.map(|e| e.path))
             .collect::<Result<_, _>>()?;
-        let original_len = std::fs::metadata(archive_path).map_err(io)?.len();
+        // The handle that cuts the file back: a plain write handle (an append-mode handle
+        // cannot truncate on Windows), opened before anything is written, and the length it
+        // restores read from it.
+        let mut restore = Restore::open(archive_path)?;
         let file = std::fs::OpenOptions::new()
             .append(true)
             .open(archive_path)
             .map_err(io)?;
         let own_id = file_identity(&file).map_err(io)?;
         let sync_file = file.try_clone().map_err(io)?;
-        let restore = file.try_clone().map_err(io)?;
         let r = (|| {
             let mut inputs = walk(root, &self.classify.ingest)?;
             inputs.retain(|i| i.identity != Some(own_id));
@@ -309,12 +313,23 @@ impl Pipeline {
             let sync: SyncFn = Box::new(move || sync_file.sync_data());
             self.run_inputs(inputs, file, Some(sync), prepared, start.elapsed(), opener)
         })();
-        if r.is_err() {
-            // The writer (and its buffer) is gone by now: whatever reached the file past
-            // the old trailer is cut off.
-            let _ = restore.set_len(original_len);
+        // The writer (and its buffer) is gone by now: whatever reached the file past the old
+        // trailer is cut off. A panic inside the closure unwinds through `restore`'s Drop.
+        match r {
+            Ok(s) => {
+                restore.disarm();
+                Ok(s)
+            }
+            Err(cause) => match restore.truncate() {
+                Ok(()) => Err(cause),
+                Err(truncation) => Err(CoreError::AppendLeftCut {
+                    path: archive_path.to_path_buf(),
+                    cause: Box::new(cause),
+                    kept: restore.len,
+                    truncation,
+                }),
+            },
         }
-        r
     }
 
     /// Like [`run`](Self::run), writing to a new file at `archive_path` with the guarantees of
@@ -561,6 +576,51 @@ impl Pipeline {
                 })
             }
         }
+    }
+}
+
+/// Cuts an archive back to the length it had before an append, on the error path and on the
+/// panic path alike (its `Drop`), unless disarmed by a completed append.
+struct Restore {
+    file: std::fs::File,
+    len: u64,
+    armed: bool,
+}
+
+impl Restore {
+    fn open(path: &Path) -> Result<Self, CoreError> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| CoreError::io(path, e))?;
+        let len = file.metadata().map_err(|e| CoreError::io(path, e))?.len();
+        Ok(Restore {
+            file,
+            len,
+            armed: true,
+        })
+    }
+
+    /// The append completed: the file keeps its new generation.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Cut the file back (once).
+    fn truncate(&mut self) -> std::io::Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
+        self.armed = false;
+        self.file.set_len(self.len)
+    }
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        // The panic path: clean up, then the panic goes on. The error path reports a failed
+        // cut itself, so nothing is lost by ignoring the result here.
+        let _ = self.truncate();
     }
 }
 

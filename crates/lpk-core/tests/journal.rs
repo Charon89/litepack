@@ -86,6 +86,9 @@ fn make_v2(root: &Path) {
     std::fs::write(root.join("docs/deep/r.bin"), r).unwrap();
     std::fs::create_dir_all(root.join("new")).unwrap();
     std::fs::write(root.join("new/c.bin"), noise(3, 80_000)).unwrap();
+    // A JPEG the earlier generation does not have: peeled in the appended generation, its
+    // record joining the archive's records (the format's append-with-records rule).
+    std::fs::write(root.join("q.jpg"), fixture("progressive.jpg")).unwrap();
 }
 
 /// Version 3: the new file grown, another file deleted, a second copy of the JPEG.
@@ -237,7 +240,28 @@ fn appends_are_snapshots_within_the_frame_overhead_of_the_one_shot() {
     // against the old chunks and never peeled; in v3 its new copy too.
     assert_eq!(s[0].peel.peeled.files, 1, "{:?}", s[0].peel);
     assert_eq!(s[1].peel.deduplicated.files, 1, "{:?}", s[1].peel);
-    assert_eq!(s[2].peel.deduplicated.files, 2, "{:?}", s[2].peel);
+    assert_eq!(s[2].peel.deduplicated.files, 3, "{:?}", s[2].peel);
+    // v2's new JPEG was peeled inside the appended generation: its record lies in a `Records`
+    // frame written by generation 1 (the old record restated first), and it extracts.
+    assert_eq!(s[1].peel.peeled.files, 1, "{:?}", s[1].peel);
+    assert_eq!(s[2].peel.peeled.files, 0, "{:?}", s[2].peel);
+    {
+        let copy = out.path().join("gen-1-records.lpk");
+        std::fs::copy(&appended, &copy).unwrap();
+        let mut f = open_rw(&copy);
+        lpk_format::rollback(&mut f, 1).unwrap();
+        drop(f);
+        let mut a = open(&copy);
+        let ix = a.index();
+        let start = ix.generations[1].start_offset;
+        let records = ix.records.unwrap();
+        assert!(records.offset >= start, "{records:?} before {start}");
+        assert_eq!(a.records().unwrap().unwrap().len(), 2);
+        drop(a);
+        let x2 = out.path().join("x2");
+        extract_to(&copy, &x2, None);
+        assert_eq!(tree(&x2), tree(&v.path().join("v2")));
+    }
 
     // Snapshot semantics: the entry table is v3's tree, nothing of v1 or v2 that v3 lacks.
     let mut a = open(&appended);
@@ -297,7 +321,8 @@ fn rollback_to_generation_0_reproduces_v1_bit_exactly() {
     assert_eq!(a.history().unwrap().len(), 1);
     let paths = entry_paths(&mut a);
     assert!(paths.iter().any(|p| p == "gone-in-v2.bin"));
-    assert!(!paths.iter().any(|p| p == "new/c.txt"));
+    assert!(!paths.iter().any(|p| p == "new/c.bin"), "{paths:?}");
+    assert!(!paths.iter().any(|p| p == "q.jpg"), "{paths:?}");
     drop(a);
     let x = out.path().join("x1");
     extract_to(&archive, &x, None);
@@ -391,26 +416,44 @@ impl FoldStage for FailingFold {
     }
 }
 
+/// Small blocks, so several of the new generation's block frames reach the file before a
+/// failure part-way through a large new file.
+fn small_blocks() -> Pipeline {
+    Pipeline::fast(FastOptions {
+        block_size: 512 << 10,
+        ..FastOptions::default()
+    })
+}
+
+/// v2 plus a large noise file, so an append of it writes blocks before `fail_after` bytes.
+fn v2_with_big_file(v: &Path) -> PathBuf {
+    let dir = v.join("v2");
+    std::fs::write(dir.join("big.bin"), noise(21, 4 << 20)).unwrap();
+    dir
+}
+
 #[test]
 fn a_failed_append_leaves_the_archive_at_its_old_generation() {
     let v = versions();
     let out = tempfile::tempdir().unwrap();
     let archive = out.path().join("a.lpk");
-    let s0 = fast().run_file(&v.path().join("v1"), &archive).unwrap();
+    let s0 = small_blocks()
+        .run_file(&v.path().join("v1"), &archive)
+        .unwrap();
     let before = std::fs::read(&archive).unwrap();
     assert_eq!(before.len() as u64, s0.writer.archive_len);
-    let mut p = fast();
+    let v2 = v2_with_big_file(v.path());
+    let mut p = small_blocks();
     p.fold = Some(Box::new(FailingFold {
-        fail_after: 100_000,
+        fail_after: 3 << 20,
     }));
-    let e = p
-        .append_file(&v.path().join("v2"), &archive, None)
-        .unwrap_err();
+    let e = p.append_file(&v2, &archive, None).unwrap_err();
     assert!(
         matches!(e, CoreError::Format(FormatError::BadChunk { .. })),
         "{e:?}"
     );
-    // Truncated back: the bytes are the old archive's, nothing past the old trailer.
+    // Truncated back: the bytes are the old archive's, nothing past the old trailer (block
+    // frames of the failed generation had reached the file by then).
     assert_eq!(std::fs::read(&archive).unwrap(), before);
     let mut a = open(&archive);
     assert_eq!(a.generation(), 0);
@@ -424,6 +467,80 @@ fn a_failed_append_leaves_the_archive_at_its_old_generation() {
     let x = out.path().join("x2");
     extract_to(&archive, &x, None);
     assert_eq!(tree(&x), tree(&v.path().join("v2")));
+}
+
+/// A fold stage whose chunker panics once it has seen `panic_after` bytes.
+#[derive(Debug)]
+struct PanickingFold {
+    panic_after: usize,
+}
+
+struct PanickingChunker {
+    inner: FailingChunker,
+}
+
+impl Chunker for PanickingChunker {
+    fn feed(&mut self, bytes: &[u8], eof: bool) -> Vec<usize> {
+        assert!(
+            self.inner.fed + bytes.len() <= self.inner.fail_after,
+            "the stage panics part-way through the append"
+        );
+        self.inner.feed(bytes, eof)
+    }
+
+    fn reset(&mut self) {}
+}
+
+impl FoldStage for PanickingFold {
+    fn name(&self) -> &'static str {
+        "panicking"
+    }
+
+    fn install(&self, options: &mut WriterOptions) -> Result<Box<dyn Chunker>, CoreError> {
+        options.chunk_size = 65_536;
+        options.dedup = true;
+        Ok(Box::new(PanickingChunker {
+            inner: FailingChunker {
+                size: 65_536,
+                fed: 0,
+                fail_after: self.panic_after,
+            },
+        }))
+    }
+}
+
+#[test]
+fn a_panic_inside_the_append_is_cleaned_up_then_re_raised() {
+    let v = versions();
+    let out = tempfile::tempdir().unwrap();
+    let archive = out.path().join("a.lpk");
+    small_blocks()
+        .run_file(&v.path().join("v1"), &archive)
+        .unwrap();
+    let before = std::fs::read(&archive).unwrap();
+    let v2 = v2_with_big_file(v.path());
+    let mut p = small_blocks();
+    p.fold = Some(Box::new(PanickingFold {
+        panic_after: 3 << 20,
+    }));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        p.append_file(&v2, &archive, None)
+    }));
+    let payload = r.unwrap_err();
+    let msg = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(msg.contains("part-way through the append"), "{msg}");
+    // The panic went on, and the file was cut back on the way.
+    assert_eq!(std::fs::read(&archive).unwrap(), before);
+    let mut a = open(&archive);
+    assert_eq!(a.generation(), 0);
+    assert_eq!(a.history().unwrap().len(), 1);
+    drop(a);
+    let s1 = fast().append_file(&v2, &archive, None).unwrap();
+    assert_eq!(s1.writer.generation, 1);
 }
 
 #[test]
