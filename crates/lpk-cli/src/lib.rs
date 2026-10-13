@@ -1,5 +1,7 @@
 //! The `lpk` command line: `a` creates an archive from a directory, `x` extracts, `t` tests,
-//! `check` and `repair` drive the recovery records.
+//! `check` and `repair` drive the recovery records, `append` adds a generation (a snapshot of
+//! a directory, deduplicated against the archive's chunks), `rollback` truncates to an earlier
+//! generation and `info` lists them.
 //!
 //! Extraction goes through `lpk-core`'s block-ordered engine (`lpk_core::extract_file`: each
 //! needed block decoded once, blocks decoded in parallel under a memory bound) with the default
@@ -63,6 +65,15 @@ enum Command {
     Check(CheckArgs),
     /// Write a copy of an archive with its damaged shards rebuilt from the recovery frames.
     Repair(RepairArgs),
+    /// Append the contents of a directory to an archive as its next generation: a snapshot
+    /// (paths the directory no longer has are removed), deduplicated against the archive's
+    /// chunks. A failed append leaves the archive as it was.
+    Append(AppendArgs),
+    /// Truncate an archive to the end of an earlier generation (in place; `info` lists them).
+    /// Also recovers an archive whose last append was cut short.
+    Rollback(RollbackArgs),
+    /// Print an archive's header, envelope, counts and generations.
+    Info(InfoArgs),
 }
 
 /// The key material of an encrypted archive; `a` seals with it, every other command opens
@@ -171,12 +182,9 @@ impl From<SuiteArg> for Suite {
 /// The format's default suite (D-39: AES-256-GCM).
 const DEFAULT_SUITE: Suite = Suite::AesGcm;
 
+/// The tier and its settings; `a` and `append` take the same ones.
 #[derive(Debug, Args)]
-struct AddArgs {
-    /// The archive to create; must not exist.
-    archive: PathBuf,
-    /// The directory whose contents are archived.
-    input: PathBuf,
+struct TierArgs {
     /// The Fast tier (zstd with a long window; the default).
     #[arg(long, conflicts_with_all = ["store", "balanced"])]
     fast: bool,
@@ -214,6 +222,16 @@ struct AddArgs {
     /// order 7-Zip uses for solid archives). Ignored with --no-dedup and --store.
     #[arg(long, value_enum, value_name = "ORDER", default_value = "none")]
     ordering: OrderingArg,
+}
+
+#[derive(Debug, Args)]
+struct AddArgs {
+    /// The archive to create; must not exist.
+    archive: PathBuf,
+    /// The directory whose contents are archived.
+    input: PathBuf,
+    #[command(flatten)]
+    tier: TierArgs,
     /// Encrypt the archive with these (AEAD per frame; the key is derived with Argon2id at the
     /// format's default cost).
     #[command(flatten)]
@@ -296,6 +314,46 @@ struct CheckArgs {
 }
 
 #[derive(Debug, Args)]
+struct AppendArgs {
+    /// The archive; must exist.
+    archive: PathBuf,
+    /// The directory whose contents become the new generation.
+    input: PathBuf,
+    #[command(flatten)]
+    tier: TierArgs,
+    /// The key material of an encrypted archive (required for one: the new generation is sealed
+    /// with the archive's key); checked before anything is written.
+    #[command(flatten)]
+    credentials: CredentialArgs,
+    /// Print the counts and the stage times to stderr.
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+#[derive(Debug, Args)]
+struct RollbackArgs {
+    /// The archive; changed in place.
+    archive: PathBuf,
+    /// The generation to keep (0 is the first write; `info` shows the latest).
+    generation: u64,
+    /// Accepted for symmetry; no key is needed to roll back.
+    #[command(flatten)]
+    credentials: CredentialArgs,
+}
+
+#[derive(Debug, Args)]
+struct InfoArgs {
+    /// The archive.
+    archive: PathBuf,
+    /// A prior file (for example a zstd dictionary) the archive needs; may be repeated.
+    #[arg(long = "prior", value_name = "FILE")]
+    priors: Vec<PathBuf>,
+    /// The key material of an encrypted archive; without it the sealed counts are not shown.
+    #[command(flatten)]
+    credentials: CredentialArgs,
+}
+
+#[derive(Debug, Args)]
 struct RepairArgs {
     /// The archive.
     archive: PathBuf,
@@ -314,16 +372,8 @@ fn core_exit(e: &CoreError) -> i32 {
     }
 }
 
-fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
-    // Decided before `take` moves the password out of the arguments.
-    let encrypted = a.credentials.given();
-    let credentials = match a.credentials.take() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            return EXIT_FAILED;
-        }
-    };
+/// The pipeline of a tier and its settings (the seal stage untouched).
+fn build_pipeline(a: &TierArgs) -> Pipeline {
     let mut pipeline = if a.store {
         Pipeline::store(StoreOptions::default())
     } else if a.balanced {
@@ -359,6 +409,30 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
             ..lpk_core::FoldOptions::default()
         })));
     }
+    pipeline
+}
+
+/// What `a` sealed with, for the `-v` report.
+#[derive(Clone, Copy)]
+struct Sealing {
+    suite: Suite,
+    listable: bool,
+}
+
+fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
+    // Decided before `take` moves the password out of the arguments.
+    let sealing = a.credentials.given().then_some(Sealing {
+        suite: a.suite.map_or(DEFAULT_SUITE, Suite::from),
+        listable: a.listable,
+    });
+    let credentials = match a.credentials.take() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return EXIT_FAILED;
+        }
+    };
+    let mut pipeline = build_pipeline(&a.tier);
     if let Some(credentials) = credentials {
         pipeline.seal.writer.seal = Some(lpk_format::SealOptions {
             suite: a.suite.map_or(DEFAULT_SUITE, Suite::from),
@@ -371,7 +445,7 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
     match pipeline.run_file(&a.input, &a.archive) {
         Ok(s) => {
             if a.verbose {
-                report(err, a, encrypted, &s);
+                report(err, &a.archive, &a.tier, sealing, a.recovery, &s);
             }
             EXIT_OK
         }
@@ -382,12 +456,43 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
     }
 }
 
-fn report(err: &mut dyn Write, a: &AddArgs, encrypted: bool, s: &RunSummary) {
+fn append(a: &mut AppendArgs, err: &mut dyn Write) -> i32 {
+    let credentials = match a.credentials.take() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return EXIT_FAILED;
+        }
+    };
+    let pipeline = build_pipeline(&a.tier);
+    match pipeline.append_file(&a.input, &a.archive, credentials.as_ref()) {
+        Ok(s) => {
+            if a.verbose {
+                report(err, &a.archive, &a.tier, None, 0, &s);
+            }
+            EXIT_OK
+        }
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            core_exit(&e)
+        }
+    }
+}
+
+fn report(
+    err: &mut dyn Write,
+    archive: &Path,
+    a: &TierArgs,
+    sealing: Option<Sealing>,
+    recovery: u8,
+    s: &RunSummary,
+) {
     let t = &s.timings;
     let _ = writeln!(
         err,
-        "{}: {} entries, {} blocks, {} bytes (threads requested: {})",
-        a.archive.display(),
+        "{}: generation {}, {} entries, {} blocks, {} bytes (threads requested: {})",
+        archive.display(),
+        s.writer.generation,
         s.writer.entries,
         s.writer.blocks,
         s.writer.archive_len,
@@ -451,19 +556,19 @@ fn report(err: &mut dyn Write, a: &AddArgs, encrypted: bool, s: &RunSummary) {
             );
         }
     }
-    if encrypted {
+    if let Some(sealing) = sealing {
         let _ = writeln!(
             err,
             "encrypted: {}{}",
-            a.suite.map_or(DEFAULT_SUITE, Suite::from).name(),
-            if a.listable { ", listable" } else { "" }
+            sealing.suite.name(),
+            if sealing.listable { ", listable" } else { "" }
         );
     }
-    if a.recovery > 0 {
+    if recovery > 0 {
         let _ = writeln!(
             err,
             "recovery: {} percent, peak {} bytes held for the open group",
-            a.recovery, s.writer.recovery_peak
+            recovery, s.writer.recovery_peak
         );
     }
     let _ = writeln!(
@@ -613,5 +718,15 @@ where
             out,
             err,
         ),
+        Command::Append(mut a) => append(&mut a, err),
+        Command::Rollback(r) => reference(
+            "rollback",
+            &[],
+            &r.credentials,
+            &[&r.archive, Path::new(&r.generation.to_string())],
+            out,
+            err,
+        ),
+        Command::Info(i) => reference("info", &i.priors, &i.credentials, &[&i.archive], out, err),
     }
 }
