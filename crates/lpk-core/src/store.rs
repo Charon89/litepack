@@ -65,6 +65,7 @@ pub fn write_inputs(
         sync,
         crate::pipeline::Prepared::Store,
         std::time::Duration::ZERO,
+        crate::pipeline::new_archive(),
     )?;
     Ok(s.writer)
 }

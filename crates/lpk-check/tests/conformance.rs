@@ -538,50 +538,61 @@ fn verify_class(d: Vec<u8>) -> (String, String) {
     (e.class.to_string(), e.detail)
 }
 
-/// A revision 1.1 decoder: `files` and `verify` of `expected-1.1.toml`, by the library and the
-/// tool; `list` and `info` of `expected.toml` (the same facts for every revision).
+/// A revision 1.1 decoder on every vector of `expected-1.1.toml` (`jpeg-peel.lpk`, and
+/// `journal-record.lpk`, whose appended generation's `Records` frame restates the old records
+/// and adds one): `files` and `verify`, by the library and the tool, and extraction to disk.
+/// Then, for `jpeg-peel.lpk`, `list` and `info` of `expected.toml` (the same facts for every
+/// revision).
 #[test]
 fn jpeg_peel_revision_1_1() {
     let exp = table("expected-1.1.toml");
-    let t = exp[JPEG].as_table().unwrap();
-    let files = strings(&t["files"]);
-    let mut a = Archive::open(read(JPEG), Options::default()).unwrap();
-    assert_eq!(a.header.version_minor, 1);
-    assert_eq!(decoded_lines(&mut a).unwrap(), files);
-    let s = a.verify().unwrap();
-    assert_eq!(
-        format!(
-            "ok: {} entries, {} chunks, {} blocks\n",
-            s.entries, s.chunks, s.blocks
-        ),
-        t["verify"].as_str().unwrap()
-    );
-    let (code, out, err) = bin(&["verify".into(), jpeg_path()]);
-    assert_eq!(
-        (code, out.as_str()),
-        (0, t["verify"].as_str().unwrap()),
-        "{err}"
-    );
-    // Extraction to disk, by the library and by the tool.
-    for tool in [false, true] {
-        let dir = temp(&format!("jpeg-{tool}"));
-        if tool {
-            let (code, _, err) = bin(&["extract".into(), jpeg_path(), dir.display().to_string()]);
-            assert_eq!(code, 0, "{err}");
-        } else {
-            let mut a = Archive::open(read(JPEG), Options::default()).unwrap();
-            let (done, err) = extract_all(&mut a, &dir).unwrap();
-            assert!(err.is_none() && done.len() == 1);
+    assert!(exp.contains_key(JPEG) && exp.contains_key("journal-record.lpk"));
+    for (name, t) in &exp {
+        let t = t.as_table().unwrap();
+        let files = strings(&t["files"]);
+        let path = vectors().join(name).display().to_string();
+        let mut a = Archive::open(read(name), Options::default()).unwrap();
+        assert_eq!(a.header.version_minor, 1, "{name}");
+        assert_eq!(decoded_lines(&mut a).unwrap(), files, "{name}");
+        let s = a.verify().unwrap();
+        assert_eq!(
+            format!(
+                "ok: {} entries, {} chunks, {} blocks\n",
+                s.entries, s.chunks, s.blocks
+            ),
+            t["verify"].as_str().unwrap(),
+            "{name}"
+        );
+        let (code, out, err) = bin(&["verify".into(), path.clone()]);
+        assert_eq!(
+            (code, out.as_str()),
+            (0, t["verify"].as_str().unwrap()),
+            "{name}: {err}"
+        );
+        // Extraction to disk, by the library and by the tool.
+        for tool in [false, true] {
+            let dir = temp(&format!("{name}-{tool}"));
+            if tool {
+                let (code, _, err) =
+                    bin(&["extract".into(), path.clone(), dir.display().to_string()]);
+                assert_eq!(code, 0, "{name}: {err}");
+            } else {
+                let mut a = Archive::open(read(name), Options::default()).unwrap();
+                let (done, err) = extract_all(&mut a, &dir).unwrap();
+                assert!(err.is_none() && done.len() == files.len(), "{name}");
+            }
+            for line in &files {
+                let mut it = line.split(' ');
+                let (p, size, h) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+                let b = std::fs::read(dir.join(p)).unwrap();
+                assert_eq!(b.len().to_string(), size, "{name}: {p}");
+                assert_eq!(blake3::hash(&b).to_hex().as_str(), h, "{name}: {p}");
+                if p.ends_with(".jpg") {
+                    assert_eq!(&b[..2], &[0xFF, 0xD8], "a JPEG");
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
         }
-        for line in &files {
-            let mut it = line.split(' ');
-            let (p, size, h) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
-            let b = std::fs::read(dir.join(p)).unwrap();
-            assert_eq!(b.len().to_string(), size);
-            assert_eq!(blake3::hash(&b).to_hex().as_str(), h);
-            assert_eq!(&b[..2], &[0xFF, 0xD8], "a JPEG");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
     }
     let old = table("expected.toml");
     let t0 = old[JPEG].as_table().unwrap();

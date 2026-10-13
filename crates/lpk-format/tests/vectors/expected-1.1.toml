@@ -7,3 +7,10 @@ files = [
   "photo.jpg 19559 5c26b237d81f0f21649f545e921e10ac451bb3803d04132005b05bff58310e12",
 ]
 verify = "ok: 1 entries, 8 chunks, 2 blocks\n"
+
+["journal-record.lpk"]
+files = [
+  "photo.jpg 19559 5c26b237d81f0f21649f545e921e10ac451bb3803d04132005b05bff58310e12",
+  "readme.txt 231 c9bcc62490ee3d7ee12078786956d9898599b1a507a0fc6eb0df9a43b8f20efb",
+]
+verify = "ok: 2 entries, 9 chunks, 3 blocks\n"

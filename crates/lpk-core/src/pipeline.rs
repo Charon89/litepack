@@ -12,12 +12,13 @@
 //! Blocks are encoded one after the other; parallel encoding needs the writer to hold blocks in
 //! flight and comes with a later task.
 
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lpk_format::{
-    Encoded, EntryKind, Graph, GraphResources, Step, Writer, WriterOptions, WriterSummary,
+    Archive, Chunker, Credentials, Encoded, EntryKind, FormatError, Graph, GraphResources, Step,
+    Writer, WriterOptions, WriterSummary,
 };
 
 use crate::balanced::{BalancedEncoder, BalancedHandle, BalancedOptions, BalancedSummary};
@@ -201,7 +202,41 @@ impl Pipeline {
         let prepared = self.prepare()?;
         let t = Instant::now();
         let inputs = walk(root, &self.classify.ingest)?;
-        self.run_inputs(inputs, out, None, prepared, t.elapsed())
+        self.run_inputs(inputs, out, None, prepared, t.elapsed(), new_archive())
+    }
+
+    /// Walk `root` and append its entries as the next generation of `existing` (spec section
+    /// 15): `out` is the same archive opened for writing and positioned at its end
+    /// ([`Writer::append`]'s contract; the caller syncs). A path that exists is replaced. The
+    /// stages run as in [`run`](Self::run) (a peeled file's record joins the archive's records);
+    /// `existing` must be open with `credentials` when it is encrypted, and its reader is read
+    /// lazily between writes (old block graphs, [`Writer::append`]), so it must not share a file
+    /// position with `out`: a separately opened handle on the same file is fine. The archive's
+    /// own revision applies: a pipeline with a peel stage needs a header `version_minor` of at
+    /// least 1 (`BadOptions`, `version_minor`, before anything is written).
+    pub fn append<R: Read + Seek + 'static, W: Write>(
+        self,
+        root: &Path,
+        existing: Archive<R>,
+        out: W,
+        credentials: Option<&Credentials>,
+    ) -> Result<RunSummary, CoreError> {
+        let prepared = self.prepare()?;
+        let t = Instant::now();
+        let inputs = walk(root, &self.classify.ingest)?;
+        let opener: Opener<'_, W> = Box::new(move |out, wopts, minor, chunker| {
+            if existing.header().version.minor < minor {
+                return Err(FormatError::BadOptions {
+                    reason: "version_minor",
+                }
+                .into());
+            }
+            Ok(match chunker {
+                Some(c) => Writer::append_with_chunker(existing, out, wopts, credentials, c)?,
+                None => Writer::append(existing, out, wopts, credentials)?,
+            })
+        });
+        self.run_inputs(inputs, out, None, prepared, t.elapsed(), opener)
     }
 
     /// Like [`run`](Self::run), writing to a new file at `archive_path` with the guarantees of
@@ -213,18 +248,27 @@ impl Pipeline {
         let ingest = self.classify.ingest;
         let start = Instant::now();
         create_new_and_run(root, archive_path, &ingest, |inputs, file, sync| {
-            self.run_inputs(inputs, file, Some(sync), prepared, start.elapsed())
+            self.run_inputs(
+                inputs,
+                file,
+                Some(sync),
+                prepared,
+                start.elapsed(),
+                new_archive(),
+            )
         })
     }
 
-    /// Run the stages over already-walked inputs.
-    pub(crate) fn run_inputs(
+    /// Run the stages over already-walked inputs; `opener` opens the writer (a new archive, or
+    /// an append).
+    pub(crate) fn run_inputs<W: Write>(
         self,
         inputs: Vec<Input>,
-        out: impl Write,
+        out: W,
         sync: Option<SyncFn>,
         prepared: Prepared,
         walk_time: Duration,
+        opener: Opener<'_, W>,
     ) -> Result<RunSummary, CoreError> {
         let mut timings = StageTimings {
             walk: walk_time,
@@ -241,7 +285,7 @@ impl Pipeline {
         let source = Source::new();
         match (model, prepared) {
             (ModelStage::Store, Prepared::Store) => {
-                let mut writer = open_writer(out, wopts, sync, 0, fold.as_deref())?;
+                let mut writer = open_writer(out, wopts, sync, 0, fold.as_deref(), opener)?;
                 let t = Instant::now();
                 for input in &inputs {
                     validate_input(input)?;
@@ -333,7 +377,7 @@ impl Pipeline {
                 // The header's version_minor is the revision this writer writes under (spec
                 // section 2): 1 whenever a peel stage is enabled, whether or not one peels.
                 let minor = if peel.is_empty() { 0 } else { 1 };
-                let mut writer = open_writer(out, wopts, sync, minor, fold.as_deref())?;
+                let mut writer = open_writer(out, wopts, sync, minor, fold.as_deref(), opener)?;
                 let mut summary = PeelSummary::default();
                 let mut peel_time = Duration::ZERO;
                 let t = Instant::now();
@@ -449,21 +493,43 @@ type Finish = Box<dyn Fn(PeelSummary) -> (Option<FastSummary>, Option<BalancedSu
 
 type OutWriter<W> = Writer<BufWriter<W>>;
 
+/// Opens the writer of a run from the output, the writer options (the fold stage's chunker
+/// installed), the revision the pipeline writes under and the fold stage's chunker: a new
+/// archive ([`new_archive`]) or the next generation of an existing one ([`Pipeline::append`]).
+pub(crate) type Opener<'a, W> = Box<
+    dyn FnOnce(
+            BufWriter<W>,
+            WriterOptions,
+            u16,
+            Option<Box<dyn Chunker>>,
+        ) -> Result<OutWriter<W>, CoreError>
+        + 'a,
+>;
+
+/// The opener of a new archive.
+pub(crate) fn new_archive<W: Write>() -> Opener<'static, W> {
+    Box::new(|out, wopts, minor, chunker| {
+        Ok(match chunker {
+            Some(c) => Writer::new_revision_with_chunker(out, wopts, minor, c)?,
+            None => Writer::new_revision(out, wopts, minor)?,
+        })
+    })
+}
+
 fn open_writer<W: Write>(
     out: W,
     mut wopts: WriterOptions,
     sync: Option<SyncFn>,
     version_minor: u16,
     fold: Option<&dyn FoldStage>,
+    opener: Opener<'_, W>,
 ) -> Result<OutWriter<W>, CoreError> {
     let out = BufWriter::with_capacity(OUT_BUF, out);
-    let mut writer = match fold {
-        Some(f) => {
-            let chunker = f.install(&mut wopts)?;
-            Writer::new_revision_with_chunker(out, wopts, version_minor, chunker)?
-        }
-        None => Writer::new_revision(out, wopts, version_minor)?,
+    let chunker = match fold {
+        Some(f) => Some(f.install(&mut wopts)?),
+        None => None,
     };
+    let mut writer = opener(out, wopts, version_minor, chunker)?;
     if let Some(sync) = sync {
         writer = writer.with_sync(sync);
     }
