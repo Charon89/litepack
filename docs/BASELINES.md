@@ -161,6 +161,13 @@ to extract.
 the default, which keeps directory locality). The two rows are measured in one run on the same
 classes; the difference is what the extension order buys.
 
+`fast-encrypted` (`--fast --password lpk-bench-password`, the same credential on extraction) is
+the sealed row of the encryption task (E2-12): the same as `fast` with the archive encrypted
+(AES-256-GCM, the format's default Argon2id parameters). The password is a fixed benchmark
+credential written in the catalogue, not a secret. Measured in the same run as `fast`, the
+difference is the cost of sealing: the key derivation once per archive, a nonce and a tag per
+sealed frame, and the AEAD over the bytes.
+
 `lpk x --threads N` (E2-19) takes N as the extraction's total thread budget: decode workers plus
 file writers never exceed N (the thread that only hands decoded blocks on is not counted). N = 1
 decodes and writes on one thread; from N = 2 on, `clamp(N / 4, 1, 4)` threads write files and the
