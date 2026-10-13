@@ -12,6 +12,7 @@
 //! Blocks are encoded one after the other; parallel encoding needs the writer to hold blocks in
 //! flight and comes with a later task.
 
+use std::collections::HashSet;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -29,7 +30,7 @@ use crate::fast::stored_by_class;
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::fold::ordering::order_cluster;
 use crate::fold::{Dedup, FoldStage};
-use crate::ingest::{validate_input, walk, IngestOptions, Input};
+use crate::ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
 use crate::store::{create_new_and_run, Counting, StoreOptions, SyncFn, OUT_BUF};
@@ -237,6 +238,83 @@ impl Pipeline {
             })
         });
         self.run_inputs(inputs, out, None, prepared, t.elapsed(), opener)
+    }
+
+    /// Like [`append`](Self::append), on the archive at `archive_path` in place, with the
+    /// guarantees of [`run_file`](Self::run_file): the archive is left out of its own walk
+    /// (by file identity, when `root` holds it), the data is synced before the new trailer,
+    /// and a failed append truncates the file back to its original length, so the archive
+    /// stays at the generation it had. The new generation is a snapshot of `root` (spec
+    /// section 15): every path of the old entry table that `root` no longer has is deleted
+    /// from the entry table (its chunks stay), the rest is replaced or kept. An encrypted
+    /// archive needs its `credentials` (a keyless open is refused with
+    /// `AppendNeedsCredentials`, a wrong password with `WrongKey`, both before the file is
+    /// opened for writing). Invalid options are refused before anything is touched.
+    pub fn append_file(
+        self,
+        root: &Path,
+        archive_path: &Path,
+        credentials: Option<&Credentials>,
+    ) -> Result<RunSummary, CoreError> {
+        let prepared = self.prepare()?;
+        let start = Instant::now();
+        let io = |e| CoreError::io(archive_path, e);
+        let mut existing = Archive::open_with(
+            std::fs::File::open(archive_path).map_err(io)?,
+            &lpk_format::Resources::default(),
+            credentials,
+        )?;
+        if existing.is_keyless() {
+            return Err(FormatError::AppendNeedsCredentials.into());
+        }
+        let old_paths: Vec<String> = existing
+            .entry_table()?
+            .table()?
+            .iter()
+            .map(|e| e.map(|e| e.path))
+            .collect::<Result<_, _>>()?;
+        let original_len = std::fs::metadata(archive_path).map_err(io)?.len();
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(archive_path)
+            .map_err(io)?;
+        let own_id = file_identity(&file).map_err(io)?;
+        let sync_file = file.try_clone().map_err(io)?;
+        let restore = file.try_clone().map_err(io)?;
+        let r = (|| {
+            let mut inputs = walk(root, &self.classify.ingest)?;
+            inputs.retain(|i| i.identity != Some(own_id));
+            let kept: HashSet<&str> = inputs.iter().map(|i| i.path.as_str()).collect();
+            let deleted: Vec<String> = old_paths
+                .iter()
+                .filter(|p| !kept.contains(p.as_str()))
+                .cloned()
+                .collect();
+            let opener: Opener<'_, std::fs::File> = Box::new(move |out, wopts, minor, chunker| {
+                if existing.header().version.minor < minor {
+                    return Err(FormatError::BadOptions {
+                        reason: "version_minor",
+                    }
+                    .into());
+                }
+                let mut w = match chunker {
+                    Some(c) => Writer::append_with_chunker(existing, out, wopts, credentials, c)?,
+                    None => Writer::append(existing, out, wopts, credentials)?,
+                };
+                for p in &deleted {
+                    w.delete_path(p)?;
+                }
+                Ok(w)
+            });
+            let sync: SyncFn = Box::new(move || sync_file.sync_data());
+            self.run_inputs(inputs, file, Some(sync), prepared, start.elapsed(), opener)
+        })();
+        if r.is_err() {
+            // The writer (and its buffer) is gone by now: whatever reached the file past
+            // the old trailer is cut off.
+            let _ = restore.set_len(original_len);
+        }
+        r
     }
 
     /// Like [`run`](Self::run), writing to a new file at `archive_path` with the guarantees of

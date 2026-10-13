@@ -786,3 +786,281 @@ fn an_archive_without_recovery_checks_clean_and_an_encrypted_one_checks_keyless(
     assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
     assert_eq!(tree_hash(&out), tree_hash(src.path()));
 }
+
+/// Three versions of a tree as sibling directories `v1`, `v2`, `v3`: a file deleted, a file
+/// changed in its tail, a file added, then another deleted.
+fn make_versions(root: &Path) {
+    let v1 = root.join("v1");
+    make_tree(&v1);
+    fs::write(v1.join("gone.bin"), random(30_000)).unwrap();
+    let v2 = root.join("v2");
+    make_tree(&v2);
+    let mut r = random(150_000);
+    r.truncate(120_000);
+    r.extend_from_slice(&prose(5, 30_000));
+    fs::write(v2.join("docs/deep/r.bin"), r).unwrap();
+    fs::write(v2.join("added.txt"), prose(6, 40_000)).unwrap();
+    let v3 = root.join("v3");
+    make_tree(&v3);
+    fs::write(
+        v3.join("docs/deep/r.bin"),
+        fs::read(v2.join("docs/deep/r.bin")).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(v3.join("docs/b.md")).unwrap();
+}
+
+#[test]
+fn append_rollback_and_info_through_the_binary() {
+    let src = tempfile::tempdir().unwrap();
+    make_versions(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("j.lpk");
+    let archive = arch.to_str().unwrap();
+    let v = |n: &str| src.path().join(n);
+    let a = run(&["a", archive, v("v1").to_str().unwrap()]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let len0 = fs::metadata(&arch).unwrap().len();
+    // Append v2 (-v reports the generation and the cross-generation reuse).
+    let p = run(&["append", archive, v("v2").to_str().unwrap(), "-v"]);
+    assert_eq!(p.status.code(), Some(0), "{}", text(&p.stderr));
+    let e = text(&p.stderr);
+    assert!(e.contains("generation 1,"), "{e}");
+    let reused = e
+        .lines()
+        .find(|l| l.starts_with("dedup: "))
+        .and_then(|l| {
+            l.split(", ")
+                .find_map(|s| s.strip_suffix(" reused from an earlier generation)"))
+        })
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("no reuse count in {e}"));
+    assert!(reused > 0, "{e}");
+    let len1 = fs::metadata(&arch).unwrap().len();
+    assert!(len1 > len0);
+    // Append v3; the tiers' flags are accepted; an impossible combination is a usage error.
+    let bad = run(&[
+        "append",
+        archive,
+        v("v3").to_str().unwrap(),
+        "--fast",
+        "--store",
+    ]);
+    assert_eq!(bad.status.code(), Some(1));
+    assert_eq!(fs::metadata(&arch).unwrap().len(), len1);
+    let p = run(&["append", archive, v("v3").to_str().unwrap(), "--balanced"]);
+    assert_eq!(p.status.code(), Some(0), "{}", text(&p.stderr));
+    let len2 = fs::metadata(&arch).unwrap().len();
+    // info lists the generations.
+    let i = run(&["info", archive]);
+    assert_eq!(i.status.code(), Some(0), "{}", text(&i.stderr));
+    let o = text(&i.stdout);
+    assert!(o.contains("generation: 2\n"), "{o}");
+    assert!(o.contains("chain length: 3\n"), "{o}");
+    // The latest generation is v3's snapshot: nothing of v1 or v2 that v3 lacks.
+    let out = work.path().join("x3");
+    let x = run(&["x", archive, out.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(&v("v3")));
+    assert!(!out.join("gone.bin").exists() && !out.join("added.txt").exists());
+    // t verifies the whole archive.
+    let t = run(&["t", archive]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    // Rollback above the latest is refused; to 1 reproduces v2; to 0 reproduces v1.
+    let r = run(&["rollback", archive, "3"]);
+    assert_eq!(r.status.code(), Some(2));
+    assert_eq!(fs::metadata(&arch).unwrap().len(), len2);
+    let r = run(&["rollback", archive, "1"]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert!(text(&r.stdout).starts_with("rolled back to generation 1:"));
+    assert_eq!(fs::metadata(&arch).unwrap().len(), len1);
+    let out = work.path().join("x2");
+    let x = run(&["x", archive, out.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(&v("v2")));
+    let r = run(&["rollback", archive, "0"]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert_eq!(fs::metadata(&arch).unwrap().len(), len0);
+    let out = work.path().join("x1");
+    let x = run(&["x", archive, out.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(&v("v1")));
+    let i = run(&["info", archive]);
+    assert!(
+        text(&i.stdout).contains("generation: 0\n"),
+        "{}",
+        text(&i.stdout)
+    );
+    // A missing archive or directory is a refused operation; the archive is untouched.
+    let gone = work.path().join("nope");
+    let r = run(&["append", gone.to_str().unwrap(), v("v1").to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(2));
+    let r = run(&["append", archive, gone.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(2));
+    assert_eq!(fs::metadata(&arch).unwrap().len(), len0);
+}
+
+#[test]
+fn a_half_written_append_is_recovered_by_rollback_through_the_binary() {
+    let src = tempfile::tempdir().unwrap();
+    make_versions(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("j.lpk");
+    let archive = arch.to_str().unwrap();
+    let a = run(&["a", archive, src.path().join("v1").to_str().unwrap()]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let len0 = fs::metadata(&arch).unwrap().len();
+    let p = run(&["append", archive, src.path().join("v2").to_str().unwrap()]);
+    assert_eq!(p.status.code(), Some(0), "{}", text(&p.stderr));
+    let len1 = fs::metadata(&arch).unwrap().len();
+    // The second generation cut short, between the old trailer and the new one.
+    let f = fs::OpenOptions::new().write(true).open(&arch).unwrap();
+    f.set_len(len0 + (len1 - len0) / 2).unwrap();
+    drop(f);
+    let t = run(&["t", archive]);
+    assert_eq!(t.status.code(), Some(2));
+    let x = run(&["x", archive, work.path().join("none").to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(2));
+    // Rollback to the generation the file still holds whole.
+    let r = run(&["rollback", archive, "0"]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert_eq!(fs::metadata(&arch).unwrap().len(), len0);
+    let t = run(&["t", archive]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    let out = work.path().join("x1");
+    let x = run(&["x", archive, out.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(&src.path().join("v1")));
+    // And it appends again.
+    let p = run(&["append", archive, src.path().join("v2").to_str().unwrap()]);
+    assert_eq!(p.status.code(), Some(0), "{}", text(&p.stderr));
+    let i = run(&["info", archive]);
+    assert!(
+        text(&i.stdout).contains("generation: 1\n"),
+        "{}",
+        text(&i.stdout)
+    );
+}
+
+#[test]
+fn an_appended_generation_gets_its_own_recovery_frames() {
+    let src = tempfile::tempdir().unwrap();
+    make_versions(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("j.lpk");
+    let archive = arch.to_str().unwrap();
+    let a = run(&[
+        "a",
+        archive,
+        src.path().join("v1").to_str().unwrap(),
+        "--recovery",
+        "5",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let c = run(&["check", archive]);
+    assert_eq!(c.status.code(), Some(0), "{}", text(&c.stderr));
+    assert!(
+        text(&c.stdout).starts_with("recovery frames: 1,"),
+        "{}",
+        text(&c.stdout)
+    );
+    // The same bounds as `a`.
+    let bad = run(&[
+        "append",
+        archive,
+        src.path().join("v2").to_str().unwrap(),
+        "--recovery",
+        "21",
+    ]);
+    assert_eq!(bad.status.code(), Some(1));
+    let p = run(&[
+        "append",
+        archive,
+        src.path().join("v2").to_str().unwrap(),
+        "--recovery",
+        "5",
+        "-v",
+    ]);
+    assert_eq!(p.status.code(), Some(0), "{}", text(&p.stderr));
+    assert!(
+        text(&p.stderr).contains("recovery: 5 percent"),
+        "{}",
+        text(&p.stderr)
+    );
+    // Both generations are covered: one frame each.
+    let c = run(&["check", archive]);
+    assert_eq!(c.status.code(), Some(0), "{}", text(&c.stderr));
+    assert!(
+        text(&c.stdout).starts_with("recovery frames: 2,"),
+        "{}",
+        text(&c.stdout)
+    );
+    let t = run(&["t", archive]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    let i = run(&["info", archive]);
+    assert!(
+        text(&i.stdout).contains("recovery frames: 2\n"),
+        "{}",
+        text(&i.stdout)
+    );
+}
+
+#[test]
+fn an_encrypted_archive_appends_with_its_password_only() {
+    let src = tempfile::tempdir().unwrap();
+    make_versions(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("j.lpk");
+    let archive = arch.to_str().unwrap();
+    let v2 = src.path().join("v2");
+    let a = run(&[
+        "a",
+        archive,
+        src.path().join("v1").to_str().unwrap(),
+        "--password",
+        "pw",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let before = fs::read(&arch).unwrap();
+    // Keyless and wrong password: refused, the archive untouched, the password never echoed.
+    let p = run(&["append", archive, v2.to_str().unwrap()]);
+    assert_eq!(p.status.code(), Some(2), "{}", text(&p.stderr));
+    assert_eq!(fs::read(&arch).unwrap(), before);
+    let p = run(&[
+        "append",
+        archive,
+        v2.to_str().unwrap(),
+        "--password",
+        "not-the-secret",
+    ]);
+    assert_eq!(p.status.code(), Some(2), "{}", text(&p.stderr));
+    assert!(
+        !text(&p.stderr).contains("not-the-secret"),
+        "{}",
+        text(&p.stderr)
+    );
+    assert_eq!(fs::read(&arch).unwrap(), before);
+    // The right password: the new generation is sealed; info and rollback need no key.
+    let p = run(&["append", archive, v2.to_str().unwrap(), "--password", "pw"]);
+    assert_eq!(p.status.code(), Some(0), "{}", text(&p.stderr));
+    let i = run(&["info", archive]);
+    assert_eq!(i.status.code(), Some(0), "{}", text(&i.stderr));
+    let o = text(&i.stdout);
+    assert!(
+        o.contains("encrypted: yes\n") && o.contains("generation: 1\n"),
+        "{o}"
+    );
+    assert!(o.contains("index: sealed"), "{o}");
+    let i = run(&["info", archive, "--password", "pw"]);
+    assert!(text(&i.stdout).contains("chunks: "), "{}", text(&i.stdout));
+    let out = work.path().join("x2");
+    let x = run(&["x", archive, out.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(2));
+    assert!(!out.exists());
+    let x = run(&["x", archive, out.to_str().unwrap(), "--password", "pw"]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(&v2));
+    let r = run(&["rollback", archive, "0", "--password", "pw"]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert_eq!(fs::read(&arch).unwrap(), before);
+}
