@@ -2,12 +2,13 @@
 #![allow(clippy::unwrap_used)]
 
 use std::fs;
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
 
 use lpk_core::{DictionaryKind, DictionaryPolicy, FastOptions, ProvidedDictionaries};
-use lpk_format::{Archive, Resources};
+use lpk_format::{Archive, Frame, ReadFrame, ReadLimits, RecoveryFrame, Resources};
 
 fn lpk(args: &[&std::ffi::OsStr]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_lpk"))
@@ -571,8 +572,12 @@ fn a_wrong_or_missing_password_leaves_no_output_and_is_never_echoed() {
         src.path().to_str().unwrap(),
         "--password",
         "hunter2",
+        "-v",
     ]);
     assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let msg = text(&a.stderr);
+    assert!(msg.contains("encrypted: AES-256-GCM\n"), "{msg}");
+    assert!(!msg.contains("hunter"), "{msg}");
     let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
     assert!(archive.is_encrypted() && !archive.is_listable());
     assert_eq!(archive.suite(), Some(lpk_format::Suite::AesGcm));
@@ -678,8 +683,17 @@ fn recovery_records_repair_a_damaged_archive() {
         let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
         let frames = archive.recovery_frames();
         assert_eq!(frames.len(), 1, "{frames:?}");
-        // The one group covers everything from the header to its frame.
-        (32u64, frames[0].offset - 32)
+        let mut r = std::io::Cursor::new(&good);
+        r.seek(SeekFrom::Start(frames[0].offset)).unwrap();
+        let limits = ReadLimits {
+            max_payload: Resources::default().max_frame_payload,
+        };
+        let frame = match Frame::read(&mut r, &limits).unwrap().unwrap() {
+            ReadFrame::Known(f) => f,
+            ReadFrame::Unknown { kind, .. } => panic!("unknown frame kind {kind}"),
+        };
+        let f = RecoveryFrame::parse(&frame.payload, archive.trailer().index_offset).unwrap();
+        (f.cover_offset, f.cover_len)
     };
     assert!(cover_len > 150_000, "{cover_len}");
     // Overwrite a run of bytes in the middle of the covered data (one shard of 64 KiB).

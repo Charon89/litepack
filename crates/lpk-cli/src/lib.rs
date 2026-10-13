@@ -67,7 +67,7 @@ enum Command {
 
 /// The key material of an encrypted archive; `a` seals with it, every other command opens
 /// with it. Either a password (one of the two forms) or a keyfile or both.
-#[derive(Debug, Args)]
+#[derive(Args)]
 #[group(id = "credential", multiple = true)]
 struct CredentialArgs {
     /// The password. Visible in the process list and the shell history; prefer
@@ -80,6 +80,17 @@ struct CredentialArgs {
     /// A keyfile as a second factor (alone: the password is empty).
     #[arg(long, value_name = "PATH")]
     keyfile: Option<PathBuf>,
+}
+
+/// The password is redacted (as `lpk_format::Credentials` does); the two paths are shown.
+impl std::fmt::Debug for CredentialArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialArgs")
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("password_file", &self.password_file)
+            .field("keyfile", &self.keyfile)
+            .finish()
+    }
 }
 
 impl CredentialArgs {
@@ -304,6 +315,8 @@ fn core_exit(e: &CoreError) -> i32 {
 }
 
 fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
+    // Decided before `take` moves the password out of the arguments.
+    let encrypted = a.credentials.given();
     let credentials = match a.credentials.take() {
         Ok(c) => c,
         Err(e) => {
@@ -358,7 +371,7 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
     match pipeline.run_file(&a.input, &a.archive) {
         Ok(s) => {
             if a.verbose {
-                report(err, a, &s);
+                report(err, a, encrypted, &s);
             }
             EXIT_OK
         }
@@ -369,7 +382,7 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
     }
 }
 
-fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
+fn report(err: &mut dyn Write, a: &AddArgs, encrypted: bool, s: &RunSummary) {
     let t = &s.timings;
     let _ = writeln!(
         err,
@@ -438,7 +451,7 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
             );
         }
     }
-    if a.credentials.given() {
+    if encrypted {
         let _ = writeln!(
             err,
             "encrypted: {}{}",
