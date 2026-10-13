@@ -65,6 +65,22 @@ pub enum CoreError {
         /// The root.
         path: PathBuf,
     },
+    /// An append failed and the archive could not be cut back to its previous generation: the
+    /// file holds a cut generation past `kept` bytes, which a rollback recovers.
+    #[error(
+        "{}: append failed ({cause}); the file could not be cut back to {kept} bytes ({truncation}) and holds a cut generation that rollback recovers",
+        path.display()
+    )]
+    AppendLeftCut {
+        /// The archive.
+        path: PathBuf,
+        /// Why the append failed.
+        cause: Box<CoreError>,
+        /// The length of the previous generation, where the file should have been cut.
+        kept: u64,
+        /// Why the truncation failed.
+        truncation: std::io::Error,
+    },
 }
 
 impl CoreError {

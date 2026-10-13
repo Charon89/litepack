@@ -417,18 +417,15 @@ fn build_pipeline(a: &TierArgs) -> Pipeline {
     pipeline
 }
 
-/// What `a` sealed with, for the `-v` report.
-#[derive(Clone, Copy)]
-struct Sealing {
-    suite: Suite,
-    listable: bool,
-}
-
 fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
-    // Decided before `take` moves the password out of the arguments.
-    let sealing = a.credentials.given().then_some(Sealing {
-        suite: a.suite.map_or(DEFAULT_SUITE, Suite::from),
-        listable: a.listable,
+    // Decided before `take` moves the password out of the arguments: what the `-v` report
+    // says the archive is sealed with.
+    let sealing = a.credentials.given().then(|| {
+        format!(
+            "{}{}",
+            a.suite.map_or(DEFAULT_SUITE, Suite::from).name(),
+            if a.listable { ", listable" } else { "" }
+        )
     });
     let credentials = match a.credentials.take() {
         Ok(c) => c,
@@ -462,6 +459,11 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
 }
 
 fn append(a: &mut AppendArgs, err: &mut dyn Write) -> i32 {
+    // The new generation is sealed with the archive's own key (the suite is the archive's).
+    let sealing = a
+        .credentials
+        .given()
+        .then(|| "the archive's key".to_string());
     let credentials = match a.credentials.take() {
         Ok(c) => c,
         Err(e) => {
@@ -474,7 +476,7 @@ fn append(a: &mut AppendArgs, err: &mut dyn Write) -> i32 {
     match pipeline.append_file(&a.input, &a.archive, credentials.as_ref()) {
         Ok(s) => {
             if a.verbose {
-                report(err, &a.archive, &a.tier, None, a.recovery, &s);
+                report(err, &a.archive, &a.tier, sealing, a.recovery, &s);
             }
             EXIT_OK
         }
@@ -489,7 +491,7 @@ fn report(
     err: &mut dyn Write,
     archive: &Path,
     a: &TierArgs,
-    sealing: Option<Sealing>,
+    sealing: Option<String>,
     recovery: u8,
     s: &RunSummary,
 ) {
@@ -563,12 +565,7 @@ fn report(
         }
     }
     if let Some(sealing) = sealing {
-        let _ = writeln!(
-            err,
-            "encrypted: {}{}",
-            sealing.suite.name(),
-            if sealing.listable { ", listable" } else { "" }
-        );
+        let _ = writeln!(err, "encrypted: {sealing}");
     }
     if recovery > 0 {
         let _ = writeln!(
@@ -668,7 +665,7 @@ fn reference(
     sub: &str,
     priors: &[PathBuf],
     credentials: &CredentialArgs,
-    paths: &[&Path],
+    positional: &[OsString],
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
@@ -681,7 +678,7 @@ fn reference(
     args.extend(credentials.reference_args());
     args.push(sub.into());
     args.push("--".into());
-    args.extend(paths.iter().map(OsString::from));
+    args.extend(positional.iter().cloned());
     match lpk_format::cli::run_with(
         args,
         out,
@@ -714,13 +711,20 @@ where
     match cli.command {
         Command::Add(mut a) => add(&mut a, err),
         Command::Extract(mut x) => extract(&mut x, out, err),
-        Command::Test(t) => reference("verify", &t.priors, &t.credentials, &[&t.archive], out, err),
-        Command::Check(c) => reference("check", &[], &c.credentials, &[&c.archive], out, err),
+        Command::Test(t) => reference(
+            "verify",
+            &t.priors,
+            &t.credentials,
+            &[t.archive.into()],
+            out,
+            err,
+        ),
+        Command::Check(c) => reference("check", &[], &c.credentials, &[c.archive.into()], out, err),
         Command::Repair(r) => reference(
             "repair",
             &[],
             &r.credentials,
-            &[&r.archive, &r.out],
+            &[r.archive.into(), r.out.into()],
             out,
             err,
         ),
@@ -729,10 +733,17 @@ where
             "rollback",
             &[],
             &r.credentials,
-            &[&r.archive, Path::new(&r.generation.to_string())],
+            &[r.archive.into(), r.generation.to_string().into()],
             out,
             err,
         ),
-        Command::Info(i) => reference("info", &i.priors, &i.credentials, &[&i.archive], out, err),
+        Command::Info(i) => reference(
+            "info",
+            &i.priors,
+            &i.credentials,
+            &[i.archive.into()],
+            out,
+            err,
+        ),
     }
 }
