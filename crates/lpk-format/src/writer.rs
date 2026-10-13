@@ -158,8 +158,10 @@ pub struct WriterOptions {
     /// Reconstruction records, written as one `Records` frame before the
     /// index (none: no frame). A record's id is its position; each block's
     /// graph is checked when the block closes and may only name ids below
-    /// `records.len()` (in an append with no new records, below the existing
-    /// record count).
+    /// `records.len()` plus the records [`Writer::add_record`] added. In an
+    /// append, empty means the old records (they are loaded, and a record
+    /// added later follows them); non-empty must restate every old record at
+    /// its position and is written as the new frame.
     pub records: Vec<Record>,
     /// Reed-Solomon recovery over the body (spec section 13): `percent` 0
     /// (the default) writes no recovery frame.
@@ -271,6 +273,28 @@ struct Base {
     by_hash: HashMap<[u8; 32], u64>,
     entries: Vec<Entry>,
     records: Option<FrameLocation>,
+    /// The old archive, kept open to read an old block's graph when a record
+    /// part would reference one of its chunks (spec section 12, nesting).
+    graphs: Box<dyn OldGraphs>,
+    /// Old block index to whether its graph names a reconstruction primitive:
+    /// one entry per old block read, read once.
+    recon: HashMap<usize, bool>,
+}
+
+/// Reads the graph of a block of the archive an append extends, the way the
+/// reader opens a block (its frame hash-checked, unsealed with the archive key).
+trait OldGraphs {
+    /// Whether the graph of the `ChunkData` frame at `at` names a
+    /// reconstruction primitive.
+    fn uses_records(&mut self, at: FrameLocation) -> Result<bool, FormatError>;
+}
+
+impl<R: Read + Seek> OldGraphs for Archive<R> {
+    fn uses_records(&mut self, at: FrameLocation) -> Result<bool, FormatError> {
+        let frame = self.read_frame_at(at, FrameKind::ChunkData)?;
+        let (graph, _) = Graph::parse(&frame.payload)?;
+        Ok(graph.uses_records())
+    }
 }
 
 /// Builds an archive in one pass over a stream of entries.
@@ -285,6 +309,10 @@ pub struct Writer<W: Write> {
     priors: BTreeSet<[u8; 32]>,
     /// Records the archive will have: a block's graph may name only those.
     record_count: u64,
+    /// True when `finish` writes a `Records` frame from `options.records`:
+    /// records given in the options, or added by `add_record`. An append
+    /// with neither keeps the old frame's location in its index.
+    write_records: bool,
     /// Paths of the entries added so far, to refuse one twice (a second copy
     /// of the paths: a known cost for the memory task).
     seen: HashSet<String>,
@@ -515,6 +543,7 @@ impl<W: Write> Writer<W> {
         }
         let spool = check_options(&options)?;
         let record_count = options.records.len() as u64;
+        let write_records = record_count > 0;
         let mut flags = HeaderFlags::EMPTY;
         let mut sealer = None;
         let mut slot = None;
@@ -556,6 +585,7 @@ impl<W: Write> Writer<W> {
             blocks: Vec::new(),
             priors: BTreeSet::new(),
             record_count,
+            write_records,
             seen: HashSet::new(),
             pending: Vec::new(),
             pending_chunks: 0,
@@ -617,13 +647,24 @@ impl<W: Write> Writer<W> {
     /// against each other. `options.archive_id` and `options.seal` are ignored
     /// (the archive's own are kept); an encrypted archive needs `credentials`
     /// (and `existing` opened with them: [`FormatError::AppendNeedsCredentials`]).
-    /// `options.records` replaces the records frame when non-empty (it must keep
-    /// the old records at their positions); empty keeps the old frame.
+    /// Records: empty `options.records` loads the old records, so a record
+    /// [`Writer::add_record`] adds follows them; the new `Records` frame
+    /// (written only when a record was added) restates the old records at
+    /// their positions, as the spec requires. Non-empty `options.records`
+    /// must restate every old record unchanged (`BadRecord`, `changed by an
+    /// append`; `RecordOutOfRange` when one is missing) and is written as the
+    /// new frame. An append that adds no record keeps the old frame's location.
     ///
     /// Memory: the old chunk table's hashes (`HashMap`, 32 bytes of key and 8 of
-    /// value per chunk), its records (`ChunkRecord`, 40 bytes per chunk) and
-    /// the old entries are held until `finish`.
-    pub fn append<R: Read + Seek>(
+    /// value per chunk), its records (`ChunkRecord`, 40 bytes per chunk), the
+    /// old entries and the old `Records` table (parsed) are held until
+    /// `finish`. `existing` stays open: a record part that would reference an
+    /// old chunk, or a closing block whose graph names a record with an old
+    /// chunk, reads that chunk's old block frame to learn whether the block's
+    /// graph names a reconstruction primitive (spec section 12); the answer is
+    /// cached per old block (`HashMap`, one entry per block read), so no old
+    /// block is read twice and none is read when no record is involved.
+    pub fn append<R: Read + Seek + 'static>(
         existing: Archive<R>,
         out: W,
         options: WriterOptions,
@@ -640,7 +681,7 @@ impl<W: Write> Writer<W> {
     }
 
     /// [`Writer::append`] with another chunker.
-    pub fn append_with_chunker<R: Read + Seek>(
+    pub fn append_with_chunker<R: Read + Seek + 'static>(
         existing: Archive<R>,
         out: W,
         options: WriterOptions,
@@ -660,7 +701,7 @@ impl<W: Write> Writer<W> {
     /// [`Writer::append_with_chunker`] drawing the new generation's salt from
     /// `rng` (use an operating system RNG for real archives; a seeded one makes
     /// the output reproducible).
-    pub fn append_with_chunker_and_rng<R: Read + Seek>(
+    pub fn append_with_chunker_and_rng<R: Read + Seek + 'static>(
         mut existing: Archive<R>,
         out: W,
         mut options: WriterOptions,
@@ -723,11 +764,17 @@ impl<W: Write> Writer<W> {
                 }
             }
         }
-        let record_count = if options.records.is_empty() {
-            existing.record_count()?
-        } else {
-            options.records.len() as u64
-        };
+        // The new frame is written only for records given here or added later;
+        // without either the index keeps the old frame's location.
+        let write_records = !options.records.is_empty();
+        if options.records.is_empty() {
+            // Load the old records: a record added later follows them, and the
+            // frame written then restates them at their positions.
+            if let Some(old) = existing.records()? {
+                options.records = old.table()?.iter().collect::<Result<Vec<_>, _>>()?;
+            }
+        }
+        let record_count = options.records.len() as u64;
         let spool = check_options(&options)?;
         let end = existing.raw_reader().seek(SeekFrom::End(0))?;
         let trailer_offset = end
@@ -778,13 +825,24 @@ impl<W: Write> Writer<W> {
             .envelope
             .decode_memory
             .saturating_sub(index.envelope.max_block_plain);
+        let old_records = index.records;
+        let blocks = index.blocks.clone();
+        let priors = index.priors.iter().copied().collect();
+        let recovery_locs = index.recovery.clone();
+        let graph_res = GraphResources {
+            window: index.envelope.max_window,
+            bwt_block: index.envelope.max_bwt_block,
+        };
+        let listable = existing.is_listable();
         let base = Base {
             generation,
             trailer_offset,
             chunks: records.len() as u64,
             by_hash,
             entries,
-            records: index.records,
+            records: old_records,
+            graphs: Box::new(existing),
+            recon: HashMap::new(),
         };
         let w = Writer {
             out: Tee { inner: out, spool },
@@ -792,30 +850,28 @@ impl<W: Write> Writer<W> {
             pos: end,
             entries: Vec::new(),
             records,
-            blocks: index.blocks.clone(),
-            priors: index.priors.iter().copied().collect(),
+            blocks,
+            priors,
             record_count,
+            write_records,
             seen: HashSet::new(),
             pending: Vec::new(),
             pending_chunks: 0,
             failed: None,
             bad_chunk: None,
-            recovery_locs: index.recovery.clone(),
+            recovery_locs,
             cover_start: end,
             sealer,
             seq,
             last_hash: [0; 32],
-            listable: existing.is_listable(),
+            listable,
             base: Some(base),
             deleted: BTreeSet::new(),
             reused: 0,
             own: HashMap::new(),
             deduped_chunks: 0,
             deduped_bytes: 0,
-            graph_res: GraphResources {
-                window: index.envelope.max_window,
-                bwt_block: index.envelope.max_bwt_block,
-            },
+            graph_res,
             salt,
             generations,
             sync: None,
@@ -1126,12 +1182,12 @@ impl<W: Write> Writer<W> {
     }
 
     /// The reader's rules for the chunks of the records a closing block's
-    /// graph names (spec section 12), for the records this writer holds: every
-    /// chunk lies in an earlier block (`BadRecord`, `chunk order`) whose graph
-    /// names no reconstruction primitive (`BadRecord`, `nested record`). An
-    /// append that does not restate the old records cannot see their chunk
-    /// lists and leaves them to the reader.
-    fn check_record_chunks(&self, graph: &Graph, first_chunk: u64) -> Result<(), FormatError> {
+    /// graph names (spec section 12), for the records this writer holds (in an
+    /// append, the old records included): every chunk lies in an earlier
+    /// block (`BadRecord`, `chunk order`) whose graph names no reconstruction
+    /// primitive (`BadRecord`, `nested record`). For a chunk of an old
+    /// generation the old block's graph is read (once per block, cached).
+    fn check_record_chunks(&mut self, graph: &Graph, first_chunk: u64) -> Result<(), FormatError> {
         #[cfg(test)]
         if self.unchecked_records {
             return Ok(());
@@ -1146,21 +1202,25 @@ impl<W: Write> Writer<W> {
             else {
                 continue;
             };
-            for (chunks, _) in r.chunk_groups() {
-                for &c in chunks {
-                    if c >= first_chunk {
-                        return Err(FormatError::BadRecord {
-                            record,
-                            reason: "chunk order",
-                        });
-                    }
-                    let i = self.recon_blocks.partition_point(|&(f, _)| f <= c);
-                    if i > 0 && c - self.recon_blocks[i - 1].0 < self.recon_blocks[i - 1].1 {
-                        return Err(FormatError::BadRecord {
-                            record,
-                            reason: "nested record",
-                        });
-                    }
+            // The record's chunk lists, copied: the block lookup may read an
+            // old block through `self`.
+            let chunks: Vec<u64> = r
+                .chunk_groups()
+                .iter()
+                .flat_map(|(c, _)| c.iter().copied())
+                .collect();
+            for c in chunks {
+                if c >= first_chunk {
+                    return Err(FormatError::BadRecord {
+                        record,
+                        reason: "chunk order",
+                    });
+                }
+                if self.in_recon_block(c)? {
+                    return Err(FormatError::BadRecord {
+                        record,
+                        reason: "nested record",
+                    });
                 }
             }
         }
@@ -1185,44 +1245,75 @@ impl<W: Write> Writer<W> {
     /// The index of a chunk this write may reference instead of storing:
     /// `(index, from_old_table)`. A chunk of a block whose graph names a
     /// reconstruction primitive is skipped when `allow_recon` is false (a
-    /// record's chunks may not lie in such a block, spec section 12).
-    ///
-    /// The old-table branch cannot tell whether an old generation's chunk lies
-    /// in a reconstruction block. An append that writes records could therefore
-    /// reference such a chunk from a record, which the writer's check at block
-    /// close cannot see today (it sees only blocks this writer closed). The
-    /// pipeline never appends with records (`add_record` is refused in an
-    /// append, and nothing else adds records to one), so that case is
-    /// unreachable from it.
-    fn find_known(&self, hash: &[u8; 32], len: u64, allow_recon: bool) -> Option<(u64, bool)> {
-        let same_len = |i: u64| {
+    /// record's chunks may not lie in such a block, spec section 12): for a
+    /// chunk of the old table that means reading the old block's graph (once
+    /// per block), and a chunk found there is stored anew instead. Errors:
+    /// the old block frame could not be read or is damaged.
+    fn find_known(
+        &mut self,
+        hash: &[u8; 32],
+        len: u64,
+        allow_recon: bool,
+    ) -> Result<Option<(u64, bool)>, FormatError> {
+        let same_len = |records: &[ChunkRecord], i: u64| {
             usize::try_from(i)
                 .ok()
-                .and_then(|i| self.records.get(i))
+                .and_then(|i| records.get(i))
                 .is_some_and(|r| r.plain_len == len)
         };
-        if let Some(base) = &self.base {
-            if let Some(&old) = base.by_hash.get(hash) {
-                if same_len(old) {
-                    return Some((old, true));
-                }
+        let old = self
+            .base
+            .as_ref()
+            .and_then(|b| b.by_hash.get(hash).copied());
+        if let Some(old) = old {
+            if same_len(&self.records, old) && (allow_recon || !self.in_recon_block(old)?) {
+                return Ok(Some((old, true)));
             }
         }
         if self.options.dedup {
             if let Some(&i) = self.own.get(hash) {
-                if same_len(i) && (allow_recon || !self.in_recon_block(i)) {
-                    return Some((i, false));
+                if same_len(&self.records, i) && (allow_recon || !self.in_recon_block(i)?) {
+                    return Ok(Some((i, false)));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
-    /// Whether chunk `c` lies in a block this writer closed whose graph names a
-    /// reconstruction primitive.
-    fn in_recon_block(&self, c: u64) -> bool {
+    /// Whether chunk `c` lies in a block whose graph names a reconstruction
+    /// primitive: a block this writer closed is known; a block of an old
+    /// generation (an append) has its graph read from the archive the first
+    /// time one of its chunks is asked about, the answer cached per block.
+    fn in_recon_block(&mut self, c: u64) -> Result<bool, FormatError> {
         let i = self.recon_blocks.partition_point(|&(f, _)| f <= c);
-        i > 0 && c - self.recon_blocks[i - 1].0 < self.recon_blocks[i - 1].1
+        if i > 0 && c - self.recon_blocks[i - 1].0 < self.recon_blocks[i - 1].1 {
+            return Ok(true);
+        }
+        let Some(base) = &mut self.base else {
+            return Ok(false);
+        };
+        if c >= base.chunks {
+            return Ok(false);
+        }
+        let b = self.blocks.partition_point(|b| b.first_chunk <= c);
+        let Some(loc) = b
+            .checked_sub(1)
+            .and_then(|b| self.blocks.get(b))
+            .filter(|loc| c - loc.first_chunk < loc.chunk_count)
+        else {
+            return Err(FormatError::BlockCoverage { block: b });
+        };
+        let block = b - 1;
+        if let Some(&known) = base.recon.get(&block) {
+            return Ok(known);
+        }
+        let recon = base.graphs.uses_records(FrameLocation {
+            offset: loc.frame_offset,
+            len: loc.frame_len,
+            sequence: loc.sequence,
+        })?;
+        base.recon.insert(block, recon);
+        Ok(recon)
     }
 
     fn note_known(&mut self, len: u64, old_table: bool) {
@@ -1239,7 +1330,7 @@ impl<W: Write> Writer<W> {
         let hash = *blake3::hash(data).as_bytes();
         // An append reuses a chunk of the old table with the same hash and length;
         // with `dedup`, so does any chunk this write stored before.
-        if let Some((i, old)) = self.find_known(&hash, len, allow_recon) {
+        if let Some((i, old)) = self.find_known(&hash, len, allow_recon)? {
             self.note_known(len, old);
             return Ok(i);
         }
@@ -1258,7 +1349,8 @@ impl<W: Write> Writer<W> {
                 None => {
                     self.own.insert(hash, index);
                 }
-                Some(i) if self.in_recon_block(i) => {
+                // A chunk of this write: its block is known without a read.
+                Some(i) if self.in_recon_block(i)? => {
                     self.own.insert(hash, index);
                 }
                 Some(_) => {}
@@ -1360,7 +1452,7 @@ impl<W: Write> Writer<W> {
         for (a, b) in self.cut_all(data)? {
             let part = &data[a..b];
             let hash = *blake3::hash(part).as_bytes();
-            match self.find_known(&hash, part.len() as u64, true) {
+            match self.find_known(&hash, part.len() as u64, true)? {
                 Some((i, old)) => found.push((i, old, part.len() as u64)),
                 None => return Ok(false),
             }
@@ -1388,7 +1480,7 @@ impl<W: Write> Writer<W> {
         for (a, b) in self.cut_all(plain)? {
             let data = &plain[a..b];
             let hash = *blake3::hash(data).as_bytes();
-            match self.find_known(&hash, data.len() as u64, true) {
+            match self.find_known(&hash, data.len() as u64, true)? {
                 Some((i, old)) => found.push((i, old, data.len() as u64)),
                 None => return Ok(None),
             }
@@ -1537,7 +1629,8 @@ impl<W: Write> Writer<W> {
         }
         self.flush_block_with(Some(encoded))?;
         if self.options.dedup {
-            // Later files may reference these chunks (never a record: see `find_known`).
+            // Later files may reference these chunks (never a record's part: `find_known`
+            // skips a reconstruction block's chunks for one).
             for &c in &chunks {
                 if let Some(r) = usize::try_from(c).ok().and_then(|i| self.records.get(i)) {
                     self.own.entry(r.hash).or_insert(c);
@@ -1584,20 +1677,18 @@ impl<W: Write> Writer<W> {
 
     /// Add a reconstruction record while writing; returns its id, its
     /// position in the `Records` frame after the records of
-    /// `WriterOptions::records`. A block closed from now on may name it. The
-    /// record is checked as `WriterOptions::records` are (`BadOptions`
-    /// `record kind`, or the record's parse error). Refused in an append
-    /// (`BadOptions`, `add_record in an append`): old blocks name records by
-    /// position.
+    /// `WriterOptions::records` (in an append, after the old records: the
+    /// frame this generation writes restates them at their positions, as old
+    /// blocks name records by position). A block closed from now on may name
+    /// it. The record is checked as `WriterOptions::records` are (`BadOptions`
+    /// `record kind`, or the record's parse error).
     pub fn add_record(&mut self, record: Record) -> Result<u64, FormatError> {
         self.check_alive()?;
-        if self.base.is_some() {
-            return Err(bad_options("add_record in an append"));
-        }
         let id = self.options.records.len() as u64;
         check_record(&record, id)?;
         self.options.records.push(record);
         self.record_count = id + 1;
+        self.write_records = true;
         Ok(id)
     }
 
@@ -1779,12 +1870,12 @@ impl<W: Write> Writer<W> {
         let table = EntryTableWriter::encode(&self.entries)?;
         let entry_table = self.write_frame(FrameKind::EntryTable, table)?;
         let entry_hash = self.last_hash;
-        let records = if self.options.records.is_empty() {
-            // An append keeps the old records frame when it has none of its own.
-            self.base.as_ref().and_then(|b| b.records)
-        } else {
+        let records = if self.write_records {
             let payload = RecordsWriter::encode(&self.options.records);
             Some(self.write_frame(FrameKind::Records, payload)?)
+        } else {
+            // An append that added no record keeps the old records frame.
+            self.base.as_ref().and_then(|b| b.records)
         };
         Ok((entry_table, entry_hash, records))
     }

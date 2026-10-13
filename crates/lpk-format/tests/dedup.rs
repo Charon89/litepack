@@ -141,8 +141,7 @@ fn dedup_works_across_blocks_and_with_an_append_against_the_old_table() {
     // An append: a copy of `big` is found in the old table (reused), and a
     // duplicate inside the appended data is found too.
     let fresh = noise(7, 8192);
-    let mut file = Cursor::new(dd.clone());
-    let existing = Archive::open(&mut file, &Resources::default()).unwrap();
+    let existing = Archive::open(Cursor::new(dd.clone()), &Resources::default()).unwrap();
     let mut out = Cursor::new(dd.clone());
     out.set_position(dd.len() as u64);
     let mut w = Writer::append(existing, &mut out, options(true), None).unwrap();
