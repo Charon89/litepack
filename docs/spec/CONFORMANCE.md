@@ -97,6 +97,7 @@ Graph = the block graph of the data blocks. Recovery = recovery frames present. 
 | `malformed-hashflip.lpk` | zstd | no | 1 | nothing | not a valid archive: see below |
 | `malformed-recovery-damaged.lpk` | store | yes | 1 | nothing | one damaged data shard: `check` reports it, `repair` restores `recovery-groups.lpk` |
 | `jpeg-peel.lpk` | zstd/store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 1 | a revision 1.1 reader | a peeled JPEG: the primary image as a Lepton stream in a block of its own, an MPF secondary image and trailing data as nested chunks in a lower block, one `jpeg` record; see below |
+| `journal-record.lpk` | store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 2 | a revision 1.1 reader | generation 0 holds a store-encoded text file; generation 1 is an append that adds a peeled JPEG (as in `jpeg-peel.lpk`): an appended generation's `Records` frame restates the old records (none here) and adds one, and the appended blocks name a record by its position in that frame |
 
 The passwords and the keyfile are also in `tests/vectors/vectors.toml` (test values, not secrets). The four sealed
 vectors (`sealed-*`) decode to the same three files.
@@ -107,10 +108,12 @@ Recovery expectations (`expected.toml`): for `recovery-groups.lpk` `check` print
 reports 1 damaged shard and exits 1, and `repair` writes a copy that is byte-identical to `recovery-groups.lpk`
 (1 shard repaired). The other vectors carry no recovery frames, so `check` finds nothing to scan on them.
 
-Apart from `jpeg-peel.lpk`, the vectors do not exercise the reconstruction primitives (7 to 12); a decoder that
-meets one it does not run reports `UnimplementedPrimitive` and does not guess.
+Apart from `jpeg-peel.lpk` and `journal-record.lpk`, the vectors do not exercise the reconstruction primitives (7 to
+12); a decoder that meets one it does not run reports `UnimplementedPrimitive` and does not guess.
 
-`jpeg-peel.lpk` (revision 1.1). Which expectations apply depends on the decoder's revision:
+`jpeg-peel.lpk` and `journal-record.lpk` (revision 1.1). Which expectations apply depends on the decoder's
+revision (`expected.toml` has a 1.0 table for `jpeg-peel.lpk` only; `journal-record.lpk` is measured through
+`expected-1.1.toml` alone, one table per vector):
 
 - A revision 1.0 decoder reads the `["jpeg-peel.lpk"]` table of `expected.toml`. It MUST open the vector, list it
   (key `list`), print `info` (key `info`: `format: 1.1`, `records: true`), and report `UnimplementedPrimitive`

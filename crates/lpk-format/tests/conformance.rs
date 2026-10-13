@@ -20,6 +20,8 @@ const HASHFLIP: &str = "malformed-hashflip.lpk";
 /// The revision 1.1 vector, written by lpk-core's JPEG peel (its full-reader expectations are
 /// in `expected-1.1.toml`, checked by lpk-core's `tests/jpeg_vector.rs`).
 const JPEG_VECTOR: &str = "jpeg-peel.lpk";
+/// The second revision 1.1 vector: an appended generation adds a peeled JPEG and its record.
+const JOURNAL_RECORD_VECTOR: &str = "journal-record.lpk";
 
 fn read(name: &str) -> Vec<u8> {
     std::fs::read(vectors_dir().join(name)).unwrap()
@@ -257,6 +259,7 @@ fn every_frame_of_every_vector_is_accounted_for() {
     names.push(JOURNAL_VECTOR);
     names.push(RECOVERY_VECTOR);
     names.push(JPEG_VECTOR);
+    names.push(JOURNAL_RECORD_VECTOR);
     for name in names {
         let bytes = read(name);
         let mut a = open(bytes.clone(), name, creds_of(name).as_ref());
