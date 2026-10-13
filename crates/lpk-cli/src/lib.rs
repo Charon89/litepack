@@ -1,4 +1,5 @@
-//! The `lpk` command line: `a` creates an archive from a directory, `x` extracts, `t` tests.
+//! The `lpk` command line: `a` creates an archive from a directory, `x` extracts, `t` tests,
+//! `check` and `repair` drive the recovery records.
 //!
 //! Extraction goes through `lpk-core`'s block-ordered engine (`lpk_core::extract_file`: each
 //! needed block decoded once, blocks decoded in parallel under a memory bound) with the default
@@ -8,8 +9,8 @@
 //! verify.
 //! Encryption: `--password`, `--password-file` and `--keyfile` are read here for `a` and `x`
 //! (the format tool's rules: one trailing newline is not part of a password file; a keyfile
-//! alone means an empty password) and passed through to the reference tool for `t`. A
-//! password is never printed or logged. `x` opens the key slot before anything
+//! alone means an empty password) and passed through to the reference tool for `t`, `check`
+//! and `repair`. A password is never printed or logged. `x` opens the key slot before anything
 //! is written: a wrong or missing password leaves no output directory.
 //! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation. Nothing is ever prompted;
 //! progress goes to stderr and only with `-v`.
@@ -58,6 +59,10 @@ enum Command {
     /// Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shards.
     #[command(name = "t")]
     Test(TestArgs),
+    /// Hash the data shards the recovery frames cover and report the damage (exit 2 if any).
+    Check(CheckArgs),
+    /// Write a copy of an archive with its damaged shards rebuilt from the recovery frames.
+    Repair(RepairArgs),
 }
 
 /// The key material of an encrypted archive; `a` seals with it, every other command opens
@@ -208,6 +213,12 @@ struct AddArgs {
     /// Leave the entry table in clear, so the encrypted archive lists without the key.
     #[arg(long, requires = "credential")]
     listable: bool,
+    /// Recovery records as a percentage of the archived data, 0 (none, the default) to 20:
+    /// Reed-Solomon frames interleaved with the data they protect; `lpk repair` rebuilds
+    /// damaged shards up to that share of each group.
+    #[arg(long, value_name = "PERCENT", default_value_t = 0,
+          value_parser = clap::value_parser!(u8).range(0..=i64::from(lpk_format::MAX_PERCENT)))]
+    recovery: u8,
     /// Print the counts and the stage times to stderr.
     #[arg(short, long)]
     verbose: bool,
@@ -260,6 +271,27 @@ struct TestArgs {
     priors: Vec<PathBuf>,
     /// The key material of an encrypted archive; without it only the frame hashes (and the
     /// recovery shards) of such an archive are checked.
+    #[command(flatten)]
+    credentials: CredentialArgs,
+}
+
+#[derive(Debug, Args)]
+struct CheckArgs {
+    /// The archive.
+    archive: PathBuf,
+    /// The key material of an encrypted archive (not needed: the shards are checked sealed).
+    #[command(flatten)]
+    credentials: CredentialArgs,
+}
+
+#[derive(Debug, Args)]
+struct RepairArgs {
+    /// The archive.
+    archive: PathBuf,
+    /// The repaired copy; must not exist. Kept with every repair that was possible when a
+    /// frame had more damage than it can rebuild (exit 2 then).
+    out: PathBuf,
+    /// The key material of an encrypted archive (not needed: the shards are rebuilt sealed).
     #[command(flatten)]
     credentials: CredentialArgs,
 }
@@ -322,6 +354,7 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
             credentials,
         });
     }
+    pipeline.seal.writer.recovery.percent = a.recovery;
     match pipeline.run_file(&a.input, &a.archive) {
         Ok(s) => {
             if a.verbose {
@@ -413,6 +446,13 @@ fn report(err: &mut dyn Write, a: &AddArgs, s: &RunSummary) {
             if a.listable { ", listable" } else { "" }
         );
     }
+    if a.recovery > 0 {
+        let _ = writeln!(
+            err,
+            "recovery: {} percent, peak {} bytes held for the open group",
+            a.recovery, s.writer.recovery_peak
+        );
+    }
     let _ = writeln!(
         err,
         "stage seconds: walk {:.3}, classify {:.3}, peel {:.3}, model {:.3}, seal {:.3}",
@@ -497,7 +537,7 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
     }
 }
 
-/// Run the reference tool with `sub` (`verify`), the prior files, the
+/// Run the reference tool with `sub` (`verify`, `check` or `repair`), the prior files, the
 /// credentials and the positional paths; its summary goes to `out`, its error line to `err`,
 /// and any failure is exit 2.
 fn reference(
@@ -551,5 +591,14 @@ where
         Command::Add(mut a) => add(&mut a, err),
         Command::Extract(mut x) => extract(&mut x, out, err),
         Command::Test(t) => reference("verify", &t.priors, &t.credentials, &[&t.archive], out, err),
+        Command::Check(c) => reference("check", &[], &c.credentials, &[&c.archive], out, err),
+        Command::Repair(r) => reference(
+            "repair",
+            &[],
+            &r.credentials,
+            &[&r.archive, &r.out],
+            out,
+            err,
+        ),
     }
 }

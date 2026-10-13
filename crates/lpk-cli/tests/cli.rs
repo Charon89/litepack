@@ -655,3 +655,120 @@ fn encryption_flags_are_checked() {
     assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
     assert_eq!(tree_hash(&out), tree_hash(src.path()));
 }
+
+// ---- E2-13: recovery records through the tool ----
+
+/// `a --recovery 10`, a few bytes overwritten inside the covered data: `t` fails, `check`
+/// reports the damaged shards (exit 2), `repair` writes a copy that tests and extracts.
+#[test]
+fn recovery_records_repair_a_damaged_archive() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("r.lpk");
+    let s = src.path().to_str().unwrap();
+    let bad = run(&["a", arch.to_str().unwrap(), s, "--recovery", "21"]);
+    assert_eq!(bad.status.code(), Some(1), "{}", text(&bad.stderr));
+    assert!(!arch.exists());
+    let a = run(&["a", arch.to_str().unwrap(), s, "--recovery", "10", "-v"]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    assert!(text(&a.stderr).contains("recovery: 10 percent"));
+    let good = fs::read(&arch).unwrap();
+    let (cover_offset, cover_len) = {
+        let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
+        let frames = archive.recovery_frames();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        // The one group covers everything from the header to its frame.
+        (32u64, frames[0].offset - 32)
+    };
+    assert!(cover_len > 150_000, "{cover_len}");
+    // Overwrite a run of bytes in the middle of the covered data (one shard of 64 KiB).
+    let mut bytes = good.clone();
+    let at = (cover_offset + cover_len / 2) as usize;
+    for (i, b) in bytes[at..at + 40].iter_mut().enumerate() {
+        *b ^= 0x80 | (i as u8);
+    }
+    fs::write(&arch, &bytes).unwrap();
+    let t = run(&["t", arch.to_str().unwrap()]);
+    assert_eq!(t.status.code(), Some(2), "{}", text(&t.stdout));
+    let c = run(&["check", arch.to_str().unwrap()]);
+    assert_eq!(c.status.code(), Some(2), "{}", text(&c.stderr));
+    assert!(
+        text(&c.stdout).contains("damaged shards: 1, repaired shards: 0"),
+        "{}",
+        text(&c.stdout)
+    );
+    let fixed = work.path().join("fixed.lpk");
+    let r = run(&["repair", arch.to_str().unwrap(), fixed.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert!(
+        text(&r.stdout).contains("damaged shards: 1, repaired shards: 1"),
+        "{}",
+        text(&r.stdout)
+    );
+    assert!(fs::read(&fixed).unwrap() == good);
+    let t = run(&["t", fixed.to_str().unwrap()]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    let out = work.path().join("out");
+    let x = run(&["x", fixed.to_str().unwrap(), out.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(src.path()));
+    // The copy must not exist already.
+    let r = run(&["repair", arch.to_str().unwrap(), fixed.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(2));
+    // The damaged archive is still refused by `x`: no silent repair on extraction.
+    let out2 = work.path().join("out2");
+    let x = run(&["x", arch.to_str().unwrap(), out2.to_str().unwrap()]);
+    assert_eq!(x.status.code(), Some(2));
+}
+
+#[test]
+fn an_archive_without_recovery_checks_clean_and_an_encrypted_one_checks_keyless() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let s = src.path().to_str().unwrap();
+    let plain = work.path().join("p.lpk");
+    let a = run(&["a", plain.to_str().unwrap(), s]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let c = run(&["check", plain.to_str().unwrap()]);
+    assert_eq!(c.status.code(), Some(0), "{}", text(&c.stderr));
+    assert!(
+        text(&c.stdout).starts_with("recovery frames: 0,"),
+        "{}",
+        text(&c.stdout)
+    );
+    // Encrypted with recovery: the shards are checked and repaired without the key.
+    let sealed = work.path().join("s.lpk");
+    let a = run(&[
+        "a",
+        sealed.to_str().unwrap(),
+        s,
+        "--password",
+        "pw",
+        "--recovery",
+        "3",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let c = run(&["check", sealed.to_str().unwrap()]);
+    assert_eq!(c.status.code(), Some(0), "{}", text(&c.stderr));
+    assert!(
+        text(&c.stdout).starts_with("recovery frames: 1,"),
+        "{}",
+        text(&c.stdout)
+    );
+    let copy = work.path().join("copy.lpk");
+    let r = run(&["repair", sealed.to_str().unwrap(), copy.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert!(fs::read(&copy).unwrap() == fs::read(&sealed).unwrap());
+    let out = work.path().join("out");
+    let x = run(&[
+        "x",
+        copy.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "--password",
+        "pw",
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(src.path()));
+}
