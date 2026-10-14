@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-14, about 02:51 UTC (2026-10-13, 22:51 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-14, about 03:03 UTC (2026-10-13, 23:03 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-13 for the work to continue until midnight; this is the state at the end of that evening.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
@@ -17,8 +17,8 @@ size as the plain row on every class, a fixed key-derivation cost per archive, a
 E2-20). `cargo deny` is green again after the `ruzstd` advisory bump (PR #45). E2-4b (parallel block encoding,
 D-60) is built, reviewed and measured (`bench/reports/phase1-2026-10-14-small-threads.md`): the Fast tier now
 compresses the multi-block classes near the store path's rate, byte-identical to the sequential writer; the
-Balanced tier gained nothing although its memory doubled — its LZMA jobs in flight do not run concurrently, the
-defect that keeps E2-4b at `[~]` (step 1 below).
+Balanced tier gained nothing because on `small` a class is one or two of its 256 MiB blocks, so there was nothing
+to run in parallel; E2-4b stays `[~]` until the Balanced half is measured where it can show (step 1 below).
 E0-1 is measured on `nodejs/node` and waits for the owner (below). Every `lpk` number
 lives in `bench/reports/phase1-2026-10-04-*.md` with its results directory; the latest overall `small` picture is
 `phase1-2026-10-04-small-extract.md`: the JPEG classes about 77% of their bytes against 94–97% for every incumbent;
@@ -27,15 +27,20 @@ and source trees; `lpk/fast` extracting faster than 7-Zip `-mx5` on every class 
 still single-threaded.
 
 **How to resume (in this order).**
-1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list. **E2-4b's Balanced half.** The
-   measured rows (`bench/results/2026-10-14-megatron`) show the Balanced tier's `compress MB/s` unchanged with four
-   blocks in flight while its peak memory doubled: the LZMA jobs exist but do not run concurrently. Find out why in
-   `crates/lpk-core/src/balanced.rs` (`BalancedEncoder::job` / `absorb` and what the job holds while it encodes —
-   a lock held for the whole encode, a shared trial, the `.threads(1)` encoder built per job) and in the writer's
-   hand-over (`crates/lpk-format/src/writer.rs`); fix it with the byte-identity tests as the guard; then re-run the
-   `lpk` tool on `small` (the detached script pattern: `target/acceptance/e2-4b-run.sh`, about an hour on an idle
-   machine), write the report, commit the directory, and tick E2-4b citing both tiers' `compress MB/s` against
-   `2026-10-13-megatron`. The Fast half is already measured and met (the feeding thread is now the limit).
+1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list. **E2-4b's Balanced half.** Not a jobs
+   defect (the evening's first reading, corrected before midnight): `BalancedOptions::block_size` is 256 MiB and
+   every class of `small` is at most 327 MB, so a class is one or two Balanced blocks and the rows of
+   `bench/results/2026-10-14-megatron` could not show block parallelism for that tier (its memory rose by one
+   block in flight, its speed did not move). Measure it where it can show, in this order: (a) one class of the
+   `full` profile that spans many blocks (`office-pdf` or `software-installed` of `full`, several GB) through the
+   runner with `--profile full --classes <class> --tools lpk` — both thread counts need two runs of the `lpk`
+   row, since the runner gives every tool the same `--threads`; use `--threads 1` and `--threads 24` as two results
+   directories and read `lpk/balanced`'s `compress MB/s` across them (the report refuses to pool differing
+   thread counts unless told, so compare the two reports); (b) only if the owner wants parallel Balanced on
+   small inputs too: a `--block-size` option for the Balanced tier and a measured ratio cost of 64 MiB and
+   128 MiB blocks against 256 MiB on `small` (matches farther back than the 64 MiB dictionary are impossible
+   anyway, so the loss is at block starts) — a `D-NN` after that measurement, never before. Then tick E2-4b
+   citing both tiers' rows. The Fast half is measured and met (the feeding thread is now the limit).
 2. Then **E2-18** (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
    G3 as restated in D-27 needs 80% — with E2-4b in, measure first, then see what the store path still spends
    per byte: the chunker, two BLAKE3 passes, the frame write), with its brief written from the PLAN text as the

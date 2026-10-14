@@ -18,8 +18,9 @@ which is the single feeding thread's limit (reading, chunking and hashing); the 
 and the walk-bound small-files are unchanged within noise. Archive sizes are equal on every class, as they must
 be. Extraction is within a few percent of the earlier run. Balanced: `compress MB/s` is unchanged (office-pdf
 1.7 → 1.7, text-prose 1.3 → 1.1, audio 1.9 → 1.9, vm-image 4.7 → 4.4) while peak memory rose (office-pdf 909 →
-1662 MiB): blocks are in flight, but their LZMA jobs do not run concurrently — a defect in the Balanced job path
-to fix before the Balanced half of E2-4b's acceptance can be claimed (STATUS, "How to resume").
+1662 MiB): not a defect in the jobs — the Balanced block is 256 MiB and every class of `small` is at most 327 MB, so a
+class is one or two Balanced blocks and block parallelism had nothing to run in parallel on this profile; the
+Balanced half of E2-4b's acceptance is measured where it can show (STATUS, "How to resume").
 
 The generated report follows unchanged.
 
