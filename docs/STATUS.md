@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-14, about 03:05 UTC (2026-10-13, 23:05 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-14, about 03:09 UTC (2026-10-13, 23:09 local on the measuring machine). A detached measurement starts after 00:30 local on 2026-10-14 (step 1 below).
 The owner asked on 2026-10-13 for the work to continue until midnight; this is the state at the end of that evening.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
@@ -31,12 +31,15 @@ still single-threaded.
    defect (the evening's first reading, corrected before midnight): `BalancedOptions::block_size` is 256 MiB and
    every class of `small` is at most 327 MB, so a class is one or two Balanced blocks and the rows of
    `bench/results/2026-10-14-megatron` could not show block parallelism for that tier (its memory rose by one
-   block in flight, its speed did not move). Measure it where it can show, in this order: (a) one class of the
-   `full` profile that spans many blocks (`office-pdf` or `software-installed` of `full`, several GB) through the
-   runner with `--profile full --classes <class> --tools lpk` — both thread counts need two runs of the `lpk`
-   row, since the runner gives every tool the same `--threads`; use `--threads 1` and `--threads 24` as two results
-   directories and read `lpk/balanced`'s `compress MB/s` across them (the report refuses to pool differing
-   thread counts unless told, so compare the two reports); (b) only if the owner wants parallel Balanced on
+   block in flight, its speed did not move). Measure it where it can show, in this order: (a) `vm-image` of `full`
+   (four files, eight 256 MiB Balanced blocks) through the runner at 24 threads and at 1 thread, two results
+   directories, since the runner gives every tool the same `--threads` — the detached script
+   `target/acceptance/e2-4b-full-run.sh` was launched on the night of 2026-10-13 to do exactly that after 00:30
+   local (status in `target/acceptance/e2-4b-full-status.log`, last line `== DONE`; the two directories are the
+   `bench/results/2026-10-14-megatron-*` ones its log names): validate, report each, read `lpk/balanced`'s
+   `compress MB/s` across them (the report refuses to pool differing thread counts unless told, so compare the
+   two reports), commit both directories with a report under `bench/reports/phase1-<date>-full-vm-image-threads.md`;
+   if the log shows no run, launch the script again on an idle machine; (b) only if the owner wants parallel Balanced on
    small inputs too: a `--block-size` option for the Balanced tier and a measured ratio cost of 64 MiB and
    128 MiB blocks against 256 MiB on `small` (matches farther back than the 64 MiB dictionary are impossible
    anyway, so the loss is at block starts) — a `D-NN` after that measurement, never before. Then tick E2-4b
