@@ -1,0 +1,154 @@
+{
+  "class": "backup-versions",
+  "corpus": {
+    "class_bytes": 25541629,
+    "class_files": 1974,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 2327762,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.25,
+      "peak_job_memory_bytes": 137482240,
+      "peak_memory_bytes": 128409600,
+      "peak_process_commit_bytes": 137482240,
+      "timed_out": false,
+      "user_cpu_seconds": 3.75,
+      "wall_seconds": 4.1176663
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.28125,
+      "peak_job_memory_bytes": 22855680,
+      "peak_memory_bytes": 26488832,
+      "peak_process_commit_bytes": 22855680,
+      "timed_out": false,
+      "user_cpu_seconds": 0.09375,
+      "wall_seconds": 0.214447
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 2327762,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.3125,
+        "peak_job_memory_bytes": 137433088,
+        "peak_memory_bytes": 128376832,
+        "peak_process_commit_bytes": 137433088,
+        "timed_out": false,
+        "user_cpu_seconds": 3.625,
+        "wall_seconds": 4.1293088000000004
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.296875,
+        "peak_job_memory_bytes": 22855680,
+        "peak_memory_bytes": 26488832,
+        "peak_process_commit_bytes": 22855680,
+        "timed_out": false,
+        "user_cpu_seconds": 0.09375,
+        "wall_seconds": 0.214447
+      }
+    },
+    {
+      "archive_bytes": 2327762,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.25,
+        "peak_job_memory_bytes": 137482240,
+        "peak_memory_bytes": 128516096,
+        "peak_process_commit_bytes": 137482240,
+        "timed_out": false,
+        "user_cpu_seconds": 3.75,
+        "wall_seconds": 4.1176663
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.171875,
+        "peak_job_memory_bytes": 21962752,
+        "peak_memory_bytes": 25743360,
+        "peak_process_commit_bytes": 21962752,
+        "timed_out": false,
+        "user_cpu_seconds": 0.1875,
+        "wall_seconds": 0.2352135
+      }
+    },
+    {
+      "archive_bytes": 2327762,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.171875,
+        "peak_job_memory_bytes": 137486336,
+        "peak_memory_bytes": 128409600,
+        "peak_process_commit_bytes": 137486336,
+        "timed_out": false,
+        "user_cpu_seconds": 3.75,
+        "wall_seconds": 4.0299517
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.28125,
+        "peak_job_memory_bytes": 23273472,
+        "peak_memory_bytes": 26902528,
+        "peak_process_commit_bytes": 23273472,
+        "timed_out": false,
+        "user_cpu_seconds": 0.078125,
+        "wall_seconds": 0.2024962
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../../.claude/worktrees/e2-12-14-seal/bench/tmp/run72856/c13/a.lpk",
+      "backup-versions",
+      "--balanced",
+      "--ordering",
+      "extension",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "balanced-extension"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+35246cda00b4"
+  },
+  "verification": {
+    "files_checked": 1974,
+    "files_ok": 1974,
+    "verified": true
+  }
+}

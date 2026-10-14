@@ -1,0 +1,156 @@
+{
+  "class": "text-prose",
+  "corpus": {
+    "class_bytes": 148205637,
+    "class_files": 51,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 52955474,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.171875,
+      "peak_job_memory_bytes": 411574272,
+      "peak_memory_bytes": 241471488,
+      "peak_process_commit_bytes": 411574272,
+      "timed_out": false,
+      "user_cpu_seconds": 0.84375,
+      "wall_seconds": 1.0558638
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.171875,
+      "peak_job_memory_bytes": 468635648,
+      "peak_memory_bytes": 447717376,
+      "peak_process_commit_bytes": 468635648,
+      "timed_out": false,
+      "user_cpu_seconds": 0.515625,
+      "wall_seconds": 0.3928947
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 52955474,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.171875,
+        "peak_job_memory_bytes": 411107328,
+        "peak_memory_bytes": 241561600,
+        "peak_process_commit_bytes": 411107328,
+        "timed_out": false,
+        "user_cpu_seconds": 0.84375,
+        "wall_seconds": 1.0811657
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.15625,
+        "peak_job_memory_bytes": 468525056,
+        "peak_memory_bytes": 455839744,
+        "peak_process_commit_bytes": 468525056,
+        "timed_out": false,
+        "user_cpu_seconds": 0.515625,
+        "wall_seconds": 0.3741669
+      }
+    },
+    {
+      "archive_bytes": 52955474,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.1875,
+        "peak_job_memory_bytes": 411582464,
+        "peak_memory_bytes": 241471488,
+        "peak_process_commit_bytes": 411582464,
+        "timed_out": false,
+        "user_cpu_seconds": 0.828125,
+        "wall_seconds": 1.0465156
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.171875,
+        "peak_job_memory_bytes": 468635648,
+        "peak_memory_bytes": 447717376,
+        "peak_process_commit_bytes": 468635648,
+        "timed_out": false,
+        "user_cpu_seconds": 0.546875,
+        "wall_seconds": 0.3984416
+      }
+    },
+    {
+      "archive_bytes": 52955474,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.15625,
+        "peak_job_memory_bytes": 411574272,
+        "peak_memory_bytes": 241410048,
+        "peak_process_commit_bytes": 411574272,
+        "timed_out": false,
+        "user_cpu_seconds": 0.875,
+        "wall_seconds": 1.0558638
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.234375,
+        "peak_job_memory_bytes": 469098496,
+        "peak_memory_bytes": 446738432,
+        "peak_process_commit_bytes": 469098496,
+        "timed_out": false,
+        "user_cpu_seconds": 0.515625,
+        "wall_seconds": 0.3928947
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../../.claude/worktrees/e2-12-14-seal/bench/tmp/run72856/c75/a.lpk",
+      "text-prose",
+      "--fast",
+      "--password",
+      "lpk-bench-password",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--password",
+      "lpk-bench-password",
+      "--threads",
+      "24"
+    ],
+    "id": "fast-encrypted"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+35246cda00b4"
+  },
+  "verification": {
+    "files_checked": 51,
+    "files_ok": 51,
+    "verified": true
+  }
+}

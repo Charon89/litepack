@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-13, about 23:54 UTC (2026-10-13, 19:54 local on the measuring machine). No measurement is running at the time of this commit (the E2-12 row is launched after the merge, see below).
+Last updated: 2026-10-14, about 01:02 UTC (2026-10-13, 21:02 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-13 for the work to continue until midnight; this is the state at the end of that evening.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
@@ -11,9 +11,10 @@ E2's twenty-two tasks, done and on `main`: E2-1 ingest, E2-2 classifier and gate
 and the `lpk` tool with the pooled report, E2-5 JPEG peel (with the independent decoder passing all eighteen
 vectors), E2-6 Balanced tier, E2-7 chunk dedup, E2-8 file ordering (negative result), E2-19 the extraction engine
 (decisions D-44 to D-55), and from 2026-10-13: E2-13 recovery records and E2-14 the journal (a negative result on
-its size clause, D-59) with the format's records-in-appends change they needed (D-56, PR #46); E2-12 encryption is
-built, reviewed and merged (D-57) and is ticked once its measured runner row (`fast-encrypted` against `fast`)
-is committed — see "How to resume". `cargo deny` is green again after the `ruzstd` advisory bump (PR #45).
+its size clause, D-59) with the format's records-in-appends change they needed (D-56, PR #46), and E2-12
+encryption (D-57; the sealed row measured on `small`, `bench/reports/phase1-2026-10-13-small-seal.md`: the same
+size as the plain row on every class, a fixed key-derivation cost per archive, a higher working set noted for
+E2-20). `cargo deny` is green again after the `ruzstd` advisory bump (PR #45).
 E0-1 is measured on `nodejs/node` and waits for the owner (below). Every `lpk` number
 lives in `bench/reports/phase1-2026-10-04-*.md` with its results directory; the latest overall `small` picture is
 `phase1-2026-10-04-small-extract.md`: the JPEG classes about 77% of their bytes against 94–97% for every incumbent;
@@ -22,21 +23,16 @@ and source trees; `lpk/fast` extracting faster than 7-Zip `-mx5` on every class 
 still single-threaded.
 
 **How to resume (in this order).**
-1. `git pull --ff-only`; `cargo build --release -p lpk-cli -p lpk-bench`. **The E2-12 row.** On the evening of
-   2026-10-13 the `lpk` tool's five settings (`store`, `fast`, `balanced`, `balanced-extension`, `fast-encrypted`)
-   were to be measured on `small` (3 repeats) by the detached script `target/acceptance/e2-12-run.sh` on the
-   measuring machine (status in `target/acceptance/e2-12-run-status.log`, last line `== DONE` when finished;
-   about an hour; it must run on an idle machine, never with a build going). If its results directory
-   `bench/results/<date>-megatron*` exists and the log says `validate exit 0`: `cargo run --release -p lpk-bench
-   -- report --results bench/results/<dir> --probes bench/results/2026-10-03-megatron-3`, write the report under
-   `bench/reports/phase1-<date>-small-seal.md`, commit the directory and the report (`feat(bench): ...`), tick
-   E2-12 in PLAN citing the `fast-encrypted` row against `fast` (D-57 names the row). If no directory exists,
-   launch the script detached (`Start-Process bash.exe target/acceptance/e2-12-run.sh` with a hidden window) on
-   an idle machine and do the same when it finishes.
-2. Then E2-4b (parallel block encoding: a writer extension holding blocks in flight) and E2-18 (the video target:
-   `lpk/fast` writes `video` at about a third of the `store` control's rate; G3 as restated in D-27 needs 80%),
-   E2-20 (memory and the envelope), then the revision-gated peels E2-10/11 (Deflate and containers — the largest
-   remaining size win on office, PDF and installed software), E2-15, E2-16, E2-17 (D-49 process), then E2-21/22.
+1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list. The next tasks are **E2-4b** (parallel
+   block encoding: a writer extension holding blocks in flight — compression is still single-threaded, which is
+   what the `compress MB/s` columns of every `lpk` row show) and **E2-18** (the video target: `lpk/fast` writes
+   `video` at about a third of the `store` control's rate; G3 as restated in D-27 needs 80%); write their briefs
+   from the PLAN text as the seal brief was written (`docs/notes/e2-12-14-seal-brief.md` is the pattern), with
+   the runner rows as the acceptance evidence (`store`, `fast` on `video` for E2-18; every class for E2-4b, the
+   compress column against `bench/results/2026-10-13-megatron`).
+2. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, is the first input), then the
+   revision-gated peels E2-10/11 (Deflate and containers — the largest remaining size win on office, PDF and
+   installed software), E2-15, E2-16, E2-17 (D-49 process), then E2-21/22.
 3. E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
    chunk in an appended generation is coded without its previous version in the window.
 4. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
