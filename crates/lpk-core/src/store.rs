@@ -20,6 +20,10 @@ pub struct StoreOptions {
     pub ingest: IngestOptions,
     /// The writer's settings (its default encoder stores).
     pub writer: WriterOptions,
+    /// Blocks in flight (`WriterOptions::encode_threads`, which this overwrites): `None` (the
+    /// default) is the machine's logical cores, 1 the sequential path. The archive is the same
+    /// whatever the count; storing is a copy, so the gain is the overlap of reading and writing.
+    pub threads: Option<usize>,
 }
 
 /// Counts what passes through a reader.

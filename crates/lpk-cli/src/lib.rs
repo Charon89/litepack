@@ -196,8 +196,9 @@ struct TierArgs {
     /// Store every block without compression.
     #[arg(long)]
     store: bool,
-    /// Worker threads: accepted and ignored (shown with -v); parallel encoding comes with the
-    /// next task.
+    /// Blocks encoded at once (default: the machine's logical cores; 1 is sequential). The
+    /// archive is the same whatever the count. The Balanced tier caps the blocks in flight at
+    /// four, as each LZMA encoder holds several times the dictionary (shown with -v).
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
     /// zstd level (of the Fast tier, or of the Balanced tier's zstd candidate; default 22 there).
@@ -380,9 +381,15 @@ fn core_exit(e: &CoreError) -> i32 {
 /// The pipeline of a tier and its settings (the seal stage untouched).
 fn build_pipeline(a: &TierArgs) -> Pipeline {
     let mut pipeline = if a.store {
-        Pipeline::store(StoreOptions::default())
+        Pipeline::store(StoreOptions {
+            threads: a.threads,
+            ..StoreOptions::default()
+        })
     } else if a.balanced {
-        let mut o = BalancedOptions::default();
+        let mut o = BalancedOptions {
+            threads: a.threads,
+            ..BalancedOptions::default()
+        };
         if let Some(l) = a.level {
             o.zstd_level = l;
         }
@@ -394,7 +401,10 @@ fn build_pipeline(a: &TierArgs) -> Pipeline {
         }
         Pipeline::balanced(o)
     } else {
-        let mut o = FastOptions::default();
+        let mut o = FastOptions {
+            threads: a.threads,
+            ..FastOptions::default()
+        };
         if let Some(l) = a.level {
             o.level = l;
         }
@@ -498,13 +508,14 @@ fn report(
     let t = &s.timings;
     let _ = writeln!(
         err,
-        "{}: generation {}, {} entries, {} blocks, {} bytes (threads requested: {})",
+        "{}: generation {}, {} entries, {} blocks, {} bytes (threads: {}, blocks in flight: {})",
         archive.display(),
         s.writer.generation,
         s.writer.entries,
         s.writer.blocks,
         s.writer.archive_len,
-        a.threads.map_or("default".to_string(), |n| n.to_string())
+        s.threads,
+        s.blocks_in_flight
     );
     if let Some(f) = s.fast {
         let _ = writeln!(

@@ -31,13 +31,16 @@ use liblzma::stream::{
     PRESET_EXTREME,
 };
 use lpk_format::{
-    BlockEncoder, Encoded, FormatError, Graph, PrimitiveId, Step, StoreEncoder, WriterSummary,
+    BlockEncoder, EncodeJob, Encoded, FormatError, Graph, JobState, PrimitiveId, Step,
+    StoreEncoder, WriterSummary,
 };
 
 use crate::classify::Class;
 use crate::cluster::DictionaryKind;
 use crate::error::CoreError;
-use crate::fast::{stored_by_class, DictionaryPolicy, FastHandle, ZstdEncoder};
+use crate::fast::{
+    stored_by_class, DictionaryPolicy, FastHandle, ZstdConfig, ZstdCore, ZstdEncoder,
+};
 use crate::gate::Gate;
 use crate::ingest::IngestOptions;
 use crate::pipeline::Pipeline;
@@ -67,6 +70,19 @@ pub struct BalancedOptions {
     pub min_block_before_boundary: Option<u64>,
     /// Longest `Jpeg`-classed input the JPEG peel reads whole (see `FastOptions`).
     pub jpeg_max_file: u64,
+    /// The thread budget; `None` (the default) is the machine's logical cores, 1 the sequential
+    /// path. The blocks in flight are `min(threads, BALANCED_MAX_IN_FLIGHT)`: each LZMA encoder
+    /// instance holds several times the dictionary, so the cap is provisional until a memory
+    /// budget (E2-20) sets it from the machine. The archive is the same whatever the count.
+    pub threads: Option<usize>,
+}
+
+impl BalancedOptions {
+    /// Blocks in flight for these options: `threads` resolved, capped at
+    /// [`BALANCED_MAX_IN_FLIGHT`].
+    pub fn blocks_in_flight(&self) -> usize {
+        crate::fast::resolve_threads(self.threads).min(BALANCED_MAX_IN_FLIGHT)
+    }
 }
 
 impl Default for BalancedOptions {
@@ -80,6 +96,7 @@ impl Default for BalancedOptions {
             block_size: 256 << 20,
             min_block_before_boundary: None,
             jpeg_max_file: crate::peel::LEPTON_MAX_FILE,
+            threads: None,
         }
     }
 }
@@ -226,8 +243,9 @@ impl LzmaEncoder {
     }
 }
 
-impl BlockEncoder for LzmaEncoder {
-    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+impl LzmaEncoder {
+    /// Encode one block (what [`BlockEncoder::encode`] does; the encoder has no state).
+    fn encode_block(&self, plain: &[u8]) -> Result<Encoded, FormatError> {
         let dict = self.dict_for(plain.len());
         let graph = self.graph(dict);
         Ok(Encoded {
@@ -235,6 +253,22 @@ impl BlockEncoder for LzmaEncoder {
             graph,
             bytes: self.compress(plain, dict)?,
         })
+    }
+}
+
+impl BlockEncoder for LzmaEncoder {
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        self.encode_block(plain)
+    }
+
+    fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
+        Some(Box::new(self.clone()))
+    }
+}
+
+impl EncodeJob for LzmaEncoder {
+    fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError> {
+        Ok((self.encode_block(plain)?, None))
     }
 }
 
@@ -269,12 +303,22 @@ impl BalancedHandle {
 }
 
 /// The Balanced tier's block encoder: gate, class rule, the lzma-or-zstd trial.
+///
+/// Parallel encoding (`WriterOptions::encode_threads`, capped at [`BALANCED_MAX_IN_FLIGHT`]
+/// by the pipeline): a job captures the class of the moment and the LZMA parameters, borrows
+/// a zstd core from the Fast encoder inside (or builds one on the pool thread), and runs the
+/// same trial and encoding as `encode`; the counts come back through `absorb` in block order.
 pub struct BalancedEncoder {
     lzma: LzmaEncoder,
     zstd: ZstdEncoder,
     sample_len: usize,
     shared: Arc<Mutex<Shared>>,
 }
+
+/// Most blocks the Balanced tier encodes at once, whatever `threads` says: each LZMA encoder
+/// instance holds several times the dictionary, so the blocks in flight are capped until a
+/// memory budget (E2-20) sets the number from the machine.
+pub const BALANCED_MAX_IN_FLIGHT: usize = 4;
 
 impl std::fmt::Debug for BalancedEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -327,8 +371,8 @@ impl BalancedEncoder {
         ))
     }
 
-    fn bump(&self, f: impl FnOnce(&mut BalancedSummary)) {
-        f(&mut lock(&self.shared).summary);
+    fn bump(&self, outcome: &BalancedOutcome) {
+        outcome.count(&mut lock(&self.shared).summary);
     }
 }
 
@@ -337,54 +381,148 @@ fn zstd_wins(lzma_len: usize, zstd_len: usize) -> bool {
     zstd_len < lzma_len
 }
 
+/// What a block became and what its trial cost, for the summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BalancedOutcome {
+    kind: BalancedKind,
+    sample_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BalancedKind {
+    Lzma,
+    Zstd,
+    StoredByClass,
+    StoredNoGain,
+}
+
+impl BalancedOutcome {
+    fn count(&self, s: &mut BalancedSummary) {
+        s.sample_bytes += self.sample_bytes;
+        match self.kind {
+            BalancedKind::Lzma => s.lzma_blocks += 1,
+            BalancedKind::Zstd => s.zstd_blocks += 1,
+            BalancedKind::StoredByClass => s.stored_by_class += 1,
+            BalancedKind::StoredNoGain => s.stored_no_gain += 1,
+        }
+    }
+}
+
+/// The Balanced encoding of one block: the class rule, the trial on the stripes, the winner.
+fn balanced_block(
+    lzma: &LzmaEncoder,
+    zstd: &mut ZstdCore,
+    class: Class,
+    sample_len: usize,
+    plain: &[u8],
+) -> Result<(Encoded, BalancedOutcome), FormatError> {
+    let mut outcome = BalancedOutcome {
+        kind: BalancedKind::StoredByClass,
+        sample_bytes: 0,
+    };
+    if stored_by_class(class) {
+        return Ok((StoreEncoder.encode(plain)?, outcome));
+    }
+    // Four stripes (the whole block when it fits the sample), each compressed separately
+    // by each candidate; the zstd encoder's own no-gain store counts as the stripe's length.
+    let whole = plain.len() <= sample_len;
+    let stripes: Vec<&[u8]> = if whole {
+        vec![plain]
+    } else {
+        let q = sample_len / 4;
+        (0..4)
+            .map(|i| {
+                let at = plain.len() / 4 * i;
+                &plain[at..plain.len().min(at + q)]
+            })
+            .collect()
+    };
+    let (mut l_len, mut z_len) = (0usize, 0usize);
+    let mut first = None;
+    for st in &stripes {
+        let l = lzma.encode_block(st)?;
+        let (z, _) = zstd.encode(class, DictionaryKind::None, st)?;
+        l_len += l.bytes.len();
+        z_len += z.bytes.len();
+        first.get_or_insert((l, z));
+        outcome.sample_bytes += st.len() as u64;
+    }
+    let zstd_won = zstd_wins(l_len, z_len);
+    let winner = match (whole, zstd_won) {
+        (true, true) => first.map(|(_, z)| z).ok_or_else(|| io_err("no stripe"))?,
+        (true, false) => first.map(|(l, _)| l).ok_or_else(|| io_err("no stripe"))?,
+        (false, true) => zstd.encode(class, DictionaryKind::None, plain)?.0,
+        (false, false) => lzma.encode_block(plain)?,
+    };
+    if winner.bytes.len() >= plain.len() {
+        outcome.kind = BalancedKind::StoredNoGain;
+        return Ok((StoreEncoder.encode(plain)?, outcome));
+    }
+    outcome.kind = if zstd_won {
+        BalancedKind::Zstd
+    } else {
+        BalancedKind::Lzma
+    };
+    Ok((winner, outcome))
+}
+
+/// One block's Balanced encoding on a pool thread.
+struct BalancedJob {
+    class: Class,
+    lzma: LzmaEncoder,
+    sample_len: usize,
+    config: ZstdConfig,
+    core: Option<ZstdCore>,
+}
+
+/// What a [`BalancedJob`] gives back: the zstd core it used and the block's outcome.
+struct BalancedReturn {
+    core: ZstdCore,
+    outcome: BalancedOutcome,
+}
+
+impl EncodeJob for BalancedJob {
+    fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError> {
+        let mut core = match self.core {
+            Some(c) => c,
+            None => ZstdCore::build(&self.config).map_err(io_err)?,
+        };
+        let (encoded, outcome) =
+            balanced_block(&self.lzma, &mut core, self.class, self.sample_len, plain)?;
+        Ok((encoded, Some(Box::new(BalancedReturn { core, outcome }))))
+    }
+}
+
 impl BlockEncoder for BalancedEncoder {
     fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
         let class = lock(&self.shared).class;
-        if stored_by_class(class) {
-            self.bump(|s| s.stored_by_class += 1);
-            return StoreEncoder.encode(plain);
-        }
-        // Four stripes (the whole block when it fits the sample), each compressed separately
-        // by each candidate; the zstd encoder's own no-gain store counts as the stripe's length.
-        let whole = plain.len() <= self.sample_len;
-        let stripes: Vec<&[u8]> = if whole {
-            vec![plain]
-        } else {
-            let q = self.sample_len / 4;
-            (0..4)
-                .map(|i| {
-                    let at = plain.len() / 4 * i;
-                    &plain[at..plain.len().min(at + q)]
-                })
-                .collect()
+        let mut core = match self.zstd.lend_core() {
+            Some(c) => c,
+            None => ZstdCore::build(self.zstd.config()).map_err(io_err)?,
         };
-        let (mut l_len, mut z_len) = (0usize, 0usize);
-        let mut first = None;
-        for st in &stripes {
-            let l = self.lzma.encode(st)?;
-            let z = self.zstd.encode(st)?;
-            l_len += l.bytes.len();
-            z_len += z.bytes.len();
-            first.get_or_insert((l, z));
-            self.bump(|s| s.sample_bytes += st.len() as u64);
+        let r = balanced_block(&self.lzma, &mut core, class, self.sample_len, plain);
+        self.zstd.return_core(core);
+        let (encoded, outcome) = r?;
+        self.bump(&outcome);
+        Ok(encoded)
+    }
+
+    fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
+        let class = lock(&self.shared).class;
+        Some(Box::new(BalancedJob {
+            class,
+            lzma: self.lzma.clone(),
+            sample_len: self.sample_len,
+            config: self.zstd.config().clone(),
+            core: self.zstd.lend_core(),
+        }))
+    }
+
+    fn absorb(&mut self, state: JobState) {
+        if let Ok(r) = state.downcast::<BalancedReturn>() {
+            self.bump(&r.outcome);
+            self.zstd.return_core(r.core);
         }
-        let zstd = zstd_wins(l_len, z_len);
-        let winner = match (whole, zstd) {
-            (true, true) => first.map(|(_, z)| z).ok_or_else(|| io_err("no stripe"))?,
-            (true, false) => first.map(|(l, _)| l).ok_or_else(|| io_err("no stripe"))?,
-            (false, true) => self.zstd.encode(plain)?,
-            (false, false) => self.lzma.encode(plain)?,
-        };
-        if winner.bytes.len() >= plain.len() {
-            self.bump(|s| s.stored_no_gain += 1);
-            return StoreEncoder.encode(plain);
-        }
-        if zstd {
-            self.bump(|s| s.zstd_blocks += 1);
-        } else {
-            self.bump(|s| s.lzma_blocks += 1);
-        }
-        Ok(winner)
     }
 }
 

@@ -26,7 +26,7 @@ use crate::balanced::{BalancedEncoder, BalancedHandle, BalancedOptions, Balanced
 use crate::classify::Class;
 use crate::cluster::{cluster, DictionaryKind};
 use crate::error::CoreError;
-use crate::fast::stored_by_class;
+use crate::fast::{resolve_threads, stored_by_class};
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::fold::ordering::order_cluster;
 use crate::fold::{Dedup, FoldStage};
@@ -97,6 +97,12 @@ pub struct RunSummary {
     pub peel: PeelSummary,
     /// Wall time per stage.
     pub timings: StageTimings,
+    /// The thread budget the run resolved (`threads` of the tier's options, the machine's
+    /// logical cores when unset).
+    pub threads: usize,
+    /// Blocks the writer encoded at once: `threads`, capped by the tier (the Balanced tier's
+    /// [`crate::balanced::BALANCED_MAX_IN_FLIGHT`]).
+    pub blocks_in_flight: usize,
 }
 
 /// The stages in order.
@@ -137,6 +143,8 @@ pub(crate) enum Prepared {
 impl Pipeline {
     /// The store pipeline with the writer settings of `options`.
     pub fn store(options: StoreOptions) -> Self {
+        let mut writer = options.writer;
+        writer.encode_threads = resolve_threads(options.threads);
         Pipeline {
             classify: ClassifyStage {
                 ingest: options.ingest,
@@ -144,9 +152,7 @@ impl Pipeline {
             peel: Vec::new(),
             fold: None,
             model: ModelStage::Store,
-            seal: SealOptions {
-                writer: options.writer,
-            },
+            seal: SealOptions { writer },
         }
     }
 
@@ -378,6 +384,7 @@ impl Pipeline {
         let source = Source::new();
         match (model, prepared) {
             (ModelStage::Store, Prepared::Store) => {
+                let threads = wopts.encode_threads.max(1);
                 let mut writer = open_writer(out, wopts, sync, 0, fold.as_deref(), opener)?;
                 let t = Instant::now();
                 for input in &inputs {
@@ -400,18 +407,23 @@ impl Pipeline {
                     balanced: None,
                     peel: PeelSummary::default(),
                     timings,
+                    threads,
+                    blocks_in_flight: threads,
                 })
             }
             (model, prepared) => {
-                let (encoder, block_size, soft, steer, finish): (
+                let (encoder, block_size, soft, steer, finish, threads, in_flight): (
                     Box<dyn lpk_format::BlockEncoder>,
                     u64,
                     Option<u64>,
                     Steer,
                     Finish,
+                    usize,
+                    usize,
                 ) = match (model, prepared) {
                     (ModelStage::Fast(o), Prepared::Fast(e, h)) => {
                         let h2 = h.clone();
+                        let threads = resolve_threads(o.threads);
                         (
                             Box::new(e),
                             o.block_size,
@@ -422,6 +434,8 @@ impl Pipeline {
                                 f.peel = peel;
                                 (Some(f), None)
                             }),
+                            threads,
+                            threads,
                         )
                     }
                     (ModelStage::Balanced(o), Prepared::Balanced(e, h)) => {
@@ -439,6 +453,8 @@ impl Pipeline {
                                 b.peel = peel;
                                 (None, Some(b))
                             }),
+                            resolve_threads(o.threads),
+                            o.blocks_in_flight(),
                         )
                     }
                     _ => {
@@ -466,6 +482,7 @@ impl Pipeline {
                 }
                 wopts.block_size = block_size;
                 wopts.encoder = encoder;
+                wopts.encode_threads = in_flight;
                 let max_part = wopts.block_size;
                 // The header's version_minor is the revision this writer writes under (spec
                 // section 2): 1 whenever a peel stage is enabled, whether or not one peels.
@@ -573,6 +590,8 @@ impl Pipeline {
                     balanced,
                     peel: summary,
                     timings,
+                    threads,
+                    blocks_in_flight: in_flight,
                 })
             }
         }

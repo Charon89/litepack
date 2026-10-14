@@ -16,8 +16,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lpk_format::{
-    BlockEncoder, Encoded, FormatError, Graph, PrimitiveId, Step, StoreEncoder, WriterSummary,
-    DEFAULT_BLOCK_SIZE,
+    BlockEncoder, EncodeJob, Encoded, FormatError, Graph, JobState, PrimitiveId, Step,
+    StoreEncoder, WriterSummary, DEFAULT_BLOCK_SIZE,
 };
 use std::io::Write;
 use zstd::zstd_safe::CParameter;
@@ -67,6 +67,11 @@ pub struct FastOptions {
     /// path and is counted as a `SizeCap` fallback before any byte is read. Default
     /// [`crate::peel::LEPTON_MAX_FILE`], `lepton_jpeg`'s own file-size cap.
     pub jpeg_max_file: u64,
+    /// Blocks encoded at once (`WriterOptions::encode_threads`); `None` (the default) is the
+    /// machine's logical cores, 1 the sequential path. The archive is the same whatever the
+    /// count. Memory: that many blocks in flight, each its plain bytes plus its encoding, plus
+    /// one zstd compressor per block in flight.
+    pub threads: Option<usize>,
 }
 
 impl Default for FastOptions {
@@ -79,8 +84,16 @@ impl Default for FastOptions {
             dictionaries: DictionaryPolicy::None,
             gate: Gate::DEFAULT,
             jpeg_max_file: crate::peel::LEPTON_MAX_FILE,
+            threads: None,
         }
     }
+}
+
+/// `threads` resolved: the machine's logical cores for `None`, at least 1.
+pub(crate) fn resolve_threads(threads: Option<usize>) -> usize {
+    threads
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        .max(1)
 }
 
 /// What the Fast encoder did with the blocks.
@@ -136,23 +149,67 @@ pub(crate) fn stored_by_class(class: Class) -> bool {
 }
 
 /// The Fast tier's block encoder (zstd, gate, dictionaries).
+///
+/// Parallel encoding (`WriterOptions::encode_threads`): each [`BlockEncoder::job`] captures
+/// the steering of the moment (class, dictionary kind) and borrows a [`ZstdCore`] — the
+/// encoder's own when it is free, a spare given back by an earlier job, or a new one built
+/// on the pool thread — so every job compresses with the same parameters and the output is
+/// the one `encode` makes; the writer gives the core and the block's outcome back through
+/// [`BlockEncoder::absorb`], in block order, where the counts are added.
 pub struct ZstdEncoder {
+    config: ZstdConfig,
+    shared: Arc<Mutex<Shared>>,
+    /// The compressors, when no job holds them.
+    core: Option<ZstdCore>,
+    /// Cores given back by jobs, for the next jobs (at most one per block in flight).
+    spare: Vec<ZstdCore>,
+}
+
+/// What builds a [`ZstdCore`]: the checked parameters.
+#[derive(Debug, Clone)]
+pub(crate) struct ZstdConfig {
     level: i32,
     window_log: u32,
     gate: Gate,
-    shared: Arc<Mutex<Shared>>,
+    policy: DictionaryPolicy,
+}
+
+/// The compressors of the Fast tier, one plain and one per provided dictionary.
+pub(crate) struct ZstdCore {
+    window_log: u32,
+    gate: Gate,
     /// The compressor without a dictionary.
     plain: zstd::bulk::Compressor<'static>,
     /// One compressor per provided dictionary: kind, prior id, compressor.
     with_dict: Vec<(DictionaryKind, [u8; 32], zstd::bulk::Compressor<'static>)>,
 }
 
+/// What a block became, for the summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Zstd,
+    StoredByGate,
+    StoredByClass,
+    StoredNoGain,
+}
+
+impl Outcome {
+    fn count(self, s: &mut FastSummary) {
+        match self {
+            Outcome::Zstd => s.zstd_blocks += 1,
+            Outcome::StoredByGate => s.stored_by_gate += 1,
+            Outcome::StoredByClass => s.stored_by_class += 1,
+            Outcome::StoredNoGain => s.stored_no_gain += 1,
+        }
+    }
+}
+
 impl std::fmt::Debug for ZstdEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZstdEncoder")
-            .field("level", &self.level)
-            .field("window_log", &self.window_log)
-            .field("dictionaries", &self.with_dict.len())
+            .field("level", &self.config.level)
+            .field("window_log", &self.config.window_log)
+            .field("spare", &self.spare.len())
             .finish_non_exhaustive()
     }
 }
@@ -204,6 +261,104 @@ fn build_compressor(
     Ok(c)
 }
 
+impl ZstdCore {
+    pub(crate) fn build(c: &ZstdConfig) -> Result<Self, CoreError> {
+        let plain = build_compressor(c.level, c.window_log, None)?;
+        let mut with_dict = Vec::new();
+        if let DictionaryPolicy::Provided(set) = &c.policy {
+            for (kind, id, bytes) in set.iter() {
+                with_dict.push((
+                    kind,
+                    id,
+                    build_compressor(c.level, c.window_log, Some(bytes))?,
+                ));
+            }
+        }
+        Ok(ZstdCore {
+            window_log: c.window_log,
+            gate: c.gate,
+            plain,
+            with_dict,
+        })
+    }
+
+    /// Encode one block under the steering `class` and `kind`.
+    pub(crate) fn encode(
+        &mut self,
+        class: Class,
+        kind: DictionaryKind,
+        plain: &[u8],
+    ) -> Result<(Encoded, Outcome), FormatError> {
+        if stored_by_class(class) {
+            return Ok((StoreEncoder.encode(plain)?, Outcome::StoredByClass));
+        }
+        if self.gate.is_incompressible(plain) {
+            return Ok((StoreEncoder.encode(plain)?, Outcome::StoredByGate));
+        }
+        // RFC 8878: a frame whose content size is known and fits its window is written
+        // single-segment, and its Window_Size is then its content size. So a block shorter than
+        // 2^w declares w (at least 10, the smallest the step allows) and the declaration holds;
+        // a longer block declares the configured window, which libzstd honours as a maximum.
+        let declared = self.window_log.min(ceil_log2(plain.len()).max(10));
+        let (id, compressor) = match self.with_dict.iter_mut().find(|(k, _, _)| *k == kind) {
+            Some((_, id, c)) => (*id, c),
+            None => ([0u8; 32], &mut self.plain),
+        };
+        compressor.set_parameter(CParameter::WindowLog(declared))?;
+        let bytes = compressor.compress(plain)?;
+        if bytes.len() >= plain.len() {
+            return Ok((StoreEncoder.encode(plain)?, Outcome::StoredNoGain));
+        }
+        let mut params = vec![declared as u8];
+        params.extend_from_slice(&id);
+        let graph = Graph {
+            steps: vec![Step {
+                primitive: PrimitiveId::Zstd,
+                params,
+            }],
+        };
+        Ok((
+            Encoded {
+                resources: graph.resources(),
+                graph,
+                bytes,
+            },
+            Outcome::Zstd,
+        ))
+    }
+}
+
+/// One block's Fast encoding on a pool thread.
+struct ZstdJob {
+    class: Class,
+    kind: DictionaryKind,
+    config: ZstdConfig,
+    core: Option<ZstdCore>,
+}
+
+/// What a [`ZstdJob`] gives back: the core it used and the block's outcome.
+struct ZstdReturn {
+    core: ZstdCore,
+    outcome: Outcome,
+}
+
+/// A build error on the pool thread (the options were accepted at construction, so this is a
+/// resource failure).
+fn build_failed(e: CoreError) -> FormatError {
+    FormatError::Io(std::io::Error::other(e.to_string()))
+}
+
+impl EncodeJob for ZstdJob {
+    fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError> {
+        let mut core = match self.core {
+            Some(c) => c,
+            None => ZstdCore::build(&self.config).map_err(build_failed)?,
+        };
+        let (encoded, outcome) = core.encode(self.class, self.kind, plain)?;
+        Ok((encoded, Some(Box::new(ZstdReturn { core, outcome }))))
+    }
+}
+
 impl ZstdEncoder {
     /// A new encoder and the handle that steers it. Errors (`InvalidOption`, naming the
     /// parameter) when `level`, `window_log` or a dictionary is not accepted.
@@ -231,77 +386,96 @@ impl ZstdEncoder {
                 range.end()
             )));
         }
-        let plain = build_compressor(level, window_log, None)?;
-        let mut with_dict = Vec::new();
-        if let DictionaryPolicy::Provided(set) = policy {
-            for (kind, id, bytes) in set.iter() {
-                with_dict.push((kind, id, build_compressor(level, window_log, Some(bytes))?));
-            }
-        }
+        let config = ZstdConfig {
+            level,
+            window_log,
+            gate,
+            policy: policy.clone(),
+        };
+        let core = ZstdCore::build(&config)?;
         let shared = Arc::new(Mutex::new(Shared {
             class: Class::Other,
             dictionary: DictionaryKind::None,
             summary: FastSummary::default(),
         }));
         let enc = ZstdEncoder {
-            level,
-            window_log,
-            gate,
+            config,
             shared: Arc::clone(&shared),
-            plain,
-            with_dict,
+            core: Some(core),
+            spare: Vec::new(),
         };
         Ok((enc, FastHandle(shared)))
     }
 
-    fn bump(&self, f: impl FnOnce(&mut FastSummary)) {
-        f(&mut lock(&self.shared).summary);
+    fn bump(&self, outcome: Outcome) {
+        outcome.count(&mut lock(&self.shared).summary);
+    }
+
+    /// The steering of the moment.
+    fn hint(&self) -> (Class, DictionaryKind) {
+        let s = lock(&self.shared);
+        (s.class, s.dictionary)
+    }
+
+    /// A core for a job: the encoder's own, a spare, or none (the job builds one).
+    pub(crate) fn lend_core(&mut self) -> Option<ZstdCore> {
+        self.core.take().or_else(|| self.spare.pop())
+    }
+
+    /// Take a core back from a job.
+    pub(crate) fn return_core(&mut self, core: ZstdCore) {
+        if self.core.is_none() {
+            self.core = Some(core);
+        } else {
+            self.spare.push(core);
+        }
+    }
+
+    /// The config a job builds a core from.
+    pub(crate) fn config(&self) -> &ZstdConfig {
+        &self.config
+    }
+
+    /// Encode on this thread with the encoder's own core (built anew if a job holds it).
+    pub(crate) fn encode_with(
+        &mut self,
+        class: Class,
+        kind: DictionaryKind,
+        plain: &[u8],
+    ) -> Result<(Encoded, Outcome), FormatError> {
+        let mut core = match self.lend_core() {
+            Some(c) => c,
+            None => ZstdCore::build(&self.config).map_err(build_failed)?,
+        };
+        let r = core.encode(class, kind, plain);
+        self.return_core(core);
+        r
     }
 }
 
 impl BlockEncoder for ZstdEncoder {
     fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
-        let (class, kind) = {
-            let s = lock(&self.shared);
-            (s.class, s.dictionary)
-        };
-        if stored_by_class(class) {
-            self.bump(|s| s.stored_by_class += 1);
-            return StoreEncoder.encode(plain);
+        let (class, kind) = self.hint();
+        let (encoded, outcome) = self.encode_with(class, kind, plain)?;
+        self.bump(outcome);
+        Ok(encoded)
+    }
+
+    fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
+        let (class, kind) = self.hint();
+        Some(Box::new(ZstdJob {
+            class,
+            kind,
+            config: self.config.clone(),
+            core: self.lend_core(),
+        }))
+    }
+
+    fn absorb(&mut self, state: JobState) {
+        if let Ok(r) = state.downcast::<ZstdReturn>() {
+            self.bump(r.outcome);
+            self.return_core(r.core);
         }
-        if self.gate.is_incompressible(plain) {
-            self.bump(|s| s.stored_by_gate += 1);
-            return StoreEncoder.encode(plain);
-        }
-        // RFC 8878: a frame whose content size is known and fits its window is written
-        // single-segment, and its Window_Size is then its content size. So a block shorter than
-        // 2^w declares w (at least 10, the smallest the step allows) and the declaration holds;
-        // a longer block declares the configured window, which libzstd honours as a maximum.
-        let declared = self.window_log.min(ceil_log2(plain.len()).max(10));
-        let (id, compressor) = match self.with_dict.iter_mut().find(|(k, _, _)| *k == kind) {
-            Some((_, id, c)) => (*id, c),
-            None => ([0u8; 32], &mut self.plain),
-        };
-        compressor.set_parameter(CParameter::WindowLog(declared))?;
-        let bytes = compressor.compress(plain)?;
-        if bytes.len() >= plain.len() {
-            self.bump(|s| s.stored_no_gain += 1);
-            return StoreEncoder.encode(plain);
-        }
-        self.bump(|s| s.zstd_blocks += 1);
-        let mut params = vec![declared as u8];
-        params.extend_from_slice(&id);
-        let graph = Graph {
-            steps: vec![Step {
-                primitive: PrimitiveId::Zstd,
-                params,
-            }],
-        };
-        Ok(Encoded {
-            resources: graph.resources(),
-            graph,
-            bytes,
-        })
     }
 }
 
