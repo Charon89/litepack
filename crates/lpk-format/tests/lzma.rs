@@ -341,6 +341,7 @@ fn registry_has_it_and_the_writer_round_trips() {
             recovery: Default::default(),
             seal: None,
             dedup: false,
+            encode_threads: 1,
         },
         &files,
     );

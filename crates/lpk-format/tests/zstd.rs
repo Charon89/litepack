@@ -303,6 +303,7 @@ fn options(encoder: ZstdTestEncoder) -> WriterOptions {
         recovery: Default::default(),
         seal: None,
         dedup: false,
+        encode_threads: 1,
     }
 }
 

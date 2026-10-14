@@ -310,6 +310,7 @@ pub fn vector_options(name: &str, dict: Option<&[u8]>) -> WriterOptions {
         recovery: Default::default(),
         seal: None,
         dedup: false,
+        encode_threads: 1,
     }
 }
 

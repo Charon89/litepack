@@ -20,8 +20,9 @@ use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use crate::varint;
 use rand::RngCore;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::thread::JoinHandle;
 
 /// Smallest `chunk_size` a writer accepts.
 pub const MIN_CHUNK_SIZE: u64 = 4096;
@@ -103,11 +104,51 @@ pub struct Encoded {
     pub resources: GraphResources,
 }
 
+/// What a finished [`EncodeJob`] hands back besides the encoding, for its
+/// encoder to take back through [`BlockEncoder::absorb`]: the counts the job
+/// made and any state it borrowed (a compressor instance). Opaque to the
+/// writer, which passes it on untouched.
+pub type JobState = Box<dyn std::any::Any + Send>;
+
+/// One block's encoding as a job the writer runs on another thread
+/// (`WriterOptions::encode_threads`). The job captures, when
+/// [`BlockEncoder::job`] makes it, everything the encoder would use for the
+/// block at that moment (its steering: class, dictionary kind), so the
+/// encoding is the one [`BlockEncoder::encode`] would make then.
+pub trait EncodeJob: Send {
+    /// Encode `plain`. The state comes back to the encoder through
+    /// [`BlockEncoder::absorb`] when the writer takes the block, in block
+    /// order.
+    fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError>;
+}
+
 /// Turns the plain bytes of a block into encoded bytes, choosing the decode
 /// graph per block.
+///
+/// The two methods with defaults are the parallel extension: a writer with
+/// `encode_threads` above 1 asks for a [`BlockEncoder::job`] per block and
+/// runs it on a pool thread; an encoder that keeps the default (`None`) is
+/// run sequentially, on the writer's thread, through `encode`, whatever the
+/// thread count. A job's graph may not name a reconstruction record (the
+/// writer refuses it: `BadRecord`, `pool-encoded block names a record`); a
+/// block that names one goes through [`Writer::add_part_encoded`].
 pub trait BlockEncoder {
     /// Encode one block's plain bytes with a graph of the encoder's choice.
     fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError>;
+
+    /// A job for the next block, carrying the encoder's steering as it is
+    /// now, to run on another thread. `None` (the default) means the writer
+    /// calls `encode` on its own thread instead.
+    fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
+        None
+    }
+
+    /// Take back what a finished job returned (its counts, borrowed state).
+    /// The writer calls this in block order, when it writes the block. The
+    /// default drops the state.
+    fn absorb(&mut self, state: JobState) {
+        drop(state);
+    }
 }
 
 /// The identity encoder: a one-step `store` graph.
@@ -126,6 +167,16 @@ impl BlockEncoder for StoreEncoder {
             bytes: plain.to_vec(),
             resources: GraphResources::default(),
         })
+    }
+
+    fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
+        Some(Box::new(StoreEncoder))
+    }
+}
+
+impl EncodeJob for StoreEncoder {
+    fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError> {
+        Ok((StoreEncoder.encode(plain)?, None))
     }
 }
 
@@ -178,6 +229,17 @@ pub struct WriterOptions {
     /// one hash-map entry per stored chunk (32 bytes of key, 8 of value, plus
     /// the map's own overhead) for the life of the archive.
     pub dedup: bool,
+    /// Blocks encoded at once. 1 (the default; 0 counts as 1) encodes every
+    /// block on the calling thread when it closes, as the earlier revisions
+    /// of this writer did. Above 1, a closing block is handed to a pool
+    /// thread (one per block in flight, through [`BlockEncoder::job`]) and
+    /// the writer keeps taking chunks; at most `encode_threads` blocks are
+    /// in flight, the oldest is awaited and written when one more must be
+    /// handed over, and blocks are written in order, so the archive is byte
+    /// for byte the one a single thread writes. Memory: `encode_threads`
+    /// times (`block_size` plus the encoded size) for the blocks in flight,
+    /// plus the encoders' own working memory, one per block in flight.
+    pub encode_threads: usize,
 }
 
 /// The output with the recovery spool beside it: while the spool is set, every
@@ -210,6 +272,7 @@ impl std::fmt::Debug for WriterOptions {
             .field("chunk_size", &self.chunk_size)
             .field("block_size", &self.block_size)
             .field("dedup", &self.dedup)
+            .field("encode_threads", &self.encode_threads)
             .field("archive_id", &self.archive_id)
             .finish()
     }
@@ -226,6 +289,7 @@ impl Default for WriterOptions {
             recovery: RecoveryOptions::default(),
             seal: None,
             dedup: false,
+            encode_threads: 1,
         }
     }
 }
@@ -366,10 +430,46 @@ pub struct Writer<W: Write> {
     /// names a reconstruction primitive, in order: a record may not name their
     /// chunks (spec section 12, nesting).
     recon_blocks: Vec<(u64, u64)>,
+    /// Blocks handed over and not yet written, in block order (empty when
+    /// `encode_threads` is 1: a block is then written as it closes).
+    queue: VecDeque<InFlight>,
     /// Tests only: skip the record chunk checks at block close, to build the
     /// archives the reader must refuse.
     #[cfg(test)]
     unchecked_records: bool,
+}
+
+/// What an encode job returns: the encoding and the state its encoder takes back.
+type JobResult = Result<(Encoded, Option<JobState>), FormatError>;
+
+/// A block handed over and not yet written.
+struct InFlight {
+    first_chunk: u64,
+    chunk_count: u64,
+    plain_len: u64,
+    /// How the block is checked when it is written.
+    commit: Commit,
+    work: Work,
+}
+
+/// The checks a block gets when it is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Commit {
+    /// Checked as the earlier revisions of this writer did, at the write: the
+    /// graph and the chunks of the records it names (sequential mode, given or
+    /// encoded).
+    Unchecked,
+    /// A pool-encoded block: the graph is checked at the write and may not
+    /// name a record.
+    Pool,
+    /// A given block whose graph and record chunks were checked, and whose
+    /// reconstruction status was recorded, at hand-over.
+    Checked,
+}
+
+enum Work {
+    Done(JobResult),
+    Running(JoinHandle<JobResult>),
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -416,6 +516,22 @@ fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(
     Ok(())
 }
 
+/// A pool-encoded block may not name a record: every block in flight is then
+/// a plain block, so a chunk's reconstruction status is known at hand-over.
+fn pool_record_rule(graph: &Graph) -> Result<(), FormatError> {
+    match graph
+        .steps
+        .iter()
+        .find_map(|s| s.primitive.record_id(&s.params))
+    {
+        Some(record) => Err(FormatError::BadRecord {
+            record,
+            reason: "pool-encoded block names a record",
+        }),
+        None => Ok(()),
+    }
+}
+
 /// A record the reader would refuse is refused here (`record` is its id).
 fn check_record(r: &Record, record: u64) -> Result<(), FormatError> {
     if r.kind != r.body.kind() {
@@ -456,6 +572,15 @@ fn check_options(options: &WriterOptions) -> Result<Option<GroupEncoder>, Format
 impl<W: Write> Writer<W> {
     /// Start an archive with the fixed-size chunker: check `options` and write
     /// the header.
+    ///
+    /// Memory: the pending block (up to `block_size` of plain bytes) and, while
+    /// a block is encoded, its encoding; with `encode_threads` above 1, up to
+    /// `encode_threads` blocks in flight at once, each its plain bytes plus its
+    /// encoding — `encode_threads` times (`block_size` plus the encoded size)
+    /// — plus the encoders' own working memory, one encoder per block in
+    /// flight; the chunk table (40 bytes per chunk) and the block table for
+    /// the life of the archive; the dedup map when `dedup` is set; the
+    /// recovery group's bytes when `recovery` is set ([`Writer::recovery_buffered`]).
     pub fn new(out: W, options: WriterOptions) -> Result<Self, FormatError> {
         let size = usize::try_from(options.chunk_size).map_err(|_| bad_options("chunk_size"))?;
         Self::with_chunker(out, options, Box::new(FixedChunker::new(size)))
@@ -616,6 +741,7 @@ impl<W: Write> Writer<W> {
             extra_memory: 0,
             open: None,
             recon_blocks: Vec::new(),
+            queue: VecDeque::new(),
             #[cfg(test)]
             unchecked_records: false,
         };
@@ -888,6 +1014,7 @@ impl<W: Write> Writer<W> {
             extra_memory,
             open: None,
             recon_blocks: Vec::new(),
+            queue: VecDeque::new(),
             #[cfg(test)]
             unchecked_records: false,
             options,
@@ -1096,37 +1223,185 @@ impl<W: Write> Writer<W> {
         self.flush_block_with(None)
     }
 
+    /// Blocks in flight at most (1: sequential).
+    fn threads(&self) -> usize {
+        self.options.encode_threads.max(1)
+    }
+
     /// Close the pending block; `given` is its encoding when the caller made
     /// it ([`Writer::add_part_encoded`]), else the encoder is asked.
+    ///
+    /// Sequential (`encode_threads` 1): the block is encoded, checked and
+    /// written here. Otherwise it is handed over: a given block joins the
+    /// ordered queue checked; an encoder's block becomes a job on a pool
+    /// thread (or is encoded here when the encoder offers no job); and when
+    /// the queue is full the oldest block is awaited and written first.
     fn flush_block_with(&mut self, given: Option<Encoded>) -> Result<(), FormatError> {
         if self.pending_chunks == 0 {
             return Ok(());
         }
         let plain = std::mem::take(&mut self.pending);
-        let encoded = match given {
-            Some(e) => Ok(e),
-            None => self.options.encoder.encode(&plain),
+        let chunk_count = std::mem::take(&mut self.pending_chunks);
+        let first_chunk = self.records.len() as u64 - chunk_count;
+        let plain_len = plain.len() as u64;
+        let threads = self.threads();
+        if threads == 1 {
+            let encoded = match given {
+                Some(e) => Ok(e),
+                None => self.options.encoder.encode(&plain),
+            };
+            drop(plain);
+            let encoded = self.abandon_on_error(encoded)?;
+            return self.commit_block(
+                encoded,
+                first_chunk,
+                chunk_count,
+                plain_len,
+                Commit::Unchecked,
+            );
+        }
+        let item = match given {
+            Some(e) => {
+                let checked = check_graph(&e.graph, self.record_count, self.version_minor)
+                    .and_then(|()| self.check_record_chunks(&e.graph, first_chunk));
+                self.abandon_on_error(checked)?;
+                // Classified now: a later chunk's dedup lookup must know this
+                // block is a reconstruction block before it is written.
+                if e.graph.uses_records() {
+                    self.recon_blocks.push((first_chunk, chunk_count));
+                }
+                InFlight {
+                    first_chunk,
+                    chunk_count,
+                    plain_len,
+                    commit: Commit::Checked,
+                    work: Work::Done(Ok((e, None))),
+                }
+            }
+            None => {
+                let work = match self.options.encoder.job() {
+                    Some(job) => {
+                        while self.queue.len() >= threads {
+                            self.write_oldest()?;
+                        }
+                        let spawned = std::thread::Builder::new()
+                            .name("lpk-encode".to_string())
+                            .spawn(move || job.run(&plain));
+                        match spawned {
+                            Ok(handle) => Work::Running(handle),
+                            Err(e) => return self.abandon_on_error(Err(FormatError::Io(e))),
+                        }
+                    }
+                    None => {
+                        // No job: this encoder runs sequentially, on this thread.
+                        let r = self.options.encoder.encode(&plain);
+                        let encoded = self.abandon_on_error(r)?;
+                        Work::Done(Ok((encoded, None)))
+                    }
+                };
+                InFlight {
+                    first_chunk,
+                    chunk_count,
+                    plain_len,
+                    commit: Commit::Pool,
+                    work,
+                }
+            }
         };
+        while self.queue.len() >= threads {
+            self.write_oldest()?;
+        }
+        self.queue.push_back(item);
+        self.write_finished()
+    }
+
+    /// An encoder or check error at block close abandons the archive (the
+    /// block's chunks are gone) like an I/O error: every later call fails.
+    fn abandon_on_error<T>(&mut self, r: Result<T, FormatError>) -> Result<T, FormatError> {
+        if let Err(e) = &r {
+            self.failed = Some((std::io::ErrorKind::InvalidData, e.to_string()));
+        }
+        r
+    }
+
+    /// Write the blocks at the front of the queue whose encoding is complete.
+    fn write_finished(&mut self) -> Result<(), FormatError> {
+        while self.queue.front().is_some_and(|b| match &b.work {
+            Work::Done(_) => true,
+            Work::Running(h) => h.is_finished(),
+        }) {
+            self.write_oldest()?;
+        }
+        Ok(())
+    }
+
+    /// Write every block in flight, in order.
+    fn drain(&mut self) -> Result<(), FormatError> {
+        while !self.queue.is_empty() {
+            self.write_oldest()?;
+        }
+        Ok(())
+    }
+
+    /// Await the oldest block in flight and write it. A job's error abandons
+    /// the archive and is returned; a job's panic is re-raised once the writer
+    /// is marked failed.
+    fn write_oldest(&mut self) -> Result<(), FormatError> {
+        let Some(InFlight {
+            first_chunk,
+            chunk_count,
+            plain_len,
+            commit,
+            work,
+        }) = self.queue.pop_front()
+        else {
+            return Ok(());
+        };
+        let result = match work {
+            Work::Done(r) => r,
+            Work::Running(handle) => match handle.join() {
+                Ok(r) => r,
+                Err(panic) => {
+                    self.failed = Some((
+                        std::io::ErrorKind::InvalidData,
+                        "an encode job panicked".to_string(),
+                    ));
+                    std::panic::resume_unwind(panic);
+                }
+            },
+        };
+        let (encoded, state) = self.abandon_on_error(result)?;
+        if let Some(state) = state {
+            self.options.encoder.absorb(state);
+        }
+        self.commit_block(encoded, first_chunk, chunk_count, plain_len, commit)
+    }
+
+    /// The in-order write step of a closed block: the checks `commit` asks
+    /// for, priors, the resource maxima, the frame (sealed or plain), the
+    /// block table and the reconstruction blocks.
+    fn commit_block(
+        &mut self,
+        encoded: Encoded,
+        first_chunk: u64,
+        chunk_count: u64,
+        plain_len: u64,
+        commit: Commit,
+    ) -> Result<(), FormatError> {
         let Encoded {
             graph,
             bytes: encoded,
             resources,
-        } = match encoded {
-            Ok(e) => e,
-            Err(e) => {
-                // The block's chunks are gone: the archive is abandoned.
-                self.failed = Some((std::io::ErrorKind::InvalidData, e.to_string()));
-                return Err(e);
-            }
+        } = encoded;
+        let checked = match commit {
+            Commit::Unchecked => check_graph(&graph, self.record_count, self.version_minor)
+                .and_then(|()| self.check_record_chunks(&graph, first_chunk)),
+            Commit::Pool => check_graph(&graph, self.record_count, self.version_minor)
+                .and_then(|()| pool_record_rule(&graph)),
+            Commit::Checked => Ok(()),
         };
-        let first_chunk = self.records.len() as u64 - self.pending_chunks;
-        let checked = check_graph(&graph, self.record_count, self.version_minor)
-            .and_then(|()| self.check_record_chunks(&graph, first_chunk));
-        if let Err(e) = checked {
-            // The block is gone: the archive is abandoned like after an I/O error.
-            self.failed = Some((std::io::ErrorKind::InvalidData, e.to_string()));
-            return Err(e);
-        }
+        // The block is gone: the archive is abandoned like after an I/O error.
+        self.abandon_on_error(checked)?;
         let recon = graph.uses_records();
         self.priors.extend(graph.prior_ids());
         let own = graph.resources();
@@ -1140,7 +1415,7 @@ impl<W: Write> Writer<W> {
         };
         let header = BlockHeader {
             graph,
-            plain_len: plain.len() as u64,
+            plain_len,
             encoded_len: encoded.len() as u64,
         };
         // The frame is written piecewise, without a second copy of the encoded
@@ -1179,14 +1454,13 @@ impl<W: Write> Writer<W> {
             frame_offset: at.offset,
             frame_len: at.len,
             first_chunk,
-            chunk_count: self.pending_chunks,
-            plain_len: plain.len() as u64,
+            chunk_count,
+            plain_len,
             sequence: at.sequence,
         });
-        if recon {
-            self.recon_blocks.push((first_chunk, self.pending_chunks));
+        if recon && commit != Commit::Checked {
+            self.recon_blocks.push((first_chunk, chunk_count));
         }
-        self.pending_chunks = 0;
         Ok(())
     }
 
@@ -1880,6 +2154,7 @@ impl<W: Write> Writer<W> {
         &mut self,
     ) -> Result<(FrameLocation, [u8; 32], Option<FrameLocation>), FormatError> {
         self.flush_block()?;
+        self.drain()?;
         self.entries = self.merged_entries();
         let table = EntryTableWriter::encode(&self.entries)?;
         let entry_table = self.write_frame(FrameKind::EntryTable, table)?;
