@@ -1064,3 +1064,49 @@ fn an_encrypted_archive_appends_with_its_password_only() {
     assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
     assert_eq!(fs::read(&arch).unwrap(), before);
 }
+
+#[test]
+fn add_threads_1_and_8_write_the_same_archive_and_v_prints_the_blocks_in_flight() {
+    // Flat: a directory entry carries a modification time the file system moves between walks.
+    let src = tempfile::tempdir().unwrap();
+    for i in 0..4u64 {
+        fs::write(src.path().join(format!("t{i}.txt")), prose(i + 1, 300_000)).unwrap();
+    }
+    fs::write(src.path().join("r.bin"), random(200_000)).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut archives = Vec::new();
+    for (tier, threads, expect) in [
+        ("--fast", "1", "threads: 1, blocks in flight: 1"),
+        ("--fast", "8", "threads: 8, blocks in flight: 8"),
+        ("--balanced", "1", "threads: 1, blocks in flight: 1"),
+        ("--balanced", "8", "threads: 8, blocks in flight: 4"),
+        ("--store", "1", "threads: 1, blocks in flight: 1"),
+        ("--store", "8", "threads: 8, blocks in flight: 8"),
+    ] {
+        let arch = work.path().join(format!("{}-{threads}.lpk", &tier[2..]));
+        let mut args = vec![
+            "a",
+            arch.to_str().unwrap(),
+            src.path().to_str().unwrap(),
+            tier,
+            "--threads",
+            threads,
+            "-v",
+        ];
+        if tier == "--balanced" {
+            args.extend(["--dict-size", "1048576"]);
+        }
+        let a = run(&args);
+        assert_eq!(a.status.code(), Some(0), "{tier}: {}", text(&a.stderr));
+        assert!(
+            text(&a.stderr).contains(expect),
+            "{tier}: {}",
+            text(&a.stderr)
+        );
+        archives.push(fs::read(&arch).unwrap());
+    }
+    assert_eq!(archives[0], archives[1], "fast");
+    assert_eq!(archives[2], archives[3], "balanced");
+    assert_eq!(archives[4], archives[5], "store");
+    assert_ne!(archives[0], archives[2]);
+}
