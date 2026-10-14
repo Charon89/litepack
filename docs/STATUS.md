@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-14, about 03:03 UTC (2026-10-13, 23:03 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-14, about 03:05 UTC (2026-10-13, 23:05 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-13 for the work to continue until midnight; this is the state at the end of that evening.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
@@ -43,8 +43,8 @@ still single-threaded.
    citing both tiers' rows. The Fast half is measured and met (the feeding thread is now the limit).
 2. Then **E2-18** (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
    G3 as restated in D-27 needs 80% — with E2-4b in, measure first, then see what the store path still spends
-   per byte: the chunker, two BLAKE3 passes, the frame write), with its brief written from the PLAN text as the
-   seal brief was (`docs/notes/e2-12-14-seal-brief.md` is the pattern).
+   per byte: the chunker, two BLAKE3 passes, the frame write); its brief is `docs/notes/e2-18-video-brief.md`
+   (written on 2026-10-13 from the committed numbers; dispatch from it).
 3. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, and the blocks-in-flight bound,
    D-60, are the first inputs; the Balanced cap of four in flight is provisional until then), then the
    revision-gated peels E2-10/11 (Deflate and containers — the largest remaining size win on office, PDF and
