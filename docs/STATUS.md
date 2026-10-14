@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-14, about 01:49 UTC (2026-10-13, 21:49 local on the measuring machine). No measurement is running at the time of this commit (the E2-4b rows are launched after the merge, see below).
+Last updated: 2026-10-14, about 02:51 UTC (2026-10-13, 22:51 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-13 for the work to continue until midnight; this is the state at the end of that evening.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
@@ -15,8 +15,10 @@ its size clause, D-59) with the format's records-in-appends change they needed (
 encryption (D-57; the sealed row measured on `small`, `bench/reports/phase1-2026-10-13-small-seal.md`: the same
 size as the plain row on every class, a fixed key-derivation cost per archive, a higher working set noted for
 E2-20). `cargo deny` is green again after the `ruzstd` advisory bump (PR #45). E2-4b (parallel block encoding,
-D-60) is built and reviewed: the writer encodes blocks in parallel and writes them in order, byte-identical to
-the sequential path on every class of `small`; its tick waits for the measured rows (step 1 below).
+D-60) is built, reviewed and measured (`bench/reports/phase1-2026-10-14-small-threads.md`): the Fast tier now
+compresses the multi-block classes near the store path's rate, byte-identical to the sequential writer; the
+Balanced tier gained nothing although its memory doubled — its LZMA jobs in flight do not run concurrently, the
+defect that keeps E2-4b at `[~]` (step 1 below).
 E0-1 is measured on `nodejs/node` and waits for the owner (below). Every `lpk` number
 lives in `bench/reports/phase1-2026-10-04-*.md` with its results directory; the latest overall `small` picture is
 `phase1-2026-10-04-small-extract.md`: the JPEG classes about 77% of their bytes against 94–97% for every incumbent;
@@ -25,19 +27,15 @@ and source trees; `lpk/fast` extracting faster than 7-Zip `-mx5` on every class 
 still single-threaded.
 
 **How to resume (in this order).**
-1. `git pull --ff-only`; `cargo build --release -p lpk-cli -p lpk-bench`. **The E2-4b rows.** On the evening of 2026-10-13, after this branch merged, the `lpk` tool's five settings were
-   measured again on `small` (3 repeats, the standard 24 threads, now with parallel encoding) by the detached
-   script `target/acceptance/e2-4b-run.sh` on the measuring machine (status in
-   `target/acceptance/e2-4b-run-status.log`, last line `== DONE` when finished; about an hour; it runs on an
-   idle machine, never with a build going). If its results directory `bench/results/<date>-megatron*` exists
-   and the log says `validate exit 0`: `cargo run --release -p lpk-bench -- report --results
-   bench/results/<dir> --probes bench/results/2026-10-03-megatron-3`. If no directory exists, launch the script
-   detached (`Start-Process 'C:/Program Files/Git/bin/bash.exe' <the script's /d/... path>`, hidden window) on
-   an idle machine and continue when it finishes.
-   The row's reading goes into `bench/reports/phase1-<date>-small-threads.md` (the generated report plus a
-   header paragraph, as `phase1-2026-10-13-small-seal.md`), the directory and the report are committed
-   (`feat(bench): ...`), and E2-4b is ticked in PLAN citing `compress MB/s` of `lpk/fast` and `lpk/balanced`
-   against `bench/results/2026-10-13-megatron` (archive sizes must be equal — they are the same coder).
+1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list. **E2-4b's Balanced half.** The
+   measured rows (`bench/results/2026-10-14-megatron`) show the Balanced tier's `compress MB/s` unchanged with four
+   blocks in flight while its peak memory doubled: the LZMA jobs exist but do not run concurrently. Find out why in
+   `crates/lpk-core/src/balanced.rs` (`BalancedEncoder::job` / `absorb` and what the job holds while it encodes —
+   a lock held for the whole encode, a shared trial, the `.threads(1)` encoder built per job) and in the writer's
+   hand-over (`crates/lpk-format/src/writer.rs`); fix it with the byte-identity tests as the guard; then re-run the
+   `lpk` tool on `small` (the detached script pattern: `target/acceptance/e2-4b-run.sh`, about an hour on an idle
+   machine), write the report, commit the directory, and tick E2-4b citing both tiers' `compress MB/s` against
+   `2026-10-13-megatron`. The Fast half is already measured and met (the feeding thread is now the limit).
 2. Then **E2-18** (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
    G3 as restated in D-27 needs 80% — with E2-4b in, measure first, then see what the store path still spends
    per byte: the chunker, two BLAKE3 passes, the frame write), with its brief written from the PLAN text as the
