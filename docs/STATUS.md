@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-14, about 01:02 UTC (2026-10-13, 21:02 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-14, about 01:49 UTC (2026-10-13, 21:49 local on the measuring machine). No measurement is running at the time of this commit (the E2-4b rows are launched after the merge, see below).
 The owner asked on 2026-10-13 for the work to continue until midnight; this is the state at the end of that evening.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
@@ -14,7 +14,9 @@ vectors), E2-6 Balanced tier, E2-7 chunk dedup, E2-8 file ordering (negative res
 its size clause, D-59) with the format's records-in-appends change they needed (D-56, PR #46), and E2-12
 encryption (D-57; the sealed row measured on `small`, `bench/reports/phase1-2026-10-13-small-seal.md`: the same
 size as the plain row on every class, a fixed key-derivation cost per archive, a higher working set noted for
-E2-20). `cargo deny` is green again after the `ruzstd` advisory bump (PR #45).
+E2-20). `cargo deny` is green again after the `ruzstd` advisory bump (PR #45). E2-4b (parallel block encoding,
+D-60) is built and reviewed: the writer encodes blocks in parallel and writes them in order, byte-identical to
+the sequential path on every class of `small`; its tick waits for the measured rows (step 1 below).
 E0-1 is measured on `nodejs/node` and waits for the owner (below). Every `lpk` number
 lives in `bench/reports/phase1-2026-10-04-*.md` with its results directory; the latest overall `small` picture is
 `phase1-2026-10-04-small-extract.md`: the JPEG classes about 77% of their bytes against 94–97% for every incumbent;
@@ -23,19 +25,30 @@ and source trees; `lpk/fast` extracting faster than 7-Zip `-mx5` on every class 
 still single-threaded.
 
 **How to resume (in this order).**
-1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list. The next tasks are **E2-4b** (parallel
-   block encoding: a writer extension holding blocks in flight — compression is still single-threaded, which is
-   what the `compress MB/s` columns of every `lpk` row show) and **E2-18** (the video target: `lpk/fast` writes
-   `video` at about a third of the `store` control's rate; G3 as restated in D-27 needs 80%); write their briefs
-   from the PLAN text as the seal brief was written (`docs/notes/e2-12-14-seal-brief.md` is the pattern), with
-   the runner rows as the acceptance evidence (`store`, `fast` on `video` for E2-18; every class for E2-4b, the
-   compress column against `bench/results/2026-10-13-megatron`).
-2. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, is the first input), then the
+1. `git pull --ff-only`; `cargo build --release -p lpk-cli -p lpk-bench`. **The E2-4b rows.** On the evening of 2026-10-13, after this branch merged, the `lpk` tool's five settings were
+   measured again on `small` (3 repeats, the standard 24 threads, now with parallel encoding) by the detached
+   script `target/acceptance/e2-4b-run.sh` on the measuring machine (status in
+   `target/acceptance/e2-4b-run-status.log`, last line `== DONE` when finished; about an hour; it runs on an
+   idle machine, never with a build going). If its results directory `bench/results/<date>-megatron*` exists
+   and the log says `validate exit 0`: `cargo run --release -p lpk-bench -- report --results
+   bench/results/<dir> --probes bench/results/2026-10-03-megatron-3`. If no directory exists, launch the script
+   detached (`Start-Process 'C:/Program Files/Git/bin/bash.exe' <the script's /d/... path>`, hidden window) on
+   an idle machine and continue when it finishes.
+   The row's reading goes into `bench/reports/phase1-<date>-small-threads.md` (the generated report plus a
+   header paragraph, as `phase1-2026-10-13-small-seal.md`), the directory and the report are committed
+   (`feat(bench): ...`), and E2-4b is ticked in PLAN citing `compress MB/s` of `lpk/fast` and `lpk/balanced`
+   against `bench/results/2026-10-13-megatron` (archive sizes must be equal — they are the same coder).
+2. Then **E2-18** (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
+   G3 as restated in D-27 needs 80% — with E2-4b in, measure first, then see what the store path still spends
+   per byte: the chunker, two BLAKE3 passes, the frame write), with its brief written from the PLAN text as the
+   seal brief was (`docs/notes/e2-12-14-seal-brief.md` is the pattern).
+3. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, and the blocks-in-flight bound,
+   D-60, are the first inputs; the Balanced cap of four in flight is provisional until then), then the
    revision-gated peels E2-10/11 (Deflate and containers — the largest remaining size win on office, PDF and
    installed software), E2-15, E2-16, E2-17 (D-49 process), then E2-21/22.
-3. E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
+4. E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
    chunk in an appended generation is coded without its previous version in the window.
-4. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
+5. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
    recorded rulings → a `D-NN` → PLAN tick with evidence → PR → CI green → `main` fast-forwarded (merge `main`
    into the branch first; squash only when a branch commit message carries figures). Learned on 2026-10-13: the
    harness gives every subagent its own worktree `.claude/worktrees/agent-<id>` on a branch `worktree-agent-<id>`
@@ -81,6 +94,7 @@ See "How to resume" above. Parked items, to pick up in the tasks named:
 - From the records change (D-56): the append constructors require `R: 'static` (the old archive is boxed into the writer); an append over an archive with an unparsable `Records` frame is refused at open; the tests' with/without pre-loading comparison is against the committed vector; `Pipeline::append` (opener-based) is the shared target `append_file` builds on.
 - From E2-13: the product's default recovery percentage is undecided (0 for now).
 - From E2-14: the size cost of a changed chunk in an appended generation (D-59) is E2-9's; an append reads the old entry table's paths into memory for the snapshot deletion.
+- From E2-4b: the JPEG peel still runs on the calling thread (the photo classes gain nothing from the pool; a peel pool is its own task); the pool is one thread per block in flight, not a persistent worker set; the Balanced cap of four blocks in flight is provisional (E2-20); `StoreOptions::threads` (None = the cores) overwrites `encode_threads`; the core and CLI identity tests use flat trees because NTFS moved a directory's mtime between two walks of a fresh temp tree.
 - The report takes one baseline directory per corpus per run; E2-22 pools directories (D-48) — a combination measured twice is refused, so each `lpk` run on a class supersedes by a new directory, never by overwriting.
 
 ### P0-5 — Linux CI smoke test (done)
