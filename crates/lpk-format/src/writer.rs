@@ -477,6 +477,20 @@ fn frame_len(payload_len: u64) -> u64 {
     4 + varint::len(payload_len) as u64 + payload_len + 32
 }
 
+impl<W: Write> Drop for Writer<W> {
+    /// Every job still running is joined (its result, or its panic payload,
+    /// dropped), so a writer dropped after an error, a panic or without
+    /// `finish` leaves no thread behind. A job that never completes holds
+    /// the drop, as it would hold `finish`.
+    fn drop(&mut self) {
+        for item in self.queue.drain(..) {
+            if let Work::Running(handle) = item.work {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 impl<W: Write> std::fmt::Debug for Writer<W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Writer")
@@ -1260,6 +1274,11 @@ impl<W: Write> Writer<W> {
                 Commit::Unchecked,
             );
         }
+        // Room first: the bound counts the encoders' cores too, and a job
+        // borrows one when it is made.
+        while self.queue.len() >= threads {
+            self.write_oldest()?;
+        }
         let item = match given {
             Some(e) => {
                 let checked = check_graph(&e.graph, self.record_count, self.version_minor)
@@ -1281,9 +1300,6 @@ impl<W: Write> Writer<W> {
             None => {
                 let work = match self.options.encoder.job() {
                     Some(job) => {
-                        while self.queue.len() >= threads {
-                            self.write_oldest()?;
-                        }
                         let spawned = std::thread::Builder::new()
                             .name("lpk-encode".to_string())
                             .spawn(move || job.run(&plain));
@@ -1308,9 +1324,6 @@ impl<W: Write> Writer<W> {
                 }
             }
         };
-        while self.queue.len() >= threads {
-            self.write_oldest()?;
-        }
         self.queue.push_back(item);
         self.write_finished()
     }
@@ -1513,6 +1526,15 @@ impl<W: Write> Writer<W> {
     /// Close the current block now, even if it has room (nothing when it holds
     /// no chunk): the next chunk starts a new block. The block's graph is
     /// validated here, as when a block closes because it is full.
+    ///
+    /// With `encode_threads` above 1 the block is handed to the pool and this
+    /// call returns without waiting on it: it waits only when `encode_threads`
+    /// blocks are already in flight, for the oldest, which it writes first;
+    /// blocks whose encoding has completed are written in order before it
+    /// returns. The checks and the frame write of the block happen at that
+    /// later, in-order step, so an error of an earlier block (its encoder's,
+    /// its graph check's, the output's) may surface here rather than in the
+    /// call that closed it.
     ///
     /// Errors: the call that fails (an encoder error, a graph that fails its
     /// check, an I/O error) returns the error's own class and abandons the

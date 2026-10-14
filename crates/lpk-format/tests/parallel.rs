@@ -195,6 +195,8 @@ struct Gate {
     open: Mutex<bool>,
     cv: Condvar,
     started: AtomicUsize,
+    /// Jobs made (`BlockEncoder::job` calls): the encoder cores lent out.
+    made: AtomicUsize,
 }
 
 impl Gate {
@@ -227,6 +229,7 @@ impl BlockEncoder for Blocking {
     }
 
     fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
+        self.0.made.fetch_add(1, Ordering::SeqCst);
         Some(Box::new(Blocking(Arc::clone(&self.0))))
     }
 }
@@ -262,10 +265,12 @@ fn at_most_n_blocks_are_in_flight_and_finish_drains_them_in_order() {
     });
     // N blocks close without waiting: N jobs have started, N files were accepted.
     settle(|| gate.started.load(Ordering::SeqCst) == N && accepted.load(Ordering::SeqCst) == N);
-    // The (N+1)th close awaits the oldest job, which is held: nothing more is accepted.
+    // The (N+1)th close awaits the oldest job, which is held: nothing more is accepted, and no
+    // job (no encoder core) beyond the N in flight has been made.
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(accepted.load(Ordering::SeqCst), N);
     assert_eq!(gate.started.load(Ordering::SeqCst), N);
+    assert_eq!(gate.made.load(Ordering::SeqCst), N);
     gate.release();
     let parallel = writer.join().unwrap();
     assert_eq!(accepted.load(Ordering::SeqCst), 5);
@@ -291,6 +296,37 @@ fn at_most_n_blocks_are_in_flight_and_finish_drains_them_in_order() {
     assert!(blocks.windows(2).all(|p| p[0].sequence < p[1].sequence
         && p[0].first_chunk < p[1].first_chunk
         && p[0].frame_offset < p[1].frame_offset));
+}
+
+#[test]
+fn dropping_a_writer_with_jobs_in_flight_joins_them() {
+    const N: usize = 3;
+    let gate = Arc::new(Gate::default());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let (g, d) = (Arc::clone(&gate), Arc::clone(&dropped));
+    let writer = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut w = Writer::new(&mut out, options(N, Box::new(Blocking(g)), false)).unwrap();
+        for i in 0..N as u64 {
+            let data = common::pattern(i + 1, BLOCK as usize);
+            w.add_file(&format!("f{i}"), EntryFlags::EMPTY, 1, &mut &data[..])
+                .unwrap();
+            w.close_block().unwrap();
+        }
+        // Abandoned with N jobs held: the drop joins them once they are released.
+        drop(w);
+        d.store(1, Ordering::SeqCst);
+    });
+    settle(|| gate.started.load(Ordering::SeqCst) == N);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        0,
+        "the drop returned before its jobs"
+    );
+    gate.release();
+    writer.join().unwrap();
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
 
 /// Fails (or panics) on the block whose hand-over index is `at`.
