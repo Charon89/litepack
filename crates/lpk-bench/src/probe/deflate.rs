@@ -356,14 +356,18 @@ fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
             rejected += 1;
             continue;
         };
-        match f.name() {
-            "AndroidManifest.xml" => apk = true,
-            "mimetype" => office = true,
-            "META-INF/MANIFEST.MF" => jar = true,
-            n if n.starts_with("word/") || n.starts_with("xl/") || n.starts_with("ppt/") => {
+        match f.name().as_deref() {
+            Ok("AndroidManifest.xml") => apk = true,
+            Ok("mimetype") => office = true,
+            Ok("META-INF/MANIFEST.MF") => jar = true,
+            Ok(n) if n.starts_with("word/") || n.starts_with("xl/") || n.starts_with("ppt/") => {
                 office_dirs = true
             }
-            _ => {}
+            Ok(_) => {}
+            Err(_) => {
+                rejected += 1;
+                continue;
+            }
         }
         if f.is_dir() || f.compression() != zip::CompressionMethod::Deflated {
             continue;
