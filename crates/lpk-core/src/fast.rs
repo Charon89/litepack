@@ -13,6 +13,7 @@
 //! give one `--prior <dictionary file>` per dictionary.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lpk_format::{
@@ -140,7 +141,32 @@ impl FastHandle {
     }
 }
 
-/// Classes stored without trying to compress them.
+/// The compression contexts an encoder made and used, counted for the tests that show where
+/// a block's store decision is made (a stored-by-class block reaches none of the counts).
+#[derive(Debug, Default)]
+pub(crate) struct ContextCounts {
+    /// zstd cores built (one compressor per dictionary each), the construction's included.
+    pub(crate) zstd_cores: AtomicU64,
+    /// zstd compressions run (a trial or a block).
+    pub(crate) zstd_runs: AtomicU64,
+    /// liblzma encoder streams created.
+    pub(crate) lzma_streams: AtomicU64,
+}
+
+impl ContextCounts {
+    pub(crate) fn bump(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(counter: &AtomicU64) -> u64 {
+        counter.load(Ordering::Relaxed)
+    }
+}
+
+/// Classes stored without trying to compress them: the class rule (D-47). It is decided
+/// before any compression context exists for the block: the jobs and the sequential paths of
+/// both tiers test it first and neither build nor borrow a compressor for such a block.
 pub(crate) fn stored_by_class(class: Class) -> bool {
     matches!(
         class,
@@ -172,6 +198,7 @@ pub(crate) struct ZstdConfig {
     window_log: u32,
     gate: Gate,
     policy: DictionaryPolicy,
+    counts: Arc<ContextCounts>,
 }
 
 /// The compressors of the Fast tier, one plain and one per provided dictionary.
@@ -182,6 +209,7 @@ pub(crate) struct ZstdCore {
     plain: zstd::bulk::Compressor<'static>,
     /// One compressor per provided dictionary: kind, prior id, compressor.
     with_dict: Vec<(DictionaryKind, [u8; 32], zstd::bulk::Compressor<'static>)>,
+    counts: Arc<ContextCounts>,
 }
 
 /// What a block became, for the summary.
@@ -263,6 +291,7 @@ fn build_compressor(
 
 impl ZstdCore {
     pub(crate) fn build(c: &ZstdConfig) -> Result<Self, CoreError> {
+        ContextCounts::bump(&c.counts.zstd_cores);
         let plain = build_compressor(c.level, c.window_log, None)?;
         let mut with_dict = Vec::new();
         if let DictionaryPolicy::Provided(set) = &c.policy {
@@ -279,10 +308,13 @@ impl ZstdCore {
             gate: c.gate,
             plain,
             with_dict,
+            counts: Arc::clone(&c.counts),
         })
     }
 
-    /// Encode one block under the steering `class` and `kind`.
+    /// Encode one block under the steering `class` and `kind`. The decisions come in this
+    /// order, the first that applies: the class rule (stored, no trial), the entropy gate on
+    /// its sample (stored), zstd, and `store` when zstd does not shrink the block.
     pub(crate) fn encode(
         &mut self,
         class: Class,
@@ -305,6 +337,7 @@ impl ZstdCore {
             None => ([0u8; 32], &mut self.plain),
         };
         compressor.set_parameter(CParameter::WindowLog(declared))?;
+        ContextCounts::bump(&self.counts.zstd_runs);
         let bytes = compressor.compress(plain)?;
         if bytes.len() >= plain.len() {
             return Ok((StoreEncoder.encode(plain)?, Outcome::StoredNoGain));
@@ -336,9 +369,10 @@ struct ZstdJob {
     core: Option<ZstdCore>,
 }
 
-/// What a [`ZstdJob`] gives back: the core it used and the block's outcome.
+/// What a [`ZstdJob`] gives back: the core it used (none for a stored-by-class block, which
+/// never takes one) and the block's outcome.
 struct ZstdReturn {
-    core: ZstdCore,
+    core: Option<ZstdCore>,
     outcome: Outcome,
 }
 
@@ -350,12 +384,24 @@ fn build_failed(e: CoreError) -> FormatError {
 
 impl EncodeJob for ZstdJob {
     fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError> {
+        if stored_by_class(self.class) {
+            // The class rule, before any compressor exists for this block.
+            let back = ZstdReturn {
+                core: self.core,
+                outcome: Outcome::StoredByClass,
+            };
+            return Ok((StoreEncoder.encode(plain)?, Some(Box::new(back))));
+        }
         let mut core = match self.core {
             Some(c) => c,
             None => ZstdCore::build(&self.config).map_err(build_failed)?,
         };
         let (encoded, outcome) = core.encode(self.class, self.kind, plain)?;
-        Ok((encoded, Some(Box::new(ZstdReturn { core, outcome }))))
+        let back = ZstdReturn {
+            core: Some(core),
+            outcome,
+        };
+        Ok((encoded, Some(Box::new(back))))
     }
 }
 
@@ -391,6 +437,7 @@ impl ZstdEncoder {
             window_log,
             gate,
             policy: policy.clone(),
+            counts: Arc::new(ContextCounts::default()),
         };
         let core = ZstdCore::build(&config)?;
         let shared = Arc::new(Mutex::new(Shared {
@@ -436,13 +483,23 @@ impl ZstdEncoder {
         &self.config
     }
 
-    /// Encode on this thread with the encoder's own core (built anew if a job holds it).
+    /// The context counts of this encoder and of every job it made.
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> Arc<ContextCounts> {
+        Arc::clone(&self.config.counts)
+    }
+
+    /// Encode on this thread with the encoder's own core (built anew if a job holds it); a
+    /// stored-by-class block takes no core.
     pub(crate) fn encode_with(
         &mut self,
         class: Class,
         kind: DictionaryKind,
         plain: &[u8],
     ) -> Result<(Encoded, Outcome), FormatError> {
+        if stored_by_class(class) {
+            return Ok((StoreEncoder.encode(plain)?, Outcome::StoredByClass));
+        }
         let mut core = match self.lend_core() {
             Some(c) => c,
             None => ZstdCore::build(&self.config).map_err(build_failed)?,
@@ -463,18 +520,26 @@ impl BlockEncoder for ZstdEncoder {
 
     fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
         let (class, kind) = self.hint();
+        // A stored-by-class block borrows no core: the job stores it without one.
+        let core = if stored_by_class(class) {
+            None
+        } else {
+            self.lend_core()
+        };
         Some(Box::new(ZstdJob {
             class,
             kind,
             config: self.config.clone(),
-            core: self.lend_core(),
+            core,
         }))
     }
 
     fn absorb(&mut self, state: JobState) {
         if let Ok(r) = state.downcast::<ZstdReturn>() {
             self.bump(r.outcome);
-            self.return_core(r.core);
+            if let Some(core) = r.core {
+                self.return_core(core);
+            }
         }
     }
 }
@@ -677,6 +742,50 @@ mod tests {
             (s.stored_by_gate, s.stored_by_class, s.zstd_blocks),
             (1, 1, 0)
         );
+    }
+
+    /// The class rule is decided before any compression context exists: a stored-by-class
+    /// cluster builds no zstd core (beyond the construction's) and runs no compression, at one
+    /// block in flight and at four (no job borrows the encoder's core for it either); a
+    /// compressible cluster written the same way does.
+    #[test]
+    fn a_stored_by_class_cluster_creates_no_compression_context() {
+        let data = prose(1 << 20);
+        for threads in [1usize, 4] {
+            for (class, compressed) in [(Class::Video, false), (Class::Text, true)] {
+                let (enc, handle) = encoder(&DictionaryPolicy::None);
+                let counts = enc.counts();
+                let cores = ContextCounts::get(&counts.zstd_cores);
+                assert_eq!(cores, 1, "the construction's core");
+                handle.set_hint(class, DictionaryKind::None);
+                let wopts = WriterOptions {
+                    encoder: Box::new(enc),
+                    chunk_size: 1 << 16,
+                    block_size: 1 << 18,
+                    encode_threads: threads,
+                    ..WriterOptions::default()
+                };
+                let mut out = Vec::new();
+                let mut w = Writer::new(&mut out, wopts).unwrap();
+                w.add_file("p.txt", Default::default(), 0, &mut &data[..])
+                    .unwrap();
+                let blocks = w.finish().unwrap().blocks;
+                let made = (
+                    ContextCounts::get(&counts.zstd_cores) - cores,
+                    ContextCounts::get(&counts.zstd_runs),
+                );
+                let s = handle.summary();
+                if compressed {
+                    assert!(made.1 > 0, "{threads} {made:?}");
+                    assert_eq!(s.stored_by_class, 0);
+                } else {
+                    assert_eq!(made, (0, 0), "threads {threads}");
+                    assert_eq!((s.stored_by_class, s.zstd_blocks), (blocks, 0));
+                    assert_eq!(blocks, 4);
+                }
+                assert_eq!(extract_all(out).1[0].1, data);
+            }
+        }
     }
 
     #[test]
