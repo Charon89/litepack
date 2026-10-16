@@ -525,6 +525,23 @@ fn b_description_matches_the_library() {
         (100, 300, false),
         (4, 4000, false),
     ];
+    // 13, "Supported counts": the predicate agrees with the library's at the edges.
+    let edges = [0usize, 1, 2, 3, 4, 5, 4095, 4096, 4097, 32767, 32768, 32769];
+    for &k in edges
+        .iter()
+        .chain(&[61439, 61440, 61441, 65535, 65536, 65537])
+    {
+        for &r in edges
+            .iter()
+            .chain(&[61439, 61440, 61441, 65535, 65536, 65537])
+        {
+            assert_eq!(
+                supports(k, r),
+                reed_solomon_simd::ReedSolomonDecoder::supports(k, r),
+                "{k} {r}"
+            );
+        }
+    }
     for (n, &(k, r, high)) in pairs.iter().enumerate() {
         assert!(supports(k, r), "{k} {r}");
         assert_eq!(uses_high_form(k, r), high, "{k} {r}");
@@ -570,6 +587,90 @@ fn c_erasures_rebuilt_by_elimination() {
             assert_eq!(decode_by_elimination(&f, k, r, &damaged), full, "{k} {r}");
         }
     }
+}
+
+/// 13, "The fast transform": what the transform computes. FFT at offset delta
+/// maps coefficients c_n in the basis X_n(X) = product over the set bits b of
+/// n of W_{2^b}(X) / W_{2^b}(w_{2^b}) to the values at w_{delta + i}, and IFFT
+/// at the same offset undoes it.
+#[test]
+fn e_transform_evaluates_in_the_subspace_polynomial_basis() {
+    let f = Field::new();
+    let mut rng = Rng(0x0FF7);
+    let basis_poly = |n: usize, x: u16| -> u16 {
+        (0..16)
+            .filter(|b| n >> b & 1 == 1)
+            .fold(1, |acc, b| f.mul(acc, twist_at(&f, b, x)))
+    };
+    for &(m, delta) in &[
+        (1usize, 0usize),
+        (2, 6),
+        (8, 0),
+        (8, 40),
+        (16, 4096),
+        (64, 128),
+    ] {
+        let coef: Vec<Vec<u16>> = (0..m).map(|_| vec![rng.next() as u16]).collect();
+        let mut x = coef.clone();
+        fft(&f, &mut x, delta);
+        for i in 0..m {
+            let at = f.w(delta + i);
+            let want = (0..m).fold(0, |acc, n| acc ^ f.mul(coef[n][0], basis_poly(n, at)));
+            assert_eq!(x[i][0], want, "m {m} delta {delta} i {i}");
+        }
+        ifft(&f, &mut x, delta);
+        assert_eq!(x, coef);
+    }
+}
+
+/// 13, "The encoding map": the matrix is the interpolation the text defines
+/// the two forms by (high form: the sum over chunks c of the polynomial of
+/// degree < m through the chunk's points w_{(c+1)m+t}, evaluated at w_j; low
+/// form: the polynomial of degree < m through w_i, evaluated at w_{m+j}),
+/// computed here by plain Lagrange products.
+#[test]
+fn f_matrix_is_the_interpolation_of_the_definition() {
+    let f = Field::new();
+    // The coefficient of the value at point `a` (one of `points`) in the
+    // interpolating polynomial evaluated at `x`.
+    let lagrange = |points: &[u16], a: u16, x: u16| -> u16 {
+        points
+            .iter()
+            .filter(|&&b| b != a)
+            .fold(1, |acc, &b| f.mul(acc, f.mul(x ^ b, f.inv(a ^ b))))
+    };
+    for &(k, r) in &[
+        (12usize, 3usize),
+        (5, 7),
+        (7, 5),
+        (3, 5),
+        (40, 9),
+        (2, 9),
+        (1, 1),
+    ] {
+        let c = coefficients(&f, k, r);
+        for j in 0..r {
+            for i in 0..k {
+                let want = if uses_high_form(k, r) {
+                    let m = r.next_power_of_two();
+                    let chunk = i / m;
+                    let points: Vec<u16> = (0..m).map(|t| f.w((chunk + 1) * m + t)).collect();
+                    lagrange(&points, f.w(m + i), f.w(j))
+                } else {
+                    let m = k.next_power_of_two();
+                    let points: Vec<u16> = (0..m).map(|t| f.w(t)).collect();
+                    lagrange(&points, f.w(i), f.w(m + j))
+                };
+                assert_eq!(c[j][i], want, "{k} {r} C[{j}][{i}]");
+            }
+        }
+    }
+}
+
+/// W_{2^b}(x) / W_{2^b}(w_{2^b}) at any element x.
+fn twist_at(f: &Field, b: usize, x: u16) -> u16 {
+    let n = 1usize << b;
+    f.mul(f.subspace_poly(n, x), f.inv(f.subspace_poly(n, f.w(n))))
 }
 
 /// Part (d): the check values printed in section 13.
