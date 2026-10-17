@@ -287,7 +287,7 @@ const ZSTD_PARAMS: [(u32, u32, u32, u8); 23] = [
 /// chain_log`, none for `fast`), the row match finder's tag table for `greedy` to `lazy2`
 /// (counted as `2 << hash_log`), with `hash_log` capped at `window_log + 1` and `chain_log`
 /// reduced so its cycle does not exceed the window (`ZSTD_adjustCParams`); long-distance
-/// matching's hash table (`8 << (window_log - 7)`) and bucket offsets; plus the sequence store
+/// matching's hash table (`8 << (window_log - 7 + strategy / 3)`) and bucket offsets; plus the sequence store
 /// and, for `btopt` and above, the optimal parser's state (allowances).
 pub fn zstd_cctx_memory(level: i32, window_log: u32, ldm: bool) -> u64 {
     let row = match level {
@@ -316,8 +316,14 @@ pub fn zstd_cctx_memory(level: i32, window_log: u32, ldm: bool) -> u64 {
         m += ZSTD_OPT_ALLOWANCE;
     }
     if ldm {
-        let h = window_log.saturating_sub(7).max(6);
-        m += (8u64 << h) + (1u64 << h.saturating_sub(3)) + (64 << 10);
+        // `ZSTD_ldm_adjustParameters` (zstd 1.5.7): hashRateLog = 7 - strategy / 3, hashLog =
+        // max(6, windowLog - hashRateLog), bucketSizeLog = clamp(strategy, 4, 8) capped at
+        // hashLog; `ZSTD_ldm_getTableSize`: 8-byte entries, one bucket offset byte per
+        // `2^bucketSizeLog` entries; plus the sequences of one block (an allowance).
+        let rate = 7 - u32::from(strategy) / 3;
+        let h = window_log.saturating_sub(rate).max(6);
+        let bucket = u32::from(strategy).clamp(4, 8).min(h);
+        m += (8u64 << h) + (1u64 << (h - bucket)) + (64 << 10);
     }
     m
 }
@@ -533,11 +539,19 @@ mod tests {
 
     #[test]
     fn zstd_context_follows_libzstds_table() {
-        // Level 3 at a 64 MiB window: dfast, hash 2^17, chain 2^16, LDM hash 2^19.
+        // Level 3 at a 64 MiB window: dfast, hash 2^17, chain 2^16, LDM hash 2^19 (rate 7),
+        // buckets of 2^4.
         let l3 = zstd_cctx_memory(3, 26, true);
         assert_eq!(
             l3,
-            (4 << 17) + (4 << 16) + MIB + (8 << 19) + (1 << 16) + (64 << 10)
+            (4 << 17) + (4 << 16) + MIB + (8 << 19) + (1 << 15) + (64 << 10)
+        );
+        // Level 22 at 2^26 with LDM: btultra2 (9), LDM rate 7 - 3 = 4, hash 2^22 (32 MiB),
+        // buckets of 2^8.
+        let l22_ldm = zstd_cctx_memory(22, 26, true);
+        assert_eq!(
+            l22_ldm,
+            (4 << 25) + (4 << 27) + 2 * MIB + (8 << 22) + (1 << 14) + (64 << 10)
         );
         // Level 22 at 2^26: btultra2, hash 2^25, chain 2^27 (cycle 26 = window), opt state.
         let l22 = zstd_cctx_memory(22, 26, false);
