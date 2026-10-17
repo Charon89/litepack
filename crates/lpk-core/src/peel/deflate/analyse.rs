@@ -1,8 +1,13 @@
 //! Analysing the streams the walker found, moved unchanged from Phase 0's `probe deflate`.
 //!
 //! Per stream: analysis with `PreflateStreamProcessor` and its `is_done` (the library's own
-//! verification is off; the stream is verified here), then `recreate_whole_deflate_stream` from
-//! the plain data and the corrections, compared byte for byte with the original stream. The
+//! verification is off; the stream is verified here), then the bounded recreation the
+//! `deflate-reconstruct` decoder runs (`recreate_whole_deflate_stream_limited`, D-66, limit = the
+//! stream's length) from the plain data and the corrections, compared byte for byte with the
+//! original stream, so a kept stream's record recreates under the decoder's limits (spec section
+//! 8, "Limits of a recreation"). A recreation the limits refuse is failed under its `ExitCode`'s
+//! name (`InvalidParameterHeader`, `InvalidPredictionData`); one that would pass the stream's
+//! length is `RoundtripMismatch`, as it would differ from the stream. The
 //! library returns `Ok` with a shortened stream when the input is truncated or the plain-text
 //! limit is hit after a first block, so the stream must be complete (`is_done`) and its plain
 //! size must equal the known one. A stream the library rejects is failed under the name of its
@@ -18,8 +23,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
 use preflate_rs::{
-    recreate_whole_deflate_stream, ExitCode, PlainText, PreflateConfig, PreflateStreamProcessor,
-    TokenPredictorParameters,
+    recreate_whole_deflate_stream_limited, ExitCode, PlainText, PreflateConfig,
+    PreflateStreamProcessor, TokenPredictorParameters,
 };
 
 use super::walk::{find_streams, inflate_extent, trim_spans, Found, Inflated};
@@ -172,7 +177,7 @@ pub fn analyse_stream(
     let original = deflate.get(..deflate_len);
     let (back, recreate_seconds) = timed(|| {
         catch_unwind(AssertUnwindSafe(|| {
-            recreate_whole_deflate_stream(plain.text(), &chunk.corrections)
+            recreate_whole_deflate_stream_limited(plain.text(), &chunk.corrections, deflate_len)
         }))
     });
     let seconds = analyse_seconds + recreate_seconds;
@@ -181,6 +186,9 @@ pub fn analyse_stream(
     }
     match (back, original) {
         (Err(_), _) => failed(PANIC, seconds),
+        (Ok(Err(e)), _) if e.exit_code() == ExitCode::OutputLimit => {
+            failed(&code_name(ExitCode::RoundtripMismatch), seconds)
+        }
         (Ok(Err(e)), _) => failed(&code_name(e.exit_code()), seconds),
         (Ok(Ok(b)), Some(o)) if b == o => StreamOutcome::Done {
             plain,
