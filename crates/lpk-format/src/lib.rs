@@ -21,6 +21,7 @@ pub mod index;
 pub mod lzma;
 pub mod magic;
 pub mod merkle;
+mod parhash;
 pub mod primitive;
 pub mod priors;
 pub mod reader;
@@ -84,7 +85,8 @@ pub use recovery::{
     MAX_SHARD_LEN, MAX_TOTAL_SHARDS, SHARD_ALIGN,
 };
 pub use writer::{
-    BlockEncoder, Chunker, EncodeJob, Encoded, FixedChunker, JobState, SealOptions, StoreEncoder,
-    Writer, WriterOptions, WriterSummary, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE, MIN_CHUNK_SIZE,
+    BlockEncoder, Chunker, EncodeJob, Encoded, FixedChunker, JobResult, JobState, SealOptions,
+    StoreEncoder, Writer, WriterOptions, WriterSummary, DEFAULT_BLOCK_SIZE, DEFAULT_CHUNK_SIZE,
+    MIN_CHUNK_SIZE,
 };
 pub use zstd::ZstdDecoder;

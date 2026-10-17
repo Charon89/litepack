@@ -31,7 +31,7 @@ use liblzma::stream::{
     PRESET_EXTREME,
 };
 use lpk_format::{
-    BlockEncoder, EncodeJob, Encoded, FormatError, Graph, JobState, PrimitiveId, Step,
+    BlockEncoder, EncodeJob, Encoded, FormatError, Graph, JobResult, JobState, PrimitiveId, Step,
     StoreEncoder, WriterSummary,
 };
 
@@ -39,7 +39,7 @@ use crate::classify::Class;
 use crate::cluster::DictionaryKind;
 use crate::error::CoreError;
 use crate::fast::{
-    stored_by_class, DictionaryPolicy, FastHandle, ZstdConfig, ZstdCore, ZstdEncoder,
+    stored_by_class, ContextCounts, DictionaryPolicy, FastHandle, ZstdConfig, ZstdCore, ZstdEncoder,
 };
 use crate::gate::Gate;
 use crate::ingest::IngestOptions;
@@ -134,6 +134,8 @@ pub struct LzmaEncoder {
     lc: u8,
     lp: u8,
     pb: u8,
+    /// Shared by the clones the jobs take.
+    counts: Arc<ContextCounts>,
 }
 
 impl LzmaEncoder {
@@ -162,6 +164,7 @@ impl LzmaEncoder {
             lc,
             lp,
             pb,
+            counts: Arc::new(ContextCounts::default()),
         })
     }
 
@@ -198,6 +201,7 @@ impl LzmaEncoder {
         let o = self.options(dict)?;
         let mut filters = Filters::new();
         filters.lzma1(&o);
+        ContextCounts::bump(&self.counts.lzma_streams);
         let mut s = Stream::new_raw_encoder(&filters).map_err(io_err)?;
         let mut out = Vec::with_capacity(plain.len() / 3 + 64);
         loop {
@@ -374,6 +378,12 @@ impl BalancedEncoder {
     fn bump(&self, outcome: &BalancedOutcome) {
         outcome.count(&mut lock(&self.shared).summary);
     }
+
+    /// The context counts: the LZMA encoder's, then the zstd candidate's.
+    #[cfg(test)]
+    fn counts(&self) -> (Arc<ContextCounts>, Arc<ContextCounts>) {
+        (Arc::clone(&self.lzma.counts), self.zstd.counts())
+    }
 }
 
 /// Whether zstd beats lzma on the sample: only a strictly smaller output wins; a tie is lzma's.
@@ -475,27 +485,74 @@ struct BalancedJob {
     core: Option<ZstdCore>,
 }
 
-/// What a [`BalancedJob`] gives back: the zstd core it used and the block's outcome.
+/// What a [`BalancedJob`] gives back: the zstd core it used (none for a stored-by-class
+/// block, which never takes one) and the block's outcome.
 struct BalancedReturn {
-    core: ZstdCore,
+    core: Option<ZstdCore>,
     outcome: BalancedOutcome,
+}
+
+/// A stored-by-class block's encoding and outcome: no trial, no compressor.
+fn stored_by_class_block(plain: &[u8]) -> Result<(Encoded, BalancedOutcome), FormatError> {
+    let outcome = BalancedOutcome {
+        kind: BalancedKind::StoredByClass,
+        sample_bytes: 0,
+    };
+    Ok((StoreEncoder.encode(plain)?, outcome))
 }
 
 impl EncodeJob for BalancedJob {
     fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError> {
+        if stored_by_class(self.class) {
+            // The class rule, before any compressor exists for this block.
+            let (encoded, outcome) = stored_by_class_block(plain)?;
+            let back = BalancedReturn {
+                core: self.core,
+                outcome,
+            };
+            return Ok((encoded, Some(Box::new(back))));
+        }
         let mut core = match self.core {
             Some(c) => c,
             None => ZstdCore::build(&self.config).map_err(io_err)?,
         };
         let (encoded, outcome) =
             balanced_block(&self.lzma, &mut core, self.class, self.sample_len, plain)?;
-        Ok((encoded, Some(Box::new(BalancedReturn { core, outcome }))))
+        let back = BalancedReturn {
+            core: Some(core),
+            outcome,
+        };
+        Ok((encoded, Some(Box::new(back))))
+    }
+
+    fn run_owned(self: Box<Self>, plain: Vec<u8>) -> (JobResult, Option<Vec<u8>>) {
+        if stored_by_class(self.class) {
+            // The class rule: the plain buffer is the encoding, uncopied.
+            let back = BalancedReturn {
+                core: self.core,
+                outcome: STORED_BY_CLASS,
+            };
+            return (Ok((StoreEncoder::wrap(plain), Some(Box::new(back)))), None);
+        }
+        let r = self.run(&plain);
+        (r, Some(plain))
     }
 }
+
+/// The outcome of a stored-by-class block.
+const STORED_BY_CLASS: BalancedOutcome = BalancedOutcome {
+    kind: BalancedKind::StoredByClass,
+    sample_bytes: 0,
+};
 
 impl BlockEncoder for BalancedEncoder {
     fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
         let class = lock(&self.shared).class;
+        if stored_by_class(class) {
+            let (encoded, outcome) = stored_by_class_block(plain)?;
+            self.bump(&outcome);
+            return Ok(encoded);
+        }
         let mut core = match self.zstd.lend_core() {
             Some(c) => c,
             None => ZstdCore::build(self.zstd.config()).map_err(io_err)?,
@@ -507,21 +564,38 @@ impl BlockEncoder for BalancedEncoder {
         Ok(encoded)
     }
 
+    fn encode_owned(&mut self, plain: Vec<u8>) -> (Result<Encoded, FormatError>, Option<Vec<u8>>) {
+        if stored_by_class(lock(&self.shared).class) {
+            self.bump(&STORED_BY_CLASS);
+            return (Ok(StoreEncoder::wrap(plain)), None);
+        }
+        let r = self.encode(&plain);
+        (r, Some(plain))
+    }
+
     fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
         let class = lock(&self.shared).class;
+        // A stored-by-class block borrows no core: the job stores it without one.
+        let core = if stored_by_class(class) {
+            None
+        } else {
+            self.zstd.lend_core()
+        };
         Some(Box::new(BalancedJob {
             class,
             lzma: self.lzma.clone(),
             sample_len: self.sample_len,
             config: self.zstd.config().clone(),
-            core: self.zstd.lend_core(),
+            core,
         }))
     }
 
     fn absorb(&mut self, state: JobState) {
         if let Ok(r) = state.downcast::<BalancedReturn>() {
             self.bump(&r.outcome);
-            self.zstd.return_core(r.core);
+            if let Some(core) = r.core {
+                self.zstd.return_core(core);
+            }
         }
     }
 }
@@ -754,6 +828,53 @@ mod tests {
         let e = enc.encode(b"hi there").unwrap();
         assert_eq!(e.graph.steps[0].primitive, PrimitiveId::Store);
         assert_eq!(h.summary().stored_no_gain, 1);
+    }
+
+    /// The class rule is decided before any compression context exists: a stored-by-class
+    /// cluster creates no LZMA stream and no zstd core and runs no zstd compression, at one
+    /// block in flight and at four; a compressible cluster written the same way does.
+    #[test]
+    fn a_stored_by_class_cluster_creates_no_compression_context() {
+        let opts = BalancedOptions {
+            sample_len: 1 << 14,
+            ..BalancedOptions::default()
+        };
+        let data = prose_seeded(9, 1 << 20);
+        for threads in [1usize, 4] {
+            for (class, compressed) in [(Class::Video, false), (Class::Text, true)] {
+                let (enc, h) = BalancedEncoder::new(&opts).unwrap();
+                let (lzma, zstd) = enc.counts();
+                let cores = ContextCounts::get(&zstd.zstd_cores);
+                h.set_hint(class, DictionaryKind::None);
+                let wopts = WriterOptions {
+                    encoder: Box::new(enc),
+                    chunk_size: 1 << 16,
+                    block_size: 1 << 18,
+                    encode_threads: threads,
+                    ..WriterOptions::default()
+                };
+                let mut out = Vec::new();
+                let mut w = Writer::new(&mut out, wopts).unwrap();
+                w.add_file("p.txt", Default::default(), 0, &mut &data[..])
+                    .unwrap();
+                let blocks = w.finish().unwrap().blocks;
+                let s = h.summary();
+                let made = (
+                    ContextCounts::get(&lzma.lzma_streams),
+                    ContextCounts::get(&zstd.zstd_cores) - cores,
+                    ContextCounts::get(&zstd.zstd_runs),
+                );
+                if compressed {
+                    assert!(made.0 > 0 && made.2 > 0, "{threads} {made:?}");
+                    assert_eq!(s.stored_by_class, 0);
+                } else {
+                    assert_eq!(made, (0, 0, 0), "threads {threads}");
+                    assert_eq!((s.stored_by_class, s.sample_bytes), (blocks, 0));
+                    assert_eq!(blocks, 4);
+                }
+                assert_eq!(read_back(&out, &Resources::default()), data);
+            }
+        }
     }
 
     fn tree(p: &Path) {

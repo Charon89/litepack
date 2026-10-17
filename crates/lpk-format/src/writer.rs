@@ -14,6 +14,7 @@ use crate::graph::{BlockHeader, Graph, Step, MAX_STEPS};
 use crate::header::{FormatVersion, Header, HeaderFlags};
 use crate::index::{BlockLocation, FrameLocation, GenerationInfo, Index};
 use crate::merkle::merkle_root;
+use crate::parhash::frame_payload_hash;
 use crate::primitive::{GraphResources, PrimitiveId};
 use crate::record::{Record, RecordsWriter};
 use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
@@ -120,6 +121,16 @@ pub trait EncodeJob: Send {
     /// [`BlockEncoder::absorb`] when the writer takes the block, in block
     /// order.
     fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError>;
+
+    /// Encode `plain`, owning it; the writer calls this one. Returns the result of
+    /// [`EncodeJob::run`] and the plain buffer when the encoding did not take it (the
+    /// writer reuses it for a later block). The default runs `run` and hands the buffer back;
+    /// a job that stores the block overrides it to move the buffer into the encoding instead
+    /// of copying it.
+    fn run_owned(self: Box<Self>, plain: Vec<u8>) -> (JobResult, Option<Vec<u8>>) {
+        let r = self.run(&plain);
+        (r, Some(plain))
+    }
 }
 
 /// Turns the plain bytes of a block into encoded bytes, choosing the decode
@@ -135,6 +146,16 @@ pub trait EncodeJob: Send {
 pub trait BlockEncoder {
     /// Encode one block's plain bytes with a graph of the encoder's choice.
     fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError>;
+
+    /// Encode, owning the plain bytes; the writer calls this one when it encodes on its own
+    /// thread. Returns the result of [`BlockEncoder::encode`] and the plain buffer when the
+    /// encoding did not take it (the writer reuses it). The default calls `encode` and hands
+    /// the buffer back; an encoder that stores the block overrides it to move the buffer into
+    /// the encoding instead of copying it.
+    fn encode_owned(&mut self, plain: Vec<u8>) -> (Result<Encoded, FormatError>, Option<Vec<u8>>) {
+        let r = self.encode(&plain);
+        (r, Some(plain))
+    }
 
     /// A job for the next block, carrying the encoder's steering as it is
     /// now, to run on another thread. `None` (the default) means the writer
@@ -155,18 +176,30 @@ pub trait BlockEncoder {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StoreEncoder;
 
-impl BlockEncoder for StoreEncoder {
-    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
-        Ok(Encoded {
+impl StoreEncoder {
+    /// The `store` encoding of a block whose plain bytes are `plain`, taking the buffer as
+    /// the encoded bytes (no copy).
+    pub fn wrap(plain: Vec<u8>) -> Encoded {
+        Encoded {
             graph: Graph {
                 steps: vec![Step {
                     primitive: PrimitiveId::Store,
                     params: Vec::new(),
                 }],
             },
-            bytes: plain.to_vec(),
+            bytes: plain,
             resources: GraphResources::default(),
-        })
+        }
+    }
+}
+
+impl BlockEncoder for StoreEncoder {
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        Ok(StoreEncoder::wrap(plain.to_vec()))
+    }
+
+    fn encode_owned(&mut self, plain: Vec<u8>) -> (Result<Encoded, FormatError>, Option<Vec<u8>>) {
+        (Ok(StoreEncoder::wrap(plain)), None)
     }
 
     fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
@@ -177,6 +210,10 @@ impl BlockEncoder for StoreEncoder {
 impl EncodeJob for StoreEncoder {
     fn run(self: Box<Self>, plain: &[u8]) -> Result<(Encoded, Option<JobState>), FormatError> {
         Ok((StoreEncoder.encode(plain)?, None))
+    }
+
+    fn run_owned(self: Box<Self>, plain: Vec<u8>) -> (JobResult, Option<Vec<u8>>) {
+        (Ok((StoreEncoder::wrap(plain), None)), None)
     }
 }
 
@@ -238,7 +275,10 @@ pub struct WriterOptions {
     /// handed over, and blocks are written in order, so the archive is byte
     /// for byte the one a single thread writes. Memory: `encode_threads`
     /// times (`block_size` plus the encoded size) for the blocks in flight,
-    /// plus the encoders' own working memory, one per block in flight.
+    /// plus the encoders' own working memory, one per block in flight, plus
+    /// one spare block buffer (up to `block_size`, kept for reuse once a
+    /// block is written) and the read buffer (up to `block_size` plus
+    /// `chunk_size`), both kept for the writer's life.
     pub encode_threads: usize,
 }
 
@@ -433,14 +473,65 @@ pub struct Writer<W: Write> {
     /// Blocks handed over and not yet written, in block order (empty when
     /// `encode_threads` is 1: a block is then written as it closes).
     queue: VecDeque<InFlight>,
+    /// A plain or encoded block buffer kept after its block was written, cleared, for the
+    /// next pending block (its pages already touched); at most one is kept.
+    spare: Option<Vec<u8>>,
+    /// The read buffer of `chunk_stream`, kept across files.
+    read_buf: Vec<u8>,
     /// Tests only: skip the record chunk checks at block close, to build the
     /// archives the reader must refuse.
     #[cfg(test)]
     unchecked_records: bool,
+    /// Tests only: the pool threads hand back a wrong frame hash.
+    #[cfg(test)]
+    corrupt_pool_hash: bool,
 }
 
 /// What an encode job returns: the encoding and the state its encoder takes back.
-type JobResult = Result<(Encoded, Option<JobState>), FormatError>;
+pub type JobResult = Result<(Encoded, Option<JobState>), FormatError>;
+
+/// What a pool thread hands back for a block: the job's result, the plain buffer when the
+/// encoding did not take it (reused for a later block), and the frame hash it computed over
+/// exactly the payload the writer will write (none when the writer hashes the frame itself:
+/// an encrypted archive, whose payload is sealed at the write step).
+struct PoolOutput {
+    result: JobResult,
+    plain: Option<Vec<u8>>,
+    frame_hash: Option<[u8; 32]>,
+}
+
+/// Buffers smaller than this are not kept for reuse.
+const RECYCLE_MIN: usize = 1 << 20;
+
+/// Computes a pool-encoded block's frame hash on the pool thread, over the
+/// payload the writer will write: the block header (encoded from the graph,
+/// `plain_len` and the encoded length, as [`Writer`] encodes it at the write
+/// step), then the encoded bytes.
+struct PoolHasher {
+    plain_len: u64,
+    threads: usize,
+    /// Tests only: hand back a wrong hash, to show the writer refuses it.
+    #[cfg(test)]
+    corrupt: bool,
+}
+
+impl PoolHasher {
+    fn hash(&self, e: &Encoded) -> [u8; 32] {
+        let head = BlockHeader {
+            graph: e.graph.clone(),
+            plain_len: self.plain_len,
+            encoded_len: e.bytes.len() as u64,
+        }
+        .encode();
+        #[allow(unused_mut)]
+        let mut h = frame_payload_hash(&head, &e.bytes, self.threads);
+        #[cfg(test)]
+        if self.corrupt {
+            h[0] ^= 1;
+        }
+        h
+    }
+}
 
 /// A block handed over and not yet written.
 struct InFlight {
@@ -468,8 +559,8 @@ enum Commit {
 }
 
 enum Work {
-    Done(JobResult),
-    Running(JoinHandle<JobResult>),
+    Done(PoolOutput),
+    Running(JoinHandle<PoolOutput>),
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -592,7 +683,10 @@ impl<W: Write> Writer<W> {
     /// `encode_threads` blocks in flight at once, each its plain bytes plus its
     /// encoding — `encode_threads` times (`block_size` plus the encoded size)
     /// — plus the encoders' own working memory, one encoder per block in
-    /// flight; the chunk table (40 bytes per chunk) and the block table for
+    /// flight; one spare block buffer (up to `block_size`) kept for reuse
+    /// after a block is written, and the read buffer of the file being added
+    /// (up to `block_size` plus `chunk_size`), both kept for the writer's
+    /// life; the chunk table (40 bytes per chunk) and the block table for
     /// the life of the archive; the dedup map when `dedup` is set; the
     /// recovery group's bytes when `recovery` is set ([`Writer::recovery_buffered`]).
     pub fn new(out: W, options: WriterOptions) -> Result<Self, FormatError> {
@@ -756,8 +850,12 @@ impl<W: Write> Writer<W> {
             open: None,
             recon_blocks: Vec::new(),
             queue: VecDeque::new(),
+            spare: None,
+            read_buf: Vec::new(),
             #[cfg(test)]
             unchecked_records: false,
+            #[cfg(test)]
+            corrupt_pool_hash: false,
         };
         if let Some(slot) = slot {
             // The key slot is the first frame, in clear.
@@ -1029,8 +1127,12 @@ impl<W: Write> Writer<W> {
             open: None,
             recon_blocks: Vec::new(),
             queue: VecDeque::new(),
+            spare: None,
+            read_buf: Vec::new(),
             #[cfg(test)]
             unchecked_records: false,
+            #[cfg(test)]
+            corrupt_pool_hash: false,
             options,
         };
         Ok(w)
@@ -1254,17 +1356,26 @@ impl<W: Write> Writer<W> {
         if self.pending_chunks == 0 {
             return Ok(());
         }
-        let plain = std::mem::take(&mut self.pending);
+        let next = self.spare.take().unwrap_or_default();
+        let plain = std::mem::replace(&mut self.pending, next);
         let chunk_count = std::mem::take(&mut self.pending_chunks);
         let first_chunk = self.records.len() as u64 - chunk_count;
         let plain_len = plain.len() as u64;
         let threads = self.threads();
         if threads == 1 {
             let encoded = match given {
-                Some(e) => Ok(e),
-                None => self.options.encoder.encode(&plain),
+                Some(e) => {
+                    self.recycle(plain);
+                    Ok(e)
+                }
+                None => {
+                    let (r, back) = self.options.encoder.encode_owned(plain);
+                    if let Some(b) = back {
+                        self.recycle(b);
+                    }
+                    r
+                }
             };
-            drop(plain);
             let encoded = self.abandon_on_error(encoded)?;
             return self.commit_block(
                 encoded,
@@ -1272,6 +1383,7 @@ impl<W: Write> Writer<W> {
                 chunk_count,
                 plain_len,
                 Commit::Unchecked,
+                None,
             );
         }
         // Room first: the bound counts the encoders' cores too, and a job
@@ -1281,6 +1393,7 @@ impl<W: Write> Writer<W> {
         }
         let item = match given {
             Some(e) => {
+                self.recycle(plain);
                 let checked = check_graph(&e.graph, self.record_count, self.version_minor)
                     .and_then(|()| self.check_record_chunks(&e.graph, first_chunk));
                 self.abandon_on_error(checked)?;
@@ -1294,15 +1407,31 @@ impl<W: Write> Writer<W> {
                     chunk_count,
                     plain_len,
                     commit: Commit::Checked,
-                    work: Work::Done(Ok((e, None))),
+                    work: Work::Done(PoolOutput {
+                        result: Ok((e, None)),
+                        plain: None,
+                        frame_hash: None,
+                    }),
                 }
             }
             None => {
                 let work = match self.options.encoder.job() {
                     Some(job) => {
+                        let hasher = self.pool_hasher(plain_len, threads);
                         let spawned = std::thread::Builder::new()
                             .name("lpk-encode".to_string())
-                            .spawn(move || job.run(&plain));
+                            .spawn(move || {
+                                let (result, plain) = job.run_owned(plain);
+                                let frame_hash = match (&result, hasher) {
+                                    (Ok((e, _)), Some(h)) => Some(h.hash(e)),
+                                    _ => None,
+                                };
+                                PoolOutput {
+                                    result,
+                                    plain,
+                                    frame_hash,
+                                }
+                            });
                         match spawned {
                             Ok(handle) => Work::Running(handle),
                             Err(e) => return self.abandon_on_error(Err(FormatError::Io(e))),
@@ -1310,9 +1439,13 @@ impl<W: Write> Writer<W> {
                     }
                     None => {
                         // No job: this encoder runs sequentially, on this thread.
-                        let r = self.options.encoder.encode(&plain);
+                        let (r, back) = self.options.encoder.encode_owned(plain);
                         let encoded = self.abandon_on_error(r)?;
-                        Work::Done(Ok((encoded, None)))
+                        Work::Done(PoolOutput {
+                            result: Ok((encoded, None)),
+                            plain: back,
+                            frame_hash: None,
+                        })
                     }
                 };
                 InFlight {
@@ -1370,7 +1503,7 @@ impl<W: Write> Writer<W> {
         else {
             return Ok(());
         };
-        let result = match work {
+        let output = match work {
             Work::Done(r) => r,
             Work::Running(handle) => match handle.join() {
                 Ok(r) => r,
@@ -1383,16 +1516,70 @@ impl<W: Write> Writer<W> {
                 }
             },
         };
+        let PoolOutput {
+            result,
+            plain,
+            frame_hash,
+        } = output;
+        if let Some(p) = plain {
+            self.recycle(p);
+        }
         let (encoded, state) = self.abandon_on_error(result)?;
         if let Some(state) = state {
             self.options.encoder.absorb(state);
         }
-        self.commit_block(encoded, first_chunk, chunk_count, plain_len, commit)
+        self.commit_block(
+            encoded,
+            first_chunk,
+            chunk_count,
+            plain_len,
+            commit,
+            frame_hash,
+        )
+    }
+
+    /// Keep `buf` (cleared) for the next pending block when it is the largest
+    /// buffer at hand: the pending block itself when it holds nothing yet,
+    /// the spare otherwise. Small buffers are dropped.
+    fn recycle(&mut self, mut buf: Vec<u8>) {
+        if buf.capacity() < RECYCLE_MIN {
+            return;
+        }
+        buf.clear();
+        if self.pending.is_empty() && self.pending.capacity() < buf.capacity() {
+            self.pending = buf;
+        } else if self
+            .spare
+            .as_ref()
+            .is_none_or(|s| s.capacity() < buf.capacity())
+        {
+            self.spare = Some(buf);
+        }
+    }
+
+    /// What computes a pool-encoded block's frame hash on the pool thread:
+    /// none for an encrypted archive (its payload is sealed at the write step,
+    /// with the frame's sequence, and the writer hashes the sealed payload).
+    fn pool_hasher(&self, plain_len: u64, threads: usize) -> Option<PoolHasher> {
+        if self.sealer.is_some() {
+            return None;
+        }
+        Some(PoolHasher {
+            plain_len,
+            threads,
+            #[cfg(test)]
+            corrupt: self.corrupt_pool_hash,
+        })
     }
 
     /// The in-order write step of a closed block: the checks `commit` asks
     /// for, priors, the resource maxima, the frame (sealed or plain), the
-    /// block table and the reconstruction blocks.
+    /// block table and the reconstruction blocks. `frame_hash` is the hash a
+    /// pool thread computed over the frame's payload (the block header the
+    /// writer encodes here, then the encoded bytes); without one the writer
+    /// hashes the payload itself. Debug builds recompute a given hash and
+    /// refuse a wrong one (`BadOptions`, `pool frame hash`), abandoning the
+    /// archive before the frame is written.
     fn commit_block(
         &mut self,
         encoded: Encoded,
@@ -1400,6 +1587,7 @@ impl<W: Write> Writer<W> {
         chunk_count: u64,
         plain_len: u64,
         commit: Commit,
+        frame_hash: Option<[u8; 32]>,
     ) -> Result<(), FormatError> {
         let Encoded {
             graph,
@@ -1432,10 +1620,19 @@ impl<W: Write> Writer<W> {
             encoded_len: encoded.len() as u64,
         };
         // The frame is written piecewise, without a second copy of the encoded
-        // block (the identity encoder still copies the plain block once).
+        // block (a stored block's encoded bytes are its plain buffer, moved).
         let head = header.encode();
         let plain_payload_len = (head.len() + encoded.len()) as u64;
         let payload_len = plain_payload_len + self.overhead();
+        let hash = match frame_hash {
+            Some(h) if self.sealer.is_none() => {
+                if cfg!(debug_assertions) && h != frame_payload_hash(&head, &encoded, 1) {
+                    return self.abandon_on_error(Err(bad_options("pool frame hash")));
+                }
+                Some(h)
+            }
+            _ => None,
+        };
         self.make_room(frame_len(payload_len))?;
         let at = if let Some(sealer) = &self.sealer {
             let mut payload = head;
@@ -1449,20 +1646,19 @@ impl<W: Write> Writer<W> {
                 len: frame_len(payload_len),
                 sequence: self.seq,
             };
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&head);
-            hasher.update(&encoded);
+            let hash = hash.unwrap_or_else(|| frame_payload_hash(&head, &encoded, 1));
             let w = &mut self.out;
             w.write_all(&(FrameKind::ChunkData as u16).to_le_bytes())?;
             w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
             varint::write(w, payload_len)?;
             w.write_all(&head)?;
             w.write_all(&encoded)?;
-            w.write_all(hasher.finalize().as_bytes())?;
+            w.write_all(&hash)?;
             self.pos += at.len;
             self.seq += 1;
             at
         };
+        self.recycle(encoded);
         self.blocks.push(BlockLocation {
             frame_offset: at.offset,
             frame_len: at.len,
@@ -2045,12 +2241,21 @@ impl<W: Write> Writer<W> {
         // the held-back tail plus one segment is in memory.
         let per_segment = self.options.block_size;
         self.chunker.reset();
-        // The held-back tail, then the newly read bytes; grows with the file.
-        let mut buf: Vec<u8> = Vec::new();
+        // The held-back tail, then the newly read bytes; kept across files so
+        // its pages are touched once per writer, not once per file.
+        let mut buf: Vec<u8> = std::mem::take(&mut self.read_buf);
+        buf.clear();
         loop {
             let before = buf.len();
             let n = Read::take(&mut *data, per_segment).read_to_end(&mut buf)?;
             let eof = (n as u64) < per_segment;
+            if !eof && self.pending.capacity() < self.options.block_size as usize {
+                // A whole segment read: the input fills blocks, so the pending
+                // block takes its full size at once instead of growing by
+                // doubling (each step a copy into untouched memory).
+                let want = self.options.block_size as usize - self.pending.len();
+                self.pending.reserve_exact(want);
+            }
             let cuts = self.chunker.feed(&buf[before..], eof);
             let mut start = 0usize;
             for cut in cuts {
@@ -2084,6 +2289,7 @@ impl<W: Write> Writer<W> {
                 break;
             }
         }
+        self.read_buf = buf;
         Ok(size)
     }
 
@@ -2496,5 +2702,135 @@ mod record_rule_tests {
                 reason: "nested record"
             }
         ));
+    }
+
+    fn noise(seed: u64, len: usize) -> Vec<u8> {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut v = Vec::with_capacity(len + 8);
+        while v.len() < len {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        v.truncate(len);
+        v
+    }
+
+    /// The store path over incompressible files, a repeated (deduplicated) one and a part
+    /// whose encoding the caller gives, with blocks large enough for the pool's frame hash
+    /// to split across threads.
+    fn store_path(threads: usize, corrupt: bool) -> Result<Vec<u8>, FormatError> {
+        store_path_with(threads, corrupt, 0)
+    }
+
+    /// [`store_path`] with unsealed recovery frames interleaved (`recovery` percent).
+    fn store_path_with(
+        threads: usize,
+        corrupt: bool,
+        recovery: u8,
+    ) -> Result<Vec<u8>, FormatError> {
+        let mut out = Vec::new();
+        let opts = WriterOptions {
+            chunk_size: 1 << 20,
+            block_size: 12 << 20,
+            dedup: true,
+            encode_threads: threads,
+            recovery: RecoveryOptions {
+                percent: recovery,
+                ..RecoveryOptions::default()
+            },
+            ..WriterOptions::default()
+        };
+        let mut w = Writer::new(&mut out, opts)?;
+        w.corrupt_pool_hash = corrupt;
+        let big = noise(1, 30 << 20);
+        w.add_file("a.bin", EntryFlags::default(), 0, &mut &big[..])?;
+        w.add_file(
+            "b.bin",
+            EntryFlags::default(),
+            0,
+            &mut &noise(2, 3 << 20)[..],
+        )?;
+        w.add_file("c.bin", EntryFlags::default(), 0, &mut &big[..5 << 20])?;
+        w.close_block()?;
+        w.add_file("d.txt", EntryFlags::default(), 0, &mut &[7u8; 100_000][..])?;
+        // A given block, written in order with the pool's and hashed by the writer.
+        let given = noise(4, 2 << 20);
+        w.begin_entry("e.bin", EntryFlags::default(), 0)?;
+        w.add_part_encoded(0, &given, StoreEncoder::wrap(given.clone()), 0)?;
+        w.end_entry()?;
+        w.add_file(
+            "f.bin",
+            EntryFlags::default(),
+            0,
+            &mut &noise(5, 9 << 20)[..],
+        )?;
+        w.finish()?;
+        Ok(out)
+    }
+
+    /// Byte identity of the store path at one thread (the writer hashes every frame) and
+    /// at N (the pool threads hash them, in parallel subtrees): the same archive, and in
+    /// debug builds the writer re-checks every handed-back hash against its own.
+    #[test]
+    fn the_store_path_writes_the_same_bytes_at_one_thread_and_n() {
+        let one = store_path(1, false).unwrap();
+        for threads in [2usize, 4, 24] {
+            assert!(
+                one == store_path(threads, false).unwrap(),
+                "threads {threads}"
+            );
+        }
+        let mut a = Archive::open(Cursor::new(one), &Resources::default()).unwrap();
+        a.verify().unwrap();
+        // Unsealed recovery frames interleaved: the pool hash still applies.
+        let one = store_path_with(1, false, 5).unwrap();
+        for threads in [4usize, 24] {
+            assert!(
+                one == store_path_with(threads, false, 5).unwrap(),
+                "recovery, threads {threads}"
+            );
+        }
+        let mut a = Archive::open(Cursor::new(one), &Resources::default()).unwrap();
+        a.verify().unwrap();
+    }
+
+    /// A pool thread that hands back a wrong frame hash: the writer refuses it before the
+    /// frame is written and abandons the archive (debug builds check every handed-back hash).
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_wrong_pool_frame_hash_is_refused() {
+        let e = store_path(4, true).unwrap_err();
+        assert!(
+            matches!(
+                e,
+                FormatError::BadOptions {
+                    reason: "pool frame hash"
+                }
+            ),
+            "{e:?}"
+        );
+        // Without a pool (one thread) the writer hashes itself: nothing to refuse.
+        store_path(1, true).unwrap();
+    }
+
+    /// The identity encoder moves the plain buffer into the encoding (no copy) on its own
+    /// thread and as a job.
+    #[test]
+    fn the_identity_encoder_takes_the_plain_buffer() {
+        let plain = noise(3, 4096);
+        let at = plain.as_ptr();
+        let copy = plain.clone();
+        let copy_at = copy.as_ptr();
+        let (r, back) = StoreEncoder.encode_owned(copy);
+        assert!(back.is_none());
+        let bytes = r.unwrap().bytes;
+        assert_eq!(bytes.as_ptr(), copy_at);
+        assert_eq!(bytes, plain);
+        let (r, back) = Box::new(StoreEncoder).run_owned(plain);
+        assert!(back.is_none());
+        let bytes = r.unwrap().0.bytes;
+        assert_eq!(bytes.as_ptr(), at);
     }
 }
