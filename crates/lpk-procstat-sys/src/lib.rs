@@ -221,7 +221,8 @@ pub fn run(spec: &Spec) -> io::Result<Measurement> {
 }
 
 /// The machine's physical memory in bytes, from the operating system (`GlobalMemoryStatusEx` on
-/// Windows, `MemTotal` of `/proc/meminfo` on Linux); `None` when the query fails. Used by the
+/// Windows, `MemTotal` of `/proc/meminfo` on Linux, capped by the cgroup's `memory.max` when it
+/// is a number); `None` when the query fails. Used by the
 /// archiver to size its default memory budget.
 pub fn physical_memory() -> Option<u64> {
     #[cfg(windows)]

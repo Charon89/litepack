@@ -122,7 +122,7 @@ impl Budget {
                 bytes,
                 source: BudgetSource::Given,
             },
-            None => Budget::default_for(ceiling, lpk_procstat_sys::physical_memory()),
+            None => Budget::default_for(ceiling, physical_memory()),
         }
     }
 
@@ -132,6 +132,19 @@ impl Budget {
             bytes: physical.map_or(ceiling, |p| ceiling.min(p / 2)),
             source: BudgetSource::Default { ceiling, physical },
         }
+    }
+}
+
+/// The machine's physical memory (on Linux, capped by the cgroup's `memory.max`); `None` where
+/// the query is not available (targets other than Windows and Linux) or fails.
+pub fn physical_memory() -> Option<u64> {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        lpk_procstat_sys::physical_memory()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
     }
 }
 

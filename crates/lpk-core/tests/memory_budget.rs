@@ -190,16 +190,8 @@ fn the_default_budget_is_the_tiers() {
     let dir = tempfile::tempdir().unwrap();
     tree(dir.path());
     let (_, s) = run(fast(2, None), dir.path()).unwrap();
-    let expect = Budget::default_for(FAST_CEILING, lpk_procstat_sys_free_physical());
+    let expect = Budget::default_for(FAST_CEILING, lpk_core::memory::physical_memory());
     assert_eq!(s.memory.budget, expect);
-}
-
-/// The physical memory as the budget saw it (through the budget's own resolution).
-fn lpk_procstat_sys_free_physical() -> Option<u64> {
-    match Budget::resolve(None, FAST_CEILING).source {
-        BudgetSource::Default { physical, .. } => physical,
-        BudgetSource::Given => None,
-    }
 }
 
 #[test]

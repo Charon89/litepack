@@ -156,10 +156,15 @@ pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
     })
 }
 
-/// Total physical memory: `MemTotal` of `/proc/meminfo` (in KiB there).
+/// Total physical memory: `MemTotal` of `/proc/meminfo` (in KiB there), capped by the
+/// cgroup v2 limit `/sys/fs/cgroup/memory.max` when that holds a number (not `max`).
 pub(crate) fn physical_memory() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    parse_mem_total(&text)
+    let total = parse_mem_total(&text)?;
+    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    Some(limit.map_or(total, |l| total.min(l)))
 }
 
 /// `MemTotal: <n> kB` to bytes.
