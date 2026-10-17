@@ -12,6 +12,8 @@ use crate::graph::{BlockHeader, Graph};
 use crate::index::FrameLocation;
 use crate::record::{Record, RecordsTable};
 use std::io::{Read, Seek, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// What [`Archive::verify`] checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,40 @@ impl OwnedRecordsTable {
     /// table was read, so this does not fail in practice).
     pub fn table(&self) -> Result<RecordsTable<'_>, FormatError> {
         RecordsTable::parse(&self.payload)
+    }
+}
+
+/// The records cache of an opened archive, shared by its forks: the
+/// `Records` frame read, hash-checked and walked once.
+#[derive(Debug, Default)]
+pub(crate) struct RecordsShared {
+    cell: OnceLock<ParsedRecords>,
+    /// Times the frame was read for the cache (the test hook).
+    parses: AtomicU64,
+}
+
+impl RecordsShared {
+    fn get(&self) -> Option<&ParsedRecords> {
+        self.cell.get()
+    }
+}
+
+/// The `Records` frame after one walk.
+#[derive(Debug)]
+struct ParsedRecords {
+    /// Records declared (0 without a frame).
+    count: u64,
+    /// Records `0..records.len()`, each hash-checked and parsed; the walk
+    /// stopped at the first bad record (id `records.len()`) or at the end.
+    records: Vec<Record>,
+    /// The frame, kept only when the walk stopped at a bad record (a lookup
+    /// at or past it walks again for that record's error).
+    damaged: Option<OwnedRecordsTable>,
+}
+
+impl ParsedRecords {
+    fn count(&self) -> u64 {
+        self.count
     }
 }
 
@@ -219,15 +255,7 @@ impl<R: Read + Seek> DecodeContext for ArchiveContext<'_, R> {
     }
 
     fn record(&mut self, id: u64) -> Result<Record, FormatError> {
-        let count = self.archive.record_count()?;
-        let owned = self
-            .archive
-            .records()?
-            .ok_or(FormatError::RecordOutOfRange { record: id, count })?;
-        owned
-            .table()?
-            .get(id)?
-            .ok_or(FormatError::RecordOutOfRange { record: id, count })
+        self.archive.record(id)
     }
 
     fn chunk(&mut self, record: u64, index: u64) -> Result<Vec<u8>, FormatError> {
@@ -355,14 +383,79 @@ impl<R: Read + Seek> Archive<R> {
         Ok(())
     }
 
-    /// Number of records (0 without a `Records` frame), cached.
-    pub(crate) fn record_count(&mut self) -> Result<u64, FormatError> {
-        if let Some(n) = self.record_count {
-            return Ok(n);
+    /// The `Records` frame parsed once for this archive and its forks: read
+    /// and hash-checked on the first call that succeeds (a failed read is not
+    /// kept, so the next call reads again, as before the cache).
+    fn parsed_records(&mut self) -> Result<Arc<RecordsShared>, FormatError> {
+        let shared = Arc::clone(&self.records_cache);
+        if shared.cell.get().is_none() {
+            let table = self.records()?;
+            shared.parses.fetch_add(1, Ordering::Relaxed);
+            let mut records = Vec::new();
+            if let Some(owned) = &table {
+                // Stop at the first bad record; a lookup at or past it walks
+                // the table again for that record's error.
+                // (After the last record the walk only checks trailing bytes,
+                // which no lookup of a record reports.)
+                for r in owned.table()?.iter() {
+                    match r {
+                        Ok(r) => records.push(r),
+                        Err(_) => break,
+                    }
+                }
+            }
+            // Another fork may have set it meanwhile; both parsed the same bytes.
+            let count = table.as_ref().map_or(0, OwnedRecordsTable::len);
+            let damaged = table.filter(|_| (records.len() as u64) < count);
+            let _ = shared.cell.set(ParsedRecords {
+                count,
+                records,
+                damaged,
+            });
         }
-        let n = self.records()?.map_or(0, |t| t.len());
-        self.record_count = Some(n);
-        Ok(n)
+        Ok(shared)
+    }
+
+    /// Number of records (0 without a `Records` frame), from the parsed
+    /// records.
+    pub(crate) fn record_count(&mut self) -> Result<u64, FormatError> {
+        let shared = self.parsed_records()?;
+        Ok(shared.get().map_or(0, ParsedRecords::count))
+    }
+
+    /// The record `id` of the `Records` frame, hash-checked and parsed:
+    /// `RecordOutOfRange` when there is no such record, and otherwise the
+    /// first error among records `0..=id` (the frame is parsed once per
+    /// archive and shared with its forks).
+    pub(crate) fn record(&mut self, id: u64) -> Result<Record, FormatError> {
+        let shared = self.parsed_records()?;
+        let Some(parsed) = shared.get() else {
+            return Err(FormatError::RecordOutOfRange {
+                record: id,
+                count: 0,
+            });
+        };
+        let count = parsed.count();
+        let out_of_range = FormatError::RecordOutOfRange { record: id, count };
+        if id >= count {
+            return Err(out_of_range);
+        }
+        if let Some(r) = usize::try_from(id).ok().and_then(|i| parsed.records.get(i)) {
+            return Ok(r.clone());
+        }
+        // At or past the first bad record: the walk reports its error.
+        match &parsed.damaged {
+            Some(owned) => owned.table()?.get(id)?.ok_or(out_of_range),
+            None => Err(out_of_range),
+        }
+    }
+
+    /// How many times the `Records` frame has been read and parsed for the
+    /// record cache of this archive and its forks (a test hook: once per
+    /// opened archive when nothing fails).
+    #[doc(hidden)]
+    pub fn records_parse_count(&self) -> u64 {
+        self.records_cache.parses.load(Ordering::Relaxed)
     }
 
     /// The entry table, read and hash-checked (`HashMismatch` when damaged).
