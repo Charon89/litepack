@@ -1028,7 +1028,9 @@ has no priors for LZMA (section 10 is about `zstd` only). The rules, in this ord
    end-of-payload marker is present: after the marker it must hold. When it does not: in the last step with the
    marker at the output bound, `LzmaError` with `trailing input` (rule 5); in the last step with the marker before
    the bound, `truncated` (rule 5); in a step that is not the last, `LzmaError` with a reason that is not
-   normative. A stream that ends at the output bound
+   normative. The end condition is the first fault after the marker: when it fails and input also follows the
+   marker, these outcomes hold as stated (in a step that is not the last the reason stays not normative, and
+   `trailing input` is one such reason). A stream that ends at the output bound
    without a marker is not checked for it, and a decoder must not refuse a marker-less stream because its final
    code value is not 0. This differs from LzmaSpec, which ends a marker-less stream only when `IsFinishedOK`
    holds and otherwise goes on to look for a marker; a v1 decoder accepts the marker-less final stream at the
