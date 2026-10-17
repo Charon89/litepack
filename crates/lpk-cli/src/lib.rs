@@ -701,6 +701,29 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
                     s.nested_decodes,
                     s.reopened
                 );
+                let m = &s.memory;
+                let source = match m.budget.source {
+                    lpk_core::memory::BudgetSource::Given => "--memory".to_string(),
+                    lpk_core::memory::BudgetSource::Default { ceiling, .. } => format!(
+                        "default: the {} tier's ceiling of {ceiling} bytes, at most half the physical memory",
+                        m.tier.name()
+                    ),
+                };
+                let _ = writeln!(
+                    err,
+                    "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}",
+                    m.budget.bytes,
+                    m.tier.name(),
+                    m.per_block,
+                    m.encoded,
+                    m.plain,
+                    m.decoder,
+                    m.nested,
+                    m.fixed,
+                    m.fixed_shared,
+                    m.per_worker,
+                    s.workers
+                );
             }
             let _ = writeln!(
                 out,
