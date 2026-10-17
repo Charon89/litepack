@@ -61,14 +61,14 @@ impl PrimitiveDecoder for LzmaDecoder {
             return self.decode(params, input, expected_len, limits);
         }
         let (props, buffer) = setup(params, input, expected_len, limits)?;
-        match pass(props, buffer, None, input, expected_len) {
+        match pass(props, buffer, None, input, expected_len, limits) {
             Ok((out, _)) => {
                 // lzma-rs also ends a marker-less stream whose input runs out
                 // cleanly. Decoded again by the length it gave, a stream with
                 // the marker leaves the marker's bytes unread; one without it
                 // consumes everything.
                 let n = out.len() as u64;
-                match pass(props, buffer, Some(n), input, expected_len) {
+                match pass(props, buffer, Some(n), input, expected_len, limits) {
                     Ok((again, used)) if again.len() as u64 == n && used == input.len() as u64 => {
                         Err(lerr(if n == expected_len {
                             "marker required"
@@ -80,7 +80,14 @@ impl PrimitiveDecoder for LzmaDecoder {
                 }
             }
             Err(e @ FormatError::PayloadTooLarge { .. }) => Err(e),
-            Err(e) => match pass(props, buffer, Some(expected_len), input, expected_len) {
+            Err(e) => match pass(
+                props,
+                buffer,
+                Some(expected_len),
+                input,
+                expected_len,
+                limits,
+            ) {
                 Ok((out, used))
                     if out.len() as u64 == expected_len && used == input.len() as u64 =>
                 {
@@ -102,14 +109,21 @@ impl PrimitiveDecoder for LzmaDecoder {
         // First as a stream that ends with the end-of-payload marker (what
         // liblzma writes); a stream without one fails that pass and is
         // decoded again by its known size.
-        let first = pass(props, buffer, None, input, expected_len);
+        let first = pass(props, buffer, None, input, expected_len, limits);
         let short = first.is_ok();
         if let Ok((out, _)) = first {
             if out.len() as u64 == expected_len {
                 return Ok(out);
             }
         }
-        match pass(props, buffer, Some(expected_len), input, expected_len) {
+        match pass(
+            props,
+            buffer,
+            Some(expected_len),
+            input,
+            expected_len,
+            limits,
+        ) {
             // The marker came before the bound: the first pass saw it too.
             Err(FormatError::PayloadTooLarge { .. }) if short => Err(lerr("truncated")),
             Err(e) => Err(e),
@@ -176,13 +190,17 @@ fn pass(
     size: Option<u64>,
     input: &[u8],
     expected_len: u64,
+    limits: &Resources,
 ) -> Result<(Vec<u8>, u64), FormatError> {
     let mem = usize::try_from(buffer).map_err(|_| lerr("dictionary"))?;
     let mut inner = Inner::new(LzmaParams::new(props, buffer, size), Some(mem))
         .map_err(|e| lerr(e.to_string()))?;
     let mut src = Cursor::new(input);
+    // Sized once to the block (bounded by the reader's block limit), so the output never
+    // doubles past it: the decoder holds the block plus its dictionary buffer (E2-20).
+    let reserve = usize::try_from(expected_len.min(limits.max_block_plain)).unwrap_or(0);
     let mut sink = Bounded {
-        out: Vec::new(),
+        out: Vec::with_capacity(reserve),
         max: expected_len,
         over: None,
     };

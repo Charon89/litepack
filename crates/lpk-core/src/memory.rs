@@ -322,10 +322,21 @@ pub fn zstd_cctx_memory(level: i32, window_log: u32, ldm: bool) -> u64 {
     m
 }
 
-/// The decoder memory a zstd block declares for the envelope beyond its plain buffer: the
-/// window the decoder keeps (`min(2^window_log, plain_len)`) plus [`DECODER_ALLOWANCE`].
+/// The largest zstd block (`MAX_BLOCK_SIZE` of RFC 8878 and ruzstd).
+const ZSTD_MAX_BLOCK: u64 = 128 << 10;
+
+/// The decoder memory a zstd block declares for the envelope beyond its plain buffer: ruzstd's
+/// ring buffer, which holds the window (`min(2^window_log, plain_len)`; a single-segment
+/// frame's window is its content) plus what one decode step produces
+/// ([`lpk_format::zstd::DECODE_STEP`] and up to one more block), its capacity rounded up to a
+/// power of two plus ruzstd's slack (it grows to `next_power_of_two(required - 256 KiB) +
+/// 256 KiB + 1`, which `next_power_of_two(required) + 256 KiB + 1` bounds), plus
+/// [`DECODER_ALLOWANCE`]. The decoded bytes go from the ring straight
+/// into the block's buffer, without an intermediate copy.
 pub fn zstd_decode_memory(window_log: u32, plain_len: u64) -> u64 {
-    (1u64 << window_log.min(63)).min(plain_len) + DECODER_ALLOWANCE
+    let window = (1u64 << window_log.min(62)).min(plain_len);
+    let required = window + lpk_format::zstd::DECODE_STEP as u64 + ZSTD_MAX_BLOCK;
+    required.next_power_of_two() + 2 * ZSTD_MAX_BLOCK + 1 + DECODER_ALLOWANCE
 }
 
 /// The decoder memory an LZMA block declares beyond its plain buffer: the dictionary buffer
@@ -623,12 +634,71 @@ mod tests {
         assert_eq!(m.threads_hint(STORE_CEILING), n.threads_hint(STORE_CEILING));
     }
 
+    /// ruzstd 0.9.1's ring buffer growth (`RingBuffer::reserve_amortized`,
+    /// `src/decoding/ringbuffer.rs`), restated from its source: the capacity `reserve(amount)`
+    /// leaves when `free < amount` (one slot is the sentinel).
+    fn ruzstd_reserve(cap: usize, len: usize, amount: usize) -> usize {
+        const SLACK: usize = 2 * 128 * 1024;
+        let free = cap.saturating_sub(len + 1);
+        if free >= amount {
+            return cap;
+        }
+        let required = cap + (amount - free);
+        if required <= SLACK {
+            cap.next_power_of_two().max(required.next_power_of_two()) + 1
+        } else {
+            (required - SLACK).next_power_of_two() + SLACK + 1
+        }
+    }
+
+    /// The ring's capacity over one frame as `DecodeBuffer` drives it: `reset` reserves the
+    /// window, then each step pushes up to `DECODE_STEP` plus one block before the caller
+    /// drains down to the window.
+    fn ruzstd_peak(window: usize) -> usize {
+        let step = lpk_format::zstd::DECODE_STEP + 128 * 1024;
+        let mut cap = ruzstd_reserve(0, 0, window);
+        let mut len = 0;
+        for _ in 0..(window / step + 8) {
+            cap = ruzstd_reserve(cap, len, step);
+            len = (len + step).min(window);
+        }
+        cap
+    }
+
+    #[test]
+    fn the_zstd_figure_covers_ruzstds_ring_growth() {
+        for (w, plain) in [
+            (20u32, 1u64 << 20),
+            (20, (1 << 20) + 1),
+            (26, 64 * MIB),
+            (26, 64 * MIB - 4096),
+            (27, 64 * MIB),
+            (28, 129 * MIB),
+            (17, 3000),
+            (12, 3000),
+            (22, 1 << 30),
+        ] {
+            let window = usize::try_from((1u64 << w).min(plain)).unwrap();
+            let ring = ruzstd_peak(window) as u64;
+            let declared = zstd_decode_memory(w, plain) - DECODER_ALLOWANCE;
+            assert!(
+                ring <= declared,
+                "w {w}, plain {plain}: ring {ring} > {declared}"
+            );
+        }
+    }
+
     #[test]
     fn decoder_memory_figures() {
-        assert_eq!(zstd_decode_memory(26, 1000), 1000 + DECODER_ALLOWANCE);
+        let r: u64 = (1 << 20) + (64 << 10) + (128 << 10);
+        let slack = (256 << 10) + 1 + DECODER_ALLOWANCE;
         assert_eq!(
             zstd_decode_memory(20, 1 << 26),
-            (1 << 20) + DECODER_ALLOWANCE
+            r.next_power_of_two() + slack
+        );
+        assert_eq!(
+            zstd_decode_memory(26, 1000),
+            (1000u64 + (192 << 10)).next_power_of_two() + slack
         );
         assert_eq!(lzma_decode_memory(1 << 26, 5000), 5000 + DECODER_ALLOWANCE);
     }
