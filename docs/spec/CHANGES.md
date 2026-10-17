@@ -190,7 +190,7 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
     that ends there or inside the next symbol is `marker required`, and input after a marker (wherever it comes) is
     `trailing input`; `lzma` rule 3's dictionary size is LzmaSpec's, raised to 4096 (rule 2 still compares the stored
     `dict_size`), and a refused distance that would also cross the bound is rule 3's `LzmaError`; rule 4 states the
-    class when the end condition fails after the marker; rule 5: a marker before the bound in the last step is
+    class when the end condition fails after the marker, input after it or not (it is the first fault); rule 5: a marker before the bound in the last step is
     `truncated` whatever follows it; rule 6: input ending inside an invalid symbol may report `truncated` (or
     `marker required`) or the decoder's text; `zstd` rule 7: a frame cut short or damaged inside its
     `Content_Checksum` has all its blocks complete, and they count; "Bounds": the bound of the pre-checks is never
