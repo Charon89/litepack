@@ -155,3 +155,30 @@ pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
         descendants_killed,
     })
 }
+
+/// Total physical memory: `MemTotal` of `/proc/meminfo` (in KiB there).
+pub(crate) fn physical_memory() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_mem_total(&text)
+}
+
+/// `MemTotal: <n> kB` to bytes.
+fn parse_mem_total(text: &str) -> Option<u64> {
+    let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
+    let mut it = line.get("MemTotal:".len()..)?.split_whitespace();
+    let n: u64 = it.next()?.parse().ok()?;
+    match it.next() {
+        Some("kB") | None => n.checked_mul(1024),
+        Some(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod meminfo_tests {
+    #[test]
+    fn mem_total_is_read_in_kib() {
+        let t = "MemFree:  10 kB\nMemTotal:       16314748 kB\nBuffers: 1 kB\n";
+        assert_eq!(super::parse_mem_total(t), Some(16_314_748 * 1024));
+        assert_eq!(super::parse_mem_total("MemFree: 3 kB\n"), None);
+    }
+}
