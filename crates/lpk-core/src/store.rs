@@ -1,7 +1,7 @@
 //! The store path: walk a tree and write it with the writer's default (store) graph.
 
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 use lpk_format::{WriterOptions, WriterSummary};
@@ -24,20 +24,6 @@ pub struct StoreOptions {
     /// default) is the machine's logical cores, 1 the sequential path. The archive is the same
     /// whatever the count; storing is a copy, so the gain is the overlap of reading and writing.
     pub threads: Option<usize>,
-}
-
-/// Counts what passes through a reader.
-pub(crate) struct Counting<R> {
-    pub(crate) inner: R,
-    pub(crate) n: u64,
-}
-
-impl<R: Read> Read for Counting<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.n += n as u64;
-        Ok(n)
-    }
 }
 
 /// Called before the trailer is written and once after it: puts the data on disk.

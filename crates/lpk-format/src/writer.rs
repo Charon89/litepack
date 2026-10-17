@@ -15,9 +15,12 @@ use crate::header::{FormatVersion, Header, HeaderFlags};
 use crate::index::{BlockLocation, FrameLocation, GenerationInfo, Index};
 use crate::merkle::merkle_root;
 use crate::parhash::frame_payload_hash;
+use crate::prefetch::{SegmentError, Segments};
 use crate::primitive::{GraphResources, PrimitiveId};
 use crate::record::{Record, RecordsWriter};
 use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
+use crate::sink::Sink;
+pub use crate::sink::WRITE_DEPTH;
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use crate::varint;
 use rand::RngCore;
@@ -275,31 +278,48 @@ pub struct WriterOptions {
     /// handed over, and blocks are written in order, so the archive is byte
     /// for byte the one a single thread writes. Memory: `encode_threads`
     /// times (`block_size` plus the encoded size) for the blocks in flight,
-    /// plus the encoders' own working memory, one per block in flight, plus
-    /// one spare block buffer (up to `block_size`, kept for reuse once a
-    /// block is written) and the read buffer (up to `block_size` plus
-    /// `chunk_size`), both kept for the writer's life.
+    /// plus the encoders' own working memory, one per block in flight; the
+    /// block buffer pool and the read buffer, as [`Writer::new`] describes.
+    /// Threads: up to `encode_threads` encode jobs, plus a write thread when
+    /// [`Writer::with_write_thread`] was called and a reader thread when the
+    /// caller reads ahead ([`crate::prefetch`]); the two I/O threads mostly
+    /// wait on I/O and come on top of the encode jobs. LitePack's pipeline
+    /// starts them only above one block in flight, so one block in flight is
+    /// one thread doing everything.
     pub encode_threads: usize,
 }
 
 /// The output with the recovery spool beside it: while the spool is set, every
 /// byte written is also fed to it.
 struct Tee<W: Write> {
-    inner: W,
+    inner: Sink<W>,
     spool: Option<GroupEncoder>,
 }
 
 impl<W: Write> Write for Tee<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = self.inner.write(buf)?;
+        self.inner.write_all(buf)?;
         if let Some(s) = &mut self.spool {
-            s.feed(&buf[..n]).map_err(std::io::Error::other)?;
+            s.feed(buf).map_err(std::io::Error::other)?;
         }
-        Ok(n)
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+impl<W: Write> Tee<W> {
+    /// Write `buf` whole, by value (moved to the write thread when there is
+    /// one). A block buffer (`back`) comes back for the pool: here at once when
+    /// written on this thread, else through the write thread; any other buffer
+    /// is dropped once written.
+    fn write_owned(&mut self, buf: Vec<u8>, back: bool) -> std::io::Result<Option<Vec<u8>>> {
+        if let Some(s) = &mut self.spool {
+            s.feed(&buf).map_err(std::io::Error::other)?;
+        }
+        self.inner.write_owned(buf, back)
     }
 }
 
@@ -473,9 +493,12 @@ pub struct Writer<W: Write> {
     /// Blocks handed over and not yet written, in block order (empty when
     /// `encode_threads` is 1: a block is then written as it closes).
     queue: VecDeque<InFlight>,
-    /// A plain or encoded block buffer kept after its block was written, cleared, for the
-    /// next pending block (its pages already touched); at most one is kept.
-    spare: Option<Vec<u8>>,
+    /// The block buffer pool: plain or encoded block buffers kept after their block
+    /// was written (or a job handed its plain buffer back), cleared, for the next
+    /// pending blocks (their pages already touched). A buffer enters it only once
+    /// nothing references it any more (ownership moves back here); at most
+    /// [`Writer::pool_cap`] are kept.
+    spares: Vec<Vec<u8>>,
     /// The read buffer of `chunk_stream`, kept across files.
     read_buf: Vec<u8>,
     /// Tests only: skip the record chunk checks at block close, to build the
@@ -485,7 +508,15 @@ pub struct Writer<W: Write> {
     /// Tests only: the pool threads hand back a wrong frame hash.
     #[cfg(test)]
     corrupt_pool_hash: bool,
+    /// Tests only: every buffer entering the pool is filled with [`POISON`] first,
+    /// so a written frame holding that pattern shows a buffer reused too early.
+    #[cfg(test)]
+    poison_pool: bool,
 }
+
+/// Tests only: the byte a poisoned pool fills returned buffers with.
+#[cfg(test)]
+const POISON: u8 = 0xA5;
 
 /// What an encode job returns: the encoding and the state its encoder takes back.
 pub type JobResult = Result<(Encoded, Option<JobState>), FormatError>;
@@ -561,6 +592,20 @@ enum Commit {
 enum Work {
     Done(PoolOutput),
     Running(JoinHandle<PoolOutput>),
+}
+
+/// BLAKE3 of `head` followed by `tail`.
+fn hash_two((head, tail): (&[u8], &[u8])) -> [u8; 32] {
+    if tail.is_empty() {
+        return *blake3::hash(head).as_bytes();
+    }
+    if head.is_empty() {
+        return *blake3::hash(tail).as_bytes();
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(head);
+    h.update(tail);
+    *h.finalize().as_bytes()
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -683,10 +728,14 @@ impl<W: Write> Writer<W> {
     /// `encode_threads` blocks in flight at once, each its plain bytes plus its
     /// encoding — `encode_threads` times (`block_size` plus the encoded size)
     /// — plus the encoders' own working memory, one encoder per block in
-    /// flight; one spare block buffer (up to `block_size`) kept for reuse
-    /// after a block is written, and the read buffer of the file being added
-    /// (up to `block_size` plus `chunk_size`), both kept for the writer's
-    /// life; the chunk table (40 bytes per chunk) and the block table for
+    /// flight; the block buffer pool: buffers of written blocks (plain or
+    /// encoded, those under 1 MiB or over `block_size` dropped) are kept,
+    /// cleared, for the next pending blocks, at most `encode_threads` plus 3
+    /// of them ([`WRITE_DEPTH`] plus 2: the pending block's, the frames queued
+    /// for the write thread and the one it writes), and never more than were
+    /// alive at once, for the writer's life; the read buffer of the file being
+    /// added by [`Writer::add_file`] (up to `block_size` plus `chunk_size`),
+    /// kept for the writer's life; the chunk table (40 bytes per chunk) and the block table for
     /// the life of the archive; the dedup map when `dedup` is set; the
     /// recovery group's bytes when `recovery` is set ([`Writer::recovery_buffered`]).
     pub fn new(out: W, options: WriterOptions) -> Result<Self, FormatError> {
@@ -807,7 +856,10 @@ impl<W: Write> Writer<W> {
         }
         Header::with_minor(flags, options.archive_id, version_minor).write(&mut out)?;
         // The covered range starts right after the header.
-        let out = Tee { inner: out, spool };
+        let out = Tee {
+            inner: Sink::Direct(out),
+            spool,
+        };
         let mut w = Writer {
             out,
             options,
@@ -850,12 +902,14 @@ impl<W: Write> Writer<W> {
             open: None,
             recon_blocks: Vec::new(),
             queue: VecDeque::new(),
-            spare: None,
+            spares: Vec::new(),
             read_buf: Vec::new(),
             #[cfg(test)]
             unchecked_records: false,
             #[cfg(test)]
             corrupt_pool_hash: false,
+            #[cfg(test)]
+            poison_pool: false,
         };
         if let Some(slot) = slot {
             // The key slot is the first frame, in clear.
@@ -1092,7 +1146,10 @@ impl<W: Write> Writer<W> {
             recon: HashMap::new(),
         };
         let w = Writer {
-            out: Tee { inner: out, spool },
+            out: Tee {
+                inner: Sink::Direct(out),
+                spool,
+            },
             chunker,
             pos: end,
             entries: Vec::new(),
@@ -1127,12 +1184,14 @@ impl<W: Write> Writer<W> {
             open: None,
             recon_blocks: Vec::new(),
             queue: VecDeque::new(),
-            spare: None,
+            spares: Vec::new(),
             read_buf: Vec::new(),
             #[cfg(test)]
             unchecked_records: false,
             #[cfg(test)]
             corrupt_pool_hash: false,
+            #[cfg(test)]
+            poison_pool: false,
             options,
         };
         Ok(w)
@@ -1238,7 +1297,8 @@ impl<W: Write> Writer<W> {
         w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
         varint::write(w, payload_len)?;
         w.write_all(&head)?;
-        w.write_all(&g.recovery)?;
+        // Moved, not copied, to the write thread when there is one; dropped once written.
+        w.write_owned(g.recovery, false)?;
         w.write_all(hasher.finalize().as_bytes())?;
         self.pos += at.len;
         self.seq += 1;
@@ -1276,18 +1336,20 @@ impl<W: Write> Writer<W> {
         flags: FrameFlags,
         payload: Vec<u8>,
     ) -> Result<FrameLocation, FormatError> {
-        let frame = Frame {
-            kind,
-            flags,
-            payload,
-        };
         let at = FrameLocation {
             offset: self.pos,
-            len: frame.encoded_len(),
+            len: frame_len(payload.len() as u64),
             sequence: self.seq,
         };
-        self.last_hash = *blake3::hash(&frame.payload).as_bytes();
-        frame.write(&mut self.out)?;
+        // As `Frame::write` lays it out, the payload moved rather than copied.
+        self.last_hash = *blake3::hash(&payload).as_bytes();
+        let w = &mut self.out;
+        w.write_all(&(kind as u16).to_le_bytes())?;
+        w.write_all(&flags.bits().to_le_bytes())?;
+        varint::write(w, payload.len() as u64)?;
+        // Not a block buffer (a table, the index, a sealed block): dropped once written.
+        w.write_owned(payload, false)?;
+        self.out.write_all(&self.last_hash)?;
         self.pos += at.len;
         self.seq += 1;
         Ok(at)
@@ -1315,6 +1377,10 @@ impl<W: Write> Writer<W> {
     fn check_alive(&self) -> Result<(), FormatError> {
         if let Some(reason) = self.bad_chunk {
             return Err(FormatError::BadChunk { reason });
+        }
+        // A write that failed on the write thread fails every later call.
+        if let Some(e) = self.out.inner.error() {
+            return Err(FormatError::Io(e));
         }
         match &self.failed {
             Some((kind, msg)) => Err(FormatError::Io(std::io::Error::new(*kind, msg.clone()))),
@@ -1356,7 +1422,7 @@ impl<W: Write> Writer<W> {
         if self.pending_chunks == 0 {
             return Ok(());
         }
-        let next = self.spare.take().unwrap_or_default();
+        let next = self.take_spare();
         let plain = std::mem::replace(&mut self.pending, next);
         let chunk_count = std::mem::take(&mut self.pending_chunks);
         let first_chunk = self.records.len() as u64 - chunk_count;
@@ -1538,22 +1604,55 @@ impl<W: Write> Writer<W> {
         )
     }
 
-    /// Keep `buf` (cleared) for the next pending block when it is the largest
-    /// buffer at hand: the pending block itself when it holds nothing yet,
-    /// the spare otherwise. Small buffers are dropped.
+    /// Block buffers the pool keeps at most: one per block in flight, plus the
+    /// pending block's and the ones queued for or being written by the write
+    /// thread ([`WRITE_DEPTH`] plus one). Never more than were alive at once.
+    fn pool_cap(&self) -> usize {
+        self.threads() + WRITE_DEPTH + 2
+    }
+
+    /// Return `buf` to the pool (cleared): it becomes the pending block when that
+    /// holds nothing yet and is smaller, else a spare. Buffers under 1 MiB or
+    /// larger than a block are dropped; a full pool drops its smallest buffer.
     fn recycle(&mut self, mut buf: Vec<u8>) {
-        if buf.capacity() < RECYCLE_MIN {
+        if buf.capacity() < RECYCLE_MIN || buf.capacity() as u64 > self.options.block_size {
             return;
+        }
+        #[cfg(test)]
+        if self.poison_pool {
+            buf.clear();
+            buf.resize(buf.capacity(), POISON);
         }
         buf.clear();
         if self.pending.is_empty() && self.pending.capacity() < buf.capacity() {
-            self.pending = buf;
-        } else if self
-            .spare
-            .as_ref()
-            .is_none_or(|s| s.capacity() < buf.capacity())
+            buf = std::mem::replace(&mut self.pending, buf);
+            if buf.capacity() < RECYCLE_MIN {
+                return;
+            }
+        }
+        if self.spares.len() < self.pool_cap() {
+            self.spares.push(buf);
+            return;
+        }
+        if let Some(small) = self
+            .spares
+            .iter_mut()
+            .min_by_key(|s| s.capacity())
+            .filter(|s| s.capacity() < buf.capacity())
         {
-            self.spare = Some(buf);
+            *small = buf;
+        }
+    }
+
+    /// The largest buffer of the pool, for the next pending block (empty when
+    /// the pool has none).
+    fn take_spare(&mut self) -> Vec<u8> {
+        for b in self.out.inner.returned() {
+            self.recycle(b);
+        }
+        match (0..self.spares.len()).max_by_key(|&i| self.spares[i].capacity()) {
+            Some(i) => self.spares.swap_remove(i),
+            None => Vec::new(),
         }
     }
 
@@ -1639,6 +1738,7 @@ impl<W: Write> Writer<W> {
             payload.extend_from_slice(&encoded);
             let sealed =
                 sealer.seal(&payload, FrameKind::ChunkData as u16, self.seq, &self.salt)?;
+            self.recycle(encoded);
             self.write_wire_frame(FrameKind::ChunkData, FrameFlags::SEALED, sealed)?
         } else {
             let at = FrameLocation {
@@ -1652,13 +1752,16 @@ impl<W: Write> Writer<W> {
             w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
             varint::write(w, payload_len)?;
             w.write_all(&head)?;
-            w.write_all(&encoded)?;
-            w.write_all(&hash)?;
+            // The block buffer moves to the write thread, if any, and comes
+            // back to the pool once written.
+            if let Some(b) = w.write_owned(encoded, true)? {
+                self.recycle(b);
+            }
+            self.out.write_all(&hash)?;
             self.pos += at.len;
             self.seq += 1;
             at
         };
-        self.recycle(encoded);
         self.blocks.push(BlockLocation {
             frame_offset: at.offset,
             frame_len: at.len,
@@ -1832,8 +1935,20 @@ impl<W: Write> Writer<W> {
     }
 
     fn add_chunk(&mut self, data: &[u8], allow_recon: bool) -> Result<u64, FormatError> {
-        let len = data.len() as u64;
         let hash = *blake3::hash(data).as_bytes();
+        self.add_chunk_hashed(data, &[], hash, allow_recon)
+    }
+
+    /// [`Writer::add_chunk`] for a chunk made of `head` then `tail`, whose
+    /// BLAKE3 `hash` is already known.
+    fn add_chunk_hashed(
+        &mut self,
+        head: &[u8],
+        tail: &[u8],
+        hash: [u8; 32],
+        allow_recon: bool,
+    ) -> Result<u64, FormatError> {
+        let len = (head.len() + tail.len()) as u64;
         // An append reuses a chunk of the old table with the same hash and length;
         // with `dedup`, so does any chunk this write stored before.
         if let Some((i, old)) = self.find_known(&hash, len, allow_recon)? {
@@ -1862,7 +1977,8 @@ impl<W: Write> Writer<W> {
                 Some(_) => {}
             }
         }
-        self.pending.extend_from_slice(data);
+        self.pending.extend_from_slice(head);
+        self.pending.extend_from_slice(tail);
         self.pending_chunks += 1;
         Ok(index)
     }
@@ -2293,6 +2409,171 @@ impl<W: Write> Writer<W> {
         Ok(size)
     }
 
+    /// Add a regular file whose bytes come from `data` segment by segment (a
+    /// read-ahead, [`crate::prefetch::Prefetch`]): cut, hashed and appended to
+    /// the current block exactly as [`Writer::add_file`] does with the same
+    /// bytes (the chunker's cuts do not depend on how the bytes are split;
+    /// see [`Chunker`]), so the archive is the same byte for byte. `len_hint`
+    /// is the file's expected length (it only sizes the pending block). Every
+    /// segment goes back to `data` once its bytes are copied. Errors as in
+    /// [`Writer::add_file`]; a reader thread's panic marks the writer failed
+    /// and is re-raised.
+    pub fn add_file_segments(
+        &mut self,
+        path: &str,
+        flags: EntryFlags,
+        mtime_ns: i64,
+        data: &mut dyn Segments,
+        len_hint: u64,
+    ) -> Result<(), FormatError> {
+        self.check_alive()?;
+        self.no_open_entry()?;
+        let r = self.add_file_segments_inner(path, flags, mtime_ns, data, len_hint);
+        self.note(r)
+    }
+
+    fn add_file_segments_inner(
+        &mut self,
+        path: &str,
+        flags: EntryFlags,
+        mtime_ns: i64,
+        data: &mut dyn Segments,
+        len_hint: u64,
+    ) -> Result<(), FormatError> {
+        let mut entry = Entry {
+            kind: EntryKind::File,
+            flags,
+            path: path.to_string(),
+            mtime_ns,
+            size: 0,
+            symlink_target: None,
+            chunks: Vec::new(),
+        };
+        self.check(&entry)?;
+        let mut chunks = Vec::new();
+        entry.size = self.chunk_segments(data, &mut chunks, len_hint)?;
+        entry.chunks = chunks;
+        self.push_entry(entry);
+        Ok(())
+    }
+
+    /// [`Writer::chunk_stream`] over segments: the chunker is fed each segment
+    /// in place; its held-back tail (at most `chunk_size`) is the only copy
+    /// besides the pending block, and a chunk that spans it and the next
+    /// segment is hashed and appended in two pieces.
+    fn chunk_segments(
+        &mut self,
+        data: &mut dyn Segments,
+        chunks: &mut Vec<u64>,
+        len_hint: u64,
+    ) -> Result<u64, FormatError> {
+        let chunk_size = self.options.chunk_size as usize;
+        let block_size = self.options.block_size as usize;
+        if self.pending.capacity() < block_size
+            && len_hint >= (block_size - self.pending.len()) as u64
+        {
+            // The input fills a block: the pending block takes its full size at
+            // once instead of growing by doubling.
+            let want = block_size - self.pending.len();
+            self.pending.reserve_exact(want);
+        }
+        self.chunker.reset();
+        let mut carry: Vec<u8> = std::mem::take(&mut self.read_buf);
+        carry.clear();
+        let mut size = 0u64;
+        loop {
+            let seg = match data.next_segment() {
+                Ok(s) => s,
+                Err(SegmentError::Io(e)) => return Err(FormatError::Io(e)),
+                Err(SegmentError::Panicked(p)) => {
+                    self.failed = Some((
+                        std::io::ErrorKind::Other,
+                        "the read-ahead thread panicked".to_string(),
+                    ));
+                    std::panic::resume_unwind(p);
+                }
+            };
+            // The end is fed with the last bytes when the reader knew them to be
+            // the last (as `chunk_stream` does after a short read), else alone.
+            // Only a buffer the reader handed out goes back to it.
+            let from_reader = seg.is_some();
+            let (seg, eof) = seg.unwrap_or((Vec::new(), true));
+            size += seg.len() as u64;
+            let cuts = self.chunker.feed(&seg, eof);
+            let held = carry.len();
+            let total = held + seg.len();
+            let mut ranges = Vec::with_capacity(cuts.len());
+            let mut start = 0usize;
+            for cut in cuts {
+                if cut <= start || cut > total {
+                    return Err(FormatError::BadChunk {
+                        reason: "cut positions",
+                    });
+                }
+                if cut - start > chunk_size {
+                    return Err(FormatError::BadChunk {
+                        reason: "chunk longer than chunk_size",
+                    });
+                }
+                ranges.push((start, cut));
+                start = cut;
+            }
+            if eof && start != total {
+                return Err(FormatError::BadChunk {
+                    reason: "bytes left uncut at eof",
+                });
+            }
+            if total - start > chunk_size {
+                return Err(FormatError::BadChunk {
+                    reason: "held back more than chunk_size",
+                });
+            }
+            // The two pieces of each chunk: in the carry, then in the segment.
+            let piece = |a: usize, b: usize| -> (&[u8], &[u8]) {
+                let head = &carry[a.min(held)..b.min(held)];
+                let tail = &seg[a.max(held) - held..b.max(held) - held];
+                (head, tail)
+            };
+            let hashes = self.hash_pieces(&ranges, &piece);
+            for (&(a, b), hash) in ranges.iter().zip(hashes) {
+                let (head, tail) = piece(a, b);
+                let i = self.add_chunk_hashed(head, tail, hash, true)?;
+                chunks.push(i);
+            }
+            // The uncut rest becomes the carry.
+            if start >= held {
+                carry.clear();
+                carry.extend_from_slice(&seg[start - held..]);
+            } else {
+                carry.drain(..start);
+                carry.extend_from_slice(&seg);
+            }
+            if from_reader {
+                data.give_back(seg);
+            }
+            if eof {
+                break;
+            }
+        }
+        // The end of the file after its last segment.
+        if !matches!(data.next_segment(), Ok(None)) {
+            return Err(FormatError::Io(std::io::Error::other(
+                "read-ahead: bytes after the last segment",
+            )));
+        }
+        self.read_buf = carry;
+        Ok(size)
+    }
+
+    /// The BLAKE3 of each chunk `ranges` names, its bytes given by `piece`.
+    fn hash_pieces<'a>(
+        &self,
+        ranges: &[(usize, usize)],
+        piece: &dyn Fn(usize, usize) -> (&'a [u8], &'a [u8]),
+    ) -> Vec<[u8; 32]> {
+        ranges.iter().map(|&(a, b)| hash_two(piece(a, b))).collect()
+    }
+
     /// Add a directory.
     pub fn add_directory(
         &mut self,
@@ -2535,6 +2816,31 @@ fn frames_max(index: &Index) -> u64 {
         0,
     )
     .max_frame_payload
+}
+
+impl<W: Write + Send + 'static> Writer<W> {
+    /// Move the output onto a write thread, so writing overlaps the cut: the
+    /// writer decides every frame's position, sequence number and hash in order
+    /// as before and hands the frame's bytes over (a block buffer by value)
+    /// through a bounded queue ([`WRITE_DEPTH`] frames beyond the one being
+    /// written); the archive is the same byte for byte. A failed write fails
+    /// the next call of this writer and abandons the archive, as a failed write
+    /// on this thread does; [`Writer::finish`] waits for every byte to be
+    /// written and flushed before it syncs (D-59) and writes the trailer. The
+    /// thread is joined when the writer is dropped; its panic is re-raised by
+    /// the call that finds it, once the writer is marked failed. When the
+    /// thread cannot be started the writer writes on this thread.
+    pub fn with_write_thread(mut self) -> Self {
+        self.out.inner.start_thread();
+        self
+    }
+}
+
+impl<W: Write> Writer<W> {
+    /// True when a write thread writes the output ([`Writer::with_write_thread`]).
+    pub fn has_write_thread(&self) -> bool {
+        matches!(self.out.inner, Sink::Thread(_))
+    }
 }
 
 impl Writer<std::fs::File> {
@@ -2834,3 +3140,7 @@ mod record_rule_tests {
         assert_eq!(bytes.as_ptr(), at);
     }
 }
+
+#[cfg(test)]
+#[path = "pipe_tests.rs"]
+mod pipe_tests;

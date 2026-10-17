@@ -17,6 +17,7 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use lpk_format::prefetch::{NextFileError, OpenFn, Prefetch, PrefetchOptions};
 use lpk_format::{
     Archive, Chunker, Credentials, Encoded, EntryKind, FormatError, Graph, GraphResources, Step,
     Writer, WriterOptions, WriterSummary,
@@ -33,7 +34,7 @@ use crate::fold::{Dedup, FoldStage};
 use crate::ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
-use crate::store::{create_new_and_run, Counting, StoreOptions, SyncFn, OUT_BUF};
+use crate::store::{create_new_and_run, StoreOptions, SyncFn, OUT_BUF};
 
 /// The classify stage: how the tree is walked; the classifier and the clustering run on what the
 /// walk found (when the model stage wants them).
@@ -103,6 +104,12 @@ pub struct RunSummary {
     /// Blocks the writer encoded at once: `threads`, capped by the tier (the Balanced tier's
     /// [`crate::balanced::BALANCED_MAX_IN_FLIGHT`]).
     pub blocks_in_flight: usize,
+    /// I/O threads beside the encode threads: a reader thread reading files ahead and a write
+    /// thread writing the archive file, each started only when more than one block is in
+    /// flight (one block in flight is the sequential path: one thread does everything), the
+    /// write thread only for an archive file (`run_file`, `append_file`). They mostly wait on
+    /// I/O; 0, 1 or 2.
+    pub io_threads: usize,
 }
 
 /// The stages in order.
@@ -301,6 +308,7 @@ impl Pipeline {
                 .cloned()
                 .collect();
             let opener: Opener<'_, std::fs::File> = Box::new(move |out, wopts, minor, chunker| {
+                let pipelined = wopts.encode_threads > 1;
                 if existing.header().version.minor < minor {
                     return Err(FormatError::BadOptions {
                         reason: "version_minor",
@@ -314,7 +322,8 @@ impl Pipeline {
                 for p in &deleted {
                     w.delete_path(p)?;
                 }
-                Ok(w)
+                // Above one block in flight writing overlaps the cut: a write thread.
+                Ok(if pipelined { w.with_write_thread() } else { w })
             });
             let sync: SyncFn = Box::new(move || sync_file.sync_data());
             self.run_inputs(inputs, file, Some(sync), prepared, start.elapsed(), opener)
@@ -354,7 +363,7 @@ impl Pipeline {
                 Some(sync),
                 prepared,
                 start.elapsed(),
-                new_archive(),
+                new_archive_file(),
             )
         })
     }
@@ -388,6 +397,11 @@ impl Pipeline {
                 let threads = wopts.encode_threads.max(1);
                 let mut writer = open_writer(out, wopts, sync, 0, fold.as_deref(), opener)?;
                 let t = Instant::now();
+                let mut reads = ReadAhead::spawn(
+                    inputs.iter().filter(|i| i.kind == EntryKind::File),
+                    threads > 1,
+                )?;
+                let io_threads = reads.threads() + usize::from(writer.has_write_thread());
                 for input in &inputs {
                     validate_input(input)?;
                     match input.kind {
@@ -395,7 +409,7 @@ impl Pipeline {
                             writer.add_directory(&input.path, input.flags, input.mtime_ns)?;
                         }
                         EntryKind::Symlink => add_symlink(&mut writer, input)?,
-                        EntryKind::File => add_file(&mut writer, &source, input)?,
+                        EntryKind::File => reads.add_file(&mut writer, input)?,
                     }
                 }
                 timings.model = t.elapsed();
@@ -410,6 +424,7 @@ impl Pipeline {
                     timings,
                     threads,
                     blocks_in_flight: threads,
+                    io_threads,
                 })
             }
             (model, prepared) => {
@@ -504,6 +519,18 @@ impl Pipeline {
                         add_symlink(&mut writer, input)?;
                     }
                 }
+                // The files streamed whole, in the order the loop below adds them, read
+                // ahead; the list and the loop take the choice from the same function.
+                let mut reads = ReadAhead::spawn(
+                    clusters.iter().flat_map(|c| {
+                        let peel = &peel;
+                        c.inputs.iter().filter(move |input| {
+                            matches!(feed_of(peel, c.class, input.len), Feed::Stream(_))
+                        })
+                    }),
+                    in_flight > 1,
+                )?;
+                let io_threads = reads.threads() + usize::from(writer.has_write_thread());
                 // Plain bytes fed since the last block boundary (approximate across the
                 // writer's own size splits).
                 let mut in_block = 0u64;
@@ -512,22 +539,22 @@ impl Pipeline {
                         // A block takes the hint of its first cluster.
                         steer(c.class, c.dictionary);
                     }
-                    let stage = peel.iter().find(|s| s.applies_to(c.class));
                     for input in &c.inputs {
                         in_block += input.len;
                         if in_block >= block_size {
                             in_block %= block_size;
                         }
-                        let Some(stage) = stage else {
-                            add_file(&mut writer, &source, input)?;
-                            continue;
+                        let stage = match feed_of(&peel, c.class, input.len) {
+                            Feed::Stream(cause) => {
+                                if let Some(cause) = cause {
+                                    // Too long to read whole: streamed like any file, never held.
+                                    summary.note_fallback(cause, input.len);
+                                }
+                                reads.add_file(&mut writer, input)?;
+                                continue;
+                            }
+                            Feed::Peel(stage) => stage,
                         };
-                        if let Some(cause) = stage.refuse_unread(input.len) {
-                            // Too long to read whole: streamed like any file, never held.
-                            summary.note_fallback(cause, input.len);
-                            add_file(&mut writer, &source, input)?;
-                            continue;
-                        }
                         // Each input is read once: the peel and the writer use the same bytes.
                         let tp = Instant::now();
                         let data = read_all(&source, input)?;
@@ -551,7 +578,7 @@ impl Pipeline {
                                     plan.primary_len,
                                     plan.original_len,
                                 );
-                                if write_peeled(&mut writer, stage.as_ref(), input, &data, plan)? {
+                                if write_peeled(&mut writer, stage, input, &data, plan)? {
                                     summary.note_primary_deduplicated(sizes.2);
                                 } else {
                                     summary.note_peeled(sizes.0, sizes.1, sizes.2);
@@ -593,6 +620,7 @@ impl Pipeline {
                     timings,
                     threads,
                     blocks_in_flight: in_flight,
+                    io_threads,
                 })
             }
         }
@@ -671,6 +699,19 @@ pub(crate) fn new_archive<W: Write>() -> Opener<'static, W> {
             Some(c) => Writer::new_revision_with_chunker(out, wopts, minor, c)?,
             None => Writer::new_revision(out, wopts, minor)?,
         })
+    })
+}
+
+/// The opener of a new archive file: [`new_archive`], the file written by a write thread so
+/// writing overlaps the cut when more than one block is in flight.
+pub(crate) fn new_archive_file() -> Opener<'static, std::fs::File> {
+    Box::new(|out, wopts, minor, chunker| {
+        let pipelined = wopts.encode_threads > 1;
+        let w = match chunker {
+            Some(c) => Writer::new_revision_with_chunker(out, wopts, minor, c)?,
+            None => Writer::new_revision(out, wopts, minor)?,
+        };
+        Ok(if pipelined { w.with_write_thread() } else { w })
     })
 }
 
@@ -766,13 +807,11 @@ fn write_peeled<W: Write>(
     Ok(false)
 }
 
-fn add_file<W: Write>(
-    writer: &mut OutWriter<W>,
-    source: &Source,
-    input: &Input,
-) -> Result<(), CoreError> {
+/// Add a file read on this thread as it is added (the sequential path); a length that changed
+/// since the walk is `ChangedWhileReading`, after its bytes were added.
+fn add_file_here<W: Write>(writer: &mut OutWriter<W>, input: &Input) -> Result<(), CoreError> {
     let mut r = Counting {
-        inner: source.open(input)?,
+        inner: Source::new().open(input)?,
         n: 0,
     };
     writer.add_file(&input.path, input.flags, input.mtime_ns, &mut r)?;
@@ -782,6 +821,124 @@ fn add_file<W: Write>(
         });
     }
     Ok(())
+}
+
+/// Counts what passes through a reader.
+struct Counting<R> {
+    inner: R,
+    n: u64,
+}
+
+impl<R: Read> Read for Counting<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.n += n as u64;
+        Ok(n)
+    }
+}
+
+/// How the run adds a file of `class` and length `len`.
+enum Feed<'a> {
+    /// Streamed whole: no peel stage applies, or the stage refuses it unread (the cause).
+    Stream(Option<crate::peel::Fallback>),
+    /// Read whole for this peel stage.
+    Peel(&'a dyn PeelStage),
+}
+
+/// The one place the run decides how a file is added (the read-ahead's list and the loop both
+/// ask it, so they cannot disagree).
+fn feed_of(peel: &[Box<dyn PeelStage>], class: Class, len: u64) -> Feed<'_> {
+    match peel.iter().find(|s| s.applies_to(class)) {
+        None => Feed::Stream(None),
+        Some(stage) => match stage.refuse_unread(len) {
+            Some(cause) => Feed::Stream(Some(cause)),
+            None => Feed::Peel(stage.as_ref()),
+        },
+    }
+}
+
+/// The files a run streams whole. Above one block in flight they are read ahead by a reader
+/// thread in the order the run adds them ([`Prefetch`]; joined when this is dropped); with one
+/// block in flight each is read on the run's thread as it is added.
+struct ReadAhead {
+    prefetch: Option<Prefetch<CoreError>>,
+    /// Files handed to the writer so far: the id the next file must carry.
+    next: usize,
+}
+
+impl ReadAhead {
+    /// Start reading `files` (in this order) ahead when `pipelined`.
+    fn spawn<'a>(
+        files: impl Iterator<Item = &'a Input>,
+        pipelined: bool,
+    ) -> Result<Self, CoreError> {
+        if !pipelined {
+            return Ok(ReadAhead {
+                prefetch: None,
+                next: 0,
+            });
+        }
+        let list: Vec<(usize, OpenFn<CoreError>)> = files
+            .enumerate()
+            .map(|(id, input)| {
+                let input = input.clone();
+                let open: OpenFn<CoreError> = Box::new(move || Source::new().open(&input));
+                (id, open)
+            })
+            .collect();
+        let prefetch = Prefetch::spawn(list, PrefetchOptions::default())
+            .map_err(|e| CoreError::Format(FormatError::Io(e)))?;
+        Ok(ReadAhead {
+            prefetch: Some(prefetch),
+            next: 0,
+        })
+    }
+
+    /// Reader threads running (0 or 1).
+    fn threads(&self) -> usize {
+        usize::from(self.prefetch.is_some())
+    }
+
+    /// Add the next file read ahead, which must be `input`; a length that changed since the
+    /// walk is `ChangedWhileReading`, after its bytes were added.
+    fn add_file<W: Write>(
+        &mut self,
+        writer: &mut OutWriter<W>,
+        input: &Input,
+    ) -> Result<(), CoreError> {
+        let Some(prefetch) = &mut self.prefetch else {
+            return add_file_here(writer, input);
+        };
+        let mut file = match prefetch.next_file() {
+            Ok(f) => f,
+            Err(NextFileError::Open(e)) => return Err(e),
+            Err(NextFileError::Panicked(p)) => std::panic::resume_unwind(p),
+            Err(NextFileError::OutOfStep | NextFileError::Ended) => {
+                return Err(CoreError::InvalidOption(
+                    "read-ahead out of step with the run".into(),
+                ))
+            }
+        };
+        if file.id() != self.next {
+            return Err(CoreError::InvalidOption(
+                "read-ahead out of step with the run".into(),
+            ));
+        }
+        self.next += 1;
+        writer.add_file_segments(
+            &input.path,
+            input.flags,
+            input.mtime_ns,
+            &mut file,
+            input.len,
+        )?;
+        if file.bytes_read() != input.len {
+            return Err(CoreError::ChangedWhileReading {
+                path: input.source.clone(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

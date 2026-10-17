@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 00:49 UTC (2026-10-16, 20:49 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 01:21 UTC (2026-10-16, 21:21 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -30,13 +30,14 @@ was single-threaded then and is parallel since E2-4b.
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Next: **E2-18 round 2** — round 1 is merged (D-61: no compression context for stored classes, one copy fewer,
-   the frame hash off the feeding thread, byte-identical); round 2 pipelines the store path from
-   `docs/notes/e2-18-round-2-brief.md`, then the acceptance rows run on `full`'s `video` against `tar`. The original
-   E2-18 brief, for context: (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
-   G3 as restated in D-27 needs 80% — with E2-4b in, measure first, then see what the store path still spends
-   per byte: the chunker, two BLAKE3 passes, the frame write); its brief is `docs/notes/e2-18-video-brief.md`
-   (written on 2026-10-13 from the committed numbers; dispatch from it).
+2. Next: **E2-18's acceptance rows.** Rounds 1 and 2 are merged (D-61, D-63: the store path byte-identical and
+   pipelined). On an idle machine — no build, no agent running — launch `target/acceptance/e2-18-run.sh` detached
+   (`Start-Process 'C:/Program Files/Git/bin/bash.exe'` on the script's `/d/...` path, hidden window; status in
+   `target/acceptance/e2-18-run-status.log`): the `lpk` tool and the `store` control on `video` and
+   `encrypted-random`, `small` then `full`, three repeats, each directory validated. Report each, write
+   `bench/reports/phase1-<date>-store-path.md` (G3: `lpk/fast` compress MB/s on `video` against `store/store` in
+   the same run — 80% or more passes, D-27), commit the directories and the report, tick E2-18 with the verdict
+   (or keep it open with the shortfall named and property 5 of the round-2 brief, parallel chunk hashes, next).
 3. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, and the blocks-in-flight bound,
    D-60, are the first inputs; the Balanced cap of four in flight is provisional until then), then the
    revision-gated peels E2-10/11 (Deflate and containers — the largest remaining size win on office, PDF and
