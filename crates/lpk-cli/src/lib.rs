@@ -704,8 +704,18 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
                 let m = &s.memory;
                 let source = match m.budget.source {
                     lpk_core::memory::BudgetSource::Given => "--memory".to_string(),
-                    lpk_core::memory::BudgetSource::Default { ceiling, .. } => format!(
-                        "default: the {} tier's ceiling of {ceiling} bytes, at most half the physical memory",
+                    lpk_core::memory::BudgetSource::Default {
+                        ceiling,
+                        physical: Some(p),
+                    } => format!(
+                        "default: the {} tier's ceiling of {ceiling} bytes, at most half the physical memory of {p} bytes",
+                        m.tier.name()
+                    ),
+                    lpk_core::memory::BudgetSource::Default {
+                        ceiling,
+                        physical: None,
+                    } => format!(
+                        "default: the {} tier's ceiling of {ceiling} bytes; physical memory unknown",
                         m.tier.name()
                     ),
                 };
