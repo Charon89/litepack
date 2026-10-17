@@ -1,0 +1,106 @@
+{
+  "class": "game-assets",
+  "corpus": {
+    "class_bytes": 52470892,
+    "class_files": 4660,
+    "manifest_blake3": "1d24f5c824fad0c85fc3b9231643b2bd80a75437c6b3d38e86ef1f6450a05f43",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 17219394,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 5.765625,
+      "peak_job_memory_bytes": 673447936,
+      "peak_memory_bytes": 597905408,
+      "peak_process_commit_bytes": 673447936,
+      "timed_out": false,
+      "user_cpu_seconds": 156.890625,
+      "wall_seconds": 22.4345213
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.921875,
+      "peak_job_memory_bytes": 87949312,
+      "peak_memory_bytes": 67670016,
+      "peak_process_commit_bytes": 87949312,
+      "timed_out": false,
+      "user_cpu_seconds": 1.671875,
+      "wall_seconds": 0.7570714
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 17219394,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 5.765625,
+        "peak_job_memory_bytes": 673447936,
+        "peak_memory_bytes": 597905408,
+        "peak_process_commit_bytes": 673447936,
+        "timed_out": false,
+        "user_cpu_seconds": 156.890625,
+        "wall_seconds": 22.4345213
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.921875,
+        "peak_job_memory_bytes": 87949312,
+        "peak_memory_bytes": 67670016,
+        "peak_process_commit_bytes": 87949312,
+        "timed_out": false,
+        "user_cpu_seconds": 1.671875,
+        "wall_seconds": 0.7570714
+      }
+    }
+  ],
+  "repeats_requested": 1,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../../.claude/worktrees/agent-a061129ee944ab0dd/bench/tmp/run32416/c12/a.lpk",
+      "game-assets",
+      "--balanced",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "balanced"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+d4b283867fb8"
+  },
+  "verification": {
+    "files_checked": 4660,
+    "files_ok": 4660,
+    "verified": true
+  }
+}
