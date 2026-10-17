@@ -198,5 +198,6 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
     never occurs with the output limit (informative). Code: the reference raises a `dict_size` below 4096 to 4096
     (it refused a distance in (`dict_size`, 4096]); a non-final `lzma` step whose input ends inside the symbol after
     the bound reports `marker required` (was `truncated`); input after a marker reports `trailing input` in a
-    non-final step and `truncated` for a marker before the bound in the last step (was lzma-rs's own text); a `zstd`
+    non-final step and `truncated` for a marker before the bound in the last step (was lzma-rs's own text, or in the
+    last step `PayloadTooLarge` with a length below the bound); a `zstd`
     frame cut inside its checksum counts its last block (it was counted as damaged). No byte of a vector changed.
