@@ -14,6 +14,72 @@ use lpk_core::memory::{
 use lpk_core::{BalancedOptions, CoreError, FastOptions, Pipeline, RunSummary, StoreOptions};
 use lpk_format::{Archive, Envelope, Resources};
 
+/// The default settings of each tier at its ceiling with 24 threads (no inventory): the figures
+/// the report quotes, and every plan within its ceiling.
+#[test]
+fn default_settings_fit_their_ceilings() {
+    use lpk_core::memory::{BALANCED_CEILING, STORE_CEILING};
+    let ceiling = |c: u64| Budget::default_for(c, None);
+    let f = FastOptions::default();
+    let b = BalancedOptions::default();
+    let (enc, _) = lpk_core::BalancedEncoder::new(&b).unwrap();
+    let base = |block: u64, encoder: EncoderMemory, peel: Option<u64>| ModelInputs {
+        block_size: block,
+        chunk_size: 512 << 10,
+        avg_chunk: 64 << 10,
+        encoder,
+        peel_max_file: peel,
+        entries: 0,
+        path_bytes: 0,
+        input_bytes: 0,
+        prefetch: Default::default(),
+    };
+    let store = ModelInputs {
+        chunk_size: lpk_format::DEFAULT_CHUNK_SIZE,
+        avg_chunk: lpk_format::DEFAULT_CHUNK_SIZE,
+        ..base(lpk_format::DEFAULT_BLOCK_SIZE, EncoderMemory::Store, None)
+    };
+    let fast = base(
+        f.block_size,
+        EncoderMemory::Zstd {
+            level: f.level,
+            window_log: window_for(f.window_log, f.block_size),
+            dictionaries: 0,
+            dictionary_bytes: 0,
+        },
+        Some(f.jpeg_max_file),
+    );
+    let balanced = base(
+        b.block_size,
+        EncoderMemory::Balanced {
+            lzma: enc.lzma_memory(),
+            zstd_level: b.zstd_level,
+            zstd_window_log: window_for(b.dict_size.ilog2(), b.block_size),
+        },
+        Some(b.jpeg_max_file),
+    );
+    for (name, m, c) in [
+        ("store", store, STORE_CEILING),
+        ("fast", fast, FAST_CEILING),
+        ("balanced", balanced, BALANCED_CEILING),
+    ] {
+        let p = m.plan(ceiling(c), 24).unwrap();
+        println!(
+            "{name}: ceiling {c}, per_block {}, encoder {}, fixed_sequential {}, fixed_pipelined {}, blocks in flight {}, threads_hint {}",
+            p.per_block,
+            m.encoder_memory(),
+            p.fixed_sequential,
+            p.fixed_pipelined,
+            p.blocks_in_flight,
+            m.threads_hint(c)
+        );
+        assert!(
+            p.fixed() + p.per_block * p.blocks_in_flight as u64 <= c,
+            "{name}"
+        );
+    }
+}
+
 const MIB: u64 = 1 << 20;
 
 fn prose(seed: u64, len: usize) -> Vec<u8> {
