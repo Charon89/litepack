@@ -788,7 +788,7 @@ The step's input is one Lepton stream and its output is the primary image of the
   (5) resources: the frame header of the JPEG is read from the stream's own header (layout below) and the image's
   term (its coefficient term plus the fixed term, counted once per image, "Resources" below) is compared with the
   decode memory left after `max_block_plain` (`Refused`, field `decode_memory`; informative: the reference reports
-  `needed` = `max_block_plain` + the image's term and `allowed` = the decode memory it compared against, the
+  `needed` = `max_block_plain` + the image's term, saturating at 2^64 - 1, and `allowed` = the decode memory it compared against, the
   archive's `decode_memory` or its own memory resource if smaller;
   a stream whose header layout is not recognised is `BadRecord`, `lepton stream`, and is not decoded); (6) the stream is decoded (`BadRecord`, `lepton stream` when the
   library refuses it or its output would exceed `primary_len`; `primary_len` when the output is shorter);
