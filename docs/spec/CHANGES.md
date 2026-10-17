@@ -152,3 +152,9 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
 6. New vector `deflate-peel.lpk` (section 11) with `expected-1.2.toml` (full reader: `files`, `verify`) and a
    `["deflate-peel.lpk"]` table in `expected.toml` (a pre-1.2 reader: `list`, `info`, `UnimplementedPrimitive` (8),
    and the new key `files_1_0`, the entries such a reader extracts). No byte of an earlier vector changed.
+7. Reference correction, no text change: a non-final `lzma` step whose output crosses its bound before any other
+   error of its stream is `PayloadTooLarge`, as lzma rules 3 and 6 state, also when a later match reaches back
+   further than the bound; the reference reported `LzmaError` ("beyond dictionary size") in that case, because
+   lzma-rs passes its output on only when its buffer is full. The defect dates from 1.0 (non-final `lzma` steps
+   with a bound below `dict_size`); revision 1.2's bound makes it reachable with a `deflate` record whose
+   `plain_len` is below the inflated text (code: the step is decoded again to stop one byte past the bound).

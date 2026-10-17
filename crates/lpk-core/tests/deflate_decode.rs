@@ -97,7 +97,18 @@ fn model_step(model: Model, plain: &[u8]) -> (Step, Vec<u8>) {
 /// An archive (minor 2) of `stream.deflate` (the stream, one block through `model` and
 /// `deflate-reconstruct`, declaring `memory`) and a small plain `readme.txt`.
 fn archive(model: Model, memory: Option<u64>) -> (Vec<u8>, Vec<u8>, DeflateRecord) {
-    let (deflate, plain, d) = stream();
+    archive_with(model, memory, |_| {})
+}
+
+/// [`archive`] with the record changed by `tweak` before it is written (the model step still
+/// encodes the whole inflated text).
+fn archive_with(
+    model: Model,
+    memory: Option<u64>,
+    tweak: impl Fn(&mut DeflateRecord),
+) -> (Vec<u8>, Vec<u8>, DeflateRecord) {
+    let (deflate, plain, mut d) = stream();
+    tweak(&mut d);
     let (step, bytes) = model_step(model, &plain);
     let mut out = Vec::new();
     let options = WriterOptions {
@@ -272,4 +283,24 @@ fn the_minimal_reader_reports_unimplemented_primitive_8_and_extracts_the_plain_f
         a.verify().unwrap_err(),
         FormatError::UnimplementedPrimitive { id: 8 }
     ));
+}
+
+/// Spec section 8, "Bounds", and lzma rule 6 (task C fix round, R13): a record whose `plain_len`
+/// is 10000 below the inflated text makes the `lzma` step cross its bound, the record's
+/// `plain_len`: `PayloadTooLarge`, whatever lzma-rs's flush timing (the text has matches reaching
+/// back further than the bound).
+#[test]
+fn a_plain_len_below_the_text_is_payload_too_large_from_the_model_step() {
+    for model in [Model::Lzma, Model::Zstd] {
+        let (bytes, _, d) = archive_with(model, None, |d| d.plain_len -= 10_000);
+        let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
+        register_full_reader(&mut a);
+        match a.verify() {
+            Err(FormatError::PayloadTooLarge { len, max }) => {
+                assert_eq!(max, d.plain_len, "{model:?}");
+                assert!(len > max, "{model:?}");
+            }
+            other => panic!("{model:?}: {other:?}"),
+        }
+    }
 }

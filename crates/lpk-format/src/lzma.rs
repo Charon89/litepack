@@ -86,7 +86,26 @@ impl PrimitiveDecoder for LzmaDecoder {
                 {
                     Err(lerr("marker required"))
                 }
-                _ => Err(e),
+                // lzma-rs hands its buffer to the sink only when the buffer is full or at
+                // the end, so the first pass may meet an error past the bound before it sees
+                // the crossing. Decoded again to stop at exactly one byte past the bound, a
+                // stream that gets there crossed the bound before any later error, which is
+                // `PayloadTooLarge` (spec section 8, lzma rules 3 and 6); an error at an
+                // earlier position keeps its class. The byte past the bound cannot fail on
+                // its distance (it is at most the bytes produced, which fit the buffer).
+                _ => match pass(
+                    props,
+                    buffer,
+                    Some(expected_len.saturating_add(1)),
+                    input,
+                    expected_len,
+                ) {
+                    // (A marker before the bound reads as a short unpacked size: not a crossing.)
+                    Err(p @ FormatError::PayloadTooLarge { len, .. }) if len > expected_len => {
+                        Err(p)
+                    }
+                    _ => Err(e),
+                },
             },
         }
     }
