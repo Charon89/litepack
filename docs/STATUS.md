@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 04:06 UTC (2026-10-17, 00:06 local on the measuring machine). A measurement is running:
+Last updated: 2026-10-17, about 04:52 UTC (2026-10-17, 00:52 local on the measuring machine). A measurement is running:
 E2-20's rows (`target/acceptance/e2-20-run.sh`, detached, started 04:00 UTC; progress in
 `target/acceptance/e2-20-run-status.log`, last line `== DONE` when both profiles are in).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
@@ -73,14 +73,15 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e2-10-revision` (PR open): task C of E2-10/11, revision 1.2 (D-68) — C1 (the patched `preflate-rs` 0.7.6,
-  D-66; the `deflate-reconstruct` decoder; the writer's minor-2 rules; fuzz targets), C2 (the text,
-  `deflate-peel.lpk`), and two fix rounds after the review of C2 (the `lzma` and `zstd` bound class corrected in the
-  reference, a writer obligation, `malformed-deflate-bound.lpk`, the analysis verifying with the bounded
-  recreation); `main` merged in (E2-20). When CI is green: fast-forward `main`, then dispatch tasks D
-  (`docs/notes/e2-10-task-d-brief.md`; add: E2-20's memory model takes the stage's buffers, the blocks declare the
-  Deflate term through `add_parts_encoded`) and E (`docs/notes/e2-10-task-e-brief.md`; add: the malformed vector,
-  and the jpeg `Refused` amounts the text now states) in parallel.
+- Task C of E2-10/11 (revision 1.2, D-68) is merged (PR #64, 2026-10-17). In flight from `main` at `01dca88`:
+  `task/e2-10-pipeline` (task D, the Deflate peel in the pipeline, `docs/notes/e2-10-task-d-brief.md` plus the
+  orchestrator's notes: E2-20's memory model takes the stage's buffers, the part blocks declare the Deflate term
+  through `add_parts_encoded`, byte identity across threads and budgets) and `task/e2-10-check` (task E,
+  `deflate-reconstruct` in `lpk-check` from the text alone — the revision's independence gate; notes: the two 1.2
+  vectors, the bound classes of rules 3, 6 and 7 from the text, the `Refused` amounts). Both are implementer
+  worktrees under `.claude/worktrees/`; each gets a read-only review before its PR. D's acceptance rows (the
+  `balanced` and `balanced-no-deflate` rows on `small`, the share test against `probe-deflate.json`) are measured
+  by the orchestrator and tick E2-10 and E2-11.
 - E2-20 (merged): its acceptance rows are running from `main` at `fb5553a` — every `lpk` setting on every class of
   `small`, then `vm-image`, `office-pdf` and `software-installed` of `full`, at the machine's 24 threads, one repeat
   (the clause is memory): each row's peak memory within its tier's ceiling (store 1 GiB, Fast 2 GiB, Balanced
