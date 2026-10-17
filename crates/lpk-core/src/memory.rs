@@ -9,8 +9,11 @@
 //! the archive's envelope shows ([`EnvelopeTier::of`]), resolved as above: a store-only envelope
 //! (`max_window` 0, `max_bwt_block` 0, `decode_memory` equal to `max_block_plain`) is the store
 //! tier's; an envelope with a BWT block, a block above [`FAST_MAX_BLOCK_PLAIN`] or a window above
-//! [`FAST_MAX_WINDOW`] (more than the Fast tier's settings can produce) is the Balanced tier's;
-//! any other the Fast tier's. A peeled archive follows the same rule on its envelope. The reader
+//! [`FAST_MAX_WINDOW`] (more than the Fast tier's default settings, the CLI's, produce) is the
+//! Balanced tier's; any other the Fast tier's. The thresholds come from the tiers' defaults: an
+//! archive built through the library with other settings may be classed otherwise, which is
+//! harmless because what the engine counts comes from the envelope, not from the class (only
+//! the default budget does). A peeled archive follows the same rule on its envelope. The reader
 //! opened for `lpk x` and `lpk t` is limited before the envelope is known, by `--memory` or by
 //! [`EXTRACT_CEILING`] resolved likewise. What extraction counts against the budget is in
 //! [`crate::extract`].
@@ -71,13 +74,18 @@ pub const BALANCED_CEILING: u64 = 4 * GIB;
 /// it is opened before its envelope is known, so this is the largest tier ceiling. The
 /// extraction's own budget is the envelope's tier's ([`EnvelopeTier::of`]).
 pub const EXTRACT_CEILING: u64 = 4 * GIB;
-/// The largest block the Fast tier writes: its block size, `FastOptions::block_size`, which is
-/// the format writer's `DEFAULT_BLOCK_SIZE` (the CLI does not change it). An envelope whose
-/// `max_block_plain` is above it was not written by the Fast tier's settings.
+/// The largest block the Fast tier writes with its default block size, `FastOptions::block_size`
+/// (the format writer's `DEFAULT_BLOCK_SIZE`), the one the CLI uses: it cannot change it. A
+/// threshold from the tiers' defaults, not a limit the code enforces: a library caller may set a
+/// larger Fast block, and its archive is then classed Balanced; a Balanced archive with blocks
+/// and dictionary within these thresholds is classed Fast. Either way is harmless: every term
+/// the engine counts comes from the envelope and the index, so the class only sets the default
+/// budget (and with it the workers), never what a block is counted at.
 pub const FAST_MAX_BLOCK_PLAIN: u64 = lpk_format::DEFAULT_BLOCK_SIZE;
-/// The largest window the Fast tier declares: its zstd step declares the smaller of the window
-/// log and the block's own log2 rounded up, so never more than [`FAST_MAX_BLOCK_PLAIN`]. An
-/// envelope whose `max_window` is above it was not written by the Fast tier's settings.
+/// The largest window the Fast tier declares with its default block size: its zstd step
+/// declares the smaller of the window log and the block's own log2 rounded up, so never more
+/// than [`FAST_MAX_BLOCK_PLAIN`] (also with `--window-log 28`). A threshold from the defaults,
+/// as [`FAST_MAX_BLOCK_PLAIN`].
 pub const FAST_MAX_WINDOW: u64 = FAST_MAX_BLOCK_PLAIN;
 
 /// The tier an archive's envelope shows, whose ceiling is the extraction's default budget.
