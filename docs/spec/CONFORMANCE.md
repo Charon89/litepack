@@ -26,7 +26,9 @@ An independent decoder passes the gate when, for every archive in the table belo
 7. recovery (spec section 13) is part of the gate: on `recovery-groups.lpk` its recovery check reports no damage;
    on `malformed-recovery-damaged.lpk` it reports exactly one damaged shard, extracts every file that no damaged
    chunk touches, and its repair writes a copy whose bytes equal `recovery-groups.lpk` — a decoder without
-   repair may skip the repair clause but must still report the damage. This item is about the recovery check:
+   repair may skip the repair clause but must still report the damage. Repair stays optional; the Reed-Solomon code
+   it needs is defined in spec section 13 ("The code"), so it can be implemented from the text without any library
+   (specification revision of 2026-10-16). This item is about the recovery check:
    `verify` leaves recovery to `check` in every mode (spec section 9) and does not fail on a damaged recovery
    frame;
 8. the negative cases on the positive vectors are gate items too: `zstd-dict.lpk` without its prior fails with

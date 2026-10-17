@@ -1412,7 +1412,6 @@ dependencies = [
  "hkdf",
  "lepton_jpeg",
  "lzma-rs",
- "reed-solomon-simd",
  "ruzstd",
  "sha2",
  "toml",

@@ -1,4 +1,5 @@
-//! Recovery frames (section 13): detection of damaged shards and repair.
+//! Recovery frames (section 13): detection of damaged shards and repair, with the
+//! Reed-Solomon code of [`crate::rs`] (no library).
 
 use crate::error::{Error, Result};
 use crate::index::{GenEntry, Loc};
@@ -105,10 +106,7 @@ pub fn parse_payload(p: &[u8], index_offset: u64) -> Result<(RecoveryHead, &[u8]
         return Err(bad("recovery_shards"));
     }
     if u64::from(h.group_shards) + u64::from(h.recovery_shards) > 65535
-        || !reed_solomon_simd::ReedSolomonDecoder::supports(
-            h.group_shards as usize,
-            h.recovery_shards as usize,
-        )
+        || !crate::rs::supported(h.group_shards, h.recovery_shards)
     {
         return Err(bad("shard count"));
     }
@@ -228,42 +226,64 @@ pub fn scan(
                 ),
             ));
         }
-        let zero = vec![0u8; h.shard_len as usize];
-        let originals: Vec<(usize, Vec<u8>)> = (0..h.group_shards)
-            .filter(|s| !damaged.contains(s))
+        let work = crate::rs::repair_work(damaged.len() as u64, u64::from(h.data_shards), sl);
+        if work > crate::rs::REPAIR_WORK_LIMIT {
+            return Err(Error::new(
+                "Refused",
+                format!(
+                    "the archive needs recovery group of {work} operations; this reader allows {}",
+                    crate::rs::REPAIR_WORK_LIMIT
+                ),
+            ));
+        }
+        // The shards are borrowed from the archive; only the last one is padded into a copy.
+        let mut is_damaged = vec![false; h.data_shards as usize];
+        for &s in &damaged {
+            is_damaged[s as usize] = true;
+        }
+        let last = h.data_shards - 1;
+        let last_bytes = shard_bytes(data, &h, last);
+        let given: Vec<Option<&[u8]>> = (0..h.data_shards)
             .map(|s| {
-                let b = if s < h.data_shards {
-                    shard_bytes(data, &h, s)
-                } else {
-                    zero.clone()
-                };
-                (s as usize, b)
+                if is_damaged[s as usize] {
+                    return None;
+                }
+                if s == last {
+                    return Some(last_bytes.as_slice());
+                }
+                let start = (h.cover_offset + u64::from(s) * sl) as usize;
+                data.get(start..start + sl as usize)
             })
             .collect();
-        let recovery: Vec<(usize, &[u8])> = (0..damaged.len())
-            .map(|j| {
-                (
-                    j,
-                    &rec[j * h.shard_len as usize..(j + 1) * h.shard_len as usize],
-                )
-            })
+        if given
+            .iter()
+            .zip(&is_damaged)
+            .any(|(g, d)| g.is_none() && !d)
+        {
+            rep.error.get_or_insert(Error::new(
+                "RecoveryError",
+                "a shard lies outside the input",
+            ));
+            continue;
+        }
+        let shard = h.shard_len as usize;
+        let recovery: Vec<(u32, &[u8])> = (0..damaged.len() as u32)
+            .map(|j| (j, &rec[j as usize * shard..(j as usize + 1) * shard]))
             .collect();
-        let restored = match reed_solomon_simd::decode(
-            h.group_shards as usize,
-            h.recovery_shards as usize,
-            originals,
-            recovery,
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                rep.error
-                    .get_or_insert(Error::new("RecoveryError", format!("decoder: {e}")));
-                continue;
-            }
-        };
+        let restored: std::collections::HashMap<u32, Vec<u8>> =
+            match crate::rs::decode(h.group_shards, h.recovery_shards, &given, &recovery) {
+                Ok(v) => v.into_iter().collect(),
+                Err(e) => {
+                    rep.error.get_or_insert(Error::new(
+                        "RecoveryError",
+                        format!("decoder: {}", e.detail),
+                    ));
+                    continue;
+                }
+            };
         for &s in &damaged {
             let want = &hashes[s as usize * 32..s as usize * 32 + 32];
-            let Some(b) = restored.get(&(s as usize)) else {
+            let Some(b) = restored.get(&s) else {
                 rep.error
                     .get_or_insert(Error::new("RecoveryError", "shard not restored"));
                 continue;

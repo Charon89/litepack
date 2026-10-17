@@ -101,3 +101,25 @@ no `version_minor` change. The recovery-list end rule in section 6 as in section
 modified frame in section 14; lzma at the bound and `IsFinishedOK` after a marker only (a stated difference from
 LzmaSpec); `MissingKeySlot` before the key slot payload limit; the keyless walk's `BadFrameLocation` `frames`; Repair
 without the key; the index-sequence and section 11 sentences; CONFORMANCE items 3 and 8. No behaviour changed.
+
+## 2026-10-16 — Specification revision of 2026-10-16: the Reed-Solomon code described normatively (E1-15)
+
+1. Section 13 gains "The code", which defines the recovery code without the library: the field GF(2^16) modulo
+   `0x1002D`, the Cantor basis b_0 .. b_15 through which a 16-bit symbol is an element, and check values.
+2. Section 13 states how a shard holds symbols: in each 64-byte unit, 32 low bytes then 32 high bytes.
+3. Section 13 defines the encoding map: the evaluation points w_j, the high form (m = P(r)) and the low form
+   (m = P(k)) by interpolation and by their Cauchy matrix, the normative rule that chooses the form, and check values.
+4. Section 13 writes out the supported-pairs predicate (`min(P(k), P(r)) + max(k, r) <= 65536`) instead of naming
+   the library's `supports`.
+5. Section 13 gives the additive FFT (twist factors, butterflies, both forms by the transform) as an exact,
+   equivalent fast computation, marked informative (the encoding map is the definition).
+6. Section 13 makes decoding normative as any inverse of the encoding map, with why the result is unique for at most
+   `recovery_shards` unknown shards, and outlines the fast decoder informatively.
+7. Section 2 and the status line name this revision: no vector byte changed, no reader outcome changed,
+   `version_minor` is unchanged. Decoders that left repair out may now implement it from the text (CONFORMANCE
+   item 7; repair stays optional). Proof: `crates/lpk-format/tests/rs_description.rs` re-derives every recovery
+   shard of `recovery-groups.lpk` from the text.
+8. Section 13's repair memory figure is a threshold every reader applies, whatever its decoder needs; a reader may
+   also refuse, with the same `Refused` (`recovery group`), a group whose rebuild would exceed a work bound it
+   documents. Section 14's `MissingKeySlot` clause drops its short-input half, which opening never reaches, and lists
+   `BadFrameLocation` (`frames`) among its errors. Found by the independent decoder's author and its review.
