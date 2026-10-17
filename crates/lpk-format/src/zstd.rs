@@ -135,7 +135,10 @@ impl PrimitiveDecoder for ZstdDecoder {
             dec.add_dict(d).map_err(map_frame_error)?;
         }
         let mut src = input;
-        let mut out: Vec<u8> = Vec::new();
+        // Reserved once to the block (bounded by the reader's block limit): the output never
+        // reallocates past it (E2-20).
+        let reserve = usize::try_from(expected_len.min(limits.max_block_plain)).unwrap_or(0);
+        let mut out: Vec<u8> = Vec::with_capacity(reserve);
         while !src.is_empty() {
             match dec.init(&mut src) {
                 Ok(()) => {}

@@ -207,7 +207,8 @@ impl LzmaEncoder {
             if st == Status::StreamEnd {
                 break;
             }
-            out.reserve(1 << 16);
+            // Exact: past the reserve the output grows by 64 KiB steps, never doubling.
+            out.reserve_exact(1 << 16);
         }
         Ok(out)
     }
