@@ -47,7 +47,7 @@ use lpk_core::peel::text::{base64, utf16};
 use lpk_core::{classify, BalancedOptions, Class, Features, LzmaEncoder, Pipeline};
 use lpk_format::{
     Archive, Base64Record, BlockEncoder, EntryKind, EntryTable, FrameKind, FrameLocation, Graph,
-    Record, RecordBody, Resources, Utf16Record,
+    Record, RecordBody, RecordsWriter, Resources, Utf16Record,
 };
 use serde::{Deserialize, Serialize};
 
@@ -309,30 +309,33 @@ pub struct Data {
 // ---------------------------------------------------------------------------------------------
 // Costs
 
-/// The exact encoded length of a base64 record (its fields are fixed-width).
+/// What one record adds to the `Records` frame (D-37): its kind, flags, body length, body
+/// and body hash, as the format's own writer lays them out.
+fn record_bytes(record: Record) -> u64 {
+    let empty = RecordsWriter::encode(&[]).len();
+    (RecordsWriter::encode(&[record]).len() - empty) as u64
+}
+
+/// The exact cost of a base64 record in the `Records` frame (its body is fixed-width).
 pub fn base64_record_bytes() -> u64 {
-    Record::new(RecordBody::Base64(Base64Record {
+    record_bytes(Record::new(RecordBody::Base64(Base64Record {
         variant: 0,
         line_len: 0,
         line_ending: 2,
         padding: 1,
         original_len: 0,
         original_hash: [0; 32],
-    }))
-    .encode()
-    .len() as u64
+    })))
 }
 
-/// The exact encoded length of a utf16 record.
+/// The exact cost of a utf16 record in the `Records` frame.
 pub fn utf16_record_bytes() -> u64 {
-    Record::new(RecordBody::Utf16(Utf16Record {
+    record_bytes(Record::new(RecordBody::Utf16(Utf16Record {
         endian: 0,
         bom: 0,
         original_len: 0,
         original_hash: [0; 32],
-    }))
-    .encode()
-    .len() as u64
+    })))
 }
 
 /// The model M: the Deflate stage's Balanced part encoder.
@@ -1681,9 +1684,10 @@ mod tests {
 
     #[test]
     fn record_lengths_are_the_designs() {
-        // kind, flags, body_len and the hash around the fixed-width bodies.
-        assert_eq!(base64_record_bytes(), 1 + 1 + 1 + 45 + 32);
-        assert_eq!(utf16_record_bytes(), 1 + 1 + 1 + 42 + 32);
+        // D-37's frame fields (kind 2, flags 2, body_len 1, body_hash 32) around the
+        // fixed-width bodies (45 and 42); the design's figures agree.
+        assert_eq!(base64_record_bytes(), 2 + 2 + 1 + 45 + 32);
+        assert_eq!(utf16_record_bytes(), 2 + 2 + 1 + 42 + 32);
     }
 
     #[test]
