@@ -602,6 +602,9 @@ struct Build {
     hex_only: bool,
     /// The last line's segment is a whole line (a next whole line may join).
     open: bool,
+    /// A line after the first is shorter than the first: the run is complete (only a regular
+    /// run's last line may be shorter), kept as a flag so each join is constant time.
+    short: bool,
 }
 
 impl Build {
@@ -611,10 +614,14 @@ impl Build {
             alphabet: seg.alphabet,
             hex_only: seg.hex_only,
             open: seg.whole,
+            short: false,
         }
     }
 
     fn push(&mut self, seg: &Seg) {
+        if seg.end - seg.start < self.lines[0].1 - self.lines[0].0 {
+            self.short = true;
+        }
         self.lines
             .push((seg.start, seg.end, seg.alphabet.is_some()));
         if self.alphabet.is_none() {
@@ -635,8 +642,7 @@ impl Build {
     /// a line it is complete, and no further line joins (R27: a MIME boundary after a short
     /// last body line stays outside the run).
     fn holds_short_line(&self) -> bool {
-        let first = self.lines[0].1 - self.lines[0].0;
-        self.lines.iter().skip(1).any(|l| l.1 - l.0 < first)
+        self.short
     }
 
     /// When the first line is the only one carrying a specific symbol (a header such as
@@ -750,17 +756,28 @@ pub fn find_runs(text: &[u8]) -> Vec<Run> {
                             let hex_only = tail
                                 .iter()
                                 .all(|l| text[l.0..l.1].iter().all(u8::is_ascii_hexdigit));
-                            let mut next_run = Build {
+                            let first = tail[0].1 - tail[0].0;
+                            let short = tail.iter().skip(1).any(|l| l.1 - l.0 < first);
+                            let next_run = Build {
                                 lines: tail,
                                 alphabet: None,
                                 hex_only,
                                 open: true,
+                                short,
                             };
-                            next_run.push(seg);
                             if let Some(old) = run.replace(next_run) {
                                 old.finish(text, &mut out);
                             }
-                            true
+                            if short {
+                                // The detached lines already end in their short last line:
+                                // they finish as a run and this line starts its own.
+                                false
+                            } else {
+                                if let Some(next) = run.as_mut() {
+                                    next.push(seg);
+                                }
+                                true
+                            }
                         }
                     }
                 }
