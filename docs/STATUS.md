@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 01:35 UTC (2026-10-16, 21:35 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 01:47 UTC (2026-10-16, 21:47 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -34,10 +34,10 @@ was single-threaded then and is parallel since E2-4b.
    76.4% of `tar` on `full`'s `video` (G3 needs 80%), with `lpk/store` above `tar`: the gap is FastCDC and the chunk
    hashes on the feeding thread. Dispatch round 3 from `docs/notes/e2-18-round-3-brief.md` (byte identity stays),
    then re-run `target/acceptance/e2-18-run.sh` on an idle machine and tick E2-18 or name the remaining gap.
-   In parallel (no shared files): **E2-10/11** from `docs/notes/e2-10-11-design.md` — task B (the walker moved into
-   `lpk-core`) is built and under review on branch `task/e2-10-walker`; task A's brief is
-   `docs/notes/e2-10-task-a-brief.md` (it touches the writer, so it waits for round 3 to merge); tasks C, D, E follow
-   the design's section 5. The design's owner question (a patched `preflate-rs` for hostile records) is under "Open
+   In parallel: **E2-10/11** from `docs/notes/e2-10-11-design.md` — task B (the walker moved into `lpk-core`, D-64)
+   is merged; task A (the `lpk-format` plumbing, `docs/notes/e2-10-task-a-brief.md`) was dispatched on 2026-10-16
+   beside round 3 (both touch `writer.rs`; whichever lands second merges `main`); tasks C, D, E follow the design's
+   section 5 (C needs the owner's answer on hostile records only before it is final). The design's owner question (a patched `preflate-rs` for hostile records) is under "Open
    for the owner".
 3. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, and the blocks-in-flight bound,
    D-60, are the first inputs; the Balanced cap of four in flight is provisional until then), then the

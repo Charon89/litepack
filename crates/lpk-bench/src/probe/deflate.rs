@@ -1,6 +1,8 @@
 //! `probe deflate` (PLAN P0-4): how much Deflate streams inside other files gain from
 //! `preflate-rs` (bit-exact recompression: inflate, keep a small correction record, compress the
-//! plain data better).
+//! plain data better). The walker and the per-stream analysis described here live in
+//! `lpk_core::peel::deflate` (moved there unchanged for the Deflate peel); this file keeps the
+//! A/B compression, the validation rules, the rendering and the estimate labels.
 //!
 //! `preflate-rs` 0.7.6 on crates.io has only the stream-level API, so this probe finds the
 //! streams itself, by content and one level deep (nothing inside inflated data is scanned):
@@ -45,21 +47,17 @@
 //! recreation are timed, alone, on data in memory; the A/B compression runs under `par_map`
 //! and is not timed.
 
-use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::io::Cursor;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use anyhow::Result;
-use flate2::{Decompress, FlushDecompress, Status};
-use preflate_rs::{
-    recreate_whole_deflate_stream, ExitCode, PlainText, PreflateConfig, PreflateStreamProcessor,
-    TokenPredictorParameters,
+use lpk_core::peel::deflate::{
+    examine, Limits, PlainText, TokenPredictorParameters, MAX_CHAIN_LENGTH, PREFLATE_VERSION,
 };
+pub use lpk_core::peel::deflate::{FAILURE_NAMES, KINDS, MIN_SCANNED_PLAIN};
 use serde::{Deserialize, Serialize};
 
 use super::codec::{xz_size, zstd_size, XzSettings, ZstdSettings};
-use super::{mbps, md_header, md_table, par_map, pct, timed, Ctx, Envelope, Output};
+use super::{mbps, md_header, md_table, par_map, pct, Ctx, Envelope, Output};
 
 pub const NAME: &str = "deflate";
 
@@ -71,9 +69,6 @@ pub const CLASSES: [&str; 5] = [
     "archives-nested",
     "software-installed",
 ];
-
-/// Container kinds, in table order.
-pub const KINDS: [&str; 8] = ["office", "jar", "apk", "zip", "png", "gzip", "pdf", "other"];
 
 /// Overhead buckets: corrections as a share of the Deflate stream size.
 pub const BUCKETS: [&str; 6] = [
@@ -88,18 +83,10 @@ pub const BUCKETS: [&str; 6] = [
 /// Text of `Settings::recognition`.
 pub const RECOGNITION: &str = "the library has no recognised/unrecognised flag: every accepted stream gets an estimate; judge by the overhead buckets";
 
-/// Smallest plain size of a stream found by the zlib scan.
-pub const MIN_SCANNED_PLAIN: u64 = 1024;
-/// Plain text the library may hold for one stream.
-const PLAIN_TEXT_LIMIT: u64 = 64 * 1024 * 1024;
-/// Plain text kept in memory for one file; later streams of the file are skipped for size.
-const FILE_PLAIN_BUDGET: u64 = 512 * 1024 * 1024;
 /// Input bytes (original and replaced) held before the A/B compression of a batch runs.
 const BATCH_BYTES: u64 = 256 * 1024 * 1024;
 /// xz preset 9 needs hundreds of MiB per encoder: fewer parallel encoders than cores.
 const COMPRESS_THREADS: usize = 4;
-/// Pre-inflation stops at this many output bytes (it discards the output; this only bounds time).
-const INFLATE_CAP: u64 = 1 << 32;
 
 // ---------------------------------------------------------------------------------------------
 // The result
@@ -216,442 +203,12 @@ pub struct FileRecord {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Finding streams
-
-/// A stream found in a file: where its Deflate bytes are (several spans for PNG).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Candidate {
-    spans: Vec<(usize, usize)>,
-    /// The plain size, when known before analysis (measured by inflation, or declared by a ZIP
-    /// entry).
-    plain_known: Option<u64>,
-}
-
-#[derive(Debug)]
-struct Found {
-    kind: &'static str,
-    candidates: Vec<Candidate>,
-    /// Structural refusals.
-    rejected: u64,
-    /// Zlib-scan false hits.
-    false_hits: u64,
-}
-
-enum Inflated {
-    Clean {
-        consumed: usize,
-        out: u64,
-    },
-    /// The data is not a valid deflate stream.
-    Bad,
-    /// Valid so far, but the input ran out (or the output cap was reached) before the end.
-    Unfinished,
-}
-
-/// Inflate `data` (zlib or raw deflate), discard the output, and say how many input bytes the
-/// stream took and how many bytes it produced.
-fn inflate_extent(data: &[u8], zlib: bool, buf: &mut [u8]) -> Inflated {
-    let mut d = Decompress::new(zlib);
-    loop {
-        let in_before = d.total_in();
-        let out_before = d.total_out();
-        let Some(rest) = data.get(in_before as usize..) else {
-            return Inflated::Unfinished;
-        };
-        match d.decompress(rest, buf, FlushDecompress::None) {
-            Ok(Status::StreamEnd) => {
-                return Inflated::Clean {
-                    consumed: d.total_in() as usize,
-                    out: d.total_out(),
-                }
-            }
-            Ok(_) => {
-                if d.total_in() == in_before && d.total_out() == out_before {
-                    // No progress and no error: the input ended inside the stream.
-                    return Inflated::Unfinished;
-                }
-                if d.total_out() > INFLATE_CAP {
-                    return Inflated::Unfinished;
-                }
-            }
-            Err(_) => return Inflated::Bad,
-        }
-    }
-}
-
-fn zlib_header(b: &[u8]) -> bool {
-    matches!(b, [0x78, 0x01 | 0x5e | 0x9c | 0xda, ..])
-}
-
-/// Any valid zlib header: method 8, window field at most 7, check divisible by 31, no preset
-/// dictionary.
-fn valid_zlib_header(b: &[u8]) -> bool {
-    match b {
-        [c, f, ..] => {
-            c & 0x0f == 8
-                && c >> 4 <= 7
-                && (u32::from(*c) * 256 + u32::from(*f)) % 31 == 0
-                && f & 0x20 == 0
-        }
-        _ => false,
-    }
-}
+// One file (the walker and the analysis are `lpk_core::peel::deflate`)
 
 fn extension(path: &str) -> String {
     path.rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
         .unwrap_or_default()
-}
-
-fn find_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    hay.get(from..)?
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .map(|p| p + from)
-}
-
-/// The zlib stream at `at` (header, deflate, 4-byte checksum) as the span of its deflate bytes.
-fn zlib_candidate(bytes: &[u8], at: usize, buf: &mut [u8]) -> Option<(Candidate, usize)> {
-    let rest = bytes.get(at..)?;
-    match inflate_extent(rest, true, buf) {
-        Inflated::Clean { consumed, out } if consumed >= 6 => Some((
-            Candidate {
-                spans: vec![(at + 2, at + consumed - 4)],
-                plain_known: Some(out),
-            },
-            consumed,
-        )),
-        _ => None,
-    }
-}
-
-fn scan_zlib(bytes: &[u8], buf: &mut [u8]) -> (Vec<Candidate>, u64) {
-    let mut out = Vec::new();
-    let mut rejected = 0;
-    let mut i = 0;
-    while i + 2 <= bytes.len() {
-        if bytes[i] == 0x78 && zlib_header(&bytes[i..]) {
-            match zlib_candidate(bytes, i, buf) {
-                Some((c, consumed)) if c.plain_known.unwrap_or(0) >= MIN_SCANNED_PLAIN => {
-                    out.push(c);
-                    i += consumed;
-                    continue;
-                }
-                _ => rejected += 1,
-            }
-        }
-        i += 1;
-    }
-    (out, rejected)
-}
-
-fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
-    let mut candidates = Vec::new();
-    let mut rejected = 0;
-    let (mut apk, mut office, mut jar) = (false, false, false);
-    let mut office_dirs = false;
-    for i in 0..zip.len() {
-        let Ok(f) = zip.by_index_raw(i) else {
-            rejected += 1;
-            continue;
-        };
-        match f.name().as_deref() {
-            Ok("AndroidManifest.xml") => apk = true,
-            Ok("mimetype") => office = true,
-            Ok("META-INF/MANIFEST.MF") => jar = true,
-            Ok(n) if n.starts_with("word/") || n.starts_with("xl/") || n.starts_with("ppt/") => {
-                office_dirs = true
-            }
-            Ok(_) => {}
-            Err(_) => {
-                rejected += 1;
-                continue;
-            }
-        }
-        if f.is_dir() || f.compression() != zip::CompressionMethod::Deflated {
-            continue;
-        }
-        let (Some(start), size) = (f.data_start(), f.compressed_size()) else {
-            rejected += 1;
-            continue;
-        };
-        let (start, end) = (
-            start as usize,
-            (start as usize).saturating_add(size as usize),
-        );
-        if f.encrypted() || end > bytes.len() {
-            rejected += 1;
-            continue;
-        }
-        candidates.push(Candidate {
-            spans: vec![(start, end)],
-            plain_known: Some(f.size()),
-        });
-    }
-    // Packages that share `[Content_Types].xml` with Office are told apart by extension first.
-    let kind = match ext {
-        "apk" => "apk",
-        "docx" | "docm" | "dotx" | "xlsx" | "xlsm" | "pptx" | "ppsx" | "potx" | "odt" | "ods"
-        | "odp" | "odg" | "epub" | "vsdx" => "office",
-        "jar" | "war" | "ear" => "jar",
-        "msix" | "appx" | "nupkg" | "vsix" | "xps" => "zip",
-        _ if apk => "apk",
-        _ if office || office_dirs => "office",
-        _ if jar => "jar",
-        _ => "zip",
-    };
-    Some(Found {
-        kind,
-        candidates,
-        rejected,
-        false_hits: 0,
-    })
-}
-
-fn find_png(bytes: &[u8], buf: &mut [u8]) -> Found {
-    let mut spans = Vec::new();
-    let mut pos = 8;
-    while let Some(head) = bytes.get(pos..pos + 8) {
-        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
-        let start = pos + 8;
-        let Some(end) = start.checked_add(len).filter(|e| *e <= bytes.len()) else {
-            break;
-        };
-        match &head[4..8] {
-            b"IDAT" => spans.push((start, end)),
-            b"IEND" => break,
-            _ => {}
-        }
-        pos = end + 4;
-    }
-    let mut found = Found {
-        kind: "png",
-        candidates: Vec::new(),
-        rejected: 0,
-        false_hits: 0,
-    };
-    let total: usize = spans.iter().map(|(a, b)| b - a).sum();
-    if total < 2 {
-        return found;
-    }
-    let mut concat = Vec::with_capacity(total);
-    for (a, b) in &spans {
-        concat.extend_from_slice(&bytes[*a..*b]);
-    }
-    let (take, plain_known) = match inflate_extent(&concat, true, buf) {
-        Inflated::Clean { consumed, out } if consumed >= 6 => (consumed - 6, Some(out)),
-        _ => (total - 2, None),
-    };
-    found.candidates.push(Candidate {
-        spans: trim_spans(&spans, 2, take),
-        plain_known,
-    });
-    found
-}
-
-/// The parts of `spans` (taken as one concatenated byte string) from `skip` on, `take` bytes.
-fn trim_spans(spans: &[(usize, usize)], skip: usize, take: usize) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let (mut skip, mut take) = (skip, take);
-    for &(a, b) in spans {
-        let len = b - a;
-        if skip >= len {
-            skip -= len;
-            continue;
-        }
-        let from = a + skip;
-        skip = 0;
-        let n = (b - from).min(take);
-        if n > 0 {
-            out.push((from, from + n));
-        }
-        take -= n;
-        if take == 0 {
-            break;
-        }
-    }
-    out
-}
-
-fn gzip_header_len(b: &[u8]) -> Option<usize> {
-    if b.len() < 10 || b[0] != 0x1f || b[1] != 0x8b || b[2] != 8 {
-        return None;
-    }
-    let flags = b[3];
-    let mut pos = 10;
-    if flags & 4 != 0 {
-        let xlen = u16::from_le_bytes([*b.get(pos)?, *b.get(pos + 1)?]) as usize;
-        pos += 2 + xlen;
-    }
-    for bit in [8u8, 16] {
-        if flags & bit != 0 {
-            pos += b.get(pos..)?.iter().position(|c| *c == 0)? + 1;
-        }
-    }
-    if flags & 2 != 0 {
-        pos += 2;
-    }
-    (pos <= b.len()).then_some(pos)
-}
-
-fn find_gzip(bytes: &[u8], buf: &mut [u8]) -> Found {
-    let mut found = Found {
-        kind: "gzip",
-        candidates: Vec::new(),
-        rejected: 0,
-        false_hits: 0,
-    };
-    let mut pos = 0;
-    while let Some(h) = gzip_header_len(&bytes[pos..]) {
-        let start = pos + h;
-        match inflate_extent(&bytes[start..], false, buf) {
-            Inflated::Clean { consumed, out } => {
-                found.candidates.push(Candidate {
-                    spans: vec![(start, start + consumed)],
-                    plain_known: Some(out),
-                });
-                pos = start + consumed + 8;
-                if pos >= bytes.len() {
-                    break;
-                }
-            }
-            Inflated::Bad | Inflated::Unfinished => {
-                // Let the library name what is wrong with the rest of the file.
-                found.candidates.push(Candidate {
-                    spans: vec![(start, bytes.len())],
-                    plain_known: None,
-                });
-                break;
-            }
-        }
-    }
-    found
-}
-
-/// Does the dictionary of the object whose `stream` keyword is at `kw` (the text after the last
-/// `obj` before it, at most 8 KiB back) name `/FlateDecode`?
-fn dictionary_has_flate(bytes: &[u8], kw: usize) -> bool {
-    let window = &bytes[kw.saturating_sub(8192)..kw];
-    let start = window
-        .windows(3)
-        .rposition(|w| w == b"obj")
-        .map_or(0, |p| p + 3);
-    window[start..]
-        .windows(b"/FlateDecode".len())
-        .any(|w| w == b"/FlateDecode")
-}
-
-fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
-    let mut found = Found {
-        kind: "pdf",
-        candidates: Vec::new(),
-        rejected: 0,
-        false_hits: 0,
-    };
-    let mut from = 0;
-    while let Some(k) = find_from(bytes, b"stream", from) {
-        from = k + 6;
-        if k >= 3 && &bytes[k - 3..k] == b"end" {
-            continue;
-        }
-        let data = match bytes.get(from..from + 2) {
-            Some(b"\r\n") => from + 2,
-            Some([b'\n', _]) => from + 1,
-            _ => continue,
-        };
-        let Some(head) = bytes.get(data..).filter(|h| valid_zlib_header(h)) else {
-            continue;
-        };
-        // A header other than the common `78 xx` needs the object's dictionary to say Flate.
-        if !zlib_header(head) && !dictionary_has_flate(bytes, k) {
-            continue;
-        }
-        match zlib_candidate(bytes, data, buf) {
-            Some((c, consumed)) => {
-                found.candidates.push(c);
-                from = data + consumed;
-            }
-            None => {
-                // Not a clean stream: the library names what is wrong with it.
-                let end = find_from(bytes, b"endstream", data).unwrap_or(bytes.len());
-                found.candidates.push(Candidate {
-                    spans: vec![(data + 2, end.max(data + 2))],
-                    plain_known: None,
-                });
-                from = end.max(from);
-            }
-        }
-    }
-    found
-}
-
-/// Find the streams of a file by its content (`ext` only labels ZIP kinds).
-fn find_streams(bytes: &[u8], ext: &str) -> Found {
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut found = if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
-        find_zip(bytes, ext)
-    } else {
-        None
-    }
-    .unwrap_or_else(|| {
-        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            find_png(bytes, &mut buf)
-        } else if bytes.starts_with(b"\x1f\x8b\x08") && gzip_header_len(bytes).is_some() {
-            find_gzip(bytes, &mut buf)
-        } else if bytes.starts_with(b"%PDF-") {
-            find_pdf(bytes, &mut buf)
-        } else {
-            let (candidates, false_hits) = scan_zlib(bytes, &mut buf);
-            Found {
-                kind: "other",
-                candidates,
-                rejected: 0,
-                false_hits,
-            }
-        }
-    });
-    // No two candidates may overlap: the replacement must be well defined.
-    found
-        .candidates
-        .sort_by_key(|c| c.spans.first().map_or(0, |s| s.0));
-    let mut end = 0;
-    let mut kept = Vec::new();
-    for c in std::mem::take(&mut found.candidates) {
-        let first = c.spans.first().map_or(0, |s| s.0);
-        let last = c.spans.last().map_or(0, |s| s.1);
-        if first < end {
-            found.rejected += 1;
-        } else {
-            end = last;
-            kept.push(c);
-        }
-    }
-    found.candidates = kept;
-    found
-}
-
-// ---------------------------------------------------------------------------------------------
-// Analysing a stream
-
-enum StreamOutcome {
-    Done {
-        plain: PlainText,
-        corrections: usize,
-        deflate_len: usize,
-        estimate: String,
-        analyse_seconds: f64,
-        recreate_seconds: f64,
-    },
-    Skipped {
-        deflate_len: usize,
-        seconds: f64,
-    },
-    Failed {
-        cause: String,
-        deflate_len: usize,
-        seconds: f64,
-    },
 }
 
 /// The variant name of a `Debug` text: everything before the first `(`, ` {` or space.
@@ -675,77 +232,6 @@ fn estimate_label(p: Option<&TokenPredictorParameters>) -> String {
     }
 }
 
-fn code_name(c: ExitCode) -> String {
-    format!("{c:?}")
-}
-
-/// The name recorded for a panic inside the library.
-pub const PANIC: &str = "Panic";
-
-fn analyse_stream(deflate: &[u8], plain_known: Option<u64>, cfg: &PreflateConfig) -> StreamOutcome {
-    let failed = |cause: &str, seconds: f64| StreamOutcome::Failed {
-        cause: cause.to_string(),
-        deflate_len: deflate.len(),
-        seconds,
-    };
-    let skipped = |seconds: f64| StreamOutcome::Skipped {
-        deflate_len: deflate.len(),
-        seconds,
-    };
-    // The library returns Ok with a shortened stream when the input ends early or the plain-text
-    // limit is hit after a first block: `is_done` tells a whole stream from a part.
-    let (r, analyse_seconds) = timed(|| {
-        catch_unwind(AssertUnwindSafe(|| {
-            let mut sp = PreflateStreamProcessor::new(cfg);
-            let chunk = sp.decompress(deflate)?;
-            let done = sp.is_done();
-            Ok::<_, preflate_rs::PreflateError>((chunk, done, sp.detach_plain_text()))
-        }))
-    });
-    let (chunk, done, plain) = match r {
-        Err(_) => return failed(PANIC, analyse_seconds),
-        Ok(Err(e)) if e.exit_code() == ExitCode::PlainTextLimit => return skipped(analyse_seconds),
-        Ok(Err(e)) => return failed(&code_name(e.exit_code()), analyse_seconds),
-        Ok(Ok(v)) => v,
-    };
-    if !done {
-        // Over the limit when the stream is complete and its plain size exceeds the limit.
-        let mut buf = vec![0u8; 64 * 1024];
-        return match inflate_extent(deflate, false, &mut buf) {
-            Inflated::Clean { out, .. } if out > cfg.plain_text_limit as u64 => {
-                skipped(analyse_seconds)
-            }
-            // Corrupt data is InvalidDeflate; only input that ran out is ShortRead.
-            Inflated::Bad => failed(&code_name(ExitCode::InvalidDeflate), analyse_seconds),
-            _ => failed(&code_name(ExitCode::ShortRead), analyse_seconds),
-        };
-    }
-    let deflate_len = chunk.compressed_size;
-    let original = deflate.get(..deflate_len);
-    let (back, recreate_seconds) = timed(|| {
-        catch_unwind(AssertUnwindSafe(|| {
-            recreate_whole_deflate_stream(plain.text(), &chunk.corrections)
-        }))
-    });
-    let seconds = analyse_seconds + recreate_seconds;
-    if plain_known.is_some_and(|k| k != plain.text().len() as u64) {
-        return failed(&code_name(ExitCode::RoundtripMismatch), seconds);
-    }
-    match (back, original) {
-        (Err(_), _) => failed(PANIC, seconds),
-        (Ok(Err(e)), _) => failed(&code_name(e.exit_code()), seconds),
-        (Ok(Ok(b)), Some(o)) if b == o => StreamOutcome::Done {
-            plain,
-            corrections: chunk.corrections.len(),
-            deflate_len,
-            estimate: estimate_label(chunk.parameters.as_ref()),
-            analyse_seconds,
-            recreate_seconds,
-        },
-        (Ok(Ok(_)), _) => failed(&code_name(ExitCode::RoundtripMismatch), seconds),
-    }
-}
-
 fn bucket(correction: u64, deflate: u64) -> &'static str {
     let c = u128::from(correction) * 100;
     let d = u128::from(deflate.max(1));
@@ -764,24 +250,6 @@ fn bucket(correction: u64, deflate: u64) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// One file
-
-#[derive(Debug, Clone)]
-pub struct Limits {
-    pub plain_text_limit: u64,
-    pub file_plain_budget: u64,
-}
-
-impl Limits {
-    fn standard() -> Self {
-        Limits {
-            plain_text_limit: PLAIN_TEXT_LIMIT,
-            file_plain_budget: FILE_PLAIN_BUDGET,
-        }
-    }
-}
-
 struct FileResult {
     kind: &'static str,
     streams: StreamStats,
@@ -789,118 +257,57 @@ struct FileResult {
     replaced: Option<Vec<u8>>,
 }
 
-fn contiguous<'a>(bytes: &'a [u8], spans: &[(usize, usize)]) -> Cow<'a, [u8]> {
-    match spans {
-        [(a, b)] => Cow::Borrowed(&bytes[*a..*b]),
-        _ => Cow::Owned(
-            spans
-                .iter()
-                .flat_map(|(a, b)| bytes[*a..*b].iter().copied())
-                .collect(),
-        ),
-    }
-}
-
 fn process_file(bytes: &[u8], ext: &str, limits: &Limits) -> FileResult {
-    let (found, panicked) = match catch_unwind(AssertUnwindSafe(|| find_streams(bytes, ext))) {
-        Ok(f) => (f, false),
-        Err(_) => (
-            Found {
-                kind: "other",
-                candidates: Vec::new(),
-                rejected: 0,
-                false_hits: 0,
-            },
-            true,
-        ),
-    };
-    let cfg = PreflateConfig {
-        max_chain_length: PreflateConfig::default().max_chain_length,
-        plain_text_limit: limits.plain_text_limit as usize,
-        verify_compression: false,
-    };
-    let mut st = StreamStats {
-        structural_refusals: found.rejected,
-        scan_false_hits: found.false_hits,
-        walker_panics: u64::from(panicked),
-        ..StreamStats::default()
-    };
+    let mut estimates: BTreeMap<String, Group> = BTreeMap::new();
+    let mut overhead: BTreeMap<String, Group> = BTreeMap::new();
     // (start, end, plain) for every edit of the replaced file.
     let mut edits: Vec<(usize, usize, Option<PlainText>)> = Vec::new();
-    let mut plain_held = 0u64;
-    for c in &found.candidates {
-        st.found += 1;
-        let data = contiguous(bytes, &c.spans);
-        let too_big = c.plain_known.is_some_and(|p| p > limits.plain_text_limit)
-            || plain_held >= limits.file_plain_budget;
-        let outcome = if too_big {
-            StreamOutcome::Skipped {
-                deflate_len: data.len(),
-                seconds: 0.0,
-            }
-        } else {
-            analyse_stream(&data, c.plain_known, &cfg)
+    let examined = examine(bytes, ext, limits, |r| {
+        let (corr, defl, plain_len) = (
+            r.corrections.len() as u64,
+            r.deflate_len as u64,
+            r.plain.text().len() as u64,
+        );
+        let g = Group {
+            streams: 1,
+            deflate_bytes: defl,
+            plain_bytes: plain_len,
+            correction_bytes: corr,
         };
-        match outcome {
-            StreamOutcome::Done {
-                plain,
-                corrections,
-                deflate_len,
-                estimate,
-                analyse_seconds,
-                recreate_seconds,
-            } => {
-                let (corr, defl, plain_len) = (
-                    corrections as u64,
-                    deflate_len as u64,
-                    plain.text().len() as u64,
-                );
-                let g = Group {
-                    streams: 1,
-                    deflate_bytes: defl,
-                    plain_bytes: plain_len,
-                    correction_bytes: corr,
-                };
-                st.reconstructed += 1;
-                st.found_deflate_bytes += defl;
-                st.reconstructed_deflate_bytes += defl;
-                st.reconstructed_plain_bytes += plain_len;
-                st.correction_bytes += corr;
-                st.analyse_seconds += analyse_seconds;
-                st.recreate_seconds += recreate_seconds;
-                st.estimates.entry(estimate).or_default().add(&g);
-                st.overhead
-                    .entry(bucket(corr, defl).to_string())
-                    .or_default()
-                    .add(&g);
-                plain_held += plain_len;
-                let spans = trim_spans(&c.spans, 0, deflate_len);
-                let mut plain = Some(plain);
-                for (a, b) in &spans {
-                    edits.push((*a, *b, plain.take()));
-                }
-            }
-            StreamOutcome::Skipped {
-                deflate_len,
-                seconds,
-            } => {
-                st.skipped += 1;
-                st.skipped_deflate_bytes += deflate_len as u64;
-                st.found_deflate_bytes += deflate_len as u64;
-                st.unreconstructed_seconds += seconds;
-            }
-            StreamOutcome::Failed {
-                cause,
-                deflate_len,
-                seconds,
-            } => {
-                *st.failed.entry(cause).or_default() += 1;
-                st.failed_deflate_bytes += deflate_len as u64;
-                st.found_deflate_bytes += deflate_len as u64;
-                st.unreconstructed_seconds += seconds;
-            }
+        estimates
+            .entry(estimate_label(r.parameters.as_ref()))
+            .or_default()
+            .add(&g);
+        overhead
+            .entry(bucket(corr, defl).to_string())
+            .or_default()
+            .add(&g);
+        let mut plain = Some(r.plain);
+        for (a, b) in &r.spans {
+            edits.push((*a, *b, plain.take()));
         }
-    }
+    });
+    let c = examined.counts;
+    let st = StreamStats {
+        found: c.found,
+        reconstructed: c.reconstructed,
+        skipped: c.skipped,
+        failed: c.failed,
+        structural_refusals: c.structural_refusals,
+        scan_false_hits: c.scan_false_hits,
+        walker_panics: c.walker_panics,
+        found_deflate_bytes: c.found_deflate_bytes,
+        reconstructed_deflate_bytes: c.reconstructed_deflate_bytes,
+        skipped_deflate_bytes: c.skipped_deflate_bytes,
+        failed_deflate_bytes: c.failed_deflate_bytes,
+        reconstructed_plain_bytes: c.reconstructed_plain_bytes,
+        correction_bytes: c.correction_bytes,
+        analyse_seconds: c.analyse_seconds,
+        recreate_seconds: c.recreate_seconds,
+        unreconstructed_seconds: c.unreconstructed_seconds,
+        estimates,
+        overhead,
+    };
     let replaced = (!edits.is_empty()).then(|| {
         let mut edits = edits;
         edits.sort_by_key(|e| e.0);
@@ -924,7 +331,7 @@ fn process_file(bytes: &[u8], ext: &str, limits: &Limits) -> FileResult {
         out
     });
     FileResult {
-        kind: found.kind,
+        kind: examined.kind,
         streams: st,
         replaced,
     }
@@ -1023,7 +430,7 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     let data = Data {
         settings: Settings {
             recognition: RECOGNITION.to_string(),
-            max_chain_length: PreflateConfig::default().max_chain_length,
+            max_chain_length: MAX_CHAIN_LENGTH,
             plain_text_limit: limits.plain_text_limit,
             file_plain_budget: limits.file_plain_budget,
             min_scanned_plain: MIN_SCANNED_PLAIN,
@@ -1035,7 +442,7 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     };
     let mut out = Output::new(data, 1).with_zstd().with_xz();
     out.libraries
-        .insert("preflate-rs".to_string(), "0.7.6".to_string());
+        .insert("preflate-rs".to_string(), PREFLATE_VERSION.to_string());
     out.notes = notes;
     Ok(out)
 }
@@ -1077,38 +484,7 @@ fn check_groups(
     }
 }
 
-/// Keys allowed in `failed`: the library's `ExitCode` names, the probe's own two.
-const FAILURE_NAMES: [&str; 29] = [
-    "ReadDeflate",
-    "InvalidPredictionData",
-    "AnalyzeFailed",
-    "RecompressFailed",
-    "RoundtripMismatch",
-    "ReadBlock",
-    "PredictBlock",
-    "PredictTree",
-    "RecreateBlock",
-    "RecreateTree",
-    "EncodeBlock",
-    "InvalidCompressedWrapper",
-    "ZstdError",
-    "InvalidParameterHeader",
-    "ShortRead",
-    "OsError",
-    "GeneralFailure",
-    "InvalidIDat",
-    "MatchNotFound",
-    "InvalidDeflate",
-    "NoCompressionCandidates",
-    "InvalidParameter",
-    "AssertionFailure",
-    "NonZeroPadding",
-    "PredictionFailure",
-    "PlainTextLimit",
-    "WebPDecodeError",
-    "OutOfMemory",
-    PANIC,
-];
+// The keys allowed in `failed` are `FAILURE_NAMES` (from `lpk-core`).
 
 /// The variant names of preflate-rs 0.7.6's parameter types (as `Debug` prints them, cut at the
 /// first parenthesis): re-check them when the library is upgraded.
@@ -1509,13 +885,14 @@ fn speed_row(k: &str, v: &Summary) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Cursor, Write};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use super::*;
     use crate::corpus::manifest::{Manifest, ManifestFile};
     use crate::probe::{execute, Config};
+    use lpk_core::peel::deflate::PANIC;
 
     /// Deterministic compressible text.
     fn text(n: usize, seed: u32) -> Vec<u8> {
@@ -1725,15 +1102,6 @@ mod tests {
     }
 
     #[test]
-    fn spans_are_trimmed_across_chunks() {
-        let spans = [(10, 20), (30, 40), (50, 60)];
-        assert_eq!(trim_spans(&spans, 2, 6), [(12, 18)]);
-        assert_eq!(trim_spans(&spans, 8, 6), [(18, 20), (30, 34)]);
-        assert_eq!(trim_spans(&spans, 2, 100), [(12, 20), (30, 40), (50, 60)]);
-        assert_eq!(trim_spans(&spans, 0, 0), []);
-    }
-
-    #[test]
     fn the_scan_needs_a_clean_stream_of_enough_plain_data() {
         let small = zlib(&text(200, 3));
         let r = process_file(&[b"xx".as_slice(), &small].concat(), "bin", &limits());
@@ -1835,50 +1203,6 @@ mod tests {
         e.finish().expect("finish")
     }
 
-    fn cfg_with(limit: usize) -> PreflateConfig {
-        PreflateConfig {
-            max_chain_length: 4096,
-            plain_text_limit: limit,
-            verify_compression: false,
-        }
-    }
-
-    #[test]
-    fn a_partial_stream_is_never_reconstructed() {
-        // Several blocks: enough varied data that the encoder closes blocks on its own.
-        let mut plain = Vec::new();
-        for i in 0..40u32 {
-            plain.extend_from_slice(&text(20_000, i));
-        }
-        let d = raw_deflate(&plain);
-        let cfg = cfg_with(64 * 1024 * 1024);
-        assert!(matches!(
-            analyse_stream(&d, Some(plain.len() as u64), &cfg),
-            StreamOutcome::Done { .. }
-        ));
-        // Truncated input: the library returns a shortened stream, the probe says ShortRead.
-        match analyse_stream(&d[..d.len() * 3 / 4], None, &cfg) {
-            StreamOutcome::Failed {
-                cause, deflate_len, ..
-            } => {
-                assert_eq!(cause, "ShortRead");
-                assert_eq!(deflate_len, d.len() * 3 / 4, "the tail is not dropped");
-            }
-            _ => panic!("a truncated stream must fail"),
-        }
-        // Plain-text limit reached after at least one block, size unknown: skipped.
-        let cfg = cfg_with(plain.len() / 2);
-        assert!(matches!(
-            analyse_stream(&d, None, &cfg),
-            StreamOutcome::Skipped { .. }
-        ));
-        // A wrong known size is a failure.
-        match analyse_stream(&d, Some(plain.len() as u64 + 1), &cfg_with(1 << 30)) {
-            StreamOutcome::Failed { cause, .. } => assert_eq!(cause, "RoundtripMismatch"),
-            _ => panic!("a size mismatch must fail"),
-        }
-    }
-
     #[test]
     fn pdf_streams_that_do_not_inflate_get_a_named_outcome() {
         let plain = text(300_000, 3);
@@ -1902,29 +1226,6 @@ mod tests {
         let failed: u64 = r.streams.failed.values().sum();
         assert_eq!(failed, 2, "{:?}", r.streams);
         check_stats(&r);
-        assert!(valid_zlib_header(&[0x58, 0x85]));
-        assert!(!valid_zlib_header(&[0x78, 0x9d]));
-        assert!(!valid_zlib_header(&[0x78, 0xbb]), "preset dictionary");
-    }
-
-    #[test]
-    fn inflate_extent_tells_corrupt_data_from_input_that_ran_out() {
-        let plain = text(50_000, 9);
-        let z = zlib(&plain);
-        let mut buf = vec![0u8; 4096];
-        assert!(matches!(
-            inflate_extent(&z, true, &mut buf),
-            Inflated::Clean { .. }
-        ));
-        assert!(matches!(
-            inflate_extent(&z[..z.len() / 2], true, &mut buf),
-            Inflated::Unfinished
-        ));
-        // A reserved block type (11) is corrupt, not short.
-        assert!(matches!(
-            inflate_extent(&[0x07, 0, 0, 0, 0], false, &mut buf),
-            Inflated::Bad
-        ));
     }
 
     #[test]
@@ -1984,6 +1285,236 @@ mod tests {
         assert_eq!(variant("Zlib { hash_mask: 1 }"), "Zlib");
         assert_eq!(variant("AddFirst(3)"), "AddFirst");
         assert_eq!(variant("None"), "None");
+    }
+
+    /// A PNG built by hand (no encoder), its zlib stream split over three `IDAT` chunks.
+    fn multi_idat_png() -> Vec<u8> {
+        let (w, h) = (48u32, 32u32);
+        let mut raw = Vec::new();
+        for y in 0..h {
+            raw.push(0); // filter type None
+            for x in 0..w * 3 {
+                raw.push(((x * 7 + y * 13) % 251) as u8);
+            }
+        }
+        let z = zlib(&raw);
+        let chunk = |out: &mut Vec<u8>, ty: &[u8], data: &[u8]| {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(ty);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&[0; 4]); // the walker does not check CRCs
+        };
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        let third = z.len() / 3;
+        chunk(&mut out, b"IDAT", &z[..third]);
+        chunk(&mut out, b"tEXt", b"Comment\0between");
+        chunk(&mut out, b"IDAT", &z[third..2 * third]);
+        chunk(&mut out, b"IDAT", &z[2 * third..]);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    /// The five synthetic files of the before/after comparison, with their extensions.
+    fn golden_inputs() -> Vec<(&'static str, &'static str, Vec<u8>)> {
+        let mut bin = b"MZ\x90\x00binary head".to_vec();
+        let mut x = 7u32;
+        for _ in 0..4000 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            bin.push((x >> 24) as u8);
+        }
+        bin.extend_from_slice(&zlib(&text(30_000, 21)));
+        bin.extend_from_slice(b"binary tail");
+        vec![
+            ("zip", "zip", zip_with(&["a.txt", "b.txt"], &[0u8; 6000])),
+            ("png", "png", multi_idat_png()),
+            ("gzip", "gz", gzip(&text(30_000, 22))),
+            ("pdf", "pdf", pdf_bytes(&zlib(&text(20_000, 23)))),
+            ("bin", "bin", bin),
+        ]
+    }
+
+    /// Every count of a file result except the timings, plus the replaced file's length and hash.
+    fn golden_snapshot(r: &FileResult) -> String {
+        let s = &r.streams;
+        let replaced = r
+            .replaced
+            .as_ref()
+            .map(|b| format!("{} {}", b.len(), blake3::hash(b).to_hex()));
+        format!(
+            "kind={} found={} reconstructed={} skipped={} failed={:?} refusals={} false_hits={} \
+             walker_panics={} found_deflate={} reconstructed_deflate={} skipped_deflate={} \
+             failed_deflate={} plain={} corrections={} estimates={:?} overhead={:?} replaced={:?}",
+            r.kind,
+            s.found,
+            s.reconstructed,
+            s.skipped,
+            s.failed,
+            s.structural_refusals,
+            s.scan_false_hits,
+            s.walker_panics,
+            s.found_deflate_bytes,
+            s.reconstructed_deflate_bytes,
+            s.skipped_deflate_bytes,
+            s.failed_deflate_bytes,
+            s.reconstructed_plain_bytes,
+            s.correction_bytes,
+            s.estimates,
+            s.overhead,
+            replaced
+        )
+    }
+
+    /// The probe's counts for the synthetic files, recorded from the probe code before the walker
+    /// moved to `lpk-core` (`lpk_core::peel::deflate`); the inputs are also `lpk-core`'s fixtures.
+    const GOLDEN: [(&str, &str, &[u8], &str); 5] = [
+        (
+            "zip",
+            "zip",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/zip.zip"),
+            "kind=zip found=2 reconstructed=2 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=1525 reconstructed_deflate=1525 skipped_deflate=0 failed_deflate=0 plain=12000 corrections=48 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 2, deflate_bytes: 1525, plain_bytes: 12000, correction_bytes: 48 }} overhead={\"1_to_5_pct\": Group { streams: 2, deflate_bytes: 1525, plain_bytes: 12000, correction_bytes: 48 }} replaced=Some(\"12296 527a2dfd1ed0c0c06e5e621c242a286d857fa3de02096d5abe8826de6b014007\")",
+        ),
+        (
+            "png",
+            "png",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/png.png"),
+            "kind=png found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=463 reconstructed_deflate=463 skipped_deflate=0 failed_deflate=0 plain=4640 corrections=49 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 463, plain_bytes: 4640, correction_bytes: 49 }} overhead={\"10_to_25_pct\": Group { streams: 1, deflate_bytes: 463, plain_bytes: 4640, correction_bytes: 49 }} replaced=Some(\"4754 28fbea47ecff8ce408dd920ef2908dd44fe947d8644a490d107766efd00dac7e\")",
+        ),
+        (
+            "gzip",
+            "gz",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/gzip.gz"),
+            "kind=gzip found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=3236 reconstructed_deflate=3236 skipped_deflate=0 failed_deflate=0 plain=30000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 3236, plain_bytes: 30000, correction_bytes: 24 }} overhead={\"under_1_pct\": Group { streams: 1, deflate_bytes: 3236, plain_bytes: 30000, correction_bytes: 24 }} replaced=Some(\"30018 53b01ce9e19b7fdf6cad6bec488dd5d05077c464a587f800f893da34e75457c8\")",
+        ),
+        (
+            "pdf",
+            "pdf",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/pdf.pdf"),
+            "kind=pdf found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=2205 reconstructed_deflate=2205 skipped_deflate=0 failed_deflate=0 plain=20000 corrections=38 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 2205, plain_bytes: 20000, correction_bytes: 38 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 2205, plain_bytes: 20000, correction_bytes: 38 }} replaced=Some(\"20117 c659bda7d83ea7b9e5cfc91c629d58a24b54b8b3539a7b72b3ca4c1c8d202d16\")",
+        ),
+        (
+            "bin",
+            "bin",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/bin.bin"),
+            "kind=other found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=3223 reconstructed_deflate=3223 skipped_deflate=0 failed_deflate=0 plain=30000 corrections=32 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 3223, plain_bytes: 30000, correction_bytes: 32 }} overhead={\"under_1_pct\": Group { streams: 1, deflate_bytes: 3223, plain_bytes: 30000, correction_bytes: 32 }} replaced=Some(\"34032 a48039e84157720e0c6a2908ae3baba5640896f977d367f25d5c5c51ce812491\")",
+        ),
+    ];
+
+    #[test]
+    fn golden_counts_of_synthetic_files_are_unchanged() {
+        // The committed fixture bytes are the inputs: regenerating them depends on the zlib build
+        // (the system zlib on Linux compresses differently from the bundled one).
+        for (name, ext, bytes, want) in GOLDEN {
+            let r = process_file(bytes, ext, &limits());
+            assert_eq!(golden_snapshot(&r), want, "{name}");
+        }
+    }
+
+    /// A ZIP for the non-success counts: a "Deflated" member whose bytes are not Deflate
+    /// (failed by name), a member that reconstructs, one over the plain-text limit, one skipped
+    /// by the per-file budget, and a central entry pointing at the second member's data
+    /// (a structural refusal).
+    fn troubled_zip() -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        w.start_file("bad.bin", stored).expect("start");
+        w.write_all(&[0xff; 64]).expect("write");
+        for (name, len, seed) in [
+            ("a.txt", 5000, 31),
+            ("big.txt", 20_000, 32),
+            ("c.txt", 3000, 33),
+        ] {
+            w.start_file(name, deflated).expect("start");
+            w.write_all(&text(len, seed)).expect("write");
+        }
+        w.start_file("dup.txt", deflated).expect("start");
+        w.write_all(&text(4000, 34)).expect("write");
+        let mut b = w.finish().expect("finish").into_inner();
+        let central: Vec<usize> = (0..b.len() - 46)
+            .filter(|i| b[*i..].starts_with(b"PK\x01\x02"))
+            .collect();
+        // bad.bin is the first member: method 0 -> 8 in its local and central headers.
+        b[8] = 8;
+        b[central[0] + 10] = 8;
+        // dup.txt's central entry points at a.txt's local header.
+        let a_off: [u8; 4] = b[central[1] + 42..central[1] + 46].try_into().expect("4");
+        b[central[4] + 42..central[4] + 46].copy_from_slice(&a_off);
+        b
+    }
+
+    /// A binary for the zlib scan: a stream under the minimum plain size and a corrupt one (scan
+    /// false hits), then a clean one.
+    fn troubled_scan() -> Vec<u8> {
+        let mut b = b"scan head ".to_vec();
+        b.extend_from_slice(&zlib(&text(300, 41)));
+        b.extend_from_slice(b" gap ");
+        let mut broken = zlib(&text(8000, 42));
+        let mid = broken.len() / 2;
+        broken[mid] ^= 0xff;
+        b.extend_from_slice(&broken);
+        b.extend_from_slice(b" gap ");
+        b.extend_from_slice(&zlib(&text(6000, 43)));
+        b.extend_from_slice(b" tail");
+        b
+    }
+
+    /// The limits the non-success golden cases run under.
+    fn troubled_limits(name: &str) -> Limits {
+        match name {
+            "troubled" => Limits {
+                plain_text_limit: 10_000,
+                file_plain_budget: 5000,
+            },
+            _ => Limits::standard(),
+        }
+    }
+
+    /// Rewrite the golden fixtures from the generators (the recorded counts then need recording
+    /// again from the probe code they are meant to pin).
+    #[test]
+    #[ignore = "rewrites the fixtures; run on purpose"]
+    fn rewrite_the_golden_fixtures() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../lpk-core/tests/fixtures/deflate");
+        let troubled = [
+            ("troubled", "zip", troubled_zip()),
+            ("troubled-scan", "bin", troubled_scan()),
+        ];
+        for (name, ext, bytes) in golden_inputs().into_iter().chain(troubled) {
+            std::fs::write(dir.join(format!("{name}.{ext}")), bytes).expect("write");
+        }
+    }
+
+    /// The non-success cases' counts, recorded by running this test code on a scratch checkout of
+    /// 8423a14 (the probe before the walker moved).
+    const GOLDEN_TROUBLED: [(&str, &str, &[u8], &str); 2] = [
+        (
+            "troubled",
+            "zip",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/troubled.zip"),
+            "kind=zip found=4 reconstructed=1 skipped=2 failed={\"InvalidDeflate\": 1} refusals=1 false_hits=0 walker_panics=0 found_deflate=3380 reconstructed_deflate=652 skipped_deflate=2664 failed_deflate=64 plain=5000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 652, plain_bytes: 5000, correction_bytes: 24 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 652, plain_bytes: 5000, correction_bytes: 24 }} replaced=Some(\"8742 fdf04005632224e8a8de4e5cbc59018f7271688007368f57541ff83401e008f4\")",
+        ),
+        (
+            "troubled-scan",
+            "bin",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/troubled-scan.bin"),
+            "kind=other found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=2 walker_panics=0 found_deflate=762 reconstructed_deflate=762 skipped_deflate=0 failed_deflate=0 plain=6000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 762, plain_bytes: 6000, correction_bytes: 24 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 762, plain_bytes: 6000, correction_bytes: 24 }} replaced=Some(\"7106 50bcf0f8bfb965abc33116b0e77d559bddcc238ddd279787e046dece6fa9d30c\")",
+        ),
+    ];
+
+    #[test]
+    fn golden_counts_of_the_non_success_paths_are_unchanged() {
+        for (name, ext, bytes, want) in GOLDEN_TROUBLED {
+            let r = process_file(bytes, ext, &troubled_limits(name));
+            assert_eq!(golden_snapshot(&r), want, "{name}");
+        }
     }
 
     fn manifest_file(path: &str, data: &[u8]) -> ManifestFile {
