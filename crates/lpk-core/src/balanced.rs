@@ -255,7 +255,7 @@ impl LzmaEncoder {
 
 impl LzmaEncoder {
     /// Encode one block (what [`BlockEncoder::encode`] does; the encoder has no state).
-    fn encode_block(&self, plain: &[u8]) -> Result<Encoded, FormatError> {
+    pub(crate) fn encode_block(&self, plain: &[u8]) -> Result<Encoded, FormatError> {
         let dict = self.dict_for(plain.len());
         let graph = self.graph(dict);
         Ok(Encoded {
@@ -459,8 +459,36 @@ fn balanced_block(
     if stored_by_class(class) {
         return Ok((StoreEncoder.encode(plain)?, outcome));
     }
-    // Four stripes (the whole block when it fits the sample), each compressed separately
-    // by each candidate; the zstd encoder's own no-gain store counts as the stripe's length.
+    // The zstd encoder's own no-gain store counts as the stripe's length.
+    let (winner, zstd_won, sample_bytes) = trial(lzma, zstd, sample_len, plain, |z, st| {
+        Ok(z.encode(class, DictionaryKind::None, st)?.0)
+    })?;
+    outcome.sample_bytes = sample_bytes;
+    if winner.bytes.len() >= plain.len() {
+        outcome.kind = BalancedKind::StoredNoGain;
+        return Ok((StoreEncoder.encode(plain)?, outcome));
+    }
+    outcome.kind = if zstd_won {
+        BalancedKind::Zstd
+    } else {
+        BalancedKind::Lzma
+    };
+    Ok((winner, outcome))
+}
+
+/// The Balanced trial on `plain`: four stripes (at 0, 1/4, 1/2 and 3/4, each a quarter of
+/// `sample_len`; the whole of `plain` when it fits the sample), each compressed separately by
+/// LZMA and by `zstd_encode`, the outputs summed; the smaller sum encodes `plain` (`lzma` on a
+/// tie). Returns the winner's encoding, true when zstd won, and the plain bytes the trial fed
+/// to each candidate. No class rule and no store: the callers decide those.
+pub(crate) fn trial(
+    lzma: &LzmaEncoder,
+    zstd: &mut ZstdCore,
+    sample_len: usize,
+    plain: &[u8],
+    mut zstd_encode: impl FnMut(&mut ZstdCore, &[u8]) -> Result<Encoded, FormatError>,
+) -> Result<(Encoded, bool, u64), FormatError> {
+    let mut sample_bytes = 0u64;
     let whole = plain.len() <= sample_len;
     let stripes: Vec<&[u8]> = if whole {
         vec![plain]
@@ -477,17 +505,17 @@ fn balanced_block(
     let mut first = None;
     for st in &stripes {
         let l = lzma.encode_block(st)?;
-        let (z, _) = zstd.encode(class, DictionaryKind::None, st)?;
+        let z = zstd_encode(zstd, st)?;
         l_len += l.bytes.len();
         z_len += z.bytes.len();
         first.get_or_insert((l, z));
-        outcome.sample_bytes += st.len() as u64;
+        sample_bytes += st.len() as u64;
     }
     let zstd_won = zstd_wins(l_len, z_len);
     let winner = match (whole, zstd_won) {
         (true, true) => first.map(|(_, z)| z).ok_or_else(|| io_err("no stripe"))?,
         (true, false) => first.map(|(l, _)| l).ok_or_else(|| io_err("no stripe"))?,
-        (false, true) => zstd.encode(class, DictionaryKind::None, plain)?.0,
+        (false, true) => zstd_encode(zstd, plain)?,
         (false, false) => {
             // The zstd context's tables go before the full LZMA encode, so a block holds one
             // full-size encoder at a time (E2-20); the context is rebuilt empty with the same
@@ -496,16 +524,7 @@ fn balanced_block(
             lzma.encode_block(plain)?
         }
     };
-    if winner.bytes.len() >= plain.len() {
-        outcome.kind = BalancedKind::StoredNoGain;
-        return Ok((StoreEncoder.encode(plain)?, outcome));
-    }
-    outcome.kind = if zstd_won {
-        BalancedKind::Zstd
-    } else {
-        BalancedKind::Lzma
-    };
-    Ok((winner, outcome))
+    Ok((winner, zstd_won, sample_bytes))
 }
 
 /// One block's Balanced encoding on a pool thread.

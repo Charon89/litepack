@@ -51,6 +51,10 @@ pub struct Found {
     pub rejected: u64,
     /// Zlib-scan false hits.
     pub false_hits: u64,
+    /// ZIP entries stored with Deflate64 (method 9): not candidates, they stay framing.
+    pub zip_deflate64: u64,
+    /// ZIP entries stored with a method other than stored, Deflate and Deflate64.
+    pub zip_other_method: u64,
 }
 
 /// The outcome of [`inflate_extent`].
@@ -162,6 +166,7 @@ fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
     let mut candidates = Vec::new();
     let mut rejected = 0;
     let (mut apk, mut office, mut jar) = (false, false, false);
+    let (mut zip_deflate64, mut zip_other_method) = (0u64, 0u64);
     let mut office_dirs = false;
     for i in 0..zip.len() {
         let Ok(f) = zip.by_index_raw(i) else {
@@ -181,8 +186,21 @@ fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
                 continue;
             }
         }
-        if f.is_dir() || f.compression() != zip::CompressionMethod::Deflated {
+        if f.is_dir() {
             continue;
+        }
+        match f.compression() {
+            zip::CompressionMethod::Deflated => {}
+            zip::CompressionMethod::Stored => continue,
+            // Method 9 is `Deflate64` or `Unsupported(9)`, depending on the crate's features.
+            m if matches!(format!("{m:?}").as_str(), "Deflate64" | "Unsupported(9)") => {
+                zip_deflate64 += 1;
+                continue;
+            }
+            _ => {
+                zip_other_method += 1;
+                continue;
+            }
         }
         let (Some(start), size) = (f.data_start(), f.compressed_size()) else {
             rejected += 1;
@@ -218,6 +236,8 @@ fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
         candidates,
         rejected,
         false_hits: 0,
+        zip_deflate64,
+        zip_other_method,
     })
 }
 
@@ -242,6 +262,8 @@ fn find_png(bytes: &[u8], buf: &mut [u8]) -> Found {
         candidates: Vec::new(),
         rejected: 0,
         false_hits: 0,
+        zip_deflate64: 0,
+        zip_other_method: 0,
     };
     let total: usize = spans.iter().map(|(a, b)| b - a).sum();
     if total < 2 {
@@ -313,6 +335,8 @@ fn find_gzip(bytes: &[u8], buf: &mut [u8]) -> Found {
         candidates: Vec::new(),
         rejected: 0,
         false_hits: 0,
+        zip_deflate64: 0,
+        zip_other_method: 0,
     };
     let mut pos = 0;
     while let Some(h) = gzip_header_len(&bytes[pos..]) {
@@ -360,6 +384,8 @@ fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
         candidates: Vec::new(),
         rejected: 0,
         false_hits: 0,
+        zip_deflate64: 0,
+        zip_other_method: 0,
     };
     let mut from = 0;
     while let Some(k) = find_from(bytes, b"stream", from) {
@@ -420,6 +446,8 @@ pub fn find_streams(bytes: &[u8], ext: &str) -> Found {
                 candidates,
                 rejected: 0,
                 false_hits,
+                zip_deflate64: 0,
+                zip_other_method: 0,
             }
         }
     });

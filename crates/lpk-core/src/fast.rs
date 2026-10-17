@@ -314,6 +314,37 @@ impl ZstdCore {
         })
     }
 
+    /// A core of its own (no dictionary, no gate, its own counts) at `level` and `window_log`,
+    /// for the Deflate peel's part encoder; the parameters are checked as for
+    /// [`ZstdEncoder::new`].
+    pub(crate) fn standalone(level: i32, window_log: u32) -> Result<Self, CoreError> {
+        let (enc, _) = ZstdEncoder::new(level, window_log, &DictionaryPolicy::None, Gate::OFF)?;
+        ZstdCore::build(enc.config())
+    }
+
+    /// zstd on `plain` with the dictionary-free compressor and nothing else: no class rule, no
+    /// gate, no store when the frame does not shrink `plain` (the caller's gate decides).
+    pub(crate) fn encode_raw(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        let declared = self.window_log.min(ceil_log2(plain.len()).max(10));
+        self.plain.set_parameter(CParameter::WindowLog(declared))?;
+        ContextCounts::bump(&self.counts.zstd_runs);
+        let bytes = self.plain.compress(plain)?;
+        let mut params = vec![declared as u8];
+        params.extend_from_slice(&[0u8; 32]);
+        let graph = Graph {
+            steps: vec![Step {
+                primitive: PrimitiveId::Zstd,
+                params,
+            }],
+        };
+        Ok(Encoded {
+            resources: graph.resources(),
+            memory: crate::memory::zstd_decode_memory(declared, plain.len() as u64),
+            graph,
+            bytes,
+        })
+    }
+
     /// Drop the dictionary-free compression context's tables: it is rebuilt empty with the
     /// same parameters (libzstd's output does not depend on a context's history), so the core
     /// holds no full-size tables while another encoder runs (E2-20). Not counted as a new core.

@@ -325,6 +325,10 @@ pub struct Counts {
     pub scan_false_hits: u64,
     /// The walker panicked (the file is then kind `other` with no streams).
     pub walker_panics: u64,
+    /// ZIP entries stored with Deflate64 (informative; never candidates).
+    pub zip_deflate64_members: u64,
+    /// ZIP entries stored with another method that is not Deflate (informative).
+    pub zip_other_method_members: u64,
     /// Bytes of every candidate (the consumed length for reconstructed ones).
     pub found_deflate_bytes: u64,
     /// Bytes of the reconstructed streams.
@@ -343,6 +347,37 @@ pub struct Counts {
     pub recreate_seconds: f64,
     /// Seconds spent on the streams that did not reconstruct.
     pub unreconstructed_seconds: f64,
+}
+
+impl Counts {
+    /// Add `o`'s counts to these.
+    pub fn add(&mut self, o: &Counts) {
+        self.found += o.found;
+        self.reconstructed += o.reconstructed;
+        self.skipped += o.skipped;
+        for (k, v) in &o.failed {
+            *self.failed.entry(k.clone()).or_default() += v;
+        }
+        self.structural_refusals += o.structural_refusals;
+        self.scan_false_hits += o.scan_false_hits;
+        self.walker_panics += o.walker_panics;
+        self.zip_deflate64_members += o.zip_deflate64_members;
+        self.zip_other_method_members += o.zip_other_method_members;
+        self.found_deflate_bytes += o.found_deflate_bytes;
+        self.reconstructed_deflate_bytes += o.reconstructed_deflate_bytes;
+        self.skipped_deflate_bytes += o.skipped_deflate_bytes;
+        self.failed_deflate_bytes += o.failed_deflate_bytes;
+        self.reconstructed_plain_bytes += o.reconstructed_plain_bytes;
+        self.correction_bytes += o.correction_bytes;
+        self.analyse_seconds += o.analyse_seconds;
+        self.recreate_seconds += o.recreate_seconds;
+        self.unreconstructed_seconds += o.unreconstructed_seconds;
+    }
+
+    /// Failed candidates, all names.
+    pub fn failed_total(&self) -> u64 {
+        self.failed.values().sum()
+    }
 }
 
 /// One reconstructed stream, handed to the caller of [`examine`] in file order.
@@ -404,6 +439,8 @@ pub fn examine(
                 candidates: Vec::new(),
                 rejected: 0,
                 false_hits: 0,
+                zip_deflate64: 0,
+                zip_other_method: 0,
             },
             true,
         ),
@@ -413,6 +450,8 @@ pub fn examine(
         structural_refusals: found.rejected,
         scan_false_hits: found.false_hits,
         walker_panics: u64::from(panicked),
+        zip_deflate64_members: found.zip_deflate64,
+        zip_other_method_members: found.zip_other_method,
         ..Counts::default()
     };
     let mut plain_held = 0u64;
