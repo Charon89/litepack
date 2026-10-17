@@ -67,6 +67,8 @@ struct Case {
     sealed: bool,
     recovery: u8,
     poison: bool,
+    /// The read-ahead's segment size.
+    segment: usize,
 }
 
 fn options(c: Case) -> WriterOptions {
@@ -140,7 +142,7 @@ fn pipelined(c: Case) -> Vec<u8> {
     let mut reads = Prefetch::spawn(
         openers(&files),
         PrefetchOptions {
-            segment: SEGMENT,
+            segment: c.segment,
             buffers: 3,
         },
     )
@@ -174,6 +176,7 @@ fn case(threads: usize) -> Case {
         sealed: false,
         recovery: 0,
         poison: false,
+        segment: SEGMENT,
     }
 }
 
@@ -200,6 +203,33 @@ fn the_pipelined_path_writes_the_sequential_paths_bytes() {
             sequential(c) == pipelined(c),
             "sealed alone, threads {threads}"
         );
+    }
+}
+
+/// Segments large enough for the chunk hashes to fan out to the hashing
+/// threads (E2-18 round 3): the bytes are still the sequential path's, at 1
+/// thread (no fan-out) and at 2, 4 and 24 blocks in flight, with dedup, a
+/// given block, recovery and sealing.
+#[test]
+fn hashing_chunks_on_several_threads_keeps_the_sequential_bytes() {
+    for segment in [(3 << 20) + 7, 8 << 20] {
+        let base = Case { segment, ..case(1) };
+        let want = sequential(base);
+        assert!(want == pipelined(base), "segment {segment} threads 1");
+        for threads in [2usize, 4, 24] {
+            let c = Case { threads, ..base };
+            let got = pipelined(c);
+            assert!(sequential(c) == got, "segment {segment} threads {threads}");
+            assert!(want == got, "segment {segment} threads {threads} vs 1");
+            if threads == 4 {
+                let c = Case {
+                    recovery: 10,
+                    sealed: true,
+                    ..c
+                };
+                assert!(sequential(c) == pipelined(c), "sealed+recovery {segment}");
+            }
+        }
     }
 }
 
@@ -430,6 +460,40 @@ fn a_reader_panic_is_re_raised_with_the_writer_failed() {
     drop(reads);
     drop(w);
     assert!(read_dropped.load(Ordering::SeqCst));
+    assert!(out_dropped.load(Ordering::SeqCst));
+}
+
+/// A hashing thread's panic (E2-18 round 3): every hashing thread is joined
+/// inside the call, the writer is marked failed and the panic re-raised; the
+/// reader and the write thread are joined on drop as for any other panic.
+#[test]
+fn a_hashing_thread_panic_is_re_raised_with_the_writer_failed() {
+    let (out, out_dropped) = faulty(usize::MAX, false, 0);
+    let mut w = small_writer(out, 4);
+    let data = noise(77, 6 << 20);
+    let files = vec![("f".to_string(), data.clone())];
+    let mut reads = Prefetch::spawn(
+        openers(&files),
+        PrefetchOptions {
+            segment: 8 << 20,
+            buffers: 2,
+        },
+    )
+    .unwrap();
+    crate::chunkhash::HASH_FAULT.with(|f| f.set(true));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut f = reads.next_file().unwrap();
+        let _ = w.add_file_segments("f", EntryFlags::default(), 0, &mut f, data.len() as u64);
+    }));
+    crate::chunkhash::HASH_FAULT.with(|f| f.set(false));
+    let p = r.err().map(|p| p.downcast_ref::<&str>().copied());
+    assert_eq!(p, Some(Some("a hashing thread fails")), "re-raised");
+    assert!(w.failed.is_some(), "the writer is marked failed first");
+    assert!(w
+        .add_file("late", EntryFlags::default(), 0, &mut &b"x"[..])
+        .is_err());
+    drop(reads);
+    drop(w);
     assert!(out_dropped.load(Ordering::SeqCst));
 }
 

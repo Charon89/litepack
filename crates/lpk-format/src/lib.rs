@@ -8,6 +8,7 @@
 
 pub mod archive;
 pub mod chunk;
+mod chunkhash;
 pub mod cli;
 pub mod crypto;
 pub mod decode;

@@ -508,7 +508,7 @@ fn report(
     let t = &s.timings;
     let _ = writeln!(
         err,
-        "{}: generation {}, {} entries, {} blocks, {} bytes (threads: {}, blocks in flight: {}, I/O threads: {})",
+        "{}: generation {}, {} entries, {} blocks, {} bytes (threads: {}, blocks in flight: {}, I/O threads: {}, chunk hash threads: up to {})",
         archive.display(),
         s.writer.generation,
         s.writer.entries,
@@ -516,7 +516,8 @@ fn report(
         s.writer.archive_len,
         s.threads,
         s.blocks_in_flight,
-        s.io_threads
+        s.io_threads,
+        s.hash_threads
     );
     if let Some(f) = s.fast {
         let _ = writeln!(

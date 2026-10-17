@@ -3,6 +3,8 @@
 
 use crate::archive::Archive;
 use crate::chunk::{ChunkRecord, ChunkTableWriter};
+pub use crate::chunkhash::MAX_HASH_THREADS;
+use crate::chunkhash::{hash_ranges, hash_two, Two};
 use crate::crypto::{
     index_sequence, sealing_rule, ArchiveKey, Argon2Params, Credentials, KeySlot, Sealer, Suite,
 };
@@ -283,7 +285,12 @@ pub struct WriterOptions {
     /// Threads: up to `encode_threads` encode jobs, plus a write thread when
     /// [`Writer::with_write_thread`] was called and a reader thread when the
     /// caller reads ahead ([`crate::prefetch`]); the two I/O threads mostly
-    /// wait on I/O and come on top of the encode jobs. LitePack's pipeline
+    /// wait on I/O and come on top of the encode jobs. Above 1, the BLAKE3
+    /// of the chunks of a segment given to [`Writer::add_file_segments`] is
+    /// computed on up to [`MAX_HASH_THREADS`] threads, the feeding thread
+    /// included, scoped to that segment and joined before its chunks are
+    /// looked up and added in order (`crate::chunkhash`); they hold no memory
+    /// beyond 32 bytes per chunk of the segment. LitePack's pipeline
     /// starts them only above one block in flight, so one block in flight is
     /// one thread doing everything.
     pub encode_threads: usize,
@@ -594,20 +601,6 @@ enum Work {
     Running(JoinHandle<PoolOutput>),
 }
 
-/// BLAKE3 of `head` followed by `tail`.
-fn hash_two((head, tail): (&[u8], &[u8])) -> [u8; 32] {
-    if tail.is_empty() {
-        return *blake3::hash(head).as_bytes();
-    }
-    if head.is_empty() {
-        return *blake3::hash(tail).as_bytes();
-    }
-    let mut h = blake3::Hasher::new();
-    h.update(head);
-    h.update(tail);
-    *h.finalize().as_bytes()
-}
-
 /// A chunk found stored already: `(index, from_old_table, len)`.
 type KnownChunk = (u64, bool, u64);
 
@@ -740,7 +733,10 @@ impl<W: Write> Writer<W> {
     /// added by [`Writer::add_file`] (up to `block_size` plus `chunk_size`),
     /// kept for the writer's life; the chunk table (40 bytes per chunk) and the block table for
     /// the life of the archive; the dedup map when `dedup` is set; the
-    /// recovery group's bytes when `recovery` is set ([`Writer::recovery_buffered`]).
+    /// recovery group's bytes when `recovery` is set ([`Writer::recovery_buffered`]);
+    /// with `encode_threads` above 1, the hashes of one read-ahead segment's
+    /// chunks (32 bytes each) while up to [`MAX_HASH_THREADS`] scoped threads
+    /// compute them.
     pub fn new(out: W, options: WriterOptions) -> Result<Self, FormatError> {
         let size = usize::try_from(options.chunk_size).map_err(|_| bad_options("chunk_size"))?;
         Self::with_chunker(out, options, Box::new(FixedChunker::new(size)))
@@ -2619,14 +2615,13 @@ impl<W: Write> Writer<W> {
                 });
             }
             // The two pieces of each chunk: in the carry, then in the segment.
-            let piece = |a: usize, b: usize| -> (&[u8], &[u8]) {
-                let head = &carry[a.min(held)..b.min(held)];
-                let tail = &seg[a.max(held) - held..b.max(held) - held];
-                (head, tail)
+            let bytes = Two {
+                carry: &carry,
+                seg: &seg,
             };
-            let hashes = self.hash_pieces(&ranges, &piece);
+            let hashes = self.hash_chunks(bytes, &ranges);
             for (&(a, b), hash) in ranges.iter().zip(hashes) {
-                let (head, tail) = piece(a, b);
+                let (head, tail) = bytes.piece(a, b);
                 let i = self.add_chunk_hashed(head, tail, hash, true)?;
                 chunks.push(i);
             }
@@ -2655,13 +2650,31 @@ impl<W: Write> Writer<W> {
         Ok(size)
     }
 
-    /// The BLAKE3 of each chunk `ranges` names, its bytes given by `piece`.
-    fn hash_pieces<'a>(
-        &self,
-        ranges: &[(usize, usize)],
-        piece: &dyn Fn(usize, usize) -> (&'a [u8], &'a [u8]),
-    ) -> Vec<[u8; 32]> {
-        ranges.iter().map(|&(a, b)| hash_two(piece(a, b))).collect()
+    /// The BLAKE3 of each chunk `ranges` names in `bytes`, in order: on this
+    /// thread with one block in flight, else on up to
+    /// [`MAX_HASH_THREADS`] scoped threads that are joined
+    /// before this returns. A hashing thread's panic marks the writer failed
+    /// and is re-raised here.
+    fn hash_chunks(&mut self, bytes: Two<'_>, ranges: &[(usize, usize)]) -> Vec<[u8; 32]> {
+        #[cfg(test)]
+        let hash: &crate::chunkhash::HashFn<'_> =
+            if crate::chunkhash::HASH_FAULT.with(std::cell::Cell::get) {
+                &crate::chunkhash::faulty_hash
+            } else {
+                &hash_two
+            };
+        #[cfg(not(test))]
+        let hash = &hash_two;
+        match hash_ranges(bytes, ranges, self.threads(), hash) {
+            Ok(h) => h,
+            Err(p) => {
+                self.failed = Some((
+                    std::io::ErrorKind::Other,
+                    "a chunk hashing thread panicked".to_string(),
+                ));
+                std::panic::resume_unwind(p)
+            }
+        }
     }
 
     /// Add a directory.
