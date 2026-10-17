@@ -22,6 +22,9 @@ const HASHFLIP: &str = "malformed-hashflip.lpk";
 const JPEG_VECTOR: &str = "jpeg-peel.lpk";
 /// The second revision 1.1 vector: an appended generation adds a peeled JPEG and its record.
 const JOURNAL_RECORD_VECTOR: &str = "journal-record.lpk";
+/// The revision 1.2 vector, built by lpk-core's `tests/deflate_vector.rs` (its full-reader
+/// expectations are in `expected-1.2.toml`, checked there).
+const DEFLATE_VECTOR: &str = "deflate-peel.lpk";
 
 fn read(name: &str) -> Vec<u8> {
     std::fs::read(vectors_dir().join(name)).unwrap()
@@ -179,6 +182,40 @@ fn render() -> String {
     let (code, _, err) = cli(&["lpk-decode", "verify", p]);
     writeln!(s, "verify_exit_1_0 = {code}").unwrap();
     writeln!(s, "verify_stderr_1_0 = {err:?}").unwrap();
+    // A reader before revision 1.2 on the revision 1.2 vector: it lists and describes the
+    // archive, reports `UnimplementedPrimitive` (id 8) from `verify`, and extracts the entries
+    // with no chunk in a `deflate-reconstruct` block (`files_1_0`).
+    let p = dir.join(DEFLATE_VECTOR);
+    let p = p.to_str().unwrap();
+    writeln!(s, "\n[\"{DEFLATE_VECTOR}\"]").unwrap();
+    for cmd in ["list", "info"] {
+        let (code, out, err) = cli(&["lpk-decode", cmd, p]);
+        assert_eq!((code, err.as_str()), (0, ""), "{DEFLATE_VECTOR} {cmd}");
+        writeln!(s, "{cmd} = {out:?}").unwrap();
+    }
+    let mut a = open(read(DEFLATE_VECTOR), DEFLATE_VECTOR, None);
+    let err = a.verify().unwrap_err();
+    assert!(matches!(err, FormatError::UnimplementedPrimitive { id: 8 }));
+    writeln!(s, "error_1_0 = {:?}", variant(&err)).unwrap();
+    writeln!(s, "message_1_0 = {:?}", err.to_string()).unwrap();
+    let (code, _, err) = cli(&["lpk-decode", "verify", p]);
+    writeln!(s, "verify_exit_1_0 = {code}").unwrap();
+    writeln!(s, "verify_stderr_1_0 = {err:?}").unwrap();
+    let table = a.entry_table().unwrap();
+    let entries: Vec<_> = table.table().unwrap().iter().map(|e| e.unwrap()).collect();
+    writeln!(s, "files_1_0 = [").unwrap();
+    for e in &entries {
+        let mut got = Vec::new();
+        match a.extract(e, &mut got) {
+            Ok(_) => {
+                let line = format!("{} {} {}", e.path, got.len(), blake3::hash(&got).to_hex());
+                writeln!(s, "  {line:?},").unwrap();
+            }
+            Err(FormatError::UnimplementedPrimitive { id: 8 }) => {}
+            Err(other) => panic!("{DEFLATE_VECTOR} {}: {other}", e.path),
+        }
+    }
+    writeln!(s, "]").unwrap();
     let (truncated, flipped) = malformed();
     for (name, bytes) in [(TRUNCATED, truncated), (HASHFLIP, flipped)] {
         let err = match Archive::open(Cursor::new(bytes), &Resources::default()) {
@@ -260,6 +297,7 @@ fn every_frame_of_every_vector_is_accounted_for() {
     names.push(RECOVERY_VECTOR);
     names.push(JPEG_VECTOR);
     names.push(JOURNAL_RECORD_VECTOR);
+    names.push(DEFLATE_VECTOR);
     for name in names {
         let bytes = read(name);
         let mut a = open(bytes.clone(), name, creds_of(name).as_ref());

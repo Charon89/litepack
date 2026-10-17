@@ -141,6 +141,17 @@ message_1_0 = "primitive 0x0007 is not implemented by this reader"
 verify_exit_1_0 = 1
 verify_stderr_1_0 = "error: primitive 0x0007 is not implemented by this reader\n"
 
+["deflate-peel.lpk"]
+list = "File\t8903\tdoc.zip\nFile\t8261\timage.png\nFile\t3102\tnotes.txt.gz\nFile\t1647\treadme.txt\n"
+info = "format: 1.2\nheader flags: 0x0\narchive id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\ngeneration: 0\nchain length: 1\nlength: 23002 bytes\nentries: 4\nchunks: 17\nblocks: 8\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: aa1011ac890c65c0713fb881369dcdaa529afdf16db179fdccc9a71142c70cb3\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 8174\nenvelope max_frame_payload: 7922\nenvelope decode_memory: 17113722\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0008 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0008 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 1647 ee8ba3d446b880393757fb52941917eeed8f56a15b2cfd4866b4f51335467df3",
+]
+
 ["malformed-truncated.lpk"]
 error = "Truncated"
 message = "input truncated in trailer"
