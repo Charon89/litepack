@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
-use lpk_format::cli::{check_extraction_path, run};
-use lpk_format::{EntryFlags, FormatError, Writer, WriterOptions};
+use lpk_format::cli::{check_extraction_path, run, run_with};
+use lpk_format::{EntryFlags, FormatError, PrimitiveDecoder, PrimitiveId, Writer, WriterOptions};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn options() -> WriterOptions {
     WriterOptions {
@@ -318,6 +319,74 @@ fn a_damaged_later_chunk_leaves_no_partial_file() {
     assert_eq!(names, ["a.txt"], "no big and no big.lpk-partial");
 }
 
+/// A `Store` decoder that panics on the second block it decodes.
+struct PanicOnSecondBlock {
+    calls: AtomicUsize,
+}
+
+impl PrimitiveDecoder for PanicOnSecondBlock {
+    fn decode(
+        &self,
+        _params: &[u8],
+        input: &[u8],
+        _expected_len: u64,
+        _limits: &lpk_format::Resources,
+    ) -> Result<Vec<u8>, FormatError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        assert!(n < 2, "test hook: the decoder panics mid-file");
+        Ok(input.to_vec())
+    }
+}
+
+/// The open hook that gives every archive the tool opens a [`PanicOnSecondBlock`].
+fn panic_on_second_block(a: &mut lpk_format::Archive<std::fs::File>) {
+    a.registry_mut().register(
+        PrimitiveId::Store,
+        Box::new(PanicOnSecondBlock {
+            calls: AtomicUsize::new(0),
+        }),
+    );
+}
+
+/// The text of a panic's payload (`panic!` with a literal or with arguments).
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_panic_mid_file_removes_the_file_then_goes_on() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("p.lpk");
+    // Three blocks: the first one's bytes are written when the second one's decode panics.
+    make(&p, &[], &[("big", data(9, 40_000))], &[]).unwrap();
+    let out_dir = t.path().join("out");
+    let r = std::panic::catch_unwind(|| {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let args = [
+            "lpk-decode",
+            "extract",
+            p.to_str().unwrap(),
+            out_dir.to_str().unwrap(),
+        ];
+        run_with(args, &mut out, &mut err, panic_on_second_block)
+    });
+    let payload = r.expect_err("the panic did not go on");
+    assert_eq!(
+        panic_text(&*payload),
+        "test hook: the decoder panics mid-file"
+    );
+    let big = out_dir.join("big");
+    assert!(
+        !big.exists(),
+        "a partial file of {} bytes was left",
+        std::fs::metadata(&big).map_or(0, |m| m.len())
+    );
+}
+
 #[test]
 fn list_escapes_control_characters() {
     let t = tempfile::tempdir().unwrap();
@@ -393,10 +462,11 @@ fn check_and_repair_on_a_damaged_archive() {
     let (code, out, _) = cli(&["verify", fixed.to_str().unwrap()]);
     assert_eq!(code, 0);
     assert!(out.starts_with("ok:"));
-    // The target is never replaced.
+    // The target is never replaced, nor removed.
     let (code, _, err) = cli(&["repair", p.to_str().unwrap(), fixed.to_str().unwrap()]);
     assert_eq!(code, 1);
     assert!(err.starts_with("error: i/o error"), "{err}");
+    assert_eq!(std::fs::read(&fixed).unwrap(), good);
 }
 
 #[test]

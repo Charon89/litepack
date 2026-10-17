@@ -360,11 +360,57 @@ fn check(path: &Path, keys: &Keys, out: &mut dyn Write) -> Result<(), FormatErro
     Ok(())
 }
 
+/// Removes a file the tool created, on the error path and on the panic path
+/// alike (its `Drop`), unless disarmed once the file is complete: a file the
+/// tool created and could not finish is removed (spec section 9).
+struct Remove<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl Remove<'_> {
+    /// The file is complete: keep it.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Remove<'_> {
+    fn drop(&mut self) {
+        // The panic path: clean up, then the panic goes on. A file that cannot
+        // be removed is not reported on either path: the call's own error or
+        // panic is the one that matters.
+        if self.armed {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
+/// The repair [`repair_cmd`] runs over the input and the new copy:
+/// [`repair_with_credentials`] (a test runs it through a writer that panics
+/// part-way).
+type RepairFn = fn(
+    File,
+    File,
+    &Resources,
+    Option<&Credentials>,
+) -> Result<(RepairReport, Option<FormatError>), FormatError>;
+
 fn repair_cmd(
     path: &Path,
     target: &Path,
     keys: &Keys,
     out: &mut dyn Write,
+) -> Result<(), FormatError> {
+    repair_into(path, target, keys, out, repair_with_credentials)
+}
+
+fn repair_into(
+    path: &Path,
+    target: &Path,
+    keys: &Keys,
+    out: &mut dyn Write,
+    repair: RepairFn,
 ) -> Result<(), FormatError> {
     let input = File::open(path)?;
     let file = std::fs::OpenOptions::new()
@@ -372,22 +418,23 @@ fn repair_cmd(
         .write(true)
         .create_new(true)
         .open(target)?;
-    match repair_with_credentials(
+    // Armed only once the file is ours, as in `extract_file`; the handle moves
+    // into the repair, so it is closed when the guard removes the file.
+    let mut remove = Remove {
+        path: target,
+        armed: true,
+    };
+    let (report, unrepairable) = repair(
         input,
         file,
         &Resources::default(),
         keys.credentials.as_ref(),
-    ) {
-        // The copy carries the repairs that were possible; keep it.
-        Ok((report, unrepairable)) => {
-            print_report(out, &report)?;
-            unrepairable.map_or(Ok(()), Err)
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(target);
-            Err(e)
-        }
-    }
+    )?;
+    // The copy carries the repairs that were possible, unrepairable groups or
+    // not; keep it.
+    remove.disarm();
+    print_report(out, &report)?;
+    unrepairable.map_or(Ok(()), Err)
 }
 
 fn rollback_cmd(path: &Path, generation: u64, out: &mut dyn Write) -> Result<(), FormatError> {
@@ -468,20 +515,28 @@ fn info(
 }
 
 /// Create the file at `target` (never replacing anything: `create_new`) and
-/// write the entry into it. If this call created the file and cannot finish it,
-/// the file is removed; a file that was already there is never touched.
+/// write the entry into it. If this call created the file and cannot finish it
+/// (an error, or a panic, which goes on after the removal), the file is
+/// removed; a file that was already there is never touched.
 fn extract_file(a: &mut Archive<File>, e: &Entry, target: &Path) -> Result<(), FormatError> {
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(target)?;
+    // Armed only once the file is ours: a create-new refused on an existing
+    // file removes nothing. Declared before the writer, so the writer's handle
+    // is closed when the guard removes the file.
+    let mut remove = Remove {
+        path: target,
+        armed: true,
+    };
     let mut w = BufWriter::new(file);
     let result = a
         .extract(e, &mut w)
         .and_then(|()| w.flush().map_err(FormatError::from));
     drop(w);
-    if result.is_err() {
-        let _ = std::fs::remove_file(target);
+    if result.is_ok() {
+        remove.disarm();
     }
     result
 }
@@ -589,5 +644,77 @@ where
             let _ = writeln!(err, "error: {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EntryFlags, Writer, WriterOptions};
+    use std::io::{Seek, SeekFrom};
+
+    /// Passes the first `left` bytes on to `inner`, then panics on the next write.
+    struct PanicAfter<W> {
+        inner: W,
+        left: usize,
+    }
+
+    impl<W: Write> Write for PanicAfter<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            assert!(self.left > 0, "test hook: the copy panics mid-write");
+            let n = self.inner.write(&buf[..buf.len().min(self.left)])?;
+            self.left -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl<W: Seek> Seek for PanicAfter<W> {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    /// The tool's repair, its copy written through a [`PanicAfter`] of 4 KiB.
+    fn repair_panicking_mid_copy(
+        input: File,
+        out: File,
+        resources: &Resources,
+        credentials: Option<&Credentials>,
+    ) -> Result<(RepairReport, Option<FormatError>), FormatError> {
+        let out = PanicAfter {
+            inner: out,
+            left: 4096,
+        };
+        repair_with_credentials(input, out, resources, credentials)
+    }
+
+    #[test]
+    fn a_panic_mid_repair_removes_the_copy_then_goes_on() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("a.lpk");
+        let mut w = Writer::new(File::create(&p).unwrap(), WriterOptions::default()).unwrap();
+        let data: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        w.add_file("a", EntryFlags::EMPTY, 0, &mut data.as_slice())
+            .unwrap();
+        w.finish().unwrap();
+        let copy = t.path().join("copy.lpk");
+        let r = std::panic::catch_unwind(|| {
+            let keys = Keys::default();
+            repair_into(&p, &copy, &keys, &mut Vec::new(), repair_panicking_mid_copy)
+        });
+        let payload = r.expect_err("the panic did not go on");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"test hook: the copy panics mid-write")
+        );
+        assert!(
+            !copy.exists(),
+            "a partial copy of {} bytes was left",
+            std::fs::metadata(&copy).map_or(0, |m| m.len())
+        );
     }
 }
