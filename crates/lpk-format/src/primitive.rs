@@ -122,6 +122,23 @@ impl PrimitiveId {
         }
     }
 
+    /// True when some revision of the specification decodes this primitive:
+    /// `store`, `zstd` and `lzma` (revision 1.0), `jpeg-reconstruct` (1.1)
+    /// and `deflate-reconstruct` (1.2). The others have an ID and a
+    /// parameter layout but no decoding yet, and a writer MUST NOT emit them
+    /// at any minor (spec section 8); the reference writer refuses them
+    /// (`BadGraph`, `undecoded primitive`).
+    pub fn is_decoded(self) -> bool {
+        matches!(
+            self,
+            PrimitiveId::Store
+                | PrimitiveId::Zstd
+                | PrimitiveId::Lzma
+                | PrimitiveId::JpegReconstruct
+                | PrimitiveId::DeflateReconstruct
+        )
+    }
+
     /// The exact parameter length of the primitive in bytes; `None` for the
     /// reconstruction primitives, whose single varint `record_id` is 1 to 10 bytes.
     pub fn params_len(self) -> Option<usize> {

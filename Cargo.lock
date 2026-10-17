@@ -1464,6 +1464,7 @@ name = "lpk-codecs-bwt"
 version = "0.0.1"
 dependencies = [
  "libsais",
+ "lpk-codecs-bwt",
 ]
 
 [[package]]

@@ -18,7 +18,7 @@ claxon = "0.4.3"
 ctr = "0.10.1"
 flate2 = { version = "1.1.10", features = ["zlib"] }
 lpk-core = { path = "../lpk-core", version = "0.0.1" }
-lpk-codecs-bwt = { path = "../lpk-codecs-bwt", version = "0.0.1" }
+lpk-codecs-bwt = { path = "../lpk-codecs-bwt", version = "0.0.1", features = ["encode"] }
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
 lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
 libz-sys ={ version = "1.1.29", features = ["static"] }

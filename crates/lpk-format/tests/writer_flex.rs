@@ -125,7 +125,7 @@ impl BlockEncoder for NamesRecord {
         Ok(Encoded {
             graph: Graph {
                 steps: vec![Step {
-                    primitive: PrimitiveId::Utf16,
+                    primitive: PrimitiveId::JpegReconstruct,
                     params: vec![5],
                 }],
             },

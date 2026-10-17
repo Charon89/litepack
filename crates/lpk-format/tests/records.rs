@@ -4,9 +4,9 @@ mod common;
 
 use common::{pattern, write_archive};
 use lpk_format::{
-    Archive, ArchiveChunks, BlockEncoder, BlockHeader, ChunkSource, ContainerMember,
-    ContainerRecord, DeflateRecord, Encoded, FormatError, Graph, GraphResources, PrimitiveId,
-    Record, RecordBody, RecordKind, Resources, Step, Utf16Record, Writer, WriterOptions,
+    Archive, ArchiveChunks, BlockEncoder, BlockHeader, ChunkSource, DeflateRecord, Encoded,
+    FormatError, Graph, GraphResources, JpegRecord, PrimitiveId, Record, RecordBody, RecordKind,
+    Resources, Step, Utf16Record, Writer, WriterOptions,
 };
 use std::io::Cursor;
 
@@ -16,6 +16,36 @@ fn utf16(n: u8) -> Record {
         bom: 1,
         original_len: u64::from(n),
         original_hash: [n; 32],
+    }))
+}
+
+/// A `jpeg` record of `len` bytes whose bytes after a zero-length primary
+/// image are held by `chunks` (a peeled trailing stream): the record names
+/// chunks, as a container's members do. `jpeg-reconstruct` is the one
+/// decoded reconstruction primitive the writer accepts without a record
+/// check of its own, so these tests name it.
+fn jpeg_nested(len: u64, chunks: Vec<u64>) -> Record {
+    Record::new(RecordBody::Jpeg(JpegRecord {
+        original_len: len,
+        primary_len: 0,
+        trailing: Vec::new(),
+        nested_trailing_chunks: chunks,
+        gainmaps: Vec::new(),
+        lepton_version: 0,
+        original_hash: [1; 32],
+    }))
+}
+
+/// A `jpeg` record naming no chunk.
+fn jpeg_plain() -> Record {
+    Record::new(RecordBody::Jpeg(JpegRecord {
+        original_len: 1000,
+        primary_len: 1000,
+        trailing: Vec::new(),
+        nested_trailing_chunks: Vec::new(),
+        gainmaps: Vec::new(),
+        lepton_version: 0,
+        original_hash: [2; 32],
     }))
 }
 
@@ -43,7 +73,9 @@ fn options(records: Vec<Record>) -> WriterOptions {
     }
 }
 
-/// An encoder whose graph is one reconstruction step naming `record`.
+/// An encoder whose graph is one reconstruction step naming `record`. The
+/// writer refuses a primitive no revision decodes, so the archives that must
+/// be written name `jpeg-reconstruct` (revision 1.1).
 struct Recon {
     primitive: PrimitiveId,
     record: u8,
@@ -178,12 +210,23 @@ fn a_reconstruction_block_passes_the_record_check_and_stops_at_the_missing_decod
 fn recon_archive(primitive: PrimitiveId, record: u8, records: Vec<Record>) -> Vec<u8> {
     let mut o = options(records);
     o.encoder = Box::new(Recon { primitive, record });
-    write_archive(o, &[("a", pattern(1, 5000))])
+    // Minor 1: the revision of `jpeg-reconstruct`.
+    let mut out = Vec::new();
+    let mut w = Writer::new_revision(&mut out, o, 1).unwrap();
+    w.add_file(
+        "a",
+        lpk_format::EntryFlags::EMPTY,
+        1_000,
+        &mut pattern(1, 5000).as_slice(),
+    )
+    .unwrap();
+    w.finish().unwrap();
+    out
 }
 
 #[test]
 fn a_block_naming_a_record_the_frame_lacks_is_out_of_range_end_to_end() {
-    let mut bytes = recon_archive(PrimitiveId::Utf16, 0, vec![utf16(1)]);
+    let mut bytes = recon_archive(PrimitiveId::JpegReconstruct, 0, vec![jpeg_plain()]);
     // Patch the block's record id (graph: count, id u16, flags, params_len,
     // params) and recompute the block frame's hash.
     let loc = open(bytes.clone()).index().blocks[0];
@@ -235,20 +278,6 @@ fn the_block_header_check_rejects_an_id_at_the_count() {
     BlockHeader::parse(&payload, 0, 2).unwrap();
 }
 
-fn container(len: u64, chunks: Vec<u64>) -> Record {
-    Record::new(RecordBody::Container(ContainerRecord {
-        format: 0,
-        original_len: len,
-        framing: vec![],
-        members: vec![ContainerMember {
-            offset: 0,
-            len,
-            chunks,
-        }],
-        original_hash: [1; 32],
-    }))
-}
-
 #[test]
 fn verify_checks_the_chunks_a_record_names() {
     // The writer refuses a block whose record names a chunk outside the earlier
@@ -256,12 +285,12 @@ fn verify_checks_the_chunks_a_record_names() {
     // chunks) and the block's record id is patched to 0, with the frame hash
     // recomputed.
     let check = |len: u64, chunks: Vec<u64>| {
-        let mut o = options(vec![container(len, chunks.clone())]);
+        let mut o = options(vec![jpeg_nested(len, chunks.clone())]);
         o.encoder = Box::new(Recon {
-            primitive: PrimitiveId::ContainerReconstruct,
+            primitive: PrimitiveId::JpegReconstruct,
             record: 0,
         });
-        let mut w = Writer::new(Vec::new(), o).unwrap();
+        let mut w = Writer::new_revision(Vec::new(), o, 1).unwrap();
         w.add_file(
             "a",
             lpk_format::EntryFlags::EMPTY,
@@ -277,9 +306,9 @@ fn verify_checks_the_chunks_a_record_names() {
             })
         ));
         let mut bytes = recon_archive(
-            PrimitiveId::ContainerReconstruct,
+            PrimitiveId::JpegReconstruct,
             1,
-            vec![container(len, chunks), utf16(1)],
+            vec![jpeg_nested(len, chunks), jpeg_plain()],
         );
         let loc = open(bytes.clone()).index().blocks[0];
         let off = loc.frame_offset as usize;

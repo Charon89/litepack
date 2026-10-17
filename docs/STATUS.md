@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 21:55 UTC (2026-10-17, 17:55 local on the measuring machine). A measurement is running: E2-22's incumbent baseline on `full` (`target/acceptance/e2-22-run-status.log`).
+Last updated: 2026-10-17, about 22:50 UTC (2026-10-17, 18:50 local on the measuring machine). A measurement is running: E2-22's incumbent baseline on `full` (`target/acceptance/e2-22-run-status.log`).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -26,21 +26,37 @@ lives in `bench/reports/phase1-2026-10-04-*.md` with its results directory; the 
 `phase1-2026-10-04-small-extract.md`: the JPEG classes about 77% of their bytes against 94–97% for every incumbent;
 Balanced at or within a few tenths of a percent of 7-Zip Ultra on the text classes, behind on installed software
 and source trees; `lpk/fast` extracting faster than 7-Zip `-mx5` on every class but the JPEG ones; compression
-was single-threaded then and is parallel since E2-4b.
+was single-threaded then and is parallel since E2-4b. Since 2026-10-17: E2-20 (memory budgets on both sides,
+D-67), E2-11 and E2-10 (the Deflate peel through format revision 1.2, D-68 to D-71) and E2-21 (the full corpus
+round-trips with 0 mismatches, D-72) are done; E2-15's gate opened (D-73) and BWT ships through a revision 1.3.
+Open in E2: E2-15's shipping, E2-16, E2-17, E2-22, and E2-9 (the owner's). E3 is adopted into PLAN from
+`docs/notes/phase1-e3-e9-breakdown.md`, which also drafts E4 to E9 and lists the decisions each epic needs.
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Next: **E2-10/11 task C, the revision 1.2** (spec, the `deflate-reconstruct` decoder, the vector, fuzz targets,
-   and the patched `preflate-rs` of D-66), from `docs/notes/e2-10-task-c-brief.md` — C1 and C2 are on
-   `task/e2-10-revision` (see "Branches in flight"); then tasks D (the pipeline) and E (`lpk-check` from the text)
-   in parallel. E2-18 is done (G3 met on `full`'s `video`, D-61/D-63/D-65).
-   Already merged for E2-10/11: task B (the walker in `lpk-core`, D-64) and task A (the `lpk-format` plumbing: the
-   input-bound hook — task C's decoder must check the bound against the envelope and the reader's limits before
-   returning it — the records cache, multi-span given blocks deduplicated all or nothing, `part_known`).
-3. E2-20's code is merged (D-67, PR #63, 2026-10-17); its rows are running (see "Branches in flight") and tick it.
-   After E2-10/11: E2-15, E2-16, E2-17 (D-49 process), then E2-21/22.
-4. E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
-   chunk in an appended generation is coded without its previous version in the window.
+2. Next: **revision 1.3** (`docs/notes/e2-15-revision-1.3-design.md` section 6: A → C → D ∥ E). Task A (the
+   look-ahead, the writer's refusal of undecoded primitives at every minor, `check_bwt_steps`, libsais behind the
+   `encode` feature) is reviewed (APPROVE, three LOWs ruled into C, D and E) and in PR #73; then C (the text, `BwtDecoder`, the
+   vectors, the fuzz targets), D (the pipeline; its `small` row ticks E2-15) and E (`lpk-check` from the text alone).
+   E2-16 and E2-17: the probes' code (task P of `docs/notes/e2-16-design.md` and `docs/notes/e2-17-design.md`) is
+   written for E2-16 (draft PR #74, a read-only review running) and partly written for E2-17 (`task/e2-17-probe`);
+   the probes run on this machine's corpus after E2-22's baseline. No build runs here while a measurement does, so
+   E2-17's rest, revision 1.3 task C and E3 wait for the baseline to end. `png-filter` joins revision 1.3 only if E2-16's gate opens (its margin is the
+   owner's, below); E2-17's gates are expected to close on `small`.
+3. E2-22: the incumbents' baseline on `full` is running (`target/acceptance/e2-22-full-baseline.sh`, started
+   2026-10-17 20:34 UTC, most of a day; its results directory is `bench/results/2026-10-17-megatron-15`). The
+   `lpk` rows follow on the final engine (after revision 1.3), pooled with it (same corpus, host and threads), then
+   the gate table and a `D-NN`. Keep the machine idle until the status log says `== DONE`.
+   Rows measured between 21:59:57 and 22:31 UTC overlapped local builds (agents meant to run in the cloud ran on
+   this machine): `encrypted-random`'s xz/9 and zpaqfranz m1/m5, every `game-assets` row, and `logs-text`'s
+   store, 7z mx5/ultra and rar m3/best/best-solid (`target/acceptance/e2-22-contaminated.txt`). Their sizes stand;
+   their timings are re-measured on the idle machine after the baseline (`--classes
+   encrypted-random,game-assets,logs-text`), and the report takes the re-measured rows in their place and says
+   so, which needs a small supersede option in `lpk-bench report` (today it refuses a combination given twice).
+4. E3 (adopted 2026-10-17): one implementer at a time, E3-1 and E3-7 first, then E3-8, E3-2, E3-3, E3-4, E3-5,
+   E3-6; E3-9 is a measuring-machine run after E2-22. E2-9 (deltas) waits for two things from the owner (below);
+   D-59 adds a third reason to want it: a changed chunk in an appended generation is coded without its previous
+   version in the window.
 5. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
    recorded rulings → a `D-NN` → PLAN tick with evidence → PR → CI green → `main` fast-forwarded (merge `main`
    into the branch first; squash only when a branch commit message carries figures). Learned on 2026-10-13: the
@@ -49,8 +65,12 @@ was single-threaded then and is parallel since E2-4b.
    `git merge --ff-only <task branch>` (so keep the task branch a descendant of `main`), and the orchestrator
    merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
    limits on tasks of this size and are resumed with a short step list.
+   While a measurement runs on the measuring machine, no agent builds, tests or runs anything there: the Agent
+   tool's `isolation: remote` ran as a local worktree agent on 2026-10-17 without an error, so it is no
+   protection. Read-only agents (designs, static reviews told not to run cargo) are fine; GitHub CI builds and
+   tests pushed branches.
 
-**Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16, one for revision 1.3 and one for E2-17 added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
+**Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16, one for revision 1.3, one for E2-17 and the E4–E9 decisions added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
   (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
   consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
@@ -74,6 +94,14 @@ was single-threaded then and is parallel since E2-4b.
   "without" row E2-10's `lpk/balanced`, recorded with the negative result. The probe (task P) runs regardless.
 - **Counsel on US 9,798,731** (`docs/LICENSING.md`, sketch-based similarity clustering with deltas): gates E2-9
   (deltas) and any return of the similarity sketch (E2-8, D-55).
+- **Decisions for E4 to E9** (`docs/notes/phase1-e3-e9-breakdown.md` section 2; none blocks E2 or E3). The one
+  with the longest lead time is E7-1: the code-signing route (Azure Artifact Signing — public trust for
+  organisations or for individuals in the US and Canada, eligibility to be checked — or an OV certificate, or
+  SignPath Foundation for open source), the publisher's legal name and the product name; the certificate subject
+  becomes the MSIX publisher, and identity validation can take weeks. Next: E4's parser stack (pure Rust for ZIP,
+  7z and tar; RAR and ISO only through libarchive in an AppContainer worker, or not in Phase 1) and E5's minimum
+  Windows (Windows 10 22H2 and 11, or 11 only). E3's five decisions are ruled for adoption (PLAN, the E3 header)
+  and can be overturned.
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -84,21 +112,14 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- E2-10 and E2-21 are done (2026-10-17; report `bench/reports/phase1-2026-10-17-deflate-peel.md`; D-69 to D-72):
-  the peel pool made the `full` office-pdf row finish within the runner's timeout; the full corpus round-trips
-  with 0 mismatches. Next: E2-22 needs a baseline of every tool on the current `full` (Phase 0's measured an
-  earlier manifest), split in two: the incumbents now (`target/acceptance/e2-22-full-baseline.sh` with the
-  catalogue without `lpk`), the `lpk` rows on the final engine later, pooled. E2-15's gate opened (D-73): BWT
-  ships through a revision 1.3, designed next; E2-16's probe (task P of `docs/notes/e2-16-design.md`) decides
-  whether `png-filter` joins it.
-- E2-20 is done (2026-10-17, PR #67): every `lpk` row's compress and extract peak within its tier's ceiling
-  (`bench/reports/phase1-2026-10-17-memory.md`).
-- Next after the run: E2-15's probe (`docs/notes/e2-15-probe-brief.md`), then E2-16's probe (task P of
-  `docs/notes/e2-16-design.md`); a format revision 1.3 follows only for a gate that opens (both share one).
-  Parked for the next format task: the reference writer accepts primitives no revision decodes (`bwt`, `bcj-*`,
-  `delta`, `png-filter`, `base64`, `utf16`, `container-reconstruct`) at any minor, because their `revision()` is 0
-  and `check_graph` refuses only `revision() > version_minor`; section 8 says a writer MUST NOT emit them (no
-  production path does). Fix: refuse them at every minor.
+- `task/rev13-plumbing` (PR #73): revision 1.3 task A, reviewed (APPROVE); merged when CI is green. It carries
+  the fix of the parked writer item (the reference writer accepted primitives no revision decodes at any minor;
+  now refused at every minor).
+- `task/e2-16-probe` (draft PR #74): E2-16's probe code; a read-only review is running; the probe's run on
+  `small` waits for the measuring machine.
+- `task/e2-17-probe`: E2-17's probe code, partly written (the implementer stopped at its turn limit; finishing
+  it needs builds, so it waits for the machine).
+- E2-22's incumbent baseline on `full`, running in the main checkout ("How to resume" 3 above).
 
 ## How to resume
 
@@ -109,9 +130,9 @@ See "How to resume" above. Parked items, to pick up in the tasks named:
 - From E2-5: the `decode_memory` fixed term of `jpeg-reconstruct` is an allowance, not measured (E2-20); the Lepton stream bytes depend on the zlib backend (vector checked structurally under another backend, byte-identically in CI).
 - From E2-6: `text-prose` and `office-pdf` a tenth or two of a percent above 7-Zip Ultra (the coder); `source-git` and `software-installed` behind (ordering gave nothing on `small`; BCJ waits for a format revision).
 - From E2-19: opening relative to a verified directory handle is the stronger parent-chain rule (E3/E6); flags and directory times are not restored (as the format tool); the writer thread count is unmeasured on `full` and on HDDs.
-- From E2-12: `lpk t|check|repair|rollback|info` hand the password to the format tool as an argument string that is not wiped, and the clap `String` lives until exit (no `zeroize` in lpk-cli; the format tool wipes its own copy) — a task that touches `lpk-format` should re-export `Zeroizing` or add a `run_with_credentials` entry point; the format tool accepts an unneeded `--keyfile` on a password-only archive.
+- From E2-12: `lpk t|check|repair|rollback|info` hand the password to the format tool as an argument string that is not wiped, and the clap `String` lives until exit (no `zeroize` in lpk-cli; the format tool wipes its own copy) — a task that touches `lpk-format` should re-export `Zeroizing` or add a `run_with_credentials` entry point; the format tool accepts an unneeded `--keyfile` on a password-only archive (E3-5 takes both).
 - From the records change (D-56): the append constructors require `R: 'static` (the old archive is boxed into the writer); an append over an archive with an unparsable `Records` frame is refused at open; the tests' with/without pre-loading comparison is against the committed vector; `Pipeline::append` (opener-based) is the shared target `append_file` builds on.
-- From E2-13: the product's default recovery percentage is undecided (0 for now).
+- From E2-13: the product's default recovery percentage is ruled for E3: the CLI keeps 0, the GUI proposes 5 (PLAN, the E3 header).
 - From E2-14: the size cost of a changed chunk in an appended generation (D-59) is E2-9's; an append reads the old entry table's paths into memory for the snapshot deletion.
 - From E2-4b: the JPEG peel still runs on the calling thread (the photo classes gain nothing from the pool; a peel pool is its own task); the pool is one thread per block in flight, not a persistent worker set; the Balanced cap of four blocks in flight is provisional (E2-20); `StoreOptions::threads` (None = the cores) overwrites `encode_threads`; the core and CLI identity tests use flat trees because NTFS moved a directory's mtime between two walks of a fresh temp tree.
 - The report takes one baseline directory per corpus per run; E2-22 pools directories (D-48) — a combination measured twice is refused, so each `lpk` run on a class supersedes by a new directory, never by overwriting.

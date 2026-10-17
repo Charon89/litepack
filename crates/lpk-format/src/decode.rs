@@ -119,8 +119,10 @@ pub trait PrimitiveDecoder: Send + Sync {
     /// `last` and `expected_len` describe this step as [`decode_in`] will see
     /// it, as far as they are known before the previous step runs: for the
     /// graph's last step `last` is true and `expected_len` is the block's
-    /// `plain_len`; otherwise `expected_len` is the envelope's
-    /// `max_block_plain` (revision 1.2's check 3 of `deflate-reconstruct`).
+    /// `plain_len`; otherwise `expected_len` is the next step's input bound
+    /// when the next step gives one (one level of look-ahead, asked first;
+    /// revision 1.3's Bounds), else the envelope's `max_block_plain`
+    /// (revision 1.2's check 3 of `deflate-reconstruct`).
     ///
     /// [`decode_in`]: PrimitiveDecoder::decode_in
     fn input_bound(
@@ -288,6 +290,15 @@ impl Registry {
 /// intermediate output larger than that bound (`limits.max_block_plain` when
 /// the decoder gives none) is `PayloadTooLarge`; the last step must produce exactly `plain_len`
 /// (`BlockLengthMismatch`, also when the decoder reports too much output).
+///
+/// The next step is asked with its own output bound, found by one level of
+/// look-ahead: when it is not the last step, the step after it is asked for
+/// its input bound first (with `plain_len` when that one is the last step,
+/// `max_block_plain` otherwise; the look-ahead goes no further), and its
+/// error, when it has one, is the block's error before anything else runs.
+/// So in `[M, bwt, deflate-reconstruct]` the `bwt` step learns the inflated
+/// length before `M` runs (revision 1.3's Bounds); in a graph whose later
+/// steps give no bound every step is asked exactly as before.
 pub fn decode_block(
     registry: &Registry,
     header: &BlockHeader,
@@ -339,13 +350,14 @@ pub fn decode_block_in(
             header.plain_len
         } else {
             // The next step may bound its input, and so this step's output,
-            // by something other than `max_block_plain`.
+            // by something other than `max_block_plain`. Its own output
+            // bound comes from one level of look-ahead: the step after it.
             let next = &steps[i + 1];
             let next_last = i + 1 == last;
             let next_expected = if next_last {
                 header.plain_len
             } else {
-                limits.max_block_plain
+                output_bound(registry, header, steps, i + 1, limits, ctx)?
             };
             registry
                 .decoder(next.primitive)
@@ -378,12 +390,40 @@ pub fn decode_block_in(
     Ok(data.into_owned())
 }
 
+/// The output bound of step `i` of `steps` (not the last step) as the
+/// look-ahead sees it: the input bound of step `i + 1` when that decoder
+/// gives one, otherwise `limits.max_block_plain`. Step `i + 1` is asked with
+/// what is known of it without looking further: the block's `plain_len` when
+/// it is the last step, otherwise `max_block_plain` (one level of look-ahead
+/// only, spec section 8, revision 1.3's Bounds). An error here is the
+/// block's error.
+fn output_bound(
+    registry: &Registry,
+    header: &BlockHeader,
+    steps: &[crate::graph::Step],
+    i: usize,
+    limits: &Resources,
+    ctx: &mut dyn DecodeContext,
+) -> Result<u64, FormatError> {
+    let after = &steps[i + 1];
+    let after_last = i + 2 == steps.len();
+    let after_expected = if after_last {
+        header.plain_len
+    } else {
+        limits.max_block_plain
+    };
+    Ok(registry
+        .decoder(after.primitive)
+        .input_bound(&after.params, after_expected, after_last, limits, ctx)?
+        .unwrap_or(limits.max_block_plain))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::{Graph, Step};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fn step(p: PrimitiveId) -> Step {
         Step {
@@ -394,6 +434,13 @@ mod tests {
 
     fn store() -> Step {
         step(PrimitiveId::Store)
+    }
+
+    fn bwt() -> Step {
+        Step {
+            primitive: PrimitiveId::Bwt,
+            params: vec![0, 0, 1, 0],
+        }
     }
 
     fn header(steps: Vec<Step>, plain: u64, enc: u64) -> BlockHeader {
@@ -699,6 +746,218 @@ mod tests {
             decode_block(&r, &h, 0, b"ab", &Resources::default()).unwrap(),
             b"ab"
         );
+    }
+
+    /// A fake of a bounded step: answers `bound` to `input_bound` and records
+    /// each call's (`expected_len`, `last`); decodes to the first
+    /// `expected_len` bytes of its input, noting that it ran.
+    struct Probe {
+        bound: Result<Option<u64>, &'static str>,
+        asked: Arc<Mutex<Vec<(u64, bool)>>>,
+        ran: Arc<AtomicBool>,
+    }
+
+    impl Probe {
+        fn new(bound: Result<Option<u64>, &'static str>) -> Probe {
+            Probe {
+                bound,
+                asked: Arc::default(),
+                ran: Arc::default(),
+            }
+        }
+    }
+
+    impl PrimitiveDecoder for Probe {
+        fn decode(
+            &self,
+            _: &[u8],
+            input: &[u8],
+            expected_len: u64,
+            _: &Resources,
+        ) -> Result<Vec<u8>, FormatError> {
+            self.ran.store(true, Ordering::SeqCst);
+            let n = usize::try_from(expected_len).unwrap().min(input.len());
+            Ok(input[..n].to_vec())
+        }
+
+        fn input_bound(
+            &self,
+            _: &[u8],
+            expected_len: u64,
+            last: bool,
+            _: &Resources,
+            _: &mut dyn DecodeContext,
+        ) -> Result<Option<u64>, FormatError> {
+            self.asked.lock().unwrap().push((expected_len, last));
+            self.bound
+                .map_err(|reason| FormatError::BadRecord { record: 9, reason })
+        }
+    }
+
+    /// `[BcjX86 = first, BcjArm64 = middle, Bwt = last]` over `max_block_plain`
+    /// 4 and a 2-byte block; `first` returns 9 bytes.
+    fn chain(
+        middle: Result<Option<u64>, &'static str>,
+        last: Result<Option<u64>, &'static str>,
+    ) -> (Result<Vec<u8>, FormatError>, Probe, Probe, Probe) {
+        let small = Resources {
+            max_block_plain: 4,
+            ..Resources::default()
+        };
+        let first = Probe::new(Ok(None));
+        let middle = Probe::new(middle);
+        let last = Probe::new(last);
+        let mut r = Registry::v1();
+        r.register(
+            PrimitiveId::BcjX86,
+            Box::new(OverFlag(9, first.ran.clone())),
+        );
+        r.register(
+            PrimitiveId::BcjArm64,
+            Box::new(Probe {
+                bound: middle.bound,
+                asked: middle.asked.clone(),
+                ran: middle.ran.clone(),
+            }),
+        );
+        r.register(
+            PrimitiveId::Bwt,
+            Box::new(Probe {
+                bound: last.bound,
+                asked: last.asked.clone(),
+                ran: last.ran.clone(),
+            }),
+        );
+        let h = header(
+            vec![
+                step(PrimitiveId::BcjX86),
+                step(PrimitiveId::BcjArm64),
+                bwt(),
+            ],
+            2,
+            2,
+        );
+        let out = decode_block(&r, &h, 0, b"ab", &small);
+        (out, first, middle, last)
+    }
+
+    fn asked(p: &Probe) -> Vec<(u64, bool)> {
+        p.asked.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn look_ahead_passes_the_last_steps_bound_to_the_middle_step() {
+        // The last step bounds its input by 20: the middle step is asked with
+        // 20 as its output bound (not `max_block_plain`), and may let the
+        // first step's 9 bytes through.
+        let (out, first, middle, last) = chain(Ok(Some(9)), Ok(Some(20)));
+        assert_eq!(out.unwrap(), vec![7, 7]);
+        assert!(first.ran.load(Ordering::SeqCst));
+        assert!(middle.ran.load(Ordering::SeqCst));
+        assert!(last.ran.load(Ordering::SeqCst));
+        // Before the first step: the last step (look-ahead, as the last step
+        // with `plain_len` 2), then the middle step with the bound 20. Before
+        // the middle step: the last step again, the same way.
+        assert_eq!(asked(&last), vec![(2, true), (2, true)]);
+        assert_eq!(asked(&middle), vec![(20, false)]);
+    }
+
+    #[test]
+    fn look_ahead_without_a_bound_asks_as_before() {
+        // The last step gives no bound: the middle step is asked with
+        // `max_block_plain`, exactly as revision 1.2 asked it.
+        let (out, _, middle, last) = chain(Ok(Some(9)), Ok(None));
+        assert_eq!(out.unwrap(), vec![7, 7]);
+        assert_eq!(asked(&middle), vec![(4, false)]);
+        assert_eq!(asked(&last), vec![(2, true), (2, true)]);
+        // And a middle step without a bound keeps `max_block_plain` for the
+        // first step's output, so 9 bytes are too many.
+        let (out, _, middle, _) = chain(Ok(None), Ok(Some(20)));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::PayloadTooLarge { len: 9, max: 4 }
+        ));
+        assert_eq!(asked(&middle), vec![(20, false)]);
+    }
+
+    #[test]
+    fn the_later_steps_checks_come_first_and_its_error_is_the_blocks() {
+        // The last step's hook fails: nothing ran, the middle step was never
+        // asked, and the error is reported unchanged.
+        let (out, first, middle, last) = chain(Ok(Some(9)), Err("last hook"));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::BadRecord {
+                record: 9,
+                reason: "last hook"
+            }
+        ));
+        assert!(!first.ran.load(Ordering::SeqCst));
+        assert!(!middle.ran.load(Ordering::SeqCst));
+        assert!(!last.ran.load(Ordering::SeqCst));
+        assert_eq!(asked(&last), vec![(2, true)]);
+        assert!(asked(&middle).is_empty());
+        // The middle step's hook fails after the last step's passed: the
+        // middle error is the block's, and the first step never ran.
+        let (out, first, _, last) = chain(Err("middle hook"), Ok(Some(20)));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::BadRecord {
+                record: 9,
+                reason: "middle hook"
+            }
+        ));
+        assert!(!first.ran.load(Ordering::SeqCst));
+        assert_eq!(asked(&last), vec![(2, true)]);
+    }
+
+    #[test]
+    fn look_ahead_is_one_level_only() {
+        // Four steps: before the first runs, the third is asked with
+        // `max_block_plain` (not the fourth's bound), then the second with
+        // the third's answer.
+        let small = Resources {
+            max_block_plain: 4,
+            ..Resources::default()
+        };
+        let second = Probe::new(Ok(Some(9)));
+        let third = Probe::new(Ok(Some(30)));
+        let fourth = Probe::new(Ok(Some(40)));
+        let mut r = Registry::v1();
+        r.register(PrimitiveId::BcjX86, Box::new(Over(9)));
+        for (id, p) in [
+            (PrimitiveId::BcjArm64, &second),
+            (PrimitiveId::Bwt, &third),
+            (PrimitiveId::Base64, &fourth),
+        ] {
+            r.register(
+                id,
+                Box::new(Probe {
+                    bound: p.bound,
+                    asked: p.asked.clone(),
+                    ran: p.ran.clone(),
+                }),
+            );
+        }
+        let h = header(
+            vec![
+                step(PrimitiveId::BcjX86),
+                step(PrimitiveId::BcjArm64),
+                bwt(),
+                Step {
+                    primitive: PrimitiveId::Base64,
+                    params: vec![0],
+                },
+            ],
+            2,
+            2,
+        );
+        assert_eq!(decode_block(&r, &h, 0, b"ab", &small).unwrap(), vec![0, 0]);
+        // Before step 1: third (look-ahead, 4), second (30). Before step 2:
+        // fourth (look-ahead, 2 as last), third (40). Before step 3: fourth (2).
+        assert_eq!(asked(&second), vec![(30, false)]);
+        assert_eq!(asked(&third), vec![(4, false), (40, false)]);
+        assert_eq!(asked(&fourth), vec![(2, true), (2, true)]);
     }
 
     #[test]
