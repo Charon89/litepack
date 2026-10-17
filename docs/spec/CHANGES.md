@@ -158,3 +158,7 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    lzma-rs passes its output on only when its buffer is full. The defect dates from 1.0 (non-final `lzma` steps
    with a bound below `dict_size`); revision 1.2's bound makes it reachable with a `deflate` record whose
    `plain_len` is below the inflated text (code: the step is decoded again to stop one byte past the bound).
+8. zstd rule 7 states which class wins when a frame is damaged and its output passes the bound, at the granularity
+   of a block: the output of the complete blocks before the damaged one past the bound is `PayloadTooLarge`,
+   otherwise `ZstdError`; a damaged block's partial output is never counted (section 8; code: the reference
+   reported `ZstdError` whenever the damage came before ruzstd released the crossing bytes).

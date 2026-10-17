@@ -62,6 +62,45 @@ impl ZstdDecoder {
     }
 }
 
+impl ZstdDecoder {
+    /// The output length of a frame's complete blocks before a damaged one: the frame cut at
+    /// `done` (the end of the last complete block, counted from the frame's start) with that
+    /// block's `Last_Block` flag set (and four placeholder checksum bytes when the frame has a
+    /// checksum), decoded on its own. `None` when there is no complete block or the cut frame does
+    /// not decode (then the original error stands).
+    fn complete_blocks_len(
+        &self,
+        frame: &[u8],
+        done: u64,
+        last_header: Option<u64>,
+        dict: &[u8; 32],
+    ) -> Option<u64> {
+        let header = usize::try_from(last_header?).ok()?;
+        let end = usize::try_from(done).ok()?;
+        let mut cut = frame.get(..end)?.to_vec();
+        *cut.get_mut(header)? |= 1;
+        // Frame_Header_Descriptor (after the 4-byte magic): bit 2 is Content_Checksum_flag.
+        if frame.get(4).is_some_and(|d| d & 0x04 != 0) {
+            cut.extend_from_slice(&[0; 4]);
+        }
+        let mut dec = FrameDecoder::new();
+        dec.set_max_window_size(u64::MAX);
+        let dictionary = self.dictionary(dict).ok()?;
+        let key = dictionary.as_ref().map(|d| d.id);
+        if let Some(d) = dictionary {
+            dec.add_dict(d).ok()?;
+        }
+        let mut src = &cut[..];
+        dec.init(&mut src).ok()?;
+        if let Some(id) = key {
+            dec.force_dict(id).ok()?;
+        }
+        dec.decode_blocks(&mut src, BlockDecodingStrategy::All)
+            .ok()?;
+        dec.is_finished().then(|| dec.can_collect() as u64)
+    }
+}
+
 /// Map a frame decoder error: a window above the declared one is a parameter
 /// error, everything else is the decoder's text.
 fn map_frame_error(e: FrameDecoderError) -> FormatError {
@@ -135,6 +174,8 @@ impl PrimitiveDecoder for ZstdDecoder {
         let mut src = input;
         let mut out: Vec<u8> = Vec::new();
         while !src.is_empty() {
+            let frame_start = input.len() - src.len();
+            let out_before_frame = out.len() as u64;
             match dec.init(&mut src) {
                 Ok(()) => {}
                 Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
@@ -151,9 +192,33 @@ impl PrimitiveDecoder for ZstdDecoder {
             if let Some(id) = dict_key {
                 dec.force_dict(id).map_err(map_frame_error)?;
             }
+            // One block at a time, so a damaged block's position is known: the end of the
+            // last complete block (`done`), whose header is at `last_header`.
+            let mut last_header: Option<u64> = None;
             loop {
-                dec.decode_blocks(&mut src, BlockDecodingStrategy::UptoBytes(STEP))
-                    .map_err(map_frame_error)?;
+                let done = dec.bytes_read_from_source();
+                if let Err(e) = dec.decode_blocks(&mut src, BlockDecodingStrategy::UptoBlocks(1)) {
+                    let e = map_frame_error(e);
+                    if matches!(e, FormatError::ZstdError { .. }) {
+                        // Spec section 8, zstd rule 7: the output of the complete blocks before
+                        // the damaged one past the bound is `PayloadTooLarge` (the damaged
+                        // block's partial output is never counted).
+                        let frame = &input[frame_start..];
+                        if let Some(held) =
+                            self.complete_blocks_len(frame, done, last_header, &dict)
+                        {
+                            let len = out_before_frame.saturating_add(held);
+                            if len > expected_len {
+                                return Err(FormatError::PayloadTooLarge {
+                                    len,
+                                    max: expected_len,
+                                });
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+                last_header = Some(done);
                 drain(&mut dec, &mut out, expected_len)?;
                 if dec.is_finished() {
                     break;
