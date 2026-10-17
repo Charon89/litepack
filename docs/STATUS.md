@@ -73,15 +73,14 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e2-10-revision` (pushed): task C of E2-10/11. C1 (the patched `preflate-rs` 0.7.6 in `vendor/`, D-66; the
-  `deflate-reconstruct` decoder in `lpk-core`; the writer's revision-1.2 rules; the fuzz targets) and C2 (the
-  revision 1.2 text, `deflate-peel.lpk` and its expectations) are reviewed; fix round 1 is running on the C2 agent's
-  branch: the reference's non-last `lzma` step must say `PayloadTooLarge` when its output crosses the bound before
-  any other error (it said `LzmaError` when a later match reached past the bound), the same precedence for `zstd`
-  by block, a writer obligation (no record the bounded recreation refuses), informative `Refused` amounts, and a
-  malformed vector for the bound rule. Then one PR (merge `main` first: E2-20's two text revisions touch sections 8
-  and 9 and `CHANGES.md`); then tasks D and E in parallel. Task D verifies every record with the bounded recreation
-  before keeping it.
+- `task/e2-10-revision` (PR open): task C of E2-10/11, revision 1.2 (D-68) — C1 (the patched `preflate-rs` 0.7.6,
+  D-66; the `deflate-reconstruct` decoder; the writer's minor-2 rules; fuzz targets), C2 (the text,
+  `deflate-peel.lpk`), and two fix rounds after the review of C2 (the `lzma` and `zstd` bound class corrected in the
+  reference, a writer obligation, `malformed-deflate-bound.lpk`, the analysis verifying with the bounded
+  recreation); `main` merged in (E2-20). When CI is green: fast-forward `main`, then dispatch tasks D
+  (`docs/notes/e2-10-task-d-brief.md`; add: E2-20's memory model takes the stage's buffers, the blocks declare the
+  Deflate term through `add_parts_encoded`) and E (`docs/notes/e2-10-task-e-brief.md`; add: the malformed vector,
+  and the jpeg `Refused` amounts the text now states) in parallel.
 - E2-20 (merged): its acceptance rows are running from `main` at `fb5553a` — every `lpk` setting on every class of
   `small`, then `vm-image`, `office-pdf` and `software-installed` of `full`, at the machine's 24 threads, one repeat
   (the clause is memory): each row's peak memory within its tier's ceiling (store 1 GiB, Fast 2 GiB, Balanced
