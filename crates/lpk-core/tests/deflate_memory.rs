@@ -96,8 +96,33 @@ fn zlib_level6(plain: &[u8]) -> Vec<u8> {
     e.finish().unwrap()
 }
 
-/// Peak bytes allocated by the limited recreation beyond what was live before it.
-fn measure(name: &str, plain: &[u8], stream: &[u8]) -> (u64, u64) {
+/// What the step needs beyond the block buffer while the limited recreation of `corr` over
+/// `plain` with limit `original_len` runs, asserted within the term; returns (needed, term) and
+/// the recreation's result. Live besides the recreation's own peak: the step's input (`plain`,
+/// held by the reader) and the decoder's parsed record (a copy of `corr`). The output buffer
+/// (`original_len + 8` bytes, reserved once) is the block's own.
+fn measure(
+    name: &str,
+    plain: &[u8],
+    corr: &[u8],
+    original_len: usize,
+) -> (u64, u64, preflate_rs::Result<Vec<u8>>) {
+    ALLOC.reset_peak();
+    let before = ALLOC.current();
+    let r = recreate_whole_deflate_stream_limited(plain, corr, original_len);
+    let peak = (ALLOC.peak() - before) as u64;
+    let (plain_len, corr_len) = (plain.len() as u64, corr.len() as u64);
+    let needed = plain_len + corr_len + peak - (original_len as u64 + 8).min(peak);
+    let term = memory_term(plain_len, corr_len);
+    println!(
+        "{name}: plain {plain_len}, corrections {corr_len}, peak {peak}, needed {needed}, term {term}"
+    );
+    assert!(needed <= term, "{name}: needed {needed} > term {term}");
+    (needed, term, r)
+}
+
+/// A valid stream: its corrections, then [`measure`], checking the output.
+fn measure_stream(name: &str, plain: &[u8], stream: &[u8]) -> (u64, u64) {
     let corr = match analyse_stream(stream, None, &preflate_config(64 * 1024 * 1024)) {
         StreamOutcome::Done {
             corrections,
@@ -109,22 +134,8 @@ fn measure(name: &str, plain: &[u8], stream: &[u8]) -> (u64, u64) {
         }
         other => panic!("{name}: {other:?}"),
     };
-    ALLOC.reset_peak();
-    let before = ALLOC.current();
-    let out = recreate_whole_deflate_stream_limited(plain, &corr, stream.len()).unwrap();
-    let peak = (ALLOC.peak() - before) as u64;
-    assert_eq!(out, stream, "{name}");
-    let plain_len = plain.len() as u64;
-    // The step's input is live during the whole recreation (held by the reader); the output
-    // buffer is the block's own (`original_len + 8` bytes at most).
-    let needed = plain_len + peak - (stream.len() as u64 + 8).min(peak);
-    let term = memory_term(plain_len);
-    println!(
-        "{name}: plain {plain_len}, peak {peak} ({:.2} x plain), needed {needed} ({:.2} x plain), term {term}",
-        peak as f64 / plain_len as f64,
-        needed as f64 / plain_len as f64
-    );
-    assert!(needed <= term, "{name}: needed {needed} > term {term}");
+    let (needed, term, r) = measure(name, plain, &corr, stream.len());
+    assert_eq!(r.unwrap(), stream, "{name}");
     (needed, term)
 }
 
@@ -134,11 +145,38 @@ fn recreation_peak_is_within_the_memory_term() {
     // The worst layout: one block, a literal token per plain byte.
     let plain = noise(8 * mib, 3);
     let stream = literals_only(&plain);
-    let (needed, term) = measure("literals-only block", &plain, &stream);
+    let (needed, term) = measure_stream("literals-only block", &plain, &stream);
     // The term leaves at least the fixed allowance's margin on the worst case's per-byte part.
     assert!(term - needed >= 8 * mib as u64, "margin {}", term - needed);
     // An ordinary stream.
     let plain = text(8 * mib);
     let stream = zlib_level6(&plain);
-    measure("zlib level 6 text", &plain, &stream);
+    measure_stream("zlib level 6 text", &plain, &stream);
+    // One test, so no other test allocates while these measure (cargo test runs tests in
+    // parallel threads of one process).
+    junk_corrections_near_original_len();
+}
+
+/// A hostile record: valid parameters and 4 MiB of junk CABAC data (`fixtures/deflate/crafted/
+/// junk-*.bin` around the junk, written by the vendored crate's ignored test
+/// `litepack_crafted`), a 16-byte plain text, and `original_len` equal to the corrections'
+/// length (the most check 4 allows). The corrections' copies (the decoder's record and the
+/// library's decoded data) dominate; the term counts them twice.
+fn junk_corrections_near_original_len() {
+    let mut x: u32 = 1;
+    let junk: Vec<u8> = (0..4usize << 20)
+        .map(|_| {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (x >> 24) as u8
+        })
+        .collect();
+    let corr = [
+        &include_bytes!("fixtures/deflate/crafted/junk-prefix.bin")[..],
+        &junk,
+        &include_bytes!("fixtures/deflate/crafted/junk-suffix.bin")[..],
+    ]
+    .concat();
+    let plain = text(16);
+    let (needed, term, _) = measure("junk corrections", &plain, &corr, corr.len());
+    assert!(term - needed >= 8 << 20, "margin {}", term - needed);
 }

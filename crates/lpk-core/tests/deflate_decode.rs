@@ -127,7 +127,7 @@ fn archive(model: Model, memory: Option<u64>) -> (Vec<u8>, Vec<u8>, DeflateRecor
         graph,
         bytes,
     };
-    let memory = memory.unwrap_or(memory_term(d.plain_len));
+    let memory = memory.unwrap_or(memory_term(d.plain_len, d.corrections.len() as u64));
     w.add_part_encoded(0, &deflate, encoded, memory).unwrap();
     w.end_entry().unwrap();
     w.add_file(
@@ -168,7 +168,7 @@ fn both_model_steps_round_trip_through_the_input_bound() {
         assert!(d.plain_len > env.max_block_plain, "{model:?}");
         assert_eq!(
             env.decode_memory,
-            env.max_block_plain + memory_term(d.plain_len)
+            env.max_block_plain + memory_term(d.plain_len, d.corrections.len() as u64)
         );
         register_full_reader(&mut a);
         let files = extract_all(&mut a).unwrap();
@@ -239,7 +239,10 @@ fn too_little_declared_memory_is_refused() {
     match a.verify().unwrap_err() {
         FormatError::Refused(r) => {
             assert_eq!(r.field, "decode_memory");
-            assert_eq!(r.needed, env.max_block_plain + memory_term(d.plain_len));
+            assert_eq!(
+                r.needed,
+                env.max_block_plain + memory_term(d.plain_len, d.corrections.len() as u64)
+            );
             assert_eq!(r.allowed, env.decode_memory);
         }
         e => panic!("{e:?}"),

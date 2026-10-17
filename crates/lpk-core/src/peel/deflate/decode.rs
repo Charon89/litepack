@@ -51,16 +51,24 @@ use preflate_rs::{recreate_whole_deflate_stream_limited, ExitCode};
 /// `max_block_plain`). Measured (`tests/deflate_memory.rs`, a counting allocator): a
 /// literals-only block needs exactly this per-byte part; the fixed allowance covers the rest.
 pub const MEMORY_PER_PLAIN_BYTE: u64 = 8;
+/// Decode memory per byte of the record's `corrections`: the decoder's own parsed record (the
+/// reader parses a fresh `Record` per lookup, holding a copy of the corrections) and the
+/// library's decoded `ReconstructionData`, whose bitcode decoding copies the CABAC bytes into a
+/// new vector. Both are live during the recreation; the archive's `Records` frame is the
+/// reader's, outside the step.
+pub const MEMORY_PER_CORRECTION_BYTE: u64 = 2;
 /// The fixed allowance for the library's tables (hash chains, Huffman tables, the CABAC
 /// contexts) and the small buffers of a recreation; the test asserts at least half of it is left
-/// unused in the worst case it measures.
+/// unused in the worst cases it measures.
 pub const MEMORY_ALLOWANCE: u64 = 16 * 1024 * 1024;
 
-/// The decode memory a stream of `plain_len` plain bytes needs beyond the block buffer:
-/// `8 × plain_len + 16777216` (saturating).
-pub fn memory_term(plain_len: u64) -> u64 {
+/// The decode memory a stream of `plain_len` plain bytes with `corrections_len` correction bytes
+/// needs beyond the block buffer: `8 × plain_len + 2 × corrections_len + 16777216` (saturating).
+/// Both lengths come from the record, so check 5 runs before anything is decoded.
+pub fn memory_term(plain_len: u64, corrections_len: u64) -> u64 {
     plain_len
         .saturating_mul(MEMORY_PER_PLAIN_BYTE)
+        .saturating_add(corrections_len.saturating_mul(MEMORY_PER_CORRECTION_BYTE))
         .saturating_add(MEMORY_ALLOWANCE)
 }
 
@@ -114,7 +122,7 @@ impl DeflateDecoder {
             return Err(bad(id, "corrections"));
         }
         // 5
-        let need = memory_term(d.plain_len);
+        let need = memory_term(d.plain_len, d.corrections.len() as u64);
         let allowance = limits.memory.saturating_sub(limits.max_block_plain);
         if need > allowance {
             return Err(FormatError::Refused(Refusal {
@@ -340,7 +348,7 @@ mod tests {
     #[test]
     fn check_5_refuses_by_the_memory_term() {
         let (plain, d) = stream();
-        let need = memory_term(d.plain_len);
+        let need = memory_term(d.plain_len, d.corrections.len() as u64);
         let mut ctx = One(Record::new(RecordBody::Deflate(d.clone())));
         let exact = Resources {
             max_block_plain: 1000,

@@ -1104,7 +1104,9 @@ fn verify_decompress_partial_gzip_deflate_body_roundtrip() {
 /// It builds a periodic plain text and a fixed-Huffman stream of it, analyses it, then encodes
 /// the corrections with every `DistOnlyCorrection` replaced by `max_chain + 4000` hops (a deep
 /// walk of the hash chain per token for upstream), and writes
-/// `hops-plain.bin` and `hops-corrections.bin`.
+/// `hops-plain.bin` and `hops-corrections.bin`; and `junk-prefix.bin` / `junk-suffix.bin`, the
+/// bytes around the CABAC data of a record with the same parameters and 4 MiB of LCG bytes as that
+/// data (the memory-term test rebuilds it).
 #[cfg(test)]
 mod litepack_crafted {
     use super::*;
@@ -1179,6 +1181,26 @@ mod litepack_crafted {
             parameters: params,
             corrections: cabac,
         });
+        // A second record: valid parameters and JUNK_LEN pseudo-random bytes as the CABAC data
+        // (x = x * 1664525 + 1013904223 from x = 1, the byte is x >> 24), written as the bytes
+        // before and after them (the tests rebuild the junk).
+        const JUNK_LEN: usize = 4 << 20;
+        let mut x: u32 = 1;
+        let data: Vec<u8> = (0..JUNK_LEN)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (x >> 24) as u8
+            })
+            .collect();
+        let junk = bitcode::encode(&ReconstructionData {
+            parameters: params,
+            corrections: data.clone(),
+        });
+        let at = junk.windows(64).position(|w| w == &data[..64]).unwrap();
+        assert_eq!(&junk[at..at + JUNK_LEN], data.as_slice());
+        std::fs::write(out_dir.join("junk-prefix.bin"), &junk[..at]).unwrap();
+        std::fs::write(out_dir.join("junk-suffix.bin"), &junk[at + JUNK_LEN..]).unwrap();
+
         std::fs::write(out_dir.join("hops-plain.bin"), &plain).unwrap();
         std::fs::write(out_dir.join("hops-corrections.bin"), &record).unwrap();
         println!(
