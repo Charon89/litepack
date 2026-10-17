@@ -308,6 +308,25 @@ struct Decided {
     kind: Kind,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook: when set, the pre-encode gate is skipped (every stream past the caps is
+    /// encoded), to show it changes nothing but time.
+    static NO_PREGATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the exact pre-encode gate runs (always, outside the test hook).
+fn pregate() -> bool {
+    #[cfg(test)]
+    {
+        !NO_PREGATE.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
 /// What the stage needs from the run.
 pub(crate) struct Context<'a> {
     pub(crate) stage: &'a DeflatePeel,
@@ -377,6 +396,21 @@ pub(crate) fn peel_file<O: Write>(
             out.memory_cap += 1;
             return;
         }
+        let record = DeflateRecord {
+            original_len: len,
+            plain_len,
+            corrections: r.corrections,
+            library: 0,
+            original_hash: *blake3::hash(&stream).as_bytes(),
+        };
+        let rec_len = record_len(&Record::new(RecordBody::Deflate(record.clone())));
+        // The exact pre-encode gate: when the record and the overhead alone reach the stream's
+        // length, no model output can pass the stream gate, so the stream is "no gain" without
+        // the encode (the same outcome and the same bytes, only sooner).
+        if pregate() && rec_len.saturating_add(STREAM_OVERHEAD) >= len {
+            out.no_gain += 1;
+            return;
+        }
         let t = Instant::now();
         let p = match encoder.encode(plain) {
             Ok(p) => p,
@@ -387,14 +421,6 @@ pub(crate) fn peel_file<O: Write>(
         };
         s.encode_seconds += t.elapsed().as_secs_f64();
         s.sample_bytes += p.sample_bytes;
-        let record = DeflateRecord {
-            original_len: len,
-            plain_len,
-            corrections: r.corrections,
-            library: 0,
-            original_hash: *blake3::hash(&stream).as_bytes(),
-        };
-        let rec_len = record_len(&Record::new(RecordBody::Deflate(record.clone())));
         let cost = (p.encoded.bytes.len() as u64)
             .saturating_add(rec_len)
             .saturating_add(STREAM_OVERHEAD);
@@ -558,6 +584,51 @@ mod tests {
         let frame = lpk_format::RecordsWriter::encode(std::slice::from_ref(&r));
         // The frame's count varint (one byte for one record) plus the record.
         assert_eq!(frame.len() as u64, 1 + record_len(&r));
+    }
+
+    /// The pre-encode gate changes neither the archive nor the summary (sample bytes and
+    /// seconds aside, which count the encodes it saves).
+    #[test]
+    fn the_pre_encode_gate_changes_nothing_but_time() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deflate");
+        for name in ["doc.zip", "image.png", "notes.txt.gz"] {
+            std::fs::copy(fixtures.join(name), dir.path().join(name)).unwrap();
+        }
+        // Small members: the record and the overhead alone exceed some of them.
+        for (i, len) in [40usize, 120, 400, 1500, 6000].into_iter().enumerate() {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+            e.write_all(&b"lorem ipsum dolor sit amet ".repeat(len / 27 + 1)[..len])
+                .unwrap();
+            std::fs::write(dir.path().join(format!("s{i}.gz")), e.finish().unwrap()).unwrap();
+        }
+        let run = |skip: bool| {
+            NO_PREGATE.with(|c| c.set(skip));
+            let mut p = crate::Pipeline::balanced(crate::BalancedOptions {
+                block_size: 4 << 20,
+                dict_size: 1 << 20,
+                sample_len: 1 << 16,
+                threads: Some(1),
+                ..crate::BalancedOptions::default()
+            });
+            p.deflate = Some(DeflatePeel {
+                record_files: true,
+                ..DeflatePeel::default()
+            });
+            let mut out = Vec::new();
+            let s = p.run(dir.path(), &mut out).unwrap();
+            NO_PREGATE.with(|c| c.set(false));
+            (out, s.peel.deflate)
+        };
+        let (with, a) = run(false);
+        let (without, b) = run(true);
+        assert!(with == without, "the archives differ");
+        assert!(a.outcomes.no_gain >= 2, "{a:?}");
+        assert_eq!(a.outcomes, b.outcomes);
+        assert_eq!(a.untimed().files, b.untimed().files);
+        assert!(a.sample_bytes < b.sample_bytes, "the gate saved encodes");
     }
 
     #[test]
