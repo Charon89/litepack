@@ -119,3 +119,7 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    `version_minor` is unchanged. Decoders that left repair out may now implement it from the text (CONFORMANCE
    item 7; repair stays optional). Proof: `crates/lpk-format/tests/rs_description.rs` re-derives every recovery
    shard of `recovery-groups.lpk` from the text.
+8. Section 13's repair memory figure is a threshold every reader applies, whatever its decoder needs; a reader may
+   also refuse, with the same `Refused` (`recovery group`), a group whose rebuild would exceed a work bound it
+   documents. Section 14 notes that opening never reaches the short-input `MissingKeySlot` case and lists
+   `BadFrameLocation` (`frames`) among its errors. Found by the independent decoder's author and its review.

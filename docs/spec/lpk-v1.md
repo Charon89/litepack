@@ -1564,7 +1564,11 @@ is itself damaged does not change the data it covers.
 Memory rule: one shard while scanning; for a group with damage, the decoder's buffer for that group,
 `(next_pow2(recovery_shards) + group_shards).next_pow2() * shard_len` bytes, independent of the archive's size. A
 reader refuses a group whose buffer would exceed its memory limit before rebuilding it (`Refused`, field `recovery
-group`).
+group`). The figure is a threshold every reader applies, whatever its decoder needs, so that readers with the same
+memory limit refuse the same groups; a decoder must rebuild any group under the threshold within that much memory.
+A reader may also refuse, with the same error, a group whose rebuild would exceed a work bound it documents (the
+fast decoder outlined in "The code" needs O(n log n) operations per symbol position, n being
+`(next_pow2(recovery_shards) + group_shards).next_pow2()`; a slower method reaches a documented bound sooner).
 
 Detection without repair is the same scan without steps 3 and 4: counts of the frames, of the unusable frames and
 of the damaged shards. `lpk-decode check <archive>` prints these counts and exits 1 (`DamageFound`) if a shard is
@@ -1667,7 +1671,9 @@ encrypted or a second one). Its payload is exactly 111 bytes:
 | check | 32 | BLAKE3 keyed with the archive key, of the archive id |
 
 Reading the key slot, in this order: input that ends before the first two bytes after the header, or a kind
-there other than 7, is `MissingKeySlot`; then the frame is read under a payload limit of 111 bytes (a larger
+there other than 7, is `MissingKeySlot` (opening never reaches the short-input case: an input shorter than 165
+bytes goes to the diagnosis of section 6 first and ends in `Truncated` with `what` `trailer`; the clause applies
+when the key slot is read on its own); then the frame is read under a payload limit of 111 bytes (a larger
 `payload_len` is `BadKeySlot`, `length`; the other errors of section 3 apply); a slot with the `SEALED` flag is
 `UnexpectedSealedFrame`; a payload that is not exactly 111 bytes is `BadKeySlot` (`length`); `suite` not 1 or 2 is
 `BadKeySlot` (`suite`); `kdf` not 1 is `BadKeySlot` (`kdf`); `argon2_t`, then `argon2_m_kib`, then `argon2_p`
@@ -1722,7 +1728,7 @@ The reference tool takes the password with `--password-file` (one trailing newli
 
 Errors of this section: `PasswordRequired`, `WrongKey`, `AuthenticationFailed`, `UnexpectedSealedFrame`, `UnsealedFrame`,
 `UnexpectedKeySlot`, `MissingKeySlot`, `BadKeySlot`, `BadArgon2`, `Refused` (field `argon2_m`), `EntryTableMismatch`,
-`Truncated` (`frames`).
+`Truncated` (`frames`), `BadFrameLocation` (`frames`).
 
 ### Test vectors
 
