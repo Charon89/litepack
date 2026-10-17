@@ -1828,9 +1828,12 @@ impl<W: Write> Writer<W> {
     /// this writer holds: the record is a `deflate` record (`BadRecord`,
     /// `kind`); as the last step, its `original_len` is the block's
     /// `plain_len` (`BlockLengthMismatch`); its `corrections` are no longer
-    /// than `original_len` (`BadRecord`, `corrections`). A step that is not
-    /// the last has its `original_len` checked by the reader against
-    /// `max_block_plain`, which is known only when the archive is finished.
+    /// than `original_len` (`BadRecord`, `corrections`). Before those, a
+    /// `deflate-reconstruct` step that is not the graph's last is refused
+    /// (`BadGraph`, `deflate-reconstruct not last`): a writer writes it last
+    /// (spec section 8), so its output is the block's and never has to meet
+    /// `max_block_plain`, which is known only when the archive is finished. A
+    /// reader still decodes the step in any position.
     fn check_deflate_steps(&self, graph: &Graph, plain_len: u64) -> Result<(), FormatError> {
         #[cfg(test)]
         if self.unchecked_records {
@@ -1840,6 +1843,11 @@ impl<W: Write> Writer<W> {
         for (i, s) in graph.steps.iter().enumerate() {
             if s.primitive != PrimitiveId::DeflateReconstruct {
                 continue;
+            }
+            if i != last {
+                return Err(FormatError::BadGraph {
+                    reason: "deflate-reconstruct not last",
+                });
             }
             let Some(record) = s.primitive.record_id(&s.params) else {
                 continue;
@@ -1856,7 +1864,7 @@ impl<W: Write> Writer<W> {
                     reason: "kind",
                 });
             };
-            if i == last && d.original_len != plain_len {
+            if d.original_len != plain_len {
                 return Err(FormatError::BlockLengthMismatch {
                     block: self.blocks.len() + self.queue.len(),
                 });
@@ -3408,6 +3416,31 @@ mod deflate_rule_tests {
         ));
         // Corrections exactly `original_len` long are allowed.
         assert!(write(2, deflate(1000, 1000)).is_ok());
+    }
+
+    #[test]
+    fn block_close_refuses_deflate_reconstruct_before_the_last_step() {
+        let p = vec![7u8; 1000];
+        let mut out = Vec::new();
+        let mut w = Writer::new_revision(&mut out, options(), 2).unwrap();
+        w.begin_entry("a", EntryFlags::EMPTY, 0).unwrap();
+        let id = w.add_record(deflate(1000, 4)).unwrap();
+        let mut e = encoded(id);
+        e.graph.steps.push(Step {
+            primitive: PrimitiveId::Store,
+            params: Vec::new(),
+        });
+        let r = w.add_part_encoded(0, &p, e, 0).and_then(|_| w.end_entry());
+        let r = r.and_then(|()| w.close_block());
+        assert!(
+            matches!(
+                r,
+                Err(FormatError::BadGraph {
+                    reason: "deflate-reconstruct not last"
+                })
+            ),
+            "{r:?}"
+        );
     }
 
     /// lpk-format alone (the minimal reader) does not decode the primitive: it
