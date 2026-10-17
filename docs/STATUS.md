@@ -3,8 +3,8 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-14, about 03:09 UTC (2026-10-13, 23:09 local on the measuring machine). A detached measurement starts after 00:30 local on 2026-10-14 (step 1 below).
-The owner asked on 2026-10-13 for the work to continue until midnight; this is the state at the end of that evening.
+Last updated: 2026-10-16, about 23:45 UTC (2026-10-16, 19:45 local on the measuring machine). No measurement is running.
+The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
 E2's twenty-two tasks, done and on `main`: E2-1 ingest, E2-2 classifier and gate, E2-3 Fast tier, E2-4 pipeline
@@ -15,36 +15,20 @@ its size clause, D-59) with the format's records-in-appends change they needed (
 encryption (D-57; the sealed row measured on `small`, `bench/reports/phase1-2026-10-13-small-seal.md`: the same
 size as the plain row on every class, a fixed key-derivation cost per archive, a higher working set noted for
 E2-20). `cargo deny` is green again after the `ruzstd` advisory bump (PR #45). E2-4b (parallel block encoding,
-D-60) is built, reviewed and measured (`bench/reports/phase1-2026-10-14-small-threads.md`): the Fast tier now
-compresses the multi-block classes near the store path's rate, byte-identical to the sequential writer; the
-Balanced tier gained nothing because on `small` a class is one or two of its 256 MiB blocks, so there was nothing
-to run in parallel; E2-4b stays `[~]` until the Balanced half is measured where it can show (step 1 below).
+D-60) is done: the Fast tier compresses `small`'s multi-block classes near the store path's rate
+(`phase1-2026-10-14-small-threads.md`) and the Balanced tier about three times faster on `vm-image` of `full`
+with four blocks in flight (`phase1-2026-10-14-full-vm-image-threads.md`), archive sizes equal, at a working set
+of several GiB for Balanced — the first input of E2-20.
 E0-1 is measured on `nodejs/node` and waits for the owner (below). Every `lpk` number
 lives in `bench/reports/phase1-2026-10-04-*.md` with its results directory; the latest overall `small` picture is
 `phase1-2026-10-04-small-extract.md`: the JPEG classes about 77% of their bytes against 94–97% for every incumbent;
 Balanced at or within a few tenths of a percent of 7-Zip Ultra on the text classes, behind on installed software
 and source trees; `lpk/fast` extracting faster than 7-Zip `-mx5` on every class but the JPEG ones; compression
-still single-threaded.
+was single-threaded then and is parallel since E2-4b.
 
 **How to resume (in this order).**
-1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list. **E2-4b's Balanced half.** Not a jobs
-   defect (the evening's first reading, corrected before midnight): `BalancedOptions::block_size` is 256 MiB and
-   every class of `small` is at most 327 MB, so a class is one or two Balanced blocks and the rows of
-   `bench/results/2026-10-14-megatron` could not show block parallelism for that tier (its memory rose by one
-   block in flight, its speed did not move). Measure it where it can show, in this order: (a) `vm-image` of `full`
-   (four files, eight 256 MiB Balanced blocks) through the runner at 24 threads and at 1 thread, two results
-   directories, since the runner gives every tool the same `--threads` — the detached script
-   `target/acceptance/e2-4b-full-run.sh` was launched on the night of 2026-10-13 to do exactly that after 00:30
-   local (status in `target/acceptance/e2-4b-full-status.log`, last line `== DONE`; the two directories are the
-   `bench/results/2026-10-14-megatron-*` ones its log names): validate, report each, read `lpk/balanced`'s
-   `compress MB/s` across them (the report refuses to pool differing thread counts unless told, so compare the
-   two reports), commit both directories with a report under `bench/reports/phase1-<date>-full-vm-image-threads.md`;
-   if the log shows no run, launch the script again on an idle machine; (b) only if the owner wants parallel Balanced on
-   small inputs too: a `--block-size` option for the Balanced tier and a measured ratio cost of 64 MiB and
-   128 MiB blocks against 256 MiB on `small` (matches farther back than the 64 MiB dictionary are impossible
-   anyway, so the loss is at block starts) — a `D-NN` after that measurement, never before. Then tick E2-4b
-   citing both tiers' rows. The Fast half is measured and met (the feeding thread is now the limit).
-2. Then **E2-18** (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
+1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
+2. Next: **E2-18** (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
    G3 as restated in D-27 needs 80% — with E2-4b in, measure first, then see what the store path still spends
    per byte: the chunker, two BLAKE3 passes, the frame write); its brief is `docs/notes/e2-18-video-brief.md`
    (written on 2026-10-13 from the committed numbers; dispatch from it).

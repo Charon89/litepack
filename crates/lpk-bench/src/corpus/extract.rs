@@ -414,7 +414,10 @@ fn extract_zip(archive: &Path, target: &Path, sel: &Selection) -> Result<Vec<Ext
         let e = za
             .by_index_raw(i)
             .with_context(|| format!("zip entry #{i}"))?;
-        let name = e.name().to_string();
+        let name = e
+            .name()
+            .with_context(|| format!("zip entry #{i}: name"))?
+            .into_owned();
         let kind = e.unix_mode().map(|m| m & 0o170_000);
         if e.is_symlink() || kind == Some(0o120_000) {
             bail!("symlink entry `{name}` is not allowed");
