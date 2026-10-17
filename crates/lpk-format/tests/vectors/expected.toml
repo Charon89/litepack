@@ -152,6 +152,17 @@ files_1_0 = [
   "readme.txt 1647 ee8ba3d446b880393757fb52941917eeed8f56a15b2cfd4866b4f51335467df3",
 ]
 
+["malformed-deflate-bound.lpk"]
+list = "File\t3102\tnotes.txt.gz\nFile\t1647\treadme.txt\n"
+info = "format: 1.2\nheader flags: 0x0\narchive id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\ngeneration: 0\nchain length: 1\nlength: 4485 bytes\nentries: 2\nchunks: 4\nblocks: 3\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 3b36ab103595974d2c150586fbe4c2b5c340c0f9049300bfdacd6d0d80519b69\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 3084\nenvelope max_frame_payload: 2995\nenvelope decode_memory: 16864336\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0008 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0008 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 1647 ee8ba3d446b880393757fb52941917eeed8f56a15b2cfd4866b4f51335467df3",
+]
+
 ["malformed-truncated.lpk"]
 error = "Truncated"
 message = "input truncated in trailer"

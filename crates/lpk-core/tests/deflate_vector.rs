@@ -32,6 +32,10 @@ use lpk_format::{
 
 const VECTOR: &str = "deflate-peel.lpk";
 const EXPECTED: &str = "expected-1.2.toml";
+/// The malformed revision 1.2 vector: `notes.txt.gz` as `[lzma, deflate-reconstruct]` whose
+/// record's `plain_len` is the inflated length minus [`SHORT_BY`], and `readme.txt`.
+const MALFORMED: &str = "malformed-deflate-bound.lpk";
+const SHORT_BY: u64 = 10_000;
 /// The fixtures, with the walker's extension, in the order they are written.
 const INPUTS: [(&str, &str); 3] = [
     ("doc.zip", "zip"),
@@ -357,6 +361,17 @@ fn framing(len: usize, streams: &[Peeled]) -> Vec<(usize, usize)> {
 
 /// `deflate-peel.lpk`'s bytes, laid out as spec section 9 says.
 fn build() -> Vec<u8> {
+    build_from(&INPUTS, false)
+}
+
+/// `malformed-deflate-bound.lpk`'s bytes: the same writer, `notes.txt.gz` only, its stream
+/// through lzma, its record's `plain_len` [`SHORT_BY`] below the inflated text (the writer does
+/// not check `plain_len`; spec section 8 makes the reader's lzma step cross its bound).
+fn build_malformed() -> Vec<u8> {
+    build_from(&[("notes.txt.gz", "gz")], true)
+}
+
+fn build_from(inputs: &[(&str, &str)], malformed: bool) -> Vec<u8> {
     let options = WriterOptions {
         chunk_size: 4096,
         block_size: 16 * 1024,
@@ -366,7 +381,7 @@ fn build() -> Vec<u8> {
     };
     let mut out = Vec::new();
     let mut w = Writer::new_revision(&mut out, options, 2).unwrap();
-    for (name, ext) in INPUTS {
+    for &(name, ext) in inputs {
         let bytes = fixture(name);
         let streams = peel(&bytes, ext);
         let want = if name == "doc.zip" { 2 } else { 1 };
@@ -378,12 +393,19 @@ fn build() -> Vec<u8> {
         }
         // 2. Per stream: the record, then the stream as a block of its own.
         for (i, s) in streams.iter().enumerate() {
+            let mut record = s.record.clone();
+            let model = if malformed {
+                record.plain_len -= SHORT_BY;
+                Model::Lzma
+            } else {
+                model_of(name, i)
+            };
             let id = w
-                .add_record(Record::new(RecordBody::Deflate(s.record.clone())))
+                .add_record(Record::new(RecordBody::Deflate(record.clone())))
                 .unwrap();
             let mut params = Vec::new();
             lpk_format::varint::write(&mut params, id).unwrap();
-            let (step, model_bytes) = match model_of(name, i) {
+            let (step, model_bytes) = match model {
                 Model::Lzma => (lzma_step(), lzma_bytes(&s.plain)),
                 Model::Zstd => (zstd_step(), zstd_bytes(&s.plain)),
             };
@@ -411,7 +433,7 @@ fn build() -> Vec<u8> {
                 .iter()
                 .flat_map(|&(a, b)| bytes[a..b].iter().copied())
                 .collect();
-            let memory = memory_term(s.record.plain_len, s.record.corrections.len() as u64);
+            let memory = memory_term(record.plain_len, record.corrections.len() as u64);
             w.add_parts_encoded(&spans, &deflate, encoded, memory)
                 .unwrap();
         }
@@ -467,6 +489,14 @@ fn render() -> String {
     let (code, out) = tool(&["lpk", "verify", path.to_str().unwrap()]);
     assert_eq!(code, 0);
     writeln!(s, "verify = {out:?}").unwrap();
+    // The malformed vector: `verify` of a revision 1.2 reader fails with the class and message.
+    let mut a = open(std::fs::read(vectors().join(MALFORMED)).unwrap());
+    let err = a.verify().unwrap_err();
+    let class = format!("{err:?}");
+    let class = class.split([' ', '{', '(']).next().unwrap();
+    writeln!(s, "\n[\"{MALFORMED}\"]").unwrap();
+    writeln!(s, "error = {class:?}").unwrap();
+    writeln!(s, "message = {:?}", err.to_string()).unwrap();
     s
 }
 
@@ -477,6 +507,57 @@ fn the_vector_regenerates_identically() {
         committed == build(),
         "{VECTOR} differs from this build's (liblzma, libzstd or preflate-rs version?)"
     );
+}
+
+#[test]
+fn the_malformed_vector_regenerates_identically() {
+    let committed = std::fs::read(vectors().join(MALFORMED)).unwrap();
+    assert!(
+        committed == build_malformed(),
+        "{MALFORMED} differs from this build's"
+    );
+}
+
+/// Spec section 8, "Bounds", and lzma rule 6 (task C fix round, R17): a revision 1.2 reader
+/// reports `PayloadTooLarge` with `max` = the record's `plain_len`, from `verify` and from
+/// extracting `notes.txt.gz`; `readme.txt` extracts.
+#[test]
+fn the_malformed_vector_is_payload_too_large() {
+    let mut a = open(std::fs::read(vectors().join(MALFORMED)).unwrap());
+    assert_eq!(a.header().version.minor, 2);
+    let RecordBody::Deflate(d) = a
+        .records()
+        .unwrap()
+        .unwrap()
+        .table()
+        .unwrap()
+        .iter()
+        .next()
+        .unwrap()
+        .unwrap()
+        .body
+    else {
+        panic!("not a deflate record")
+    };
+    let check = |e: FormatError| match e {
+        FormatError::PayloadTooLarge { len, max } => {
+            assert_eq!(max, d.plain_len);
+            assert!(len > max);
+        }
+        other => panic!("{other:?}"),
+    };
+    check(a.verify().unwrap_err());
+    let t = a.entry_table().unwrap();
+    let entries: Vec<_> = t.table().unwrap().iter().map(|e| e.unwrap()).collect();
+    for e in &entries {
+        let mut got = Vec::new();
+        if e.path == README {
+            a.extract(e, &mut got).unwrap();
+            assert!(got == fixture(README));
+        } else {
+            check(a.extract(e, &mut got).unwrap_err());
+        }
+    }
 }
 
 #[test]
@@ -556,8 +637,9 @@ fn the_vector_has_the_shape_it_claims() {
 }
 
 #[test]
-#[ignore = "rewrites deflate-peel.lpk and expected-1.2.toml in crates/lpk-format/tests/vectors"]
+#[ignore = "rewrites deflate-peel.lpk, malformed-deflate-bound.lpk and expected-1.2.toml in crates/lpk-format/tests/vectors"]
 fn regenerate() {
     std::fs::write(vectors().join(VECTOR), build()).unwrap();
+    std::fs::write(vectors().join(MALFORMED), build_malformed()).unwrap();
     std::fs::write(vectors().join(EXPECTED), render()).unwrap();
 }

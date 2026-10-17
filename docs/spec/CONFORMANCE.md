@@ -52,7 +52,7 @@ One TOML table per vector, named by the file name in quotes (`["zstd-basic.lpk"]
 | `check` | string | `recovery-groups.lpk` | the stdout of `lpk-decode check` |
 | `latest_generation` | integer | `journal-3gen.lpk` | the generation of the last trailer |
 | `files_at_generation_<g>` | array of strings | `journal-3gen.lpk` | `files` after a rollback to generation `<g>`, for each `<g>` below `latest_generation` |
-| `error` | string | `malformed-*` without `recovery` | the error class |
+| `error` | string | `malformed-*` without `recovery` (for `malformed-deflate-bound.lpk`, in `expected-1.2.toml`) | the error class |
 | `message` | string | the same | the reference reader's message (informative) |
 | `recovery_frames` | integer | `malformed-recovery-damaged.lpk` | recovery frames the index lists |
 | `shards_damaged` | integer | the same | damaged data shards `check` reports |
@@ -62,8 +62,8 @@ One TOML table per vector, named by the file name in quotes (`["zstd-basic.lpk"]
 | `info` | string | `jpeg-peel.lpk` | the stdout of `lpk-decode info` |
 | `error_1_0`, `message_1_0` | string | `jpeg-peel.lpk` | the error class a revision 1.0 reader's `verify` reports (`UnimplementedPrimitive`) and the reference reader's message (informative) |
 | `verify_exit_1_0`, `verify_stderr_1_0` | integer, string | `jpeg-peel.lpk` | the exit code and stderr of `lpk-decode verify` (a 1.0 reader) |
-| `info`, `error_1_0`, `message_1_0`, `verify_exit_1_0`, `verify_stderr_1_0` | as above | `deflate-peel.lpk` | the same keys for every reader before revision 1.2 (`UnimplementedPrimitive`, ID 8) |
-| `files_1_0` | array of strings | `deflate-peel.lpk` | the lines of `files` (same format) for the entries a reader before revision 1.2 extracts: those with no chunk in a `deflate-reconstruct` block |
+| `info`, `error_1_0`, `message_1_0`, `verify_exit_1_0`, `verify_stderr_1_0` | as above | `deflate-peel.lpk`, `malformed-deflate-bound.lpk` | the same keys for every reader before revision 1.2 (`UnimplementedPrimitive`, ID 8) |
+| `files_1_0` | array of strings | `deflate-peel.lpk`, `malformed-deflate-bound.lpk` | the lines of `files` (same format) for the entries a reader before revision 1.2 extracts: those with no chunk in a `deflate-reconstruct` block |
 
 A decoder needs only `files`, `latest_generation`, `files_at_generation_<g>`, `error` and the recovery counts; the
 stdout strings matter only to a decoder that prints the reference formats.
@@ -162,12 +162,13 @@ To regenerate the vector: `cargo test -p lpk-core --test deflate_vector -- --ign
 
 ## Malformed vectors
 
-The first two are derived from `zstd-basic.lpk` (the third from the recovery vector, see above) by `tests/conformance.rs` (the test checks the committed bytes against
+The first two are derived from `zstd-basic.lpk` (the third from the recovery vector, see above; the fourth is built by lpk-core, see its row) by `tests/conformance.rs` (the test checks the committed bytes against
 the derivation, so they cannot drift).
 
 | Archive | Derivation | Required outcome |
 |---|---|---|
 | `malformed-truncated.lpk` | the last 100 bytes removed | open fails: `Truncated` ("input truncated in trailer"); nothing is extracted |
+| `malformed-deflate-bound.lpk` | built by lpk-core's `tests/deflate_vector.rs` (revision 1.2, header minor 2): `notes.txt.gz` with its Deflate stream as `[lzma, deflate-reconstruct]` whose record's `plain_len` is 10000 below the inflated text, and `readme.txt` | a revision 1.2 reader: open succeeds; `verify`, and extracting `notes.txt.gz`, fail with `PayloadTooLarge` (the `lzma` step crosses its bound, the record's `plain_len`, spec section 8 "Bounds" and lzma rule 6; keys `error` and `message` of its table in `expected-1.2.toml`; only the class is normative; the reference reports `max` = the record's `plain_len`, and the `len` it reports depends on how far its decoder got); `readme.txt` extracts. A reader before revision 1.2: the `_1_0` keys of its `expected.toml` table, as for `deflate-peel.lpk` (`UnimplementedPrimitive`, ID 8; `files_1_0` is `readme.txt`) |
 | `malformed-hashflip.lpk` | one bit flipped in the middle of the first block's frame | open succeeds (the damage is in the body); `verify`, and extracting any file of that block, fails with `HashMismatch` of kind 2 ("payload hash mismatch in frame kind 2", the `ChunkData` frame), never `ChunkMismatch` (spec section 9) |
 
 A decoder may name the errors differently; the class matters: a cut-off file is reported as truncated, a changed

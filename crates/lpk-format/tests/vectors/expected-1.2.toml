@@ -10,3 +10,7 @@ files = [
   "readme.txt 1647 ee8ba3d446b880393757fb52941917eeed8f56a15b2cfd4866b4f51335467df3",
 ]
 verify = "ok: 4 entries, 17 chunks, 8 blocks\n"
+
+["malformed-deflate-bound.lpk"]
+error = "PayloadTooLarge"
+message = "payload length 10485 exceeds limit 10480"

@@ -167,3 +167,6 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    steps states informatively the `needed` and `allowed` the reference reports; the term is computed in 64-bit
    arithmetic saturating at 2^64 - 1; a reader that cannot address `original_len` bytes reports `original_len`
    (informative); the bound checks run before any of the previous step's own rules (section 8).
+10. New malformed vector `malformed-deflate-bound.lpk` (a `[lzma, deflate-reconstruct]` block whose record's
+    `plain_len` is below the inflated text): `PayloadTooLarge` for a revision 1.2 reader (`expected-1.2.toml`), the
+    `_1_0` keys in `expected.toml` for earlier readers; its CONFORMANCE row. No byte of an earlier vector changed.
