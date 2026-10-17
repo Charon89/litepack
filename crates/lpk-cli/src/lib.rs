@@ -508,14 +508,15 @@ fn report(
     let t = &s.timings;
     let _ = writeln!(
         err,
-        "{}: generation {}, {} entries, {} blocks, {} bytes (threads: {}, blocks in flight: {})",
+        "{}: generation {}, {} entries, {} blocks, {} bytes (threads: {}, blocks in flight: {}, I/O threads: {})",
         archive.display(),
         s.writer.generation,
         s.writer.entries,
         s.writer.blocks,
         s.writer.archive_len,
         s.threads,
-        s.blocks_in_flight
+        s.blocks_in_flight,
+        s.io_threads
     );
     if let Some(f) = s.fast {
         let _ = writeln!(
