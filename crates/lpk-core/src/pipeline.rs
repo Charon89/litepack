@@ -110,6 +110,15 @@ pub struct RunSummary {
     /// write thread only for an archive file (`run_file`, `append_file`). They mostly wait on
     /// I/O; 0, 1 or 2.
     pub io_threads: usize,
+    /// Threads hashing the chunks of a read-ahead segment, the feeding thread included: 1
+    /// with one block in flight, else up to [`lpk_format::writer::MAX_HASH_THREADS`]
+    /// (bounded by the blocks in flight), scoped to one segment at a time.
+    pub hash_threads: usize,
+}
+
+/// [`RunSummary::hash_threads`] for `blocks_in_flight`.
+fn hash_threads(blocks_in_flight: usize) -> usize {
+    blocks_in_flight.clamp(1, lpk_format::writer::MAX_HASH_THREADS)
 }
 
 /// The stages in order.
@@ -424,6 +433,7 @@ impl Pipeline {
                     threads,
                     blocks_in_flight: threads,
                     io_threads,
+                    hash_threads: hash_threads(threads),
                 })
             }
             (model, prepared) => {
@@ -620,6 +630,7 @@ impl Pipeline {
                     threads,
                     blocks_in_flight: in_flight,
                     io_threads,
+                    hash_threads: hash_threads(in_flight),
                 })
             }
         }
