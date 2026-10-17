@@ -292,24 +292,25 @@ mod tests {
                 let mut f = z.by_index(i).expect("entry");
                 let mut got = Vec::new();
                 f.read_to_end(&mut got).expect("read");
+                let entry = f.name().expect("name").into_owned();
                 let want = std::fs::read(
                     a.path()
                         .join("out")
-                        .join(if f.name().starts_with("govdocs/") {
+                        .join(if entry.starts_with("govdocs/") {
                             "office-pdf"
                         } else {
                             "logs-text"
                         })
-                        .join(if f.name().starts_with("govdocs/") {
+                        .join(if entry.starts_with("govdocs/") {
                             "govdocs"
                         } else {
                             "apache"
                         })
-                        .join(f.name().split_once('/').expect("slash").1),
+                        .join(entry.split_once('/').expect("slash").1),
                 )
                 .expect("source file");
-                assert_eq!(got, want, "{name}: {}", f.name());
-                names.push(f.name().to_string());
+                assert_eq!(got, want, "{name}: {entry}");
+                names.push(entry);
             }
             let mut sorted = names.clone();
             sorted.sort();
@@ -363,13 +364,13 @@ mod tests {
         assert_eq!(ar.len(), 2);
         let f = ar.by_index(0).expect("a");
         assert_eq!(
-            (f.name(), f.size(), f.compression()),
+            (f.name().expect("name").as_ref(), f.size(), f.compression()),
             ("a", 0, zip::CompressionMethod::Stored)
         );
         drop(f);
         let f = ar.by_index(1).expect("b");
         assert_eq!(
-            (f.name(), f.compression()),
+            (f.name().expect("name").as_ref(), f.compression()),
             ("b", zip::CompressionMethod::Deflated)
         );
     }

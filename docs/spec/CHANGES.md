@@ -96,6 +96,12 @@ order and early block close. No reader behaviour or vector byte changed.
 2026-10-04: revision 1.1 text clarified after the independent decoder's reading (fifteen points); no behaviour or
 byte changed.
 
+2026-10-16: the second reading of 2026-10-04 (E1-14d round 2), landed 2026-10-16; text only, no vector byte changed,
+no `version_minor` change. The recovery-list end rule in section 6 as in sections 13 and 15; the outcomes of a
+modified frame in section 14; lzma at the bound and `IsFinishedOK` after a marker only (a stated difference from
+LzmaSpec); `MissingKeySlot` before the key slot payload limit; the keyless walk's `BadFrameLocation` `frames`; Repair
+without the key; the index-sequence and section 11 sentences; CONFORMANCE items 3 and 8. No behaviour changed.
+
 ## 2026-10-16 — Specification revision of 2026-10-16: the Reed-Solomon code described normatively (E1-15)
 
 1. Section 13 gains "The code", which defines the recovery code without the library: the field GF(2^16) modulo
