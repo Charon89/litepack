@@ -1441,6 +1441,7 @@ dependencies = [
  "liblzma",
  "lpk-check",
  "lpk-format",
+ "lpk-procstat-sys",
  "preflate-rs",
  "same-file",
  "serde_json",

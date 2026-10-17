@@ -20,6 +20,7 @@ pub mod fast;
 pub mod fold;
 pub mod gate;
 pub mod ingest;
+pub mod memory;
 pub mod peel;
 pub mod pipeline;
 pub mod priors;
