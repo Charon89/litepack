@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 21:15 UTC (2026-10-17, 17:15 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 21:55 UTC (2026-10-17, 17:55 local on the measuring machine). A measurement is running: E2-22's incumbent baseline on `full` (`target/acceptance/e2-22-run-status.log`).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -50,7 +50,7 @@ was single-threaded then and is parallel since E2-4b.
    merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
    limits on tasks of this size and are resumed with a short step list.
 
-**Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16 and one for revision 1.3 added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
+**Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16, one for revision 1.3 and one for E2-17 added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
   (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
   consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
@@ -64,6 +64,10 @@ was single-threaded then and is parallel since E2-4b.
   primitive. The alternative folds the probe's MTF + zero-run + arithmetic coder into `bwt` itself for about 3.2% more
   on the text classes, but freezes that untuned coder in v1 for good. Say so before revision 1.3's text is final if
   the fold is wanted.
+- **E2-17's gate and corpus** (`docs/notes/e2-17-design.md` section 7): the same 1% margin is recommended for the
+  base64 and UTF-16 primitives. `small` holds base64 only in two certificate bundles and no UTF-16 text, so both
+  gates are expected to close; testing them on real mail, notebooks, data URIs or Windows UTF-16 text would need a
+  new corpus class, which is a corpus spec change and the owner's to approve. The probe runs on `small` regardless.
 - **E2-16's gate margin** (`docs/notes/e2-16-design.md` section 5): a new gate threshold, so the owner's. Recommended:
   open the PNG-filter revision only if the probe's per-stream saving on `photo-raw-png` is at least 1% of that
   class's `lpk/balanced` bytes. And for a closed gate: the "with" figure is the probe's committed prediction, the
