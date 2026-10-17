@@ -20,7 +20,9 @@
 
 use std::any::Any;
 use std::io::Read;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 /// Opens one file for the reader thread.
@@ -50,6 +52,30 @@ impl std::fmt::Debug for SegmentError {
         match self {
             SegmentError::Io(e) => write!(f, "Io({e:?})"),
             SegmentError::Panicked(_) => write!(f, "Panicked"),
+        }
+    }
+}
+
+/// Why [`Prefetch::next_file`] has no file.
+pub enum NextFileError<E> {
+    /// The file did not open (the reader has stopped).
+    Open(E),
+    /// Segments of an earlier file are still queued: the caller left a file
+    /// unfinished.
+    OutOfStep,
+    /// The reader has ended: past the last file, or after a failure.
+    Ended,
+    /// The reader thread panicked (joined); the payload, to re-raise.
+    Panicked(Box<dyn Any + Send>),
+}
+
+impl<E: std::fmt::Debug> std::fmt::Debug for NextFileError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NextFileError::Open(e) => write!(f, "Open({e:?})"),
+            NextFileError::OutOfStep => write!(f, "OutOfStep"),
+            NextFileError::Ended => write!(f, "Ended"),
+            NextFileError::Panicked(_) => write!(f, "Panicked"),
         }
     }
 }
@@ -92,6 +118,8 @@ pub struct Prefetch<E: Send + 'static> {
     rx: Option<Receiver<Msg<E>>>,
     back: Option<Sender<Vec<u8>>>,
     handle: Option<JoinHandle<()>>,
+    /// Read buffers the reader allocated so far.
+    allocated: Arc<AtomicUsize>,
     /// Tests only: every buffer given back is filled with this byte first.
     #[cfg(test)]
     poison: Option<u8>,
@@ -117,25 +145,23 @@ impl<E: Send + 'static> Prefetch<E> {
         let buffers = options.buffers.max(2);
         let (tx, rx) = mpsc::sync_channel::<Msg<E>>(buffers - 1);
         let (back, free) = mpsc::channel::<Vec<u8>>();
+        let allocated = Arc::new(AtomicUsize::new(0));
+        let a = allocated.clone();
         let handle = std::thread::Builder::new()
             .name("lpk-read".to_string())
-            .spawn(move || read_files(files, &tx, &free, segment, buffers))?;
+            .spawn(move || read_files(files, &tx, &free, segment, buffers, &a))?;
         Ok(Prefetch {
             rx: Some(rx),
             back: Some(back),
             handle: Some(handle),
+            allocated,
             #[cfg(test)]
             poison: None,
         })
     }
 
-    /// Wait for the next file: its segments, or the error opening it. A reader
-    /// that panicked is joined and its panic re-raised here.
-    ///
-    /// # Panics
-    /// When the reader thread panicked (its payload, re-raised), or when called
-    /// past the last file.
-    pub fn next_file(&mut self) -> Result<PrefetchedFile<'_, E>, E> {
+    /// Wait for the next file: its segments, or why there is none.
+    pub fn next_file(&mut self) -> Result<PrefetchedFile<'_, E>, NextFileError<E>> {
         match self.recv() {
             Ok(Msg::Opened(id)) => Ok(PrefetchedFile {
                 prefetch: self,
@@ -143,10 +169,10 @@ impl<E: Send + 'static> Prefetch<E> {
                 read: 0,
                 done: false,
             }),
-            Ok(Msg::OpenFailed(e)) => Err(e),
-            Ok(_) => panic!("read-ahead out of step: segments outside a file"),
-            Err(SegmentError::Panicked(p)) => std::panic::resume_unwind(p),
-            Err(SegmentError::Io(e)) => panic!("read-ahead ended early: {e}"),
+            Ok(Msg::OpenFailed(e)) => Err(NextFileError::Open(e)),
+            Ok(_) => Err(NextFileError::OutOfStep),
+            Err(SegmentError::Panicked(p)) => Err(NextFileError::Panicked(p)),
+            Err(SegmentError::Io(_)) => Err(NextFileError::Ended),
         }
     }
 
@@ -185,6 +211,12 @@ impl<E: Send + 'static> Prefetch<E> {
             // A reader that ended no longer needs it.
             let _ = back.send(buf);
         }
+    }
+
+    /// Read buffers the reader allocated so far (never more than
+    /// [`PrefetchOptions::buffers`]).
+    pub fn buffers_allocated(&self) -> usize {
+        self.allocated.load(Ordering::Relaxed)
     }
 
     /// Tests only: fill every buffer given back with `byte`.
@@ -272,9 +304,21 @@ fn read_files<E>(
     free: &Receiver<Vec<u8>>,
     segment: usize,
     buffers: usize,
+    allocated: &AtomicUsize,
 ) {
+    // Buffers allocated, and those handed out and not yet back: a returned
+    // buffer is taken only while one is out and only at full size, so no more
+    // than `buffers` ever exist, whatever the feeding side gives back.
     let mut made = 0usize;
+    let mut out = 0usize;
     let mut spare: Option<Vec<u8>> = None;
+    let take_back = |b: Vec<u8>, out: &mut usize| -> Option<Vec<u8>> {
+        if *out == 0 || b.capacity() < segment {
+            return None;
+        }
+        *out -= 1;
+        Some(b)
+    };
     for (id, open) in files {
         let mut input = match open() {
             Ok(r) => r,
@@ -290,20 +334,31 @@ fn read_files<E>(
         loop {
             // A buffer: one kept back, one returned, a new one while fewer
             // than `buffers` exist, else wait for one to come back.
-            let mut buf = match spare.take() {
-                Some(b) => b,
-                None => match free.try_recv() {
-                    Ok(b) => b,
+            let mut buf = loop {
+                if let Some(b) = spare.take() {
+                    break b;
+                }
+                match free.try_recv() {
+                    Ok(b) => {
+                        if let Some(b) = take_back(b, &mut out) {
+                            break b;
+                        }
+                    }
                     Err(TryRecvError::Empty) if made < buffers => {
                         made += 1;
-                        Vec::with_capacity(segment)
+                        allocated.fetch_add(1, Ordering::Relaxed);
+                        break Vec::with_capacity(segment);
                     }
                     Err(TryRecvError::Empty) => match free.recv() {
-                        Ok(b) => b,
+                        Ok(b) => {
+                            if let Some(b) = take_back(b, &mut out) {
+                                break b;
+                            }
+                        }
                         Err(_) => return,
                     },
                     Err(TryRecvError::Disconnected) => return,
-                },
+                }
             };
             buf.clear();
             let n = match (&mut input).take(segment as u64).read_to_end(&mut buf) {
@@ -321,6 +376,7 @@ fn read_files<E>(
             // A short read met the end (`read_to_end` stops only there or at
             // the segment's size).
             let last = n < segment;
+            out += 1;
             if tx.send(Msg::Data(buf, last)).is_err() {
                 return;
             }
@@ -389,7 +445,59 @@ mod tests {
         let mut p = Prefetch::spawn(list, PrefetchOptions::default()).unwrap();
         let mut f = p.next_file().unwrap();
         assert_eq!(collect(&mut f).unwrap(), vec![1; 10]);
-        assert_eq!(p.next_file().unwrap_err(), "gone");
+        assert!(matches!(p.next_file().unwrap_err(), NextFileError::Open(e) if e == "gone"));
+        // The reader has stopped: no file after the failure, and no panic.
+        assert!(matches!(p.next_file().unwrap_err(), NextFileError::Ended));
+    }
+
+    #[test]
+    fn a_file_left_unfinished_puts_the_next_call_out_of_step() {
+        let list = vec![(0, opener(vec![1; 10_000])), (1, opener(vec![2; 10]))];
+        let mut p = Prefetch::spawn(list, SMALL).unwrap();
+        let mut f = p.next_file().unwrap();
+        let (b, _) = f.next_segment().unwrap().unwrap();
+        f.give_back(b);
+        assert!(matches!(
+            p.next_file().unwrap_err(),
+            NextFileError::OutOfStep
+        ));
+    }
+
+    /// Files that end on a segment boundary (empty ones, exact multiples of the
+    /// segment) between longer ones: no more than `buffers` read buffers are
+    /// ever allocated, and every segment handed out has the full capacity (none
+    /// grew from a smaller buffer).
+    #[test]
+    fn files_ending_on_a_segment_boundary_add_no_buffer() {
+        let mut files: Vec<Vec<u8>> = Vec::new();
+        for i in 0..200u8 {
+            files.push(match i % 4 {
+                0 => Vec::new(),
+                1 => vec![i; 4096],
+                2 => vec![i; 3 * 4096],
+                _ => vec![i; 10_001],
+            });
+        }
+        let list = files
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i, opener(d.clone())))
+            .collect();
+        let mut p = Prefetch::spawn(list, SMALL).unwrap();
+        for want in &files {
+            let mut f = p.next_file().unwrap();
+            let mut got = Vec::new();
+            while let Some((b, _)) = f.next_segment().unwrap() {
+                assert!(b.capacity() >= SMALL.segment);
+                got.extend_from_slice(&b);
+                f.give_back(b);
+            }
+            // A caller that also gives back a buffer of its own: refused.
+            f.give_back(Vec::new());
+            assert_eq!(&got, want);
+        }
+        let made = p.buffers_allocated();
+        assert!(made <= SMALL.buffers, "{made} buffers allocated");
     }
 
     /// A reader that yields `ok` bytes of a pattern, then fails or panics; it
@@ -492,10 +600,10 @@ mod tests {
         // A panic while opening is re-raised by `next_file`.
         let open: OpenFn<String> = Box::new(|| panic!("open panics"));
         let mut p = Prefetch::spawn(vec![(0, open)], SMALL).unwrap();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = p.next_file();
-        }));
-        assert!(r.is_err());
+        assert!(matches!(
+            p.next_file().unwrap_err(),
+            NextFileError::Panicked(_)
+        ));
         assert!(p.handle.is_none());
     }
 

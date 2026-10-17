@@ -47,6 +47,13 @@ fn stored_classes_are_identical_at_one_thread_and_twenty_four() {
         }
         let same = runs[0].0 == runs[1].0 && runs[0].1.writer == runs[1].1.writer;
         println!("{class}: blake3 {}", blake3::hash(&runs[0].0).to_hex());
+        // Round 1's archives (the sequential writer before the pipeline) of the locked
+        // `small` corpus, byte for byte.
+        let want = match class {
+            "video" => "76c5b9a1e88dca34a47911a05a3ee7ce4e84ee8122b900dae94a07777c0de9fb",
+            _ => "964c82a6e7956ad21e20bc599ad1193143263377b2310a02070ca950c644196f",
+        };
+        assert_eq!(blake3::hash(&runs[0].0).to_hex().as_str(), want, "{class}");
         println!(
             "| {class} | {} | {:.3} | {:.3} | {} |",
             runs[0].1.writer.archive_len,

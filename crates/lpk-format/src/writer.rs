@@ -280,6 +280,12 @@ pub struct WriterOptions {
     /// times (`block_size` plus the encoded size) for the blocks in flight,
     /// plus the encoders' own working memory, one per block in flight; the
     /// block buffer pool and the read buffer, as [`Writer::new`] describes.
+    /// Threads: up to `encode_threads` encode jobs, plus a write thread when
+    /// [`Writer::with_write_thread`] was called and a reader thread when the
+    /// caller reads ahead ([`crate::prefetch`]); the two I/O threads mostly
+    /// wait on I/O and come on top of the encode jobs. LitePack's pipeline
+    /// starts them only above one block in flight, so one block in flight is
+    /// one thread doing everything.
     pub encode_threads: usize,
 }
 
@@ -306,12 +312,14 @@ impl<W: Write> Write for Tee<W> {
 
 impl<W: Write> Tee<W> {
     /// Write `buf` whole, by value (moved to the write thread when there is
-    /// one); it comes back here at once when written on this thread.
-    fn write_owned(&mut self, buf: Vec<u8>) -> std::io::Result<Option<Vec<u8>>> {
+    /// one). A block buffer (`back`) comes back for the pool: here at once when
+    /// written on this thread, else through the write thread; any other buffer
+    /// is dropped once written.
+    fn write_owned(&mut self, buf: Vec<u8>, back: bool) -> std::io::Result<Option<Vec<u8>>> {
         if let Some(s) = &mut self.spool {
             s.feed(&buf).map_err(std::io::Error::other)?;
         }
-        self.inner.write_owned(buf)
+        self.inner.write_owned(buf, back)
     }
 }
 
@@ -721,7 +729,7 @@ impl<W: Write> Writer<W> {
     /// encoding — `encode_threads` times (`block_size` plus the encoded size)
     /// — plus the encoders' own working memory, one encoder per block in
     /// flight; the block buffer pool: buffers of written blocks (plain or
-    /// encoded, up to `block_size` each, those under 1 MiB dropped) are kept,
+    /// encoded, those under 1 MiB or over `block_size` dropped) are kept,
     /// cleared, for the next pending blocks, at most `encode_threads` plus 3
     /// of them ([`WRITE_DEPTH`] plus 2: the pending block's, the frames queued
     /// for the write thread and the one it writes), and never more than were
@@ -1289,8 +1297,8 @@ impl<W: Write> Writer<W> {
         w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
         varint::write(w, payload_len)?;
         w.write_all(&head)?;
-        // Moved, not copied, to the write thread when there is one (and dropped once written).
-        w.write_owned(g.recovery)?;
+        // Moved, not copied, to the write thread when there is one; dropped once written.
+        w.write_owned(g.recovery, false)?;
         w.write_all(hasher.finalize().as_bytes())?;
         self.pos += at.len;
         self.seq += 1;
@@ -1339,9 +1347,8 @@ impl<W: Write> Writer<W> {
         w.write_all(&(kind as u16).to_le_bytes())?;
         w.write_all(&flags.bits().to_le_bytes())?;
         varint::write(w, payload.len() as u64)?;
-        if let Some(b) = w.write_owned(payload)? {
-            self.recycle(b);
-        }
+        // Not a block buffer (a table, the index, a sealed block): dropped once written.
+        w.write_owned(payload, false)?;
         self.out.write_all(&self.last_hash)?;
         self.pos += at.len;
         self.seq += 1;
@@ -1605,10 +1612,10 @@ impl<W: Write> Writer<W> {
     }
 
     /// Return `buf` to the pool (cleared): it becomes the pending block when that
-    /// holds nothing yet and is smaller, else a spare. Small buffers are dropped;
-    /// a full pool drops its smallest buffer.
+    /// holds nothing yet and is smaller, else a spare. Buffers under 1 MiB or
+    /// larger than a block are dropped; a full pool drops its smallest buffer.
     fn recycle(&mut self, mut buf: Vec<u8>) {
-        if buf.capacity() < RECYCLE_MIN {
+        if buf.capacity() < RECYCLE_MIN || buf.capacity() as u64 > self.options.block_size {
             return;
         }
         #[cfg(test)]
@@ -1747,7 +1754,7 @@ impl<W: Write> Writer<W> {
             w.write_all(&head)?;
             // The block buffer moves to the write thread, if any, and comes
             // back to the pool once written.
-            if let Some(b) = w.write_owned(encoded)? {
+            if let Some(b) = w.write_owned(encoded, true)? {
                 self.recycle(b);
             }
             self.out.write_all(&hash)?;
@@ -2488,6 +2495,8 @@ impl<W: Write> Writer<W> {
             };
             // The end is fed with the last bytes when the reader knew them to be
             // the last (as `chunk_stream` does after a short read), else alone.
+            // Only a buffer the reader handed out goes back to it.
+            let from_reader = seg.is_some();
             let (seg, eof) = seg.unwrap_or((Vec::new(), true));
             size += seg.len() as u64;
             let cuts = self.chunker.feed(&seg, eof);
@@ -2539,7 +2548,9 @@ impl<W: Write> Writer<W> {
                 carry.drain(..start);
                 carry.extend_from_slice(&seg);
             }
-            data.give_back(seg);
+            if from_reader {
+                data.give_back(seg);
+            }
             if eof {
                 break;
             }
@@ -2822,6 +2833,13 @@ impl<W: Write + Send + 'static> Writer<W> {
     pub fn with_write_thread(mut self) -> Self {
         self.out.inner.start_thread();
         self
+    }
+}
+
+impl<W: Write> Writer<W> {
+    /// True when a write thread writes the output ([`Writer::with_write_thread`]).
+    pub fn has_write_thread(&self) -> bool {
+        matches!(self.out.inner, Sink::Thread(_))
     }
 }
 

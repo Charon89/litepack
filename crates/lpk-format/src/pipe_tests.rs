@@ -195,12 +195,21 @@ fn the_pipelined_path_writes_the_sequential_paths_bytes() {
         assert!(sequential(c) == pipelined(c), "recovery, threads {threads}");
         let c = Case { sealed: true, ..c };
         assert!(sequential(c) == pipelined(c), "sealed, threads {threads}");
+        let c = Case { recovery: 0, ..c };
+        assert!(
+            sequential(c) == pipelined(c),
+            "sealed alone, threads {threads}"
+        );
     }
 }
 
 /// Every buffer returned to the block pool or to the reader is filled with a
 /// pattern first: a buffer handed out while still referenced would put the
-/// pattern into a frame.
+/// pattern into a frame. Ownership already rules that out (buffers move by
+/// value to jobs, the write thread and the reader, and come back through
+/// channels); what this can catch is a logic error reading stale bytes of a
+/// cleared buffer. The bound on buffers is tested apart
+/// (`files_ending_on_a_segment_boundary_keep_the_read_buffers_bounded`).
 #[test]
 fn recycled_buffers_are_never_reused_while_referenced() {
     for threads in [1usize, 4] {
@@ -424,28 +433,90 @@ fn a_reader_panic_is_re_raised_with_the_writer_failed() {
     assert!(out_dropped.load(Ordering::SeqCst));
 }
 
-/// The writer and the reader dropped mid-archive: the write queue full behind a
-/// slow output, the read queue full of unread segments. Both threads end and
-/// are joined; nothing deadlocks.
-#[test]
-fn dropping_mid_archive_with_both_queues_full_joins_every_thread() {
+/// The writer and the reader dropped mid-archive with both queues full: one
+/// encode thread (each block written as it closes) behind an output that
+/// takes a while per write, so the write queue holds `WRITE_DEPTH` frames plus
+/// the one being written; the read queue full of unread segments. Both drop
+/// orders; both threads end and are joined; nothing deadlocks.
+fn drop_with_full_queues(writer_first: bool) {
     let (mut reads, read_dropped) = faulty_reads(64 << 20, false);
-    let (out, out_dropped) = faulty(usize::MAX, false, 20);
-    let mut w = small_writer(out, 4);
-    let data = noise(7, 3 << 20);
-    w.add_file("a", EntryFlags::default(), 0, &mut &data[..])
-        .unwrap();
-    w.close_block().unwrap();
+    let (out, out_dropped) = faulty(usize::MAX, false, 50);
+    let mut w = small_writer(out, 1);
+    let mut i = 0u64;
+    while w.out.inner.queued() < WRITE_DEPTH + 1 {
+        let data = noise(300 + i, 1 << 20);
+        w.add_file(&format!("f{i}"), EntryFlags::default(), 0, &mut &data[..])
+            .unwrap();
+        i += 1;
+        assert!(i < 50, "the write queue never filled");
+    }
+    assert_eq!(w.out.inner.queued(), WRITE_DEPTH + 1);
     // One segment taken, the rest of the read queue left full.
     let mut f = reads.next_file().unwrap();
     let seg = crate::prefetch::Segments::next_segment(&mut f).unwrap();
     assert!(seg.is_some());
     let t = std::time::Instant::now();
-    drop(w);
-    drop(reads);
+    if writer_first {
+        drop(w);
+        drop(reads);
+    } else {
+        drop(reads);
+        drop(w);
+    }
     assert!(read_dropped.load(Ordering::SeqCst));
     assert!(out_dropped.load(Ordering::SeqCst));
     assert!(t.elapsed() < std::time::Duration::from_secs(30));
+}
+
+#[test]
+fn dropping_mid_archive_with_both_queues_full_joins_every_thread() {
+    drop_with_full_queues(true);
+    drop_with_full_queues(false);
+}
+
+/// Many files that end on a segment boundary (empty, exactly one segment, two)
+/// between longer ones, through the writer: the reader never allocates more
+/// than its buffers, and the archive is the sequential path's.
+#[test]
+fn files_ending_on_a_segment_boundary_keep_the_read_buffers_bounded() {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..300u64 {
+        let data = match i % 5 {
+            0 | 1 => Vec::new(),
+            2 => noise(i, SEGMENT),
+            3 => noise(i, 2 * SEGMENT),
+            _ => noise(i, 250_000),
+        };
+        files.push((format!("f{i:03}"), data));
+    }
+    let opts = PrefetchOptions {
+        segment: SEGMENT,
+        buffers: 3,
+    };
+    let mut reads = Prefetch::spawn(openers(&files), opts).unwrap();
+    let out = Shared::default();
+    let mut w = Writer::new(out.clone(), options(case(1)))
+        .unwrap()
+        .with_write_thread();
+    for (path, data) in &files {
+        let mut f = reads.next_file().unwrap();
+        w.add_file_segments(path, EntryFlags::default(), 0, &mut f, data.len() as u64)
+            .unwrap();
+    }
+    w.finish().unwrap();
+    assert!(
+        reads.buffers_allocated() <= opts.buffers,
+        "{}",
+        reads.buffers_allocated()
+    );
+    let mut want = Vec::new();
+    let mut w = Writer::new(&mut want, options(case(1))).unwrap();
+    for (path, data) in &files {
+        w.add_file(path, EntryFlags::default(), 0, &mut &data[..])
+            .unwrap();
+    }
+    w.finish().unwrap();
+    assert!(want == *out.0.lock().unwrap());
 }
 
 /// Threads the pipelined writer and reader start are all gone after a run:
