@@ -354,16 +354,24 @@ pub fn decode(
         };
         match sym {
             Symbol::Marker => {
-                // Rule 4: after the marker the range coder's code is 0; rule 5: no input follows;
-                // a marker before the bound in the last step is `truncated`.
-                if rc.code != 0 {
-                    return Err(lzerr("range coder end condition after the marker"));
-                }
-                if rc.pos != input.len() {
-                    return Err(lzerr("trailing input"));
-                }
+                // Rule 5: in the last step a marker before the bound is `truncated`, whatever
+                // follows it (input after it, or an end condition that fails).
                 if last && !at_bound {
                     return Err(lzerr("truncated"));
+                }
+                // Rule 4: after the marker the range coder's code is 0. In the last step with the
+                // marker at the bound a failing end condition is `trailing input` (rule 5); in a
+                // step that is not the last the reason is not normative.
+                if rc.code != 0 {
+                    return Err(lzerr(if last {
+                        "trailing input"
+                    } else {
+                        "range coder end condition after the marker"
+                    }));
+                }
+                // Input after the marker, wherever it comes, is `trailing input`.
+                if rc.pos != input.len() {
+                    return Err(lzerr("trailing input"));
                 }
                 return Ok(out);
             }
@@ -493,6 +501,57 @@ mod tests {
             e.class == "BlockLengthMismatch" || e.detail == "lzma: trailing input",
             "{e:?}"
         );
+    }
+
+    /// Rules 4 and 5 (round 2 text): the end condition failing after the marker, and input after
+    /// a marker, in each position.
+    #[test]
+    fn marker_end_condition_and_input_after_it() {
+        let plain = plain();
+        let (enc, dict) = marked_stream(&plain);
+        let n = plain.len() as u64;
+        // The last byte changed: the marker still decodes, with a code value that is not 0.
+        let mut bad = enc.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            decode(&bad, dict, P, n + 1, false).unwrap_err().detail,
+            "lzma: range coder end condition after the marker",
+            "not the last step: a reason that is not normative"
+        );
+        // Last step, marker at the bound: `trailing input`.
+        assert_eq!(
+            decode(&bad, dict, P, n, true).unwrap_err().detail,
+            "lzma: trailing input"
+        );
+        // Last step, marker before the bound: `truncated`, whatever follows it.
+        assert_eq!(
+            decode(&bad, dict, P, n + 1, true).unwrap_err().detail,
+            "lzma: truncated"
+        );
+        let mut extra = enc.clone();
+        extra.push(0);
+        assert_eq!(
+            decode(&extra, dict, P, n + 1, true).unwrap_err().detail,
+            "lzma: truncated"
+        );
+        // Not the last step: input after a marker before the bound is `trailing input`.
+        assert_eq!(
+            decode(&extra, dict, P, n + 1, false).unwrap_err().detail,
+            "lzma: trailing input"
+        );
+    }
+
+    /// Rule 3: the dictionary size is at least 4096, so a distance up to 4096 is never refused for
+    /// the dictionary; a larger one beyond a small `dict_size` is.
+    #[test]
+    fn dictionary_floor_of_4096() {
+        // A literal block of 3000 bytes, then a repeat of it: distances up to 3000.
+        let mut plain: Vec<u8> = (0..3000u32).map(|i| (i * 31 % 253) as u8).collect();
+        plain.extend_from_within(..);
+        let (enc, _) = marked_stream(&plain);
+        let n = plain.len() as u64;
+        assert_eq!(decode(&enc, 1, P, n, true).unwrap(), plain);
+        assert_eq!(decode(&enc, 4096, P, n, true).unwrap(), plain);
     }
 
     #[test]
