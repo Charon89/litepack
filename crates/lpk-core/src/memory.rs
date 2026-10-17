@@ -207,8 +207,10 @@ pub enum EncoderMemory {
 }
 
 /// The Deflate peel's working set (design 3.2; it runs on the feeding thread, one file at a
-/// time, so the whole set is a `fixed` term, never per block). It holds the file read whole (up
-/// to `max_file`) and, until the file gate decides, the kept streams' encodings, each smaller
+/// time, so the whole set is a `fixed` term, never per block). The pipeline counts it only when
+/// some input file is of a class the stage examines, with `max_file` the largest such file
+/// within the stage's cap; a run without such files plans as without the stage. It holds the file
+/// read whole (up to `max_file`) and, until the file gate decides, the kept streams' encodings, each smaller
 /// than its stream, together with one multi-span stream's contiguous copy, all within one more
 /// `max_file`; then the larger of the analysis and recreation of one stream (bounded by the
 /// decoder's memory term for a `plain_limit` text with no corrections: the recreation the

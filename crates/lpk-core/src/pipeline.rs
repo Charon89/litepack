@@ -629,13 +629,22 @@ impl Pipeline {
                     avg_chunk,
                     encoder: enc,
                     peel_max_file: if peel.is_empty() { None } else { peel_cap },
+                    // The Deflate stage's set counts only when some file is of a class it
+                    // examines (and within its cap), sized to the largest such file.
                     deflate: match (&deflate, &part) {
-                        (Some(d), Some(p)) => Some(DeflateMemory {
-                            max_file: d.max_file,
-                            plain_limit: d.plain_limit(),
-                            encoder: p.memory(),
-                            records: d.records_cap,
-                        }),
+                        (Some(d), Some(p)) => clusters
+                            .iter()
+                            .filter(|c| d.applies_to(c.class))
+                            .flat_map(|c| c.inputs.iter())
+                            .map(|i| i.len)
+                            .filter(|&l| l > 0 && l <= d.max_file)
+                            .max()
+                            .map(|largest| DeflateMemory {
+                                max_file: largest,
+                                plain_limit: d.plain_limit(),
+                                encoder: p.memory(),
+                                records: d.records_cap,
+                            }),
                         _ => None,
                     },
                     entries: files,

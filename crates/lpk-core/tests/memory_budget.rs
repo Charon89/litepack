@@ -342,3 +342,57 @@ fn a_peeled_archive_declares_the_images_allowance() {
     );
     assert!(e.threads_hint >= 1);
 }
+
+/// The Deflate stage's memory term counts only when a file of a class it examines is present
+/// (design 3.2, task D fix round 1): a text-only tree plans as without the stage, a tree with a
+/// gzip member plans the stage's term, sized to that file.
+#[test]
+fn the_deflate_term_counts_only_with_an_examined_file() {
+    let plan = |dir: &Path| {
+        let mut p = Pipeline::balanced(BalancedOptions {
+            threads: Some(24),
+            ..BalancedOptions::default()
+        });
+        p.seal.memory = Some(lpk_core::memory::BALANCED_CEILING);
+        let off = {
+            let mut q = Pipeline::balanced(BalancedOptions {
+                threads: Some(24),
+                ..BalancedOptions::default()
+            });
+            q.seal.memory = Some(lpk_core::memory::BALANCED_CEILING);
+            q.deflate = None;
+            run(q, dir).unwrap().1
+        };
+        (run(p, dir).unwrap().1, off)
+    };
+    let text = tempfile::tempdir().unwrap();
+    std::fs::write(text.path().join("a.txt"), prose(1, 200_000)).unwrap();
+    let (on, off) = plan(text.path());
+    println!(
+        "text only: blocks in flight {} (peel off {}), fixed_pipelined {} (peel off {})",
+        on.blocks_in_flight,
+        off.blocks_in_flight,
+        on.memory.fixed_pipelined,
+        off.memory.fixed_pipelined
+    );
+    assert_eq!(on.memory, off.memory);
+    let gz = tempfile::tempdir().unwrap();
+    std::fs::write(gz.path().join("a.txt"), prose(1, 200_000)).unwrap();
+    std::fs::write(
+        gz.path().join("n.gz"),
+        std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deflate/notes.txt.gz"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (on, off) = plan(gz.path());
+    println!(
+        "with a gzip member: blocks in flight {} (peel off {}), fixed_pipelined {} (peel off {})",
+        on.blocks_in_flight,
+        off.blocks_in_flight,
+        on.memory.fixed_pipelined,
+        off.memory.fixed_pipelined
+    );
+    assert!(on.memory.fixed_sequential > off.memory.fixed_sequential);
+}
