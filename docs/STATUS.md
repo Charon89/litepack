@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 03:00 UTC (2026-10-16, 23:00 local on the measuring machine). No measurement is running; two branches are under review (below).
+Last updated: 2026-10-17, about 03:26 UTC (2026-10-16, 23:26 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -78,12 +78,9 @@ was single-threaded then and is parallel since E2-4b.
   `docs/notes/e2-10-task-c-brief.md`), then one PR; then tasks D and E (`docs/notes/e2-10-task-d-brief.md`,
   `-task-e-brief.md`) in parallel. C1 extended task A's `input_bound` hook with the block's expected length and
   whether the step is last (check 3 needs them); C2's text states it.
-- `task/e2-20-memory` (pushed when reviewed): E2-20 built (per-tier budgets, blocks in flight from the budget, the
-  envelope from what blocks declare, `--memory` on `a|append|x|t`, the acceptance test passing) and under read-only
-  review. Open point: at its default settings Balanced now runs one block in flight under the 4 GiB ceiling (each job
-  holds both trial candidates' contexts), which gives back E2-4b's Balanced speedup; the review is asked whether
-  dropping the losing candidate's context after the trial is a safe fix. After merge: the runner's peak-memory rows on
-  `small` and the large classes of `full` are the acceptance evidence.
+- E2-20's code is merged (D-67); its acceptance rows are next: on an idle machine, the `lpk` tool on every class of
+  `small` and on `vm-image`, `office-pdf` and `software-installed` of `full` at 24 threads, each row's peak memory
+  within its tier's ceiling (store 1 GiB, Fast 2 GiB, Balanced 4 GiB); then tick E2-20.
 
 ## How to resume
 
