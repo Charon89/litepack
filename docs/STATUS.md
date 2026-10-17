@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 05:25 UTC (2026-10-17, 01:25 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 08:15 UTC (2026-10-17, 04:15 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -71,15 +71,9 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- Task C of E2-10/11 (revision 1.2, D-68) is merged (PR #64). In flight:
-  - `task/e2-10-pipeline` — task D (the Deflate peel in the pipeline), implementer running.
-  - `task/e2-10-check` — task E with the settlement of its text gaps (`task/e2-10-text` merged into it): PR open.
-    The gate passed (D-68 (7)); when CI is green, fast-forward `main`, then tighten task D's corpus test to require
-    `lpk-check` to decode the Deflate blocks.
-  - Task D's review (2026-10-17): REQUEST CHANGES for the tick only (the 1-vs-24-thread corpus identity on
-    office-pdf and photo-raw-png is missing), should-fix items (records in the memory model, a per-file work budget,
-    the Deflate term only when examined classes are present, an exact pre-encode gate, a bounded read). Fix round
-    next, after task E lands.
+- E2-10/11: tasks A, B, C (revision 1.2, D-68) and E (the independence gate, passed; revision 1.2 final) are
+  merged; task D (the Deflate peel in the pipeline, D-69) merges with this PR and ticks E2-11 (every container of
+  `small` round-trips, through `lpk-check` too). E2-10 waits for its rows (below).
 - E2-20 is done (2026-10-17): round 2 merged (PR #66), its rows measured on `main` at `205c2ae`
   (`bench/results/2026-10-17-megatron-7`, `-8`; report `bench/reports/phase1-2026-10-17-memory.md`), every
   compress and extract peak within its tier's ceiling. `target/acceptance/e2-20b-e2-10-run.sh` is kept for task
