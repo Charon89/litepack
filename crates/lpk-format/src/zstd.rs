@@ -203,6 +203,15 @@ impl PrimitiveDecoder for ZstdDecoder {
             loop {
                 let done = dec.bytes_read_from_source();
                 if let Err(e) = dec.decode_blocks(&mut src, BlockDecodingStrategy::UptoBlocks(1)) {
+                    // RFC 8878's Content_Checksum belongs to no block: ruzstd reads it in the call
+                    // that decoded the last block, so when that read fails the last block is
+                    // complete, and its end is what ruzstd has counted (spec section 8, zstd rule 7).
+                    let (done, last_header) =
+                        if matches!(e, FrameDecoderError::FailedToReadChecksum(_)) {
+                            (dec.bytes_read_from_source(), Some(done))
+                        } else {
+                            (done, last_header)
+                        };
                     let e = map_frame_error(e);
                     if matches!(e, FormatError::ZstdError { .. }) {
                         // Spec section 8, zstd rule 7: the output of the complete blocks before
