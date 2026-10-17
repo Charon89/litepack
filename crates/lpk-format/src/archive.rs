@@ -214,7 +214,7 @@ fn read_frame_at_impl<R: Read + Seek>(
         });
     }
     let mut rest = (&kind[..]).chain(&mut limited);
-    match Frame::read(&mut rest, limits) {
+    match Frame::read_located(&mut rest, limits, at.len) {
         Ok(Some(ReadFrame::Known(f))) if f.encoded_len() == at.len => Ok(f),
         Ok(_) => Err(bad),
         Err(FormatError::Truncated { .. }) => Err(bad),
