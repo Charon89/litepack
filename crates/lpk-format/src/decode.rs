@@ -102,6 +102,22 @@ pub trait PrimitiveDecoder: Send + Sync {
         let _ = ctx;
         self.decode_step(params, input, expected_len, last, limits)
     }
+
+    /// The most input this step accepts, asked by the reader before it runs
+    /// the step before this one: `Some(n)` makes `n` the output bound of the
+    /// previous step instead of the envelope's `max_block_plain`; `None` (the
+    /// default) keeps `max_block_plain`. Never asked for a graph's first step.
+    /// An error here is the block's error and the previous step does not run,
+    /// so a reconstruction decoder can check its record here first.
+    fn input_bound(
+        &self,
+        params: &[u8],
+        limits: &Resources,
+        ctx: &mut dyn DecodeContext,
+    ) -> Result<Option<u64>, FormatError> {
+        let _ = (params, limits, ctx);
+        Ok(None)
+    }
 }
 
 /// The identity decoder of `store`.
@@ -250,9 +266,11 @@ impl Registry {
 /// step's params must validate (`BadParams`), `plain_len` must be at most
 /// `limits.max_block_plain` (`PayloadTooLarge`), `encoded.len()` must equal
 /// `encoded_len` (`BlockLengthMismatch`), and every step's primitive must be
-/// implemented (`UnimplementedPrimitive`). Then the steps run in order: an
-/// intermediate output larger than `limits.max_block_plain` is
-/// `PayloadTooLarge`; the last step must produce exactly `plain_len`
+/// implemented (`UnimplementedPrimitive`). Then the steps run in order: before
+/// a step that is not the last runs, the next step's decoder is asked for its
+/// [`PrimitiveDecoder::input_bound`] (an error there is the block's error); an
+/// intermediate output larger than that bound (`limits.max_block_plain` when
+/// the decoder gives none) is `PayloadTooLarge`; the last step must produce exactly `plain_len`
 /// (`BlockLengthMismatch`, also when the decoder reports too much output).
 pub fn decode_block(
     registry: &Registry,
@@ -304,7 +322,13 @@ pub fn decode_block_in(
         let expected = if i == last {
             header.plain_len
         } else {
-            limits.max_block_plain
+            // The next step may bound its input, and so this step's output,
+            // by something other than `max_block_plain`.
+            let next = &steps[i + 1];
+            registry
+                .decoder(next.primitive)
+                .input_bound(&next.params, limits, ctx)?
+                .unwrap_or(limits.max_block_plain)
         };
         let out = match registry.decoder(step.primitive).decode_in(
             &step.params,
@@ -324,11 +348,8 @@ pub fn decode_block_in(
             if len != header.plain_len {
                 return Err(FormatError::BlockLengthMismatch { block });
             }
-        } else if len > limits.max_block_plain {
-            return Err(FormatError::PayloadTooLarge {
-                len,
-                max: limits.max_block_plain,
-            });
+        } else if len > expected {
+            return Err(FormatError::PayloadTooLarge { len, max: expected });
         }
         data = std::borrow::Cow::Owned(out);
     }
@@ -545,6 +566,115 @@ mod tests {
             FormatError::UnimplementedPrimitive { id: 7 }
         ));
         assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    /// Gives `bound` as its input bound (or the hook error when `bound` is
+    /// `Err`), and returns the first `expected_len` bytes of its input.
+    struct Bounded(Result<Option<u64>, ()>);
+    impl PrimitiveDecoder for Bounded {
+        fn decode(
+            &self,
+            _: &[u8],
+            input: &[u8],
+            expected_len: u64,
+            _: &Resources,
+        ) -> Result<Vec<u8>, FormatError> {
+            let n = usize::try_from(expected_len).unwrap().min(input.len());
+            Ok(input[..n].to_vec())
+        }
+
+        fn input_bound(
+            &self,
+            _: &[u8],
+            _: &Resources,
+            _: &mut dyn DecodeContext,
+        ) -> Result<Option<u64>, FormatError> {
+            self.0.map_err(|()| FormatError::BadRecord {
+                record: 5,
+                reason: "hook",
+            })
+        }
+    }
+
+    /// Returns `n` bytes and records that it ran.
+    struct OverFlag(usize, Arc<AtomicBool>);
+    impl PrimitiveDecoder for OverFlag {
+        fn decode(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: u64,
+            _: &Resources,
+        ) -> Result<Vec<u8>, FormatError> {
+            self.1.store(true, Ordering::SeqCst);
+            Ok(vec![7; self.0])
+        }
+    }
+
+    fn bounded_run(bound: Result<Option<u64>, ()>) -> (Result<Vec<u8>, FormatError>, bool) {
+        let small = Resources {
+            max_block_plain: 4,
+            ..Resources::default()
+        };
+        let ran = Arc::new(AtomicBool::new(false));
+        let mut r = Registry::v1();
+        r.register(PrimitiveId::BcjX86, Box::new(OverFlag(9, ran.clone())));
+        r.register(PrimitiveId::BcjArm64, Box::new(Bounded(bound)));
+        let h = header(
+            vec![step(PrimitiveId::BcjX86), step(PrimitiveId::BcjArm64)],
+            2,
+            2,
+        );
+        let out = decode_block(&r, &h, 0, b"ab", &small);
+        (out, ran.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn input_bound_replaces_max_block_plain() {
+        // The first step's output (9 bytes) exceeds `max_block_plain` (4):
+        // a bound that allows it decodes ...
+        let (out, ran) = bounded_run(Ok(Some(9)));
+        assert_eq!(out.unwrap(), vec![7, 7]);
+        assert!(ran);
+        let (out, _) = bounded_run(Ok(Some(100)));
+        assert_eq!(out.unwrap(), vec![7, 7]);
+        // ... one that does not, and no bound at all, are PayloadTooLarge.
+        let (out, _) = bounded_run(Ok(Some(8)));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::PayloadTooLarge { len: 9, max: 8 }
+        ));
+        let (out, _) = bounded_run(Ok(None));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::PayloadTooLarge { len: 9, max: 4 }
+        ));
+    }
+
+    #[test]
+    fn input_bound_error_is_the_block_error() {
+        let (out, ran) = bounded_run(Err(()));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::BadRecord {
+                record: 5,
+                reason: "hook"
+            }
+        ));
+        // The step before the hook never ran.
+        assert!(!ran);
+    }
+
+    #[test]
+    fn input_bound_of_a_first_step_is_never_asked() {
+        // A bounded decoder as the only step: its hook error is not raised.
+        let mut r = Registry::v1();
+        r.register(PrimitiveId::BcjArm64, Box::new(Bounded(Err(()))));
+        let h = header(vec![step(PrimitiveId::BcjArm64)], 2, 2);
+        assert_eq!(
+            decode_block(&r, &h, 0, b"ab", &Resources::default()).unwrap(),
+            b"ab"
+        );
     }
 
     #[test]
