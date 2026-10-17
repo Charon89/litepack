@@ -545,13 +545,23 @@ mod tests {
     /// the dictionary; a larger one beyond a small `dict_size` is.
     #[test]
     fn dictionary_floor_of_4096() {
-        // A literal block of 3000 bytes, then a repeat of it: distances up to 3000.
-        let mut plain: Vec<u8> = (0..3000u32).map(|i| (i * 31 % 253) as u8).collect();
-        plain.extend_from_within(..);
-        let (enc, _) = marked_stream(&plain);
-        let n = plain.len() as u64;
-        assert_eq!(decode(&enc, 1, P, n, true).unwrap(), plain);
-        assert_eq!(decode(&enc, 4096, P, n, true).unwrap(), plain);
+        // Raw LZMA1 streams written by xz 5.8 (`xz --format=raw --lzma1=dict=4KiB,lc=3,lp=0,pb=2`,
+        // `dict=8KiB` for the second): N pseudo-random bytes, then a repeat of their first 1500,
+        // so the stream holds matches at distance N. `near`: N = 3000; `far`: N = 5000.
+        let near = include_bytes!("../tests/fixtures/near.lzma");
+        let far = include_bytes!("../tests/fixtures/far.lzma");
+        let shape = |out: &[u8], n: usize| out.len() == n + 1500 && out[n..] == out[..1500];
+        // A stored dict_size of 1000 is raised to 4096: distance 3000 is accepted.
+        let out = decode(near, 1000, P, 4500, true).unwrap();
+        assert!(shape(&out, 3000));
+        assert_eq!(decode(near, 1, P, 4500, true).unwrap(), out);
+        // Distance 5000 is beyond 4096: refused under a stored 1000 (or 4096), accepted with 8192.
+        for d in [1000, 4096] {
+            let e = decode(far, d, P, 6500, true).unwrap_err();
+            assert_eq!(e.class, "LzmaError", "{e:?}");
+            assert_eq!(e.detail, "lzma: match distance beyond dict_size");
+        }
+        assert!(shape(&decode(far, 8192, P, 6500, true).unwrap(), 5000));
     }
 
     #[test]
