@@ -1371,28 +1371,33 @@ mod tests {
 
     /// The probe's counts for the synthetic files, recorded from the probe code before the walker
     /// moved to `lpk-core` (`lpk_core::peel::deflate`); the inputs are also `lpk-core`'s fixtures.
-    const GOLDEN: [(&str, &[u8], &str); 5] = [
+    const GOLDEN: [(&str, &str, &[u8], &str); 5] = [
         (
+            "zip",
             "zip",
             include_bytes!("../../../lpk-core/tests/fixtures/deflate/zip.zip"),
             "kind=zip found=2 reconstructed=2 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=1525 reconstructed_deflate=1525 skipped_deflate=0 failed_deflate=0 plain=12000 corrections=48 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 2, deflate_bytes: 1525, plain_bytes: 12000, correction_bytes: 48 }} overhead={\"1_to_5_pct\": Group { streams: 2, deflate_bytes: 1525, plain_bytes: 12000, correction_bytes: 48 }} replaced=Some(\"12296 527a2dfd1ed0c0c06e5e621c242a286d857fa3de02096d5abe8826de6b014007\")",
         ),
         (
             "png",
+            "png",
             include_bytes!("../../../lpk-core/tests/fixtures/deflate/png.png"),
             "kind=png found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=463 reconstructed_deflate=463 skipped_deflate=0 failed_deflate=0 plain=4640 corrections=49 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 463, plain_bytes: 4640, correction_bytes: 49 }} overhead={\"10_to_25_pct\": Group { streams: 1, deflate_bytes: 463, plain_bytes: 4640, correction_bytes: 49 }} replaced=Some(\"4754 28fbea47ecff8ce408dd920ef2908dd44fe947d8644a490d107766efd00dac7e\")",
         ),
         (
             "gzip",
+            "gz",
             include_bytes!("../../../lpk-core/tests/fixtures/deflate/gzip.gz"),
             "kind=gzip found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=3236 reconstructed_deflate=3236 skipped_deflate=0 failed_deflate=0 plain=30000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 3236, plain_bytes: 30000, correction_bytes: 24 }} overhead={\"under_1_pct\": Group { streams: 1, deflate_bytes: 3236, plain_bytes: 30000, correction_bytes: 24 }} replaced=Some(\"30018 53b01ce9e19b7fdf6cad6bec488dd5d05077c464a587f800f893da34e75457c8\")",
         ),
         (
             "pdf",
+            "pdf",
             include_bytes!("../../../lpk-core/tests/fixtures/deflate/pdf.pdf"),
             "kind=pdf found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=2205 reconstructed_deflate=2205 skipped_deflate=0 failed_deflate=0 plain=20000 corrections=38 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 2205, plain_bytes: 20000, correction_bytes: 38 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 2205, plain_bytes: 20000, correction_bytes: 38 }} replaced=Some(\"20117 c659bda7d83ea7b9e5cfc91c629d58a24b54b8b3539a7b72b3ca4c1c8d202d16\")",
         ),
         (
+            "bin",
             "bin",
             include_bytes!("../../../lpk-core/tests/fixtures/deflate/bin.bin"),
             "kind=other found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=3223 reconstructed_deflate=3223 skipped_deflate=0 failed_deflate=0 plain=30000 corrections=32 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 3223, plain_bytes: 30000, correction_bytes: 32 }} overhead={\"under_1_pct\": Group { streams: 1, deflate_bytes: 3223, plain_bytes: 30000, correction_bytes: 32 }} replaced=Some(\"34032 a48039e84157720e0c6a2908ae3baba5640896f977d367f25d5c5c51ce812491\")",
@@ -1401,14 +1406,9 @@ mod tests {
 
     #[test]
     fn golden_counts_of_synthetic_files_are_unchanged() {
-        let inputs = golden_inputs();
-        assert_eq!(inputs.len(), GOLDEN.len());
-        for ((name, ext, bytes), (g_name, fixture, want)) in inputs.iter().zip(GOLDEN) {
-            assert_eq!(*name, g_name);
-            assert!(
-                bytes == fixture,
-                "{name}: the generated input differs from the fixture"
-            );
+        // The committed fixture bytes are the inputs: regenerating them depends on the zlib build
+        // (the system zlib on Linux compresses differently from the bundled one).
+        for (name, ext, bytes, want) in GOLDEN {
             let r = process_file(bytes, ext, &limits());
             assert_eq!(golden_snapshot(&r), want, "{name}");
         }
@@ -1465,32 +1465,45 @@ mod tests {
         b
     }
 
-    /// The non-success golden cases, with the limits each runs under.
-    fn golden_troubled() -> Vec<(&'static str, &'static str, Vec<u8>, Limits)> {
-        vec![
-            (
-                "troubled",
-                "zip",
-                troubled_zip(),
-                Limits {
-                    plain_text_limit: 10_000,
-                    file_plain_budget: 5000,
-                },
-            ),
-            ("troubled-scan", "bin", troubled_scan(), Limits::standard()),
-        ]
+    /// The limits the non-success golden cases run under.
+    fn troubled_limits(name: &str) -> Limits {
+        match name {
+            "troubled" => Limits {
+                plain_text_limit: 10_000,
+                file_plain_budget: 5000,
+            },
+            _ => Limits::standard(),
+        }
+    }
+
+    /// Rewrite the golden fixtures from the generators (the recorded counts then need recording
+    /// again from the probe code they are meant to pin).
+    #[test]
+    #[ignore = "rewrites the fixtures; run on purpose"]
+    fn rewrite_the_golden_fixtures() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../lpk-core/tests/fixtures/deflate");
+        let troubled = [
+            ("troubled", "zip", troubled_zip()),
+            ("troubled-scan", "bin", troubled_scan()),
+        ];
+        for (name, ext, bytes) in golden_inputs().into_iter().chain(troubled) {
+            std::fs::write(dir.join(format!("{name}.{ext}")), bytes).expect("write");
+        }
     }
 
     /// The non-success cases' counts, recorded by running this test code on a scratch checkout of
     /// 8423a14 (the probe before the walker moved).
-    const GOLDEN_TROUBLED: [(&str, &[u8], &str); 2] = [
+    const GOLDEN_TROUBLED: [(&str, &str, &[u8], &str); 2] = [
         (
             "troubled",
+            "zip",
             include_bytes!("../../../lpk-core/tests/fixtures/deflate/troubled.zip"),
             "kind=zip found=4 reconstructed=1 skipped=2 failed={\"InvalidDeflate\": 1} refusals=1 false_hits=0 walker_panics=0 found_deflate=3380 reconstructed_deflate=652 skipped_deflate=2664 failed_deflate=64 plain=5000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 652, plain_bytes: 5000, correction_bytes: 24 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 652, plain_bytes: 5000, correction_bytes: 24 }} replaced=Some(\"8742 fdf04005632224e8a8de4e5cbc59018f7271688007368f57541ff83401e008f4\")",
         ),
         (
             "troubled-scan",
+            "bin",
             include_bytes!("../../../lpk-core/tests/fixtures/deflate/troubled-scan.bin"),
             "kind=other found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=2 walker_panics=0 found_deflate=762 reconstructed_deflate=762 skipped_deflate=0 failed_deflate=0 plain=6000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 762, plain_bytes: 6000, correction_bytes: 24 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 762, plain_bytes: 6000, correction_bytes: 24 }} replaced=Some(\"7106 50bcf0f8bfb965abc33116b0e77d559bddcc238ddd279787e046dece6fa9d30c\")",
         ),
@@ -1498,15 +1511,8 @@ mod tests {
 
     #[test]
     fn golden_counts_of_the_non_success_paths_are_unchanged() {
-        let inputs = golden_troubled();
-        assert_eq!(inputs.len(), GOLDEN_TROUBLED.len());
-        for ((name, ext, bytes, l), (g_name, fixture, want)) in inputs.iter().zip(GOLDEN_TROUBLED) {
-            assert_eq!(*name, g_name);
-            assert!(
-                bytes == fixture,
-                "{name}: the generated input differs from the fixture"
-            );
-            let r = process_file(bytes, ext, l);
+        for (name, ext, bytes, want) in GOLDEN_TROUBLED {
+            let r = process_file(bytes, ext, &troubled_limits(name));
             assert_eq!(golden_snapshot(&r), want, "{name}");
         }
     }
