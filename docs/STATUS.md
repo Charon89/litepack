@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 02:21 UTC (2026-10-16, 22:21 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 03:00 UTC (2026-10-16, 23:00 local on the measuring machine). No measurement is running; two branches are under review (below).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -30,18 +30,12 @@ was single-threaded then and is parallel since E2-4b.
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Next: **E2-18's rows after round 3.** Round 3 step (a) is merged (D-65: the chunk hashes on up to four threads,
-   byte-identical). On an idle machine — no build, no agent running — build release on `main` and launch
-   `target/acceptance/e2-18-run.sh` detached (status in `target/acceptance/e2-18-run-status.log`); report, commit the
-   two directories and a report, and tick E2-18 if `lpk/fast` reaches 80% of `store/store` on `full`'s `video`
-   (D-27); otherwise step (b) of `docs/notes/e2-18-round-3-brief.md` (the exactly resynchronised parallel cut).
-   In parallel: **E2-10/11** from `docs/notes/e2-10-11-design.md` — task B (the walker moved into `lpk-core`, D-64)
-   and task A (the `lpk-format` plumbing: the input-bound hook, whose contract task C's decoder must honour by
-   checking the bound against the envelope and the reader's limits before returning it; the records cache;
-   multi-span given blocks, deduplicated all or nothing; `part_known`) are merged; next is task C, the revision
-   (spec, decoder, vector, fuzz targets), then D (the pipeline) and E (`lpk-check` from the text) in parallel —
-   briefs to write from the design's section 5 (C needs the owner's answer on hostile records only before final). The design's owner question (a patched `preflate-rs` for hostile records) is under "Open
-   for the owner".
+2. Next: **E2-10/11 task C, the revision 1.2** (spec, the `deflate-reconstruct` decoder, the vector, fuzz targets,
+   and the patched `preflate-rs` of D-66), from `docs/notes/e2-10-task-c-brief.md`; then tasks D (the pipeline) and E
+   (`lpk-check` from the text) in parallel. E2-18 is done (G3 met on `full`'s `video`, D-61/D-63/D-65).
+   Already merged for E2-10/11: task B (the walker in `lpk-core`, D-64) and task A (the `lpk-format` plumbing: the
+   input-bound hook — task C's decoder must check the bound against the envelope and the reader's limits before
+   returning it — the records cache, multi-span given blocks deduplicated all or nothing, `part_known`).
 3. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, and the blocks-in-flight bound,
    D-60, are the first inputs; the Balanced cap of four in flight is provisional until then), then the
    revision-gated peels E2-10/11 (Deflate and containers — the largest remaining size win on office, PDF and
@@ -57,14 +51,7 @@ was single-threaded then and is parallel since E2-4b.
    merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
    limits on tasks of this size and are resumed with a short step list.
 
-**Open for the owner (three asked on 2026-10-04, one on 2026-10-16; all unanswered):**
-- **Hostile Deflate records (E2-10, before task C lands).** `preflate-rs` 0.7.6's recreation has no output
-  limit, so a crafted correction record could push memory and time far past what an archive declares. Recommended:
-  carry a small patched copy (Apache-2.0) whose recreation stops at the declared length, caps the block count and
-  checks the parameters as analysis does — as D-62 bounded repair — once task C's fuzz target confirms the gap; the
-  alternative is upstream plus a documented gap. Either way the format cites 0.7.6's correction format. Also for
-  the record: the Deflate peel brings `cabac` (LGPL-3.0-or-later, allowed under D-26's named exception) into the
-  shipped `lpk` binary for the first time, so D-26's notice and source duties become a packaging item.
+**Open for the owner (three asked on 2026-10-04, unanswered; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
   (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
   consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
@@ -85,8 +72,18 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-None. Every task branch is merged and deleted; the E2-8 branch's unmerged sketch commits (3be4d83, b599566) are
-referenced from D-55 and remain in the repository's history through the merged branch.
+- `task/e2-10-revision` (pushed when reviewed): task C1 of E2-10/11 — the patched `preflate-rs` 0.7.6 in
+  `vendor/` (D-66), the `deflate-reconstruct` decoder in `lpk-core`, the writer's revision-1.2 rules, the fuzz targets;
+  built and under read-only review on 2026-10-16. Next on the same branch: C2 (the spec text and the vector,
+  `docs/notes/e2-10-task-c-brief.md`), then one PR; then tasks D and E (`docs/notes/e2-10-task-d-brief.md`,
+  `-task-e-brief.md`) in parallel. C1 extended task A's `input_bound` hook with the block's expected length and
+  whether the step is last (check 3 needs them); C2's text states it.
+- `task/e2-20-memory` (pushed when reviewed): E2-20 built (per-tier budgets, blocks in flight from the budget, the
+  envelope from what blocks declare, `--memory` on `a|append|x|t`, the acceptance test passing) and under read-only
+  review. Open point: at its default settings Balanced now runs one block in flight under the 4 GiB ceiling (each job
+  holds both trial candidates' contexts), which gives back E2-4b's Balanced speedup; the review is asked whether
+  dropping the losing candidate's context after the trial is a safe fix. After merge: the runner's peak-memory rows on
+  `small` and the large classes of `full` are the acceptance evidence.
 
 ## How to resume
 
