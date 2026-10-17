@@ -1,6 +1,6 @@
 //! Extraction with the reference tool's refusals (section 9 "Extraction by the reference tool").
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -97,17 +97,49 @@ pub fn extract_entry(a: &mut Archive, e: &Entry, dir: &Path) -> Result<()> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|x| Error::io("create directory", &x))?;
     }
-    let mut f = OpenOptions::new()
+    write_new(&target, &bytes, &escape(&e.path))
+}
+
+/// Writes `bytes` to a new file at `path` and syncs it ("create new": an existing file is
+/// refused and left untouched). A file this call created and could not finish is removed, on an
+/// error and on a panic alike, and the panic goes on (section 9). The errors name the step and
+/// `what`: `create <what>`, `write <what>`.
+pub fn write_new(path: &Path, bytes: &[u8], what: &str) -> Result<()> {
+    fill_new(path, what, |mut f| {
+        f.write_all(bytes).and_then(|()| f.sync_all())
+    })
+}
+
+/// [`write_new`] with the writing done by `fill`, which owns the new file's handle.
+fn fill_new(path: &Path, what: &str, fill: impl FnOnce(File) -> std::io::Result<()>) -> Result<()> {
+    let f = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&target)
-        .map_err(|x| Error::io(&format!("create {}", escape(&e.path)), &x))?;
-    if let Err(x) = f.write_all(&bytes).and_then(|()| f.sync_all()) {
-        drop(f);
-        let _ = fs::remove_file(&target);
-        return Err(Error::io("write", &x));
-    }
+        .open(path)
+        .map_err(|x| Error::io(&format!("create {what}"), &x))?;
+    // Only now is the file this call's to remove. `fill` owns the handle, so the handle is
+    // closed by the time the guard removes the file.
+    let mut unfinished = Unfinished { path, armed: true };
+    fill(f).map_err(|x| Error::io(&format!("write {what}"), &x))?;
+    unfinished.armed = false;
     Ok(())
+}
+
+/// A new file that is not complete yet: removed when the guard is dropped while armed, which is
+/// on an error return and while a panic unwinds through [`fill_new`].
+struct Unfinished<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl Drop for Unfinished<'_> {
+    fn drop(&mut self) {
+        // A removal that fails is not reported: the error or the panic that left the file
+        // unfinished is the one the caller needs.
+        if self.armed {
+            let _ = fs::remove_file(self.path);
+        }
+    }
 }
 
 /// Extracts every entry; returns the paths extracted and the first error, if any. Refusals of
@@ -132,8 +164,61 @@ pub fn extract_all(a: &mut Archive, dir: &Path) -> Result<(Vec<String>, Option<E
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A new, empty directory for one test under the system's temporary directory.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lpk-check-unit-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_panic_mid_write_removes_the_new_file_then_goes_on() {
+        let dir = scratch("panic");
+        let path = dir.join("f");
+        let r = std::panic::catch_unwind(|| {
+            fill_new(&path, "f", |mut f| {
+                f.write_all(b"the first half")?;
+                panic!("test hook: the write panics mid-file")
+            })
+        });
+        let payload = r.expect_err("the panic did not go on");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"test hook: the write panics mid-file")
+        );
+        assert!(!path.exists(), "a partial file was left");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_error_mid_write_removes_the_new_file() {
+        let dir = scratch("error");
+        let path = dir.join("f");
+        let e = fill_new(&path, "f", |mut f| {
+            f.write_all(b"the first half")?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(e.to_string(), "write f: disk full");
+        assert!(!path.exists(), "a partial file was left");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_existing_file_is_refused_and_left_untouched() {
+        let dir = scratch("existing");
+        let path = dir.join("f");
+        fs::write(&path, b"mine").unwrap();
+        let e = write_new(&path, b"theirs", "f").unwrap_err();
+        assert!(e.to_string().starts_with("create f: "), "{e}");
+        assert_eq!(fs::read(&path).unwrap(), b"mine");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn device_names() {
