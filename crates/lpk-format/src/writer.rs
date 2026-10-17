@@ -3122,3 +3122,7 @@ mod record_rule_tests {
         assert_eq!(bytes.as_ptr(), at);
     }
 }
+
+#[cfg(test)]
+#[path = "pipe_tests.rs"]
+mod pipe_tests;

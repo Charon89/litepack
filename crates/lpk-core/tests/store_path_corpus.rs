@@ -2,7 +2,10 @@
 //! `LPK_CORPUS=<path to bench/corpus/small> cargo test -p lpk-core --release --test store_path_corpus -- --ignored --nocapture`
 //!
 //! `video` and `encrypted-random` with the Fast tier at one thread and at twenty-four: the
-//! archives must be byte for byte the same; the wall seconds are printed (report only).
+//! archives must be byte for byte the same; the wall seconds are printed (report only). Each
+//! is written twice: to memory (the reader thread, no write thread) and to a file with
+//! `run_file` (the reader thread and the write thread); all four must agree. The archive's
+//! BLAKE3 is printed, to compare with an earlier build's output.
 #![allow(clippy::unwrap_used)]
 
 use std::path::PathBuf;
@@ -21,18 +24,29 @@ fn stored_classes_are_identical_at_one_thread_and_twenty_four() {
     for class in ["video", "encrypted-random"] {
         let dir = root.join(class);
         let mut runs = Vec::new();
+        let tmp = tempfile::tempdir().unwrap();
         for threads in [1usize, 24] {
+            let fast = || {
+                Pipeline::fast(FastOptions {
+                    threads: Some(threads),
+                    ..FastOptions::default()
+                })
+            };
             let t0 = Instant::now();
-            let mut out = Vec::new();
-            let s = Pipeline::fast(FastOptions {
-                threads: Some(threads),
-                ..FastOptions::default()
-            })
-            .run(&dir, &mut out)
-            .unwrap();
-            runs.push((out, s, t0.elapsed().as_secs_f64()));
+            let file = tmp.path().join(format!("t{threads}.lpk"));
+            let s = fast().run_file(&dir, &file).unwrap();
+            let secs = t0.elapsed().as_secs_f64();
+            let out = std::fs::read(&file).unwrap();
+            let mut mem = Vec::new();
+            let m = fast().run(&dir, &mut mem).unwrap();
+            assert!(
+                mem == out && m.writer == s.writer,
+                "{class}: memory and file differ"
+            );
+            runs.push((out, s, secs));
         }
         let same = runs[0].0 == runs[1].0 && runs[0].1.writer == runs[1].1.writer;
+        println!("{class}: blake3 {}", blake3::hash(&runs[0].0).to_hex());
         println!(
             "| {class} | {} | {:.3} | {:.3} | {} |",
             runs[0].1.writer.archive_len,
