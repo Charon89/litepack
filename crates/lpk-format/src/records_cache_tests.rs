@@ -3,18 +3,41 @@
 //! its forks, and a lookup of record `n` reports exactly what the walk from
 //! record 0 reports.
 
-#![allow(clippy::unwrap_used)]
-
-mod common;
-
-use common::{pattern, write_archive};
-use lpk_format::{
-    Archive, ArchiveChunks, BlockEncoder, ChunkSource, DecodeContext, Encoded, FormatError, Graph,
-    GraphResources, PrimitiveDecoder, PrimitiveId, Record, RecordBody, RecordsWriter, Resources,
-    Step, Utf16Record, WriterOptions,
+use crate::{
+    Archive, ArchiveChunks, BlockEncoder, ChunkSource, DecodeContext, Encoded, EntryFlags,
+    FormatError, Graph, GraphResources, PrimitiveDecoder, PrimitiveId, Record, RecordBody,
+    RecordsWriter, Resources, Step, Utf16Record, Writer, WriterOptions,
 };
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
+
+/// Seeded bytes of a few repeated words.
+fn pattern(seed: u64, len: usize) -> Vec<u8> {
+    const WORDS: [&str; 4] = ["lite", "pack", "chunk", "block"];
+    let mut s = seed | 1;
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        out.extend_from_slice(WORDS[(s % 4) as usize].as_bytes());
+        out.push(b' ');
+    }
+    out.truncate(len);
+    out
+}
+
+/// Write `files` with `options`.
+fn write_archive(options: WriterOptions, files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut w = Writer::new(&mut out, options).unwrap();
+    for (path, data) in files {
+        w.add_file(path, EntryFlags::EMPTY, 1_000, &mut data.as_slice())
+            .unwrap();
+    }
+    w.finish().unwrap();
+    out
+}
 
 fn utf16(n: u64) -> Record {
     Record::new(RecordBody::Utf16(Utf16Record {
@@ -173,11 +196,38 @@ fn a_fork_shares_the_cache() {
     assert_eq!(f2.records_parse_count(), 1);
 }
 
+#[test]
+fn forks_starting_together_on_threads_parse_once() {
+    const THREADS: usize = 8;
+    let recs: Vec<Record> = (0..20_000).map(utf16).collect();
+    let bytes = archive(recs.clone());
+    let (a, seen) = open_with_lookups(&bytes, vec![0, 7_777, 19_999]);
+    let forks: Vec<_> = (0..THREADS)
+        .map(|_| a.fork(Cursor::new(bytes.clone())))
+        .collect();
+    let start = Barrier::new(THREADS);
+    std::thread::scope(|s| {
+        for mut f in forks {
+            let start = &start;
+            s.spawn(move || {
+                start.wait();
+                ArchiveChunks::new(&mut f).chunk(0).unwrap();
+            });
+        }
+    });
+    assert_eq!(a.records_parse_count(), 1);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 3 * THREADS);
+    for got in seen.iter() {
+        assert!(recs.contains(got.as_ref().unwrap()));
+    }
+}
+
 /// Recompute the hash of the frame at `offset` (`len` bytes in all).
 fn rehash_frame(bytes: &mut [u8], offset: u64, len: u64) {
     let (o, l) = (offset as usize, len as usize);
     let vl = (1..=10)
-        .find(|&vl| lpk_format::varint::len((l - 36 - vl) as u64) == vl)
+        .find(|&vl| crate::varint::len((l - 36 - vl) as u64) == vl)
         .unwrap();
     let payload = bytes[o + 4 + vl..o + l - 32].to_vec();
     let h = blake3::hash(&payload);
@@ -194,15 +244,15 @@ fn damaged(count: u64, bad: u64, damage: fn(&mut [u8])) -> Vec<u8> {
     let loc = a.index().records.unwrap();
     let (o, l) = (loc.offset as usize, loc.len as usize);
     let vl = (1..=10)
-        .find(|&vl| lpk_format::varint::len((l - 36 - vl) as u64) == vl)
+        .find(|&vl| crate::varint::len((l - 36 - vl) as u64) == vl)
         .unwrap();
     let payload_at = o + 4 + vl;
     // The record `bad` starts after the count and the records before it.
     let before = RecordsWriter::encode(&recs[..bad as usize]);
-    let lead = lpk_format::varint::len(count) - lpk_format::varint::len(bad);
+    let lead = crate::varint::len(count) - crate::varint::len(bad);
     let start = payload_at + before.len() + lead;
     let one = RecordsWriter::encode(&recs[bad as usize..=bad as usize]);
-    let rec_len = one.len() - lpk_format::varint::len(1);
+    let rec_len = one.len() - crate::varint::len(1);
     damage(&mut bytes[start..start + rec_len]);
     rehash_frame(&mut bytes, loc.offset, loc.len);
     bytes

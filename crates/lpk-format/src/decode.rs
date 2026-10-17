@@ -109,6 +109,12 @@ pub trait PrimitiveDecoder: Send + Sync {
     /// default) keeps `max_block_plain`. Never asked for a graph's first step.
     /// An error here is the block's error and the previous step does not run,
     /// so a reconstruction decoder can check its record here first.
+    ///
+    /// The reader trusts the bound: it may exceed `max_block_plain` (that is
+    /// its purpose) and the reader does not clamp it. An implementation that
+    /// returns `Some(n)` must already have checked `n` against the archive's
+    /// envelope and the reader's limits (`limits`, including the decode
+    /// memory), and refused with an error what they do not allow.
     fn input_bound(
         &self,
         params: &[u8],

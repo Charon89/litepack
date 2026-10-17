@@ -2270,7 +2270,11 @@ impl<W: Write> Writer<W> {
     /// (`BadOptions`): `plain` empty or longer than `block_size` (`encoded
     /// part length`); spans unsorted, overlapping, empty, or whose lengths do
     /// not add up to `plain.len()` (`encoded part spans`). Returns the
-    /// block's chunk indices, span after span.
+    /// block's chunk indices, span after span. Dedup of a multi-span stream
+    /// is all or nothing: a later copy can be referenced (span by span, with
+    /// [`Writer::part_known`] and [`Writer::add_part_known`]) only when every
+    /// span's chunks are stored already; otherwise the whole stream is written
+    /// again as a block of its own.
     pub fn add_parts_encoded(
         &mut self,
         spans: &[(u64, u64)],

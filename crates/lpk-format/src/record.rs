@@ -908,7 +908,23 @@ pub struct RecordsIter<'a> {
     done: bool,
 }
 
-impl RecordsIter<'_> {
+impl<'a> RecordsIter<'a> {
+    /// An iterator over the one record `id` that starts at the beginning of
+    /// `rest` (the reader's records cache parses a record per lookup).
+    pub(crate) fn one(rest: &'a [u8], id: u64) -> RecordsIter<'a> {
+        RecordsIter {
+            rest,
+            remaining: 1,
+            next_id: id,
+            done: false,
+        }
+    }
+
+    /// Bytes of the payload not yet walked.
+    pub(crate) fn rest_len(&self) -> usize {
+        self.rest.len()
+    }
+
     fn next_record(&mut self) -> Result<Record, FormatError> {
         let id = self.next_id;
         let mut r = Rd::new(self.rest, id);
