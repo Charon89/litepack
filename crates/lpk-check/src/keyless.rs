@@ -53,11 +53,16 @@ pub fn walk(data: &[u8], opts: &Options) -> Result<Walk> {
         let kind_v = u16::from_le_bytes([data[pos], data[pos + 1]]);
         let flags = u16::from_le_bytes([data[pos + 2], data[pos + 3]]);
         let plen = read_varint(data, &mut p, "frames")?;
+        // Section 14, step 2: a length that overflows a 64-bit offset is `BadFrameLocation`
+        // (`frames`); a frame that would end past the file is `Truncated` (`frames`).
         let end = (p as u64)
             .checked_add(plen)
             .and_then(|e| e.checked_add(32))
-            .filter(|e| *e <= end_of_file as u64)
-            .ok_or_else(|| Error::truncated("frames"))? as usize;
+            .ok_or_else(|| Error::bad_location("frames"))?;
+        if end > end_of_file as u64 {
+            return Err(Error::truncated("frames"));
+        }
+        let end = end as usize;
         let loc = Loc {
             offset: pos as u64,
             len: (end - pos) as u64,
