@@ -499,6 +499,7 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
     pipeline.seal.writer.recovery.percent = a.recovery;
     match pipeline.run_file(&a.input, &a.archive) {
         Ok(s) => {
+            records_cap_note(err, &s.peel.deflate);
             if a.verbose {
                 report(err, &a.archive, &a.tier, sealing, a.recovery, &s);
             }
@@ -528,6 +529,7 @@ fn append(a: &mut AppendArgs, err: &mut dyn Write) -> i32 {
     pipeline.seal.writer.recovery.percent = a.recovery;
     match pipeline.append_file(&a.input, &a.archive, credentials.as_ref()) {
         Ok(s) => {
+            records_cap_note(err, &s.peel.deflate);
             if a.verbose {
                 report(err, &a.archive, &a.tier, sealing, a.recovery, &s);
             }
@@ -662,6 +664,19 @@ fn report(
         t.model.as_secs_f64(),
         t.seal.as_secs_f64()
     );
+}
+
+/// The summary line, with or without `-v`, when the run reached the Deflate peel's records cap
+/// (a whole-run cap: later streams were stored as found).
+fn records_cap_note(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSummary) {
+    let n = d.outcomes.records_cap;
+    if n > 0 {
+        let _ = writeln!(
+            err,
+            "records cap: {n} Deflate streams stored as found, the run's records reached the cap of {} bytes",
+            lpk_core::peel::deflate::stage::RECORDS_CAP
+        );
+    }
 }
 
 /// The Deflate peel's lines of `-v` (nothing when the stage saw no file).
@@ -919,5 +934,20 @@ where
             out,
             err,
         ),
+    }
+}
+
+#[cfg(test)]
+mod records_cap_tests {
+    #[test]
+    fn the_records_cap_line_shows_only_when_reached() {
+        let mut d = lpk_core::peel::deflate::DeflateSummary::default();
+        let mut out = Vec::new();
+        super::records_cap_note(&mut out, &d);
+        assert!(out.is_empty());
+        d.outcomes.records_cap = 3;
+        super::records_cap_note(&mut out, &d);
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.starts_with("records cap: 3 Deflate streams"), "{text}");
     }
 }
