@@ -8,6 +8,7 @@
 
 pub mod analyse;
 pub mod decode;
+pub mod part;
 pub mod walk;
 
 pub use analyse::{
@@ -18,6 +19,7 @@ pub use decode::{
     memory_term, DeflateDecoder, MEMORY_ALLOWANCE, MEMORY_PER_CORRECTION_BYTE,
     MEMORY_PER_PLAIN_BYTE,
 };
+pub use part::{PartEncoded, PartEncoder, PartModel};
 pub use walk::{find_streams, trim_spans, Candidate, Found, INFLATE_CAP, KINDS, MIN_SCANNED_PLAIN};
 /// The pinned `preflate-rs` version (Cargo.toml pins it exactly).
 pub const PREFLATE_VERSION: &str = "0.7.6";
