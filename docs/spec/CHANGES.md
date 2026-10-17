@@ -162,3 +162,8 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    of a block: the output of the complete blocks before the damaged one past the bound is `PayloadTooLarge`,
    otherwise `ZstdError`; a damaged block's partial output is never counted (section 8; code: the reference
    reported `ZstdError` whenever the damage came before ruzstd released the crossing bytes).
+9. Text after the review of revision 1.2: a writer MUST NOT write a `deflate` record whose recreation under the
+   stated limits is refused, and the evidence behind "not expected to" is named; check (5) of both reconstruction
+   steps states informatively the `needed` and `allowed` the reference reports; the term is computed in 64-bit
+   arithmetic saturating at 2^64 - 1; a reader that cannot address `original_len` bytes reports `original_len`
+   (informative); the bound checks run before any of the previous step's own rules (section 8).

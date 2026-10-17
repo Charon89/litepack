@@ -678,7 +678,8 @@ the step count, every step's parameters, and that every primitive is one it can 
 `UnimplementedPrimitive`); no step runs when a later one cannot.
 
 Revision 1.2. A step whose next step is `deflate-reconstruct` has, as its output bound, the `plain_len` of the
-record that step names instead of `max_block_plain`. Before the step runs, the reader applies checks (1) to (5) of
+record that step names instead of `max_block_plain`. Before the step runs, and before any of that step's own rules
+(its parameters' resources against the reader, its prior, its input), the reader applies checks (1) to (5) of
 "Decoding `deflate-reconstruct`" to that record, with the `deflate-reconstruct` step's own output bound in check (3):
 the block's `plain_len` when that step is the last, `max_block_plain` otherwise; an error there is the block's error
 and the step does not run. The step's output longer than `plain_len` is `PayloadTooLarge`; a shorter one is
@@ -784,7 +785,9 @@ The step's input is one Lepton stream and its output is the primary image of the
   smaller one only when the step's output length is compared after check (8), section 8 "Bounds");
   (5) resources: the frame header of the JPEG is read from the stream's own header (layout below) and the image's
   term (its coefficient term plus the fixed term, counted once per image, "Resources" below) is compared with the
-  decode memory left after `max_block_plain` (`Refused`, field `decode_memory`;
+  decode memory left after `max_block_plain` (`Refused`, field `decode_memory`; informative: the reference reports
+  `needed` = `max_block_plain` + the image's term and `allowed` = the decode memory it compared against, the
+  archive's `decode_memory` or its own memory resource if smaller;
   a stream whose header layout is not recognised is `BadRecord`, `lepton stream`, and is not decoded); (6) the stream is decoded (`BadRecord`, `lepton stream` when the
   library refuses it or its output would exceed `primary_len`; `primary_len` when the output is shorter);
   (7) assembly, in file order. When `trailing` is not empty it follows the primary image. Otherwise the nested
@@ -889,13 +892,18 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   `BlockLengthMismatch`; on a step that is not the last an `original_len` above the step's bound
   (`max_block_plain`, or the bound "Bounds" gives) is `PayloadTooLarge`; (4) `corrections` longer than
   `original_len` bytes are `BadRecord`, `corrections`; (5) resources: the stream's term ("Resources" below) above the
-  decode memory left after `max_block_plain` is `Refused`, field `decode_memory`, and nothing is decoded; (6) the
+  decode memory left after `max_block_plain` is `Refused`, field `decode_memory`, and nothing is decoded
+  (informative: section 16 makes the class and its `field` normative; the reference reports `needed` =
+  `max_block_plain` + the term and `allowed` = the decode memory it compared against, the archive's `decode_memory`
+  or its own memory resource if smaller); (6) the
   input must be exactly `plain_len` bytes (`BadRecord`, `plain_len`); (7) the stream is recreated from the input and
   `corrections`: corrections the library refuses, or a recreation that panics, are `BadRecord`, `corrections`; an
   output that would exceed `original_len` bytes is `BadRecord`, `original_len` (a decoder SHOULD stop the
   recreation as soon as its output would be longer; the reference stops before it writes past `original_len`, so a
-  crafted record cannot make it produce more); (8) an output shorter than `original_len` is `BadRecord`,
-  `original_len`, and an output whose BLAKE3-256 differs from `original_hash` is `BadRecord`, `original_hash`.
+  crafted record cannot make it produce more; informative: a reader whose address space cannot hold
+  `original_len` bytes refuses the recreation with `BadRecord`, `original_len`, which a 64-bit reader never meets);
+  (8) an output shorter than `original_len` is `BadRecord`, `original_len`, and an output whose BLAKE3-256 differs
+  from `original_hash` is `BadRecord`, `original_hash`.
 - Limits of a recreation. A reader MAY refuse, with `BadRecord` `corrections` in check (7), a recreation that would
   produce more Deflate blocks than `original_len`, one whose predictor parameters (the first part of `corrections`)
   lie outside the values 0.7.6's analysis produces, and one with a correction that asks for more hops along the
@@ -909,9 +917,14 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   of `vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`); and it refuses a hop count above `max_chain` before it walks
   the chain. Informative: the parameter ranges are those 0.7.6's analysis constructs, and its analysis emitted no
   hop count above `max_chain` on any stream LitePack checked, so a record a writer makes with 0.7.6's analysis is
-  not expected to meet these refusals; the records of `deflate-peel.lpk` (section 11) recreate under them.
+  not expected to meet these refusals (the evidence: LitePack's check that every Deflate stream of its `small`
+  benchmark corpus recreated under these limits to the same bytes as upstream); the records of `deflate-peel.lpk`
+  (section 11) recreate under them. A writer MUST NOT write a `deflate` record whose recreation under the limits
+  stated here is refused (informative: a writer meets this by recreating each stream under these limits before it
+  writes the record; the reference writer's Deflate peel does).
 - Resources: memory per stream, declared by the envelope's `decode_memory` (section 7). A stream's term is
-  8 × `plain_len` + 2 × (the length of `corrections`) + 16777216 bytes. The term is a threshold every revision 1.2
+  8 × `plain_len` + 2 × (the length of `corrections`) + 16777216 bytes, computed in 64-bit unsigned arithmetic
+  that saturates at 2^64 - 1 (as the reference does), so a term too large for 64 bits is refused. The term is a threshold every revision 1.2
   reader applies, whatever its own decoder needs: it compares the term with the archive's `decode_memory`, never
   above its own memory resource, minus `max_block_plain`, and refuses a stream whose term exceeds it with `Refused`
   (field `decode_memory`, the class `Archive::open` uses for an envelope the reader cannot meet, section 7), without
