@@ -147,6 +147,8 @@ pub struct FileStreams {
     pub counts: Counts,
     /// The pipeline's partition.
     pub outcomes: Outcomes,
+    /// Kept streams by the class of their inflated text.
+    pub kept_by_class: BTreeMap<&'static str, u64>,
 }
 
 /// What the Deflate peel did. Equality ignores the seconds (two runs of the same input compare
@@ -351,6 +353,7 @@ pub(crate) fn peel_file<O: Write>(
     let ext = extension(&input.path);
     let mut decided: Vec<Decided> = Vec::new();
     let mut out = Outcomes::default();
+    let mut kept_by_class = BTreeMap::new();
     let mut err: Option<CoreError> = None;
     let block_size = cx.block_size;
     let records_cap = cx.stage.records_cap;
@@ -467,7 +470,7 @@ pub(crate) fn peel_file<O: Write>(
         }
         w.add_file(&input.path, input.flags, input.mtime_ns, &mut &data[..])?;
     } else {
-        write_peeled(w, input, data, decided, &mut out, s)?;
+        write_peeled(w, input, data, decided, &mut out, &mut kept_by_class, s)?;
         s.peeled.files += 1;
         s.peeled.bytes += data.len() as u64;
     }
@@ -479,6 +482,7 @@ pub(crate) fn peel_file<O: Write>(
             kind: examined.kind,
             counts: examined.counts,
             outcomes: out,
+            kept_by_class,
         });
     }
     Ok(())
@@ -494,6 +498,7 @@ fn write_peeled<O: Write>(
     data: &[u8],
     decided: Vec<Decided>,
     out: &mut Outcomes,
+    file_classes: &mut BTreeMap<&'static str, u64>,
     s: &mut DeflateSummary,
 ) -> Result<(), CoreError> {
     w.begin_entry(&input.path, input.flags, input.mtime_ns)?;
@@ -528,6 +533,7 @@ fn write_peeled<O: Write>(
             } => {
                 out.kept += 1;
                 *s.kept_by_class.entry(class.as_str()).or_default() += 1;
+                *file_classes.entry(class.as_str()).or_default() += 1;
                 s.stream_bytes += record.original_len;
                 s.plain_bytes += record.plain_len;
                 s.model_bytes += encoded.bytes.len() as u64;

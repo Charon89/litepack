@@ -139,6 +139,22 @@ fn make_tree(root: &Path) {
     scan.extend_from_slice(&noise(53, 10_000));
     std::fs::write(root.join("scan.bin"), scan).unwrap();
     std::fs::write(root.join("data.gz"), gzip(&repetitive(61, 300_000), 6)).unwrap();
+    // The same member, deflated the same way, in two containers with different framing: the
+    // second is an already-stored hit.
+    let member = repetitive(91, 90_000);
+    std::fs::write(
+        root.join("dup-a.zip"),
+        zip_of(&[("same.xml", member.clone(), true)]),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("dup-b.zip"),
+        zip_of(&[
+            ("first.txt", prose(92, 2_000), false),
+            ("same.xml", member, true),
+        ]),
+    )
+    .unwrap();
     std::fs::write(
         root.join("tiny.zip"),
         zip_of(&[("t.txt", b"a tiny member of thirty bytes".to_vec(), true)]),
@@ -249,13 +265,14 @@ fn every_kind_round_trips_and_the_streams_are_partitioned() {
     for kind in ["zip", "office", "jar", "png", "gzip", "pdf", "other"] {
         assert!(d.walked_by_kind.contains_key(kind), "{kind}: {d:?}");
     }
-    // Member streams reach the classifier: the docx's XML is text.
-    assert!(
-        d.kept_by_class.get("text").copied().unwrap_or(0) >= 1,
-        "{d:?}"
-    );
     let files = d.files.as_ref().unwrap();
     let docx = files.iter().find(|f| f.path == "report.docx").unwrap();
+    // Member streams reach the classifier: the docx's XML member is counted under text, for
+    // that file.
+    assert!(
+        docx.kept_by_class.get("text").copied().unwrap_or(0) >= 1,
+        "{docx:?}"
+    );
     assert_eq!(docx.kind, "office");
     assert!(docx.outcomes.kept >= 1, "{docx:?}");
     // A tiny stream is not kept (no gain), and its file goes through the normal path whole.
@@ -381,6 +398,11 @@ fn one_thread_eight_threads_and_a_one_block_budget_write_the_same_bytes() {
     let (one, s1) = run(balanced(1), dir.path());
     let (eight, s8) = run(balanced(8), dir.path());
     assert!(one == eight, "1 and 8 threads differ");
+    assert!(
+        s1.peel.deflate.outcomes.already_stored >= 1,
+        "an already-stored hit: {:?}",
+        s1.peel.deflate.outcomes
+    );
     assert_eq!(s1.peel, s8.peel);
     assert!(s8.blocks_in_flight > 1);
     let mut narrow = balanced(8);
@@ -451,4 +473,17 @@ fn an_append_to_a_revision_1_1_archive_runs_without_the_deflate_stage() {
     assert!(s2.peel.dropped_stages.is_empty());
     assert!(s2.peel.deflate.outcomes.kept >= 7);
     check(&std::fs::read(&archive2).unwrap(), v2.path(), None);
+}
+
+#[test]
+fn the_store_model_refuses_the_deflate_peel_before_any_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("n.gz"), fixture("notes.txt.gz")).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("s.lpk");
+    let mut p = Pipeline::store(lpk_core::StoreOptions::default());
+    p.deflate = Some(DeflatePeel::default());
+    let e = p.run_file(dir.path(), &arch).unwrap_err();
+    assert!(matches!(e, lpk_core::CoreError::InvalidOption(_)), "{e}");
+    assert!(!arch.exists());
 }

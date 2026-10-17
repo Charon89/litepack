@@ -152,7 +152,7 @@ pub struct Pipeline {
     /// models only).
     pub peel: Vec<Box<dyn PeelStage>>,
     /// The Deflate peel (design `docs/notes/e2-10-11-design.md`, section 3), with its own write
-    /// path beside `peel`: on by default in Balanced, off in Fast, never in the store model.
+    /// path beside `peel`: on by default in Balanced, off in Fast; refused with the store model.
     /// When set the header's `version_minor` is 2 (revision 1.2).
     pub deflate: Option<DeflatePeel>,
     /// The fold stage (chunker and dedup); `None` keeps the writer's fixed chunker, no dedup. A
@@ -256,8 +256,15 @@ impl Pipeline {
         self.seal.dropped = dropped;
     }
 
-    /// Validate the options and build the encoder, before any output exists.
+    /// Validate the options and build the encoder, before any output exists. The store model
+    /// runs no peel stage: a set [`Pipeline::deflate`] is refused there (`InvalidOption`).
     fn prepare(&self) -> Result<Prepared, CoreError> {
+        if matches!(self.model, ModelStage::Store) && self.deflate.is_some() {
+            return Err(CoreError::InvalidOption(
+                "the store model runs no peel stage: the Deflate peel needs --fast or --balanced"
+                    .into(),
+            ));
+        }
         match &self.model {
             ModelStage::Store => Ok(Prepared::Store),
             ModelStage::Fast(o) => {
