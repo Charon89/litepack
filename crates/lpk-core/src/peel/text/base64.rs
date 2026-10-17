@@ -1114,11 +1114,20 @@ mod tests {
         let runs = find_runs(text.as_bytes());
         assert_eq!(runs.len(), 1, "{runs:?}");
         let run = runs[0];
-        assert_eq!((run.label, run.lines, run.chars, run.len), (Label::Pem, 7, 400, body.len()));
-        assert_eq!(&text.as_bytes()[run.offset..run.offset + run.len], &body[..]);
+        assert_eq!(
+            (run.label, run.lines, run.chars, run.len),
+            (Label::Pem, 7, 400, body.len())
+        );
+        assert_eq!(
+            &text.as_bytes()[run.offset..run.offset + run.len],
+            &body[..]
+        );
         let a = analyse(&text.as_bytes()[run.offset..run.offset + run.len]).unwrap();
         assert_eq!(a.payload, payload);
-        assert_eq!(a.layout, lines(64, LineEnding::Lf, true, Alphabet::Standard));
+        assert_eq!(
+            a.layout,
+            lines(64, LineEnding::Lf, true, Alphabet::Standard)
+        );
         // The header-over-neutral-lines case (R26): a `-----` rule line, neutral lines, then
         // a line of the standard alphabet; the neutral lines go with the standard line.
         let neutral = "A".repeat(100);
@@ -1169,7 +1178,12 @@ mod tests {
         p3[100..130].fill(0xFF);
         let body = lines(76, LineEnding::CrLf, true, Alphabet::Standard).encode(&p3);
         let body = String::from_utf8(body).unwrap();
-        assert!(body.rsplit("\r\n").next().unwrap().bytes().all(|b| b == b'A'));
+        assert!(body
+            .rsplit("\r\n")
+            .next()
+            .unwrap()
+            .bytes()
+            .all(|b| b == b'A'));
         let mime = format!("Content-Transfer-Encoding: base64\r\n\r\n{body}\r\n--boundary--\r\n");
         let runs = find_runs(mime.as_bytes());
         assert_eq!(runs.len(), 1);

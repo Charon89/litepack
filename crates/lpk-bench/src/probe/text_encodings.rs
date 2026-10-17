@@ -1023,11 +1023,7 @@ impl FileCache<'_> {
 }
 
 /// The plain bytes of block `b`, assembled from the files and checked chunk by chunk.
-fn assemble_block(
-    m: &Mapped,
-    b: usize,
-    cache: &mut FileCache<'_>,
-) -> Result<Option<Vec<u8>>> {
+fn assemble_block(m: &Mapped, b: usize, cache: &mut FileCache<'_>) -> Result<Option<Vec<u8>>> {
     let first = usize::try_from(m.first_chunk[b])?;
     let end = m
         .first_chunk
