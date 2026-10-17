@@ -80,12 +80,13 @@ was single-threaded then and is parallel since E2-4b.
     office-pdf and photo-raw-png is missing), should-fix items (records in the memory model, a per-file work budget,
     the Deflate term only when examined classes are present, an exact pre-encode gate, a bounded read). Fix round
     next, after task E lands.
-- E2-20: round 2 (the extraction side, D-67 (5)) is in its PR (`task/e2-20-extract`). When CI is green: fast-forward
-  `main`; after task D also lands, build release on `main` and launch `target/acceptance/e2-20b-e2-10-run.sh`
-  (detached: A = every tool on office-pdf, photo-raw-png, software-installed of `small`; B = `lpk` on the other
-  fourteen `small` classes; C = `lpk` on vm-image, office-pdf, software-installed of `full`; one repeat). E2-20 ticks
-  when every `lpk` row's compress and extract peaks are within its tier's ceiling; the first rows
-  (`bench/results/2026-10-17-megatron-5`, `-6`, not committed yet) are the before.
+- E2-20 is done (2026-10-17): round 2 merged (PR #66), its rows measured on `main` at `205c2ae`
+  (`bench/results/2026-10-17-megatron-7`, `-8`; report `bench/reports/phase1-2026-10-17-memory.md`), every
+  compress and extract peak within its tier's ceiling. `target/acceptance/e2-20b-e2-10-run.sh` is kept for task
+  D's rows: after task D lands, build release on `main` and launch it detached (A = every tool on office-pdf,
+  photo-raw-png, software-installed of `small`; B = `lpk` on the other fourteen `small` classes; C = `lpk` on
+  vm-image, office-pdf, software-installed of `full`; one repeat) — E2-10's and E2-11's evidence, and the memory
+  rows again with the peel on.
 
 ## How to resume
 
