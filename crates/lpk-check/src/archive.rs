@@ -8,7 +8,7 @@ use crate::entries::{parse_entry_table, Entry, EntryKind};
 use crate::error::{Error, Result};
 use crate::index::{parse_index, Index};
 use crate::journal;
-use crate::record::{self, bad_record, Body, JpegRecord, Record};
+use crate::record::{self, bad_record, Body, DeflateRecord, JpegRecord, Record};
 use crate::wire::{
     kind, parse_frame, parse_header, read_recorded, trailer_ending_at, Frame, Header, Trailer,
     HEADER_LEN, MIN_FRAME_LEN, TRAILER_FRAME_LEN,
@@ -42,7 +42,7 @@ impl Default for Resources {
 }
 
 /// What the caller gives the reader.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Password bytes.
     pub password: Option<Vec<u8>>,
@@ -52,8 +52,26 @@ pub struct Options {
     pub priors: HashMap<[u8; 32], Vec<u8>>,
     /// Resources.
     pub resources: Resources,
-    /// Behave as a revision 1.0 reader: `jpeg-reconstruct` is `UnimplementedPrimitive`.
+    /// The revision this reader runs (its minor, 0 to 2; default 2): a lower revision reports
+    /// `UnimplementedPrimitive` for the primitives it does not run (`jpeg-reconstruct` below 1,
+    /// `deflate-reconstruct` below 2).
+    pub revision: u8,
+    /// Alias of `revision` 0, kept for callers of the earlier field: when set, the reader runs
+    /// revision 1.0 whatever `revision` says.
     pub revision_1_0: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            password: None,
+            keyfile: None,
+            priors: HashMap::new(),
+            resources: Resources::default(),
+            revision: 2,
+            revision_1_0: false,
+        }
+    }
 }
 
 impl Options {
@@ -509,22 +527,40 @@ impl Archive {
         }
         // (4).
         if j.primary_len > bound {
-            return Err(block::too_large(last, "jpeg-reconstruct"));
+            return Err(block::too_large(last, j.primary_len, bound));
         }
-        // (5).
+        // (5): the image's term, its coefficient term plus the fixed term.
         let frame = crate::jpeg::stream_frame(id, stream, j.primary_len)?;
-        let env = self.index.envelope;
-        crate::jpeg::check_memory(
-            frame.memory_term(),
-            env.decode_memory,
-            self.opts.resources.memory,
-            env.max_block_plain,
-        )?;
+        self.memory()
+            .check(frame.memory_term().saturating_add(crate::jpeg::FIXED_TERM))?;
         // (6).
         let primary = crate::jpeg::decode(id, stream, j.primary_len)?;
         // (7) and (8).
         self.assemble_check(b, id, &j, &primary)?;
         Ok(primary)
+    }
+
+    /// What check (5) of both reconstruction steps compares against.
+    fn memory(&self) -> crate::deflate::Memory {
+        let env = self.index.envelope;
+        crate::deflate::Memory {
+            decode_memory: env.decode_memory,
+            memory: self.opts.resources.memory,
+            max_block_plain: env.max_block_plain,
+        }
+    }
+
+    /// Checks (1) to (5) of `deflate-reconstruct` (section 8) on record `id`, with a step's output
+    /// bound and whether that step is the last.
+    fn deflate_record(&self, id: u64, bound: u64, last: bool) -> Result<DeflateRecord> {
+        // (1) the lookup, with the errors of the `Records` frame.
+        let r = self.record(id)?;
+        let rec = match &r.body {
+            Body::Deflate(d) => Some(d),
+            _ => None,
+        };
+        // (2) to (5).
+        Ok(crate::deflate::record_checks(id, rec, bound, last, &self.memory())?.clone())
     }
 
     /// Check 7 (assembly in file order) and check 8 (`original_len`, `original_hash`).
@@ -670,12 +706,13 @@ impl Archive {
             priors: &self.opts.priors,
             max_window: self.opts.resources.max_window,
             max_block_plain: env.max_block_plain,
-            jpeg: !self.opts.revision_1_0,
+            revision: if self.opts.revision_1_0 {
+                0
+            } else {
+                self.opts.revision
+            },
         };
-        let mut recon = |id: u64, input: &[u8], bound: u64, last: bool| {
-            self.jpeg_step(b, id, input, bound, last)
-        };
-        block::decode(&h, &ctx, &mut recon)
+        block::decode(&h, &ctx, &mut Steps { archive: self, b })
     }
 
     /// The bytes of chunk `i`, checked against the chunk table. A block whose frame fails keeps
@@ -777,5 +814,21 @@ impl Archive {
             chunks: self.index.chunks.len(),
             blocks: self.index.blocks.len(),
         })
+    }
+}
+
+/// The reconstruction steps of block `b`, through the archive.
+struct Steps<'a> {
+    archive: &'a Archive,
+    b: usize,
+}
+
+impl block::Recon for Steps<'_> {
+    fn jpeg(&mut self, id: u64, input: &[u8], bound: u64, last: bool) -> Result<Vec<u8>> {
+        self.archive.jpeg_step(self.b, id, input, bound, last)
+    }
+
+    fn deflate_record(&mut self, id: u64, bound: u64, last: bool) -> Result<DeflateRecord> {
+        self.archive.deflate_record(id, bound, last)
     }
 }

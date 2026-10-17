@@ -33,14 +33,29 @@ pub struct JpegRecord {
     pub original_hash: [u8; 32],
 }
 
+/// A `deflate` record body (kind 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeflateRecord {
+    /// Length of the original compressed stream.
+    pub original_len: u64,
+    /// Its decompressed length.
+    pub plain_len: u64,
+    /// The correction bytes (section 8).
+    pub corrections: Vec<u8>,
+    /// BLAKE3 of the original compressed stream.
+    pub original_hash: [u8; 32],
+}
+
 /// A parsed record body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Body {
     /// Kind 7.
     Jpeg(JpegRecord),
+    /// Kind 8.
+    Deflate(DeflateRecord),
     /// Kind 12: per member, its length and chunks (the rest is not needed by this decoder).
     Container(Vec<(u64, Vec<u64>)>),
-    /// Kinds 8 to 11: no chunk lists.
+    /// Kinds 9 to 11: no chunk lists.
     Other,
 }
 
@@ -68,7 +83,7 @@ impl Record {
                 v
             }
             Body::Container(m) => m.iter().map(|(len, c)| (&c[..], *len)).collect(),
-            Body::Other => Vec::new(),
+            Body::Deflate(_) | Body::Other => Vec::new(),
         }
     }
 }
@@ -163,12 +178,17 @@ fn parse_body(id: u64, kind: u16, body: &[u8]) -> Result<Body> {
     let b = match kind {
         7 => Body::Jpeg(jpeg_body(&mut c, id)?),
         8 => {
-            c.u64()?;
-            c.u64()?;
-            byte_string(&mut c)?;
+            let original_len = c.u64()?;
+            let plain_len = c.u64()?;
+            let corrections = byte_string(&mut c)?.to_vec();
             u8_in(&mut c, id, "library", 0)?;
-            c.array::<32>()?;
-            Body::Other
+            let original_hash = c.array::<32>()?;
+            Body::Deflate(DeflateRecord {
+                original_len,
+                plain_len,
+                corrections,
+                original_hash,
+            })
         }
         9 => {
             c.u32()?;

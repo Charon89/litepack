@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{compress_stream, pattern, zstd_params};
+use common::{compress, compress_stream, pattern, zstd_params};
 use lpk_format::{FormatError, PrimitiveDecoder, Resources, ZstdDecoder};
 
 const KIB: u64 = 1024;
@@ -60,4 +60,32 @@ fn damage_before_any_crossing_is_zstd_error() {
         step(&cut, 1024 * KIB),
         Err(FormatError::ZstdError { .. })
     ));
+}
+
+/// Ruling 4 (gap 4): RFC 8878's `Content_Checksum` belongs to no block, so a frame cut inside its
+/// checksum has all its blocks complete, and their output counts: past the bound
+/// `PayloadTooLarge`, otherwise `ZstdError`.
+#[test]
+fn a_frame_cut_inside_its_checksum_counts_all_its_blocks() {
+    let data = pattern(5, 384 * 1024);
+    // The one-shot encoder marks the block that holds the last bytes as the last block (the
+    // streaming encoder may end with an empty one, which would not exercise this).
+    let frame = compress(3, Some(17), None, &data);
+    assert!(step(&frame, data.len() as u64).unwrap() == data);
+    // The frame has a checksum (Frame_Header_Descriptor bit 2).
+    assert!(frame[4] & 0x04 != 0);
+    for cut in 1..=3 {
+        let short = &frame[..frame.len() - cut];
+        match step(short, 300 * KIB) {
+            Err(FormatError::PayloadTooLarge { len, max }) => {
+                assert_eq!(max, 300 * KIB);
+                assert_eq!(len, 384 * KIB);
+            }
+            other => panic!("cut {cut}: {other:?}"),
+        }
+        assert!(matches!(
+            step(short, 400 * KIB),
+            Err(FormatError::ZstdError { .. })
+        ));
+    }
 }

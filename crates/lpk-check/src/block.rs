@@ -1,9 +1,9 @@
 //! The decode graph, the `ChunkData` block header and the decoders (section 8).
 
 use std::collections::HashMap;
-use std::io::Write;
 
 use crate::error::{Error, Result};
+use crate::record::DeflateRecord;
 use crate::wire::{read_varint, Cursor};
 
 /// A primitive of the registry with its parsed parameters.
@@ -31,6 +31,11 @@ pub enum Prim {
     },
     /// 0x0007 `jpeg-reconstruct` (revision 1.1).
     Jpeg {
+        /// The record in the `Records` frame.
+        record_id: u64,
+    },
+    /// 0x0008 `deflate-reconstruct` (revision 1.2).
+    Deflate {
         /// The record in the `Records` frame.
         record_id: u64,
     },
@@ -180,10 +185,10 @@ pub fn parse_block<'a>(
                     return Err(bad_params(id, "record_id"));
                 }
                 record_ids.push(rid);
-                if id == 0x0007 {
-                    Prim::Jpeg { record_id: rid }
-                } else {
-                    Prim::Unimplemented(id)
+                match id {
+                    0x0007 => Prim::Jpeg { record_id: rid },
+                    0x0008 => Prim::Deflate { record_id: rid },
+                    _ => Prim::Unimplemented(id),
                 }
             }
         };
@@ -228,13 +233,20 @@ pub struct DecodeCtx<'a> {
     pub max_window: u64,
     /// The envelope's `max_block_plain` (bounds every intermediate output, section 8).
     pub max_block_plain: u64,
-    /// Whether `jpeg-reconstruct` runs (a revision 1.1 reader); false emulates revision 1.0.
-    pub jpeg: bool,
+    /// The revision this reader emulates (its minor): 0 runs `store`, `zstd` and `lzma`; 1 adds
+    /// `jpeg-reconstruct`; 2 adds `deflate-reconstruct` and the bound of the step before it.
+    pub revision: u8,
 }
 
-/// Runs a `jpeg-reconstruct` step: record id, the step's input, its output bound, whether it is
-/// the last step; returns the step's output (the primary image).
-pub type Reconstruct<'r> = dyn FnMut(u64, &[u8], u64, bool) -> Result<Vec<u8>> + 'r;
+/// The reconstruction steps, which need the archive (its records and chunks).
+pub trait Recon {
+    /// A `jpeg-reconstruct` step: record id, the step's input, its output bound, whether it is
+    /// the last step; returns the step's output (the primary image).
+    fn jpeg(&mut self, id: u64, input: &[u8], bound: u64, last: bool) -> Result<Vec<u8>>;
+    /// Checks (1) to (5) of `deflate-reconstruct` on record `id`, with a step's output bound and
+    /// whether that step is the last; returns the record.
+    fn deflate_record(&mut self, id: u64, bound: u64, last: bool) -> Result<DeflateRecord>;
+}
 
 /// The `UnimplementedPrimitive` error.
 pub fn unimplemented(id: u16) -> Error {
@@ -244,37 +256,33 @@ pub fn unimplemented(id: u16) -> Error {
     )
 }
 
-pub fn too_large(last: bool, what: &str) -> Error {
+/// An output of `len` bytes past a step's bound `max`: `BlockLengthMismatch` on the last step,
+/// `PayloadTooLarge` otherwise.
+pub fn too_large(last: bool, len: u64, max: u64) -> Error {
     if last {
         Error::new(
             "BlockLengthMismatch",
-            format!("{what}: output longer than plain_len"),
+            format!("block output of {len} bytes or more, plain_len {max}"),
         )
     } else {
         Error::new(
             "PayloadTooLarge",
-            format!("{what}: output above max_block_plain"),
+            format!("payload length {len} exceeds limit {max}"),
         )
     }
 }
 
 /// Decodes a block whose header has been checked; returns exactly `plain_len` bytes.
-pub fn decode(
-    h: &BlockHeader<'_>,
-    ctx: &DecodeCtx<'_>,
-    recon: &mut Reconstruct<'_>,
-) -> Result<Vec<u8>> {
+pub fn decode(h: &BlockHeader<'_>, ctx: &DecodeCtx<'_>, recon: &mut dyn Recon) -> Result<Vec<u8>> {
     if h.plain_len > ctx.max_block_plain {
-        return Err(Error::new(
-            "PayloadTooLarge",
-            "block plain_len above max_block_plain",
-        ));
+        return Err(too_large(false, h.plain_len, ctx.max_block_plain));
     }
     // Check the whole graph before any step runs.
     for s in &h.steps {
         match s {
             Prim::Unimplemented(id) => return Err(unimplemented(*id)),
-            Prim::Jpeg { .. } if !ctx.jpeg => return Err(unimplemented(0x0007)),
+            Prim::Jpeg { .. } if ctx.revision < 1 => return Err(unimplemented(0x0007)),
+            Prim::Deflate { .. } if ctx.revision < 2 => return Err(unimplemented(0x0008)),
             _ => {}
         }
     }
@@ -282,15 +290,11 @@ pub fn decode(
     let last_i = h.steps.len() - 1;
     for (i, s) in h.steps.iter().enumerate() {
         let last = i == last_i;
-        let bound = if last {
-            h.plain_len
-        } else {
-            ctx.max_block_plain
-        };
+        let bound = step_bound(h, ctx, i, recon)?;
         data = match s {
             Prim::Store => {
                 if data.len() as u64 > bound {
-                    return Err(too_large(last, "store"));
+                    return Err(too_large(last, data.len() as u64, bound));
                 }
                 data
             }
@@ -303,8 +307,22 @@ pub fn decode(
                 lc,
                 lp,
                 pb,
-            } => lzma(&data, *dict_size, *lc, *lp, *pb, bound, last, ctx)?,
-            Prim::Jpeg { record_id } => recon(*record_id, &data, bound, last)?,
+            } => {
+                // Rule 2, before the input is read.
+                if u64::from(*dict_size) > ctx.max_window {
+                    return Err(Error::new(
+                        "WindowTooLarge",
+                        format!("dictionary {dict_size} needed, {} allowed", ctx.max_window),
+                    ));
+                }
+                crate::lzma::decode(&data, *dict_size, [*lc, *lp, *pb], bound, last)?
+            }
+            Prim::Jpeg { record_id } => recon.jpeg(*record_id, &data, bound, last)?,
+            Prim::Deflate { record_id } => {
+                // Checks (1) to (5) again at the step, with its actual bound; then (6) to (8).
+                let r = recon.deflate_record(*record_id, bound, last)?;
+                crate::deflate::recreate(*record_id, &r, &data)?
+            }
             Prim::Unimplemented(_) => return Err(Error::new("Internal", "unreachable")),
         };
     }
@@ -321,6 +339,38 @@ pub fn decode(
     Ok(data)
 }
 
+/// The output bound of step `i` (section 8, "Bounds"): the block's `plain_len` on the last step;
+/// `max_block_plain` on any other, except (revision 1.2) a step whose next step is
+/// `deflate-reconstruct`: checks (1) to (5) run on that step's record first, with that step's own
+/// bound (the block's `plain_len` when it is the last, `max_block_plain` otherwise), and the bound
+/// is the record's `plain_len`. Runs before any of step `i`'s own rules.
+fn step_bound(
+    h: &BlockHeader<'_>,
+    ctx: &DecodeCtx<'_>,
+    i: usize,
+    recon: &mut dyn Recon,
+) -> Result<u64> {
+    let last_i = h.steps.len() - 1;
+    if i == last_i {
+        return Ok(h.plain_len);
+    }
+    match h.steps.get(i + 1) {
+        Some(Prim::Deflate { record_id }) => {
+            let next_last = i + 1 == last_i;
+            let next_bound = if next_last {
+                h.plain_len
+            } else {
+                ctx.max_block_plain
+            };
+            Ok(recon
+                .deflate_record(*record_id, next_bound, next_last)?
+                .plain_len)
+        }
+        _ => Ok(ctx.max_block_plain),
+    }
+}
+
+/// A `zstd` step (section 8, "What the reference decoder enforces for `zstd`", rules 2 to 7).
 fn zstd(
     input: &[u8],
     window_log: u8,
@@ -332,6 +382,7 @@ fn zstd(
     use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
     use ruzstd::decoding::{BlockDecodingStrategy, Dictionary, FrameDecoder};
     let zerr = |e: &dyn std::fmt::Display| Error::new("ZstdError", format!("zstd: {e}"));
+    // Rule 2.
     let window = 1u64 << window_log;
     if window > ctx.max_window {
         return Err(Error::new(
@@ -339,25 +390,39 @@ fn zstd(
             format!("window {window} needed, {} allowed", ctx.max_window),
         ));
     }
-    let mut dec = FrameDecoder::new();
-    dec.set_max_window_size(window);
-    let mut dict_id = None;
-    if *dictionary != [0u8; 32] {
-        let prior = ctx
+    // Rule 3.
+    let prior = if *dictionary == [0u8; 32] {
+        None
+    } else {
+        let p = ctx
             .priors
             .get(dictionary)
             .filter(|p| blake3::hash(p).as_bytes() == dictionary)
             .ok_or_else(|| Error::new("MissingPrior", "a prior the block names is missing"))?;
-        let d = Dictionary::decode_dict(prior).map_err(|e| zerr(&e))?;
-        dict_id = Some(d.id);
-        dec.add_dict(d).map_err(|e| zerr(&e))?;
-    }
+        Some(p)
+    };
+    // A decoder with the declared window as its limit (rule 5) and the prior, if any.
+    let fresh = || -> Result<(FrameDecoder, Option<u32>)> {
+        let mut dec = FrameDecoder::new();
+        dec.set_max_window_size(window);
+        let mut id = None;
+        if let Some(p) = prior {
+            let d = Dictionary::decode_dict(p).map_err(|e| zerr(&e))?;
+            id = Some(d.id);
+            dec.add_dict(d).map_err(|e| zerr(&e))?;
+        }
+        Ok((dec, id))
+    };
+    fresh()?;
+    // Rule 4.
     if input.is_empty() && bound > 0 {
         return Err(Error::new("ZstdError", "zstd: truncated"));
     }
     let mut out: Vec<u8> = Vec::new();
     let mut src = input;
     while !src.is_empty() {
+        let frame = src;
+        let (mut dec, dict_id) = fresh()?;
         match dec.reset(&mut src) {
             Ok(()) => {}
             Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
@@ -374,25 +439,47 @@ fn zstd(
             }
             Err(e) => return Err(zerr(&e)),
         }
+        // Rule 6: a frame without a Dictionary_ID is decoded with the step's prior.
         if let Some(id) = dict_id {
             dec.force_dict(id).map_err(|e| zerr(&e))?;
         }
+        let frame_base = out.len() as u64;
+        // Rule 7, one block at a time: the output so far is checked against the bound after
+        // every complete block; a damaged block's partial output is never counted.
+        let mut last_block_start = None;
         loop {
-            dec.decode_blocks(&mut src, BlockDecodingStrategy::UptoBytes(64 * 1024))
-                .map_err(|e| zerr(&e))?;
+            let start = dec.bytes_read_from_source();
+            if let Err(e) = dec.decode_blocks(&mut src, BlockDecodingStrategy::UptoBlocks(1)) {
+                // `Content_Checksum` belongs to no block: a frame cut short or damaged inside it
+                // has all its blocks complete, the one just decoded included.
+                let in_checksum = matches!(e, FrameDecoderError::FailedToReadChecksum(_));
+                let complete = if in_checksum {
+                    Some((start, dec.bytes_read_from_source()))
+                } else {
+                    last_block_start.map(|s| (s, start))
+                };
+                let done = match complete {
+                    None => 0,
+                    Some((s, end)) => complete_blocks_len(frame, s, end, &fresh).unwrap_or(0),
+                };
+                if frame_base + done > bound {
+                    return Err(too_large(last, frame_base + done, bound));
+                }
+                return Err(zerr(&e));
+            }
+            last_block_start = Some(start);
             if let Some(v) = dec.collect() {
                 out.extend_from_slice(&v);
-            }
-            if out.len() as u64 > bound {
-                return Err(too_large(last, "zstd"));
             }
             if dec.is_finished() {
                 if let Some(v) = dec.collect() {
                     out.extend_from_slice(&v);
                 }
-                if out.len() as u64 > bound {
-                    return Err(too_large(last, "zstd"));
-                }
+            }
+            if out.len() as u64 > bound {
+                return Err(too_large(last, out.len() as u64, bound));
+            }
+            if dec.is_finished() {
                 break;
             }
         }
@@ -405,104 +492,37 @@ fn zstd(
     Ok(out)
 }
 
-/// A writer that refuses to grow past a bound.
-struct Bounded {
-    buf: Vec<u8>,
-    limit: u64,
-    overflow: bool,
-}
-
-impl Write for Bounded {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        if self.buf.len() as u64 + b.len() as u64 > self.limit {
-            self.overflow = true;
-            return Err(std::io::Error::other("output bound"));
+/// The output of a frame's complete blocks, the last of which starts at `last_start` and ends at
+/// `end` (offsets from the frame's first byte): the frame is cut at `end`, that block marked as the
+/// last one and the checksum flag cleared, then decoded to its end. The decoder keeps a window of
+/// output it has not released, so this is how the count of rule 7 is taken after damage.
+fn complete_blocks_len(
+    frame: &[u8],
+    last_start: u64,
+    end: u64,
+    fresh: &dyn Fn() -> Result<(ruzstd::decoding::FrameDecoder, Option<u32>)>,
+) -> Option<u64> {
+    use ruzstd::decoding::BlockDecodingStrategy;
+    let mut cut = frame.get(..usize::try_from(end).ok()?)?.to_vec();
+    // Frame_Header_Descriptor after the 4-byte magic: bit 2 is Content_Checksum_flag.
+    *cut.get_mut(4)? &= !0x04;
+    // Block_Header bit 0 is Last_Block.
+    *cut.get_mut(usize::try_from(last_start).ok()?)? |= 1;
+    let (mut dec, dict_id) = fresh().ok()?;
+    let mut src = &cut[..];
+    dec.reset(&mut src).ok()?;
+    if let Some(id) = dict_id {
+        dec.force_dict(id).ok()?;
+    }
+    let mut n = 0u64;
+    loop {
+        dec.decode_blocks(&mut src, BlockDecodingStrategy::UptoBlocks(1))
+            .ok()?;
+        if dec.is_finished() {
+            n += dec.collect().map_or(0, |v| v.len() as u64);
+            return Some(n);
         }
-        self.buf.extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lzma(
-    input: &[u8],
-    dict_size: u32,
-    lc: u8,
-    lp: u8,
-    pb: u8,
-    bound: u64,
-    last: bool,
-    ctx: &DecodeCtx<'_>,
-) -> Result<Vec<u8>> {
-    use lzma_rs::decompress::{Options, UnpackedSize};
-    if u64::from(dict_size) > ctx.max_window {
-        return Err(Error::new(
-            "WindowTooLarge",
-            format!("dictionary {dict_size} needed, {} allowed", ctx.max_window),
-        ));
-    }
-    match input.first() {
-        None => return Err(Error::new("LzmaError", "lzma: truncated")),
-        Some(0) => {}
-        Some(_) => return Err(Error::new("LzmaError", "lzma: range coder")),
-    }
-    // lzma-rs reads a `.lzma` header; build one with the step's properties and no size field.
-    let props = (pb * 5 + lp) * 9 + lc;
-    let mut stream = Vec::with_capacity(input.len() + 5);
-    stream.push(props);
-    stream.extend_from_slice(&dict_size.to_le_bytes());
-    stream.extend_from_slice(input);
-    let run =
-        |size: Option<u64>| -> (std::result::Result<(), lzma_rs::error::Error>, Bounded, u64) {
-            let mut w = Bounded {
-                buf: Vec::new(),
-                limit: bound,
-                overflow: false,
-            };
-            let opts = Options {
-                unpacked_size: UnpackedSize::UseProvided(size),
-                memlimit: None,
-                allow_incomplete: false,
-            };
-            let mut rd = std::io::Cursor::new(&stream[..]);
-            let r = lzma_rs::lzma_decompress_with_options(&mut rd, &mut w, &opts);
-            let consumed = rd.position();
-            (r, w, consumed)
-        };
-    let lzerr = |reason: &str| Error::new("LzmaError", format!("lzma: {reason}"));
-    let is_eof = |e: &lzma_rs::error::Error| matches!(e, lzma_rs::error::Error::IoError(x) if x.kind() == std::io::ErrorKind::UnexpectedEof);
-    // With the end-of-payload marker (what liblzma writes).
-    let (r, w, _) = run(None);
-    if r.is_ok() && !w.overflow {
-        // Section 8, rule 5: in the last step a marker before the output bound is `truncated`.
-        if last && (w.buf.len() as u64) < bound {
-            return Err(lzerr("truncated"));
-        }
-        return Ok(w.buf);
-    }
-    if !last {
-        // A step that is not the last has only a bound: its stream must carry the marker.
-        let reached = w.overflow || w.buf.len() as u64 == bound;
-        return Err(match r {
-            _ if reached => lzerr("marker required"),
-            Err(ref e) if is_eof(e) => lzerr("truncated"),
-            Err(e) => lzerr(&e.to_string()),
-            Ok(()) => lzerr("marker required"),
-        });
-    }
-    // Last step without the marker: stop at the output bound; all input must be used.
-    let (r2, w2, consumed) = run(Some(bound));
-    if w2.overflow {
-        return Err(too_large(last, "lzma"));
-    }
-    match r2 {
-        Ok(()) if consumed == stream.len() as u64 => Ok(w2.buf),
-        Ok(()) => Err(lzerr("trailing input")),
-        Err(ref e) if is_eof(e) => Err(lzerr("truncated")),
-        Err(e) => Err(lzerr(&e.to_string())),
+        n += dec.collect().map_or(0, |v| v.len() as u64);
     }
 }
 
@@ -511,42 +531,89 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    /// A raw LZMA1 stream (lc 3, lp 0, pb 2) of `plain` that ends with the end-of-payload marker.
-    fn marked_stream(plain: &[u8]) -> (Vec<u8>, u32) {
-        let mut out = Vec::new();
-        lzma_rs::lzma_compress(&mut std::io::Cursor::new(plain), &mut out).unwrap();
-        // `.lzma` header: properties, dictionary size, then an unknown size (all ones), so the
-        // stream carries the marker.
-        assert_eq!(out[0], (2 * 5) * 9 + 3);
-        assert_eq!(out[5..13], [0xFF; 8]);
-        let dict = u32::from_le_bytes(out[1..5].try_into().unwrap());
-        (out[13..].to_vec(), dict)
-    }
-
     fn ctx(priors: &HashMap<[u8; 32], Vec<u8>>) -> DecodeCtx<'_> {
         DecodeCtx {
             priors,
             max_window: 1 << 30,
             max_block_plain: 1 << 20,
-            jpeg: true,
+            revision: 2,
         }
     }
 
+    /// A zstd frame (window 1 KiB, no checksum, no content size) of raw blocks, each `n` bytes of
+    /// `b`, then optionally a block of the reserved type 3 (damage).
+    fn raw_frame(blocks: &[(usize, u8)], damaged_tail: bool) -> Vec<u8> {
+        let mut f = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00];
+        for (i, &(n, b)) in blocks.iter().enumerate() {
+            let last = !damaged_tail && i == blocks.len() - 1;
+            let h = (n as u32) << 3 | u32::from(last);
+            f.extend_from_slice(&h.to_le_bytes()[..3]);
+            f.extend(std::iter::repeat_n(b, n));
+        }
+        if damaged_tail {
+            let h = 10u32 << 3 | 3 << 1 | 1;
+            f.extend_from_slice(&h.to_le_bytes()[..3]);
+            f.extend_from_slice(&[0; 10]);
+        }
+        f
+    }
+
+    /// Rule 7 (round 2 text): a frame cut short inside its `Content_Checksum` has all its blocks
+    /// complete, and their output counts.
     #[test]
-    fn lzma_marker_before_the_declared_length_is_truncated() {
-        let plain = b"an lzma stream with its end marker, then a block that claims one byte more";
-        let (enc, dict) = marked_stream(plain);
+    fn zstd_rule_7_checksum_cut_short() {
         let p = HashMap::new();
-        let n = plain.len() as u64;
-        // Declared exactly: decodes.
-        let ok = lzma(&enc, dict, 3, 0, 2, n, true, &ctx(&p)).unwrap();
-        assert_eq!(ok, plain);
-        // Declared one byte longer: the marker comes first.
-        let err = lzma(&enc, dict, 3, 0, 2, n + 1, true, &ctx(&p)).unwrap_err();
-        assert_eq!(err.class, "LzmaError");
-        assert!(err.detail.ends_with("truncated"), "{}", err.detail);
-        // A step that is not the last is bounded only, and the marker ends it there.
-        let mid = lzma(&enc, dict, 3, 0, 2, n + 1, false, &ctx(&p)).unwrap();
-        assert_eq!(mid, plain);
+        let mut f = raw_frame(&[(600, 1), (300, 2)], false);
+        f[4] |= 0x04; // Content_Checksum_flag
+        f.extend_from_slice(&[0, 0]); // two of the four checksum bytes
+        let class = |bound: u64, last: bool| {
+            zstd(&f, 10, &[0; 32], bound, last, &ctx(&p))
+                .unwrap_err()
+                .class
+        };
+        assert_eq!(class(899, false), "PayloadTooLarge");
+        assert_eq!(class(899, true), "BlockLengthMismatch");
+        assert_eq!(class(900, false), "ZstdError");
+    }
+
+    #[test]
+    fn zstd_raw_blocks_decode() {
+        let p = HashMap::new();
+        let f = raw_frame(&[(600, 1), (600, 2)], false);
+        let out = zstd(&f, 10, &[0; 32], 1200, true, &ctx(&p)).unwrap();
+        assert_eq!(out.len(), 1200);
+        assert!(out[..600].iter().all(|&b| b == 1) && out[600..].iter().all(|&b| b == 2));
+        assert_eq!(
+            zstd(&f, 10, &[0; 32], 1199, false, &ctx(&p))
+                .unwrap_err()
+                .class,
+            "PayloadTooLarge"
+        );
+    }
+
+    /// Rule 7: damage after complete blocks whose output passes the bound is `PayloadTooLarge`
+    /// (`BlockLengthMismatch` on the last step), also while the decoder still holds that output in
+    /// its window; otherwise `ZstdError`. Earlier frames count.
+    #[test]
+    fn zstd_rule_7_by_block() {
+        let p = HashMap::new();
+        let f = raw_frame(&[(600, 1), (300, 2)], true);
+        let class = |input: &[u8], bound: u64, last: bool| {
+            zstd(input, 10, &[0; 32], bound, last, &ctx(&p))
+                .unwrap_err()
+                .class
+        };
+        assert_eq!(class(&f, 899, false), "PayloadTooLarge");
+        assert_eq!(class(&f, 899, true), "BlockLengthMismatch");
+        assert_eq!(class(&f, 900, false), "ZstdError");
+        assert_eq!(class(&f, 5000, false), "ZstdError");
+        // The first block damaged: nothing of the frame counts.
+        let first = raw_frame(&[], true);
+        assert_eq!(class(&first, 0, false), "ZstdError");
+        // An earlier whole frame counts.
+        let mut two = raw_frame(&[(500, 3)], false);
+        two.extend_from_slice(&f);
+        assert_eq!(class(&two, 1399, false), "PayloadTooLarge");
+        assert_eq!(class(&two, 1400, false), "ZstdError");
     }
 }

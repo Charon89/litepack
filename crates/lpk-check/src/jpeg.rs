@@ -4,10 +4,11 @@
 
 use std::io::Write;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::record::bad_record;
 
-/// The fixed term of the writer's allowance (section 8, "Resources"); informative for a reader.
+/// The fixed term of an image's term (section 8, "Resources"): counted once per image in check
+/// (5), which every revision 1.1 reader applies.
 pub const FIXED_TERM: u64 = 67_108_864;
 
 /// What the frame header of the JPEG gives the memory term.
@@ -160,24 +161,6 @@ fn zlib_prefix(z: &[u8], limit: usize) -> Vec<u8> {
     out
 }
 
-/// Check 5's comparison: the image's term against the archive's `decode_memory` (never above the
-/// reader's memory) minus `max_block_plain`.
-pub fn check_memory(
-    term: u64,
-    decode_memory: u64,
-    memory: u64,
-    max_block_plain: u64,
-) -> Result<()> {
-    let left = decode_memory.min(memory).saturating_sub(max_block_plain);
-    if term > left {
-        return Err(Error::new(
-            "Refused",
-            format!("the archive needs decode_memory of {term} bytes; this reader allows {left}"),
-        ));
-    }
-    Ok(())
-}
-
 struct Bounded {
     buf: Vec<u8>,
     limit: usize,
@@ -265,6 +248,16 @@ mod tests {
 
     #[test]
     fn memory_comparison() {
+        // Check 5's comparison: the image's term against the archive's `decode_memory` (never
+        // above the reader's memory) minus `max_block_plain`.
+        let check_memory = |term, decode_memory, memory, max_block_plain| {
+            crate::deflate::Memory {
+                decode_memory,
+                memory,
+                max_block_plain,
+            }
+            .check(term)
+        };
         assert!(check_memory(100, 1000, 2000, 900).is_ok());
         let e = check_memory(101, 1000, 2000, 900).unwrap_err();
         assert_eq!(e.class, "Refused");

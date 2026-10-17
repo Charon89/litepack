@@ -23,8 +23,13 @@ struct Cli {
     /// A prior (repeatable); matched by its BLAKE3.
     #[arg(long, global = true)]
     prior: Vec<PathBuf>,
-    /// Behave as a revision 1.0 reader (`jpeg-reconstruct` is not run).
-    #[arg(long, global = true)]
+    /// The revision this reader runs: 0 (store, zstd, lzma), 1 (adds jpeg-reconstruct) or 2
+    /// (adds deflate-reconstruct). A primitive a lower revision does not run is
+    /// `UnimplementedPrimitive`.
+    #[arg(long, global = true, default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=2))]
+    revision: u8,
+    /// Alias of `--revision 0`.
+    #[arg(long, global = true, conflicts_with = "revision")]
     revision_1_0: bool,
     #[command(subcommand)]
     cmd: Cmd,
@@ -58,7 +63,7 @@ fn read(p: &Path) -> Result<Vec<u8>, Error> {
 
 fn options(cli: &Cli) -> Result<Options, Error> {
     let mut o = Options {
-        revision_1_0: cli.revision_1_0,
+        revision: if cli.revision_1_0 { 0 } else { cli.revision },
         ..Options::default()
     };
     if let Some(p) = &cli.password {

@@ -10,6 +10,11 @@ use lzma_rs::decompress::raw::{LzmaDecoder as Inner, LzmaParams, LzmaProperties}
 use std::io::{self, Cursor, Write};
 
 const ID: u16 = 2;
+/// LzmaSpec's smallest dictionary: a stored `dict_size` below it is raised to it.
+const MIN_DICT: u64 = 4096;
+/// The reason for an end condition that fails after the marker with no input after it (not
+/// normative, spec section 8, lzma rule 4).
+const MARKER_END: &str = "range coder end condition after the marker";
 
 fn lerr(reason: impl Into<String>) -> FormatError {
     FormatError::LzmaError {
@@ -100,20 +105,33 @@ impl PrimitiveDecoder for LzmaDecoder {
                 // `PayloadTooLarge` (spec section 8, lzma rules 3 and 6); an error at an
                 // earlier position keeps its class. The byte past the bound cannot fail on
                 // its distance (it is at most the bytes produced, which fit the buffer).
-                _ => match pass(
-                    props,
-                    buffer,
-                    Some(expected_len.saturating_add(1)),
-                    input,
-                    expected_len,
-                    limits,
-                ) {
-                    // (A marker before the bound reads as a short unpacked size: not a crossing.)
-                    Err(p @ FormatError::PayloadTooLarge { len, .. }) if len > expected_len => {
-                        Err(p)
+                second => {
+                    let reached =
+                        matches!(&second, Ok((out, _)) if out.len() as u64 == expected_len);
+                    match pass(
+                        props,
+                        buffer,
+                        Some(expected_len.saturating_add(1)),
+                        input,
+                        expected_len,
+                        limits,
+                    ) {
+                        // (A marker before the bound reads as a short unpacked size: not a
+                        // crossing.)
+                        Err(p @ FormatError::PayloadTooLarge { len, .. }) if len > expected_len => {
+                            Err(p)
+                        }
+                        // The output reached the bound and the input ends inside the next
+                        // symbol: `marker required` (spec section 8, the `lzma` step that is
+                        // not the last).
+                        Err(FormatError::LzmaError { reason })
+                            if reached && reason == "truncated" =>
+                        {
+                            Err(lerr("marker required"))
+                        }
+                        _ => Err(e),
                     }
-                    _ => Err(e),
-                },
+                }
             },
         }
     }
@@ -144,8 +162,19 @@ impl PrimitiveDecoder for LzmaDecoder {
             expected_len,
             limits,
         ) {
-            // The marker came before the bound: the first pass saw it too.
-            Err(FormatError::PayloadTooLarge { .. }) if short => Err(lerr("truncated")),
+            // The marker came before the bound (lzma-rs reports a short unpacked size, read as a
+            // length below the bound; when nothing follows the marker the first pass saw it too):
+            // `truncated` whatever follows it (spec section 8, lzma rule 5).
+            Err(FormatError::PayloadTooLarge { len, .. }) if short || len <= expected_len => {
+                Err(lerr("truncated"))
+            }
+            // Decoding by the known size stops at the bound, so a marker this pass meets (with
+            // input after it, or a failed end condition) came before the bound: `truncated`.
+            Err(FormatError::LzmaError { reason })
+                if reason == "trailing input" || reason == MARKER_END =>
+            {
+                Err(lerr("truncated"))
+            }
             Err(e) => Err(e),
             Ok((out, _)) if (out.len() as u64) < expected_len => Err(lerr("truncated")),
             Ok((_, used)) if used < input.len() as u64 => Err(lerr("trailing input")),
@@ -185,10 +214,14 @@ fn setup(
         });
     }
     // The buffer is the dictionary, capped by the output: lzma-rs refuses
-    // a distance beyond the buffer, so exactly the distances beyond
-    // `dict_size` or beyond the bytes produced are refused, whatever the
+    // a distance beyond the buffer, so exactly the distances beyond the
+    // dictionary size or beyond the bytes produced are refused, whatever the
     // reader's `max_window` is (`dict_size` <= `max_window` was checked).
-    let buffer = expected_len.min(u64::from(dict_size)).max(1);
+    // The dictionary size is LzmaSpec's, raised to 4096 when the stored one
+    // is smaller (spec section 8, lzma rule 3): lzma-rs applies that floor
+    // only when it reads a `.lzma` header, not for the raw parameters here.
+    let dictionary = u64::from(dict_size).max(MIN_DICT);
+    let buffer = expected_len.min(dictionary).max(1);
     let buffer = u32::try_from(buffer).map_err(|_| lerr("dictionary"))?;
     // The first byte of a range coder stream is always 0.
     if input.first().is_some_and(|&b| b != 0) {
@@ -234,9 +267,21 @@ fn pass(
     if let Err(e) = res {
         // Only the over-length case is read from the text: lzma-rs checks its
         // size after a match crossed the bound and says so in words. A marker
-        // before the bound gives the same words; the caller tells the two
-        // apart by the first pass.
+        // before the bound gives the same words, with a length that is not
+        // above the bound; the callers tell the two apart by that length.
         let text = e.to_string();
+        // A marker that is not where the stream must end (input after it, or
+        // its end condition fails): input after it is `trailing input` (spec
+        // section 8; the last step's callers turn a marker before the bound
+        // into `truncated`); a failed end condition alone has a reason that
+        // is not normative.
+        if text.contains("Found end-of-stream marker but more bytes are available") {
+            return Err(lerr(if src.position() < input.len() as u64 {
+                "trailing input"
+            } else {
+                MARKER_END
+            }));
+        }
         if text.starts_with("lzma error: Expected unpacked size") {
             let len = text
                 .rsplit("decompressed to ")
