@@ -155,7 +155,17 @@ fn examine_reports_the_counts_the_probe_reported() {
 /// code on a scratch checkout of 8423a14 (before the move).
 #[test]
 fn examine_reports_the_probes_non_success_counts() {
-    let cases: [(&str, &[u8], Limits, &str, Counts, usize, &str); 2] = [
+    /// (name, bytes, limits, kind, counts, replaced length, replaced BLAKE3).
+    type Troubled = (
+        &'static str,
+        &'static [u8],
+        Limits,
+        &'static str,
+        Counts,
+        usize,
+        &'static str,
+    );
+    let cases: [Troubled; 2] = [
         (
             "troubled",
             include_bytes!("fixtures/deflate/troubled.zip"),
