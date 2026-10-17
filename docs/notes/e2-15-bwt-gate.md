@@ -62,3 +62,7 @@ explained to the byte here.
 Per the brief: D-05 is to be amended (the gate opens), and the revision 1.3 design for BWT
 (a decoding written out, the entropy primitive for (b), vectors, the independence gate) follows as
 the next task. `full` was not run: the margins are not close.
+
+## The gap between candidate (c) and the runner's row (review note)
+
+The read-only review traced the probe's LZMA candidate being smaller than the runner's `lpk/balanced` archive to the archive's chunk table: about 35 bytes per chunk (a varint length and a 32-byte BLAKE3 hash) at the Fold's 64 KiB average chunk — the reviewer's arithmetic, not a measurement; a BWT archive pays the same table, so the comparison between the candidates stands.
