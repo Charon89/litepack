@@ -450,9 +450,17 @@ fn zstd(
         loop {
             let start = dec.bytes_read_from_source();
             if let Err(e) = dec.decode_blocks(&mut src, BlockDecodingStrategy::UptoBlocks(1)) {
-                let done = match last_block_start {
+                // `Content_Checksum` belongs to no block: a frame cut short or damaged inside it
+                // has all its blocks complete, the one just decoded included.
+                let in_checksum = matches!(e, FrameDecoderError::FailedToReadChecksum(_));
+                let complete = if in_checksum {
+                    Some((start, dec.bytes_read_from_source()))
+                } else {
+                    last_block_start.map(|s| (s, start))
+                };
+                let done = match complete {
                     None => 0,
-                    Some(s) => complete_blocks_len(frame, s, start, &fresh).unwrap_or(0),
+                    Some((s, end)) => complete_blocks_len(frame, s, end, &fresh).unwrap_or(0),
                 };
                 if frame_base + done > bound {
                     return Err(too_large(last, frame_base + done, bound));
@@ -548,6 +556,24 @@ mod tests {
             f.extend_from_slice(&[0; 10]);
         }
         f
+    }
+
+    /// Rule 7 (round 2 text): a frame cut short inside its `Content_Checksum` has all its blocks
+    /// complete, and their output counts.
+    #[test]
+    fn zstd_rule_7_checksum_cut_short() {
+        let p = HashMap::new();
+        let mut f = raw_frame(&[(600, 1), (300, 2)], false);
+        f[4] |= 0x04; // Content_Checksum_flag
+        f.extend_from_slice(&[0, 0]); // two of the four checksum bytes
+        let class = |bound: u64, last: bool| {
+            zstd(&f, 10, &[0; 32], bound, last, &ctx(&p))
+                .unwrap_err()
+                .class
+        };
+        assert_eq!(class(899, false), "PayloadTooLarge");
+        assert_eq!(class(899, true), "BlockLengthMismatch");
+        assert_eq!(class(900, false), "ZstdError");
     }
 
     #[test]
