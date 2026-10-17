@@ -27,7 +27,7 @@ use preflate_rs::{
     PreflateStreamProcessor, TokenPredictorParameters,
 };
 
-use super::walk::{find_streams, inflate_extent, trim_spans, Found, Inflated};
+use super::walk::{find_streams, inflate_extent, trim_spans, Candidate, Found, Inflated};
 
 /// Plain text the library may hold for one stream.
 pub const PLAIN_TEXT_LIMIT: u64 = 64 * 1024 * 1024;
@@ -488,6 +488,36 @@ fn contiguous<'a>(bytes: &'a [u8], spans: &[(usize, usize)]) -> Cow<'a, [u8]> {
     }
 }
 
+/// What [`examine_with`] tells its caller while it examines one file.
+pub trait Visitor {
+    /// The walker is done: the candidates, in file order (before any analysis).
+    fn walked(&mut self, candidates: &[Candidate]) {
+        let _ = candidates;
+    }
+    /// The candidate `index` is about to be analysed; `plain` is the most plain text its
+    /// analysis may produce (the declared size plus one, else the plain-text limit, and never
+    /// above Deflate's expansion of its bytes). Returning false stops the examination here (the
+    /// counts then cover only what was examined; the caller discards them).
+    fn analysing(&mut self, index: usize, plain: u64) -> bool {
+        let _ = (index, plain);
+        true
+    }
+    /// One reconstructed stream, in file order.
+    fn done(&mut self, r: Reconstructed);
+}
+
+struct OnDone<F>(F);
+
+impl<F: FnMut(Reconstructed)> Visitor for OnDone<F> {
+    fn done(&mut self, r: Reconstructed) {
+        (self.0)(r)
+    }
+}
+
+/// Deflate's largest expansion, plain bytes per compressed byte (a 258-byte match per two-bit
+/// code, rounded up; the stage's `MAX_EXPANSION`).
+const EXPANSION: u64 = 1032;
+
 /// Find and analyse every Deflate stream of one file (`ext`, lower case without the dot, only
 /// labels ZIP kinds). `on_done` is called once per reconstructed stream, in file order; a
 /// stream's plain text is dropped when `on_done` returns unless the caller keeps it. A panic in
@@ -496,7 +526,17 @@ pub fn examine(
     bytes: &[u8],
     ext: &str,
     limits: &Limits,
-    mut on_done: impl FnMut(Reconstructed),
+    on_done: impl FnMut(Reconstructed),
+) -> Examined {
+    examine_with(bytes, ext, limits, &mut OnDone(on_done))
+}
+
+/// [`examine`] with the hooks of a [`Visitor`]: after the walker and before each analysis.
+pub fn examine_with(
+    bytes: &[u8],
+    ext: &str,
+    limits: &Limits,
+    visitor: &mut impl Visitor,
 ) -> Examined {
     // Restored to unlimited when `examine` returns or unwinds (a panic in `on_done`).
     let _work = super::walk::WorkGuard::new(work_budget(bytes.len() as u64));
@@ -514,6 +554,7 @@ pub fn examine(
             true,
         ),
     };
+    visitor.walked(&found.candidates);
     let cfg = preflate_config(limits.plain_text_limit);
     let mut st = Counts {
         structural_refusals: found.rejected,
@@ -545,6 +586,17 @@ pub fn examine(
             break;
         }
         analysis_left -= charge;
+        if !too_big {
+            let len: u64 = c.spans.iter().map(|(a, b)| (b - a) as u64).sum();
+            let plain = c
+                .plain_known
+                .map_or(limits.plain_text_limit, |k| k.saturating_add(1))
+                .min(limits.plain_text_limit)
+                .min(len.saturating_mul(EXPANSION));
+            if !visitor.analysing(i, plain) {
+                break;
+            }
+        }
         st.found += 1;
         let data = contiguous(bytes, &c.spans);
         let outcome = if too_big {
@@ -582,7 +634,7 @@ pub fn examine(
                 st.analyse_seconds += analyse_seconds;
                 st.recreate_seconds += recreate_seconds;
                 plain_held += plain_len;
-                on_done(Reconstructed {
+                visitor.done(Reconstructed {
                     spans: trim_spans(&c.spans, 0, deflate_len),
                     plain,
                     corrections,

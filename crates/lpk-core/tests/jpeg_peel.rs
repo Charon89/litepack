@@ -367,3 +367,90 @@ fn a_corrupted_stream_or_a_mismatch_falls_back() {
     );
     assert!(r.is_err());
 }
+
+/// Design `docs/notes/e2-10-peel-pool-design.md` task 4: the Lepton stream does not depend on
+/// the processor threads (the pool's workers use 1, the preset 8).
+#[test]
+fn lepton_streams_are_identical_at_one_and_eight_processor_threads() {
+    let one = JpegPeel {
+        processor_threads: 1,
+        ..JpegPeel::default()
+    };
+    let eight = JpegPeel::default();
+    assert_eq!(eight.processor_threads, 8);
+    for name in ["baseline.jpg", "progressive.jpg", "secondary.jpg"] {
+        let data = fixture(name);
+        let a = one.peel(&data, 1 << 26).unwrap();
+        let b = eight.peel(&data, 1 << 26).unwrap();
+        assert!(a.stream == b.stream, "{name}");
+        assert_eq!(a.nested, b.nested, "{name}");
+    }
+}
+
+/// Design task 4: the Fast and Balanced pipelines write the same archive and the same
+/// summaries at 1, 2, 3 and 8 threads (the JPEG files through the peel pool) and across
+/// budgets.
+#[test]
+fn jpeg_archives_are_identical_at_every_width_and_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    for (i, name) in ["baseline.jpg", "progressive.jpg", "secondary.jpg"]
+        .iter()
+        .enumerate()
+    {
+        let data = fixture(name);
+        std::fs::write(dir.path().join(format!("a{i}.jpg")), &data).unwrap();
+        // A whole copy (deduplicated) and a copy with a trailing tail (a nested part).
+        std::fs::write(dir.path().join(format!("b{i}.jpg")), &data).unwrap();
+        let mut tail = data.clone();
+        tail.extend_from_slice(b"trailing bytes after the image");
+        std::fs::write(dir.path().join(format!("c{i}.jpg")), tail).unwrap();
+    }
+    for e in std::fs::read_dir(dir.path()).unwrap() {
+        let f = std::fs::File::options()
+            .write(true)
+            .open(e.unwrap().path())
+            .unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+    }
+    let run = |balanced: bool, threads: usize, memory: Option<u64>| {
+        let mut p = if balanced {
+            lpk_core::Pipeline::balanced(lpk_core::BalancedOptions {
+                block_size: 4 << 20,
+                dict_size: 1 << 20,
+                sample_len: 1 << 16,
+                threads: Some(threads),
+                ..lpk_core::BalancedOptions::default()
+            })
+        } else {
+            lpk_core::Pipeline::fast(FastOptions {
+                threads: Some(threads),
+                ..FastOptions::default()
+            })
+        };
+        p.seal.memory = memory;
+        let mut out = Vec::new();
+        let s = p.run(dir.path(), &mut out).unwrap();
+        (out, s)
+    };
+    lpk_core::peel::deflate::pool::set_delay_seed(0x1E97);
+    for balanced in [false, true] {
+        let (one, s1) = run(balanced, 1, None);
+        assert!(s1.peel.peeled.files >= 3, "{:?}", s1.peel);
+        assert!(s1.peel.deduplicated.files >= 1, "{:?}", s1.peel);
+        let minimum = s1.memory.minimum();
+        for threads in [2, 3, 8] {
+            for memory in [Some(minimum), None, Some(1 << 40)] {
+                let (bytes, s) = run(balanced, threads, memory);
+                assert!(
+                    bytes == one,
+                    "balanced {balanced}, {threads} threads, {memory:?}"
+                );
+                assert_eq!(s.peel, s1.peel);
+                assert_eq!(s.writer, s1.writer);
+                assert!(s.peel_pool.workers >= 1, "{:?}", s.peel_pool);
+            }
+        }
+    }
+    lpk_core::peel::deflate::pool::set_delay_seed(0);
+}

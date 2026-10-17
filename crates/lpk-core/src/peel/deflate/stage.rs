@@ -20,12 +20,13 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
 use lpk_format::envelope::DEFAULT_MEMORY;
 use lpk_format::{DeflateRecord, Encoded, PrimitiveId, Record, RecordBody, Step, Writer};
 
-use super::{examine, memory_term, Counts, Limits, PartEncoder, PartModel};
+use super::{examine_with, memory_term, Counts, Limits, PartEncoder, PartModel, Reconstructed};
 use crate::classify::{classify, Class};
 use crate::error::CoreError;
 use crate::ingest::Input;
@@ -70,6 +71,12 @@ pub struct DeflatePeel {
     pub record_files: bool,
     /// The records cap ([`RECORDS_CAP`]).
     pub records_cap: u64,
+    /// The exact skips of design `docs/notes/e2-10-peel-pool-design.md` section 3 (no encode
+    /// for a stream of a file whose bound decides it; the archive is the same either way).
+    pub exact_skips: bool,
+    /// The peel pool's hints (design section 1: a worker skips what the commits already wrote;
+    /// the archive is the same either way).
+    pub hints: bool,
 }
 
 impl Default for DeflatePeel {
@@ -79,6 +86,8 @@ impl Default for DeflatePeel {
             limits: Limits::standard(),
             record_files: false,
             records_cap: RECORDS_CAP,
+            exact_skips: true,
+            hints: true,
         }
     }
 }
@@ -126,6 +135,9 @@ pub struct Outcomes {
     pub file_share: u64,
     /// Would have been kept, but its record would take the run's records past [`RECORDS_CAP`].
     pub records_cap: u64,
+    /// Not encoded: its file's bound (design `docs/notes/e2-10-peel-pool-design.md`, section 3)
+    /// sent the file whole through the normal path whatever the encode would say.
+    pub file_bound: u64,
 }
 
 impl Outcomes {
@@ -139,6 +151,7 @@ impl Outcomes {
             + self.file_gate
             + self.file_share
             + self.records_cap
+            + self.file_bound
     }
 
     fn add(&mut self, o: &Outcomes) {
@@ -150,6 +163,7 @@ impl Outcomes {
         self.file_gate += o.file_gate;
         self.file_share += o.file_share;
         self.records_cap += o.records_cap;
+        self.file_bound += o.file_bound;
     }
 }
 
@@ -188,6 +202,9 @@ pub struct DeflateSummary {
     pub file_gate: u64,
     /// Walked files sent whole through the normal path by the file share rule.
     pub file_share: u64,
+    /// Walked files sent whole through the normal path by their bound, without the encodes
+    /// (design `docs/notes/e2-10-peel-pool-design.md`, section 3).
+    pub file_bound: u64,
     /// The probe's stream counts, summed over the walked files (walker panics included).
     pub streams: Counts,
     /// The partition of `streams.reconstructed`.
@@ -254,6 +271,7 @@ impl DeflateSummary {
                 self.none_kept,
                 self.file_gate,
                 self.file_share,
+                self.file_bound,
             ),
             (&self.outcomes, &self.kept_by_class),
             (
@@ -284,7 +302,7 @@ impl PartialEq for DeflateSummary {
 
 /// The exact length of `record` in the `Records` frame: kind, flags, the length varint, the
 /// body and its BLAKE3.
-fn record_len(record: &Record) -> u64 {
+pub(crate) fn record_len(record: &Record) -> u64 {
     let body = record.encode().len() as u64;
     let mut v = Vec::new();
     // Writing to a vector cannot fail.
@@ -380,7 +398,671 @@ pub(crate) struct Context<'a> {
     pub(crate) block_size: u64,
 }
 
-/// Peel one file read whole (at most the size cap) and add it to the open writer.
+impl Context<'_> {
+    /// The settings [`prepare`] reads, taken on the feeding thread.
+    pub(crate) fn settings(&self) -> Settings {
+        Settings::of(self.stage, self.block_size)
+    }
+}
+
+impl Settings {
+    /// The settings of `stage` with the tier's `block_size`, taken on the feeding thread.
+    pub(crate) fn of(stage: &DeflatePeel, block_size: u64) -> Settings {
+        Settings {
+            limits: stage.limits.clone(),
+            block_size,
+            pregate: pregate(),
+            skips: stage.exact_skips,
+            share: true,
+        }
+    }
+}
+
+/// Everything [`prepare`] reads besides the file's bytes (design
+/// `docs/notes/e2-10-peel-pool-design.md`, section 1): no writer state.
+#[derive(Debug, Clone)]
+pub(crate) struct Settings {
+    pub(crate) limits: Limits,
+    pub(crate) block_size: u64,
+    pub(crate) pregate: bool,
+    /// The exact skips of design section 3 ([`DeflatePeel::exact_skips`]).
+    pub(crate) skips: bool,
+    /// With `skips`, the share bound too (off when a share-bound file with a stored stream is
+    /// prepared again; the gate bound stays).
+    pub(crate) share: bool,
+}
+
+/// An error or a panic met while preparing, raised by the commit only where the sequential
+/// run would have met it.
+pub(crate) enum Failure {
+    /// An error (of the part encoder, or of reading the file).
+    Error(CoreError),
+    /// A panic's payload, resumed on the feeding thread.
+    Panic(Box<dyn std::any::Any + Send + 'static>),
+}
+
+impl Failure {
+    /// Raise it: return the error, or resume the panic.
+    pub(crate) fn raise<T>(self) -> Result<T, CoreError> {
+        match self {
+            Failure::Error(e) => Err(e),
+            Failure::Panic(p) => std::panic::resume_unwind(p),
+        }
+    }
+}
+
+impl std::fmt::Debug for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Error(e) => write!(f, "Error({e})"),
+            Failure::Panic(_) => f.write_str("Panic"),
+        }
+    }
+}
+
+/// A stream's model encoding with what the commit needs to judge it.
+#[derive(Debug)]
+pub(crate) struct Coded {
+    record: DeflateRecord,
+    record_len: u64,
+    class: Class,
+    encoded: Encoded,
+    model: PartModel,
+    sample_bytes: u64,
+    seconds: f64,
+}
+
+/// The pure verdict on one reconstructed stream (design section 1): every check that depends
+/// only on the file's bytes and the settings, in the sequential order, without the dedup probe
+/// and the records cap, which the commit applies.
+#[derive(Debug)]
+pub(crate) enum Verdict {
+    /// No spans or no bytes: no gain, before the probe.
+    Empty,
+    /// Longer than the block size.
+    BlockCap,
+    /// The memory term plus the block size above the reader's default memory.
+    MemoryCap,
+    /// The record and the overhead alone reach the stream's length.
+    PreNoGain,
+    /// The oracle found the spans stored: nothing past it was computed.
+    Skipped,
+    /// Not encoded: the file's bound ([`Prepared::bound`]) decides the file without it.
+    Bound,
+    /// Encoded, and M's bytes, the record and the overhead reach the stream's length: only what
+    /// the summary counts of the encode is kept (the stream gate is pure).
+    NoGain {
+        /// The trial's sample bytes.
+        sample_bytes: u64,
+        /// Seconds in the part encoder.
+        seconds: f64,
+    },
+    /// Encoded, and below the stream's length.
+    Encoded(Box<Coded>),
+    /// The encode failed or panicked.
+    Failed(Failure),
+}
+
+/// A bound on a file's gain that decides the file without encodes (design section 3): G, the
+/// lengths of the streams reconstructed so far plus the span lengths of the candidates left,
+/// bounds the gain of its streams (a stream gains at most its length).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bound {
+    /// G ≤ [`FILE_GATE`]: the file gate fails whatever the encodes say.
+    Gate,
+    /// `FILE_SHARE × G` < the file's length and no stream was found stored: the share rule
+    /// fails for any kept stream.
+    Share,
+}
+
+/// One reconstructed stream, prepared.
+#[derive(Debug)]
+pub(crate) struct PreparedStream {
+    spans: Vec<(usize, usize)>,
+    len: u64,
+    verdict: Verdict,
+}
+
+/// One file, prepared: the walker's kind, the probe's counts and its reconstructed streams in
+/// file order.
+#[derive(Debug)]
+pub(crate) struct Prepared {
+    kind: &'static str,
+    counts: Counts,
+    streams: Vec<PreparedStream>,
+    /// The hooks stopped the examination (a cancelled run): the result is incomplete.
+    pub(crate) stopped: bool,
+    /// The bound that left streams unencoded ([`Verdict::Bound`]), if any.
+    bound: Option<Bound>,
+    /// Not examined: a hint says the file is stored whole already (the commit checks).
+    pub(crate) whole_hint: bool,
+}
+
+impl Prepared {
+    /// The result for a file a hint says is stored whole (nothing examined).
+    pub(crate) fn hinted_whole() -> Prepared {
+        Prepared {
+            kind: "other",
+            counts: Counts::default(),
+            streams: Vec::new(),
+            stopped: false,
+            bound: None,
+            whole_hint: true,
+        }
+    }
+}
+
+impl Prepared {
+    /// The sample bytes of the encodes whose result the commit did not use (counted outside
+    /// [`DeflateSummary`]).
+    fn unused_encodes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.streams.iter().filter_map(|s| match &s.verdict {
+            Verdict::Encoded(c) => Some(c.sample_bytes),
+            Verdict::NoGain { sample_bytes, .. } => Some(*sample_bytes),
+            _ => None,
+        })
+    }
+}
+
+/// What a pool asks of [`prepare`] around each stream (design section 2): the reservation of
+/// the stream's analysis and encode, and the cancellation of a dropped run.
+pub(crate) trait Hooks {
+    /// The candidates are known (before any analysis).
+    fn walked(&mut self, candidates: &[super::Candidate]) {
+        let _ = candidates;
+    }
+    /// A candidate whose text is at most `plain` bytes is about to be analysed; false stops.
+    fn analysing(&mut self, plain: u64) -> bool {
+        let _ = plain;
+        true
+    }
+    /// The analysis and the encode of the last candidate are over.
+    fn finished(&mut self) {}
+}
+
+/// No hooks (the sequential path).
+pub(crate) struct NoHooks;
+
+impl Hooks for NoHooks {}
+
+/// The skip-only oracle of [`prepare`]: whether the stream at these spans of the file is stored.
+pub(crate) type Oracle<'a> = dyn FnMut(&[u8], &[(usize, usize)]) -> bool + 'a;
+
+struct Prep<'a, H: Hooks> {
+    data: &'a [u8],
+    #[cfg_attr(not(test), allow(dead_code))]
+    path: &'a str,
+    set: &'a Settings,
+    encoder: &'a mut PartEncoder,
+    oracle: &'a mut Oracle<'a>,
+    hooks: &'a mut H,
+    streams: Vec<PreparedStream>,
+    /// Span lengths of the candidates after each index (`left[i]`: candidates `i..`).
+    left: Vec<u64>,
+    /// The candidate being analysed.
+    index: usize,
+    /// Lengths of the streams reconstructed so far.
+    reconstructed: u64,
+    /// The file's bound, once it holds.
+    bound: Option<Bound>,
+    /// An encode failed: the encoder is replaced before the next encode.
+    stale: bool,
+    /// The hooks stopped the examination.
+    stopped: bool,
+}
+
+impl<H: Hooks> super::analyse::Visitor for Prep<'_, H> {
+    fn walked(&mut self, candidates: &[super::Candidate]) {
+        let mut left = vec![0u64; candidates.len() + 1];
+        for (i, c) in candidates.iter().enumerate().rev() {
+            let len: u64 = c.spans.iter().map(|(a, b)| (b - a) as u64).sum();
+            left[i] = left[i + 1].saturating_add(len);
+        }
+        self.left = left;
+        self.hooks.walked(candidates);
+    }
+
+    fn analysing(&mut self, index: usize, plain: u64) -> bool {
+        self.index = index;
+        self.hooks.finished();
+        let go = self.hooks.analysing(plain);
+        self.stopped |= !go;
+        go
+    }
+
+    fn done(&mut self, mut r: Reconstructed) {
+        self.reconstructed = self.reconstructed.saturating_add(r.deflate_len as u64);
+        // The file's bound (design section 3), a function of the file's bytes alone: updated
+        // for every reconstructed stream, whatever the oracle says of it.
+        if self.set.skips {
+            let g = self
+                .reconstructed
+                .saturating_add(self.left.get(self.index + 1).copied().unwrap_or(0));
+            if g <= FILE_GATE {
+                self.bound = Some(Bound::Gate);
+            } else if self.bound.is_none()
+                && self.set.share
+                && g.saturating_mul(FILE_SHARE) < self.data.len() as u64
+            {
+                self.bound = Some(Bound::Share);
+            }
+        }
+        let verdict = self.verdict(&mut r);
+        self.hooks.finished();
+        self.streams.push(PreparedStream {
+            spans: r.spans,
+            len: r.deflate_len as u64,
+            verdict,
+        });
+    }
+}
+
+impl<H: Hooks> Prep<'_, H> {
+    fn verdict(&mut self, r: &mut Reconstructed) -> Verdict {
+        let data = self.data;
+        let len = r.deflate_len as u64;
+        if r.spans.is_empty() || len == 0 {
+            return Verdict::Empty;
+        }
+        // The skip-only oracle: a stream it finds stored is not encoded (the commit checks).
+        if (self.oracle)(data, &r.spans) {
+            return Verdict::Skipped;
+        }
+        if len > self.set.block_size {
+            return Verdict::BlockCap;
+        }
+        let plain = r.plain.text();
+        let plain_len = plain.len() as u64;
+        let term = memory_term(plain_len, r.corrections.len() as u64);
+        if term.saturating_add(self.set.block_size) > DEFAULT_MEMORY {
+            return Verdict::MemoryCap;
+        }
+        let class = classify(&plain[..plain.len().min(CLASSIFY_LEN)]);
+        let stream = contiguous(data, &r.spans);
+        let record = DeflateRecord {
+            original_len: len,
+            plain_len,
+            corrections: std::mem::take(&mut r.corrections),
+            library: 0,
+            original_hash: *blake3::hash(&stream).as_bytes(),
+        };
+        let record_len = record_len(&Record::new(RecordBody::Deflate(record.clone())));
+        // The exact pre-encode gate: when the record and the overhead alone reach the stream's
+        // length, no model output can pass the stream gate, so the stream is "no gain" without
+        // the encode (the same outcome and the same bytes, only sooner).
+        if self.set.pregate && record_len.saturating_add(STREAM_OVERHEAD) >= len {
+            return Verdict::PreNoGain;
+        }
+        // The exact skips (design section 3): once the file's bound holds, no encode is needed.
+        if self.bound.is_some() {
+            return Verdict::Bound;
+        }
+        // No state of a failed encode is carried into the next one. A replacement that fails is
+        // retried at the next encode; this stream is left unencoded and unknown (`Skipped`): the
+        // commit, if it finds it not stored, prepares the file again on the feeding thread.
+        if self.stale {
+            match fresh_in(self.encoder, self.path) {
+                Ok(e) => {
+                    *self.encoder = e;
+                    self.stale = false;
+                }
+                Err(_) => return Verdict::Skipped,
+            }
+        }
+        let t = Instant::now();
+        let (encoder, path) = (&mut *self.encoder, self.path);
+        let r = catch_unwind(AssertUnwindSafe(|| encode_hook(encoder, path, plain)));
+        let seconds = t.elapsed().as_secs_f64();
+        let failure = match r {
+            Ok(Ok(p)) => {
+                let cost = (p.encoded.bytes.len() as u64)
+                    .saturating_add(record_len)
+                    .saturating_add(STREAM_OVERHEAD);
+                if cost >= len {
+                    return Verdict::NoGain {
+                        sample_bytes: p.sample_bytes,
+                        seconds,
+                    };
+                }
+                return Verdict::Encoded(Box::new(Coded {
+                    record,
+                    record_len,
+                    class,
+                    encoded: p.encoded,
+                    model: p.model,
+                    sample_bytes: p.sample_bytes,
+                    seconds,
+                }));
+            }
+            Ok(Err(e)) => Failure::Error(e.into()),
+            Err(p) => Failure::Panic(p),
+        };
+        self.stale = true;
+        Verdict::Failed(failure)
+    }
+}
+
+/// Test hook, for every thread (pool workers too): the part encoder fails on the texts that
+/// start with the prefix (empty: every text) of the file with this entry path (`false`: an
+/// error, `true`: a panic). Tests use paths no other test uses.
+#[cfg(test)]
+pub(crate) static FAIL_ON: std::sync::Mutex<Vec<(String, Vec<u8>, bool)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test hook, for every thread: replacing the part encoder while preparing the file with this
+/// entry path fails this many more times.
+#[cfg(test)]
+pub(crate) static FRESH_FAIL_ON: std::sync::Mutex<Vec<(String, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test hook for the part encoder failing (see `FAIL_ON`); the plain encode outside tests.
+fn encode_hook(
+    encoder: &mut PartEncoder,
+    path: &str,
+    plain: &[u8],
+) -> Result<super::PartEncoded, lpk_format::FormatError> {
+    #[cfg(test)]
+    {
+        let fail = FAIL_ON
+            .lock()
+            .map(|f| {
+                f.iter()
+                    .find(|(p, x, _)| p == path && plain.starts_with(x))
+                    .map(|(_, _, panic)| *panic)
+            })
+            .unwrap_or(None);
+        match fail {
+            Some(true) => panic!("injected part encoder panic"),
+            Some(false) => {
+                return Err(lpk_format::FormatError::Io(std::io::Error::other(
+                    "injected part encoder error",
+                )))
+            }
+            None => {}
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
+    encoder.encode(plain)
+}
+
+/// The replacement of a part encoder while preparing the file `path` (see `FRESH_FAIL_ON`).
+fn fresh_in(encoder: &PartEncoder, path: &str) -> Result<PartEncoder, CoreError> {
+    #[cfg(test)]
+    {
+        let mut f = FRESH_FAIL_ON.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, n)) = f.iter_mut().find(|(p, n)| p == path && *n > 0) {
+            *n -= 1;
+            return Err(CoreError::InvalidOption("injected fresh failure".into()));
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
+    fresh_hook(encoder)
+}
+
+// Test hook: with `Some(n)`, `PartEncoder::fresh` succeeds n more times on this thread, then
+// fails every time.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FRESH_FAILS_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `PartEncoder::fresh`, failing on the test hook (see `FRESH_FAILS_AFTER`; this thread only).
+pub(crate) fn fresh_hook(encoder: &PartEncoder) -> Result<PartEncoder, CoreError> {
+    #[cfg(test)]
+    {
+        let fail = FRESH_FAILS_AFTER.with(|f| match f.get() {
+            Some(0) => true,
+            Some(n) => {
+                f.set(Some(n - 1));
+                false
+            }
+            None => false,
+        });
+        if fail {
+            return Err(CoreError::InvalidOption("injected fresh failure".into()));
+        }
+    }
+    encoder.fresh()
+}
+
+/// The pure half of the peel of one file (design section 1): `examine` and, per reconstructed
+/// stream, every check that depends only on the file's bytes and `set`, and the encode. `path`
+/// is the entry path (its extension labels ZIP kinds). The `oracle` may only skip work: a
+/// stream all of whose spans it calls stored is not encoded ([`Verdict::Skipped`]); the commit
+/// re-checks every stream against the writer.
+pub(crate) fn prepare(
+    data: &[u8],
+    path: &str,
+    set: &Settings,
+    encoder: &mut PartEncoder,
+    oracle: &mut Oracle<'_>,
+    hooks: &mut impl Hooks,
+) -> Prepared {
+    let ext = extension(path);
+    let mut p = Prep {
+        data,
+        path,
+        set,
+        encoder,
+        oracle,
+        hooks,
+        streams: Vec::new(),
+        left: Vec::new(),
+        index: 0,
+        reconstructed: 0,
+        bound: None,
+        stale: false,
+        stopped: false,
+    };
+    let examined = examine_with(data, &ext, &set.limits, &mut p);
+    p.hooks.finished();
+    Prepared {
+        kind: examined.kind,
+        counts: examined.counts,
+        streams: p.streams,
+        stopped: p.stopped,
+        bound: p.bound,
+        whole_hint: false,
+    }
+}
+
+/// The writer's own probe as the oracle (exact at the commit point: the sequential path).
+fn writer_oracle<O: Write>(w: &mut Writer<O>) -> impl FnMut(&[u8], &[(usize, usize)]) -> bool + '_ {
+    move |data: &[u8], spans: &[(usize, usize)]| {
+        spans
+            .iter()
+            .all(|&(a, b)| matches!(w.part_known(&data[a..b]), Ok(Some(_))))
+    }
+}
+
+/// What the commit decided for one file's streams.
+enum Decision {
+    /// A stream the oracle skipped is not stored now, or a bound file's stored and unencoded
+    /// streams mix: prepare the file again with no skips.
+    Rerun,
+    Ready {
+        decided: Vec<Decided>,
+        out: Outcomes,
+        sample_bytes: u64,
+        encode_seconds: f64,
+        /// A stream left unencoded by the file's bound was not stored.
+        bound_hit: bool,
+    },
+}
+
+/// The sequential walk over one file's prepared streams (design section 1): empty, probe, then
+/// the pure verdict, then the records cap against the run's record bytes.
+fn decide<O: Write>(
+    w: &mut Writer<O>,
+    data: &[u8],
+    prepared: &mut Prepared,
+    record_bytes: u64,
+    records_cap: u64,
+) -> Result<Decision, CoreError> {
+    let mut decided: Vec<Decided> = Vec::new();
+    let mut out = Outcomes::default();
+    let (mut sample_bytes, mut encode_seconds) = (0u64, 0f64);
+    let mut pending = 0u64;
+    let mut bound_hit = false;
+    for st in &mut prepared.streams {
+        if matches!(st.verdict, Verdict::Empty) {
+            out.no_gain += 1;
+            continue;
+        }
+        // The dedup probe: span by span, the stream is referenced when every span's chunks are
+        // stored already (a multi-span stream is all or nothing, as `add_parts_encoded` writes
+        // it: a copy of a peeled PNG, whose file is not cut as a whole, is found here).
+        let mut known = true;
+        for &(a, b) in &st.spans {
+            if w.part_known(&data[a..b])?.is_none() {
+                known = false;
+                break;
+            }
+        }
+        if known {
+            decided.push(Decided {
+                spans: std::mem::take(&mut st.spans),
+                gain: st.len,
+                kind: Kind::Stored,
+            });
+            // Its verdict stays: an encode left here is work the sequential run skipped.
+            continue;
+        }
+        // Taken: what is left in the file's verdicts afterwards is unused work.
+        match std::mem::replace(&mut st.verdict, Verdict::Empty) {
+            Verdict::Empty => {}
+            Verdict::Skipped => return Ok(Decision::Rerun),
+            Verdict::Bound => {
+                out.file_bound += 1;
+                bound_hit = true;
+            }
+            Verdict::BlockCap => out.block_cap += 1,
+            Verdict::MemoryCap => out.memory_cap += 1,
+            Verdict::PreNoGain => out.no_gain += 1,
+            Verdict::Failed(f) => return f.raise(),
+            Verdict::NoGain {
+                sample_bytes: b,
+                seconds,
+            } => {
+                encode_seconds += seconds;
+                sample_bytes += b;
+                out.no_gain += 1;
+            }
+            Verdict::Encoded(c) => {
+                let c = *c;
+                encode_seconds += c.seconds;
+                sample_bytes += c.sample_bytes;
+                let cost = (c.encoded.bytes.len() as u64)
+                    .saturating_add(c.record_len)
+                    .saturating_add(STREAM_OVERHEAD);
+                if cost >= st.len {
+                    out.no_gain += 1;
+                    continue;
+                }
+                if record_bytes + pending + c.record_len > records_cap {
+                    out.records_cap += 1;
+                    continue;
+                }
+                pending += c.record_len;
+                decided.push(Decided {
+                    spans: std::mem::take(&mut st.spans),
+                    gain: st.len - cost,
+                    kind: Kind::Kept {
+                        record: c.record,
+                        encoded: c.encoded,
+                        class: c.class,
+                        model: c.model,
+                        record_len: c.record_len,
+                    },
+                });
+            }
+        }
+    }
+    // A file bound by the share rule goes whole only when none of its streams is stored (then
+    // a stream that would be kept fails the rule, and with none kept nothing is written
+    // either); with a stored one the unencoded streams decide, so it is prepared again.
+    if bound_hit
+        && prepared.bound == Some(Bound::Share)
+        && decided.iter().any(|d| matches!(d.kind, Kind::Stored))
+    {
+        return Ok(Decision::Rerun);
+    }
+    Ok(Decision::Ready {
+        decided,
+        out,
+        sample_bytes,
+        encode_seconds,
+        bound_hit,
+    })
+}
+
+/// Work the commit did not use, and work the hints saved (design section 1: counted outside
+/// [`DeflateSummary`]'s equality, like the seconds).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Waste {
+    /// Files prepared and then referenced whole (`add_file_if_known`).
+    pub files: u64,
+    /// Streams encoded and then found stored by the commit's probe.
+    pub encodes: u64,
+    /// The trial's sample bytes of those encodes.
+    pub sample_bytes: u64,
+    /// Files prepared again on the feeding thread (a skip the commit did not confirm, a bound
+    /// file whose stored and unencoded streams mix, or a forced miss).
+    pub reruns: u64,
+}
+
+/// Where the commit takes a file's prepared result from.
+pub(crate) enum Source {
+    /// Prepare it now, on the feeding thread, with the writer's probe as the oracle.
+    Inline,
+    /// Prepared by a pool worker (or its failure).
+    Ready(Box<Result<Prepared, Failure>>),
+}
+
+/// What a commit wrote that later copies can be found by (design section 1, hints): the file
+/// whole, or its streams as parts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Published {
+    /// The BLAKE3 and length of the file, when it was written or referenced whole.
+    pub(crate) whole: Option<([u8; 32], u64)>,
+    /// Per stream written as a part block or referenced: the BLAKE3 of its bytes and its span
+    /// lengths.
+    pub(crate) streams: Vec<StreamKey>,
+}
+
+/// A stream's hint key: the BLAKE3 of its bytes and its span lengths.
+pub(crate) type StreamKey = ([u8; 32], Vec<u64>);
+
+/// The hint key of the stream at `spans` of `data`.
+pub(crate) fn stream_key(data: &[u8], spans: &[(usize, usize)]) -> StreamKey {
+    (
+        *blake3::hash(&contiguous(data, spans)).as_bytes(),
+        spans.iter().map(|&(a, b)| (b - a) as u64).collect(),
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: the commit treats every pool result as a miss and prepares the file again.
+    pub(crate) static FORCE_RERUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn force_rerun() -> bool {
+    #[cfg(test)]
+    {
+        FORCE_RERUN.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// Peel one file read whole (at most the size cap) and add it to the open writer, on the
+/// feeding thread: prepare and commit back to back.
 pub(crate) fn peel_file<O: Write>(
     w: &mut Writer<O>,
     cx: &mut Context<'_>,
@@ -388,131 +1070,141 @@ pub(crate) fn peel_file<O: Write>(
     data: &[u8],
     s: &mut DeflateSummary,
 ) -> Result<(), CoreError> {
+    commit(
+        w,
+        cx,
+        input,
+        data,
+        Source::Inline,
+        s,
+        &mut Waste::default(),
+        None,
+    )
+}
+
+/// The writer-dependent half of the peel of one file (design section 1), on the feeding thread
+/// in input order: whole-file dedup, the probe of every stream, the records cap, the file gate
+/// and the share rule, then the writes. With `publish`, what later copies can be found by is
+/// recorded there (the pool's hints).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit<O: Write>(
+    w: &mut Writer<O>,
+    cx: &mut Context<'_>,
+    input: &Input,
+    data: &[u8],
+    source: Source,
+    s: &mut DeflateSummary,
+    waste: &mut Waste,
+    mut publish: Option<&mut Published>,
+) -> Result<(), CoreError> {
+    let whole = |publish: &mut Option<&mut Published>| {
+        if let Some(p) = publish.as_mut() {
+            p.whole = Some((*blake3::hash(data).as_bytes(), data.len() as u64));
+        }
+    };
     // A whole duplicate is referenced and never walked.
     if w.add_file_if_known(&input.path, input.flags, input.mtime_ns, data)? {
         s.deduplicated.files += 1;
         s.deduplicated.bytes += data.len() as u64;
+        // A file prepared for nothing; one a hint let the worker skip was never examined (it
+        // counts under the pool's hinted files only, review N1).
+        if matches!(&source, Source::Ready(r) if !matches!(&**r, Ok(p) if p.whole_hint)) {
+            waste.files += 1;
+        }
+        whole(&mut publish);
         return Ok(());
     }
-    let ext = extension(&input.path);
-    let mut decided: Vec<Decided> = Vec::new();
-    let mut out = Outcomes::default();
-    let mut kept_by_class = BTreeMap::new();
-    let mut err: Option<CoreError> = None;
-    let block_size = cx.block_size;
+    let set = cx.settings();
     let records_cap = cx.stage.records_cap;
-    let encoder = &mut *cx.encoder;
-    let examined = examine(data, &ext, &cx.stage.limits, |r| {
-        if err.is_some() {
-            return;
-        }
-        let len = r.deflate_len as u64;
-        if r.spans.is_empty() || len == 0 {
-            out.no_gain += 1;
-            return;
-        }
-        let plain = r.plain.text();
-        let class = classify(&plain[..plain.len().min(CLASSIFY_LEN)]);
-        let stream = contiguous(data, &r.spans);
-        // The dedup probe: span by span, the stream is referenced when every span's chunks are
-        // stored already (a multi-span stream is all or nothing, as `add_parts_encoded` writes
-        // it: a copy of a peeled PNG, whose file is not cut as a whole, is found here).
-        let mut known = true;
-        for &(a, b) in &r.spans {
-            match w.part_known(&data[a..b]) {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    known = false;
-                    break;
-                }
-                Err(e) => {
-                    err = Some(e.into());
-                    return;
+    let inline = |w: &mut Writer<O>, encoder: &mut PartEncoder, share: bool| {
+        let set = Settings {
+            share: set.share && share,
+            ..set.clone()
+        };
+        prepare(
+            data,
+            &input.path,
+            &set,
+            encoder,
+            &mut writer_oracle(w),
+            &mut NoHooks,
+        )
+    };
+    let mut prepared = match source {
+        Source::Inline => inline(w, &mut *cx.encoder, true),
+        Source::Ready(r) => match *r {
+            // A file hinted whole that whole-file dedup did not find: prepare it here.
+            Ok(p) if !force_rerun() && !p.whole_hint => p,
+            Ok(_) => {
+                waste.reruns += 1;
+                inline(w, &mut *cx.encoder, true)
+            }
+            Err(f) => return f.raise(),
+        },
+    };
+    let (decided, mut out, sample_bytes, encode_seconds, bound_hit) =
+        match decide(w, data, &mut prepared, s.record_bytes, records_cap)? {
+            Decision::Ready {
+                decided,
+                out,
+                sample_bytes,
+                encode_seconds,
+                bound_hit,
+            } => (decided, out, sample_bytes, encode_seconds, bound_hit),
+            Decision::Rerun => {
+                waste.reruns += 1;
+                // Without the share bound (the gate bound, a function of the bytes, stays): every
+                // stream it would leave unencoded is judged as the sequential run judges it.
+                prepared = inline(w, &mut *cx.encoder, false);
+                match decide(w, data, &mut prepared, s.record_bytes, records_cap)? {
+                    Decision::Ready {
+                        decided,
+                        out,
+                        sample_bytes,
+                        encode_seconds,
+                        bound_hit,
+                    } => (decided, out, sample_bytes, encode_seconds, bound_hit),
+                    // Not reachable: the writer's own probe skipped only stored streams.
+                    Decision::Rerun => {
+                        return Err(CoreError::InvalidOption(
+                            "the Deflate peel's probe changed its answer".into(),
+                        ))
+                    }
                 }
             }
-        }
-        if known {
-            decided.push(Decided {
-                spans: r.spans,
-                gain: len,
-                kind: Kind::Stored,
-            });
-            return;
-        }
-        if len > block_size {
-            out.block_cap += 1;
-            return;
-        }
-        let plain_len = plain.len() as u64;
-        let term = memory_term(plain_len, r.corrections.len() as u64);
-        if term.saturating_add(block_size) > DEFAULT_MEMORY {
-            out.memory_cap += 1;
-            return;
-        }
-        let record = DeflateRecord {
-            original_len: len,
-            plain_len,
-            corrections: r.corrections,
-            library: 0,
-            original_hash: *blake3::hash(&stream).as_bytes(),
         };
-        let rec_len = record_len(&Record::new(RecordBody::Deflate(record.clone())));
-        // The exact pre-encode gate: when the record and the overhead alone reach the stream's
-        // length, no model output can pass the stream gate, so the stream is "no gain" without
-        // the encode (the same outcome and the same bytes, only sooner).
-        if pregate() && rec_len.saturating_add(STREAM_OVERHEAD) >= len {
-            out.no_gain += 1;
-            return;
-        }
-        let t = Instant::now();
-        let p = match encoder.encode(plain) {
-            Ok(p) => p,
-            Err(e) => {
-                err = Some(e.into());
-                return;
-            }
-        };
-        s.encode_seconds += t.elapsed().as_secs_f64();
-        s.sample_bytes += p.sample_bytes;
-        let cost = (p.encoded.bytes.len() as u64)
-            .saturating_add(rec_len)
-            .saturating_add(STREAM_OVERHEAD);
-        if cost >= len {
-            out.no_gain += 1;
-            return;
-        }
-        let pending: u64 = decided
-            .iter()
-            .map(|d| match &d.kind {
-                Kind::Kept { record_len, .. } => *record_len,
-                Kind::Stored => 0,
-            })
-            .sum();
-        if s.record_bytes + pending + rec_len > records_cap {
-            out.records_cap += 1;
-            return;
-        }
-        decided.push(Decided {
-            spans: r.spans,
-            gain: len - cost,
-            kind: Kind::Kept {
-                record,
-                encoded: p.encoded,
-                class,
-                model: p.model,
-                record_len: rec_len,
-            },
-        });
-    });
-    if let Some(e) = err {
-        return Err(e);
+    // Encodes the sequential run would not have made: streams found stored.
+    for b in prepared.unused_encodes() {
+        waste.encodes += 1;
+        waste.sample_bytes += b;
     }
+    // Only the kind and the counts are needed past here: the unused encodings go before the
+    // writes.
+    let Prepared {
+        kind,
+        counts,
+        bound,
+        ..
+    } = prepared;
+    s.sample_bytes += sample_bytes;
+    s.encode_seconds += encode_seconds;
     let gain: u64 = decided.iter().map(|d| d.gain).sum();
-    *s.walked_by_kind.entry(examined.kind).or_default() += 1;
+    *s.walked_by_kind.entry(kind).or_default() += 1;
     let kept = decided.iter().any(|d| matches!(d.kind, Kind::Kept { .. }));
     let verdict = file_verdict(gain, data.len() as u64, kept);
-    if decided.is_empty() || verdict != FileVerdict::Peel {
-        if examined.counts.reconstructed == 0 {
+    let mut kept_by_class = BTreeMap::new();
+    if bound_hit {
+        // The file's bound sent it whole without the encodes (design section 3): the gate
+        // (gain at most the file gate) or the share rule (no stream stored, see `decide`).
+        match bound {
+            Some(Bound::Share) => out.file_share += decided.len() as u64,
+            _ => out.file_gate += decided.len() as u64,
+        }
+        s.file_bound += 1;
+        w.add_file(&input.path, input.flags, input.mtime_ns, &mut &data[..])?;
+        whole(&mut publish);
+    } else if decided.is_empty() || verdict != FileVerdict::Peel {
+        if counts.reconstructed == 0 {
             s.no_streams += 1;
         } else if decided.is_empty() {
             s.none_kept += 1;
@@ -524,18 +1216,31 @@ pub(crate) fn peel_file<O: Write>(
             s.file_gate += 1;
         }
         w.add_file(&input.path, input.flags, input.mtime_ns, &mut &data[..])?;
+        whole(&mut publish);
     } else {
+        if let Some(p) = publish.as_mut() {
+            p.streams = decided
+                .iter()
+                .map(|d| match &d.kind {
+                    Kind::Kept { record, .. } => (
+                        record.original_hash,
+                        d.spans.iter().map(|&(a, b)| (b - a) as u64).collect(),
+                    ),
+                    Kind::Stored => stream_key(data, &d.spans),
+                })
+                .collect();
+        }
         write_peeled(w, input, data, decided, &mut out, &mut kept_by_class, s)?;
         s.peeled.files += 1;
         s.peeled.bytes += data.len() as u64;
     }
-    s.streams.add(&examined.counts);
+    s.streams.add(&counts);
     s.outcomes.add(&out);
     if let Some(files) = s.files.as_mut() {
         files.push(FileStreams {
             path: input.path.clone(),
-            kind: examined.kind,
-            counts: examined.counts,
+            kind,
+            counts,
             outcomes: out,
             kept_by_class,
         });
@@ -677,6 +1382,8 @@ mod tests {
             });
             p.deflate = Some(DeflatePeel {
                 record_files: true,
+                // The exact skips would leave the encodes the gate skips undone too.
+                exact_skips: false,
                 ..DeflatePeel::default()
             });
             let mut out = Vec::new();
@@ -710,6 +1417,59 @@ mod tests {
         assert_eq!(file_verdict(u64::MAX, u64::MAX, true), FileVerdict::Peel);
         // Only already-stored streams: no block is closed, the share rule does not apply.
         assert_eq!(file_verdict(g, u64::MAX, false), FileVerdict::Peel);
+    }
+
+    /// A prepared file keeps no encoding of a stream the stream gate refuses (review B1): its
+    /// streams of incompressible text are encoded and dropped, so what the file holds until its
+    /// commit (the kept encodings and records) stays far within h = 2 × its length.
+    #[test]
+    fn a_prepared_file_keeps_no_encoding_of_a_no_gain_stream() {
+        use super::super::testkit::{gzip, noise, text};
+        let mut data = gzip(&noise(300_000, 5));
+        data.extend_from_slice(&gzip(&noise(200_000, 6)));
+        data.extend_from_slice(&gzip(&text(100_000, 7)));
+        let o = crate::BalancedOptions {
+            dict_size: 1 << 20,
+            sample_len: 1 << 16,
+            ..crate::BalancedOptions::default()
+        };
+        let mut encoder = PartEncoder::balanced(&o, 64 << 20).unwrap();
+        let set = Settings {
+            limits: Limits::standard(),
+            block_size: 4 << 20,
+            pregate: true,
+            skips: false,
+            share: true,
+        };
+        let p = prepare(
+            &data,
+            "b1.gz",
+            &set,
+            &mut encoder,
+            &mut |_, _| false,
+            &mut NoHooks,
+        );
+        assert_eq!(p.streams.len(), 3, "{p:?}");
+        let no_gain = p
+            .streams
+            .iter()
+            .filter(
+                |s| matches!(s.verdict, Verdict::NoGain { sample_bytes, .. } if sample_bytes > 0),
+            )
+            .count();
+        assert_eq!(no_gain, 2, "{p:?}");
+        let held: u64 = p
+            .streams
+            .iter()
+            .map(|s| match &s.verdict {
+                Verdict::Encoded(c) => {
+                    c.encoded.bytes.len() as u64 + c.record.corrections.len() as u64
+                }
+                _ => 0,
+            })
+            .sum();
+        assert!(held > 0 && held < 20_000, "{held}");
+        assert!(held <= 2 * data.len() as u64);
     }
 
     #[test]

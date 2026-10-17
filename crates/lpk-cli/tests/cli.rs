@@ -1149,8 +1149,8 @@ fn add_threads_1_and_8_write_the_same_archive_and_v_prints_the_blocks_in_flight(
         (
             "--balanced",
             "8",
-            "threads: 8, blocks in flight: 8",
-            "chunk hash threads: up to 4)",
+            "threads: 8, blocks in flight: 3",
+            "chunk hash threads: up to 3)",
         ),
         (
             "--store",
@@ -1185,6 +1185,14 @@ fn add_threads_1_and_8_write_the_same_archive_and_v_prints_the_blocks_in_flight(
         assert_eq!(a.status.code(), Some(0), "{tier}: {}", text(&a.stderr));
         assert!(
             text(&a.stderr).contains(expect) && text(&a.stderr).contains(hashes),
+            "{tier}: {}",
+            text(&a.stderr)
+        );
+        // The Balanced tier peels r.bin (a class the Deflate peel scans): at eight threads the
+        // peel pool takes five, the blocks three (design `docs/notes/e2-10-peel-pool-design.md`, section 2).
+        assert_eq!(
+            text(&a.stderr).contains("peel pool: 5 workers"),
+            tier == "--balanced" && threads == "8",
             "{tier}: {}",
             text(&a.stderr)
         );

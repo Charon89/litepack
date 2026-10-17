@@ -583,6 +583,23 @@ fn report(
             " (sequential: no reader or write thread)"
         }
     );
+    let p = &s.peel_pool;
+    if p.workers > 0 {
+        let _ = writeln!(
+            err,
+            "peel pool: {} workers, {} bytes (reserve {} bytes), {} files prepared, peak {} bytes reserved, waits {} by workers and {} by the feeding thread; unused work: {} files deduplicated whole, {} encodes of stored streams, {} files prepared again",
+            p.workers,
+            p.pool_bytes,
+            p.reserve,
+            p.files,
+            p.peak_bytes,
+            p.worker_waits,
+            p.feeding_waits,
+            p.waste.files,
+            p.waste.encodes,
+            p.waste.reruns
+        );
+    }
     if let Some(f) = &s.fast {
         let _ = writeln!(
             err,
@@ -704,7 +721,7 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
         .collect();
     let _ = writeln!(
         err,
-        "deflate peel: {walked} files walked ({}), {} peeled ({} bytes), {} over the size cap ({} bytes), {} deduplicated whole, {} without streams, {} with none kept, {} sent whole by the file gate, {} by the file share rule, {} walker panics",
+        "deflate peel: {walked} files walked ({}), {} peeled ({} bytes), {} over the size cap ({} bytes), {} deduplicated whole, {} without streams, {} with none kept, {} sent whole by the file gate, {} by the file share rule, {} by their bound without encodes, {} walker panics",
         kinds.join(", "),
         d.peeled.files,
         d.peeled.bytes,
@@ -715,6 +732,7 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
         d.none_kept,
         d.file_gate,
         d.file_share,
+        d.file_bound,
         s.walker_panics
     );
     let _ = writeln!(
@@ -732,7 +750,7 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
     );
     let _ = writeln!(
         err,
-        "  reconstructed: {} kept ({}), {} no gain, {} block cap, {} memory cap, {} records cap, {} already stored, {} file gate, {} file share",
+        "  reconstructed: {} kept ({}), {} no gain, {} block cap, {} memory cap, {} records cap, {} already stored, {} file gate, {} file share, {} file bound",
         o.kept,
         classes.join(", "),
         o.no_gain,
@@ -741,7 +759,8 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
         o.records_cap,
         o.already_stored,
         o.file_gate,
-        o.file_share
+        o.file_share,
+        o.file_bound
     );
     let _ = writeln!(
         err,

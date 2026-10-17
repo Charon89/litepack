@@ -625,3 +625,69 @@ fn a_partly_matching_multi_span_stream_is_peeled_again() {
     assert_eq!(peeled_blocks(&bytes), 2);
     check(&bytes, dir.path(), None);
 }
+
+/// The test tree with every file's modification time fixed (the archive holds it), so the
+/// archive's bytes depend only on the code.
+fn pinned_tree(root: &Path) {
+    make_tree(root);
+    for e in std::fs::read_dir(root).unwrap() {
+        let f = std::fs::File::options()
+            .write(true)
+            .open(e.unwrap().path())
+            .unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(1000))
+            .unwrap();
+    }
+}
+
+/// BLAKE3 of the test tree's one-thread archives, pinned from the serial peel (D-70, `main`
+/// 54b1163) before the peel pool: the tests' Balanced settings and the default Balanced options.
+const PINNED_TREE: [(&str, &str); 2] = [
+    (
+        "tests' balanced",
+        "9b2c2c00dcd4f2672037fe20b3c6724b2397835b91ce4682cccd459f5338b303",
+    ),
+    (
+        "default balanced",
+        "c13b0f16dbef1b0e94bb5f07be7da6df139c473f75e763c9bf3cddcbaf540c08",
+    ),
+];
+
+fn pinned_pipelines(threads: usize) -> [Pipeline; 2] {
+    let mut d = Pipeline::balanced(BalancedOptions {
+        threads: Some(threads),
+        ..BalancedOptions::default()
+    });
+    d.deflate = Some(DeflatePeel::default());
+    [balanced(threads), d]
+}
+
+#[test]
+fn the_one_thread_archives_match_the_pinned_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    pinned_tree(dir.path());
+    let mut differ = Vec::new();
+    // At one thread and through the peel pool, with the exact skips and the hints on and off
+    // (design `docs/notes/e2-10-peel-pool-design.md`, tasks 1 to 3).
+    for threads in [1, 8] {
+        for (skips, hints) in [(true, true), (false, false), (true, false)] {
+            for ((name, want), mut p) in PINNED_TREE.iter().zip(pinned_pipelines(threads)) {
+                if let Some(d) = p.deflate.as_mut() {
+                    d.exact_skips = skips;
+                    d.hints = hints;
+                }
+                let (bytes, _) = run(p, dir.path());
+                let got = blake3::hash(&bytes).to_hex().to_string();
+                println!("{name}, {threads} threads, skips {skips}, hints {hints}: {got}");
+                if got != *want {
+                    differ.push((*name, threads, skips, hints));
+                }
+            }
+        }
+    }
+    // The tree's own Deflate streams come from the C zlib flate2 links: the static copy on
+    // Windows, possibly the system's elsewhere, so the pins hold on Windows builds.
+    if cfg!(windows) {
+        assert!(differ.is_empty(), "differ from the pins: {differ:?}");
+    }
+}

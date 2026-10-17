@@ -138,8 +138,10 @@ fn the_fast_tier_writes_the_same_bytes_with_one_thread_and_eight() {
     assert!(f.zstd_blocks > 0 && f.stored_by_class > 0, "{f:?}");
     assert!(f.peel.peeled.files >= 2, "{:?}", f.peel);
     assert!(s1.writer.deduped_chunks > 0);
-    assert_eq!((s1.threads, s1.blocks_in_flight), (1, 1));
-    assert_eq!((s8.threads, s8.blocks_in_flight), (8, 8));
+    // The JPEG peel pool takes the threads the blocks leave: at most half go to the blocks (the
+    // coordinator's width ruling, design `docs/notes/e2-10-peel-pool-design.md` section 4).
+    assert_eq!((s8.threads, s8.blocks_in_flight), (8, 3));
+    assert_eq!(s8.peel_pool.workers, 5);
     check(eight, dir.path());
 }
 
@@ -165,8 +167,10 @@ fn the_balanced_tier_writes_the_same_bytes_with_one_thread_and_eight_capped_in_f
         "{b:?}"
     );
     assert_eq!((s1.threads, s1.blocks_in_flight), (1, 1));
-    // No cap of four any more: the budget allows eight blocks this small.
-    assert_eq!((s8.threads, s8.blocks_in_flight), (8, 8));
+    // No cap of four any more: the budget allows eight blocks this small; the Deflate peel pool
+    // takes the threads the blocks leave: at most half go to the blocks (design `docs/notes/e2-10-peel-pool-design.md`, section 2).
+    assert_eq!((s8.threads, s8.blocks_in_flight), (8, 3));
+    assert_eq!((s8.memory.peel_workers, s8.peel_pool.workers), (5, 5));
     check(eight, dir.path());
 }
 

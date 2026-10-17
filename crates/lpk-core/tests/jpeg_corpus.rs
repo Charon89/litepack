@@ -75,3 +75,40 @@ fn photo_classes_round_trip_with_the_jpeg_peel() {
         }
     }
 }
+
+/// Design `docs/notes/e2-10-peel-pool-design.md` task 4: every `photo-jpeg` file's Lepton
+/// stream is the same at one and at eight processor threads (the pool's workers use one).
+#[test]
+#[ignore = "needs LPK_CORPUS; run in release by hand"]
+fn lepton_streams_are_identical_at_one_and_eight_processor_threads() {
+    use lpk_core::{JpegPeel, PeelStage};
+    let root = PathBuf::from(std::env::var("LPK_CORPUS").expect("set LPK_CORPUS"));
+    let one = JpegPeel {
+        processor_threads: 1,
+        ..JpegPeel::default()
+    };
+    let eight = JpegPeel::default();
+    let (mut files, mut peeled) = (0u64, 0u64);
+    let mut stack = vec![root.join("photo-jpeg")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let data = std::fs::read(&p).unwrap();
+            files += 1;
+            match (one.peel(&data, 1 << 26), eight.peel(&data, 1 << 26)) {
+                (Ok(a), Ok(b)) => {
+                    assert!(a.stream == b.stream, "{}", p.display());
+                    peeled += 1;
+                }
+                (Err(a), Err(b)) => assert_eq!(a, b, "{}", p.display()),
+                _ => panic!("{}: one peeled, the other not", p.display()),
+            }
+        }
+    }
+    println!("photo-jpeg: {files} files, {peeled} peeled, every stream identical");
+    assert!(peeled > 0);
+}

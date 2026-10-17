@@ -114,6 +114,39 @@ impl PartEncoder {
         }))
     }
 
+    /// A new encoder with this one's settings (a pool worker's own; or a replacement after an
+    /// encode failed, so no state of a failed encode is carried into the next).
+    pub fn fresh(&self) -> Result<Self, CoreError> {
+        match &self.0 {
+            Inner::Balanced {
+                lzma,
+                sample_len,
+                zstd_level,
+                window_log,
+                plain_limit,
+                ..
+            } => Ok(PartEncoder(Inner::Balanced {
+                lzma: LzmaEncoder::with_dict(lzma.dict_size())?,
+                zstd: ZstdCore::standalone(*zstd_level, *window_log)?,
+                sample_len: *sample_len,
+                zstd_level: *zstd_level,
+                window_log: *window_log,
+                plain_limit: *plain_limit,
+            })),
+            Inner::Fast {
+                level,
+                window_log,
+                plain_limit,
+                ..
+            } => Ok(PartEncoder(Inner::Fast {
+                zstd: ZstdCore::standalone(*level, *window_log)?,
+                level: *level,
+                window_log: *window_log,
+                plain_limit: *plain_limit,
+            })),
+        }
+    }
+
     /// The encoder's working set while it encodes a text of the `plain_limit` given at
     /// construction: the encoders and the output buffer (the text itself is not counted).
     pub fn memory(&self) -> u64 {
@@ -258,7 +291,19 @@ mod tests {
             let mut b2 = PartEncoder::balanced(&o, 64 << 20).unwrap();
             b2.encode(&t).unwrap().encoded.bytes
         });
+        // A fresh encoder with the same settings writes the same bytes and plans the same.
+        let mut b3 = b.fresh().unwrap();
+        assert_eq!(b3.memory(), b.memory());
+        assert_eq!(
+            b3.encode(&t).unwrap().encoded.bytes,
+            b.encode(&t).unwrap().encoded.bytes
+        );
         let mut f = PartEncoder::fast(&FastOptions::default(), 64 << 20).unwrap();
+        let mut f2 = f.fresh().unwrap();
+        assert_eq!(
+            f2.encode(&t).unwrap().encoded.bytes,
+            f.encode(&t).unwrap().encoded.bytes
+        );
         let e = f.encode(&t).unwrap();
         assert_eq!(e.model, PartModel::Zstd);
         assert_eq!(e.encoded.graph.steps[0].primitive, PrimitiveId::Zstd);

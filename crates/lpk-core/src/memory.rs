@@ -315,6 +315,13 @@ impl DeflateMemory {
             .saturating_add(analysis.max(encode))
             .saturating_add(self.records.saturating_mul(2))
     }
+
+    /// R of the peel pool: one stream's analysis or encode for the run's largest text,
+    /// `max(memory_term(plain_limit, 0), plain_limit + encoder)`.
+    pub fn reserve(&self) -> u64 {
+        let analysis = crate::peel::deflate::memory_term(self.plain_limit, 0);
+        analysis.max(self.plain_limit.saturating_add(self.encoder))
+    }
 }
 
 /// What the model needs to know about a run.
@@ -377,6 +384,11 @@ pub struct MemoryPlan {
     pub fixed_pipelined: u64,
     /// Blocks in flight: 1 is the sequential path.
     pub blocks_in_flight: usize,
+    /// The bytes the Deflate peel pool may hold, P (design
+    /// `docs/notes/e2-10-peel-pool-design.md`, section 2; 0: no pool).
+    pub peel_pool: u64,
+    /// The Deflate peel pool's workers, W = threads − max(blocks in flight, 1) (0: no pool).
+    pub peel_workers: usize,
 }
 
 impl MemoryPlan {
@@ -623,6 +635,8 @@ impl ModelInputs {
             fixed_sequential: self.fixed_sequential(),
             fixed_pipelined: self.fixed_pipelined(),
             blocks_in_flight: 1,
+            peel_pool: 0,
+            peel_workers: 0,
         };
         if budget.bytes < plan.minimum() && budget.source == BudgetSource::Given {
             return Err(CoreError::InvalidOption(format!(
@@ -639,6 +653,41 @@ impl ModelInputs {
             .min(threads.max(1));
         plan.blocks_in_flight = if n >= 2 { n } else { 1 };
         Ok(plan)
+    }
+
+    /// The peel pool's bytes, P (design `docs/notes/e2-10-peel-pool-design.md`, sections 2 and
+    /// 4), with `blocks` blocks in flight: `max(P_min, budget − fixed(blocks) without the
+    /// pooled peels' sets − blocks × per_block)`, where the Deflate records' term stays in
+    /// `fixed`; `P_min` is the larger one-file set plus R ([`DeflateMemory::reserve`], 0
+    /// without the Deflate stage): `2 × max_file` for the Deflate peel, `2 × peel_max_file +`
+    /// [`crate::peel::MODEL_ALLOWANCE`] for the JPEG peel when `jpeg` (its files go through
+    /// the pool).
+    pub fn peel_pool(&self, budget: u64, blocks: usize, jpeg: bool) -> u64 {
+        let jpeg_set = self.peel_max_file.filter(|_| jpeg).map(|f| {
+            f.saturating_mul(2)
+                .saturating_add(crate::peel::MODEL_ALLOWANCE)
+        });
+        let without = ModelInputs {
+            deflate: None,
+            peel_max_file: if jpeg { None } else { self.peel_max_file },
+            ..*self
+        };
+        let fixed = if blocks > 1 {
+            without.fixed_pipelined()
+        } else {
+            without.fixed_sequential()
+        }
+        .saturating_add(self.deflate.map_or(0, |d| d.records.saturating_mul(2)));
+        let reserve = self.deflate.map_or(0, |d| d.reserve());
+        let p_min = self
+            .deflate
+            .map_or(0, |d| d.max_file.saturating_mul(2))
+            .max(jpeg_set.unwrap_or(0))
+            .saturating_add(reserve);
+        budget
+            .saturating_sub(fixed)
+            .saturating_sub(self.per_block().saturating_mul(blocks as u64))
+            .max(p_min)
     }
 
     /// The envelope's `threads_hint` cap for this run: the blocks in flight the tier's

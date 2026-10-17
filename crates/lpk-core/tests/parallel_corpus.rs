@@ -42,7 +42,18 @@ fn fast_archives_are_identical_at_one_thread_and_twenty_four() {
         let (many, s24, t24) = run(&dir, 24);
         let same = one == many && s1.fast == s24.fast && s1.writer == s24.writer;
         assert_eq!((s1.threads, s1.blocks_in_flight), (1, 1));
-        assert_eq!((s24.threads, s24.blocks_in_flight), (24, 24));
+        // With files the JPEG peel examines, the peel pool takes the threads the blocks leave
+        // (at most half go to the blocks: the width ruling, design
+        // `docs/notes/e2-10-peel-pool-design.md` section 4).
+        assert_eq!(s24.threads, 24);
+        if s24.peel_pool.workers == 0 {
+            // The blocks the default budget allows (D-67), at most the threads.
+            assert!(s24.blocks_in_flight <= 24, "{name}");
+            assert_eq!(s24.blocks_in_flight, s24.memory.blocks_in_flight, "{name}");
+        } else {
+            assert_eq!(s24.blocks_in_flight + s24.peel_pool.workers, 24, "{name}");
+            assert!(s24.blocks_in_flight <= 11, "{name}");
+        }
         println!(
             "| {name} | {} | {} | {t1:.2} | {t24:.2} | {} |",
             s1.writer.archive_len,
@@ -51,6 +62,64 @@ fn fast_archives_are_identical_at_one_thread_and_twenty_four() {
         );
         if !same {
             failed.push(name);
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "classes whose archives differ: {failed:?}"
+    );
+}
+
+/// Design `docs/notes/e2-10-peel-pool-design.md` task 4: both JPEG classes through the Fast
+/// and the Balanced pipelines (their JPEG files through the peel pool) at one thread and at
+/// twenty-four, at the smallest budget accepted, the default and a wide one: the archives must
+/// be byte for byte the same.
+#[test]
+#[ignore]
+fn jpeg_classes_are_identical_at_one_thread_and_twenty_four_across_budgets() {
+    let root = PathBuf::from(std::env::var_os("LPK_CORPUS").unwrap());
+    println!("| class | tier | archive B | peeled | pool workers (24, default) | s (1) | s (24, min) | s (24, default) | s (24, wide) | identical |");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    let mut failed = Vec::new();
+    for name in ["photo-jpeg", "photo-jpeg-edited"] {
+        let dir = root.join(name);
+        for tier in ["fast", "balanced"] {
+            let go = |threads: usize, memory: Option<u64>| {
+                if tier == "fast" {
+                    let t0 = Instant::now();
+                    let mut out = Vec::new();
+                    let mut p = Pipeline::fast(FastOptions {
+                        threads: Some(threads),
+                        ..FastOptions::default()
+                    });
+                    p.seal.memory = memory;
+                    let s = p.run(&dir, &mut out).unwrap();
+                    (out, s, t0.elapsed().as_secs_f64())
+                } else {
+                    run_balanced(&dir, threads, memory)
+                }
+            };
+            let (one, s1, t1) = go(1, None);
+            let (min, sm, tm) = go(24, Some(s1.memory.minimum()));
+            let (def, sd, td) = go(24, None);
+            let (wide, sw, tw) = go(24, Some(1 << 40));
+            let same = one == min
+                && one == def
+                && one == wide
+                && s1.peel == sm.peel
+                && s1.peel == sd.peel
+                && s1.peel == sw.peel;
+            println!(
+                "| {name} | {tier} | {} | {} | {} | {t1:.1} | {tm:.1} | {td:.1} | {tw:.1} | {} |",
+                s1.writer.archive_len,
+                s1.peel.peeled.files,
+                sd.peel_pool.workers,
+                if same { "yes" } else { "NO" }
+            );
+            assert!(sd.peel_pool.workers >= 1, "{name} {tier}: no pool");
+            if !same {
+                failed.push((name, tier));
+            }
         }
     }
     assert!(
@@ -71,10 +140,25 @@ fn run_balanced(dir: &Path, threads: usize, memory: Option<u64>) -> (Vec<u8>, Ru
     (out, s, t0.elapsed().as_secs_f64())
 }
 
+/// The one-thread archives' BLAKE3 pinned from the serial peel (the same values as
+/// `deflate_pinned_corpus.rs`; they hold for the `small` corpus of the machine that pinned them,
+/// whose files' modification times the archives hold).
+const PINNED: [(&str, &str); 2] = [
+    (
+        "office-pdf",
+        "5c266d1461dffb9ff0468843e674affa9f3a78aef027b6d2b402bb3ff3cbc94c",
+    ),
+    (
+        "photo-raw-png",
+        "b9e0c17bb3b3dc422ce61b59b3d5464375d03653114893904b46dae4c4dce0d2",
+    ),
+];
+
 /// Design `docs/notes/e2-10-11-design.md` section 7: `office-pdf` and `photo-raw-png` through the
 /// default Balanced pipeline (its Deflate peel on) at one thread and at twenty-four, the latter
-/// both at the default budget and at a budget wide enough for twenty-four blocks in flight: the
-/// archives must be byte for byte the same.
+/// both at the default budget and at a budget wide enough for eleven blocks in flight and
+/// the peel pool: the archives must be byte for byte the same and the one-thread archive must
+/// match the pinned hash (the peel pool, `docs/notes/e2-10-peel-pool-design.md`, task 2).
 #[test]
 #[ignore]
 fn balanced_archives_with_the_deflate_peel_are_identical_at_one_thread_and_twenty_four() {
@@ -87,8 +171,25 @@ fn balanced_archives_with_the_deflate_peel_are_identical_at_one_thread_and_twent
         let (one, s1, t1) = run_balanced(&dir, 1, None);
         let (def, sd, td) = run_balanced(&dir, 24, None);
         let (wide, sw, tw) = run_balanced(&dir, 24, Some(1 << 40));
-        assert_eq!(sw.blocks_in_flight, 24);
-        let same = one == def
+        // The blocks get at most half the threads, the Deflate peel pool the rest (design
+        // `docs/notes/e2-10-peel-pool-design.md`, section 2).
+        assert_eq!((sw.blocks_in_flight, sw.peel_pool.workers), (11, 13));
+        assert!(sd.peel_pool.workers >= 1);
+        let hash = blake3::hash(&one).to_hex().to_string();
+        let pinned = PINNED.iter().find(|(n, _)| *n == name).unwrap().1;
+        println!(
+            "{name}: one thread {hash} (pinned {pinned}); pool at 24 threads: {} workers, P {} bytes, {} worker waits, {} feeding waits, {} unused encodes",
+            sd.peel_pool.workers,
+            sd.peel_pool.pool_bytes,
+            sd.peel_pool.worker_waits,
+            sd.peel_pool.feeding_waits,
+            sd.peel_pool.waste.encodes
+        );
+        // `LPK_PIN_PRINT` (as in `deflate_pinned_corpus.rs`): print the hash without checking
+        // it, for another machine's corpus build (D-13).
+        let print_only = std::env::var_os("LPK_PIN_PRINT").is_some();
+        let same = (print_only || hash == pinned)
+            && one == def
             && one == wide
             && s1.peel == sd.peel
             && s1.peel == sw.peel

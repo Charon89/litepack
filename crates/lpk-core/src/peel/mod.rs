@@ -116,6 +116,12 @@ pub trait PeelStage: std::fmt::Debug + Send + Sync {
     /// The record of `plan`, given the chunk lists the writer gave its nested parts (same order
     /// as `plan.nested`).
     fn record(&self, plan: &PeelPlan, nested_chunks: &[Vec<u64>]) -> Record;
+    /// A copy for a peel pool worker (design `docs/notes/e2-10-peel-pool-design.md`, section
+    /// 4): the same `peel` results, using one thread; `None` keeps the stage on the feeding
+    /// thread.
+    fn worker_copy(&self) -> Option<Box<dyn PeelStage>> {
+        None
+    }
 }
 
 /// Files and input bytes.

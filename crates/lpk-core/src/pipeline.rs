@@ -36,7 +36,10 @@ use crate::memory::{
     window_for, Budget, DeflateMemory, EncoderMemory, MemoryPlan, ModelInputs, BALANCED_CEILING,
     FAST_CEILING, STORE_CEILING,
 };
-use crate::peel::deflate::stage::{peel_file, Context};
+use crate::peel::deflate::pool::{Job, Outcome, Pool, PoolSummary};
+use crate::peel::deflate::stage::{
+    commit, peel_file, Context, Failure, Published, Settings, Source as PeelSource, Waste,
+};
 use crate::peel::deflate::{DeflatePeel, PartEncoder};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
@@ -134,6 +137,9 @@ pub struct RunSummary {
     /// with few chunk bytes, or a run whose files are all read whole for a peel, uses fewer;
     /// the threads are scoped to one segment at a time.
     pub hash_threads: usize,
+    /// The Deflate peel pool's figures and counters (`workers` 0: no pool; design
+    /// `docs/notes/e2-10-peel-pool-design.md`).
+    pub peel_pool: PoolSummary,
 }
 
 /// [`RunSummary::hash_threads`] for `blocks_in_flight`, with or without a reader thread.
@@ -518,6 +524,7 @@ impl Pipeline {
                     memory: plan,
                     io_threads,
                     hash_threads: hash_threads(in_flight, reads.threads() > 0),
+                    peel_pool: PoolSummary::default(),
                 })
             }
             (model, prepared) => {
@@ -669,7 +676,67 @@ impl Pipeline {
                     recovery,
                     base_chunks,
                 };
-                let plan = model.plan(Budget::resolve(seal.memory, ceiling), threads)?;
+                let mut plan = model.plan(Budget::resolve(seal.memory, ceiling), threads)?;
+                // The Deflate peel pool (design `docs/notes/e2-10-peel-pool-design.md`, section
+                // 2): the files the loop below peels, in its order. B is chosen first as
+                // without the pool; with the pool the CPU-bound threads stay at `threads`: B =
+                // min(B, max(1, (threads − 1) / 2)) and W = threads − max(B, 1); P is what the B blocks leave.
+                // The JPEG peel joins the pool through its worker copy (design section 4).
+                let copies: Vec<Option<Box<dyn PeelStage>>> =
+                    peel.iter().map(|s| s.worker_copy()).collect();
+                let pooled_stages: Vec<bool> = copies.iter().map(Option::is_some).collect();
+                let deflate_jobs = deflate.is_some() && part.is_some() && model.deflate.is_some();
+                let mut work: Vec<Job> = Vec::new();
+                if threads > 1 {
+                    for c in &clusters {
+                        for i in &c.inputs {
+                            let stage = match feed_of(&peel, deflate.as_ref(), c.class, i.len) {
+                                Feed::Deflate if deflate_jobs => None,
+                                Feed::Peel(s) => match stage_index(&peel, s) {
+                                    Some(x) if pooled_stages[x] => Some(x),
+                                    _ => continue,
+                                },
+                                _ => continue,
+                            };
+                            work.push(Job {
+                                input: i.clone(),
+                                stage,
+                            });
+                        }
+                    }
+                }
+                let jpeg_jobs = work.iter().any(|j| j.stage.is_some());
+                let pool = match (deflate.as_ref(), part.as_ref()) {
+                    (stage, template) if !work.is_empty() => {
+                        // The coordinator's ruling of 2026-10-17 on the width: with examined
+                        // files the block encodes get at most half the threads, the pool the
+                        // rest.
+                        let b = plan.blocks_in_flight.min((threads - 1) / 2).max(1);
+                        let p = model.peel_pool(plan.budget.bytes, b, jpeg_jobs);
+                        let default_stage = DeflatePeel::default();
+                        let stage = stage.unwrap_or(&default_stage);
+                        let pool = Pool::start(
+                            work,
+                            copies,
+                            block_size,
+                            Settings::of(stage, block_size),
+                            template.filter(|_| deflate_jobs),
+                            threads - b,
+                            p,
+                            model.deflate.map_or(0, |d| d.reserve()),
+                            stage.hints,
+                        );
+                        // A pool none of whose threads started: the sequential path, with the
+                        // blocks in flight chosen without the pool.
+                        if let Some(pool) = &pool {
+                            plan.blocks_in_flight = b;
+                            plan.peel_workers = pool.workers();
+                            plan.peel_pool = p;
+                        }
+                        pool
+                    }
+                    _ => None,
+                };
                 let in_flight = plan.blocks_in_flight;
                 wopts.encode_threads = in_flight;
                 wopts.threads_hint = model.threads_hint(ceiling);
@@ -701,6 +768,8 @@ impl Pipeline {
                     }),
                     _ => None,
                 };
+                let mut next_job = 0usize;
+                let mut waste = Waste::default();
                 let mut peel_time = Duration::ZERO;
                 let t = Instant::now();
                 let mut meta: Vec<&Input> = inputs
@@ -761,6 +830,45 @@ impl Pipeline {
                             }
                             Feed::Deflate => {
                                 let tp = Instant::now();
+                                if let (Some(pool), Some(cx), true) =
+                                    (pool.as_ref(), dcx.as_mut(), deflate_jobs)
+                                {
+                                    let k = next_job;
+                                    next_job += 1;
+                                    // The pool read and prepared it; commit it here, in order.
+                                    let mut published = Published::default();
+                                    let publish = pool.hints().then_some(&mut published);
+                                    let r = match pool.take(k) {
+                                        Some(Outcome::Read(f)) => f.raise(),
+                                        Some(Outcome::Ready(data, prepared)) => commit(
+                                            &mut writer,
+                                            cx,
+                                            input,
+                                            &data,
+                                            PeelSource::Ready(Box::new(prepared)),
+                                            &mut summary.deflate,
+                                            &mut waste,
+                                            publish,
+                                        ),
+                                        Some(Outcome::Peeled(..)) => Err(CoreError::InvalidOption(
+                                            "the peel pool out of step with the run".into(),
+                                        )),
+                                        None => read_all(&source, input).and_then(|data| {
+                                            peel_file(
+                                                &mut writer,
+                                                cx,
+                                                input,
+                                                &data,
+                                                &mut summary.deflate,
+                                            )
+                                        }),
+                                    };
+                                    pool.publish(published);
+                                    pool.committed(k);
+                                    peel_time += tp.elapsed();
+                                    r?;
+                                    continue;
+                                }
                                 let data = read_all(&source, input)?;
                                 let r = match dcx.as_mut() {
                                     Some(cx) => peel_file(
@@ -787,43 +895,56 @@ impl Pipeline {
                         };
                         // Each input is read once: the peel and the writer use the same bytes.
                         let tp = Instant::now();
-                        let data = read_all(&source, input)?;
-                        // Dedup: a file whose chunks are all stored already is never peeled.
-                        if writer.add_file_if_known(
-                            &input.path,
-                            input.flags,
-                            input.mtime_ns,
-                            &data,
-                        )? {
-                            summary.note_deduplicated(input.len);
-                            peel_time += tp.elapsed();
-                            continue;
-                        }
-                        let r = stage.peel(&data, max_part);
+                        let pooled = stage_index(&peel, stage).is_some_and(|i| pooled_stages[i]);
+                        let r = match pool.as_ref().filter(|_| pooled) {
+                            Some(pool) => {
+                                // The pool read and peeled it; dedup and the writes happen
+                                // here, in order.
+                                let k = next_job;
+                                next_job += 1;
+                                let r = match pool.take(k) {
+                                    Some(Outcome::Read(f)) => f.raise(),
+                                    Some(Outcome::Peeled(data, r)) => commit_peel(
+                                        &mut writer,
+                                        stage,
+                                        input,
+                                        &data,
+                                        Some(r),
+                                        &mut summary,
+                                        max_part,
+                                    ),
+                                    Some(Outcome::Ready(..)) => Err(CoreError::InvalidOption(
+                                        "the peel pool out of step with the run".into(),
+                                    )),
+                                    None => read_all(&source, input).and_then(|data| {
+                                        commit_peel(
+                                            &mut writer,
+                                            stage,
+                                            input,
+                                            &data,
+                                            None,
+                                            &mut summary,
+                                            max_part,
+                                        )
+                                    }),
+                                };
+                                pool.committed(k);
+                                r
+                            }
+                            None => read_all(&source, input).and_then(|data| {
+                                commit_peel(
+                                    &mut writer,
+                                    stage,
+                                    input,
+                                    &data,
+                                    None,
+                                    &mut summary,
+                                    max_part,
+                                )
+                            }),
+                        };
                         peel_time += tp.elapsed();
-                        match r {
-                            Ok(plan) => {
-                                let sizes = (
-                                    plan.stream.len() as u64,
-                                    plan.primary_len,
-                                    plan.original_len,
-                                );
-                                if write_peeled(&mut writer, stage, input, &data, plan)? {
-                                    summary.note_primary_deduplicated(sizes.2);
-                                } else {
-                                    summary.note_peeled(sizes.0, sizes.1, sizes.2);
-                                }
-                            }
-                            Err(cause) => {
-                                summary.note_fallback(cause, data.len() as u64);
-                                writer.add_file(
-                                    &input.path,
-                                    input.flags,
-                                    input.mtime_ns,
-                                    &mut &data[..],
-                                )?;
-                            }
-                        }
+                        r?;
                     }
                     let next_stored = clusters.get(i + 1).is_none_or(|n| stored_by_class(n.class));
                     let close = match soft {
@@ -838,6 +959,10 @@ impl Pipeline {
                 // Only peel time spent inside the model interval is taken out of it.
                 timings.peel = peel_time;
                 timings.model = t.elapsed().saturating_sub(peel_time);
+                let mut peel_pool = pool.as_ref().map(Pool::summary).unwrap_or_default();
+                peel_pool.waste = waste;
+                // Cancel (nothing is left) and join the workers before sealing.
+                drop(pool);
                 let t = Instant::now();
                 let written = writer.finish()?;
                 timings.seal = t.elapsed();
@@ -853,6 +978,7 @@ impl Pipeline {
                     memory: plan,
                     io_threads,
                     hash_threads: hash_threads(in_flight, reads.threads() > 0),
+                    peel_pool,
                 })
             }
         }
@@ -1021,7 +1147,7 @@ fn add_symlink<W: Write>(writer: &mut OutWriter<W>, input: &Input) -> Result<(),
 /// Read a whole input (a file a peel stage applies to); a length that changed since the walk is
 /// `ChangedWhileReading`, the walk's changed-file rule. At most one byte past the walked length
 /// is read, so a file that grew is never read whole.
-fn read_all(source: &Source, input: &Input) -> Result<Vec<u8>, CoreError> {
+pub(crate) fn read_all(source: &Source, input: &Input) -> Result<Vec<u8>, CoreError> {
     let mut data = Vec::with_capacity(usize::try_from(input.len).unwrap_or(0));
     source
         .open(input)?
@@ -1034,6 +1160,54 @@ fn read_all(source: &Source, input: &Input) -> Result<Vec<u8>, CoreError> {
         });
     }
     Ok(data)
+}
+
+/// The position of `stage` in the run's peel stages.
+fn stage_index(peel: &[Box<dyn PeelStage>], stage: &dyn PeelStage) -> Option<usize> {
+    peel.iter()
+        .position(|s| std::ptr::addr_eq(s.as_ref() as *const dyn PeelStage, stage))
+}
+
+/// The writer's half of a peel stage's file, on the feeding thread in input order: whole-file
+/// dedup (a file whose chunks are all stored already is never peeled), then the stage's result
+/// (`ready`, from a pool worker; else peeled here) written or its fallback counted.
+fn commit_peel<W: Write>(
+    writer: &mut OutWriter<W>,
+    stage: &dyn PeelStage,
+    input: &Input,
+    data: &[u8],
+    ready: Option<Result<Result<PeelPlan, crate::peel::Fallback>, Failure>>,
+    summary: &mut PeelSummary,
+    max_part: u64,
+) -> Result<(), CoreError> {
+    if writer.add_file_if_known(&input.path, input.flags, input.mtime_ns, data)? {
+        summary.note_deduplicated(input.len);
+        return Ok(());
+    }
+    let r = match ready {
+        Some(Ok(r)) => r,
+        Some(Err(f)) => return f.raise(),
+        None => stage.peel(data, max_part),
+    };
+    match r {
+        Ok(plan) => {
+            let sizes = (
+                plan.stream.len() as u64,
+                plan.primary_len,
+                plan.original_len,
+            );
+            if write_peeled(writer, stage, input, data, plan)? {
+                summary.note_primary_deduplicated(sizes.2);
+            } else {
+                summary.note_peeled(sizes.0, sizes.1, sizes.2);
+            }
+        }
+        Err(cause) => {
+            summary.note_fallback(cause, data.len() as u64);
+            writer.add_file(&input.path, input.flags, input.mtime_ns, &mut &data[..])?;
+        }
+    }
+    Ok(())
 }
 
 /// Write a peeled input; true when its primary part was stored already (dedup) and the entry

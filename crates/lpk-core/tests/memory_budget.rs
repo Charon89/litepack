@@ -395,8 +395,27 @@ fn the_deflate_term_counts_only_with_an_examined_file() {
         off.memory.fixed_pipelined
     );
     // A small gzip member can only hold a small text: the stage's set (sized to it) stays below
-    // the JPEG peel's, which the plan already counts, so the plan is the one without the stage.
-    assert_eq!(on.memory, off.memory);
+    // the JPEG peel's, which the plan already counts, so the plan is the one without the stage
+    // (but for the peel pool, which takes one of the threads: design
+    // `docs/notes/e2-10-peel-pool-design.md`, section 2).
+    let m = on.memory;
+    assert_eq!(
+        lpk_core::memory::MemoryPlan {
+            blocks_in_flight: off.memory.blocks_in_flight,
+            peel_pool: 0,
+            peel_workers: 0,
+            ..m
+        },
+        off.memory
+    );
+    if on.threads > 1 {
+        assert_eq!(
+            m.blocks_in_flight,
+            off.memory.blocks_in_flight.min(on.threads - 1)
+        );
+        assert_eq!(m.peel_workers, on.threads - m.blocks_in_flight);
+        assert!(m.peel_pool > 0);
+    }
 }
 
 /// The part encoder plans for the largest text the examined files can hold (Deflate's

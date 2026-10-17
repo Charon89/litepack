@@ -364,6 +364,11 @@ pub struct JpegPeel {
     /// Longest input the peel reads whole; a longer one is stored through the streaming path
     /// and counted as [`Cause::SizeCap`] before any byte is read. Default [`LEPTON_MAX_FILE`].
     pub max_file: u64,
+    /// Lepton's `max_processor_threads` (the preset's 8). The stream does not depend on it:
+    /// lepton_jpeg 0.5.8 splits an image by `max_partitions` and writes the partitions in a
+    /// fixed order. The peel pool's workers use 1 (design
+    /// `docs/notes/e2-10-peel-pool-design.md`, section 4).
+    pub processor_threads: u32,
 }
 
 impl Default for JpegPeel {
@@ -372,6 +377,7 @@ impl Default for JpegPeel {
             progressive: true,
             memory_limit: DEFAULT_MEMORY,
             max_file: LEPTON_MAX_FILE,
+            processor_threads: 8,
         }
     }
 }
@@ -447,6 +453,7 @@ impl JpegPeel {
         }
         let mut f = features(u32::try_from(max_part).unwrap_or(u32::MAX));
         f.progressive = self.progressive;
+        f.max_processor_threads = self.processor_threads.max(1);
         let pool: &dyn LeptonThreadPool = &DEFAULT_THREAD_POOL;
         let enc = catch_unwind(AssertUnwindSafe(|| {
             let mut reader = Cursor::new(primary);
@@ -532,6 +539,13 @@ impl PeelStage for JpegPeel {
 
     fn refuse_unread(&self, len: u64) -> Option<Fallback> {
         (len > self.max_file).then_some(Fallback::Jpeg(Cause::SizeCap))
+    }
+
+    fn worker_copy(&self) -> Option<Box<dyn PeelStage>> {
+        Some(Box::new(JpegPeel {
+            processor_threads: 1,
+            ..self.clone()
+        }))
     }
 
     fn peel(&self, data: &[u8], max_part: u64) -> Result<PeelPlan, Fallback> {
