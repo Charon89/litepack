@@ -95,3 +95,21 @@ order and early block close. No reader behaviour or vector byte changed.
 
 2026-10-04: revision 1.1 text clarified after the independent decoder's reading (fifteen points); no behaviour or
 byte changed.
+
+## 2026-10-16 — Specification revision of 2026-10-16: the Reed-Solomon code described normatively (E1-15)
+
+1. Section 13 gains "The code", which defines the recovery code without the library: the field GF(2^16) modulo
+   `0x1002D`, the Cantor basis b_0 .. b_15 through which a 16-bit symbol is an element, and check values.
+2. Section 13 states how a shard holds symbols: in each 64-byte unit, 32 low bytes then 32 high bytes.
+3. Section 13 defines the encoding map: the evaluation points w_j, the high form (m = P(r)) and the low form
+   (m = P(k)) by interpolation and by their Cauchy matrix, the normative rule that chooses the form, and check values.
+4. Section 13 writes out the supported-pairs predicate (`min(P(k), P(r)) + max(k, r) <= 65536`) instead of naming
+   the library's `supports`.
+5. Section 13 gives the additive FFT (twist factors, butterflies, both forms by the transform) as an exact,
+   equivalent fast computation.
+6. Section 13 makes decoding normative as any inverse of the encoding map, with why the result is unique for at most
+   `recovery_shards` unknown shards, and outlines the fast decoder informatively.
+7. Section 2 and the status line name this revision: no vector byte changed, no reader outcome changed,
+   `version_minor` is unchanged. Decoders that left repair out may now implement it from the text (CONFORMANCE
+   item 7; repair stays optional). Proof: `crates/lpk-format/tests/rs_description.rs` re-derives every recovery
+   shard of `recovery-groups.lpk` from the text.
