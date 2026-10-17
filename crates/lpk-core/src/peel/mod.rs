@@ -1,6 +1,7 @@
 //! Peel stages: turn one input stream into a peeled stream plus a reconstruction record that
 //! restores the original bit for bit (D-09: verified at compression time, fallback-first).
 
+pub mod deflate;
 pub mod jpeg;
 
 pub use jpeg::{Cause, JpegDecoder, JpegPeel, LEPTON_MAX_FILE, LEPTON_VERSION, MODEL_ALLOWANCE};

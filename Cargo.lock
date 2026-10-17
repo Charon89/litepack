@@ -1441,10 +1441,12 @@ dependencies = [
  "liblzma",
  "lpk-check",
  "lpk-format",
+ "preflate-rs",
  "same-file",
  "serde_json",
  "tempfile",
  "thiserror",
+ "zip",
  "zstd",
 ]
 

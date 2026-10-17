@@ -15,8 +15,11 @@ flate2 = "1.1.10"
 lepton_jpeg = "=0.5.8"
 liblzma = { version = "0.4.8", features = ["static", "parallel"] }
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
+# Pinned: deflate-reconstruct records carry this version's corrections (design section 2.2).
+preflate-rs = "=0.7.6"
 same-file = "1.0.6"
 thiserror = "2.0.21"
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 zstd = { version = "0.14.0", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
