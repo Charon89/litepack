@@ -619,6 +619,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "either"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
 name = "email_address"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1320,6 +1326,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsais"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a739d1c7c4b375c59e25802b577f6d94b0101b77ce478cbcc8a36327957f583c"
+dependencies = [
+ "bytemuck",
+ "either",
+ "libsais-sys",
+ "num-traits",
+]
+
+[[package]]
+name = "libsais-sys"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec495a2918bacd868428951b45b9b3fb9464840e2ac559462c4370d6fa2c404"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1428,6 +1455,13 @@ dependencies = [
  "lpk-format",
  "tempfile",
  "zstd",
+]
+
+[[package]]
+name = "lpk-codecs-bwt"
+version = "0.0.1"
+dependencies = [
+ "libsais",
 ]
 
 [[package]]

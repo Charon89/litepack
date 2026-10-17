@@ -1,0 +1,16 @@
+[package]
+name = "lpk-codecs-bwt"
+description = "LitePack BWT codec: libsais forward transform, a safe inverse, and a bzip2-structured entropy stage with arithmetic coding (E2-15 measured gate)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# MIT OR Apache-2.0 (the C sources: Apache-2.0 with LLVM exceptions, docs/LICENSING.md); the
+# `openmp` feature stays off.
+libsais = { version = "0.2.0", default-features = false }
+
+[lints]
+workspace = true
