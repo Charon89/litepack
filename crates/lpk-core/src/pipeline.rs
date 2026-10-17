@@ -1041,13 +1041,16 @@ mod tests {
                 x as u8
             })
             .collect();
-        std::fs::write(dir.path().join("big.bin"), noise).unwrap();
-        // One block at a time, and blocks in flight when the panic comes.
+        // Eight files of one block each, fed to the chunker a file at a time on both paths (one
+        // read of `block_size`, or one read-ahead segment): six are cut, and several blocks
+        // written, before the chunker has seen 3 MiB.
+        for (i, part) in noise.chunks(512 << 10).enumerate() {
+            std::fs::write(dir.path().join(format!("{i}.bin")), part).unwrap();
+        }
+        // One block at a time; then blocks in flight, read-ahead and a write thread.
         for threads in [1, 4] {
             let out = tempfile::tempdir().unwrap();
             let arch = out.path().join("x.lpk");
-            // Small blocks: the file is read and fed a block at a time, so several blocks are
-            // written before the chunker has seen 3 MiB.
             let mut p = Pipeline::fast(FastOptions {
                 block_size: 512 << 10,
                 threads: Some(threads),
