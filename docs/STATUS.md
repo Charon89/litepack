@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 02:31 UTC (2026-10-16, 22:31 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 03:00 UTC (2026-10-16, 23:00 local on the measuring machine). No measurement is running; two branches are under review (below).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -72,8 +72,18 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-None. Every task branch is merged and deleted; the E2-8 branch's unmerged sketch commits (3be4d83, b599566) are
-referenced from D-55 and remain in the repository's history through the merged branch.
+- `task/e2-10-revision` (pushed when reviewed): task C1 of E2-10/11 — the patched `preflate-rs` 0.7.6 in
+  `vendor/` (D-66), the `deflate-reconstruct` decoder in `lpk-core`, the writer's revision-1.2 rules, the fuzz targets;
+  built and under read-only review on 2026-10-16. Next on the same branch: C2 (the spec text and the vector,
+  `docs/notes/e2-10-task-c-brief.md`), then one PR; then tasks D and E (`docs/notes/e2-10-task-d-brief.md`,
+  `-task-e-brief.md`) in parallel. C1 extended task A's `input_bound` hook with the block's expected length and
+  whether the step is last (check 3 needs them); C2's text states it.
+- `task/e2-20-memory` (pushed when reviewed): E2-20 built (per-tier budgets, blocks in flight from the budget, the
+  envelope from what blocks declare, `--memory` on `a|append|x|t`, the acceptance test passing) and under read-only
+  review. Open point: at its default settings Balanced now runs one block in flight under the 4 GiB ceiling (each job
+  holds both trial candidates' contexts), which gives back E2-4b's Balanced speedup; the review is asked whether
+  dropping the losing candidate's context after the trial is a safe fix. After merge: the runner's peak-memory rows on
+  `small` and the large classes of `full` are the acceptance evidence.
 
 ## How to resume
 
