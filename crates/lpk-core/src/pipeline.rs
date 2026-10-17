@@ -481,7 +481,7 @@ impl Pipeline {
                     Steer,
                     Finish,
                     usize,
-                    (EncoderMemory, Option<u64>, u64),
+                    TierMemory,
                 ) = match (model, prepared) {
                     (ModelStage::Fast(o), Prepared::Fast(e, h)) => {
                         let h2 = h.clone();
@@ -778,6 +778,9 @@ impl Drop for Restore {
 
 /// Tells the encoder the class and dictionary kind of the next cluster.
 type Steer = Box<dyn Fn(Class, DictionaryKind)>;
+
+/// A tier's encoder working set, its peel's file cap and its ceiling, for the memory budget.
+type TierMemory = (EncoderMemory, Option<u64>, u64);
 /// Reads the encoder's counts once the peel summary is known.
 type Finish = Box<dyn Fn(PeelSummary) -> (Option<FastSummary>, Option<BalancedSummary>)>;
 
