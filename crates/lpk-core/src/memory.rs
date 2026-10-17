@@ -2,9 +2,18 @@
 //! extracting, and the blocks in flight the writer derives from it.
 //!
 //! **Budgets.** A tier's budget is `min(ceiling, half of the machine's physical memory)` by
-//! default, with the ceilings [`STORE_CEILING`], [`FAST_CEILING`] and [`BALANCED_CEILING`]; the
-//! extraction side, which does not know the writer's tier, uses [`EXTRACT_CEILING`]. `--memory`
-//! replaces the default.
+//! default, with the ceilings [`STORE_CEILING`], [`FAST_CEILING`] and [`BALANCED_CEILING`].
+//! `--memory` replaces the default.
+//!
+//! **Extraction** (ruling R19, amending D-67 (4)): the budget defaults to the ceiling of the tier
+//! the archive's envelope shows ([`EnvelopeTier::of`]), resolved as above: a store-only envelope
+//! (`max_window` 0, `max_bwt_block` 0, `decode_memory` equal to `max_block_plain`) is the store
+//! tier's; an envelope with a BWT block, a block above [`FAST_MAX_BLOCK_PLAIN`] or a window above
+//! [`FAST_MAX_WINDOW`] (more than the Fast tier's settings can produce) is the Balanced tier's;
+//! any other the Fast tier's. A peeled archive follows the same rule on its envelope. The reader
+//! opened for `lpk x` and `lpk t` is limited before the envelope is known, by `--memory` or by
+//! [`EXTRACT_CEILING`] resolved likewise. What extraction counts against the budget is in
+//! [`crate::extract`].
 //!
 //! **The model.** Compressing holds:
 //!
@@ -58,8 +67,67 @@ pub const STORE_CEILING: u64 = GIB;
 pub const FAST_CEILING: u64 = 2 * GIB;
 /// The Balanced tier's ceiling.
 pub const BALANCED_CEILING: u64 = 4 * GIB;
-/// The extraction side's ceiling (tier-free).
+/// The ceiling the reader of `lpk x` and `lpk t` is limited by when `--memory` is not given:
+/// it is opened before its envelope is known, so this is the largest tier ceiling. The
+/// extraction's own budget is the envelope's tier's ([`EnvelopeTier::of`]).
 pub const EXTRACT_CEILING: u64 = 4 * GIB;
+/// The largest block the Fast tier writes: its block size, `FastOptions::block_size`, which is
+/// the format writer's `DEFAULT_BLOCK_SIZE` (the CLI does not change it). An envelope whose
+/// `max_block_plain` is above it was not written by the Fast tier's settings.
+pub const FAST_MAX_BLOCK_PLAIN: u64 = lpk_format::DEFAULT_BLOCK_SIZE;
+/// The largest window the Fast tier declares: its zstd step declares the smaller of the window
+/// log and the block's own log2 rounded up, so never more than [`FAST_MAX_BLOCK_PLAIN`]. An
+/// envelope whose `max_window` is above it was not written by the Fast tier's settings.
+pub const FAST_MAX_WINDOW: u64 = FAST_MAX_BLOCK_PLAIN;
+
+/// The tier an archive's envelope shows, whose ceiling is the extraction's default budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnvelopeTier {
+    /// Every block stored: `max_window` 0, `max_bwt_block` 0, `decode_memory` equal to
+    /// `max_block_plain`.
+    #[default]
+    Store,
+    /// Blocks and windows within what the Fast tier's settings produce.
+    Fast,
+    /// A BWT block, a block above [`FAST_MAX_BLOCK_PLAIN`] or a window above
+    /// [`FAST_MAX_WINDOW`].
+    Balanced,
+}
+
+impl EnvelopeTier {
+    /// The tier `env` shows.
+    pub fn of(env: &lpk_format::Envelope) -> EnvelopeTier {
+        if env.max_window == 0 && env.max_bwt_block == 0 && env.decode_memory == env.max_block_plain
+        {
+            EnvelopeTier::Store
+        } else if env.max_bwt_block > 0
+            || env.max_block_plain > FAST_MAX_BLOCK_PLAIN
+            || env.max_window > FAST_MAX_WINDOW
+        {
+            EnvelopeTier::Balanced
+        } else {
+            EnvelopeTier::Fast
+        }
+    }
+
+    /// The tier's ceiling.
+    pub fn ceiling(self) -> u64 {
+        match self {
+            EnvelopeTier::Store => STORE_CEILING,
+            EnvelopeTier::Fast => FAST_CEILING,
+            EnvelopeTier::Balanced => BALANCED_CEILING,
+        }
+    }
+
+    /// `store`, `fast` or `balanced`, for `-v`.
+    pub fn name(self) -> &'static str {
+        match self {
+            EnvelopeTier::Store => "store",
+            EnvelopeTier::Fast => "fast",
+            EnvelopeTier::Balanced => "balanced",
+        }
+    }
+}
 
 /// Bytes counted per chunk: the chunk table's 40, the dedup map's 40 with the hash map's
 /// control bytes, load factor and growth headroom, and the index's encoding of the entry. An
@@ -552,6 +620,42 @@ mod tests {
     use super::*;
 
     const MIB: u64 = 1 << 20;
+
+    /// R19 (1): the envelope's tier at and around each threshold; the Fast thresholds are the
+    /// Fast tier's own block size.
+    #[test]
+    fn the_envelope_shows_its_tier() {
+        assert_eq!(
+            crate::FastOptions::default().block_size,
+            FAST_MAX_BLOCK_PLAIN
+        );
+        let env = |window: u64, bwt: u64, plain: u64, decode: u64| lpk_format::Envelope {
+            max_window: window,
+            max_bwt_block: bwt,
+            max_block_plain: plain,
+            decode_memory: decode,
+            max_frame_payload: plain,
+            threads_hint: 1,
+        };
+        let f = FAST_MAX_BLOCK_PLAIN;
+        for (e, tier) in [
+            (env(0, 0, f, f), EnvelopeTier::Store),
+            (env(0, 0, 4 * f, 4 * f), EnvelopeTier::Store),
+            (env(0, 0, f, f + 1), EnvelopeTier::Fast),
+            (env(FAST_MAX_WINDOW, 0, f, 2 * f), EnvelopeTier::Fast),
+            (
+                env(FAST_MAX_WINDOW + 1, 0, f, 3 * f),
+                EnvelopeTier::Balanced,
+            ),
+            (env(MIB, 0, f + 1, 2 * f), EnvelopeTier::Balanced),
+            (env(0, MIB, f, 2 * f), EnvelopeTier::Balanced),
+        ] {
+            assert_eq!(EnvelopeTier::of(&e), tier, "{e:?}");
+        }
+        assert_eq!(EnvelopeTier::Store.ceiling(), STORE_CEILING);
+        assert_eq!(EnvelopeTier::Fast.ceiling(), FAST_CEILING);
+        assert_eq!(EnvelopeTier::Balanced.ceiling(), BALANCED_CEILING);
+    }
 
     fn given(bytes: u64) -> Budget {
         Budget {

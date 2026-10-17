@@ -35,7 +35,8 @@ pub use classify::{classify, Class, Features};
 pub use cluster::{cluster, Cluster, DictionaryKind};
 pub use error::CoreError;
 pub use extract::{
-    extract_archive, extract_file, DefaultPolicy, ExtractOptions, ExtractPolicy, ExtractSummary,
+    extract_archive, extract_file, DefaultPolicy, ExtractMemory, ExtractOptions, ExtractPolicy,
+    ExtractSummary,
 };
 pub use fast::{
     archive_fast, archive_fast_file, DictionaryPolicy, FastHandle, FastOptions, FastSummary,
