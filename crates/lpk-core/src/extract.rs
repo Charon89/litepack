@@ -64,9 +64,10 @@
 //! last writer has written the block, so at most `workers` blocks are in flight, each at most
 //! `per_block`. The entry table, read and dropped by the plan before any block is decoded, is
 //! not counted; nor is an encrypted archive's key derivation (the key slot's Argon2 memory),
-//! which runs at open, is freed before the plan, and is bounded by the reader's limit. A given budget below one block in flight (`total(1)`: `fixed_shared +
-//! per_block + per_worker`) is refused with that figure before any directory or file is
-//! created, as the compress side refuses (D-67 (1)); a default budget that small runs one worker.
+//! which runs at open, is freed before the plan, and is bounded by the reader's limit. A given
+//! budget below one block in flight (`total(1)`: `fixed_shared + per_block + per_worker`) is
+//! refused with that figure before any directory or file is created, as the compress side
+//! refuses (D-67 (1)); a default budget that small runs one worker.
 //!
 //! **The write path.** Files are dealt to the writers (file `i` to writer `i mod n`); a
 //! dispatcher reorders the decoded blocks and hands each, in index order, to every writer with a
