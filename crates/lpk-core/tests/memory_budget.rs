@@ -86,6 +86,45 @@ fn default_settings_fit_their_ceilings() {
 
 const MIB: u64 = 1 << 20;
 
+/// Spec section 9: every stored block declares no working memory, so an archive of stored
+/// blocks — the store tier's, and the Fast and Balanced tiers' when every block is stored —
+/// declares `max_window` 0, `max_bwt_block` 0 and `decode_memory` equal to `max_block_plain`.
+#[test]
+fn stored_blocks_declare_no_working_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let noise: Vec<u8> = (0..3 * MIB)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect();
+    std::fs::write(dir.path().join("r.bin"), &noise).unwrap();
+    let store = Pipeline::store(StoreOptions {
+        threads: Some(1),
+        ..StoreOptions::default()
+    });
+    for (name, p) in [
+        ("store", store),
+        ("fast", fast(1, None)),
+        ("balanced", balanced(1, None)),
+    ] {
+        let (bytes, _) = run(p, dir.path()).unwrap();
+        let e = envelope(&bytes);
+        assert_eq!(
+            (e.max_window, e.max_bwt_block, e.decode_memory),
+            (0, 0, e.max_block_plain),
+            "{name}"
+        );
+        assert!(
+            e.threads_hint >= 1,
+            "{name}: the hint is written for any archive"
+        );
+    }
+}
+
 fn prose(seed: u64, len: usize) -> Vec<u8> {
     const WORDS: [&str; 8] = ["the", "king", "of", "France", "and", "army", "sea", "road"];
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;

@@ -123,3 +123,14 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    also refuse, with the same `Refused` (`recovery group`), a group whose rebuild would exceed a work bound it
    documents. Section 14's `MissingKeySlot` clause drops its short-input half, which opening never reaches, and lists
    `BadFrameLocation` (`frames`) among its errors. Found by the independent decoder's author and its review.
+
+## 2026-10-16 — Text revisions of E2-20 (D-67): no reader outcome changes
+
+1. Section 9: a store-only archive's envelope no longer lists `threads_hint` 0; `threads_hint` is the writer's choice
+   for any archive (section 7), and the reference writer now writes it for store-only archives as for any other.
+   `max_window` 0, `max_bwt_block` 0 and `decode_memory` equal to `max_block_plain` stand. The pipeline-written
+   vectors `jpeg-peel.lpk` and `journal-record.lpk` were regenerated (envelope `threads_hint` only). Text revision
+   (E2-20, D-67).
+2. Section 8, `jpeg-reconstruct` "Resources": the reference writer declares `max_block_plain` plus the largest
+   working memory any of its blocks declares (an image's term, a `zstd` block's window as its decoder holds it, an
+   `lzma` block's dictionary), no longer only the largest peeled image's term. Text revision (E2-20, D-67).

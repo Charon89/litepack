@@ -5,7 +5,8 @@ independent decoder written from it (`docs/spec/CHANGES.md` lists every change);
 Revision 1.1 (section 2) adds the decoding of `jpeg-reconstruct` (section 8) and nothing else.
 The specification revision of 2026-10-16 (E1-15) defines the recovery frames' Reed-Solomon code normatively in
 section 13 instead of by reference to a library; it changes no byte and no reader outcome, and `version_minor` is
-unchanged.
+unchanged. Two text revisions of E2-20 (D-67) state that `threads_hint` is the writer's choice for store-only
+archives too and what the reference writer declares as `decode_memory`; neither changes a reader outcome.
 The reference reader is the `lpk-format` crate; the tables below are checked against it by a test. Section 16 lists
 every error class. `docs/spec/CONFORMANCE.md` states what an independent decoder must do with the test vectors.
 
@@ -821,8 +822,9 @@ The step's input is one Lepton stream and its output is the primary image of the
   h and v over the counted components (at least 1), each component has ceil(X / (8·Hmax))·h ×
   ceil(Y / (8·Vmax))·v blocks of 8x8, and the term is the sum over the components times 128 bytes (64
   coefficients of 2 bytes); a component with a sampling factor of 0 adds no blocks (the term does not refuse it;
-  the library decides in check (6)). The reference writer declares `max_block_plain` plus the term of the largest
-  peeled image. Revision 1.1 states no bound on the library's working set, and the fixed term is not measured; no
+  the library decides in check (6)). The reference writer declares `max_block_plain` plus the largest working
+  memory any of its blocks declares: an image's term, a `zstd` block's window as its decoder holds it, an `lzma`
+  block's dictionary. Revision 1.1 states no bound on the library's working set, and the fixed term is not measured; no
   revision bounds it yet, and a later revision may state a bound after measurement. A decoder compares the image's
   term (the same computation, fixed term included) with the archive's `decode_memory`, never above its own memory
   resource, minus `max_block_plain`, and refuses an image whose term exceeds it with `Refused` (field
@@ -947,9 +949,10 @@ chunk size.
 
 Chunks fill blocks in order. A writer closes the current block before the chunk that would take it past its
 size limit, so a block holds whole chunks and a chunk never spans two blocks. A block of a store-only archive
-has the graph `[store]`; for such an archive the envelope declares `max_window` 0, `max_bwt_block` 0,
-`threads_hint` 0 and `decode_memory` equal to `max_block_plain`, the space of one block buffer; the encoded
-input a decoder reads beside it is not counted in `decode_memory`.
+has the graph `[store]`; for such an archive the envelope declares `max_window` 0, `max_bwt_block` 0 and
+`decode_memory` equal to `max_block_plain`, the space of one block buffer; the encoded input a decoder reads
+beside it is not counted in `decode_memory`. `threads_hint` is the writer's choice for any archive, store-only
+included (section 7).
 
 A block is encoded by the writer's block encoder, which reports, for each block, its decode graph and the decoder
 resources that graph needs (they feed the envelope); the writer checks each graph when its block closes, records
