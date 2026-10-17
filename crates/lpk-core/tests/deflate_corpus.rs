@@ -48,8 +48,8 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
         .filter(|p| p.is_dir())
         .collect();
     classes.sort();
-    println!("| class | files | raw B | archive B | walked | reconstructed | kept | kept by class | no gain | block cap | memory cap | already stored | file gate | size cap | lpk-check files | s compress | s extract |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| class | files | raw B | archive B | walked | reconstructed | kept | kept by class | no gain | block cap | memory cap | already stored | file gate | file share | size cap | lpk-check files | s compress | s extract |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let mut mismatches = 0;
     let mut check_mismatches = 0;
     let mut largest_records = 0u64;
@@ -122,7 +122,7 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
             .map(|(k, n)| format!("{k} {n}"))
             .collect();
         println!(
-            "| {name} | {} | {raw} | {} | {walked} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {checked} | {compress:.1} | {extract:.1} |",
+            "| {name} | {} | {raw} | {} | {walked} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {checked} | {compress:.1} | {extract:.1} |",
             src.len(),
             s.writer.archive_len,
             d.streams.reconstructed,
@@ -133,6 +133,7 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
             o.memory_cap,
             o.already_stored,
             o.file_gate,
+            o.file_share,
             d.size_cap.files
         );
         assert_eq!(o.total(), d.streams.reconstructed, "{name}");

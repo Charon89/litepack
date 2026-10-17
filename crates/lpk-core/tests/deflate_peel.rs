@@ -487,3 +487,141 @@ fn the_store_model_refuses_the_deflate_peel_before_any_output() {
     assert!(matches!(e, lpk_core::CoreError::InvalidOption(_)), "{e}");
     assert!(!arch.exists());
 }
+
+/// A ZIP of `members`, each deflated at `level`.
+fn zip_at(members: &[(&str, &[u8])], level: i64) -> Vec<u8> {
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, data) in members {
+        let o = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(level))
+            .last_modified_time(zip::DateTime::default());
+        w.start_file(*name, o).unwrap();
+        w.write_all(data).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// A PNG built by hand whose pixel rows are repetitive prose (so its peeled stream gains), its
+/// zlib stream split over three `IDAT` chunks with a `tEXt` between; the second split is
+/// `shift` bytes later than a third.
+fn prose_png(seed: u64, shift: usize) -> Vec<u8> {
+    let (w, h) = (500u32, 100u32);
+    let text = repetitive(seed, (w * 3 * h) as usize);
+    let mut raw = Vec::new();
+    for row in text.chunks((w * 3) as usize) {
+        raw.push(0);
+        raw.extend_from_slice(row);
+    }
+    let z = zlib(&raw, 6);
+    let chunk = |out: &mut Vec<u8>, ty: &[u8], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(ty);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&[0; 4]);
+    };
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    chunk(&mut out, b"IHDR", &ihdr);
+    let third = z.len() / 3;
+    chunk(&mut out, b"IDAT", &z[..third]);
+    chunk(&mut out, b"tEXt", b"Comment\0between");
+    chunk(&mut out, b"IDAT", &z[third..2 * third + shift]);
+    chunk(&mut out, b"IDAT", &z[2 * third + shift..]);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// The `archives-nested` loss, small: the same mostly incompressible member (with a little
+/// text the model codes better than Deflate) zipped at several levels. Each stream gains a
+/// little against its own length, but peeling would close the solid block at every file and
+/// code each copy alone, while the normal path matches the copies against each other. The
+/// file share rule sends the files whole through the normal path: peeled is not larger than
+/// unpeeled.
+#[test]
+fn the_same_member_zipped_at_several_levels_is_not_larger_peeled() {
+    let dir = tempfile::tempdir().unwrap();
+    let member = [noise(91, 400_000), repetitive(92, 60_000)].concat();
+    for level in [1, 6, 9] {
+        std::fs::write(
+            dir.path().join(format!("m-{level}.zip")),
+            zip_at(&[("inner.bin", &member)], level),
+        )
+        .unwrap();
+    }
+    let (on, s) = run(balanced(1), dir.path());
+    let mut off = balanced(1);
+    off.deflate = None;
+    let (off, _) = run(off, dir.path());
+    let d = &s.peel.deflate;
+    assert!(
+        on.len() <= off.len(),
+        "peeled {} > unpeeled {}",
+        on.len(),
+        off.len()
+    );
+    assert_eq!((d.file_share, d.outcomes.file_share), (3, 3), "{d:?}");
+    assert_eq!(d.outcomes.kept, 0, "{d:?}");
+    assert_eq!(d.outcomes.total(), d.streams.reconstructed);
+    check(&on, dir.path(), None);
+    let (eight, s8) = run(balanced(8), dir.path());
+    assert!(eight == on, "1 and 8 threads differ");
+    assert_eq!(s8.peel, s.peel);
+}
+
+/// A copy of a peeled multi-IDAT PNG is not cut as a whole file the way the first was written
+/// (its framing and its stream's spans are separate parts), so whole-file dedup misses it; the
+/// dedup probe finds every span of its stream stored already and references them.
+#[test]
+fn a_copy_of_a_peeled_multi_span_stream_is_referenced() {
+    let one = tempfile::tempdir().unwrap();
+    std::fs::write(one.path().join("a.png"), prose_png(93, 0)).unwrap();
+    let two = tempfile::tempdir().unwrap();
+    std::fs::write(two.path().join("a.png"), prose_png(93, 0)).unwrap();
+    std::fs::write(two.path().join("b.png"), prose_png(93, 0)).unwrap();
+    let (single, s1) = run(balanced(1), one.path());
+    assert_eq!(s1.peel.deflate.outcomes.kept, 1, "{:?}", s1.peel.deflate);
+    let (both, s2) = run(balanced(1), two.path());
+    let d = &s2.peel.deflate;
+    let b = d.files.as_ref().unwrap().iter().find(|f| f.path == "b.png");
+    let b = b.unwrap();
+    assert_eq!(
+        (b.outcomes.already_stored, b.outcomes.kept),
+        (1, 0),
+        "{b:?}"
+    );
+    assert_eq!(d.outcomes.kept, 1, "{d:?}");
+    // The copy costs its entry and references, not a second block.
+    assert!(
+        both.len() < single.len() + 1024,
+        "{} {}",
+        both.len(),
+        single.len()
+    );
+    check(&both, two.path(), None);
+}
+
+/// A multi-span stream that only partly matches a stored one (its first span equal, the other
+/// two cut elsewhere) is all or nothing: it is peeled again, not referenced.
+#[test]
+fn a_partly_matching_multi_span_stream_is_peeled_again() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.png"), prose_png(93, 0)).unwrap();
+    std::fs::write(dir.path().join("b.png"), prose_png(93, 777)).unwrap();
+    let (bytes, s) = run(balanced(1), dir.path());
+    let d = &s.peel.deflate;
+    let files = d.files.as_ref().unwrap();
+    for name in ["a.png", "b.png"] {
+        let f = files.iter().find(|f| f.path == name).unwrap();
+        assert_eq!(
+            (f.outcomes.kept, f.outcomes.already_stored),
+            (1, 0),
+            "{f:?}"
+        );
+    }
+    assert_eq!(peeled_blocks(&bytes), 2);
+    check(&bytes, dir.path(), None);
+}

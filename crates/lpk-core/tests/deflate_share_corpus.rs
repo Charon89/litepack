@@ -79,8 +79,8 @@ fn the_stream_counts_equal_the_probes_on_every_walked_file() {
         Some(u64::from(MAX_CHAIN_LENGTH))
     );
     assert_eq!(set["min_scanned_plain"].as_u64(), Some(MIN_SCANNED_PLAIN));
-    println!("| class | probe files with streams | walked | found | reconstructed | probe reconstructed | kept | no gain | block cap | memory cap | already stored | file gate |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| class | probe files with streams | walked | found | reconstructed | probe reconstructed | kept | no gain | block cap | memory cap | already stored | file gate | file share |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for class in probe["data"]["classes"].as_array().unwrap() {
         let name = class["class"].as_str().unwrap();
         let dir = root.join(name);
@@ -151,14 +151,15 @@ fn the_stream_counts_equal_the_probes_on_every_walked_file() {
         assert_eq!(d.outcomes.total(), d.streams.reconstructed, "{name}");
         let o = &d.outcomes;
         println!(
-            "| {name} | {with_streams} | {} | {found} | {rec} | {probe_rec} | {} | {} | {} | {} | {} | {} |",
+            "| {name} | {with_streams} | {} | {found} | {rec} | {probe_rec} | {} | {} | {} | {} | {} | {} | {} |",
             ours.len(),
             o.kept,
             o.no_gain,
             o.block_cap,
             o.memory_cap,
             o.already_stored,
-            o.file_gate
+            o.file_gate,
+            o.file_share
         );
     }
 }

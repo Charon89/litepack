@@ -41,6 +41,14 @@ pub const STREAM_OVERHEAD: u64 = 160;
 /// A file's streams are kept only when their total gain exceeds this (the early plain-block
 /// close and the extra framing chunk).
 pub const FILE_GATE: u64 = 256;
+/// The file share rule: a file's streams are kept only when their total gain is at least
+/// `1 / FILE_SHARE` of the file's length. Peeling a file closes the open solid block (a part
+/// block takes the next chunk indices) and codes each kept stream alone, so the file's framing
+/// and its streams lose the long-range context the normal path gives them across files (the
+/// same members zipped at several levels, versions of a container). That loss grows with the
+/// file's length, not with the streams' gains, so a gain that is a small share of the file
+/// does not pay for it; a file that fails the rule goes whole through the normal path.
+pub const FILE_SHARE: u64 = 32;
 /// Deflate's largest expansion, plain bytes per compressed byte (a 258-byte match per
 /// two-bit code, rounded up): a file of `n` bytes holds no stream whose text exceeds
 /// `MAX_EXPANSION × n`, which sizes the memory the part encoder plans.
@@ -113,6 +121,9 @@ pub struct Outcomes {
     pub already_stored: u64,
     /// Kept or already stored, but the file gate sent the file whole through the normal path.
     pub file_gate: u64,
+    /// Kept or already stored, past the file gate, but the file share rule
+    /// ([`FILE_SHARE`]) sent the file whole through the normal path.
+    pub file_share: u64,
     /// Would have been kept, but its record would take the run's records past [`RECORDS_CAP`].
     pub records_cap: u64,
 }
@@ -126,6 +137,7 @@ impl Outcomes {
             + self.memory_cap
             + self.already_stored
             + self.file_gate
+            + self.file_share
             + self.records_cap
     }
 
@@ -136,6 +148,7 @@ impl Outcomes {
         self.memory_cap += o.memory_cap;
         self.already_stored += o.already_stored;
         self.file_gate += o.file_gate;
+        self.file_share += o.file_share;
         self.records_cap += o.records_cap;
     }
 }
@@ -173,6 +186,8 @@ pub struct DeflateSummary {
     pub none_kept: u64,
     /// Walked files sent whole through the normal path by the file gate.
     pub file_gate: u64,
+    /// Walked files sent whole through the normal path by the file share rule.
+    pub file_share: u64,
     /// The probe's stream counts, summed over the walked files (walker panics included).
     pub streams: Counts,
     /// The partition of `streams.reconstructed`.
@@ -238,6 +253,7 @@ impl DeflateSummary {
                 self.no_streams,
                 self.none_kept,
                 self.file_gate,
+                self.file_share,
             ),
             (&self.outcomes, &self.kept_by_class),
             (
@@ -285,6 +301,30 @@ fn contiguous<'a>(bytes: &'a [u8], spans: &[(usize, usize)]) -> Cow<'a, [u8]> {
                 .flat_map(|(a, b)| bytes[*a..*b].iter().copied())
                 .collect(),
         ),
+    }
+}
+
+/// Which file gate a file's streams fail, if any: `gain` is the sum of their gains, `len` the
+/// file's length, `kept` whether at least one of them would be written as a peeled block (the
+/// share rule applies only then: a file whose streams are all already stored closes no block
+/// and codes nothing alone, so it keeps its references).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileVerdict {
+    /// Keep the streams.
+    Peel,
+    /// The total gain does not exceed [`FILE_GATE`].
+    Gate,
+    /// A stream is kept and the total gain is below `1 / FILE_SHARE` of the file's length.
+    Share,
+}
+
+fn file_verdict(gain: u64, len: u64, kept: bool) -> FileVerdict {
+    if gain <= FILE_GATE {
+        FileVerdict::Gate
+    } else if kept && gain.saturating_mul(FILE_SHARE) < len {
+        FileVerdict::Share
+    } else {
+        FileVerdict::Peel
     }
 }
 
@@ -374,24 +414,30 @@ pub(crate) fn peel_file<O: Write>(
         let plain = r.plain.text();
         let class = classify(&plain[..plain.len().min(CLASSIFY_LEN)]);
         let stream = contiguous(data, &r.spans);
-        // The dedup probe: single-span streams only (a multi-span stream gets whole-file
-        // dedup only).
-        if r.spans.len() == 1 {
-            match w.part_known(&stream) {
-                Ok(Some(_)) => {
-                    decided.push(Decided {
-                        spans: r.spans,
-                        gain: len,
-                        kind: Kind::Stored,
-                    });
-                    return;
+        // The dedup probe: span by span, the stream is referenced when every span's chunks are
+        // stored already (a multi-span stream is all or nothing, as `add_parts_encoded` writes
+        // it: a copy of a peeled PNG, whose file is not cut as a whole, is found here).
+        let mut known = true;
+        for &(a, b) in &r.spans {
+            match w.part_known(&data[a..b]) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    known = false;
+                    break;
                 }
-                Ok(None) => {}
                 Err(e) => {
                     err = Some(e.into());
                     return;
                 }
             }
+        }
+        if known {
+            decided.push(Decided {
+                spans: r.spans,
+                gain: len,
+                kind: Kind::Stored,
+            });
+            return;
         }
         if len > block_size {
             out.block_cap += 1;
@@ -463,13 +509,18 @@ pub(crate) fn peel_file<O: Write>(
     }
     let gain: u64 = decided.iter().map(|d| d.gain).sum();
     *s.walked_by_kind.entry(examined.kind).or_default() += 1;
-    if decided.is_empty() || gain <= FILE_GATE {
-        out.file_gate += decided.len() as u64;
+    let kept = decided.iter().any(|d| matches!(d.kind, Kind::Kept { .. }));
+    let verdict = file_verdict(gain, data.len() as u64, kept);
+    if decided.is_empty() || verdict != FileVerdict::Peel {
         if examined.counts.reconstructed == 0 {
             s.no_streams += 1;
         } else if decided.is_empty() {
             s.none_kept += 1;
+        } else if verdict == FileVerdict::Share {
+            out.file_share += decided.len() as u64;
+            s.file_share += 1;
         } else {
+            out.file_gate += decided.len() as u64;
             s.file_gate += 1;
         }
         w.add_file(&input.path, input.flags, input.mtime_ns, &mut &data[..])?;
@@ -522,10 +573,11 @@ fn write_peeled<O: Write>(
         match d.kind {
             Kind::Stored => {
                 out.already_stored += 1;
-                let (a, b) = d.spans[0];
-                if w.add_part_known(a as u64, &data[a..b])?.is_none() {
-                    // Not reachable (stored chunks stay stored); written plainly if it were.
-                    w.add_part(a as u64, &mut &data[a..b])?;
+                for &(a, b) in &d.spans {
+                    if w.add_part_known(a as u64, &data[a..b])?.is_none() {
+                        // Not reachable (stored chunks stay stored); written plainly if it were.
+                        w.add_part(a as u64, &mut &data[a..b])?;
+                    }
                 }
             }
             Kind::Kept {
@@ -639,6 +691,25 @@ mod tests {
         assert_eq!(a.outcomes, b.outcomes);
         assert_eq!(a.untimed().files, b.untimed().files);
         assert!(a.sample_bytes < b.sample_bytes, "the gate saved encodes");
+    }
+
+    #[test]
+    fn the_file_verdict_applies_the_gate_then_the_share() {
+        for kept in [false, true] {
+            assert_eq!(file_verdict(0, 0, kept), FileVerdict::Gate);
+            assert_eq!(file_verdict(FILE_GATE, 1, kept), FileVerdict::Gate);
+            assert_eq!(file_verdict(FILE_GATE, 1 << 30, kept), FileVerdict::Gate);
+        }
+        let g = FILE_GATE + 1;
+        assert_eq!(file_verdict(g, g, true), FileVerdict::Peel);
+        assert_eq!(file_verdict(g, g * FILE_SHARE, true), FileVerdict::Peel);
+        assert_eq!(
+            file_verdict(g, g * FILE_SHARE + 1, true),
+            FileVerdict::Share
+        );
+        assert_eq!(file_verdict(u64::MAX, u64::MAX, true), FileVerdict::Peel);
+        // Only already-stored streams: no block is closed, the share rule does not apply.
+        assert_eq!(file_verdict(g, u64::MAX, false), FileVerdict::Peel);
     }
 
     #[test]

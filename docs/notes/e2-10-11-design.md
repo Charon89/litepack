@@ -264,10 +264,11 @@ the vectors, CONFORMANCE and preflate-rs's documentation.
 3. Whole-file dedup: read the file once, whole; try `add_file_if_known` first — a whole duplicate is referenced and
    never walked.
 4. Examine: `examine` applies the probe's rules unchanged. For each reconstructed stream, in order: classify the
-   inflated text (its first 1 MiB); run the dedup probe (single-span streams only, via `Writer::part_known`); encode
+   inflated text (its first 1 MiB); run the dedup probe (span by span, via `Writer::part_known`); encode
    with the part encoder unless the stream is already stored; apply the gates (3.3). Each plain text is dropped once
    its stream is decided.
-5. Write: apply the file gate, then either the write path of 1.3, or `add_file` from the buffer when nothing is kept.
+5. Write: apply the file gate and the file share rule (3.3), then either the write path of 1.3, or `add_file` from
+   the buffer when nothing is kept.
 
 ### 3.3 Gates (D-09: per stream and per file)
 - Stream gate: cost = M's encoded bytes + the record's exact encoded length + 160 (a fixed estimate: frame 37–40,
@@ -280,8 +281,17 @@ the vectors, CONFORMANCE and preflate-rs's documentation.
 - File gate: keep the file's streams only if the sum of (length − cost) over kept and already-stored streams exceeds
   256, which covers the early plain-block close and the extra framing chunk; otherwise every stream is counted "not
   kept: file gate" and the file goes whole through the normal path.
+- File share rule (amendment, task S of 2026-10-17): past the file gate, when at least one stream is kept (not only
+  already stored), keep the file's streams only if their total gain is at least 1/32 of the file's length; otherwise every stream is counted "not kept: file share" and the file
+  goes whole through the normal path. Reason: a part block takes the next chunk indices, so peeling a file closes the
+  open solid block and codes each kept stream alone; the file's framing and streams lose the long-range context the
+  normal path has across files (the same members zipped at several levels, versions of a container), a loss that
+  grows with the file's length, not with the streams' gains. The stream gate's reference (the stored bytes) does not
+  see it.
+- Dedup probe (amendment, same task): span by span for multi-span streams too (all or nothing); a copy of a peeled PNG
+  is not cut as a whole file the way the first was written, so whole-file dedup misses it and only this probe finds it.
 - Counting: `reconstructed` is decided before any gate, exactly as in the probe; the pipeline's outcomes (kept, no
-  gain, block cap, memory cap, already stored, file gate) partition `reconstructed`.
+  gain, block cap, memory cap, records cap, already stored, file gate, file share) partition `reconstructed`.
 
 ### 3.4 Documented fallbacks (each counted)
 
@@ -314,10 +324,12 @@ like any plain block's coder.
 - Header minor: 2 when the Deflate peel is enabled, otherwise 1 with the JPEG peel, otherwise 0.
 
 ### 3.6 Dedup (D-53)
-A whole duplicate file is referenced and never walked, as with JPEG. A single-span stream whose original bytes are
-all stored already (cut by the chunker) is referenced with `add_part_known`: no record, no block, counted as already
-stored; analysis still runs, so the counts equal the probe's; encoding does not. Multi-span (PNG) streams get
-whole-file dedup only. Framing gets the normal path's chunk dedup. Not possible: a deflated member's inflated text
+A whole duplicate file is referenced and never walked, as with JPEG. A stream whose original bytes are all stored
+already is referenced with `add_part_known`: no record, no block, counted as already stored; analysis still runs, so
+the counts equal the probe's; encoding does not. The probe goes span by span (each span cut by the chunker on its own,
+as `add_parts_encoded` cuts it): a multi-span (PNG) stream is referenced only when every span is stored (all or
+nothing); a partly matching one is peeled again. A copy of a peeled file is not cut as a whole file the way the first
+was written, so whole-file dedup misses it and only this probe finds its stream (amendment, task S). Framing gets the normal path's chunk dedup. Not possible: a deflated member's inflated text
 against an equal loose file (1.5).
 
 ### 3.7 Parallel encoding and determinism (D-60)
@@ -335,9 +347,9 @@ grows with the archive's record count.
 
 ### 3.9 Summary, CLI and bench
 - `PeelSummary.deflate: DeflateSummary`: files (walked by kind, peeled, size cap, deduplicated whole, no streams, none
-  kept, file gate, walker panics); streams in the probe's taxonomy (found, reconstructed, skipped, failed by name,
+  kept, file gate, file share, walker panics); streams in the probe's taxonomy (found, reconstructed, skipped, failed by name,
   structural refusals, scan false hits, bytes); the pipeline's partition of reconstructed (kept, no gain, block cap,
-  memory cap, already stored, file gate); `kept_by_class`; bytes (stream, plain, M, corrections, records); seconds
+  memory cap, records cap, already stored, file gate, file share); `kept_by_class`; bytes (stream, plain, M, corrections, records); seconds
   (analyse, recreate, encode); the ZIP method counters; `files: Option<Vec<FileStreams>>`, filled only when
   `record_files` is set (for the share test).
 - CLI: `lpk a --deflate-peel on|off`, defaulting per tier; `-v` prints the summary.

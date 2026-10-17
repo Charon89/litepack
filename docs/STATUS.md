@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 08:35 UTC (2026-10-17, 04:35 local on the measuring machine). A measurement is running (E2-10 / E2-21, see below).
+Last updated: 2026-10-17, about 12:45 UTC (2026-10-17, 08:45 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -75,13 +75,15 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- E2-10/11: tasks A to E are merged (task D, the Deflate peel in the pipeline, D-69, PR #68); E2-11 is done.
-  E2-10 waits for its rows: `target/acceptance/e2-20b-e2-10-run.sh` runs detached from `main` (status in
-  `target/acceptance/e2-20b-run-status.log`): A = every tool on office-pdf, photo-raw-png, software-installed of
-  `small` (E2-10 against the incumbents), B = `lpk` on the other fourteen `small` classes, C = `lpk` `fast` and
-  `balanced` on every class of `full` through the trimmed catalogue `target/acceptance/tools-e2-21.toml` (E2-21's
-  full-corpus round trip); one repeat; the machine kept idle for it (E2-22 reads its times). When `== DONE`:
-  validate logs, reports, commit the directories, tick E2-10 and E2-21.
+- E2-10: the runner rows of 2026-10-17 (`bench/results/2026-10-17-megatron-9` = every tool on office-pdf,
+  photo-raw-png, software-installed of `small`; `-10` = `lpk` on the other classes; build `18bb9e1`; not committed
+  yet) showed the peel losing on `archives-nested` and `backup-versions`; the gate fix (D-70, squashed PR from
+  `task/e2-10-gate`) is in its PR. The full pass of the same run (`-11`, `fast` and `balanced` on every class of
+  `full`) found the peel too slow: `lpk/balanced` on `full`'s office-pdf timed out at the runner's 3600 s (the
+  peel's analysis and part encoding run on the feeding thread), and one `preflate-rs` panic inside the analysis was
+  caught and counted (the stream stored as is). Next: the peel pool (design 3.7's follow-up: the Deflate stage's
+  examine and part encoding on worker threads, writes still in input order), then re-run
+  `target/acceptance/e2-20b-e2-10-run.sh` for E2-10's rows and E2-21's full pass.
 - E2-20 is done (2026-10-17, PR #67): every `lpk` row's compress and extract peak within its tier's ceiling
   (`bench/reports/phase1-2026-10-17-memory.md`).
 - Next after the run: E2-15's probe (`docs/notes/e2-15-probe-brief.md`), then E2-16's probe (task P of
