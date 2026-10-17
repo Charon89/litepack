@@ -46,7 +46,7 @@ pub use statistical_codec::{CodecCorrection, CountNonDefaultActions};
 pub use stream_processor::{
     PreflateStreamChunkResult, PreflateStreamProcessor, RecreateStreamProcessor,
     preflate_whole_deflate_stream, recreate_whole_deflate_stream,
-    recreate_whole_deflate_stream_limited,
+    recreate_whole_deflate_stream_limited, recreate_whole_deflate_stream_limited_report,
 };
 
 /// Configure the preflate stream processor

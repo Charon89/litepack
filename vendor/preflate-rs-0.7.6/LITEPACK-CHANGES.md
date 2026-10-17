@@ -21,12 +21,13 @@ lists) far beyond what the archive declares.
    `src/stream_processor.rs` (exported from `src/lib.rs`). It runs the same steps as
    `recreate_whole_deflate_stream` (decode the `ReconstructionData`, build the `TokenPredictor`,
    recreate block by block, encode each block with `DeflateWriter`, stop at the decoded
-   end-of-chunk flag) and returns an error (the new `ExitCode::OutputLimit`, 30, in `src/preflate_error.rs`) as soon as the output,
-   measured after each block, exceeds `limit` bytes. It does not keep the recreated blocks (the
-   upstream function returns them to an internal caller only). A failure to start the CABAC
-   reader is an error (`ExitCode::InvalidPredictionData`) instead of a panic.
+   end-of-chunk flag) and returns an error as soon as the output would exceed `limit` bytes
+   (change 5; the check after each block is kept as a backstop). It does not keep the recreated
+   blocks (the upstream function returns them to an internal caller only). A failure to start
+   the CABAC reader is an error (`ExitCode::InvalidPredictionData`) instead of a panic.
    To measure the output, `DeflateWriter` (`src/deflate/deflate_writer.rs`) gains
-   `pub fn output_len(&self) -> usize`.
+   `pub fn output_len(&self) -> usize`. The error is a new exit code,
+   `ExitCode::OutputLimit` (30, in `src/preflate_error.rs`), which nothing else returns.
 2. **A cap on the number of blocks.** The limited recreation refuses to start a block once it has
    produced `limit` blocks. Every block this crate writes takes at least 10 bits (a
    fixed-Huffman block with no tokens: 3 header bits and the 7-bit end-of-block code; a stored
@@ -46,6 +47,26 @@ lists) far beyond what the archive declares.
    instead of the decoded token count. The loop that fills it pushes at most that many tokens
    (each consumes at least one input byte), so the output is unchanged; the change only stops a
    decoded count from reserving gigabytes. It applies to both recreation functions.
+5. **A capped writer.** `DeflateWriter::with_cap(limit)` reserves its buffer once,
+   `limit + CAP_SLACK` bytes (`CAP_SLACK` = 8), and `DeflateWriter::encode_block_capped(block,
+   limit)` writes the same bytes as `encode_block` but returns `OutputLimit` before any write
+   step that could take the output past `limit`: each step (block header, one token, the
+   end-of-block code, the last block's padding) appends at most 8 bytes and runs only while the
+   output is at most `limit` bytes; the dynamic Huffman table goes to a scratch buffer and the
+   stored payload is measured first, both appended only if the output stays within `limit`. So
+   the buffer never grows past its reservation, and a valid stream of at most `limit` bytes is
+   never refused. The limited recreation uses it. For tests and fuzzing,
+   `recreate_whole_deflate_stream_limited_report` (hidden from the docs) also returns the
+   buffer's capacity at the end; `DeflateWriter::capacity()` reads it.
+6. **Hops bounded by `max_chain`.** In the limited recreation only,
+   `TokenPredictor::limit_hops_to_max_chain` makes `recreate_block` refuse
+   (`InvalidPredictionData`) a correction that asks for more hops along the hash chain
+   (`DistAfterLenCorrection + 1` or `DistOnlyCorrection`) than the parameters' `max_chain`,
+   before the hash chain is walked; the `+ 1` is checked in 64 bits first. Upstream walks up to
+   the whole window per token for any decoded count. Analysis did not emit more hops than
+   `max_chain` on any stream LitePack checked (its corpus test, see its tests).
+   `src/stream_processor.rs` also gains a test module, `litepack_crafted`, whose ignored test
+   writes the crafted record LitePack's tests use for this change.
 
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.

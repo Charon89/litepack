@@ -10,7 +10,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use flate2::{Compress, Compression, FlushCompress};
 use lpk_core::peel::deflate::{analyse_stream, examine, preflate_config, Limits, StreamOutcome};
 use preflate_rs::{
-    recreate_whole_deflate_stream, recreate_whole_deflate_stream_limited, ExitCode, PreflateConfig,
+    recreate_whole_deflate_stream, recreate_whole_deflate_stream_limited,
+    recreate_whole_deflate_stream_limited_report, ExitCode, PreflateConfig,
 };
 
 fn cfg() -> PreflateConfig {
@@ -261,6 +262,53 @@ fn mutated_records_never_escape_the_limit_and_some_parameters_are_refused() {
         }
     }
     assert!(refused_parameters > 0);
+}
+
+/// A record of one large block, recreated with a limit far below the block's encoding: refused
+/// with `OutputLimit`, and the writer's buffer never grows past `limit + 8` (it is reserved
+/// once and every write step checks the limit first). With the exact limit the capacity is
+/// still `limit + 8` at most.
+#[test]
+fn one_block_far_over_the_limit_is_refused_without_growing_the_buffer() {
+    let data = noise(12_000, 21);
+    let stream = raw(&data, 6);
+    let corr = match analyse_stream(&stream, None, &cfg()) {
+        StreamOutcome::Done { corrections, .. } => corrections,
+        other => panic!("{other:?}"),
+    };
+    for limit in [0, 1, 100, 4096, stream.len() - 1] {
+        let (r, capacity) = recreate_whole_deflate_stream_limited_report(&data, &corr, limit);
+        assert_eq!(
+            r.unwrap_err().exit_code(),
+            ExitCode::OutputLimit,
+            "limit {limit}"
+        );
+        assert!(capacity <= limit + 8, "limit {limit}: capacity {capacity}");
+    }
+    let (r, capacity) = recreate_whole_deflate_stream_limited_report(&data, &corr, stream.len());
+    assert_eq!(r.unwrap(), stream);
+    assert!(capacity <= stream.len() + 8);
+}
+
+/// A crafted record (`fixtures/deflate/crafted/hops-*.bin`, written by the vendored crate's
+/// ignored test `litepack_crafted::write_crafted_hops_record`): a periodic plain text whose
+/// corrections ask, for every reference, for `max_chain + 4000` hops along the hash chain
+/// (`max_chain` is 1). Upstream walks the chain for each; the limited recreation refuses at the
+/// first reference (`InvalidPredictionData`), before any walk.
+#[test]
+fn corrections_asking_for_too_many_hops_are_refused_quickly() {
+    let plain = include_bytes!("fixtures/deflate/crafted/hops-plain.bin");
+    let corr = include_bytes!("fixtures/deflate/crafted/hops-corrections.bin");
+    let start = std::time::Instant::now();
+    let e = recreate_whole_deflate_stream_limited(plain, corr, 1 << 20).unwrap_err();
+    assert_eq!(e.exit_code(), ExitCode::InvalidPredictionData);
+    assert!(e.message().contains("hops"), "{}", e.message());
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    // Upstream has no such check: whatever it returns, it is not this refusal.
+    let up = catch_unwind(|| recreate_whole_deflate_stream(plain, corr));
+    if let Ok(Err(e)) = up {
+        assert!(!e.message().contains("more hops than max_chain"));
+    }
 }
 
 /// On real files (a directory named by `LPK_PREFLATE_CORPUS`, walked recursively; run with

@@ -33,6 +33,9 @@ pub struct TokenPredictor {
     params: TokenPredictorParameters,
     pending_reference: Option<DeflateTokenReference>,
     max_token_count: u32,
+    /// LitePack change 6 (LITEPACK-CHANGES.md): the most hops a correction may ask for; None
+    /// (upstream's behaviour) except in the limited recreation.
+    hop_limit: Option<u32>,
 }
 
 impl std::fmt::Debug for TokenPredictor {
@@ -54,6 +57,23 @@ impl TokenPredictor {
             params: *params,
             pending_reference: None,
             max_token_count: params.max_token_count.into(),
+            hop_limit: None,
+        }
+    }
+
+    /// LitePack change 6 (LITEPACK-CHANGES.md): refuse corrections asking for more hops along
+    /// the hash chain than `max_chain` (used by the limited recreation only).
+    pub fn limit_hops_to_max_chain(&mut self) {
+        self.hop_limit = Some(self.params.max_chain);
+    }
+
+    fn check_hops(&self, hops: u64) -> Result<()> {
+        match self.hop_limit {
+            Some(m) if hops > u64::from(m) => err_exit_code(
+                ExitCode::InvalidPredictionData,
+                "correction asks for more hops than max_chain",
+            ),
+            _ => Ok(()),
         }
     }
 
@@ -425,7 +445,11 @@ impl TokenPredictor {
                 codec.decode_correction_diff(CodecCorrection::LenCorrection, predicted_ref.len());
 
             if new_len != predicted_ref.len() {
-                let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection) + 1;
+                let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection);
+                // LitePack change 6 (LITEPACK-CHANGES.md): the limited recreation refuses more
+                // hops than the parameters' max_chain (checked before the + 1, which could wrap).
+                self.check_hops(u64::from(hops) + 1)?;
+                let hops = hops + 1;
 
                 predicted_ref = DeflateTokenReference::new(
                     new_len,
@@ -436,6 +460,8 @@ impl TokenPredictor {
             } else {
                 let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection);
                 if hops != 0 {
+                    // LitePack change 6
+                    self.check_hops(u64::from(hops))?;
                     let new_dist = self
                         .state
                         .hop_match(predicted_ref.len(), hops, input)

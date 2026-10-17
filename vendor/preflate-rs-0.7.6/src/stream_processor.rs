@@ -342,12 +342,42 @@ pub fn recreate_whole_deflate_stream(
 ///   writes takes at least 10 bits (a fixed-Huffman block with no tokens: 3 header bits and
 ///   the 7-bit end-of-block code; a stored block takes 35 bits or more, a dynamic one more
 ///   than 10), so a stream of at most `limit` bytes has at most `limit` blocks;
-/// - its output exceeds `limit` bytes. The output is measured after each block, so at most one
-///   block's encoding is held beyond the limit before the error is returned.
+/// - its output exceeds `limit` bytes (`OutputLimit`). The writer's buffer is reserved once,
+///   `limit + 8` bytes, and never grows: every write step checks the limit first (change 5);
+///   the check after each block is kept as a backstop;
+/// - a correction asks for more hops along the hash chain than the parameters' `max_chain`
+///   (`InvalidPredictionData`, change 6).
 pub fn recreate_whole_deflate_stream_limited(
     plain_text: &[u8],
     prediction_corrections: &[u8],
     limit: usize,
+) -> Result<Vec<u8>> {
+    recreate_whole_deflate_stream_limited_report(plain_text, prediction_corrections, limit).0
+}
+
+/// LitePack change 5 (LITEPACK-CHANGES.md): [`recreate_whole_deflate_stream_limited`], also
+/// returning the capacity of the writer's buffer when the recreation ended (for tests and
+/// fuzzing: it never exceeds `limit + 8`).
+#[doc(hidden)]
+pub fn recreate_whole_deflate_stream_limited_report(
+    plain_text: &[u8],
+    prediction_corrections: &[u8],
+    limit: usize,
+) -> (Result<Vec<u8>>, usize) {
+    let mut writer = match DeflateWriter::with_cap(limit) {
+        Ok(w) => w,
+        Err(e) => return (Err(e), 0),
+    };
+    let r = recreate_limited_into(plain_text, prediction_corrections, limit, &mut writer);
+    let capacity = writer.capacity();
+    (r, capacity)
+}
+
+fn recreate_limited_into(
+    plain_text: &[u8],
+    prediction_corrections: &[u8],
+    limit: usize,
+    writer: &mut DeflateWriter,
 ) -> Result<Vec<u8>> {
     let r = ReconstructionData::read(prediction_corrections)?;
 
@@ -358,13 +388,12 @@ pub fn recreate_whole_deflate_stream_limited(
     let mut input = PreflateInput::new(&plain);
 
     let mut predictor = TokenPredictor::new(&r.parameters);
+    predictor.limit_hops_to_max_chain();
 
     let reader = VP8Reader::new(Cursor::new(r.corrections)).map_err(|e| {
         PreflateError::new(ExitCode::InvalidPredictionData, e.to_string().as_str())
     })?;
     let mut cabac_decoder = PredictionDecoderCabac::new(reader);
-
-    let mut writer = DeflateWriter::new();
 
     let mut blocks: usize = 0;
     loop {
@@ -377,9 +406,10 @@ pub fn recreate_whole_deflate_stream_limited(
 
         let block = predictor.recreate_block(&mut cabac_decoder, &mut input)?;
 
-        writer.encode_block(&block)?;
+        writer.encode_block_capped(&block, limit)?;
         blocks += 1;
 
+        // backstop (encode_block_capped already refuses)
         if writer.output_len() > limit {
             return Err(PreflateError::new(
                 ExitCode::OutputLimit,
@@ -1066,4 +1096,97 @@ fn verify_decompress_partial_gzip_deflate_body_roundtrip() {
 
     recompressed.append(&mut rest);
     crate::utils::assert_eq_array(deflate_body, &recompressed);
+}
+
+/// LitePack (LITEPACK-CHANGES.md, change 6): writes the crafted record LitePack's tests use for
+/// the hop limit. Run once, by hand, from this directory:
+/// `LPK_CRAFTED_OUT=<dir> cargo test --lib litepack_crafted -- --ignored`
+/// It builds a periodic plain text and a fixed-Huffman stream of it, analyses it, then encodes
+/// the corrections with every `DistOnlyCorrection` replaced by `max_chain + 4000` hops (a deep
+/// walk of the hash chain per token for upstream), and writes
+/// `hops-plain.bin` and `hops-corrections.bin`.
+#[cfg(test)]
+mod litepack_crafted {
+    use super::*;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
+    use crate::deflate::deflate_token::{
+        DeflateHuffmanType, DeflateToken, DeflateTokenBlockType, DeflateTokenReference,
+    };
+
+    struct Tamper<E> {
+        inner: E,
+        hops: u32,
+    }
+
+    impl<E: PredictionEncoder> PredictionEncoder for Tamper<E> {
+        fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
+            if action == CodecCorrection::DistOnlyCorrection {
+                self.inner.encode_correction(action, self.hops);
+            } else {
+                self.inner.encode_correction(action, value);
+            }
+        }
+        fn encode_verify_state(&mut self, message: &'static str, checksum: u64) {
+            self.inner.encode_verify_state(message, checksum);
+        }
+        fn finish(&mut self) {
+            self.inner.finish();
+        }
+    }
+
+    #[test]
+    #[ignore = "writes the crafted record (LPK_CRAFTED_OUT)"]
+    fn write_crafted_hops_record() {
+        let out_dir = std::path::PathBuf::from(std::env::var("LPK_CRAFTED_OUT").unwrap());
+        let period = b"abcdefgh";
+        let mut tokens: Vec<DeflateToken> =
+            period.iter().map(|&c| DeflateToken::Literal(c)).collect();
+        let mut plain: Vec<u8> = period.to_vec();
+        for _ in 0..800 {
+            tokens.push(DeflateToken::Reference(DeflateTokenReference::new(258, 8)));
+            for _ in 0..258 {
+                plain.push(plain[plain.len() - 8]);
+            }
+        }
+        let block = DeflateTokenBlock {
+            block_type: DeflateTokenBlockType::Huffman {
+                tokens,
+                huffman_type: DeflateHuffmanType::Static,
+            },
+            last: true,
+        };
+        let mut w = DeflateWriter::new();
+        w.encode_block(&block).unwrap();
+        w.flush();
+        let deflate = w.detach_output();
+
+        let (contents, plain_text) = parse_deflate_whole(&deflate).unwrap();
+        assert_eq!(plain_text.text(), plain.as_slice());
+        let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+
+        let mut cabac = Vec::new();
+        {
+            let mut enc = Tamper {
+                inner: PredictionEncoderCabac::new(VP8Writer::new(&mut cabac).unwrap()),
+                hops: params.max_chain + 4000,
+            };
+            let mut input = PreflateInput::new(&plain_text);
+            let mut tp = TokenPredictor::new(&params);
+            predict_blocks(&contents.blocks, &mut tp, &mut enc, &mut input).unwrap();
+            enc.finish();
+        }
+        let record = bitcode::encode(&ReconstructionData {
+            parameters: params,
+            corrections: cabac,
+        });
+        std::fs::write(out_dir.join("hops-plain.bin"), &plain).unwrap();
+        std::fs::write(out_dir.join("hops-corrections.bin"), &record).unwrap();
+        println!(
+            "deflate {} bytes, plain {} bytes, record {} bytes, max_chain {}",
+            deflate.len(),
+            plain.len(),
+            record.len(),
+            params.max_chain
+        );
+    }
 }
