@@ -36,23 +36,40 @@ pub const FILE_PLAIN_BUDGET: u64 = 512 * 1024 * 1024;
 /// The library's match-chain bound used for analysis (the library's default).
 pub const MAX_CHAIN_LENGTH: u32 = 4096;
 
-/// The per-file work budget of [`examine`]: inflated bytes per byte of the file. Every byte
-/// the walker inflates (false hits and refused candidates included) and, before each analysis,
-/// the candidate's plain size (known, or the plain-text limit) plus its length are charged; a
-/// file whose work reaches the budget stops being examined, its remaining candidates are not
-/// analysed (counted as `unexamined`, the file as `work_budget_stopped`). The budget is
-/// `WORK_FLOOR + WORK_PER_BYTE × len`: a legitimate file is charged about twice its streams'
-/// plain text, which this leaves room for at sixty-four times the file's length (a Deflate
-/// stream can expand more, but then its analysis is capped by the plain-text limit anyway), and
-/// the floor covers small files with one large stream. A crafted file can then cost at most
-/// that much inflation, never the 2^32 bytes per candidate the walker's cap allows.
+/// [`examine`] bounds each file's work with two budgets; a file that reaches either stops being
+/// examined: its remaining candidates are not analysed (counted as `unexamined`, the file as
+/// `work_budget_stopped`).
+///
+/// - **The walker's inflation:** every byte the walker inflates (false hits and refused
+///   candidates included) is charged against `WORK_FLOOR + WORK_PER_BYTE × len`
+///   ([`work_budget`]). Proportional, because the walker legitimately inflates each stream once
+///   and a file's streams rarely expand beyond sixty-four times its length; the floor covers
+///   small files with one large stream. A crafted file can then cost at most that much
+///   inflation, never the 2^32 bytes per candidate the walker's cap allows.
+/// - **The analyses:** before each analysis (failed and skipped ones included) the candidate's
+///   plain bound plus its length is charged against `ANALYSIS_BUDGET_FACTOR ×
+///   file_plain_budget` ([`analysis_budget`]), a fixed allowance per file. The plain bound is
+///   the declared or measured size plus one when known (the analysis stops one byte past a
+///   declared size), else the bytes the walker inflated for the candidate, each at most the
+///   plain-text limit. Fixed, because a legitimate file already stops reconstructing once its
+///   reconstructed text reaches the file plain budget; twice that leaves room for the analyses
+///   that fail.
 pub const WORK_PER_BYTE: u64 = 64;
-/// The fixed part of the per-file work budget (see [`WORK_PER_BYTE`]).
+/// The fixed part of the walker's budget (see [`WORK_PER_BYTE`]).
 pub const WORK_FLOOR: u64 = 512 * 1024 * 1024;
+/// The analyses' budget per file, in file plain budgets (see [`WORK_PER_BYTE`]).
+pub const ANALYSIS_BUDGET_FACTOR: u64 = 2;
 
-/// The per-file work budget for a file of `len` bytes.
+/// The walker's inflation budget for a file of `len` bytes.
 pub fn work_budget(len: u64) -> u64 {
     WORK_FLOOR.saturating_add(WORK_PER_BYTE.saturating_mul(len))
+}
+
+/// The analyses' budget per file under `limits`.
+pub fn analysis_budget(limits: &Limits) -> u64 {
+    limits
+        .file_plain_budget
+        .saturating_mul(ANALYSIS_BUDGET_FACTOR)
 }
 
 /// The name recorded for a panic inside the library.
@@ -507,23 +524,28 @@ pub fn examine(
     };
     let mut plain_held = 0u64;
     let walked_out = super::walk::work_left() == 0;
+    let mut analysis_left = analysis_budget(limits);
     for (i, c) in found.candidates.iter().enumerate() {
-        let charge = c
+        let too_big = c.plain_known.is_some_and(|p| p > limits.plain_text_limit)
+            || plain_held >= limits.file_plain_budget;
+        // Skipped candidates are not analysed and cost nothing; every analysis is charged.
+        let bound = c
             .plain_known
-            .unwrap_or(limits.plain_text_limit)
-            .min(limits.plain_text_limit)
-            .saturating_add(c.spans.iter().map(|(a, b)| (b - a) as u64).sum::<u64>());
-        let left = super::walk::work_left();
-        if walked_out || left < charge {
+            .map_or(c.inflated, |k| k.saturating_add(1))
+            .min(limits.plain_text_limit);
+        let charge = if too_big {
+            0
+        } else {
+            bound.saturating_add(c.spans.iter().map(|(a, b)| (b - a) as u64).sum::<u64>())
+        };
+        if walked_out || analysis_left < charge {
             st.work_budget_stopped = 1;
             st.unexamined = (found.candidates.len() - i) as u64;
             break;
         }
-        super::walk::set_work_left(left - charge);
+        analysis_left -= charge;
         st.found += 1;
         let data = contiguous(bytes, &c.spans);
-        let too_big = c.plain_known.is_some_and(|p| p > limits.plain_text_limit)
-            || plain_held >= limits.file_plain_budget;
         let outcome = if too_big {
             StreamOutcome::Skipped {
                 deflate_len: data.len(),
@@ -830,6 +852,7 @@ mod tests {
     fn a_file_past_its_work_budget_stops_being_examined() {
         let one = zlib(&vec![0u8; 1 << 20]);
         let copies = usize::try_from(work_budget(0) / (1 << 20)).unwrap() + 400;
+        assert!(analysis_budget(&Limits::standard()) == 2 * FILE_PLAIN_BUDGET);
         let mut file = Vec::new();
         for _ in 0..copies {
             file.extend_from_slice(b"xx");

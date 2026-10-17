@@ -13,9 +13,9 @@ pub mod stage;
 pub mod walk;
 
 pub use analyse::{
-    analyse_stream, examine, work_budget, Counts, Estimate, Examined, Limits, Plain, Reconstructed,
-    StreamOutcome, FAILURE_NAMES, FILE_PLAIN_BUDGET, MAX_CHAIN_LENGTH, PANIC, PLAIN_TEXT_LIMIT,
-    WORK_FLOOR, WORK_PER_BYTE,
+    analyse_stream, analysis_budget, examine, work_budget, Counts, Estimate, Examined, Limits,
+    Plain, Reconstructed, StreamOutcome, ANALYSIS_BUDGET_FACTOR, FAILURE_NAMES, FILE_PLAIN_BUDGET,
+    MAX_CHAIN_LENGTH, PANIC, PLAIN_TEXT_LIMIT, WORK_FLOOR, WORK_PER_BYTE,
 };
 pub use decode::{
     memory_term, DeflateDecoder, MEMORY_ALLOWANCE, MEMORY_PER_CORRECTION_BYTE,

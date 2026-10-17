@@ -38,6 +38,10 @@ pub struct Candidate {
     /// The plain size, when known before analysis (measured by inflation, or declared by a ZIP
     /// entry).
     pub plain_known: Option<u64>,
+    /// Plain bytes the walker inflated while finding it (0 when it was not inflated, as for a
+    /// ZIP entry); for a stream of unknown size, what its analysis is charged
+    /// ([`examine`](super::examine)).
+    pub inflated: u64,
 }
 
 /// What the walker found in one file.
@@ -156,6 +160,7 @@ fn zlib_candidate(bytes: &[u8], at: usize, buf: &mut [u8]) -> Option<(Candidate,
             Candidate {
                 spans: vec![(at + 2, at + consumed - 4)],
                 plain_known: Some(out),
+                inflated: out,
             },
             consumed,
         )),
@@ -239,6 +244,7 @@ fn find_zip(bytes: &[u8], ext: &str) -> Option<Found> {
         candidates.push(Candidate {
             spans: vec![(start, end)],
             plain_known: Some(f.size()),
+            inflated: 0,
         });
     }
     // Packages that share `[Content_Types].xml` with Office are told apart by extension first.
@@ -295,13 +301,17 @@ fn find_png(bytes: &[u8], buf: &mut [u8]) -> Found {
     for (a, b) in &spans {
         concat.extend_from_slice(&bytes[*a..*b]);
     }
-    let (take, plain_known) = match inflate_extent(&concat, true, buf) {
+    let before = work_left();
+    let inflated_png = inflate_extent(&concat, true, buf);
+    let inflated = before.saturating_sub(work_left());
+    let (take, plain_known) = match inflated_png {
         Inflated::Clean { consumed, out } if consumed >= 6 => (consumed - 6, Some(out)),
         _ => (total - 2, None),
     };
     found.candidates.push(Candidate {
         spans: trim_spans(&spans, 2, take),
         plain_known,
+        inflated,
     });
     found
 }
@@ -363,11 +373,15 @@ fn find_gzip(bytes: &[u8], buf: &mut [u8]) -> Found {
     let mut pos = 0;
     while let Some(h) = gzip_header_len(&bytes[pos..]) {
         let start = pos + h;
-        match inflate_extent(&bytes[start..], false, buf) {
+        let before = work_left();
+        let r = inflate_extent(&bytes[start..], false, buf);
+        let inflated = before.saturating_sub(work_left());
+        match r {
             Inflated::Clean { consumed, out } => {
                 found.candidates.push(Candidate {
                     spans: vec![(start, start + consumed)],
                     plain_known: Some(out),
+                    inflated,
                 });
                 pos = start + consumed + 8;
                 if pos >= bytes.len() {
@@ -379,6 +393,7 @@ fn find_gzip(bytes: &[u8], buf: &mut [u8]) -> Found {
                 found.candidates.push(Candidate {
                     spans: vec![(start, bytes.len())],
                     plain_known: None,
+                    inflated,
                 });
                 break;
             }
@@ -427,7 +442,10 @@ fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
         if !zlib_header(head) && !dictionary_has_flate(bytes, k) {
             continue;
         }
-        match zlib_candidate(bytes, data, buf) {
+        let before = work_left();
+        let r = zlib_candidate(bytes, data, buf);
+        let inflated = before.saturating_sub(work_left());
+        match r {
             Some((c, consumed)) => {
                 found.candidates.push(c);
                 from = data + consumed;
@@ -438,6 +456,7 @@ fn find_pdf(bytes: &[u8], buf: &mut [u8]) -> Found {
                 found.candidates.push(Candidate {
                     spans: vec![(data + 2, end.max(data + 2))],
                     plain_known: None,
+                    inflated,
                 });
                 from = end.max(from);
             }
