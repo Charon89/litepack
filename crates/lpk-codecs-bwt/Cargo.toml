@@ -7,10 +7,18 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# The forward transform through libsais (the only C code); a reader build leaves it off.
+encode = ["dep:libsais"]
+
 [dependencies]
 # MIT OR Apache-2.0 (the C sources: Apache-2.0 with LLVM exceptions, docs/LICENSING.md); the
-# `openmp` feature stays off.
-libsais = { version = "0.2.0", default-features = false }
+# `openmp` feature stays off. Linked only with the `encode` feature.
+libsais = { version = "0.2.0", default-features = false, optional = true }
+
+[dev-dependencies]
+# The crate's tests check the inverse against the forward transform.
+lpk-codecs-bwt = { path = ".", features = ["encode"] }
 
 [lints]
 workspace = true
