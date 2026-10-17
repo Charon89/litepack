@@ -85,6 +85,24 @@ pub(crate) fn set_work_left(n: u64) {
     WORK_LEFT.with(|w| w.set(n));
 }
 
+/// Sets this thread's work left for its lifetime and restores it to unlimited when dropped,
+/// on the panic path too.
+pub(crate) struct WorkGuard;
+
+impl WorkGuard {
+    /// Set the work left to `n` until the guard is dropped.
+    pub(crate) fn new(n: u64) -> Self {
+        set_work_left(n);
+        WorkGuard
+    }
+}
+
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        set_work_left(u64::MAX);
+    }
+}
+
 /// This thread's work left.
 pub(crate) fn work_left() -> u64 {
     WORK_LEFT.with(|w| w.get())

@@ -498,7 +498,8 @@ pub fn examine(
     limits: &Limits,
     mut on_done: impl FnMut(Reconstructed),
 ) -> Examined {
-    super::walk::set_work_left(work_budget(bytes.len() as u64));
+    // Restored to unlimited when `examine` returns or unwinds (a panic in `on_done`).
+    let _work = super::walk::WorkGuard::new(work_budget(bytes.len() as u64));
     let (found, panicked) = match catch_unwind(AssertUnwindSafe(|| find_streams(bytes, ext))) {
         Ok(f) => (f, false),
         Err(_) => (
@@ -612,7 +613,6 @@ pub fn examine(
             }
         }
     }
-    super::walk::set_work_left(u64::MAX);
     Examined {
         kind: found.kind,
         counts: st,
@@ -947,6 +947,16 @@ mod tests {
             "{:?}",
             e.counts
         );
+    }
+
+    #[test]
+    fn a_panic_in_the_callback_leaves_the_work_budget_unlimited() {
+        let file = zlib(&text(30_000, 2));
+        let r = std::panic::catch_unwind(|| {
+            examine(&file, "bin", &Limits::standard(), |_| panic!("in on_done"));
+        });
+        assert!(r.is_err());
+        assert_eq!(super::super::walk::work_left(), u64::MAX);
     }
 
     #[test]
