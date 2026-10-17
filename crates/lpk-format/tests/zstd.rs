@@ -304,6 +304,7 @@ fn options(encoder: ZstdTestEncoder) -> WriterOptions {
         seal: None,
         dedup: false,
         encode_threads: 1,
+        threads_hint: 0,
     }
 }
 

@@ -267,6 +267,7 @@ fn peeled_archive(edit: &dyn Fn(Record) -> Record, memory: Option<u64>) -> Vec<u
         },
         bytes: plan.stream.clone(),
         resources: GraphResources::default(),
+        memory: 0,
     };
     let primary = &data[..plan.primary_len as usize];
     w.add_part_encoded(0, primary, encoded, memory.unwrap_or(plan.memory))

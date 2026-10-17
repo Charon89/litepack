@@ -56,6 +56,7 @@ impl BlockEncoder for Recon {
             },
             bytes: plain.to_vec(),
             resources: GraphResources::default(),
+            memory: 0,
         })
     }
 }

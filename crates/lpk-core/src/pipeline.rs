@@ -816,6 +816,7 @@ fn write_peeled<W: Write>(
         },
         bytes: plan.stream,
         resources: GraphResources::default(),
+        memory: 0,
     };
     writer.add_part_encoded(0, &data[..plan.primary_len as usize], encoded, plan.memory)?;
     writer.end_entry()?;

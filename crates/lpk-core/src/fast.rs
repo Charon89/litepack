@@ -353,6 +353,7 @@ impl ZstdCore {
         Ok((
             Encoded {
                 resources: graph.resources(),
+                memory: 0,
                 graph,
                 bytes,
             },

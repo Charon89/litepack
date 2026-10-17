@@ -73,6 +73,7 @@ fn encoded(record: u64, primary: &[u8]) -> Encoded {
         },
         bytes: primary.iter().rev().copied().collect(),
         resources: GraphResources::default(),
+        memory: 0,
     }
 }
 

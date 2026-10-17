@@ -254,6 +254,7 @@ impl LzmaEncoder {
         let graph = self.graph(dict);
         Ok(Encoded {
             resources: graph.resources(),
+            memory: 0,
             graph,
             bytes: self.compress(plain, dict)?,
         })

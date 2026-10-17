@@ -107,6 +107,7 @@ impl BlockEncoder for ZstdTestEncoder {
         let graph = self.graph();
         Ok(Encoded {
             resources: graph.resources(),
+            memory: 0,
             graph,
             bytes: compress_stream(
                 self.level,
@@ -198,6 +199,7 @@ impl BlockEncoder for LzmaTestEncoder {
         let graph = self.graph();
         Ok(Encoded {
             resources: graph.resources(),
+            memory: 0,
             graph,
             bytes: lzma_raw(&o, plain),
         })
@@ -311,6 +313,7 @@ pub fn vector_options(name: &str, dict: Option<&[u8]>) -> WriterOptions {
         seal: None,
         dedup: false,
         encode_threads: 1,
+        threads_hint: 0,
     }
 }
 
