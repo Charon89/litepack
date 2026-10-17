@@ -50,7 +50,7 @@ was single-threaded then and is parallel since E2-4b.
    merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
    limits on tasks of this size and are resumed with a short step list.
 
-**Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16 added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
+**Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16 and one for revision 1.3 added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
   (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
   consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
@@ -59,6 +59,11 @@ was single-threaded then and is parallel since E2-4b.
 - **Nine file names.** The Windows `tar` crashes on node's emoji and CJK test-file names, so the `store` control and
   the tar-stream tools (zstd, xz) have no rows on the class. Recommended: exclude names outside ASCII from this
   class's export (nine of 127153 files), re-run the three tools.
+- **Revision 1.3's entropy stage** (`docs/notes/e2-15-revision-1.3-design.md` sections 1 and 7): ruled for now as
+  `[lzma, bwt]` (BWT then the existing LZMA; ruling R21), because v1's frozen registry has no ID for a new coder
+  primitive. The alternative folds the probe's MTF + zero-run + arithmetic coder into `bwt` itself for about 3.2% more
+  on the text classes, but freezes that untuned coder in v1 for good. Say so before revision 1.3's text is final if
+  the fold is wanted.
 - **E2-16's gate margin** (`docs/notes/e2-16-design.md` section 5): a new gate threshold, so the owner's. Recommended:
   open the PNG-filter revision only if the probe's per-stream saving on `photo-raw-png` is at least 1% of that
   class's `lpk/balanced` bytes. And for a closed gate: the "with" figure is the probe's committed prediction, the
