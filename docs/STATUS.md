@@ -3,9 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 04:52 UTC (2026-10-17, 00:52 local on the measuring machine). A measurement is running:
-E2-20's rows (`target/acceptance/e2-20-run.sh`, detached, started 04:00 UTC; progress in
-`target/acceptance/e2-20-run-status.log`, last line `== DONE` when both profiles are in).
+Last updated: 2026-10-17, about 05:25 UTC (2026-10-17, 01:25 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -73,21 +71,22 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- Task C of E2-10/11 (revision 1.2, D-68) is merged (PR #64, 2026-10-17). In flight from `main` at `01dca88`:
-  `task/e2-10-pipeline` (task D, the Deflate peel in the pipeline, `docs/notes/e2-10-task-d-brief.md` plus the
-  orchestrator's notes: E2-20's memory model takes the stage's buffers, the part blocks declare the Deflate term
-  through `add_parts_encoded`, byte identity across threads and budgets) and `task/e2-10-check` (task E,
-  `deflate-reconstruct` in `lpk-check` from the text alone — the revision's independence gate; notes: the two 1.2
-  vectors, the bound classes of rules 3, 6 and 7 from the text, the `Refused` amounts). Both are implementer
-  worktrees under `.claude/worktrees/`; each gets a read-only review before its PR. D's acceptance rows (the
-  `balanced` and `balanced-no-deflate` rows on `small`, the share test against `probe-deflate.json`) are measured
-  by the orchestrator and tick E2-10 and E2-11.
-- E2-20 (merged): its acceptance rows are running from `main` at `fb5553a` — every `lpk` setting on every class of
-  `small`, then `vm-image`, `office-pdf` and `software-installed` of `full`, at the machine's 24 threads, one repeat
-  (the clause is memory): each row's peak memory within its tier's ceiling (store 1 GiB, Fast 2 GiB, Balanced
-  4 GiB). When `== DONE` is in the status log: validate output is in `target/acceptance/e2-20-validate-*.log`; write
-  the report, commit the two results directories, tick E2-20. Agents were building and testing in other worktrees
-  during the run, so its times are not for comparison.
+- Task C of E2-10/11 (revision 1.2, D-68) is merged (PR #64). In flight:
+  - `task/e2-10-pipeline` — task D (the Deflate peel in the pipeline), implementer running.
+  - `task/e2-10-check` — task E (`deflate-reconstruct` in `lpk-check` from the text): the gate passed from the text
+    alone (both 1.2 vectors; reviewed: correct, the gate honest); its author listed nine sentences it had to guess
+    at, and the review found the two decoders disagreeing on three. `task/e2-10-text` (pushed) settles all nine in
+    section 8 and corrects the reference (the 4 KiB LZMA dictionary floor of LzmaSpec applies; `marker required`
+    for input ending inside the symbol after a non-final step's bound; a zstd checksum belongs to no block; input
+    after a marker); task E's author is aligning `lpk-check` from the revised text only. Then one review of both
+    with a probe that runs the two decoders on the same crafted inputs, then the PRs.
+- E2-20 (code merged): its rows were measured on 2026-10-17 (`bench/results/2026-10-17-megatron-5` = `small`,
+  `-6` = `full` vm-image/office-pdf/software-installed, 24 threads, from `fb5553a`; not committed yet). Every
+  compress peak is within its tier's ceiling; extraction is not: at 24 threads it plans only plain bytes plus the
+  decode allowance against the reader's 2 GiB and holds more (store extraction of `vm-image` well above the store
+  ceiling). Ruling R19: E2-20 ticks only when extraction too stays within the ceiling of the tier the archive's
+  envelope shows. `task/e2-20-extract` (implementer running, `task-r` brief in the session scratchpad) builds that
+  model; then re-run `target/acceptance/e2-20-run.sh` and tick with both runs.
 
 ## How to resume
 
