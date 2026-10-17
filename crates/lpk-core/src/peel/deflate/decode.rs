@@ -23,6 +23,10 @@
 //! Checks 1 to 5 need only the record: [`PrimitiveDecoder::input_bound`] runs them before the
 //! previous step and returns `plain_len` as that step's output bound; `decode_in` runs them again
 //! (the records are cached) and then 6 to 8.
+//!
+//! A hostile record can make the library panic (check 7 contains it). The panic still goes
+//! through the process's panic hook first, so with the default hook one "thread panicked" line is
+//! printed on standard error per such record; this decoder does not change the global hook.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -32,14 +36,28 @@ use lpk_format::{
 };
 use preflate_rs::{recreate_whole_deflate_stream_limited, ExitCode};
 
-/// Decode memory per plain byte of a stream: the step's input, the library's own copy of it, and
-/// at most four bytes per plain byte for the token lists 0.7.6 keeps while recreating.
-pub const MEMORY_PER_PLAIN_BYTE: u64 = 6;
-/// The fixed allowance for the library's tables (by construction, not measured).
+/// Decode memory per plain byte of a stream, from the layout of the patched 0.7.6 recreation:
+/// - 1 byte: the step's input (the previous step's output, held by the reader);
+/// - 1 byte: the library's own copy of it (`PlainText`, filled by one exact-size append);
+/// - 6 bytes: the token list of the block being recreated. A `DeflateToken` is 6 bytes (a tag
+///   and a 4-byte reference, alignment 2), and one block may hold a token per plain byte: a
+///   block of literals only, which is a valid stream, or any `TokenCount` a crafted record
+///   decodes (the reservation is `min(TokenCount, input remaining)` exactly, and the loop never
+///   pushes past it). The limited recreation drops each block's tokens once written, so only
+///   one block's list is live.
+///
+/// The output is not part of the term: it is the block's own buffer (the capped writer reserves
+/// `original_len + 8` bytes once, and `original_len` is the block's `plain_len` or at most
+/// `max_block_plain`). Measured (`tests/deflate_memory.rs`, a counting allocator): a
+/// literals-only block needs exactly this per-byte part; the fixed allowance covers the rest.
+pub const MEMORY_PER_PLAIN_BYTE: u64 = 8;
+/// The fixed allowance for the library's tables (hash chains, Huffman tables, the CABAC
+/// contexts) and the small buffers of a recreation; the test asserts at least half of it is left
+/// unused in the worst case it measures.
 pub const MEMORY_ALLOWANCE: u64 = 16 * 1024 * 1024;
 
 /// The decode memory a stream of `plain_len` plain bytes needs beyond the block buffer:
-/// `6 × plain_len + 16777216` (saturating).
+/// `8 × plain_len + 16777216` (saturating).
 pub fn memory_term(plain_len: u64) -> u64 {
     plain_len
         .saturating_mul(MEMORY_PER_PLAIN_BYTE)

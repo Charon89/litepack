@@ -34,6 +34,8 @@ mod unix;
 #[cfg(windows)]
 mod windows_impl;
 
+pub mod alloc;
+
 /// Where a standard stream of the child goes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Output {
