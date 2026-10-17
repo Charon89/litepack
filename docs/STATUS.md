@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 02:06 UTC (2026-10-16, 22:06 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 02:20 UTC (2026-10-16, 22:20 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -30,11 +30,9 @@ was single-threaded then and is parallel since E2-4b.
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Next: **E2-18's rows after round 3.** Round 3 step (a) is merged (D-65: the chunk hashes on up to four threads,
-   byte-identical). On an idle machine — no build, no agent running — build release on `main` and launch
-   `target/acceptance/e2-18-run.sh` detached (status in `target/acceptance/e2-18-run-status.log`); report, commit the
-   two directories and a report, and tick E2-18 if `lpk/fast` reaches 80% of `store/store` on `full`'s `video`
-   (D-27); otherwise step (b) of `docs/notes/e2-18-round-3-brief.md` (the exactly resynchronised parallel cut).
+2. Next: **E2-10/11 task C, the revision 1.2** (spec, the `deflate-reconstruct` decoder, the vector, fuzz targets,
+   and the patched `preflate-rs` of D-66), from `docs/notes/e2-10-task-c-brief.md`; then tasks D (the pipeline) and E
+   (`lpk-check` from the text) in parallel. E2-18 is done (G3 met on `full`'s `video`, D-61/D-63/D-65).
    In parallel: **E2-10/11** from `docs/notes/e2-10-11-design.md` — task B (the walker moved into `lpk-core`, D-64)
    is merged; task A (the `lpk-format` plumbing, `docs/notes/e2-10-task-a-brief.md`) was dispatched on 2026-10-16
    beside round 3 (both touch `writer.rs`; whichever lands second merges `main`); tasks C, D, E follow the design's
@@ -55,14 +53,7 @@ was single-threaded then and is parallel since E2-4b.
    merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
    limits on tasks of this size and are resumed with a short step list.
 
-**Open for the owner (three asked on 2026-10-04, one on 2026-10-16; all unanswered):**
-- **Hostile Deflate records (E2-10, before task C lands).** `preflate-rs` 0.7.6's recreation has no output
-  limit, so a crafted correction record could push memory and time far past what an archive declares. Recommended:
-  carry a small patched copy (Apache-2.0) whose recreation stops at the declared length, caps the block count and
-  checks the parameters as analysis does — as D-62 bounded repair — once task C's fuzz target confirms the gap; the
-  alternative is upstream plus a documented gap. Either way the format cites 0.7.6's correction format. Also for
-  the record: the Deflate peel brings `cabac` (LGPL-3.0-or-later, allowed under D-26's named exception) into the
-  shipped `lpk` binary for the first time, so D-26's notice and source duties become a packaging item.
+**Open for the owner (three asked on 2026-10-04, unanswered; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
   (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
   consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
