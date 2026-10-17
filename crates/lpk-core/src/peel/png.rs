@@ -817,7 +817,7 @@ mod tests {
         assert_eq!((p[1].width, p[1].height, p[1].scanlines()), (0, 1, 0));
         assert_eq!((p[2].width, p[2].height), (1, 1));
         assert_eq!(l.scanlines(), 8); // passes 1, 3, 5 and 7: 1 + 1 + 2 + 4
-        // 8 x 8: every pass present.
+                                      // 8 x 8: every pass present.
         let l = layout(8, 8, 8, 0, 1);
         let dims: Vec<(u32, u32)> = l.passes().iter().map(|p| (p.width, p.height)).collect();
         assert_eq!(
