@@ -182,6 +182,21 @@ fn check_bound(name: &str, s: &ExtractSummary, peak: u64) {
     );
 }
 
+/// The sequential path (one thread: the main archive decodes through its one-block cache and
+/// writes) holds within `total(1)`.
+fn check_one(name: &str, s: &ExtractSummary, peak: u64) {
+    println!(
+        "{name} at one thread: measured peak {peak}, counted {}",
+        s.memory.total(1)
+    );
+    assert_eq!(s.workers, 1, "{name}");
+    assert!(
+        peak <= s.memory.total(1),
+        "{name} at one thread: measured {peak} above counted {}",
+        s.memory.total(1)
+    );
+}
+
 /// A small `--memory` (room for three blocks in flight) binds at 24 threads; the bytes are the
 /// source's at 24 threads under it, at 24 under no bound, and at one thread.
 fn small_budget_case(name: &str, tier: Tier, files: u64, mib: u64, expect: EnvelopeTier) {
@@ -199,7 +214,8 @@ fn small_budget_case(name: &str, tier: Tier, files: u64, mib: u64, expect: Envel
     assert_eq!(s.memory.budget.source, BudgetSource::Given, "{name}");
     assert_eq!(s.workers, 3, "{name}");
     check_bound(name, &s, peak);
-    let (_, _) = measure(&arch, &work.path().join("o2"), 1, Some(budget));
+    let (one, peak) = measure(&arch, &work.path().join("o2"), 1, Some(budget));
+    check_one(name, &one, peak);
     for o in ["o0", "o1", "o2"] {
         assert_eq!(hashes(&work.path().join(o)), want, "{name} {o}");
     }
@@ -268,7 +284,8 @@ fn a_small_budget_binds_for_a_peeled_archive() {
     let (s, peak) = measure(&arch, &work.path().join("o1"), THREADS, Some(budget));
     assert_eq!(s.workers, 3);
     check_bound("peeled", &s, peak);
-    measure(&arch, &work.path().join("o2"), 1, Some(budget));
+    let (one, peak) = measure(&arch, &work.path().join("o2"), 1, Some(budget));
+    check_one("peeled", &one, peak);
     for o in ["o0", "o1", "o2"] {
         assert_eq!(hashes(&work.path().join(o)), want, "peeled {o}");
     }
@@ -297,7 +314,8 @@ fn default_budget_case(name: &str, tier: Tier, block: u64, per_block_estimate: u
     check_bound(name, &s, peak);
     assert_eq!(hashes(&work.path().join("o1")), want, "{name}");
     std::fs::remove_dir_all(work.path().join("o1")).unwrap();
-    measure(&arch, &work.path().join("o2"), 1, None);
+    let (one, peak) = measure(&arch, &work.path().join("o2"), 1, None);
+    check_one(name, &one, peak);
     assert_eq!(
         hashes(&work.path().join("o2")),
         want,
