@@ -12,6 +12,9 @@ use std::io::{self, Cursor, Write};
 const ID: u16 = 2;
 /// LzmaSpec's smallest dictionary: a stored `dict_size` below it is raised to it.
 const MIN_DICT: u64 = 4096;
+/// The reason for an end condition that fails after the marker with no input after it (not
+/// normative, spec section 8, lzma rule 4).
+const MARKER_END: &str = "range coder end condition after the marker";
 
 fn lerr(reason: impl Into<String>) -> FormatError {
     FormatError::LzmaError {
@@ -159,8 +162,19 @@ impl PrimitiveDecoder for LzmaDecoder {
             expected_len,
             limits,
         ) {
-            // The marker came before the bound: the first pass saw it too.
-            Err(FormatError::PayloadTooLarge { .. }) if short => Err(lerr("truncated")),
+            // The marker came before the bound (lzma-rs reports a short unpacked size, read as a
+            // length below the bound; when nothing follows the marker the first pass saw it too):
+            // `truncated` whatever follows it (spec section 8, lzma rule 5).
+            Err(FormatError::PayloadTooLarge { len, .. }) if short || len <= expected_len => {
+                Err(lerr("truncated"))
+            }
+            // Decoding by the known size stops at the bound, so a marker this pass meets (with
+            // input after it, or a failed end condition) came before the bound: `truncated`.
+            Err(FormatError::LzmaError { reason })
+                if reason == "trailing input" || reason == MARKER_END =>
+            {
+                Err(lerr("truncated"))
+            }
             Err(e) => Err(e),
             Ok((out, _)) if (out.len() as u64) < expected_len => Err(lerr("truncated")),
             Ok((_, used)) if used < input.len() as u64 => Err(lerr("trailing input")),
@@ -253,9 +267,21 @@ fn pass(
     if let Err(e) = res {
         // Only the over-length case is read from the text: lzma-rs checks its
         // size after a match crossed the bound and says so in words. A marker
-        // before the bound gives the same words; the caller tells the two
-        // apart by the first pass.
+        // before the bound gives the same words, with a length that is not
+        // above the bound; the callers tell the two apart by that length.
         let text = e.to_string();
+        // A marker that is not where the stream must end (input after it, or
+        // its end condition fails): input after it is `trailing input` (spec
+        // section 8; the last step's callers turn a marker before the bound
+        // into `truncated`); a failed end condition alone has a reason that
+        // is not normative.
+        if text.contains("Found end-of-stream marker but more bytes are available") {
+            return Err(lerr(if src.position() < input.len() as u64 {
+                "trailing input"
+            } else {
+                MARKER_END
+            }));
+        }
         if text.starts_with("lzma error: Expected unpacked size") {
             let len = text
                 .rsplit("decompressed to ")

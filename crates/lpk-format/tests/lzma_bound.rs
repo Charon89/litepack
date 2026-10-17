@@ -267,7 +267,6 @@ fn a_dict_size_below_4096_is_raised_to_4096() {
 /// wherever the marker comes; in the last step a marker before the bound is `truncated` whatever
 /// follows it, and input after a marker at the bound is `trailing input`.
 #[test]
-#[ignore = "ruling 10: next commit"]
 fn input_after_the_marker() {
     let (data, p, mut raw) = marked(5000);
     let n = data.len() as u64;
