@@ -3,9 +3,8 @@
 //! from Phase 0's `probe deflate` (design `docs/notes/e2-10-11-design.md`, section 3.1);
 //! [`examine`] is the probe's per-file loop, calling back once per reconstructed stream.
 //!
-//! The walker inflates with `flate2`, whose backend is C zlib in the workspace build and
-//! `miniz_oxide` when this crate is built alone: a different backend can change which damaged
-//! streams become candidates, never what a reconstructed stream recreates.
+//! The walker inflates with `flate2` on its C zlib backend, enabled in this crate's manifest, so
+//! every build (the workspace's, or `lpk-cli`'s alone) uses the inflater the probe used.
 
 pub mod analyse;
 pub mod walk;
@@ -22,3 +21,17 @@ pub const PREFLATE_VERSION: &str = "0.7.6";
 
 #[cfg(test)]
 mod testkit;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_preflate_version_is_the_manifest_pin() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let manifest = std::fs::read_to_string(path).expect("manifest");
+        let pin = format!("preflate-rs = \"={}\"", super::PREFLATE_VERSION);
+        assert!(
+            manifest.lines().any(|l| l.trim() == pin),
+            "Cargo.toml must pin `{pin}`"
+        );
+    }
+}

@@ -448,8 +448,9 @@ mod tests {
     use super::super::testkit::{every_kind, multi_idat_png, noise, text, zlib};
     use super::*;
 
-    /// Spans of every candidate, flattened, are sorted, disjoint and inside the file, and the
-    /// spans plus the gaps between them rebuild the file byte for byte.
+    /// Spans of every candidate, flattened, are sorted, disjoint and inside the file. That is
+    /// the whole partition property: spans plus the gaps between them then cover the file
+    /// exactly once, so a byte-for-byte rebuild would add nothing.
     fn assert_partition(bytes: &[u8], found: &Found, what: &str) {
         let spans: Vec<(usize, usize)> = found
             .candidates
@@ -457,15 +458,10 @@ mod tests {
             .flat_map(|c| c.spans.iter().copied())
             .collect();
         let mut pos = 0;
-        let mut rebuilt = Vec::with_capacity(bytes.len());
         for &(a, b) in &spans {
             assert!(pos <= a && a <= b && b <= bytes.len(), "{what}: {spans:?}");
-            rebuilt.extend_from_slice(&bytes[pos..a]);
-            rebuilt.extend_from_slice(&bytes[a..b]);
             pos = b;
         }
-        rebuilt.extend_from_slice(&bytes[pos..]);
-        assert!(rebuilt == bytes, "{what}: spans and gaps rebuild the file");
         assert!(KINDS.contains(&found.kind), "{what}");
     }
 

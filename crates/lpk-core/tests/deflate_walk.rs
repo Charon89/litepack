@@ -149,3 +149,70 @@ fn examine_reports_the_counts_the_probe_reported() {
         );
     }
 }
+
+/// The non-success paths (failed by name, skipped by the plain-text limit and by the per-file
+/// budget, a structural refusal, scan false hits), recorded by running the probe's golden test
+/// code on a scratch checkout of 8423a14 (before the move).
+#[test]
+fn examine_reports_the_probes_non_success_counts() {
+    let cases: [(&str, &[u8], Limits, &str, Counts, usize, &str); 2] = [
+        (
+            "troubled",
+            include_bytes!("fixtures/deflate/troubled.zip"),
+            Limits {
+                plain_text_limit: 10_000,
+                file_plain_budget: 5000,
+            },
+            "zip",
+            Counts {
+                found: 4,
+                reconstructed: 1,
+                skipped: 2,
+                failed: BTreeMap::from([("InvalidDeflate".to_string(), 1)]),
+                structural_refusals: 1,
+                scan_false_hits: 0,
+                walker_panics: 0,
+                found_deflate_bytes: 3380,
+                reconstructed_deflate_bytes: 652,
+                skipped_deflate_bytes: 2664,
+                failed_deflate_bytes: 64,
+                reconstructed_plain_bytes: 5000,
+                correction_bytes: 24,
+                ..Counts::default()
+            },
+            8742,
+            "fdf04005632224e8a8de4e5cbc59018f7271688007368f57541ff83401e008f4",
+        ),
+        (
+            "troubled-scan",
+            include_bytes!("fixtures/deflate/troubled-scan.bin"),
+            Limits::standard(),
+            "other",
+            Counts {
+                found: 1,
+                reconstructed: 1,
+                scan_false_hits: 2,
+                found_deflate_bytes: 762,
+                reconstructed_deflate_bytes: 762,
+                reconstructed_plain_bytes: 6000,
+                correction_bytes: 24,
+                ..Counts::default()
+            },
+            7106,
+            "50bcf0f8bfb965abc33116b0e77d559bddcc238ddd279787e046dece6fa9d30c",
+        ),
+    ];
+    for (name, bytes, limits, kind, want, rep_len, rep_hash) in cases {
+        let mut edits = Vec::new();
+        let ext = if kind == "zip" { "zip" } else { "bin" };
+        let e = examine(bytes, ext, &limits, |r| edits.push((r.spans, r.plain)));
+        assert_eq!(e.kind, kind, "{name}");
+        assert_eq!(untimed(&e.counts), want, "{name}");
+        let r = replaced(bytes, &edits);
+        assert_eq!(
+            (r.len(), blake3::hash(&r).to_hex().to_string()),
+            (rep_len, rep_hash.to_string()),
+            "{name}: the replaced file"
+        );
+    }
+}

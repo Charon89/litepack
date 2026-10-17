@@ -1414,6 +1414,103 @@ mod tests {
         }
     }
 
+    /// A ZIP for the non-success counts: a "Deflated" member whose bytes are not Deflate
+    /// (failed by name), a member that reconstructs, one over the plain-text limit, one skipped
+    /// by the per-file budget, and a central entry pointing at the second member's data
+    /// (a structural refusal).
+    fn troubled_zip() -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        w.start_file("bad.bin", stored).expect("start");
+        w.write_all(&[0xff; 64]).expect("write");
+        for (name, len, seed) in [
+            ("a.txt", 5000, 31),
+            ("big.txt", 20_000, 32),
+            ("c.txt", 3000, 33),
+        ] {
+            w.start_file(name, deflated).expect("start");
+            w.write_all(&text(len, seed)).expect("write");
+        }
+        w.start_file("dup.txt", deflated).expect("start");
+        w.write_all(&text(4000, 34)).expect("write");
+        let mut b = w.finish().expect("finish").into_inner();
+        let central: Vec<usize> = (0..b.len() - 46)
+            .filter(|i| b[*i..].starts_with(b"PK\x01\x02"))
+            .collect();
+        // bad.bin is the first member: method 0 -> 8 in its local and central headers.
+        b[8] = 8;
+        b[central[0] + 10] = 8;
+        // dup.txt's central entry points at a.txt's local header.
+        let a_off: [u8; 4] = b[central[1] + 42..central[1] + 46].try_into().expect("4");
+        b[central[4] + 42..central[4] + 46].copy_from_slice(&a_off);
+        b
+    }
+
+    /// A binary for the zlib scan: a stream under the minimum plain size and a corrupt one (scan
+    /// false hits), then a clean one.
+    fn troubled_scan() -> Vec<u8> {
+        let mut b = b"scan head ".to_vec();
+        b.extend_from_slice(&zlib(&text(300, 41)));
+        b.extend_from_slice(b" gap ");
+        let mut broken = zlib(&text(8000, 42));
+        let mid = broken.len() / 2;
+        broken[mid] ^= 0xff;
+        b.extend_from_slice(&broken);
+        b.extend_from_slice(b" gap ");
+        b.extend_from_slice(&zlib(&text(6000, 43)));
+        b.extend_from_slice(b" tail");
+        b
+    }
+
+    /// The non-success golden cases, with the limits each runs under.
+    fn golden_troubled() -> Vec<(&'static str, &'static str, Vec<u8>, Limits)> {
+        vec![
+            (
+                "troubled",
+                "zip",
+                troubled_zip(),
+                Limits {
+                    plain_text_limit: 10_000,
+                    file_plain_budget: 5000,
+                },
+            ),
+            ("troubled-scan", "bin", troubled_scan(), Limits::standard()),
+        ]
+    }
+
+    /// The non-success cases' counts, recorded by running this test code on a scratch checkout of
+    /// 8423a14 (the probe before the walker moved).
+    const GOLDEN_TROUBLED: [(&str, &[u8], &str); 2] = [
+        (
+            "troubled",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/troubled.zip"),
+            "kind=zip found=4 reconstructed=1 skipped=2 failed={\"InvalidDeflate\": 1} refusals=1 false_hits=0 walker_panics=0 found_deflate=3380 reconstructed_deflate=652 skipped_deflate=2664 failed_deflate=64 plain=5000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 652, plain_bytes: 5000, correction_bytes: 24 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 652, plain_bytes: 5000, correction_bytes: 24 }} replaced=Some(\"8742 fdf04005632224e8a8de4e5cbc59018f7271688007368f57541ff83401e008f4\")",
+        ),
+        (
+            "troubled-scan",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/troubled-scan.bin"),
+            "kind=other found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=2 walker_panics=0 found_deflate=762 reconstructed_deflate=762 skipped_deflate=0 failed_deflate=0 plain=6000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 762, plain_bytes: 6000, correction_bytes: 24 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 762, plain_bytes: 6000, correction_bytes: 24 }} replaced=Some(\"7106 50bcf0f8bfb965abc33116b0e77d559bddcc238ddd279787e046dece6fa9d30c\")",
+        ),
+    ];
+
+    #[test]
+    fn golden_counts_of_the_non_success_paths_are_unchanged() {
+        let inputs = golden_troubled();
+        assert_eq!(inputs.len(), GOLDEN_TROUBLED.len());
+        for ((name, ext, bytes, l), (g_name, fixture, want)) in inputs.iter().zip(GOLDEN_TROUBLED) {
+            assert_eq!(*name, g_name);
+            assert!(
+                bytes == fixture,
+                "{name}: the generated input differs from the fixture"
+            );
+            let r = process_file(bytes, ext, l);
+            assert_eq!(golden_snapshot(&r), want, "{name}");
+        }
+    }
+
     fn manifest_file(path: &str, data: &[u8]) -> ManifestFile {
         ManifestFile {
             blake3: blake3::hash(data).to_hex().to_string(),
