@@ -63,7 +63,9 @@
 //! `per_worker` for each worker. A worker holds a permit from before it reads a frame until the
 //! last writer has written the block, so at most `workers` blocks are in flight, each at most
 //! `per_block`. The entry table, read and dropped by the plan before any block is decoded, is
-//! not counted.
+//! not counted. A given budget below one block in flight (`total(1)`: `fixed_shared +
+//! per_block + per_worker`) is refused with that figure before any directory or file is
+//! created, as the compress side refuses (D-67 (1)); a default budget that small runs one worker.
 //!
 //! **The write path.** Files are dealt to the writers (file `i` to writer `i mod n`); a
 //! dispatcher reorders the decoded blocks and hands each, in index order, to every writer with a
@@ -571,6 +573,8 @@ struct Plan {
     placements: u64,
     /// The targets' name and path bytes.
     name_bytes: u64,
+    /// The directories to create, the output directory first.
+    mkdirs: Vec<PathBuf>,
 }
 
 fn plan<R: Read + Seek>(
@@ -659,13 +663,14 @@ fn plan<R: Read + Seek>(
             }
         }
     }
-    // Directories: the root, every directory entry, every file's parent; each created once.
-    std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+    // Directories: the root, every directory entry, every file's parent; each once. Created
+    // by `make_dirs` after the memory check, so a refused budget leaves nothing behind.
     let mut made: HashSet<PathBuf> = HashSet::new();
+    let mut mkdirs = vec![dir.to_path_buf()];
     let parents = targets.iter().filter_map(|t| t.path.parent());
     for d in dirs.iter().map(PathBuf::as_path).chain(parents) {
         if made.insert(d.to_path_buf()) {
-            std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
+            mkdirs.push(d.to_path_buf());
         }
     }
     let needed = (0..blocks).filter(|&b| !per_block[b].is_empty()).collect();
@@ -688,7 +693,16 @@ fn plan<R: Read + Seek>(
         directories: dirs.len() as u64,
         placements,
         name_bytes,
+        mkdirs,
     })
+}
+
+/// Create the plan's directories, the output directory first.
+fn make_dirs(mkdirs: &[PathBuf]) -> Result<(), CoreError> {
+    for d in mkdirs {
+        std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
+    }
+    Ok(())
 }
 
 /// The pool for `archive` under `opts`: decode workers, decoded blocks in flight, file writers.
@@ -863,7 +877,7 @@ where
     F: Fn() -> std::io::Result<R>,
 {
     // An encrypted archive opened without its key has no index to plan from: refused here,
-    // before `plan` creates the output directory, so nothing is written.
+    // before anything is created, so nothing is written.
     if archive.is_keyless() {
         return Err(CoreError::Format(FormatError::PasswordRequired));
     }
@@ -874,6 +888,7 @@ where
         directories,
         placements,
         name_bytes,
+        mkdirs,
     } = plan(archive, dir, policy)?;
     let shape = Shape {
         needed: &needed,
@@ -883,6 +898,19 @@ where
         name_bytes,
     };
     let pool = pool_size(archive, opts, &shape);
+    // A given budget below one block in flight is refused with the figure, before anything is
+    // written, as the compress side refuses (D-67 (1)); a default budget that small runs one.
+    let m = pool.memory;
+    if m.budget.source == BudgetSource::Given && m.budget.bytes < m.total(1) {
+        return Err(CoreError::InvalidOption(format!(
+            "--memory {} is below what one block in flight needs: {} bytes ({} per block, {} fixed)",
+            m.budget.bytes,
+            m.total(1),
+            m.per_block,
+            m.fixed_shared.saturating_add(m.per_worker)
+        )));
+    }
+    make_dirs(&mkdirs)?;
     let first_file: Vec<usize> = per_block
         .iter()
         .map(|p| p.first().map_or(usize::MAX, |p| p.file))

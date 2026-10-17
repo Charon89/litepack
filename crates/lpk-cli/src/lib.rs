@@ -298,7 +298,8 @@ struct ExtractArgs {
     /// anything is written). Default: half of the physical memory, at most the ceiling of the
     /// tier the archive's envelope shows: 1 GiB (stored blocks only), 2 GiB (Fast-sized blocks
     /// and windows) or 4 GiB (larger); the reader is then limited to half of the physical
-    /// memory, at most 4 GiB. The decoders in flight are derived from the budget (shown with -v).
+    /// memory, at most 4 GiB. The decoders in flight are derived from the budget (shown with -v);
+    /// a budget below what one block in flight needs is refused with that figure.
     #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
     memory: Option<u64>,
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
