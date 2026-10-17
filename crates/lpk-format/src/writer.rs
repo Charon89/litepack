@@ -19,7 +19,7 @@ use crate::merkle::merkle_root;
 use crate::parhash::frame_payload_hash;
 use crate::prefetch::{SegmentError, Segments};
 use crate::primitive::{GraphResources, PrimitiveId};
-use crate::record::{Record, RecordsWriter};
+use crate::record::{Record, RecordBody, RecordsWriter};
 use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
 use crate::sink::Sink;
 pub use crate::sink::WRITE_DEPTH;
@@ -1460,7 +1460,8 @@ impl<W: Write> Writer<W> {
             Some(e) => {
                 self.recycle(plain);
                 let checked = check_graph(&e.graph, self.record_count, self.version_minor)
-                    .and_then(|()| self.check_record_chunks(&e.graph, first_chunk));
+                    .and_then(|()| self.check_record_chunks(&e.graph, first_chunk))
+                    .and_then(|()| self.check_deflate_steps(&e.graph, plain_len));
                 self.abandon_on_error(checked)?;
                 // Classified now: a later chunk's dedup lookup must know this
                 // block is a reconstruction block before it is written.
@@ -1694,7 +1695,8 @@ impl<W: Write> Writer<W> {
         } = encoded;
         let checked = match commit {
             Commit::Unchecked => check_graph(&graph, self.record_count, self.version_minor)
-                .and_then(|()| self.check_record_chunks(&graph, first_chunk)),
+                .and_then(|()| self.check_record_chunks(&graph, first_chunk))
+                .and_then(|()| self.check_deflate_steps(&graph, plain_len)),
             Commit::Pool => check_graph(&graph, self.record_count, self.version_minor)
                 .and_then(|()| pool_record_rule(&graph)),
             Commit::Checked => Ok(()),
@@ -1816,6 +1818,54 @@ impl<W: Write> Writer<W> {
                         reason: "nested record",
                     });
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Revision 1.2's record checks of `deflate-reconstruct` (spec section 8,
+    /// checks 2 to 4) for the steps of a closing block's graph, for the records
+    /// this writer holds: the record is a `deflate` record (`BadRecord`,
+    /// `kind`); as the last step, its `original_len` is the block's
+    /// `plain_len` (`BlockLengthMismatch`); its `corrections` are no longer
+    /// than `original_len` (`BadRecord`, `corrections`). A step that is not
+    /// the last has its `original_len` checked by the reader against
+    /// `max_block_plain`, which is known only when the archive is finished.
+    fn check_deflate_steps(&self, graph: &Graph, plain_len: u64) -> Result<(), FormatError> {
+        #[cfg(test)]
+        if self.unchecked_records {
+            return Ok(());
+        }
+        let last = graph.steps.len().saturating_sub(1);
+        for (i, s) in graph.steps.iter().enumerate() {
+            if s.primitive != PrimitiveId::DeflateReconstruct {
+                continue;
+            }
+            let Some(record) = s.primitive.record_id(&s.params) else {
+                continue;
+            };
+            let Some(r) = usize::try_from(record)
+                .ok()
+                .and_then(|i| self.options.records.get(i))
+            else {
+                continue;
+            };
+            let RecordBody::Deflate(d) = &r.body else {
+                return Err(FormatError::BadRecord {
+                    record,
+                    reason: "kind",
+                });
+            };
+            if i == last && d.original_len != plain_len {
+                return Err(FormatError::BlockLengthMismatch {
+                    block: self.blocks.len() + self.queue.len(),
+                });
+            }
+            if d.corrections.len() as u64 > d.original_len {
+                return Err(FormatError::BadRecord {
+                    record,
+                    reason: "corrections",
+                });
             }
         }
         Ok(())
@@ -3241,6 +3291,137 @@ mod record_rule_tests {
         assert!(back.is_none());
         let bytes = r.unwrap().0.bytes;
         assert_eq!(bytes.as_ptr(), at);
+    }
+}
+
+#[cfg(test)]
+mod deflate_rule_tests {
+    //! Revision 1.2's writer rules for `deflate-reconstruct`: the minor, and
+    //! at block close what the reader's checks 2 to 4 refuse.
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::envelope::Resources;
+    use crate::record::{DeflateRecord, JpegRecord};
+    use std::io::Cursor;
+
+    fn options() -> WriterOptions {
+        WriterOptions {
+            chunk_size: 4096,
+            block_size: 16384,
+            ..WriterOptions::default()
+        }
+    }
+
+    fn deflate(original_len: u64, corrections: usize) -> Record {
+        Record::new(RecordBody::Deflate(DeflateRecord {
+            original_len,
+            plain_len: 10,
+            corrections: vec![1; corrections],
+            library: 0,
+            original_hash: [0; 32],
+        }))
+    }
+
+    fn jpeg() -> Record {
+        Record::new(RecordBody::Jpeg(JpegRecord {
+            original_len: 1000,
+            primary_len: 1000,
+            trailing: Vec::new(),
+            nested_trailing_chunks: Vec::new(),
+            gainmaps: Vec::new(),
+            lepton_version: 0,
+            original_hash: [0; 32],
+        }))
+    }
+
+    /// A one-step graph `[deflate-reconstruct {id}]` over ten input bytes.
+    fn encoded(id: u64) -> Encoded {
+        let mut params = Vec::new();
+        varint::write(&mut params, id).unwrap();
+        Encoded {
+            graph: Graph {
+                steps: vec![Step {
+                    primitive: PrimitiveId::DeflateReconstruct,
+                    params,
+                }],
+            },
+            bytes: vec![0; 10],
+            resources: GraphResources::default(),
+        }
+    }
+
+    /// An archive of minor `minor` with one 1000-byte part through `record`.
+    fn write(minor: u16, record: Record) -> Result<Vec<u8>, FormatError> {
+        let p = vec![7u8; 1000];
+        let mut out = Vec::new();
+        let mut w = Writer::new_revision(&mut out, options(), minor)?;
+        w.begin_entry("a", EntryFlags::EMPTY, 0)?;
+        let id = w.add_record(record)?;
+        w.add_part_encoded(0, &p, encoded(id), 0)?;
+        w.end_entry()?;
+        w.add_file("readme.txt", EntryFlags::EMPTY, 0, &mut &b"plain"[..])?;
+        w.finish()?;
+        Ok(out)
+    }
+
+    #[test]
+    fn deflate_reconstruct_is_revision_2() {
+        assert_eq!(PrimitiveId::DeflateReconstruct.revision(), 2);
+        assert_eq!(FormatVersion::LATEST.minor, 2);
+    }
+
+    #[test]
+    fn minor_below_2_refuses_the_primitive() {
+        for minor in [0, 1] {
+            assert!(
+                matches!(
+                    write(minor, deflate(1000, 4)),
+                    Err(FormatError::BadOptions {
+                        reason: "version_minor"
+                    })
+                ),
+                "minor {minor}"
+            );
+        }
+        assert!(write(2, deflate(1000, 4)).is_ok());
+    }
+
+    #[test]
+    fn block_close_refuses_what_checks_2_to_4_refuse() {
+        assert!(matches!(
+            write(2, jpeg()),
+            Err(FormatError::BadRecord {
+                record: 0,
+                reason: "kind"
+            })
+        ));
+        assert!(matches!(
+            write(2, deflate(999, 4)),
+            Err(FormatError::BlockLengthMismatch { block: 0 })
+        ));
+        assert!(matches!(
+            write(2, deflate(1000, 1001)),
+            Err(FormatError::BadRecord {
+                record: 0,
+                reason: "corrections"
+            })
+        ));
+        // Corrections exactly `original_len` long are allowed.
+        assert!(write(2, deflate(1000, 1000)).is_ok());
+    }
+
+    /// lpk-format alone (the minimal reader) does not decode the primitive: it
+    /// opens the minor-2 archive and its verification reports
+    /// `UnimplementedPrimitive` (8) for the block that names it.
+    #[test]
+    fn the_minimal_reader_reports_unimplemented_primitive_8() {
+        let bytes = write(2, deflate(1000, 4)).unwrap();
+        let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
+        assert_eq!(a.header().version.minor, 2);
+        assert!(matches!(
+            a.verify().unwrap_err(),
+            FormatError::UnimplementedPrimitive { id: 8 }
+        ));
     }
 }
 

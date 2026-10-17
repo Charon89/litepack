@@ -230,7 +230,7 @@ fn version_minor_rules() {
         })
     ));
     assert!(matches!(
-        Writer::new_revision(Vec::new(), options(), 2),
+        Writer::new_revision(Vec::new(), options(), 3),
         Err(FormatError::BadOptions {
             reason: "version_minor"
         })

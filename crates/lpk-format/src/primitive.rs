@@ -109,13 +109,15 @@ impl PrimitiveId {
     }
 
     /// The format revision (the header's `version_minor`) that specifies this
-    /// primitive's decoding: 1 for `jpeg-reconstruct` (revision 1.1), 0 for
+    /// primitive's decoding: 1 for `jpeg-reconstruct` (revision 1.1), 2 for
+    /// `deflate-reconstruct` (revision 1.2), 0 for
     /// the primitives of revision 1.0 and for those no revision decodes yet.
     /// A writer refuses a graph that names a primitive of a revision above the
     /// archive's `version_minor` (spec section 2).
     pub fn revision(self) -> u16 {
         match self {
             PrimitiveId::JpegReconstruct => 1,
+            PrimitiveId::DeflateReconstruct => 2,
             _ => 0,
         }
     }

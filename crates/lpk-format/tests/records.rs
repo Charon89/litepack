@@ -19,14 +19,18 @@ fn utf16(n: u8) -> Record {
     }))
 }
 
-fn deflate() -> Record {
-    Record::new(RecordBody::Deflate(DeflateRecord {
+fn deflate_body() -> DeflateRecord {
+    DeflateRecord {
         original_len: 9,
         plain_len: 20,
         corrections: vec![1, 2, 3],
         library: 0,
         original_hash: [7; 32],
-    }))
+    }
+}
+
+fn deflate() -> Record {
+    Record::new(RecordBody::Deflate(deflate_body()))
 }
 
 fn options(records: Vec<Record>) -> WriterOptions {
@@ -139,13 +143,28 @@ fn the_writer_refuses_a_graph_naming_a_missing_record() {
 
 #[test]
 fn a_reconstruction_block_passes_the_record_check_and_stops_at_the_missing_decoder() {
-    let mut o = options(vec![utf16(1), deflate()]);
+    // Revision 1.2 (minor 2) names deflate-reconstruct; the block's plain_len
+    // (5000) is the record's original_len, as the writer requires.
+    let record = Record::new(RecordBody::Deflate(DeflateRecord {
+        original_len: 5000,
+        ..deflate_body()
+    }));
+    let mut o = options(vec![utf16(1), record]);
     o.encoder = Box::new(Recon {
         primitive: PrimitiveId::DeflateReconstruct,
         record: 1,
     });
-    let bytes = write_archive(o, &[("a", pattern(1, 5000))]);
-    let mut a = open(bytes);
+    let mut out = Vec::new();
+    let mut w = Writer::new_revision(&mut out, o, 2).unwrap();
+    w.add_file(
+        "a",
+        lpk_format::EntryFlags::EMPTY,
+        1_000,
+        &mut pattern(1, 5000).as_slice(),
+    )
+    .unwrap();
+    w.finish().unwrap();
+    let mut a = open(out);
     assert_eq!(a.records().unwrap().unwrap().len(), 2);
     assert!(matches!(
         a.verify().unwrap_err(),
