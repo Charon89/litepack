@@ -1020,9 +1020,9 @@ has no priors for LZMA (section 10 is about `zstd` only). The rules, in this ord
    with `max_window`). So a distance of at most 4096 is never refused for exceeding the dictionary, whatever
    `dict_size` is stored. A match whose distance this rule refuses and that would also cross the output bound is
    this rule's `LzmaError`, not `PayloadTooLarge`: its distance is checked before any of its bytes is written.
-   Whether a stream decodes never depends on the reader's `max_window` beyond rule 2: a decoder needs a buffer of
-   the smaller of max(`dict_size`, 4096) and the output bound (at least 1 byte), which is exactly the reach a valid
-   stream can use.
+   Whether a stream decodes never depends on the reader's
+   `max_window` beyond rule 2: a decoder needs a buffer of the smaller of max(`dict_size`, 4096) and the output
+   bound (at least 1 byte), which is exactly the reach a valid stream can use.
 4. The first byte of the range coder stream must be 0, else `LzmaError` with reason `range coder`. The
    range coder's end condition (LzmaSpec's `IsFinishedOK`: its code value is 0) is checked only when the
    end-of-payload marker is present: after the marker it must hold. When it does not: in the last step with the

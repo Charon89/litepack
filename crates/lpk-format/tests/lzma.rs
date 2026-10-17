@@ -249,11 +249,11 @@ fn output_never_passes_expected_len() {
 
 #[test]
 fn a_distance_beyond_dict_size_is_refused_whatever_max_window_is() {
-    let mut data = pattern(1, 2000);
+    let mut data = pattern(1, 5000);
     data.extend_from_slice(&data.clone());
     let raw = lzma_raw(&lzma_options(6, 1 << 20, 3, 0, 2), &data);
     let n = data.len() as u64;
-    // Declared dictionary 1000, but the stream reaches back 2000.
+    // Declared dictionary 1000 (4096 under LzmaSpec's floor), but the stream reaches back 5000.
     let p = lzma_params(1000, 3, 0, 2);
     let tight = Resources {
         max_window: 1000,

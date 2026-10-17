@@ -10,6 +10,8 @@ use lzma_rs::decompress::raw::{LzmaDecoder as Inner, LzmaParams, LzmaProperties}
 use std::io::{self, Cursor, Write};
 
 const ID: u16 = 2;
+/// LzmaSpec's smallest dictionary: a stored `dict_size` below it is raised to it.
+const MIN_DICT: u64 = 4096;
 
 fn lerr(reason: impl Into<String>) -> FormatError {
     FormatError::LzmaError {
@@ -185,10 +187,14 @@ fn setup(
         });
     }
     // The buffer is the dictionary, capped by the output: lzma-rs refuses
-    // a distance beyond the buffer, so exactly the distances beyond
-    // `dict_size` or beyond the bytes produced are refused, whatever the
+    // a distance beyond the buffer, so exactly the distances beyond the
+    // dictionary size or beyond the bytes produced are refused, whatever the
     // reader's `max_window` is (`dict_size` <= `max_window` was checked).
-    let buffer = expected_len.min(u64::from(dict_size)).max(1);
+    // The dictionary size is LzmaSpec's, raised to 4096 when the stored one
+    // is smaller (spec section 8, lzma rule 3): lzma-rs applies that floor
+    // only when it reads a `.lzma` header, not for the raw parameters here.
+    let dictionary = u64::from(dict_size).max(MIN_DICT);
+    let buffer = expected_len.min(dictionary).max(1);
     let buffer = u32::try_from(buffer).map_err(|_| lerr("dictionary"))?;
     // The first byte of a range coder stream is always 0.
     if input.first().is_some_and(|&b| b != 0) {
