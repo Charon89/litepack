@@ -56,6 +56,9 @@ pub struct Options {
     /// `UnimplementedPrimitive` for the primitives it does not run (`jpeg-reconstruct` below 1,
     /// `deflate-reconstruct` below 2).
     pub revision: u8,
+    /// Alias of `revision` 0, kept for callers of the earlier field: when set, the reader runs
+    /// revision 1.0 whatever `revision` says.
+    pub revision_1_0: bool,
 }
 
 impl Default for Options {
@@ -66,6 +69,7 @@ impl Default for Options {
             priors: HashMap::new(),
             resources: Resources::default(),
             revision: 2,
+            revision_1_0: false,
         }
     }
 }
@@ -702,7 +706,11 @@ impl Archive {
             priors: &self.opts.priors,
             max_window: self.opts.resources.max_window,
             max_block_plain: env.max_block_plain,
-            revision: self.opts.revision,
+            revision: if self.opts.revision_1_0 {
+                0
+            } else {
+                self.opts.revision
+            },
         };
         block::decode(&h, &ctx, &mut Steps { archive: self, b })
     }
