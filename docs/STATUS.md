@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 01:21 UTC (2026-10-16, 21:21 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 01:35 UTC (2026-10-16, 21:35 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -30,14 +30,15 @@ was single-threaded then and is parallel since E2-4b.
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Next: **E2-18's acceptance rows.** Rounds 1 and 2 are merged (D-61, D-63: the store path byte-identical and
-   pipelined). On an idle machine — no build, no agent running — launch `target/acceptance/e2-18-run.sh` detached
-   (`Start-Process 'C:/Program Files/Git/bin/bash.exe'` on the script's `/d/...` path, hidden window; status in
-   `target/acceptance/e2-18-run-status.log`): the `lpk` tool and the `store` control on `video` and
-   `encrypted-random`, `small` then `full`, three repeats, each directory validated. Report each, write
-   `bench/reports/phase1-<date>-store-path.md` (G3: `lpk/fast` compress MB/s on `video` against `store/store` in
-   the same run — 80% or more passes, D-27), commit the directories and the report, tick E2-18 with the verdict
-   (or keep it open with the shortfall named and property 5 of the round-2 brief, parallel chunk hashes, next).
+2. Next: **E2-18 round 3.** The acceptance rows (`bench/reports/phase1-2026-10-17-store-path.md`) put `lpk/fast` at
+   76.4% of `tar` on `full`'s `video` (G3 needs 80%), with `lpk/store` above `tar`: the gap is FastCDC and the chunk
+   hashes on the feeding thread. Dispatch round 3 from `docs/notes/e2-18-round-3-brief.md` (byte identity stays),
+   then re-run `target/acceptance/e2-18-run.sh` on an idle machine and tick E2-18 or name the remaining gap.
+   In parallel (no shared files): **E2-10/11** from `docs/notes/e2-10-11-design.md` — task B (the walker moved into
+   `lpk-core`) is built and under review on branch `task/e2-10-walker`; task A's brief is
+   `docs/notes/e2-10-task-a-brief.md` (it touches the writer, so it waits for round 3 to merge); tasks C, D, E follow
+   the design's section 5. The design's owner question (a patched `preflate-rs` for hostile records) is under "Open
+   for the owner".
 3. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, and the blocks-in-flight bound,
    D-60, are the first inputs; the Balanced cap of four in flight is provisional until then), then the
    revision-gated peels E2-10/11 (Deflate and containers — the largest remaining size win on office, PDF and
@@ -53,7 +54,14 @@ was single-threaded then and is parallel since E2-4b.
    merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
    limits on tasks of this size and are resumed with a short step list.
 
-**Open for the owner (asked on 2026-10-04, unanswered):**
+**Open for the owner (three asked on 2026-10-04, one on 2026-10-16; all unanswered):**
+- **Hostile Deflate records (E2-10, before task C lands).** `preflate-rs` 0.7.6's recreation has no output
+  limit, so a crafted correction record could push memory and time far past what an archive declares. Recommended:
+  carry a small patched copy (Apache-2.0) whose recreation stops at the declared length, caps the block count and
+  checks the parameters as analysis does — as D-62 bounded repair — once task C's fuzz target confirms the gap; the
+  alternative is upstream plus a documented gap. Either way the format cites 0.7.6's correction format. Also for
+  the record: the Deflate peel brings `cabac` (LGPL-3.0-or-later, allowed under D-26's named exception) into the
+  shipped `lpk` binary for the first time, so D-26's notice and source duties become a packaging item.
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
   (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
   consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
