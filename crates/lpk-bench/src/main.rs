@@ -3,7 +3,7 @@
 //! Subcommands (implemented by PLAN tasks P0-2 … P0-5):
 //!   corpus   build the public corpus or scan a private folder (docs/CORPUS.md)
 //!   run      run baseline tools over the corpus with round-trip verification
-//!   probe    component probes: jpeg | deflate | dedup | text | weights | entropy-gate
+//!   probe    component probes: jpeg | deflate | dedup | text | weights | entropy-gate | bwt
 //!   report   generate bench/reports/phase0-<date>.md from bench/results
 //!
 //! Every number LitePack ever quotes must come from this tool's committed JSON output.
@@ -30,7 +30,7 @@ enum Command {
     Corpus(corpus::CorpusArgs),
     /// Run baseline tools over the corpus with round-trip verification (PLAN P0-3)
     Run(run::RunArgs),
-    /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate (PLAN P0-4)
+    /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate, bwt (PLAN P0-4, E2-15)
     Probe(probe::ProbeArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
     Report(report::ReportArgs),
@@ -111,6 +111,7 @@ mod tests {
             "text",
             "weights",
             "entropy-gate",
+            "bwt",
             "all",
         ] {
             let cli = Cli::try_parse_from(["lpk-bench", "probe", name]).expect("parse");

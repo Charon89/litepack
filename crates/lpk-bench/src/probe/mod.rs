@@ -1,7 +1,7 @@
 //! Component probes (PLAN P0-4): `lpk-bench probe <name|all>`.
 //!
 //! ```text
-//! lpk-bench probe <jpeg|deflate|dedup|text|weights|entropy-gate|all> [--profile small|full]
+//! lpk-bench probe <jpeg|deflate|dedup|text|weights|entropy-gate|bwt|all> [--profile small|full]
 //!     [--corpus DIR] [--results ROOT | --into DIR] [--tmp DIR] [--threads N]
 //!     [--allow-dirty-build] [--allow-debug-build]
 //! ```
@@ -40,6 +40,7 @@ use crate::run::exec::{load_corpus, Corpus};
 use crate::run::host;
 use crate::run::result::{render, HostFile};
 
+pub mod bwt;
 pub mod codec;
 pub mod dedup;
 pub mod deflate;
@@ -53,7 +54,8 @@ pub mod weights;
 /// Version of the envelope and of the rules in this module.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// Every probe, in the order `probe all` runs them.
+/// Every probe, in the order `probe all` runs them. `bwt` (the E2-15 gate, minutes of LZMA
+/// per class) runs only when named.
 pub const NAMES: [&str; 6] = [
     "jpeg",
     "deflate",
@@ -66,7 +68,7 @@ pub const NAMES: [&str; 6] = [
 #[derive(Debug, Args)]
 pub struct ProbeArgs {
     /// Probe to run, or `all`
-    #[arg(value_parser = ["jpeg", "deflate", "dedup", "text", "weights", "entropy-gate", "all"])]
+    #[arg(value_parser = ["jpeg", "deflate", "dedup", "text", "weights", "entropy-gate", "bwt", "all"])]
     pub name: String,
     /// Corpus profile, `small` or `full`: selects bench/corpus/<profile> (default: small)
     #[arg(long, value_parser = ["small", "full"])]
@@ -592,6 +594,7 @@ fn run_one(name: &str, ctx: &Ctx<'_>, info: &RunInfo) -> Result<String> {
         "text" => go!(text),
         "weights" => go!(weights),
         "entropy-gate" => go!(entropy_gate),
+        "bwt" => go!(bwt),
         other => bail!("unknown probe `{other}`"),
     }
 }
@@ -649,6 +652,7 @@ pub fn render_file(name: &str, json: &str) -> Result<String> {
         "text" => go!(text),
         "weights" => go!(weights),
         "entropy-gate" => go!(entropy_gate),
+        "bwt" => go!(bwt),
         other => bail!("unknown probe `{other}`"),
     }
 }
@@ -752,6 +756,7 @@ pub fn check_file(dir: &Path, json_name: &str) -> FileCheck {
         "text" => typed!(text),
         "weights" => typed!(weights),
         "entropy-gate" => typed!(entropy_gate),
+        "bwt" => typed!(bwt),
         _ => out.problems.push(format!(
             "{json_name}: (file name): `{stem}` is not a known probe"
         )),

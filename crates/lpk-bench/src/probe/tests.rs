@@ -798,3 +798,55 @@ fn the_scratch_helper_gives_empty_directories() {
         );
     });
 }
+
+#[test]
+fn bwt_end_to_end_on_two_text_classes_validates_and_a_wrong_verdict_is_a_problem() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path().join("textcorpus");
+    let mut files = Vec::new();
+    let prose: Vec<u8> = b"It was the best of times, it was the worst of times.\n"
+        .iter()
+        .cycle()
+        .take(40_000)
+        .copied()
+        .collect();
+    let log: Vec<u8> = (0..2000u32)
+        .flat_map(|i| format!("2026-10-17 12:00:{:02} INFO request {i} ok\n", i % 60).into_bytes())
+        .collect();
+    for (class, rel, data) in [
+        ("text-prose", "books/a.txt", &prose),
+        ("text-prose", "b.md", &prose),
+        ("logs-text", "app.log", &log),
+    ] {
+        let p = dir.join(class).join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, data).expect("write");
+        files.push((
+            class.to_string(),
+            manifest_file(&format!("{class}/{rel}"), data),
+        ));
+    }
+    let m = Manifest::with_profile_name("small", files);
+    std::fs::write(dir.join("manifest.json"), m.render()).expect("manifest");
+    let cfg = config(dir, tmp.path().join("results"), &["bwt"]);
+    let out = execute(&cfg).expect("execute");
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(out.problems, 0, "{:?}", problems(&out.results_dir));
+    let path = out.results_dir.join("probe-bwt.json");
+    let json = std::fs::read_to_string(&path).expect("json");
+    let env: Envelope<bwt::Data> = serde_json::from_str(&json).expect("typed");
+    assert_eq!(env.data.classes.len(), 2);
+    assert_eq!(env.data.classes[0].files, 2);
+    assert_eq!(env.data.classes[0].plain_bytes, 80_000);
+    assert!(env
+        .data
+        .classes
+        .iter()
+        .all(|c| c.present && c.candidates.len() == 5));
+    assert!(env.libraries.contains_key("libsais"));
+    let flipped = !env.data.gate_open;
+    edit_json(&path, |v| v["data"]["gate_open"] = Value::from(flipped));
+    assert!(problems(&out.results_dir)
+        .iter()
+        .any(|m| m.contains("/data/gate_open")));
+}
