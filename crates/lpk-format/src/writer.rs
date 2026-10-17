@@ -2697,4 +2697,97 @@ mod record_rule_tests {
             }
         ));
     }
+
+    fn noise(seed: u64, len: usize) -> Vec<u8> {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut v = Vec::with_capacity(len + 8);
+        while v.len() < len {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        v.truncate(len);
+        v
+    }
+
+    /// The store path over incompressible files and a repeated (deduplicated) one, with
+    /// blocks large enough for the pool's frame hash to split across threads.
+    fn store_path(threads: usize, corrupt: bool) -> Result<Vec<u8>, FormatError> {
+        let mut out = Vec::new();
+        let opts = WriterOptions {
+            chunk_size: 1 << 20,
+            block_size: 12 << 20,
+            dedup: true,
+            encode_threads: threads,
+            ..WriterOptions::default()
+        };
+        let mut w = Writer::new(&mut out, opts)?;
+        w.corrupt_pool_hash = corrupt;
+        let big = noise(1, 30 << 20);
+        w.add_file("a.bin", EntryFlags::default(), 0, &mut &big[..])?;
+        w.add_file(
+            "b.bin",
+            EntryFlags::default(),
+            0,
+            &mut &noise(2, 3 << 20)[..],
+        )?;
+        w.add_file("c.bin", EntryFlags::default(), 0, &mut &big[..5 << 20])?;
+        w.close_block()?;
+        w.add_file("d.txt", EntryFlags::default(), 0, &mut &[7u8; 100_000][..])?;
+        w.finish()?;
+        Ok(out)
+    }
+
+    /// Byte identity of the store path at one thread (the writer hashes every frame) and
+    /// at N (the pool threads hash them, in parallel subtrees): the same archive, and in
+    /// debug builds the writer re-checks every handed-back hash against its own.
+    #[test]
+    fn the_store_path_writes_the_same_bytes_at_one_thread_and_n() {
+        let one = store_path(1, false).unwrap();
+        for threads in [2usize, 4, 24] {
+            assert!(
+                one == store_path(threads, false).unwrap(),
+                "threads {threads}"
+            );
+        }
+        let mut a = Archive::open(Cursor::new(one), &Resources::default()).unwrap();
+        a.verify().unwrap();
+    }
+
+    /// A pool thread that hands back a wrong frame hash: the writer refuses it before the
+    /// frame is written and abandons the archive (debug builds check every handed-back hash).
+    #[test]
+    fn a_wrong_pool_frame_hash_is_refused() {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let e = store_path(4, true).unwrap_err();
+        assert!(
+            matches!(
+                e,
+                FormatError::BadOptions {
+                    reason: "pool frame hash"
+                }
+            ),
+            "{e:?}"
+        );
+        // Without a pool (one thread) the writer hashes itself: nothing to refuse.
+        store_path(1, true).unwrap();
+    }
+
+    /// The identity encoder moves the plain buffer into the encoding (no copy) on its own
+    /// thread and as a job.
+    #[test]
+    fn the_identity_encoder_takes_the_plain_buffer() {
+        let plain = noise(3, 4096);
+        let at = plain.as_ptr();
+        let (r, back) = StoreEncoder.encode_owned(plain.clone());
+        assert!(back.is_none());
+        assert_eq!(r.unwrap().bytes, plain);
+        let (r, back) = Box::new(StoreEncoder).run_owned(plain);
+        assert!(back.is_none());
+        let bytes = r.unwrap().0.bytes;
+        assert_eq!(bytes.as_ptr(), at);
+    }
 }
