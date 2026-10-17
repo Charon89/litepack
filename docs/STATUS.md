@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 22:50 UTC (2026-10-17, 18:50 local on the measuring machine). A measurement is running: E2-22's incumbent baseline on `full` (`target/acceptance/e2-22-run-status.log`).
+Last updated: 2026-10-17, about 23:45 UTC (2026-10-17, 19:45 local on the measuring machine). A measurement is running: E2-22's incumbent baseline on `full` (`target/acceptance/e2-22-run-status.log`).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -36,10 +36,10 @@ Open in E2: E2-15's shipping, E2-16, E2-17, E2-22, and E2-9 (the owner's). E3 is
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
 2. Next: **revision 1.3** (`docs/notes/e2-15-revision-1.3-design.md` section 6: A → C → D ∥ E). Task A (the
    look-ahead, the writer's refusal of undecoded primitives at every minor, `check_bwt_steps`, libsais behind the
-   `encode` feature) is reviewed (APPROVE, three LOWs ruled into C, D and E) and in PR #73; then C (the text, `BwtDecoder`, the
+   `encode` feature) is merged (PR #73; three LOWs ruled into C, D and E); next C (the text, `BwtDecoder`, the
    vectors, the fuzz targets), D (the pipeline; its `small` row ticks E2-15) and E (`lpk-check` from the text alone).
    E2-16 and E2-17: the probes' code (task P of `docs/notes/e2-16-design.md` and `docs/notes/e2-17-design.md`) is
-   written for E2-16 (draft PR #74, a read-only review running) and partly written for E2-17 (`task/e2-17-probe`);
+   merged for E2-16 (PR #74, reviewed twice) and in review for E2-17 (draft PR #75, fix round 3);
    the probes run on this machine's corpus after E2-22's baseline. No build runs here while a measurement does, so
    E2-17's rest, revision 1.3 task C and E3 wait for the baseline to end. `png-filter` joins revision 1.3 only if E2-16's gate opens (its margin is the
    owner's, below); E2-17's gates are expected to close on `small`.
@@ -112,13 +112,9 @@ Open in E2: E2-15's shipping, E2-16, E2-17, E2-22, and E2-9 (the owner's). E3 is
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/rev13-plumbing` (PR #73): revision 1.3 task A, reviewed (APPROVE); merged when CI is green. It carries
-  the fix of the parked writer item (the reference writer accepted primitives no revision decodes at any minor;
-  now refused at every minor).
-- `task/e2-16-probe` (draft PR #74): E2-16's probe code; a read-only review is running; the probe's run on
-  `small` waits for the measuring machine.
-- `task/e2-17-probe`: E2-17's probe code, partly written (the implementer stopped at its turn limit; finishing
-  it needs builds, so it waits for the machine).
+- `task/e2-17-probe` (draft PR #75): E2-17's probe code, in its third review fix round; written partly without
+  local builds (GitHub CI compiles and tests it); squashed at merge (it carries a `wip:` commit). Its run on
+  `small` waits for the measuring machine, like E2-16's (merged in PR #74).
 - E2-22's incumbent baseline on `full`, running in the main checkout ("How to resume" 3 above).
 
 ## How to resume
