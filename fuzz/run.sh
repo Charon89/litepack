@@ -17,7 +17,7 @@ fi
 
 all="frame_read header_read varint_read entry_table chunk_table records_table index_parse \
 trailer_read_tail block_header_and_decode zstd_decode lzma_decode recovery_frame key_slot \
-archive_open archive_mutate"
+archive_open archive_mutate deflate_walk deflate_recreate"
 targets="${*:-$all}"
 toolchain="${LPK_FUZZ_TOOLCHAIN:-nightly}"
 vectors="../crates/lpk-format/tests/vectors"

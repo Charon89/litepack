@@ -1,4 +1,4 @@
-# Fuzz targets of lpk-format (cargo-fuzz / libFuzzer). Not a workspace member: see ../Cargo.toml.
+# Fuzz targets of lpk-format and lpk-core (cargo-fuzz / libFuzzer). Not a workspace member: see ../Cargo.toml.
 [package]
 name = "lpk-format-fuzz"
 version = "0.0.0"
@@ -12,9 +12,15 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 lpk-format = { version = "0.0.1", path = "../crates/lpk-format" }
+lpk-core = { version = "0.0.1", path = "../crates/lpk-core" }
+preflate-rs = "=0.7.6"
 
 # An empty table detaches this crate from the root workspace.
 [workspace]
+
+# The root workspace's patch does not reach a detached crate: the same patched copy (D-66).
+[patch.crates-io]
+preflate-rs = { path = "../vendor/preflate-rs-0.7.6" }
 
 [profile.release]
 debug = 1
@@ -120,6 +126,20 @@ bench = false
 [[bin]]
 name = "archive_mutate"
 path = "fuzz_targets/archive_mutate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deflate_walk"
+path = "fuzz_targets/deflate_walk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deflate_recreate"
+path = "fuzz_targets/deflate_recreate.rs"
 test = false
 doc = false
 bench = false
