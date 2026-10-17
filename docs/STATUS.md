@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 12:45 UTC (2026-10-17, 08:45 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 13:20 UTC (2026-10-17, 09:20 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -77,13 +77,13 @@ was single-threaded then and is parallel since E2-4b.
 ## Branches in flight
 - E2-10: the runner rows of 2026-10-17 (`bench/results/2026-10-17-megatron-9` = every tool on office-pdf,
   photo-raw-png, software-installed of `small`; `-10` = `lpk` on the other classes; build `18bb9e1`; not committed
-  yet) showed the peel losing on `archives-nested` and `backup-versions`; the gate fix (D-70, squashed PR from
-  `task/e2-10-gate`) is in its PR. The full pass of the same run (`-11`, `fast` and `balanced` on every class of
+  yet) showed the peel losing on `archives-nested` and `backup-versions`; the gate fix (D-70) is merged. The full pass of the same run (`-11`, `fast` and `balanced` on every class of
   `full`) found the peel too slow: `lpk/balanced` on `full`'s office-pdf timed out at the runner's 3600 s (the
   peel's analysis and part encoding run on the feeding thread), and one `preflate-rs` panic inside the analysis was
-  caught and counted (the stream stored as is). Next: the peel pool (design 3.7's follow-up: the Deflate stage's
-  examine and part encoding on worker threads, writes still in input order), then re-run
-  `target/acceptance/e2-20b-e2-10-run.sh` for E2-10's rows and E2-21's full pass.
+  caught and counted (the stream stored as is). The gate fix is merged (D-70, PR #69). Next: the peel pool
+  (`docs/notes/e2-10-peel-pool-design.md`, tasks 1 to 7: prepare/commit split, the pool, exact skips, JPEG through
+  the pool, the rows, a part-encoder A/B), then re-run `target/acceptance/e2-20b-e2-10-run.sh` for E2-10's rows and
+  E2-21's full pass.
 - E2-20 is done (2026-10-17, PR #67): every `lpk` row's compress and extract peak within its tier's ceiling
   (`bench/reports/phase1-2026-10-17-memory.md`).
 - Next after the run: E2-15's probe (`docs/notes/e2-15-probe-brief.md`), then E2-16's probe (task P of
