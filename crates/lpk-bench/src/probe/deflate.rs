@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use lpk_core::peel::deflate::{
-    examine, Limits, PlainText, TokenPredictorParameters, MAX_CHAIN_LENGTH, PREFLATE_VERSION,
+    examine, Estimate, Limits, Plain, MAX_CHAIN_LENGTH, PREFLATE_VERSION,
 };
 pub use lpk_core::peel::deflate::{FAILURE_NAMES, KINDS, MIN_SCANNED_PLAIN};
 use serde::{Deserialize, Serialize};
@@ -211,25 +211,10 @@ fn extension(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The variant name of a `Debug` text: everything before the first `(`, ` {` or space.
-fn variant(debug: &str) -> &str {
-    debug.split(['(', ' ', '{']).next().unwrap_or(debug)
-}
-
 /// The library's estimate of the encoder, by names only (no numeric parameters), so that
 /// streams of one encoder family group together.
-fn estimate_label(p: Option<&TokenPredictorParameters>) -> String {
-    match p {
-        None => "none".to_string(),
-        Some(p) => format!(
-            "strategy={} hash={} add={} match={} zlib_compatible={}",
-            variant(&format!("{:?}", p.strategy)),
-            variant(&format!("{:?}", p.hash_algorithm)),
-            variant(&format!("{:?}", p.add_policy)),
-            variant(&format!("{:?}", p.matching_type)),
-            p.zlib_compatible
-        ),
-    }
+fn estimate_label(p: Option<&Estimate>) -> String {
+    p.map_or_else(|| "none".to_string(), Estimate::label)
 }
 
 fn bucket(correction: u64, deflate: u64) -> &'static str {
@@ -261,7 +246,7 @@ fn process_file(bytes: &[u8], ext: &str, limits: &Limits) -> FileResult {
     let mut estimates: BTreeMap<String, Group> = BTreeMap::new();
     let mut overhead: BTreeMap<String, Group> = BTreeMap::new();
     // (start, end, plain) for every edit of the replaced file.
-    let mut edits: Vec<(usize, usize, Option<PlainText>)> = Vec::new();
+    let mut edits: Vec<(usize, usize, Option<Plain>)> = Vec::new();
     let examined = examine(bytes, ext, limits, |r| {
         let (corr, defl, plain_len) = (
             r.corrections.len() as u64,
@@ -275,7 +260,7 @@ fn process_file(bytes: &[u8], ext: &str, limits: &Limits) -> FileResult {
             correction_bytes: corr,
         };
         estimates
-            .entry(estimate_label(r.parameters.as_ref()))
+            .entry(estimate_label(r.estimate.as_ref()))
             .or_default()
             .add(&g);
         overhead
@@ -1282,9 +1267,6 @@ mod tests {
         assert_eq!(bucket(250, 1000), "25_to_50_pct");
         assert_eq!(bucket(500, 1000), "50_pct_or_more");
         assert_eq!(bucket(5, 0), "50_pct_or_more");
-        assert_eq!(variant("Zlib { hash_mask: 1 }"), "Zlib");
-        assert_eq!(variant("AddFirst(3)"), "AddFirst");
-        assert_eq!(variant("None"), "None");
     }
 
     /// A PNG built by hand (no encoder), its zlib stream split over three `IDAT` chunks.

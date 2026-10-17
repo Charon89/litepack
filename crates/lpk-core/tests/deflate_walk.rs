@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use lpk_core::peel::deflate::{examine, Counts, Limits, PlainText};
+use lpk_core::peel::deflate::{examine, Counts, Limits, Plain};
 
 /// (name, extension, bytes, kind, streams, deflate bytes, plain bytes, correction bytes,
 /// replaced length, replaced BLAKE3).
@@ -98,7 +98,7 @@ fn untimed(c: &Counts) -> Counts {
 
 /// The probe's replaced file: every reconstructed stream's spans replaced by its plain text
 /// (written at the first span; later spans are cut out).
-fn replaced(bytes: &[u8], edits: &[(Vec<(usize, usize)>, PlainText)]) -> Vec<u8> {
+fn replaced(bytes: &[u8], edits: &[(Vec<(usize, usize)>, Plain)]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut pos = 0;
     for (spans, plain) in edits {

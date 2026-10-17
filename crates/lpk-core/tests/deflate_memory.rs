@@ -12,7 +12,7 @@
 
 use std::io::Write;
 
-use lpk_core::peel::deflate::{analyse_stream, memory_term, preflate_config, StreamOutcome};
+use lpk_core::peel::deflate::{analyse_stream, memory_term, StreamOutcome};
 use lpk_procstat_sys::alloc::CountingAlloc;
 use preflate_rs::recreate_whole_deflate_stream_limited;
 
@@ -123,7 +123,7 @@ fn measure(
 
 /// A valid stream: its corrections, then [`measure`], checking the output.
 fn measure_stream(name: &str, plain: &[u8], stream: &[u8]) -> (u64, u64) {
-    let corr = match analyse_stream(stream, None, &preflate_config(64 * 1024 * 1024)) {
+    let corr = match analyse_stream(stream, None, 64 * 1024 * 1024) {
         StreamOutcome::Done {
             corrections,
             deflate_len,

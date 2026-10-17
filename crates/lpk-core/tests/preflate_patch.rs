@@ -8,14 +8,14 @@ use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use flate2::{Compress, Compression, FlushCompress};
-use lpk_core::peel::deflate::{analyse_stream, examine, preflate_config, Limits, StreamOutcome};
+use lpk_core::peel::deflate::{analyse_stream, examine, Limits, StreamOutcome};
 use preflate_rs::{
     recreate_whole_deflate_stream, recreate_whole_deflate_stream_limited,
-    recreate_whole_deflate_stream_limited_report, ExitCode, PreflateConfig,
+    recreate_whole_deflate_stream_limited_report, ExitCode,
 };
 
-fn cfg() -> PreflateConfig {
-    preflate_config(lpk_core::peel::deflate::PLAIN_TEXT_LIMIT)
+fn cfg() -> u64 {
+    lpk_core::peel::deflate::PLAIN_TEXT_LIMIT
 }
 
 /// Upstream and the patched function agree on `stream`, recreated from `plain` and `corr`; the
@@ -164,7 +164,7 @@ fn synthetic_streams_of_every_block_type_and_level_recreate_as_upstream() {
     let mut checked = 0;
     let mut not_analysed = Vec::new();
     for (name, stream) in &inputs {
-        match analyse_stream(stream, None, &cfg()) {
+        match analyse_stream(stream, None, cfg()) {
             StreamOutcome::Done {
                 plain,
                 corrections,
@@ -188,7 +188,7 @@ fn synthetic_streams_of_every_block_type_and_level_recreate_as_upstream() {
 fn many_empty_blocks(blocks: usize) -> (Vec<u8>, Vec<u8>) {
     let mut stream = EMPTY_STORED.repeat(blocks - 1);
     stream.extend_from_slice(&EMPTY_STORED_FINAL);
-    match analyse_stream(&stream, None, &cfg()) {
+    match analyse_stream(&stream, None, cfg()) {
         StreamOutcome::Done { corrections, .. } => (stream, corrections),
         other => panic!("{other:?}"),
     }
@@ -227,7 +227,7 @@ fn a_record_that_makes_upstream_grow_is_refused_within_the_limit() {
 fn mutated_records_never_escape_the_limit_and_some_parameters_are_refused() {
     let data = text(6000, 11);
     let stream = raw(&data, 6);
-    let corr = match analyse_stream(&stream, None, &cfg()) {
+    let corr = match analyse_stream(&stream, None, cfg()) {
         StreamOutcome::Done { corrections, .. } => corrections,
         other => panic!("{other:?}"),
     };
@@ -272,7 +272,7 @@ fn mutated_records_never_escape_the_limit_and_some_parameters_are_refused() {
 fn one_block_far_over_the_limit_is_refused_without_growing_the_buffer() {
     let data = noise(12_000, 21);
     let stream = raw(&data, 6);
-    let corr = match analyse_stream(&stream, None, &cfg()) {
+    let corr = match analyse_stream(&stream, None, cfg()) {
         StreamOutcome::Done { corrections, .. } => corrections,
         other => panic!("{other:?}"),
     };

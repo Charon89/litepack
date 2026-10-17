@@ -73,13 +73,13 @@ pub const FAILURE_NAMES: [&str; 29] = [
 ];
 
 /// The name of a library exit code (its `Debug` text).
-pub fn code_name(c: ExitCode) -> String {
+pub(crate) fn code_name(c: ExitCode) -> String {
     format!("{c:?}")
 }
 
 /// The analysis configuration for a plain-text limit: [`MAX_CHAIN_LENGTH`], the limit, and the
 /// library's own verification off (each stream is verified by recreation instead).
-pub fn preflate_config(plain_text_limit: u64) -> PreflateConfig {
+pub(crate) fn preflate_config(plain_text_limit: u64) -> PreflateConfig {
     PreflateConfig {
         max_chain_length: MAX_CHAIN_LENGTH,
         plain_text_limit: usize::try_from(plain_text_limit).unwrap_or(usize::MAX),
@@ -93,6 +93,80 @@ fn timed<T>(f: impl FnOnce() -> T) -> (T, f64) {
     (value, start.elapsed().as_secs_f64())
 }
 
+/// The inflated text of a reconstructed stream (the library's buffer, behind this crate's type).
+pub struct Plain(PlainText);
+
+impl Plain {
+    /// The bytes.
+    pub fn text(&self) -> &[u8] {
+        self.0.text()
+    }
+
+    /// Their length.
+    pub fn len(&self) -> usize {
+        self.0.text().len()
+    }
+
+    /// True when the text is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.text().is_empty()
+    }
+}
+
+impl std::fmt::Debug for Plain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Plain").field("len", &self.len()).finish()
+    }
+}
+
+/// The library's estimate of a stream's encoder, by names only (no numeric parameters).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Estimate {
+    /// The strategy's variant name.
+    pub strategy: String,
+    /// The hash algorithm's variant name.
+    pub hash_algorithm: String,
+    /// The add policy's variant name.
+    pub add_policy: String,
+    /// The matching type's variant name.
+    pub matching_type: String,
+    /// True when the parameters are zlib's.
+    pub zlib_compatible: bool,
+}
+
+/// The variant name of a `Debug` text (what precedes its fields).
+fn variant(debug: &str) -> String {
+    debug
+        .split(['(', ' ', '{'])
+        .next()
+        .unwrap_or(debug)
+        .to_string()
+}
+
+impl Estimate {
+    fn of(p: &TokenPredictorParameters) -> Self {
+        Estimate {
+            strategy: variant(&format!("{:?}", p.strategy)),
+            hash_algorithm: variant(&format!("{:?}", p.hash_algorithm)),
+            add_policy: variant(&format!("{:?}", p.add_policy)),
+            matching_type: variant(&format!("{:?}", p.matching_type)),
+            zlib_compatible: p.zlib_compatible,
+        }
+    }
+
+    /// `strategy=.. hash=.. add=.. match=.. zlib_compatible=..`, the probe's grouping label.
+    pub fn label(&self) -> String {
+        format!(
+            "strategy={} hash={} add={} match={} zlib_compatible={}",
+            self.strategy,
+            self.hash_algorithm,
+            self.add_policy,
+            self.matching_type,
+            self.zlib_compatible
+        )
+    }
+}
+
 /// The outcome of [`analyse_stream`].
 #[derive(Debug)]
 pub enum StreamOutcome {
@@ -100,13 +174,13 @@ pub enum StreamOutcome {
     /// `deflate_len` bytes back exactly.
     Done {
         /// The inflated text.
-        plain: PlainText,
+        plain: Plain,
         /// The library's correction record.
         corrections: Vec<u8>,
         /// Bytes of the stream the library consumed (the rest of the candidate is not part of it).
         deflate_len: usize,
-        /// The library's estimate of the encoder's parameters.
-        parameters: Option<TokenPredictorParameters>,
+        /// The library's estimate of the encoder.
+        estimate: Option<Estimate>,
         /// Seconds spent in analysis.
         analyse_seconds: f64,
         /// Seconds spent in recreation.
@@ -130,12 +204,17 @@ pub enum StreamOutcome {
     },
 }
 
-/// Analyse one raw Deflate stream and verify it by recreation (see the module text).
+/// Analyse one raw Deflate stream with the plain-text limit `plain_text_limit` and verify it by
+/// recreation (see the module text).
 pub fn analyse_stream(
     deflate: &[u8],
     plain_known: Option<u64>,
-    cfg: &PreflateConfig,
+    plain_text_limit: u64,
 ) -> StreamOutcome {
+    analyse_with(deflate, plain_known, &preflate_config(plain_text_limit))
+}
+
+fn analyse_with(deflate: &[u8], plain_known: Option<u64>, cfg: &PreflateConfig) -> StreamOutcome {
     let failed = |cause: &str, seconds: f64| StreamOutcome::Failed {
         cause: cause.to_string(),
         deflate_len: deflate.len(),
@@ -191,10 +270,10 @@ pub fn analyse_stream(
         }
         (Ok(Err(e)), _) => failed(&code_name(e.exit_code()), seconds),
         (Ok(Ok(b)), Some(o)) if b == o => StreamOutcome::Done {
-            plain,
+            plain: Plain(plain),
             corrections: chunk.corrections,
             deflate_len,
-            parameters: chunk.parameters,
+            estimate: chunk.parameters.as_ref().map(Estimate::of),
             analyse_seconds,
             recreate_seconds,
         },
@@ -273,13 +352,13 @@ pub struct Reconstructed {
     /// the library consumed. Sorted, disjoint, not empty unless the stream is.
     pub spans: Vec<(usize, usize)>,
     /// The inflated text.
-    pub plain: PlainText,
+    pub plain: Plain,
     /// The library's correction record.
     pub corrections: Vec<u8>,
     /// The stream's length (the sum of the span lengths).
     pub deflate_len: usize,
-    /// The library's estimate of the encoder's parameters.
-    pub parameters: Option<TokenPredictorParameters>,
+    /// The library's estimate of the encoder.
+    pub estimate: Option<Estimate>,
     /// Seconds spent in analysis.
     pub analyse_seconds: f64,
     /// Seconds spent in recreation.
@@ -348,14 +427,14 @@ pub fn examine(
                 seconds: 0.0,
             }
         } else {
-            analyse_stream(&data, c.plain_known, &cfg)
+            analyse_with(&data, c.plain_known, &cfg)
         };
         match outcome {
             StreamOutcome::Done {
                 plain,
                 corrections,
                 deflate_len,
-                parameters,
+                estimate,
                 analyse_seconds,
                 recreate_seconds,
             } => {
@@ -377,7 +456,7 @@ pub fn examine(
                     plain,
                     corrections,
                     deflate_len,
-                    parameters,
+                    estimate,
                     analyse_seconds,
                     recreate_seconds,
                 });
@@ -466,6 +545,9 @@ mod tests {
         assert_eq!(Limits::default(), Limits::standard());
         assert!(FAILURE_NAMES.contains(&"ShortRead") && FAILURE_NAMES.contains(&PANIC));
         assert_eq!(code_name(ExitCode::ShortRead), "ShortRead");
+        assert_eq!(variant("Zlib { hash_mask: 1 }"), "Zlib");
+        assert_eq!(variant("AddFirst(3)"), "AddFirst");
+        assert_eq!(variant("None"), "None");
     }
 
     #[test]
@@ -483,7 +565,7 @@ mod tests {
             assert_eq!(e.kind, kind);
             assert_eq!((e.counts.found, e.counts.reconstructed), (n, n), "{ext}");
             assert_eq!(done.len() as u64, n);
-            assert!(done.iter().all(|r| r.parameters.is_some()));
+            assert!(done.iter().all(|r| r.estimate.is_some()));
         }
     }
 
@@ -496,7 +578,7 @@ mod tests {
         }
         let d = raw_deflate(&plain);
         let cfg = cfg_with(64 * 1024 * 1024);
-        match analyse_stream(&d, Some(plain.len() as u64), &cfg) {
+        match analyse_with(&d, Some(plain.len() as u64), &cfg) {
             StreamOutcome::Done {
                 plain: p,
                 corrections,
@@ -510,7 +592,7 @@ mod tests {
             _ => panic!("a whole stream reconstructs"),
         }
         // Truncated input: the library returns a shortened stream, the analysis says ShortRead.
-        match analyse_stream(&d[..d.len() * 3 / 4], None, &cfg) {
+        match analyse_with(&d[..d.len() * 3 / 4], None, &cfg) {
             StreamOutcome::Failed {
                 cause, deflate_len, ..
             } => {
@@ -522,11 +604,11 @@ mod tests {
         // Plain-text limit reached after at least one block, size unknown: skipped.
         let cfg = cfg_with(plain.len() / 2);
         assert!(matches!(
-            analyse_stream(&d, None, &cfg),
+            analyse_with(&d, None, &cfg),
             StreamOutcome::Skipped { .. }
         ));
         // A wrong known size is a failure.
-        match analyse_stream(&d, Some(plain.len() as u64 + 1), &cfg_with(1 << 30)) {
+        match analyse_stream(&d, Some(plain.len() as u64 + 1), 1 << 30) {
             StreamOutcome::Failed { cause, .. } => assert_eq!(cause, "RoundtripMismatch"),
             _ => panic!("a size mismatch must fail"),
         }

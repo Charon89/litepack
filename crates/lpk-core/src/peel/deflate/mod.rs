@@ -11,15 +11,13 @@ pub mod decode;
 pub mod walk;
 
 pub use analyse::{
-    analyse_stream, code_name, examine, preflate_config, Counts, Examined, Limits, Reconstructed,
+    analyse_stream, examine, Counts, Estimate, Examined, Limits, Plain, Reconstructed,
     StreamOutcome, FAILURE_NAMES, FILE_PLAIN_BUDGET, MAX_CHAIN_LENGTH, PANIC, PLAIN_TEXT_LIMIT,
 };
 pub use decode::{
     memory_term, DeflateDecoder, MEMORY_ALLOWANCE, MEMORY_PER_CORRECTION_BYTE,
     MEMORY_PER_PLAIN_BYTE,
 };
-/// The `preflate-rs` types that appear in this module's public items.
-pub use preflate_rs::{PlainText, PreflateConfig, TokenPredictorParameters};
 pub use walk::{find_streams, trim_spans, Candidate, Found, INFLATE_CAP, KINDS, MIN_SCANNED_PLAIN};
 /// The pinned `preflate-rs` version (Cargo.toml pins it exactly).
 pub const PREFLATE_VERSION: &str = "0.7.6";

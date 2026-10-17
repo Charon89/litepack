@@ -246,7 +246,7 @@ mod tests {
         let deflated = e.finish().unwrap();
         let (r, p) = preflate_rs::preflate_whole_deflate_stream(
             &deflated,
-            &super::super::preflate_config(super::super::PLAIN_TEXT_LIMIT),
+            &super::super::analyse::preflate_config(super::super::PLAIN_TEXT_LIMIT),
         )
         .unwrap();
         assert_eq!(r.compressed_size, deflated.len());
