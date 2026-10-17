@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 22:30 UTC (2026-10-17, 18:30 local on the measuring machine). A measurement is running: E2-22's incumbent baseline on `full` (`target/acceptance/e2-22-run-status.log`).
+Last updated: 2026-10-17, about 22:50 UTC (2026-10-17, 18:50 local on the measuring machine). A measurement is running: E2-22's incumbent baseline on `full` (`target/acceptance/e2-22-run-status.log`).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -36,16 +36,23 @@ Open in E2: E2-15's shipping, E2-16, E2-17, E2-22, and E2-9 (the owner's). E3 is
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
 2. Next: **revision 1.3** (`docs/notes/e2-15-revision-1.3-design.md` section 6: A → C → D ∥ E). Task A (the
    look-ahead, the writer's refusal of undecoded primitives at every minor, `check_bwt_steps`, libsais behind the
-   `encode` feature) is on `task/rev13-plumbing`, under read-only review; then C (the text, `BwtDecoder`, the
+   `encode` feature) is reviewed (APPROVE, three LOWs ruled into C, D and E) and in PR #73; then C (the text, `BwtDecoder`, the
    vectors, the fuzz targets), D (the pipeline; its `small` row ticks E2-15) and E (`lpk-check` from the text alone).
    E2-16 and E2-17: the probes' code (task P of `docs/notes/e2-16-design.md` and `docs/notes/e2-17-design.md`) is
-   being written by cloud agents on `task/e2-16-probe` and `task/e2-17-probe`; the probes run on this machine's
-   corpus after E2-22's baseline. `png-filter` joins revision 1.3 only if E2-16's gate opens (its margin is the
+   written for E2-16 (draft PR #74, a read-only review running) and partly written for E2-17 (`task/e2-17-probe`);
+   the probes run on this machine's corpus after E2-22's baseline. No build runs here while a measurement does, so
+   E2-17's rest, revision 1.3 task C and E3 wait for the baseline to end. `png-filter` joins revision 1.3 only if E2-16's gate opens (its margin is the
    owner's, below); E2-17's gates are expected to close on `small`.
 3. E2-22: the incumbents' baseline on `full` is running (`target/acceptance/e2-22-full-baseline.sh`, started
    2026-10-17 20:34 UTC, most of a day; its results directory is `bench/results/2026-10-17-megatron-15`). The
    `lpk` rows follow on the final engine (after revision 1.3), pooled with it (same corpus, host and threads), then
    the gate table and a `D-NN`. Keep the machine idle until the status log says `== DONE`.
+   Rows measured between 21:59:57 and 22:31 UTC overlapped local builds (agents meant to run in the cloud ran on
+   this machine): `encrypted-random`'s xz/9 and zpaqfranz m1/m5, every `game-assets` row, and `logs-text`'s
+   store, 7z mx5/ultra and rar m3/best/best-solid (`target/acceptance/e2-22-contaminated.txt`). Their sizes stand;
+   their timings are re-measured on the idle machine after the baseline (`--classes
+   encrypted-random,game-assets,logs-text`), and the report takes the re-measured rows in their place and says
+   so, which needs a small supersede option in `lpk-bench report` (today it refuses a combination given twice).
 4. E3 (adopted 2026-10-17): one implementer at a time, E3-1 and E3-7 first, then E3-8, E3-2, E3-3, E3-4, E3-5,
    E3-6; E3-9 is a measuring-machine run after E2-22. E2-9 (deltas) waits for two things from the owner (below);
    D-59 adds a third reason to want it: a changed chunk in an appended generation is coded without its previous
@@ -58,8 +65,10 @@ Open in E2: E2-15's shipping, E2-16, E2-17, E2-22, and E2-9 (the owner's). E3 is
    `git merge --ff-only <task branch>` (so keep the task branch a descendant of `main`), and the orchestrator
    merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
    limits on tasks of this size and are resumed with a short step list.
-   While a measurement runs on the measuring machine, implementers and reviewers run as cloud agents (the Agent
-   tool's remote isolation), so no build competes with the timings; corpus runs wait for the machine.
+   While a measurement runs on the measuring machine, no agent builds, tests or runs anything there: the Agent
+   tool's `isolation: remote` ran as a local worktree agent on 2026-10-17 without an error, so it is no
+   protection. Read-only agents (designs, static reviews told not to run cargo) are fine; GitHub CI builds and
+   tests pushed branches.
 
 **Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16, one for revision 1.3, one for E2-17 and the E4–E9 decisions added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
@@ -103,10 +112,13 @@ Open in E2: E2-15's shipping, E2-16, E2-17, E2-22, and E2-9 (the owner's). E3 is
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/rev13-plumbing`: revision 1.3 task A (four commits on `e654bc1`, pushed), implemented in the cloud; a
-  read-only review is running. It carries the fix of the parked writer item (the reference writer accepted
-  primitives no revision decodes at any minor; now refused at every minor).
-- `task/e2-16-probe`, `task/e2-17-probe`: the probes' code, being written by cloud agents (no corpus run yet).
+- `task/rev13-plumbing` (PR #73): revision 1.3 task A, reviewed (APPROVE); merged when CI is green. It carries
+  the fix of the parked writer item (the reference writer accepted primitives no revision decodes at any minor;
+  now refused at every minor).
+- `task/e2-16-probe` (draft PR #74): E2-16's probe code; a read-only review is running; the probe's run on
+  `small` waits for the measuring machine.
+- `task/e2-17-probe`: E2-17's probe code, partly written (the implementer stopped at its turn limit; finishing
+  it needs builds, so it waits for the machine).
 - E2-22's incumbent baseline on `full`, running in the main checkout ("How to resume" 3 above).
 
 ## How to resume
