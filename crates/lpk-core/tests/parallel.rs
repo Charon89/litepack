@@ -70,6 +70,18 @@ fn make_tree(root: &Path) {
     trailing.extend_from_slice(b"some trailing bytes after the EOI");
     std::fs::write(root.join("p-trailing.jpg"), trailing).unwrap();
     std::fs::write(root.join("q.jpg"), fixture("progressive.jpg")).unwrap();
+    // Deflate containers for the Balanced tier's Deflate peel (a ZIP, a multi-IDAT PNG, a gzip
+    // member, and a gzip member that pays for its record).
+    for name in ["doc.zip", "image.png", "notes.txt.gz"] {
+        std::fs::write(root.join(name), fixture(&format!("deflate/{name}"))).unwrap();
+    }
+    let mut text = Vec::new();
+    for _ in 0..6 {
+        text.extend_from_slice(&prose(3, 40_000));
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+    std::io::Write::write_all(&mut gz, &text).unwrap();
+    std::fs::write(root.join("text.gz"), gz.finish().unwrap()).unwrap();
 }
 
 fn fast(threads: usize) -> Pipeline {
@@ -142,6 +154,11 @@ fn the_balanced_tier_writes_the_same_bytes_with_one_thread_and_eight_capped_in_f
     assert_eq!(s1.writer, s8.writer);
     assert_eq!(s1.balanced, s8.balanced);
     assert_eq!(s1.peel, s8.peel);
+    let d = &s1.peel.deflate;
+    assert!(
+        d.streams.reconstructed >= 4 && d.outcomes.kept >= 1,
+        "{d:?}"
+    );
     let b = s1.balanced.unwrap();
     assert!(
         b.lzma_blocks + b.zstd_blocks > 0 && b.sample_bytes > 0,

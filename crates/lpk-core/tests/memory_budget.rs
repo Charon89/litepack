@@ -29,6 +29,7 @@ fn default_settings_fit_their_ceilings() {
         avg_chunk: 64 << 10,
         encoder,
         peel_max_file: peel,
+        deflate: None,
         entries: 0,
         path_bytes: 0,
         input_bytes: 0,
@@ -62,10 +63,22 @@ fn default_settings_fit_their_ceilings() {
         },
         Some(b.jpeg_max_file),
     );
+    // Balanced with its default Deflate peel (design 3.2, note 3 of task D).
+    let d = lpk_core::peel::deflate::DeflatePeel::default();
+    let part = lpk_core::peel::deflate::PartEncoder::balanced(&b, d.plain_limit()).unwrap();
+    let balanced_deflate = ModelInputs {
+        deflate: Some(lpk_core::memory::DeflateMemory {
+            max_file: d.max_file,
+            plain_limit: d.plain_limit(),
+            encoder: part.memory(),
+        }),
+        ..balanced
+    };
     for (name, m, c) in [
         ("store", store, STORE_CEILING),
         ("fast", fast, FAST_CEILING),
         ("balanced", balanced, BALANCED_CEILING),
+        ("balanced+deflate", balanced_deflate, BALANCED_CEILING),
     ] {
         let p = m.plan(ceiling(c), 24).unwrap();
         println!(
@@ -271,6 +284,7 @@ fn fast_model() -> ModelInputs {
             dictionary_bytes: 0,
         },
         peel_max_file: Some(o.jpeg_max_file),
+        deflate: None,
         entries: 0,
         path_bytes: 0,
         input_bytes: 0,

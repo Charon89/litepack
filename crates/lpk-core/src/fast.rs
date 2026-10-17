@@ -98,7 +98,7 @@ pub(crate) fn resolve_threads(threads: Option<usize>) -> usize {
 }
 
 /// What the Fast encoder did with the blocks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FastSummary {
     /// Blocks coded with zstd.
     pub zstd_blocks: u64,
@@ -137,7 +137,7 @@ impl FastHandle {
 
     /// The counts so far.
     pub fn summary(&self) -> FastSummary {
-        lock(&self.0).summary
+        lock(&self.0).summary.clone()
     }
 }
 

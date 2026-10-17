@@ -206,6 +206,35 @@ pub enum EncoderMemory {
     },
 }
 
+/// The Deflate peel's working set (design 3.2; it runs on the feeding thread, one file at a
+/// time, so the whole set is a `fixed` term, never per block). It holds the file read whole (up
+/// to `max_file`) and, until the file gate decides, the kept streams' encodings, each smaller
+/// than its stream, together with one multi-span stream's contiguous copy, all within one more
+/// `max_file`; then the larger of the analysis and recreation of one stream (bounded by the
+/// decoder's memory term for a `plain_limit` text with no corrections: the recreation the
+/// analysis verifies with is the decoder's) and the encoding of one inflated text (the text
+/// plus the part encoder's encoders and output, `encoder`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeflateMemory {
+    /// The stage's file cap.
+    pub max_file: u64,
+    /// The largest inflated text of one stream.
+    pub plain_limit: u64,
+    /// The part encoder's working set for a `plain_limit` text.
+    pub encoder: u64,
+}
+
+impl DeflateMemory {
+    /// `2 * max_file + max(memory_term(plain_limit, 0), plain_limit + encoder)`.
+    pub fn working_set(&self) -> u64 {
+        let analysis = crate::peel::deflate::memory_term(self.plain_limit, 0);
+        let encode = self.plain_limit.saturating_add(self.encoder);
+        self.max_file
+            .saturating_mul(2)
+            .saturating_add(analysis.max(encode))
+    }
+}
+
 /// What the model needs to know about a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelInputs {
@@ -219,6 +248,8 @@ pub struct ModelInputs {
     pub encoder: EncoderMemory,
     /// The peel stage's file cap (`None`: no peel).
     pub peel_max_file: Option<u64>,
+    /// The Deflate peel's working set (`None`: the stage is off).
+    pub deflate: Option<DeflateMemory>,
     /// Entries of the run.
     pub entries: u64,
     /// Their path bytes.
@@ -465,10 +496,13 @@ impl ModelInputs {
 
     /// The fixed cost of the sequential path.
     pub fn fixed_sequential(&self) -> u64 {
-        let peel = self.peel_max_file.map_or(0, |f| {
+        // The JPEG and Deflate stages handle one file at a time on the feeding thread: the
+        // larger of their working sets.
+        let jpeg = self.peel_max_file.map_or(0, |f| {
             f.saturating_mul(2)
                 .saturating_add(crate::peel::MODEL_ALLOWANCE)
         });
+        let peel = jpeg.max(self.deflate.map_or(0, |d| d.working_set()));
         let b = self.block_size;
         b.saturating_add(b.saturating_add(self.chunk_size))
             .saturating_add(crate::store::OUT_BUF as u64)
@@ -486,6 +520,7 @@ impl ModelInputs {
         let read_seq = self.block_size.saturating_add(self.chunk_size);
         let read_pipe = (self.prefetch.segment as u64)
             .max(self.peel_max_file.unwrap_or(0))
+            .max(self.deflate.map_or(0, |d| d.max_file))
             .saturating_add(self.chunk_size);
         self.fixed_sequential()
             .saturating_sub(read_seq)
@@ -567,6 +602,7 @@ mod tests {
             avg_chunk: 64 << 10,
             encoder,
             peel_max_file: None,
+            deflate: None,
             entries: 0,
             path_bytes: 0,
             input_bytes: 0,
@@ -617,6 +653,29 @@ mod tests {
         assert_eq!(pipe_extra(&m) + seq_read, common + 8 * MIB + (512 << 10));
         m.peel_max_file = Some(128 * MIB);
         assert_eq!(pipe_extra(&m) + seq_read, common + 128 * MIB + (512 << 10));
+    }
+
+    #[test]
+    fn the_deflate_stage_is_fixed_and_the_larger_peel_set() {
+        let mut m = inputs(256 * MIB, EncoderMemory::Store);
+        m.peel_max_file = Some(128 * MIB);
+        let jpeg = m.fixed_sequential();
+        let d = DeflateMemory {
+            max_file: 256 * MIB,
+            plain_limit: 64 * MIB,
+            encoder: 800 * MIB,
+        };
+        assert_eq!(d.working_set(), 512 * MIB + 64 * MIB + 800 * MIB);
+        let small = DeflateMemory { encoder: 0, ..d };
+        assert_eq!(
+            small.working_set(),
+            512 * MIB + crate::peel::deflate::memory_term(64 * MIB, 0)
+        );
+        let per = m.per_block();
+        m.deflate = Some(d);
+        assert_eq!(m.per_block(), per, "never per block");
+        let jpeg_set = 2 * 128 * MIB + crate::peel::MODEL_ALLOWANCE;
+        assert_eq!(m.fixed_sequential(), jpeg - jpeg_set + d.working_set());
     }
 
     #[test]

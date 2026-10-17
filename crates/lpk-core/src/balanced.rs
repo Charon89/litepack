@@ -94,7 +94,7 @@ impl Default for BalancedOptions {
 }
 
 /// What the Balanced encoder did with the blocks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BalancedSummary {
     /// Blocks coded with LZMA.
     pub lzma_blocks: u64,
@@ -309,7 +309,7 @@ impl BalancedHandle {
 
     /// The counts so far.
     pub fn summary(&self) -> BalancedSummary {
-        lock(&self.shared).summary
+        lock(&self.shared).summary.clone()
     }
 }
 

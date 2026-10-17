@@ -560,14 +560,14 @@ fn report(
             " (sequential: no reader or write thread)"
         }
     );
-    if let Some(f) = s.fast {
+    if let Some(f) = &s.fast {
         let _ = writeln!(
             err,
             "blocks: {} zstd, {} stored by gate, {} stored by class, {} stored without gain",
             f.zstd_blocks, f.stored_by_gate, f.stored_by_class, f.stored_no_gain
         );
     }
-    if let Some(b) = s.balanced {
+    if let Some(b) = &s.balanced {
         let _ = writeln!(
             err,
             "blocks: {} lzma, {} zstd, {} stored by class, {} stored without gain; trial sample bytes {}; encoder memory about {} bytes (approximate: liblzma LZMA2 encoder query at one thread, not measured)",

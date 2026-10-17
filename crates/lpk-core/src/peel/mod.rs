@@ -128,7 +128,7 @@ pub struct Count {
 }
 
 /// What the peel stages did.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PeelSummary {
     /// Inputs peeled.
     pub peeled: Count,
@@ -142,6 +142,11 @@ pub struct PeelSummary {
     pub primary_deduplicated: Count,
     /// Inputs stored through the normal path, by cause (indexed like [`Fallback::ALL`]).
     pub fallbacks: [Count; Fallback::ALL.len()],
+    /// What the Deflate peel did (empty when it is off).
+    pub deflate: deflate::DeflateSummary,
+    /// Peel stages an append did not run because the archive's revision does not allow them
+    /// (`"deflate"` below minor 2, `"jpeg"` below minor 1; design 3.8).
+    pub dropped_stages: Vec<&'static str>,
 }
 
 impl PeelSummary {

@@ -33,9 +33,11 @@ use crate::fold::ordering::order_cluster;
 use crate::fold::{Dedup, FoldStage};
 use crate::ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 use crate::memory::{
-    window_for, Budget, EncoderMemory, MemoryPlan, ModelInputs, BALANCED_CEILING, FAST_CEILING,
-    STORE_CEILING,
+    window_for, Budget, DeflateMemory, EncoderMemory, MemoryPlan, ModelInputs, BALANCED_CEILING,
+    FAST_CEILING, STORE_CEILING,
 };
+use crate::peel::deflate::stage::{peel_file, Context};
+use crate::peel::deflate::{DeflatePeel, PartEncoder};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
 use crate::store::{create_new_and_run, StoreOptions, SyncFn, OUT_BUF};
@@ -76,6 +78,8 @@ pub struct SealOptions {
     pub memory: Option<u64>,
     /// An append's old archive for the memory model: its chunks, entries and path bytes.
     pub(crate) base: (u64, u64, u64),
+    /// Peel stages an append dropped for the archive's revision (design 3.8).
+    pub(crate) dropped: Vec<&'static str>,
 }
 
 /// Wall time per stage.
@@ -97,7 +101,7 @@ pub struct StageTimings {
 }
 
 /// What a pipeline run did.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RunSummary {
     /// The writer's counts.
     pub writer: WriterSummary,
@@ -144,8 +148,13 @@ fn hash_threads(blocks_in_flight: usize, reader: bool) -> usize {
 pub struct Pipeline {
     /// Walk and classify.
     pub classify: ClassifyStage,
-    /// Peel stages: the first that applies to an input's class peels it (Fast model only).
+    /// Peel stages: the first that applies to an input's class peels it (Fast and Balanced
+    /// models only).
     pub peel: Vec<Box<dyn PeelStage>>,
+    /// The Deflate peel (design `docs/notes/e2-10-11-design.md`, section 3), with its own write
+    /// path beside `peel`: on by default in Balanced, off in Fast, never in the store model.
+    /// When set the header's `version_minor` is 2 (revision 1.2).
+    pub deflate: Option<DeflatePeel>,
     /// The fold stage (chunker and dedup); `None` keeps the writer's fixed chunker, no dedup. A
     /// fold stage sets the writer's `chunk_size` (the longest chunk its chunker makes), so the
     /// `chunk_size` of [`SealOptions`] is overridden whenever this is `Some`.
@@ -161,6 +170,7 @@ impl std::fmt::Debug for Pipeline {
         f.debug_struct("Pipeline")
             .field("classify", &self.classify)
             .field("peel", &self.peel)
+            .field("deflate", &self.deflate)
             .field("fold", &self.fold)
             .field("model", &self.model)
             .field("seal", &self.seal)
@@ -185,18 +195,20 @@ impl Pipeline {
                 ingest: options.ingest,
             },
             peel: Vec::new(),
+            deflate: None,
             fold: None,
             model: ModelStage::Store,
             seal: SealOptions {
                 writer,
                 memory: None,
                 base: (0, 0, 0),
+                dropped: Vec::new(),
             },
         }
     }
 
     /// The Fast pipeline, with the JPEG peel (reading whole inputs up to
-    /// [`FastOptions::jpeg_max_file`]).
+    /// [`FastOptions::jpeg_max_file`]); the Deflate peel is off (set [`Pipeline::deflate`]).
     pub fn fast(options: FastOptions) -> Self {
         Pipeline {
             classify: ClassifyStage {
@@ -206,13 +218,14 @@ impl Pipeline {
                 max_file: options.jpeg_max_file,
                 ..JpegPeel::default()
             })],
+            deflate: None,
             fold: Some(Box::new(Dedup::default())),
             model: ModelStage::Fast(options),
             seal: SealOptions::default(),
         }
     }
 
-    /// The Balanced pipeline, with the JPEG peel.
+    /// The Balanced pipeline, with the JPEG peel and the Deflate peel.
     pub fn balanced(options: BalancedOptions) -> Self {
         Pipeline {
             classify: ClassifyStage {
@@ -222,10 +235,25 @@ impl Pipeline {
                 max_file: options.jpeg_max_file,
                 ..JpegPeel::default()
             })],
+            deflate: Some(DeflatePeel::default()),
             fold: Some(Box::new(Dedup::default())),
             model: ModelStage::Balanced(options),
             seal: SealOptions::default(),
         }
+    }
+
+    /// Drop the peel stages the archive's revision `minor` does not allow (the Deflate stage
+    /// needs 2, the JPEG stage 1; design 3.8, amending D-56 (3)); the summary names them.
+    fn restrict_to_revision(&mut self, minor: u16) {
+        let mut dropped = Vec::new();
+        if minor < 2 && self.deflate.take().is_some() {
+            dropped.push("deflate");
+        }
+        if minor < 1 && !self.peel.is_empty() {
+            self.peel.clear();
+            dropped.push("jpeg");
+        }
+        self.seal.dropped = dropped;
     }
 
     /// Validate the options and build the encoder, before any output exists.
@@ -258,8 +286,9 @@ impl Pipeline {
     /// `existing` must be open with `credentials` when it is encrypted, and its reader is read
     /// lazily between writes (old block graphs, [`Writer::append`]), so it must not share a file
     /// position with `out`: a separately opened handle on the same file is fine. The archive's
-    /// own revision applies: a pipeline with a peel stage needs a header `version_minor` of at
-    /// least 1 (`BadOptions`, `version_minor`, before anything is written).
+    /// own revision applies: the append runs only the peel stages its header `version_minor`
+    /// allows (the Deflate peel needs 2, the JPEG peel 1) and names the others in
+    /// [`PeelSummary::dropped_stages`].
     pub fn append<R: Read + Seek + 'static, W: Write>(
         mut self,
         root: &Path,
@@ -268,6 +297,7 @@ impl Pipeline {
         credentials: Option<&Credentials>,
     ) -> Result<RunSummary, CoreError> {
         let prepared = self.prepare()?;
+        self.restrict_to_revision(existing.header().version.minor);
         let paths = old_paths(&mut existing)?;
         self.seal.base = base_inventory(&existing, &paths);
         let t = Instant::now();
@@ -316,6 +346,7 @@ impl Pipeline {
         if existing.is_keyless() {
             return Err(FormatError::AppendNeedsCredentials.into());
         }
+        self.restrict_to_revision(existing.header().version.minor);
         let old_paths: Vec<String> = old_paths(&mut existing)?;
         self.seal.base = base_inventory(&existing, &old_paths);
         // The handle that cuts the file back: a plain write handle (an append-mode handle
@@ -416,9 +447,11 @@ impl Pipeline {
             model,
             seal,
             peel,
+            deflate,
             fold,
             ..
         } = self;
+        let dropped = seal.dropped;
         let mut wopts = seal.writer;
         let source = Source::new();
         let (files, path_bytes, input_bytes) = inventory(&inputs);
@@ -434,6 +467,7 @@ impl Pipeline {
                     avg_chunk: wopts.chunk_size,
                     encoder: EncoderMemory::Store,
                     peel_max_file: None,
+                    deflate: None,
                     entries: files,
                     path_bytes,
                     input_bytes,
@@ -480,84 +514,87 @@ impl Pipeline {
                 })
             }
             (model, prepared) => {
-                let (encoder, block_size, soft, steer, finish, threads, memory): (
-                    Box<dyn lpk_format::BlockEncoder>,
-                    u64,
-                    Option<u64>,
-                    Steer,
-                    Finish,
-                    usize,
-                    TierMemory,
-                ) = match (model, prepared) {
-                    (ModelStage::Fast(o), Prepared::Fast(e, h)) => {
-                        let h2 = h.clone();
-                        let threads = resolve_threads(o.threads);
-                        let (dictionaries, dictionary_bytes) = match &o.dictionaries {
-                            crate::DictionaryPolicy::None => (0, 0),
-                            crate::DictionaryPolicy::Provided(set) => {
-                                set.iter().fold((0u64, 0u64), |(n, b), (_, _, d)| {
-                                    (n + 1, b + d.len() as u64)
-                                })
-                            }
-                        };
-                        let enc = EncoderMemory::Zstd {
-                            level: o.level,
-                            window_log: window_for(o.window_log, o.block_size),
-                            dictionaries,
-                            dictionary_bytes,
-                        };
-                        (
-                            Box::new(e),
-                            o.block_size,
-                            None,
-                            Box::new(move |c, d| h.set_hint(c, d)),
-                            Box::new(move |peel| {
-                                let mut f = h2.summary();
-                                f.peel = peel;
-                                (Some(f), None)
-                            }),
-                            threads,
-                            (enc, Some(o.jpeg_max_file), FAST_CEILING),
-                        )
-                    }
-                    (ModelStage::Balanced(o), Prepared::Balanced(e, h)) => {
-                        let h2 = h.clone();
-                        let enc = EncoderMemory::Balanced {
-                            lzma: e.lzma_memory(),
-                            lzma_sample: e.lzma_sample_memory(),
-                            zstd_sample_window_log: window_for(
-                                o.zstd_window_log.unwrap_or(o.dict_size.ilog2()),
-                                e.stripe_len() as u64,
-                            ),
-                            zstd_level: o.zstd_level,
-                            zstd_window_log: window_for(
-                                o.zstd_window_log.unwrap_or(o.dict_size.ilog2()),
+                let (encoder, block_size, soft, steer, finish, threads, memory, part): Tier =
+                    match (model, prepared) {
+                        (ModelStage::Fast(o), Prepared::Fast(e, h)) => {
+                            let h2 = h.clone();
+                            let part = deflate
+                                .as_ref()
+                                .map(|d| PartEncoder::fast(&o, d.plain_limit()))
+                                .transpose()?;
+                            let threads = resolve_threads(o.threads);
+                            let (dictionaries, dictionary_bytes) = match &o.dictionaries {
+                                crate::DictionaryPolicy::None => (0, 0),
+                                crate::DictionaryPolicy::Provided(set) => {
+                                    set.iter().fold((0u64, 0u64), |(n, b), (_, _, d)| {
+                                        (n + 1, b + d.len() as u64)
+                                    })
+                                }
+                            };
+                            let enc = EncoderMemory::Zstd {
+                                level: o.level,
+                                window_log: window_for(o.window_log, o.block_size),
+                                dictionaries,
+                                dictionary_bytes,
+                            };
+                            (
+                                Box::new(e),
                                 o.block_size,
-                            ),
-                        };
-                        (
-                            Box::new(e),
-                            o.block_size,
-                            Some(
-                                o.min_block_before_boundary
-                                    .unwrap_or(u64::from(o.dict_size) / 2),
-                            ),
-                            Box::new(move |c, d| h.set_hint(c, d)),
-                            Box::new(move |peel| {
-                                let mut b = h2.summary();
-                                b.peel = peel;
-                                (None, Some(b))
-                            }),
-                            resolve_threads(o.threads),
-                            (enc, Some(o.jpeg_max_file), BALANCED_CEILING),
-                        )
-                    }
-                    _ => {
-                        return Err(CoreError::InvalidOption(
-                            "the model needs a prepared encoder of its own tier".into(),
-                        ))
-                    }
-                };
+                                None,
+                                Box::new(move |c, d| h.set_hint(c, d)),
+                                Box::new(move |peel| {
+                                    let mut f = h2.summary();
+                                    f.peel = peel;
+                                    (Some(f), None)
+                                }),
+                                threads,
+                                (enc, Some(o.jpeg_max_file), FAST_CEILING),
+                                part,
+                            )
+                        }
+                        (ModelStage::Balanced(o), Prepared::Balanced(e, h)) => {
+                            let h2 = h.clone();
+                            let part = deflate
+                                .as_ref()
+                                .map(|d| PartEncoder::balanced(&o, d.plain_limit()))
+                                .transpose()?;
+                            let enc = EncoderMemory::Balanced {
+                                lzma: e.lzma_memory(),
+                                lzma_sample: e.lzma_sample_memory(),
+                                zstd_sample_window_log: window_for(
+                                    o.zstd_window_log.unwrap_or(o.dict_size.ilog2()),
+                                    e.stripe_len() as u64,
+                                ),
+                                zstd_level: o.zstd_level,
+                                zstd_window_log: window_for(
+                                    o.zstd_window_log.unwrap_or(o.dict_size.ilog2()),
+                                    o.block_size,
+                                ),
+                            };
+                            (
+                                Box::new(e),
+                                o.block_size,
+                                Some(
+                                    o.min_block_before_boundary
+                                        .unwrap_or(u64::from(o.dict_size) / 2),
+                                ),
+                                Box::new(move |c, d| h.set_hint(c, d)),
+                                Box::new(move |peel| {
+                                    let mut b = h2.summary();
+                                    b.peel = peel;
+                                    (None, Some(b))
+                                }),
+                                resolve_threads(o.threads),
+                                (enc, Some(o.jpeg_max_file), BALANCED_CEILING),
+                                part,
+                            )
+                        }
+                        _ => {
+                            return Err(CoreError::InvalidOption(
+                                "the model needs a prepared encoder of its own tier".into(),
+                            ))
+                        }
+                    };
                 for input in &inputs {
                     validate_input(input)?;
                 }
@@ -592,6 +629,14 @@ impl Pipeline {
                     avg_chunk,
                     encoder: enc,
                     peel_max_file: if peel.is_empty() { None } else { peel_cap },
+                    deflate: match (&deflate, &part) {
+                        (Some(d), Some(p)) => Some(DeflateMemory {
+                            max_file: d.max_file,
+                            plain_limit: d.plain_limit(),
+                            encoder: p.memory(),
+                        }),
+                        _ => None,
+                    },
                     entries: files,
                     path_bytes,
                     input_bytes,
@@ -605,10 +650,32 @@ impl Pipeline {
                 wopts.threads_hint = model.threads_hint(ceiling);
                 let max_part = wopts.block_size;
                 // The header's version_minor is the revision this writer writes under (spec
-                // section 2): 1 whenever a peel stage is enabled, whether or not one peels.
-                let minor = if peel.is_empty() { 0 } else { 1 };
+                // section 2), whether or not a stage peels: 2 whenever the Deflate peel is
+                // enabled, else 1 whenever a peel stage is, else 0.
+                let minor = if deflate.is_some() {
+                    2
+                } else if peel.is_empty() {
+                    0
+                } else {
+                    1
+                };
                 let mut writer = open_writer(out, wopts, sync, minor, fold.as_deref(), opener)?;
-                let mut summary = PeelSummary::default();
+                let mut summary = PeelSummary {
+                    dropped_stages: dropped,
+                    ..PeelSummary::default()
+                };
+                if deflate.as_ref().is_some_and(|d| d.record_files) {
+                    summary.deflate.files = Some(Vec::new());
+                }
+                let mut part = part;
+                let mut dcx = match (deflate.as_ref(), part.as_mut()) {
+                    (Some(stage), Some(encoder)) => Some(Context {
+                        stage,
+                        encoder,
+                        block_size,
+                    }),
+                    _ => None,
+                };
                 let mut peel_time = Duration::ZERO;
                 let t = Instant::now();
                 let mut meta: Vec<&Input> = inputs
@@ -628,8 +695,12 @@ impl Pipeline {
                 let mut reads = ReadAhead::spawn(
                     clusters.iter().flat_map(|c| {
                         let peel = &peel;
+                        let deflate = deflate.as_ref();
                         c.inputs.iter().filter(move |input| {
-                            matches!(feed_of(peel, c.class, input.len), Feed::Stream(_))
+                            matches!(
+                                feed_of(peel, deflate, c.class, input.len),
+                                Feed::Stream(_) | Feed::DeflateCap
+                            )
                         })
                     }),
                     in_flight > 1,
@@ -648,13 +719,43 @@ impl Pipeline {
                         if in_block >= block_size {
                             in_block %= block_size;
                         }
-                        let stage = match feed_of(&peel, c.class, input.len) {
+                        let stage = match feed_of(&peel, deflate.as_ref(), c.class, input.len) {
                             Feed::Stream(cause) => {
                                 if let Some(cause) = cause {
                                     // Too long to read whole: streamed like any file, never held.
                                     summary.note_fallback(cause, input.len);
                                 }
                                 reads.add_file(&mut writer, input)?;
+                                continue;
+                            }
+                            Feed::DeflateCap => {
+                                // Above the Deflate peel's size cap: refused unread.
+                                summary.deflate.note_size_cap(input.len);
+                                reads.add_file(&mut writer, input)?;
+                                continue;
+                            }
+                            Feed::Deflate => {
+                                let tp = Instant::now();
+                                let data = read_all(&source, input)?;
+                                let r = match dcx.as_mut() {
+                                    Some(cx) => peel_file(
+                                        &mut writer,
+                                        cx,
+                                        input,
+                                        &data,
+                                        &mut summary.deflate,
+                                    ),
+                                    None => writer
+                                        .add_file(
+                                            &input.path,
+                                            input.flags,
+                                            input.mtime_ns,
+                                            &mut &data[..],
+                                        )
+                                        .map_err(CoreError::from),
+                                };
+                                peel_time += tp.elapsed();
+                                r?;
                                 continue;
                             }
                             Feed::Peel(stage) => stage,
@@ -715,7 +816,7 @@ impl Pipeline {
                 let t = Instant::now();
                 let written = writer.finish()?;
                 timings.seal = t.elapsed();
-                let (fast, balanced) = finish(summary);
+                let (fast, balanced) = finish(summary.clone());
                 Ok(RunSummary {
                     writer: written,
                     fast,
@@ -813,6 +914,18 @@ type Steer = Box<dyn Fn(Class, DictionaryKind)>;
 
 /// A tier's encoder working set, its peel's file cap and its ceiling, for the memory budget.
 type TierMemory = (EncoderMemory, Option<u64>, u64);
+/// A tier's encoder, block size, soft boundary, steering, counts, threads, memory figures and
+/// the Deflate peel's part encoder.
+type Tier = (
+    Box<dyn lpk_format::BlockEncoder>,
+    u64,
+    Option<u64>,
+    Steer,
+    Finish,
+    usize,
+    TierMemory,
+    Option<PartEncoder>,
+);
 /// Reads the encoder's counts once the peel summary is known.
 type Finish = Box<dyn Fn(PeelSummary) -> (Option<FastSummary>, Option<BalancedSummary>)>;
 
@@ -981,18 +1094,37 @@ impl<R: Read> Read for Counting<R> {
 enum Feed<'a> {
     /// Streamed whole: no peel stage applies, or the stage refuses it unread (the cause).
     Stream(Option<crate::peel::Fallback>),
+    /// Streamed whole: above the Deflate peel's size cap (counted as `size cap`).
+    DeflateCap,
     /// Read whole for this peel stage.
     Peel(&'a dyn PeelStage),
+    /// Read whole for the Deflate peel.
+    Deflate,
 }
 
 /// The one place the run decides how a file is added (the read-ahead's list and the loop both
-/// ask it, so they cannot disagree).
-fn feed_of(peel: &[Box<dyn PeelStage>], class: Class, len: u64) -> Feed<'_> {
+/// ask it, so they cannot disagree). The peel stages first, then the Deflate peel (their
+/// classes do not overlap).
+fn feed_of<'a>(
+    peel: &'a [Box<dyn PeelStage>],
+    deflate: Option<&DeflatePeel>,
+    class: Class,
+    len: u64,
+) -> Feed<'a> {
     match peel.iter().find(|s| s.applies_to(class)) {
-        None => Feed::Stream(None),
         Some(stage) => match stage.refuse_unread(len) {
             Some(cause) => Feed::Stream(Some(cause)),
             None => Feed::Peel(stage.as_ref()),
+        },
+        None => match deflate {
+            Some(d) if d.applies_to(class) => {
+                if len > d.max_file {
+                    Feed::DeflateCap
+                } else {
+                    Feed::Deflate
+                }
+            }
+            _ => Feed::Stream(None),
         },
     }
 }
@@ -1102,6 +1234,8 @@ mod tests {
         assert!(t.seal > Duration::ZERO);
         assert_eq!(t.fold, Duration::ZERO);
         assert_eq!(s.peel, PeelSummary::default());
+        let b = Pipeline::balanced(BalancedOptions::default());
+        assert!(b.deflate.is_some() && Pipeline::fast(FastOptions::default()).deflate.is_none());
         let mut out = Vec::new();
         let s = Pipeline::store(StoreOptions::default())
             .run(dir.path(), &mut out)
