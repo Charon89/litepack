@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use lpk_check::extract::{escape, extract_all};
+use lpk_check::extract::{escape, extract_all, write_new};
 use lpk_check::{journal, keyless, recovery, Archive, Error, Options};
 
 #[derive(Debug, Parser)]
@@ -80,18 +80,6 @@ fn options(cli: &Cli) -> Result<Options, Error> {
         o.add_prior(read(p)?);
     }
     Ok(o)
-}
-
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|e| Error::io("create output", &e))?;
-    f.write_all(bytes)
-        .and_then(|()| f.sync_all())
-        .map_err(|e| Error::io("write output", &e))
 }
 
 fn hex(b: &[u8]) -> String {
@@ -213,7 +201,7 @@ fn run(cli: &Cli) -> Result<u8, Error> {
             if let Cmd::Repair { out, .. } = &cli.cmd {
                 let keep = rep.error.as_ref().is_none_or(|e| e.class == "Unrepairable");
                 if keep {
-                    write_new(out, &copy)?;
+                    write_new(out, &copy, "output")?;
                 }
                 println!("{}", rep.line());
                 return match rep.error {
@@ -240,7 +228,7 @@ fn run(cli: &Cli) -> Result<u8, Error> {
         } => {
             let data = read(archive)?;
             let len = journal::rollback_len(&data, *generation)?;
-            write_new(out, &data[..len])?;
+            write_new(out, &data[..len], "output")?;
             println!("rolled back to generation {generation}: {len} bytes");
             Ok(0)
         }
