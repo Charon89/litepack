@@ -10,15 +10,17 @@
 //!
 //! - per block in flight (`per_block`): the block's plain bytes (`block_size`), its encoding
 //!   (the largest buffer the encoder may allocate for it: none for `store`, whose encoding is the
-//!   plain buffer moved; `ZSTD_compressBound` for zstd; four thirds of the block for the
-//!   Balanced tier, which is how far the LZMA output buffer grows from its first third when the
-//!   output stays below the input) and one encoder working set: none for `store`; for zstd the
-//!   compression context at the level and window used ([`zstd_cctx_memory`], from libzstd's
-//!   parameter table and table sizes, as `ZSTD_estimateCCtxSize` computes it), one per provided
-//!   dictionary more; for the Balanced tier liblzma's own encoder memory query for the dictionary
-//!   and match finder used plus the zstd candidate's context at its level and window (a
-//!   compression context keeps the tables of its largest compression, so both may be alive on
-//!   one thread);
+//!   plain buffer moved; `ZSTD_compressBound` for zstd; for the Balanced tier the larger of that
+//!   and the LZMA output buffer, which is reserved once at `block + block / 64 + 64 KiB`) and
+//!   one encoder working set: none for `store`; for zstd the compression context at the level
+//!   and window used ([`zstd_cctx_memory`], from libzstd's parameter table and table sizes, as
+//!   `ZSTD_estimateCCtxSize` computes it), one per provided dictionary more, and each provided
+//!   dictionary twice (the context's copy and the prepared dictionary's); for the Balanced tier
+//!   the larger of the two ways a block ends: LZMA wins the trial (liblzma's own encoder memory
+//!   query for the dictionary and match finder used, plus the zstd candidate's context sized by
+//!   the trial's stripe — the job drops the zstd context's tables before the full LZMA encode)
+//!   or zstd wins (the zstd context at the level and window used, plus the LZMA encoder of the
+//!   stripe, dropped after the trial);
 //! - `fixed` with one block in flight (the sequential path): the writer's spare block buffer and
 //!   read buffer (D-61: `block_size` and `block_size + chunk_size`), the output buffer
 //!   ([`crate::store`]'s `OUT_BUF`), the peel's working set when a peel stage runs (the file it
@@ -26,9 +28,14 @@
 //!   allowance [`crate::peel::MODEL_ALLOWANCE`]), and the input-dependent terms: per chunk
 //!   [`CHUNK_COST`] bytes (the chunk table's entry, the dedup map's entry and its overhead, the
 //!   index's encoding), per entry [`ENTRY_COST`] bytes plus three times its path (the walk's
-//!   input, the writer's entry and its seen-path set);
-//! - `fixed` with two or more blocks in flight adds the pipeline of D-63: the pending block
-//!   being filled (`block_size`), the frames queued for the write thread and the one it writes
+//!   input, the writer's entry and its seen-path set), with an append's old chunks and entries
+//!   counted too (its hash map, records and entries are held until `finish`); and, with
+//!   recovery records, the group encoder's open group, work buffer and recovery shards
+//!   ([`recovery_memory`]);
+//! - `fixed` with two or more blocks in flight counts the read buffer as `max(segment, the
+//!   peel's file cap when a peel stage runs) + chunk_size` (the reader thread hands segments
+//!   over; only a peeled file's fallback goes through the writer's own read buffer) and adds the
+//!   pipeline of D-63: the pending block being filled (`block_size`), the frames queued for the write thread and the one it writes
 //!   (`WRITE_DEPTH + 1` times the larger of the block and its encoding), the reader thread's read
 //!   buffers (`buffers * segment` of the prefetch options) and the write thread's staging buffer.
 //!   The chunk-hash threads of D-65 and the frame-hash threads of D-61 hold nothing beyond the
@@ -170,10 +177,15 @@ pub enum EncoderMemory {
         /// Their bytes.
         dictionary_bytes: u64,
     },
-    /// The Balanced tier: liblzma's encoder memory query (`lzma`) plus the zstd candidate.
+    /// The Balanced tier: liblzma's encoder memory query (`lzma`) or the zstd candidate, each
+    /// with the other's trial-sized working set.
     Balanced {
         /// liblzma's figure for the dictionary and match finder used.
         lzma: u64,
+        /// liblzma's figure for the trial's stripe (its dictionary sized to the stripe).
+        lzma_sample: u64,
+        /// The zstd candidate's effective window log for one trial stripe.
+        zstd_sample_window_log: u32,
         /// The zstd candidate's level.
         zstd_level: i32,
         /// Its effective window log for a full block.
@@ -202,6 +214,28 @@ pub struct ModelInputs {
     pub input_bytes: u64,
     /// The reader thread's read-ahead.
     pub prefetch: PrefetchOptions,
+    /// The recovery group encoder's memory ([`recovery_memory`]; 0 without recovery).
+    pub recovery: u64,
+    /// Chunks of the archive an append extends (0 for a new archive).
+    pub base_chunks: u64,
+}
+
+/// The recovery group encoder's memory with `o` (0 when `o.percent` is 0): the open group's
+/// data shards (`group_shards * shard_len`), the encoder's work buffer
+/// ([`lpk_format::recovery::encoder_work_bytes`]) and the group's recovery shards.
+pub fn recovery_memory(o: &lpk_format::RecoveryOptions) -> u64 {
+    if o.percent == 0 {
+        return 0;
+    }
+    let r = lpk_format::recovery::group_recovery_shards(o.group_shards, o.percent);
+    let shard = u64::from(o.shard_len);
+    (u64::from(o.group_shards) * shard)
+        .saturating_add(lpk_format::recovery::encoder_work_bytes(
+            o.group_shards,
+            r,
+            o.shard_len,
+        ))
+        .saturating_add(u64::from(r) * shard)
 }
 
 /// The blocks in flight a budget allows, with the figures that decided it.
@@ -239,6 +273,12 @@ impl MemoryPlan {
 pub fn window_for(window_log: u32, block_size: u64) -> u32 {
     let need = 64 - block_size.saturating_sub(1).leading_zeros();
     window_log.min(need.max(10))
+}
+
+/// The capacity the Balanced tier's LZMA encoder reserves for a block's output, once:
+/// `n + n / 64 + 64 KiB`.
+pub fn lzma_out_reserve(n: u64) -> u64 {
+    n + n / 64 + (64 << 10)
 }
 
 /// `ZSTD_compressBound`.
@@ -358,7 +398,7 @@ impl ModelInputs {
         match self.encoder {
             EncoderMemory::Store => 0,
             EncoderMemory::Zstd { .. } => zstd_bound(b),
-            EncoderMemory::Balanced { .. } => zstd_bound(b).max(b + b / 3 + (64 << 10)),
+            EncoderMemory::Balanced { .. } => zstd_bound(b).max(lzma_out_reserve(b)),
         }
     }
 
@@ -373,12 +413,20 @@ impl ModelInputs {
                 dictionary_bytes,
             } => zstd_cctx_memory(level, window_log, true)
                 .saturating_mul(1 + dictionaries)
-                .saturating_add(dictionary_bytes),
+                .saturating_add(dictionary_bytes.saturating_mul(2)),
             EncoderMemory::Balanced {
                 lzma,
+                lzma_sample,
+                zstd_sample_window_log,
                 zstd_level,
                 zstd_window_log,
-            } => lzma.saturating_add(zstd_cctx_memory(zstd_level, zstd_window_log, true)),
+            } => {
+                let lzma_wins =
+                    lzma.saturating_add(zstd_cctx_memory(zstd_level, zstd_sample_window_log, true));
+                let zstd_wins =
+                    zstd_cctx_memory(zstd_level, zstd_window_log, true).saturating_add(lzma_sample);
+                lzma_wins.max(zstd_wins)
+            }
         }
     }
 
@@ -394,7 +442,8 @@ impl ModelInputs {
         let chunks = self
             .input_bytes
             .div_ceil(self.avg_chunk.max(1))
-            .saturating_add(self.entries);
+            .saturating_add(self.entries)
+            .saturating_add(self.base_chunks);
         chunks
             .saturating_mul(CHUNK_COST)
             .saturating_add(self.entries.saturating_mul(ENTRY_COST))
@@ -412,6 +461,7 @@ impl ModelInputs {
             .saturating_add(crate::store::OUT_BUF as u64)
             .saturating_add(peel)
             .saturating_add(self.inventory())
+            .saturating_add(self.recovery)
     }
 
     /// The fixed cost with two or more blocks in flight.
@@ -419,7 +469,14 @@ impl ModelInputs {
         let frame = self.block_size.max(self.encoded());
         let queue = frame.saturating_mul(lpk_format::writer::WRITE_DEPTH as u64 + 1);
         let reads = (self.prefetch.segment as u64).saturating_mul(self.prefetch.buffers as u64);
+        // The read buffer: what the sequential path counts, replaced.
+        let read_seq = self.block_size.saturating_add(self.chunk_size);
+        let read_pipe = (self.prefetch.segment as u64)
+            .max(self.peel_max_file.unwrap_or(0))
+            .saturating_add(self.chunk_size);
         self.fixed_sequential()
+            .saturating_sub(read_seq)
+            .saturating_add(read_pipe)
             .saturating_add(self.block_size)
             .saturating_add(queue)
             .saturating_add(reads)
@@ -501,7 +558,52 @@ mod tests {
             path_bytes: 0,
             input_bytes: 0,
             prefetch: PrefetchOptions::default(),
+            recovery: 0,
+            base_chunks: 0,
         }
+    }
+
+    #[test]
+    fn recovery_append_and_dictionaries_count() {
+        let mut m = inputs(
+            64 * MIB,
+            EncoderMemory::Zstd {
+                level: 3,
+                window_log: 26,
+                dictionaries: 2,
+                dictionary_bytes: 1000,
+            },
+        );
+        assert_eq!(m.encoder_memory(), 3 * zstd_cctx_memory(3, 26, true) + 2000);
+        let base = (m.fixed_sequential(), m.fixed_pipelined());
+        let o = lpk_format::RecoveryOptions {
+            percent: 5,
+            ..lpk_format::RecoveryOptions::default()
+        };
+        let r = lpk_format::recovery::group_recovery_shards(o.group_shards, o.percent);
+        let want = u64::from(o.group_shards) * u64::from(o.shard_len)
+            + lpk_format::recovery::encoder_work_bytes(o.group_shards, r, o.shard_len)
+            + u64::from(r) * u64::from(o.shard_len);
+        assert_eq!(recovery_memory(&o), want);
+        assert_eq!(recovery_memory(&lpk_format::RecoveryOptions::default()), 0);
+        m.recovery = want;
+        m.base_chunks = 100;
+        let add = want + 100 * CHUNK_COST;
+        assert_eq!(
+            (m.fixed_sequential(), m.fixed_pipelined()),
+            (base.0 + add, base.1 + add)
+        );
+    }
+
+    #[test]
+    fn the_pipelined_read_buffer_is_the_segment_or_the_peel_cap() {
+        let mut m = inputs(256 * MIB, EncoderMemory::Store);
+        let seq_read = 256 * MIB + (512 << 10);
+        let pipe_extra = |m: &ModelInputs| m.fixed_pipelined() - m.fixed_sequential();
+        let common = 256 * MIB + 2 * 256 * MIB + 32 * MIB + MIB;
+        assert_eq!(pipe_extra(&m) + seq_read, common + 8 * MIB + (512 << 10));
+        m.peel_max_file = Some(128 * MIB);
+        assert_eq!(pipe_extra(&m) + seq_read, common + 128 * MIB + (512 << 10));
     }
 
     #[test]
@@ -614,17 +716,32 @@ mod tests {
             256 * MIB,
             EncoderMemory::Balanced {
                 lzma: 700 * MIB,
+                lzma_sample: 12 * MIB,
+                zstd_sample_window_log: 20,
                 zstd_level: 22,
                 zstd_window_log: 26,
             },
         );
+        // LZMA wins: the full LZMA encoder plus the stripe-sized zstd context.
+        let lzma_wins = 700 * MIB + zstd_cctx_memory(22, 20, true);
+        let zstd_wins = zstd_cctx_memory(22, 26, true) + 12 * MIB;
+        assert!(lzma_wins > zstd_wins);
         assert_eq!(
             m.per_block(),
-            256 * MIB
-                + (256 * MIB + 256 * MIB / 3 + (64 << 10))
-                + 700 * MIB
-                + zstd_cctx_memory(22, 26, true)
+            256 * MIB + (256 * MIB + 256 * MIB / 64 + (64 << 10)) + lzma_wins
         );
+        // A bigger zstd context decides instead.
+        let z = inputs(
+            256 * MIB,
+            EncoderMemory::Balanced {
+                lzma: 10 * MIB,
+                lzma_sample: 12 * MIB,
+                zstd_sample_window_log: 20,
+                zstd_level: 22,
+                zstd_window_log: 26,
+            },
+        );
+        assert_eq!(z.encoder_memory(), zstd_wins);
         let p = m
             .plan(given(m.fixed_pipelined() + 2 * m.per_block()), 24)
             .unwrap();

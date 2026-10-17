@@ -195,7 +195,10 @@ impl LzmaEncoder {
         filters.lzma1(&o);
         ContextCounts::bump(&self.counts.lzma_streams);
         let mut s = Stream::new_raw_encoder(&filters).map_err(io_err)?;
-        let mut out = Vec::with_capacity(plain.len() / 3 + 64);
+        // Reserved once, so the output does not double past the block (E2-20's model counts
+        // this figure).
+        let reserve = crate::memory::lzma_out_reserve(plain.len() as u64);
+        let mut out = Vec::with_capacity(usize::try_from(reserve).unwrap_or(plain.len()));
         loop {
             let consumed = usize::try_from(s.total_in()).unwrap_or(plain.len());
             let st = s
@@ -226,7 +229,17 @@ impl LzmaEncoder {
     /// Approximate: liblzma's LZMA2 encoder memory query at one thread for the configured
     /// dictionary (see [`BalancedSummary::lzma_encoder_memory`]); 0 when the options are refused.
     pub fn memory_usage(&self) -> u64 {
-        let Ok(o) = self.options(self.dict_size) else {
+        self.memory_usage_for(self.dict_size)
+    }
+
+    /// [`LzmaEncoder::memory_usage`] for the dictionary a block of `len` bytes uses (the trial's
+    /// stripes use a smaller one).
+    pub fn memory_usage_for_len(&self, len: usize) -> u64 {
+        self.memory_usage_for(self.dict_for(len))
+    }
+
+    fn memory_usage_for(&self, dict: u32) -> u64 {
+        let Ok(o) = self.options(dict) else {
             return 0;
         };
         let mut filters = Filters::new();
@@ -332,6 +345,19 @@ impl BalancedEncoder {
             0 => u64::from(self.lzma.dict_size).saturating_mul(12),
             m => m,
         }
+    }
+
+    /// The LZMA encoder memory of one trial stripe (`sample_len / 4` bytes), liblzma's query.
+    pub fn lzma_sample_memory(&self) -> u64 {
+        match self.lzma.memory_usage_for_len((self.sample_len / 4).max(1)) {
+            0 => u64::from(self.lzma.dict_size).saturating_mul(12),
+            m => m,
+        }
+    }
+
+    /// The trial's stripe length.
+    pub fn stripe_len(&self) -> usize {
+        (self.sample_len / 4).max(1)
     }
 
     /// A new encoder and the handle that steers it; every option is checked here
@@ -461,7 +487,13 @@ fn balanced_block(
         (true, true) => first.map(|(_, z)| z).ok_or_else(|| io_err("no stripe"))?,
         (true, false) => first.map(|(l, _)| l).ok_or_else(|| io_err("no stripe"))?,
         (false, true) => zstd.encode(class, DictionaryKind::None, plain)?.0,
-        (false, false) => lzma.encode_block(plain)?,
+        (false, false) => {
+            // The zstd context's tables go before the full LZMA encode, so a block holds one
+            // full-size encoder at a time (E2-20); the context is rebuilt empty with the same
+            // parameters, which gives the same output.
+            zstd.release().map_err(io_err)?;
+            lzma.encode_block(plain)?
+        }
     };
     if winner.bytes.len() >= plain.len() {
         outcome.kind = BalancedKind::StoredNoGain;

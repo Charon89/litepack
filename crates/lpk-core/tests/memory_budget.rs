@@ -33,6 +33,8 @@ fn default_settings_fit_their_ceilings() {
         path_bytes: 0,
         input_bytes: 0,
         prefetch: Default::default(),
+        recovery: 0,
+        base_chunks: 0,
     };
     let store = ModelInputs {
         chunk_size: lpk_format::DEFAULT_CHUNK_SIZE,
@@ -53,6 +55,8 @@ fn default_settings_fit_their_ceilings() {
         b.block_size,
         EncoderMemory::Balanced {
             lzma: enc.lzma_memory(),
+            lzma_sample: enc.lzma_sample_memory(),
+            zstd_sample_window_log: window_for(b.dict_size.ilog2(), enc.stripe_len() as u64),
             zstd_level: b.zstd_level,
             zstd_window_log: window_for(b.dict_size.ilog2(), b.block_size),
         },
@@ -240,6 +244,8 @@ fn fast_model() -> ModelInputs {
         path_bytes: 0,
         input_bytes: 0,
         prefetch: Default::default(),
+        recovery: 0,
+        base_chunks: 0,
     }
 }
 

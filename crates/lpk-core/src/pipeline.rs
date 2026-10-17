@@ -74,6 +74,8 @@ pub struct SealOptions {
     /// `min(ceiling, half of the physical memory)` ([`crate::memory::Budget`]). A budget below
     /// what one block in flight needs is refused (`InvalidOption`, naming the figure).
     pub memory: Option<u64>,
+    /// An append's old archive for the memory model: its chunks, entries and path bytes.
+    pub(crate) base: (u64, u64, u64),
 }
 
 /// Wall time per stage.
@@ -188,6 +190,7 @@ impl Pipeline {
             seal: SealOptions {
                 writer,
                 memory: None,
+                base: (0, 0, 0),
             },
         }
     }
@@ -258,13 +261,15 @@ impl Pipeline {
     /// own revision applies: a pipeline with a peel stage needs a header `version_minor` of at
     /// least 1 (`BadOptions`, `version_minor`, before anything is written).
     pub fn append<R: Read + Seek + 'static, W: Write>(
-        self,
+        mut self,
         root: &Path,
-        existing: Archive<R>,
+        mut existing: Archive<R>,
         out: W,
         credentials: Option<&Credentials>,
     ) -> Result<RunSummary, CoreError> {
         let prepared = self.prepare()?;
+        let paths = old_paths(&mut existing)?;
+        self.seal.base = base_inventory(&existing, &paths);
         let t = Instant::now();
         let inputs = walk(root, &self.classify.ingest)?;
         let opener: Opener<'_, W> = Box::new(move |out, wopts, minor, chunker| {
@@ -295,7 +300,7 @@ impl Pipeline {
     /// password with `WrongKey`, both before the file is opened for writing). Invalid options
     /// are refused before anything is touched.
     pub fn append_file(
-        self,
+        mut self,
         root: &Path,
         archive_path: &Path,
         credentials: Option<&Credentials>,
@@ -311,12 +316,8 @@ impl Pipeline {
         if existing.is_keyless() {
             return Err(FormatError::AppendNeedsCredentials.into());
         }
-        let old_paths: Vec<String> = existing
-            .entry_table()?
-            .table()?
-            .iter()
-            .map(|e| e.map(|e| e.path))
-            .collect::<Result<_, _>>()?;
+        let old_paths: Vec<String> = old_paths(&mut existing)?;
+        self.seal.base = base_inventory(&existing, &old_paths);
         // The handle that cuts the file back: a plain write handle (an append-mode handle
         // cannot truncate on Windows), opened before anything is written, and the length it
         // restores read from it.
@@ -421,6 +422,9 @@ impl Pipeline {
         let mut wopts = seal.writer;
         let source = Source::new();
         let (files, path_bytes, input_bytes) = inventory(&inputs);
+        let (base_chunks, base_entries, base_paths) = seal.base;
+        let (files, path_bytes) = (files + base_entries, path_bytes + base_paths);
+        let recovery = crate::memory::recovery_memory(&wopts.recovery);
         match (model, prepared) {
             (ModelStage::Store, Prepared::Store) => {
                 let threads = wopts.encode_threads.max(1);
@@ -434,6 +438,8 @@ impl Pipeline {
                     path_bytes,
                     input_bytes,
                     prefetch: PrefetchOptions::default(),
+                    recovery,
+                    base_chunks,
                 };
                 let plan = model.plan(Budget::resolve(seal.memory, STORE_CEILING), threads)?;
                 let in_flight = plan.blocks_in_flight;
@@ -518,6 +524,11 @@ impl Pipeline {
                         let h2 = h.clone();
                         let enc = EncoderMemory::Balanced {
                             lzma: e.lzma_memory(),
+                            lzma_sample: e.lzma_sample_memory(),
+                            zstd_sample_window_log: window_for(
+                                o.zstd_window_log.unwrap_or(o.dict_size.ilog2()),
+                                e.stripe_len() as u64,
+                            ),
                             zstd_level: o.zstd_level,
                             zstd_window_log: window_for(
                                 o.zstd_window_log.unwrap_or(o.dict_size.ilog2()),
@@ -585,6 +596,8 @@ impl Pipeline {
                     path_bytes,
                     input_bytes,
                     prefetch: PrefetchOptions::default(),
+                    recovery,
+                    base_chunks,
                 };
                 let plan = model.plan(Budget::resolve(seal.memory, ceiling), threads)?;
                 let in_flight = plan.blocks_in_flight;
@@ -718,6 +731,25 @@ impl Pipeline {
             }
         }
     }
+}
+
+/// The paths of an archive's entry table.
+fn old_paths<R: Read + Seek>(existing: &mut Archive<R>) -> Result<Vec<String>, CoreError> {
+    Ok(existing
+        .entry_table()?
+        .table()?
+        .iter()
+        .map(|e| e.map(|e| e.path))
+        .collect::<Result<_, _>>()?)
+}
+
+/// An append's old archive for the memory model: chunks, entries, path bytes.
+fn base_inventory<R: Read + Seek>(existing: &Archive<R>, paths: &[String]) -> (u64, u64, u64) {
+    (
+        existing.chunks().len(),
+        paths.len() as u64,
+        paths.iter().map(|p| p.len() as u64).sum(),
+    )
 }
 
 /// Entries, path bytes and file bytes of a run's inputs, for the memory model.
