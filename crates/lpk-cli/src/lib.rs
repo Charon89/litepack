@@ -296,7 +296,7 @@ struct ExtractArgs {
     /// The total thread budget, decoders plus file writers (default: the machine's logical
     /// cores; at most four times that). 1 decodes and writes on one thread; from 2 on,
     /// clamp(N/4, 1, 4) threads write files and the rest decode blocks, the decoders capped so
-    /// that the decoded blocks in flight stay within the reader's decode memory.
+    /// that the extraction stays within its memory budget (see --memory).
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     threads: Option<u64>,
     /// A prior file (for example a zstd dictionary) the archive needs; may be repeated.
@@ -305,12 +305,16 @@ struct ExtractArgs {
     /// The key material of an encrypted archive; checked before anything is written.
     #[command(flatten)]
     credentials: CredentialArgs,
-    /// The decode memory limit, for example 512M or 2G or plain bytes (default: half of the
-    /// physical memory, at most 4 GiB). An archive whose envelope needs more is refused before
-    /// anything is written; the decoders in flight stay within it.
+    /// The memory budget of the extraction, for example 512M or 2G or plain bytes; also the
+    /// reader's decode memory limit (an archive whose envelope needs more is refused before
+    /// anything is written). Default: half of the physical memory, at most the ceiling of the
+    /// tier the archive's envelope shows: 1 GiB (stored blocks only), 2 GiB (Fast-sized blocks
+    /// and windows) or 4 GiB (larger); the reader is then limited to half of the physical
+    /// memory, at most 4 GiB. The decoders in flight are derived from the budget (shown with -v);
+    /// a budget below what one block in flight needs is refused with that figure.
     #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
     memory: Option<u64>,
-    /// Print the plan's counts and the pool size to stderr.
+    /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
     #[arg(short, long)]
     verbose: bool,
 }
@@ -336,8 +340,8 @@ fn parse_memory(s: &str) -> Result<u64, String> {
     lpk_core::memory::parse_size(s)
 }
 
-/// The decode memory limit of `x` and `t`: `--memory`, else `min(4 GiB, half the physical
-/// memory)`.
+/// The reader's decode memory limit of `t`: `--memory`, else `min(4 GiB, half the physical
+/// memory)` (`x` passes `--memory` on; the engine applies the same default to its reader).
 fn decode_memory(given: Option<u64>) -> u64 {
     lpk_core::memory::Budget::resolve(given, lpk_core::memory::EXTRACT_CEILING).bytes
 }
@@ -786,7 +790,7 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
     }
     let opts = lpk_core::ExtractOptions {
         threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
-        memory: Some(decode_memory(x.memory)),
+        memory: x.memory,
         ..lpk_core::ExtractOptions::default()
     };
     match lpk_core::extract_file(
@@ -815,6 +819,51 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
                     s.blocks_decoded,
                     s.nested_decodes,
                     s.reopened
+                );
+                let m = &s.memory;
+                let source = match m.budget.source {
+                    lpk_core::memory::BudgetSource::Given => "--memory".to_string(),
+                    lpk_core::memory::BudgetSource::Default {
+                        ceiling,
+                        physical: Some(p),
+                    } => format!(
+                        "default: the {} tier's ceiling of {ceiling} bytes, at most half the physical memory of {p} bytes",
+                        m.tier.name()
+                    ),
+                    lpk_core::memory::BudgetSource::Default {
+                        ceiling,
+                        physical: None,
+                    } => format!(
+                        "default: the {} tier's ceiling of {ceiling} bytes; physical memory unknown",
+                        m.tier.name()
+                    ),
+                };
+                // A sealed archive's key is derived at open, before its envelope can be read:
+                // its Argon2 memory is limited by the reader's limit, not the tier's budget.
+                let key = if m.key_derivation > 0 {
+                    format!(
+                        "; key derivation at open: argon2_m {} bytes (process peak {} bytes)",
+                        m.key_derivation,
+                        m.peak(s.workers)
+                    )
+                } else {
+                    String::new()
+                };
+                let _ = writeln!(
+                    err,
+                    "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}{key}",
+                    m.budget.bytes,
+                    m.tier.name(),
+                    m.per_block,
+                    m.encoded,
+                    m.plain,
+                    m.decoder,
+                    m.step_input,
+                    m.nested,
+                    m.fixed,
+                    m.fixed_shared,
+                    m.per_worker,
+                    s.workers
                 );
             }
             let _ = writeln!(

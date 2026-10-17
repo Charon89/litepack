@@ -108,6 +108,122 @@ fn a_256_mib_window_is_refused_below_its_memory_and_extracts_by_default() {
         fs::read(out.join("big.txt")).unwrap(),
         fs::read(src.path().join("big.txt")).unwrap()
     );
+    // R19: a window above the Fast tier's is the Balanced tier's ceiling by default.
+    let v = text(&x.stderr);
+    assert!(
+        v.contains("envelope tier balanced")
+            && v.contains(&format!(
+                "default: the balanced tier's ceiling of {} bytes",
+                lpk_core::memory::BALANCED_CEILING
+            )),
+        "{v}"
+    );
+}
+
+/// A sealed archive: `lpk x -v` shows the key slot's `argon2_m` (the writer's default, 64 MiB)
+/// and the process peak, the larger of it and the extraction's count.
+#[test]
+fn x_v_shows_the_key_derivation_of_a_sealed_archive() {
+    let src = tempfile::tempdir().unwrap();
+    fs::write(src.path().join("t.txt"), prose(5, 300_000)).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("s.lpk");
+    let a = run(&[
+        "a".as_ref(),
+        arch.as_os_str(),
+        src.path().as_os_str(),
+        "--password".as_ref(),
+        "pw".as_ref(),
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let out = work.path().join("out");
+    let x = run(&[
+        "x".as_ref(),
+        arch.as_os_str(),
+        out.as_os_str(),
+        "--password".as_ref(),
+        "pw".as_ref(),
+        "-v".as_ref(),
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    let v = text(&x.stderr);
+    let m = u64::from(lpk_format::Argon2Params::default().m_kib) * 1024;
+    assert_eq!(figure(&v, "argon2_m "), m, "{v}");
+    assert!(figure(&v, "process peak ") >= m, "{v}");
+}
+
+/// The `-v` figure after `key` in `v`.
+fn figure(v: &str, key: &str) -> u64 {
+    let at = v.find(key).unwrap_or_else(|| panic!("{key:?} in {v}")) + key.len();
+    v[at..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// R19 (3): `lpk x -v` prints the budget, its source, the per-block and fixed terms and the
+/// workers; `--memory` for exactly one block in flight gives one worker and the same bytes.
+#[test]
+fn x_v_prints_the_extraction_budget_and_its_terms() {
+    let src = tempfile::tempdir().unwrap();
+    for i in 0..4u64 {
+        fs::write(src.path().join(format!("t{i}.txt")), prose(i + 1, 900_000)).unwrap();
+    }
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("f.lpk");
+    let mut p = Pipeline::fast(FastOptions {
+        block_size: MIB,
+        threads: Some(1),
+        ..FastOptions::default()
+    });
+    p.fold = None;
+    p.run_file(src.path(), &arch).unwrap();
+    let a = arch.as_os_str();
+    let wide = work.path().join("wide");
+    let x = run(&[
+        "x".as_ref(),
+        a,
+        wide.as_os_str(),
+        "--threads".as_ref(),
+        "8".as_ref(),
+        "-v".as_ref(),
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    let v = text(&x.stderr);
+    assert!(v.contains("envelope tier fast"), "{v}");
+    assert!(v.contains("default: the fast tier's ceiling"), "{v}");
+    let (per_block, shared, per_worker) = (
+        figure(&v, "per block "),
+        figure(&v, "shared "),
+        figure(&v, "per worker "),
+    );
+    assert!(figure(&v, "workers ") > 1, "{v}");
+    let one = shared + per_block + per_worker;
+    let narrow = work.path().join("slim"); // as long as "wide": the plan counts the paths
+    let x = run(&[
+        "x".as_ref(),
+        a,
+        narrow.as_os_str(),
+        "--threads".as_ref(),
+        "8".as_ref(),
+        "--memory".as_ref(),
+        one.to_string().as_ref(),
+        "-v".as_ref(),
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    let v = text(&x.stderr);
+    assert!(v.contains(&format!("budget {one} bytes (--memory)")), "{v}");
+    assert_eq!(figure(&v, "; workers "), 1, "{v}");
+    assert_eq!(figure(&v, "fixed "), shared + per_worker, "{v}");
+    for i in 0..4u64 {
+        let name = format!("t{i}.txt");
+        assert_eq!(
+            fs::read(wide.join(&name)).unwrap(),
+            fs::read(narrow.join(&name)).unwrap()
+        );
+    }
 }
 
 #[test]

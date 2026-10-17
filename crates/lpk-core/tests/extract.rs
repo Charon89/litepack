@@ -298,12 +298,58 @@ fn the_memory_bound_reduces_the_pool() {
     let bytes = pack(&files, options());
     let a = Archive::open(Cursor::new(bytes.clone()), &Resources::default()).unwrap();
     let env = a.index().envelope;
-    let cost = env.max_block_plain + env.decode_memory;
     let blocks = a.index().blocks.len();
+    // The terms do not depend on the budget: read them from a run with room for every block.
+    let d = tempfile::tempdir().unwrap();
+    let wide = ExtractOptions {
+        threads: Some(8),
+        memory: Some(u64::MAX),
+        ..ExtractOptions::default()
+    };
+    let m = extract(&bytes, &d.path().join("out"), &wide)
+        .unwrap()
+        .memory;
+    // A store archive: the plain bytes, the frame they are copied from, no decoder beyond.
+    assert_eq!((m.plain, m.decoder, m.nested), (env.max_block_plain, 0, 0));
+    let largest = a.index().blocks.iter().map(|b| b.frame_len).max().unwrap();
+    assert_eq!(m.encoded, largest);
+    assert_eq!(m.step_input, m.plain);
+    assert_eq!(
+        m.per_block,
+        m.encoded + m.plain + m.step_input + lpk_core::extract::BLOCK_ALLOWANCE
+    );
+    let cost = m.per_block + m.per_worker;
+    // A given budget below one block in flight is refused with the figure; nothing is created.
+    for memory in [1, m.total(1) - 1] {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out");
+        let e = extract(
+            &bytes,
+            &out,
+            &ExtractOptions {
+                threads: Some(8),
+                memory: Some(memory),
+                ..ExtractOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(e, CoreError::InvalidOption(_)), "{e}");
+        assert!(
+            e.to_string().contains(&format!(
+                "below what one block in flight needs: {} bytes",
+                m.total(1)
+            )),
+            "{e}"
+        );
+        assert!(
+            !out.exists(),
+            "{memory}: nothing is created before the refusal"
+        );
+    }
     for (memory, workers) in [
-        (1, 1),
-        (cost, 1),
-        (2 * cost + 1, 2),
+        (m.total(1), 1),
+        (m.total(2), 2),
+        (m.total(2) - 1, 1),
         (u64::MAX, blocks.min(6)),
     ] {
         let d = tempfile::tempdir().unwrap();
@@ -326,10 +372,15 @@ fn the_memory_bound_reduces_the_pool() {
             s.peak_in_flight
         );
         assert!(
-            s.peak_in_flight as u64 * cost <= memory.max(cost),
+            s.memory.fixed_shared + s.peak_in_flight as u64 * cost <= memory.max(m.total(1)),
             "{memory}: peak {}",
             s.peak_in_flight
         );
+        assert_eq!(
+            s.memory.fixed,
+            m.fixed_shared + workers as u64 * m.per_worker
+        );
+        assert_eq!(s.memory.per_block, m.per_block);
         assert_eq!(tree(&out), expect(&files));
     }
 }

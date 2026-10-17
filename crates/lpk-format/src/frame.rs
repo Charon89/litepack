@@ -159,6 +159,19 @@ impl Frame {
 
     /// Read one frame. `Ok(None)` is a clean end of input at a frame boundary.
     pub fn read(r: &mut impl Read, limits: &ReadLimits) -> Result<Option<ReadFrame>, FormatError> {
+        Self::read_located(r, limits, 0)
+    }
+
+    /// [`Frame::read`] of a frame whose whole encoded length `located` a trusted source gives
+    /// (the hash-checked index): a payload no longer than that is reserved once at its declared
+    /// length, so the buffer holds the payload and no growth headroom. A declared length above
+    /// `located` grows by chunks as in [`Frame::read`] (and fails as that frame would). `0` is
+    /// no location.
+    pub fn read_located(
+        r: &mut impl Read,
+        limits: &ReadLimits,
+        located: u64,
+    ) -> Result<Option<ReadFrame>, FormatError> {
         let mut head = [0u8; 4];
         loop {
             match r.read(&mut head[..1]) {
@@ -193,6 +206,11 @@ impl Frame {
 
         let mut hasher = blake3::Hasher::new();
         let mut payload = Vec::new();
+        if known.is_some() && len < located {
+            if let Ok(n) = usize::try_from(len) {
+                payload.reserve_exact(n);
+            }
+        }
         let mut scratch = Vec::new();
         let mut remaining = len;
         while remaining > 0 {
@@ -272,6 +290,27 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::io::Cursor;
+
+    /// A located read reserves exactly the payload (no growth headroom); an unlocated read, or
+    /// a location shorter than the declared length, reads the same frame.
+    #[test]
+    fn a_located_read_reserves_the_payload_once() {
+        let payload = vec![7u8; 100_000];
+        let bytes = raw(FrameKind::ChunkData as u16, 0, &payload);
+        let limits = ReadLimits::default();
+        let read = |located: u64| match Frame::read_located(&mut &bytes[..], &limits, located) {
+            Ok(Some(ReadFrame::Known(f))) => f,
+            other => panic!("{other:?}"),
+        };
+        let exact = read(bytes.len() as u64);
+        assert_eq!(exact.payload, payload);
+        assert_eq!(exact.payload.capacity(), payload.len());
+        // Without a location that bounds it the payload is grown by chunks (std's growth
+        // policy decides the capacity, so only the bytes are checked).
+        for located in [0, 1000] {
+            assert_eq!(read(located).payload, payload);
+        }
+    }
 
     fn raw(kind: u16, flags: u16, payload: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
