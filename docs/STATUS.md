@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 08:15 UTC (2026-10-17, 04:15 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 08:35 UTC (2026-10-17, 04:35 local on the measuring machine). A measurement is running (E2-10 / E2-21, see below).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -50,7 +50,7 @@ was single-threaded then and is parallel since E2-4b.
    merges the agent branch into the task branch afterwards; implementers and reviewers still stop at their turn
    limits on tasks of this size and are resumed with a short step list.
 
-**Open for the owner (three asked on 2026-10-04, unanswered; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
+**Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16 added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
   (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
   consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
@@ -59,6 +59,10 @@ was single-threaded then and is parallel since E2-4b.
 - **Nine file names.** The Windows `tar` crashes on node's emoji and CJK test-file names, so the `store` control and
   the tar-stream tools (zstd, xz) have no rows on the class. Recommended: exclude names outside ASCII from this
   class's export (nine of 127153 files), re-run the three tools.
+- **E2-16's gate margin** (`docs/notes/e2-16-design.md` section 5): a new gate threshold, so the owner's. Recommended:
+  open the PNG-filter revision only if the probe's per-stream saving on `photo-raw-png` is at least 1% of that
+  class's `lpk/balanced` bytes. And for a closed gate: the "with" figure is the probe's committed prediction, the
+  "without" row E2-10's `lpk/balanced`, recorded with the negative result. The probe (task P) runs regardless.
 - **Counsel on US 9,798,731** (`docs/LICENSING.md`, sketch-based similarity clustering with deltas): gates E2-9
   (deltas) and any return of the similarity sketch (E2-8, D-55).
 
@@ -71,16 +75,21 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- E2-10/11: tasks A, B, C (revision 1.2, D-68) and E (the independence gate, passed; revision 1.2 final) are
-  merged; task D (the Deflate peel in the pipeline, D-69) merges with this PR and ticks E2-11 (every container of
-  `small` round-trips, through `lpk-check` too). E2-10 waits for its rows (below).
-- E2-20 is done (2026-10-17): round 2 merged (PR #66), its rows measured on `main` at `205c2ae`
-  (`bench/results/2026-10-17-megatron-7`, `-8`; report `bench/reports/phase1-2026-10-17-memory.md`), every
-  compress and extract peak within its tier's ceiling. `target/acceptance/e2-20b-e2-10-run.sh` is kept for task
-  D's rows: after task D lands, build release on `main` and launch it detached (A = every tool on office-pdf,
-  photo-raw-png, software-installed of `small`; B = `lpk` on the other fourteen `small` classes; C = `lpk` on
-  vm-image, office-pdf, software-installed of `full`; one repeat) — E2-10's and E2-11's evidence, and the memory
-  rows again with the peel on.
+- E2-10/11: tasks A to E are merged (task D, the Deflate peel in the pipeline, D-69, PR #68); E2-11 is done.
+  E2-10 waits for its rows: `target/acceptance/e2-20b-e2-10-run.sh` runs detached from `main` (status in
+  `target/acceptance/e2-20b-run-status.log`): A = every tool on office-pdf, photo-raw-png, software-installed of
+  `small` (E2-10 against the incumbents), B = `lpk` on the other fourteen `small` classes, C = `lpk` `fast` and
+  `balanced` on every class of `full` through the trimmed catalogue `target/acceptance/tools-e2-21.toml` (E2-21's
+  full-corpus round trip); one repeat; the machine kept idle for it (E2-22 reads its times). When `== DONE`:
+  validate logs, reports, commit the directories, tick E2-10 and E2-21.
+- E2-20 is done (2026-10-17, PR #67): every `lpk` row's compress and extract peak within its tier's ceiling
+  (`bench/reports/phase1-2026-10-17-memory.md`).
+- Next after the run: E2-15's probe (`docs/notes/e2-15-probe-brief.md`), then E2-16's probe (task P of
+  `docs/notes/e2-16-design.md`); a format revision 1.3 follows only for a gate that opens (both share one).
+  Parked for the next format task: the reference writer accepts primitives no revision decodes (`bwt`, `bcj-*`,
+  `delta`, `png-filter`, `base64`, `utf16`, `container-reconstruct`) at any minor, because their `revision()` is 0
+  and `check_graph` refuses only `revision() > version_minor`; section 8 says a writer MUST NOT emit them (no
+  production path does). Fix: refuse them at every minor.
 
 ## How to resume
 
