@@ -934,7 +934,10 @@ fn text_encodings_end_to_end_on_a_pem_bundle_and_a_utf16_text_validates() {
     assert_eq!(certs.streams.len(), 6);
     for s in &certs.streams {
         assert_eq!(s.label, "pem");
-        assert_eq!((s.line_len, s.line_ending.as_str(), s.padding), (64, "lf", true));
+        assert_eq!(
+            (s.line_len, s.line_ending.as_str(), s.padding),
+            (64, "lf", true)
+        );
         assert_eq!(s.payload_len, 6000);
         assert!(s.kept, "{s:?}");
     }
@@ -973,7 +976,9 @@ fn text_encodings_end_to_end_on_a_pem_bundle_and_a_utf16_text_validates() {
     // The table is written and a flipped gate is a validation problem.
     assert!(out.results_dir.join("probe-text-encodings.md").exists());
     let flipped = !d.base64_gate_open;
-    edit_json(&path, |v| v["data"]["base64_gate_open"] = Value::from(flipped));
+    edit_json(&path, |v| {
+        v["data"]["base64_gate_open"] = Value::from(flipped)
+    });
     assert!(problems(&out.results_dir)
         .iter()
         .any(|m| m.contains("/data/base64_gate_open")));
