@@ -17,6 +17,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 claxon = "0.4.3"
 ctr = "0.10.1"
 flate2 = { version = "1.1.10", features = ["zlib"] }
+lpk-core = { path = "../lpk-core", version = "0.0.1" }
 lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
 libz-sys ={ version = "1.1.29", features = ["static"] }
 globset = "0.4.20"
@@ -41,7 +42,6 @@ liblzma = { version = "0.4.8", features = ["static", "parallel"] }
 # Pinned with lpk-core: the stream header layout of 0.5.8 (spec section 8).
 lepton_jpeg = "=0.5.8"
 liblzma-sys = "0.4.9"
-preflate-rs = "0.7.6"
 fastcdc = "5.0.0"
 
 [lints]
