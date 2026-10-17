@@ -28,6 +28,7 @@ use crate::run::validate::validate_dir;
 pub mod mixes;
 pub mod model;
 pub mod render;
+pub mod supersede;
 pub mod traced;
 
 #[cfg(test)]
@@ -223,6 +224,7 @@ fn load_baseline(dir: &Path, sources: &mut Sources, outside: &mut Vec<String>) -
         results,
         pooled: vec![],
         tool_srcs: BTreeMap::new(),
+        superseded: vec![],
     })
 }
 
@@ -358,7 +360,81 @@ fn pool_dir(label: String, b: &Baseline) -> model::PoolDir {
         threads: b.run.threads,
         settle_ms: b.run.settle_ms_per_1000_files,
         antivirus_changed: b.run.antivirus_changed,
+        rows: b.results.iter().map(|(_, s)| *s).collect(),
     }
+}
+
+/// The later directory's `supersedes.toml`, checked against the pool: every entry names one
+/// earlier pooled directory that holds the combination, and the combination is in `next` too.
+/// Returns, per entry, the index of that earlier directory in `base.pooled`.
+fn read_supersedes(
+    base: &Baseline,
+    next: &Baseline,
+    dir: &Path,
+) -> Result<Vec<(supersede::Supersede, usize)>> {
+    let path = dir.join(supersede::FILE_NAME);
+    if !path.is_file() {
+        return Ok(vec![]);
+    }
+    let file = supersede::Supersedes::parse(&read_text(&path)?)
+        .with_context(|| format!("in {}", path.display()))?;
+    let name = path.display();
+    let given: Vec<String> = base
+        .pooled
+        .iter()
+        .map(|d| format!("`{}`", d.label))
+        .collect();
+    let mut out = Vec::with_capacity(file.supersede.len());
+    for e in file.supersede {
+        let combination = e.combination();
+        let matches: Vec<usize> = base
+            .pooled
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| e.names(&d.label))
+            .map(|(i, _)| i)
+            .collect();
+        let from = match matches.as_slice() {
+            [i] => *i,
+            [] => bail!(
+                "{name}: {combination}: `from = \"{}\"` names no earlier --results directory \
+                 (given before this one: {})",
+                e.from,
+                given.join(", ")
+            ),
+            _ => bail!(
+                "{name}: {combination}: `from = \"{}\"` names more than one earlier directory; \
+                 give the full label",
+                e.from
+            ),
+        };
+        if !next.results.iter().any(|(r, _)| is_row(r, &e)) {
+            bail!(
+                "{name}: {combination} is listed as superseding, but `{}` has no such row",
+                next.dir
+            );
+        }
+        if row_of(base, &e, from).is_none() {
+            bail!(
+                "{name}: {combination} is listed as superseded, but `{}` has no such row",
+                base.pooled[from].label
+            );
+        }
+        out.push((e, from));
+    }
+    Ok(out)
+}
+
+/// Is `r` the row `e` names?
+fn is_row(r: &ToolResult, e: &supersede::Supersede) -> bool {
+    r.tool.id == e.tool && r.setting.id == e.setting && r.class == e.class
+}
+
+/// The position in `base.results` of the row `e` names, supplied by `base.pooled[from]`.
+fn row_of(base: &Baseline, e: &supersede::Supersede, from: usize) -> Option<usize> {
+    base.results
+        .iter()
+        .position(|(r, s)| is_row(r, e) && base.pooled[from].rows.contains(s))
 }
 
 /// Does `b` hold a result row of tool `id`?
@@ -400,6 +476,7 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path, allow_unclean: bool) ->
         );
     }
     let pd = pool_dir(dir_label(dir).0, &next);
+    let supersedes = read_supersedes(base, &next, dir)?;
     let (base_rows, next_rows): (Vec<String>, Vec<String>) = (
         base.tools
             .tools
@@ -466,6 +543,30 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path, allow_unclean: bool) ->
         }
         base.tools.tools[slot] = merged;
     }
+    // The superseded rows leave the earlier directory's contribution (never the disk): the
+    // later directory's rows then pool like any other.
+    for (e, from) in supersedes {
+        let (Some(pos), Some((_, by_src))) = (
+            row_of(base, &e, from),
+            next.results.iter().find(|(r, _)| is_row(r, &e)),
+        ) else {
+            bail!("{name}: {} vanished while pooling", e.combination());
+        };
+        let (_, from_src) = base.results.remove(pos);
+        base.pooled[from].rows.retain(|s| *s != from_src);
+        let key = (&e.tool, &e.setting, &e.class);
+        base.run.combinations.retain(|c| (&c.tool, &c.setting, &c.class) != key);
+        base.superseded.push(model::Superseded {
+            tool: e.tool,
+            setting: e.setting,
+            class: e.class,
+            from: base.pooled[from].label.clone(),
+            from_src,
+            by: pd.label.clone(),
+            by_src: *by_src,
+            reason: e.reason,
+        });
+    }
     for c in next.run.combinations {
         if base
             .run
@@ -507,6 +608,14 @@ pub fn load(args: &ReportArgs) -> Result<Inputs> {
     };
     let mut baseline =
         load_baseline_checked(first_dir, args.allow_unclean, &mut sources, &mut outside)?;
+    if first_dir.join(supersede::FILE_NAME).is_file() {
+        bail!(
+            "{}: carries {}, so it replaces rows of an earlier directory: give that directory \
+             first (--results <earlier> --results <this one>)",
+            first_dir.display(),
+            supersede::FILE_NAME
+        );
+    }
     if !more.is_empty() {
         let first = pool_dir(dir_label(first_dir).0, &baseline);
         baseline.pooled.push(first);

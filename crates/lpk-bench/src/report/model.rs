@@ -94,6 +94,31 @@ pub struct PoolDir {
     pub threads: u32,
     pub settle_ms: u64,
     pub antivirus_changed: bool,
+    /// The source ids of the result rows this directory supplies to the pool (a superseded row
+    /// is taken out of its directory's list).
+    pub rows: Vec<SourceId>,
+}
+
+/// One row of an earlier pooled directory replaced by a later directory's re-measurement, as
+/// listed in the later directory's `supersedes.toml`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Superseded {
+    pub tool: String,
+    pub setting: String,
+    pub class: String,
+    /// Label of the earlier directory and the source id of its (replaced) row.
+    pub from: String,
+    pub from_src: SourceId,
+    /// Label of the later directory and the source id of the row used instead.
+    pub by: String,
+    pub by_src: SourceId,
+    pub reason: String,
+}
+
+impl Superseded {
+    pub fn combination(&self) -> String {
+        format!("{}/{}/{}", self.tool, self.setting, self.class)
+    }
 }
 
 #[derive(Debug)]
@@ -111,6 +136,9 @@ pub struct Baseline {
     pub pooled: Vec<PoolDir>,
     /// Pooled runs only: the source files each merged `tools.json` entry came from.
     pub tool_srcs: BTreeMap<String, std::collections::BTreeSet<SourceId>>,
+    /// Pooled runs only: rows of an earlier directory replaced by a later one's re-measurement
+    /// (`supersedes.toml`); the replaced rows are not in `results`.
+    pub superseded: Vec<Superseded>,
 }
 
 #[derive(Debug)]
@@ -897,6 +925,8 @@ pub struct Model {
     pub dedup_known: bool,
     pub classes: Vec<ClassView>,
     pub mixes: Vec<MixView>,
+    /// Rows of an earlier pooled directory replaced by a later one (`supersedes.toml`).
+    pub superseded: Vec<Superseded>,
 }
 
 impl Model {
@@ -980,6 +1010,7 @@ impl Model {
             dedup_known,
             classes,
             mixes,
+            superseded: inputs.baseline.superseded.clone(),
         }
     }
 
