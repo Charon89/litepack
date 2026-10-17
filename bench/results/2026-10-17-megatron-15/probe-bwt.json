@@ -1,0 +1,169 @@
+{
+  "build": "7f614f9be362",
+  "build_profile": {
+    "allow_debug_build": false,
+    "debug_assertions": false,
+    "opt_level": "3",
+    "profile": "release"
+  },
+  "corpus": {
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "private": false,
+    "profile": "small"
+  },
+  "data": {
+    "balanced_block": 268435456,
+    "bwt_block": 67108864,
+    "classes": [
+      {
+        "best_bwt": "bwt+ari",
+        "candidates": [
+          {
+            "blocks": 3,
+            "bwt_seconds": 3.7902488,
+            "compress_seconds": 82.187582,
+            "compressed_bytes": 37044622,
+            "decompress_seconds": 5.1993464000000005,
+            "description": "(a) libsais BWT, then the Balanced LZMA (64 MiB dict, lc3 lp0 pb2, preset 9e, nice 273)",
+            "id": "bwt+lzma",
+            "unbwt_seconds": 2.9287375000000004,
+            "verified": true
+          },
+          {
+            "blocks": 3,
+            "bwt_seconds": 3.7902488,
+            "compress_seconds": 69.46139430000001,
+            "compressed_bytes": 38929998,
+            "decompress_seconds": 3.5139189999999996,
+            "description": "(a) libsais BWT, then zstd level 22, long matching, window = LZMA dictionary rule",
+            "id": "bwt+zstd",
+            "unbwt_seconds": 2.9287375000000004,
+            "verified": true
+          },
+          {
+            "blocks": 3,
+            "bwt_seconds": 3.7902488,
+            "compress_seconds": 7.178447800000001,
+            "compressed_bytes": 35876961,
+            "decompress_seconds": 4.8382800999999995,
+            "description": "(b) libsais BWT, then MTF + zero-run + order-1 adaptive binary arithmetic coder",
+            "id": "bwt+ari",
+            "unbwt_seconds": 2.9287375000000004,
+            "verified": true
+          },
+          {
+            "blocks": 3,
+            "bwt_seconds": null,
+            "compress_seconds": 101.44998320000002,
+            "compressed_bytes": 38844551,
+            "decompress_seconds": 2.1436294,
+            "description": "(c) the Balanced LZMA on the same (BWT-cap) blocks",
+            "id": "lzma",
+            "unbwt_seconds": null,
+            "verified": true
+          },
+          {
+            "blocks": 1,
+            "bwt_seconds": null,
+            "compress_seconds": 123.0052111,
+            "compressed_bytes": 38023384,
+            "decompress_seconds": 2.1815461,
+            "description": "(c') the Balanced LZMA on the Balanced tier's own blocks",
+            "id": "lzma-balanced-blocks",
+            "unbwt_seconds": null,
+            "verified": true
+          }
+        ],
+        "class": "text-prose",
+        "files": 51,
+        "passes": true,
+        "plain_bytes": 148205637,
+        "present": true,
+        "reference": "lzma-balanced-blocks"
+      },
+      {
+        "best_bwt": "bwt+ari",
+        "candidates": [
+          {
+            "blocks": 2,
+            "bwt_seconds": 2.4744396,
+            "compress_seconds": 24.6802283,
+            "compressed_bytes": 6564062,
+            "decompress_seconds": 2.7030773999999997,
+            "description": "(a) libsais BWT, then the Balanced LZMA (64 MiB dict, lc3 lp0 pb2, preset 9e, nice 273)",
+            "id": "bwt+lzma",
+            "unbwt_seconds": 2.025409,
+            "verified": true
+          },
+          {
+            "blocks": 2,
+            "bwt_seconds": 2.4744396,
+            "compress_seconds": 20.825785600000003,
+            "compressed_bytes": 6809783,
+            "decompress_seconds": 2.2763783,
+            "description": "(a) libsais BWT, then zstd level 22, long matching, window = LZMA dictionary rule",
+            "id": "bwt+zstd",
+            "unbwt_seconds": 2.025409,
+            "verified": true
+          },
+          {
+            "blocks": 2,
+            "bwt_seconds": 2.4744396,
+            "compress_seconds": 3.8417698999999996,
+            "compressed_bytes": 6322582,
+            "decompress_seconds": 2.373123,
+            "description": "(b) libsais BWT, then MTF + zero-run + order-1 adaptive binary arithmetic coder",
+            "id": "bwt+ari",
+            "unbwt_seconds": 2.025409,
+            "verified": true
+          },
+          {
+            "blocks": 2,
+            "bwt_seconds": null,
+            "compress_seconds": 64.2119471,
+            "compressed_bytes": 7254388,
+            "decompress_seconds": 0.6635927,
+            "description": "(c) the Balanced LZMA on the same (BWT-cap) blocks",
+            "id": "lzma",
+            "unbwt_seconds": null,
+            "verified": true
+          },
+          {
+            "blocks": 1,
+            "bwt_seconds": null,
+            "compress_seconds": 64.2263405,
+            "compressed_bytes": 7254691,
+            "decompress_seconds": 0.635068,
+            "description": "(c') the Balanced LZMA on the Balanced tier's own blocks",
+            "id": "lzma-balanced-blocks",
+            "unbwt_seconds": null,
+            "verified": true
+          }
+        ],
+        "class": "logs-text",
+        "files": 4,
+        "passes": true,
+        "plain_bytes": 111493402,
+        "present": true,
+        "reference": "lzma"
+      }
+    ],
+    "gate_open": true,
+    "min_block_before_boundary": 33554432
+  },
+  "date": "2026-10-17T20:14:37Z",
+  "elapsed_seconds": 565.9051847,
+  "format_version": 1,
+  "host": "megatron",
+  "libraries": {
+    "liblzma": "liblzma 5.8.4 (bundled by liblzma-sys 0.4.9; generic C build, no SIMD or unaligned-access paths)",
+    "libsais": "2.10.3",
+    "libzstd": "1.5.7",
+    "lzma-rs (decode)": "0.3.0",
+    "ruzstd (decode)": "0.9.0"
+  },
+  "library_threads": 1,
+  "notes": [],
+  "probe": "bwt",
+  "threads": 24
+}
