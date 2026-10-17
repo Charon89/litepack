@@ -313,7 +313,8 @@ fn the_memory_bound_reduces_the_pool() {
     assert_eq!((m.plain, m.decoder, m.nested), (env.max_block_plain, 0, 0));
     let largest = a.index().blocks.iter().map(|b| b.frame_len).max().unwrap();
     assert_eq!(m.encoded, largest);
-    assert_eq!(m.per_block, m.encoded + m.plain);
+    assert_eq!(m.step_input, m.plain);
+    assert_eq!(m.per_block, m.encoded + m.plain + m.step_input);
     let cost = m.per_block + m.per_worker;
     for (memory, workers) in [
         (1, 1),

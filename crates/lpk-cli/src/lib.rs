@@ -721,13 +721,14 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
                 };
                 let _ = writeln!(
                     err,
-                    "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}",
+                    "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}",
                     m.budget.bytes,
                     m.tier.name(),
                     m.per_block,
                     m.encoded,
                     m.plain,
                     m.decoder,
+                    m.step_input,
                     m.nested,
                     m.fixed,
                     m.fixed_shared,

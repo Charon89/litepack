@@ -151,7 +151,7 @@ fn check_bound(name: &str, s: &ExtractSummary, peak: u64) {
     let m = &s.memory;
     let room = (THREADS - s.writers).min(s.blocks_needed as usize);
     println!(
-        "{name}: budget {} ({:?}, tier {}), per_block {} (encoded {}, plain {}, decoder {}, nested {}), fixed {}, workers {} of {room}, blocks {}, peak in flight {}, measured peak {peak}, counted {}",
+        "{name}: budget {} ({:?}, tier {}), per_block {} (encoded {}, plain {}, decoder {}, step input {}, nested {}), fixed {}, workers {} of {room}, blocks {}, peak in flight {}, measured peak {peak}, counted {}",
         m.budget.bytes,
         m.budget.source,
         m.tier.name(),
@@ -159,6 +159,7 @@ fn check_bound(name: &str, s: &ExtractSummary, peak: u64) {
         m.encoded,
         m.plain,
         m.decoder,
+        m.step_input,
         m.nested,
         m.fixed,
         s.workers,
@@ -312,7 +313,7 @@ fn the_default_budget_binds_for_a_store_archive() {
         "store default",
         Tier::Store { block },
         block,
-        2 * block,
+        3 * block,
         lpk_core::memory::STORE_CEILING,
     );
 }
@@ -325,7 +326,7 @@ fn the_default_budget_binds_for_a_fast_archive() {
         "fast default",
         Tier::Fast { block },
         block,
-        2 * block + 2 * MIB,
+        3 * block + 2 * MIB,
         FAST_CEILING,
     );
 }
@@ -341,7 +342,7 @@ fn the_default_budget_binds_for_a_balanced_archive() {
             dict: block as u32,
         },
         block,
-        2 * block + 2 * MIB,
+        3 * block + 2 * MIB,
         BALANCED_CEILING,
     );
 }

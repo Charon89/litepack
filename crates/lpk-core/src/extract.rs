@@ -41,10 +41,13 @@
 //!   read into one buffer reserved at its length; twice that for an encrypted archive, whose
 //!   frame is opened into a second buffer), its plain bytes (`plain`: the envelope's
 //!   `max_block_plain`), the decoder's working memory beyond them (`decoder`: `decode_memory -
-//!   max_block_plain`), and in an archive with records (`nested`) the lower block a
-//!   reconstruction reads (its plain bytes and the largest frame of any block, which may lie
-//!   outside the needed ones) plus one more `max_block_plain` for a step's input while the next
-//!   step decodes. A store block's plain bytes are a copy of its frame's, so both are counted;
+//!   max_block_plain`), a step's input while the next step decodes (`step_input`:
+//!   `max_block_plain`, for every archive: the decoder keeps a step's output while the next step
+//!   builds its own for any graph of more than one step, and the index does not say which blocks
+//!   have one, so a graph from any writer is covered), and in an archive with records (`nested`)
+//!   the lower block a reconstruction reads (its plain bytes and the largest frame of any block,
+//!   which may lie outside the needed ones). A store block's plain bytes are a copy of its
+//!   frame's, so both are counted;
 //! - `fixed`: the opened archive's index and chunk table, the plan (per placement its record
 //!   in the block lists and in the writers' split, each list grown by doubling; per file its
 //!   target, name, path, state and chunk counter; per block the lists' headers), each worker's
@@ -223,7 +226,7 @@ pub struct ExtractMemory {
     pub budget: Budget,
     /// The tier the envelope shows (whose ceiling is the default budget).
     pub tier: EnvelopeTier,
-    /// Per block in flight: `encoded + plain + decoder + nested`.
+    /// Per block in flight: `encoded + plain + decoder + step_input + nested`.
     pub per_block: u64,
     /// The largest encoded frame a worker reads (doubled for an encrypted archive).
     pub encoded: u64,
@@ -231,7 +234,9 @@ pub struct ExtractMemory {
     pub plain: u64,
     /// The decoder's working memory beyond the plain bytes: `decode_memory - max_block_plain`.
     pub decoder: u64,
-    /// With records: the nested lower block (plain and frame) and a step's input; else 0.
+    /// A step's input while the next step decodes: `max_block_plain`, for every archive.
+    pub step_input: u64,
+    /// With records: the nested lower block (its plain bytes and frame); else 0.
     pub nested: u64,
     /// Held whatever the workers: the opened archive, the plan, the writers, the dispatcher.
     pub fixed_shared: u64,
@@ -253,6 +258,7 @@ impl Default for ExtractMemory {
             encoded: 0,
             plain: 0,
             decoder: 0,
+            step_input: 0,
             nested: 0,
             fixed_shared: 0,
             per_worker: 0,
@@ -749,17 +755,17 @@ fn pool_size<R: Read + Seek>(archive: &Archive<R>, opts: &ExtractOptions, shape:
         .saturating_mul(copies);
     let plain = env.max_block_plain;
     let decoder = env.decode_memory.saturating_sub(plain);
+    let step_input = plain;
     let nested = if index.records.is_some() {
         let largest = index.blocks.iter().map(|l| l.frame_len).max().unwrap_or(0);
-        plain
-            .saturating_mul(2)
-            .saturating_add(largest.saturating_mul(copies))
+        plain.saturating_add(largest.saturating_mul(copies))
     } else {
         0
     };
     let per_block = encoded
         .saturating_add(plain)
         .saturating_add(decoder)
+        .saturating_add(step_input)
         .saturating_add(nested)
         .max(1);
     // Fixed.
@@ -811,6 +817,7 @@ fn pool_size<R: Read + Seek>(archive: &Archive<R>, opts: &ExtractOptions, shape:
         encoded,
         plain,
         decoder,
+        step_input,
         nested,
         fixed_shared,
         per_worker,
