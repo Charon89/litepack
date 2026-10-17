@@ -1986,6 +1986,133 @@ mod tests {
         assert_eq!(variant("None"), "None");
     }
 
+    /// A PNG built by hand (no encoder), its zlib stream split over three `IDAT` chunks.
+    fn multi_idat_png() -> Vec<u8> {
+        let (w, h) = (48u32, 32u32);
+        let mut raw = Vec::new();
+        for y in 0..h {
+            raw.push(0); // filter type None
+            for x in 0..w * 3 {
+                raw.push(((x * 7 + y * 13) % 251) as u8);
+            }
+        }
+        let z = zlib(&raw);
+        let chunk = |out: &mut Vec<u8>, ty: &[u8], data: &[u8]| {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(ty);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&[0; 4]); // the walker does not check CRCs
+        };
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        let third = z.len() / 3;
+        chunk(&mut out, b"IDAT", &z[..third]);
+        chunk(&mut out, b"tEXt", b"Comment\0between");
+        chunk(&mut out, b"IDAT", &z[third..2 * third]);
+        chunk(&mut out, b"IDAT", &z[2 * third..]);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    /// The five synthetic files of the before/after comparison, with their extensions.
+    fn golden_inputs() -> Vec<(&'static str, &'static str, Vec<u8>)> {
+        let mut bin = b"MZ\x90\x00binary head".to_vec();
+        let mut x = 7u32;
+        for _ in 0..4000 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            bin.push((x >> 24) as u8);
+        }
+        bin.extend_from_slice(&zlib(&text(30_000, 21)));
+        bin.extend_from_slice(b"binary tail");
+        vec![
+            ("zip", "zip", zip_with(&["a.txt", "b.txt"], &[0u8; 6000])),
+            ("png", "png", multi_idat_png()),
+            ("gzip", "gz", gzip(&text(30_000, 22))),
+            ("pdf", "pdf", pdf_bytes(&zlib(&text(20_000, 23)))),
+            ("bin", "bin", bin),
+        ]
+    }
+
+    /// Every count of a file result except the timings, plus the replaced file's length and hash.
+    fn golden_snapshot(r: &FileResult) -> String {
+        let s = &r.streams;
+        let replaced = r
+            .replaced
+            .as_ref()
+            .map(|b| format!("{} {}", b.len(), blake3::hash(b).to_hex()));
+        format!(
+            "kind={} found={} reconstructed={} skipped={} failed={:?} refusals={} false_hits={} \
+             walker_panics={} found_deflate={} reconstructed_deflate={} skipped_deflate={} \
+             failed_deflate={} plain={} corrections={} estimates={:?} overhead={:?} replaced={:?}",
+            r.kind,
+            s.found,
+            s.reconstructed,
+            s.skipped,
+            s.failed,
+            s.structural_refusals,
+            s.scan_false_hits,
+            s.walker_panics,
+            s.found_deflate_bytes,
+            s.reconstructed_deflate_bytes,
+            s.skipped_deflate_bytes,
+            s.failed_deflate_bytes,
+            s.reconstructed_plain_bytes,
+            s.correction_bytes,
+            s.estimates,
+            s.overhead,
+            replaced
+        )
+    }
+
+    /// The probe's counts for the synthetic files, recorded from the probe code before the walker
+    /// moved to `lpk-core` (`lpk_core::peel::deflate`); the inputs are also `lpk-core`'s fixtures.
+    const GOLDEN: [(&str, &[u8], &str); 5] = [
+        (
+            "zip",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/zip.zip"),
+            "kind=zip found=2 reconstructed=2 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=1525 reconstructed_deflate=1525 skipped_deflate=0 failed_deflate=0 plain=12000 corrections=48 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 2, deflate_bytes: 1525, plain_bytes: 12000, correction_bytes: 48 }} overhead={\"1_to_5_pct\": Group { streams: 2, deflate_bytes: 1525, plain_bytes: 12000, correction_bytes: 48 }} replaced=Some(\"12296 527a2dfd1ed0c0c06e5e621c242a286d857fa3de02096d5abe8826de6b014007\")",
+        ),
+        (
+            "png",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/png.png"),
+            "kind=png found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=463 reconstructed_deflate=463 skipped_deflate=0 failed_deflate=0 plain=4640 corrections=49 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 463, plain_bytes: 4640, correction_bytes: 49 }} overhead={\"10_to_25_pct\": Group { streams: 1, deflate_bytes: 463, plain_bytes: 4640, correction_bytes: 49 }} replaced=Some(\"4754 28fbea47ecff8ce408dd920ef2908dd44fe947d8644a490d107766efd00dac7e\")",
+        ),
+        (
+            "gzip",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/gzip.gz"),
+            "kind=gzip found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=3236 reconstructed_deflate=3236 skipped_deflate=0 failed_deflate=0 plain=30000 corrections=24 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 3236, plain_bytes: 30000, correction_bytes: 24 }} overhead={\"under_1_pct\": Group { streams: 1, deflate_bytes: 3236, plain_bytes: 30000, correction_bytes: 24 }} replaced=Some(\"30018 53b01ce9e19b7fdf6cad6bec488dd5d05077c464a587f800f893da34e75457c8\")",
+        ),
+        (
+            "pdf",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/pdf.pdf"),
+            "kind=pdf found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=2205 reconstructed_deflate=2205 skipped_deflate=0 failed_deflate=0 plain=20000 corrections=38 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 2205, plain_bytes: 20000, correction_bytes: 38 }} overhead={\"1_to_5_pct\": Group { streams: 1, deflate_bytes: 2205, plain_bytes: 20000, correction_bytes: 38 }} replaced=Some(\"20117 c659bda7d83ea7b9e5cfc91c629d58a24b54b8b3539a7b72b3ca4c1c8d202d16\")",
+        ),
+        (
+            "bin",
+            include_bytes!("../../../lpk-core/tests/fixtures/deflate/bin.bin"),
+            "kind=other found=1 reconstructed=1 skipped=0 failed={} refusals=0 false_hits=0 walker_panics=0 found_deflate=3223 reconstructed_deflate=3223 skipped_deflate=0 failed_deflate=0 plain=30000 corrections=32 estimates={\"strategy=Default hash=Libdeflate4Fast add=AddFirst match=Greedy zlib_compatible=true\": Group { streams: 1, deflate_bytes: 3223, plain_bytes: 30000, correction_bytes: 32 }} overhead={\"under_1_pct\": Group { streams: 1, deflate_bytes: 3223, plain_bytes: 30000, correction_bytes: 32 }} replaced=Some(\"34032 a48039e84157720e0c6a2908ae3baba5640896f977d367f25d5c5c51ce812491\")",
+        ),
+    ];
+
+    #[test]
+    fn golden_counts_of_synthetic_files_are_unchanged() {
+        let inputs = golden_inputs();
+        assert_eq!(inputs.len(), GOLDEN.len());
+        for ((name, ext, bytes), (g_name, fixture, want)) in inputs.iter().zip(GOLDEN) {
+            assert_eq!(*name, g_name);
+            assert!(
+                bytes == fixture,
+                "{name}: the generated input differs from the fixture"
+            );
+            let r = process_file(bytes, ext, &limits());
+            assert_eq!(golden_snapshot(&r), want, "{name}");
+        }
+    }
+
     fn manifest_file(path: &str, data: &[u8]) -> ManifestFile {
         ManifestFile {
             blake3: blake3::hash(data).to_hex().to_string(),
