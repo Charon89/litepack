@@ -1865,8 +1865,6 @@ dependencies = [
 [[package]]
 name = "preflate-rs"
 version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2e9d0ac8c6cd9bb134681e11b5a32c7c56b89c5958cf785775080def38537c"
 dependencies = [
  "bitcode",
  "byteorder",

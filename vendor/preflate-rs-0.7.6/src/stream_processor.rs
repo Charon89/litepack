@@ -329,6 +329,85 @@ pub fn recreate_whole_deflate_stream(
     Ok(recompressed)
 }
 
+/// LitePack changes 1-3 (LITEPACK-CHANGES.md): [`recreate_whole_deflate_stream`] with an output
+/// limit, for corrections that come from an untrusted source.
+///
+/// Returns the same bytes as [`recreate_whole_deflate_stream`] whenever that function's output
+/// is at most `limit` bytes long and the predictor parameters are ones analysis produces.
+/// Otherwise it returns an error:
+/// - the predictor parameters decoded from the corrections lie outside the ranges
+///   `estimate_preflate_parameters` produces (`InvalidParameterHeader`, before anything is
+///   recreated);
+/// - the recreation would produce more than `limit` blocks: every Deflate block this crate
+///   writes takes at least 10 bits (a fixed-Huffman block with no tokens: 3 header bits and
+///   the 7-bit end-of-block code; a stored block takes 35 bits or more, a dynamic one more
+///   than 10), so a stream of at most `limit` bytes has at most `limit` blocks;
+/// - its output exceeds `limit` bytes. The output is measured after each block, so at most one
+///   block's encoding is held beyond the limit before the error is returned.
+pub fn recreate_whole_deflate_stream_limited(
+    plain_text: &[u8],
+    prediction_corrections: &[u8],
+    limit: usize,
+) -> Result<Vec<u8>> {
+    let r = ReconstructionData::read(prediction_corrections)?;
+
+    crate::estimator::preflate_parameter_estimator::check_decoded_parameters(&r.parameters)?;
+
+    let mut plain = PlainText::new();
+    plain.append(plain_text);
+    let mut input = PreflateInput::new(&plain);
+
+    let mut predictor = TokenPredictor::new(&r.parameters);
+
+    let reader = VP8Reader::new(Cursor::new(r.corrections)).map_err(|e| {
+        PreflateError::new(ExitCode::InvalidPredictionData, e.to_string().as_str())
+    })?;
+    let mut cabac_decoder = PredictionDecoderCabac::new(reader);
+
+    let mut writer = DeflateWriter::new();
+
+    let mut blocks: usize = 0;
+    loop {
+        if blocks >= limit {
+            return Err(PreflateError::new(
+                ExitCode::InvalidDeflate,
+                "recreation exceeds the block limit",
+            ));
+        }
+
+        let block = predictor.recreate_block(&mut cabac_decoder, &mut input)?;
+
+        writer.encode_block(&block)?;
+        blocks += 1;
+
+        if writer.output_len() > limit {
+            return Err(PreflateError::new(
+                ExitCode::InvalidDeflate,
+                "recreation exceeds the output limit",
+            ));
+        }
+
+        // end of stream normally is the last block (as in recreate_blocks)
+        let last = cabac_decoder
+            .decode_correction_bool(CodecCorrection::EndOfChunk, input.remaining() == 0);
+
+        if last {
+            break;
+        }
+    }
+
+    writer.flush();
+
+    let output = writer.detach_output();
+    if output.len() > limit {
+        return Err(PreflateError::new(
+            ExitCode::InvalidDeflate,
+            "recreation exceeds the output limit",
+        ));
+    }
+    Ok(output)
+}
+
 /// takes a deflate compressed stream, analyzes it, decoompresses it, and records
 /// any differences in the encoder codec
 #[cfg(test)]

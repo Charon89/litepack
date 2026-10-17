@@ -107,6 +107,12 @@ impl DeflateWriter {
         self.bitwriter.flush_whole_bytes(&mut self.output);
     }
 
+    /// LitePack change 1 (LITEPACK-CHANGES.md): the number of whole bytes written so far, so a
+    /// limited recreation can stop once its output exceeds the limit.
+    pub fn output_len(&self) -> usize {
+        self.output.len()
+    }
+
     fn encode_huffman(&mut self, tokens: &Vec<DeflateToken>, huffman_writer: &HuffmanWriter) {
         for token in tokens {
             match token {

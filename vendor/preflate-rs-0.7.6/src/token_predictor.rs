@@ -367,7 +367,10 @@ impl TokenPredictor {
 
         // rust aborts on OOM, so check before we allocate to avoid crashing the process
         let mut tokens = Vec::new();
-        if tokens.try_reserve_exact(blocksize as usize).is_err() {
+        // LitePack change 4 (LITEPACK-CHANGES.md): reserve no more tokens than the loop below can
+        // push (each token consumes at least one byte of input); the output is unchanged.
+        let reserve = std::cmp::min(blocksize, input.remaining());
+        if tokens.try_reserve_exact(reserve as usize).is_err() {
             return err_exit_code(ExitCode::OutOfMemory, "Out of memory");
         }
 

@@ -132,6 +132,127 @@ pub fn estimate_preflate_parameters(
     })
 }
 
+/// LitePack change 3 (LITEPACK-CHANGES.md): refuses parameters that
+/// `estimate_preflate_parameters` cannot produce. Used only by
+/// `recreate_whole_deflate_stream_limited`, on the parameters decoded from the corrections.
+///
+/// The accepted sets are read from the function above and from `estimate_preflate_comp_level`:
+/// the store and Huffman-only branch returns one fixed set (only `strategy` and
+/// `block_type_strategy` vary); the other branch bounds every field as checked below.
+pub(crate) fn check_decoded_parameters(p: &TokenPredictorParameters) -> Result<()> {
+    use crate::preflate_error::{ExitCode, err_exit_code};
+    use deflate_constants::{MAX_MATCH, MIN_MATCH};
+
+    let refuse = |what: &str| -> Result<()> {
+        err_exit_code(
+            ExitCode::InvalidParameterHeader,
+            format!("predictor parameter out of range: {what}"),
+        )
+    };
+
+    match p.strategy {
+        PreflateStrategy::Store | PreflateStrategy::HuffOnly => {
+            // the early return of estimate_preflate_parameters
+            if p.window_bits != 0
+                || p.very_far_matches_detected
+                || p.matches_to_start_detected
+                || p.nice_length != 0
+                || p.add_policy != DictionaryAddPolicy::AddAll
+                || p.max_token_count != 16386
+                || !p.zlib_compatible
+                || p.max_dist_3_matches != 0
+                || p.matching_type != MatchingType::Greedy
+                || p.max_chain != 0
+                || p.min_len != 0
+                || p.hash_algorithm != HashAlgorithm::None
+            {
+                return refuse("store or huffman-only set");
+            }
+            return Ok(());
+        }
+        PreflateStrategy::Default | PreflateStrategy::RleOnly => {}
+    }
+
+    // estimate_preflate_window_bits clamps to 9..=15
+    if !(9..=15).contains(&p.window_bits) {
+        return refuse("window_bits");
+    }
+    // (1 << (6 + mem_level)) - 1 with mem_level in 1..=9 (estimate_preflate_mem_level)
+    let tokens = u32::from(p.max_token_count) + 1;
+    if !tokens.is_power_of_two() || !((1u32 << 7)..=(1u32 << 15)).contains(&tokens) {
+        return refuse("max_token_count");
+    }
+    // the parser tables' nice lengths, or 258 when no table row matched
+    if ![8, 16, 32, 128, 258].contains(&p.nice_length) {
+        return refuse("nice_length");
+    }
+    // the tables' matching types, or Greedy when no row matched
+    let lazy_rows: [(u16, u16); 5] = [(4, 4), (8, 16), (8, 32), (32, 128), (32, 258)];
+    match p.matching_type {
+        MatchingType::Greedy => {}
+        MatchingType::Lazy {
+            good_length,
+            max_lazy,
+        } => {
+            if !lazy_rows.contains(&(good_length, max_lazy)) {
+                return refuse("matching_type");
+            }
+        }
+    }
+    // match lengths are at most 258 (estimate_add_policy)
+    match p.add_policy {
+        DictionaryAddPolicy::AddFirst(n) | DictionaryAddPolicy::AddFirstAndLast(n) => {
+            if u32::from(n) > MAX_MATCH {
+                return refuse("add_policy");
+            }
+        }
+        DictionaryAddPolicy::AddAll
+        | DictionaryAddPolicy::AddFirstExcept4kBoundary
+        | DictionaryAddPolicy::AddFirstWith32KBoundary => {}
+    }
+    // a Deflate distance is at most 32768
+    if p.max_dist_3_matches > 32768 {
+        return refuse("max_dist_3_matches");
+    }
+    // max_chain_found + 1 with max_chain_found below 4096
+    if !(1..=4096).contains(&p.max_chain) {
+        return refuse("max_chain");
+    }
+    // the shortest match length, or u32::MAX when no Huffman block holds a match
+    if !((MIN_MATCH..=MAX_MATCH).contains(&p.min_len) || p.min_len == u32::MAX) {
+        return refuse("min_len");
+    }
+    // the candidates of estimate_preflate_comp_level, which depend on whether min_len is 3
+    let hash_ok = if p.min_len == 3 {
+        match p.hash_algorithm {
+            HashAlgorithm::MiniZFast | HashAlgorithm::Libdeflate4 | HashAlgorithm::RandomVector => {
+                true
+            }
+            HashAlgorithm::Zlib {
+                hash_mask,
+                hash_shift,
+            } => {
+                (hash_shift, hash_mask) == (5, 32767)
+                    || (hash_shift, hash_mask) == (4, 2047)
+                    || (8..=16u32).any(|hash_bits| {
+                        (hash_shift, u32::from(hash_mask))
+                            == ((hash_bits + 2) / 3, (1u32 << hash_bits) - 1)
+                    })
+            }
+            _ => false,
+        }
+    } else {
+        matches!(
+            p.hash_algorithm,
+            HashAlgorithm::Libdeflate4Fast | HashAlgorithm::ZlibNG | HashAlgorithm::Crc32cHash
+        )
+    };
+    if !hash_ok {
+        return refuse("hash_algorithm");
+    }
+    Ok(())
+}
+
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
 pub enum PreflateStrategy {
