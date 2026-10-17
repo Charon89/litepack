@@ -720,9 +720,20 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
                         m.tier.name()
                     ),
                 };
+                // A sealed archive's key is derived at open, before its envelope can be read:
+                // its Argon2 memory is limited by the reader's limit, not the tier's budget.
+                let key = if m.key_derivation > 0 {
+                    format!(
+                        "; key derivation at open: argon2_m {} bytes (process peak {} bytes)",
+                        m.key_derivation,
+                        m.peak(s.workers)
+                    )
+                } else {
+                    String::new()
+                };
                 let _ = writeln!(
                     err,
-                    "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}",
+                    "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}{key}",
                     m.budget.bytes,
                     m.tier.name(),
                     m.per_block,

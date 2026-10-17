@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use lpk_core::extract::BLOCK_ALLOWANCE;
 use lpk_core::memory::{Budget, BudgetSource, EnvelopeTier, BALANCED_CEILING, FAST_CEILING};
 use lpk_core::{
     extract_archive, extract_file, register_full_reader, BalancedOptions, DefaultPolicy,
@@ -73,11 +74,26 @@ enum Tier {
 }
 
 fn pack(tier: &Tier, src: &Path, arch: &Path) {
-    pack_sealed(tier, src, arch, None);
+    pack_sealed(tier, src, arch, None, light());
 }
 
-/// [`pack`], encrypted with `credentials` when given (a light Argon2 cost for the test).
-fn pack_sealed(tier: &Tier, src: &Path, arch: &Path, credentials: Option<&Credentials>) {
+/// A light Argon2 cost, for the tests that do not measure the key derivation.
+fn light() -> Argon2Params {
+    Argon2Params {
+        t: 1,
+        m_kib: 8192,
+        p: 1,
+    }
+}
+
+/// [`pack`], encrypted with `credentials` and `argon2` when credentials are given.
+fn pack_sealed(
+    tier: &Tier,
+    src: &Path,
+    arch: &Path,
+    credentials: Option<&Credentials>,
+    argon2: Argon2Params,
+) {
     let mut p = match *tier {
         Tier::Store { block } => Pipeline::store(StoreOptions {
             writer: WriterOptions {
@@ -113,11 +129,7 @@ fn pack_sealed(tier: &Tier, src: &Path, arch: &Path, credentials: Option<&Creden
     };
     p.seal.writer.seal = credentials.map(|c| SealOptions {
         suite: Suite::AesGcm,
-        argon2: Argon2Params {
-            t: 1,
-            m_kib: 8192,
-            p: 1,
-        },
+        argon2,
         listable: false,
         credentials: c.clone(),
     });
@@ -304,6 +316,56 @@ fn a_small_budget_binds_for_a_balanced_archive() {
     );
 }
 
+/// A sealed archive at the writer's default Argon2 cost, extracted with `extract_file` at 24
+/// threads under the default budget: the whole process's peak, the key derivation at open
+/// included, stays within the default budget and within the counted process peak plus the
+/// derivation's own bookkeeping.
+#[test]
+fn the_whole_process_peak_of_a_sealed_extraction_is_within_the_default_budget() {
+    let creds = Credentials::password("correct horse battery staple");
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), 2, 3);
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("d.lpk");
+    let argon2 = Argon2Params::default();
+    pack_sealed(
+        &Tier::Fast { block: MIB },
+        src.path(),
+        &arch,
+        Some(&creds),
+        argon2,
+    );
+    let want = hashes(src.path());
+    let out = work.path().join("o");
+    let opts = ExtractOptions {
+        threads: Some(THREADS),
+        ..ExtractOptions::default()
+    };
+    let (s, peak) = {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let before = ALLOC.current();
+        ALLOC.reset_peak();
+        let s = extract_file(&arch, &out, &[], Some(&creds), &DefaultPolicy, &opts).unwrap();
+        (s, (ALLOC.peak() - before) as u64)
+    };
+    let m = &s.memory;
+    println!(
+        "sealed default: budget {}, key derivation {}, total {}, counted peak {}, measured whole-process peak {peak}",
+        m.budget.bytes,
+        m.key_derivation,
+        m.total(s.workers),
+        m.peak(s.workers)
+    );
+    assert_eq!(m.key_derivation, u64::from(argon2.m_kib) * 1024);
+    assert!(peak >= m.key_derivation, "the derivation is in the peak");
+    assert!(peak <= m.budget.bytes, "{peak} above the default budget");
+    assert!(
+        peak <= m.peak(s.workers) + BLOCK_ALLOWANCE,
+        "{peak} above the counted process peak"
+    );
+    assert_eq!(hashes(&out), want);
+}
+
 /// An encrypted Fast archive: the encoded term is the largest frame twice (the sealed frame
 /// and the opened one), and the bound binds; the bytes are the source's at every count.
 #[test]
@@ -313,7 +375,13 @@ fn a_small_budget_binds_for_an_encrypted_fast_archive() {
     write_tree(src.path(), 4, 6);
     let work = tempfile::tempdir().unwrap();
     let arch = work.path().join("e.lpk");
-    pack_sealed(&Tier::Fast { block: MIB }, src.path(), &arch, Some(&creds));
+    pack_sealed(
+        &Tier::Fast { block: MIB },
+        src.path(),
+        &arch,
+        Some(&creds),
+        light(),
+    );
     let largest = {
         let f = std::fs::File::open(&arch).unwrap();
         let a = Archive::open_with(f, &Resources::default(), Some(&creds)).unwrap();

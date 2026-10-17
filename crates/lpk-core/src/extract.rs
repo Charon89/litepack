@@ -63,8 +63,13 @@
 //! `per_worker` for each worker. A worker holds a permit from before it reads a frame until the
 //! last writer has written the block, so at most `workers` blocks are in flight, each at most
 //! `per_block`. The entry table, read and dropped by the plan before any block is decoded, is
-//! not counted; nor is an encrypted archive's key derivation (the key slot's Argon2 memory),
-//! which runs at open, is freed before the plan, and is bounded by the reader's limit. A given
+//! not counted. An encrypted archive's key derivation (the key slot's Argon2 memory,
+//! `key_derivation`) runs at open and is freed before the plan, so the process peak is
+//! `max(key_derivation, total(workers))` ([`ExtractMemory::peak`]). The derivation cannot be
+//! held to the tier's budget: a sealed archive's index, and with it the envelope that shows the
+//! tier, is readable only with the derived key, so at the derivation the only limit known is the
+//! reader's (`--memory`, else [`crate::memory::EXTRACT_CEILING`] resolved), against which the
+//! key slot's `argon2_m` is checked (an archive asking more is refused at open). A given
 //! budget below one block in flight (`total(1)`: `fixed_shared + per_block + per_worker`) is
 //! refused with that figure before any directory or file is created, as the compress side
 //! refuses (D-67 (1)); a default budget that small runs one worker.
@@ -250,6 +255,10 @@ pub struct ExtractMemory {
     pub per_worker: u64,
     /// `fixed_shared + per_worker * workers`.
     pub fixed: u64,
+    /// A sealed archive's key derivation at open: the key slot's Argon2 memory (`argon2_m`, in
+    /// bytes); 0 for an archive that is not encrypted. Freed before the plan, so not part of
+    /// [`ExtractMemory::total`]; the process peak is [`ExtractMemory::peak`].
+    pub key_derivation: u64,
 }
 
 impl Default for ExtractMemory {
@@ -269,6 +278,7 @@ impl Default for ExtractMemory {
             fixed_shared: 0,
             per_worker: 0,
             fixed: 0,
+            key_derivation: 0,
         }
     }
 }
@@ -280,6 +290,12 @@ impl ExtractMemory {
         let w = u64::try_from(workers).unwrap_or(u64::MAX);
         self.fixed_shared
             .saturating_add(w.saturating_mul(self.per_block.saturating_add(self.per_worker)))
+    }
+
+    /// The process's counted peak with `workers` workers: the larger of the key derivation at
+    /// open and [`ExtractMemory::total`] (the two never overlap).
+    pub fn peak(&self, workers: usize) -> u64 {
+        self.key_derivation.max(self.total(workers))
     }
 }
 
@@ -847,6 +863,9 @@ fn pool_size<R: Read + Seek>(archive: &Archive<R>, opts: &ExtractOptions, shape:
         fixed_shared,
         per_worker,
         fixed: fixed_shared.saturating_add((workers as u64).saturating_mul(per_worker)),
+        key_derivation: archive
+            .key_slot()
+            .map_or(0, |k| u64::from(k.argon2.m_kib).saturating_mul(1024)),
     };
     Pool {
         threads,

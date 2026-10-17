@@ -120,6 +120,38 @@ fn a_256_mib_window_is_refused_below_its_memory_and_extracts_by_default() {
     );
 }
 
+/// A sealed archive: `lpk x -v` shows the key slot's `argon2_m` (the writer's default, 64 MiB)
+/// and the process peak, the larger of it and the extraction's count.
+#[test]
+fn x_v_shows_the_key_derivation_of_a_sealed_archive() {
+    let src = tempfile::tempdir().unwrap();
+    fs::write(src.path().join("t.txt"), prose(5, 300_000)).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("s.lpk");
+    let a = run(&[
+        "a".as_ref(),
+        arch.as_os_str(),
+        src.path().as_os_str(),
+        "--password".as_ref(),
+        "pw".as_ref(),
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let out = work.path().join("out");
+    let x = run(&[
+        "x".as_ref(),
+        arch.as_os_str(),
+        out.as_os_str(),
+        "--password".as_ref(),
+        "pw".as_ref(),
+        "-v".as_ref(),
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    let v = text(&x.stderr);
+    let m = u64::from(lpk_format::Argon2Params::default().m_kib) * 1024;
+    assert_eq!(figure(&v, "argon2_m "), m, "{v}");
+    assert!(figure(&v, "process peak ") >= m, "{v}");
+}
+
 /// The `-v` figure after `key` in `v`.
 fn figure(v: &str, key: &str) -> u64 {
     let at = v.find(key).unwrap_or_else(|| panic!("{key:?} in {v}")) + key.len();
