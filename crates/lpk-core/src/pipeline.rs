@@ -1004,11 +1004,13 @@ fn add_symlink<W: Write>(writer: &mut OutWriter<W>, input: &Input) -> Result<(),
 }
 
 /// Read a whole input (a file a peel stage applies to); a length that changed since the walk is
-/// `ChangedWhileReading`.
+/// `ChangedWhileReading`, the walk's changed-file rule. At most one byte past the walked length
+/// is read, so a file that grew is never read whole.
 fn read_all(source: &Source, input: &Input) -> Result<Vec<u8>, CoreError> {
     let mut data = Vec::with_capacity(usize::try_from(input.len).unwrap_or(0));
     source
         .open(input)?
+        .take(input.len.saturating_add(1))
         .read_to_end(&mut data)
         .map_err(|e| CoreError::io(&input.source, e))?;
     if data.len() as u64 != input.len {
