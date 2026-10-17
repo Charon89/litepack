@@ -18,10 +18,12 @@ use std::sync::Mutex;
 
 use lpk_core::memory::{Budget, BudgetSource, EnvelopeTier, BALANCED_CEILING, FAST_CEILING};
 use lpk_core::{
-    extract_file, BalancedOptions, DefaultPolicy, ExtractOptions, ExtractSummary, FastOptions,
-    Pipeline, StoreOptions,
+    extract_archive, extract_file, register_full_reader, BalancedOptions, DefaultPolicy,
+    ExtractOptions, ExtractSummary, FastOptions, Pipeline, StoreOptions,
 };
-use lpk_format::{Archive, Envelope, Resources, WriterOptions};
+use lpk_format::{
+    Archive, Argon2Params, Credentials, Envelope, Resources, SealOptions, Suite, WriterOptions,
+};
 use lpk_procstat_sys::alloc::CountingAlloc;
 
 #[global_allocator]
@@ -71,7 +73,12 @@ enum Tier {
 }
 
 fn pack(tier: &Tier, src: &Path, arch: &Path) {
-    let p = match *tier {
+    pack_sealed(tier, src, arch, None);
+}
+
+/// [`pack`], encrypted with `credentials` when given (a light Argon2 cost for the test).
+fn pack_sealed(tier: &Tier, src: &Path, arch: &Path, credentials: Option<&Credentials>) {
+    let mut p = match *tier {
         Tier::Store { block } => Pipeline::store(StoreOptions {
             writer: WriterOptions {
                 block_size: block,
@@ -104,6 +111,16 @@ fn pack(tier: &Tier, src: &Path, arch: &Path) {
             p
         }
     };
+    p.seal.writer.seal = credentials.map(|c| SealOptions {
+        suite: Suite::AesGcm,
+        argon2: Argon2Params {
+            t: 1,
+            m_kib: 8192,
+            p: 1,
+        },
+        listable: false,
+        credentials: c.clone(),
+    });
     p.run_file(src, arch).unwrap();
 }
 
@@ -132,17 +149,53 @@ fn hashes(root: &Path) -> BTreeMap<PathBuf, [u8; 32]> {
 /// Extract `arch` under a fresh `out` and return the summary and the peak heap use above what
 /// was allocated before.
 fn measure(arch: &Path, out: &Path, threads: usize, memory: Option<u64>) -> (ExtractSummary, u64) {
+    measure_as(arch, out, threads, memory, None)
+}
+
+/// [`measure`] with the key material of an encrypted archive. The archive is opened first, as
+/// `extract_file` opens it, and the peak is taken over the extraction only: the key derivation
+/// (the key slot's Argon2 memory) runs at open, is freed before the plan, and is bounded by the
+/// reader's limit (an archive whose key slot asks more is refused at open), so it is not a
+/// term of the extraction's count. The opened archive's index and chunk table, allocated
+/// before the reset, stay counted in `fixed_shared`.
+fn measure_as(
+    arch: &Path,
+    out: &Path,
+    threads: usize,
+    memory: Option<u64>,
+    credentials: Option<&Credentials>,
+) -> (ExtractSummary, u64) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let opts = ExtractOptions {
         threads: Some(threads),
         memory,
         ..ExtractOptions::default()
     };
+    let Some(creds) = credentials else {
+        let before = ALLOC.current();
+        ALLOC.reset_peak();
+        let s = extract_file(arch, out, &[], None, &DefaultPolicy, &opts).unwrap();
+        return (s, (ALLOC.peak() - before) as u64);
+    };
+    let resources = Resources {
+        memory: memory
+            .unwrap_or_else(|| Budget::resolve(None, lpk_core::memory::EXTRACT_CEILING).bytes),
+        ..Resources::default()
+    };
+    let f = std::fs::File::open(arch).unwrap();
+    let mut a = Archive::open_with(f, &resources, Some(creds)).unwrap();
+    register_full_reader(&mut a);
     let before = ALLOC.current();
     ALLOC.reset_peak();
-    let s = extract_file(arch, out, &[], None, &DefaultPolicy, &opts).unwrap();
-    let peak = (ALLOC.peak() - before) as u64;
-    (s, peak)
+    let s = extract_archive(
+        &mut a,
+        || std::fs::File::open(arch),
+        out,
+        &DefaultPolicy,
+        &opts,
+    )
+    .unwrap();
+    (s, (ALLOC.peak() - before) as u64)
 }
 
 /// The bound binds (fewer workers than the threads and the blocks would allow), the peak is
@@ -249,6 +302,43 @@ fn a_small_budget_binds_for_a_balanced_archive() {
         6,
         EnvelopeTier::Fast,
     );
+}
+
+/// An encrypted Fast archive: the encoded term is the largest frame twice (the sealed frame
+/// and the opened one), and the bound binds; the bytes are the source's at every count.
+#[test]
+fn a_small_budget_binds_for_an_encrypted_fast_archive() {
+    let creds = Credentials::password("correct horse battery staple");
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), 4, 6);
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("e.lpk");
+    pack_sealed(&Tier::Fast { block: MIB }, src.path(), &arch, Some(&creds));
+    let largest = {
+        let f = std::fs::File::open(&arch).unwrap();
+        let a = Archive::open_with(f, &Resources::default(), Some(&creds)).unwrap();
+        assert!(a.is_encrypted());
+        a.index().blocks.iter().map(|b| b.frame_len).max().unwrap()
+    };
+    let want = hashes(src.path());
+    let c = Some(&creds);
+    let (wide, _) = measure_as(
+        &arch,
+        &work.path().join("o0"),
+        THREADS,
+        Some(u64::MAX / 2),
+        c,
+    );
+    assert_eq!(wide.memory.encoded, 2 * largest, "{:?}", wide.memory);
+    let budget = wide.memory.total(3);
+    let (s, peak) = measure_as(&arch, &work.path().join("o1"), THREADS, Some(budget), c);
+    assert_eq!(s.workers, 3);
+    check_bound("fast encrypted", &s, peak);
+    let (one, peak) = measure_as(&arch, &work.path().join("o2"), 1, Some(budget), c);
+    check_one("fast encrypted", &one, peak);
+    for o in ["o0", "o1", "o2"] {
+        assert_eq!(hashes(&work.path().join(o)), want, "fast encrypted {o}");
+    }
 }
 
 /// A peeled archive (JPEG records): the nested lower block is counted, and the bound binds.
