@@ -477,6 +477,10 @@ fn lzma(
     // With the end-of-payload marker (what liblzma writes).
     let (r, w, _) = run(None);
     if r.is_ok() && !w.overflow {
+        // Section 8, rule 5: in the last step a marker before the output bound is `truncated`.
+        if last && (w.buf.len() as u64) < bound {
+            return Err(lzerr("truncated"));
+        }
         return Ok(w.buf);
     }
     if !last {
@@ -499,5 +503,50 @@ fn lzma(
         Ok(()) => Err(lzerr("trailing input")),
         Err(ref e) if is_eof(e) => Err(lzerr("truncated")),
         Err(e) => Err(lzerr(&e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    /// A raw LZMA1 stream (lc 3, lp 0, pb 2) of `plain` that ends with the end-of-payload marker.
+    fn marked_stream(plain: &[u8]) -> (Vec<u8>, u32) {
+        let mut out = Vec::new();
+        lzma_rs::lzma_compress(&mut std::io::Cursor::new(plain), &mut out).unwrap();
+        // `.lzma` header: properties, dictionary size, then an unknown size (all ones), so the
+        // stream carries the marker.
+        assert_eq!(out[0], (2 * 5) * 9 + 3);
+        assert_eq!(out[5..13], [0xFF; 8]);
+        let dict = u32::from_le_bytes(out[1..5].try_into().unwrap());
+        (out[13..].to_vec(), dict)
+    }
+
+    fn ctx(priors: &HashMap<[u8; 32], Vec<u8>>) -> DecodeCtx<'_> {
+        DecodeCtx {
+            priors,
+            max_window: 1 << 30,
+            max_block_plain: 1 << 20,
+            jpeg: true,
+        }
+    }
+
+    #[test]
+    fn lzma_marker_before_the_declared_length_is_truncated() {
+        let plain = b"an lzma stream with its end marker, then a block that claims one byte more";
+        let (enc, dict) = marked_stream(plain);
+        let p = HashMap::new();
+        let n = plain.len() as u64;
+        // Declared exactly: decodes.
+        let ok = lzma(&enc, dict, 3, 0, 2, n, true, &ctx(&p)).unwrap();
+        assert_eq!(ok, plain);
+        // Declared one byte longer: the marker comes first.
+        let err = lzma(&enc, dict, 3, 0, 2, n + 1, true, &ctx(&p)).unwrap_err();
+        assert_eq!(err.class, "LzmaError");
+        assert!(err.detail.ends_with("truncated"), "{}", err.detail);
+        // A step that is not the last is bounded only, and the marker ends it there.
+        let mid = lzma(&enc, dict, 3, 0, 2, n + 1, false, &ctx(&p)).unwrap();
+        assert_eq!(mid, plain);
     }
 }
