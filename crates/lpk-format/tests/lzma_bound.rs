@@ -220,15 +220,19 @@ fn marked(len: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 /// Ruling 1 (gap 1): in a step that is not the last, once the output has reached the bound, input
 /// that ends inside the next symbol (here the marker, cut short) is `marker required`.
 #[test]
-#[ignore = "ruling 1: next commit"]
 fn input_ending_inside_the_symbol_after_the_bound_is_marker_required() {
     let (data, p, raw) = marked(5000);
     let bound = data.len() as u64;
     assert!(step(&p, &raw, bound).unwrap() == data);
-    // Cut inside the marker: the output still reaches the bound (checked with the known size).
+    // Cut inside the marker: the output still reaches the bound (in the last step the cut
+    // marker's bytes are input after the position at the bound).
     for cut in 1..=3 {
         let short = &raw[..raw.len() - cut];
-        assert!(last(&p, short, bound).unwrap() == data, "cut {cut}");
+        assert_eq!(
+            reason(last(&p, short, bound)),
+            "trailing input",
+            "cut {cut}"
+        );
         assert_eq!(
             reason(step(&p, short, bound)),
             "marker required",

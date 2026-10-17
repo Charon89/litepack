@@ -102,20 +102,33 @@ impl PrimitiveDecoder for LzmaDecoder {
                 // `PayloadTooLarge` (spec section 8, lzma rules 3 and 6); an error at an
                 // earlier position keeps its class. The byte past the bound cannot fail on
                 // its distance (it is at most the bytes produced, which fit the buffer).
-                _ => match pass(
-                    props,
-                    buffer,
-                    Some(expected_len.saturating_add(1)),
-                    input,
-                    expected_len,
-                    limits,
-                ) {
-                    // (A marker before the bound reads as a short unpacked size: not a crossing.)
-                    Err(p @ FormatError::PayloadTooLarge { len, .. }) if len > expected_len => {
-                        Err(p)
+                second => {
+                    let reached =
+                        matches!(&second, Ok((out, _)) if out.len() as u64 == expected_len);
+                    match pass(
+                        props,
+                        buffer,
+                        Some(expected_len.saturating_add(1)),
+                        input,
+                        expected_len,
+                        limits,
+                    ) {
+                        // (A marker before the bound reads as a short unpacked size: not a
+                        // crossing.)
+                        Err(p @ FormatError::PayloadTooLarge { len, .. }) if len > expected_len => {
+                            Err(p)
+                        }
+                        // The output reached the bound and the input ends inside the next
+                        // symbol: `marker required` (spec section 8, the `lzma` step that is
+                        // not the last).
+                        Err(FormatError::LzmaError { reason })
+                            if reached && reason == "truncated" =>
+                        {
+                            Err(lerr("marker required"))
+                        }
+                        _ => Err(e),
                     }
-                    _ => Err(e),
-                },
+                }
             },
         }
     }
