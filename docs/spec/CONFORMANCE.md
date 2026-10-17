@@ -11,9 +11,9 @@ An independent decoder passes the gate when, for every archive in the table belo
 2. it extracts every entry bit-exactly: for each line of `files` in `tests/vectors/expected.toml` the path,
    the byte length and the BLAKE3-256 of the extracted bytes are equal, in entry-table order;
 3. its `verify` is clean: every frame hash, every block's decoded length, every chunk hash, the index's Merkle
-   root and its `entry_table_hash` check out, for a revision 1.1 vector every record's `original_hash` too (spec
-   section 8), the extracted entries match the hashes of `files` in `expected.toml` (`expected-1.1.toml` for the
-   revision 1.1 vectors), and it reports no error;
+   root and its `entry_table_hash` check out, for a revision 1.1 or 1.2 vector every record's `original_hash` too
+   (spec section 8), the extracted entries match the hashes of `files` in `expected.toml` (`expected-1.1.toml` for
+   the revision 1.1 vectors, `expected-1.2.toml` for the revision 1.2 vector), and it reports no error;
 4. its `list` output, if it has one in the reference format, is `list` of `expected.toml`; its `verify` summary,
    likewise, is `verify` (`ok: <entries> entries, <chunks> chunks, <blocks> blocks`). Only the facts matter (entry
    count, chunk count, block count); the wording of a different tool is free;
@@ -62,6 +62,8 @@ One TOML table per vector, named by the file name in quotes (`["zstd-basic.lpk"]
 | `info` | string | `jpeg-peel.lpk` | the stdout of `lpk-decode info` |
 | `error_1_0`, `message_1_0` | string | `jpeg-peel.lpk` | the error class a revision 1.0 reader's `verify` reports (`UnimplementedPrimitive`) and the reference reader's message (informative) |
 | `verify_exit_1_0`, `verify_stderr_1_0` | integer, string | `jpeg-peel.lpk` | the exit code and stderr of `lpk-decode verify` (a 1.0 reader) |
+| `info`, `error_1_0`, `message_1_0`, `verify_exit_1_0`, `verify_stderr_1_0` | as above | `deflate-peel.lpk` | the same keys for every reader before revision 1.2 (`UnimplementedPrimitive`, ID 8) |
+| `files_1_0` | array of strings | `deflate-peel.lpk` | the lines of `files` (same format) for the entries a reader before revision 1.2 extracts: those with no chunk in a `deflate-reconstruct` block |
 
 A decoder needs only `files`, `latest_generation`, `files_at_generation_<g>`, `error` and the recovery counts; the
 stdout strings matter only to a decoder that prints the reference formats.
@@ -105,6 +107,7 @@ Graph = the block graph of the data blocks. Recovery = recovery frames present. 
 | `malformed-hashflip.lpk` | zstd | no | 1 | nothing | not a valid archive: see below |
 | `malformed-recovery-damaged.lpk` | store | yes | 1 | nothing | one damaged data shard: `check` reports it, `repair` restores `recovery-groups.lpk` |
 | `jpeg-peel.lpk` | store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 1 | a revision 1.1 reader | a peeled JPEG: the primary image as a Lepton stream in a block of its own, an MPF secondary image and trailing data as nested chunks in a lower block, one `jpeg` record; see below |
+| `deflate-peel.lpk` | zstd, `[lzma, deflate-reconstruct]` and `[zstd, deflate-reconstruct]` (revision 1.2, header minor 2) | no | 1 | a revision 1.2 reader | four peeled Deflate streams (two ZIP members, a PNG's IDAT stream over three spans, a gzip member) as section 9 lays them out: both model steps as non-final steps, one inflated text above `max_block_plain` (the bound of section 8), ZIP, PNG and gzip framing as plain chunks, four `deflate` records; a plain text file every reader extracts; see below |
 | `journal-record.lpk` | store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 2 | a revision 1.1 reader | generation 0 holds a store-encoded text file; generation 1 is an append that adds a peeled JPEG (as in `jpeg-peel.lpk`): an appended generation's `Records` frame restates the old records (none here) and adds one, and the appended blocks name a record by its position in that frame |
 
 The passwords and the keyfile are also in `tests/vectors/vectors.toml` (test values, not secrets). The four sealed
@@ -116,7 +119,7 @@ Recovery expectations (`expected.toml`): for `recovery-groups.lpk` `check` print
 reports 1 damaged shard and exits 1, and `repair` writes a copy that is byte-identical to `recovery-groups.lpk`
 (1 shard repaired). The other vectors carry no recovery frames, so `check` finds nothing to scan on them.
 
-Apart from `jpeg-peel.lpk` and `journal-record.lpk`, the vectors do not exercise the reconstruction primitives (7 to
+Apart from `jpeg-peel.lpk`, `journal-record.lpk` and `deflate-peel.lpk`, the vectors do not exercise the reconstruction primitives (7 to
 12); a decoder that meets one it does not run reports `UnimplementedPrimitive` and does not guess.
 
 `jpeg-peel.lpk` and `journal-record.lpk` (revision 1.1). Which expectations apply depends on the decoder's
@@ -137,6 +140,25 @@ revision (`expected.toml` has a 1.0 table for `jpeg-peel.lpk` only; `journal-rec
   of the reference full reader's `verify`, exit code 0); the primary image is the Lepton stream's decoding, and the
   record's `original_hash` is checked over the assembled file (spec section 8). `expected-1.1.toml` is checked by
   `cargo test -p lpk-core --test jpeg_vector`.
+
+`deflate-peel.lpk` (revision 1.2). For this vector the `_1_0` keys of `expected.toml` describe every reader before
+revision 1.2, a revision 1.1 reader included (it does not run `deflate-reconstruct` either):
+
+- A reader before revision 1.2 reads the `["deflate-peel.lpk"]` table of `expected.toml`. It MUST open the vector,
+  list it (key `list`), print `info` (key `info`: `format: 1.2`, `records: true`), verify its frames and records,
+  and report `UnimplementedPrimitive` with the ID 8 from `verify` (keys `error_1_0`, `message_1_0`,
+  `verify_exit_1_0`, `verify_stderr_1_0`) and from extracting any entry with a chunk in a `deflate-reconstruct`
+  block; it MUST extract the entries of the key `files_1_0` (`readme.txt`) bit-exactly.
+- A revision 1.2 decoder reads `expected-1.2.toml` (keys `files` and `verify`); `list` and `info` of
+  `expected.toml` apply to it as well. It MUST extract every entry to the bytes of `files` and `verify` the vector
+  (exit code 0): each Deflate stream is recreated from its plain text, the output of the block's `lzma` or `zstd`
+  step, whose bound is the record's `plain_len` (spec section 8, "Bounds"), and checked against the record's
+  `original_len` and `original_hash`. `expected-1.2.toml` is checked by
+  `cargo test -p lpk-core --test deflate_vector`.
+
+To regenerate the vector: `cargo test -p lpk-core --test deflate_vector -- --ignored regenerate`, then
+`cargo test -p lpk-format --test conformance -- --ignored`; byte identity needs the same liblzma, libzstd,
+`preflate-rs`, `bitcode` and `cabac` versions. Its inputs are committed fixtures (spec section 11).
 
 ## Malformed vectors
 

@@ -123,3 +123,32 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    also refuse, with the same `Refused` (`recovery group`), a group whose rebuild would exceed a work bound it
    documents. Section 14's `MissingKeySlot` clause drops its short-input half, which opening never reaches, and lists
    `BadFrameLocation` (`frames`) among its errors. Found by the independent decoder's author and its review.
+
+## 2026-10-16 — revision 1.2: deflate-reconstruct decoding
+
+1. `version_minor` 2 for revision 1.2, with the declaration rule of 1.1: a 1.2 writer writes 2 whether or not a block
+   names `deflate-reconstruct`; a 1.0 or 1.1 reader accepts minor 2, lists the archive, verifies its frames and
+   records, and reports `UnimplementedPrimitive` (8) for the blocks that name the primitive (section 2; code: the
+   writer refuses 0x0008 under a minor below 2).
+2. `deflate-reconstruct` recreates one raw Deflate stream (RFC 1951) from its plain text and the record's
+   `corrections`; the codec is defined by citing `preflate-rs` 0.7.6 exactly (`recreate_whole_deflate_stream`), with
+   `library` 0 naming it; checks (1) to (8) in the reference's order, with the `BadRecord` reasons `kind`,
+   `corrections`, `plain_len`, `original_len` and `original_hash`, `BlockLengthMismatch` and `PayloadTooLarge` for
+   `original_len` against the step's bound, and `Refused` (`decode_memory`) for the term 8 × `plain_len` + 2 ×
+   (corrections length) + 16777216, a lasting threshold with its derivation (informative); the registry row's
+   resources become "memory per stream, declared by `decode_memory`"; a reader may refuse, as `corrections`, a
+   recreation past the reference's stated limits (block count, predictor parameter ranges, hops above
+   `max_chain`); a writer writes the step last (code: `BadGraph` `deflate-reconstruct not last`) (section 8).
+3. The step before `deflate-reconstruct` is bounded by the record's `plain_len` instead of `max_block_plain`, with
+   checks (1) to (5) applied before it runs, using the deflate step's own bound (the block's `plain_len` when it is
+   last, `max_block_plain` otherwise), and again at the step with its actual bound, the same class either way (code;
+   section 8 "Bounds", and the bound in the `lzma` section).
+4. How the reference writer lays out a peeled Deflate stream: framing as plain parts first, then per stream the
+   record and a block of its own whose chunks are cut per span (section 9, informative).
+5. Section 12: the deflate body's `corrections` and `library` rows name section 8 and preflate-rs 0.7.6; a
+   `deflate` record names no chunks, so the chunk rules have nothing to check; the nested peel the container body
+   mentions does not occur while no revision specifies `container-reconstruct`; revision 1.2's full reader applies
+   `deflate` records. No behaviour change. Section 16 lists the new reasons.
+6. New vector `deflate-peel.lpk` (section 11) with `expected-1.2.toml` (full reader: `files`, `verify`) and a
+   `["deflate-peel.lpk"]` table in `expected.toml` (a pre-1.2 reader: `list`, `info`, `UnimplementedPrimitive` (8),
+   and the new key `files_1_0`, the entries such a reader extracts). No byte of an earlier vector changed.
