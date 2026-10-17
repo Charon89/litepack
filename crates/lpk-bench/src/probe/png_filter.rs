@@ -401,7 +401,9 @@ fn crate_rows(file: &[u8]) -> std::result::Result<Vec<u8>, String> {
     );
     dec.set_transformations(png::Transformations::IDENTITY);
     let mut reader = dec.read_info().map_err(|e| e.to_string())?;
-    let size = reader.output_buffer_size().ok_or_else(|| "output size overflows".to_string())?;
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| "output size overflows".to_string())?;
     let mut buf = vec![0u8; size];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     buf.truncate(info.buffer_size());
@@ -470,9 +472,14 @@ fn process_stream(
             return Ok(out);
         }
     };
-    let raster = layout.deinterlace(&undone.raw).map_err(|e| anyhow!("de-interlace: {e}"))?;
+    let raster = layout
+        .deinterlace(&undone.raw)
+        .map_err(|e| anyhow!("de-interlace: {e}"))?;
     if theirs != raster {
-        return Err(mismatch(mismatches, "the undone rows differ from the png crate's"));
+        return Err(mismatch(
+            mismatches,
+            "the undone rows differ from the png crate's",
+        ));
     }
     drop(theirs);
     drop(raster);
@@ -480,7 +487,10 @@ fn process_stream(
     let (back, refilter_seconds) = timed(|| layout.refilter(&undone.raw, &undone.filters));
     let back = back.map_err(|e| anyhow!("re-filter: {e}"))?;
     if back != plain {
-        return Err(mismatch(mismatches, "the re-filtered rows differ from the inflated text"));
+        return Err(mismatch(
+            mismatches,
+            "the re-filtered rows differ from the inflated text",
+        ));
     }
     drop(back);
     let mut filter_counts = [0u64; 5];
@@ -517,7 +527,9 @@ fn process_stream(
             .refilter_uniform(&undone.raw, f)
             .map_err(|e| anyhow!("re-filter {name}: {e}"))?;
         // Each uniform text undoes to the raw rows with that filter on every scanline.
-        let again = layout.undo(&text).map_err(|e| anyhow!("undo of the {name} text: {e}"))?;
+        let again = layout
+            .undo(&text)
+            .map_err(|e| anyhow!("undo of the {name} text: {e}"))?;
         if again.raw != undone.raw || again.filters.iter().any(|g| *g != f) {
             return Err(mismatch(
                 mismatches,
