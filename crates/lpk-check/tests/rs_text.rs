@@ -185,4 +185,12 @@ fn hostile_group_is_refused_by_the_work_bound() {
     assert!(t.elapsed() < std::time::Duration::from_secs(1));
     assert_eq!(err.class, "Refused");
     assert!(err.detail.contains("recovery group"), "{}", err.detail);
+    // The work bound refused, not the memory threshold (which counts bytes, not operations).
+    let work = rs::repair_work(u64::from(r), u64::from(k), u64::from(sl));
+    assert!(work > rs::REPAIR_WORK_LIMIT);
+    assert!(
+        err.detail.contains(&format!("{work} operations")),
+        "{}",
+        err.detail
+    );
 }

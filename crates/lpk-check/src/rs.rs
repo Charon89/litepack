@@ -18,11 +18,11 @@
 //! Cost (no fast transform): encoding is `r * k * S` field multiplications, where `S` is
 //! `shard_len / 2` symbols. Rebuilding `e` shards of a group with `d` real data shards is
 //! `e * d * S` field multiply-adds ([`repair_work`]); a reader refuses a rebuild above
-//! [`REPAIR_WORK_LIMIT`]. Memory besides the caller's shards: `e` residuals and `e` rebuilt
-//! shards, plus one scratch shard (`2 * e + 1` shards, each `shard_len` bytes), within section
-//! 13's threshold `(P(r) + k).next_pow2() * shard_len` up to that scratch shard since `e <= r`
-//! and `e <= d <= k`. That is quadratic in the group where the reference's transform is
-//! quasi-linear.
+//! [`REPAIR_WORK_LIMIT`]. Peak memory of a rebuild beyond the archive bytes is about `2 * e + 2`
+//! shards of `shard_len` bytes: `e` residuals, `e` rebuilt shards, one scratch shard, and the
+//! repair's padded copy of the group's last shard. Since `e <= r` and `e <= d <= k`, that exceeds
+//! section 13's threshold `(P(r) + k).next_pow2() * shard_len` only on the smallest groups. The
+//! work is quadratic in the group where the reference's transform is quasi-linear.
 
 use std::sync::OnceLock;
 
@@ -276,8 +276,9 @@ pub fn encode(k: u32, r: u32, data: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
 
 /// The most field multiply-adds this reader spends on one group's rebuild (section 13, "Repair":
 /// a reader may refuse, with `Refused` field `recovery group`, a group whose rebuild exceeds a
-/// work bound it documents). See [`repair_work`] for the count. 2^32 admits, for example, 64
-/// damaged shards in a default group (2048 shards of 65536 bytes), which takes seconds.
+/// work bound it documents). See [`repair_work`] for the count. With 2^32, a full default group
+/// (2048 shards of 65536 bytes) is rebuilt by this decoder with at most 64 damaged shards; with
+/// more, the group is refused.
 pub const REPAIR_WORK_LIMIT: u64 = 1 << 32;
 
 /// The work of rebuilding `e` unknown shards of a group with `data_shards` real data shards of
