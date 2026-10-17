@@ -211,7 +211,7 @@ fn a_record_that_makes_upstream_grow_is_refused_within_the_limit() {
     assert_eq!(up, stream);
     for limit in [0, 1, 64, 4096, 5 * blocks - 1] {
         let e = recreate_whole_deflate_stream_limited(&[], &corr, limit).unwrap_err();
-        assert_eq!(e.exit_code(), ExitCode::InvalidDeflate, "limit {limit}");
+        assert_eq!(e.exit_code(), ExitCode::OutputLimit, "limit {limit}");
     }
     assert_eq!(
         recreate_whole_deflate_stream_limited(&[], &corr, 5 * blocks).unwrap(),

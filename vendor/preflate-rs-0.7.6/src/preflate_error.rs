@@ -62,6 +62,10 @@ pub enum ExitCode {
 
     /// Out of memory
     OutOfMemory = 29,
+
+    /// LitePack change 1 (LITEPACK-CHANGES.md): a limited recreation would
+    /// produce more output (or more blocks) than its limit allows
+    OutputLimit = 30,
 }
 
 impl Display for ExitCode {

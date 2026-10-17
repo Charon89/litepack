@@ -763,7 +763,8 @@ fn stream_frame(stream: &[u8], primary_len: u64) -> Option<Frame> {
     marker_scan(&raw).frame
 }
 
-/// Register the full reader's decoders (revision 1.1's `jpeg-reconstruct`) on `archive`, so its
+/// Register the full reader's decoders (revision 1.1's `jpeg-reconstruct`, revision 1.2's
+/// `deflate-reconstruct`) on `archive`, so its
 /// peeled files extract and verify. Call it after `set_priors` (which keeps it anyway).
 pub fn register_full_reader<R: std::io::Read + std::io::Seek>(
     archive: &mut lpk_format::Archive<R>,
@@ -771,4 +772,8 @@ pub fn register_full_reader<R: std::io::Read + std::io::Seek>(
     archive
         .registry_mut()
         .register(PrimitiveId::JpegReconstruct, Box::new(JpegDecoder));
+    archive.registry_mut().register(
+        PrimitiveId::DeflateReconstruct,
+        Box::new(super::deflate::DeflateDecoder),
+    );
 }

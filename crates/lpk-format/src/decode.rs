@@ -115,13 +115,23 @@ pub trait PrimitiveDecoder: Send + Sync {
     /// returns `Some(n)` must already have checked `n` against the archive's
     /// envelope and the reader's limits (`limits`, including the decode
     /// memory), and refused with an error what they do not allow.
+    ///
+    /// `last` and `expected_len` describe this step as [`decode_in`] will see
+    /// it, as far as they are known before the previous step runs: for the
+    /// graph's last step `last` is true and `expected_len` is the block's
+    /// `plain_len`; otherwise `expected_len` is the envelope's
+    /// `max_block_plain` (revision 1.2's check 3 of `deflate-reconstruct`).
+    ///
+    /// [`decode_in`]: PrimitiveDecoder::decode_in
     fn input_bound(
         &self,
         params: &[u8],
+        expected_len: u64,
+        last: bool,
         limits: &Resources,
         ctx: &mut dyn DecodeContext,
     ) -> Result<Option<u64>, FormatError> {
-        let _ = (params, limits, ctx);
+        let _ = (params, expected_len, last, limits, ctx);
         Ok(None)
     }
 }
@@ -331,9 +341,15 @@ pub fn decode_block_in(
             // The next step may bound its input, and so this step's output,
             // by something other than `max_block_plain`.
             let next = &steps[i + 1];
+            let next_last = i + 1 == last;
+            let next_expected = if next_last {
+                header.plain_len
+            } else {
+                limits.max_block_plain
+            };
             registry
                 .decoder(next.primitive)
-                .input_bound(&next.params, limits, ctx)?
+                .input_bound(&next.params, next_expected, next_last, limits, ctx)?
                 .unwrap_or(limits.max_block_plain)
         };
         let out = match registry.decoder(step.primitive).decode_in(
@@ -592,6 +608,8 @@ mod tests {
         fn input_bound(
             &self,
             _: &[u8],
+            _: u64,
+            _: bool,
             _: &Resources,
             _: &mut dyn DecodeContext,
         ) -> Result<Option<u64>, FormatError> {

@@ -21,7 +21,7 @@ lists) far beyond what the archive declares.
    `src/stream_processor.rs` (exported from `src/lib.rs`). It runs the same steps as
    `recreate_whole_deflate_stream` (decode the `ReconstructionData`, build the `TokenPredictor`,
    recreate block by block, encode each block with `DeflateWriter`, stop at the decoded
-   end-of-chunk flag) and returns an error (`ExitCode::InvalidDeflate`) as soon as the output,
+   end-of-chunk flag) and returns an error (the new `ExitCode::OutputLimit`, 30, in `src/preflate_error.rs`) as soon as the output,
    measured after each block, exceeds `limit` bytes. It does not keep the recreated blocks (the
    upstream function returns them to an internal caller only). A failure to start the CABAC
    reader is an error (`ExitCode::InvalidPredictionData`) instead of a panic.

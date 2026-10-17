@@ -45,7 +45,8 @@ pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
 pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 pub use peel::jpeg::register_full_reader;
 pub use peel::{
-    Cause, Count, Fallback, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage, PeelSummary,
+    Cause, Count, DeflateDecoder, Fallback, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage,
+    PeelSummary,
 };
 pub use pipeline::{ClassifyStage, ModelStage, Pipeline, RunSummary, SealOptions, StageTimings};
 pub use priors::ProvidedDictionaries;

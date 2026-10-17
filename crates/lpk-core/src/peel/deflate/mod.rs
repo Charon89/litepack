@@ -7,12 +7,14 @@
 //! every build (the workspace's, or `lpk-cli`'s alone) uses the inflater the probe used.
 
 pub mod analyse;
+pub mod decode;
 pub mod walk;
 
 pub use analyse::{
     analyse_stream, code_name, examine, preflate_config, Counts, Examined, Limits, Reconstructed,
     StreamOutcome, FAILURE_NAMES, FILE_PLAIN_BUDGET, MAX_CHAIN_LENGTH, PANIC, PLAIN_TEXT_LIMIT,
 };
+pub use decode::{memory_term, DeflateDecoder, MEMORY_ALLOWANCE, MEMORY_PER_PLAIN_BYTE};
 /// The `preflate-rs` types that appear in this module's public items.
 pub use preflate_rs::{PlainText, PreflateConfig, TokenPredictorParameters};
 pub use walk::{find_streams, trim_spans, Candidate, Found, INFLATE_CAP, KINDS, MIN_SCANNED_PLAIN};

@@ -4,6 +4,7 @@
 pub mod deflate;
 pub mod jpeg;
 
+pub use deflate::DeflateDecoder;
 pub use jpeg::{Cause, JpegDecoder, JpegPeel, LEPTON_MAX_FILE, LEPTON_VERSION, MODEL_ALLOWANCE};
 
 use lpk_format::{PrimitiveId, Record};

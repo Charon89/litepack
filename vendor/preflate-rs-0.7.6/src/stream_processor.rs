@@ -370,7 +370,7 @@ pub fn recreate_whole_deflate_stream_limited(
     loop {
         if blocks >= limit {
             return Err(PreflateError::new(
-                ExitCode::InvalidDeflate,
+                ExitCode::OutputLimit,
                 "recreation exceeds the block limit",
             ));
         }
@@ -382,7 +382,7 @@ pub fn recreate_whole_deflate_stream_limited(
 
         if writer.output_len() > limit {
             return Err(PreflateError::new(
-                ExitCode::InvalidDeflate,
+                ExitCode::OutputLimit,
                 "recreation exceeds the output limit",
             ));
         }
@@ -401,7 +401,7 @@ pub fn recreate_whole_deflate_stream_limited(
     let output = writer.detach_output();
     if output.len() > limit {
         return Err(PreflateError::new(
-            ExitCode::InvalidDeflate,
+            ExitCode::OutputLimit,
             "recreation exceeds the output limit",
         ));
     }
