@@ -121,5 +121,5 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    shard of `recovery-groups.lpk` from the text.
 8. Section 13's repair memory figure is a threshold every reader applies, whatever its decoder needs; a reader may
    also refuse, with the same `Refused` (`recovery group`), a group whose rebuild would exceed a work bound it
-   documents. Section 14 notes that opening never reaches the short-input `MissingKeySlot` case and lists
+   documents. Section 14's `MissingKeySlot` clause drops its short-input half, which opening never reaches, and lists
    `BadFrameLocation` (`frames`) among its errors. Found by the independent decoder's author and its review.

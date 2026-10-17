@@ -1565,7 +1565,7 @@ Memory rule: one shard while scanning; for a group with damage, the decoder's bu
 `(next_pow2(recovery_shards) + group_shards).next_pow2() * shard_len` bytes, independent of the archive's size. A
 reader refuses a group whose buffer would exceed its memory limit before rebuilding it (`Refused`, field `recovery
 group`). The figure is a threshold every reader applies, whatever its decoder needs, so that readers with the same
-memory limit refuse the same groups; a decoder must rebuild any group under the threshold within that much memory.
+memory limit refuse the same groups, and a reader does not refuse a group under the threshold for lack of memory.
 A reader may also refuse, with the same error, a group whose rebuild would exceed a work bound it documents (the
 fast decoder outlined in "The code" needs O(n log n) operations per symbol position, n being
 `(next_pow2(recovery_shards) + group_shards).next_pow2()`; a slower method reaches a documented bound sooner).
@@ -1670,10 +1670,9 @@ encrypted or a second one). Its payload is exactly 111 bytes:
 | wrapped_key | 48 | the archive key encrypted under the KEK (32 bytes of ciphertext, then the 16-byte tag) |
 | check | 32 | BLAKE3 keyed with the archive key, of the archive id |
 
-Reading the key slot, in this order: input that ends before the first two bytes after the header, or a kind
-there other than 7, is `MissingKeySlot` (opening never reaches the short-input case: an input shorter than 165
-bytes goes to the diagnosis of section 6 first and ends in `Truncated` with `what` `trailer`; the clause applies
-when the key slot is read on its own); then the frame is read under a payload limit of 111 bytes (a larger
+Reading the key slot, in this order: a kind after the header other than 7 is `MissingKeySlot` (an input too short
+to hold the key slot's kind never reaches this step: section 6's first step diagnoses it, ending in the header's
+own error or in `Truncated`); then the frame is read under a payload limit of 111 bytes (a larger
 `payload_len` is `BadKeySlot`, `length`; the other errors of section 3 apply); a slot with the `SEALED` flag is
 `UnexpectedSealedFrame`; a payload that is not exactly 111 bytes is `BadKeySlot` (`length`); `suite` not 1 or 2 is
 `BadKeySlot` (`suite`); `kdf` not 1 is `BadKeySlot` (`kdf`); `argon2_t`, then `argon2_m_kib`, then `argon2_p`
