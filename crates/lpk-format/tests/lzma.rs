@@ -342,6 +342,7 @@ fn registry_has_it_and_the_writer_round_trips() {
             seal: None,
             dedup: false,
             encode_threads: 1,
+            threads_hint: 0,
         },
         &files,
     );

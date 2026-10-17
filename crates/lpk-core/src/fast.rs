@@ -203,6 +203,7 @@ pub(crate) struct ZstdConfig {
 
 /// The compressors of the Fast tier, one plain and one per provided dictionary.
 pub(crate) struct ZstdCore {
+    level: i32,
     window_log: u32,
     gate: Gate,
     /// The compressor without a dictionary.
@@ -304,12 +305,21 @@ impl ZstdCore {
             }
         }
         Ok(ZstdCore {
+            level: c.level,
             window_log: c.window_log,
             gate: c.gate,
             plain,
             with_dict,
             counts: Arc::clone(&c.counts),
         })
+    }
+
+    /// Drop the dictionary-free compression context's tables: it is rebuilt empty with the
+    /// same parameters (libzstd's output does not depend on a context's history), so the core
+    /// holds no full-size tables while another encoder runs (E2-20). Not counted as a new core.
+    pub(crate) fn release(&mut self) -> Result<(), CoreError> {
+        self.plain = build_compressor(self.level, self.window_log, None)?;
+        Ok(())
     }
 
     /// Encode one block under the steering `class` and `kind`. The decisions come in this
@@ -353,6 +363,7 @@ impl ZstdCore {
         Ok((
             Encoded {
                 resources: graph.resources(),
+                memory: crate::memory::zstd_decode_memory(declared, plain.len() as u64),
                 graph,
                 bytes,
             },

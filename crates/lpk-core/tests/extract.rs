@@ -319,6 +319,17 @@ fn the_memory_bound_reduces_the_pool() {
         )
         .unwrap();
         assert_eq!((s.workers, s.in_flight), (workers, workers), "{memory}");
+        // Measured: the blocks held at once never exceed what the budget allows (E2-20).
+        assert!(
+            (1..=workers).contains(&s.peak_in_flight),
+            "{memory}: peak {} of {workers}",
+            s.peak_in_flight
+        );
+        assert!(
+            s.peak_in_flight as u64 * cost <= memory.max(cost),
+            "{memory}: peak {}",
+            s.peak_in_flight
+        );
         assert_eq!(tree(&out), expect(&files));
     }
 }

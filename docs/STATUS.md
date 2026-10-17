@@ -3,7 +3,9 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 03:00 UTC (2026-10-16, 23:00 local on the measuring machine). No measurement is running; two branches are under review (below).
+Last updated: 2026-10-17, about 04:06 UTC (2026-10-17, 00:06 local on the measuring machine). A measurement is running:
+E2-20's rows (`target/acceptance/e2-20-run.sh`, detached, started 04:00 UTC; progress in
+`target/acceptance/e2-20-run-status.log`, last line `== DONE` when both profiles are in).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -31,15 +33,14 @@ was single-threaded then and is parallel since E2-4b.
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
 2. Next: **E2-10/11 task C, the revision 1.2** (spec, the `deflate-reconstruct` decoder, the vector, fuzz targets,
-   and the patched `preflate-rs` of D-66), from `docs/notes/e2-10-task-c-brief.md`; then tasks D (the pipeline) and E
-   (`lpk-check` from the text) in parallel. E2-18 is done (G3 met on `full`'s `video`, D-61/D-63/D-65).
+   and the patched `preflate-rs` of D-66), from `docs/notes/e2-10-task-c-brief.md` — C1 and C2 are on
+   `task/e2-10-revision` (see "Branches in flight"); then tasks D (the pipeline) and E (`lpk-check` from the text)
+   in parallel. E2-18 is done (G3 met on `full`'s `video`, D-61/D-63/D-65).
    Already merged for E2-10/11: task B (the walker in `lpk-core`, D-64) and task A (the `lpk-format` plumbing: the
    input-bound hook — task C's decoder must check the bound against the envelope and the reader's limits before
    returning it — the records cache, multi-span given blocks deduplicated all or nothing, `part_known`).
-3. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, and the blocks-in-flight bound,
-   D-60, are the first inputs; the Balanced cap of four in flight is provisional until then), then the
-   revision-gated peels E2-10/11 (Deflate and containers — the largest remaining size win on office, PDF and
-   installed software), E2-15, E2-16, E2-17 (D-49 process), then E2-21/22.
+3. E2-20's code is merged (D-67, PR #63, 2026-10-17); its rows are running (see "Branches in flight") and tick it.
+   After E2-10/11: E2-15, E2-16, E2-17 (D-49 process), then E2-21/22.
 4. E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
    chunk in an appended generation is coded without its previous version in the window.
 5. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
@@ -72,18 +73,21 @@ was single-threaded then and is parallel since E2-4b.
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e2-10-revision` (pushed when reviewed): task C1 of E2-10/11 — the patched `preflate-rs` 0.7.6 in
-  `vendor/` (D-66), the `deflate-reconstruct` decoder in `lpk-core`, the writer's revision-1.2 rules, the fuzz targets;
-  built and under read-only review on 2026-10-16. Next on the same branch: C2 (the spec text and the vector,
-  `docs/notes/e2-10-task-c-brief.md`), then one PR; then tasks D and E (`docs/notes/e2-10-task-d-brief.md`,
-  `-task-e-brief.md`) in parallel. C1 extended task A's `input_bound` hook with the block's expected length and
-  whether the step is last (check 3 needs them); C2's text states it.
-- `task/e2-20-memory` (pushed when reviewed): E2-20 built (per-tier budgets, blocks in flight from the budget, the
-  envelope from what blocks declare, `--memory` on `a|append|x|t`, the acceptance test passing) and under read-only
-  review. Open point: at its default settings Balanced now runs one block in flight under the 4 GiB ceiling (each job
-  holds both trial candidates' contexts), which gives back E2-4b's Balanced speedup; the review is asked whether
-  dropping the losing candidate's context after the trial is a safe fix. After merge: the runner's peak-memory rows on
-  `small` and the large classes of `full` are the acceptance evidence.
+- `task/e2-10-revision` (pushed): task C of E2-10/11. C1 (the patched `preflate-rs` 0.7.6 in `vendor/`, D-66; the
+  `deflate-reconstruct` decoder in `lpk-core`; the writer's revision-1.2 rules; the fuzz targets) and C2 (the
+  revision 1.2 text, `deflate-peel.lpk` and its expectations) are reviewed; fix round 1 is running on the C2 agent's
+  branch: the reference's non-last `lzma` step must say `PayloadTooLarge` when its output crosses the bound before
+  any other error (it said `LzmaError` when a later match reached past the bound), the same precedence for `zstd`
+  by block, a writer obligation (no record the bounded recreation refuses), informative `Refused` amounts, and a
+  malformed vector for the bound rule. Then one PR (merge `main` first: E2-20's two text revisions touch sections 8
+  and 9 and `CHANGES.md`); then tasks D and E in parallel. Task D verifies every record with the bounded recreation
+  before keeping it.
+- E2-20 (merged): its acceptance rows are running from `main` at `fb5553a` — every `lpk` setting on every class of
+  `small`, then `vm-image`, `office-pdf` and `software-installed` of `full`, at the machine's 24 threads, one repeat
+  (the clause is memory): each row's peak memory within its tier's ceiling (store 1 GiB, Fast 2 GiB, Balanced
+  4 GiB). When `== DONE` is in the status log: validate output is in `target/acceptance/e2-20-validate-*.log`; write
+  the report, commit the two results directories, tick E2-20. Agents were building and testing in other worktrees
+  during the run, so its times are not for comparison.
 
 ## How to resume
 

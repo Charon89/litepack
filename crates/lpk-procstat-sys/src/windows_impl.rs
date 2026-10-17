@@ -258,3 +258,16 @@ pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
     })
     // `job` drops here: kill-on-close terminates anything still alive.
 }
+
+/// Total physical memory (`ullTotalPhys` of `GlobalMemoryStatusEx`).
+pub(crate) fn physical_memory() -> Option<u64> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>()).ok()?,
+        ..Default::default()
+    };
+    // SAFETY: `status` is a valid, writable MEMORYSTATUSEX with `dwLength` set, as the call
+    // requires, and lives for the duration of the call.
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+    (status.ullTotalPhys > 0).then_some(status.ullTotalPhys)
+}

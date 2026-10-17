@@ -1097,7 +1097,7 @@ fn add_threads_1_and_8_write_the_same_archive_and_v_prints_the_blocks_in_flight(
         (
             "--balanced",
             "8",
-            "threads: 8, blocks in flight: 4",
+            "threads: 8, blocks in flight: 8",
             "chunk hash threads: up to 4)",
         ),
         (
@@ -1121,6 +1121,9 @@ fn add_threads_1_and_8_write_the_same_archive_and_v_prints_the_blocks_in_flight(
             tier,
             "--threads",
             threads,
+            // A budget that cannot bind, so the blocks in flight are the threads on any machine.
+            "--memory",
+            "64G",
             "-v",
         ];
         if tier == "--balanced" {

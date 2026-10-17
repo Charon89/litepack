@@ -108,6 +108,12 @@ pub struct Encoded {
     /// the maximum of this and `graph.resources()`, so an encoder that reports
     /// too little cannot make the envelope too small.
     pub resources: GraphResources,
+    /// Decoder working memory this block needs beyond its plain buffer (a
+    /// zstd window, an LZMA dictionary, a reconstruction's working set), for
+    /// the envelope: `decode_memory` is `max_block_plain` plus the largest
+    /// such figure of the archive's blocks (and of the `memory` given to
+    /// [`Writer::add_part_encoded`]). 0 declares none.
+    pub memory: u64,
 }
 
 /// What a finished [`EncodeJob`] hands back besides the encoding, for its
@@ -194,6 +200,7 @@ impl StoreEncoder {
             },
             bytes: plain,
             resources: GraphResources::default(),
+            memory: 0,
         }
     }
 }
@@ -294,6 +301,12 @@ pub struct WriterOptions {
     /// starts them only above one block in flight, so one block in flight is
     /// one thread doing everything.
     pub encode_threads: usize,
+    /// The most blocks the archive tells a reader it may decode at once: the
+    /// envelope's `threads_hint` is the smaller of this and the number of
+    /// blocks the archive has. 0 (the default) writes 0, no hint. Kept apart
+    /// from `encode_threads` so that an archive's bytes never depend on the
+    /// threads (or the memory budget) used to write it (D-60).
+    pub threads_hint: u32,
 }
 
 /// The output with the recovery spool beside it: while the spool is set, every
@@ -340,6 +353,7 @@ impl std::fmt::Debug for WriterOptions {
             .field("block_size", &self.block_size)
             .field("dedup", &self.dedup)
             .field("encode_threads", &self.encode_threads)
+            .field("threads_hint", &self.threads_hint)
             .field("archive_id", &self.archive_id)
             .finish()
     }
@@ -357,6 +371,7 @@ impl Default for WriterOptions {
             seal: None,
             dedup: false,
             encode_threads: 1,
+            threads_hint: 0,
         }
     }
 }
@@ -1692,6 +1707,7 @@ impl<W: Write> Writer<W> {
             graph,
             bytes: encoded,
             resources,
+            memory,
         } = encoded;
         let checked = match commit {
             Commit::Unchecked => check_graph(&graph, self.record_count, self.version_minor)
@@ -1705,6 +1721,7 @@ impl<W: Write> Writer<W> {
         self.abandon_on_error(checked)?;
         let recon = graph.uses_records();
         self.priors.extend(graph.prior_ids());
+        self.extra_memory = self.extra_memory.max(memory);
         let own = graph.resources();
         self.graph_res = GraphResources {
             window: self.graph_res.window.max(resources.window).max(own.window),
@@ -2860,6 +2877,9 @@ impl<W: Write> Writer<W> {
         let leaves: Vec<[u8; 32]> = recs.iter().map(|r| r.hash).collect();
         let max_plain = self.blocks.iter().map(|b| b.plain_len).max().unwrap_or(0);
         let graph = self.graph_res;
+        let threads_hint = u32::try_from(self.blocks.len())
+            .unwrap_or(u32::MAX)
+            .min(self.options.threads_hint);
         let mut index = Index {
             chunk_table: ChunkTableWriter::encode(recs).into(),
             merkle_root: merkle_root(&leaves),
@@ -2895,7 +2915,7 @@ impl<W: Write> Writer<W> {
                 },
                 graph,
                 max_plain.saturating_add(self.extra_memory),
-                0,
+                threads_hint,
             );
             let payload = index.encode()?;
             // The envelope names the payload as stored: sealed, when sealing.
@@ -3103,6 +3123,7 @@ mod record_rule_tests {
             },
             bytes: primary.iter().rev().copied().collect(),
             resources: GraphResources::default(),
+            memory: 0,
         }
     }
 
@@ -3355,6 +3376,7 @@ mod deflate_rule_tests {
             },
             bytes: vec![0; 10],
             resources: GraphResources::default(),
+            memory: 0,
         }
     }
 

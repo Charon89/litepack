@@ -196,11 +196,17 @@ struct TierArgs {
     /// Store every block without compression.
     #[arg(long)]
     store: bool,
-    /// Blocks encoded at once (default: the machine's logical cores; 1 is sequential). The
-    /// archive is the same whatever the count. The Balanced tier caps the blocks in flight at
-    /// four, as each LZMA encoder holds several times the dictionary (shown with -v).
+    /// Blocks encoded at once at most (default: the machine's logical cores; 1 is sequential).
+    /// The archive is the same whatever the count. The memory budget may allow fewer (shown
+    /// with -v).
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
+    /// The memory budget of the whole run, for example 512M or 2G (binary units) or plain
+    /// bytes. Default: half of the physical memory, at most 1 GiB (--store), 2 GiB (--fast) or
+    /// 4 GiB (--balanced). The blocks in flight are derived from it; a budget below what one
+    /// block in flight needs is refused with that figure.
+    #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
+    memory: Option<u64>,
     /// zstd level (of the Fast tier, or of the Balanced tier's zstd candidate; default 22 there).
     #[arg(long, value_name = "L", conflicts_with = "store")]
     level: Option<i32>,
@@ -287,6 +293,11 @@ struct ExtractArgs {
     /// The key material of an encrypted archive; checked before anything is written.
     #[command(flatten)]
     credentials: CredentialArgs,
+    /// The decode memory limit, for example 512M or 2G or plain bytes (default: half of the
+    /// physical memory, at most 4 GiB). An archive whose envelope needs more is refused before
+    /// anything is written; the decoders in flight stay within it.
+    #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
+    memory: Option<u64>,
     /// Print the plan's counts and the pool size to stderr.
     #[arg(short, long)]
     verbose: bool,
@@ -303,6 +314,20 @@ struct TestArgs {
     /// recovery shards) of such an archive are checked.
     #[command(flatten)]
     credentials: CredentialArgs,
+    /// The decode memory limit, as for `x`: an archive whose envelope needs more is refused.
+    #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
+    memory: Option<u64>,
+}
+
+/// `--memory`'s value: `512M`, `2G`, plain bytes ([`lpk_core::memory::parse_size`]).
+fn parse_memory(s: &str) -> Result<u64, String> {
+    lpk_core::memory::parse_size(s)
+}
+
+/// The decode memory limit of `x` and `t`: `--memory`, else `min(4 GiB, half the physical
+/// memory)`.
+fn decode_memory(given: Option<u64>) -> u64 {
+    lpk_core::memory::Budget::resolve(given, lpk_core::memory::EXTRACT_CEILING).bytes
 }
 
 #[derive(Debug, Args)]
@@ -416,6 +441,7 @@ fn build_pipeline(a: &TierArgs) -> Pipeline {
         }
         Pipeline::fast(o)
     };
+    pipeline.seal.memory = a.memory;
     if a.no_dedup {
         pipeline.fold = None;
     } else if pipeline.fold.is_some() {
@@ -518,6 +544,21 @@ fn report(
         s.blocks_in_flight,
         s.io_threads,
         s.hash_threads
+    );
+    let m = &s.memory;
+    let _ = writeln!(
+        err,
+        "memory: budget {} bytes ({}), per block {} bytes, fixed {} bytes, blocks in flight {}{}",
+        m.budget.bytes,
+        m.budget.source.name(),
+        m.per_block,
+        m.fixed(),
+        m.blocks_in_flight,
+        if m.blocks_in_flight > 1 {
+            ""
+        } else {
+            " (sequential: no reader or write thread)"
+        }
     );
     if let Some(f) = s.fast {
         let _ = writeln!(
@@ -627,6 +668,7 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
     }
     let opts = lpk_core::ExtractOptions {
         threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+        memory: Some(decode_memory(x.memory)),
         ..lpk_core::ExtractOptions::default()
     };
     match lpk_core::extract_file(
@@ -677,6 +719,7 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32
 fn reference(
     sub: &str,
     priors: &[PathBuf],
+    memory: Option<u64>,
     credentials: &CredentialArgs,
     positional: &[OsString],
     out: &mut dyn Write,
@@ -689,6 +732,9 @@ fn reference(
         args.push(a);
     }
     args.extend(credentials.reference_args());
+    if let Some(m) = memory {
+        args.push(format!("--memory={m}").into());
+    }
     args.push(sub.into());
     args.push("--".into());
     args.extend(positional.iter().cloned());
@@ -727,15 +773,25 @@ where
         Command::Test(t) => reference(
             "verify",
             &t.priors,
+            Some(decode_memory(t.memory)),
             &t.credentials,
             &[t.archive.into()],
             out,
             err,
         ),
-        Command::Check(c) => reference("check", &[], &c.credentials, &[c.archive.into()], out, err),
+        Command::Check(c) => reference(
+            "check",
+            &[],
+            None,
+            &c.credentials,
+            &[c.archive.into()],
+            out,
+            err,
+        ),
         Command::Repair(r) => reference(
             "repair",
             &[],
+            None,
             &r.credentials,
             &[r.archive.into(), r.out.into()],
             out,
@@ -745,6 +801,7 @@ where
         Command::Rollback(r) => reference(
             "rollback",
             &[],
+            None,
             &r.credentials,
             &[r.archive.into(), r.generation.to_string().into()],
             out,
@@ -753,6 +810,7 @@ where
         Command::Info(i) => reference(
             "info",
             &i.priors,
+            None,
             &i.credentials,
             &[i.archive.into()],
             out,

@@ -288,6 +288,7 @@ impl BlockEncoder for PlainZstd {
         };
         Ok(Encoded {
             resources: graph.resources(),
+            memory: 0,
             graph,
             bytes: zstd_bytes(plain),
         })
@@ -420,6 +421,7 @@ fn build_from(inputs: &[(&str, &str)], malformed: bool) -> Vec<u8> {
             };
             let encoded = Encoded {
                 resources: graph.resources(),
+                memory: 0,
                 graph,
                 bytes: model_bytes,
             };

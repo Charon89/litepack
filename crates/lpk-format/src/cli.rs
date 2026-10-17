@@ -39,6 +39,11 @@ struct Cli {
     /// The keyfile of an archive that uses one as a second factor.
     #[arg(long, global = true, value_name = "PATH")]
     keyfile: Option<PathBuf>,
+    /// The decode memory limit in bytes (the reader's `Resources::memory`;
+    /// default 2 GiB): an archive whose envelope declares more is refused when
+    /// it is opened, naming the field, the needed and the allowed amounts.
+    #[arg(long, global = true, value_name = "BYTES")]
+    memory: Option<u64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -210,6 +215,8 @@ pub type OpenHook = fn(&mut Archive<File>);
 struct Keys {
     credentials: Option<Credentials>,
     hook: Option<OpenHook>,
+    /// The reader's limits (`--memory` sets the decode memory).
+    resources: Resources,
 }
 
 fn credentials(cli: &mut Cli) -> Result<Keys, FormatError> {
@@ -241,16 +248,21 @@ fn credentials(cli: &mut Cli) -> Result<Keys, FormatError> {
             keyfile,
         }),
     };
+    let mut resources = Resources::default();
+    if let Some(m) = cli.memory {
+        resources.memory = m;
+    }
     Ok(Keys {
         credentials,
         hook: None,
+        resources,
     })
 }
 
 fn open(path: &Path, priors: &[PathBuf], keys: &Keys) -> Result<Archive<File>, FormatError> {
     let mut a = Archive::open_with(
         File::open(path)?,
-        &Resources::default(),
+        &keys.resources,
         keys.credentials.as_ref(),
     )?;
     if !priors.is_empty() {
@@ -372,12 +384,7 @@ fn repair_cmd(
         .write(true)
         .create_new(true)
         .open(target)?;
-    match repair_with_credentials(
-        input,
-        file,
-        &Resources::default(),
-        keys.credentials.as_ref(),
-    ) {
+    match repair_with_credentials(input, file, &keys.resources, keys.credentials.as_ref()) {
         // The copy carries the repairs that were possible; keep it.
         Ok((report, unrepairable)) => {
             print_report(out, &report)?;

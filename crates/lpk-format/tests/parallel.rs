@@ -143,6 +143,7 @@ fn recon_encoded(record: u8, primary: &[u8]) -> Encoded {
         },
         bytes: primary.iter().rev().copied().collect(),
         resources: Default::default(),
+        memory: 0,
     }
 }
 

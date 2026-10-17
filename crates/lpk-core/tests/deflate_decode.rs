@@ -135,6 +135,7 @@ fn archive_with(
     };
     let encoded = Encoded {
         resources: graph.resources(),
+        memory: 0,
         graph,
         bytes,
     };

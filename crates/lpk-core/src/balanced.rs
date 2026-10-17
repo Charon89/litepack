@@ -71,18 +71,10 @@ pub struct BalancedOptions {
     /// Longest `Jpeg`-classed input the JPEG peel reads whole (see `FastOptions`).
     pub jpeg_max_file: u64,
     /// The thread budget; `None` (the default) is the machine's logical cores, 1 the sequential
-    /// path. The blocks in flight are `min(threads, BALANCED_MAX_IN_FLIGHT)`: each LZMA encoder
-    /// instance holds several times the dictionary, so the cap is provisional until a memory
-    /// budget (E2-20) sets it from the machine. The archive is the same whatever the count.
+    /// path. The blocks in flight are `threads` capped by the memory budget (E2-20,
+    /// [`crate::memory`]): each block in flight holds an LZMA encoder of several times the
+    /// dictionary and a zstd candidate. The archive is the same whatever the count.
     pub threads: Option<usize>,
-}
-
-impl BalancedOptions {
-    /// Blocks in flight for these options: `threads` resolved, capped at
-    /// [`BALANCED_MAX_IN_FLIGHT`].
-    pub fn blocks_in_flight(&self) -> usize {
-        crate::fast::resolve_threads(self.threads).min(BALANCED_MAX_IN_FLIGHT)
-    }
 }
 
 impl Default for BalancedOptions {
@@ -203,7 +195,10 @@ impl LzmaEncoder {
         filters.lzma1(&o);
         ContextCounts::bump(&self.counts.lzma_streams);
         let mut s = Stream::new_raw_encoder(&filters).map_err(io_err)?;
-        let mut out = Vec::with_capacity(plain.len() / 3 + 64);
+        // Reserved once, so the output does not double past the block (E2-20's model counts
+        // this figure).
+        let reserve = crate::memory::lzma_out_reserve(plain.len() as u64);
+        let mut out = Vec::with_capacity(usize::try_from(reserve).unwrap_or(plain.len()));
         loop {
             let consumed = usize::try_from(s.total_in()).unwrap_or(plain.len());
             let st = s
@@ -212,7 +207,8 @@ impl LzmaEncoder {
             if st == Status::StreamEnd {
                 break;
             }
-            out.reserve(1 << 16);
+            // Exact: past the reserve the output grows by 64 KiB steps, never doubling.
+            out.reserve_exact(1 << 16);
         }
         Ok(out)
     }
@@ -234,7 +230,17 @@ impl LzmaEncoder {
     /// Approximate: liblzma's LZMA2 encoder memory query at one thread for the configured
     /// dictionary (see [`BalancedSummary::lzma_encoder_memory`]); 0 when the options are refused.
     pub fn memory_usage(&self) -> u64 {
-        let Ok(o) = self.options(self.dict_size) else {
+        self.memory_usage_for(self.dict_size)
+    }
+
+    /// [`LzmaEncoder::memory_usage`] for the dictionary a block of `len` bytes uses (the trial's
+    /// stripes use a smaller one).
+    pub fn memory_usage_for_len(&self, len: usize) -> u64 {
+        self.memory_usage_for(self.dict_for(len))
+    }
+
+    fn memory_usage_for(&self, dict: u32) -> u64 {
+        let Ok(o) = self.options(dict) else {
             return 0;
         };
         let mut filters = Filters::new();
@@ -254,6 +260,7 @@ impl LzmaEncoder {
         let graph = self.graph(dict);
         Ok(Encoded {
             resources: graph.resources(),
+            memory: crate::memory::lzma_decode_memory(dict, plain.len() as u64),
             graph,
             bytes: self.compress(plain, dict)?,
         })
@@ -308,7 +315,7 @@ impl BalancedHandle {
 
 /// The Balanced tier's block encoder: gate, class rule, the lzma-or-zstd trial.
 ///
-/// Parallel encoding (`WriterOptions::encode_threads`, capped at [`BALANCED_MAX_IN_FLIGHT`]
+/// Parallel encoding (`WriterOptions::encode_threads`, capped by the memory budget
 /// by the pipeline): a job captures the class of the moment and the LZMA parameters, borrows
 /// a zstd core from the Fast encoder inside (or builds one on the pool thread), and runs the
 /// same trial and encoding as `encode`; the counts come back through `absorb` in block order.
@@ -318,11 +325,6 @@ pub struct BalancedEncoder {
     sample_len: usize,
     shared: Arc<Mutex<Shared>>,
 }
-
-/// Most blocks the Balanced tier encodes at once, whatever `threads` says: each LZMA encoder
-/// instance holds several times the dictionary, so the blocks in flight are capped until a
-/// memory budget (E2-20) sets the number from the machine.
-pub const BALANCED_MAX_IN_FLIGHT: usize = 4;
 
 impl std::fmt::Debug for BalancedEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -335,6 +337,30 @@ impl std::fmt::Debug for BalancedEncoder {
 }
 
 impl BalancedEncoder {
+    /// One LZMA encoder's memory for the memory budget: liblzma's own query for the configured
+    /// dictionary and match finder ([`LzmaEncoder::memory_usage`]); when the query fails,
+    /// liblzma's documented figure for the binary-tree match finder, about 11.5 times the
+    /// dictionary, rounded up to 12 times.
+    pub fn lzma_memory(&self) -> u64 {
+        match self.lzma.memory_usage() {
+            0 => u64::from(self.lzma.dict_size).saturating_mul(12),
+            m => m,
+        }
+    }
+
+    /// The LZMA encoder memory of one trial stripe (`sample_len / 4` bytes), liblzma's query.
+    pub fn lzma_sample_memory(&self) -> u64 {
+        match self.lzma.memory_usage_for_len((self.sample_len / 4).max(1)) {
+            0 => u64::from(self.lzma.dict_size).saturating_mul(12),
+            m => m,
+        }
+    }
+
+    /// The trial's stripe length.
+    pub fn stripe_len(&self) -> usize {
+        (self.sample_len / 4).max(1)
+    }
+
     /// A new encoder and the handle that steers it; every option is checked here
     /// (`InvalidOption`).
     pub fn new(o: &BalancedOptions) -> Result<(Self, BalancedHandle), CoreError> {
@@ -462,7 +488,13 @@ fn balanced_block(
         (true, true) => first.map(|(_, z)| z).ok_or_else(|| io_err("no stripe"))?,
         (true, false) => first.map(|(l, _)| l).ok_or_else(|| io_err("no stripe"))?,
         (false, true) => zstd.encode(class, DictionaryKind::None, plain)?.0,
-        (false, false) => lzma.encode_block(plain)?,
+        (false, false) => {
+            // The zstd context's tables go before the full LZMA encode, so a block holds one
+            // full-size encoder at a time (E2-20); the context is rebuilt empty with the same
+            // parameters, which gives the same output.
+            zstd.release().map_err(io_err)?;
+            lzma.encode_block(plain)?
+        }
     };
     if winner.bytes.len() >= plain.len() {
         outcome.kind = BalancedKind::StoredNoGain;

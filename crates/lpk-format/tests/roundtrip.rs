@@ -489,6 +489,7 @@ fn writer_refusals() {
                 },
                 bytes: plain.to_vec(),
                 resources: lpk_format::GraphResources::default(),
+                memory: 0,
             })
         }
     }

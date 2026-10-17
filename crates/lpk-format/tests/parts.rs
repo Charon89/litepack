@@ -180,6 +180,7 @@ fn peeled_archive(minor: u16, primary: &[u8], trailing: &[u8]) -> Result<Vec<u8>
         graph: jpeg_graph(id as u8),
         bytes: primary.iter().rev().copied().collect(),
         resources: GraphResources::default(),
+        memory: 0,
     };
     w.add_part_encoded(0, primary, encoded, 12_345)?;
     w.end_entry()?;
@@ -259,6 +260,7 @@ fn add_record_ids_follow_the_options_records_and_bound_the_graphs() {
         graph: jpeg_graph(1),
         bytes: vec![1],
         resources: GraphResources::default(),
+        memory: 0,
     };
     assert!(matches!(
         w.add_part_encoded(0, &[1], e, 0),
@@ -298,6 +300,7 @@ fn the_writer_refuses_a_record_chunk_in_a_later_block() {
         graph: jpeg_graph(id as u8),
         bytes: primary.iter().rev().copied().collect(),
         resources: GraphResources::default(),
+        memory: 0,
     };
     assert!(matches!(
         w.add_part_encoded(0, &primary, e, 0),

@@ -24,6 +24,11 @@ thiserror = "2.0.21"
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 zstd = { version = "0.14.0", default-features = false }
 
+# The physical-memory query of the default memory budget (E2-20; the workspace's -sys crate,
+# which supports Windows and Linux only; elsewhere the budget falls back to the ceiling).
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 

@@ -133,6 +133,8 @@ pub struct ExtractOptions {
     /// 1 is the sequential path.
     pub threads: Option<usize>,
     /// The decode memory budget in bytes; `None` is the reader's `Resources::memory`.
+    /// [`extract_file`] also opens the archive with it as the reader's `Resources::memory`, so
+    /// an archive whose envelope needs more is refused before any output exists.
     pub memory: Option<u64>,
     /// Most files open at once (at least one); also caps the writers.
     pub max_open_files: usize,
@@ -181,6 +183,9 @@ pub struct ExtractSummary {
     pub writers: usize,
     /// Times a file closed by the open-file bound was opened again.
     pub reopened: u64,
+    /// Most decoded blocks held at once, measured (permits taken and not yet returned): never
+    /// above `in_flight`. 1 on the sequential path when a block was decoded, else 0.
+    pub peak_in_flight: usize,
 }
 
 /// One chunk's destination.
@@ -394,6 +399,10 @@ struct Permits {
     free: Mutex<usize>,
     cv: Condvar,
     cancelled: AtomicBool,
+    /// Permits in all.
+    cap: usize,
+    /// Most permits out at once.
+    peak: AtomicUsize,
 }
 
 impl Permits {
@@ -402,6 +411,8 @@ impl Permits {
             free: Mutex::new(n),
             cv: Condvar::new(),
             cancelled: AtomicBool::new(false),
+            cap: n,
+            peak: AtomicUsize::new(0),
         }
     }
 
@@ -419,6 +430,8 @@ impl Permits {
             }
             if *n > 0 {
                 *n -= 1;
+                self.peak
+                    .fetch_max(self.cap.saturating_sub(*n), Ordering::SeqCst);
                 return true;
             }
             n = match self.cv.wait(n) {
@@ -665,6 +678,7 @@ where
         .collect();
     let decoded = AtomicU64::new(0);
     let reads = AtomicU64::new(0);
+    let peak = AtomicUsize::new(0);
     let decode_error = |block: usize, source: FormatError| CoreError::Decode {
         block,
         path: shared
@@ -693,6 +707,7 @@ where
                     for &b in &needed {
                         let plain = archive.decode_block_checked(b);
                         decoded.fetch_add(1, Ordering::Relaxed);
+                        peak.store(1, Ordering::Relaxed);
                         let plain = plain.map_err(|e| decode_error(b, e))?;
                         out.write_block(b, &per_block[b], &plain)?;
                     }
@@ -720,6 +735,7 @@ where
                         panic_at: opts.panic_in_dispatch_at,
                         decoded: &decoded,
                         reads: &reads,
+                        peak: &peak,
                         decode_error: &decode_error,
                     }),
                     Err(e) => Outcome::Failed(FormatError::from(e).into()),
@@ -760,6 +776,7 @@ where
         in_flight: pool.in_flight,
         writers: pool.writers,
         reopened: shared.reopened.load(Ordering::Relaxed),
+        peak_in_flight: peak.load(Ordering::Relaxed),
     })
 }
 
@@ -793,6 +810,8 @@ struct Run<'a, R: Read + Seek> {
     panic_at: Option<usize>,
     decoded: &'a AtomicU64,
     reads: &'a AtomicU64,
+    /// Receives the most permits out at once.
+    peak: &'a AtomicUsize,
     decode_error: &'a (dyn Fn(usize, FormatError) -> CoreError + Sync),
 }
 
@@ -816,6 +835,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         panic_at,
         decoded,
         reads,
+        peak,
         decode_error,
     } = run;
     let n = pool.writers.max(1);
@@ -827,6 +847,38 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         }
     }
     let permits = Permits::new(pool.in_flight);
+    let outcome = parallel_with(
+        shared,
+        forks,
+        needed,
+        split,
+        &pool,
+        max_open,
+        panic_at,
+        decoded,
+        reads,
+        decode_error,
+        &permits,
+    );
+    peak.store(permits.peak.load(Ordering::SeqCst), Ordering::Relaxed);
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parallel_with<R: Read + Seek + Send>(
+    shared: &Shared,
+    forks: Vec<Archive<R>>,
+    needed: &[usize],
+    split: Vec<Vec<Vec<Place>>>,
+    pool: &Pool,
+    max_open: usize,
+    panic_at: Option<usize>,
+    decoded: &AtomicU64,
+    reads: &AtomicU64,
+    decode_error: &(dyn Fn(usize, FormatError) -> CoreError + Sync),
+    permits: &Permits,
+) -> Outcome {
+    let n = pool.writers.max(1);
     let panic: Mutex<Option<Box<dyn Any + Send>>> = Mutex::new(None);
     let next = AtomicUsize::new(0);
     let per_writer_open = (max_open / n).max(1);
@@ -1040,7 +1092,13 @@ pub fn extract_file(
     opts: &ExtractOptions,
 ) -> Result<ExtractSummary, CoreError> {
     let file = File::open(path).map_err(|e| io(path, e))?;
-    let mut a = Archive::open_with(file, &lpk_format::Resources::default(), credentials)?;
+    // `opts.memory` is the reader's decode memory too: an archive whose envelope needs more is
+    // refused here, before any output exists.
+    let mut resources = lpk_format::Resources::default();
+    if let Some(m) = opts.memory {
+        resources.memory = m;
+    }
+    let mut a = Archive::open_with(file, &resources, credentials)?;
     if !priors.is_empty() {
         let mut store = MemoryPriors::new();
         for p in priors {

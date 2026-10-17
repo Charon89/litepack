@@ -7,6 +7,13 @@ use std::time::Duration;
 const MIB: u64 = 1024 * 1024;
 const PROBE: &str = env!("CARGO_BIN_EXE_lpk-procstat-probe");
 
+#[test]
+fn physical_memory_is_reported() {
+    let m = lpk_procstat_sys::physical_memory().expect("the query works on Windows and Linux");
+    // Any machine that builds this workspace has more than 256 MiB of memory.
+    assert!(m > 256 * MIB, "{m}");
+}
+
 fn probe(args: &[&str]) -> Spec {
     Spec::new(PROBE)
         .args(args.iter().copied())

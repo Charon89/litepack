@@ -11,8 +11,10 @@ use ruzstd::decoding::{BlockDecodingStrategy, Dictionary, FrameDecoder};
 use std::sync::Arc;
 
 const ID: u16 = 1;
-/// Decoding goes on in steps of about this many output bytes.
-const STEP: usize = 64 * 1024;
+/// Bytes the decoder is asked to produce per `decode_blocks` call (it decodes whole blocks,
+/// so it may produce up to one block more): with the window, what its ring buffer holds.
+pub const DECODE_STEP: usize = 64 * 1024;
+const STEP: usize = DECODE_STEP;
 
 fn zerr(e: impl std::fmt::Display) -> FormatError {
     FormatError::ZstdError {
@@ -113,26 +115,26 @@ fn map_frame_error(e: FrameDecoderError) -> FormatError {
     }
 }
 
-/// Move what the decoder can hand out into `out`, refusing to pass `max`.
+/// Move what the decoder can hand out into `out`, refusing to pass `max`. The bytes go
+/// from the decoder's ring buffer straight into `out` (`collect_to_writer`), with no
+/// intermediate copy, so the decoder holds `out` plus its ring buffer (E2-20).
 fn drain(dec: &mut FrameDecoder, out: &mut Vec<u8>, max: u64) -> Result<(), FormatError> {
     while dec.can_collect() > 0 {
-        let len = (out.len() as u64).saturating_add(dec.can_collect() as u64);
+        let n = dec.can_collect();
+        let len = (out.len() as u64).saturating_add(n as u64);
         if len > max {
             return Err(FormatError::PayloadTooLarge { len, max });
         }
-        match dec.collect() {
-            Some(chunk) if !chunk.is_empty() => {
-                let need = out.len() + chunk.len();
-                if out.capacity() < need {
-                    // Grow by an eighth (at least 64 KiB), never past `max`:
-                    // capacity stays within `max`, copies stay amortised.
-                    let step = (out.len() / 8).max(STEP).max(chunk.len());
-                    let cap = (out.len() + step).min(max.try_into().unwrap_or(usize::MAX));
-                    out.reserve_exact(cap.max(need) - out.len());
-                }
-                out.extend_from_slice(&chunk);
-            }
-            _ => break,
+        let need = out.len() + n;
+        if out.capacity() < need {
+            // Grow by an eighth (at least 64 KiB), never past `max`:
+            // capacity stays within `max`, copies stay amortised.
+            let step = (out.len() / 8).max(STEP).max(n);
+            let cap = (out.len() + step).min(max.try_into().unwrap_or(usize::MAX));
+            out.reserve_exact(cap.max(need) - out.len());
+        }
+        if dec.collect_to_writer(&mut *out).map_err(zerr)? == 0 {
+            break;
         }
     }
     Ok(())
@@ -172,7 +174,10 @@ impl PrimitiveDecoder for ZstdDecoder {
             dec.add_dict(d).map_err(map_frame_error)?;
         }
         let mut src = input;
-        let mut out: Vec<u8> = Vec::new();
+        // Reserved once to the block (bounded by the reader's block limit): the output never
+        // reallocates past it (E2-20).
+        let reserve = usize::try_from(expected_len.min(limits.max_block_plain)).unwrap_or(0);
+        let mut out: Vec<u8> = Vec::with_capacity(reserve);
         while !src.is_empty() {
             let frame_start = input.len() - src.len();
             let out_before_frame = out.len() as u64;
