@@ -301,8 +301,8 @@ impl PartialEq for DeflateSummary {
 }
 
 /// The exact length of `record` in the `Records` frame: kind, flags, the length varint, the
-/// body and its BLAKE3.
-pub(crate) fn record_len(record: &Record) -> u64 {
+/// body and its BLAKE3 (public for `probe png-filter`, which counts side information with it).
+pub fn record_len(record: &Record) -> u64 {
     let body = record.encode().len() as u64;
     let mut v = Vec::new();
     // Writing to a vector cannot fail.
