@@ -230,10 +230,24 @@ pub fn analyse_stream(
     plain_known: Option<u64>,
     plain_text_limit: u64,
 ) -> StreamOutcome {
-    analyse_with(deflate, plain_known, &preflate_config(plain_text_limit))
+    analyse_with(
+        deflate,
+        plain_known,
+        &preflate_config(plain_text_limit),
+        false,
+    )
 }
 
-fn analyse_with(deflate: &[u8], plain_known: Option<u64>, cfg: &PreflateConfig) -> StreamOutcome {
+/// [`analyse_stream`] with `cfg`; `declared` is true when `cfg`'s plain-text limit is the
+/// declared size plus one (tighter than the stream limit): a stream that reaches it inflates
+/// past its declared size and is `RoundtripMismatch` (its declared size is wrong), as the probe
+/// names a size mismatch.
+fn analyse_with(
+    deflate: &[u8],
+    plain_known: Option<u64>,
+    cfg: &PreflateConfig,
+    declared: bool,
+) -> StreamOutcome {
     let failed = |cause: &str, seconds: f64| StreamOutcome::Failed {
         cause: cause.to_string(),
         deflate_len: deflate.len(),
@@ -253,16 +267,27 @@ fn analyse_with(deflate: &[u8], plain_known: Option<u64>, cfg: &PreflateConfig) 
             Ok::<_, preflate_rs::PreflateError>((chunk, done, sp.detach_plain_text()))
         }))
     });
+    let mismatch = code_name(ExitCode::RoundtripMismatch);
     let (chunk, done, plain) = match r {
         Err(_) => return failed(PANIC, analyse_seconds),
+        Ok(Err(e)) if e.exit_code() == ExitCode::PlainTextLimit && declared => {
+            return failed(&mismatch, analyse_seconds)
+        }
         Ok(Err(e)) if e.exit_code() == ExitCode::PlainTextLimit => return skipped(analyse_seconds),
         Ok(Err(e)) => return failed(&code_name(e.exit_code()), analyse_seconds),
         Ok(Ok(v)) => v,
     };
     if !done {
+        if declared && plain.text().len() >= cfg.plain_text_limit {
+            // Past its declared size.
+            return failed(&mismatch, analyse_seconds);
+        }
         // Over the limit when the stream is complete and its plain size exceeds the limit.
         let mut buf = vec![0u8; 64 * 1024];
         return match inflate_extent(deflate, false, &mut buf) {
+            Inflated::Clean { out, .. } if out > cfg.plain_text_limit as u64 && declared => {
+                failed(&mismatch, analyse_seconds)
+            }
             Inflated::Clean { out, .. } if out > cfg.plain_text_limit as u64 => {
                 skipped(analyse_seconds)
             }
@@ -505,7 +530,12 @@ pub fn examine(
                 seconds: 0.0,
             }
         } else {
-            analyse_with(&data, c.plain_known, &cfg)
+            // A declared size bounds the analysis: the library stops one byte past it, so a
+            // member that lies about its size costs no more than it declares.
+            match c.plain_known.filter(|&k| k < limits.plain_text_limit) {
+                Some(k) => analyse_with(&data, c.plain_known, &preflate_config(k + 1), true),
+                None => analyse_with(&data, c.plain_known, &cfg, false),
+            }
         };
         match outcome {
             StreamOutcome::Done {
@@ -657,7 +687,7 @@ mod tests {
         }
         let d = raw_deflate(&plain);
         let cfg = cfg_with(64 * 1024 * 1024);
-        match analyse_with(&d, Some(plain.len() as u64), &cfg) {
+        match analyse_with(&d, Some(plain.len() as u64), &cfg, false) {
             StreamOutcome::Done {
                 plain: p,
                 corrections,
@@ -671,7 +701,7 @@ mod tests {
             _ => panic!("a whole stream reconstructs"),
         }
         // Truncated input: the library returns a shortened stream, the analysis says ShortRead.
-        match analyse_with(&d[..d.len() * 3 / 4], None, &cfg) {
+        match analyse_with(&d[..d.len() * 3 / 4], None, &cfg, false) {
             StreamOutcome::Failed {
                 cause, deflate_len, ..
             } => {
@@ -683,7 +713,7 @@ mod tests {
         // Plain-text limit reached after at least one block, size unknown: skipped.
         let cfg = cfg_with(plain.len() / 2);
         assert!(matches!(
-            analyse_with(&d, None, &cfg),
+            analyse_with(&d, None, &cfg, false),
             StreamOutcome::Skipped { .. }
         ));
         // A wrong known size is a failure.
@@ -820,6 +850,80 @@ mod tests {
         // A file within its budget is examined as before.
         let (e, _) = run(&zlib(&text(30_000, 1)), "bin", &Limits::standard());
         assert_eq!((e.counts.work_budget_stopped, e.counts.found), (0, 1));
+    }
+
+    /// A ZIP built by hand: `n` members, each the same raw Deflate stream, every member declaring
+    /// `declared` plain bytes (local and central headers; the CRC is not checked by the walker).
+    fn lying_zip(n: usize, stream: &[u8], declared: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for i in 0..n {
+            let name = format!("m{i:05}.bin");
+            let offset = out.len() as u32;
+            let mut h = Vec::new();
+            h.extend_from_slice(b"PK\x03\x04");
+            h.extend_from_slice(&[20, 0, 0, 0, 8, 0, 0, 0, 0x21, 0]);
+            h.extend_from_slice(&0u32.to_le_bytes()); // crc
+            h.extend_from_slice(&(stream.len() as u32).to_le_bytes());
+            h.extend_from_slice(&declared.to_le_bytes());
+            h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            h.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&h);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(stream);
+            central.extend_from_slice(b"PK\x01\x02");
+            central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 8, 0, 0, 0, 0x21, 0]);
+            central.extend_from_slice(&0u32.to_le_bytes());
+            central.extend_from_slice(&(stream.len() as u32).to_le_bytes());
+            central.extend_from_slice(&declared.to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0; 8]); // extra, comment, disk, internal attributes
+            central.extend_from_slice(&0u32.to_le_bytes()); // external attributes
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    /// Members that declare one byte but inflate to 16 MiB each: every analysis stops one byte
+    /// past the declared size, so the file finishes quickly; each is a size mismatch.
+    #[test]
+    fn zip_members_that_lie_about_their_size_cost_what_they_declare() {
+        let stream = raw_deflate(&vec![0u8; 16 << 20]);
+        let file = lying_zip(200, &stream, 1);
+        let t = std::time::Instant::now();
+        let (e, done) = run(&file, "zip", &Limits::standard());
+        assert_eq!(
+            (e.kind, e.counts.found, done.len()),
+            ("zip", 200, 0),
+            "{:?}",
+            e.counts
+        );
+        assert_eq!(
+            e.counts.failed.get("RoundtripMismatch"),
+            Some(&200),
+            "{:?}",
+            e.counts
+        );
+        assert!(t.elapsed().as_secs() < 60, "{:?}", t.elapsed());
+        // An honest declaration still reconstructs.
+        let honest = lying_zip(1, &stream, 16 << 20);
+        let (e, done) = run(&honest, "zip", &Limits::standard());
+        assert_eq!(
+            (e.counts.reconstructed, done.len()),
+            (1, 1),
+            "{:?}",
+            e.counts
+        );
     }
 
     #[test]
