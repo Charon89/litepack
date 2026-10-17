@@ -508,7 +508,7 @@ fn report(
     let t = &s.timings;
     let _ = writeln!(
         err,
-        "{}: generation {}, {} entries, {} blocks, {} bytes (threads: {}, blocks in flight: {}, I/O threads: {}, chunk hash threads: {})",
+        "{}: generation {}, {} entries, {} blocks, {} bytes (threads: {}, blocks in flight: {}, I/O threads: {}, chunk hash threads: up to {})",
         archive.display(),
         s.writer.generation,
         s.writer.entries,

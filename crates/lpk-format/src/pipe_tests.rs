@@ -220,6 +220,7 @@ fn hashing_chunks_on_several_threads_keeps_the_sequential_bytes() {
             let c = Case { threads, ..base };
             let got = pipelined(c);
             assert!(sequential(c) == got, "segment {segment} threads {threads}");
+            assert!(want == got, "segment {segment} threads {threads} vs 1");
             if threads == 4 {
                 let c = Case {
                     recovery: 10,

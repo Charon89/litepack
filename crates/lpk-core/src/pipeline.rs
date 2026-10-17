@@ -110,14 +110,19 @@ pub struct RunSummary {
     /// write thread only for an archive file (`run_file`, `append_file`). They mostly wait on
     /// I/O; 0, 1 or 2.
     pub io_threads: usize,
-    /// Threads hashing the chunks of a read-ahead segment, the feeding thread included: 1
-    /// with one block in flight, else up to [`lpk_format::writer::MAX_HASH_THREADS`]
-    /// (bounded by the blocks in flight), scoped to one segment at a time.
+    /// The most threads that may hash the chunks of a read-ahead segment, the feeding thread
+    /// included: 1 with one block in flight or without a reader thread, else the blocks in
+    /// flight capped at [`lpk_format::writer::MAX_HASH_THREADS`]. An upper bound: a segment
+    /// with few chunk bytes, or a run whose files are all read whole for a peel, uses fewer;
+    /// the threads are scoped to one segment at a time.
     pub hash_threads: usize,
 }
 
-/// [`RunSummary::hash_threads`] for `blocks_in_flight`.
-fn hash_threads(blocks_in_flight: usize) -> usize {
+/// [`RunSummary::hash_threads`] for `blocks_in_flight`, with or without a reader thread.
+fn hash_threads(blocks_in_flight: usize, reader: bool) -> usize {
+    if !reader {
+        return 1;
+    }
     blocks_in_flight.clamp(1, lpk_format::writer::MAX_HASH_THREADS)
 }
 
@@ -433,7 +438,7 @@ impl Pipeline {
                     threads,
                     blocks_in_flight: threads,
                     io_threads,
-                    hash_threads: hash_threads(threads),
+                    hash_threads: hash_threads(threads, reads.threads() > 0),
                 })
             }
             (model, prepared) => {
@@ -630,7 +635,7 @@ impl Pipeline {
                     threads,
                     blocks_in_flight: in_flight,
                     io_threads,
-                    hash_threads: hash_threads(in_flight),
+                    hash_threads: hash_threads(in_flight, reads.threads() > 0),
                 })
             }
         }

@@ -259,20 +259,28 @@ mod tests {
         let rs = ranges(data.len(), &[65_536]);
         let last = data.len();
         let first = rs[0].1;
-        // On a pool thread (the last group), then on the calling thread (group 0).
-        for bad_end in [last, first] {
-            let started = std::sync::atomic::AtomicUsize::new(0);
+        // Four groups of equal bytes: 32 chunks each.
+        let group = rs.len() / 4;
+        // On a pool thread (the last chunk of the last group): every other chunk
+        // is hashed. On the calling thread (the first chunk of group 0): group 0
+        // stops there, the three pool groups are hashed whole. Counting finished
+        // hashes right after the call shows the pool threads ran to the end
+        // before it returned.
+        for (bad_end, done) in [(last, rs.len() - 1), (first, rs.len() - group)] {
+            let finished = std::sync::atomic::AtomicUsize::new(0);
             let r = hash_ranges(bytes, &rs, 4, &|(h, t): (&[u8], &[u8])| {
-                started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let p = t.as_ptr() as usize + t.len() - data.as_ptr() as usize;
                 if p == bad_end && h.is_empty() {
                     panic!("injected");
                 }
-                hash_two((h, t))
+                let out = hash_two((h, t));
+                finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                out
             });
+            let n = finished.load(std::sync::atomic::Ordering::SeqCst);
             let p = r.err().map(|p| p.downcast_ref::<&str>().copied());
             assert_eq!(p, Some(Some("injected")), "bad end {bad_end}");
-            assert!(started.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+            assert_eq!(n, done, "bad end {bad_end}: hashes finished at return");
         }
     }
 }

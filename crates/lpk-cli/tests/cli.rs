@@ -1080,37 +1080,37 @@ fn add_threads_1_and_8_write_the_same_archive_and_v_prints_the_blocks_in_flight(
             "--fast",
             "1",
             "threads: 1, blocks in flight: 1",
-            "chunk hash threads: 1)",
+            "chunk hash threads: up to 1)",
         ),
         (
             "--fast",
             "8",
             "threads: 8, blocks in flight: 8",
-            "chunk hash threads: 4)",
+            "chunk hash threads: up to 4)",
         ),
         (
             "--balanced",
             "1",
             "threads: 1, blocks in flight: 1",
-            "chunk hash threads: 1)",
+            "chunk hash threads: up to 1)",
         ),
         (
             "--balanced",
             "8",
             "threads: 8, blocks in flight: 4",
-            "chunk hash threads: 4)",
+            "chunk hash threads: up to 4)",
         ),
         (
             "--store",
             "1",
             "threads: 1, blocks in flight: 1",
-            "chunk hash threads: 1)",
+            "chunk hash threads: up to 1)",
         ),
         (
             "--store",
             "8",
             "threads: 8, blocks in flight: 8",
-            "chunk hash threads: 4)",
+            "chunk hash threads: up to 4)",
         ),
     ] {
         let arch = work.path().join(format!("{}-{threads}.lpk", &tier[2..]));
