@@ -971,7 +971,8 @@ into at most the step's output bound. It applies these rules, in this order:
    is `ZstdError`; the `reason` is the decoder's own text and is not normative. When a frame is damaged and its
    output also passes the bound, the class is decided at the granularity of a block: if the output so far (earlier
    frames included) plus that of the frame's complete blocks before the damaged one exceeds the bound, the step is
-   `PayloadTooLarge`; otherwise it is `ZstdError`. A damaged block's partial output is never counted.
+   `PayloadTooLarge` (`BlockLengthMismatch` on the last step, as above); otherwise it is `ZstdError`. A damaged
+   block's partial output is never counted.
 
 Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`, `BadParams`,
 `BlockLengthMismatch`, `PayloadTooLarge`, `WindowTooLarge`, `ZstdError`, `LzmaError`, and `Truncated` with the
