@@ -682,7 +682,8 @@ Revision 1.2. A step whose next step is `deflate-reconstruct` has, as its output
 record that step names instead of `max_block_plain`. Before the step runs, and before any of that step's own rules
 (its parameters' resources against the reader, its prior, its input), the reader applies checks (1) to (5) of
 "Decoding `deflate-reconstruct`" to that record, with the `deflate-reconstruct` step's own output bound in check (3):
-the block's `plain_len` when that step is the last, `max_block_plain` otherwise; an error there is the block's error
+the block's `plain_len` when that step is the last, `max_block_plain` otherwise, never a bound derived from a later
+step (such as the `plain_len` of a record that a step after it names); an error there is the block's error
 and the step does not run. The step's output longer than `plain_len` is `PayloadTooLarge`; a shorter one is
 reported by the reconstruction step (check (6), `BadRecord` `plain_len`). Check (5) is what bounds `plain_len`: a
 record whose `plain_len` the archive's decode memory cannot hold is refused before the step that would produce it
@@ -896,7 +897,7 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   `original_len` bytes are `BadRecord`, `corrections`; (5) resources: the stream's term ("Resources" below) above the
   decode memory left after `max_block_plain` is `Refused`, field `decode_memory`, and nothing is decoded
   (informative: section 16 makes the class and its `field` normative; the reference reports `needed` =
-  `max_block_plain` + the term and `allowed` = the decode memory it compared against, the archive's `decode_memory`
+  `max_block_plain` + the term, saturating at 2^64 - 1, and `allowed` = the decode memory it compared against, the archive's `decode_memory`
   or its own memory resource if smaller); (6) the
   input must be exactly `plain_len` bytes (`BadRecord`, `plain_len`); (7) the stream is recreated from the input and
   `corrections`: corrections the library refuses, or a recreation that panics, are `BadRecord`, `corrections`; an
@@ -912,7 +913,9 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   hash chain than the parameters' `max_chain`. A reader that calls the cited library cannot inspect these inside
   the corrections, so they are permitted refusals, not rules every reader applies. The reference refuses exactly
   there: it starts no block once it has produced `original_len` blocks (every Deflate block takes at least 10
-  bits, so a stream of at most `original_len` bytes has at most that many); it accepts, besides the one parameter set
+  bits, so a stream of at most `original_len` bytes has at most that many; informative: a reader that recreates
+  with the output limit of check (7) meets output past `original_len` first, so with the reference's limits the
+  block-count refusal never occurs and such a stream is `BadRecord` `original_len`); it accepts, besides the one parameter set
   of stored and Huffman-only streams, `window_bits` 9 to 15, `max_token_count` 2^k - 1 for k from 7 to 15,
   `max_chain` 1 to 4096, `min_len` 3 to 258 or 2^32 - 1, `max_dist_3_matches` at most 32768, and the nice lengths,
   lazy-matching rows, dictionary add policies and hash algorithms analysis constructs (the full list is change 3
@@ -946,8 +949,16 @@ The decoding of a `zstd` step is that of RFC 8878 (Zstandard frames), and the de
 the LZMA SDK's `lzma-specification.txt` (LZMA1, its reference decoder `LzmaSpec`), including how much input each
 consumes. For an `lzma` step, the end of the stream is the input position of that decoder after the end-of-payload
 marker, or, for a stream without the marker (allowed only in the last step of a graph), its input position when the
-output bound is reached; "trailing input" is any byte after that position. For a `zstd` step the input is a sequence
-of whole frames and nothing else.
+output bound is reached; "trailing input" is any byte after that position. The input position at the bound is
+LzmaSpec's: the 5 bytes of the range coder's initialisation plus one byte for each normalisation, up to and including
+the normalisation LzmaSpec performs after the last bit of the symbol that reaches the bound. A marker-less stream ends
+there; any byte after it is trailing input, unless the bytes after it are exactly the end-of-payload marker with the
+end condition holding (`lzma` rules 4 and 5). For a `zstd` step the input is a sequence of whole frames and nothing
+else.
+
+Where the rules below are silent on which of two faults of one stream decides its class, the first fault in stream
+order decides (as for a crossing of the output bound, `zstd` rule 7 and `lzma` rules 3 and 6). Where they are silent
+on a detail of decoding, the normative decoder cited here decides, not the behaviour of a library a decoder uses.
 
 ### What the reference decoder enforces for `zstd`
 
@@ -974,7 +985,9 @@ into at most the step's output bound. It applies these rules, in this order:
    output also passes the bound, the class is decided at the granularity of a block: if the output so far (earlier
    frames included) plus that of the frame's complete blocks before the damaged one exceeds the bound, the step is
    `PayloadTooLarge` (`BlockLengthMismatch` on the last step, as above); otherwise it is `ZstdError`. A damaged
-   block's partial output is never counted.
+   block's partial output is never counted. RFC 8878's `Content_Checksum` belongs to no block: a frame cut short or
+   damaged inside its checksum has all its blocks complete, and their output counts under this rule (past the bound,
+   `PayloadTooLarge`, or `BlockLengthMismatch` on the last step; otherwise `ZstdError`).
 
 Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`, `BadParams`,
 `BlockLengthMismatch`, `PayloadTooLarge`, `WindowTooLarge`, `ZstdError`, `LzmaError`, and `Truncated` with the
@@ -988,7 +1001,11 @@ bound is the block's `plain_len` and the decoder stops when it has produced exac
 is not the last has only a bound (the envelope's `max_block_plain`, or in revision 1.2 the `plain_len` of the
 record of a following `deflate-reconstruct` step, section 8 "Bounds"), so its stream MUST end with the
 end-of-payload marker: a stream without it that reaches the bound is `LzmaError` with the reason
-`marker required`, and one that ends early without it is `LzmaError` with `truncated`. `lzma` parameters carry no prior ID: v1
+`marker required`, and one that ends early without it is `LzmaError` with `truncated`. Precisely, in a step that
+is not the last, once the output has reached the bound: a literal or match decoded next is `PayloadTooLarge` (rule
+6); input that ends there, or inside the next symbol, is `LzmaError` with `marker required`. In such a step the
+end-of-payload marker ends the stream wherever it comes, at the bound or before it, and input after it is `LzmaError`
+with `trailing input`. `lzma` parameters carry no prior ID: v1
 has no priors for LZMA (section 10 is about `zstd` only). The rules, in this order:
 
 1. `lc` <= 8, `lp` <= 4, `pb` <= 4 and `lc + lp` <= 4 (`BadParams`, `lc`, `lp`, `pb` or `lc + lp`), in that
@@ -997,13 +1014,21 @@ has no priors for LZMA (section 10 is about `zstd` only). The rules, in this ord
    `LZMA_LCLP_MAX`; the LZMA SDK would accept up to 12.)
 2. `dict_size` must not exceed the reader's `max_window`; otherwise `WindowTooLarge` with the size needed and
    the size allowed, raised before the input is read.
-3. A match distance greater than `dict_size`, or greater than the number of bytes produced so far, is
-   `LzmaError`. Whether a stream decodes never depends on the reader's
-   `max_window` beyond rule 2: a decoder needs a buffer of the smaller of `dict_size` and
-   the output bound (at least 1 byte), which is exactly the reach a valid stream can use.
+3. A match distance greater than the dictionary size, or greater than the number of bytes produced so far, is
+   `LzmaError`. The dictionary size here is LzmaSpec's, at least 4096: the stored `dict_size`, raised to 4096 when
+   it is below 4096, as LzmaSpec, the LZMA SDK's `LzmaDec` and liblzma do (rule 2 compares the stored `dict_size`
+   with `max_window`). So a distance of at most 4096 is never refused for exceeding the dictionary, whatever
+   `dict_size` is stored. A match whose distance this rule refuses and that would also cross the output bound is
+   this rule's `LzmaError`, not `PayloadTooLarge`: its distance is checked before any of its bytes is written.
+   Whether a stream decodes never depends on the reader's `max_window` beyond rule 2: a decoder needs a buffer of
+   the smaller of max(`dict_size`, 4096) and the output bound (at least 1 byte), which is exactly the reach a valid
+   stream can use.
 4. The first byte of the range coder stream must be 0, else `LzmaError` with reason `range coder`. The
    range coder's end condition (LzmaSpec's `IsFinishedOK`: its code value is 0) is checked only when the
-   end-of-payload marker is present: after the marker it must hold. A stream that ends at the output bound
+   end-of-payload marker is present: after the marker it must hold. When it does not: in the last step with the
+   marker at the output bound, `LzmaError` with `trailing input` (rule 5); in the last step with the marker before
+   the bound, `truncated` (rule 5); in a step that is not the last, `LzmaError` with a reason that is not
+   normative. A stream that ends at the output bound
    without a marker is not checked for it, and a decoder must not refuse a marker-less stream because its final
    code value is not 0. This differs from LzmaSpec, which ends a marker-less stream only when `IsFinishedOK`
    holds and otherwise goes on to look for a marker; a v1 decoder accepts the marker-less final stream at the
@@ -1011,15 +1036,20 @@ has no priors for LZMA (section 10 is about `zstd` only). The rules, in this ord
 5. In the last step the stream may end with the end-of-payload marker or without one (the test vectors carry
    it; `.lzma` files of known size do not), and a decoder that has produced the output bound accepts either.
    When the output bound is reached with input left, the next symbol must be the end-of-payload marker, after
-   which no input may follow; otherwise every byte after the decoder's input position at the bound is
-   `LzmaError` with reason `trailing input`. That covers bytes that would decode as further symbols starting at
-   the bound (a literal or a match after the last byte) and bytes that decode as nothing. Input after the marker
-   is `trailing input` too. Input that ends before the output bound is reached, or a marker before it, is
-   `LzmaError` with reason `truncated`.
+   which no input may follow; otherwise every byte after the decoder's input position at the bound ("Normative
+   decoders" above) is `LzmaError` with reason `trailing input`. That covers bytes that would decode as further
+   symbols starting at the bound (a literal or a match after the last byte) and bytes that decode as nothing.
+   Input after a marker at the bound is `trailing input` too. Input that ends before the output bound is reached
+   is `LzmaError` with reason `truncated`, and so is a marker before the bound, whatever follows it (input after
+   it, or an end condition that fails): the early marker is the first fault, and LzmaSpec reports a marker before
+   the known size as an error without looking further.
 6. A match that crosses the output bound is `PayloadTooLarge` (`BlockLengthMismatch` on the last step); the
    decoder never writes past the bound. Any other damage is `LzmaError`; its `reason` is the decoder's own text
    and is not normative, except the reasons `range coder`, `trailing input`, `truncated` and `marker required`
-   named above.
+   named above. When the input ends inside a symbol that is also invalid (for example a rep match before any byte
+   was produced, which LzmaSpec refuses before it reads the rest of the symbol), the reason is either the one given
+   above for input that ends there (`truncated`, or `marker required` after the bound in a step that is not the
+   last) or the decoder's own text.
 
 ## 9. Writing and reading an archive
 
