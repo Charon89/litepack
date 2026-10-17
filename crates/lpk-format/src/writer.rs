@@ -275,10 +275,8 @@ pub struct WriterOptions {
     /// handed over, and blocks are written in order, so the archive is byte
     /// for byte the one a single thread writes. Memory: `encode_threads`
     /// times (`block_size` plus the encoded size) for the blocks in flight,
-    /// plus the encoders' own working memory, one per block in flight, plus
-    /// one spare block buffer (up to `block_size`, kept for reuse once a
-    /// block is written) and the read buffer (up to `block_size` plus
-    /// `chunk_size`), both kept for the writer's life.
+    /// plus the encoders' own working memory, one per block in flight; the
+    /// block buffer pool and the read buffer, as [`Writer::new`] describes.
     pub encode_threads: usize,
 }
 
@@ -473,9 +471,12 @@ pub struct Writer<W: Write> {
     /// Blocks handed over and not yet written, in block order (empty when
     /// `encode_threads` is 1: a block is then written as it closes).
     queue: VecDeque<InFlight>,
-    /// A plain or encoded block buffer kept after its block was written, cleared, for the
-    /// next pending block (its pages already touched); at most one is kept.
-    spare: Option<Vec<u8>>,
+    /// The block buffer pool: plain or encoded block buffers kept after their block
+    /// was written (or a job handed its plain buffer back), cleared, for the next
+    /// pending blocks (their pages already touched). A buffer enters it only once
+    /// nothing references it any more (ownership moves back here); at most
+    /// [`Writer::pool_cap`] are kept.
+    spares: Vec<Vec<u8>>,
     /// The read buffer of `chunk_stream`, kept across files.
     read_buf: Vec<u8>,
     /// Tests only: skip the record chunk checks at block close, to build the
@@ -485,7 +486,15 @@ pub struct Writer<W: Write> {
     /// Tests only: the pool threads hand back a wrong frame hash.
     #[cfg(test)]
     corrupt_pool_hash: bool,
+    /// Tests only: every buffer entering the pool is filled with [`POISON`] first,
+    /// so a written frame holding that pattern shows a buffer reused too early.
+    #[cfg(test)]
+    poison_pool: bool,
 }
+
+/// Tests only: the byte a poisoned pool fills returned buffers with.
+#[cfg(test)]
+const POISON: u8 = 0xA5;
 
 /// What an encode job returns: the encoding and the state its encoder takes back.
 pub type JobResult = Result<(Encoded, Option<JobState>), FormatError>;
@@ -502,6 +511,9 @@ struct PoolOutput {
 
 /// Buffers smaller than this are not kept for reuse.
 const RECYCLE_MIN: usize = 1 << 20;
+
+/// Frames queued for the write thread at most (beyond the one it is writing).
+pub const WRITE_DEPTH: usize = 1;
 
 /// Computes a pool-encoded block's frame hash on the pool thread, over the
 /// payload the writer will write: the block header (encoded from the graph,
@@ -683,10 +695,14 @@ impl<W: Write> Writer<W> {
     /// `encode_threads` blocks in flight at once, each its plain bytes plus its
     /// encoding — `encode_threads` times (`block_size` plus the encoded size)
     /// — plus the encoders' own working memory, one encoder per block in
-    /// flight; one spare block buffer (up to `block_size`) kept for reuse
-    /// after a block is written, and the read buffer of the file being added
-    /// (up to `block_size` plus `chunk_size`), both kept for the writer's
-    /// life; the chunk table (40 bytes per chunk) and the block table for
+    /// flight; the block buffer pool: buffers of written blocks (plain or
+    /// encoded, up to `block_size` each, those under 1 MiB dropped) are kept,
+    /// cleared, for the next pending blocks, at most `encode_threads` plus 3
+    /// of them ([`WRITE_DEPTH`] plus 2: the pending block's, the frames queued
+    /// for the write thread and the one it writes), and never more than were
+    /// alive at once, for the writer's life; the read buffer of the file being
+    /// added by [`Writer::add_file`] (up to `block_size` plus `chunk_size`),
+    /// kept for the writer's life; the chunk table (40 bytes per chunk) and the block table for
     /// the life of the archive; the dedup map when `dedup` is set; the
     /// recovery group's bytes when `recovery` is set ([`Writer::recovery_buffered`]).
     pub fn new(out: W, options: WriterOptions) -> Result<Self, FormatError> {
@@ -850,12 +866,14 @@ impl<W: Write> Writer<W> {
             open: None,
             recon_blocks: Vec::new(),
             queue: VecDeque::new(),
-            spare: None,
+            spares: Vec::new(),
             read_buf: Vec::new(),
             #[cfg(test)]
             unchecked_records: false,
             #[cfg(test)]
             corrupt_pool_hash: false,
+            #[cfg(test)]
+            poison_pool: false,
         };
         if let Some(slot) = slot {
             // The key slot is the first frame, in clear.
@@ -1127,12 +1145,14 @@ impl<W: Write> Writer<W> {
             open: None,
             recon_blocks: Vec::new(),
             queue: VecDeque::new(),
-            spare: None,
+            spares: Vec::new(),
             read_buf: Vec::new(),
             #[cfg(test)]
             unchecked_records: false,
             #[cfg(test)]
             corrupt_pool_hash: false,
+            #[cfg(test)]
+            poison_pool: false,
             options,
         };
         Ok(w)
@@ -1356,7 +1376,7 @@ impl<W: Write> Writer<W> {
         if self.pending_chunks == 0 {
             return Ok(());
         }
-        let next = self.spare.take().unwrap_or_default();
+        let next = self.take_spare();
         let plain = std::mem::replace(&mut self.pending, next);
         let chunk_count = std::mem::take(&mut self.pending_chunks);
         let first_chunk = self.records.len() as u64 - chunk_count;
@@ -1538,22 +1558,52 @@ impl<W: Write> Writer<W> {
         )
     }
 
-    /// Keep `buf` (cleared) for the next pending block when it is the largest
-    /// buffer at hand: the pending block itself when it holds nothing yet,
-    /// the spare otherwise. Small buffers are dropped.
+    /// Block buffers the pool keeps at most: one per block in flight, plus the
+    /// pending block's and the ones queued for or being written by the write
+    /// thread ([`WRITE_DEPTH`] plus one). Never more than were alive at once.
+    fn pool_cap(&self) -> usize {
+        self.threads() + WRITE_DEPTH + 2
+    }
+
+    /// Return `buf` to the pool (cleared): it becomes the pending block when that
+    /// holds nothing yet and is smaller, else a spare. Small buffers are dropped;
+    /// a full pool drops its smallest buffer.
     fn recycle(&mut self, mut buf: Vec<u8>) {
         if buf.capacity() < RECYCLE_MIN {
             return;
         }
+        #[cfg(test)]
+        if self.poison_pool {
+            buf.clear();
+            buf.resize(buf.capacity(), POISON);
+        }
         buf.clear();
         if self.pending.is_empty() && self.pending.capacity() < buf.capacity() {
-            self.pending = buf;
-        } else if self
-            .spare
-            .as_ref()
-            .is_none_or(|s| s.capacity() < buf.capacity())
+            buf = std::mem::replace(&mut self.pending, buf);
+            if buf.capacity() < RECYCLE_MIN {
+                return;
+            }
+        }
+        if self.spares.len() < self.pool_cap() {
+            self.spares.push(buf);
+            return;
+        }
+        if let Some(small) = self
+            .spares
+            .iter_mut()
+            .min_by_key(|s| s.capacity())
+            .filter(|s| s.capacity() < buf.capacity())
         {
-            self.spare = Some(buf);
+            *small = buf;
+        }
+    }
+
+    /// The largest buffer of the pool, for the next pending block (empty when
+    /// the pool has none).
+    fn take_spare(&mut self) -> Vec<u8> {
+        match (0..self.spares.len()).max_by_key(|&i| self.spares[i].capacity()) {
+            Some(i) => self.spares.swap_remove(i),
+            None => Vec::new(),
         }
     }
 
