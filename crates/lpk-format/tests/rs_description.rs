@@ -101,17 +101,17 @@ impl Field {
         self.exp[((65535 - self.log[a as usize]) % 65535) as usize]
     }
 
-    /// 13, "The evaluation points": w_j, the element of symbol j.
+    /// 13, "Evaluation points": w_j, the element of symbol j.
     fn w(&self, j: usize) -> u16 {
         self.sym_to_el[j]
     }
 
-    /// 13, "The evaluation points": W_m(x), the product of (x + w_s) over s < m.
+    /// 13, "Evaluation points": W_m(x), the product of (x + w_s) over s < m.
     fn subspace_poly(&self, m: usize, x: u16) -> u16 {
         (0..m).fold(1, |acc, s| self.mul(acc, x ^ self.w(s)))
     }
 
-    /// 13, "The evaluation points": k_m, the product of w_s over 1 <= s < m.
+    /// 13, "Evaluation points": k_m, the product of w_s over 1 <= s < m.
     fn kappa(&self, m: usize) -> u16 {
         (1..m).fold(1, |acc, s| self.mul(acc, self.w(s)))
     }
@@ -688,7 +688,7 @@ fn d_check_values_of_the_text() {
         let (a, b) = (rng.next() as u16, rng.next() as u16);
         assert_eq!(f.mul(a, b), clmul(a, b));
     }
-    // "The evaluation points": W_m(w_j) = w_{j / m} and k_m = 1 for every m a
+    // "Evaluation points": W_m(w_j) = w_{j / m} and k_m = 1 for every m a
     // power of two (checked for m <= 256 and j over a sample).
     for lg in 0..=8 {
         let m = 1usize << lg;

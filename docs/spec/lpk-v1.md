@@ -3,6 +3,9 @@
 Status: freeze candidate. This revision applies the findings of two independent readings of the text and of an
 independent decoder written from it (`docs/spec/CHANGES.md` lists every change); once frozen it is format v1.
 Revision 1.1 (section 2) adds the decoding of `jpeg-reconstruct` (section 8) and nothing else.
+The specification revision of 2026-10-16 (E1-15) defines the recovery frames' Reed-Solomon code normatively in
+section 13 instead of by reference to a library; it changes no byte and no reader outcome, and `version_minor` is
+unchanged.
 The reference reader is the `lpk-format` crate; the tables below are checked against it by a test. Section 16 lists
 every error class. `docs/spec/CONFORMANCE.md` states what an independent decoder must do with the test vectors.
 
@@ -88,6 +91,11 @@ a primitive of revision 1.1 (informative: the reference pipeline writes 1 whenev
 reader of revision 1.0 accepts an archive of minor 1 (any minor), lists it,
 verifies its frames and records, and reports `UnimplementedPrimitive` with the ID 7 for every block whose graph
 names `jpeg-reconstruct`, exactly as for any primitive it does not run.
+
+A revision of the text that changes no byte and no reader outcome, only how completely something is described, does
+not change `version_minor`: the specification revision of 2026-10-16 writes out the Reed-Solomon code of the
+recovery frames (section 13, "The code"), which version 1 had defined by reference to a library, and every archive
+of minor 0 or 1 is read as before.
 
 Header flags:
 
@@ -1295,15 +1303,141 @@ Errors of this section: `UnknownRecordKind`, `ReservedRecordBits`, `RecordHashMi
 groups of data shards and each group has its own frame, so the memory a writer or a repairing reader needs depends
 on the group, not on the archive. The index lists every frame (section 6).
 
-The code. Version 1 defines the Reed-Solomon code by reference: a systematic erasure code over GF(2^16), the
-Leopard-RS construction as implemented by the `reed-solomon-simd` library, version 3.x, with its 64-byte shard
-interleave (each shard's bytes are coded in 64-byte units, which is why `shard_len` is a multiple of 64). The
-recovery shards of a frame are those that library's encoder produces for the frame's `group_shards` data shards
-(the real ones followed by the implicit zero shards) and its `recovery_shards`. Which pairs of counts are allowed is
-that library's `ReedSolomonDecoder::supports(group_shards, recovery_shards)`. A normative description of the field,
-its basis and the shard layout, independent of the library, is planned for a later revision; until then an
-independent decoder MUST report damage from the shard hashes (which need no Reed-Solomon code) and MAY leave repair
-out.
+The recovery shards are a systematic Reed-Solomon erasure code over GF(2^16), defined in "The code" below so that an
+implementation written from this text alone produces byte-identical recovery shards and can rebuild damaged ones.
+Damage is located by the shard hashes, which need no Reed-Solomon code; repair needs the code. An independent
+decoder MUST report damage from the shard hashes and MAY leave repair out (`docs/spec/CONFORMANCE.md`, item 7).
+
+### The code
+
+This subsection is normative except where it says informative. Informative: the reference writer uses the
+`reed-solomon-simd` library, version 3.x, which implements this code (the Leopard-RS construction of Lin, Chung and
+Han, "Novel polynomial basis and its application to Reed-Solomon erasure codes", 2014); nothing below depends on that
+library. Notation: `k` is the frame's `group_shards`, `r` its `recovery_shards`, and `P(n)` the smallest power of two
+at least `n` (`P(1) = 1`).
+
+**The field.** The field is GF(2^16) = GF(2)[x] / (p(x)) with p(x) = x^16 + x^5 + x^3 + x^2 + 1 (`0x1002D`). An element
+in the polynomial representation is a 16-bit integer whose bit n is the coefficient of x^n; addition is XOR and
+multiplication is the carry-less product reduced modulo p(x). The element x generates the multiplicative group (of
+order 65535). The code does not use the polynomial representation for its symbols directly: it uses the basis
+b_0 .. b_15 below, each given in the polynomial representation, and a 16-bit symbol `s` (a value read from a shard,
+below) denotes the element e(s) = the XOR of the b_n over the set bits n of `s`.
+
+| n | b_n | n | b_n | n | b_n | n | b_n |
+|---|---|---|---|---|---|---|---|
+| 0 | `0x0001` | 4 | `0xC582` | 8 | `0x6C98` | 12 | `0xFDB8` |
+| 1 | `0xACCA` | 5 | `0xED2E` | 9 | `0x10D8` | 13 | `0xFB34` |
+| 2 | `0x3C0E` | 6 | `0x914C` | 10 | `0x6A72` | 14 | `0xFF38` |
+| 3 | `0x163E` | 7 | `0x4012` | 11 | `0xB900` | 15 | `0x991E` |
+
+The map e is GF(2)-linear and one to one: the XOR of two symbols denotes the sum of their elements, but the product
+of two symbols is the symbol of the product of their elements (e^-1(e(s) * e(t))), not an integer product. The basis
+is a Cantor basis: b_0 = 1 and b_n^2 + b_n = b_(n-1) for n from 1 to 15 (a check, not a construction: each step has
+two roots and the table fixes which). An implementation may convert each symbol to the polynomial representation,
+compute there and convert back, or tabulate the arithmetic of symbols directly; the results are the same. Check values,
+all in symbols: e(`0x0002`) = `0xACCA` and e(`0x8000`) = `0x991E`; the element x is the symbol `0x4690`;
+`0x0002` * `0x0002` = `0x0003`, `0x0002` * `0x0003` = `0x0001`, `0x1234` * `0xABCD` = `0x43C1`; the inverse of
+`0x0002` is `0x0003`.
+
+**Shards and symbols.** A shard (`shard_len` bytes, a multiple of 64) is a sequence of 64-byte units; unit u
+(bytes 64u to 64u + 63) holds symbols 32u to 32u + 31, and for t from 0 to 31 symbol 32u + t is
+`byte[64u + t] + 256 * byte[64u + 32 + t]`: the first 32 bytes of a unit are the low bytes of its 32 symbols and the
+last 32 bytes their high bytes. A shard holds `shard_len / 2` symbols. The code acts on each symbol position on its
+own: symbol q of every recovery shard depends only on symbol q of the data shards. The data shards are numbered i =
+0 .. k-1: the real ones (the group's bytes cut into `shard_len` pieces, the last padded with zeros) and then the
+implicit all-zero shards. The recovery shards are numbered j = 0 .. r-1 and stored in that order in the payload's
+`recovery` field. Below, d_i is the element of symbol q of data shard i and y_j the element of symbol q of recovery
+shard j; every recovery symbol is the symbol of its y_j.
+
+**Evaluation points.** For an integer j from 0 to 65535, w_j = e(j), the element whose symbol is j. For m a power of
+two, the points w_0 .. w_(m-1) form a GF(2)-subspace V_m and w_(cm) .. w_(cm+m-1) is its coset w_(cm) + V_m. Let
+W_m(X) = (X + w_0)(X + w_1)...(X + w_(m-1)), the polynomial vanishing on V_m, and K_m = w_1 * w_2 * ... * w_(m-1)
+(K_1 = 1). Because the basis is a Cantor basis, W_m(w_j) = w_(floor(j / m)) for every j and K_m = 1; an implementation
+may use these identities instead of the products.
+
+**Supported counts.** A pair `(k, r)` is supported when k >= 1, r >= 1, k <= 65536, r <= 65536 and
+`min(P(k), P(r)) + max(k, r) <= 65536`. This is exactly the condition under which every point the chosen form uses
+(below) is one of w_0 .. w_65535. (Informative: it is what the library's `ReedSolomonDecoder::supports(k, r)`
+answers. The bounds of "Geometry and bounds" below are checked as well; a pair inside them can still be unsupported,
+for example k = 20000 and r = 40000.)
+
+**Which form a pair uses.** The code has two forms. A pair uses the high form when P(k) > P(r), or when P(k) = P(r)
+and k <= r; otherwise (P(k) < P(r), or P(k) = P(r) and k > r) it uses the low form. The rule is part of the code: the
+two forms give different recovery shards for most pairs. (Informative: the reference writer takes r =
+ceil(k * percent / 100) with `percent` at most 20, so r <= k and P(r) < P(k) except for k = r = 1, and it always uses
+the high form; a reader accepts every supported pair and so implements both.)
+
+**The encoding map.** In both forms m is a power of two and every data and recovery shard sits at its own point.
+
+- High form, m = P(r). Data shard i sits at w_(m+i) and recovery shard j at w_j. The data shards are cut into chunks
+  of m (chunk c holds shards cm .. cm+m-1; the last chunk is completed with zero values). For each chunk let F_c be
+  the polynomial of degree less than m whose value at w_((c+1)m+t) is d_(cm+t) for t = 0 .. m-1; then
+  y_j = F_0(w_j) + F_1(w_j) + ... over all chunks. The values at w_r .. w_(m-1) are not stored.
+- Low form, m = P(k). Data shard i sits at w_i and recovery shard j at w_(m+j). Let F be the polynomial of degree
+  less than m whose value at w_i is d_i for i < k and 0 for k <= i < m; then y_j = F(w_(m+j)).
+
+Equivalently, by Lagrange interpolation on a coset of V_m, y_j = sum over i < k of C[j][i] * d_i with
+
+- high form: C[j][i] = W_m(w_(m+i)) / (K_m * (w_j + w_(m+i))) = w_(1 + floor(i/m)) / (w_j + w_(m+i));
+- low form: C[j][i] = W_m(w_(m+j)) / (K_m * (w_(m+j) + w_i)) = w_(1 + floor(j/m)) / (w_(m+j) + w_i).
+
+The implicit zero shards contribute nothing, so a group's recovery shards do not depend on how many of its k shards
+are real. With r = 1 the code is the XOR of the data shards. Check values (matrices written as symbols, rows j): for
+(k, r) = (3, 2), high form, C = [[`0x0003`, `0x0002`, `0x0005`], [`0x0002`, `0x0003`, `0x0004`]]; for (2, 3), low form,
+C = [[`0x0003`, `0x0002`], [`0x0002`, `0x0003`], [`0x0005`, `0x0004`]]. For 64-byte data shards whose symbol 0 is
+`0x1234`, `0xABCD`, `0xFFFF` (all other symbols 0), symbol 0 of the recovery shards is `0xFFC3`, `0xB9C5` for (3, 2)
+and, with the first two shards, `0xEC26`, `0x55DF`, `0x9998` for (2, 3).
+
+**The fast transform.** The map above may be computed in any way. This paragraph gives the transform the reference
+uses (an additive FFT), exact, for implementers who want the same speed; it computes the same values. For b >= 0 and
+an integer `base`, the twist factor is L(b, base) = W_(2^b)(w_base) / W_(2^b)(w_(2^b)), which for `base` a multiple of
+2^(b+1) is w_(base / 2^b). For m a power of two and an offset `delta` that is a multiple of m, FFT(delta) acts on a
+sequence x_0 .. x_(m-1) of elements (in practice, of whole shards, symbol by symbol):
+
+    for b = log2(m) - 1 down to 0:
+      for each block start s = 0, 2^(b+1), 2 * 2^(b+1), ... below m:
+        L = L(b, delta + s)
+        for i = s .. s + 2^b - 1:
+          x_i = x_i + L * x_(i + 2^b)
+          x_(i + 2^b) = x_(i + 2^b) + x_i
+
+and IFFT(delta) is the same loops with b going up from 0 to log2(m) - 1 and the two steps of each
+butterfly in the other order (first x_(i + 2^b) = x_(i + 2^b) + x_i, then x_i = x_i + L * x_(i + 2^b)). IFFT(delta) is the inverse of
+FFT(delta). FFT(delta) maps the coefficients c_n of a polynomial of degree less than m written in the basis
+X_n(X) = the product, over the set bits b of n, of W_(2^b)(X) / W_(2^b)(w_(2^b)) to its values at w_delta ..
+w_(delta+m-1); IFFT(delta) interpolates. (When L = 0 the product is 0; the reference skips that multiplication.)
+The two forms by the transform:
+
+- High form, m = P(r): for each chunk c of m data shards (the last completed with zero shards) apply IFFT((c+1)m);
+  add (XOR) the results of all chunks, shard by shard; apply FFT(0); recovery shard j is element j of the result for
+  j < r.
+- Low form, m = P(k): apply IFFT(0) to the data shards 0 .. m-1 (shards k .. m-1 zero); for each c from 0 to
+  ceil(r / m) - 1 apply FFT((c+1)m) to a copy of the result; recovery shard cm + t is element t of that copy (those at
+  cm + t >= r are discarded).
+
+(Informative: an all-zero chunk transforms to zero and may be skipped, and a transform whose input is zero beyond
+some position, or whose output is needed only up to some position, may skip the blocks that lie wholly outside.)
+
+**Decoding.** The rebuilt shards of a group are the unique shards consistent with the encoding map. The matrix C of
+either form is C[j][i] = u_i * v_j / (x_i + y_j) with the data points x_i and the recovery points y_j all distinct
+and the factors u_i, v_j non-zero (in the high form v_j = 1 and u_i = W_m(w_(m+i)) / K_m, non-zero because w_(m+i)
+is not in V_m; in the low form u_i = 1 and v_j = W_m(w_(m+j)) / K_m), a Cauchy matrix scaled by rows and columns,
+and every square submatrix of such a matrix is invertible. So when at most r shards of a group (data or recovery) are
+unknown, the known ones determine them: the e unknown data shards solve the e-by-e linear system that any e known
+recovery shards give (subtract the known data shards' part, then invert the submatrix of C on those rows and the
+unknown columns), and unknown recovery shards are then encoded again. The implicit zero shards are always known.
+A reader may use any method that gives these shards (Gaussian elimination over the field, the fast decoder below or
+a library); with more than r unknown shards the shards are not determined and the frame cannot rebuild them (step 3
+of "Repair").
+
+Informative, the fast decoder the reference uses (an outline; nothing normative depends on it): it places the
+received shards at their points (high form: recovery at w_0 .. w_(r-1), the unstored ones at w_r .. w_(m-1) treated
+as erased, data at w_m ..; low form: data at w_0 .., recovery at w_m ..), computes the erasure locator Λ(X), the
+product of (X + w_e) over the erased points e, at every point at once (its logarithms are a convolution over the XOR
+group, computed with a fast Walsh-Hadamard transform), multiplies each received value by Λ at its point (erased
+values by 0), applies IFFT(0) over P(number of points) positions, takes the formal derivative in the basis X_n,
+applies FFT(0) and divides at each erased point w_e by the product of (w_e + w_f) over the other erased points f
+(the derivative of Λ at w_e), which yields the erased value.
 
 ### Coverage and groups
 
@@ -1341,7 +1475,7 @@ rules of the payload below, and inside `check` and `repair` it too only makes th
 `shard_len` is a multiple of 64, not 0 and at most 16777216 (16 MiB). `group_shards` is 1 to 32768 and
 `group_shards * shard_len` is at most 1073741824 (1 GiB). `data_shards`, the real shards of a group, is
 `ceil(cover_len / shard_len)` and between 1 and `group_shards`. `recovery_shards` is at least 1 and
-`group_shards + recovery_shards` is at most 65535, and the pair must be one the code supports (above; a frame
+`group_shards + recovery_shards` is at most 65535, and the pair must be one the code supports ("The code", "Supported counts"; a frame
 that is not is `BadRecovery`, `reason` `shard count`). The reference writer takes `recovery_shards =
 ceil(group_shards * percent / 100)` (at least 1) from the frame's own `group_shards`, with `percent` from 1 to 20
 (0 means no recovery frames). Its options are `percent`, `shard_len` (default 65536) and `group_shards`, the most
