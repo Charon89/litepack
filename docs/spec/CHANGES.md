@@ -106,7 +106,7 @@ byte changed.
 4. Section 13 writes out the supported-pairs predicate (`min(P(k), P(r)) + max(k, r) <= 65536`) instead of naming
    the library's `supports`.
 5. Section 13 gives the additive FFT (twist factors, butterflies, both forms by the transform) as an exact,
-   equivalent fast computation.
+   equivalent fast computation, marked informative (the encoding map is the definition).
 6. Section 13 makes decoding normative as any inverse of the encoding map, with why the result is unique for at most
    `recovery_shards` unknown shards, and outlines the fast decoder informatively.
 7. Section 2 and the status line name this revision: no vector byte changed, no reader outcome changed,

@@ -1334,9 +1334,9 @@ The map e is GF(2)-linear and one to one: the XOR of two symbols denotes the sum
 of two symbols is the symbol of the product of their elements (e^-1(e(s) * e(t))), not an integer product. The basis
 is a Cantor basis: b_0 = 1 and b_n^2 + b_n = b_(n-1) for n from 1 to 15 (a check, not a construction: each step has
 two roots and the table fixes which). An implementation may convert each symbol to the polynomial representation,
-compute there and convert back, or tabulate the arithmetic of symbols directly; the results are the same. Check values,
-all in symbols: e(`0x0002`) = `0xACCA` and e(`0x8000`) = `0x991E`; the element x is the symbol `0x4690`;
-`0x0002` * `0x0002` = `0x0003`, `0x0002` * `0x0003` = `0x0001`, `0x1234` * `0xABCD` = `0x43C1`; the inverse of
+compute there and convert back, or tabulate the arithmetic of symbols directly; the results are the same. Check values:
+e(`0x0002`) = `0xACCA` and e(`0x8000`) = `0x991E` (symbol in, element out in the polynomial representation); the
+element x (polynomial representation `0x0002`) is the symbol `0x4690`; and, in symbols, `0x0002` * `0x0002` = `0x0003`, `0x0002` * `0x0003` = `0x0001`, `0x1234` * `0xABCD` = `0x43C1`; the inverse of
 `0x0002` is `0x0003`.
 
 **Shards and symbols.** A shard (`shard_len` bytes, a multiple of 64) is a sequence of 64-byte units; unit u
@@ -1353,7 +1353,11 @@ shard j; every recovery symbol is the symbol of its y_j.
 two, the points w_0 .. w_(m-1) form a GF(2)-subspace V_m and w_(cm) .. w_(cm+m-1) is its coset w_(cm) + V_m. Let
 W_m(X) = (X + w_0)(X + w_1)...(X + w_(m-1)), the polynomial vanishing on V_m, and K_m = w_1 * w_2 * ... * w_(m-1)
 (K_1 = 1). Because the basis is a Cantor basis, W_m(w_j) = w_(floor(j / m)) for every j and K_m = 1; an implementation
-may use these identities instead of the products.
+may use these identities instead of the products. Proof: S(X) = X^2 + X is GF(2)-linear with S(b_0) = 0 and
+S(b_n) = b_(n-1), so S(w_j) = w_(floor(j / 2)). For m = 2^a the a-fold composition S^a is monic of degree m and
+vanishes on V_m, which has m elements, so W_m = S^a and W_m(w_j) = w_(floor(j / m)). K_m is the coefficient of X in
+W_m (the product of its non-zero roots, in characteristic 2); the coefficient of X in S is 1, and composing linear
+polynomials multiplies their coefficients of X, so K_m = 1.
 
 **Supported counts.** A pair `(k, r)` is supported when k >= 1, r >= 1, k <= 65536, r <= 65536 and
 `min(P(k), P(r)) + max(k, r) <= 65536`. This is exactly the condition under which every point the chosen form uses
@@ -1388,10 +1392,11 @@ C = [[`0x0003`, `0x0002`], [`0x0002`, `0x0003`], [`0x0005`, `0x0004`]]. For 64-b
 `0x1234`, `0xABCD`, `0xFFFF` (all other symbols 0), symbol 0 of the recovery shards is `0xFFC3`, `0xB9C5` for (3, 2)
 and, with the first two shards, `0xEC26`, `0x55DF`, `0x9998` for (2, 3).
 
-**The fast transform.** The map above may be computed in any way. This paragraph gives the transform the reference
-uses (an additive FFT), exact, for implementers who want the same speed; it computes the same values. For b >= 0 and
-an integer `base`, the twist factor is L(b, base) = W_(2^b)(w_base) / W_(2^b)(w_(2^b)), which for `base` a multiple of
-2^(b+1) is w_(base / 2^b). For m a power of two and an offset `delta` that is a multiple of m, FFT(delta) acts on a
+**The fast transform.** Informative: this paragraph is an equivalent computation, and the encoding map above is the
+definition; where the two differ, the encoding map wins. The map may be computed in any way; this is the transform
+the reference uses (an additive FFT), exact, for implementers who want the same speed, and it computes the same
+values. For b >= 0 and an integer `base`, the twist factor is L(b, base) = W_(2^b)(w_base) / W_(2^b)(w_(2^b)), which
+by the identities above is w_(floor(base / 2^b)) for every `base`. For m a power of two and an offset `delta` that is a multiple of m, FFT(delta) acts on a
 sequence x_0 .. x_(m-1) of elements (in practice, of whole shards, symbol by symbol):
 
     for b = log2(m) - 1 down to 0:
@@ -1419,8 +1424,9 @@ The two forms by the transform:
 some position, or whose output is needed only up to some position, may skip the blocks that lie wholly outside.)
 
 **Decoding.** The rebuilt shards of a group are the unique shards consistent with the encoding map. The matrix C of
-either form is C[j][i] = u_i * v_j / (x_i + y_j) with the data points x_i and the recovery points y_j all distinct
-and the factors u_i, v_j non-zero (in the high form v_j = 1 and u_i = W_m(w_(m+i)) / K_m, non-zero because w_(m+i)
+either form is C[j][i] = u_i * v_j / (alpha_i + beta_j) with the data points alpha_i (w_(m+i) in the high form, w_i
+in the low form) and the recovery points beta_j (w_j in the high form, w_(m+j) in the low form) all distinct (their
+indices are distinct numbers below 65536), and the factors u_i, v_j non-zero (in the high form v_j = 1 and u_i = W_m(w_(m+i)) / K_m, non-zero because w_(m+i)
 is not in V_m; in the low form u_i = 1 and v_j = W_m(w_(m+j)) / K_m), a Cauchy matrix scaled by rows and columns,
 and every square submatrix of such a matrix is invertible. So when at most r shards of a group (data or recovery) are
 unknown, the known ones determine them: the e unknown data shards solve the e-by-e linear system that any e known
@@ -1475,8 +1481,8 @@ rules of the payload below, and inside `check` and `repair` it too only makes th
 `shard_len` is a multiple of 64, not 0 and at most 16777216 (16 MiB). `group_shards` is 1 to 32768 and
 `group_shards * shard_len` is at most 1073741824 (1 GiB). `data_shards`, the real shards of a group, is
 `ceil(cover_len / shard_len)` and between 1 and `group_shards`. `recovery_shards` is at least 1 and
-`group_shards + recovery_shards` is at most 65535, and the pair must be one the code supports ("The code", "Supported counts"; a frame
-that is not is `BadRecovery`, `reason` `shard count`). The reference writer takes `recovery_shards =
+`group_shards + recovery_shards` is at most 65535, and the pair must be one the code supports ("The code",
+"Supported counts"; a frame that is not is `BadRecovery`, `reason` `shard count`). The reference writer takes `recovery_shards =
 ceil(group_shards * percent / 100)` (at least 1) from the frame's own `group_shards`, with `percent` from 1 to 20
 (0 means no recovery frames). Its options are `percent`, `shard_len` (default 65536) and `group_shards`, the most
 shards a group may take (default 2048: 128 MiB, so that the default 64 MiB block fits). It refuses options outside

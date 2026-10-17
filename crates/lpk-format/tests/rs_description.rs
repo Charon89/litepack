@@ -555,6 +555,28 @@ fn b_description_matches_the_library() {
             assert_eq!(encode_by_transform(&f, k, r, &data), want, "fft {k} {r}");
         }
     }
+    // Large transforms, m = 4096 (layers b up to 11): (4200, 2049) is the high
+    // form (P(k) = 8192 > P(r) = 4096) and (2100, 2049) the low form (equal
+    // powers, k > r). The matrix is checked on the first 8 recovery shards, the
+    // transform on all.
+    for (k, r, high) in [(4200usize, 2049usize, true), (2100, 2049, false)] {
+        assert!(supports(k, r));
+        assert_eq!(uses_high_form(k, r), high, "{k} {r}");
+        let data: Vec<Vec<u8>> = (0..k).map(|_| rng.bytes(64)).collect();
+        let want = library(k, r, &data);
+        let c = coefficients(&f, k, r);
+        let d: Vec<Vec<u16>> = data.iter().map(|s| to_elements(&f, s)).collect();
+        for j in 0..8 {
+            let mut acc = vec![0u16; 32];
+            for (i, di) in d.iter().enumerate() {
+                for (a, &x) in acc.iter_mut().zip(di) {
+                    *a ^= f.mul(c[j][i], x);
+                }
+            }
+            assert_eq!(to_shard(&f, &acc), want[j], "matrix {k} {r} shard {j}");
+        }
+        assert_eq!(encode_by_transform(&f, k, r, &data), want, "fft {k} {r}");
+    }
 }
 
 /// Part (c): erase up to `recovery_shards` shards of random groups and rebuild
@@ -697,9 +719,15 @@ fn d_check_values_of_the_text() {
             assert_eq!(f.subspace_poly(m, f.w(j)), f.w(j >> lg), "W_{m}(w_{j})");
         }
     }
-    // "The fast transform": the twist factor of block base at layer b is w_{base >> b}.
+    // "The fast transform": the twist factor is w_{floor(base / 2^b)} for every base.
     for b in 0..6 {
-        for base in (0..4096).step_by(2 << b) {
+        for base in 0..4096 {
+            assert_eq!(twist(&f, b, base), f.w(base >> b), "b {b} base {base}");
+        }
+    }
+    // ... and for the top layers, on a sample of bases.
+    for b in 6..16 {
+        for base in (0..65536).step_by(4093) {
             assert_eq!(twist(&f, b, base), f.w(base >> b), "b {b} base {base}");
         }
     }
