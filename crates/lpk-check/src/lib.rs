@@ -8,6 +8,7 @@
 pub mod archive;
 pub mod block;
 pub mod crypto;
+pub mod deflate;
 pub mod entries;
 pub mod error;
 pub mod extract;
@@ -15,6 +16,7 @@ pub mod index;
 pub mod journal;
 pub mod jpeg;
 pub mod keyless;
+pub mod lzma;
 pub mod merkle;
 pub mod record;
 pub mod recovery;

@@ -4,7 +4,7 @@
 
 use std::io::Write;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::record::bad_record;
 
 /// The fixed term of the writer's allowance (section 8, "Resources"); informative for a reader.
@@ -168,14 +168,12 @@ pub fn check_memory(
     memory: u64,
     max_block_plain: u64,
 ) -> Result<()> {
-    let left = decode_memory.min(memory).saturating_sub(max_block_plain);
-    if term > left {
-        return Err(Error::new(
-            "Refused",
-            format!("the archive needs decode_memory of {term} bytes; this reader allows {left}"),
-        ));
+    crate::deflate::Memory {
+        decode_memory,
+        memory,
+        max_block_plain,
     }
-    Ok(())
+    .check(term)
 }
 
 struct Bounded {

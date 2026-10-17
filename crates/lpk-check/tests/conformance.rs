@@ -622,7 +622,7 @@ fn jpeg_peel_revision_1_0_mode() {
     let exp = table("expected.toml");
     let t = exp[JPEG].as_table().unwrap();
     let o = Options {
-        revision_1_0: true,
+        revision: 0,
         ..Options::default()
     };
     let mut a = Archive::open(read(JPEG), o).unwrap();
@@ -692,12 +692,23 @@ fn later_minor_and_unknown_reconstruction() {
     assert_eq!(&d[p.start..p.start + 3], &[1, 7, 0]);
     d[p.start + 1] = 8;
     rehash_frame(&mut d, off);
+    // A revision 1.1 reader does not run it.
+    let o = Options {
+        revision: 1,
+        ..Options::default()
+    };
+    let e = Archive::open(d.clone(), o).unwrap().verify().unwrap_err();
+    assert_eq!(
+        (e.class, e.detail.as_str()),
+        (
+            "UnimplementedPrimitive",
+            "primitive 0x0008 is not implemented by this reader"
+        )
+    );
+    // A revision 1.2 reader runs it: record 0 is a `jpeg` record (check (2)).
     assert_eq!(
         verify_class(d),
-        (
-            "UnimplementedPrimitive".into(),
-            "primitive 0x0008 is not implemented by this reader".into()
-        )
+        ("BadRecord".into(), "bad record 0: kind".into())
     );
 }
 

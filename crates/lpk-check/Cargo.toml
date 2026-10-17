@@ -26,6 +26,7 @@ hkdf = "0.13"
 sha2 = "0.11"
 lepton_jpeg = "=0.5.8"
 flate2 = "1.1.10"
+preflate-rs = "=0.7.6"
 clap = { version = "4.6", features = ["derive"] }
 
 [dev-dependencies]

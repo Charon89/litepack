@@ -58,7 +58,7 @@ fn read(p: &Path) -> Result<Vec<u8>, Error> {
 
 fn options(cli: &Cli) -> Result<Options, Error> {
     let mut o = Options {
-        revision_1_0: cli.revision_1_0,
+        revision: if cli.revision_1_0 { 0 } else { 2 },
         ..Options::default()
     };
     if let Some(p) = &cli.password {
