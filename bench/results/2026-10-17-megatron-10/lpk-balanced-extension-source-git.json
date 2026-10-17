@@ -1,0 +1,108 @@
+{
+  "class": "source-git",
+  "corpus": {
+    "class_bytes": 14793892,
+    "class_files": 664,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 7631660,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 2.015625,
+      "peak_job_memory_bytes": 132780032,
+      "peak_memory_bytes": 104923136,
+      "peak_process_commit_bytes": 132780032,
+      "timed_out": false,
+      "user_cpu_seconds": 19.15625,
+      "wall_seconds": 21.7480401
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.359375,
+      "peak_job_memory_bytes": 65060864,
+      "peak_memory_bytes": 40919040,
+      "peak_process_commit_bytes": 65060864,
+      "timed_out": false,
+      "user_cpu_seconds": 0.734375,
+      "wall_seconds": 0.3497429
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 7631660,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 2.015625,
+        "peak_job_memory_bytes": 132780032,
+        "peak_memory_bytes": 104923136,
+        "peak_process_commit_bytes": 132780032,
+        "timed_out": false,
+        "user_cpu_seconds": 19.15625,
+        "wall_seconds": 21.7480401
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.359375,
+        "peak_job_memory_bytes": 65060864,
+        "peak_memory_bytes": 40919040,
+        "peak_process_commit_bytes": 65060864,
+        "timed_out": false,
+        "user_cpu_seconds": 0.734375,
+        "wall_seconds": 0.3497429
+      }
+    }
+  ],
+  "repeats_requested": 1,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../tmp/run12752/c63/a.lpk",
+      "source-git",
+      "--balanced",
+      "--ordering",
+      "extension",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "balanced-extension"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+18bb9e1d62d0"
+  },
+  "verification": {
+    "files_checked": 664,
+    "files_ok": 664,
+    "verified": true
+  }
+}

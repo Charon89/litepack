@@ -1,0 +1,108 @@
+{
+  "class": "vm-image",
+  "corpus": {
+    "class_bytes": 174063616,
+    "class_files": 2,
+    "manifest_blake3": "8daaaf66f1e06460ce264c73c101aa5dc388668b2006d82c803b7fe016124db0",
+    "profile": "small"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 80648465,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.828125,
+      "peak_job_memory_bytes": 1084416000,
+      "peak_memory_bytes": 996614144,
+      "peak_process_commit_bytes": 1084416000,
+      "timed_out": false,
+      "user_cpu_seconds": 15.421875,
+      "wall_seconds": 16.7555252
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.078125,
+      "peak_job_memory_bytes": 283537408,
+      "peak_memory_bytes": 253050880,
+      "peak_process_commit_bytes": 283537408,
+      "timed_out": false,
+      "user_cpu_seconds": 0.15625,
+      "wall_seconds": 0.2014677
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 80648465,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.828125,
+        "peak_job_memory_bytes": 1084416000,
+        "peak_memory_bytes": 996614144,
+        "peak_process_commit_bytes": 1084416000,
+        "timed_out": false,
+        "user_cpu_seconds": 15.421875,
+        "wall_seconds": 16.7555252
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.078125,
+        "peak_job_memory_bytes": 283537408,
+        "peak_memory_bytes": 253050880,
+        "peak_process_commit_bytes": 283537408,
+        "timed_out": false,
+        "user_cpu_seconds": 0.15625,
+        "wall_seconds": 0.2014677
+      }
+    }
+  ],
+  "repeats_requested": 1,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../../.claude/worktrees/agent-a061129ee944ab0dd/bench/tmp/run25704/c81/a.lpk",
+      "vm-image",
+      "--balanced",
+      "--ordering",
+      "extension",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "balanced-extension"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+d4b283867fb8"
+  },
+  "verification": {
+    "files_checked": 2,
+    "files_ok": 2,
+    "verified": true
+  }
+}

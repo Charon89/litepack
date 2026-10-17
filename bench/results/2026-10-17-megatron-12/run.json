@@ -1,0 +1,426 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "a8a47192aa452dd8f269bf4ba057e989badb1d05b8ab9e2e0751cef66ab8296a",
+  "classes": [
+    "office-pdf",
+    "photo-raw-png",
+    "software-installed"
+  ],
+  "combinations": [
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "balanced-extension",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "balanced-no-deflate",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "fast-encrypted",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "balanced-extension",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "balanced-no-deflate",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "fast-encrypted",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "balanced-extension",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "balanced-no-deflate",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "fast-encrypted",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 1,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}
