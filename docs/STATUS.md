@@ -80,13 +80,12 @@ was single-threaded then and is parallel since E2-4b.
     office-pdf and photo-raw-png is missing), should-fix items (records in the memory model, a per-file work budget,
     the Deflate term only when examined classes are present, an exact pre-encode gate, a bounded read). Fix round
     next, after task E lands.
-- E2-20 (code merged): its rows were measured on 2026-10-17 (`bench/results/2026-10-17-megatron-5` = `small`,
-  `-6` = `full` vm-image/office-pdf/software-installed, 24 threads, from `fb5553a`; not committed yet). Every
-  compress peak is within its tier's ceiling; extraction is not: at 24 threads it plans only plain bytes plus the
-  decode allowance against the reader's 2 GiB and holds more (store extraction of `vm-image` well above the store
-  ceiling). Ruling R19: E2-20 ticks only when extraction too stays within the ceiling of the tier the archive's
-  envelope shows. `task/e2-20-extract` (implementer running, `task-r` brief in the session scratchpad) builds that
-  model; then re-run `target/acceptance/e2-20-run.sh` and tick with both runs.
+- E2-20: round 2 (the extraction side, D-67 (5)) is in its PR (`task/e2-20-extract`). When CI is green: fast-forward
+  `main`; after task D also lands, build release on `main` and launch `target/acceptance/e2-20b-e2-10-run.sh`
+  (detached: A = every tool on office-pdf, photo-raw-png, software-installed of `small`; B = `lpk` on the other
+  fourteen `small` classes; C = `lpk` on vm-image, office-pdf, software-installed of `full`; one repeat). E2-20 ticks
+  when every `lpk` row's compress and extract peaks are within its tier's ceiling; the first rows
+  (`bench/results/2026-10-17-megatron-5`, `-6`, not committed yet) are the before.
 
 ## How to resume
 
