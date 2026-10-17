@@ -360,6 +360,58 @@ fn balanced_round_trips_bit_exact_and_uses_lzma() {
     assert!(text(&t.stdout).starts_with("ok: "));
 }
 
+/// `--deflate-peel on|off`: on by default with --balanced (header minor 2, `-v` reports the
+/// stage), off by default with --fast (minor 1), and either way on request.
+#[test]
+fn the_deflate_peel_flag_defaults_per_tier() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let zip = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../lpk-core/tests/fixtures/deflate/doc.zip");
+    fs::write(src.path().join("doc.zip"), fs::read(zip).unwrap()).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cases: [(&str, &[&str], u16); 4] = [
+        ("b", &["--balanced", "--dict-size", "1048576"], 2),
+        (
+            "b-off",
+            &[
+                "--balanced",
+                "--dict-size",
+                "1048576",
+                "--deflate-peel",
+                "off",
+            ],
+            1,
+        ),
+        ("f", &["--fast"], 1),
+        ("f-on", &["--fast", "--deflate-peel", "on"], 2),
+    ];
+    for (name, flags, minor) in cases {
+        let arch = work.path().join(format!("{name}.lpk"));
+        let mut args = vec![
+            "a",
+            arch.to_str().unwrap(),
+            src.path().to_str().unwrap(),
+            "-v",
+        ];
+        args.extend_from_slice(flags);
+        let a = run(&args);
+        assert_eq!(a.status.code(), Some(0), "{name}: {}", text(&a.stderr));
+        let walked = text(&a.stderr).contains("deflate peel: ");
+        assert_eq!(walked, minor == 2, "{name}: {}", text(&a.stderr));
+        let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
+        assert_eq!(archive.header().version.minor, minor, "{name}");
+        let out = work.path().join(format!("{name}-out"));
+        let x = run(&["x", arch.to_str().unwrap(), out.to_str().unwrap()]);
+        assert_eq!(x.status.code(), Some(0), "{name}: {}", text(&x.stderr));
+        assert_eq!(tree_hash(&out), tree_hash(src.path()), "{name}");
+    }
+    let bad = run(&["a", "x.lpk", ".", "--store", "--deflate-peel", "on"]);
+    assert_eq!(bad.status.code(), Some(1));
+    let bad = run(&["a", "x.lpk", ".", "--deflate-peel", "maybe"]);
+    assert_eq!(bad.status.code(), Some(1));
+}
+
 #[test]
 fn balanced_flags_are_exclusive_and_checked() {
     let src = tempfile::tempdir().unwrap();

@@ -146,12 +146,14 @@ Then the tool is run once with its version arguments and the version is read fro
 | `wzzip`     | WinZip command line | manual, see below              | not available               | paid licence                     |
 | `pacl`      | PowerArchiver command line | manual, see below       | not available               | paid licence                     |
 
-The `lpk` row has four settings (the fourth is the file-ordering A/B of E2-8, below): `fast` (`--fast`, zstd with a long window), `balanced`
+The `lpk` row has six settings (the file-ordering, Deflate peel and encryption rows are A/B rows, below): `fast` (`--fast`, zstd with a long window), `balanced`
 (`--balanced`: raw LZMA1 blocks with a 64 MiB dictionary, the dictionary the 7-Zip Ultra row uses,
 or zstd `--ultra --long` for a block where a trial on a 4 MiB sample, taken as four stripes,
 prefers it) and `store` (`--store`). The Fast tier closes a block at every cluster change; the
 Balanced tier closes one only once it holds half the dictionary, and runs without the entropy
-gate. JPEG files are peeled under both compressing settings. Balanced needs memory of about the
+gate. JPEG files are peeled under both compressing settings; Deflate streams (inside ZIP,
+Office, JAR, PNG, gzip and PDF files, and zlib streams found in other binary files) are peeled
+under `balanced` (its default since E2-10; `lpk a --deflate-peel on|off`). Balanced needs memory of about the
 block size plus several times the dictionary to compress, and the block size plus the dictionary
 to extract.
 
@@ -160,6 +162,11 @@ to extract.
 (then name), the order 7-Zip uses for solid archives, not in path order (`lpk a --ordering none`,
 the default, which keeps directory locality). The two rows are measured in one run on the same
 classes; the difference is what the extension order buys.
+
+`balanced-no-deflate` (`--balanced --deflate-peel off`) is the A/B row of the Deflate peel
+(E2-10): the same as `balanced` with the Deflate peel turned off, which is what `balanced` was
+before E2-10 (the build hash in the version separates the measurement eras). The two rows are
+measured in one run on the same classes; the difference is what the peel buys.
 
 `fast-encrypted` (`--fast --password lpk-bench-password`, the same credential on extraction) is
 the sealed row of the encryption task (E2-12): the same as `fast` with the archive encrypted

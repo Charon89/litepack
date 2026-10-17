@@ -254,6 +254,11 @@ extract = []
 id = "balanced-extension"
 compress = ["--balanced", "--ordering", "extension"]
 extract = []
+# The Deflate peel's A/B (E2-10): `balanced` carries the peel by default; this row turns it off.
+[[tool.setting]]
+id = "balanced-no-deflate"
+compress = ["--balanced", "--deflate-peel", "off"]
+extract = []
 [[tool.setting]]
 id = "store"
 compress = ["--store"]

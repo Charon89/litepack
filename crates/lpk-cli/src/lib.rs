@@ -229,6 +229,18 @@ struct TierArgs {
     /// order 7-Zip uses for solid archives). Ignored with --no-dedup and --store.
     #[arg(long, value_enum, value_name = "ORDER", default_value = "none")]
     ordering: OrderingArg,
+    /// The Deflate peel: Deflate streams inside ZIP, Office, JAR, PNG, gzip and PDF files (and
+    /// zlib streams found in other binary files) stored as their plain text plus a
+    /// reconstruction record that restores them bit for bit (revision 1.2). Default: on with
+    /// --balanced, off with --fast. An append runs it only on a revision 1.2 archive.
+    #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
+    deflate_peel: Option<OnOff>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Debug, Args)]
@@ -442,6 +454,11 @@ fn build_pipeline(a: &TierArgs) -> Pipeline {
         Pipeline::fast(o)
     };
     pipeline.seal.memory = a.memory;
+    match a.deflate_peel {
+        Some(OnOff::On) => pipeline.deflate = Some(lpk_core::peel::deflate::DeflatePeel::default()),
+        Some(OnOff::Off) => pipeline.deflate = None,
+        None => {}
+    }
     if a.no_dedup {
         pipeline.fold = None;
     } else if pipeline.fold.is_some() {
@@ -618,6 +635,14 @@ fn report(
             );
         }
     }
+    if !p.dropped_stages.is_empty() {
+        let _ = writeln!(
+            err,
+            "append: peel stages not run, the archive's revision does not allow them: {}",
+            p.dropped_stages.join(", ")
+        );
+    }
+    deflate_report(err, &p.deflate);
     if let Some(sealing) = sealing {
         let _ = writeln!(err, "encrypted: {sealing}");
     }
@@ -636,6 +661,81 @@ fn report(
         t.peel.as_secs_f64(),
         t.model.as_secs_f64(),
         t.seal.as_secs_f64()
+    );
+}
+
+/// The Deflate peel's lines of `-v` (nothing when the stage saw no file).
+fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSummary) {
+    let walked: u64 = d.walked_by_kind.values().sum();
+    if walked == 0 && d.size_cap.files == 0 && d.deduplicated.files == 0 {
+        return;
+    }
+    let kinds: Vec<String> = d
+        .walked_by_kind
+        .iter()
+        .map(|(k, n)| format!("{k} {n}"))
+        .collect();
+    let s = &d.streams;
+    let failed: Vec<String> = s.failed.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    let o = &d.outcomes;
+    let classes: Vec<String> = d
+        .kept_by_class
+        .iter()
+        .map(|(k, n)| format!("{k} {n}"))
+        .collect();
+    let _ = writeln!(
+        err,
+        "deflate peel: {walked} files walked ({}), {} peeled ({} bytes), {} over the size cap ({} bytes), {} deduplicated whole, {} without streams, {} with none kept, {} sent whole by the file gate, {} walker panics",
+        kinds.join(", "),
+        d.peeled.files,
+        d.peeled.bytes,
+        d.size_cap.files,
+        d.size_cap.bytes,
+        d.deduplicated.files,
+        d.no_streams,
+        d.none_kept,
+        d.file_gate,
+        s.walker_panics
+    );
+    let _ = writeln!(
+        err,
+        "  streams: {} found, {} reconstructed, {} skipped, {} failed ({}), {} structural refusals, {} scan false hits",
+        s.found,
+        s.reconstructed,
+        s.skipped,
+        s.failed_total(),
+        failed.join(", "),
+        s.structural_refusals,
+        s.scan_false_hits
+    );
+    let _ = writeln!(
+        err,
+        "  reconstructed: {} kept ({}), {} no gain, {} block cap, {} memory cap, {} already stored, {} file gate",
+        o.kept,
+        classes.join(", "),
+        o.no_gain,
+        o.block_cap,
+        o.memory_cap,
+        o.already_stored,
+        o.file_gate
+    );
+    let _ = writeln!(
+        err,
+        "  kept bytes: stream {}, plain {}, model {}, corrections {}, records {}; part blocks: {} lzma, {} zstd; ZIP members not Deflate: {} Deflate64, {} other",
+        d.stream_bytes,
+        d.plain_bytes,
+        d.model_bytes,
+        d.correction_bytes,
+        d.record_bytes,
+        d.lzma_blocks,
+        d.zstd_blocks,
+        s.zip_deflate64_members,
+        s.zip_other_method_members
+    );
+    let _ = writeln!(
+        err,
+        "  seconds: analyse {:.3}, recreate {:.3}, encode {:.3}",
+        s.analyse_seconds, s.recreate_seconds, d.encode_seconds
     );
 }
 
