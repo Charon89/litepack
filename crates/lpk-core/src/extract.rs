@@ -47,7 +47,8 @@
 //!   have one, so a graph from any writer is covered), and in an archive with records (`nested`)
 //!   the lower block a reconstruction reads (its plain bytes and the largest frame of any block,
 //!   which may lie outside the needed ones). A store block's plain bytes are a copy of its
-//!   frame's, so both are counted;
+//!   frame's, so both are counted. Each block also counts [`BLOCK_ALLOWANCE`] for its
+//!   bookkeeping, so the count has a margin over what the buffers above hold to the byte;
 //! - `fixed`: the opened archive's index and chunk table, the plan (per placement its record
 //!   in the block lists and in the writers' split, each list grown by doubling; per file its
 //!   target, name, path, state and chunk counter; per block the lists' headers), each worker's
@@ -226,7 +227,8 @@ pub struct ExtractMemory {
     pub budget: Budget,
     /// The tier the envelope shows (whose ceiling is the default budget).
     pub tier: EnvelopeTier,
-    /// Per block in flight: `encoded + plain + decoder + step_input + nested`.
+    /// Per block in flight: `encoded + plain + decoder + step_input + nested +`
+    /// [`BLOCK_ALLOWANCE`].
     pub per_block: u64,
     /// The largest encoded frame a worker reads (doubled for an encrypted archive).
     pub encoded: u64,
@@ -280,6 +282,13 @@ impl ExtractMemory {
 /// Each decode worker's frame reader (its `BufReader` and the frame header's reads), file
 /// handle and thread bookkeeping: an allowance.
 pub const WORKER_ALLOWANCE: u64 = 64 << 10;
+/// Each block in flight's bookkeeping beyond its buffers: one frame-reader chunk (64 KiB, the
+/// format's read step: the scratch of a frame read without a location, or a read buffer a
+/// platform's std allocates differently) plus 64 KiB for the block header and graph, the
+/// decoder's per-call state outside `decode_memory`, the `Held` block and its `Arc`, and its
+/// channel and reordering-map nodes. An allowance, so that the count is not a byte-exact match
+/// of the buffers (review S1 of E2-20 round 2).
+pub const BLOCK_ALLOWANCE: u64 = 128 << 10;
 /// Each file writer's open-file set, order and channel: an allowance.
 pub const WRITER_ALLOWANCE: u64 = 64 << 10;
 /// The dispatcher's channel and reordering map, beyond the blocks they hold: an allowance.
@@ -767,7 +776,7 @@ fn pool_size<R: Read + Seek>(archive: &Archive<R>, opts: &ExtractOptions, shape:
         .saturating_add(decoder)
         .saturating_add(step_input)
         .saturating_add(nested)
-        .max(1);
+        .saturating_add(BLOCK_ALLOWANCE);
     // Fixed.
     let writers = if threads == 1 {
         1
