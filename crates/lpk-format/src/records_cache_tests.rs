@@ -27,10 +27,11 @@ fn pattern(seed: u64, len: usize) -> Vec<u8> {
     out
 }
 
-/// Write `files` with `options`.
+/// Write `files` with `options`, at minor 1 (the revision of
+/// `jpeg-reconstruct`, which the blocks name).
 fn write_archive(options: WriterOptions, files: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut w = Writer::new(&mut out, options).unwrap();
+    let mut w = Writer::new_revision(&mut out, options, 1).unwrap();
     for (path, data) in files {
         w.add_file(path, EntryFlags::EMPTY, 1_000, &mut data.as_slice())
             .unwrap();
@@ -48,8 +49,8 @@ fn utf16(n: u64) -> Record {
     }))
 }
 
-/// One reconstruction step naming record 0 (`utf16`, a primitive of
-/// revision 1.0 that no shipped reader decodes).
+/// One reconstruction step naming record 0 (`jpeg-reconstruct`, which this
+/// crate's minimal reader does not decode; a decoder is registered below).
 struct Recon;
 
 impl BlockEncoder for Recon {
@@ -57,7 +58,7 @@ impl BlockEncoder for Recon {
         Ok(Encoded {
             graph: Graph {
                 steps: vec![Step {
-                    primitive: PrimitiveId::Utf16,
+                    primitive: PrimitiveId::JpegReconstruct,
                     params: vec![0],
                 }],
             },
@@ -121,7 +122,7 @@ fn open_with_lookups(bytes: &[u8], ids: Vec<u64>) -> (Archive<Cursor<Vec<u8>>>, 
     let mut a = Archive::open(Cursor::new(bytes.to_vec()), &Resources::default()).unwrap();
     let seen: Seen = Arc::default();
     a.registry_mut().register(
-        PrimitiveId::Utf16,
+        PrimitiveId::JpegReconstruct,
         Box::new(Lookups {
             ids,
             seen: Arc::clone(&seen),

@@ -1,14 +1,16 @@
 //! The BWT codec of LitePack's measured gate E2-15 (D-05: BWT only on text-classified streams).
 //!
-//! * [`forward`]: the Burrows-Wheeler transform of a block through libsais (the safe `libsais`
-//!   wrapper, single-threaded, no OpenMP), giving the transformed bytes and the primary index.
+//! * `forward` (feature `encode`): the Burrows-Wheeler transform of a block through libsais
+//!   (the safe `libsais` wrapper, single-threaded, no OpenMP), giving the transformed bytes and
+//!   the primary index. Only the `encode` feature links the C library: a reader build
+//!   (the default features) has no C dependency.
 //! * [`inverse`]: the inverse transform, written here in safe Rust (the wrapper's own inverse
 //!   needs an `unsafe` constructor for a BWT that did not come from its forward call).
 //! * [`entropy`]: a dedicated entropy stage for BWT output: move-to-front, zero-run coding
 //!   (bzip2's RUNA/RUNB) and an adaptive binary arithmetic coder with order-1 contexts on the
 //!   ranks (bzip2's structure with arithmetic coding instead of Huffman tables).
-//! * [`encode_block`] / [`decode_block`]: candidate (b) of the gate, a whole block: the primary
-//!   index (4 bytes, little-endian) followed by the entropy stage's output.
+//! * `encode_block` (feature `encode`) / [`decode_block`]: candidate (b) of the gate, a whole
+//!   block: the primary index (4 bytes, little-endian) followed by the entropy stage's output.
 //!
 //! Nothing here is part of the `.lpk` format yet: shipping it is a format revision (D-49), which
 //! follows only if the gate opens.
@@ -25,14 +27,17 @@
 pub mod entropy;
 mod rc;
 
+#[cfg(feature = "encode")]
 use libsais::bwt::AuxIndicesSamplingRate;
+#[cfg(feature = "encode")]
 use libsais::BwtConstruction;
 
-/// The largest block [`forward`] accepts: libsais's `i32` temporary array limits the text to
+/// The largest block `forward` accepts: libsais's `i32` temporary array limits the text to
 /// `i32::MAX` bytes; the format's default cap (`max_bwt_block`) is far below.
 pub const MAX_BLOCK: usize = i32::MAX as usize;
 
-/// The version of the libsais C library linked.
+/// The version of the libsais C library linked (feature `encode`).
+#[cfg(feature = "encode")]
 pub const LIBSAIS_VERSION: &str = libsais::LIBSAIS_VERSION_STRING;
 
 /// What can go wrong.
@@ -136,12 +141,15 @@ fn aux_count(len: usize, rate_log2: u8) -> usize {
 
 /// The sampling rate's log2 for `len` bytes: the smallest power of two (at least 2) that
 /// splits the block into at most [`CHAINS`] pieces.
+#[cfg(feature = "encode")]
 fn rate_log2_for(len: usize) -> u8 {
     let per = len.div_ceil(CHAINS).max(2);
     per.next_power_of_two().trailing_zeros() as u8
 }
 
 /// The BWT of `block` (libsais, one thread), with one auxiliary index per [`CHAINS`]th of it.
+/// Feature `encode`.
+#[cfg(feature = "encode")]
 pub fn forward(block: &[u8]) -> Result<Transformed, BwtError> {
     if block.len() > MAX_BLOCK {
         return Err(BwtError::TooLarge(block.len()));
@@ -263,7 +271,8 @@ pub fn inverse(t: &Transformed) -> Result<Vec<u8>, BwtError> {
 }
 
 /// Candidate (b): `block` transformed and entropy-coded, after the index header
-/// ([`Transformed::header`]).
+/// ([`Transformed::header`]). Feature `encode`.
+#[cfg(feature = "encode")]
 pub fn encode_block(block: &[u8]) -> Result<Vec<u8>, BwtError> {
     let t = forward(block)?;
     Ok(encode_transformed(&t))
@@ -289,7 +298,9 @@ pub fn decode_to_transformed(data: &[u8], len: usize) -> Result<Transformed, Bwt
     Ok(t)
 }
 
-#[cfg(test)]
+// The tests need the forward transform: the crate's own dev-dependency on itself turns the
+// `encode` feature on for them.
+#[cfg(all(test, feature = "encode"))]
 mod tests {
     use super::*;
 
