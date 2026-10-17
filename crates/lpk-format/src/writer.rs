@@ -655,8 +655,11 @@ fn bad_options(reason: &'static str) -> FormatError {
 
 /// The checks a reader makes of a block's graph: step count, parameters and
 /// the records it names (`record_count` is how many the archive will have);
-/// then the writer's own: every primitive belongs to a revision no later than
-/// the archive's `version_minor` (`BadOptions`, `version_minor`).
+/// then the writer's own: no primitive that no revision decodes (`bwt`,
+/// `bcj-x86`, `bcj-arm64`, `delta`, `png-filter`, `base64`, `utf16`,
+/// `container-reconstruct`; `BadGraph`, `undecoded primitive`, at every
+/// minor, spec section 8), and every primitive belongs to a revision no later
+/// than the archive's `version_minor` (`BadOptions`, `version_minor`).
 fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(), FormatError> {
     if graph.steps.is_empty() || graph.steps.len() > MAX_STEPS {
         return Err(FormatError::BadGraph {
@@ -667,6 +670,11 @@ fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(
         s.primitive.validate_params(&s.params)?;
     }
     graph.check_records(record_count)?;
+    if graph.steps.iter().any(|s| !s.primitive.is_decoded()) {
+        return Err(FormatError::BadGraph {
+            reason: "undecoded primitive",
+        });
+    }
     if graph
         .steps
         .iter()
@@ -3477,6 +3485,164 @@ mod deflate_rule_tests {
             a.verify().unwrap_err(),
             FormatError::UnimplementedPrimitive { id: 8 }
         ));
+    }
+}
+
+#[cfg(test)]
+mod undecoded_rule_tests {
+    //! The writer refuses, at every minor, a primitive no revision decodes
+    //! (spec section 8: a writer MUST NOT emit them).
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::record::JpegRecord;
+
+    fn options() -> WriterOptions {
+        WriterOptions {
+            chunk_size: 4096,
+            block_size: 16384,
+            // Record 0, so a reconstruction step naming it passes the record
+            // check and reaches the rule.
+            records: vec![Record::new(RecordBody::Jpeg(JpegRecord {
+                original_len: 1000,
+                primary_len: 1000,
+                trailing: Vec::new(),
+                nested_trailing_chunks: Vec::new(),
+                gainmaps: Vec::new(),
+                lepton_version: 0,
+                original_hash: [0; 32],
+            }))],
+            ..WriterOptions::default()
+        }
+    }
+
+    /// The primitives no revision decodes, each with valid parameters.
+    fn undecoded() -> Vec<Step> {
+        vec![
+            Step {
+                primitive: PrimitiveId::Bwt,
+                params: vec![0, 0, 1, 0],
+            },
+            Step {
+                primitive: PrimitiveId::BcjX86,
+                params: Vec::new(),
+            },
+            Step {
+                primitive: PrimitiveId::BcjArm64,
+                params: Vec::new(),
+            },
+            Step {
+                primitive: PrimitiveId::Delta,
+                params: vec![0; 9],
+            },
+            Step {
+                primitive: PrimitiveId::PngFilter,
+                params: vec![0],
+            },
+            Step {
+                primitive: PrimitiveId::Base64,
+                params: vec![0],
+            },
+            Step {
+                primitive: PrimitiveId::Utf16,
+                params: vec![0],
+            },
+            Step {
+                primitive: PrimitiveId::ContainerReconstruct,
+                params: vec![0],
+            },
+        ]
+    }
+
+    /// An archive of minor `minor` with one 1000-byte part encoded by the
+    /// graph `steps` (an identity: the bytes are the part).
+    fn write(minor: u16, steps: Vec<Step>) -> Result<Vec<u8>, FormatError> {
+        let p = vec![7u8; 1000];
+        let mut out = Vec::new();
+        let mut w = Writer::new_revision(&mut out, options(), minor)?;
+        w.begin_entry("a", EntryFlags::EMPTY, 0)?;
+        let e = Encoded {
+            graph: Graph { steps },
+            bytes: p.clone(),
+            resources: GraphResources::default(),
+            memory: 0,
+        };
+        w.add_part_encoded(0, &p, e, 0)?;
+        w.end_entry()?;
+        w.finish()?;
+        Ok(out)
+    }
+
+    #[test]
+    fn the_rule_names_every_undecoded_primitive_and_no_other() {
+        for p in PrimitiveId::ALL {
+            let listed = undecoded().iter().any(|s| s.primitive == p);
+            assert_eq!(!p.is_decoded(), listed, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn each_undecoded_primitive_is_refused_at_minors_0_1_and_2() {
+        for minor in [0u16, 1, 2] {
+            for step in undecoded() {
+                let p = step.primitive;
+                // Alone, and after a decoded step.
+                for steps in [
+                    vec![step.clone()],
+                    vec![
+                        Step {
+                            primitive: PrimitiveId::Store,
+                            params: Vec::new(),
+                        },
+                        step.clone(),
+                    ],
+                ] {
+                    let r = write(minor, steps);
+                    assert!(
+                        matches!(
+                            r,
+                            Err(FormatError::BadGraph {
+                                reason: "undecoded primitive"
+                            })
+                        ),
+                        "{p:?} at minor {minor}: {r:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_decoded_graph_still_writes() {
+        let store = Step {
+            primitive: PrimitiveId::Store,
+            params: Vec::new(),
+        };
+        for minor in [0u16, 1, 2] {
+            assert!(write(minor, vec![store.clone()]).is_ok(), "minor {minor}");
+        }
+    }
+
+    #[test]
+    fn the_record_check_comes_before_the_rule() {
+        // A missing record is reported first (`RecordOutOfRange`), as the
+        // reader would report it.
+        let r = write(
+            2,
+            vec![Step {
+                primitive: PrimitiveId::Utf16,
+                params: vec![5],
+            }],
+        );
+        assert!(
+            matches!(
+                r,
+                Err(FormatError::RecordOutOfRange {
+                    record: 5,
+                    count: 1
+                })
+            ),
+            "{r:?}"
+        );
     }
 }
 
