@@ -400,6 +400,10 @@ fn crate_rows(file: &[u8]) -> std::result::Result<Vec<u8>, String> {
         png::Limits { bytes: usize::MAX },
     );
     dec.set_transformations(png::Transformations::IDENTITY);
+    // Only the rows are needed: no ancillary chunk is inflated (an iCCP or zTXt bomb would be
+    // the one allocation the layout check before this call does not bound).
+    dec.set_ignore_iccp_chunk(true);
+    dec.set_ignore_text_chunk(true);
     let mut reader = dec.read_info().map_err(|e| e.to_string())?;
     let size = reader
         .output_buffer_size()
