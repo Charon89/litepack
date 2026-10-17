@@ -3,10 +3,10 @@
 //! `LPK_CORPUS=<path to bench/corpus/small> cargo test -p lpk-core --release --test deflate_corpus -- --ignored --nocapture`
 //!
 //! Asserted: the D-54 engine extracts each archive and every file equals its source (0
-//! mismatches); `verify` is clean. `lpk-check` reads the same archives: every file it extracts
-//! equals its source, and the only refusal allowed is `deflate-reconstruct` (id 8) while
-//! `lpk-check` does not implement revision 1.2 yet (task E); the count is printed. Printed per
-//! class: raw and archive bytes, the Deflate summary (kept by class, not kept by cause), seconds.
+//! mismatches); `verify` is clean. `lpk-check`, the decoder written from the text alone, verifies
+//! the same archives and extracts every file, each equal to its source (0 mismatches, no refusal).
+//! Printed per class: raw and archive bytes, the Deflate summary (kept by class, not kept by
+//! cause), seconds.
 #![allow(clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
@@ -48,9 +48,10 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
         .filter(|p| p.is_dir())
         .collect();
     classes.sort();
-    println!("| class | files | raw B | archive B | walked | reconstructed | kept | kept by class | no gain | block cap | memory cap | already stored | file gate | size cap | lpk-check refused (id 8) | s compress | s extract |");
+    println!("| class | files | raw B | archive B | walked | reconstructed | kept | kept by class | no gain | block cap | memory cap | already stored | file gate | size cap | lpk-check files | s compress | s extract |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let mut mismatches = 0;
+    let mut check_mismatches = 0;
     let mut largest_records = 0u64;
     for dir in classes {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
@@ -98,28 +99,20 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
         let mut c =
             lpk_check::archive::Archive::open(bytes, lpk_check::archive::Options::default())
                 .unwrap();
-        let mut refused = 0;
+        c.verify().unwrap();
+        let mut checked = 0;
         for e in c.entries().unwrap() {
             if e.kind != lpk_check::entries::EntryKind::File {
                 continue;
             }
-            match c.read_file(&e) {
-                Ok(v) => assert!(
-                    v == std::fs::read(dir.join(&e.path)).unwrap(),
-                    "lpk-check: {name}/{}",
-                    e.path
-                ),
-                Err(err) => {
-                    let m = format!("{err:?} {err}");
-                    assert!(
-                        m.contains("Unimplemented") && m.contains('8'),
-                        "lpk-check: {name}/{}: {m}",
-                        e.path
-                    );
-                    refused += 1;
-                }
+            let v = c.read_file(&e).unwrap();
+            if v != std::fs::read(dir.join(&e.path)).unwrap() {
+                check_mismatches += 1;
+                println!("LPK-CHECK MISMATCH {name}/{}", e.path);
             }
+            checked += 1;
         }
+        assert_eq!(checked, src.len(), "{name}: lpk-check extracted every file");
         let d = &s.peel.deflate;
         let o = &d.outcomes;
         let walked: u64 = d.walked_by_kind.values().sum();
@@ -129,7 +122,7 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
             .map(|(k, n)| format!("{k} {n}"))
             .collect();
         println!(
-            "| {name} | {} | {raw} | {} | {walked} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {refused} | {compress:.1} | {extract:.1} |",
+            "| {name} | {} | {raw} | {} | {walked} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {checked} | {compress:.1} | {extract:.1} |",
             src.len(),
             s.writer.archive_len,
             d.streams.reconstructed,
@@ -147,8 +140,9 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
         largest_records = largest_records.max(d.record_bytes);
     }
     println!(
-        "mismatches: {mismatches}; largest records total of a class {largest_records} B against the cap {} B",
+        "mismatches: {mismatches}; lpk-check mismatches: {check_mismatches}; largest records total of a class {largest_records} B against the cap {} B",
         lpk_core::peel::deflate::stage::RECORDS_CAP
     );
     assert_eq!(mismatches, 0);
+    assert_eq!(check_mismatches, 0);
 }
