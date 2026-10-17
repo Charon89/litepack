@@ -675,12 +675,37 @@ fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(
             reason: "undecoded primitive",
         });
     }
+    check_bwt_steps(graph)?;
     if graph
         .steps
         .iter()
         .any(|s| s.primitive.revision() > version_minor)
     {
         return Err(bad_options("version_minor"));
+    }
+    Ok(())
+}
+
+/// Revision 1.3's position rule for `bwt`: a writer puts it last, or
+/// directly before a last `deflate-reconstruct` (the look-ahead of the
+/// reader's bounds goes one step, so only there is the step before `bwt`
+/// bounded by the inflated length); anywhere else is `BadGraph`,
+/// `bwt position`. Until revision 1.3 lands, `bwt` is refused before this
+/// rule as a primitive no revision decodes; the rule is checked on its own in
+/// the tests.
+fn check_bwt_steps(graph: &Graph) -> Result<(), FormatError> {
+    let last = graph.steps.len().saturating_sub(1);
+    for (i, s) in graph.steps.iter().enumerate() {
+        if s.primitive != PrimitiveId::Bwt {
+            continue;
+        }
+        let allowed = i == last
+            || (i + 1 == last && graph.steps[i + 1].primitive == PrimitiveId::DeflateReconstruct);
+        if !allowed {
+            return Err(FormatError::BadGraph {
+                reason: "bwt position",
+            });
+        }
     }
     Ok(())
 }
@@ -3643,6 +3668,92 @@ mod undecoded_rule_tests {
             ),
             "{r:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod bwt_rule_tests {
+    //! Revision 1.3's position rule for `bwt`, checked on the function itself:
+    //! through the writer, `bwt` is refused first as a primitive no revision
+    //! decodes until revision 1.3 lands.
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn st(p: PrimitiveId) -> Step {
+        let params = match p {
+            PrimitiveId::Bwt => vec![0, 0, 1, 0],
+            PrimitiveId::Lzma => vec![0, 0, 1, 0, 3, 0, 2],
+            PrimitiveId::DeflateReconstruct => vec![0],
+            _ => Vec::new(),
+        };
+        Step {
+            primitive: p,
+            params,
+        }
+    }
+
+    fn graph(ps: &[PrimitiveId]) -> Graph {
+        Graph {
+            steps: ps.iter().map(|&p| st(p)).collect(),
+        }
+    }
+
+    #[test]
+    fn bwt_last_or_before_a_last_deflate_reconstruct_passes() {
+        use PrimitiveId::*;
+        for ps in [
+            &[Bwt][..],
+            &[Lzma, Bwt],
+            &[Store, Lzma, Bwt],
+            &[Bwt, DeflateReconstruct],
+            &[Lzma, Bwt, DeflateReconstruct],
+            // No bwt at all.
+            &[Lzma],
+            &[Lzma, DeflateReconstruct],
+        ] {
+            assert!(check_bwt_steps(&graph(ps)).is_ok(), "{ps:?}");
+        }
+    }
+
+    #[test]
+    fn bwt_anywhere_else_is_bwt_position() {
+        use PrimitiveId::*;
+        for ps in [
+            &[Bwt, Lzma][..],
+            &[Bwt, Store],
+            &[Lzma, Bwt, Store],
+            &[Bwt, DeflateReconstruct, Store],
+            &[Bwt, Lzma, DeflateReconstruct],
+            &[Bwt, Bwt],
+            &[Bwt, Store, DeflateReconstruct],
+        ] {
+            assert!(
+                matches!(
+                    check_bwt_steps(&graph(ps)),
+                    Err(FormatError::BadGraph {
+                        reason: "bwt position"
+                    })
+                ),
+                "{ps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn through_the_writer_bwt_is_still_refused_as_undecoded_first() {
+        // `check_graph` runs the undecoded rule before the position rule, so
+        // a misplaced `bwt` reports `undecoded primitive` until revision 1.3.
+        for ps in [
+            &[PrimitiveId::Bwt, PrimitiveId::Lzma][..],
+            &[PrimitiveId::Lzma, PrimitiveId::Bwt],
+        ] {
+            assert!(matches!(
+                check_graph(&graph(ps), 1, FormatVersion::LATEST.minor),
+                Err(FormatError::BadGraph {
+                    reason: "undecoded primitive"
+                })
+            ));
+        }
     }
 }
 
