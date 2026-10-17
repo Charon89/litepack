@@ -646,11 +646,19 @@ impl Pipeline {
                             .map(|i| i.len)
                             .filter(|&l| l > 0 && l <= d.max_file)
                             .max()
-                            .map(|largest| DeflateMemory {
-                                max_file: largest,
-                                plain_limit: d.plain_limit(),
-                                encoder: p.memory(),
-                                records: d.records_cap,
+                            .map(|largest| {
+                                // No text of these files can exceed Deflate's expansion of
+                                // the largest one.
+                                let plain =
+                                    d.plain_limit().min(largest.saturating_mul(
+                                        crate::peel::deflate::stage::MAX_EXPANSION,
+                                    ));
+                                DeflateMemory {
+                                    max_file: largest,
+                                    plain_limit: plain,
+                                    encoder: p.memory_for(plain),
+                                    records: d.records_cap,
+                                }
                             }),
                         _ => None,
                     },

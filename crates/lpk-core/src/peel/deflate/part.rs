@@ -52,15 +52,21 @@ enum Inner {
         zstd: ZstdCore,
         /// The trial's sample length.
         sample_len: usize,
-        /// The working set figure of the memory model.
-        memory: u64,
+        /// The zstd candidate's level and window log (for the memory figure).
+        zstd_level: i32,
+        window_log: u32,
+        /// The largest text it encodes.
+        plain_limit: u64,
     },
     /// The Fast tier's zstd.
     Fast {
         /// The zstd core (the tier's level and window).
         zstd: ZstdCore,
-        /// The working set figure of the memory model.
-        memory: u64,
+        /// The level and window log (for the memory figure).
+        level: i32,
+        window_log: u32,
+        /// The largest text it encodes.
+        plain_limit: u64,
     },
 }
 
@@ -87,50 +93,84 @@ impl PartEncoder {
         let window_log = o.zstd_window_log.unwrap_or(o.dict_size.ilog2());
         let zstd = ZstdCore::standalone(o.zstd_level, window_log)?;
         let sample_len = o.sample_len.max(4);
-        let len = usize::try_from(plain_limit).unwrap_or(usize::MAX);
-        let fallback = |m: u64| {
-            if m == 0 {
-                u64::from(o.dict_size).saturating_mul(12)
-            } else {
-                m
-            }
-        };
-        let lzma_full = fallback(lzma.memory_usage_for_len(len));
-        let lzma_stripe = fallback(lzma.memory_usage_for_len((sample_len / 4).max(1)));
-        let z_full = zstd_cctx_memory(o.zstd_level, window_for(window_log, plain_limit), true);
-        let z_stripe = zstd_cctx_memory(
-            o.zstd_level,
-            window_for(window_log, (sample_len / 4).max(1) as u64),
-            true,
-        );
-        // As a Balanced block: the larger of the two ways the trial ends, plus the output.
-        let encoder = lzma_full
-            .saturating_add(z_stripe)
-            .max(z_full.saturating_add(lzma_stripe));
-        let memory = encoder
-            .saturating_add(lzma_out_reserve(plain_limit).max(zstd_bound(plain_limit)))
-            .saturating_add(sample_len as u64);
         Ok(PartEncoder(Inner::Balanced {
             lzma,
             zstd,
             sample_len,
-            memory,
+            zstd_level: o.zstd_level,
+            window_log,
+            plain_limit,
         }))
     }
 
     /// The Fast part encoder of `o` (see [`PartEncoder::balanced`] for `plain_limit`).
     pub fn fast(o: &FastOptions, plain_limit: u64) -> Result<Self, CoreError> {
         let zstd = ZstdCore::standalone(o.level, o.window_log)?;
-        let memory = zstd_cctx_memory(o.level, window_for(o.window_log, plain_limit), true)
-            .saturating_add(zstd_bound(plain_limit));
-        Ok(PartEncoder(Inner::Fast { zstd, memory }))
+        Ok(PartEncoder(Inner::Fast {
+            zstd,
+            level: o.level,
+            window_log: o.window_log,
+            plain_limit,
+        }))
     }
 
     /// The encoder's working set while it encodes a text of the `plain_limit` given at
     /// construction: the encoders and the output buffer (the text itself is not counted).
     pub fn memory(&self) -> u64 {
         match &self.0 {
-            Inner::Balanced { memory, .. } | Inner::Fast { memory, .. } => *memory,
+            Inner::Balanced { plain_limit, .. } | Inner::Fast { plain_limit, .. } => {
+                self.memory_for(*plain_limit)
+            }
+        }
+    }
+
+    /// The working set for texts of at most `plain` bytes (at most the construction's limit):
+    /// the LZMA dictionary and the zstd window follow the text (`dict_for(len)`, the declared
+    /// window), so a run whose files can only hold small texts plans less.
+    pub fn memory_for(&self, plain: u64) -> u64 {
+        match &self.0 {
+            Inner::Balanced {
+                lzma,
+                sample_len,
+                zstd_level,
+                window_log,
+                plain_limit,
+                ..
+            } => {
+                let plain = plain.min(*plain_limit);
+                let fallback = |m: u64| {
+                    if m == 0 {
+                        u64::from(lzma.dict_size()).saturating_mul(12)
+                    } else {
+                        m
+                    }
+                };
+                let stripe = (*sample_len / 4).max(1);
+                let lzma_full = fallback(
+                    lzma.memory_usage_for_len(usize::try_from(plain).unwrap_or(usize::MAX)),
+                );
+                let lzma_stripe = fallback(lzma.memory_usage_for_len(stripe));
+                let z_full = zstd_cctx_memory(*zstd_level, window_for(*window_log, plain), true);
+                let z_stripe =
+                    zstd_cctx_memory(*zstd_level, window_for(*window_log, stripe as u64), true);
+                // As a Balanced block: the larger of the two ways the trial ends, plus the output.
+                let encoder = lzma_full
+                    .saturating_add(z_stripe)
+                    .max(z_full.saturating_add(lzma_stripe));
+                encoder
+                    .saturating_add(lzma_out_reserve(plain).max(zstd_bound(plain)))
+                    .saturating_add(*sample_len as u64)
+            }
+            Inner::Fast {
+                level,
+                window_log,
+                plain_limit,
+                ..
+            } => {
+                let plain = plain.min(*plain_limit);
+                zstd_cctx_memory(*level, window_for(*window_log, plain), true)
+                    .saturating_add(zstd_bound(plain))
+            }
         }
     }
 
@@ -199,6 +239,8 @@ mod tests {
         };
         let mut b = PartEncoder::balanced(&o, 64 << 20).unwrap();
         assert!(b.memory() > 64 << 20);
+        assert_eq!(b.memory_for(u64::MAX), b.memory());
+        assert!(b.memory_for(1 << 20) < b.memory() / 4);
         let t = text(300_000);
         let e = b.encode(&t).unwrap();
         assert!(e.sample_bytes > 0 && e.encoded.bytes.len() < t.len());

@@ -41,6 +41,10 @@ pub const STREAM_OVERHEAD: u64 = 160;
 /// A file's streams are kept only when their total gain exceeds this (the early plain-block
 /// close and the extra framing chunk).
 pub const FILE_GATE: u64 = 256;
+/// Deflate's largest expansion, plain bytes per compressed byte (a 258-byte match per
+/// two-bit code, rounded up): a file of `n` bytes holds no stream whose text exceeds
+/// `MAX_EXPANSION × n`, which sizes the memory the part encoder plans.
+pub const MAX_EXPANSION: u64 = 1032;
 /// Bytes of an inflated text the classifier reads.
 pub const CLASSIFY_LEN: usize = 1 << 20;
 /// The most record bytes (as encoded in the `Records` frame) one run keeps (see the module

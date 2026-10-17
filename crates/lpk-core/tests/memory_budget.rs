@@ -394,5 +394,48 @@ fn the_deflate_term_counts_only_with_an_examined_file() {
         on.memory.fixed_pipelined,
         off.memory.fixed_pipelined
     );
-    assert!(on.memory.fixed_sequential > off.memory.fixed_sequential);
+    // A small gzip member can only hold a small text: the stage's set (sized to it) stays below
+    // the JPEG peel's, which the plan already counts, so the plan is the one without the stage.
+    assert_eq!(on.memory, off.memory);
+}
+
+/// The part encoder plans for the largest text the examined files can hold (Deflate's
+/// expansion of the largest file, at most the plain-text limit): a tree of small office files
+/// against one holding a large PDF.
+#[test]
+fn small_examined_files_plan_a_smaller_part_encoder() {
+    let plan = |dir: &Path| {
+        let mut p = Pipeline::balanced(BalancedOptions {
+            threads: Some(24),
+            ..BalancedOptions::default()
+        });
+        p.seal.memory = Some(lpk_core::memory::BALANCED_CEILING);
+        run(p, dir).unwrap().1
+    };
+    let docx = |seed: u64| {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("word/document.xml", o).unwrap();
+        std::io::Write::write_all(&mut w, &prose(seed, 40_000)).unwrap();
+        w.finish().unwrap().into_inner()
+    };
+    let small = tempfile::tempdir().unwrap();
+    for i in 0..4u64 {
+        std::fs::write(small.path().join(format!("d{i}.docx")), docx(i + 1)).unwrap();
+    }
+    let s = plan(small.path());
+    let large = tempfile::tempdir().unwrap();
+    for i in 0..4u64 {
+        std::fs::write(large.path().join(format!("d{i}.docx")), docx(i + 1)).unwrap();
+    }
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    pdf.extend_from_slice(&prose(9, 300_000));
+    std::fs::write(large.path().join("big.pdf"), pdf).unwrap();
+    let l = plan(large.path());
+    println!(
+        "small office files: blocks in flight {}, fixed_pipelined {}; with a large PDF: blocks in flight {}, fixed_pipelined {}",
+        s.blocks_in_flight, s.memory.fixed_pipelined, l.blocks_in_flight, l.memory.fixed_pipelined
+    );
+    assert!(s.memory.fixed_pipelined < l.memory.fixed_pipelined);
 }
