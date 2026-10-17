@@ -6,11 +6,12 @@
 //! A candidate is a maximal run of at least [`MIN_RUN`] characters over one RFC 4648 alphabet.
 //! The scan is line-oriented and linear: inside a line, a segment is a maximal span of
 //! characters of one alphabet (the 62 shared symbols, `=`, and either `+`/`/` or `-`/`_`);
-//! segments on consecutive lines join into one run when each inner segment spans its whole
-//! line (the first may start inside its line, the last may end inside its line). A line whose
-//! alphabet differs from the run's ends the run; when that line is a whole-line segment, the
-//! run's trailing lines that carry no alphabet-specific symbol move to the new run (so a PEM
-//! block's first line, which follows `-----BEGIN ...-----`, is not lost to the header's `-`).
+//! a multi-line run is a sequence of consecutive whole-line segments (so a PEM header's
+//! `CERTIFICATE-----`, which is url-safe and ends its line but does not start it, never
+//! absorbs a neutral body); a segment inside a line is a run on its own when it reaches the
+//! minimum. A whole line whose alphabet differs from the run's ends the run; when the run's
+//! only alphabet-bearing line is its first (a `-----` rule over neutral lines), the lines
+//! after it move to the new run, otherwise the run is finished whole (R26).
 //!
 //! A run is **regular** when every line but the last has the same length, one line ending (LF
 //! or CRLF) separates the lines and none follows the last line, `=` appears only as final
@@ -588,8 +589,8 @@ struct Seg {
     start: usize,
     end: usize,
     alphabet: Option<Alphabet>,
-    at_line_start: bool,
-    at_line_end: bool,
+    /// The segment is the whole line: only such segments join a multi-line run.
+    whole: bool,
     hex_only: bool,
 }
 
@@ -599,7 +600,7 @@ struct Build {
     lines: Vec<(usize, usize, bool)>,
     alphabet: Option<Alphabet>,
     hex_only: bool,
-    /// The last line's segment ends at its line's end (a next line may join).
+    /// The last line's segment is a whole line (a next whole line may join).
     open: bool,
 }
 
@@ -609,7 +610,7 @@ impl Build {
             lines: vec![(seg.start, seg.end, seg.alphabet.is_some())],
             alphabet: seg.alphabet,
             hex_only: seg.hex_only,
-            open: seg.at_line_end,
+            open: seg.whole,
         }
     }
 
@@ -620,7 +621,7 @@ impl Build {
             self.alphabet = seg.alphabet;
         }
         self.hex_only &= seg.hex_only;
-        self.open = seg.at_line_end;
+        self.open = seg.whole;
     }
 
     fn compatible(&self, seg: &Seg) -> bool {
@@ -630,10 +631,16 @@ impl Build {
         }
     }
 
-    /// The lines after the last one with a specific symbol, taken out.
-    fn split_neutral_tail(&mut self) -> Vec<(usize, usize, bool)> {
-        let keep = self.lines.iter().rposition(|l| l.2).map_or(0, |i| i + 1);
-        self.lines.split_off(keep)
+    /// When the first line is the only one carrying a specific symbol (a header such as
+    /// `-----` over neutral lines), the lines after it, taken out; else nothing (R26: a run
+    /// whose body carries its alphabet is finished whole).
+    fn detach_after_lone_first_specific(&mut self) -> Vec<(usize, usize, bool)> {
+        let specific = self.lines.iter().filter(|l| l.2).count();
+        if specific == 1 && self.lines[0].2 && self.lines.len() > 1 {
+            self.lines.split_off(1)
+        } else {
+            Vec::new()
+        }
     }
 
     fn finish(self, text: &[u8], out: &mut Vec<Run>) {
@@ -654,7 +661,9 @@ impl Build {
     }
 }
 
-/// The segments of the line `text[ls..le]`.
+/// The segments of the line `text[ls..le]` that can be or join a run: a whole line, or a
+/// segment of at least [`MIN_RUN`] characters (the others are dropped as they are found, so
+/// a long line of short segments costs no memory).
 fn segments(text: &[u8], ls: usize, le: usize) -> Vec<Seg> {
     let mut segs = Vec::new();
     let mut i = ls;
@@ -678,14 +687,16 @@ fn segments(text: &[u8], ls: usize, le: usize) -> Vec<Seg> {
             hex_only &= b.is_ascii_hexdigit();
             i += 1;
         }
-        segs.push(Seg {
-            start,
-            end: i,
-            alphabet,
-            at_line_start: start == ls,
-            at_line_end: i == le,
-            hex_only,
-        });
+        let whole = start == ls && i == le;
+        if whole || i - start >= MIN_RUN {
+            segs.push(Seg {
+                start,
+                end: i,
+                alphabet,
+                whole,
+                hex_only,
+            });
+        }
     }
     segs
 }
@@ -713,34 +724,33 @@ pub fn find_runs(text: &[u8]) -> Vec<Run> {
         let segs = segments(text, ls, le);
         for (k, seg) in segs.iter().enumerate() {
             let joined = match run.as_mut() {
-                Some(r) if k == 0 && seg.at_line_start && r.open => {
+                Some(r) if k == 0 && seg.whole && r.open => {
                     if r.compatible(seg) {
                         r.push(seg);
                         true
-                    } else if seg.at_line_end {
-                        // A whole-line segment of the other alphabet: the run's trailing
-                        // neutral lines go with it.
-                        let tail = r.split_neutral_tail();
-                        let mut next_run = Build {
-                            lines: tail,
-                            alphabet: None,
-                            hex_only: true,
-                            open: true,
-                        };
-                        next_run.hex_only = next_run
-                            .lines
-                            .iter()
-                            .all(|l| text[l.0..l.1].iter().all(u8::is_ascii_hexdigit));
-                        next_run.push(seg);
-                        if let Some(old) = run.replace(next_run) {
-                            old.finish(text, &mut out);
-                        }
-                        if run.as_ref().is_some_and(|r| r.lines.is_empty()) {
-                            run = None;
-                        }
-                        true
                     } else {
-                        false
+                        // A whole line of the other alphabet ends the run. When the run's
+                        // only alphabet-bearing line is its first (a `-----` header over
+                        // neutral lines), the lines after it belong to the new run.
+                        let tail = r.detach_after_lone_first_specific();
+                        if tail.is_empty() {
+                            false
+                        } else {
+                            let hex_only = tail
+                                .iter()
+                                .all(|l| text[l.0..l.1].iter().all(u8::is_ascii_hexdigit));
+                            let mut next_run = Build {
+                                lines: tail,
+                                alphabet: None,
+                                hex_only,
+                                open: true,
+                            };
+                            next_run.push(seg);
+                            if let Some(old) = run.replace(next_run) {
+                                old.finish(text, &mut out);
+                            }
+                            true
+                        }
                     }
                 }
                 _ => false,
@@ -752,8 +762,8 @@ pub fn find_runs(text: &[u8]) -> Vec<Run> {
                 run = Some(Build::new(seg));
             }
         }
-        // A run whose last segment ended inside the line, or a line without segments, cannot
-        // continue.
+        // A run whose last segment is not a whole line, or a line without a segment that can
+        // join, cannot continue.
         if let Some(r) = run.as_ref() {
             if !r.open || segs.is_empty() {
                 if let Some(old) = run.take() {
@@ -795,6 +805,8 @@ fn label_of(text: &[u8], offset: usize) -> Label {
 /// True when `before`, trimmed of trailing blanks, ends with `>` closing a tag that is not a
 /// closing tag (`<a>` yes, `</a>` no).
 fn ends_in_opening_tag(before: &[u8]) -> bool {
+    // Bounded: the tag must lie within the label window.
+    let before = &before[before.len().saturating_sub(MIME_WINDOW)..];
     let end = before
         .iter()
         .rposition(|b| !b.is_ascii_whitespace())
@@ -1083,6 +1095,40 @@ mod tests {
     }
 
     #[test]
+    fn one_pem_block_over_a_neutral_payload_is_one_regular_pem_run() {
+        // An ASCII payload encodes without `+` or `/`: the body is neutral, so the header's
+        // url-safe `CERTIFICATE-----` and the footer's `-----END` must not join it.
+        let payload: Vec<u8> = b"alpha bravo charlie delta "
+            .iter()
+            .cycle()
+            .take(300)
+            .copied()
+            .collect();
+        let body = lines(64, LineEnding::Lf, true, Alphabet::Standard).encode(&payload);
+        assert!(body.iter().all(|&b| specific_of(b).is_none()));
+        assert_eq!(body.len(), 400 + 6);
+        let text = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            String::from_utf8(body.clone()).unwrap()
+        );
+        let runs = find_runs(text.as_bytes());
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let run = runs[0];
+        assert_eq!((run.label, run.lines, run.chars, run.len), (Label::Pem, 7, 400, body.len()));
+        assert_eq!(&text.as_bytes()[run.offset..run.offset + run.len], &body[..]);
+        let a = analyse(&text.as_bytes()[run.offset..run.offset + run.len]).unwrap();
+        assert_eq!(a.payload, payload);
+        assert_eq!(a.layout, lines(64, LineEnding::Lf, true, Alphabet::Standard));
+        // The header-over-neutral-lines case (R26): a `-----` rule line, neutral lines, then
+        // a line of the standard alphabet; the neutral lines go with the standard line.
+        let neutral = "A".repeat(100);
+        let text = format!("-----\n{neutral}\n{neutral}\n{}\n", "+".repeat(100));
+        let runs = find_runs(text.as_bytes());
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!((runs[0].offset, runs[0].lines, runs[0].chars), (6, 3, 300));
+    }
+
+    #[test]
     fn runs_are_found_whole_and_labelled() {
         // A PEM bundle: two blocks, the second's first line carrying no `+` or `/`, so it
         // first looks like the header's url-safe line's continuation.
@@ -1115,6 +1161,21 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].label, Label::Mime);
         assert!(analyse(&mime.as_bytes()[runs[0].offset..runs[0].offset + runs[0].len]).is_ok());
+        // A MIME body whose last line carries no `+` or `/` keeps that line when the
+        // url-safe `--boundary--` line follows: the run's alphabet sits on more than its first
+        // line, so it is finished whole (R26).
+        let mut p3 = vec![0u8; 300];
+        p3[..30].fill(0xFF);
+        p3[100..130].fill(0xFF);
+        let body = lines(76, LineEnding::CrLf, true, Alphabet::Standard).encode(&p3);
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.rsplit("\r\n").next().unwrap().bytes().all(|b| b == b'A'));
+        let mime = format!("Content-Transfer-Encoding: base64\r\n\r\n{body}\r\n--boundary--\r\n");
+        let runs = find_runs(mime.as_bytes());
+        assert_eq!(runs.len(), 1);
+        assert_eq!((runs[0].label, runs[0].len), (Label::Mime, body.len()));
+        let a = analyse(&mime.as_bytes()[runs[0].offset..runs[0].offset + runs[0].len]).unwrap();
+        assert_eq!(a.payload, p3);
         // A data URI, a JSON string, an XML element, a bare run, and the url-safe alphabet.
         let one_line = String::from_utf8(plain().encode(&p1)).unwrap();
         let url = String::from_utf8(

@@ -970,7 +970,8 @@ fn text_encodings_end_to_end_on_a_pem_bundle_and_a_utf16_text_validates() {
     assert_eq!(u.code_points, u.bytes / 2);
     assert_eq!(u.cjk_code_points, 0);
     assert_eq!(u.wtf8_len, u.bytes / 2 + 2);
-    assert!(u.a_prime <= u.a);
+    assert!(u.verified);
+    assert!(u.a_prime <= u.a_lzma_default);
     let cluster = win.utf16_cluster.as_ref().expect("cluster rows");
     assert_eq!((cluster.files, cluster.b_sum), (1, u.b));
     // The table is written and a flipped gate is a validation problem.

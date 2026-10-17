@@ -81,9 +81,11 @@ pub struct Detected {
 }
 
 /// Whether `bytes` is a UTF-16 text: a byte order mark decides; otherwise, over the first
-/// [`DETECT_SAMPLE`] bytes, at least half the bytes of one parity are zero and at most one
-/// in fifty of the other (ASCII-heavy text in UTF-16; a text with few zero bytes, such as
-/// CJK without a mark, is not detected). Fewer than four bytes is never a text.
+/// [`DETECT_SAMPLE`] bytes, at least half the bytes of one parity are zero, at most one in
+/// fifty of the other, and at least nine units in ten are printable ASCII (or tab, LF, CR)
+/// in that byte order — the design's text-like criterion (ASCII-heavy text in UTF-16; a text
+/// with few zero bytes, such as CJK without a mark, is not detected, nor is a binary whose
+/// zeros happen to alternate). Fewer than four bytes is never a text.
 pub fn detect(bytes: &[u8]) -> Option<Detected> {
     if bytes.len() < 4 {
         return None;
@@ -105,19 +107,27 @@ pub fn detect(bytes: &[u8]) -> Option<Detected> {
     }
     let sample = &bytes[..bytes.len().min(DETECT_SAMPLE) & !1];
     let units = sample.len() / 2;
+    let printable = |b: u8| (0x20..=0x7E).contains(&b) || matches!(b, 0x09 | 0x0A | 0x0D);
+    // Zero bytes per parity, and printable units (a zero high byte, a printable low byte) per
+    // byte order.
     let (mut even_zero, mut odd_zero) = (0usize, 0usize);
+    let (mut le_printable, mut be_printable) = (0usize, 0usize);
     for pair in sample.as_chunks::<2>().0 {
         even_zero += usize::from(pair[0] == 0);
         odd_zero += usize::from(pair[1] == 0);
+        le_printable += usize::from(pair[1] == 0 && printable(pair[0]));
+        be_printable += usize::from(pair[0] == 0 && printable(pair[1]));
     }
     let many = |z: usize| z * 2 >= units;
     let few = |z: usize| z * 50 <= units;
-    if many(odd_zero) && few(even_zero) {
+    // The design's text-like criterion: at least nine units in ten are printable.
+    let text_like = |p: usize| p * 10 >= units * 9;
+    if many(odd_zero) && few(even_zero) && text_like(le_printable) {
         Some(Detected {
             endian: Endian::Little,
             bom: false,
         })
-    } else if many(even_zero) && few(odd_zero) {
+    } else if many(even_zero) && few(odd_zero) && text_like(be_printable) {
         Some(Detected {
             endian: Endian::Big,
             bom: false,
@@ -300,6 +310,9 @@ pub fn to_utf16(units: &[u16], endian: Endian) -> Vec<u8> {
 /// A UTF-16 text converted: its record and its generalized UTF-8.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Converted {
+    /// The generalized UTF-8 decoded back to the text (D-09: checked every time; a writer
+    /// keeps nothing unverified).
+    pub verified: bool,
     /// The record of the even-length text (the odd last byte, if any, excluded).
     pub record: Utf16Record,
     /// The generalized UTF-8 (the byte order mark included when `bom`).
@@ -315,7 +328,7 @@ pub struct Converted {
 
 /// Convert a detected UTF-16 text: the text is the even-length prefix of `bytes` (an odd last
 /// byte stays framing), converted in `d.endian`; the record states `d.bom`. The conversion
-/// is checked back to the bytes before it is returned.
+/// is decoded back and compared with the text (`verified`).
 pub fn convert(bytes: &[u8], d: Detected) -> Converted {
     let (text, tail) = if bytes.len() % 2 == 1 {
         (&bytes[..bytes.len() - 1], bytes.last().copied())
@@ -342,14 +355,11 @@ pub fn convert(bytes: &[u8], d: Detected) -> Converted {
             0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF | 0x2_0000..=0x3_134F
         ));
     }
-    debug_assert_eq!(
-        from_wtf8(&wtf8)
-            .map(|u| to_utf16(&u, d.endian))
-            .ok()
-            .as_deref(),
-        Some(text)
-    );
+    let verified = from_wtf8(&wtf8)
+        .map(|u| to_utf16(&u, d.endian))
+        .is_ok_and(|back| back == text);
     Converted {
+        verified,
         record: Utf16Record {
             endian: d.endian.code(),
             bom: u8::from(d.bom),
@@ -446,6 +456,7 @@ mod tests {
                     }
                     let d = Detected { endian, bom };
                     let c = convert(&text, d);
+                    assert!(c.verified);
                     assert_eq!(c.tail, odd.then_some(0x41));
                     assert_eq!(c.record.endian, endian.code());
                     assert_eq!(c.record.bom, u8::from(bom));
@@ -580,6 +591,13 @@ mod tests {
         assert_eq!(detect(&[]), None);
         // Zeros on both parities (a binary) are not a text.
         assert_eq!(detect(&[0u8; 4096]), None);
+        // Alternating zeros over control bytes (a binary table) are not a text without a
+        // mark; the same bytes behind a mark are.
+        let table: Vec<u8> = (0..2048u32).flat_map(|i| [(i % 7) as u8, 0u8]).collect();
+        assert_eq!(detect(&table), None);
+        let mut marked = vec![0xFF, 0xFE];
+        marked.extend_from_slice(&table);
+        assert!(detect(&marked).is_some_and(|d| d.bom));
     }
 
     #[test]

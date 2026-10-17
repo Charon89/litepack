@@ -9,9 +9,11 @@
 //! least `MIN_RUN` characters over one RFC 4648 alphabet, labelled by what precedes it,
 //! hex-only runs counted apart; the regularity rule sorts the rest into regular runs and
 //! irregular causes; each regular run is decoded and re-encoded from its record's fields (a
-//! mismatch fails the run). UTF-16 texts are detected in every file (a mark, or alternating
-//! zero bytes) and converted to generalized UTF-8; UTF-16 runs inside binaries and base64 runs
-//! in depth-1 inflated texts of Deflate containers are counted only.
+//! mismatch fails the run). UTF-16 texts are detected in every file read whole (a mark, or
+//! alternating zero bytes) and converted to generalized UTF-8, the conversion checked back
+//! (a failure counts as a mismatch and the file is not kept); UTF-16 runs inside binaries
+//! (and in every streamed file) and base64 runs in depth-1 inflated texts of Deflate
+//! containers are counted only.
 //!
 //! Costs, exact, with the Deflate stage's part encoder (`PartEncoder::balanced`, the tier's
 //! LZMA against its zstd in the four-stripe trial): per stream M(text alone), M(payload), the
@@ -62,8 +64,8 @@ pub const MARGIN: f64 = 0.01;
 pub const TEXT_LIKE_PRINTABLE: f64 = 0.9;
 /// Bytes the classifier and the text-likeness look at.
 pub const SAMPLE: usize = 64 << 10;
-/// Files up to this size are read whole; larger ones are streamed (UTF-16 detection on the
-/// first block, binary runs per block, no base64 scan).
+/// Files up to this size are read whole; larger ones are streamed (binary UTF-16 runs
+/// counted per block; no UTF-16 detection and no base64 scan).
 pub const MAX_READ: u64 = 256 << 20;
 /// Block size of the streamed read.
 pub const BLOCK_READ: usize = 16 << 20;
@@ -143,9 +145,14 @@ pub struct Utf16FileRow {
     pub wtf8_len: u64,
     pub code_points: u64,
     pub cjk_code_points: u64,
+    /// The conversion decoded back to the text (a failure is a mismatch; never kept).
+    pub verified: bool,
     /// A: M(the UTF-16 bytes alone).
     pub a: u64,
-    /// A': the best `[lzma]` over the `lc`/`lp`/`pb` grid, and its parameters.
+    /// The grid point with the tier's default `lc`/`lp`/`pb` (`[lzma]` alone, no trial).
+    pub a_lzma_default: u64,
+    /// A': the best `[lzma]` over the `lc`/`lp`/`pb` grid (never above `a_lzma_default`),
+    /// and its parameters.
     pub a_prime: u64,
     pub a_prime_params: String,
     pub m_wtf8: u64,
@@ -153,7 +160,8 @@ pub struct Utf16FileRow {
     pub overhead_bytes: u64,
     /// B: `m_wtf8 + record_bytes + overhead_bytes`.
     pub b: u64,
-    /// `b < a` and the generalized UTF-8 is not longer than the text (the writer's rule).
+    /// Verified, `b < a` and the generalized UTF-8 is not longer than the text (the
+    /// writer's rule).
     pub kept: bool,
 }
 
@@ -168,6 +176,8 @@ pub struct Utf16Cluster {
     pub cjk_code_points: u64,
     /// A: M(the texts concatenated).
     pub a: u64,
+    /// The grid point with the tier's default `lc`/`lp`/`pb`, on the same sample as A'.
+    pub a_lzma_default: u64,
     /// A': the grid's best on the first `a_prime_sample_bytes` of the concatenation.
     pub a_prime: u64,
     pub a_prime_params: String,
@@ -300,7 +310,8 @@ pub struct Data {
     pub base64_record_bytes: u64,
     pub utf16_record_bytes: u64,
     pub classes: Vec<ClassRun>,
-    /// Regular runs whose re-encoding differed (counted under the `mismatch` cause too).
+    /// Regular runs whose re-encoding differed (counted under the `mismatch` cause too) plus
+    /// UTF-16 texts whose conversion did not decode back.
     pub mismatches: u64,
     pub base64_gate_open: bool,
     pub utf16_gate_open: bool,
@@ -374,18 +385,41 @@ pub fn grid() -> Vec<(u8, u8, u8)> {
     g
 }
 
-/// The smallest `[lzma]` over the grid on `plain` (the tier's dictionary), and its parameters.
-fn best_lzma(plain: &[u8]) -> Result<(u64, String)> {
+/// The tier's default `lc`, `lp`, `pb` (D-51; `LzmaEncoder::with_dict`), a point of the grid.
+pub const DEFAULT_LZMA: (u8, u8, u8) = (3, 0, 2);
+
+/// The grid's result on one text.
+struct Grid {
+    /// The smallest `[lzma]` and its parameters.
+    best: u64,
+    params: String,
+    /// The length at [`DEFAULT_LZMA`].
+    default: u64,
+}
+
+/// `[lzma]` over the grid on `plain` (the tier's dictionary).
+fn best_lzma(plain: &[u8]) -> Result<Grid> {
     let dict = BalancedOptions::default().dict_size;
     let mut best: Option<(u64, String)> = None;
+    let mut default = None;
     for (lc, lp, pb) in grid() {
         let mut enc = LzmaEncoder::new(dict, lc, lp, pb).map_err(|e| anyhow!("{e}"))?;
         let len = enc.encode(plain).map_err(|e| anyhow!("{e}"))?.bytes.len() as u64;
         if best.as_ref().is_none_or(|b| len < b.0) {
             best = Some((len, format!("lc{lc} lp{lp} pb{pb}")));
         }
+        if (lc, lp, pb) == DEFAULT_LZMA {
+            default = Some(len);
+        }
     }
-    best.ok_or_else(|| anyhow!("empty grid"))
+    match (best, default) {
+        (Some((best, params)), Some(default)) => Ok(Grid {
+            best,
+            params,
+            default,
+        }),
+        _ => Err(anyhow!("the grid lacks the default parameters")),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -635,7 +669,7 @@ fn utf16_rows(
     let c = utf16::convert(bytes, d);
     let even = &bytes[..bytes.len() & !1];
     let a = model.m(even)?;
-    let (a_prime, a_prime_params) = best_lzma(&even[..even.len().min(GRID_SAMPLE)])?;
+    let g = best_lzma(&even[..even.len().min(GRID_SAMPLE)])?;
     let m_wtf8 = model.m(&c.wtf8)?;
     let b = m_wtf8
         .saturating_add(record_bytes)
@@ -650,14 +684,16 @@ fn utf16_rows(
         wtf8_len: c.wtf8.len() as u64,
         code_points: c.code_points,
         cjk_code_points: c.cjk_code_points,
+        verified: c.verified,
         a,
-        a_prime,
-        a_prime_params,
+        a_lzma_default: g.default,
+        a_prime: g.best,
+        a_prime_params: g.params,
         m_wtf8,
         record_bytes,
         overhead_bytes: STREAM_OVERHEAD,
         b,
-        kept: b < a && c.wtf8.len() <= even.len(),
+        kept: c.verified && b < a && c.wtf8.len() <= even.len(),
     };
     Ok((row, c.wtf8))
 }
@@ -728,6 +764,9 @@ fn scan_class(ctx: &Ctx<'_>, class: &str, files: &[ManifestFile]) -> Result<Clas
         let ext = f.path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         if let Some(d) = utf16::detect(&bytes) {
             let (row, wtf8) = utf16_rows(ctx, f, idx, &bytes, d, &mut out.model, out.u16_record)?;
+            if !row.verified {
+                out.mismatches += 1;
+            }
             scan.utf16 = Some(row);
             scan.wtf8 = wtf8;
         } else {
@@ -793,7 +832,7 @@ fn cluster_rows(
     }
     let a = model.m(&utf16_all)?;
     let sample = &utf16_all[..utf16_all.len().min(GRID_SAMPLE)];
-    let (a_prime, a_prime_params) = best_lzma(sample)?;
+    let g = best_lzma(sample)?;
     let b_prime = model
         .m(&wtf8_all)?
         .saturating_add(utf16_record_bytes())
@@ -805,8 +844,9 @@ fn cluster_rows(
         code_points: cps,
         cjk_code_points: cjk,
         a,
-        a_prime,
-        a_prime_params,
+        a_lzma_default: g.default,
+        a_prime: g.best,
+        a_prime_params: g.params,
         a_prime_sample_bytes: sample.len() as u64,
         b_sum,
         b_prime,
@@ -959,11 +999,34 @@ fn map_archive(path: &PathBuf, by_path: &HashMap<String, usize>) -> Result<Mappe
     })
 }
 
+/// The class files read while a block is assembled; cleared after each block.
+struct FileCache<'a> {
+    ctx: &'a Ctx<'a>,
+    class: &'a str,
+    files: &'a [ManifestFile],
+    held: HashMap<usize, std::rc::Rc<Vec<u8>>>,
+}
+
+impl FileCache<'_> {
+    fn read(&mut self, i: usize) -> Result<std::rc::Rc<Vec<u8>>> {
+        if let Some(b) = self.held.get(&i) {
+            return Ok(b.clone());
+        }
+        let b = std::rc::Rc::new(self.ctx.read_file(self.class, &self.files[i])?);
+        self.held.insert(i, b.clone());
+        Ok(b)
+    }
+
+    fn clear(&mut self) {
+        self.held.clear();
+    }
+}
+
 /// The plain bytes of block `b`, assembled from the files and checked chunk by chunk.
 fn assemble_block(
     m: &Mapped,
     b: usize,
-    read: &mut dyn FnMut(usize) -> Result<std::rc::Rc<Vec<u8>>>,
+    cache: &mut FileCache<'_>,
 ) -> Result<Option<Vec<u8>>> {
     let first = usize::try_from(m.first_chunk[b])?;
     let end = m
@@ -975,7 +1038,7 @@ fn assemble_block(
         let Some((file, off)) = m.chunk_owner[c] else {
             return Ok(None);
         };
-        let bytes = read(file)?;
+        let bytes = cache.read(file)?;
         let (start, len) = (usize::try_from(off)?, usize::try_from(m.chunk_len[c])?);
         let Some(piece) = bytes.get(start..start + len) else {
             return Ok(None);
@@ -994,7 +1057,7 @@ fn predict(
     items: &[Item],
     kept_files: &[usize],
     model: &mut Model,
-    read: &mut dyn FnMut(usize) -> Result<std::rc::Rc<Vec<u8>>>,
+    cache: &mut FileCache<'_>,
 ) -> Result<Prediction> {
     let a_total: u64 = m.blocks.iter().map(|b| b.0).sum();
     let mut per_block: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -1009,7 +1072,10 @@ fn predict(
     let mut order: Vec<usize> = per_block.keys().copied().collect();
     order.sort_unstable();
     for b in order {
-        let Some(plain) = assemble_block(m, b, read)? else {
+        let assembled = assemble_block(m, b, cache)?;
+        // The files of this block are not needed past its plain bytes.
+        cache.clear();
+        let Some(plain) = assembled else {
             unmapped += per_block[&b].len() as u64;
             continue;
         };
@@ -1103,14 +1169,11 @@ fn archive_rows(
         .map(|(i, f)| (ctx.rel_path(class, f), i))
         .collect();
     let m = map_archive(&path, &by_path)?;
-    let mut cache: HashMap<usize, std::rc::Rc<Vec<u8>>> = HashMap::new();
-    let mut read = |i: usize| -> Result<std::rc::Rc<Vec<u8>>> {
-        if let Some(b) = cache.get(&i) {
-            return Ok(b.clone());
-        }
-        let b = std::rc::Rc::new(ctx.read_file(class, &files[i])?);
-        cache.insert(i, b.clone());
-        Ok(b)
+    let mut cache = FileCache {
+        ctx,
+        class,
+        files,
+        held: HashMap::new(),
     };
     let mut model = Model::new()?;
     let mut b64_items = Vec::new();
@@ -1139,8 +1202,8 @@ fn archive_rows(
             });
         }
     }
-    let base64 = predict(&m, &b64_items, &b64_files, &mut model, &mut read)?;
-    let utf16 = predict(&m, &u16_items, &u16_files, &mut model, &mut read)?;
+    let base64 = predict(&m, &b64_items, &b64_files, &mut model, &mut cache)?;
+    let utf16 = predict(&m, &u16_items, &u16_files, &mut model, &mut cache)?;
     let _ = std::fs::remove_file(&path);
     Ok(ArchiveRows {
         archive_bytes: m.archive_bytes,
@@ -1328,7 +1391,7 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                 .m_wtf8
                 .saturating_add(u.record_bytes)
                 .saturating_add(u.overhead_bytes);
-            if u.b != b || u.kept != (u.b < u.a && u.wtf8_len <= u.bytes) {
+            if u.b != b || u.kept != (u.verified && u.b < u.a && u.wtf8_len <= u.bytes) {
                 p.push(format!("{at}: b and kept must follow from the costs"));
             }
             if u.record_bytes != d.utf16_record_bytes || u.overhead_bytes != d.stream_overhead {
@@ -1336,11 +1399,13 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
                     "{at}: record and overhead bytes must be the data's"
                 ));
             }
-            if u.a_prime > u.a {
+            if u.a_prime > u.a_lzma_default {
                 p.push(format!(
-                    "{at}/a_prime: the grid holds the default parameters, so it cannot exceed a"
+                    "{at}/a_prime: the grid holds the default parameters, so it cannot exceed \
+                     a_lzma_default"
                 ));
             }
+            mismatches += u64::from(!u.verified);
         }
         if let Some(cl) = &c.utf16_cluster {
             if cl.files != c.utf16_files.len() as u64 {
@@ -1394,7 +1459,11 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
         }
     }
     if mismatches != d.mismatches {
-        p.push("/data/mismatches: must equal the `mismatch` cause over the classes".to_string());
+        p.push(
+            "/data/mismatches: must equal the `mismatch` cause plus the unverified UTF-16 texts \
+             over the classes"
+                .to_string(),
+        );
     }
     if d.base64_gate_open != gate(&d.classes, |c| c.base64_passes, |c| c.base64_larger) {
         p.push(
