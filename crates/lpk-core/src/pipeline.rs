@@ -32,6 +32,10 @@ use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::fold::ordering::order_cluster;
 use crate::fold::{Dedup, FoldStage};
 use crate::ingest::{file_identity, validate_input, walk, IngestOptions, Input};
+use crate::memory::{
+    window_for, Budget, EncoderMemory, MemoryPlan, ModelInputs, BALANCED_CEILING, FAST_CEILING,
+    STORE_CEILING,
+};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
 use crate::store::{create_new_and_run, StoreOptions, SyncFn, OUT_BUF};
@@ -63,8 +67,13 @@ pub enum ModelStage {
 #[derive(Debug, Default)]
 pub struct SealOptions {
     /// The writer's settings. `chunk_size` and `dedup` are set by the fold stage when there is
-    /// one (see [`Pipeline::fold`]) and are used as given only without it.
+    /// one (see [`Pipeline::fold`]) and are used as given only without it. `encode_threads` and
+    /// `threads_hint` are set by the run from the memory budget ([`crate::memory`]).
     pub writer: WriterOptions,
+    /// The memory budget in bytes (`--memory`); `None` is the tier's default,
+    /// `min(ceiling, half of the physical memory)` ([`crate::memory::Budget`]). A budget below
+    /// what one block in flight needs is refused (`InvalidOption`, naming the figure).
+    pub memory: Option<u64>,
 }
 
 /// Wall time per stage.
@@ -101,9 +110,12 @@ pub struct RunSummary {
     /// The thread budget the run resolved (`threads` of the tier's options, the machine's
     /// logical cores when unset).
     pub threads: usize,
-    /// Blocks the writer encoded at once: `threads`, capped by the tier (the Balanced tier's
-    /// [`crate::balanced::BALANCED_MAX_IN_FLIGHT`]).
+    /// Blocks the writer encoded at once: `threads`, capped by the memory budget
+    /// ([`RunSummary::memory`]).
     pub blocks_in_flight: usize,
+    /// The memory budget, its source, the model's `per_block` and `fixed` figures and the blocks
+    /// in flight they allow (1: the sequential path, no I/O threads).
+    pub memory: MemoryPlan,
     /// I/O threads beside the encode threads: a reader thread reading files ahead and a write
     /// thread writing the archive file, each started only when more than one block is in
     /// flight (one block in flight is the sequential path: one thread does everything), the
@@ -173,7 +185,10 @@ impl Pipeline {
             peel: Vec::new(),
             fold: None,
             model: ModelStage::Store,
-            seal: SealOptions { writer },
+            seal: SealOptions {
+                writer,
+                memory: None,
+            },
         }
     }
 
@@ -405,14 +420,30 @@ impl Pipeline {
         } = self;
         let mut wopts = seal.writer;
         let source = Source::new();
+        let (files, path_bytes, input_bytes) = inventory(&inputs);
         match (model, prepared) {
             (ModelStage::Store, Prepared::Store) => {
                 let threads = wopts.encode_threads.max(1);
+                let model = ModelInputs {
+                    block_size: wopts.block_size,
+                    chunk_size: wopts.chunk_size,
+                    avg_chunk: wopts.chunk_size,
+                    encoder: EncoderMemory::Store,
+                    peel_max_file: None,
+                    entries: files,
+                    path_bytes,
+                    input_bytes,
+                    prefetch: PrefetchOptions::default(),
+                };
+                let plan = model.plan(Budget::resolve(seal.memory, STORE_CEILING), threads)?;
+                let in_flight = plan.blocks_in_flight;
+                wopts.encode_threads = in_flight;
+                wopts.threads_hint = model.threads_hint(STORE_CEILING);
                 let mut writer = open_writer(out, wopts, sync, 0, fold.as_deref(), opener)?;
                 let t = Instant::now();
                 let mut reads = ReadAhead::spawn(
                     inputs.iter().filter(|i| i.kind == EntryKind::File),
-                    threads > 1,
+                    in_flight > 1,
                 )?;
                 let io_threads = reads.threads() + usize::from(writer.has_write_thread());
                 for input in &inputs {
@@ -436,24 +467,39 @@ impl Pipeline {
                     peel: PeelSummary::default(),
                     timings,
                     threads,
-                    blocks_in_flight: threads,
+                    blocks_in_flight: in_flight,
+                    memory: plan,
                     io_threads,
-                    hash_threads: hash_threads(threads, reads.threads() > 0),
+                    hash_threads: hash_threads(in_flight, reads.threads() > 0),
                 })
             }
             (model, prepared) => {
-                let (encoder, block_size, soft, steer, finish, threads, in_flight): (
+                let (encoder, block_size, soft, steer, finish, threads, memory): (
                     Box<dyn lpk_format::BlockEncoder>,
                     u64,
                     Option<u64>,
                     Steer,
                     Finish,
                     usize,
-                    usize,
+                    (EncoderMemory, Option<u64>, u64),
                 ) = match (model, prepared) {
                     (ModelStage::Fast(o), Prepared::Fast(e, h)) => {
                         let h2 = h.clone();
                         let threads = resolve_threads(o.threads);
+                        let (dictionaries, dictionary_bytes) = match &o.dictionaries {
+                            crate::DictionaryPolicy::None => (0, 0),
+                            crate::DictionaryPolicy::Provided(set) => {
+                                set.iter().fold((0u64, 0u64), |(n, b), (_, _, d)| {
+                                    (n + 1, b + d.len() as u64)
+                                })
+                            }
+                        };
+                        let enc = EncoderMemory::Zstd {
+                            level: o.level,
+                            window_log: window_for(o.window_log, o.block_size),
+                            dictionaries,
+                            dictionary_bytes,
+                        };
                         (
                             Box::new(e),
                             o.block_size,
@@ -465,11 +511,19 @@ impl Pipeline {
                                 (Some(f), None)
                             }),
                             threads,
-                            threads,
+                            (enc, Some(o.jpeg_max_file), FAST_CEILING),
                         )
                     }
                     (ModelStage::Balanced(o), Prepared::Balanced(e, h)) => {
                         let h2 = h.clone();
+                        let enc = EncoderMemory::Balanced {
+                            lzma: e.lzma_memory(),
+                            zstd_level: o.zstd_level,
+                            zstd_window_log: window_for(
+                                o.zstd_window_log.unwrap_or(o.dict_size.ilog2()),
+                                o.block_size,
+                            ),
+                        };
                         (
                             Box::new(e),
                             o.block_size,
@@ -484,7 +538,7 @@ impl Pipeline {
                                 (None, Some(b))
                             }),
                             resolve_threads(o.threads),
-                            o.blocks_in_flight(),
+                            (enc, Some(o.jpeg_max_file), BALANCED_CEILING),
                         )
                     }
                     _ => {
@@ -512,7 +566,30 @@ impl Pipeline {
                 }
                 wopts.block_size = block_size;
                 wopts.encoder = encoder;
+                let (enc, peel_cap, ceiling) = memory;
+                let (chunk_size, avg_chunk) = if fold.is_some() {
+                    (
+                        crate::fold::chunker::MAX_CHUNK as u64,
+                        crate::fold::chunker::AVG_CHUNK as u64,
+                    )
+                } else {
+                    (wopts.chunk_size, wopts.chunk_size)
+                };
+                let model = ModelInputs {
+                    block_size,
+                    chunk_size,
+                    avg_chunk,
+                    encoder: enc,
+                    peel_max_file: if peel.is_empty() { None } else { peel_cap },
+                    entries: files,
+                    path_bytes,
+                    input_bytes,
+                    prefetch: PrefetchOptions::default(),
+                };
+                let plan = model.plan(Budget::resolve(seal.memory, ceiling), threads)?;
+                let in_flight = plan.blocks_in_flight;
                 wopts.encode_threads = in_flight;
+                wopts.threads_hint = model.threads_hint(ceiling);
                 let max_part = wopts.block_size;
                 // The header's version_minor is the revision this writer writes under (spec
                 // section 2): 1 whenever a peel stage is enabled, whether or not one peels.
@@ -634,12 +711,24 @@ impl Pipeline {
                     timings,
                     threads,
                     blocks_in_flight: in_flight,
+                    memory: plan,
                     io_threads,
                     hash_threads: hash_threads(in_flight, reads.threads() > 0),
                 })
             }
         }
     }
+}
+
+/// Entries, path bytes and file bytes of a run's inputs, for the memory model.
+fn inventory(inputs: &[Input]) -> (u64, u64, u64) {
+    inputs.iter().fold((0, 0, 0), |(n, p, b), i| {
+        (
+            n + 1,
+            p + i.path.len() as u64,
+            b + if i.kind == EntryKind::File { i.len } else { 0 },
+        )
+    })
 }
 
 /// Cuts an archive back to the length it had before an append, on the error path and on the

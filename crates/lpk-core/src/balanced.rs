@@ -71,18 +71,10 @@ pub struct BalancedOptions {
     /// Longest `Jpeg`-classed input the JPEG peel reads whole (see `FastOptions`).
     pub jpeg_max_file: u64,
     /// The thread budget; `None` (the default) is the machine's logical cores, 1 the sequential
-    /// path. The blocks in flight are `min(threads, BALANCED_MAX_IN_FLIGHT)`: each LZMA encoder
-    /// instance holds several times the dictionary, so the cap is provisional until a memory
-    /// budget (E2-20) sets it from the machine. The archive is the same whatever the count.
+    /// path. The blocks in flight are `threads` capped by the memory budget (E2-20,
+    /// [`crate::memory`]): each block in flight holds an LZMA encoder of several times the
+    /// dictionary and a zstd candidate. The archive is the same whatever the count.
     pub threads: Option<usize>,
-}
-
-impl BalancedOptions {
-    /// Blocks in flight for these options: `threads` resolved, capped at
-    /// [`BALANCED_MAX_IN_FLIGHT`].
-    pub fn blocks_in_flight(&self) -> usize {
-        crate::fast::resolve_threads(self.threads).min(BALANCED_MAX_IN_FLIGHT)
-    }
 }
 
 impl Default for BalancedOptions {
@@ -254,7 +246,7 @@ impl LzmaEncoder {
         let graph = self.graph(dict);
         Ok(Encoded {
             resources: graph.resources(),
-            memory: 0,
+            memory: crate::memory::lzma_decode_memory(dict, plain.len() as u64),
             graph,
             bytes: self.compress(plain, dict)?,
         })
@@ -309,7 +301,7 @@ impl BalancedHandle {
 
 /// The Balanced tier's block encoder: gate, class rule, the lzma-or-zstd trial.
 ///
-/// Parallel encoding (`WriterOptions::encode_threads`, capped at [`BALANCED_MAX_IN_FLIGHT`]
+/// Parallel encoding (`WriterOptions::encode_threads`, capped by the memory budget
 /// by the pipeline): a job captures the class of the moment and the LZMA parameters, borrows
 /// a zstd core from the Fast encoder inside (or builds one on the pool thread), and runs the
 /// same trial and encoding as `encode`; the counts come back through `absorb` in block order.
@@ -319,11 +311,6 @@ pub struct BalancedEncoder {
     sample_len: usize,
     shared: Arc<Mutex<Shared>>,
 }
-
-/// Most blocks the Balanced tier encodes at once, whatever `threads` says: each LZMA encoder
-/// instance holds several times the dictionary, so the blocks in flight are capped until a
-/// memory budget (E2-20) sets the number from the machine.
-pub const BALANCED_MAX_IN_FLIGHT: usize = 4;
 
 impl std::fmt::Debug for BalancedEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -336,6 +323,17 @@ impl std::fmt::Debug for BalancedEncoder {
 }
 
 impl BalancedEncoder {
+    /// One LZMA encoder's memory for the memory budget: liblzma's own query for the configured
+    /// dictionary and match finder ([`LzmaEncoder::memory_usage`]); when the query fails,
+    /// liblzma's documented figure for the binary-tree match finder, about 11.5 times the
+    /// dictionary, rounded up to 12 times.
+    pub fn lzma_memory(&self) -> u64 {
+        match self.lzma.memory_usage() {
+            0 => u64::from(self.lzma.dict_size).saturating_mul(12),
+            m => m,
+        }
+    }
+
     /// A new encoder and the handle that steers it; every option is checked here
     /// (`InvalidOption`).
     pub fn new(o: &BalancedOptions) -> Result<(Self, BalancedHandle), CoreError> {

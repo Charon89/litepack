@@ -133,6 +133,8 @@ pub struct ExtractOptions {
     /// 1 is the sequential path.
     pub threads: Option<usize>,
     /// The decode memory budget in bytes; `None` is the reader's `Resources::memory`.
+    /// [`extract_file`] also opens the archive with it as the reader's `Resources::memory`, so
+    /// an archive whose envelope needs more is refused before any output exists.
     pub memory: Option<u64>,
     /// Most files open at once (at least one); also caps the writers.
     pub max_open_files: usize,
@@ -1040,7 +1042,13 @@ pub fn extract_file(
     opts: &ExtractOptions,
 ) -> Result<ExtractSummary, CoreError> {
     let file = File::open(path).map_err(|e| io(path, e))?;
-    let mut a = Archive::open_with(file, &lpk_format::Resources::default(), credentials)?;
+    // `opts.memory` is the reader's decode memory too: an archive whose envelope needs more is
+    // refused here, before any output exists.
+    let mut resources = lpk_format::Resources::default();
+    if let Some(m) = opts.memory {
+        resources.memory = m;
+    }
+    let mut a = Archive::open_with(file, &resources, credentials)?;
     if !priors.is_empty() {
         let mut store = MemoryPriors::new();
         for p in priors {

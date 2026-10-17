@@ -353,7 +353,7 @@ impl ZstdCore {
         Ok((
             Encoded {
                 resources: graph.resources(),
-                memory: 0,
+                memory: crate::memory::zstd_decode_memory(declared, plain.len() as u64),
                 graph,
                 bytes,
             },

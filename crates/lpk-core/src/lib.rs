@@ -29,7 +29,7 @@ pub mod store;
 
 pub use balanced::{
     archive_balanced, archive_balanced_file, BalancedEncoder, BalancedHandle, BalancedOptions,
-    BalancedSummary, LzmaEncoder, BALANCED_MAX_IN_FLIGHT,
+    BalancedSummary, LzmaEncoder,
 };
 pub use classify::{classify, Class, Features};
 pub use cluster::{cluster, Cluster, DictionaryKind};

@@ -1,15 +1,12 @@
 //! Parallel block encoding through the pipeline (E2-4b): the Fast and Balanced tiers write the
 //! same bytes with one thread and eight, with peeled JPEGs and duplicates in the tree, and
-//! their summaries agree; the Balanced tier caps the blocks in flight.
+//! their summaries agree; the memory budget sets the blocks in flight (E2-20).
 #![allow(clippy::unwrap_used)]
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use lpk_core::{
-    register_full_reader, BalancedOptions, FastOptions, Pipeline, RunSummary,
-    BALANCED_MAX_IN_FLIGHT,
-};
+use lpk_core::{register_full_reader, BalancedOptions, FastOptions, Pipeline, RunSummary};
 use lpk_format::{Archive, EntryKind, Resources};
 
 fn noise(seed: u64, len: usize) -> Vec<u8> {
@@ -151,10 +148,8 @@ fn the_balanced_tier_writes_the_same_bytes_with_one_thread_and_eight_capped_in_f
         "{b:?}"
     );
     assert_eq!((s1.threads, s1.blocks_in_flight), (1, 1));
-    assert_eq!(
-        (s8.threads, s8.blocks_in_flight),
-        (8, BALANCED_MAX_IN_FLIGHT)
-    );
+    // No cap of four any more: the budget allows eight blocks this small.
+    assert_eq!((s8.threads, s8.blocks_in_flight), (8, 8));
     check(eight, dir.path());
 }
 
