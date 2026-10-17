@@ -73,13 +73,13 @@ was single-threaded then and is parallel since E2-4b.
 ## Branches in flight
 - Task C of E2-10/11 (revision 1.2, D-68) is merged (PR #64). In flight:
   - `task/e2-10-pipeline` — task D (the Deflate peel in the pipeline), implementer running.
-  - `task/e2-10-check` — task E (`deflate-reconstruct` in `lpk-check` from the text): the gate passed from the text
-    alone (both 1.2 vectors; reviewed: correct, the gate honest); its author listed nine sentences it had to guess
-    at, and the review found the two decoders disagreeing on three. `task/e2-10-text` (pushed) settles all nine in
-    section 8 and corrects the reference (the 4 KiB LZMA dictionary floor of LzmaSpec applies; `marker required`
-    for input ending inside the symbol after a non-final step's bound; a zstd checksum belongs to no block; input
-    after a marker); task E's author is aligning `lpk-check` from the revised text only. Then one review of both
-    with a probe that runs the two decoders on the same crafted inputs, then the PRs.
+  - `task/e2-10-check` — task E with the settlement of its text gaps (`task/e2-10-text` merged into it): PR open.
+    The gate passed (D-68 (7)); when CI is green, fast-forward `main`, then tighten task D's corpus test to require
+    `lpk-check` to decode the Deflate blocks.
+  - Task D's review (2026-10-17): REQUEST CHANGES for the tick only (the 1-vs-24-thread corpus identity on
+    office-pdf and photo-raw-png is missing), should-fix items (records in the memory model, a per-file work budget,
+    the Deflate term only when examined classes are present, an exact pre-encode gate, a bounded read). Fix round
+    next, after task E lands.
 - E2-20 (code merged): its rows were measured on 2026-10-17 (`bench/results/2026-10-17-megatron-5` = `small`,
   `-6` = `full` vm-image/office-pdf/software-installed, 24 threads, from `fb5553a`; not committed yet). Every
   compress peak is within its tier's ceiling; extraction is not: at 24 threads it plans only plain bytes plus the
