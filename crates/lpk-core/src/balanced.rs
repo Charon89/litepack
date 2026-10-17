@@ -31,7 +31,7 @@ use liblzma::stream::{
     PRESET_EXTREME,
 };
 use lpk_format::{
-    BlockEncoder, EncodeJob, Encoded, FormatError, Graph, JobState, PrimitiveId, Step,
+    BlockEncoder, EncodeJob, Encoded, FormatError, Graph, JobResult, JobState, PrimitiveId, Step,
     StoreEncoder, WriterSummary,
 };
 
@@ -524,7 +524,26 @@ impl EncodeJob for BalancedJob {
         };
         Ok((encoded, Some(Box::new(back))))
     }
+
+    fn run_owned(self: Box<Self>, plain: Vec<u8>) -> (JobResult, Option<Vec<u8>>) {
+        if stored_by_class(self.class) {
+            // The class rule: the plain buffer is the encoding, uncopied.
+            let back = BalancedReturn {
+                core: self.core,
+                outcome: STORED_BY_CLASS,
+            };
+            return (Ok((StoreEncoder::wrap(plain), Some(Box::new(back)))), None);
+        }
+        let r = self.run(&plain);
+        (r, Some(plain))
+    }
 }
+
+/// The outcome of a stored-by-class block.
+const STORED_BY_CLASS: BalancedOutcome = BalancedOutcome {
+    kind: BalancedKind::StoredByClass,
+    sample_bytes: 0,
+};
 
 impl BlockEncoder for BalancedEncoder {
     fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
@@ -543,6 +562,15 @@ impl BlockEncoder for BalancedEncoder {
         let (encoded, outcome) = r?;
         self.bump(&outcome);
         Ok(encoded)
+    }
+
+    fn encode_owned(&mut self, plain: Vec<u8>) -> (Result<Encoded, FormatError>, Option<Vec<u8>>) {
+        if stored_by_class(lock(&self.shared).class) {
+            self.bump(&STORED_BY_CLASS);
+            return (Ok(StoreEncoder::wrap(plain)), None);
+        }
+        let r = self.encode(&plain);
+        (r, Some(plain))
     }
 
     fn job(&mut self) -> Option<Box<dyn EncodeJob>> {

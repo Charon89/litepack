@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lpk_format::{
-    BlockEncoder, EncodeJob, Encoded, FormatError, Graph, JobState, PrimitiveId, Step,
+    BlockEncoder, EncodeJob, Encoded, FormatError, Graph, JobResult, JobState, PrimitiveId, Step,
     StoreEncoder, WriterSummary, DEFAULT_BLOCK_SIZE,
 };
 use std::io::Write;
@@ -403,6 +403,33 @@ impl EncodeJob for ZstdJob {
         };
         Ok((encoded, Some(Box::new(back))))
     }
+
+    fn run_owned(self: Box<Self>, plain: Vec<u8>) -> (JobResult, Option<Vec<u8>>) {
+        // The class rule, then the gate on its sample: a block either one
+        // stores takes the plain buffer as its encoding, uncopied.
+        let stored = stored_outcome(self.class, &self.config.gate, &plain);
+        if let Some(outcome) = stored {
+            let back = ZstdReturn {
+                core: self.core,
+                outcome,
+            };
+            return (Ok((StoreEncoder::wrap(plain), Some(Box::new(back)))), None);
+        }
+        let r = self.run(&plain);
+        (r, Some(plain))
+    }
+}
+
+/// The store decision taken before any compression: the class rule (D-47), then the entropy
+/// gate on the block's sample. `None` means the block goes to zstd.
+fn stored_outcome(class: Class, gate: &Gate, plain: &[u8]) -> Option<Outcome> {
+    if stored_by_class(class) {
+        Some(Outcome::StoredByClass)
+    } else if gate.is_incompressible(plain) {
+        Some(Outcome::StoredByGate)
+    } else {
+        None
+    }
 }
 
 impl ZstdEncoder {
@@ -516,6 +543,16 @@ impl BlockEncoder for ZstdEncoder {
         let (encoded, outcome) = self.encode_with(class, kind, plain)?;
         self.bump(outcome);
         Ok(encoded)
+    }
+
+    fn encode_owned(&mut self, plain: Vec<u8>) -> (Result<Encoded, FormatError>, Option<Vec<u8>>) {
+        let (class, _) = self.hint();
+        if let Some(outcome) = stored_outcome(class, &self.config.gate, &plain) {
+            self.bump(outcome);
+            return (Ok(StoreEncoder::wrap(plain)), None);
+        }
+        let r = self.encode(&plain);
+        (r, Some(plain))
     }
 
     fn job(&mut self) -> Option<Box<dyn EncodeJob>> {
