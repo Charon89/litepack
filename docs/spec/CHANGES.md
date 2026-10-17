@@ -181,3 +181,23 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
 10. New malformed vector `malformed-deflate-bound.lpk` (a `[lzma, deflate-reconstruct]` block whose record's
     `plain_len` is below the inflated text): `PayloadTooLarge` for a revision 1.2 reader (`expected-1.2.toml`), the
     `_1_0` keys in `expected.toml` for earlier readers; its CONFORMANCE row. No byte of an earlier vector changed.
+11. Text gaps found by an independent decoder written from the text alone, settled (section 8): where the rules are
+    silent on which of two faults decides, the first in stream order does, and on a decoding detail the normative
+    decoder decides over a library ("Normative decoders"); the `lzma` input position at the bound is LzmaSpec's (5
+    bytes of initialisation plus one per normalisation, up to the normalisation after the last bit of the symbol that
+    reaches the bound), and the bytes after it are `trailing input` unless they are exactly the marker with the end
+    condition holding; in a non-final `lzma` step, after the bound a literal or match is `PayloadTooLarge` and input
+    that ends there or inside the next symbol is `marker required`, and input after a marker (wherever it comes) is
+    `trailing input`; `lzma` rule 3's dictionary size is LzmaSpec's, raised to 4096 (rule 2 still compares the stored
+    `dict_size`), and a refused distance that would also cross the bound is rule 3's `LzmaError`; rule 4 states the
+    class when the end condition fails after the marker, input after it or not (it is the first fault); rule 5: a marker before the bound in the last step is
+    `truncated` whatever follows it; rule 6: input ending inside an invalid symbol may report `truncated` (or
+    `marker required`) or the decoder's text; `zstd` rule 7: a frame cut short or damaged inside its
+    `Content_Checksum` has all its blocks complete, and they count; "Bounds": the bound of the pre-checks is never
+    derived from a later step; `deflate-reconstruct`: `needed` saturates at 2^64 - 1, and the block-count refusal
+    never occurs with the output limit (informative). Code: the reference raises a `dict_size` below 4096 to 4096
+    (it refused a distance in (`dict_size`, 4096]); a non-final `lzma` step whose input ends inside the symbol after
+    the bound reports `marker required` (was `truncated`); input after a marker reports `trailing input` in a
+    non-final step and `truncated` for a marker before the bound in the last step (was lzma-rs's own text, or in the
+    last step `PayloadTooLarge` with a length below the bound); a `zstd`
+    frame cut inside its checksum counts its last block (it was counted as damaged). No byte of a vector changed.

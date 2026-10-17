@@ -72,17 +72,19 @@ fn a_distance_above_dict_size_after_the_crossing_is_payload_too_large() {
 }
 
 /// (c) A distance above `dict_size` at a position before the crossing keeps its class,
-/// `LzmaError` (lzma-rs refuses a distance beyond its buffer, which is the smaller of `dict_size`
-/// and the bound, so a distance above the bytes produced is the same check).
+/// `LzmaError` (lzma-rs refuses a distance beyond its buffer, which is the smaller of the
+/// dictionary size, at least 4096, and the bound, so a distance above the bytes produced is the
+/// same check).
 #[test]
 fn a_distance_error_before_the_crossing_stays_lzma_error() {
     let a = noise(21, 3000);
     let mut data = a.clone();
-    data.extend_from_slice(&noise(22, 1000));
+    data.extend_from_slice(&noise(22, 2000));
     data.extend_from_slice(&a);
     let raw = lzma_raw(&lzma_options(6, 1 << 20, 3, 0, 2), &data);
-    // The match at 4000 reaches back 4000 > 2048; the bound (6000) would be crossed later.
-    let r = reason(step(&lzma_params(2048, 3, 0, 2), &raw, 6000));
+    // The match at 5000 reaches back 5000 > 4096 (the stored 2048 raised to LzmaSpec's floor);
+    // the bound (7000) would be crossed later.
+    let r = reason(step(&lzma_params(2048, 3, 0, 2), &raw, 7000));
     assert!(r.contains("beyond"), "{r}");
 }
 
@@ -199,4 +201,80 @@ fn a_distance_above_the_bytes_produced_before_the_crossing_is_lzma_error() {
         let r = reason(step(&p, &raw, bound));
         assert!(r.contains("beyond"), "bound {bound}: {r}");
     }
+}
+
+fn last(p: &[u8], raw: &[u8], len: u64) -> Result<Vec<u8>, FormatError> {
+    LzmaDecoder.decode_step(p, raw, len, true, &Resources::default())
+}
+
+/// Text with repeats, encoded with the end-of-payload marker (the raw encoder always writes it).
+fn marked(len: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let data: Vec<u8> = (0..len)
+        .map(|i| b"lzma text gap "[i % 14] ^ (i / 700) as u8)
+        .collect();
+    let p = lzma_params(1 << 16, 3, 0, 2);
+    let raw = lzma_raw(&lzma_options(6, 1 << 16, 3, 0, 2), &data);
+    (data, p, raw)
+}
+
+/// Ruling 1 (gap 1): in a step that is not the last, once the output has reached the bound, input
+/// that ends inside the next symbol (here the marker, cut short) is `marker required`.
+#[test]
+fn input_ending_inside_the_symbol_after_the_bound_is_marker_required() {
+    let (data, p, raw) = marked(5000);
+    let bound = data.len() as u64;
+    assert!(step(&p, &raw, bound).unwrap() == data);
+    // Cut inside the marker: the output still reaches the bound (in the last step the cut
+    // marker's bytes are input after the position at the bound).
+    for cut in 1..=3 {
+        let short = &raw[..raw.len() - cut];
+        assert_eq!(
+            reason(last(&p, short, bound)),
+            "trailing input",
+            "cut {cut}"
+        );
+        assert_eq!(
+            reason(step(&p, short, bound)),
+            "marker required",
+            "cut {cut}"
+        );
+    }
+}
+
+/// Ruling 2 (gap 2): LzmaSpec raises a `dict_size` below 4096 to 4096, so a distance in
+/// (`dict_size`, 4096] is accepted; a distance above 4096 is still refused.
+#[test]
+fn a_dict_size_below_4096_is_raised_to_4096() {
+    let a = noise(41, 2000);
+    let mut data = a.clone();
+    data.extend_from_slice(&noise(42, 1000));
+    data.extend_from_slice(&a);
+    // The repeat is one match at distance 3000, above the stored 1024 and within 4096.
+    let raw = lzma_raw(&lzma_options(6, 1 << 20, 3, 0, 2), &data);
+    let p = lzma_params(1024, 3, 0, 2);
+    assert!(last(&p, &raw, data.len() as u64).unwrap() == data);
+    assert!(step(&p, &raw, 1 << 20).unwrap() == data);
+    // A distance of 5000, above 4096, stays `LzmaError`.
+    let mut far = a.clone();
+    far.extend_from_slice(&noise(43, 3000));
+    far.extend_from_slice(&a);
+    let raw = lzma_raw(&lzma_options(6, 1 << 20, 3, 0, 2), &far);
+    let r = reason(last(&p, &raw, far.len() as u64));
+    assert!(r.contains("beyond"), "{r}");
+}
+
+/// Ruling 10 (S4): in a step that is not the last, input after the marker is `trailing input`,
+/// wherever the marker comes; in the last step a marker before the bound is `truncated` whatever
+/// follows it, and input after a marker at the bound is `trailing input`.
+#[test]
+fn input_after_the_marker() {
+    let (data, p, mut raw) = marked(5000);
+    let n = data.len() as u64;
+    raw.push(0);
+    // Not the last step: marker at the bound, and before it.
+    assert_eq!(reason(step(&p, &raw, n)), "trailing input");
+    assert_eq!(reason(step(&p, &raw, n + 100)), "trailing input");
+    // The last step: marker at the bound, and before it.
+    assert_eq!(reason(last(&p, &raw, n)), "trailing input");
+    assert_eq!(reason(last(&p, &raw, n + 100)), "truncated");
 }

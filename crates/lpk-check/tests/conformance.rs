@@ -622,7 +622,7 @@ fn jpeg_peel_revision_1_0_mode() {
     let exp = table("expected.toml");
     let t = exp[JPEG].as_table().unwrap();
     let o = Options {
-        revision_1_0: true,
+        revision: 0,
         ..Options::default()
     };
     let mut a = Archive::open(read(JPEG), o).unwrap();
@@ -692,12 +692,23 @@ fn later_minor_and_unknown_reconstruction() {
     assert_eq!(&d[p.start..p.start + 3], &[1, 7, 0]);
     d[p.start + 1] = 8;
     rehash_frame(&mut d, off);
+    // A revision 1.1 reader does not run it.
+    let o = Options {
+        revision: 1,
+        ..Options::default()
+    };
+    let e = Archive::open(d.clone(), o).unwrap().verify().unwrap_err();
+    assert_eq!(
+        (e.class, e.detail.as_str()),
+        (
+            "UnimplementedPrimitive",
+            "primitive 0x0008 is not implemented by this reader"
+        )
+    );
+    // A revision 1.2 reader runs it: record 0 is a `jpeg` record (check (2)).
     assert_eq!(
         verify_class(d),
-        (
-            "UnimplementedPrimitive".into(),
-            "primitive 0x0008 is not implemented by this reader".into()
-        )
+        ("BadRecord".into(), "bad record 0: kind".into())
     );
 }
 
@@ -777,4 +788,261 @@ fn jpeg_mutations_never_panic_or_pass() {
             );
         }
     }
+}
+
+const DEFLATE: &str = "deflate-peel.lpk";
+const BOUND: &str = "malformed-deflate-bound.lpk";
+
+fn with_revision(revision: u8) -> Options {
+    Options {
+        revision,
+        ..Options::default()
+    }
+}
+
+/// `path size blake3` of one entry, or its error class.
+fn entry_line(a: &mut Archive, e: &lpk_check::entries::Entry) -> Result<String, &'static str> {
+    let b = a.read_file(e).map_err(|e| e.class)?;
+    Ok(format!(
+        "{} {} {}",
+        e.path,
+        b.len(),
+        blake3::hash(&b).to_hex()
+    ))
+}
+
+/// A revision 1.2 decoder on every vector of `expected-1.2.toml`: `deflate-peel.lpk` extracts to
+/// `files` and verifies (`verify`), by the library and the tool; `malformed-deflate-bound.lpk`
+/// opens, its `verify` and the extraction of `notes.txt.gz` fail with `error`, and `readme.txt`
+/// extracts. `list` and `info` of `expected.toml` apply to both.
+#[test]
+fn deflate_vectors_revision_1_2() {
+    let exp = table("expected-1.2.toml");
+    let old = table("expected.toml");
+    assert!(exp.contains_key(DEFLATE) && exp.contains_key(BOUND));
+    for (name, t) in &exp {
+        let t = t.as_table().unwrap();
+        let path = vectors().join(name).display().to_string();
+        let t0 = old[name.as_str()].as_table().unwrap();
+        for (cmd, key) in [("list", "list"), ("info", "info")] {
+            let (code, out, err) = bin(&[cmd.into(), path.clone()]);
+            assert_eq!(
+                (code, out.as_str()),
+                (0, t0[key].as_str().unwrap()),
+                "{name} {cmd}: {err}"
+            );
+        }
+        let mut a = Archive::open(read(name), Options::default()).unwrap();
+        assert_eq!(a.header.version_minor, 2, "{name}");
+        if let Some(want) = t.get("error") {
+            let want = want.as_str().unwrap();
+            let e = a.verify().unwrap_err();
+            assert_eq!(e.class, want, "{name}: {}", e.detail);
+            let (code, out, err) = bin(&["verify".into(), path.clone()]);
+            assert_eq!(code, 1, "{name}");
+            assert!(
+                out.is_empty() && err.starts_with("error: "),
+                "{name}: {err}"
+            );
+            let keep = strings(&t0["files_1_0"]);
+            for e in a.entries().unwrap() {
+                let got = entry_line(&mut a, &e);
+                if e.path == "notes.txt.gz" {
+                    assert_eq!(got, Err(want), "{name}: {}", e.path);
+                } else {
+                    assert!(keep.contains(&got.unwrap()), "{name}: {}", e.path);
+                }
+            }
+            continue;
+        }
+        let files = strings(&t["files"]);
+        assert_eq!(decoded_lines(&mut a).unwrap(), files, "{name}");
+        let s = a.verify().unwrap();
+        assert_eq!(
+            format!(
+                "ok: {} entries, {} chunks, {} blocks\n",
+                s.entries, s.chunks, s.blocks
+            ),
+            t["verify"].as_str().unwrap(),
+            "{name}"
+        );
+        let (code, out, err) = bin(&["verify".into(), path.clone()]);
+        assert_eq!(
+            (code, out.as_str()),
+            (0, t["verify"].as_str().unwrap()),
+            "{name}: {err}"
+        );
+        for tool in [false, true] {
+            let dir = temp(&format!("{name}-{tool}"));
+            if tool {
+                let (code, _, err) =
+                    bin(&["extract".into(), path.clone(), dir.display().to_string()]);
+                assert_eq!(code, 0, "{name}: {err}");
+            } else {
+                let mut a = Archive::open(read(name), Options::default()).unwrap();
+                let (done, err) = extract_all(&mut a, &dir).unwrap();
+                assert!(err.is_none() && done.len() == files.len(), "{name}");
+            }
+            for line in &files {
+                let mut it = line.split(' ');
+                let (p, size, h) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+                let b = std::fs::read(dir.join(p)).unwrap();
+                assert_eq!(b.len().to_string(), size, "{name}: {p}");
+                assert_eq!(blake3::hash(&b).to_hex().as_str(), h, "{name}: {p}");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// Readers before revision 1.2 (this decoder under `--revision 1` and `--revision 0`) on both
+/// revision 1.2 vectors: the `_1_0` keys of `expected.toml`: `verify` is `UnimplementedPrimitive`
+/// (8) with `message_1_0`, the tool's exit code and stderr; the entries of `files_1_0` extract
+/// bit-exactly, every other entry is `UnimplementedPrimitive`; `list` and `info` as for any reader.
+#[test]
+fn deflate_vectors_before_revision_1_2() {
+    let old = table("expected.toml");
+    for name in [DEFLATE, BOUND] {
+        let t = old[name].as_table().unwrap();
+        let path = vectors().join(name).display().to_string();
+        let keep = strings(&t["files_1_0"]);
+        for rev in [0u8, 1] {
+            let mut a = Archive::open(read(name), with_revision(rev)).unwrap();
+            let e = a.verify().unwrap_err();
+            assert_eq!(e.class, t["error_1_0"].as_str().unwrap(), "{name} {rev}");
+            assert_eq!(e.detail, t["message_1_0"].as_str().unwrap(), "{name} {rev}");
+            let mut extracted = Vec::new();
+            for e in a.entries().unwrap() {
+                match entry_line(&mut a, &e) {
+                    Ok(l) => extracted.push(l),
+                    Err(c) => assert_eq!(c, "UnimplementedPrimitive", "{name} {rev}"),
+                }
+            }
+            assert_eq!(extracted, keep, "{name} {rev}");
+            let mut flags = vec![vec!["--revision".to_string(), rev.to_string()]];
+            if rev == 0 {
+                flags.push(vec!["--revision-1-0".to_string()]);
+            }
+            for f in flags {
+                let mut v = f.clone();
+                v.extend(["verify".to_string(), path.clone()]);
+                let (code, out, err) = bin(&v);
+                assert_eq!(
+                    i64::from(code),
+                    t["verify_exit_1_0"].as_integer().unwrap(),
+                    "{name} {f:?}"
+                );
+                assert_eq!(
+                    err,
+                    t["verify_stderr_1_0"].as_str().unwrap(),
+                    "{name} {f:?}"
+                );
+                assert!(out.is_empty());
+                for (cmd, key) in [("list", "list"), ("info", "info")] {
+                    let mut v = f.clone();
+                    v.extend([cmd.to_string(), path.clone()]);
+                    let (code, out, _) = bin(&v);
+                    assert_eq!((code, out.as_str()), (0, t[key].as_str().unwrap()));
+                }
+            }
+        }
+    }
+}
+
+/// Rewrites record `n`'s body of `name` with `f` (same length), then its `body_hash` and the
+/// `Records` frame hash.
+fn patch_deflate_record(name: &str, n: usize, f: impl Fn(&mut [u8])) -> Vec<u8> {
+    let mut d = read(name);
+    let a = Archive::open(d.clone(), Options::default()).unwrap();
+    let off = a.index.records.unwrap().offset as usize;
+    let p = payload_range(&d, off);
+    let varint = |d: &[u8], pos: &mut usize| {
+        let (mut v, mut shift) = (0usize, 0);
+        loop {
+            let b = d[*pos];
+            *pos += 1;
+            v |= usize::from(b & 0x7F) << shift;
+            shift += 7;
+            if b & 0x80 == 0 {
+                return v;
+            }
+        }
+    };
+    let mut pos = p.start;
+    let count = varint(&d, &mut pos);
+    assert!(n < count);
+    for i in 0..=n {
+        pos += 4; // kind, flags
+        let len = varint(&d, &mut pos);
+        if i == n {
+            let body = pos..pos + len;
+            f(&mut d[body.clone()]);
+            let h = blake3::hash(&d[body.clone()]);
+            d[body.end..body.end + 32].copy_from_slice(h.as_bytes());
+        }
+        pos += len + 32;
+    }
+    rehash_frame(&mut d, off);
+    d
+}
+
+/// Section 8 on mutated copies of `deflate-peel.lpk` (hashes recomputed so the damage reaches the
+/// step): the bound rule on the record's `plain_len`, check (6), (7) and (8), and the `library`
+/// field rule of section 12.
+#[test]
+fn deflate_reconstruct_negative_cases() {
+    let n = Archive::open(read(DEFLATE), Options::default())
+        .unwrap()
+        .records()
+        .unwrap()
+        .len();
+    assert_eq!(n, 4);
+    let plain_len = |b: &mut [u8], delta: i64| {
+        let v = u64::from_le_bytes(b[8..16].try_into().unwrap());
+        b[8..16].copy_from_slice(&v.wrapping_add_signed(delta).to_le_bytes());
+    };
+    let mut refused = 0;
+    for r in 0..n {
+        // plain_len one below the inflated text: the step before crosses its bound.
+        let d = patch_deflate_record(DEFLATE, r, |b| plain_len(b, -1));
+        let (class, detail) = verify_class(d);
+        assert_eq!(class, "PayloadTooLarge", "record {r}: {detail}");
+        // One above: the step before ends short, check (6); or, for the record whose term the
+        // writer declared (decode_memory = max_block_plain + the largest term), 8 more bytes of
+        // term than declared: check (5), before the step before it runs.
+        let d = patch_deflate_record(DEFLATE, r, |b| plain_len(b, 1));
+        let got = verify_class(d);
+        if got.0 == "Refused" {
+            assert!(got.1.contains("decode_memory"), "{got:?}");
+            refused += 1;
+        } else {
+            assert_eq!(
+                got,
+                ("BadRecord".into(), format!("bad record {r}: plain_len"))
+            );
+        }
+        // original_hash.
+        let d = patch_deflate_record(DEFLATE, r, |b| {
+            let i = b.len() - 1;
+            b[i] ^= 1;
+        });
+        assert_eq!(
+            verify_class(d),
+            ("BadRecord".into(), format!("bad record {r}: original_hash")),
+        );
+        // library 1: the field rule, while the records are walked.
+        let d = patch_deflate_record(DEFLATE, r, |b| {
+            let i = b.len() - 33;
+            b[i] = 1;
+        });
+        assert_eq!(
+            verify_class(d),
+            ("BadRecord".into(), format!("bad record {r}: library")),
+        );
+        // A corrections byte changed: refused, or a stream that fails its checks.
+        let d = patch_deflate_record(DEFLATE, r, |b| b[20] ^= 0x55);
+        let (class, detail) = verify_class(d);
+        assert_eq!(class, "BadRecord", "record {r}: {detail}");
+    }
+    assert_eq!(refused, 1, "exactly one record carries the declared term");
 }
