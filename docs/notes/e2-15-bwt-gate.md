@@ -1,6 +1,6 @@
 # E2-15 — the BWT measured gate: result on `small` (report; 2026-10-17)
 
-Source of every figure below: `bench/results/2026-10-17-megatron-15/probe-bwt.json` (its table is
+Source of every figure below: `bench/results/2026-10-17-megatron-16/probe-bwt.json` (its table is
 `probe-bwt.md` next to it). Command: `cargo run --release -p lpk-bench -- probe bwt --profile small`
 (build `7f614f9be362`, release, one thread in timed sections, corpus `small` manifest `8daaaf66…`).
 The brief is `docs/notes/e2-15-probe-brief.md`; the codec is `crates/lpk-codecs-bwt`.
