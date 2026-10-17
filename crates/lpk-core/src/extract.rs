@@ -290,8 +290,8 @@ pub const WORKER_ALLOWANCE: u64 = 64 << 10;
 /// format's read step: the scratch of a frame read without a location, or a read buffer a
 /// platform's std allocates differently) plus 64 KiB for the block header and graph, the
 /// decoder's per-call state outside `decode_memory`, the `Held` block and its `Arc`, and its
-/// channel and reordering-map nodes. An allowance, so that the count is not a byte-exact match
-/// of the buffers (review S1 of E2-20 round 2).
+/// channel and reordering-map nodes. An allowance, so that the count has a margin over the
+/// buffers it names instead of matching them to the byte.
 pub const BLOCK_ALLOWANCE: u64 = 128 << 10;
 /// Each file writer's open-file set, order and channel: an allowance.
 pub const WRITER_ALLOWANCE: u64 = 64 << 10;
