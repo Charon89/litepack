@@ -19,6 +19,8 @@ use crate::prefetch::{SegmentError, Segments};
 use crate::primitive::{GraphResources, PrimitiveId};
 use crate::record::{Record, RecordsWriter};
 use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
+use crate::sink::Sink;
+pub use crate::sink::WRITE_DEPTH;
 use crate::trailer::{Trailer, TRAILER_FRAME_LEN};
 use crate::varint;
 use rand::RngCore;
@@ -284,21 +286,32 @@ pub struct WriterOptions {
 /// The output with the recovery spool beside it: while the spool is set, every
 /// byte written is also fed to it.
 struct Tee<W: Write> {
-    inner: W,
+    inner: Sink<W>,
     spool: Option<GroupEncoder>,
 }
 
 impl<W: Write> Write for Tee<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = self.inner.write(buf)?;
+        self.inner.write_all(buf)?;
         if let Some(s) = &mut self.spool {
-            s.feed(&buf[..n]).map_err(std::io::Error::other)?;
+            s.feed(buf).map_err(std::io::Error::other)?;
         }
-        Ok(n)
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+impl<W: Write> Tee<W> {
+    /// Write `buf` whole, by value (moved to the write thread when there is
+    /// one); it comes back here at once when written on this thread.
+    fn write_owned(&mut self, buf: Vec<u8>) -> std::io::Result<Option<Vec<u8>>> {
+        if let Some(s) = &mut self.spool {
+            s.feed(&buf).map_err(std::io::Error::other)?;
+        }
+        self.inner.write_owned(buf)
     }
 }
 
@@ -512,9 +525,6 @@ struct PoolOutput {
 
 /// Buffers smaller than this are not kept for reuse.
 const RECYCLE_MIN: usize = 1 << 20;
-
-/// Frames queued for the write thread at most (beyond the one it is writing).
-pub const WRITE_DEPTH: usize = 1;
 
 /// Computes a pool-encoded block's frame hash on the pool thread, over the
 /// payload the writer will write: the block header (encoded from the graph,
@@ -838,7 +848,10 @@ impl<W: Write> Writer<W> {
         }
         Header::with_minor(flags, options.archive_id, version_minor).write(&mut out)?;
         // The covered range starts right after the header.
-        let out = Tee { inner: out, spool };
+        let out = Tee {
+            inner: Sink::Direct(out),
+            spool,
+        };
         let mut w = Writer {
             out,
             options,
@@ -1125,7 +1138,10 @@ impl<W: Write> Writer<W> {
             recon: HashMap::new(),
         };
         let w = Writer {
-            out: Tee { inner: out, spool },
+            out: Tee {
+                inner: Sink::Direct(out),
+                spool,
+            },
             chunker,
             pos: end,
             entries: Vec::new(),
@@ -1273,7 +1289,8 @@ impl<W: Write> Writer<W> {
         w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
         varint::write(w, payload_len)?;
         w.write_all(&head)?;
-        w.write_all(&g.recovery)?;
+        // Moved, not copied, to the write thread when there is one (and dropped once written).
+        w.write_owned(g.recovery)?;
         w.write_all(hasher.finalize().as_bytes())?;
         self.pos += at.len;
         self.seq += 1;
@@ -1311,18 +1328,21 @@ impl<W: Write> Writer<W> {
         flags: FrameFlags,
         payload: Vec<u8>,
     ) -> Result<FrameLocation, FormatError> {
-        let frame = Frame {
-            kind,
-            flags,
-            payload,
-        };
         let at = FrameLocation {
             offset: self.pos,
-            len: frame.encoded_len(),
+            len: frame_len(payload.len() as u64),
             sequence: self.seq,
         };
-        self.last_hash = *blake3::hash(&frame.payload).as_bytes();
-        frame.write(&mut self.out)?;
+        // As `Frame::write` lays it out, the payload moved rather than copied.
+        self.last_hash = *blake3::hash(&payload).as_bytes();
+        let w = &mut self.out;
+        w.write_all(&(kind as u16).to_le_bytes())?;
+        w.write_all(&flags.bits().to_le_bytes())?;
+        varint::write(w, payload.len() as u64)?;
+        if let Some(b) = w.write_owned(payload)? {
+            self.recycle(b);
+        }
+        self.out.write_all(&self.last_hash)?;
         self.pos += at.len;
         self.seq += 1;
         Ok(at)
@@ -1350,6 +1370,10 @@ impl<W: Write> Writer<W> {
     fn check_alive(&self) -> Result<(), FormatError> {
         if let Some(reason) = self.bad_chunk {
             return Err(FormatError::BadChunk { reason });
+        }
+        // A write that failed on the write thread fails every later call.
+        if let Some(e) = self.out.inner.error() {
+            return Err(FormatError::Io(e));
         }
         match &self.failed {
             Some((kind, msg)) => Err(FormatError::Io(std::io::Error::new(*kind, msg.clone()))),
@@ -1616,6 +1640,9 @@ impl<W: Write> Writer<W> {
     /// The largest buffer of the pool, for the next pending block (empty when
     /// the pool has none).
     fn take_spare(&mut self) -> Vec<u8> {
+        for b in self.out.inner.returned() {
+            self.recycle(b);
+        }
         match (0..self.spares.len()).max_by_key(|&i| self.spares[i].capacity()) {
             Some(i) => self.spares.swap_remove(i),
             None => Vec::new(),
@@ -1704,6 +1731,7 @@ impl<W: Write> Writer<W> {
             payload.extend_from_slice(&encoded);
             let sealed =
                 sealer.seal(&payload, FrameKind::ChunkData as u16, self.seq, &self.salt)?;
+            self.recycle(encoded);
             self.write_wire_frame(FrameKind::ChunkData, FrameFlags::SEALED, sealed)?
         } else {
             let at = FrameLocation {
@@ -1717,13 +1745,16 @@ impl<W: Write> Writer<W> {
             w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
             varint::write(w, payload_len)?;
             w.write_all(&head)?;
-            w.write_all(&encoded)?;
-            w.write_all(&hash)?;
+            // The block buffer moves to the write thread, if any, and comes
+            // back to the pool once written.
+            if let Some(b) = w.write_owned(encoded)? {
+                self.recycle(b);
+            }
+            self.out.write_all(&hash)?;
             self.pos += at.len;
             self.seq += 1;
             at
         };
-        self.recycle(encoded);
         self.blocks.push(BlockLocation {
             frame_offset: at.offset,
             frame_len: at.len,
@@ -2774,6 +2805,24 @@ fn frames_max(index: &Index) -> u64 {
         0,
     )
     .max_frame_payload
+}
+
+impl<W: Write + Send + 'static> Writer<W> {
+    /// Move the output onto a write thread, so writing overlaps the cut: the
+    /// writer decides every frame's position, sequence number and hash in order
+    /// as before and hands the frame's bytes over (a block buffer by value)
+    /// through a bounded queue ([`WRITE_DEPTH`] frames beyond the one being
+    /// written); the archive is the same byte for byte. A failed write fails
+    /// the next call of this writer and abandons the archive, as a failed write
+    /// on this thread does; [`Writer::finish`] waits for every byte to be
+    /// written and flushed before it syncs (D-59) and writes the trailer. The
+    /// thread is joined when the writer is dropped; its panic is re-raised by
+    /// the call that finds it, once the writer is marked failed. When the
+    /// thread cannot be started the writer writes on this thread.
+    pub fn with_write_thread(mut self) -> Self {
+        self.out.inner.start_thread();
+        self
+    }
 }
 
 impl Writer<std::fs::File> {

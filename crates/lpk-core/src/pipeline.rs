@@ -315,7 +315,8 @@ impl Pipeline {
                 for p in &deleted {
                     w.delete_path(p)?;
                 }
-                Ok(w)
+                // Writing overlaps the cut: the file is written by a write thread.
+                Ok(w.with_write_thread())
             });
             let sync: SyncFn = Box::new(move || sync_file.sync_data());
             self.run_inputs(inputs, file, Some(sync), prepared, start.elapsed(), opener)
@@ -354,7 +355,7 @@ impl Pipeline {
                 Some(sync),
                 prepared,
                 start.elapsed(),
-                new_archive(),
+                new_archive_file(),
             )
         })
     }
@@ -685,6 +686,18 @@ pub(crate) fn new_archive<W: Write>() -> Opener<'static, W> {
             Some(c) => Writer::new_revision_with_chunker(out, wopts, minor, c)?,
             None => Writer::new_revision(out, wopts, minor)?,
         })
+    })
+}
+
+/// The opener of a new archive file: [`new_archive`], the file written by a write thread so
+/// writing overlaps the cut.
+pub(crate) fn new_archive_file() -> Opener<'static, std::fs::File> {
+    Box::new(|out, wopts, minor, chunker| {
+        let w = match chunker {
+            Some(c) => Writer::new_revision_with_chunker(out, wopts, minor, c)?,
+            None => Writer::new_revision(out, wopts, minor)?,
+        };
+        Ok(w.with_write_thread())
     })
 }
 

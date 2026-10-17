@@ -28,6 +28,7 @@ pub mod priors;
 pub mod reader;
 pub mod record;
 pub mod recovery;
+mod sink;
 pub mod trailer;
 pub mod varint;
 pub mod writer;
