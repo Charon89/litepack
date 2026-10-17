@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 01:47 UTC (2026-10-16, 21:47 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 02:06 UTC (2026-10-16, 22:06 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -30,10 +30,11 @@ was single-threaded then and is parallel since E2-4b.
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Next: **E2-18 round 3.** The acceptance rows (`bench/reports/phase1-2026-10-17-store-path.md`) put `lpk/fast` at
-   76.4% of `tar` on `full`'s `video` (G3 needs 80%), with `lpk/store` above `tar`: the gap is FastCDC and the chunk
-   hashes on the feeding thread. Dispatch round 3 from `docs/notes/e2-18-round-3-brief.md` (byte identity stays),
-   then re-run `target/acceptance/e2-18-run.sh` on an idle machine and tick E2-18 or name the remaining gap.
+2. Next: **E2-18's rows after round 3.** Round 3 step (a) is merged (D-65: the chunk hashes on up to four threads,
+   byte-identical). On an idle machine — no build, no agent running — build release on `main` and launch
+   `target/acceptance/e2-18-run.sh` detached (status in `target/acceptance/e2-18-run-status.log`); report, commit the
+   two directories and a report, and tick E2-18 if `lpk/fast` reaches 80% of `store/store` on `full`'s `video`
+   (D-27); otherwise step (b) of `docs/notes/e2-18-round-3-brief.md` (the exactly resynchronised parallel cut).
    In parallel: **E2-10/11** from `docs/notes/e2-10-11-design.md` — task B (the walker moved into `lpk-core`, D-64)
    is merged; task A (the `lpk-format` plumbing, `docs/notes/e2-10-task-a-brief.md`) was dispatched on 2026-10-16
    beside round 3 (both touch `writer.rs`; whichever lands second merges `main`); tasks C, D, E follow the design's
