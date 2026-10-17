@@ -3,10 +3,12 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 00:27 UTC (2026-10-16, 20:27 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 00:49 UTC (2026-10-16, 20:49 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
-**Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
+**Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
+2026-10-16 E1-15 wrote the Reed-Solomon code out in section 13, proven by an independent repair in `lpk-check`, and
+a forgotten second-reading commit of 2026-10-04 was landed — both text only, D-62). Of
 E2's twenty-two tasks, done and on `main`: E2-1 ingest, E2-2 classifier and gate, E2-3 Fast tier, E2-4 pipeline
 and the `lpk` tool with the pooled report, E2-5 JPEG peel (with the independent decoder passing all eighteen
 vectors), E2-6 Balanced tier, E2-7 chunk dedup, E2-8 file ordering (negative result), E2-19 the extraction engine
