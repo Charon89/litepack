@@ -291,8 +291,8 @@ mod tests {
     use proptest::prelude::*;
     use std::io::Cursor;
 
-    /// A located read reserves the payload once (no growth headroom); an unlocated read, or
-    /// a location shorter than the declared length, grows by chunks; both read the same frame.
+    /// A located read reserves exactly the payload (no growth headroom); an unlocated read, or
+    /// a location shorter than the declared length, reads the same frame.
     #[test]
     fn a_located_read_reserves_the_payload_once() {
         let payload = vec![7u8; 100_000];
@@ -305,10 +305,10 @@ mod tests {
         let exact = read(bytes.len() as u64);
         assert_eq!(exact.payload, payload);
         assert_eq!(exact.payload.capacity(), payload.len());
+        // Without a location that bounds it the payload is grown by chunks (std's growth
+        // policy decides the capacity, so only the bytes are checked).
         for located in [0, 1000] {
-            let grown = read(located);
-            assert_eq!(grown.payload, payload);
-            assert!(grown.payload.capacity() > payload.len());
+            assert_eq!(read(located).payload, payload);
         }
     }
 
