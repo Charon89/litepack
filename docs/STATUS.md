@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-16, about 23:45 UTC (2026-10-16, 19:45 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 00:27 UTC (2026-10-16, 20:27 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel). Of
@@ -28,7 +28,10 @@ was single-threaded then and is parallel since E2-4b.
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Next: **E2-18** (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
+2. Next: **E2-18 round 2** — round 1 is merged (D-61: no compression context for stored classes, one copy fewer,
+   the frame hash off the feeding thread, byte-identical); round 2 pipelines the store path from
+   `docs/notes/e2-18-round-2-brief.md`, then the acceptance rows run on `full`'s `video` against `tar`. The original
+   E2-18 brief, for context: (the video target: `lpk/fast` writes `video` at about a third of the `store` control's rate;
    G3 as restated in D-27 needs 80% — with E2-4b in, measure first, then see what the store path still spends
    per byte: the chunker, two BLAKE3 passes, the frame write); its brief is `docs/notes/e2-18-video-brief.md`
    (written on 2026-10-13 from the committed numbers; dispatch from it).
