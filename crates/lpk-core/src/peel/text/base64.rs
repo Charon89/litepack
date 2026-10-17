@@ -631,6 +631,14 @@ impl Build {
         }
     }
 
+    /// Only a regular run's last line may be shorter than its first: once the run holds such
+    /// a line it is complete, and no further line joins (R27: a MIME boundary after a short
+    /// last body line stays outside the run).
+    fn holds_short_line(&self) -> bool {
+        let first = self.lines[0].1 - self.lines[0].0;
+        self.lines.iter().skip(1).any(|l| l.1 - l.0 < first)
+    }
+
     /// When the first line is the only one carrying a specific symbol (a header such as
     /// `-----` over neutral lines), the lines after it, taken out; else nothing (R26: a run
     /// whose body carries its alphabet is finished whole).
@@ -725,7 +733,10 @@ pub fn find_runs(text: &[u8]) -> Vec<Run> {
         for (k, seg) in segs.iter().enumerate() {
             let joined = match run.as_mut() {
                 Some(r) if k == 0 && seg.whole && r.open => {
-                    if r.compatible(seg) {
+                    if r.holds_short_line() {
+                        // Complete: a line after a short last line (a boundary) stays out.
+                        false
+                    } else if r.compatible(seg) {
                         r.push(seg);
                         true
                     } else {
@@ -823,6 +834,8 @@ fn ends_in_opening_tag(before: &[u8]) -> bool {
 
 /// The line before the one `before` ends in (the run's first line), without its ending.
 fn previous_line(before: &[u8]) -> Option<&[u8]> {
+    // Bounded: a header line must lie within the label window (R27).
+    let before = &before[before.len().saturating_sub(MIME_WINDOW)..];
     let cur = before.iter().rposition(|&b| b == b'\n')?;
     let end = if cur > 0 && before[cur - 1] == b'\r' {
         cur - 1
@@ -1138,6 +1151,34 @@ mod tests {
     }
 
     #[test]
+    fn a_boundary_after_a_short_last_line_stays_outside_the_run() {
+        // A neutral (ASCII payload) body whose last line is short, followed by a neutral
+        // Gmail-style boundary and, in the second case, by a url-safe Apple-style one: the
+        // run is complete at its short line, so neither boundary joins it (R27).
+        let payload: Vec<u8> = b"golf hotel india juliet "
+            .iter()
+            .cycle()
+            .take(300)
+            .copied()
+            .collect();
+        let body = lines(76, LineEnding::CrLf, true, Alphabet::Standard).encode(&payload);
+        assert!(body.iter().all(|&b| specific_of(b).is_none()));
+        let body = String::from_utf8(body).unwrap();
+        assert_eq!(body.rsplit("\r\n").next().unwrap().len(), 20);
+        for boundary in ["--000000000000a1b2c3d4e5f6", "--Apple-Mail=_0F1E2D3C-4B5A"] {
+            let mime = format!("Content-Transfer-Encoding: base64\r\n\r\n{body}\r\n{boundary}\r\n");
+            let runs = find_runs(mime.as_bytes());
+            assert_eq!(runs.len(), 1, "{boundary}: {runs:?}");
+            assert_eq!((runs[0].label, runs[0].len), (Label::Mime, body.len()));
+            let text = &mime.as_bytes()[runs[0].offset..runs[0].offset + runs[0].len];
+            assert_eq!(text, body.as_bytes());
+            let a = analyse(text).unwrap_or_else(|e| panic!("{boundary}: {e}"));
+            assert_eq!(a.payload, payload);
+            assert_eq!(a.layout.line_len, 76);
+        }
+    }
+
+    #[test]
     fn runs_are_found_whole_and_labelled() {
         // A PEM bundle: two blocks, the second's first line carrying no `+` or `/`, so it
         // first looks like the header's url-safe line's continuation.
@@ -1267,14 +1308,22 @@ mod tests {
         // Each indented line is its own segment that does not start at the line start, so
         // the lines do not join: no run reaches the minimum.
         assert!(runs.is_empty(), "{runs:?}");
-        // The same without indentation but with one line shortened: ragged.
+        // The same without indentation but with the second line shortened: as one text it
+        // is ragged; the scan closes a run at its first short line (R27), so the first two
+        // lines are a run too short to count and the rest is a regular run of its own.
         let body = lines(64, LineEnding::Lf, true, Alphabet::Standard).encode(&p);
         let mut t = body.clone();
         t.remove(70);
         assert_eq!(analyse(&t).err(), Some(Irregular::RaggedLines));
         let runs = find_runs(&t);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].offset, 65 + 64);
+        assert_eq!(runs[0].offset + runs[0].len, t.len());
+        assert!(analyse(&t[runs[0].offset..]).is_ok());
+        // A short line that is the last stays a regular run: a full-width last line too.
+        let runs = find_runs(&body);
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].len, t.len());
+        assert_eq!(runs[0].len, body.len());
     }
 
     #[test]

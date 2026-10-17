@@ -823,8 +823,11 @@ fn cluster_rows(
     for (s, f) in &rows {
         let bytes = ctx.read_file(class, f)?;
         utf16_all.extend_from_slice(&bytes[..bytes.len() & !1]);
-        wtf8_all.extend_from_slice(&s.wtf8);
         if let Some(r) = &s.utf16 {
+            // An unverified conversion is never written: its text stays out of B'.
+            if r.verified {
+                wtf8_all.extend_from_slice(&s.wtf8);
+            }
             cps += r.code_points;
             cjk += r.cjk_code_points;
             b_sum = b_sum.saturating_add(r.b);
@@ -1406,6 +1409,12 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
         if let Some(cl) = &c.utf16_cluster {
             if cl.files != c.utf16_files.len() as u64 {
                 p.push(format!("{at}/utf16_cluster/files: must count utf16_files"));
+            }
+            if cl.a_prime > cl.a_lzma_default {
+                p.push(format!(
+                    "{at}/utf16_cluster/a_prime: the grid holds the default parameters, so it \
+                     cannot exceed a_lzma_default"
+                ));
             }
             if cl.b_sum
                 != c.utf16_files
