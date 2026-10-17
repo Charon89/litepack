@@ -340,8 +340,9 @@ impl Pipeline {
 
     /// Like [`run`](Self::run), writing to a new file at `archive_path` with the guarantees of
     /// `archive_store_file`: create-new, the output left out of its own archive, data synced
-    /// before the trailer, a failed write removes the file. Invalid options are refused before
-    /// the file exists. The walk time then includes creating the file.
+    /// before the trailer, a failed write (an error, or a panic in a stage, which is re-raised)
+    /// removes the file. Invalid options are refused before the file exists. The walk time then
+    /// includes creating the file.
     pub fn run_file(self, root: &Path, archive_path: &Path) -> Result<RunSummary, CoreError> {
         let prepared = self.prepare()?;
         let ingest = self.classify.ingest;
@@ -827,5 +828,98 @@ mod tests {
             .unwrap_err();
         assert!(matches!(e, CoreError::InvalidOption(_)));
         assert!(!arch.exists());
+    }
+
+    /// The default fold stage, except that its chunker panics once it has been fed more than
+    /// `panic_after` bytes: a panic part-way through a run, after blocks were written.
+    #[derive(Debug)]
+    struct PanickingFold {
+        panic_after: usize,
+    }
+
+    struct PanickingChunker {
+        inner: Box<dyn Chunker>,
+        fed: usize,
+        panic_after: usize,
+    }
+
+    impl Chunker for PanickingChunker {
+        fn feed(&mut self, bytes: &[u8], eof: bool) -> Vec<usize> {
+            self.fed += bytes.len();
+            assert!(
+                self.fed <= self.panic_after,
+                "test hook: the chunker panics mid-run"
+            );
+            self.inner.feed(bytes, eof)
+        }
+
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+    }
+
+    impl FoldStage for PanickingFold {
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+
+        fn install(&self, options: &mut WriterOptions) -> Result<Box<dyn Chunker>, CoreError> {
+            Ok(Box::new(PanickingChunker {
+                inner: Dedup::default().install(options)?,
+                fed: 0,
+                panic_after: self.panic_after,
+            }))
+        }
+    }
+
+    #[test]
+    fn a_panic_mid_run_removes_the_new_file_then_is_re_raised() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let noise: Vec<u8> = (0..4 << 20)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        std::fs::write(dir.path().join("big.bin"), noise).unwrap();
+        // One block at a time, and blocks in flight when the panic comes.
+        for threads in [1, 4] {
+            let out = tempfile::tempdir().unwrap();
+            let arch = out.path().join("x.lpk");
+            // Small blocks: the file is read and fed a block at a time, so several blocks are
+            // written before the chunker has seen 3 MiB.
+            let mut p = Pipeline::fast(FastOptions {
+                block_size: 512 << 10,
+                threads: Some(threads),
+                ..FastOptions::default()
+            });
+            p.fold = Some(Box::new(PanickingFold {
+                panic_after: 3 << 20,
+            }));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                p.run_file(dir.path(), &arch)
+            }));
+            let payload = match r {
+                Ok(r) => panic!("threads {threads}: the panic was not re-raised: {r:?}"),
+                Err(payload) => payload,
+            };
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            assert_eq!(
+                msg, "test hook: the chunker panics mid-run",
+                "threads {threads}"
+            );
+            assert!(
+                !arch.exists(),
+                "threads {threads}: a partial archive of {} bytes was left",
+                std::fs::metadata(&arch).map_or(0, |m| m.len())
+            );
+        }
     }
 }

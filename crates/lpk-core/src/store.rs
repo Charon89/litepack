@@ -75,9 +75,10 @@ pub fn write_inputs(
 }
 
 /// Like [`archive_store`], writing to a new file at `archive_path` (create-new: an existing
-/// file is an error). The data is synced before the trailer is written. A failed write leaves
-/// no partial archive behind. When `archive_path` is inside `root` the output file is left out
-/// of the archive (matched by file identity) and nothing else changes.
+/// file is an error). The data is synced before the trailer is written. A failed write (an
+/// error, or a panic, which is re-raised) leaves no partial archive behind. When
+/// `archive_path` is inside `root` the output file is left out of the archive (matched by file
+/// identity) and nothing else changes.
 pub fn archive_store_file(
     root: &Path,
     archive_path: &Path,
@@ -89,8 +90,8 @@ pub fn archive_store_file(
 }
 
 /// Create `archive_path` (create-new), walk `root` leaving the new file out of the inputs, and
-/// run `f` with the inputs, the file and a data-sync hook. A failure removes the file. Shared by
-/// the store and Fast paths.
+/// run `f` with the inputs, the file and a data-sync hook. A failure (an error, or a panic in
+/// `f`, which is re-raised) removes the file. Shared by the store and Fast paths.
 pub(crate) fn create_new_and_run<T>(
     root: &Path,
     archive_path: &Path,
@@ -102,6 +103,13 @@ pub(crate) fn create_new_and_run<T>(
         .create_new(true)
         .open(archive_path)
         .map_err(|e| CoreError::io(archive_path, e))?;
+    // Armed only once the file is ours: a create-new refused on an existing file removes
+    // nothing. Every handle on the file moves into the closure, so all are closed when the
+    // guard removes it.
+    let mut remove = Remove {
+        path: archive_path,
+        armed: true,
+    };
     let r = (|| {
         let own_id = file_identity(&file).map_err(|e| CoreError::io(archive_path, e))?;
         let sync_file = file
@@ -112,10 +120,34 @@ pub(crate) fn create_new_and_run<T>(
         let sync: SyncFn = Box::new(move || sync_file.sync_data());
         f(inputs, file, sync)
     })();
-    if r.is_err() {
-        let _ = std::fs::remove_file(archive_path);
+    if r.is_ok() {
+        remove.disarm();
     }
     r
+}
+
+/// Removes a new archive's file on the error path and on the panic path alike (its `Drop`),
+/// unless disarmed by a completed run.
+struct Remove<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl Remove<'_> {
+    /// The run completed: the file is the archive.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Remove<'_> {
+    fn drop(&mut self) {
+        // The panic path: clean up, then the panic goes on. A file that cannot be removed is
+        // not reported on either path: the run's own error or panic is the one that matters.
+        if self.armed {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
 }
 
 #[cfg(test)]
