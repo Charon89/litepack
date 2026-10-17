@@ -1165,6 +1165,25 @@ mod tests {
         let runs = find_runs(text.as_bytes());
         assert_eq!(runs.len(), 1, "{runs:?}");
         assert_eq!((runs[0].offset, runs[0].lines, runs[0].chars), (6, 3, 300));
+        // The same with detached lines that already end in a short line: they finish as a run
+        // of their own and the standard line starts another (review round 3).
+        let text = format!(
+            "-----
+{}
+{}
+{}
+",
+            "A".repeat(300),
+            "A".repeat(200),
+            "+".repeat(300)
+        );
+        let runs = find_runs(text.as_bytes());
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert_eq!((runs[0].offset, runs[0].lines, runs[0].chars), (6, 2, 500));
+        assert_eq!(
+            (runs[1].offset, runs[1].lines, runs[1].chars),
+            (508, 1, 300)
+        );
     }
 
     #[test]
