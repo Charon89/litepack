@@ -400,3 +400,267 @@ pub fn examine(
         counts: st,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Write};
+
+    use super::super::testkit::{every_kind, gzip, raw_deflate, text, zip_with, zlib};
+    use super::*;
+
+    fn cfg_with(limit: usize) -> PreflateConfig {
+        PreflateConfig {
+            max_chain_length: 4096,
+            plain_text_limit: limit,
+            verify_compression: false,
+        }
+    }
+
+    /// Examine and check the per-file invariants; returns the counts and the reconstructed
+    /// streams.
+    fn run(bytes: &[u8], ext: &str, limits: &Limits) -> (Examined, Vec<Reconstructed>) {
+        let mut done = Vec::new();
+        let e = examine(bytes, ext, limits, |r| done.push(r));
+        let c = &e.counts;
+        let failed: u64 = c.failed.values().sum();
+        assert_eq!(c.found, c.reconstructed + failed + c.skipped, "{c:?}");
+        assert_eq!(done.len() as u64, c.reconstructed);
+        assert_eq!(
+            c.found_deflate_bytes,
+            c.reconstructed_deflate_bytes + c.skipped_deflate_bytes + c.failed_deflate_bytes
+        );
+        assert!(c.failed.keys().all(|k| FAILURE_NAMES.contains(&k.as_str())));
+        let mut end = 0;
+        for r in &done {
+            // Trimmed spans: sorted, disjoint, inside the file, summing to the stream length.
+            let mut len = 0;
+            let mut stream = Vec::new();
+            for &(a, b) in &r.spans {
+                assert!(end <= a && a < b && b <= bytes.len(), "{:?}", r.spans);
+                end = b;
+                len += b - a;
+                stream.extend_from_slice(&bytes[a..b]);
+            }
+            assert_eq!(len, r.deflate_len);
+            let back = preflate_rs::recreate_whole_deflate_stream(r.plain.text(), &r.corrections)
+                .expect("recreate");
+            assert!(back == stream, "the corrections recreate the stream");
+        }
+        (e, done)
+    }
+
+    #[test]
+    fn the_configuration_is_the_probes() {
+        let cfg = preflate_config(PLAIN_TEXT_LIMIT);
+        assert_eq!(cfg, cfg_with(64 * 1024 * 1024));
+        assert_eq!(MAX_CHAIN_LENGTH, PreflateConfig::default().max_chain_length);
+        assert_eq!(FILE_PLAIN_BUDGET, 512 * 1024 * 1024);
+        assert_eq!(Limits::default(), Limits::standard());
+        assert!(FAILURE_NAMES.contains(&"ShortRead") && FAILURE_NAMES.contains(&PANIC));
+        assert_eq!(code_name(ExitCode::ShortRead), "ShortRead");
+    }
+
+    #[test]
+    fn every_kind_reconstructs_and_calls_back_in_file_order() {
+        let want = [
+            ("zip", 2),
+            ("office", 2),
+            ("png", 1),
+            ("gzip", 2),
+            ("pdf", 1),
+            ("other", 1),
+        ];
+        for ((ext, bytes), (kind, n)) in every_kind().iter().zip(want) {
+            let (e, done) = run(bytes, ext, &Limits::standard());
+            assert_eq!(e.kind, kind);
+            assert_eq!((e.counts.found, e.counts.reconstructed), (n, n), "{ext}");
+            assert_eq!(done.len() as u64, n);
+            assert!(done.iter().all(|r| r.parameters.is_some()));
+        }
+    }
+
+    #[test]
+    fn a_partial_stream_is_never_reconstructed() {
+        // Several blocks: enough varied data that the encoder closes blocks on its own.
+        let mut plain = Vec::new();
+        for i in 0..40u32 {
+            plain.extend_from_slice(&text(20_000, i));
+        }
+        let d = raw_deflate(&plain);
+        let cfg = cfg_with(64 * 1024 * 1024);
+        match analyse_stream(&d, Some(plain.len() as u64), &cfg) {
+            StreamOutcome::Done {
+                plain: p,
+                corrections,
+                deflate_len,
+                ..
+            } => {
+                assert_eq!(p.text(), plain.as_slice());
+                assert_eq!(deflate_len, d.len());
+                assert!(!corrections.is_empty());
+            }
+            _ => panic!("a whole stream reconstructs"),
+        }
+        // Truncated input: the library returns a shortened stream, the analysis says ShortRead.
+        match analyse_stream(&d[..d.len() * 3 / 4], None, &cfg) {
+            StreamOutcome::Failed {
+                cause, deflate_len, ..
+            } => {
+                assert_eq!(cause, "ShortRead");
+                assert_eq!(deflate_len, d.len() * 3 / 4, "the tail is not dropped");
+            }
+            _ => panic!("a truncated stream must fail"),
+        }
+        // Plain-text limit reached after at least one block, size unknown: skipped.
+        let cfg = cfg_with(plain.len() / 2);
+        assert!(matches!(
+            analyse_stream(&d, None, &cfg),
+            StreamOutcome::Skipped { .. }
+        ));
+        // A wrong known size is a failure.
+        match analyse_stream(&d, Some(plain.len() as u64 + 1), &cfg_with(1 << 30)) {
+            StreamOutcome::Failed { cause, .. } => assert_eq!(cause, "RoundtripMismatch"),
+            _ => panic!("a size mismatch must fail"),
+        }
+    }
+
+    #[test]
+    fn the_scan_needs_a_clean_stream_of_enough_plain_data() {
+        let small = zlib(&text(200, 3));
+        let (e, _) = run(
+            &[b"xx".as_slice(), &small].concat(),
+            "bin",
+            &Limits::standard(),
+        );
+        assert_eq!(e.counts.found, 0, "plain data under the minimum");
+        assert!(e.counts.scan_false_hits >= 1);
+        let mut broken = zlib(&text(20_000, 4));
+        let mid = broken.len() / 2;
+        broken[mid] ^= 0xff;
+        let (e, _) = run(&broken, "bin", &Limits::standard());
+        assert_eq!(e.counts.found, 0, "a corrupt stream is not a stream");
+        let (e, done) = run(&text(5000, 5), "txt", &Limits::standard());
+        assert_eq!((e.kind, e.counts.found, done.len()), ("other", 0, 0));
+    }
+
+    #[test]
+    fn limits_skip_streams_and_count_them() {
+        let plain = text(30_000, 6);
+        let file = [b"zz".as_slice(), &zlib(&plain)].concat();
+        let small = Limits {
+            plain_text_limit: 1000,
+            file_plain_budget: 1 << 30,
+        };
+        let (e, done) = run(&file, "bin", &small);
+        assert_eq!((e.counts.found, e.counts.skipped), (1, 1));
+        assert!(e.counts.skipped_deflate_bytes > 0 && done.is_empty());
+        let (e, _) = run(&zip_with(&["a.txt"], 30_000), "zip", &small);
+        assert_eq!(e.counts.skipped, 1);
+        // A per-file budget of zero skips everything.
+        let none = Limits {
+            plain_text_limit: 1 << 30,
+            file_plain_budget: 0,
+        };
+        assert_eq!(run(&file, "bin", &none).0.counts.skipped, 1);
+        // A budget used up by the first stream skips the second.
+        let two = [gzip(&plain), gzip(&text(5000, 9))].concat();
+        let tight = Limits {
+            plain_text_limit: 1 << 30,
+            file_plain_budget: plain.len() as u64,
+        };
+        let (e, done) = run(&two, "gz", &tight);
+        assert_eq!((e.counts.reconstructed, e.counts.skipped), (1, 1));
+        assert_eq!(done[0].plain.text(), plain.as_slice());
+    }
+
+    #[test]
+    fn overlapping_zip_entries_are_structural_refusals() {
+        // Two central-directory entries pointing at the same data.
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("a.txt", o).expect("start");
+        w.write_all(&text(5000, 1)).expect("write");
+        w.start_file("b.txt", o).expect("start");
+        w.write_all(&text(5000, 1)).expect("write");
+        let mut bytes = w.finish().expect("finish").into_inner();
+        let mut seen = 0;
+        for i in 0..bytes.len() - 46 {
+            if bytes[i..].starts_with(b"PK\x01\x02") {
+                seen += 1;
+                if seen == 2 {
+                    bytes[i + 42..i + 46].copy_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+        }
+        let (e, _) = run(&bytes, "zip", &Limits::standard());
+        assert_eq!(e.counts.found + e.counts.structural_refusals, 2, "{e:?}");
+        assert!(e.counts.structural_refusals >= 1, "{e:?}");
+    }
+
+    #[test]
+    fn a_stream_the_library_rejects_is_a_failure_with_its_name() {
+        // A "Deflated" ZIP entry whose bytes are not Deflate.
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        w.start_file(
+            "x.bin",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .expect("start");
+        w.write_all(&[0xff; 64]).expect("write");
+        let mut bytes = w.finish().expect("finish").into_inner();
+        for i in 0..bytes.len().saturating_sub(10) {
+            if bytes[i..].starts_with(b"PK\x03\x04") {
+                bytes[i + 8] = 8;
+            }
+            if bytes[i..].starts_with(b"PK\x01\x02") {
+                bytes[i + 10] = 8;
+            }
+        }
+        let (e, done) = run(&bytes, "zip", &Limits::standard());
+        assert_eq!((e.kind, e.counts.found, done.len()), ("zip", 1, 0));
+        let failed: u64 = e.counts.failed.values().sum();
+        assert_eq!(failed, 1, "{e:?}");
+        assert!(e.counts.failed_deflate_bytes > 0);
+    }
+
+    #[test]
+    fn a_truncated_gzip_member_is_short_read() {
+        let g = gzip(&text(400_000, 7));
+        let (e, done) = run(&g[..g.len() / 2], "gz", &Limits::standard());
+        assert_eq!((e.kind, e.counts.found, done.len()), ("gzip", 1, 0));
+        assert_eq!(e.counts.failed.get("ShortRead"), Some(&1), "{e:?}");
+    }
+
+    #[test]
+    fn pdf_streams_that_do_not_inflate_get_a_named_outcome() {
+        let z = zlib(&text(300_000, 3));
+        let mut pdf = b"%PDF-1.4\n(a stream\nnot data) ".to_vec();
+        pdf.extend_from_slice(b"1 0 obj\nstream\r\n");
+        pdf.extend_from_slice(&z[..z.len() / 2]);
+        pdf.extend_from_slice(
+            b"\nendstream\n2 0 obj\n<< /Filter /FlateDecode >>\nstream\n\x58\x85 garbage\nendstream\n",
+        );
+        let mut without = pdf.clone();
+        without.extend_from_slice(b"3 0 obj\n<< >>\nstream\n\x58\x85 more\nendstream\n");
+        assert_eq!(run(&without, "pdf", &Limits::standard()).0.counts.found, 2);
+        let (e, _) = run(&pdf, "pdf", &Limits::standard());
+        assert_eq!(
+            (e.kind, e.counts.found, e.counts.reconstructed),
+            ("pdf", 2, 0)
+        );
+        assert_eq!(e.counts.failed.values().sum::<u64>(), 2, "{e:?}");
+    }
+
+    #[test]
+    fn truncated_containers_examine_without_a_panic() {
+        for (ext, bytes) in every_kind() {
+            for cut in (0..bytes.len()).step_by(bytes.len() / 40 + 1) {
+                let (e, _) = run(&bytes[..cut], ext, &Limits::standard());
+                assert_eq!(e.counts.walker_panics, 0, "{ext} at {cut}");
+                assert!(!e.counts.failed.contains_key(PANIC), "{ext} at {cut}");
+            }
+        }
+    }
+}

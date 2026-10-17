@@ -442,3 +442,144 @@ pub fn find_streams(bytes: &[u8], ext: &str) -> Found {
     found.candidates = kept;
     found
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::testkit::{every_kind, multi_idat_png, noise, text, zlib};
+    use super::*;
+
+    /// Spans of every candidate, flattened, are sorted, disjoint and inside the file, and the
+    /// spans plus the gaps between them rebuild the file byte for byte.
+    fn assert_partition(bytes: &[u8], found: &Found, what: &str) {
+        let spans: Vec<(usize, usize)> = found
+            .candidates
+            .iter()
+            .flat_map(|c| c.spans.iter().copied())
+            .collect();
+        let mut pos = 0;
+        let mut rebuilt = Vec::with_capacity(bytes.len());
+        for &(a, b) in &spans {
+            assert!(pos <= a && a <= b && b <= bytes.len(), "{what}: {spans:?}");
+            rebuilt.extend_from_slice(&bytes[pos..a]);
+            rebuilt.extend_from_slice(&bytes[a..b]);
+            pos = b;
+        }
+        rebuilt.extend_from_slice(&bytes[pos..]);
+        assert!(rebuilt == bytes, "{what}: spans and gaps rebuild the file");
+        assert!(KINDS.contains(&found.kind), "{what}");
+    }
+
+    #[test]
+    fn spans_are_trimmed_across_chunks() {
+        let spans = [(10, 20), (30, 40), (50, 60)];
+        assert_eq!(trim_spans(&spans, 2, 6), [(12, 18)]);
+        assert_eq!(trim_spans(&spans, 8, 6), [(18, 20), (30, 34)]);
+        assert_eq!(trim_spans(&spans, 2, 100), [(12, 20), (30, 40), (50, 60)]);
+        assert_eq!(trim_spans(&spans, 0, 0), []);
+    }
+
+    #[test]
+    fn inflate_extent_tells_corrupt_data_from_input_that_ran_out() {
+        let plain = text(50_000, 9);
+        let z = zlib(&plain);
+        let mut buf = vec![0u8; 4096];
+        assert!(matches!(
+            inflate_extent(&z, true, &mut buf),
+            Inflated::Clean { .. }
+        ));
+        assert!(matches!(
+            inflate_extent(&z[..z.len() / 2], true, &mut buf),
+            Inflated::Unfinished
+        ));
+        // A reserved block type (11) is corrupt, not short.
+        assert!(matches!(
+            inflate_extent(&[0x07, 0, 0, 0, 0], false, &mut buf),
+            Inflated::Bad
+        ));
+    }
+
+    #[test]
+    fn zlib_headers_are_checked_like_the_probe() {
+        // The 0x58 0x85 header is valid (method 8, window 5, divisible by 31).
+        assert!(valid_zlib_header(&[0x58, 0x85]));
+        assert!(!valid_zlib_header(&[0x78, 0x9d]));
+        assert!(!valid_zlib_header(&[0x78, 0xbb]), "preset dictionary");
+        assert!(!valid_zlib_header(&[0x78]));
+        assert!(zlib_header(&[0x78, 0xda]) && !zlib_header(&[0x78, 0x85]));
+        assert_eq!(MIN_SCANNED_PLAIN, 1024);
+        assert_eq!(INFLATE_CAP, 1 << 32);
+    }
+
+    #[test]
+    fn every_kind_is_found_as_the_probe_found_it() {
+        let kinds: Vec<&str> = every_kind()
+            .iter()
+            .map(|(ext, b)| find_streams(b, ext).kind)
+            .collect();
+        assert_eq!(kinds, ["zip", "office", "png", "gzip", "pdf", "other"]);
+        let png = find_streams(&multi_idat_png(), "png");
+        assert_eq!(png.candidates.len(), 1);
+        assert_eq!(
+            png.candidates[0].spans.len(),
+            3,
+            "one stream over three IDATs"
+        );
+        let gz = &every_kind()[3].1;
+        assert_eq!(find_streams(gz, "gz").candidates.len(), 2);
+    }
+
+    #[test]
+    fn spans_partition_every_synthetic_and_random_input() {
+        for (ext, bytes) in every_kind() {
+            assert_partition(&bytes, &find_streams(&bytes, ext), ext);
+        }
+        let magics: [&[u8]; 6] = [
+            b"PK\x03\x04",
+            b"PK\x05\x06",
+            b"\x89PNG\r\n\x1a\n",
+            b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03",
+            b"%PDF-1.7\nstream\n\x78\x9c",
+            b"",
+        ];
+        for seed in 0..40u32 {
+            for m in magics {
+                let mut b = m.to_vec();
+                b.extend_from_slice(&noise(1 + (seed as usize * 97) % 3000, seed));
+                if seed % 3 == 0 {
+                    // Random data with a real stream inside.
+                    b.extend_from_slice(&zlib(&text(2000 + seed as usize, seed)));
+                    b.extend_from_slice(&noise(50, seed + 1));
+                }
+                assert_partition(&b, &find_streams(&b, "bin"), "random");
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_and_damaged_containers_do_not_panic() {
+        for (ext, bytes) in every_kind() {
+            // Every truncation point.
+            let n = bytes.len();
+            for cut in 0..=n {
+                let t = &bytes[..cut];
+                assert_partition(t, &find_streams(t, ext), ext);
+            }
+            // Flipped bytes along the file.
+            for at in (0..n).step_by(29) {
+                let mut d = bytes.clone();
+                d[at] ^= 0xa5;
+                assert_partition(&d, &find_streams(&d, ext), ext);
+            }
+        }
+    }
+
+    #[test]
+    fn a_png_with_a_huge_declared_chunk_length_is_not_followed() {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&u32::MAX.to_be_bytes());
+        png.extend_from_slice(b"IDAT");
+        png.extend_from_slice(&[1, 2, 3]);
+        let f = find_streams(&png, "png");
+        assert_eq!((f.kind, f.candidates.len()), ("png", 0));
+    }
+}
