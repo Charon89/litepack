@@ -130,6 +130,8 @@ fn examine_reports_the_counts_the_probe_reported() {
             structural_refusals: 0,
             scan_false_hits: 0,
             walker_panics: 0,
+            work_budget_stopped: 0,
+            unexamined: 0,
             zip_deflate64_members: 0,
             zip_other_method_members: 0,
             found_deflate_bytes: defl,

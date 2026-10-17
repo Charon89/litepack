@@ -70,17 +70,39 @@ pub enum Inflated {
     Unfinished,
 }
 
+thread_local! {
+    /// Inflated bytes this thread may still produce in [`inflate_extent`] (the per-file work
+    /// budget of [`examine`](super::examine); unlimited outside it).
+    static WORK_LEFT: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+}
+
+/// Set this thread's work left (see [`WORK_LEFT`]).
+pub(crate) fn set_work_left(n: u64) {
+    WORK_LEFT.with(|w| w.set(n));
+}
+
+/// This thread's work left.
+pub(crate) fn work_left() -> u64 {
+    WORK_LEFT.with(|w| w.get())
+}
+
 /// Inflate `data` (zlib or raw deflate), discard the output, and say how many input bytes the
-/// stream took and how many bytes it produced.
+/// stream took and how many bytes it produced. Inside [`examine`](super::examine) the output is
+/// charged to the file's work budget; a stream that would pass it is `Unfinished`.
 pub fn inflate_extent(data: &[u8], zlib: bool, buf: &mut [u8]) -> Inflated {
     let mut d = Decompress::new(zlib);
     loop {
+        if work_left() == 0 {
+            return Inflated::Unfinished;
+        }
         let in_before = d.total_in();
         let out_before = d.total_out();
         let Some(rest) = data.get(in_before as usize..) else {
             return Inflated::Unfinished;
         };
-        match d.decompress(rest, buf, FlushDecompress::None) {
+        let r = d.decompress(rest, buf, FlushDecompress::None);
+        set_work_left(work_left().saturating_sub(d.total_out() - out_before));
+        match r {
             Ok(Status::StreamEnd) => {
                 return Inflated::Clean {
                     consumed: d.total_in() as usize,

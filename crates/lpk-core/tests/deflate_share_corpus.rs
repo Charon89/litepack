@@ -95,6 +95,10 @@ fn the_stream_counts_equal_the_probes_on_every_walked_file() {
         let s = p.run(&dir, std::io::sink()).unwrap();
         let d = &s.peel.deflate;
         assert_eq!(d.size_cap.files, 0, "{name}");
+        assert_eq!(
+            d.streams.work_budget_stopped, 0,
+            "{name}: a file reached its work budget"
+        );
         let ours: BTreeMap<String, Key> = d
             .files
             .as_ref()

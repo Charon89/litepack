@@ -36,6 +36,25 @@ pub const FILE_PLAIN_BUDGET: u64 = 512 * 1024 * 1024;
 /// The library's match-chain bound used for analysis (the library's default).
 pub const MAX_CHAIN_LENGTH: u32 = 4096;
 
+/// The per-file work budget of [`examine`]: inflated bytes per byte of the file. Every byte
+/// the walker inflates (false hits and refused candidates included) and, before each analysis,
+/// the candidate's plain size (known, or the plain-text limit) plus its length are charged; a
+/// file whose work reaches the budget stops being examined, its remaining candidates are not
+/// analysed (counted as `unexamined`, the file as `work_budget_stopped`). The budget is
+/// `WORK_FLOOR + WORK_PER_BYTE × len`: a legitimate file is charged about twice its streams'
+/// plain text, which this leaves room for at sixty-four times the file's length (a Deflate
+/// stream can expand more, but then its analysis is capped by the plain-text limit anyway), and
+/// the floor covers small files with one large stream. A crafted file can then cost at most
+/// that much inflation, never the 2^32 bytes per candidate the walker's cap allows.
+pub const WORK_PER_BYTE: u64 = 64;
+/// The fixed part of the per-file work budget (see [`WORK_PER_BYTE`]).
+pub const WORK_FLOOR: u64 = 512 * 1024 * 1024;
+
+/// The per-file work budget for a file of `len` bytes.
+pub fn work_budget(len: u64) -> u64 {
+    WORK_FLOOR.saturating_add(WORK_PER_BYTE.saturating_mul(len))
+}
+
 /// The name recorded for a panic inside the library.
 pub const PANIC: &str = "Panic";
 
@@ -325,6 +344,10 @@ pub struct Counts {
     pub scan_false_hits: u64,
     /// The walker panicked (the file is then kind `other` with no streams).
     pub walker_panics: u64,
+    /// 1 when the file reached its work budget ([`work_budget`]) and stopped being examined.
+    pub work_budget_stopped: u64,
+    /// Candidates left unanalysed because the work budget was reached (not in `found`).
+    pub unexamined: u64,
     /// ZIP entries stored with Deflate64 (informative; never candidates).
     pub zip_deflate64_members: u64,
     /// ZIP entries stored with another method that is not Deflate (informative).
@@ -361,6 +384,8 @@ impl Counts {
         self.structural_refusals += o.structural_refusals;
         self.scan_false_hits += o.scan_false_hits;
         self.walker_panics += o.walker_panics;
+        self.work_budget_stopped += o.work_budget_stopped;
+        self.unexamined += o.unexamined;
         self.zip_deflate64_members += o.zip_deflate64_members;
         self.zip_other_method_members += o.zip_other_method_members;
         self.found_deflate_bytes += o.found_deflate_bytes;
@@ -431,6 +456,7 @@ pub fn examine(
     limits: &Limits,
     mut on_done: impl FnMut(Reconstructed),
 ) -> Examined {
+    super::walk::set_work_left(work_budget(bytes.len() as u64));
     let (found, panicked) = match catch_unwind(AssertUnwindSafe(|| find_streams(bytes, ext))) {
         Ok(f) => (f, false),
         Err(_) => (
@@ -455,7 +481,20 @@ pub fn examine(
         ..Counts::default()
     };
     let mut plain_held = 0u64;
-    for c in &found.candidates {
+    let walked_out = super::walk::work_left() == 0;
+    for (i, c) in found.candidates.iter().enumerate() {
+        let charge = c
+            .plain_known
+            .unwrap_or(limits.plain_text_limit)
+            .min(limits.plain_text_limit)
+            .saturating_add(c.spans.iter().map(|(a, b)| (b - a) as u64).sum::<u64>());
+        let left = super::walk::work_left();
+        if walked_out || left < charge {
+            st.work_budget_stopped = 1;
+            st.unexamined = (found.candidates.len() - i) as u64;
+            break;
+        }
+        super::walk::set_work_left(left - charge);
         st.found += 1;
         let data = contiguous(bytes, &c.spans);
         let too_big = c.plain_known.is_some_and(|p| p > limits.plain_text_limit)
@@ -521,6 +560,7 @@ pub fn examine(
             }
         }
     }
+    super::walk::set_work_left(u64::MAX);
     Examined {
         kind: found.kind,
         counts: st,
@@ -752,6 +792,34 @@ mod tests {
         let failed: u64 = e.counts.failed.values().sum();
         assert_eq!(failed, 1, "{e:?}");
         assert!(e.counts.failed_deflate_bytes > 0);
+    }
+
+    /// A crafted file of many small zlib streams that each inflate far past their length: the
+    /// work budget stops it quickly, and it is counted.
+    #[test]
+    fn a_file_past_its_work_budget_stops_being_examined() {
+        let one = zlib(&vec![0u8; 1 << 20]);
+        let copies = usize::try_from(work_budget(0) / (1 << 20)).unwrap() + 400;
+        let mut file = Vec::new();
+        for _ in 0..copies {
+            file.extend_from_slice(b"xx");
+            file.extend_from_slice(&one);
+        }
+        assert!(work_budget(file.len() as u64) < (copies as u64) << 20);
+        let t = std::time::Instant::now();
+        let (e, done) = run(&file, "bin", &Limits::standard());
+        assert_eq!(e.counts.work_budget_stopped, 1, "{:?}", e.counts);
+        assert_eq!((e.counts.found, done.len()), (0, 0));
+        assert!(e.counts.unexamined > 0);
+        assert!(t.elapsed().as_secs() < 120, "{:?}", t.elapsed());
+        assert_eq!(
+            super::super::walk::work_left(),
+            u64::MAX,
+            "reset after the file"
+        );
+        // A file within its budget is examined as before.
+        let (e, _) = run(&zlib(&text(30_000, 1)), "bin", &Limits::standard());
+        assert_eq!((e.counts.work_budget_stopped, e.counts.found), (0, 1));
     }
 
     #[test]

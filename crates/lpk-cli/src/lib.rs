@@ -699,23 +699,26 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
     );
     let _ = writeln!(
         err,
-        "  streams: {} found, {} reconstructed, {} skipped, {} failed ({}), {} structural refusals, {} scan false hits",
+        "  streams: {} found, {} reconstructed, {} skipped, {} failed ({}), {} structural refusals, {} scan false hits; {} files reached the work budget ({} candidates not examined)",
         s.found,
         s.reconstructed,
         s.skipped,
         s.failed_total(),
         failed.join(", "),
         s.structural_refusals,
-        s.scan_false_hits
+        s.scan_false_hits,
+        s.work_budget_stopped,
+        s.unexamined
     );
     let _ = writeln!(
         err,
-        "  reconstructed: {} kept ({}), {} no gain, {} block cap, {} memory cap, {} already stored, {} file gate",
+        "  reconstructed: {} kept ({}), {} no gain, {} block cap, {} memory cap, {} records cap, {} already stored, {} file gate",
         o.kept,
         classes.join(", "),
         o.no_gain,
         o.block_cap,
         o.memory_cap,
+        o.records_cap,
         o.already_stored,
         o.file_gate
     );
