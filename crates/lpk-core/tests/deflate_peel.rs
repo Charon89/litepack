@@ -294,6 +294,27 @@ fn the_file_gate_sends_small_gains_through_the_normal_path() {
 }
 
 #[test]
+fn the_records_cap_stops_keeping_streams_and_is_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    make_tree(dir.path());
+    let (_, full) = run(balanced(1), dir.path());
+    let all = full.peel.deflate.record_bytes;
+    assert!(all > 0);
+    let mut p = balanced(1);
+    p.deflate = Some(DeflatePeel {
+        records_cap: all - 1,
+        record_files: true,
+        ..DeflatePeel::default()
+    });
+    let (bytes, s) = run(p, dir.path());
+    let d = &s.peel.deflate;
+    assert!(d.outcomes.records_cap >= 1, "{d:?}");
+    assert!(d.record_bytes < all);
+    assert_eq!(d.outcomes.total(), d.streams.reconstructed);
+    check(&bytes, dir.path(), None);
+}
+
+#[test]
 fn equal_streams_and_whole_duplicates_are_stored_once() {
     let dir = tempfile::tempdir().unwrap();
     let member = prose(71, 120_000);

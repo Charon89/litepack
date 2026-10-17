@@ -71,6 +71,7 @@ fn default_settings_fit_their_ceilings() {
             max_file: d.max_file,
             plain_limit: d.plain_limit(),
             encoder: part.memory(),
+            records: d.records_cap,
         }),
         ..balanced
     };

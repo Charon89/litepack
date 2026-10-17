@@ -634,6 +634,7 @@ impl Pipeline {
                             max_file: d.max_file,
                             plain_limit: d.plain_limit(),
                             encoder: p.memory(),
+                            records: d.records_cap,
                         }),
                         _ => None,
                     },

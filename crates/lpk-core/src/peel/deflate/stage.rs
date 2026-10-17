@@ -7,6 +7,15 @@
 //!
 //! Everything runs on the feeding thread in input order, so the archive does not depend on the
 //! thread count (D-60).
+//!
+//! **Records cap.** The writer holds every record it adds (each with its correction bytes) until
+//! `finish`, and then encodes them into one `Records` frame. A stream whose record would take the
+//! records this run keeps past [`RECORDS_CAP`] (their encoded bytes, as the frame holds them) is
+//! not kept and is counted `records_cap`. The cap is 64 MiB: the memory model counts twice the
+//! cap (the held records and the frame's encoding), which stays a small share of every tier's
+//! ceiling, and the frame stays far below the reader's default frame limit of 1 GiB; it is the
+//! same size as the plain text one stream may hold, so a run reaches it only with very many
+//! peeled streams.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -34,6 +43,9 @@ pub const STREAM_OVERHEAD: u64 = 160;
 pub const FILE_GATE: u64 = 256;
 /// Bytes of an inflated text the classifier reads.
 pub const CLASSIFY_LEN: usize = 1 << 20;
+/// The most record bytes (as encoded in the `Records` frame) one run keeps (see the module
+/// text).
+pub const RECORDS_CAP: u64 = 64 << 20;
 
 /// The Deflate peel stage's settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +56,8 @@ pub struct DeflatePeel {
     pub limits: Limits,
     /// Fill [`DeflateSummary::files`] (one record per walked file; for the share test).
     pub record_files: bool,
+    /// The records cap ([`RECORDS_CAP`]).
+    pub records_cap: u64,
 }
 
 impl Default for DeflatePeel {
@@ -52,6 +66,7 @@ impl Default for DeflatePeel {
             max_file: MAX_FILE,
             limits: Limits::standard(),
             record_files: false,
+            records_cap: RECORDS_CAP,
         }
     }
 }
@@ -94,6 +109,8 @@ pub struct Outcomes {
     pub already_stored: u64,
     /// Kept or already stored, but the file gate sent the file whole through the normal path.
     pub file_gate: u64,
+    /// Would have been kept, but its record would take the run's records past [`RECORDS_CAP`].
+    pub records_cap: u64,
 }
 
 impl Outcomes {
@@ -105,6 +122,7 @@ impl Outcomes {
             + self.memory_cap
             + self.already_stored
             + self.file_gate
+            + self.records_cap
     }
 
     fn add(&mut self, o: &Outcomes) {
@@ -114,6 +132,7 @@ impl Outcomes {
         self.memory_cap += o.memory_cap;
         self.already_stored += o.already_stored;
         self.file_gate += o.file_gate;
+        self.records_cap += o.records_cap;
     }
 }
 
@@ -315,6 +334,7 @@ pub(crate) fn peel_file<O: Write>(
     let mut out = Outcomes::default();
     let mut err: Option<CoreError> = None;
     let block_size = cx.block_size;
+    let records_cap = cx.stage.records_cap;
     let encoder = &mut *cx.encoder;
     let examined = examine(data, &ext, &cx.stage.limits, |r| {
         if err.is_some() {
@@ -380,6 +400,17 @@ pub(crate) fn peel_file<O: Write>(
             .saturating_add(STREAM_OVERHEAD);
         if cost >= len {
             out.no_gain += 1;
+            return;
+        }
+        let pending: u64 = decided
+            .iter()
+            .map(|d| match &d.kind {
+                Kind::Kept { record_len, .. } => *record_len,
+                Kind::Stored => 0,
+            })
+            .sum();
+        if s.record_bytes + pending + rec_len > records_cap {
+            out.records_cap += 1;
             return;
         }
         decided.push(Decided {

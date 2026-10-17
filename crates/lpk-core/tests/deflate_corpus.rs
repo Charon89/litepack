@@ -51,6 +51,7 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
     println!("| class | files | raw B | archive B | walked | reconstructed | kept | kept by class | no gain | block cap | memory cap | already stored | file gate | size cap | lpk-check refused (id 8) | s compress | s extract |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let mut mismatches = 0;
+    let mut largest_records = 0u64;
     for dir in classes {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         let work = tempfile::tempdir().unwrap();
@@ -142,7 +143,12 @@ fn every_class_round_trips_through_the_default_balanced_pipeline() {
             d.size_cap.files
         );
         assert_eq!(o.total(), d.streams.reconstructed, "{name}");
+        assert_eq!(o.records_cap, 0, "{name}");
+        largest_records = largest_records.max(d.record_bytes);
     }
-    println!("mismatches: {mismatches}");
+    println!(
+        "mismatches: {mismatches}; largest records total of a class {largest_records} B against the cap {} B",
+        lpk_core::peel::deflate::stage::RECORDS_CAP
+    );
     assert_eq!(mismatches, 0);
 }

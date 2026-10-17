@@ -213,7 +213,8 @@ pub enum EncoderMemory {
 /// `max_file`; then the larger of the analysis and recreation of one stream (bounded by the
 /// decoder's memory term for a `plain_limit` text with no corrections: the recreation the
 /// analysis verifies with is the decoder's) and the encoding of one inflated text (the text
-/// plus the part encoder's encoders and output, `encoder`).
+/// plus the part encoder's encoders and output, `encoder`). The records the run keeps are held by
+/// the writer until `finish` and encoded into one frame there: twice `records` more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeflateMemory {
     /// The stage's file cap.
@@ -222,16 +223,19 @@ pub struct DeflateMemory {
     pub plain_limit: u64,
     /// The part encoder's working set for a `plain_limit` text.
     pub encoder: u64,
+    /// The records cap (the stage's `RECORDS_CAP`).
+    pub records: u64,
 }
 
 impl DeflateMemory {
-    /// `2 * max_file + max(memory_term(plain_limit, 0), plain_limit + encoder)`.
+    /// `2 * max_file + max(memory_term(plain_limit, 0), plain_limit + encoder) + 2 * records`.
     pub fn working_set(&self) -> u64 {
         let analysis = crate::peel::deflate::memory_term(self.plain_limit, 0);
         let encode = self.plain_limit.saturating_add(self.encoder);
         self.max_file
             .saturating_mul(2)
             .saturating_add(analysis.max(encode))
+            .saturating_add(self.records.saturating_mul(2))
     }
 }
 
@@ -664,6 +668,7 @@ mod tests {
             max_file: 256 * MIB,
             plain_limit: 64 * MIB,
             encoder: 800 * MIB,
+            records: 0,
         };
         assert_eq!(d.working_set(), 512 * MIB + 64 * MIB + 800 * MIB);
         let small = DeflateMemory { encoder: 0, ..d };
@@ -676,6 +681,11 @@ mod tests {
         assert_eq!(m.per_block(), per, "never per block");
         let jpeg_set = 2 * 128 * MIB + crate::peel::MODEL_ALLOWANCE;
         assert_eq!(m.fixed_sequential(), jpeg - jpeg_set + d.working_set());
+        let r = DeflateMemory {
+            records: 64 * MIB,
+            ..d
+        };
+        assert_eq!(r.working_set(), d.working_set() + 128 * MIB);
     }
 
     #[test]
