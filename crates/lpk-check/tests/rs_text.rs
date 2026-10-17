@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use lpk_check::index::{GenEntry, Loc};
 use lpk_check::recovery::{self, RecoveryHead};
 use lpk_check::{rs, wire, Archive, Options};
 
@@ -122,4 +123,66 @@ fn erasures_up_to_capacity_rebuild_and_one_more_does_not() {
     assert_eq!(err.class, "Unrepairable");
     assert_eq!(rep.repaired, 0);
     assert!(copy == bad);
+}
+
+fn varint(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let b = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            return out;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+/// A frame whose rebuild passes the memory threshold but not the work bound: group_shards 32768,
+/// shard_len 64, recovery_shards 32767, and 32767 shard hashes wrong. Repair is `Refused`
+/// (field `recovery group`) at once, before any decoding.
+#[test]
+fn hostile_group_is_refused_by_the_work_bound() {
+    let (k, r, sl) = (32768u32, 32767u32, 64u32);
+    let cover_len = u64::from(k) * u64::from(sl);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&32u64.to_le_bytes());
+    payload.extend_from_slice(&cover_len.to_le_bytes());
+    for v in [sl, k, k, r] {
+        payload.extend_from_slice(&v.to_le_bytes());
+    }
+    let good = *blake3::hash(&[0u8; 64]).as_bytes();
+    for s in 0..k {
+        payload.extend_from_slice(if s + 1 == k { &good } else { &[0u8; 32] });
+    }
+    payload.resize(payload.len() + r as usize * sl as usize, 0);
+    let mut data = vec![0u8; 32 + cover_len as usize];
+    let offset = data.len() as u64;
+    data.extend_from_slice(&4u16.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.extend(varint(payload.len() as u64));
+    data.extend_from_slice(&payload);
+    data.extend_from_slice(blake3::hash(&payload).as_bytes());
+    let locs = [Loc {
+        offset,
+        len: data.len() as u64 - offset,
+        sequence: 0,
+    }];
+    let gens = [GenEntry {
+        generation: 0,
+        start_offset: 32,
+        first_sequence: 0,
+        salt: [0; 16],
+    }];
+    let end = data.len() as u64;
+    // Detection alone reports the damage.
+    let rep = recovery::scan(&data, &locs, &gens, end, None, 1 << 31).unwrap();
+    assert_eq!((rep.unusable, rep.damaged), (0, r as usize));
+    // Repair passes the memory threshold, then the work bound refuses.
+    let t = std::time::Instant::now();
+    let mut copy = data.clone();
+    let err = recovery::scan(&data, &locs, &gens, end, Some(&mut copy), 1 << 31).unwrap_err();
+    assert!(t.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(err.class, "Refused");
+    assert!(err.detail.contains("recovery group"), "{}", err.detail);
 }

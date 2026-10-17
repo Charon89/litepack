@@ -11,14 +11,18 @@
 //!   C[j][i] = w_(1 + floor(j/m)) / (w_(m+j) + w_i) in the low form (m = P(k)), where w_n = e(n).
 //!   Since e is linear, w_a + w_b = w_(a XOR b).
 //! - Decoding by the normative rule ("any method that inverts the encoding"): the e unknown data
-//!   shards solve the e-by-e system that e known recovery shards give, solved here by
-//!   Gauss-Jordan inversion of the e-by-e submatrix of C.
+//!   shards solve the e-by-e system that e known recovery shards give. The submatrix is a Cauchy
+//!   matrix scaled by rows and columns (section 13, "Decoding"), so its inverse has a closed form
+//!   ([`cauchy_inverse`]): `O(e)` memory and `O(e^2)` scalar work, no e-by-e matrix.
 //!
 //! Cost (no fast transform): encoding is `r * k * S` field multiplications, where `S` is
-//! `shard_len / 2` symbols; decoding `e` shards is `e * (k - e) * S + e * e * S` multiplications
-//! plus `O(e^3)` for the inversion, and holds `2 * e` shards of elements besides the input. That
-//! is quadratic in the group where the reference's transform is quasi-linear; it repairs the
-//! conformance vectors at once but would be slow on a full default group (2048 shards of 64 KiB).
+//! `shard_len / 2` symbols. Rebuilding `e` shards of a group with `d` real data shards is
+//! `e * d * S` field multiply-adds ([`repair_work`]); a reader refuses a rebuild above
+//! [`REPAIR_WORK_LIMIT`]. Memory besides the caller's shards: `e` residuals and `e` rebuilt
+//! shards, plus one scratch shard (`2 * e + 1` shards, each `shard_len` bytes), within section
+//! 13's threshold `(P(r) + k).next_pow2() * shard_len` up to that scratch shard since `e <= r`
+//! and `e <= d <= k`. That is quadratic in the group where the reference's transform is
+//! quasi-linear.
 
 use std::sync::OnceLock;
 
@@ -186,14 +190,23 @@ pub fn coeff(k: u32, r: u32, j: u32, i: u32) -> u16 {
 
 /// Reads a shard's symbols as elements (the unit layout of "Shards and symbols").
 pub fn shard_to_elems(shard: &[u8]) -> Vec<u16> {
-    let mut out = Vec::with_capacity(shard.len() / 2);
-    for unit in shard.as_chunks::<64>().0 {
+    let mut out = vec![0u16; shard.len() / 2];
+    shard_to_elems_into(shard, &mut out);
+    out
+}
+
+/// [`shard_to_elems`] into a buffer of `shard.len() / 2` elements.
+fn shard_to_elems_into(shard: &[u8], out: &mut [u16]) {
+    for (unit, o) in shard
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<32>().0)
+    {
         for t in 0..32 {
-            let s = u16::from(unit[t]) | u16::from(unit[32 + t]) << 8;
-            out.push(elem(s));
+            o[t] = elem(u16::from(unit[t]) | u16::from(unit[32 + t]) << 8);
         }
     }
-    out
 }
 
 /// Writes elements back as a shard's bytes.
@@ -261,33 +274,104 @@ pub fn encode(k: u32, r: u32, data: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
     Ok(out)
 }
 
-/// Inverts a square matrix of elements by Gauss-Jordan elimination.
-fn invert(mut a: Vec<Vec<u16>>) -> Option<Vec<Vec<u16>>> {
-    let n = a.len();
-    let mut b: Vec<Vec<u16>> = (0..n)
-        .map(|i| (0..n).map(|j| u16::from(i == j)).collect())
-        .collect();
-    for col in 0..n {
-        let piv = (col..n).find(|&row| a[row][col] != 0)?;
-        a.swap(col, piv);
-        b.swap(col, piv);
-        let pinv = inv(a[col][col])?;
-        for x in 0..n {
-            a[col][x] = mul(a[col][x], pinv);
-            b[col][x] = mul(b[col][x], pinv);
+/// The most field multiply-adds this reader spends on one group's rebuild (section 13, "Repair":
+/// a reader may refuse, with `Refused` field `recovery group`, a group whose rebuild exceeds a
+/// work bound it documents). See [`repair_work`] for the count. 2^32 admits, for example, 64
+/// damaged shards in a default group (2048 shards of 65536 bytes), which takes seconds.
+pub const REPAIR_WORK_LIMIT: u64 = 1 << 32;
+
+/// The work of rebuilding `e` unknown shards of a group with `data_shards` real data shards of
+/// `shard_len` bytes: `e * data_shards * (shard_len / 2)` field multiply-adds. That counts the
+/// residuals (each of the `data_shards - e` known shards into each of the `e` residuals) and the
+/// combination (each of the `e` residuals into each of the `e` rebuilt shards), one per symbol;
+/// the `O(e^2)` scalar work of the closed-form inverse is smaller than one symbol pass (`shard_len
+/// / 2` is at least 32) and is not counted.
+pub fn repair_work(e: u64, data_shards: u64, shard_len: u64) -> u64 {
+    e.saturating_mul(data_shards).saturating_mul(shard_len / 2)
+}
+
+/// (alpha_i, u_i): the point of data shard i and its factor in "Decoding",
+/// C[j][i] = u_i * v_j / (alpha_i + beta_j); u_i is W_m(w_(m+i)) / K_m = w_(1 + floor(i/m)).
+fn data_point(k: u32, r: u32, i: u32) -> (u16, u16) {
+    match form(k, r) {
+        Form::High => {
+            let m = p2(r);
+            (w(m + i), w(1 + i / m))
         }
-        for row in 0..n {
-            let f = a[row][col];
-            if row == col || f == 0 {
-                continue;
-            }
-            for x in 0..n {
-                a[row][x] ^= mul(f, a[col][x]);
-                b[row][x] ^= mul(f, b[col][x]);
-            }
+        Form::Low => (w(i), 1),
+    }
+}
+
+/// (beta_j, v_j): the point of recovery shard j and its factor; v_j is w_(1 + floor(j/m)).
+fn rec_point(k: u32, r: u32, j: u32) -> (u16, u16) {
+    match form(k, r) {
+        Form::High => (w(j), 1),
+        Form::Low => {
+            let m = p2(k);
+            (w(m + j), w(1 + j / m))
         }
     }
-    Some(b)
+}
+
+/// The closed-form inverse of a scaled Cauchy submatrix (see [`cauchy_inverse`]).
+#[derive(Debug)]
+struct CauchyInverse {
+    x: Vec<u16>,
+    y: Vec<u16>,
+    g: Vec<u16>,
+    h: Vec<u16>,
+}
+
+impl CauchyInverse {
+    /// Entry [b][a] of the inverse: G_a * H_b / (x_a + y_b).
+    fn at(&self, b: usize, a: usize) -> u16 {
+        inv(self.x[a] ^ self.y[b]).map_or(0, |d| mul(mul(self.g[a], self.h[b]), d))
+    }
+}
+
+/// The inverse of the e-by-e submatrix of C on recovery rows `rows` and data columns `cols`, in
+/// closed form, as a function of (column b, row a): entry [b][a] of the inverse.
+///
+/// The submatrix is M[a][b] = v_a * u_b / (x_a + y_b), with x_a = beta of row a and y_b = alpha
+/// of column b. Solving sum over b of M[a][b] * d_b = r_a: f(z) = sum over b of (u_b d_b) / (z +
+/// y_b) is N(z) / D(z) with D(z) = prod over b of (z + y_b) and deg N < e; N(x_a) = D(x_a) r_a / v_a
+/// fixes N by interpolation on the x_a, and u_b d_b is the residue of f at y_b, N(y_b) / D'(y_b).
+/// That gives inverse[b][a] = G_a * H_b / (x_a + y_b), with
+/// G_a = D(x_a) / (v_a * prod over c != a of (x_a + x_c)) and
+/// H_b = E(y_b) / (u_b * prod over c != b of (y_b + y_c)), E(z) = prod over c of (z + x_c).
+/// Memory `O(e)`, time `O(e^2)`. `None` when two points coincide (a repeated row or column).
+fn cauchy_inverse(k: u32, r: u32, rows: &[u32], cols: &[u32]) -> Option<CauchyInverse> {
+    let (x, v): (Vec<u16>, Vec<u16>) = rows.iter().map(|&j| rec_point(k, r, j)).unzip();
+    let (y, u): (Vec<u16>, Vec<u16>) = cols.iter().map(|&i| data_point(k, r, i)).unzip();
+    let mut g = Vec::with_capacity(x.len());
+    for (a, &xa) in x.iter().enumerate() {
+        let mut num = 1u16;
+        for &yb in &y {
+            num = mul(num, xa ^ yb);
+        }
+        let mut den = v[a];
+        for (c, &xc) in x.iter().enumerate() {
+            if c != a {
+                den = mul(den, xa ^ xc);
+            }
+        }
+        g.push(mul(num, inv(den)?));
+    }
+    let mut h = Vec::with_capacity(y.len());
+    for (b, &yb) in y.iter().enumerate() {
+        let mut num = 1u16;
+        for &xc in &x {
+            num = mul(num, yb ^ xc);
+        }
+        let mut den = u[b];
+        for (c, &yc) in y.iter().enumerate() {
+            if c != b {
+                den = mul(den, yb ^ yc);
+            }
+        }
+        h.push(mul(num, inv(den)?));
+    }
+    Some(CauchyInverse { x, y, g, h })
 }
 
 /// Decodes: rebuilds the unknown data shards of a group coded with `k` data shards and `r`
@@ -295,8 +379,9 @@ fn invert(mut a: Vec<Vec<u16>>) -> Option<Vec<Vec<u16>>> {
 ///
 /// `data[i]` is data shard i when known and `None` when unknown; shards at `data.len()` and
 /// above (up to `k`) are implicit zero shards, always known. `recovery` holds known recovery
-/// shards as `(j, bytes)`; the first `e` of them are used, where `e` is the number of unknown
-/// data shards. Returns the rebuilt shards as `(i, bytes)`, in ascending `i`.
+/// shards as `(j, bytes)` with distinct `j` (a repeated `j` is a `RecoveryError`); the first `e`
+/// of them are used, where `e` is the number of unknown data shards. Returns the rebuilt shards as
+/// `(i, bytes)`, in ascending `i`. The caller bounds the work with [`repair_work`].
 pub fn decode(
     k: u32,
     r: u32,
@@ -336,32 +421,28 @@ pub fn decode(
         ));
     }
     let rows = &recovery[..e];
-    let m: Vec<Vec<u16>> = rows
-        .iter()
-        .map(|&(j, _)| unknown.iter().map(|&i| coeff(k, r, j, i)).collect())
-        .collect();
-    let minv = invert(m).ok_or_else(|| Error::new("RecoveryError", "singular system"))?;
+    let row_idx: Vec<u32> = rows.iter().map(|&(j, _)| j).collect();
+    let ci = cauchy_inverse(k, r, &row_idx, &unknown)
+        .ok_or_else(|| Error::new("RecoveryError", "repeated recovery shard"))?;
     // Residuals: y_j + sum over known i of C[j][i] * d_i = sum over unknown u of C[j][u] * d_u.
-    let known: Vec<(u32, Vec<u16>)> = data
-        .iter()
-        .enumerate()
-        .filter_map(|(i, d)| d.map(|d| (i as u32, shard_to_elems(d))))
-        .collect();
-    let mut res = Vec::with_capacity(e);
-    for &(j, y) in rows {
-        let mut acc = shard_to_elems(y);
-        for (i, di) in &known {
-            mul_add(&mut acc, coeff(k, r, j, *i), di);
+    // One known shard at a time is converted, then added into every residual.
+    let mut res: Vec<Vec<u16>> = rows.iter().map(|&(_, b)| shard_to_elems(b)).collect();
+    let mut scratch = vec![0u16; shard_len / 2];
+    for (i, d) in data.iter().enumerate() {
+        let Some(d) = d else { continue };
+        shard_to_elems_into(d, &mut scratch);
+        for (acc, &j) in res.iter_mut().zip(&row_idx) {
+            mul_add(acc, coeff(k, r, j, i as u32), &scratch);
         }
-        res.push(acc);
     }
     let mut out = Vec::with_capacity(e);
     for (b, &u) in unknown.iter().enumerate() {
-        let mut acc = vec![0u16; shard_len / 2];
+        scratch.fill(0);
         for (a, ra) in res.iter().enumerate() {
-            mul_add(&mut acc, minv[b][a], ra);
+            let c = ci.at(b, a);
+            mul_add(&mut scratch, c, ra);
         }
-        out.push((u, elems_to_shard(&acc)));
+        out.push((u, elems_to_shard(&scratch)));
     }
     Ok(out)
 }
@@ -369,6 +450,35 @@ pub fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Inverts a square matrix of elements by Gauss-Jordan elimination.
+    fn invert(mut a: Vec<Vec<u16>>) -> Option<Vec<Vec<u16>>> {
+        let n = a.len();
+        let mut b: Vec<Vec<u16>> = (0..n)
+            .map(|i| (0..n).map(|j| u16::from(i == j)).collect())
+            .collect();
+        for col in 0..n {
+            let piv = (col..n).find(|&row| a[row][col] != 0)?;
+            a.swap(col, piv);
+            b.swap(col, piv);
+            let pinv = inv(a[col][col])?;
+            for x in 0..n {
+                a[col][x] = mul(a[col][x], pinv);
+                b[col][x] = mul(b[col][x], pinv);
+            }
+            for row in 0..n {
+                let f = a[row][col];
+                if row == col || f == 0 {
+                    continue;
+                }
+                for x in 0..n {
+                    a[row][x] ^= mul(f, a[col][x]);
+                    b[row][x] ^= mul(f, b[col][x]);
+                }
+            }
+        }
+        Some(b)
+    }
 
     fn s(v: u16) -> u16 {
         sym(v)
@@ -551,9 +661,57 @@ mod tests {
         // Low form.
         round_trip(2, 3, 2, &[0, 1], &[2, 1]);
         round_trip(5, 9, 5, &[0, 1, 2, 3, 4], &[8, 0, 3, 5, 6]);
-        // P(k) = P(r), k <= r: high form with several chunks of m.
+        // P(k) > P(r): high form with several chunks of m (m = 16, k = 40).
         round_trip(40, 9, 40, &[1, 17, 33, 39], &[0, 4, 7, 8]);
         round_trip(1, 1, 1, &[0], &[0]);
+        // The ties of "Which form a pair uses": P(k) = P(r) and k <= r is high, k > r is low.
+        assert_eq!((form(3, 4), form(4, 3)), (Form::High, Form::Low));
+        round_trip(3, 4, 3, &[0, 1, 2], &[3, 1, 0]);
+        round_trip(4, 3, 4, &[0, 2, 3], &[2, 0, 1]);
+        round_trip(4, 4, 4, &[0, 1, 2, 3], &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn closed_form_inverse_matches_elimination() {
+        for (k, r, rows, cols) in [
+            (12u32, 3u32, vec![0u32, 2, 1], vec![0u32, 5, 11]),
+            (2, 3, vec![2, 0], vec![1, 0]),
+            (40, 9, vec![8, 3, 0, 5], vec![39, 1, 16, 17]),
+            (4, 3, vec![1, 2, 0], vec![3, 0, 2]),
+        ] {
+            let m: Vec<Vec<u16>> = rows
+                .iter()
+                .map(|&j| cols.iter().map(|&i| coeff(k, r, j, i)).collect())
+                .collect();
+            let want = invert(m).expect("invertible");
+            let ci = cauchy_inverse(k, r, &rows, &cols).expect("closed form");
+            for (b, row) in want.iter().enumerate() {
+                for (a, &entry) in row.iter().enumerate() {
+                    assert_eq!(ci.at(b, a), entry, "k {k} r {r} [{b}][{a}]");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_recovery_index_is_an_error() {
+        let d = [pseudo(64, 1), pseudo(64, 2), pseudo(64, 3)];
+        let refs: Vec<&[u8]> = d.iter().map(|v| v.as_slice()).collect();
+        let y = encode(3, 2, &refs).expect("encode");
+        let given = [None, None, Some(d[2].as_slice())];
+        let rec = [(0, y[0].as_slice()), (0, y[0].as_slice())];
+        assert_eq!(
+            decode(3, 2, &given, &rec).expect_err("repeat").class,
+            "RecoveryError"
+        );
+    }
+
+    #[test]
+    fn repair_work_expression() {
+        assert_eq!(repair_work(3, 10, 1024), 3 * 10 * 512);
+        assert_eq!(repair_work(u64::MAX, 2, 64), u64::MAX);
+        // The hostile group of the review: 32767 unknowns of 32768 shards of 64 bytes.
+        assert!(repair_work(32767, 32768, 64) > REPAIR_WORK_LIMIT);
     }
 
     #[test]

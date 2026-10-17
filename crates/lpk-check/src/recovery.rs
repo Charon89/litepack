@@ -226,12 +226,46 @@ pub fn scan(
                 ),
             ));
         }
-        let data_bytes: Vec<Vec<u8>> = (0..h.data_shards)
-            .map(|s| shard_bytes(data, &h, s))
-            .collect();
+        let work = crate::rs::repair_work(damaged.len() as u64, u64::from(h.data_shards), sl);
+        if work > crate::rs::REPAIR_WORK_LIMIT {
+            return Err(Error::new(
+                "Refused",
+                format!(
+                    "the archive needs recovery group of {work} operations; this reader allows {}",
+                    crate::rs::REPAIR_WORK_LIMIT
+                ),
+            ));
+        }
+        // The shards are borrowed from the archive; only the last one is padded into a copy.
+        let mut is_damaged = vec![false; h.data_shards as usize];
+        for &s in &damaged {
+            is_damaged[s as usize] = true;
+        }
+        let last = h.data_shards - 1;
+        let last_bytes = shard_bytes(data, &h, last);
         let given: Vec<Option<&[u8]>> = (0..h.data_shards)
-            .map(|s| (!damaged.contains(&s)).then(|| data_bytes[s as usize].as_slice()))
+            .map(|s| {
+                if is_damaged[s as usize] {
+                    return None;
+                }
+                if s == last {
+                    return Some(last_bytes.as_slice());
+                }
+                let start = (h.cover_offset + u64::from(s) * sl) as usize;
+                data.get(start..start + sl as usize)
+            })
             .collect();
+        if given
+            .iter()
+            .zip(&is_damaged)
+            .any(|(g, d)| g.is_none() && !d)
+        {
+            rep.error.get_or_insert(Error::new(
+                "RecoveryError",
+                "a shard lies outside the input",
+            ));
+            continue;
+        }
         let shard = h.shard_len as usize;
         let recovery: Vec<(u32, &[u8])> = (0..damaged.len() as u32)
             .map(|j| (j, &rec[j as usize * shard..(j as usize + 1) * shard]))
