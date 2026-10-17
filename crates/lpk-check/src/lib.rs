@@ -18,6 +18,7 @@ pub mod keyless;
 pub mod merkle;
 pub mod record;
 pub mod recovery;
+pub mod rs;
 pub mod wire;
 
 pub use archive::{Archive, Options, Resources};
