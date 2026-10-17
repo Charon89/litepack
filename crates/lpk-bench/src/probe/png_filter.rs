@@ -211,7 +211,7 @@ pub struct FileRecord {
     pub streams: Vec<Stream>,
 }
 
-/// The three writers under one layout: class bytes of the PNG files (every file's length
+/// The three writers under one layout: the class's bytes (every file's length
 /// less its kept gain), and what each undoes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -392,8 +392,27 @@ fn contiguous(bytes: &[u8], spans: &[(usize, usize)]) -> Vec<u8> {
         .collect()
 }
 
-/// One stream: `A`, the eligibility, the undo verified, every `B`.
+/// The file's rows as the `png` crate decodes them with no transformation (the raster: rows
+/// packed, 16-bit big-endian, palette indices), or the decoder's error.
+fn crate_rows(file: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let mut dec = png::Decoder::new_with_limits(
+        std::io::Cursor::new(file),
+        png::Limits { bytes: usize::MAX },
+    );
+    dec.set_transformations(png::Transformations::IDENTITY);
+    let mut reader = dec.read_info().map_err(|e| e.to_string())?;
+    let size = reader.output_buffer_size().ok_or_else(|| "output size overflows".to_string())?;
+    let mut buf = vec![0u8; size];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(info.buffer_size());
+    Ok(buf)
+}
+
+/// One stream: `A`, the eligibility, the undo verified three ways (re-filtering gives the
+/// text back; the `png` crate's rows are the de-interlaced raw rows; each uniform text undoes
+/// to the raw rows), every `B`.
 fn process_stream(
+    file: &[u8],
     header: &Result<Header, PngError>,
     h: Held,
     enc: &mut PartEncoder,
@@ -431,19 +450,37 @@ fn process_stream(
             return Ok(out);
         }
     };
-    let (back, refilter_seconds) = timed(|| layout.refilter(&undone.raw, &undone.filters));
-    let back = back.map_err(|e| anyhow!("re-filter: {e}"))?;
-    if back != plain {
+    // A mismatch is a bug in lpk_core::peel::png, never a fallback: it fails the run.
+    let mismatch = |mismatches: &mut u64, what: &str| -> anyhow::Error {
         *mismatches += 1;
-        bail!(
-            "the re-filtered rows differ from the inflated text ({}x{} depth {} colour type {} \
-             interlace {}): a bug in lpk_core::peel::png",
+        anyhow!(
+            "{what} ({}x{} depth {} colour type {} interlace {}): a bug in lpk_core::peel::png",
             layout.width(),
             layout.height(),
             layout.bit_depth(),
             layout.color_type(),
             layout.interlace()
-        );
+        )
+    };
+    // The `png` crate's rows (no transformation) are the de-interlaced raw rows.
+    let theirs = match crate_rows(file) {
+        Ok(rows) => rows,
+        Err(_) => {
+            out.ineligible = Some("png_crate".to_string());
+            return Ok(out);
+        }
+    };
+    let raster = layout.deinterlace(&undone.raw).map_err(|e| anyhow!("de-interlace: {e}"))?;
+    if theirs != raster {
+        return Err(mismatch(mismatches, "the undone rows differ from the png crate's"));
+    }
+    drop(theirs);
+    drop(raster);
+    // Re-filtering gives the inflated text back byte for byte.
+    let (back, refilter_seconds) = timed(|| layout.refilter(&undone.raw, &undone.filters));
+    let back = back.map_err(|e| anyhow!("re-filter: {e}"))?;
+    if back != plain {
+        return Err(mismatch(mismatches, "the re-filtered rows differ from the inflated text"));
     }
     drop(back);
     let mut filter_counts = [0u64; 5];
@@ -475,10 +512,20 @@ fn process_stream(
     };
     push("raw", &undone.raw)?;
     for f in FILTER_SUB..=FILTER_PAETH {
+        let name = FILTER_NAMES[usize::from(f)];
         let text = layout
             .refilter_uniform(&undone.raw, f)
-            .map_err(|e| anyhow!("re-filter {}: {e}", FILTER_NAMES[usize::from(f)]))?;
-        push(FILTER_NAMES[usize::from(f)], &text)?;
+            .map_err(|e| anyhow!("re-filter {name}: {e}"))?;
+        // Each uniform text undoes to the raw rows with that filter on every scanline.
+        let again = layout.undo(&text).map_err(|e| anyhow!("undo of the {name} text: {e}"))?;
+        if again.raw != undone.raw || again.filters.iter().any(|g| *g != f) {
+            return Err(mismatch(
+                mismatches,
+                &format!("the {name} text does not undo to the raw rows"),
+            ));
+        }
+        drop(again);
+        push(name, &text)?;
     }
     if layout.interlace() == 1 {
         let text = layout
@@ -521,7 +568,7 @@ fn process_file(
     let mut streams = Vec::with_capacity(held.len());
     let mut failed = None;
     for h in held {
-        match process_stream(&header, h, &mut enc, &mut mismatches) {
+        match process_stream(bytes, &header, h, &mut enc, &mut mismatches) {
             Ok(s) => streams.push(s),
             Err(e) => {
                 failed = Some(e);
@@ -646,18 +693,20 @@ fn empty_totals(label: &str) -> Totals {
     }
 }
 
-/// The totals of `files` (a stream filter selects which streams count; a file counts whenever
-/// one of its streams passes, its bytes and writers computed over those streams only).
+/// The totals of `files`. `keep` selects which streams count; with `filtered`, a file counts
+/// only when one of its streams passes (its bytes and writers computed over those streams),
+/// else every file counts (the class totals, over the class's files).
 fn totals_of(
     label: &str,
     files: &[&FileRecord],
     set: &Settings,
+    filtered: bool,
     keep: impl Fn(&Stream) -> bool,
 ) -> Totals {
     let mut t = empty_totals(label);
     for f in files {
         let streams: Vec<Stream> = f.streams.iter().filter(|s| keep(s)).cloned().collect();
-        if streams.len() != f.streams.len() && streams.is_empty() {
+        if filtered && streams.is_empty() {
             continue;
         }
         let sub = FileRecord {
@@ -721,7 +770,7 @@ fn summarise(
     set: &Settings,
 ) -> (Totals, Vec<Totals>, Vec<Totals>) {
     let all: Vec<&FileRecord> = files.iter().collect();
-    let totals = totals_of("all", &all, set, |_| true);
+    let totals = totals_of("all", &all, set, false, |_| true);
     let mut by_group = Vec::new();
     for g in ctx.groups(class, GROUP_DEPTH) {
         let members: Vec<&FileRecord> = g
@@ -735,7 +784,7 @@ fn summarise(
                 files.iter().find(|f| f.index as usize == i)
             })
             .collect();
-        by_group.push(totals_of(&g.label, &members, set, |_| true));
+        by_group.push(totals_of(&g.label, &members, set, false, |_| true));
     }
     let mut labels: Vec<String> = files
         .iter()
@@ -747,7 +796,7 @@ fn summarise(
     let by_geometry = labels
         .iter()
         .map(|l| {
-            totals_of(l, &all, set, |s| {
+            totals_of(l, &all, set, true, |s| {
                 s.geometry.as_ref().is_some_and(|g| g.label() == *l)
             })
         })
@@ -1029,7 +1078,7 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
 /// [`summarise`] without the corpus (no source groups): the totals and the geometry tables.
 fn summarise_pure(files: &[FileRecord], set: &Settings) -> (Totals, Vec<Totals>, Vec<Totals>) {
     let all: Vec<&FileRecord> = files.iter().collect();
-    let totals = totals_of("all", &all, set, |_| true);
+    let totals = totals_of("all", &all, set, false, |_| true);
     let mut labels: Vec<String> = files
         .iter()
         .flat_map(|f| f.streams.iter())
@@ -1040,7 +1089,7 @@ fn summarise_pure(files: &[FileRecord], set: &Settings) -> (Totals, Vec<Totals>,
     let by_geometry = labels
         .iter()
         .map(|l| {
-            totals_of(l, &all, set, |s| {
+            totals_of(l, &all, set, true, |s| {
                 s.geometry.as_ref().is_some_and(|g| g.label() == *l)
             })
         })
@@ -1155,7 +1204,7 @@ pub fn render(e: &Envelope<Data>) -> String {
          gates: a stream is kept below its length after M, the Deflate record and {} bytes; a \
          file's streams gain more than {} bytes and at least 1/{} of the file. Writers: `today` \
          (`A`), `always` (`B` for every eligible stream), `per stream` (the cheaper). Class bytes \
-         are the PNG files' lengths less their kept gains, so the differences between writers \
+         are the class's files' lengths less their kept gains, so the differences between writers \
          predict the row differences up to varint widths. Files above {} bytes are skipped as \
          the stage does; {} workers.\n\n",
         set.dict_size,
@@ -1369,6 +1418,28 @@ mod tests {
         out
     }
 
+    /// The inflated IDAT text of a PNG file (every IDAT body concatenated, then zlib).
+    fn idat_text(file: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut z = Vec::new();
+        let mut pos = 8;
+        while pos + 8 <= file.len() {
+            let head = &file[pos..pos + 8];
+            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            let name = &head[4..8];
+            let body = &file[pos + 8..pos + 8 + len];
+            if name == b"IDAT" {
+                z.extend_from_slice(body);
+            }
+            pos += 12 + len;
+        }
+        let mut out = Vec::new();
+        flate2::read::ZlibDecoder::new(&z[..])
+            .read_to_end(&mut out)
+            .expect("inflate");
+        out
+    }
+
     /// Smooth, compressible raw rows (a gradient with a little noise) and mixed filters.
     fn image(layout: &Layout, rng: &mut Rng) -> (Vec<u8>, Vec<u8>) {
         let n = layout.raw_len().expect("raw") as usize;
@@ -1397,12 +1468,15 @@ mod tests {
                     let theirs = &buf[..info.buffer_size()];
                     let ours = layout.deinterlace(&raw).expect("raster");
                     assert_eq!(theirs, &ours[..], "{layout:?}");
-                    // And the inflated text undoes to the rows the file was made from.
+                    // And the inflated IDAT text undoes to the rows and filters the file was
+                    // made from, through the header the probe parses.
                     let hdr = Header::parse(&file)
                         .expect("header")
                         .layout()
                         .expect("layout");
                     assert_eq!(hdr, layout);
+                    let u = hdr.undo(&idat_text(&file)).expect("undo");
+                    assert_eq!((u.raw, u.filters), (raw, filters), "{layout:?}");
                 }
             }
         }

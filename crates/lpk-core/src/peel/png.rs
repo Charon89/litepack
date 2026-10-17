@@ -376,6 +376,9 @@ impl Layout {
         let bpp = self.filter_unit();
         let (mut src, mut dst) = (0usize, 0usize);
         for pass in self.passes() {
+            if pass.scanlines() == 0 {
+                continue;
+            }
             // The filtered length was checked, so every row of the pass fits in a usize.
             let rb = pass.row_bytes as usize;
             let zeros = vec![0u8; rb];
@@ -429,6 +432,9 @@ impl Layout {
         let bpp = self.filter_unit();
         let (mut src, mut dst, mut line) = (0usize, 0usize, 0usize);
         for pass in self.passes() {
+            if pass.scanlines() == 0 {
+                continue;
+            }
             let rb = pass.row_bytes as usize;
             let zeros = vec![0u8; rb];
             for y in 0..pass.scanlines() {
