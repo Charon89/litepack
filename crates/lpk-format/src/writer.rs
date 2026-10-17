@@ -15,6 +15,7 @@ use crate::header::{FormatVersion, Header, HeaderFlags};
 use crate::index::{BlockLocation, FrameLocation, GenerationInfo, Index};
 use crate::merkle::merkle_root;
 use crate::parhash::frame_payload_hash;
+use crate::prefetch::{SegmentError, Segments};
 use crate::primitive::{GraphResources, PrimitiveId};
 use crate::record::{Record, RecordsWriter};
 use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
@@ -573,6 +574,20 @@ enum Commit {
 enum Work {
     Done(PoolOutput),
     Running(JoinHandle<PoolOutput>),
+}
+
+/// BLAKE3 of `head` followed by `tail`.
+fn hash_two((head, tail): (&[u8], &[u8])) -> [u8; 32] {
+    if tail.is_empty() {
+        return *blake3::hash(head).as_bytes();
+    }
+    if head.is_empty() {
+        return *blake3::hash(tail).as_bytes();
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(head);
+    h.update(tail);
+    *h.finalize().as_bytes()
 }
 
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
@@ -1882,8 +1897,20 @@ impl<W: Write> Writer<W> {
     }
 
     fn add_chunk(&mut self, data: &[u8], allow_recon: bool) -> Result<u64, FormatError> {
-        let len = data.len() as u64;
         let hash = *blake3::hash(data).as_bytes();
+        self.add_chunk_hashed(data, &[], hash, allow_recon)
+    }
+
+    /// [`Writer::add_chunk`] for a chunk made of `head` then `tail`, whose
+    /// BLAKE3 `hash` is already known.
+    fn add_chunk_hashed(
+        &mut self,
+        head: &[u8],
+        tail: &[u8],
+        hash: [u8; 32],
+        allow_recon: bool,
+    ) -> Result<u64, FormatError> {
+        let len = (head.len() + tail.len()) as u64;
         // An append reuses a chunk of the old table with the same hash and length;
         // with `dedup`, so does any chunk this write stored before.
         if let Some((i, old)) = self.find_known(&hash, len, allow_recon)? {
@@ -1912,7 +1939,8 @@ impl<W: Write> Writer<W> {
                 Some(_) => {}
             }
         }
-        self.pending.extend_from_slice(data);
+        self.pending.extend_from_slice(head);
+        self.pending.extend_from_slice(tail);
         self.pending_chunks += 1;
         Ok(index)
     }
@@ -2341,6 +2369,167 @@ impl<W: Write> Writer<W> {
         }
         self.read_buf = buf;
         Ok(size)
+    }
+
+    /// Add a regular file whose bytes come from `data` segment by segment (a
+    /// read-ahead, [`crate::prefetch::Prefetch`]): cut, hashed and appended to
+    /// the current block exactly as [`Writer::add_file`] does with the same
+    /// bytes (the chunker's cuts do not depend on how the bytes are split;
+    /// see [`Chunker`]), so the archive is the same byte for byte. `len_hint`
+    /// is the file's expected length (it only sizes the pending block). Every
+    /// segment goes back to `data` once its bytes are copied. Errors as in
+    /// [`Writer::add_file`]; a reader thread's panic marks the writer failed
+    /// and is re-raised.
+    pub fn add_file_segments(
+        &mut self,
+        path: &str,
+        flags: EntryFlags,
+        mtime_ns: i64,
+        data: &mut dyn Segments,
+        len_hint: u64,
+    ) -> Result<(), FormatError> {
+        self.check_alive()?;
+        self.no_open_entry()?;
+        let r = self.add_file_segments_inner(path, flags, mtime_ns, data, len_hint);
+        self.note(r)
+    }
+
+    fn add_file_segments_inner(
+        &mut self,
+        path: &str,
+        flags: EntryFlags,
+        mtime_ns: i64,
+        data: &mut dyn Segments,
+        len_hint: u64,
+    ) -> Result<(), FormatError> {
+        let mut entry = Entry {
+            kind: EntryKind::File,
+            flags,
+            path: path.to_string(),
+            mtime_ns,
+            size: 0,
+            symlink_target: None,
+            chunks: Vec::new(),
+        };
+        self.check(&entry)?;
+        let mut chunks = Vec::new();
+        entry.size = self.chunk_segments(data, &mut chunks, len_hint)?;
+        entry.chunks = chunks;
+        self.push_entry(entry);
+        Ok(())
+    }
+
+    /// [`Writer::chunk_stream`] over segments: the chunker is fed each segment
+    /// in place; its held-back tail (at most `chunk_size`) is the only copy
+    /// besides the pending block, and a chunk that spans it and the next
+    /// segment is hashed and appended in two pieces.
+    fn chunk_segments(
+        &mut self,
+        data: &mut dyn Segments,
+        chunks: &mut Vec<u64>,
+        len_hint: u64,
+    ) -> Result<u64, FormatError> {
+        let chunk_size = self.options.chunk_size as usize;
+        let block_size = self.options.block_size as usize;
+        if self.pending.capacity() < block_size
+            && len_hint >= (block_size - self.pending.len()) as u64
+        {
+            // The input fills a block: the pending block takes its full size at
+            // once instead of growing by doubling.
+            let want = block_size - self.pending.len();
+            self.pending.reserve_exact(want);
+        }
+        self.chunker.reset();
+        let mut carry: Vec<u8> = std::mem::take(&mut self.read_buf);
+        carry.clear();
+        let mut size = 0u64;
+        loop {
+            let seg = match data.next_segment() {
+                Ok(s) => s,
+                Err(SegmentError::Io(e)) => return Err(FormatError::Io(e)),
+                Err(SegmentError::Panicked(p)) => {
+                    self.failed = Some((
+                        std::io::ErrorKind::Other,
+                        "the read-ahead thread panicked".to_string(),
+                    ));
+                    std::panic::resume_unwind(p);
+                }
+            };
+            // The end is fed with the last bytes when the reader knew them to be
+            // the last (as `chunk_stream` does after a short read), else alone.
+            let (seg, eof) = seg.unwrap_or((Vec::new(), true));
+            size += seg.len() as u64;
+            let cuts = self.chunker.feed(&seg, eof);
+            let held = carry.len();
+            let total = held + seg.len();
+            let mut ranges = Vec::with_capacity(cuts.len());
+            let mut start = 0usize;
+            for cut in cuts {
+                if cut <= start || cut > total {
+                    return Err(FormatError::BadChunk {
+                        reason: "cut positions",
+                    });
+                }
+                if cut - start > chunk_size {
+                    return Err(FormatError::BadChunk {
+                        reason: "chunk longer than chunk_size",
+                    });
+                }
+                ranges.push((start, cut));
+                start = cut;
+            }
+            if eof && start != total {
+                return Err(FormatError::BadChunk {
+                    reason: "bytes left uncut at eof",
+                });
+            }
+            if total - start > chunk_size {
+                return Err(FormatError::BadChunk {
+                    reason: "held back more than chunk_size",
+                });
+            }
+            // The two pieces of each chunk: in the carry, then in the segment.
+            let piece = |a: usize, b: usize| -> (&[u8], &[u8]) {
+                let head = &carry[a.min(held)..b.min(held)];
+                let tail = &seg[a.max(held) - held..b.max(held) - held];
+                (head, tail)
+            };
+            let hashes = self.hash_pieces(&ranges, &piece);
+            for (&(a, b), hash) in ranges.iter().zip(hashes) {
+                let (head, tail) = piece(a, b);
+                let i = self.add_chunk_hashed(head, tail, hash, true)?;
+                chunks.push(i);
+            }
+            // The uncut rest becomes the carry.
+            if start >= held {
+                carry.clear();
+                carry.extend_from_slice(&seg[start - held..]);
+            } else {
+                carry.drain(..start);
+                carry.extend_from_slice(&seg);
+            }
+            data.give_back(seg);
+            if eof {
+                break;
+            }
+        }
+        // The end of the file after its last segment.
+        if !matches!(data.next_segment(), Ok(None)) {
+            return Err(FormatError::Io(std::io::Error::other(
+                "read-ahead: bytes after the last segment",
+            )));
+        }
+        self.read_buf = carry;
+        Ok(size)
+    }
+
+    /// The BLAKE3 of each chunk `ranges` names, its bytes given by `piece`.
+    fn hash_pieces<'a>(
+        &self,
+        ranges: &[(usize, usize)],
+        piece: &dyn Fn(usize, usize) -> (&'a [u8], &'a [u8]),
+    ) -> Vec<[u8; 32]> {
+        ranges.iter().map(|&(a, b)| hash_two(piece(a, b))).collect()
     }
 
     /// Add a directory.

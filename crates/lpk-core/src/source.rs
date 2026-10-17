@@ -27,7 +27,7 @@ impl Source {
     /// the residual that a file reached through a swapped junction is opened (read access only,
     /// no side effect) before the check rejects it. The opened object must be a regular file
     /// and the object the walk saw; otherwise [`CoreError::ChangedWhileReading`].
-    pub fn open(&self, input: &Input) -> Result<Box<dyn Read + '_>, CoreError> {
+    pub fn open(&self, input: &Input) -> Result<Box<dyn Read + Send>, CoreError> {
         if input.kind != EntryKind::File {
             return Err(CoreError::io(
                 &input.source,

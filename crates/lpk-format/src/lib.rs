@@ -22,6 +22,7 @@ pub mod lzma;
 pub mod magic;
 pub mod merkle;
 mod parhash;
+pub mod prefetch;
 pub mod primitive;
 pub mod priors;
 pub mod reader;

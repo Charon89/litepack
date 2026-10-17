@@ -17,6 +17,7 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use lpk_format::prefetch::{OpenFn, Prefetch, PrefetchOptions};
 use lpk_format::{
     Archive, Chunker, Credentials, Encoded, EntryKind, FormatError, Graph, GraphResources, Step,
     Writer, WriterOptions, WriterSummary,
@@ -33,7 +34,7 @@ use crate::fold::{Dedup, FoldStage};
 use crate::ingest::{file_identity, validate_input, walk, IngestOptions, Input};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
 use crate::source::Source;
-use crate::store::{create_new_and_run, Counting, StoreOptions, SyncFn, OUT_BUF};
+use crate::store::{create_new_and_run, StoreOptions, SyncFn, OUT_BUF};
 
 /// The classify stage: how the tree is walked; the classifier and the clustering run on what the
 /// walk found (when the model stage wants them).
@@ -387,6 +388,8 @@ impl Pipeline {
                 let threads = wopts.encode_threads.max(1);
                 let mut writer = open_writer(out, wopts, sync, 0, fold.as_deref(), opener)?;
                 let t = Instant::now();
+                let mut reads =
+                    ReadAhead::spawn(inputs.iter().filter(|i| i.kind == EntryKind::File))?;
                 for input in &inputs {
                     validate_input(input)?;
                     match input.kind {
@@ -394,7 +397,7 @@ impl Pipeline {
                             writer.add_directory(&input.path, input.flags, input.mtime_ns)?;
                         }
                         EntryKind::Symlink => add_symlink(&mut writer, input)?,
-                        EntryKind::File => add_file(&mut writer, &source, input)?,
+                        EntryKind::File => reads.add_file(&mut writer, input)?,
                     }
                 }
                 timings.model = t.elapsed();
@@ -503,6 +506,18 @@ impl Pipeline {
                         add_symlink(&mut writer, input)?;
                     }
                 }
+                // The files streamed whole (no peel stage applies, or one refuses them
+                // unread), in the order the loop below adds them: read ahead.
+                let streamed = |c: &crate::cluster::Cluster, input: &Input| {
+                    peel.iter()
+                        .find(|s| s.applies_to(c.class))
+                        .is_none_or(|s| s.refuse_unread(input.len).is_some())
+                };
+                let mut reads = ReadAhead::spawn(
+                    clusters
+                        .iter()
+                        .flat_map(|c| c.inputs.iter().filter(move |input| streamed(c, input))),
+                )?;
                 // Plain bytes fed since the last block boundary (approximate across the
                 // writer's own size splits).
                 let mut in_block = 0u64;
@@ -518,13 +533,13 @@ impl Pipeline {
                             in_block %= block_size;
                         }
                         let Some(stage) = stage else {
-                            add_file(&mut writer, &source, input)?;
+                            reads.add_file(&mut writer, input)?;
                             continue;
                         };
                         if let Some(cause) = stage.refuse_unread(input.len) {
                             // Too long to read whole: streamed like any file, never held.
                             summary.note_fallback(cause, input.len);
-                            add_file(&mut writer, &source, input)?;
+                            reads.add_file(&mut writer, input)?;
                             continue;
                         }
                         // Each input is read once: the peel and the writer use the same bytes.
@@ -765,22 +780,58 @@ fn write_peeled<W: Write>(
     Ok(false)
 }
 
-fn add_file<W: Write>(
-    writer: &mut OutWriter<W>,
-    source: &Source,
-    input: &Input,
-) -> Result<(), CoreError> {
-    let mut r = Counting {
-        inner: source.open(input)?,
-        n: 0,
-    };
-    writer.add_file(&input.path, input.flags, input.mtime_ns, &mut r)?;
-    if r.n != input.len {
-        return Err(CoreError::ChangedWhileReading {
-            path: input.source.clone(),
-        });
+/// The files a run streams whole, read ahead by a reader thread in the order the run adds
+/// them ([`Prefetch`]); the thread is joined when this is dropped.
+struct ReadAhead {
+    prefetch: Prefetch<CoreError>,
+    /// Files handed to the writer so far: the id the next file must carry.
+    next: usize,
+}
+
+impl ReadAhead {
+    /// Start reading `files` (in this order) ahead.
+    fn spawn<'a>(files: impl Iterator<Item = &'a Input>) -> Result<Self, CoreError> {
+        let list: Vec<(usize, OpenFn<CoreError>)> = files
+            .enumerate()
+            .map(|(id, input)| {
+                let input = input.clone();
+                let open: OpenFn<CoreError> = Box::new(move || Source::new().open(&input));
+                (id, open)
+            })
+            .collect();
+        let prefetch = Prefetch::spawn(list, PrefetchOptions::default())
+            .map_err(|e| CoreError::Format(FormatError::Io(e)))?;
+        Ok(ReadAhead { prefetch, next: 0 })
     }
-    Ok(())
+
+    /// Add the next file read ahead, which must be `input`; a length that changed since the
+    /// walk is `ChangedWhileReading`, after its bytes were added.
+    fn add_file<W: Write>(
+        &mut self,
+        writer: &mut OutWriter<W>,
+        input: &Input,
+    ) -> Result<(), CoreError> {
+        let mut file = self.prefetch.next_file()?;
+        if file.id() != self.next {
+            return Err(CoreError::InvalidOption(
+                "read-ahead out of step with the run".into(),
+            ));
+        }
+        self.next += 1;
+        writer.add_file_segments(
+            &input.path,
+            input.flags,
+            input.mtime_ns,
+            &mut file,
+            input.len,
+        )?;
+        if file.bytes_read() != input.len {
+            return Err(CoreError::ChangedWhileReading {
+                path: input.source.clone(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
