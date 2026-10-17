@@ -3,6 +3,8 @@
 Status: freeze candidate. This revision applies the findings of two independent readings of the text and of an
 independent decoder written from it (`docs/spec/CHANGES.md` lists every change); once frozen it is format v1.
 Revision 1.1 (section 2) adds the decoding of `jpeg-reconstruct` (section 8) and nothing else.
+Revision 1.2 (section 2) adds the decoding of `deflate-reconstruct` and the output bound of the step before it
+(section 8) and nothing else.
 The specification revision of 2026-10-16 (E1-15) defines the recovery frames' Reed-Solomon code normatively in
 section 13 instead of by reference to a library; it changes no byte and no reader outcome, and `version_minor` is
 unchanged.
@@ -80,7 +82,9 @@ Version rule: a reader accepts `version_major` 1 and any `version_minor`; any ot
 Revisions. Version 1 grows by revisions that add the decoding of primitives the registry already lists (section
 8); a revision never changes the meaning of a byte an earlier revision defines. Revision 1.0 decodes `store`,
 `zstd` and `lzma`. Revision 1.1 (minor 1) adds the decoding of `jpeg-reconstruct` (0x0007, section 8 "Decoding
-`jpeg-reconstruct`") and nothing else. `version_minor` is the revision the writer wrote under, a declaration and
+`jpeg-reconstruct`") and nothing else. Revision 1.2 (minor 2) adds the decoding of `deflate-reconstruct` (0x0008,
+section 8 "Decoding `deflate-reconstruct`") and the output bound of the step before it (section 8, "Bounds"), and
+nothing else. `version_minor` is the revision the writer wrote under, a declaration and
 not a fact about the archive's blocks: the archive may use any primitive of that revision or an earlier one, and
 none of a later one (section 8). A reader does not infer from the minor which primitives occur; it checks the
 primitives of each block as section 8 says, and never consults the minor to decide what to decode: an archive of
@@ -90,7 +94,11 @@ of minor 1. So a writer of revision 1.1 writes 1 whether or not any block names
 a primitive of revision 1.1 (informative: the reference pipeline writes 1 whenever its JPEG peel is enabled). A
 reader of revision 1.0 accepts an archive of minor 1 (any minor), lists it,
 verifies its frames and records, and reports `UnimplementedPrimitive` with the ID 7 for every block whose graph
-names `jpeg-reconstruct`, exactly as for any primitive it does not run.
+names `jpeg-reconstruct`, exactly as for any primitive it does not run. Revision 1.2 follows the same rule: a writer
+of revision 1.2 writes 2 whether or not any block names `deflate-reconstruct` (informative: the reference pipeline
+writes 2 whenever its Deflate peel is enabled), and a reader of revision 1.0 or 1.1 accepts an archive of minor 2,
+lists it, verifies its frames and records, and reports `UnimplementedPrimitive` with the ID 8 for every block whose
+graph names `deflate-reconstruct`.
 
 A revision of the text that changes no byte and no reader outcome, only how completely something is described, does
 not change `version_minor`: the specification revision of 2026-10-16 writes out the Reed-Solomon code of the
@@ -615,7 +623,7 @@ data. The registry gives each primitive a 16-bit ID, a name, a parameter layout 
 | 0x0005 | `bcj-arm64` | none | none |
 | 0x0006 | `delta` | `base_chunk: u64` LE (the chunk the patch applies to), `patch_format: u8` (0 = zstd patch, 1 = suffix-array patch) | none |
 | 0x0007 | `jpeg-reconstruct` | `record_id: varint` (the record in the `Records` frame, section 12) | memory per image, declared by `decode_memory` |
-| 0x0008 | `deflate-reconstruct` | `record_id: varint` | none |
+| 0x0008 | `deflate-reconstruct` | `record_id: varint` | memory per stream, declared by `decode_memory` |
 | 0x0009 | `png-filter` | `record_id: varint` | none |
 | 0x000A | `base64` | `record_id: varint` | none |
 | 0x000B | `utf16` | `record_id: varint` | none |
@@ -633,7 +641,7 @@ reason. A `params` whose length differs from the layout's is `BadParams` with th
 
 Primitives 3 to 12. Revision 1.0 gives `bwt`, `bcj-x86`, `bcj-arm64`, `delta` and the six reconstruction
 primitives an ID, a parameter layout and their resources, but no decoding. Revision 1.1 specifies the decoding of
-`jpeg-reconstruct` (below). A writer MUST NOT emit a primitive whose decoding no revision up to the archive's
+`jpeg-reconstruct` (below), and revision 1.2 that of `deflate-reconstruct` (below). A writer MUST NOT emit a primitive whose decoding no revision up to the archive's
 `version_minor` specifies, and a reader MUST report `UnimplementedPrimitive` with the ID for a graph that names a
 primitive it does not run, before it runs any step (it still validates their parameters as above). Whether a
 reader runs a primitive depends on the reader alone, never on the archive's `version_minor` (section 2): a block
@@ -660,13 +668,28 @@ step's decoder, its output into the second step's, and the last output is the bl
 compressed with `bcj-x86` and then with `lzma` therefore writes the graph `[lzma, bcj-x86]`.
 
 Bounds. Every intermediate output is bounded by the archive's envelope `max_block_plain` (section 7), which the
-reader has already compared with its own resource; a larger one is `PayloadTooLarge`. So whether a block decodes
+reader has already compared with its own resource; a larger one is `PayloadTooLarge` (revision 1.2 makes one
+exception, below). So whether a block decodes
 never depends on the reader's resources beyond the checks that refuse the archive. The last step must produce
 exactly `plain_len` bytes; any other length, including a decoder
 that would produce more, is `BlockLengthMismatch`. A block whose `plain_len` exceeds `max_block_plain` is
 `PayloadTooLarge`, raised before any decoding. Before the first step runs, a reader checks the whole graph:
 the step count, every step's parameters, and that every primitive is one it can run (otherwise
 `UnimplementedPrimitive`); no step runs when a later one cannot.
+
+Revision 1.2. A step whose next step is `deflate-reconstruct` has, as its output bound, the `plain_len` of the
+record that step names instead of `max_block_plain`. Before the step runs, the reader applies checks (1) to (5) of
+"Decoding `deflate-reconstruct`" to that record, with the `deflate-reconstruct` step's own output bound in check (3):
+the block's `plain_len` when that step is the last, `max_block_plain` otherwise; an error there is the block's error
+and the step does not run. The step's output longer than `plain_len` is `PayloadTooLarge`; a shorter one is
+reported by the reconstruction step (check (6), `BadRecord` `plain_len`). Check (5) is what bounds `plain_len`: a
+record whose `plain_len` the archive's decode memory cannot hold is refused before the step that would produce it
+runs. Every other intermediate output stays bounded by `max_block_plain`. When the `deflate-reconstruct` step is not
+the last (a writer does not produce this, but a reader decodes it), checks (1) to (5) run again at the step with
+its actual output bound, which may be tighter than `max_block_plain` (the `plain_len` of the next step's record when
+that step is `deflate-reconstruct` too); an `original_len` that passes one bound and not the other fails with the
+same class, `PayloadTooLarge`, at the step or before the step before it. When `deflate-reconstruct` is the first
+step, its input is the encoded bytes and checks (1) to (5) run at the step itself.
 
 Unknown IDs. A primitive ID that is not in the table is `UnknownPrimitive`, raised as soon as the ID is read
 while the graph is parsed, before any later byte of the graph or any encoded byte is looked at; a graph that is
@@ -719,8 +742,9 @@ in exactly one of two groups (informative; the normative rule for 3 to 12 is abo
 
 For a primitive without a decoder the reference decoder reports `UnimplementedPrimitive` with the ID, before it
 runs any step of the graph. The reference decoder (`lpk-format`, `lpk-decode`) stays a revision 1.0 reader; the
-full reader of revision 1.1 is `lpk-core` (informative: it registers its `jpeg-reconstruct` decoder on an opened
-archive, and the `lpk` tool extracts and tests through it).
+full reader of revisions 1.1 and 1.2 is `lpk-core` (informative: it registers its `jpeg-reconstruct` and
+`deflate-reconstruct` decoders on an opened archive, and the `lpk` tool extracts and tests through it).
+`deflate-reconstruct` needs the full reader.
 
 ### Decoding `jpeg-reconstruct` (revision 1.1)
 
@@ -829,6 +853,78 @@ The step's input is one Lepton stream and its output is the primary image of the
   `decode_memory`, the class `Archive::open` uses for an envelope the reader cannot meet, section 7), without
   decoding it.
 
+### Decoding `deflate-reconstruct` (revision 1.2)
+
+The step's input is the plain text of one Deflate stream, the record's `plain_len` bytes: the previous step's
+output, or the block's encoded bytes when it is the first step. Its output is the original stream, the record's
+`original_len` bytes: a raw Deflate stream as RFC 1951 defines it (normatively by citation, as section 8 cites RFC
+8878 for `zstd`), with no zlib or gzip wrapper; the bytes of a wrapper are bytes of the entry outside the block
+(section 9).
+
+- The codec is defined by the library. `corrections` are the bytes that `preflate-rs` 0.7.6
+  (<https://github.com/microsoft/preflate-rs>, Apache-2.0) returns as `corrections` from
+  `preflate_whole_deflate_stream` when the whole stream is analysed in one call, and the step's output is what that
+  version's `recreate_whole_deflate_stream(input, corrections)` returns for the step's input and the record's
+  `corrections`. Upstream publishes no format document, so the library version is the definition, normatively by
+  citation; a conforming decoder may use that library to recreate the stream (D-49), and a later release conforms
+  if it recreates the same streams from the same bytes. The version is pinned exactly, not as a range: the layout of
+  the correction bytes may change between patch releases. `library` 0 names this format (section 12). Informative:
+  the bytes are a `bitcode` 0.6 encoding of the predictor parameters followed by a CABAC-coded correction stream
+  (`cabac` 0.15); the reference locks `bitcode` 0.6.9 and `cabac` 0.15.0, and recreates with a bounded copy of
+  0.7.6 (`vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`) whose output equals upstream's for every record within the
+  limits below.
+- Corrections are not canonical: two different correction records may recreate the same stream. The output is
+  guaranteed by `original_len`, `original_hash` and the chunk hashes, never by the correction bytes.
+- One block holds exactly one stream, because a graph applies to the whole block: the block's `plain_len` is the
+  record's `original_len` and its chunk records are those of the stream's bytes. A `deflate` record names no chunks
+  (section 12). A writer writes the step as the last step of its graph (informative: the reference writer writes it
+  after exactly one `lzma` or `zstd` step, which holds the plain text), and refuses a graph that names it in another
+  position (`BadGraph`, `deflate-reconstruct not last`); a reader decodes the step in any position, by the rules
+  below and "Bounds" above.
+- Order of checks, exactly as the reference performs them. Checks (1) to (5) need only the record. When a step
+  precedes the `deflate-reconstruct` step they run before that step (section 8, "Bounds"), and again at the step
+  itself; when it is the first step they run at the step. (1) The record is looked up by its id (the errors of the
+  `Records` frame, section 12); (2) its kind is `deflate` (`BadRecord`, `kind`); (3) `original_len` against the
+  step's output bound: on the last step an `original_len` that differs from the block's `plain_len` is
+  `BlockLengthMismatch`; on a step that is not the last an `original_len` above the step's bound
+  (`max_block_plain`, or the bound "Bounds" gives) is `PayloadTooLarge`; (4) `corrections` longer than
+  `original_len` bytes are `BadRecord`, `corrections`; (5) resources: the stream's term ("Resources" below) above the
+  decode memory left after `max_block_plain` is `Refused`, field `decode_memory`, and nothing is decoded; (6) the
+  input must be exactly `plain_len` bytes (`BadRecord`, `plain_len`); (7) the stream is recreated from the input and
+  `corrections`: corrections the library refuses, or a recreation that panics, are `BadRecord`, `corrections`; an
+  output that would exceed `original_len` bytes is `BadRecord`, `original_len` (a decoder SHOULD stop the
+  recreation as soon as its output would be longer; the reference stops before it writes past `original_len`, so a
+  crafted record cannot make it produce more); (8) an output shorter than `original_len` is `BadRecord`,
+  `original_len`, and an output whose BLAKE3-256 differs from `original_hash` is `BadRecord`, `original_hash`.
+- Limits of a recreation. A reader MAY refuse, with `BadRecord` `corrections` in check (7), a recreation that would
+  produce more Deflate blocks than `original_len`, one whose predictor parameters (the first part of `corrections`)
+  lie outside the values 0.7.6's analysis produces, and one with a correction that asks for more hops along the
+  hash chain than the parameters' `max_chain`. A reader that calls the cited library cannot inspect these inside
+  the corrections, so they are permitted refusals, not rules every reader applies. The reference refuses exactly
+  there: it starts no block once it has produced `original_len` blocks (every Deflate block takes at least 10
+  bits, so a stream of at most `original_len` bytes has at most that many); it accepts, besides the one parameter set
+  of stored and Huffman-only streams, `window_bits` 9 to 15, `max_token_count` 2^k - 1 for k from 7 to 15,
+  `max_chain` 1 to 4096, `min_len` 3 to 258 or 2^32 - 1, `max_dist_3_matches` at most 32768, and the nice lengths,
+  lazy-matching rows, dictionary add policies and hash algorithms analysis constructs (the full list is change 3
+  of `vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`); and it refuses a hop count above `max_chain` before it walks
+  the chain. Informative: the parameter ranges are those 0.7.6's analysis constructs, and its analysis emitted no
+  hop count above `max_chain` on any stream LitePack checked, so a record a writer makes with 0.7.6's analysis is
+  not expected to meet these refusals; the records of `deflate-peel.lpk` (section 11) recreate under them.
+- Resources: memory per stream, declared by the envelope's `decode_memory` (section 7). A stream's term is
+  8 × `plain_len` + 2 × (the length of `corrections`) + 16777216 bytes. The term is a threshold every revision 1.2
+  reader applies, whatever its own decoder needs: it compares the term with the archive's `decode_memory`, never
+  above its own memory resource, minus `max_block_plain`, and refuses a stream whose term exceeds it with `Refused`
+  (field `decode_memory`, the class `Archive::open` uses for an envelope the reader cannot meet, section 7), without
+  decoding it, exactly as for `jpeg-reconstruct`. The figure is lasting: a revision 1.2 reader refuses the stream
+  of any archive that declares less, whatever revision wrote it. The writer declares `max_block_plain`
+  plus the largest term of any block of the archive, JPEG image terms included. Informative, the derivation from the
+  layout of 0.7.6's recreation: per plain byte, 1 byte for the step's input, 1 for the library's own copy of it, and
+  6 for the token list of the block being recreated (a token is 6 bytes, and one Deflate block may hold a token per
+  plain byte, a block of literals only); per correction byte, 2 bytes, the decoder's parsed copy of the record and
+  the library's decoded copy of the CABAC stream; and a fixed allowance of 16777216 bytes for the library's tables
+  (hash chains, Huffman tables, CABAC contexts) and small buffers. The output is the block's own buffer, counted in
+  `max_block_plain`. The reference's test measures a recreation with a counting allocator against the term.
+
 ### Normative decoders
 
 The decoding of a `zstd` step is that of RFC 8878 (Zstandard frames), and the decoding of an `lzma` step is that of
@@ -870,7 +966,8 @@ Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`
 The encoded bytes of an `lzma` step are a raw LZMA1 stream: no `.lzma` or `.xz` header (the properties are
 the step's parameters, the output length is the step's output bound). In the last step of a graph the output
 bound is the block's `plain_len` and the decoder stops when it has produced exactly that many bytes. A step that
-is not the last has only a bound (the envelope's `max_block_plain`), so its stream MUST end with the
+is not the last has only a bound (the envelope's `max_block_plain`, or in revision 1.2 the `plain_len` of the
+record of a following `deflate-reconstruct` step, section 8 "Bounds"), so its stream MUST end with the
 end-of-payload marker: a stream without it that reaches the bound is `LzmaError` with the reason
 `marker required`, and one that ends early without it is `LzmaError` with `truncated`. `lzma` parameters carry no prior ID: v1
 has no priors for LZMA (section 10 is about `zstd` only). The rules, in this order:
@@ -981,6 +1078,41 @@ entry whose parts it writes in this order, while the entry's chunk list is in fi
 A file whose peel fails (the library refuses it, the decoded stream differs from the primary image, there is no
 EOI, or the stream is not smaller than the primary image) is written as it is, through the normal path.
 
+### How a writer lays out a peeled Deflate stream (revision 1.2, informative but exact)
+
+The reference writer peels the Deflate streams it finds in a file (section 8, "Decoding `deflate-reconstruct`") at
+depth 1: it looks for streams once, in the file's bytes as given, and never in an inflated text. A stream's bytes
+are exactly these, the rest of the file being framing:
+
+| Found in | The stream's bytes (the block's plain bytes) | Framing |
+|---|---|---|
+| a ZIP member of method 8 | the member's compressed data | local headers, data descriptors, the central directory, the end record, stored members |
+| a gzip member | the raw Deflate data between the RFC 1952 header and the 8-byte trailer | header, trailer |
+| a zlib stream (a PDF Flate stream, a stream found by scanning) | the raw Deflate data between the 2-byte header and the Adler-32 | header, Adler-32, the rest of the file |
+| a PNG | the IDAT payloads, concatenated, without the zlib header and the Adler-32 (several spans of the file) | the signature, the chunk headers and CRCs, the other chunks |
+
+Only the bytes the analysis consumed belong to the stream; bytes of a candidate after them are framing. The record
+(section 12, kind 8): `original_len` the stream's length; `plain_len` its inflated length; `corrections` from
+`preflate_whole_deflate_stream` run once on the whole stream; `library` 0; `original_hash` the BLAKE3-256 of the
+stream's bytes. A stream is kept only when the recreation from its plain text and corrections reproduces it
+exactly.
+
+The file is one entry whose parts are written in this order, while the entry's chunk list is in file order:
+
+1. Every framing range, in file order, as plain parts (the normal path: chunks in the current plain block).
+2. For each kept stream, in file order: its record, added to the `Records` frame; then the stream as a block of its
+   own (the current plain block is closed first), with the graph `[M, deflate-reconstruct {record_id}]`, where `M`
+   is one `lzma` or `zstd` step whose encoded bytes are the stream's plain text; the block's `plain_len` and chunk
+   records are those of the stream's bytes, cut span by span, so no chunk crosses a span boundary and a PNG's
+   framing lies between the stream's chunks in the entry. The writer adds the stream's term (section 8,
+   "Resources") to the memory the archive declares.
+
+So the chunk table hashes the original bytes and verification is unchanged, and a reader before revision 1.2
+extracts every file that has no chunk in such a block. A stream that is not found, or not kept (the library
+refuses it, its recreation differs, its inflated text is above the writer's limit, or it is not worth a block), stays
+framing; a file without a kept stream is written as it is. With deduplication, a stream whose chunks the archive
+already stores (every span's) is referenced through those chunks, with no new record or block.
+
 ### Reading one block at a time
 
 A reader reads a chunk by finding its block in the chunk index, reading that block's frame, decoding the block
@@ -1068,7 +1200,7 @@ does not check that. `BadPriorList` as above.
 The archives under `crates/lpk-format/tests/vectors/` are written by the reference writer with a zstd or an LZMA encoder
 (zstd level 3 or LZMA preset 6, chunk size 4096, archive id 0x5A repeated, entry mtime 1000). Their plain contents are generated by
 the tests from seeded patterns, so the repository holds the archives and their side files (the dictionary,
-the keyfile, `vectors.toml`, `expected.toml` and `expected-1.1.toml`), not the contents. These are the zstd and LZMA vectors; the others
+the keyfile, `vectors.toml`, `expected.toml`, `expected-1.1.toml` and `expected-1.2.toml`), not the contents. These are the zstd and LZMA vectors; the others
 are listed in `docs/spec/CONFORMANCE.md`:
 
 - `zstd-basic.lpk`: three files in one block, `window_log` 20.
@@ -1086,6 +1218,13 @@ are listed in `docs/spec/CONFORMANCE.md`:
   by `lpk-core`'s pipeline (`cargo test -p lpk-core --test jpeg_vector -- --ignored` regenerates it), and the same
   `lepton_jpeg` version and the same `flate2` backend (the library deflates its stream header; the workspace
   build, which the committed bytes come from, uses the zlib backend) are needed to reproduce its bytes.
+- `deflate-peel.lpk` (revision 1.2): a ZIP with two deflated members (one at zlib level 6, one at level 9) and two
+  stored ones, a PNG whose zlib stream is split over three IDAT chunks, a gzip file and a plain text file, the four
+  Deflate streams peeled as section 9 lays them out: two with the graph `[lzma, deflate-reconstruct]`, two with
+  `[zstd, deflate-reconstruct]`, one ZIP member's inflated text larger than `max_block_plain` (section 8,
+  "Bounds"). Its inputs are committed fixtures (`doc.zip`, `image.png`, `notes.txt.gz` and `readme.txt` in
+  `crates/lpk-core/tests/fixtures/deflate/`), so the bytes do not depend on the `flate2` backend; `cargo test -p lpk-core --test deflate_vector -- --ignored` regenerates it,
+  and the same liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce its bytes.
 
 The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts
 it (with `--prior tests/vectors/zstd-dict.prior` for the dictionary one). The full list of vectors, including the
@@ -1165,8 +1304,8 @@ followed by that many varint chunk indices (section 5).
 |---|---|---|
 | original_len | u64 LE | compressed byte length of the Deflate stream |
 | plain_len | u64 LE | its decompressed length |
-| corrections | bytes | preflate-rs's correction data |
-| library | u8 | 0 = preflate-rs 0.7 format; no other value |
+| corrections | bytes | the correction data of section 8 (Decoding `deflate-reconstruct`) |
+| library | u8 | 0 = the correction format of preflate-rs 0.7.6; no other value |
 | original_hash | 32 | BLAKE3-256 of the original compressed stream |
 
 **png-filter body (kind 9)**
@@ -1280,7 +1419,10 @@ original bytes, they must hash to it (and have `original_len` bytes where the re
   reconstruction step reads plain blocks only and never recurses. A violation is `BadRecord` with `reason`
   `nested record`, raised at the reconstruction step when it reads that chunk (section 8). A writer refuses to
   close a block whose graph names a record that breaks the chunk order or this rule, as it refuses any graph
-  a reader would refuse.
+  a reader would refuse. No revision specifies `container-reconstruct` yet; under this rule a member's chunks lie in
+  plain blocks, so the nested peel that the container body's `chunks` row mentions does not occur.
+- deflate: the record names no chunks; its plain text is the step's input and the stream its output (section 8),
+  so the chunk indices, chunk order and nesting rules have nothing to check for it.
 
 ### What the reference decoder does with records
 
@@ -1289,7 +1431,9 @@ above) and checks the record ids of every block header it parses; it applies non
 reconstruction primitive is reported as `UnimplementedPrimitive` (section 8), as before. Applying records needs the
 JPEG and Deflate libraries of the full reader; revision 1.1's full reader applies `jpeg` records (section 8,
 "Decoding `jpeg-reconstruct`"), reading the chunks a record names through the archive's blocks, which by the
-nesting rule above are plain blocks (the reference full reader refuses any other with `nested record`). Whole-archive
+nesting rule above are plain blocks (the reference full reader refuses any other with `nested record`); revision
+1.2's full reader applies `deflate` records too (section 8, "Decoding `deflate-reconstruct`"), which name no
+chunks. Whole-archive
 verification (section 9), whenever the index lists a
 `Records` frame, reads it and walks every record (a damaged frame is `HashMismatch`), checks the chunk indices,
 chunk sums and block order above, and checks the record ids of every block graph, all before it decodes a block,
@@ -1885,7 +2029,7 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `Truncated` | `what`: `header`, `frame header`, `payload`, `hash`, `entry table`, `chunk table`, `index`, `trailer`, `graph`, `block header`, `records`, `record body`, `recovery`, `frames` | input or a payload ends inside the named part (2 to 15) |
 | `HashMismatch` | `kind` | a frame's payload does not match its hash (3, 6, 9) |
 | `UnknownMustUnderstand` | `kind` | an unknown kind with MUST_UNDERSTAND (3) |
-| `PayloadTooLarge` | `len`, `max` | a `payload_len` above the frame limit (3); a block `plain_len` or an intermediate output above `max_block_plain`, a non-final step's output past its bound (8) |
+| `PayloadTooLarge` | `len`, `max` | a `payload_len` above the frame limit (3); a block `plain_len` or an intermediate output above `max_block_plain`, a non-final step's output past its bound, a non-final `deflate-reconstruct` record's `original_len` above the step's bound (8) |
 | `UnsortedEntries` | `index` | entry table: a path not greater than the previous one (4) |
 | `UnsupportedEntryKind` | `kind`, `index` | entry table: an unknown entry kind (4) |
 | `ReservedEntryBits` | `bits`, `index` | entry table: a reserved entry flag bit (4) |
@@ -1909,10 +2053,10 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `GenerationMismatch` | `expected`, `found` | trailer chain: a generation number not one lower (15) |
 | `BadFrameLocation` | `what`: `index`, `entry table`, `records`, `recovery`, `trailer`, `ChunkData`, `Recovery`, `frames` | a recorded location out of range, overlapping, or not matching the frame there (6, 13, 14, 15) |
 | `EnvelopeMismatch` | `field` | the envelope against the archive, or a block graph against the envelope (7, 9) |
-| `Refused` | `field`, `needed`, `allowed` | the archive needs more than the reader allows: an envelope field, `argon2_m`, `recovery group` (7, 13, 14) |
+| `Refused` | `field`, `needed`, `allowed` | the archive needs more than the reader allows: an envelope field, `argon2_m`, `recovery group`; a reconstruction step's term, `decode_memory` (7, 8, 13, 14) |
 | `UnknownPrimitive` | `id` | a primitive ID not in the registry (8) |
 | `UnimplementedPrimitive` | `id` | a primitive the reader does not run (8) |
-| `BadGraph` | `reason`: `step count`, `step flags`, `params length` | the decode graph (8) |
+| `BadGraph` | `reason`: `step count`, `step flags`, `params length`; writer: `deflate-reconstruct not last` | the decode graph (8) |
 | `BadParams` | `id`, `reason` | a primitive's parameters break its layout; `frame window exceeds declared` (8) |
 | `WindowTooLarge` | `needed`, `allowed` | a step's window above the reader's `max_window` (8) |
 | `ZstdError` | `reason` | a `zstd` step's input (8) |
@@ -1924,7 +2068,7 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `ReservedRecordBits` | `bits`, `record` | records: non-zero record flags (12) |
 | `RecordHashMismatch` | `record` | records: a body that does not match `body_hash` (12) |
 | `RecordOutOfRange` | `record`, `count` | a block names a record the archive does not have (12) |
-| `BadRecord` | `record`, `reason` | a record body breaks its rules (12) |
+| `BadRecord` | `record`, `reason` | a record body breaks its rules (12); a reconstruction step's checks (8), for `deflate-reconstruct` the reasons `kind`, `corrections`, `plain_len`, `original_len` and `original_hash` |
 | `BadRecovery` | `reason` | a recovery payload breaks its rules (13) |
 | `Unrepairable` | `frame`, `damaged`, `capacity` | repair: more damaged shards than a frame can rebuild (13) |
 | `RecoveryError` | `reason` | repair: a rebuilt shard does not match its hash (13) |

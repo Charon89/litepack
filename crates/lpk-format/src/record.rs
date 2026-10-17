@@ -341,9 +341,9 @@ pub struct DeflateRecord {
     pub original_len: u64,
     /// Decompressed length.
     pub plain_len: u64,
-    /// preflate-rs's correction data.
+    /// The correction data of spec section 8 (preflate-rs 0.7.6).
     pub corrections: Vec<u8>,
-    /// 0 = preflate-rs 0.7 format.
+    /// 0 = the correction format of preflate-rs 0.7.6.
     pub library: u8,
     /// BLAKE3 of the original compressed stream.
     pub original_hash: [u8; 32],
@@ -1028,8 +1028,8 @@ pub fn record_layout_tables() -> String {
 | Field | Size | Meaning |\n|---|---|---|\n\
 | original_len | u64 LE | compressed byte length of the Deflate stream |\n\
 | plain_len | u64 LE | its decompressed length |\n\
-| corrections | bytes | preflate-rs's correction data |\n\
-| library | u8 | 0 = preflate-rs 0.7 format; no other value |\n\
+| corrections | bytes | the correction data of section 8 (Decoding `deflate-reconstruct`) |\n\
+| library | u8 | 0 = the correction format of preflate-rs 0.7.6; no other value |\n\
 | original_hash | 32 | BLAKE3-256 of the original compressed stream |\n\n\
 **png-filter body (kind 9)**\n\n\
 | Field | Size | Meaning |\n|---|---|---|\n\

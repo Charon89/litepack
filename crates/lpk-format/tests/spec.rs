@@ -158,7 +158,10 @@ fn primitive_table_lists_every_id_and_name() {
         // Only zstd, lzma and bwt declare window/bwt resources; lzma with a
         // zero dict_size is the one row whose zero parameters give zero.
         assert_eq!(nonzero, matches!(p, P::Zstd | P::Bwt), "{}", p.name());
-        if matches!(p, P::Zstd | P::Lzma | P::Bwt | P::JpegReconstruct) {
+        if matches!(
+            p,
+            P::Zstd | P::Lzma | P::Bwt | P::JpegReconstruct | P::DeflateReconstruct
+        ) {
             assert!(has_res, "{}", p.name());
         } else {
             assert!(!has_res, "{}", p.name());

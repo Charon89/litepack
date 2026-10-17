@@ -222,7 +222,7 @@ pub fn primitive_table() -> String {
      | 0x0005 | `bcj-arm64` | none | none |\n\
      | 0x0006 | `delta` | `base_chunk: u64` LE (the chunk the patch applies to), `patch_format: u8` (0 = zstd patch, 1 = suffix-array patch) | none |\n\
      | 0x0007 | `jpeg-reconstruct` | `record_id: varint` (the record in the `Records` frame, section 12) | memory per image, declared by `decode_memory` |\n\
-     | 0x0008 | `deflate-reconstruct` | `record_id: varint` | none |\n\
+     | 0x0008 | `deflate-reconstruct` | `record_id: varint` | memory per stream, declared by `decode_memory` |\n\
      | 0x0009 | `png-filter` | `record_id: varint` | none |\n\
      | 0x000A | `base64` | `record_id: varint` | none |\n\
      | 0x000B | `utf16` | `record_id: varint` | none |\n\
