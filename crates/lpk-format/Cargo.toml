@@ -11,7 +11,8 @@ rust-version.workspace = true
 blake3 = "1.8.7"
 thiserror = "2.0.21"
 clap = { version = "4.6.7", features = ["derive"] }
-ruzstd = { version = "0.9.0", default-features = false, features = ["std", "hash"] }
+# Pinned: the zstd bound fix (zstd.rs) relies on `bytes_read_from_source` counting the frame header.
+ruzstd = { version = "=0.9.1", default-features = false, features = ["std", "hash"] }
 lzma-rs = { version = "=0.3.0", features = ["raw_decoder"] }
 reed-solomon-simd = "3.1.0"
 aes-gcm = "0.11"
