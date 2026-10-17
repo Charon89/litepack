@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-17, about 02:20 UTC (2026-10-16, 22:20 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-17, about 02:31 UTC (2026-10-16, 22:31 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -33,11 +33,9 @@ was single-threaded then and is parallel since E2-4b.
 2. Next: **E2-10/11 task C, the revision 1.2** (spec, the `deflate-reconstruct` decoder, the vector, fuzz targets,
    and the patched `preflate-rs` of D-66), from `docs/notes/e2-10-task-c-brief.md`; then tasks D (the pipeline) and E
    (`lpk-check` from the text) in parallel. E2-18 is done (G3 met on `full`'s `video`, D-61/D-63/D-65).
-   In parallel: **E2-10/11** from `docs/notes/e2-10-11-design.md` — task B (the walker moved into `lpk-core`, D-64)
-   is merged; task A (the `lpk-format` plumbing, `docs/notes/e2-10-task-a-brief.md`) was dispatched on 2026-10-16
-   beside round 3 (both touch `writer.rs`; whichever lands second merges `main`); tasks C, D, E follow the design's
-   section 5 (C needs the owner's answer on hostile records only before it is final). The design's owner question (a patched `preflate-rs` for hostile records) is under "Open
-   for the owner".
+   Already merged for E2-10/11: task B (the walker in `lpk-core`, D-64) and task A (the `lpk-format` plumbing: the
+   input-bound hook — task C's decoder must check the bound against the envelope and the reader's limits before
+   returning it — the records cache, multi-span given blocks deduplicated all or nothing, `part_known`).
 3. Then E2-20 (memory and the envelope — the sealed row's working set, D-57, and the blocks-in-flight bound,
    D-60, are the first inputs; the Balanced cap of four in flight is provisional until then), then the
    revision-gated peels E2-10/11 (Deflate and containers — the largest remaining size win on office, PDF and

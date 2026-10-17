@@ -12,6 +12,8 @@ use crate::graph::{BlockHeader, Graph};
 use crate::index::FrameLocation;
 use crate::record::{Record, RecordsTable};
 use std::io::{Read, Seek, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// What [`Archive::verify`] checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,35 @@ impl OwnedRecordsTable {
     /// table was read, so this does not fail in practice).
     pub fn table(&self) -> Result<RecordsTable<'_>, FormatError> {
         RecordsTable::parse(&self.payload)
+    }
+}
+
+/// The records cache of an opened archive, shared by its forks: the
+/// `Records` frame read, hash-checked and walked once. The lock is held
+/// while the frame is read and walked, so forks that start together wait
+/// for one parse instead of each making their own.
+#[derive(Debug, Default)]
+pub(crate) struct RecordsShared {
+    cell: Mutex<Option<Arc<ParsedRecords>>>,
+    /// Times the frame was read for the cache (the test hook).
+    parses: AtomicU64,
+}
+
+/// The `Records` frame after one walk: the verified payload and where each
+/// record starts; a lookup parses its one record from there.
+#[derive(Debug)]
+struct ParsedRecords {
+    /// The frame (`None` when the index lists none).
+    table: Option<OwnedRecordsTable>,
+    /// The payload offset of records `0..offsets.len()`, each of which the
+    /// walk hash-checked and parsed; the walk stopped at the first bad
+    /// record (id `offsets.len()`) or at the end.
+    offsets: Vec<usize>,
+}
+
+impl ParsedRecords {
+    fn count(&self) -> u64 {
+        self.table.as_ref().map_or(0, OwnedRecordsTable::len)
     }
 }
 
@@ -219,15 +250,7 @@ impl<R: Read + Seek> DecodeContext for ArchiveContext<'_, R> {
     }
 
     fn record(&mut self, id: u64) -> Result<Record, FormatError> {
-        let count = self.archive.record_count()?;
-        let owned = self
-            .archive
-            .records()?
-            .ok_or(FormatError::RecordOutOfRange { record: id, count })?;
-        owned
-            .table()?
-            .get(id)?
-            .ok_or(FormatError::RecordOutOfRange { record: id, count })
+        self.archive.record(id)
     }
 
     fn chunk(&mut self, record: u64, index: u64) -> Result<Vec<u8>, FormatError> {
@@ -355,14 +378,75 @@ impl<R: Read + Seek> Archive<R> {
         Ok(())
     }
 
-    /// Number of records (0 without a `Records` frame), cached.
-    pub(crate) fn record_count(&mut self) -> Result<u64, FormatError> {
-        if let Some(n) = self.record_count {
-            return Ok(n);
+    /// The `Records` frame parsed once for this archive and its forks: read
+    /// and hash-checked on the first call that succeeds (a failed read is not
+    /// kept, so the next call reads again, as before the cache).
+    fn parsed_records(&mut self) -> Result<Arc<ParsedRecords>, FormatError> {
+        let shared = Arc::clone(&self.records_cache);
+        // A panic while parsing leaves `None` behind: nothing half-built.
+        let mut cell = shared
+            .cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(parsed) = &*cell {
+            return Ok(Arc::clone(parsed));
         }
-        let n = self.records()?.map_or(0, |t| t.len());
-        self.record_count = Some(n);
-        Ok(n)
+        let table = self.records()?;
+        shared.parses.fetch_add(1, Ordering::Relaxed);
+        let mut offsets = Vec::new();
+        if let Some(owned) = &table {
+            let payload_len = owned.payload.len();
+            let mut it = owned.table()?.iter();
+            // Stop at the first bad record; a lookup at or past it walks the
+            // table again for that record's error. (After the last record the
+            // walk only checks trailing bytes, which no lookup reports.)
+            loop {
+                let start = payload_len - it.rest_len();
+                match it.next() {
+                    Some(Ok(_)) => offsets.push(start),
+                    _ => break,
+                }
+            }
+        }
+        let parsed = Arc::new(ParsedRecords { table, offsets });
+        *cell = Some(Arc::clone(&parsed));
+        Ok(parsed)
+    }
+
+    /// Number of records (0 without a `Records` frame), from the parsed
+    /// records.
+    pub(crate) fn record_count(&mut self) -> Result<u64, FormatError> {
+        Ok(self.parsed_records()?.count())
+    }
+
+    /// The record `id` of the `Records` frame, hash-checked and parsed:
+    /// `RecordOutOfRange` when there is no such record, and otherwise the
+    /// first error among records `0..=id` (the frame is parsed once per
+    /// archive and shared with its forks).
+    pub(crate) fn record(&mut self, id: u64) -> Result<Record, FormatError> {
+        let parsed = self.parsed_records()?;
+        let count = parsed.count();
+        let out_of_range = FormatError::RecordOutOfRange { record: id, count };
+        let Some(owned) = parsed.table.as_ref().filter(|_| id < count) else {
+            return Err(out_of_range);
+        };
+        if let Some(&at) = usize::try_from(id).ok().and_then(|i| parsed.offsets.get(i)) {
+            // A record the walk found good: parse it alone (the same checks).
+            let rest = owned.payload.get(at..).unwrap_or(&[]);
+            return crate::record::RecordsIter::one(rest, id)
+                .next()
+                .unwrap_or(Err(out_of_range));
+        }
+        // At or past the first bad record: the walk reports its error.
+        owned.table()?.get(id)?.ok_or(out_of_range)
+    }
+
+    /// How many times the `Records` frame has been read and parsed for the
+    /// record cache of this archive and its forks (a test hook: once per
+    /// opened archive when nothing fails).
+    #[cfg(test)]
+    pub(crate) fn records_parse_count(&self) -> u64 {
+        self.records_cache.parses.load(Ordering::Relaxed)
     }
 
     /// The entry table, read and hash-checked (`HashMismatch` when damaged).
@@ -510,3 +594,7 @@ impl<R: Read + Seek> Archive<R> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "records_cache_tests.rs"]
+mod records_cache_tests;

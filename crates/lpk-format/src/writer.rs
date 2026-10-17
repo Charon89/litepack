@@ -601,6 +601,9 @@ enum Work {
     Running(JoinHandle<PoolOutput>),
 }
 
+/// A chunk found stored already: `(index, from_old_table, len)`.
+type KnownChunk = (u64, bool, u64);
+
 /// Whole encoded length of a frame with a payload of `payload_len` bytes.
 fn frame_len(payload_len: u64) -> u64 {
     4 + varint::len(payload_len) as u64 + payload_len + 32
@@ -2083,14 +2086,29 @@ impl<W: Write> Writer<W> {
         Ok(true)
     }
 
-    fn add_part_known_inner(
-        &mut self,
-        offset: u64,
-        plain: &[u8],
-    ) -> Result<Option<Vec<u64>>, FormatError> {
-        if self.open.is_none() {
-            return Err(bad_options("no entry is open"));
-        }
+    /// Whether [`Writer::add_part_known`] would reference `plain` as a part
+    /// at the current position, and with which chunks, without committing
+    /// anything: `Some(indices)` when `WriterOptions::dedup` is on, `plain`
+    /// is not empty and every chunk the chunker cuts from `plain` (cut from
+    /// its start, exactly as `add_part_known` cuts it) is stored already with
+    /// the same hash and length (in this write, or in the old table of an
+    /// append; chunks in reconstruction blocks count, as for
+    /// `add_part_known`); `None` otherwise. The indices are those
+    /// `add_part_known` returns for the same `plain` if nothing is added in
+    /// between. Nothing of the writer changes (no entry is needed, no counter
+    /// moves, a failure does not abandon the archive); `BadChunk` comes back
+    /// for a chunker that cuts badly.
+    pub fn part_known(&mut self, plain: &[u8]) -> Result<Option<Vec<u64>>, FormatError> {
+        self.check_alive()?;
+        Ok(self
+            .known_chunks(plain)?
+            .map(|found| found.into_iter().map(|(i, _, _)| i).collect()))
+    }
+
+    /// The `(index, from_old_table, len)` of every chunk of `plain` when all
+    /// are stored already (see [`Writer::part_known`]); `None` otherwise.
+    /// Commits nothing: the chunker is reset before it cuts, as at every use.
+    fn known_chunks(&mut self, plain: &[u8]) -> Result<Option<Vec<KnownChunk>>, FormatError> {
         if !self.options.dedup || plain.is_empty() {
             return Ok(None);
         }
@@ -2103,6 +2121,20 @@ impl<W: Write> Writer<W> {
                 None => return Ok(None),
             }
         }
+        Ok(Some(found))
+    }
+
+    fn add_part_known_inner(
+        &mut self,
+        offset: u64,
+        plain: &[u8],
+    ) -> Result<Option<Vec<u64>>, FormatError> {
+        if self.open.is_none() {
+            return Err(bad_options("no entry is open"));
+        }
+        let Some(found) = self.known_chunks(plain)? else {
+            return Ok(None);
+        };
         let mut chunks = Vec::with_capacity(found.len());
         for (i, old, len) in found {
             self.note_known(len, old);
@@ -2216,13 +2248,61 @@ impl<W: Write> Writer<W> {
         memory: u64,
     ) -> Result<Vec<u64>, FormatError> {
         self.check_alive()?;
-        let r = self.add_part_encoded_inner(offset, plain, encoded, memory);
+        let r =
+            self.add_parts_encoded_inner(&[(offset, plain.len() as u64)], plain, encoded, memory);
         self.note(r)
     }
 
-    fn add_part_encoded_inner(
+    /// [`Writer::add_part_encoded`] for a block whose plain bytes lie in
+    /// several parts of the open entry (a PNG's IDAT payloads): `spans` lists
+    /// each part's `(offset, len)` in the file, sorted by offset, disjoint and
+    /// none empty; `plain` is the concatenation of those parts' bytes, in that
+    /// order. The chunker cuts each span on its own, so no chunk crosses a
+    /// span boundary; the chunks of every span form one block written with
+    /// `encoded`, checked and accounted exactly as in `add_part_encoded`
+    /// (which is the one-span case). Each span becomes a part of the entry at
+    /// its offset, so parts added before or after (the framing between the
+    /// spans) interleave with them at [`Writer::end_entry`]. Refused
+    /// (`BadOptions`): `plain` empty or longer than `block_size` (`encoded
+    /// part length`); spans unsorted, overlapping, empty, or whose lengths do
+    /// not add up to `plain.len()` (`encoded part spans`). Returns the
+    /// block's chunk indices, span after span. Dedup of a multi-span stream
+    /// is all or nothing: a later copy can be referenced (span by span, with
+    /// [`Writer::part_known`] and [`Writer::add_part_known`]) only when every
+    /// span's chunks are stored already; otherwise the whole stream is written
+    /// again as a block of its own.
+    pub fn add_parts_encoded(
         &mut self,
-        offset: u64,
+        spans: &[(u64, u64)],
+        plain: &[u8],
+        encoded: Encoded,
+        memory: u64,
+    ) -> Result<Vec<u64>, FormatError> {
+        self.check_alive()?;
+        let r = self.add_parts_encoded_inner(spans, plain, encoded, memory);
+        self.note(r)
+    }
+
+    /// The spans of [`Writer::add_parts_encoded`] as ranges of `plain`.
+    fn span_ranges(spans: &[(u64, u64)], plain_len: usize) -> Option<Vec<(usize, usize)>> {
+        let mut out = Vec::with_capacity(spans.len());
+        let mut start = 0usize;
+        let mut end_of_last: Option<u64> = None;
+        for &(offset, len) in spans {
+            if len == 0 || end_of_last.is_some_and(|e| offset < e) {
+                return None;
+            }
+            end_of_last = Some(offset.checked_add(len)?);
+            let end = start.checked_add(usize::try_from(len).ok()?)?;
+            out.push((start, end));
+            start = end;
+        }
+        (!out.is_empty() && start == plain_len).then_some(out)
+    }
+
+    fn add_parts_encoded_inner(
+        &mut self,
+        spans: &[(u64, u64)],
         plain: &[u8],
         encoded: Encoded,
         memory: u64,
@@ -2233,17 +2313,25 @@ impl<W: Write> Writer<W> {
         if plain.is_empty() || plain.len() as u64 > self.options.block_size {
             return Err(bad_options("encoded part length"));
         }
+        let ranges =
+            Self::span_ranges(spans, plain.len()).ok_or(bad_options("encoded part spans"))?;
         self.flush_block()?;
         let mut chunks = Vec::new();
-        for (a, b) in self.cut_all(plain)? {
-            let data = &plain[a..b];
-            chunks.push(self.records.len() as u64);
-            self.records.push(ChunkRecord {
-                plain_len: data.len() as u64,
-                hash: *blake3::hash(data).as_bytes(),
-            });
-            self.pending.extend_from_slice(data);
-            self.pending_chunks += 1;
+        let mut per_span = Vec::with_capacity(ranges.len());
+        for &(s, e) in &ranges {
+            let span = &plain[s..e];
+            let first = chunks.len();
+            for (a, b) in self.cut_all(span)? {
+                let data = &span[a..b];
+                chunks.push(self.records.len() as u64);
+                self.records.push(ChunkRecord {
+                    plain_len: data.len() as u64,
+                    hash: *blake3::hash(data).as_bytes(),
+                });
+                self.pending.extend_from_slice(data);
+                self.pending_chunks += 1;
+            }
+            per_span.push(first..chunks.len());
         }
         self.flush_block_with(Some(encoded))?;
         if self.options.dedup {
@@ -2257,7 +2345,9 @@ impl<W: Write> Writer<W> {
         }
         self.extra_memory = self.extra_memory.max(memory);
         if let Some(o) = &mut self.open {
-            o.parts.push((offset, plain.len() as u64, chunks.clone()));
+            for (&(offset, len), r) in spans.iter().zip(per_span) {
+                o.parts.push((offset, len, chunks[r].to_vec()));
+            }
         }
         Ok(chunks)
     }

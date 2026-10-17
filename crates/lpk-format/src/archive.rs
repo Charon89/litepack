@@ -30,9 +30,9 @@ pub struct Archive<R: Read + Seek> {
     pub(crate) registry: Registry,
     /// The most recently decoded block: its index and plain bytes.
     pub(crate) cache: Option<(usize, Vec<u8>)>,
-    /// Number of records, read from the `Records` frame the first time a
-    /// block names a record (0 without a frame).
-    pub(crate) record_count: Option<u64>,
+    /// The `Records` frame, read, hash-checked and parsed the first time a
+    /// block names a record; shared with every fork.
+    pub(crate) records_cache: Arc<crate::reader::RecordsShared>,
     /// Blocks this reader has decoded (one-block cache misses, nested reads included).
     pub(crate) decodes: u64,
     /// Opens sealed frames; `None` for an archive that is not encrypted and for
@@ -540,7 +540,7 @@ impl<R: Read + Seek> Archive<R> {
                 chunks: Arc::new(chunks),
                 registry: Registry::v1(),
                 cache: None,
-                record_count: None,
+                records_cache: Arc::default(),
                 decodes: 0,
                 sealer: None,
                 key_slot,
@@ -596,7 +596,7 @@ impl<R: Read + Seek> Archive<R> {
             chunks: Arc::new(chunks),
             registry: Registry::v1(),
             cache: None,
-            record_count: None,
+            records_cache: Arc::default(),
             decodes: 0,
             sealer,
             key_slot,
@@ -718,7 +718,8 @@ impl<R: Read + Seek> Archive<R> {
 
     /// A second reader of the same archive over `reader` (another handle on
     /// the same bytes): the opened state — header, trailer, index, chunk
-    /// table (shared), key, limits and the registry with every decoder
+    /// table (shared), the parsed records (shared, also when they are first
+    /// read after the fork), key, limits and the registry with every decoder
     /// registered so far (shared) — is copied, nothing is read again and no
     /// check is repeated; the block cache starts empty. A parallel extraction
     /// gives each decode worker one. The caller vouches that `reader` holds
@@ -734,7 +735,7 @@ impl<R: Read + Seek> Archive<R> {
             chunks: Arc::clone(&self.chunks),
             registry: self.registry.clone(),
             cache: None,
-            record_count: self.record_count,
+            records_cache: Arc::clone(&self.records_cache),
             decodes: 0,
             sealer: self.sealer.clone(),
             key_slot: self.key_slot.clone(),
