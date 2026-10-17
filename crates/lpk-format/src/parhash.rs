@@ -32,19 +32,53 @@ impl Parts<'_> {
     }
 }
 
-/// Run `a` on a scoped thread and `b` here; both results.
+/// Most threads one hash fans out to (the calling thread included): the
+/// subtrees are split at most `log2(MAX_FAN_OUT)` levels deep, whatever
+/// `threads` asks for.
+const MAX_FAN_OUT: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: every spawn on this thread fails, to reach the fallback.
+    static FAIL_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `a` on a scoped thread and `b` here; both results. When the thread
+/// cannot be created (a resource failure), `a` runs here too, after `b`:
+/// the hash is the same, only slower.
 fn join<A, B>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B) -> (A, B)
 where
     A: Send,
 {
-    std::thread::scope(|s| {
-        let left = s.spawn(a);
+    #[cfg(test)]
+    if FAIL_SPAWN.with(std::cell::Cell::get) {
         let right = b();
-        match left.join() {
-            Ok(l) => (l, right),
-            Err(panic) => std::panic::resume_unwind(panic),
+        return (a(), right);
+    }
+    // Taken by the new thread, or here when the spawn fails.
+    let slot = std::sync::Mutex::new(Some(a));
+    let take = || slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    std::thread::scope(|s| {
+        let spawned = std::thread::Builder::new().spawn_scoped(s, || take().map(|f| f()));
+        let right = b();
+        match spawned {
+            Ok(left) => match left.join() {
+                Ok(Some(l)) => (l, right),
+                Ok(None) => unreachable_none(),
+                Err(panic) => std::panic::resume_unwind(panic),
+            },
+            Err(_) => match take() {
+                Some(f) => (f(), right),
+                None => unreachable_none(),
+            },
         }
     })
+}
+
+/// The closure is taken exactly once: by the thread, or here when the spawn failed.
+#[cold]
+fn unreachable_none() -> ! {
+    panic!("parhash: the left subtree's closure was taken twice")
 }
 
 /// The chaining value of the non-root subtree `[at, at + len)`, split `depth` more times.
@@ -63,7 +97,8 @@ fn subtree(p: Parts<'_>, at: u64, len: u64, depth: u32) -> ChainingValue {
     merge_subtrees_non_root(&l, &r, Mode::Hash)
 }
 
-/// BLAKE3 of `head` followed by `body` on up to `threads` threads (1: this thread only).
+/// BLAKE3 of `head` followed by `body` on up to `threads` threads (1: this thread only;
+/// at most [`MAX_FAN_OUT`]).
 pub(crate) fn frame_payload_hash(head: &[u8], body: &[u8], threads: usize) -> [u8; 32] {
     let total = (head.len() + body.len()) as u64;
     if threads <= 1 || total < 2 * SPLIT_MIN {
@@ -73,7 +108,11 @@ pub(crate) fn frame_payload_hash(head: &[u8], body: &[u8], threads: usize) -> [u
         return *h.finalize().as_bytes();
     }
     let p = Parts { head, body };
-    let depth = threads.next_power_of_two().trailing_zeros();
+    let fan_out = threads
+        .min(MAX_FAN_OUT)
+        .checked_next_power_of_two()
+        .unwrap_or(MAX_FAN_OUT);
+    let depth = fan_out.trailing_zeros();
     let left = left_subtree_len(total);
     let (l, r) = join(
         || subtree(p, 0, left, depth - 1),
@@ -116,7 +155,7 @@ mod tests {
                 let head_len = head_len.min(total);
                 let (head, body) = data[..total].split_at(head_len);
                 let want = *blake3::hash(&data[..total]).as_bytes();
-                for threads in [1usize, 2, 3, 4, 8, 24] {
+                for threads in [1usize, 2, 3, 4, 8, 24, usize::MAX] {
                     assert_eq!(
                         frame_payload_hash(head, body, threads),
                         want,
@@ -125,5 +164,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A thread that cannot be created: the subtree is hashed on the calling thread and
+    /// the hash is the same.
+    #[test]
+    fn a_failed_spawn_falls_back_to_the_calling_thread() {
+        let data = noise((5 << 22) + 777);
+        let want = *blake3::hash(&data).as_bytes();
+        FAIL_SPAWN.with(|f| f.set(true));
+        let got = frame_payload_hash(&data[..40], &data[40..], 8);
+        FAIL_SPAWN.with(|f| f.set(false));
+        assert_eq!(got, want);
     }
 }

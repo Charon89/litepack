@@ -275,7 +275,10 @@ pub struct WriterOptions {
     /// handed over, and blocks are written in order, so the archive is byte
     /// for byte the one a single thread writes. Memory: `encode_threads`
     /// times (`block_size` plus the encoded size) for the blocks in flight,
-    /// plus the encoders' own working memory, one per block in flight.
+    /// plus the encoders' own working memory, one per block in flight, plus
+    /// one spare block buffer (up to `block_size`, kept for reuse once a
+    /// block is written) and the read buffer (up to `block_size` plus
+    /// `chunk_size`), both kept for the writer's life.
     pub encode_threads: usize,
 }
 
@@ -680,7 +683,10 @@ impl<W: Write> Writer<W> {
     /// `encode_threads` blocks in flight at once, each its plain bytes plus its
     /// encoding — `encode_threads` times (`block_size` plus the encoded size)
     /// — plus the encoders' own working memory, one encoder per block in
-    /// flight; the chunk table (40 bytes per chunk) and the block table for
+    /// flight; one spare block buffer (up to `block_size`) kept for reuse
+    /// after a block is written, and the read buffer of the file being added
+    /// (up to `block_size` plus `chunk_size`), both kept for the writer's
+    /// life; the chunk table (40 bytes per chunk) and the block table for
     /// the life of the archive; the dedup map when `dedup` is set; the
     /// recovery group's bytes when `recovery` is set ([`Writer::recovery_buffered`]).
     pub fn new(out: W, options: WriterOptions) -> Result<Self, FormatError> {
@@ -2711,15 +2717,29 @@ mod record_rule_tests {
         v
     }
 
-    /// The store path over incompressible files and a repeated (deduplicated) one, with
-    /// blocks large enough for the pool's frame hash to split across threads.
+    /// The store path over incompressible files, a repeated (deduplicated) one and a part
+    /// whose encoding the caller gives, with blocks large enough for the pool's frame hash
+    /// to split across threads.
     fn store_path(threads: usize, corrupt: bool) -> Result<Vec<u8>, FormatError> {
+        store_path_with(threads, corrupt, 0)
+    }
+
+    /// [`store_path`] with unsealed recovery frames interleaved (`recovery` percent).
+    fn store_path_with(
+        threads: usize,
+        corrupt: bool,
+        recovery: u8,
+    ) -> Result<Vec<u8>, FormatError> {
         let mut out = Vec::new();
         let opts = WriterOptions {
             chunk_size: 1 << 20,
             block_size: 12 << 20,
             dedup: true,
             encode_threads: threads,
+            recovery: RecoveryOptions {
+                percent: recovery,
+                ..RecoveryOptions::default()
+            },
             ..WriterOptions::default()
         };
         let mut w = Writer::new(&mut out, opts)?;
@@ -2735,6 +2755,17 @@ mod record_rule_tests {
         w.add_file("c.bin", EntryFlags::default(), 0, &mut &big[..5 << 20])?;
         w.close_block()?;
         w.add_file("d.txt", EntryFlags::default(), 0, &mut &[7u8; 100_000][..])?;
+        // A given block, written in order with the pool's and hashed by the writer.
+        let given = noise(4, 2 << 20);
+        w.begin_entry("e.bin", EntryFlags::default(), 0)?;
+        w.add_part_encoded(0, &given, StoreEncoder::wrap(given.clone()), 0)?;
+        w.end_entry()?;
+        w.add_file(
+            "f.bin",
+            EntryFlags::default(),
+            0,
+            &mut &noise(5, 9 << 20)[..],
+        )?;
         w.finish()?;
         Ok(out)
     }
@@ -2753,15 +2784,23 @@ mod record_rule_tests {
         }
         let mut a = Archive::open(Cursor::new(one), &Resources::default()).unwrap();
         a.verify().unwrap();
+        // Unsealed recovery frames interleaved: the pool hash still applies.
+        let one = store_path_with(1, false, 5).unwrap();
+        for threads in [4usize, 24] {
+            assert!(
+                one == store_path_with(threads, false, 5).unwrap(),
+                "recovery, threads {threads}"
+            );
+        }
+        let mut a = Archive::open(Cursor::new(one), &Resources::default()).unwrap();
+        a.verify().unwrap();
     }
 
     /// A pool thread that hands back a wrong frame hash: the writer refuses it before the
     /// frame is written and abandons the archive (debug builds check every handed-back hash).
     #[test]
+    #[cfg(debug_assertions)]
     fn a_wrong_pool_frame_hash_is_refused() {
-        if !cfg!(debug_assertions) {
-            return;
-        }
         let e = store_path(4, true).unwrap_err();
         assert!(
             matches!(
@@ -2782,9 +2821,13 @@ mod record_rule_tests {
     fn the_identity_encoder_takes_the_plain_buffer() {
         let plain = noise(3, 4096);
         let at = plain.as_ptr();
-        let (r, back) = StoreEncoder.encode_owned(plain.clone());
+        let copy = plain.clone();
+        let copy_at = copy.as_ptr();
+        let (r, back) = StoreEncoder.encode_owned(copy);
         assert!(back.is_none());
-        assert_eq!(r.unwrap().bytes, plain);
+        let bytes = r.unwrap().bytes;
+        assert_eq!(bytes.as_ptr(), copy_at);
+        assert_eq!(bytes, plain);
         let (r, back) = Box::new(StoreEncoder).run_owned(plain);
         assert!(back.is_none());
         let bytes = r.unwrap().0.bytes;

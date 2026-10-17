@@ -13,7 +13,9 @@ use lpk_core::{FastOptions, Pipeline};
 #[test]
 #[ignore]
 fn stored_classes_are_identical_at_one_thread_and_twenty_four() {
-    let root = PathBuf::from(std::env::var_os("LPK_CORPUS").unwrap());
+    let root = PathBuf::from(
+        std::env::var_os("LPK_CORPUS").expect("set LPK_CORPUS to the bench/corpus/small path"),
+    );
     println!("| class | archive B | s (1 thread) | s (24 threads) | identical |");
     println!("|---|---|---|---|---|");
     for class in ["video", "encrypted-random"] {
