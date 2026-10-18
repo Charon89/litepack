@@ -17,19 +17,30 @@
 //! Tiers: `--fast` (the default), `--balanced`, `--store`, or `--tier <name>` as their long form
 //! (what the GUI mirrors); `--strong` and `--tier strong` are reserved for the Strong tier
 //! (Phase 2) and refused as a usage error.
-//! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation. Nothing is ever prompted;
-//! progress goes to stderr and only with `-v`.
+//! Listing: `l` streams the entry table ([`list`]): kind, size, mtime and path per line,
+//! `--long` for the flags and the generation, `--json` for one object per entry per line; a
+//! listable sealed archive lists without its key, a sealed one that is not says
+//! `PasswordRequired`.
+//! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation ([`failure`]: one line
+//! `error: ...` on stderr, or with the global `--json` flag one JSON object line). Nothing is
+//! ever prompted; progress goes to stderr and only with `-v`.
 #![forbid(unsafe_code)]
+
+pub mod failure;
+pub mod list;
 
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use lpk_core::{
-    BalancedOptions, CoreError, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions,
+    BalancedOptions, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions,
 };
-use lpk_format::{Argon2Params, Credentials, Suite};
+use lpk_format::{Argon2Params, Credentials, FormatError, Resources, Suite};
+
+pub use failure::{core_exit, format_exit, EntryFailure, Failure};
+pub use list::{list_archive, ListOptions};
 
 /// Exit code: success.
 pub const EXIT_OK: i32 = 0;
@@ -46,9 +57,19 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("LPK_GIT_COMM
     name = "lpk",
     version = VERSION,
     about = "LitePack archiver: create, extract and test .lpk archives",
-    after_help = "Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed."
+    after_help = "Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure \
+                  is one line on stderr, `error: <message>`; with --json it is one JSON object \
+                  line instead: {\"error\":{\"code\":1|2,\"kind\":\"<the error's variant name; \
+                  Usage for a command-line error; Reference for a failure reported by the \
+                  reference tool's code>\",\"message\":\"...\",\"path\":\"<the path the error \
+                  names, else the archive>\",\"entries\":[{\"path\",\"kind\",\"message\"}, the \
+                  per-entry errors of a partial extraction, when there are some]}}."
 )]
 struct Cli {
+    /// Machine-readable output: `l` prints one JSON object per entry per line, and any failing
+    /// command prints exactly one JSON object line on stderr instead of `error: ...`.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -58,6 +79,9 @@ enum Command {
     /// Create an archive from the contents of a directory (not the directory itself).
     #[command(name = "a")]
     Add(AddArgs),
+    /// List an archive, one line per entry: kind, size, mtime (UTC), path (tab-separated).
+    #[command(name = "l", long_about = LIST_ABOUT)]
+    List(ListArgs),
     /// Extract every entry of an archive into a directory; never overwrites a file.
     #[command(name = "x")]
     Extract(ExtractArgs),
@@ -78,6 +102,25 @@ enum Command {
     /// Print an archive's header, envelope, counts and generations.
     Info(InfoArgs),
 }
+
+/// The long help of `l`: the columns and the keys of a `--json` line.
+const LIST_ABOUT: &str = "\
+List an archive, one line per entry, streamed in table order: kind (File, Directory or \
+Symlink), size (bytes; a symlink's target length), mtime (UTC, ISO 8601 to the second; `-` \
+when the archive records none) and path, tab-separated, control characters in the path \
+escaped as the reference tool escapes them (`\\n`, `\\t`, `\\u{1}`). --long adds the flags \
+column (`xhrs`: executable, hidden, read-only, system; `-` for a flag not set) before the \
+path, a symlink's target after ` -> `, and a first line `generation<TAB>N` with the archive's \
+generation (the format records one per archive, not per entry).
+
+With --json each line is one object: \"kind\", \"size\", \"mtime\" (the string above, or \
+null), \"mtime_ns\" (nanoseconds since the Unix epoch, or null), \"flags\" (an array of \
+\"executable\", \"hidden\", \"read-only\", \"system\"), \"flag_bits\" (the raw flag word), \
+\"path\" (unescaped: a JSON string), \"symlink_target\" (a symlink's target, else null), \
+\"chunks\" (the number of chunks the file references) and \"generation\" (the archive's).
+
+A sealed archive written with --listable lists without its key; one that was not is refused \
+with PasswordRequired (exit 2) unless a credential is given.";
 
 /// The key material of an encrypted archive; `a` seals with it, every other command opens
 /// with it. Either a password (one of the two forms) or a keyfile or both.
@@ -116,11 +159,14 @@ impl CredentialArgs {
     /// The credentials, read as the format tool reads them (the password moves out of the
     /// parsed arguments into `Credentials`, which wipes it on drop). `None` when nothing was
     /// given.
-    fn take(&mut self) -> Result<Option<Credentials>, String> {
+    fn take(&mut self) -> Result<Option<Credentials>, Failure> {
+        let unreadable = |f: &Path, e: std::io::Error| {
+            Failure::failed("Io", format!("{}: {e}", f.display()), Some(f))
+        };
         let password = match (self.password.take(), &self.password_file) {
             (Some(p), _) => Some(p.into_bytes()),
             (None, Some(f)) => {
-                let mut b = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
+                let mut b = std::fs::read(f).map_err(|e| unreadable(f, e))?;
                 if b.ends_with(b"\n") {
                     b.pop();
                     if b.ends_with(b"\r") {
@@ -132,7 +178,7 @@ impl CredentialArgs {
             (None, None) => None,
         };
         let keyfile = match &self.keyfile {
-            Some(f) => Some(std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?),
+            Some(f) => Some(std::fs::read(f).map_err(|e| unreadable(f, e))?),
             None => None,
         };
         Ok(match (password, keyfile) {
@@ -411,6 +457,19 @@ struct ExtractArgs {
 }
 
 #[derive(Debug, Args)]
+struct ListArgs {
+    /// The archive.
+    archive: PathBuf,
+    /// Add the flags column and the symlink targets, after a first line with the archive's
+    /// generation.
+    #[arg(long)]
+    long: bool,
+    /// The key material of a sealed archive that was not written with --listable.
+    #[command(flatten)]
+    credentials: CredentialArgs,
+}
+
+#[derive(Debug, Args)]
 struct TestArgs {
     /// The archive.
     archive: PathBuf,
@@ -503,13 +562,6 @@ struct RepairArgs {
     credentials: CredentialArgs,
 }
 
-fn core_exit(e: &CoreError) -> i32 {
-    match e {
-        CoreError::InvalidOption(_) => EXIT_USAGE,
-        _ => EXIT_FAILED,
-    }
-}
-
 /// The pipeline of a tier and its settings (the seal stage untouched).
 fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
     let mut pipeline = if tier == Tier::Store {
@@ -565,14 +617,8 @@ fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
     pipeline
 }
 
-fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
-    let tier = match a.tier.tier() {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            return EXIT_USAGE;
-        }
-    };
+fn add(a: &mut AddArgs, err: &mut dyn Write) -> Result<(), Failure> {
+    let tier = a.tier.tier().map_err(Failure::usage)?;
     // Decided before `take` moves the password out of the arguments: what the `-v` report
     // says the archive is sealed with.
     let sealing = a.credentials.given().then(|| {
@@ -582,13 +628,7 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
             if a.listable { ", listable" } else { "" }
         )
     });
-    let credentials = match a.credentials.take() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            return EXIT_FAILED;
-        }
-    };
+    let credentials = a.credentials.take()?;
     let mut pipeline = build_pipeline(&a.tier, tier);
     if let Some(credentials) = credentials {
         pipeline.seal.writer.seal = Some(lpk_format::SealOptions {
@@ -599,56 +639,34 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
         });
     }
     pipeline.seal.writer.recovery.percent = a.recovery;
-    match pipeline.run_file(&a.input, &a.archive) {
-        Ok(s) => {
-            records_cap_note(err, &s.peel.deflate);
-            if a.verbose {
-                report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
-            }
-            EXIT_OK
-        }
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            core_exit(&e)
-        }
+    let s = pipeline
+        .run_file(&a.input, &a.archive)
+        .map_err(|e| Failure::core(&e, Some(&a.archive)))?;
+    records_cap_note(err, &s.peel.deflate);
+    if a.verbose {
+        report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
     }
+    Ok(())
 }
 
-fn append(a: &mut AppendArgs, err: &mut dyn Write) -> i32 {
-    let tier = match a.tier.tier() {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            return EXIT_USAGE;
-        }
-    };
+fn append(a: &mut AppendArgs, err: &mut dyn Write) -> Result<(), Failure> {
+    let tier = a.tier.tier().map_err(Failure::usage)?;
     // The new generation is sealed with the archive's own key (the suite is the archive's).
     let sealing = a
         .credentials
         .given()
         .then(|| "the archive's key".to_string());
-    let credentials = match a.credentials.take() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            return EXIT_FAILED;
-        }
-    };
+    let credentials = a.credentials.take()?;
     let mut pipeline = build_pipeline(&a.tier, tier);
     pipeline.seal.writer.recovery.percent = a.recovery;
-    match pipeline.append_file(&a.input, &a.archive, credentials.as_ref()) {
-        Ok(s) => {
-            records_cap_note(err, &s.peel.deflate);
-            if a.verbose {
-                report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
-            }
-            EXIT_OK
-        }
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            core_exit(&e)
-        }
+    let s = pipeline
+        .append_file(&a.input, &a.archive, credentials.as_ref())
+        .map_err(|e| Failure::core(&e, Some(&a.archive)))?;
+    records_cap_note(err, &s.peel.deflate);
+    if a.verbose {
+        report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
     }
+    Ok(())
 }
 
 fn report(
@@ -888,128 +906,111 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
     );
 }
 
-fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let credentials = match x.credentials.take() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            return EXIT_FAILED;
-        }
-    };
+fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Failure> {
+    let credentials = x.credentials.take()?;
     let mut priors = Vec::with_capacity(x.priors.len());
     for p in &x.priors {
-        match std::fs::read(p) {
-            Ok(b) => priors.push(b),
-            Err(e) => {
-                let _ = writeln!(err, "error: {}: {e}", p.display());
-                return EXIT_FAILED;
-            }
-        }
+        let b = std::fs::read(p)
+            .map_err(|e| Failure::failed("Io", format!("{}: {e}", p.display()), Some(p)))?;
+        priors.push(b);
     }
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let max = u64::try_from(cores.saturating_mul(4)).unwrap_or(u64::MAX);
     if x.threads.is_some_and(|n| n > max) {
-        let _ = writeln!(
-            err,
-            "error: --threads: at most {max} (four times the logical cores) on this machine"
-        );
-        return EXIT_USAGE;
+        return Err(Failure::usage(format!(
+            "--threads: at most {max} (four times the logical cores) on this machine"
+        )));
     }
     let opts = lpk_core::ExtractOptions {
         threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
         memory: x.memory,
         ..lpk_core::ExtractOptions::default()
     };
-    match lpk_core::extract_file(
+    let s = lpk_core::extract_file(
         &x.archive,
         &x.outdir,
         &priors,
         credentials.as_ref(),
         &lpk_core::DefaultPolicy,
         &opts,
-    ) {
-        Ok(s) => {
-            if x.verbose {
-                let _ = writeln!(
-                    err,
-                    "{}: {} files, {} directories, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} nested decodes, {} files reopened",
-                    x.archive.display(),
-                    s.files,
-                    s.directories,
-                    s.bytes,
-                    s.placements,
-                    s.blocks_needed,
-                    s.blocks,
-                    s.workers,
-                    s.in_flight,
-                    s.writers,
-                    s.blocks_decoded,
-                    s.nested_decodes,
-                    s.reopened
-                );
-                let m = &s.memory;
-                let source = match m.budget.source {
-                    lpk_core::memory::BudgetSource::Given => "--memory".to_string(),
-                    lpk_core::memory::BudgetSource::Default {
-                        ceiling,
-                        physical: Some(p),
-                    } => format!(
-                        "default: the {} tier's ceiling of {ceiling} bytes, at most half the physical memory of {p} bytes",
-                        m.tier.name()
-                    ),
-                    lpk_core::memory::BudgetSource::Default {
-                        ceiling,
-                        physical: None,
-                    } => format!(
-                        "default: the {} tier's ceiling of {ceiling} bytes; physical memory unknown",
-                        m.tier.name()
-                    ),
-                };
-                // A sealed archive's key is derived at open, before its envelope can be read:
-                // its Argon2 memory is limited by the reader's limit, not the tier's budget.
-                let key = if m.key_derivation > 0 {
-                    format!(
-                        "; key derivation at open: argon2_m {} bytes (process peak {} bytes)",
-                        m.key_derivation,
-                        m.peak(s.workers)
-                    )
-                } else {
-                    String::new()
-                };
-                let _ = writeln!(
-                    err,
-                    "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}{key}",
-                    m.budget.bytes,
-                    m.tier.name(),
-                    m.per_block,
-                    m.encoded,
-                    m.plain,
-                    m.decoder,
-                    m.step_input,
-                    m.nested,
-                    m.fixed,
-                    m.fixed_shared,
-                    m.per_worker,
-                    s.workers
-                );
-            }
-            let _ = writeln!(
-                out,
-                "extracted {} files, {} directories",
-                s.files, s.directories
-            );
-            EXIT_OK
-        }
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            EXIT_FAILED
-        }
+    )
+    .map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    if x.verbose {
+        let _ = writeln!(
+            err,
+            "{}: {} files, {} directories, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} nested decodes, {} files reopened",
+            x.archive.display(),
+            s.files,
+            s.directories,
+            s.bytes,
+            s.placements,
+            s.blocks_needed,
+            s.blocks,
+            s.workers,
+            s.in_flight,
+            s.writers,
+            s.blocks_decoded,
+            s.nested_decodes,
+            s.reopened
+        );
+        let m = &s.memory;
+        let source = match m.budget.source {
+            lpk_core::memory::BudgetSource::Given => "--memory".to_string(),
+            lpk_core::memory::BudgetSource::Default {
+                ceiling,
+                physical: Some(p),
+            } => format!(
+                "default: the {} tier's ceiling of {ceiling} bytes, at most half the physical memory of {p} bytes",
+                m.tier.name()
+            ),
+            lpk_core::memory::BudgetSource::Default {
+                ceiling,
+                physical: None,
+            } => format!(
+                "default: the {} tier's ceiling of {ceiling} bytes; physical memory unknown",
+                m.tier.name()
+            ),
+        };
+        // A sealed archive's key is derived at open, before its envelope can be read:
+        // its Argon2 memory is limited by the reader's limit, not the tier's budget.
+        let key = if m.key_derivation > 0 {
+            format!(
+                "; key derivation at open: argon2_m {} bytes (process peak {} bytes)",
+                m.key_derivation,
+                m.peak(s.workers)
+            )
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            err,
+            "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}{key}",
+            m.budget.bytes,
+            m.tier.name(),
+            m.per_block,
+            m.encoded,
+            m.plain,
+            m.decoder,
+            m.step_input,
+            m.nested,
+            m.fixed,
+            m.fixed_shared,
+            m.per_worker,
+            s.workers
+        );
     }
+    let _ = writeln!(
+        out,
+        "extracted {} files, {} directories",
+        s.files, s.directories
+    );
+    Ok(())
 }
 
-/// Run the reference tool with `sub` (`verify`, `check` or `repair`), the prior files, the
-/// credentials and the positional paths; its summary goes to `out`, its error line to `err`,
-/// and any failure is exit 2.
+/// Run the reference tool with `sub` (`verify`, `check`, `repair`, `rollback` or `info`), the
+/// prior files, the credentials and the positional paths; its summary goes to `out`. Its
+/// error line becomes a [`Failure`] of kind `Reference` (its variant does not reach this
+/// crate); any failure is exit 2.
 fn reference(
     sub: &str,
     priors: &[PathBuf],
@@ -1017,8 +1018,7 @@ fn reference(
     credentials: &CredentialArgs,
     positional: &[OsString],
     out: &mut dyn Write,
-    err: &mut dyn Write,
-) -> i32 {
+) -> Result<(), Failure> {
     let mut args: Vec<OsString> = vec!["lpk".into()];
     for p in priors {
         let mut a = OsString::from("--prior=");
@@ -1032,15 +1032,62 @@ fn reference(
     args.push(sub.into());
     args.push("--".into());
     args.extend(positional.iter().cloned());
-    match lpk_format::cli::run_with(
-        args,
-        out,
-        err,
-        lpk_core::register_full_reader::<std::fs::File>,
-    ) {
-        0 => EXIT_OK,
-        _ => EXIT_FAILED,
+    let hook = lpk_core::register_full_reader::<std::fs::File>;
+    let archive = positional
+        .first()
+        .map(|p| PathBuf::from(p).display().to_string());
+    // The tool writes one `error: <message>` line on failure and nothing else to its error
+    // stream; captured, so the message is printed in the form the global flag selects (the
+    // text form is the same line).
+    let mut captured = Vec::new();
+    match lpk_format::cli::run_with(args, out, &mut captured, hook) {
+        0 => Ok(()),
+        _ => {
+            let text = String::from_utf8_lossy(&captured);
+            let message = text.trim_end_matches(['\n', '\r']);
+            let message = message.strip_prefix("error: ").unwrap_or(message);
+            Err(Failure {
+                code: EXIT_FAILED,
+                kind: "Reference".to_string(),
+                message: message.to_string(),
+                path: archive,
+                entries: Vec::new(),
+            })
+        }
     }
+}
+
+/// `lpk l`: open with the credentials (a sealed archive without them opens keyless, which
+/// lists only when it is listable) and stream the entry table.
+fn list(l: &mut ListArgs, json: bool, out: &mut dyn Write) -> Result<(), Failure> {
+    let credentials = l.credentials.take()?;
+    let failed = |e: FormatError| {
+        let mut f = Failure::format(&e, Some(&l.archive));
+        f.message = format!("{}: {} ({})", l.archive.display(), f.message, f.kind);
+        f
+    };
+    let file = std::fs::File::open(&l.archive).map_err(|e| failed(FormatError::Io(e)))?;
+    let mut archive =
+        lpk_format::Archive::open_with(file, &Resources::default(), credentials.as_ref())
+            .map_err(failed)?;
+    let options = ListOptions { long: l.long, json };
+    list_archive(&mut archive, options, out).map_err(failed)
+}
+
+/// True when the raw command line carries `--json` (before any `--`), so a usage error clap
+/// reports is printed as JSON too.
+fn wants_json(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|a| a.as_os_str() != "--")
+        .any(|a| a.as_os_str() == "--json")
+}
+
+/// The command line as clap defines it, for the generated reference (`docs/cli/lpk.md`, the
+/// man page): the version is the crate's alone, without the build hash `--version` prints,
+/// so the text is the same for every build of one version.
+pub fn command() -> clap::Command {
+    Cli::command().version(env!("CARGO_PKG_VERSION"))
 }
 
 /// Run the tool with `args` (the first is the program name); returns the exit code.
@@ -1049,20 +1096,29 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(args) {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let cli = match Cli::try_parse_from(&args) {
         Ok(c) => c,
         Err(e) => {
             let text = e.to_string();
             if e.use_stderr() {
-                let _ = err.write_all(text.as_bytes());
+                if wants_json(&args) {
+                    let message = text.trim_end_matches(['\n', '\r']);
+                    let message = message.strip_prefix("error: ").unwrap_or(message);
+                    Failure::usage(message).write_json(err);
+                } else {
+                    let _ = err.write_all(text.as_bytes());
+                }
                 return EXIT_USAGE;
             }
             let _ = out.write_all(text.as_bytes());
             return EXIT_OK;
         }
     };
-    match cli.command {
+    let json = cli.json;
+    let result = match cli.command {
         Command::Add(mut a) => add(&mut a, err),
+        Command::List(mut l) => list(&mut l, json, out),
         Command::Extract(mut x) => extract(&mut x, out, err),
         Command::Test(t) => reference(
             "verify",
@@ -1071,17 +1127,10 @@ where
             &t.credentials,
             &[t.archive.into()],
             out,
-            err,
         ),
-        Command::Check(c) => reference(
-            "check",
-            &[],
-            None,
-            &c.credentials,
-            &[c.archive.into()],
-            out,
-            err,
-        ),
+        Command::Check(c) => {
+            reference("check", &[], None, &c.credentials, &[c.archive.into()], out)
+        }
         Command::Repair(r) => reference(
             "repair",
             &[],
@@ -1089,7 +1138,6 @@ where
             &r.credentials,
             &[r.archive.into(), r.out.into()],
             out,
-            err,
         ),
         Command::Append(mut a) => append(&mut a, err),
         Command::Rollback(r) => reference(
@@ -1099,7 +1147,6 @@ where
             &r.credentials,
             &[r.archive.into(), r.generation.to_string().into()],
             out,
-            err,
         ),
         Command::Info(i) => reference(
             "info",
@@ -1108,8 +1155,14 @@ where
             &i.credentials,
             &[i.archive.into()],
             out,
-            err,
         ),
+    };
+    match result {
+        Ok(()) => EXIT_OK,
+        Err(f) => {
+            f.write(json, err);
+            f.code
+        }
     }
 }
 

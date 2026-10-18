@@ -289,8 +289,9 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Control characters (newlines included) as Rust-style escapes, so one entry is one line.
-fn escape_path(p: &str) -> String {
+/// Control characters (newlines included) as Rust-style escapes, so one entry is one line:
+/// what `list` prints, shared with the `lpk` tool's listing so both escape the same way.
+pub fn escape_path(p: &str) -> String {
     p.chars()
         .map(|c| {
             if c.is_control() {

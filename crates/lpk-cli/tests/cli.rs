@@ -1348,3 +1348,217 @@ fn add_threads_1_and_8_write_the_same_archive_and_v_prints_the_blocks_in_flight(
     assert_eq!(archives[4], archives[5], "store");
     assert_ne!(archives[0], archives[2]);
 }
+
+/// The conformance vectors of the format crate.
+fn vectors() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../lpk-format/tests/vectors")
+}
+
+/// The reference tool's `list` of a vector, run in-process (its own escaping, its own order).
+fn reference_list(args: &[&str]) -> String {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut argv = vec!["lpk-decode"];
+    argv.extend_from_slice(args);
+    let code = lpk_format::cli::run(argv, &mut out, &mut err);
+    assert_eq!(code, 0, "{}", text(&err));
+    text(&out)
+}
+
+/// `lpk l`'s default output with its mtime column removed: the reference tool's `list`.
+fn without_mtime(listing: &str) -> String {
+    listing
+        .lines()
+        .map(|l| {
+            let mut cols: Vec<&str> = l.split('\t').collect();
+            assert_eq!(cols.len(), 4, "{l}");
+            cols.remove(2);
+            cols.join("\t") + "\n"
+        })
+        .collect()
+}
+
+#[test]
+fn list_prints_the_vectors_as_the_reference_tool_does_with_an_mtime_column() {
+    let v = vectors();
+    for (name, generation) in [
+        ("zstd-basic.lpk", 0u64),
+        ("sealed-listable.lpk", 0),
+        ("journal-3gen.lpk", 2),
+    ] {
+        let path = v.join(name);
+        let p = path.to_str().unwrap();
+        let r = run(&["l", p]);
+        assert_eq!(r.status.code(), Some(0), "{name}: {}", text(&r.stderr));
+        assert!(r.stderr.is_empty(), "{name}: {}", text(&r.stderr));
+        let listing = text(&r.stdout);
+        assert_eq!(
+            without_mtime(&listing),
+            reference_list(&["list", p]),
+            "{name}: {listing}"
+        );
+        for line in listing.lines() {
+            let mtime = line.split('\t').nth(2).unwrap();
+            assert!(
+                mtime.len() == 20 && mtime.ends_with('Z') && &mtime[10..11] == "T",
+                "{name}: {line}"
+            );
+        }
+        // --long: the generation header, then the flags column before the path.
+        let r = run(&["l", "--long", p]);
+        assert_eq!(r.status.code(), Some(0), "{name}: {}", text(&r.stderr));
+        let long = text(&r.stdout);
+        let mut lines = long.lines();
+        assert_eq!(lines.next().unwrap(), format!("generation\t{generation}"));
+        let rest: Vec<&str> = lines.collect();
+        assert_eq!(rest.len(), listing.lines().count());
+        for (long_line, line) in rest.iter().zip(listing.lines()) {
+            let cols: Vec<&str> = long_line.split('\t').collect();
+            assert_eq!(cols.len(), 5, "{long_line}");
+            assert_eq!(cols[3], "----", "{long_line}");
+            assert_eq!(
+                [cols[0], cols[1], cols[2], cols[4]].join("\t"),
+                line,
+                "{name}"
+            );
+        }
+        // --json: one object per entry per line, every line parses, every key present.
+        for argv in [vec!["l", "--json", p], vec!["--json", "l", p]] {
+            let r = run(&argv);
+            assert_eq!(r.status.code(), Some(0), "{name}: {}", text(&r.stderr));
+            let json = text(&r.stdout);
+            assert_eq!(json.lines().count(), listing.lines().count());
+            for (object, line) in json.lines().zip(listing.lines()) {
+                let v: serde_json::Value = serde_json::from_str(object).unwrap();
+                let cols: Vec<&str> = line.split('\t').collect();
+                assert_eq!(v["kind"], cols[0]);
+                assert_eq!(v["size"].to_string(), cols[1]);
+                assert_eq!(v["mtime"], cols[2]);
+                assert_eq!(v["path"], cols[3]);
+                assert_eq!(v["generation"], generation);
+                let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+                assert_eq!(
+                    keys,
+                    [
+                        "chunks",
+                        "flag_bits",
+                        "flags",
+                        "generation",
+                        "kind",
+                        "mtime",
+                        "mtime_ns",
+                        "path",
+                        "size",
+                        "symlink_target"
+                    ],
+                    "{object}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_sealed_archive_lists_only_with_its_key_unless_listable() {
+    let v = vectors();
+    let sealed = v.join("sealed-aes.lpk");
+    let sealed = sealed.to_str().unwrap();
+    // Without the key: refused before any line, exit 2, the variant named.
+    let r = run(&["l", sealed]);
+    assert_eq!(r.status.code(), Some(2));
+    assert!(r.stdout.is_empty());
+    let err = text(&r.stderr);
+    assert!(
+        err.starts_with("error: ") && err.contains("PasswordRequired") && err.contains(sealed),
+        "{err}"
+    );
+    let r = run(&["--json", "l", sealed]);
+    assert_eq!(r.status.code(), Some(2));
+    assert!(r.stdout.is_empty());
+    let err = text(&r.stderr);
+    assert_eq!(err.lines().count(), 1, "{err}");
+    let e: serde_json::Value = serde_json::from_str(&err).unwrap();
+    assert_eq!(e["error"]["code"], 2);
+    assert_eq!(e["error"]["kind"], "PasswordRequired");
+    assert_eq!(e["error"]["path"], sealed);
+    // A wrong key is refused at the key slot.
+    let r = run(&["l", sealed, "--password", "wrong"]);
+    assert_eq!(r.status.code(), Some(2));
+    assert!(text(&r.stderr).contains("WrongKey"), "{}", text(&r.stderr));
+    // With the key (the vector's test password, `vectors.toml`): the reference's list.
+    let r = run(&["l", sealed, "--password", "correct horse"]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert_eq!(
+        without_mtime(&text(&r.stdout)),
+        reference_list(&["--password=correct horse", "list", sealed])
+    );
+    // The listable vector needs no key (checked above with the others) and takes one.
+    let listable = v.join("sealed-listable.lpk");
+    let listable = listable.to_str().unwrap();
+    let keyless = run(&["l", listable]);
+    let keyed = run(&["l", listable, "--password", "list me"]);
+    assert_eq!(keyed.status.code(), Some(0), "{}", text(&keyed.stderr));
+    assert_eq!(keyed.stdout, keyless.stdout);
+}
+
+#[test]
+fn list_escapes_control_characters_as_the_reference_tool_and_shows_symlinks_in_long() {
+    use lpk_format::{EntryFlags, Writer, WriterOptions};
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("odd.lpk");
+    {
+        let mut out = std::fs::File::create(&arch).unwrap();
+        let mut w = Writer::new(&mut out, WriterOptions::default()).unwrap();
+        w.add_file(
+            "a\nb\tc\u{1}",
+            EntryFlags::EXECUTABLE.union(EntryFlags::READ_ONLY),
+            1_760_745_600_000_000_000 + 5,
+            &mut &b"xyz"[..],
+        )
+        .unwrap();
+        w.add_directory("dir", EntryFlags::HIDDEN, i64::MIN)
+            .unwrap();
+        w.add_symlink("link", EntryFlags::EMPTY, 0, "a\nb\tc\u{1}".as_bytes())
+            .unwrap();
+        w.finish().unwrap();
+    }
+    let p = arch.to_str().unwrap();
+    let r = run(&["l", p]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    let listing = text(&r.stdout);
+    assert_eq!(listing.lines().count(), 3, "{listing}");
+    assert_eq!(without_mtime(&listing), reference_list(&["list", p]));
+    assert!(
+        listing.contains("File\t3\t2025-10-18T00:00:00Z\ta\\nb\\tc\\u{1}\n"),
+        "{listing}"
+    );
+    assert!(listing.contains("Directory\t0\t-\tdir\n"), "{listing}");
+    let r = run(&["l", "--long", p]);
+    let long = text(&r.stdout);
+    assert!(long.starts_with("generation\t0\n"), "{long}");
+    assert!(long.contains("\tx-r-\ta\\nb\\tc\\u{1}\n"), "{long}");
+    assert!(long.contains("\t-h--\tdir\n"), "{long}");
+    assert!(
+        long.contains("Symlink\t6\t1970-01-01T00:00:00Z\t----\tlink -> a\\nb\\tc\\u{1}\n"),
+        "{long}"
+    );
+    // JSON carries the raw path, the names of the flags and the symlink target.
+    let r = run(&["l", "--json", p]);
+    let json = text(&r.stdout);
+    let objects: Vec<serde_json::Value> = json
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(objects[0]["path"], "a\nb\tc\u{1}");
+    assert_eq!(
+        objects[0]["flags"],
+        serde_json::json!(["executable", "read-only"])
+    );
+    assert_eq!(objects[0]["flag_bits"], 5);
+    assert_eq!(objects[0]["mtime_ns"], 1_760_745_600_000_000_005i64);
+    assert_eq!(objects[1]["mtime"], serde_json::Value::Null);
+    assert_eq!(objects[1]["mtime_ns"], serde_json::Value::Null);
+    assert_eq!(objects[2]["kind"], "Symlink");
+    assert_eq!(objects[2]["symlink_target"], "a\nb\tc\u{1}");
+    assert_eq!(objects[2]["size"], 6);
+}
