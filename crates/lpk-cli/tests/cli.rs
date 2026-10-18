@@ -1562,3 +1562,113 @@ fn list_escapes_control_characters_as_the_reference_tool_and_shows_symlinks_in_l
     assert_eq!(objects[2]["symlink_target"], "a\nb\tc\u{1}");
     assert_eq!(objects[2]["size"], 6);
 }
+
+/// The one JSON object line a failing command writes on stderr with `--json`.
+fn json_error(r: &Output) -> serde_json::Value {
+    let err = text(&r.stderr);
+    assert_eq!(err.lines().count(), 1, "exactly one line: {err}");
+    let v: serde_json::Value = serde_json::from_str(&err).unwrap();
+    assert_eq!(v.as_object().unwrap().len(), 1, "{err}");
+    v["error"].clone()
+}
+
+#[test]
+fn json_errors_are_one_object_line_and_text_errors_are_unchanged() {
+    let v = vectors();
+    let work = tempfile::tempdir().unwrap();
+    let gone = work.path().join("nope");
+    let gone = gone.to_str().unwrap();
+    let arch = work.path().join("t.lpk");
+    let arch = arch.to_str().unwrap();
+
+    // A clap usage error: code 1, kind Usage, the message without clap's `error: ` prefix.
+    let r = run(&["--json", "a", "only-one-arg"]);
+    assert_eq!(r.status.code(), Some(1));
+    let e = json_error(&r);
+    assert_eq!(e["code"], 1);
+    assert_eq!(e["kind"], "Usage");
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("the following required arguments"),
+        "{e}"
+    );
+    assert_eq!(e.as_object().unwrap().len(), 3, "{e}");
+    let plain = run(&["a", "only-one-arg"]);
+    assert_eq!(plain.status.code(), Some(1));
+    assert!(
+        text(&plain.stderr).starts_with("error: "),
+        "{}",
+        text(&plain.stderr)
+    );
+
+    // A refused tier (E3-8) and an engine-refused option: Usage, exit 1, no file.
+    let r = run(&["a", arch, gone, "--strong", "--json"]);
+    assert_eq!(r.status.code(), Some(1));
+    assert_eq!(json_error(&r)["kind"], "Usage");
+    let r = run(&["a", arch, gone, "--json", "--window-log", "40"]);
+    assert_eq!(r.status.code(), Some(1));
+    let e = json_error(&r);
+    assert_eq!(e["kind"], "InvalidOption", "{e}");
+    assert!(!Path::new(arch).exists());
+
+    // A pipeline error naming its path: code 2, kind Io, the path the error names.
+    let r = run(&["--json", "a", arch, gone]);
+    assert_eq!(r.status.code(), Some(2));
+    let e = json_error(&r);
+    assert_eq!(e["code"], 2);
+    assert_eq!(e["kind"], "Io");
+    assert_eq!(e["path"], gone);
+    assert!(e.get("entries").is_none(), "{e}");
+    let plain = run(&["a", arch, gone]);
+    assert_eq!(plain.status.code(), Some(2));
+    assert_eq!(
+        text(&plain.stderr),
+        format!("error: {}\n", e["message"].as_str().unwrap())
+    );
+
+    // The reference tool's commands: kind Reference, the archive as the path, the same
+    // message as the text line.
+    let bad = v.join("malformed-hashflip.lpk");
+    let bad = bad.to_str().unwrap();
+    let r = run(&["t", bad, "--json"]);
+    assert_eq!(r.status.code(), Some(2));
+    let e = json_error(&r);
+    assert_eq!(e["kind"], "Reference");
+    assert_eq!(e["path"], bad);
+    assert_eq!(e["message"], "payload hash mismatch in frame kind 2");
+    let plain = run(&["t", bad]);
+    assert_eq!(plain.status.code(), Some(2));
+    assert_eq!(
+        text(&plain.stderr),
+        "error: payload hash mismatch in frame kind 2\n"
+    );
+    assert_eq!(plain.stdout, r.stdout);
+
+    // Extraction refused before anything is written (a sealed archive without its key).
+    let sealed = v.join("sealed-aes.lpk");
+    let outdir = work.path().join("out");
+    let r = run(&[
+        "--json",
+        "x",
+        sealed.to_str().unwrap(),
+        outdir.to_str().unwrap(),
+    ]);
+    assert_eq!(r.status.code(), Some(2));
+    let e = json_error(&r);
+    assert_eq!(e["kind"], "PasswordRequired", "{e}");
+    assert_eq!(e["path"], sealed.to_str().unwrap());
+    assert!(!outdir.exists());
+
+    // Success is unchanged by the flag (stdout as before, nothing on stderr).
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let ok = run(&["--json", "a", arch, src.path().to_str().unwrap()]);
+    assert_eq!(ok.status.code(), Some(0), "{}", text(&ok.stderr));
+    assert!(ok.stderr.is_empty() && ok.stdout.is_empty());
+    let ok = run(&["t", arch, "--json"]);
+    assert_eq!(ok.status.code(), Some(0));
+    assert!(text(&ok.stdout).starts_with("ok: "), "{}", text(&ok.stdout));
+    assert!(ok.stderr.is_empty());
+}
