@@ -454,7 +454,10 @@ fn strong_is_reserved_and_refused_before_any_output() {
         let r = run(&args);
         let e = text(&r.stderr);
         assert_eq!(r.status.code(), Some(1), "{args:?}: {e}");
-        assert!(e.contains("Strong tier arrives in Phase 2"), "{args:?}: {e}");
+        assert!(
+            e.contains("Strong tier arrives in Phase 2"),
+            "{args:?}: {e}"
+        );
         assert_eq!(e.trim_end().lines().count(), 1, "{args:?}: {e}");
         assert!(r.stdout.is_empty(), "{args:?}: {}", text(&r.stdout));
         assert!(!arch.exists(), "{args:?}");
@@ -553,7 +556,11 @@ fn tier_long_form_writes_the_same_archive_as_the_flag() {
         "-v",
     ]);
     assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
-    assert!(!text(&r.stderr).contains("ordering:"), "{}", text(&r.stderr));
+    assert!(
+        !text(&r.stderr).contains("ordering:"),
+        "{}",
+        text(&r.stderr)
+    );
 }
 
 #[test]
