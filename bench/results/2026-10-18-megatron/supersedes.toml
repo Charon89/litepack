@@ -1,0 +1,339 @@
+# E2-22 (D-74): every combination of this directory replaces the same combination of the earlier
+# directory 2026-10-17-megatron-15 in a pooled report. List of the overlapping rows: target/acceptance/e2-22-contaminated.txt
+# on the measuring machine (rows whose measurement overlapped local builds), reproduced here per entry.
+
+[[supersede]]
+tool = "7z"
+setting = "mx5"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "7z"
+setting = "ultra"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "rar"
+setting = "best"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "rar"
+setting = "best-rr3"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "rar"
+setting = "best-solid"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "rar"
+setting = "m3"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "store"
+setting = "store"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "tsaur"
+setting = "default"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "tsaur"
+setting = "max"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "xz"
+setting = "6"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "xz"
+setting = "9"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "zpaqfranz"
+setting = "m1"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "zpaqfranz"
+setting = "m5"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "zstd"
+setting = "19"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "zstd"
+setting = "3"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "zstd"
+setting = "ultra22-long27"
+class = "encrypted-random"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "7z"
+setting = "mx5"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "7z"
+setting = "ultra"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "rar"
+setting = "best"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "rar"
+setting = "best-rr3"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "rar"
+setting = "best-solid"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "rar"
+setting = "m3"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "store"
+setting = "store"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "tsaur"
+setting = "default"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "tsaur"
+setting = "max"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "xz"
+setting = "6"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "xz"
+setting = "9"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "zpaqfranz"
+setting = "m1"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "zpaqfranz"
+setting = "m5"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "zstd"
+setting = "19"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "zstd"
+setting = "3"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "zstd"
+setting = "ultra22-long27"
+class = "game-assets"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "7z"
+setting = "mx5"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "7z"
+setting = "ultra"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "rar"
+setting = "best"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "rar"
+setting = "best-rr3"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "rar"
+setting = "best-solid"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "rar"
+setting = "m3"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "store"
+setting = "store"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "measured while builds and tests ran on the machine (2026-10-17 21:59:57-22:31 UTC)"
+
+[[supersede]]
+tool = "tsaur"
+setting = "default"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "tsaur"
+setting = "max"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "xz"
+setting = "6"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "xz"
+setting = "9"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "zpaqfranz"
+setting = "m1"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "zpaqfranz"
+setting = "m5"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "zstd"
+setting = "19"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "zstd"
+setting = "3"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
+
+[[supersede]]
+tool = "zstd"
+setting = "ultra22-long27"
+class = "logs-text"
+from = "2026-10-17-megatron-15"
+reason = "class re-measured as a whole on the idle machine with the rows that overlapped those builds"
