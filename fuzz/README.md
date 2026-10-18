@@ -12,11 +12,14 @@ are untouched. `cargo-fuzz` is Unix-only: use Linux, or WSL on Windows.
 | `frame_read`, `header_read`, `varint_read` | `Frame::read`, `Header::read`, `varint::read` |
 | `entry_table`, `chunk_table`, `records_table` | `parse` + iterate + `get` + `validate` |
 | `index_parse`, `trailer_read_tail` | `Index::parse`, `Trailer::read_tail` |
-| `block_header_and_decode` | `BlockHeader::parse` + `decode_block` (`Registry::v1`, tight `Resources`) |
+| `block_header_and_decode` | `BlockHeader::parse` + `decode_block` (`Registry::v1` and the full reader's decoders, tight `Resources`) |
 | `zstd_decode`, `lzma_decode` | the decoders directly, random `expected_len` |
 | `recovery_frame`, `key_slot` | `RecoveryFrame::parse` (runs the section 13 field checks), `KeySlot::parse` + `unwrap` |
 | `archive_open` | `Archive::open_with` (keyless and with a password) + `verify` + extract every entry |
 | `archive_mutate` | structure-aware: byte mutations of a committed vector (every family, including sealed and journal), then open, verify, extract, `check_recovery`, `repair` |
+| `deflate_walk`, `deflate_recreate` | the Deflate peel's stream walk; the bounded recreation of D-66 with arbitrary corrections |
+| `bwt_decode` | revision 1.3's `bwt` step (`lpk_core::BwtDecoder`) over arbitrary input with a small block size and bounds; a counting allocator asserts nothing is allocated past the output bound plus the memory term |
+| `bwt_roundtrip` | libsais's forward transform of arbitrary text in arbitrary block sizes, then the layout and the `u32` inverse: the text comes back; one index or byte damaged: an error or other bytes, never a panic |
 
 Seeds: `seeds/<target>/` (real payloads cut from the vectors by `cargo test -p lpk-format --test gen_vectors --
 --ignored regenerate_fuzz_seeds`, plus a few hand-made minimal inputs; `archive_mutate` has one unmutated

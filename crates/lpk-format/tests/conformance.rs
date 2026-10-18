@@ -28,6 +28,21 @@ const DEFLATE_VECTOR: &str = "deflate-peel.lpk";
 /// The malformed revision 1.2 vector (a record's `plain_len` below its text; its revision 1.2
 /// expectation is in `expected-1.2.toml`): the same `_1_0` keys as `deflate-peel.lpk`.
 const MALFORMED_DEFLATE: &str = "malformed-deflate-bound.lpk";
+/// The revision 1.3 vector and its two malformed companions, built by lpk-core's
+/// `tests/bwt_vector.rs` (their full-reader expectations are in `expected-1.3.toml`, checked
+/// there); every reader before revision 1.3 reports `UnimplementedPrimitive` (3) on them.
+const BWT_VECTOR: &str = "bwt-text.lpk";
+const MALFORMED_BWT_BOUND: &str = "malformed-bwt-bound.lpk";
+const MALFORMED_BWT_INVERSE: &str = "malformed-bwt-inverse.lpk";
+/// The vectors an earlier reader opens, lists and reports `UnimplementedPrimitive` on, with the
+/// primitive's ID: the `_1_0` keys of `expected.toml`.
+const LATER_REVISION_VECTORS: [(&str, u16); 5] = [
+    (DEFLATE_VECTOR, 8),
+    (MALFORMED_DEFLATE, 8),
+    (BWT_VECTOR, 3),
+    (MALFORMED_BWT_BOUND, 3),
+    (MALFORMED_BWT_INVERSE, 3),
+];
 
 fn read(name: &str) -> Vec<u8> {
     std::fs::read(vectors_dir().join(name)).unwrap()
@@ -185,10 +200,11 @@ fn render() -> String {
     let (code, _, err) = cli(&["lpk-decode", "verify", p]);
     writeln!(s, "verify_exit_1_0 = {code}").unwrap();
     writeln!(s, "verify_stderr_1_0 = {err:?}").unwrap();
-    // A reader before revision 1.2 on the revision 1.2 vector: it lists and describes the
-    // archive, reports `UnimplementedPrimitive` (id 8) from `verify`, and extracts the entries
-    // with no chunk in a `deflate-reconstruct` block (`files_1_0`).
-    for name in [DEFLATE_VECTOR, MALFORMED_DEFLATE] {
+    // A reader before the vector's revision (1.2's `deflate-peel.lpk`, 1.3's `bwt-text.lpk`
+    // and their malformed companions): it lists and describes the archive, reports
+    // `UnimplementedPrimitive` (the primitive's id) from `verify`, and extracts the entries
+    // with no chunk in a block of that primitive (`files_1_0`).
+    for (name, id) in LATER_REVISION_VECTORS {
         let p = dir.join(name);
         let p = p.to_str().unwrap();
         writeln!(s, "\n[\"{name}\"]").unwrap();
@@ -199,7 +215,10 @@ fn render() -> String {
         }
         let mut a = open(read(name), name, None);
         let err = a.verify().unwrap_err();
-        assert!(matches!(err, FormatError::UnimplementedPrimitive { id: 8 }));
+        assert!(
+            matches!(err, FormatError::UnimplementedPrimitive { id: got } if got == id),
+            "{name}: {err:?}"
+        );
         writeln!(s, "error_1_0 = {:?}", variant(&err)).unwrap();
         writeln!(s, "message_1_0 = {:?}", err.to_string()).unwrap();
         let (code, _, err) = cli(&["lpk-decode", "verify", p]);
@@ -215,7 +234,7 @@ fn render() -> String {
                     let line = format!("{} {} {}", e.path, got.len(), blake3::hash(&got).to_hex());
                     writeln!(s, "  {line:?},").unwrap();
                 }
-                Err(FormatError::UnimplementedPrimitive { id: 8 }) => {}
+                Err(FormatError::UnimplementedPrimitive { id: got }) if got == id => {}
                 Err(other) => panic!("{name} {}: {other}", e.path),
             }
         }
@@ -302,8 +321,7 @@ fn every_frame_of_every_vector_is_accounted_for() {
     names.push(RECOVERY_VECTOR);
     names.push(JPEG_VECTOR);
     names.push(JOURNAL_RECORD_VECTOR);
-    names.push(DEFLATE_VECTOR);
-    names.push(MALFORMED_DEFLATE);
+    names.extend(LATER_REVISION_VECTORS.iter().map(|&(n, _)| n));
     for name in names {
         let bytes = read(name);
         let mut a = open(bytes.clone(), name, creds_of(name).as_ref());

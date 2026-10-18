@@ -163,6 +163,39 @@ files_1_0 = [
   "readme.txt 1647 ee8ba3d446b880393757fb52941917eeed8f56a15b2cfd4866b4f51335467df3",
 ]
 
+["bwt-text.lpk"]
+list = "File\t21384\tlog.txt\nFile\t3102\tnotes.txt.gz\nFile\t40000\tprose.txt\nFile\t1403\treadme.txt\nFile\t3256\truns.bin\nFile\t1\ttiny.txt\n"
+info = "format: 1.3\nheader flags: 0x0\narchive id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\ngeneration: 0\nchain length: 1\nlength: 15538 bytes\nentries: 6\nchunks: 22\nblocks: 10\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 084ce9673600025bd6d598c67723a0c5f743e4116d7743bbc74f2db212a73519\nenvelope max_window: 131072\nenvelope max_bwt_block: 16384\nenvelope max_block_plain: 16384\nenvelope max_frame_payload: 2750\nenvelope decode_memory: 16957636\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0003 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0003 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 1403 d2cbf024bbfaf864a4b7e70b3b6857e14f44086bff73646a8b49431b08c6213d",
+]
+
+["malformed-bwt-bound.lpk"]
+list = "File\t16384\tprose.txt\nFile\t1403\treadme.txt\n"
+info = "format: 1.3\nheader flags: 0x0\narchive id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\ngeneration: 0\nchain length: 1\nlength: 3915 bytes\nentries: 2\nchunks: 5\nblocks: 2\nrecords: false\nrecovery frames: 0\npriors: 0\nmerkle root: 09e32c486872c301ad4e6a551e300747db9435dfbf061ca588a2bcf8ae90ee66\nenvelope max_window: 131072\nenvelope max_bwt_block: 4096\nenvelope max_block_plain: 16384\nenvelope max_frame_payload: 2753\nenvelope decode_memory: 1098248\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0003 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0003 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 1403 d2cbf024bbfaf864a4b7e70b3b6857e14f44086bff73646a8b49431b08c6213d",
+]
+
+["malformed-bwt-inverse.lpk"]
+list = "File\t16384\tprose.txt\nFile\t1403\treadme.txt\n"
+info = "format: 1.3\nheader flags: 0x0\narchive id: 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\ngeneration: 0\nchain length: 1\nlength: 3222 bytes\nentries: 2\nchunks: 5\nblocks: 2\nrecords: false\nrecovery frames: 0\npriors: 0\nmerkle root: 09e32c486872c301ad4e6a551e300747db9435dfbf061ca588a2bcf8ae90ee66\nenvelope max_window: 131072\nenvelope max_bwt_block: 16384\nenvelope max_block_plain: 16384\nenvelope max_frame_payload: 2059\nenvelope decode_memory: 1147016\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0003 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0003 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 1403 d2cbf024bbfaf864a4b7e70b3b6857e14f44086bff73646a8b49431b08c6213d",
+]
+
 ["malformed-truncated.lpk"]
 error = "Truncated"
 message = "input truncated in trailer"

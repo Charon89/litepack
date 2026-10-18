@@ -13,6 +13,10 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 lpk-format = { version = "0.0.1", path = "../crates/lpk-format" }
 lpk-core = { version = "0.0.1", path = "../crates/lpk-core" }
+# The forward transform (libsais) for `bwt_roundtrip`; the inverse and the layout for both bwt targets.
+lpk-codecs-bwt = { version = "0.0.1", path = "../crates/lpk-codecs-bwt", features = ["encode"] }
+# Its counting allocator: `bwt_decode` asserts nothing is allocated past the bound and the term.
+lpk-procstat-sys = { version = "0.0.1", path = "../crates/lpk-procstat-sys" }
 preflate-rs = "=0.7.6"
 
 # An empty table detaches this crate from the root workspace.
@@ -140,6 +144,20 @@ bench = false
 [[bin]]
 name = "deflate_recreate"
 path = "fuzz_targets/deflate_recreate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bwt_decode"
+path = "fuzz_targets/bwt_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bwt_roundtrip"
+path = "fuzz_targets/bwt_roundtrip.rs"
 test = false
 doc = false
 bench = false
