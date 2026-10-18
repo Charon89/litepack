@@ -473,27 +473,40 @@ fn tier_conflicts_with_the_tier_flags_and_checks_the_settings() {
     let work = tempfile::tempdir().unwrap();
     let arch = work.path().join("t.lpk");
     let (a, s) = (arch.to_str().unwrap(), src.path().to_str().unwrap());
-    for extra in [
-        &["--tier", "fast", "--fast"][..],
-        &["--tier", "fast", "--balanced"][..],
-        &["--tier", "balanced", "--store"][..],
-        &["--tier", "store", "--strong"][..],
-        &["--tier", "strong", "--fast"][..],
-        &["--fast", "--strong"][..],
-        &["--balanced", "--strong"][..],
-        &["--store", "--strong"][..],
-        &["--tier", "bogus"][..],
-        &["--tier"][..],
-        &["--tier", "store", "--level", "3"][..],
-        &["--tier", "store", "--window-log", "20"][..],
-        &["--tier", "store", "--deflate-peel", "on"][..],
-        &["--tier", "fast", "--dict-size", "1048576"][..],
-        &["--tier", "balanced", "--no-dictionaries"][..],
+    // Each row: the extra arguments and the text the refusal must name (clap's wording for
+    // the conflicts, `lpk`'s own for a setting of another tier under `--tier`).
+    const STORE: &str = "cannot be used with '--tier store'";
+    const DICT: &str = "'--dict-size' requires the Balanced tier";
+    for (extra, reason) in [
+        (&["--tier", "fast", "--fast"][..], "cannot be used with"),
+        (&["--tier", "fast", "--balanced"][..], "cannot be used with"),
+        (&["--tier", "balanced", "--store"][..], "cannot be used with"),
+        (&["--tier", "store", "--strong"][..], "cannot be used with"),
+        (&["--tier", "strong", "--fast"][..], "cannot be used with"),
+        (&["--fast", "--strong"][..], "cannot be used with"),
+        (&["--balanced", "--strong"][..], "cannot be used with"),
+        (&["--store", "--strong"][..], "cannot be used with"),
+        (&["--tier", "bogus"][..], "invalid value 'bogus'"),
+        (&["--tier"][..], "--tier <TIER>"),
+        (&["--tier", "store", "--level", "3"][..], STORE),
+        (&["--tier", "store", "--window-log", "20"][..], STORE),
+        (&["--tier", "store", "--deflate-peel", "on"][..], STORE),
+        (&["--tier", "store", "--dict-size", "1048576"][..], DICT),
+        (&["--tier", "fast", "--dict-size", "1048576"][..], DICT),
+        (&["--fast", "--dict-size", "1048576"][..], DICT),
+        (&["--store", "--dict-size", "1048576"][..], DICT),
+        (&["--dict-size", "1048576"][..], DICT),
+        (
+            &["--tier", "balanced", "--no-dictionaries"][..],
+            "'--no-dictionaries' cannot be used with '--tier balanced'",
+        ),
     ] {
         let mut args = vec!["a", a, s];
         args.extend_from_slice(extra);
         let r = run(&args);
-        assert_eq!(r.status.code(), Some(1), "{extra:?}: {}", text(&r.stderr));
+        let e = text(&r.stderr);
+        assert_eq!(r.status.code(), Some(1), "{extra:?}: {e}");
+        assert!(e.contains(reason), "{extra:?}: {e}");
         assert!(!arch.exists(), "{extra:?}");
     }
 }

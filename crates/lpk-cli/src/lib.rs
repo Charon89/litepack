@@ -189,6 +189,10 @@ const DEFAULT_SUITE: Suite = Suite::AesGcm;
 const STRONG_RESERVED: &str =
     "the Strong tier arrives in Phase 2; --strong and --tier strong are reserved until then";
 
+/// The refusal of `--dict-size` under a tier other than Balanced, whatever its spelling.
+const DICT_SIZE_BALANCED: &str =
+    "the argument '--dict-size' requires the Balanced tier (--balanced or --tier balanced)";
+
 /// The value of `--tier`: the long form of the tier flags, which the GUI mirrors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum TierArg {
@@ -258,7 +262,7 @@ struct TierArgs {
     #[arg(long, value_name = "W", conflicts_with = "store")]
     window_log: Option<u32>,
     /// The Balanced tier's LZMA dictionary in bytes (default 64 MiB).
-    #[arg(long, value_name = "BYTES", requires = "balanced")]
+    #[arg(long, value_name = "BYTES")]
     dict_size: Option<u32>,
     /// Use no dictionaries (what the Fast tier does today: none is bundled).
     #[arg(long, conflicts_with = "balanced")]
@@ -285,7 +289,8 @@ impl TierArgs {
     /// The tier chosen, or the usage error that refuses the command line before anything is
     /// written: `--strong` and `--tier strong` (the Strong tier arrives in Phase 2), and a
     /// setting of one tier given with `--tier` naming another (the rules clap applies to the
-    /// tier flags, so `--tier X` and `--X` accept the same command lines).
+    /// tier flags, so `--tier X` and `--X` accept the same command lines); `--dict-size`, a
+    /// setting of the Balanced tier alone, is checked here for every spelling.
     fn tier(&self) -> Result<Tier, String> {
         if self.strong {
             return Err(STRONG_RESERVED.to_string());
@@ -299,14 +304,16 @@ impl TierArgs {
             None if self.balanced => Tier::Balanced,
             None => Tier::Fast,
         };
+        if self.dict_size.is_some() && tier != Tier::Balanced {
+            return Err(DICT_SIZE_BALANCED.to_string());
+        }
         if self.tier.is_some() {
             let settings: &[(&str, bool)] = match tier {
-                Tier::Fast => &[("--dict-size", self.dict_size.is_some())],
+                Tier::Fast => &[],
                 Tier::Balanced => &[("--no-dictionaries", self.no_dictionaries)],
                 Tier::Store => &[
                     ("--level", self.level.is_some()),
                     ("--window-log", self.window_log.is_some()),
-                    ("--dict-size", self.dict_size.is_some()),
                     ("--deflate-peel", self.deflate_peel.is_some()),
                 ],
             };
