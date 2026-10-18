@@ -309,7 +309,7 @@ impl LzmaEncoder {
     /// the raw LZMA stream with the end marker. The block declares the larger of the step's
     /// term (section 8) and the `lzma` step's own figure for its input of I(`plain_len`, B)
     /// bytes. A function of `plain` and the settings alone. `plain` must not be empty.
-    pub(crate) fn encode_bwt(&self, plain: &[u8], bwt_block: u32) -> Result<Encoded, FormatError> {
+    pub fn encode_bwt(&self, plain: &[u8], bwt_block: u32) -> Result<Encoded, FormatError> {
         let b = u32::try_from(plain.len())
             .unwrap_or(u32::MAX)
             .min(bwt_block)
