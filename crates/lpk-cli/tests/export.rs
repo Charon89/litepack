@@ -525,9 +525,32 @@ fn encrypt_writes_aes_entries_with_the_archives_password() {
     assert!(text(&r.stderr).contains("--encrypt"), "{}", text(&r.stderr));
     let key = work.path().join("k.bin");
     fs::write(&key, b"key").unwrap();
+    // On this password-only archive a keyfile is refused first (D-80, exit 2); on an
+    // archive sealed with a keyfile alone, --encrypt has no password to use (exit 1).
     let r = lpk(&[
+        "--json",
         "export",
         arch.to_str().unwrap(),
+        work.path().join("n.zip").to_str().unwrap(),
+        "--keyfile",
+        key.to_str().unwrap(),
+        "--encrypt",
+    ]);
+    assert_eq!(r.status.code(), Some(2), "{}", text(&r.stderr));
+    let e: serde_json::Value = serde_json::from_str(text(&r.stderr).trim()).unwrap();
+    assert_eq!(e["error"]["kind"], "UnneededKeyfile", "{e}");
+    let karch = work.path().join("k.lpk");
+    let a = lpk(&[
+        "a",
+        karch.to_str().unwrap(),
+        src.to_str().unwrap(),
+        "--keyfile",
+        key.to_str().unwrap(),
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let r = lpk(&[
+        "export",
+        karch.to_str().unwrap(),
         work.path().join("n.zip").to_str().unwrap(),
         "--keyfile",
         key.to_str().unwrap(),
@@ -540,6 +563,19 @@ fn encrypt_writes_aes_entries_with_the_archives_password() {
         text(&r.stderr)
     );
     assert!(!work.path().join("n.zip").exists());
+    // --force with a wrong password: the key slot is refused before the output is touched.
+    let kept = work.path().join("kept.zip");
+    fs::write(&kept, b"keep me").unwrap();
+    let r = lpk(&[
+        "export",
+        arch.to_str().unwrap(),
+        kept.to_str().unwrap(),
+        "--force",
+        "--password",
+        "wrong",
+    ]);
+    assert_eq!(r.status.code(), Some(2), "{}", text(&r.stderr));
+    assert_eq!(fs::read(&kept).unwrap(), b"keep me");
     let r = lpk(&[
         "--json",
         "export",
@@ -719,10 +755,60 @@ fn refusals_and_usage_errors_exit_as_the_contract_says() {
     assert_eq!(r.status.code(), Some(2), "{}", text(&r.stderr));
     assert!(text(&r.stderr).contains("--force"), "{}", text(&r.stderr));
     assert_eq!(fs::read(&z).unwrap(), b"old");
+    // --force with a refused budget: the plan is checked before the output is touched.
+    let r = lpk(&[
+        "export",
+        a,
+        z.to_str().unwrap(),
+        "--force",
+        "--memory",
+        "1000",
+    ]);
+    assert_eq!(r.status.code(), Some(2), "{}", text(&r.stderr));
+    assert_eq!(fs::read(&z).unwrap(), b"old");
     let r = lpk(&["export", a, z.to_str().unwrap(), "--force"]);
     assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
     assert!(fs::metadata(&z).unwrap().len() > 1000);
     assert_eq!(read_zip(&z, None).len(), 10);
+    // The output must not be the archive itself, whatever the spelling, even with --force.
+    let alias = work.path().join("t.lpk");
+    assert!(alias.exists());
+    let spelled = work.path().join(".").join("t.lpk");
+    for (args, out) in [
+        (
+            vec!["export", a, alias.to_str().unwrap(), "--force"],
+            &alias,
+        ),
+        (
+            vec!["export", a, spelled.to_str().unwrap(), "--force"],
+            &spelled,
+        ),
+    ] {
+        let r = lpk(&args);
+        assert_eq!(r.status.code(), Some(1), "{}", text(&r.stderr));
+        assert!(
+            text(&r.stderr).contains(".zip or .7z"),
+            "{}",
+            text(&r.stderr)
+        );
+        assert!(out.exists());
+    }
+    let same = work.path().join("same.zip");
+    fs::copy(&arch, &same).unwrap();
+    let spelled = work.path().join(".").join("same.zip");
+    let r = lpk(&[
+        "export",
+        same.to_str().unwrap(),
+        spelled.to_str().unwrap(),
+        "--force",
+    ]);
+    assert_eq!(r.status.code(), Some(2), "{}", text(&r.stderr));
+    assert!(
+        text(&r.stderr).contains("the output is the archive itself"),
+        "{}",
+        text(&r.stderr)
+    );
+    assert_eq!(fs::read(&same).unwrap(), fs::read(&arch).unwrap());
     // A missing archive: exit 2 and no output left behind.
     let missing = work.path().join("missing.lpk");
     let m = work.path().join("m.zip");
@@ -772,10 +858,115 @@ fn refusals_and_usage_errors_exit_as_the_contract_says() {
             "3",
         ]);
         assert_eq!(r.status.code(), Some(0), "{v}: {}", text(&r.stderr));
-        let got = read_zip(&out, None);
-        assert!(!got.is_empty(), "{v}");
+        // Every entry's content equals what `lpk x` writes (the peel reconstructed through
+        // the same reader), in the ZIP and in the 7z.
+        let xdir = work.path().join(format!("{v}.x"));
+        let x = lpk(&["x", p.to_str().unwrap(), xdir.to_str().unwrap()]);
+        assert_eq!(x.status.code(), Some(0), "{v}: {}", text(&x.stderr));
+        let want = tree(&xdir);
+        let got: BTreeMap<String, Option<[u8; 32]>> = read_zip(&out, None)
+            .into_iter()
+            .map(|(name, (data, is_dir, _, _, _, _, _, _))| {
+                if is_dir {
+                    (name.trim_end_matches('/').to_string(), None)
+                } else {
+                    (name, Some(*blake3::hash(&data).as_bytes()))
+                }
+            })
+            .collect();
+        assert_eq!(got, want, "{v}: the ZIP differs from lpk x");
+        assert!(want.values().any(|h| h.is_some()), "{v}");
         unzip_test(&out);
+        let out7 = work.path().join(format!("{v}.7z"));
+        let r = lpk(&["export", p.to_str().unwrap(), out7.to_str().unwrap()]);
+        assert_eq!(r.status.code(), Some(0), "{v}: {}", text(&r.stderr));
+        let mut rd = sevenz_rust2::ArchiveReader::new(
+            fs::File::open(&out7).unwrap(),
+            sevenz_rust2::Password::empty(),
+        )
+        .unwrap();
+        let mut got7: BTreeMap<String, Option<[u8; 32]>> = BTreeMap::new();
+        rd.for_each_entries(|e, data| {
+            let name = e.name().replace('\\', "/");
+            if e.is_directory() {
+                got7.insert(name, None);
+            } else {
+                let mut d = Vec::new();
+                data.read_to_end(&mut d).unwrap();
+                got7.insert(name, Some(*blake3::hash(&d).as_bytes()));
+            }
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(got7, want, "{v}: the 7z differs from lpk x");
+        seven_zip_round_trip(&out7, None, &want);
     }
+}
+
+/// More entries than a ZIP's 16-bit count holds: 70,000 empty files, the central directory
+/// counted in Zip64 form; the crate's reader sees them all and 7-Zip tests the file.
+#[test]
+fn seventy_thousand_entries_need_a_zip64_central_directory() {
+    use lpk_format::{EntryFlags, Writer, WriterOptions};
+    const N: usize = 70_000;
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("many.lpk");
+    {
+        let mut out = fs::File::create(&arch).unwrap();
+        let mut w = Writer::new(&mut out, WriterOptions::default()).unwrap();
+        for i in 0..N {
+            w.add_file(
+                &format!("d{:02}/f{i:06}", i % 100),
+                EntryFlags::EMPTY,
+                0,
+                &mut &b""[..],
+            )
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+    let out = work.path().join("many.zip");
+    let r = lpk(&[
+        "export",
+        arch.to_str().unwrap(),
+        out.to_str().unwrap(),
+        "-v",
+    ]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert!(
+        text(&r.stdout).starts_with("exported 70000 files, 0 directories"),
+        "{}",
+        text(&r.stdout)
+    );
+    assert!(
+        text(&r.stderr).contains("for 70000 entries"),
+        "{}",
+        text(&r.stderr)
+    );
+    let z = zip::ZipArchive::new(fs::File::open(&out).unwrap()).unwrap();
+    assert_eq!(z.len(), N);
+    drop(z);
+    if let Some(exe) = seven_zip() {
+        let r = Command::new(exe)
+            .arg("t")
+            .arg("-bd")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert_eq!(
+            r.status.code(),
+            Some(0),
+            "7z t: {}{}",
+            text(&r.stdout),
+            text(&r.stderr)
+        );
+        assert!(
+            text(&r.stdout).contains("Files: 70000"),
+            "{}",
+            text(&r.stdout)
+        );
+    }
+    unzip_test(&out);
 }
 
 /// A file above 4 GiB (all zeros: the archive deduplicates it to a few chunks, so the test

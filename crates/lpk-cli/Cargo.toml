@@ -15,10 +15,12 @@ path = "src/main.rs"
 clap = { version = "4.6.7", features = ["derive"] }
 lpk-core = { path = "../lpk-core", version = "0.0.1" }
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
+rpassword = "7.5.4"
 serde_json = "1.0.151"
+zeroize = "1.9.0"
 # `lpk export`: 7z through sevenz-rust2 (Apache-2.0; already in the tree for lpk-bench's
-# corpus extraction): LZMA2, Deflate, zstd and store, AES-256 with the archive's password.
-sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["compress", "deflate", "zstd", "aes256"] }
+# corpus extraction): LZMA2, Deflate and store, AES-256 with the archive's password.
+sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["compress", "deflate", "aes256"] }
 # `lpk export`: ZIP through the zip crate (MIT; lpk-core's Deflate peel already reads with it):
 # Deflate (flate2 with the zlib-rs backend), zstd (method 93), store; AES-256 (AE-2).
 zip = { version = "9.0.4", default-features = false, features = ["deflate", "zstd", "aes-crypto"] }

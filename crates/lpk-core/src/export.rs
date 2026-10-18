@@ -94,6 +94,8 @@ pub struct ExportSummary {
     pub nested_decodes: u64,
     /// Chunk placements (a deduplicated chunk counts once per place).
     pub placements: u64,
+    /// The bytes of every entry's path (what a container's directory holds per name).
+    pub name_bytes: u64,
     /// Block visits: maximal stretches of consecutive places in one block.
     pub visits: u64,
     /// Decode workers (1 on the sequential path).
@@ -136,6 +138,9 @@ struct Run {
     hit: bool,
     /// The cached block to drop before this run's block is decoded.
     evict: Option<usize>,
+    /// No later run uses the block: it is dropped after this run instead of cached, so its
+    /// permit goes back to the decoders.
+    last: bool,
 }
 
 struct Plan {
@@ -204,6 +209,7 @@ fn plan<R: Read + Seek>(archive: &mut Archive<R>) -> Result<Plan, CoreError> {
                             end: places.len(),
                             hit: false,
                             evict: None,
+                            last: false,
                         }),
                     }
                     off =
@@ -242,8 +248,9 @@ fn plan<R: Read + Seek>(archive: &mut Archive<R>) -> Result<Plan, CoreError> {
 }
 
 /// Belady's schedule over `runs` for a cache of `capacity` blocks: marks each run a hit or a
-/// miss, names the block a miss evicts, and returns the misses' blocks in order (what the
-/// decoders decode). With capacity 0 every run is a miss and nothing is kept.
+/// miss, names the block a miss evicts, marks a run after which its block is never used
+/// again (dropped, not cached), and returns the misses' blocks in order (what the decoders
+/// decode). With capacity 0 every run is a miss and nothing is kept.
 fn schedule(runs: &mut [Run], capacity: usize) -> Vec<usize> {
     // The next run of each block after run i (`usize::MAX`: none).
     let mut next_use = vec![usize::MAX; runs.len()];
@@ -261,14 +268,19 @@ fn schedule(runs: &mut [Run], capacity: usize) -> Vec<usize> {
     for (i, r) in runs.iter_mut().enumerate() {
         r.hit = false;
         r.evict = None;
+        r.last = next_use[i] == usize::MAX;
         if let Some(nu) = cached.get_mut(&r.block) {
             r.hit = true;
-            *nu = next_use[i];
-            heap.push((next_use[i], r.block));
+            if r.last {
+                cached.remove(&r.block);
+            } else {
+                *nu = next_use[i];
+                heap.push((next_use[i], r.block));
+            }
             continue;
         }
         misses.push(r.block);
-        if capacity == 0 {
+        if capacity == 0 || r.last {
             continue;
         }
         if cached.len() >= capacity {
@@ -436,11 +448,15 @@ impl<R: Read + Seek> Stream<'_, '_, R> {
         self.current = None;
         let r = self.runs[run];
         let held = if r.hit {
-            Arc::clone(
+            let held = Arc::clone(
                 self.cache
                     .get(&r.block)
                     .ok_or(CoreError::Extract("a scheduled hit is not in the cache"))?,
-            )
+            );
+            if r.last {
+                self.cache.remove(&r.block);
+            }
+            held
         } else {
             if let Some(x) = r.evict {
                 self.cache.remove(&x);
@@ -451,7 +467,7 @@ impl<R: Read + Seek> Stream<'_, '_, R> {
                 plain,
                 permits: self.permits,
             });
-            if self.capacity > 0 {
+            if self.capacity > 0 && !r.last {
                 self.cache.insert(r.block, Arc::clone(&held));
             }
             held
@@ -777,6 +793,7 @@ where
         redecodes: decoded.saturating_sub(needed.len() as u64),
         nested_decodes: reads.load(Ordering::Relaxed).saturating_sub(decoded),
         placements: places.len() as u64,
+        name_bytes,
         visits: runs.len() as u64,
         workers,
         in_flight: held,
@@ -785,17 +802,17 @@ where
     })
 }
 
-/// Open the archive file at `path` with the full reader and the given prior files' contents,
-/// and export it into `sink` (each decode worker opens the file again). `credentials` open an
-/// encrypted archive as [`crate::extract_file`] does: a wrong password is `WrongKey`, a
-/// missing one `PasswordRequired`, both before the sink is called.
-pub fn export_file(
+/// Open the archive file at `path` with the full reader (revision 1.1's `jpeg-reconstruct`)
+/// and the given prior files' contents, as [`export_file`] does before exporting: a wrong
+/// password is `WrongKey` at the key slot and a missing one `PasswordRequired`; `opts.memory`
+/// is the reader's decode memory too, so an archive whose envelope needs more is refused
+/// here. Nothing is written by this step.
+pub fn open_file(
     path: &Path,
     priors: &[Vec<u8>],
     credentials: Option<&Credentials>,
-    sink: &mut dyn Sink,
     opts: &ExtractOptions,
-) -> Result<ExportSummary, CoreError> {
+) -> Result<Archive<std::fs::File>, CoreError> {
     let file = std::fs::File::open(path).map_err(|e| CoreError::io(path, e))?;
     let resources = lpk_format::Resources {
         memory: opts
@@ -812,6 +829,19 @@ pub fn export_file(
         a.set_priors(Box::new(store));
     }
     crate::register_full_reader(&mut a);
+    Ok(a)
+}
+
+/// [`open_file`], then [`export_archive`] into `sink` (each decode worker opens the file
+/// again).
+pub fn export_file(
+    path: &Path,
+    priors: &[Vec<u8>],
+    credentials: Option<&Credentials>,
+    sink: &mut dyn Sink,
+    opts: &ExtractOptions,
+) -> Result<ExportSummary, CoreError> {
+    let mut a = open_file(path, priors, credentials, opts)?;
     export_archive(&mut a, || std::fs::File::open(path), sink, opts)
 }
 
@@ -828,6 +858,7 @@ mod tests {
                 end: i + 1,
                 hit: false,
                 evict: None,
+                last: false,
             })
             .collect()
     }
@@ -837,10 +868,15 @@ mod tests {
     fn replay(runs: &[Run], capacity: usize) -> usize {
         let mut cache: std::collections::HashSet<usize> = Default::default();
         let mut misses = 0;
-        for r in runs {
+        for (i, r) in runs.iter().enumerate() {
+            let used_later = runs[i + 1..].iter().any(|l| l.block == r.block);
+            assert_eq!(r.last, !used_later, "run {i}");
             if r.hit {
                 assert!(cache.contains(&r.block), "hit on {} not cached", r.block);
                 assert_eq!(r.evict, None);
+                if r.last {
+                    cache.remove(&r.block);
+                }
                 continue;
             }
             misses += 1;
@@ -848,7 +884,7 @@ mod tests {
             if let Some(x) = r.evict {
                 assert!(cache.remove(&x), "evicting {x} not cached");
             }
-            if capacity > 0 {
+            if capacity > 0 && !r.last {
                 cache.insert(r.block);
             }
             assert!(cache.len() <= capacity);
@@ -870,9 +906,11 @@ mod tests {
         let mut r = runs(&[0, 1, 2, 0, 1]);
         let misses = schedule(&mut r, 2);
         assert_eq!(misses, [0, 1, 2, 1]);
-        assert_eq!(r[2].evict, Some(1));
-        assert!(r[3].hit);
-        assert_eq!(r[4].evict, Some(2));
+        // Block 2 is never used again: dropped after its run, nothing evicted for it.
+        assert_eq!(r[2].evict, None);
+        assert!(r[2].last);
+        assert!(r[3].hit && r[3].last);
+        assert_eq!(r[4].evict, None);
         assert_eq!(replay(&r, 2), 4);
     }
 
@@ -899,8 +937,13 @@ mod tests {
         let mut r = runs(&[0, 1, 0, 2, 0, 1]);
         let misses = schedule(&mut r, 2);
         assert_eq!(misses, [0, 1, 2, 1]);
-        assert_eq!(r[3].evict, Some(1));
+        assert_eq!(r[3].evict, None, "2 is last: not cached, nothing evicted");
         assert!(r[4].hit);
         assert_eq!(replay(&r, 2), 4);
+        // With one slot: 0, 1 evicts 0, 0 evicts 1, 2 (last, dropped), 0 hit and last, 1 miss.
+        let mut r = runs(&[0, 1, 0, 2, 0, 1]);
+        let misses = schedule(&mut r, 1);
+        assert_eq!(misses, [0, 1, 0, 2, 1]);
+        assert_eq!(replay(&r, 1), 5);
     }
 }

@@ -11,11 +11,18 @@
 //! tool's code (`lpk_format::cli::run_with`). Both use
 //! `lpk-core`'s full reader (revision 1.1's `jpeg-reconstruct`), so peeled files extract and
 //! verify.
-//! Encryption: `--password`, `--password-file` and `--keyfile` are read here for `a` and `x`
-//! (the format tool's rules: one trailing newline is not part of a password file; a keyfile
-//! alone means an empty password) and passed through to the reference tool for `t`, `check`
-//! and `repair`. A password is never printed or logged. `x` opens the key slot before anything
-//! is written: a wrong or missing password leaves no output directory.
+//! Encryption: `--password`, `--password-file`, `--password-prompt` and `--keyfile` are read
+//! here for every command (the format tool's rules: one trailing newline is not part of a
+//! password file; a keyfile alone means an empty password) into memory that is wiped
+//! ([`zeroize::Zeroizing`], then the format's `Credentials`) and handed to the reference tool
+//! as a typed value (`lpk_format::cli::run_with_credentials`), never as an argument string. A
+//! password is never printed or logged. `x` opens the key slot before anything is written: a
+//! wrong or missing password leaves no output directory. A `--keyfile` on an archive whose
+//! key slot takes none is refused (exit 2, `UnneededKeyfile`).
+//! Prompting ([`prompt`]): `--password-prompt` reads the password from the terminal without
+//! echo (twice on `a`); without it a prompt happens only when stdin and stderr are terminals
+//! and the archive needs a credential that was not given; through a pipe (the benchmark
+//! runner) there is never a prompt, the command fails with `PasswordRequired`.
 //! Tiers: `--fast` (the default), `--balanced`, `--store`, or `--tier <name>` as their long form
 //! (what the GUI mirrors); `--strong` and `--tier strong` are reserved for the Strong tier
 //! (Phase 2) and refused as a usage error.
@@ -29,13 +36,14 @@
 //! the whole plan) without a tree on disk; `--method`, `--encrypt` with the archive's
 //! password, `--force` to replace an existing output.
 //! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation ([`failure`]: one line
-//! `error: ...` on stderr, or with the global `--json` flag one JSON object line). Nothing is
-//! ever prompted; progress goes to stderr and only with `-v`.
+//! `error: ...` on stderr, or with the global `--json` flag one JSON object line). Progress
+//! goes to stderr and only with `-v`.
 #![forbid(unsafe_code)]
 
 pub mod export;
 pub mod failure;
 pub mod list;
+pub mod prompt;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -46,10 +54,12 @@ use lpk_core::{
     BalancedOptions, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions,
 };
 use lpk_format::{Argon2Params, Credentials, FormatError, Resources, Suite};
+use zeroize::Zeroizing;
 
 pub use export::{Container, Method};
 pub use failure::{core_exit, format_exit, EntryFailure, Failure};
 pub use list::{list_archive, ListOptions};
+pub use prompt::Terminal;
 
 /// Exit code: success.
 pub const EXIT_OK: i32 = 0;
@@ -69,10 +79,13 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("LPK_GIT_COMM
     after_help = "Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure \
                   is one line on stderr, `error: <message>`; with --json it is one JSON object \
                   line instead: {\"error\":{\"code\":1|2,\"kind\":\"<the error's variant name; \
-                  Usage for a command-line error; Reference for a failure reported by the \
-                  reference tool's code>\",\"message\":\"...\",\"path\":\"<the path the error \
+                  Usage for a command-line error; UnneededKeyfile for a --keyfile the archive \
+                  does not take>\",\"message\":\"...\",\"path\":\"<the path the error \
                   names, else the archive>\",\"entries\":[{\"path\",\"kind\",\"message\"}, the \
-                  per-entry errors of a partial extraction, when there are some]}}."
+                  per-entry errors of a partial extraction, when there are some]}}. A password \
+                  is asked for on the terminal only with --password-prompt, or when stdin and \
+                  stderr are terminals and the archive needs one that was not given; never \
+                  through a pipe."
 )]
 struct Cli {
     /// Machine-readable output: `l` prints one JSON object per entry per line, and any failing
@@ -107,7 +120,8 @@ enum Command {
     /// chunks. A failed append leaves the archive as it was.
     Append(AppendArgs),
     /// Truncate an archive to the end of an earlier generation (in place; `info` lists them).
-    /// Also recovers an archive whose last append was cut short.
+    /// Also recovers an archive whose last append was cut short. No key is needed: the
+    /// credential flags, --password-prompt included, are accepted and ignored.
     Rollback(RollbackArgs),
     /// Print an archive's header, envelope, counts and generations.
     Info(InfoArgs),
@@ -134,9 +148,17 @@ or store; --encrypt writes AES-256 (AE-2) entries with the archive's password.
 
 7z: one entry per archive entry, each in its own stream (an empty file as a stream-less \
 entry); --method lzma2 (default), deflate or store (zstd inside 7z is a fork extension 7-Zip \
-does not read: refused); --encrypt writes AES-256 with an encrypted header. Both writers run \
-in process. An existing output is refused unless --force replaces it. A failed export removes \
-the output.";
+does not read: refused); --encrypt writes AES-256 with an encrypted header.
+
+Names are written as the archive stores them: the format's reader already refuses absolute \
+paths and `..`; a colon, a device name or a trailing dot or space goes through as-is for the \
+consumer's extractor to sanitise. Both writers run in process. The archive, its key slot and \
+the plan are checked before the output exists; the output is refused when it is the archive \
+itself, and when it exists unless --force replaces it (touched only once the export writes). \
+A failed export removes the output; a panic leaves it in place. Outside the memory budget: \
+the writer's directory, kept until the end (ZIP's central directory about 200 bytes plus the \
+name per entry, 7z's entry table about 100 plus the name), and its compressor (Deflate under \
+1 MiB, zstd a few MiB, LZMA2 about eleven times its 16 MiB dictionary); -v prints the figures.";
 
 /// The long help of `l`: the columns and the keys of a `--json` line.
 const LIST_ABOUT: &str = "\
@@ -158,20 +180,33 @@ A sealed archive written with --listable lists without its key; one that was not
 with PasswordRequired (exit 2) unless a credential is given.";
 
 /// The key material of an encrypted archive; `a` seals with it, every other command opens
-/// with it. Either a password (one of the two forms) or a keyfile or both.
+/// with it. A password (one of the three forms) or a keyfile or both.
 #[derive(Args)]
 #[group(id = "credential", multiple = true)]
 struct CredentialArgs {
     /// The password. Visible in the process list and the shell history; prefer
-    /// --password-file.
-    #[arg(long, value_name = "STR", conflicts_with = "password_file")]
-    password: Option<String>,
+    /// --password-file or --password-prompt.
+    #[arg(long, value_name = "STR", value_parser = secret,
+          conflicts_with_all = ["password_file", "password_prompt"])]
+    password: Option<Zeroizing<String>>,
     /// A file holding the password; one trailing newline is not part of it.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", conflicts_with = "password_prompt")]
     password_file: Option<PathBuf>,
-    /// A keyfile as a second factor (alone: the password is empty).
+    /// Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin
+    /// and stderr to be terminals, else refused (exit 1). Without this flag the password is
+    /// asked for only when the archive needs one that was not given and stdin and stderr are
+    /// terminals; through a pipe the command fails with PasswordRequired instead.
+    #[arg(long)]
+    password_prompt: bool,
+    /// A keyfile as a second factor (alone: the password is empty). Refused on an archive
+    /// whose key slot takes none.
     #[arg(long, value_name = "PATH")]
     keyfile: Option<PathBuf>,
+}
+
+/// `--password`'s value in memory that is wiped when it is dropped.
+fn secret(s: &str) -> Result<Zeroizing<String>, String> {
+    Ok(Zeroizing::new(s.to_string()))
 }
 
 /// The password is redacted (as `lpk_format::Credentials` does); the two paths are shown.
@@ -180,69 +215,147 @@ impl std::fmt::Debug for CredentialArgs {
         f.debug_struct("CredentialArgs")
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("password_file", &self.password_file)
+            .field("password_prompt", &self.password_prompt)
             .field("keyfile", &self.keyfile)
             .finish()
     }
 }
 
+/// Whether the credentials seal a new archive (`a`) or open an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Use {
+    /// `a`: a prompted password is confirmed; no archive to check the keyfile against.
+    Create,
+    /// Every other command: a `--keyfile` the archive's key slot does not take is refused.
+    Open,
+}
+
+/// The kind of the refusal of a `--keyfile` on an archive whose key slot takes none.
+pub const UNNEEDED_KEYFILE: &str = "UnneededKeyfile";
+
 impl CredentialArgs {
-    /// True when any credential was given.
+    /// True when any credential was given (a prompt asked for counts: it is read before the
+    /// command runs).
     fn given(&self) -> bool {
-        self.password.is_some() || self.password_file.is_some() || self.keyfile.is_some()
+        self.password.is_some()
+            || self.password_file.is_some()
+            || self.password_prompt
+            || self.keyfile.is_some()
     }
 
-    /// The credentials, read as the format tool reads them (the password moves out of the
-    /// parsed arguments into `Credentials`, which wipes it on drop). `None` when nothing was
-    /// given.
-    fn take(&mut self) -> Result<Option<Credentials>, Failure> {
+    /// The credentials, read as the format tool reads them, in memory that is wiped: the
+    /// password moves out of the parsed arguments (or is read from its file, or asked for on
+    /// `terminal` with `--password-prompt`, confirmed for [`Use::Create`]) into
+    /// `Credentials`, which wipes it on drop. `None` when nothing was given. A credential file
+    /// that cannot be read names that file; a `--keyfile` on an existing archive whose key
+    /// slot takes none is refused ([`UNNEEDED_KEYFILE`], exit 2) before the command runs.
+    fn resolve(
+        &mut self,
+        terminal: &Terminal,
+        archive: &Path,
+        purpose: Use,
+    ) -> Result<Option<Credentials>, Failure> {
         let unreadable = |f: &Path, e: std::io::Error| {
             Failure::failed("Io", format!("{}: {e}", f.display()), Some(f))
         };
-        let password = match (self.password.take(), &self.password_file) {
-            (Some(p), _) => Some(p.into_bytes()),
-            (None, Some(f)) => {
-                let mut b = std::fs::read(f).map_err(|e| unreadable(f, e))?;
-                if b.ends_with(b"\n") {
-                    b.pop();
-                    if b.ends_with(b"\r") {
-                        b.pop();
-                    }
-                }
-                Some(b)
-            }
-            (None, None) => None,
-        };
         let keyfile = match &self.keyfile {
-            Some(f) => Some(std::fs::read(f).map_err(|e| unreadable(f, e))?),
+            Some(f) => {
+                let bytes = std::fs::read(f).map_err(|e| unreadable(f, e))?;
+                if purpose == Use::Open {
+                    check_keyfile_needed(archive)?;
+                }
+                Some(bytes)
+            }
             None => None,
+        };
+        let password: Option<Zeroizing<Vec<u8>>> = if self.password_prompt {
+            Some(terminal.read_password(archive, purpose == Use::Create)?)
+        } else {
+            match (self.password.take(), &self.password_file) {
+                (Some(p), _) => {
+                    // The bytes move; the wrapper left behind is wiped as it drops.
+                    let mut p = p;
+                    Some(Zeroizing::new(std::mem::take(&mut *p).into_bytes()))
+                }
+                (None, Some(f)) => {
+                    let mut b = Zeroizing::new(std::fs::read(f).map_err(|e| unreadable(f, e))?);
+                    if b.ends_with(b"\n") {
+                        b.pop();
+                        if b.ends_with(b"\r") {
+                            b.pop();
+                        }
+                    }
+                    Some(b)
+                }
+                (None, None) => None,
+            }
         };
         Ok(match (password, keyfile) {
             (None, None) => None,
             (p, keyfile) => Some(Credentials {
-                password: p.unwrap_or_default(),
+                password: p.map(|mut p| std::mem::take(&mut *p)).unwrap_or_default(),
                 keyfile,
             }),
         })
     }
+}
 
-    /// The same credentials as global arguments of the reference tool (`--password=STR`,
-    /// `--password-file=PATH`, `--keyfile=PATH`), which applies the same rules itself.
-    fn reference_args(&self) -> Vec<OsString> {
-        let mut v = Vec::new();
-        if let Some(p) = &self.password {
-            v.push(OsString::from(format!("--password={p}")));
+/// The refusal of a `--keyfile` on an archive that is encrypted with a password alone: the
+/// header and the key slot are read, nothing more (a plain archive, or one that cannot be
+/// read, passes: the command reports it). Exit 2 as a refused operation naming the archive
+/// (D-77's table: the command line alone is not at fault, the archive decides).
+fn check_keyfile_needed(archive: &Path) -> Result<(), Failure> {
+    let Ok(mut file) = std::fs::File::open(archive) else {
+        return Ok(());
+    };
+    let Ok(header) = lpk_format::Header::read(&mut file) else {
+        return Ok(());
+    };
+    if !header.flags.contains(lpk_format::HeaderFlags::ENCRYPTED) {
+        return Ok(());
+    }
+    match lpk_format::read_key_slot(&mut file) {
+        Ok((slot, _)) if !slot.keyfile_required => Err(Failure::failed(
+            UNNEEDED_KEYFILE,
+            format!(
+                "{}: the archive's key slot takes no keyfile; --keyfile is not needed",
+                archive.display()
+            ),
+            Some(archive),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Run `f` with the credentials the command line gave; when it reports that the archive
+/// needs a credential (`PasswordRequired`, `AppendNeedsCredentials`), none was given and
+/// `terminal` is interactive, ask for the password once and run `f` again with it. Every
+/// command this covers refuses before it writes anything, so the second run starts clean.
+fn with_credentials(
+    given: Option<Credentials>,
+    args: &CredentialArgs,
+    archive: &Path,
+    terminal: &Terminal,
+    mut f: impl FnMut(Option<&Credentials>) -> Result<(), Failure>,
+) -> Result<(), Failure> {
+    match f(given.as_ref()) {
+        Err(e)
+            if given.is_none()
+                && !args.given()
+                && terminal.interactive()
+                && matches!(
+                    e.kind.as_str(),
+                    "PasswordRequired" | "AppendNeedsCredentials"
+                ) =>
+        {
+            let mut password = terminal.read_password(archive, false)?;
+            let credentials = Credentials {
+                password: std::mem::take(&mut *password),
+                keyfile: None,
+            };
+            f(Some(&credentials))
         }
-        for (flag, path) in [
-            ("--password-file=", &self.password_file),
-            ("--keyfile=", &self.keyfile),
-        ] {
-            if let Some(path) = path {
-                let mut a = OsString::from(flag);
-                a.push(path);
-                v.push(a);
-            }
-        }
-        v
+        r => r,
     }
 }
 
@@ -604,7 +717,8 @@ struct RollbackArgs {
     archive: PathBuf,
     /// The generation to keep (0 is the first write; `info` shows the latest).
     generation: u64,
-    /// Accepted for symmetry; no key is needed to roll back.
+    /// Accepted for symmetry and ignored (--password-prompt included: nothing is asked for);
+    /// no key is needed to roll back.
     #[command(flatten)]
     credentials: CredentialArgs,
 }
@@ -724,18 +838,16 @@ fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
     pipeline
 }
 
-fn add(a: &mut AddArgs, err: &mut dyn Write) -> Result<(), Failure> {
+fn add(a: &AddArgs, credentials: Option<Credentials>, err: &mut dyn Write) -> Result<(), Failure> {
     let tier = a.tier.tier().map_err(Failure::usage)?;
-    // Decided before `take` moves the password out of the arguments: what the `-v` report
-    // says the archive is sealed with.
-    let sealing = a.credentials.given().then(|| {
+    // What the `-v` report says the archive is sealed with.
+    let sealing = credentials.is_some().then(|| {
         format!(
             "{}{}",
             a.suite.map_or(DEFAULT_SUITE, Suite::from).name(),
             if a.listable { ", listable" } else { "" }
         )
     });
-    let credentials = a.credentials.take()?;
     let mut pipeline = build_pipeline(&a.tier, tier);
     if let Some(credentials) = credentials {
         pipeline.seal.writer.seal = Some(lpk_format::SealOptions {
@@ -756,18 +868,20 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> Result<(), Failure> {
     Ok(())
 }
 
-fn append(a: &mut AppendArgs, err: &mut dyn Write) -> Result<(), Failure> {
+fn append(
+    a: &AppendArgs,
+    credentials: Option<&Credentials>,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
     let tier = a.tier.tier().map_err(Failure::usage)?;
     // The new generation is sealed with the archive's own key (the suite is the archive's).
-    let sealing = a
-        .credentials
-        .given()
+    let sealing = credentials
+        .is_some()
         .then(|| "the archive's key".to_string());
-    let credentials = a.credentials.take()?;
     let mut pipeline = build_pipeline(&a.tier, tier);
     pipeline.seal.writer.recovery.percent = a.recovery;
     let s = pipeline
-        .append_file(&a.input, &a.archive, credentials.as_ref())
+        .append_file(&a.input, &a.archive, credentials)
         .map_err(|e| Failure::core(&e, Some(&a.archive)))?;
     records_cap_note(err, &s.peel.deflate);
     if a.verbose {
@@ -1014,12 +1128,12 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
 }
 
 fn extract(
-    x: &mut ExtractArgs,
+    x: &ExtractArgs,
+    credentials: Option<&Credentials>,
     json: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let credentials = x.credentials.take()?;
     let mut priors = Vec::with_capacity(x.priors.len());
     for p in &x.priors {
         let b = std::fs::read(p)
@@ -1044,14 +1158,7 @@ fn extract(
         lpk_core::Symlinks::Skip
     };
     let policy = lpk_core::Policy::new(x.overwrite.into(), symlinks);
-    let r = lpk_core::extract_file(
-        &x.archive,
-        &x.outdir,
-        &priors,
-        credentials.as_ref(),
-        &policy,
-        &opts,
-    );
+    let r = lpk_core::extract_file(&x.archive, &x.outdir, &priors, credentials, &policy, &opts);
     // On failure the error line is the only stderr output (D-77 (3)): the warnings are
     // printed only after success, one line per skipped symlink entry, then the counts.
     let s = r.map_err(|e| Failure::core(&e, Some(&x.archive)))?;
@@ -1162,10 +1269,16 @@ fn extract(
 }
 
 /// `lpk export`: the container by the output's extension, the method by the container, the
-/// credentials as `x` takes them, the output created (refused when it exists unless
-/// `--force`), the engine's export into the writer, then the writer's trailer. A failure at
-/// any point after the output was created removes it.
-fn export(x: &mut ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Failure> {
+/// archive opened with the credentials (its key slot, then the plan and the pool, every
+/// refusal before the output exists), the output refused when it is the archive or when it
+/// exists without `--force`, then created at the first entry and removed on failure (an
+/// existing output replaced under `--force` is touched only once the export writes).
+fn export(
+    x: &ExportArgs,
+    credentials: Option<&Credentials>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
     let container = Container::of(&x.out).ok_or_else(|| {
         Failure::usage(format!(
             "{}: the output must end in .zip or .7z",
@@ -1190,9 +1303,8 @@ fn export(x: &mut ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> Resul
             "--threads: at most {max} (four times the logical cores) on this machine"
         )));
     }
-    let credentials = x.credentials.take()?;
     let password = if x.encrypt {
-        match credentials.as_ref().map(|c| c.password.as_slice()) {
+        match credentials.map(|c| c.password.as_slice()) {
             Some(p) if !p.is_empty() => Some(p),
             _ => {
                 return Err(Failure::usage(
@@ -1214,38 +1326,65 @@ fn export(x: &mut ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> Resul
         memory: x.memory,
         ..lpk_core::ExtractOptions::default()
     };
-    let mut open = std::fs::OpenOptions::new();
-    open.write(true);
-    if x.force {
-        open.create(true).truncate(true);
-    } else {
-        open.create_new(true);
-    }
-    let file = open.open(&x.out).map_err(|e| {
-        let message = if e.kind() == std::io::ErrorKind::AlreadyExists {
-            format!("{}: exists (--force replaces it)", x.out.display())
-        } else {
-            format!("{}: {e}", x.out.display())
+    // The output must not be the archive (whatever the spelling of either path), and an
+    // existing one is refused unless --force; both before the archive is opened.
+    let existing = std::fs::metadata(&x.out).is_ok();
+    if existing {
+        let same = match (
+            std::fs::canonicalize(&x.archive),
+            std::fs::canonicalize(&x.out),
+        ) {
+            (Ok(a), Ok(o)) => a == o,
+            _ => false,
         };
-        Failure::failed("Io", message, Some(&x.out))
-    })?;
+        if same {
+            return Err(Failure::failed(
+                "Io",
+                format!("{}: the output is the archive itself", x.out.display()),
+                Some(&x.out),
+            ));
+        }
+        if !x.force {
+            return Err(Failure::failed(
+                "Io",
+                format!("{}: exists (--force replaces it)", x.out.display()),
+                Some(&x.out),
+            ));
+        }
+    }
+    // The archive, its key slot and its priors: a wrong or missing password, an unreadable
+    // archive or an envelope over the budget are refused here, before any output exists.
+    let mut archive = lpk_core::export::open_file(&x.archive, &priors, credentials, &opts)
+        .map_err(|e| Failure::core(&e, Some(&x.archive)))?;
     let settings = export::Settings { method, password };
-    let run = || -> Result<lpk_core::ExportSummary, lpk_core::CoreError> {
-        let mut writer = export::open(container, file, &x.out, settings)?;
-        let s = lpk_core::export_file(
-            &x.archive,
-            &priors,
-            credentials.as_ref(),
-            writer.as_mut(),
-            &opts,
-        )?;
-        writer.finish()?;
-        Ok(s)
+    let out_path = x.out.clone();
+    let opener = move || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&out_path)
     };
-    let s = match run() {
+    let mut writer = export::open(container, Box::new(opener), &x.out, settings);
+    let r = lpk_core::export_archive(
+        &mut archive,
+        || std::fs::File::open(&x.archive),
+        writer.as_mut(),
+        &opts,
+    );
+    // Only an output this export created (or truncated under --force) is removed on
+    // failure; an existing one a refusal left untouched stays as it was.
+    let created = writer.created();
+    // (The trailer opens the output when no entry did, so its failure always removes.)
+    let r = r
+        .map_err(|e| (e, created))
+        .and_then(|s| writer.finish().map(|()| s).map_err(|e| (e, true)));
+    let s = match r {
         Ok(s) => s,
-        Err(e) => {
-            let _ = std::fs::remove_file(&x.out);
+        Err((e, created)) => {
+            if created {
+                let _ = std::fs::remove_file(&x.out);
+            }
             return Err(Failure::core(&e, Some(&x.archive)));
         }
     };
@@ -1274,9 +1413,10 @@ fn export(x: &mut ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> Resul
             s.nested_decodes
         );
         let m = &s.memory;
+        let entries = s.files + s.directories + s.symlinks;
         let _ = writeln!(
             err,
-            "memory: budget {} bytes ({}); envelope tier {}; per block {} bytes; fixed {} bytes (shared {}, per worker {}); counted {} bytes for {} blocks held and {} workers; the writer's own memory is not counted",
+            "memory: budget {} bytes ({}); envelope tier {}; per block {} bytes; fixed {} bytes (shared {}, per worker {}); counted {} bytes for {} blocks held and {} workers; not counted: the writer's own memory, {} (about {} bytes for {} entries) plus its compressor ({})",
             m.budget.bytes,
             m.budget.source.name(),
             m.tier.name(),
@@ -1286,7 +1426,14 @@ fn export(x: &mut ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> Resul
             m.per_worker,
             s.counted(),
             s.in_flight,
-            s.workers
+            s.workers,
+            match container {
+                Container::Zip => "the ZIP central directory kept until the end",
+                Container::SevenZ => "the 7z entry table kept until the end",
+            },
+            export::directory_estimate(container, entries, s.name_bytes),
+            entries,
+            export::compressor_memory(container, method)
         );
     }
     let _ = writeln!(
@@ -1300,60 +1447,36 @@ fn export(x: &mut ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> Resul
     Ok(())
 }
 
-/// Run the reference tool with `sub` (`verify`, `check`, `repair`, `rollback` or `info`), the
-/// prior files, the credentials and the positional paths; its summary goes to `out`. Its
-/// error line becomes a [`Failure`] of kind `Reference` (its variant does not reach this
-/// crate); any failure is exit 2.
+/// Run one typed command of the reference tool (`verify`, `check`, `repair`, `rollback` or
+/// `info`) with the prior files, the decode memory limit and the credentials as typed values
+/// (`lpk_format::cli::run_with_credentials`: no password passes through an argument string);
+/// its summary goes to `out`, its `FormatError` becomes a [`Failure`] of that variant's kind,
+/// naming the archive unless the error names a path itself.
 fn reference(
-    sub: &str,
+    command: &lpk_format::cli::Command,
     priors: &[PathBuf],
     memory: Option<u64>,
-    credentials: &CredentialArgs,
-    positional: &[OsString],
+    credentials: Option<&Credentials>,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let mut args: Vec<OsString> = vec!["lpk".into()];
-    for p in priors {
-        let mut a = OsString::from("--prior=");
-        a.push(p);
-        args.push(a);
-    }
-    args.extend(credentials.reference_args());
-    if let Some(m) = memory {
-        args.push(format!("--memory={m}").into());
-    }
-    args.push(sub.into());
-    args.push("--".into());
-    args.extend(positional.iter().cloned());
-    let hook = lpk_core::register_full_reader::<std::fs::File>;
-    let archive = positional
-        .first()
-        .map(|p| PathBuf::from(p).display().to_string());
-    // The tool writes one `error: <message>` line on failure and nothing else to its error
-    // stream; captured, so the message is printed in the form the global flag selects (the
-    // text form is the same line).
-    let mut captured = Vec::new();
-    match lpk_format::cli::run_with(args, out, &mut captured, hook) {
-        0 => Ok(()),
-        _ => {
-            let text = String::from_utf8_lossy(&captured);
-            let message = text.trim_end_matches(['\n', '\r']);
-            let message = message.strip_prefix("error: ").unwrap_or(message);
-            Err(Failure {
-                code: EXIT_FAILED,
-                kind: "Reference".to_string(),
-                message: message.to_string(),
-                path: archive,
-                entries: Vec::new(),
-            })
-        }
-    }
+    let options = lpk_format::cli::ToolOptions {
+        priors: priors.to_vec(),
+        memory,
+        credentials,
+        hook: Some(lpk_core::register_full_reader::<std::fs::File>),
+    };
+    lpk_format::cli::run_with_credentials(command, options, out)
+        .map_err(|e| Failure::format(&e, Some(command.archive())))
 }
 
 /// `lpk l`: open with the credentials (a sealed archive without them opens keyless, which
 /// lists only when it is listable) and stream the entry table.
-fn list(l: &mut ListArgs, json: bool, out: &mut dyn Write) -> Result<(), Failure> {
-    let credentials = l.credentials.take()?;
+fn list(
+    l: &ListArgs,
+    credentials: Option<&Credentials>,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
     let failed = |e: FormatError| {
         let mut f = Failure::format(&e, Some(&l.archive));
         f.message = format!("{}: {} ({})", l.archive.display(), f.message, f.kind);
@@ -1361,8 +1484,7 @@ fn list(l: &mut ListArgs, json: bool, out: &mut dyn Write) -> Result<(), Failure
     };
     let file = std::fs::File::open(&l.archive).map_err(|e| failed(FormatError::Io(e)))?;
     let mut archive =
-        lpk_format::Archive::open_with(file, &Resources::default(), credentials.as_ref())
-            .map_err(failed)?;
+        lpk_format::Archive::open_with(file, &Resources::default(), credentials).map_err(failed)?;
     let options = ListOptions { long: l.long, json };
     list_archive(&mut archive, options, out).map_err(failed)
 }
@@ -1409,53 +1531,101 @@ where
         }
     };
     let json = cli.json;
-    let result = match cli.command {
-        Command::Add(mut a) => add(&mut a, err),
-        Command::List(mut l) => list(&mut l, json, out),
-        Command::Extract(mut x) => extract(&mut x, json, out, err),
-        Command::Test(t) => reference(
-            "verify",
-            &t.priors,
-            Some(decode_memory(t.memory)),
-            &t.credentials,
-            &[t.archive.into()],
-            out,
-        ),
-        Command::Check(c) => {
-            reference("check", &[], None, &c.credentials, &[c.archive.into()], out)
-        }
-        Command::Repair(r) => reference(
-            "repair",
-            &[],
-            None,
-            &r.credentials,
-            &[r.archive.into(), r.out.into()],
-            out,
-        ),
-        Command::Append(mut a) => append(&mut a, err),
-        Command::Rollback(r) => reference(
-            "rollback",
-            &[],
-            None,
-            &r.credentials,
-            &[r.archive.into(), r.generation.to_string().into()],
-            out,
-        ),
-        Command::Info(i) => reference(
-            "info",
-            &i.priors,
-            None,
-            &i.credentials,
-            &[i.archive.into()],
-            out,
-        ),
-        Command::Export(mut x) => export(&mut x, out, err),
-    };
-    match result {
+    let terminal = Terminal::detect();
+    match dispatch(cli.command, json, &terminal, out, err) {
         Ok(()) => EXIT_OK,
         Err(f) => {
             f.write(json, err);
             f.code
+        }
+    }
+}
+
+/// Resolve the command's credentials (read, or asked for on `terminal`), then run it; the
+/// commands that open an archive run through [`with_credentials`], which asks for the
+/// password on an interactive terminal when the archive turns out to need one.
+fn dispatch(
+    command: Command,
+    json: bool,
+    terminal: &Terminal,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
+    use lpk_format::cli::Command as Tool;
+    match command {
+        Command::Add(mut a) => {
+            let credentials = a.credentials.resolve(terminal, &a.archive, Use::Create)?;
+            add(&a, credentials, err)
+        }
+        Command::List(mut l) => {
+            let given = l.credentials.resolve(terminal, &l.archive, Use::Open)?;
+            with_credentials(given, &l.credentials, &l.archive, terminal, |c| {
+                list(&l, c, json, out)
+            })
+        }
+        Command::Extract(mut x) => {
+            let given = x.credentials.resolve(terminal, &x.archive, Use::Open)?;
+            with_credentials(given, &x.credentials, &x.archive, terminal, |c| {
+                extract(&x, c, json, out, err)
+            })
+        }
+        Command::Test(mut t) => {
+            let given = t.credentials.resolve(terminal, &t.archive, Use::Open)?;
+            let tool = Tool::Verify {
+                archive: t.archive.clone(),
+            };
+            with_credentials(given, &t.credentials, &t.archive, terminal, |c| {
+                reference(&tool, &t.priors, Some(decode_memory(t.memory)), c, out)
+            })
+        }
+        Command::Check(mut c) => {
+            let given = c.credentials.resolve(terminal, &c.archive, Use::Open)?;
+            let tool = Tool::Check {
+                archive: c.archive.clone(),
+            };
+            with_credentials(given, &c.credentials, &c.archive, terminal, |k| {
+                reference(&tool, &[], None, k, out)
+            })
+        }
+        Command::Repair(mut r) => {
+            let given = r.credentials.resolve(terminal, &r.archive, Use::Open)?;
+            let tool = Tool::Repair {
+                archive: r.archive.clone(),
+                out: r.out.clone(),
+            };
+            with_credentials(given, &r.credentials, &r.archive, terminal, |c| {
+                reference(&tool, &[], None, c, out)
+            })
+        }
+        Command::Append(mut a) => {
+            let given = a.credentials.resolve(terminal, &a.archive, Use::Open)?;
+            with_credentials(given, &a.credentials, &a.archive, terminal, |c| {
+                append(&a, c, err)
+            })
+        }
+        Command::Rollback(r) => {
+            // No key is needed: the credential flags are accepted and ignored, nothing is
+            // read or asked for (`--password-prompt` does not prompt here).
+            let tool = Tool::Rollback {
+                archive: r.archive.clone(),
+                generation: r.generation,
+            };
+            reference(&tool, &[], None, None, out)
+        }
+        Command::Info(mut i) => {
+            let given = i.credentials.resolve(terminal, &i.archive, Use::Open)?;
+            let tool = Tool::Info {
+                archive: i.archive.clone(),
+            };
+            with_credentials(given, &i.credentials, &i.archive, terminal, |c| {
+                reference(&tool, &i.priors, None, c, out)
+            })
+        }
+        Command::Export(mut x) => {
+            let given = x.credentials.resolve(terminal, &x.archive, Use::Open)?;
+            with_credentials(given, &x.credentials, &x.archive, terminal, |c| {
+                export(&x, c, out, err)
+            })
         }
     }
 }

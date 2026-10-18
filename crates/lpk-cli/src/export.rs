@@ -25,8 +25,13 @@
 //! target; AES-256-SHA256 with the header encrypted under `--encrypt` (the password as a
 //! string: a password that is not UTF-8 is refused for 7z).
 //!
-//! Each writer's own memory (the Deflate or zstd state, LZMA2's dictionary) is outside the
-//! engine's count.
+//! Names are written as the archive stores them (the format's reader already refuses absolute
+//! paths and `..`; a colon, a device name, a trailing dot or space go through for the
+//! consumer's extractor to sanitise). Each writer's own memory is outside the engine's count:
+//! its directory, kept until the end (ZIP's central directory, about 200 bytes plus the name
+//! per entry; 7z's entry table, about 100 plus the name), and its compressor (Deflate under
+//! 1 MiB, zstd a few MiB, LZMA2 about eleven times its 16 MiB dictionary). The output is
+//! opened at the first entry; a failure removes it, a panic leaves it in place.
 
 use std::fs::File;
 use std::io::{Cursor, Read};
@@ -99,6 +104,9 @@ impl Method {
 pub trait Writer: Sink {
     /// Write the container's trailer and close it.
     fn finish(self: Box<Self>) -> Result<(), CoreError>;
+    /// True once the output file was created (or truncated): the writer opens it at the
+    /// first entry, so a refusal before that leaves whatever was at the path untouched.
+    fn created(&self) -> bool;
 }
 
 /// The settings of a writer.
@@ -109,17 +117,42 @@ pub struct Settings<'k> {
     pub password: Option<&'k [u8]>,
 }
 
-/// Open a writer of `container` over `file` (created by the caller at `path`, which the
-/// errors name).
+/// What creates the output file, called at the first entry.
+pub type Opener = Box<dyn FnOnce() -> std::io::Result<File>>;
+
+/// A writer of `container` over the file `opener` creates at `path` (which the errors name).
 pub fn open<'k>(
     container: Container,
-    file: File,
+    opener: Opener,
     path: &Path,
     settings: Settings<'k>,
-) -> Result<Box<dyn Writer + 'k>, CoreError> {
+) -> Box<dyn Writer + 'k> {
     match container {
-        Container::Zip => Ok(Box::new(ZipSink::new(file, path, settings))),
-        Container::SevenZ => Ok(Box::new(SevenZSink::new(file, path, settings)?)),
+        Container::Zip => Box::new(ZipSink::new(opener, path, settings)),
+        Container::SevenZ => Box::new(SevenZSink::new(opener, path, settings)),
+    }
+}
+
+/// About what the writer keeps for its directory until the end, outside the engine's
+/// count: the ZIP central directory (the `zip` crate's per-entry record, about 200 bytes,
+/// plus the name) or the 7z entry table (about 100 bytes plus the name per entry).
+pub fn directory_estimate(container: Container, entries: u64, name_bytes: u64) -> u64 {
+    let per = match container {
+        Container::Zip => 200,
+        Container::SevenZ => 100,
+    };
+    entries.saturating_mul(per).saturating_add(name_bytes)
+}
+
+/// About what the compressor of `method` holds while an entry is written (also outside
+/// the engine's count).
+pub fn compressor_memory(container: Container, method: Method) -> &'static str {
+    match (container, method) {
+        (_, Method::Store) => "none",
+        (_, Method::Deflate) => "under 1 MiB",
+        (Container::Zip, Method::Zstd) => "a few MiB (zstd level 3)",
+        (Container::SevenZ, Method::Zstd) => "a few MiB",
+        (_, Method::Lzma2) => "about 11 times the LZMA2 dictionary (16 MiB at this level)",
     }
 }
 
@@ -218,25 +251,48 @@ fn extended_timestamp(secs: Option<i64>) -> Option<[u8; 5]> {
     Some(f)
 }
 
+/// Zip64 for an entry whose stored form may reach 4 GiB: the plain size with a margin for
+/// what AES (the salt, the verifier and the authentication code) or an incompressible
+/// Deflate stream (five bytes per 64 KiB block) adds, so an entry just under the limit is
+/// not refused by the writer once it has grown.
+fn needs_zip64(size: u64) -> bool {
+    size.saturating_add(size / 1000 + 64) >= u64::from(u32::MAX)
+}
+
+/// The output file: opened at the first entry.
+enum Output<W> {
+    Unopened(Option<Opener>),
+    Open(W),
+    Closed,
+}
+
 struct ZipSink<'k> {
-    w: Option<ZipWriter<File>>,
+    w: Output<ZipWriter<File>>,
     path: PathBuf,
     settings: Settings<'k>,
 }
 
 impl<'k> ZipSink<'k> {
-    fn new(file: File, path: &Path, settings: Settings<'k>) -> Self {
+    fn new(opener: Opener, path: &Path, settings: Settings<'k>) -> Self {
         ZipSink {
-            w: Some(ZipWriter::new(file)),
+            w: Output::Unopened(Some(opener)),
             path: path.to_path_buf(),
             settings,
         }
     }
 
     fn writer(&mut self) -> Result<&mut ZipWriter<File>, CoreError> {
-        self.w
-            .as_mut()
-            .ok_or_else(|| export_error(&self.path, "", "the writer is closed"))
+        if let Output::Unopened(opener) = &mut self.w {
+            let opener = opener
+                .take()
+                .ok_or_else(|| export_error(&self.path, "", "the writer is closed"))?;
+            let file = opener().map_err(|e| export_error(&self.path, "", e))?;
+            self.w = Output::Open(ZipWriter::new(file));
+        }
+        match &mut self.w {
+            Output::Open(w) => Ok(w),
+            _ => Err(export_error(&self.path, "", "the writer is closed")),
+        }
     }
 
     /// The options of an entry: method, time, attributes, Zip64 when the size needs it,
@@ -270,7 +326,7 @@ impl<'k> ZipSink<'k> {
             .last_modified_time(dos_time(secs))
             .system(System::Unix)
             .external_attributes((unix_mode(e) << 16) | dos_attributes(e))
-            .large_file(e.size >= u64::from(u32::MAX));
+            .large_file(needs_zip64(e.size));
         if let Some(f) = extended_timestamp(secs) {
             o.add_extra_field(0x5455, f, false)
                 .map_err(|err| export_error(&self.path, &e.path, err))?;
@@ -315,46 +371,81 @@ impl Sink for ZipSink<'_> {
 
 impl Writer for ZipSink<'_> {
     fn finish(mut self: Box<Self>) -> Result<(), CoreError> {
-        let w = self
-            .w
-            .take()
-            .ok_or_else(|| export_error(&self.path, "", "the writer is closed"))?;
+        // An archive without entries is still a (empty) ZIP.
+        self.writer()?;
+        let w = match std::mem::replace(&mut self.w, Output::Closed) {
+            Output::Open(w) => w,
+            _ => return Err(export_error(&self.path, "", "the writer is closed")),
+        };
         let file = w.finish().map_err(|e| export_error(&self.path, "", e))?;
         file.sync_all().map_err(|e| export_error(&self.path, "", e))
+    }
+
+    fn created(&self) -> bool {
+        !matches!(self.w, Output::Unopened(_))
     }
 }
 
 struct SevenZSink {
-    w: Option<sevenz_rust2::ArchiveWriter<File>>,
+    w: Output<sevenz_rust2::ArchiveWriter<File>>,
     path: PathBuf,
+    methods: Vec<sevenz_rust2::EncoderConfiguration>,
+    /// A password that is not UTF-8: refused at the first entry (7z takes a string).
+    bad_password: bool,
 }
 
 impl SevenZSink {
-    fn new(file: File, path: &Path, settings: Settings<'_>) -> Result<Self, CoreError> {
+    fn new(opener: Opener, path: &Path, settings: Settings<'_>) -> Self {
         use sevenz_rust2::{
             encoder_options::AesEncoderOptions, EncoderConfiguration, EncoderMethod,
         };
-        let mut w =
-            sevenz_rust2::ArchiveWriter::new(file).map_err(|e| export_error(path, "", e))?;
         let method = match settings.method {
             Method::Deflate => EncoderMethod::DEFLATE,
-            Method::Zstd => EncoderMethod::ZSTD,
             Method::Store => EncoderMethod::COPY,
-            Method::Lzma2 => EncoderMethod::LZMA2,
+            // zstd inside 7z is refused by the command line; LZMA2 stands in.
+            Method::Lzma2 | Method::Zstd => EncoderMethod::LZMA2,
         };
         let mut methods = Vec::new();
+        let mut bad_password = false;
         if let Some(pw) = settings.password {
-            let pw = std::str::from_utf8(pw).map_err(|_| {
-                export_error(path, "", "7z takes a UTF-8 password; the archive's is not")
-            })?;
-            methods.push(AesEncoderOptions::new(sevenz_rust2::Password::new(pw)).into());
+            match std::str::from_utf8(pw) {
+                Ok(pw) => {
+                    methods.push(AesEncoderOptions::new(sevenz_rust2::Password::new(pw)).into())
+                }
+                Err(_) => bad_password = true,
+            }
         }
         methods.push(EncoderConfiguration::new(method));
-        w.set_content_methods(methods);
-        Ok(SevenZSink {
-            w: Some(w),
+        SevenZSink {
+            w: Output::Unopened(Some(opener)),
             path: path.to_path_buf(),
-        })
+            methods,
+            bad_password,
+        }
+    }
+
+    fn writer(&mut self) -> Result<&mut sevenz_rust2::ArchiveWriter<File>, CoreError> {
+        if self.bad_password {
+            return Err(export_error(
+                &self.path,
+                "",
+                "7z takes a UTF-8 password; the archive's is not",
+            ));
+        }
+        if let Output::Unopened(opener) = &mut self.w {
+            let opener = opener
+                .take()
+                .ok_or_else(|| export_error(&self.path, "", "the writer is closed"))?;
+            let file = opener().map_err(|e| export_error(&self.path, "", e))?;
+            let mut w = sevenz_rust2::ArchiveWriter::new(file)
+                .map_err(|e| export_error(&self.path, "", e))?;
+            w.set_content_methods(std::mem::take(&mut self.methods));
+            self.w = Output::Open(w);
+        }
+        match &mut self.w {
+            Output::Open(w) => Ok(w),
+            _ => Err(export_error(&self.path, "", "the writer is closed")),
+        }
     }
 
     fn entry(&self, e: &Entry) -> sevenz_rust2::ArchiveEntry {
@@ -375,10 +466,7 @@ impl SevenZSink {
     fn push(&mut self, e: &Entry, content: Option<&mut dyn Read>) -> Result<(), CoreError> {
         let entry = self.entry(e);
         let path = self.path.clone();
-        let w = self
-            .w
-            .as_mut()
-            .ok_or_else(|| export_error(&path, "", "the writer is closed"))?;
+        let w = self.writer()?;
         w.push_archive_entry(entry, content)
             .map(|_| ())
             .map_err(|err| export_error(&path, &e.path, err))
@@ -425,12 +513,17 @@ impl Sink for SevenZSink {
 
 impl Writer for SevenZSink {
     fn finish(mut self: Box<Self>) -> Result<(), CoreError> {
-        let w = self
-            .w
-            .take()
-            .ok_or_else(|| export_error(&self.path, "", "the writer is closed"))?;
+        self.writer()?;
+        let w = match std::mem::replace(&mut self.w, Output::Closed) {
+            Output::Open(w) => w,
+            _ => return Err(export_error(&self.path, "", "the writer is closed")),
+        };
         let file = w.finish().map_err(|e| export_error(&self.path, "", e))?;
         file.sync_all().map_err(|e| export_error(&self.path, "", e))
+    }
+
+    fn created(&self) -> bool {
+        !matches!(self.w, Output::Unopened(_))
     }
 }
 
@@ -463,6 +556,15 @@ mod tests {
         assert_eq!(extended_timestamp(Some(-1)), None);
         assert_eq!(extended_timestamp(Some(1 << 33)), None);
         assert_eq!(extended_timestamp(None), None);
+    }
+
+    #[test]
+    fn zip64_is_chosen_with_a_margin_under_4_gib() {
+        assert!(!needs_zip64(0));
+        assert!(!needs_zip64(4_000_000_000));
+        assert!(needs_zip64(u64::from(u32::MAX) - 1000));
+        assert!(needs_zip64(u64::from(u32::MAX)));
+        assert!(needs_zip64(1 << 40));
     }
 
     #[test]

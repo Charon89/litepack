@@ -41,7 +41,7 @@ lpk\-append(1)
 Append the contents of a directory to an archive as its next generation: a snapshot (paths the directory no longer has are removed), deduplicated against the archive\*(Aqs chunks. A failed append leaves the archive as it was
 .TP
 lpk\-rollback(1)
-Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short
+Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short. No key is needed: the credential flags, \-\-password\-prompt included, are accepted and ignored
 .TP
 lpk\-info(1)
 Print an archive\*(Aqs header, envelope, counts and generations
@@ -52,6 +52,6 @@ Write every entry of an archive into a ZIP or 7z file (by the output\*(Aqs exten
 lpk\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH EXTRA
-Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure is one line on stderr, `error: <message>`; with \-\-json it is one JSON object line instead: {"error":{"code":1|2,"kind":"<the error\*(Aqs variant name; Usage for a command\-line error; Reference for a failure reported by the reference tool\*(Aqs code>","message":"...","path":"<the path the error names, else the archive>","entries":[{"path","kind","message"}, the per\-entry errors of a partial extraction, when there are some]}}.
+Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure is one line on stderr, `error: <message>`; with \-\-json it is one JSON object line instead: {"error":{"code":1|2,"kind":"<the error\*(Aqs variant name; Usage for a command\-line error; UnneededKeyfile for a \-\-keyfile the archive does not take>","message":"...","path":"<the path the error names, else the archive>","entries":[{"path","kind","message"}, the per\-entry errors of a partial extraction, when there are some]}}. A password is asked for on the terminal only with \-\-password\-prompt, or when stdin and stderr are terminals and the archive needs one that was not given; never through a pipe.
 .SH VERSION
 v0.0.1
