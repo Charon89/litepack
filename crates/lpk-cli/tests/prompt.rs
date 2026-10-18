@@ -98,6 +98,13 @@ fn the_password_prompt_is_refused_through_a_pipe_and_nothing_is_prompted_without
         vec!["t", archive, "--password-prompt"],
         vec!["l", archive, "--password-prompt"],
         vec!["info", archive, "--password-prompt"],
+        vec!["check", archive, "--password-prompt"],
+        vec![
+            "repair",
+            archive,
+            new.to_str().unwrap(),
+            "--password-prompt",
+        ],
         vec!["append", archive, s, "--password-prompt"],
     ] {
         let r = run(&args);
@@ -112,6 +119,15 @@ fn the_password_prompt_is_refused_through_a_pipe_and_nothing_is_prompted_without
         assert_eq!(e["kind"], "Usage", "{e}");
     }
     assert!(!new.exists() && !out.exists());
+    // `rollback` needs no key: its credential flags, the prompt included, are accepted and
+    // ignored, so nothing is asked for and nothing is refused through the pipe.
+    let r = run(&["rollback", archive, "0", "--password-prompt"]);
+    assert_ne!(r.status.code(), Some(1), "{}", text(&r.stderr));
+    assert!(
+        !text(&r.stderr).contains("--password-prompt"),
+        "{}",
+        text(&r.stderr)
+    );
     // The flag conflicts with the other password forms (clap: exit 1).
     let r = run(&["t", archive, "--password-prompt", "--password", "x"]);
     assert_eq!(r.status.code(), Some(1));

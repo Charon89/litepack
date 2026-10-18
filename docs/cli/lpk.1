@@ -41,7 +41,7 @@ lpk\-append(1)
 Append the contents of a directory to an archive as its next generation: a snapshot (paths the directory no longer has are removed), deduplicated against the archive\*(Aqs chunks. A failed append leaves the archive as it was
 .TP
 lpk\-rollback(1)
-Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short
+Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short. No key is needed: the credential flags, \-\-password\-prompt included, are accepted and ignored
 .TP
 lpk\-info(1)
 Print an archive\*(Aqs header, envelope, counts and generations

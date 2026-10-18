@@ -113,7 +113,8 @@ enum Command {
     /// chunks. A failed append leaves the archive as it was.
     Append(AppendArgs),
     /// Truncate an archive to the end of an earlier generation (in place; `info` lists them).
-    /// Also recovers an archive whose last append was cut short.
+    /// Also recovers an archive whose last append was cut short. No key is needed: the
+    /// credential flags, --password-prompt included, are accepted and ignored.
     Rollback(RollbackArgs),
     /// Print an archive's header, envelope, counts and generations.
     Info(InfoArgs),
@@ -676,7 +677,8 @@ struct RollbackArgs {
     archive: PathBuf,
     /// The generation to keep (0 is the first write; `info` shows the latest).
     generation: u64,
-    /// Accepted for symmetry; no key is needed to roll back.
+    /// Accepted for symmetry and ignored (--password-prompt included: nothing is asked for);
+    /// no key is needed to roll back.
     #[command(flatten)]
     credentials: CredentialArgs,
 }
@@ -1346,13 +1348,14 @@ fn dispatch(
                 append(&a, c, err)
             })
         }
-        Command::Rollback(mut r) => {
-            let given = r.credentials.resolve(terminal, &r.archive, Use::Open)?;
+        Command::Rollback(r) => {
+            // No key is needed: the credential flags are accepted and ignored, nothing is
+            // read or asked for (`--password-prompt` does not prompt here).
             let tool = Tool::Rollback {
                 archive: r.archive.clone(),
                 generation: r.generation,
             };
-            reference(&tool, &[], None, given.as_ref(), out)
+            reference(&tool, &[], None, None, out)
         }
         Command::Info(mut i) => {
             let given = i.credentials.resolve(terminal, &i.archive, Use::Open)?;

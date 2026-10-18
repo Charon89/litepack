@@ -32,7 +32,7 @@ Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure
 * `check` — Hash the data shards the recovery frames cover and report the damage (exit 2 if any)
 * `repair` — Write a copy of an archive with its damaged shards rebuilt from the recovery frames
 * `append` — Append the contents of a directory to an archive as its next generation: a snapshot (paths the directory no longer has are removed), deduplicated against the archive's chunks. A failed append leaves the archive as it was
-* `rollback` — Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short
+* `rollback` — Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short. No key is needed: the credential flags, --password-prompt included, are accepted and ignored
 * `info` — Print an archive's header, envelope, counts and generations
 
 ###### **Options:**
@@ -271,7 +271,7 @@ Append the contents of a directory to an archive as its next generation: a snaps
 
 ## `lpk rollback`
 
-Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short
+Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short. No key is needed: the credential flags, --password-prompt included, are accepted and ignored
 
 **Usage:** `lpk rollback [OPTIONS] <ARCHIVE> <GENERATION>`
 
