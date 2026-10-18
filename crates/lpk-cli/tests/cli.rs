@@ -480,7 +480,10 @@ fn tier_conflicts_with_the_tier_flags_and_checks_the_settings() {
     for (extra, reason) in [
         (&["--tier", "fast", "--fast"][..], "cannot be used with"),
         (&["--tier", "fast", "--balanced"][..], "cannot be used with"),
-        (&["--tier", "balanced", "--store"][..], "cannot be used with"),
+        (
+            &["--tier", "balanced", "--store"][..],
+            "cannot be used with",
+        ),
         (&["--tier", "store", "--strong"][..], "cannot be used with"),
         (&["--tier", "strong", "--fast"][..], "cannot be used with"),
         (&["--fast", "--strong"][..], "cannot be used with"),
