@@ -661,8 +661,7 @@ impl OutDir<'_> {
         &mut self,
         path: &Path,
         wanted: Wanted,
-        targets: &[Target],
-        links: &[Link],
+        entries: &[Entry],
     ) -> Result<Decision, CoreError> {
         if !self.parents_ok(path)? {
             return Ok(Decision::Skip);
@@ -672,25 +671,23 @@ impl OutDir<'_> {
             Some(Existing::Skip) => Decision::Skip,
             Some(Existing::Replace) => Decision::Replace,
             Some(Existing::Rename) => {
+                // A free name is one that neither the disk nor any entry of the archive
+                // (earlier or later, of any kind) nor an earlier rename takes. Built on the
+                // first rename only, so an extraction without one costs nothing more.
+                let dir = self.dir;
                 let planned = self.planned.get_or_insert_with(|| {
-                    targets
+                    entries
                         .iter()
-                        .map(|t| t.path.clone())
-                        .chain(links.iter().map(|l| l.path.clone()))
+                        .map(|e| join_components(dir, &e.path))
                         .collect()
                 });
                 let renamed = policy::rename_target(path, |p| {
                     planned.contains(p) || std::fs::symlink_metadata(p).is_ok()
                 });
+                planned.insert(renamed.clone());
                 Decision::Rename(renamed)
             }
         };
-        if let Some(planned) = &mut self.planned {
-            planned.insert(match &d {
-                Decision::Rename(p) => p.clone(),
-                _ => path.to_path_buf(),
-            });
-        }
         Ok(d)
     }
 }
@@ -754,19 +751,18 @@ fn plan<R: Read + Seek>(
                     symlinks_skipped += 1;
                     continue;
                 }
-                let (path, replace) =
-                    match existing.decide(&path, Wanted::Symlink, &targets, &links)? {
-                        Decision::Write => (path, false),
-                        Decision::Replace => (path, true),
-                        Decision::Rename(p) => {
-                            renamed += 1;
-                            (p, false)
-                        }
-                        Decision::Skip => {
-                            skipped += 1;
-                            continue;
-                        }
-                    };
+                let (path, replace) = match existing.decide(&path, Wanted::Symlink, &entries)? {
+                    Decision::Write => (path, false),
+                    Decision::Replace => (path, true),
+                    Decision::Rename(p) => {
+                        renamed += 1;
+                        (p, false)
+                    }
+                    Decision::Skip => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
                 links.push(Link {
                     path,
                     target: e.symlink_target.clone().unwrap_or_default(),
@@ -774,19 +770,18 @@ fn plan<R: Read + Seek>(
                 });
             }
             EntryKind::File => {
-                let (path, replace) =
-                    match existing.decide(&path, Wanted::File, &targets, &links)? {
-                        Decision::Write => (path, false),
-                        Decision::Replace => (path, true),
-                        Decision::Rename(p) => {
-                            renamed += 1;
-                            (p, false)
-                        }
-                        Decision::Skip => {
-                            skipped += 1;
-                            continue;
-                        }
-                    };
+                let (path, replace) = match existing.decide(&path, Wanted::File, &entries)? {
+                    Decision::Write => (path, false),
+                    Decision::Replace => (path, true),
+                    Decision::Rename(p) => {
+                        renamed += 1;
+                        (p, false)
+                    }
+                    Decision::Skip => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
                 let file = targets.len();
                 let mut off = Some(0u64);
                 for &c in &e.chunks {
@@ -1134,8 +1129,11 @@ where
         )));
     }
     make_dirs(&mkdirs)?;
-    // Links are created before any file: a failure here (no privilege on Windows, a target
-    // that is not UTF-8) fails the extraction with nothing to clean up.
+    // Links are created after every directory and before any file: a failure here (no
+    // privilege on Windows, a target that is not UTF-8) fails the extraction with nothing to
+    // clean up, and the order is load-bearing: a directory that exists before any link is
+    // made can never be a link this extraction created, so no file is written through one
+    // (the plan's checks hold whatever the entry order or the target's case rules).
     make_links(&links)?;
     let first_file: Vec<usize> = per_block
         .iter()

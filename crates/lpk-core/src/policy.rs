@@ -440,11 +440,16 @@ pub fn case_insensitive_target(dir: &Path) -> bool {
     cfg!(any(windows, target_os = "macos"))
 }
 
-/// Refuse two entries whose paths differ only by case (Unicode lower-casing of every
-/// component): [`CoreError::CaseCollision`] naming both, the first in entry order first.
-/// Called when the target is case-insensitive.
+/// Refuse two entries whose paths differ only by case: [`CoreError::CaseCollision`] naming
+/// both, the first in entry order first; and, with the same folding, a path one of whose
+/// parents is an entry that is not a directory ([`check_conflicting_names`]'s rule, so a
+/// symlink `A` beside `a/x` is a conflicting name here as `a` beside `a/x` is everywhere).
+/// Called when the target is case-insensitive. Folding is full Unicode lower-casing of the
+/// whole path, which over-refuses some pairs NTFS keeps distinct (`ß` and `ẞ`, for one):
+/// safe, since refusing is the failure mode, and simpler than the file system's own table.
 pub fn check_case_collisions(entries: &[Entry]) -> Result<(), CoreError> {
     let mut seen: HashMap<String, &str> = HashMap::with_capacity(entries.len());
+    let mut not_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
     for e in entries {
         let folded = e.path.to_lowercase();
         if let Some(first) = seen.get(folded.as_str()) {
@@ -453,7 +458,23 @@ pub fn check_case_collisions(entries: &[Entry]) -> Result<(), CoreError> {
                 second: e.path.clone(),
             });
         }
+        if e.kind != EntryKind::Directory {
+            not_dirs.insert(folded.clone());
+        }
         seen.insert(folded, &e.path);
+    }
+    for e in entries {
+        let folded = e.path.to_lowercase();
+        let conflict = folded
+            .match_indices('/')
+            .any(|(i, _)| not_dirs.contains(&folded[..i]));
+        if conflict {
+            return Err(FormatError::UnsafePath {
+                path: e.path.clone(),
+                reason: "conflicting name",
+            }
+            .into());
+        }
     }
     Ok(())
 }
@@ -485,17 +506,23 @@ pub fn rename_target(target: &Path, taken: impl Fn(&Path) -> bool) -> PathBuf {
 }
 
 /// Remove what is at `target` so an entry can be written in its place: a link is removed as a
-/// link (never followed; on Windows a directory symlink or a junction is removed as a
-/// directory entry), a file as a file. A directory is an error (nothing is written into or
-/// over one).
+/// link (never followed; on Windows a directory symlink or a junction, which the metadata
+/// already read says it is, is removed as a directory entry, with no fallback that could take
+/// a real directory swapped in between), a file as a file. A directory is an error (nothing
+/// is written into or over one).
 pub fn remove_existing(target: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(target)?;
     match Found::of(&meta) {
-        Found::Symlink => match std::fs::remove_file(target) {
-            Ok(()) => Ok(()),
-            Err(e) if cfg!(windows) => std::fs::remove_dir(target).map_err(|_| e),
-            Err(e) => Err(e),
-        },
+        Found::Symlink => {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::FileTypeExt;
+                if meta.file_type().is_symlink_dir() {
+                    return std::fs::remove_dir(target);
+                }
+            }
+            std::fs::remove_file(target)
+        }
         Found::File => std::fs::remove_file(target),
         Found::Directory => Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
@@ -602,6 +629,18 @@ mod tests {
         ));
         let linked = [link("a"), file("a/b")];
         assert!(check_conflicting_names(&linked).is_err());
+        // Case-insensitive target: a symlink `A` beside `a/x` is the same conflict.
+        let folded = [link("A"), file("a/x")];
+        assert!(check_conflicting_names(&folded).is_ok());
+        assert!(matches!(
+            check_case_collisions(&folded),
+            Err(CoreError::Format(FormatError::UnsafePath {
+                reason: "conflicting name",
+                ..
+            }))
+        ));
+        let folded_dir = [dir("A"), file("a/x")];
+        assert!(check_case_collisions(&folded_dir).is_ok());
     }
 
     #[test]

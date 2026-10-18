@@ -362,3 +362,38 @@ fn found_of_tells_the_kinds_apart() {
         lpk_core::policy::Existing::Skip
     );
 }
+
+/// `rename` never takes a name a later entry of the archive has: existing `n`, entries `n`
+/// then `n (1)` (a file, then a directory): `n` is written as `n (2)`.
+#[test]
+fn rename_skips_names_later_entries_take() {
+    let as_file = packed_with(|w| {
+        w.add_file("n", EntryFlags::EMPTY, 0, &mut &b"first"[..])
+            .unwrap();
+        w.add_file("n (1)", EntryFlags::EMPTY, 0, &mut &b"second"[..])
+            .unwrap();
+    });
+    let as_dir = packed_with(|w| {
+        w.add_file("n", EntryFlags::EMPTY, 0, &mut &b"first"[..])
+            .unwrap();
+        w.add_directory("n (1)", EntryFlags::EMPTY, 0).unwrap();
+        w.add_file("n (1)/inside", EntryFlags::EMPTY, 0, &mut &b"inside"[..])
+            .unwrap();
+    });
+    for (bytes, dir_variant) in [(&as_file, false), (&as_dir, true)] {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("n"), b"old").unwrap();
+        let s = extract(bytes, &out, &policy(Overwrite::Rename)).unwrap();
+        assert_eq!(s.renamed, 1, "{dir_variant}: {s:?}");
+        assert_eq!(std::fs::read(out.join("n")).unwrap(), b"old");
+        assert_eq!(std::fs::read(out.join("n (2)")).unwrap(), b"first");
+        if dir_variant {
+            assert!(out.join("n (1)").is_dir());
+            assert_eq!(std::fs::read(out.join("n (1)/inside")).unwrap(), b"inside");
+        } else {
+            assert_eq!(std::fs::read(out.join("n (1)")).unwrap(), b"second");
+        }
+    }
+}

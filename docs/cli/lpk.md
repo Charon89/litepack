@@ -141,13 +141,13 @@ Extract every entry of an archive into a directory; an existing file is refused 
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
 * `--memory <SIZE>` — The memory budget of the extraction, for example 512M or 2G or plain bytes; also the reader's decode memory limit (an archive whose envelope needs more is refused before anything is written). Default: half of the physical memory, at most the ceiling of the tier the archive's envelope shows: 1 GiB (stored blocks only), 2 GiB (Fast-sized blocks and windows) or 4 GiB (larger); the reader is then limited to half of the physical memory, at most 4 GiB. The decoders in flight are derived from the budget (shown with -v); a budget below what one block in flight needs is refused with that figure
-* `--overwrite <MODE>` — What an existing file at a target gets. refuse: the extraction is refused before any output (the default). skip: the file is left as it is and counted. rename: the entry is written beside it as `<stem> (<k>)<.ext>` with the smallest free k, and counted. replace: the file is replaced (a link at the target is removed as a link, never followed). A directory where a file goes, or a file where a directory goes, is refused in every mode but skip, which skips it (and everything below a skipped directory). Directories are created or reused whatever the mode
+* `--overwrite <MODE>` — What an existing file at a target gets. refuse: the extraction is refused before any output (the default). skip: the file is left as it is and counted (`skipped <n> existing entries` on stderr; with --json one `{"summary":{...}}` line). rename: the entry is written beside it as `<stem> (<k>)<.ext>` with the smallest free k, and counted. replace: the file is replaced (a link at the target is removed as a link, never followed). A directory where a file goes, or a file where a directory goes, is refused in every mode but skip, which skips it (and everything below a skipped directory). Directories are created or reused whatever the mode
 
   Default value: `refuse`
 
   Possible values: `refuse`, `skip`, `rename`, `replace`
 
-* `--symlinks` — Create symlink entries with the target the archive holds. Without this flag every symlink entry is skipped with a warning on stderr. A link that cannot be created (for example without the privilege on Windows) fails the extraction
+* `--symlinks` — Create symlink entries with the target the archive holds. Without this flag every symlink entry is skipped with a warning on stderr (with --json one `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). A link that cannot be created (for example without the privilege on Windows) fails the extraction
 * `-v`, `--verbose` — Print the plan's counts, the memory budget and its terms, and the pool size to stderr
 
 

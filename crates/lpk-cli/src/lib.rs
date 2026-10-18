@@ -455,7 +455,8 @@ struct ExtractArgs {
     #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
     memory: Option<u64>,
     /// What an existing file at a target gets. refuse: the extraction is refused before any
-    /// output (the default). skip: the file is left as it is and counted. rename: the entry is
+    /// output (the default). skip: the file is left as it is and counted (`skipped <n> existing
+    /// entries` on stderr; with --json one `{"summary":{...}}` line). rename: the entry is
     /// written beside it as `<stem> (<k>)<.ext>` with the smallest free k, and counted.
     /// replace: the file is replaced (a link at the target is removed as a link, never
     /// followed). A directory where a file goes, or a file where a directory goes, is refused
@@ -464,7 +465,8 @@ struct ExtractArgs {
     #[arg(long, value_enum, value_name = "MODE", default_value_t = OverwriteArg::Refuse)]
     overwrite: OverwriteArg,
     /// Create symlink entries with the target the archive holds. Without this flag every
-    /// symlink entry is skipped with a warning on stderr. A link that cannot be created (for
+    /// symlink entry is skipped with a warning on stderr (with --json one
+    /// `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). A link that cannot be created (for
     /// example without the privilege on Windows) fails the extraction.
     #[arg(long)]
     symlinks: bool,
@@ -943,7 +945,12 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
     );
 }
 
-fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Failure> {
+fn extract(
+    x: &mut ExtractArgs,
+    json: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
     let credentials = x.credentials.take()?;
     let mut priors = Vec::with_capacity(x.priors.len());
     for p in &x.priors {
@@ -977,20 +984,41 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> Res
         &policy,
         &opts,
     );
-    // One warning per skipped symlink entry, whether or not the extraction went through.
-    for p in policy.skipped_symlinks() {
-        let _ = writeln!(
-            err,
-            "warning: {}: symlink entry skipped (--symlinks creates it)",
-            lpk_format::cli::escape_path(&p)
-        );
-    }
+    // On failure the error line is the only stderr output (D-77 (3)): the warnings are
+    // printed only after success, one line per skipped symlink entry, then the counts.
     let s = r.map_err(|e| Failure::core(&e, Some(&x.archive)))?;
-    if s.skipped > 0 {
-        let _ = writeln!(err, "skipped {} existing file(s)", s.skipped);
+    for p in policy.skipped_symlinks() {
+        if json {
+            let line = serde_json::json!({
+                "warning": { "kind": "SymlinkSkipped", "path": p }
+            });
+            let _ = writeln!(err, "{line}");
+        } else {
+            let _ = writeln!(
+                err,
+                "warning: {}: symlink entry skipped (--symlinks creates it)",
+                lpk_format::cli::escape_path(&p)
+            );
+        }
     }
-    if s.renamed > 0 {
-        let _ = writeln!(err, "renamed {} existing file(s)", s.renamed);
+    if json {
+        if s.skipped > 0 || s.renamed > 0 || s.symlinks_skipped > 0 {
+            let line = serde_json::json!({
+                "summary": {
+                    "skipped": s.skipped,
+                    "renamed": s.renamed,
+                    "symlinks_skipped": s.symlinks_skipped,
+                }
+            });
+            let _ = writeln!(err, "{line}");
+        }
+    } else {
+        if s.skipped > 0 {
+            let _ = writeln!(err, "skipped {} existing entries", s.skipped);
+        }
+        if s.renamed > 0 {
+            let _ = writeln!(err, "renamed {} existing entries", s.renamed);
+        }
     }
     if x.verbose {
         let _ = writeln!(
@@ -1177,7 +1205,7 @@ where
     let result = match cli.command {
         Command::Add(mut a) => add(&mut a, err),
         Command::List(mut l) => list(&mut l, json, out),
-        Command::Extract(mut x) => extract(&mut x, out, err),
+        Command::Extract(mut x) => extract(&mut x, json, out, err),
         Command::Test(t) => reference(
             "verify",
             &t.priors,
