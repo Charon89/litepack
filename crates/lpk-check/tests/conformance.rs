@@ -1046,3 +1046,204 @@ fn deflate_reconstruct_negative_cases() {
     }
     assert_eq!(refused, 1, "exactly one record carries the declared term");
 }
+
+const BWT: &str = "bwt-text.lpk";
+const BWT_BOUND: &str = "malformed-bwt-bound.lpk";
+const BWT_INVERSE: &str = "malformed-bwt-inverse.lpk";
+
+/// A revision 1.3 decoder on every vector of `expected-1.3.toml`: `bwt-text.lpk` extracts to
+/// `files` and verifies (`verify`), by the library and the tool; the malformed vectors open,
+/// their `verify` and the extraction of `prose.txt` fail with `error` (and, for the inverse, the
+/// text's reason), and `readme.txt` extracts. `list` and `info` of `expected.toml` apply to all.
+#[test]
+fn bwt_vectors_revision_1_3() {
+    let exp = table("expected-1.3.toml");
+    let old = table("expected.toml");
+    assert!(exp.contains_key(BWT) && exp.contains_key(BWT_BOUND) && exp.contains_key(BWT_INVERSE));
+    for (name, t) in &exp {
+        let t = t.as_table().unwrap();
+        let path = vectors().join(name).display().to_string();
+        let t0 = old[name.as_str()].as_table().unwrap();
+        for (cmd, key) in [("list", "list"), ("info", "info")] {
+            let (code, out, err) = bin(&[cmd.into(), path.clone()]);
+            assert_eq!(
+                (code, out.as_str()),
+                (0, t0[key].as_str().unwrap()),
+                "{name} {cmd}: {err}"
+            );
+        }
+        let mut a = Archive::open(read(name), Options::default()).unwrap();
+        assert_eq!(a.header.version_minor, 3, "{name}");
+        if let Some(want) = t.get("error") {
+            let want = want.as_str().unwrap();
+            let e = a.verify().unwrap_err();
+            assert_eq!(e.class, want, "{name}: {}", e.detail);
+            if name == BWT_INVERSE {
+                assert_eq!(e.detail, t["message"].as_str().unwrap(), "{name}");
+            }
+            let (code, out, err) = bin(&["verify".into(), path.clone()]);
+            assert_eq!(code, 1, "{name}");
+            assert!(
+                out.is_empty() && err.starts_with("error: "),
+                "{name}: {err}"
+            );
+            let keep = strings(&t0["files_1_0"]);
+            for e in a.entries().unwrap() {
+                let got = entry_line(&mut a, &e);
+                if e.path == "prose.txt" {
+                    assert_eq!(got, Err(want), "{name}: {}", e.path);
+                } else {
+                    assert!(keep.contains(&got.unwrap()), "{name}: {}", e.path);
+                }
+            }
+            continue;
+        }
+        let files = strings(&t["files"]);
+        assert_eq!(decoded_lines(&mut a).unwrap(), files, "{name}");
+        let s = a.verify().unwrap();
+        assert_eq!(
+            format!(
+                "ok: {} entries, {} chunks, {} blocks\n",
+                s.entries, s.chunks, s.blocks
+            ),
+            t["verify"].as_str().unwrap(),
+            "{name}"
+        );
+        let (code, out, err) = bin(&["verify".into(), path.clone()]);
+        assert_eq!(
+            (code, out.as_str()),
+            (0, t["verify"].as_str().unwrap()),
+            "{name}: {err}"
+        );
+        for tool in [false, true] {
+            let dir = temp(&format!("{name}-{tool}"));
+            if tool {
+                let (code, _, err) =
+                    bin(&["extract".into(), path.clone(), dir.display().to_string()]);
+                assert_eq!(code, 0, "{name}: {err}");
+            } else {
+                let mut a = Archive::open(read(name), Options::default()).unwrap();
+                let (done, err) = extract_all(&mut a, &dir).unwrap();
+                assert!(err.is_none() && done.len() == files.len(), "{name}");
+            }
+            for line in &files {
+                let mut it = line.split(' ');
+                let (p, size, h) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+                let b = std::fs::read(dir.join(p)).unwrap();
+                assert_eq!(b.len().to_string(), size, "{name}: {p}");
+                assert_eq!(blake3::hash(&b).to_hex().as_str(), h, "{name}: {p}");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// Readers before revision 1.3 (this decoder under `--revision 2`, `1` and `0`) on the three
+/// revision 1.3 vectors: the `_1_0` keys of `expected.toml`: `verify` is `UnimplementedPrimitive`
+/// (3) with `message_1_0`, the tool's exit code and stderr; the entries of `files_1_0` extract
+/// bit-exactly, every other entry is `UnimplementedPrimitive`; `list` and `info` as for any reader.
+#[test]
+fn bwt_vectors_before_revision_1_3() {
+    let old = table("expected.toml");
+    for name in [BWT, BWT_BOUND, BWT_INVERSE] {
+        let t = old[name].as_table().unwrap();
+        let path = vectors().join(name).display().to_string();
+        let keep = strings(&t["files_1_0"]);
+        for rev in [0u8, 1, 2] {
+            let mut a = Archive::open(read(name), with_revision(rev)).unwrap();
+            let e = a.verify().unwrap_err();
+            assert_eq!(e.class, t["error_1_0"].as_str().unwrap(), "{name} {rev}");
+            assert_eq!(e.detail, t["message_1_0"].as_str().unwrap(), "{name} {rev}");
+            let mut extracted = Vec::new();
+            for e in a.entries().unwrap() {
+                match entry_line(&mut a, &e) {
+                    Ok(l) => extracted.push(l),
+                    Err(c) => assert_eq!(c, "UnimplementedPrimitive", "{name} {rev}"),
+                }
+            }
+            assert_eq!(extracted, keep, "{name} {rev}");
+            let mut flags = vec![vec!["--revision".to_string(), rev.to_string()]];
+            if rev == 0 {
+                flags.push(vec!["--revision-1-0".to_string()]);
+            }
+            for f in flags {
+                let mut v = f.clone();
+                v.extend(["verify".to_string(), path.clone()]);
+                let (code, out, err) = bin(&v);
+                assert_eq!(
+                    i64::from(code),
+                    t["verify_exit_1_0"].as_integer().unwrap(),
+                    "{name} {f:?}"
+                );
+                assert_eq!(
+                    err,
+                    t["verify_stderr_1_0"].as_str().unwrap(),
+                    "{name} {f:?}"
+                );
+                assert!(out.is_empty());
+                for (cmd, key) in [("list", "list"), ("info", "info")] {
+                    let mut v = f.clone();
+                    v.extend([cmd.to_string(), path.clone()]);
+                    let (code, out, _) = bin(&v);
+                    assert_eq!((code, out.as_str()), (0, t[key].as_str().unwrap()));
+                }
+            }
+        }
+    }
+}
+
+/// Checks (3) and (5) of "Decoding `bwt`" on mutated copies of `bwt-text.lpk` (the frame hash
+/// recomputed so the damage reaches the step): the `[bwt]` block of `tiny.txt` is one BWT block
+/// of one byte, its input `out_len` 1, index[0] 1 and the byte, read straight from the frame.
+#[test]
+fn bwt_step_negative_cases() {
+    let d = read(BWT);
+    let a = Archive::open(d.clone(), Options::default()).unwrap();
+    let tiny = a
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|e| e.path == "tiny.txt")
+        .unwrap();
+    let b = a.index.chunk_block[tiny.chunks[0] as usize];
+    let off = a.index.blocks[b].frame_offset as usize;
+    let p = payload_range(&d, off);
+    // Graph: step_count 1, id 0x0003, flags 0, params_len 4, block_size; plain_len 1;
+    // encoded_len 13; out_len (8), index[0] (4), the byte.
+    assert_eq!(&d[p.start..p.start + 5], &[1, 3, 0, 0, 4]);
+    assert_eq!(&d[p.start + 9..p.start + 11], &[1, 13]);
+    assert_eq!(p.len(), 24);
+    let out_len = p.start + 11..p.start + 19;
+    let index = p.start + 19..p.start + 23;
+    assert_eq!(
+        u64::from_le_bytes(d[out_len.clone()].try_into().unwrap()),
+        1
+    );
+    assert_eq!(u32::from_le_bytes(d[index.clone()].try_into().unwrap()), 1);
+    let mutate = |f: &dyn Fn(&mut [u8])| {
+        let mut d = d.clone();
+        f(&mut d);
+        rehash_frame(&mut d, off);
+        verify_class(d)
+    };
+    // Check (5): an index of 0 or above n is `index`.
+    for bad in [0u32, 2, u32::MAX] {
+        assert_eq!(
+            mutate(&|d| d[index.clone()].copy_from_slice(&bad.to_le_bytes())),
+            ("BwtError".into(), "bwt: index".into()),
+            "index {bad}"
+        );
+    }
+    // Check (3) on the last step: an out_len other than plain_len.
+    for bad in [0u64, 2, u64::MAX] {
+        let (class, _) = mutate(&|d| d[out_len.clone()].copy_from_slice(&bad.to_le_bytes()));
+        assert_eq!(class, "BlockLengthMismatch", "out_len {bad}");
+    }
+    // The untouched block decodes to one byte.
+    let tiny_line = decoded_lines(&mut Archive::open(d.clone(), Options::default()).unwrap())
+        .unwrap()
+        .into_iter()
+        .find(|l| l.starts_with("tiny.txt "))
+        .unwrap();
+    assert!(strings(&table("expected-1.3.toml")[BWT]["files"]).contains(&tiny_line));
+}
