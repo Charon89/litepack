@@ -261,9 +261,9 @@ fn schedule(runs: &mut [Run], capacity: usize) -> Vec<usize> {
     for (i, r) in runs.iter_mut().enumerate() {
         r.hit = false;
         r.evict = None;
-        if cached.contains_key(&r.block) {
+        if let Some(nu) = cached.get_mut(&r.block) {
             r.hit = true;
-            cached.insert(r.block, next_use[i]);
+            *nu = next_use[i];
             heap.push((next_use[i], r.block));
             continue;
         }

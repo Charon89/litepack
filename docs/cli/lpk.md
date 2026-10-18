@@ -14,6 +14,7 @@ This document contains the help content for the `lpk` command-line program.
 * [`lpk append`↴](#lpk-append)
 * [`lpk rollback`↴](#lpk-rollback)
 * [`lpk info`↴](#lpk-info)
+* [`lpk export`↴](#lpk-export)
 
 ## `lpk`
 
@@ -34,6 +35,7 @@ Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure
 * `append` — Append the contents of a directory to an archive as its next generation: a snapshot (paths the directory no longer has are removed), deduplicated against the archive's chunks. A failed append leaves the archive as it was
 * `rollback` — Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short
 * `info` — Print an archive's header, envelope, counts and generations
+* `export` — Write every entry of an archive into a ZIP or 7z file (by the output's extension), streamed in entry order: no tree on disk, the blocks decoded as for `x`
 
 ###### **Options:**
 
@@ -297,6 +299,44 @@ Print an archive's header, envelope, counts and generations
 * `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+
+
+
+## `lpk export`
+
+Write every entry of an archive into a ZIP or a 7z file, chosen by the output's extension (.zip or .7z; anything else is a usage error). The entries are streamed in entry order through the extraction engine (the same plan, thread budget and memory budget as `x`; the decoded blocks are cached under the budget by a schedule computed from the whole plan, so a deduplicated chunk referring back to an earlier block is decoded again only when the cache cannot hold it): no tree is written on disk and no whole file is held in memory.
+
+ZIP: one entry per archive entry, Zip64 where an entry or the directory needs it, UTF-8 names, the modification time as DOS time and as the extended-timestamp field, a Unix mode with the executable flag and the DOS read-only, hidden and system bits; a symlink entry is a ZIP symlink (its target as the stored content); --method deflate (default), zstd (method 93) or store; --encrypt writes AES-256 (AE-2) entries with the archive's password.
+
+7z: one entry per archive entry, each in its own stream (an empty file as a stream-less entry); --method lzma2 (default), deflate or store (zstd inside 7z is a fork extension 7-Zip does not read: refused); --encrypt writes AES-256 with an encrypted header. Both writers run in process. An existing output is refused unless --force replaces it. A failed export removes the output.
+
+**Usage:** `lpk export [OPTIONS] <ARCHIVE> <OUT>`
+
+###### **Arguments:**
+
+* `<ARCHIVE>` — The archive
+* `<OUT>` — The file to write: `.zip` or `.7z` by its extension; must not exist unless --force
+
+###### **Options:**
+
+* `--method <METHOD>` — The compression method of the entries: deflate (ZIP's default), zstd (ZIP only), store, or lzma2 (7z's default; 7z only)
+
+  Possible values:
+  - `deflate`
+  - `zstd`
+  - `store`
+  - `lzma2`:
+    7z only
+
+* `--encrypt` — Encrypt every entry with the archive's password (AES-256: ZIP's AE-2, 7z's with the header encrypted). Needs a credential with a password; a keyfile alone is refused
+* `--force` — Replace an existing output file
+* `--threads <N>` — The thread budget: 1 decodes on the calling thread; from 2 on, N - 1 threads decode blocks ahead of the writer (capped by the memory budget), as for `x`
+* `--prior <FILE>` — A prior file (for example a zstd dictionary) the archive needs; may be repeated
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--memory <SIZE>` — The memory budget, as for `x`: the decoded blocks held at once (cached or in flight) are derived from it; the writer's own memory (its compressor) is outside the count
+* `-v`, `--verbose` — Print the plan's counts, the cache schedule's outcome and the memory terms to stderr
 
 
 
