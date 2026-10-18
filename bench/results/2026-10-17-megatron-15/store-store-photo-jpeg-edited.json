@@ -1,0 +1,150 @@
+{
+  "class": "photo-jpeg-edited",
+  "corpus": {
+    "class_bytes": 550674750,
+    "class_files": 600,
+    "manifest_blake3": "1d24f5c824fad0c85fc3b9231643b2bd80a75437c6b3d38e86ef1f6450a05f43",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 551132160,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.390625,
+      "peak_job_memory_bytes": 1536000,
+      "peak_memory_bytes": 6168576,
+      "peak_process_commit_bytes": 1536000,
+      "timed_out": false,
+      "user_cpu_seconds": 0.03125,
+      "wall_seconds": 0.4221382
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.3125,
+      "peak_job_memory_bytes": 1204224,
+      "peak_memory_bytes": 6283264,
+      "peak_process_commit_bytes": 1204224,
+      "timed_out": false,
+      "user_cpu_seconds": 0.046875,
+      "wall_seconds": 0.3731254
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 551132160,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.421875,
+        "peak_job_memory_bytes": 1536000,
+        "peak_memory_bytes": 6172672,
+        "peak_process_commit_bytes": 1536000,
+        "timed_out": false,
+        "user_cpu_seconds": 0.0,
+        "wall_seconds": 0.4276352
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.296875,
+        "peak_job_memory_bytes": 1208320,
+        "peak_memory_bytes": 6283264,
+        "peak_process_commit_bytes": 1208320,
+        "timed_out": false,
+        "user_cpu_seconds": 0.046875,
+        "wall_seconds": 0.3731254
+      }
+    },
+    {
+      "archive_bytes": 551132160,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.390625,
+        "peak_job_memory_bytes": 1540096,
+        "peak_memory_bytes": 6168576,
+        "peak_process_commit_bytes": 1540096,
+        "timed_out": false,
+        "user_cpu_seconds": 0.03125,
+        "wall_seconds": 0.4221382
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.359375,
+        "peak_job_memory_bytes": 1204224,
+        "peak_memory_bytes": 6283264,
+        "peak_process_commit_bytes": 1204224,
+        "timed_out": false,
+        "user_cpu_seconds": 0.0,
+        "wall_seconds": 0.3696968
+      }
+    },
+    {
+      "archive_bytes": 551132160,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.3125,
+        "peak_job_memory_bytes": 1531904,
+        "peak_memory_bytes": 6160384,
+        "peak_process_commit_bytes": 1531904,
+        "timed_out": false,
+        "user_cpu_seconds": 0.03125,
+        "wall_seconds": 0.3814965
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.3125,
+        "peak_job_memory_bytes": 1200128,
+        "peak_memory_bytes": 6270976,
+        "peak_process_commit_bytes": 1200128,
+        "timed_out": false,
+        "user_cpu_seconds": 0.046875,
+        "wall_seconds": 0.3812747
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "-cf",
+      "../../tmp/run41344/c141/a.tar",
+      "-C",
+      "photo-jpeg-edited",
+      "."
+    ],
+    "extract_args": [
+      "-xf",
+      "a.tar",
+      "-C",
+      "x"
+    ],
+    "id": "store"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "store",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "bsdtar 3.8.8"
+  },
+  "verification": {
+    "files_checked": 600,
+    "files_ok": 600,
+    "verified": true
+  }
+}

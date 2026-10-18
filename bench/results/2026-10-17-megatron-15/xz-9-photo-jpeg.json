@@ -1,0 +1,149 @@
+{
+  "class": "photo-jpeg",
+  "corpus": {
+    "class_bytes": 8258908517,
+    "class_files": 3055,
+    "manifest_blake3": "1d24f5c824fad0c85fc3b9231643b2bd80a75437c6b3d38e86ef1f6450a05f43",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "tar": {
+      "format": "pax-restricted",
+      "in_published_time": true,
+      "tool": "bsdtar 3.8.8"
+    },
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 8075576488,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 47.953125,
+      "peak_job_memory_bytes": 30287675392,
+      "peak_memory_bytes": 29852073984,
+      "peak_process_commit_bytes": 30287675392,
+      "tar_step": {
+        "kernel_cpu_seconds": 5.90625,
+        "user_cpu_seconds": 0.109375,
+        "wall_seconds": 6.2667023
+      },
+      "timed_out": false,
+      "tool_step": {
+        "kernel_cpu_seconds": 42.046875,
+        "user_cpu_seconds": 4769.671875,
+        "wall_seconds": 245.4435645
+      },
+      "user_cpu_seconds": 4769.78125,
+      "wall_seconds": 251.7102668
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 12.25,
+      "peak_job_memory_bytes": 6465986560,
+      "peak_memory_bytes": 6159896576,
+      "peak_process_commit_bytes": 6465986560,
+      "tar_step": {
+        "kernel_cpu_seconds": 3.71875,
+        "user_cpu_seconds": 0.0625,
+        "wall_seconds": 4.1123171
+      },
+      "timed_out": false,
+      "tool_step": {
+        "kernel_cpu_seconds": 8.53125,
+        "user_cpu_seconds": 59.125,
+        "wall_seconds": 9.1483022
+      },
+      "user_cpu_seconds": 59.1875,
+      "wall_seconds": 13.2606193
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 8075576488,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 47.953125,
+        "peak_job_memory_bytes": 30287675392,
+        "peak_memory_bytes": 29852073984,
+        "peak_process_commit_bytes": 30287675392,
+        "tar_step": {
+          "kernel_cpu_seconds": 5.90625,
+          "user_cpu_seconds": 0.109375,
+          "wall_seconds": 6.2667023
+        },
+        "timed_out": false,
+        "tool_step": {
+          "kernel_cpu_seconds": 42.046875,
+          "user_cpu_seconds": 4769.671875,
+          "wall_seconds": 245.4435645
+        },
+        "user_cpu_seconds": 4769.78125,
+        "wall_seconds": 251.7102668
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 12.25,
+        "peak_job_memory_bytes": 6465986560,
+        "peak_memory_bytes": 6159896576,
+        "peak_process_commit_bytes": 6465986560,
+        "tar_step": {
+          "kernel_cpu_seconds": 3.71875,
+          "user_cpu_seconds": 0.0625,
+          "wall_seconds": 4.1123171
+        },
+        "timed_out": false,
+        "tool_step": {
+          "kernel_cpu_seconds": 8.53125,
+          "user_cpu_seconds": 59.125,
+          "wall_seconds": 9.1483022
+        },
+        "user_cpu_seconds": 59.1875,
+        "wall_seconds": 13.2606193
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "repeats_short": "the first repeat's compress plus extract wall time reached --long-run-s (120 s): not repeated",
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "-q",
+      "-9",
+      "-T24",
+      "-c"
+    ],
+    "extract_args": [
+      "-d",
+      "-q",
+      "-T24",
+      "-c"
+    ],
+    "id": "9"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "xz",
+    "mode": "tar-stream",
+    "ratio_depends_on_threads": true,
+    "version": "5.8.4"
+  },
+  "verification": {
+    "files_checked": 3055,
+    "files_ok": 3055,
+    "verified": true
+  }
+}

@@ -1,0 +1,234 @@
+{
+  "class": "archives-nested",
+  "corpus": {
+    "class_bytes": 34975551,
+    "class_files": 14,
+    "manifest_blake3": "1d24f5c824fad0c85fc3b9231643b2bd80a75437c6b3d38e86ef1f6450a05f43",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "tar": {
+      "format": "pax-restricted",
+      "in_published_time": true,
+      "tool": "bsdtar 3.8.8"
+    },
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 27639848,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.34375,
+      "peak_job_memory_bytes": 1111420928,
+      "peak_memory_bytes": 450048000,
+      "peak_process_commit_bytes": 1111420928,
+      "tar_step": {
+        "kernel_cpu_seconds": 0.03125,
+        "user_cpu_seconds": 0.0,
+        "wall_seconds": 0.0365447
+      },
+      "timed_out": false,
+      "tool_step": {
+        "kernel_cpu_seconds": 0.328125,
+        "user_cpu_seconds": 8.5,
+        "wall_seconds": 9.0340171
+      },
+      "user_cpu_seconds": 8.5,
+      "wall_seconds": 9.0705618
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.046875,
+      "peak_job_memory_bytes": 130830336,
+      "peak_memory_bytes": 102363136,
+      "peak_process_commit_bytes": 130830336,
+      "tar_step": {
+        "kernel_cpu_seconds": 0.015625,
+        "user_cpu_seconds": 0.0,
+        "wall_seconds": 0.0270762
+      },
+      "timed_out": false,
+      "tool_step": {
+        "kernel_cpu_seconds": 0.015625,
+        "user_cpu_seconds": 0.21875,
+        "wall_seconds": 0.2263207
+      },
+      "user_cpu_seconds": 0.234375,
+      "wall_seconds": 0.25339690000000004
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 27639848,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.421875,
+        "peak_job_memory_bytes": 1111465984,
+        "peak_memory_bytes": 450011136,
+        "peak_process_commit_bytes": 1111465984,
+        "tar_step": {
+          "kernel_cpu_seconds": 0.03125,
+          "user_cpu_seconds": 0.0,
+          "wall_seconds": 0.0325138
+        },
+        "timed_out": false,
+        "tool_step": {
+          "kernel_cpu_seconds": 0.390625,
+          "user_cpu_seconds": 8.359375,
+          "wall_seconds": 9.0438819
+        },
+        "user_cpu_seconds": 8.359375,
+        "wall_seconds": 9.0763957
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.109375,
+        "peak_job_memory_bytes": 130822144,
+        "peak_memory_bytes": 102363136,
+        "peak_process_commit_bytes": 130822144,
+        "tar_step": {
+          "kernel_cpu_seconds": 0.015625,
+          "user_cpu_seconds": 0.0,
+          "wall_seconds": 0.0281005
+        },
+        "timed_out": false,
+        "tool_step": {
+          "kernel_cpu_seconds": 0.09375,
+          "user_cpu_seconds": 0.1875,
+          "wall_seconds": 0.223457
+        },
+        "user_cpu_seconds": 0.1875,
+        "wall_seconds": 0.2515575
+      }
+    },
+    {
+      "archive_bytes": 27639848,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.34375,
+        "peak_job_memory_bytes": 1111420928,
+        "peak_memory_bytes": 450048000,
+        "peak_process_commit_bytes": 1111420928,
+        "tar_step": {
+          "kernel_cpu_seconds": 0.015625,
+          "user_cpu_seconds": 0.015625,
+          "wall_seconds": 0.0365447
+        },
+        "timed_out": false,
+        "tool_step": {
+          "kernel_cpu_seconds": 0.328125,
+          "user_cpu_seconds": 8.515625,
+          "wall_seconds": 9.0340171
+        },
+        "user_cpu_seconds": 8.53125,
+        "wall_seconds": 9.0705618
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.046875,
+        "peak_job_memory_bytes": 130842624,
+        "peak_memory_bytes": 102412288,
+        "peak_process_commit_bytes": 130842624,
+        "tar_step": {
+          "kernel_cpu_seconds": 0.03125,
+          "user_cpu_seconds": 0.0,
+          "wall_seconds": 0.0270762
+        },
+        "timed_out": false,
+        "tool_step": {
+          "kernel_cpu_seconds": 0.015625,
+          "user_cpu_seconds": 0.234375,
+          "wall_seconds": 0.2263207
+        },
+        "user_cpu_seconds": 0.234375,
+        "wall_seconds": 0.25339690000000004
+      }
+    },
+    {
+      "archive_bytes": 27639848,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.3125,
+        "peak_job_memory_bytes": 1111416832,
+        "peak_memory_bytes": 450088960,
+        "peak_process_commit_bytes": 1111416832,
+        "tar_step": {
+          "kernel_cpu_seconds": 0.046875,
+          "user_cpu_seconds": 0.0,
+          "wall_seconds": 0.0370448
+        },
+        "timed_out": false,
+        "tool_step": {
+          "kernel_cpu_seconds": 0.265625,
+          "user_cpu_seconds": 8.5,
+          "wall_seconds": 9.021084
+        },
+        "user_cpu_seconds": 8.5,
+        "wall_seconds": 9.0581288
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.03125,
+        "peak_job_memory_bytes": 130830336,
+        "peak_memory_bytes": 102350848,
+        "peak_process_commit_bytes": 130830336,
+        "tar_step": {
+          "kernel_cpu_seconds": 0.015625,
+          "user_cpu_seconds": 0.015625,
+          "wall_seconds": 0.0256566
+        },
+        "timed_out": false,
+        "tool_step": {
+          "kernel_cpu_seconds": 0.015625,
+          "user_cpu_seconds": 0.21875,
+          "wall_seconds": 0.2279719
+        },
+        "user_cpu_seconds": 0.234375,
+        "wall_seconds": 0.25362850000000003
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "-q",
+      "-9",
+      "-T24",
+      "-c"
+    ],
+    "extract_args": [
+      "-d",
+      "-q",
+      "-T24",
+      "-c"
+    ],
+    "id": "9"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "xz",
+    "mode": "tar-stream",
+    "ratio_depends_on_threads": true,
+    "version": "5.8.4"
+  },
+  "verification": {
+    "files_checked": 14,
+    "files_ok": 14,
+    "verified": true
+  }
+}

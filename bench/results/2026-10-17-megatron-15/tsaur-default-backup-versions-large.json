@@ -1,0 +1,22 @@
+{
+  "class": "backup-versions-large",
+  "corpus": {
+    "class_bytes": 1663755751,
+    "class_files": 127153,
+    "manifest_blake3": "1d24f5c824fad0c85fc3b9231643b2bd80a75437c6b3d38e86ef1f6450a05f43",
+    "profile": "full"
+  },
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [],
+    "extract_args": [],
+    "id": "default"
+  },
+  "skipped": "not installed",
+  "threads": 24,
+  "tool": {
+    "id": "tsaur",
+    "mode": "directory",
+    "ratio_depends_on_threads": false
+  }
+}
