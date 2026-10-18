@@ -555,7 +555,9 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path, allow_unclean: bool) ->
         let (_, from_src) = base.results.remove(pos);
         base.pooled[from].rows.retain(|s| *s != from_src);
         let key = (&e.tool, &e.setting, &e.class);
-        base.run.combinations.retain(|c| (&c.tool, &c.setting, &c.class) != key);
+        base.run
+            .combinations
+            .retain(|c| (&c.tool, &c.setting, &c.class) != key);
         base.superseded.push(model::Superseded {
             tool: e.tool,
             setting: e.setting,

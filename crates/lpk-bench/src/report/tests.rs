@@ -2252,7 +2252,10 @@ fn a_listed_row_of_a_later_directory_replaces_the_earlier_one_and_the_report_say
     assert_eq!(base.superseded.len(), 1);
     let e = &base.superseded[0];
     assert_eq!(e.combination(), "7z/mx5/audio");
-    assert_eq!((e.from.as_str(), e.from_src), ("a/2026-10-01-testbox", a_row));
+    assert_eq!(
+        (e.from.as_str(), e.from_src),
+        ("a/2026-10-01-testbox", a_row)
+    );
     assert_eq!((e.by.as_str(), e.by_src), ("b/2026-10-01-testbox", b_row));
     assert_eq!(Model::build(&inputs).superseded, base.superseded);
     let text = report_text(&inputs);
@@ -2316,15 +2319,24 @@ fn a_listed_row_missing_on_either_side_or_naming_no_directory_is_refused() {
     // (The validator refuses the directory before the pool looks at it.)
     let err = load(&pooled_args(tmp.path(), vec![a.clone(), b])).expect_err("not in b");
     let msg = format!("{err:#}");
-    assert!(msg.contains("7z/ultra/audio") && msg.contains("superseding"), "{msg}");
+    assert!(
+        msg.contains("7z/ultra/audio") && msg.contains("superseding"),
+        "{msg}"
+    );
     assert!(msg.contains("no such result file"), "{msg}");
     // Listed and in the later directory, but the earlier one never measured it.
     let c = dir_under(tmp.path(), "c", &second_results());
     write_supersedes(&c, &[("7z", "ultra", "audio", "2026-10-01-testbox")]);
     let err = load(&pooled_args(tmp.path(), vec![a.clone(), c])).expect_err("not in a");
     let msg = format!("{err:#}");
-    assert!(msg.contains("7z/ultra/audio") && msg.contains("superseded"), "{msg}");
-    assert!(msg.contains("`a/2026-10-01-testbox` has no such row"), "{msg}");
+    assert!(
+        msg.contains("7z/ultra/audio") && msg.contains("superseded"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("`a/2026-10-01-testbox` has no such row"),
+        "{msg}"
+    );
     // `from` names no earlier directory.
     let d = dir_under(tmp.path(), "d", &remeasured_mx5());
     write_supersedes(&d, &[("7z", "mx5", "audio", "2026-10-01-otherbox")]);
@@ -2340,7 +2352,10 @@ fn a_listed_row_missing_on_either_side_or_naming_no_directory_is_refused() {
     // The first directory cannot carry the file: there is nothing before it to replace.
     let first = b_with_file(tmp.path());
     let err = load(&pooled_args(tmp.path(), vec![first, a])).expect_err("first");
-    assert!(format!("{err:#}").contains("give that directory first"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("give that directory first"),
+        "{err:#}"
+    );
 }
 
 /// A fresh later directory carrying a supersedes.toml for `7z/mx5/audio`.
