@@ -2284,7 +2284,7 @@ fn a_listed_row_of_a_later_directory_replaces_the_earlier_one_and_the_report_say
         .lines()
         .skip_while(|l| !l.starts_with("## 2."))
         .take_while(|l| !l.starts_with("## 3."))
-        .find(|l| l.starts_with('|') && l.contains("mx5"))
+        .find(|l| l.starts_with("| 7z/mx5"))
         .expect("table row");
     // A cell's citations are one bracket list (`[2,7]`, runs written `2-4`), so read them as a set.
     let cited: std::collections::BTreeSet<usize> = row
