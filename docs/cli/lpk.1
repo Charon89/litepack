@@ -1,0 +1,54 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH lpk 1  "lpk 0.0.1" 
+.SH NAME
+lpk \- LitePack archiver: create, extract and test .lpk archives
+.SH SYNOPSIS
+\fBlpk\fR [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+LitePack archiver: create, extract and test .lpk archives
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Machine\-readable output: `l` prints one JSON object per entry per line, and any failing command prints exactly one JSON object line on stderr instead of `error: ...`
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+lpk\-a(1)
+Create an archive from the contents of a directory (not the directory itself)
+.TP
+lpk\-l(1)
+List an archive, one line per entry: kind, size, mtime (UTC), path (tab\-separated)
+.TP
+lpk\-x(1)
+Extract every entry of an archive into a directory; never overwrites a file
+.TP
+lpk\-t(1)
+Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shards
+.TP
+lpk\-check(1)
+Hash the data shards the recovery frames cover and report the damage (exit 2 if any)
+.TP
+lpk\-repair(1)
+Write a copy of an archive with its damaged shards rebuilt from the recovery frames
+.TP
+lpk\-append(1)
+Append the contents of a directory to an archive as its next generation: a snapshot (paths the directory no longer has are removed), deduplicated against the archive\*(Aqs chunks. A failed append leaves the archive as it was
+.TP
+lpk\-rollback(1)
+Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short
+.TP
+lpk\-info(1)
+Print an archive\*(Aqs header, envelope, counts and generations
+.TP
+lpk\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH EXTRA
+Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure is one line on stderr, `error: <message>`; with \-\-json it is one JSON object line instead: {"error":{"code":1|2,"kind":"<the error\*(Aqs variant name; Usage for a command\-line error; Reference for a failure reported by the reference tool\*(Aqs code>","message":"...","path":"<the path the error names, else the archive>","entries":[{"path","kind","message"}, the per\-entry errors of a partial extraction, when there are some]}}.
+.SH VERSION
+v0.0.1
