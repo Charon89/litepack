@@ -2158,10 +2158,16 @@ fn a_merged_tool_is_cited_to_the_directory_that_holds_its_rows() {
 fn rows_of_one_tool_at_two_versions_are_refused() {
     let tmp = tempfile::tempdir().expect("tmp");
     let a = dir_under(tmp.path(), "a", &real_class_results());
-    let b = dir_under(tmp.path(), "b", &second_results());
+    // The result file and tools.json both say 27.00, so only the pool's version rule refuses.
+    let mut r = second_results();
+    r[0].tool.version = Some("27.00".into());
+    let b = dir_under(tmp.path(), "b", &r);
     set_tool_version(&b, "7z", "27.00");
     let err = load(&pooled_args(tmp.path(), vec![a, b])).expect_err("versions");
-    assert!(format!("{err:#}").contains("version"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("has rows at version"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -2369,11 +2375,17 @@ fn b_with_file(tmp: &Path) -> std::path::PathBuf {
 fn a_superseding_row_from_another_tool_version_is_refused() {
     let tmp = tempfile::tempdir().expect("tmp");
     let a = dir_under(tmp.path(), "a", &real_class_results());
-    let b = dir_under(tmp.path(), "b", &remeasured_mx5());
+    // The result file and tools.json both say 27.00, so only the pool's version rule refuses.
+    let mut r = remeasured_mx5();
+    r[0].tool.version = Some("27.00".into());
+    let b = dir_under(tmp.path(), "b", &r);
     set_tool_version(&b, "7z", "27.00");
     write_supersedes(&b, &[("7z", "mx5", "audio", "2026-10-01-testbox")]);
     let err = load(&pooled_args(tmp.path(), vec![a, b])).expect_err("versions");
-    assert!(format!("{err:#}").contains("version"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("has rows at version"),
+        "{err:#}"
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "lpk-bench result files",
-  "description": "A results directory bench/results/<date>-<host>[-<n>]/ holds host.json, tools.json and one result file per tool x setting x class named <tool>-<setting>-<class>.json (plus probe-<name>.json files, accepted by name). Beyond this schema, lpk-bench run --validate rejects any string that contains an absolute path, recomputes the medians, and checks file names, directory name, host, tool versions, and one profile and manifest hash per directory against the contents. Kept in step with crates/lpk-bench/src/run/result.rs by a unit test; every property carries a description with its unit.",
+  "description": "A results directory bench/results/<date>-<host>[-<n>]/ holds host.json, tools.json and one result file per tool x setting x class named <tool>-<setting>-<class>.json (plus probe-<name>.json files, accepted by name, and an optional supersedes.toml naming the combinations of an earlier directory that this one replaces in a pooled report). Beyond this schema, lpk-bench run --validate rejects any string that contains an absolute path, recomputes the medians, and checks file names, directory name, host, tool versions, and one profile and manifest hash per directory against the contents. Kept in step with crates/lpk-bench/src/run/result.rs by a unit test; every property carries a description with its unit.",
   "$defs": {
     "id": {
       "type": "string",
