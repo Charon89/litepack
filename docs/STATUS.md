@@ -36,22 +36,16 @@ E3-8 is done (D-75, PR #77).
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
 2. Revision 1.3 is final (D-78 (8): tasks A, C and E merged, PRs #73, #80, #83, and the reference's look-ahead
-   correction R36, PR #84). Task D (the Balanced tier writes `[lzma, bwt]` on text) is approved and in PR #86
-   (`task/rev13-d`, merged with `main`; CI was finishing at the pause): squash-merge it when green, then on the idle
-   machine the rows that tick E2-15: a release build of `main`, a trimmed catalogue with `lpk`'s `balanced` and
+   correction R36, PR #84). Task D (the Balanced tier writes `[lzma, bwt]` on text) is in `main`, PR #86
+   (merged, D-81). Next, on the idle
+   machine, the rows that tick E2-15: a release build of `main`, a trimmed catalogue with `lpk`'s `balanced` and
    `balanced-no-bwt` (as `target/acceptance/tools-e2-21.toml` trims to `fast` and `balanced`), `lpk-bench run
    --tools lpk --profile small --catalogue <it>`, results committed, the report; tick when `lpk/balanced` is
    smaller than `lpk/balanced-no-bwt` on `text-prose` and `logs-text`, with both rows' compress and extraction
-   times and peak memory, and run `lpk-check` over those two classes' archives. Then the D-entry for task D: BWT
-   on by default in Balanced on `Text`-hinted blocks, chosen only when strictly smaller, B = min(64 MiB,
-   `plain_len`); a block declares max(term, I + the LZMA figure); header minor 3 whenever the stage is on (R38:
-   one header byte on archives without text); an append onto a pre-1.3 archive drops the stage; with a `Text`
-   cluster the default plan drops to one block in flight and `threads_hint` 1 (sequential compression) and text
-   blocks declare about twice the decode memory (a follow-up may shrink the per-block figure); libsais in the
-   writer only. `png-filter` would be revision 1.4 if the owner accepts E2-16's margin (below). E2-17 closed
+   times and peak memory, and run `lpk-check` over those two classes' archives. `png-filter` would be revision 1.4 if the owner accepts E2-16's margin (below). E2-17 closed
    (D-76).
 3. E2-22: the incumbents' baseline on `full` is committed (`bench/results/2026-10-17-megatron-15` with the
-   re-measured `2026-10-18-megatron` and its `supersedes.toml`, D-74; PR #78). Next, after PR #86: the `lpk` rows
+   re-measured `2026-10-18-megatron` and its `supersedes.toml`, D-74; PR #78). Next: the `lpk` rows
    on the final engine (`fast` and `balanced` on `full`, a trimmed catalogue, a detached script with a status file
    since it takes hours, the machine idle), pooled with both directories (same corpus, host and threads); then the
    report's gate table, its D-entry and the Phase 1 verdict input. A measurement needs the machine idle: no agent
@@ -61,8 +55,7 @@ E3-8 is done (D-75, PR #77).
    with the prompt rules; open the archive before creating the output and refuse the archive itself as the
    output; a Zip64 margin for entries that grow; bit-exact checks of the peeled vectors and a 70,000-entry test;
    three small points); the implementer was stopped mid-round and its branch's last commit lists what remains.
-   E3-3 (progress, cancellation) and E3-4 (several inputs, selective extraction) start after PR #86 (they touch
-   the same engine files); E3-9 re-runs the harness after E2-22.
+   E3-3 (progress, cancellation) and E3-4 (several inputs, selective extraction) can start now that PR #86 is merged; E3-9 re-runs the harness after E2-22.
    E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
    chunk in an appended generation is coded without its previous version in the window.
 5. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
@@ -114,7 +107,6 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/rev13-d` (PR #86): revision 1.3 task D, approved (two small fixes done); squash-merge when CI is green.
 - `task/e3-6` (PR #87): E3-6, fix round R39 in progress (see "How to resume" 4).
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
