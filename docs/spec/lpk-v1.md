@@ -5,6 +5,8 @@ independent decoder written from it (`docs/spec/CHANGES.md` lists every change);
 Revision 1.1 (section 2) adds the decoding of `jpeg-reconstruct` (section 8) and nothing else.
 Revision 1.2 (section 2) adds the decoding of `deflate-reconstruct` and the output bound of the step before it
 (section 8) and nothing else.
+Revision 1.3 (section 2) adds the decoding of `bwt` and the output bound of the step before it (section 8) and
+nothing else.
 The specification revision of 2026-10-16 (E1-15) defines the recovery frames' Reed-Solomon code normatively in
 section 13 instead of by reference to a library; it changes no byte and no reader outcome, and `version_minor` is
 unchanged. Two text revisions of E2-20 (D-67) state that `threads_hint` is the writer's choice for store-only
@@ -64,7 +66,7 @@ The header is fixed at 32 bytes at offset 0.
 |---|---|---|---|
 | 0 | 8 | magic | `0x89 0x4C 0x50 0x4B 0x0D 0x0A 0x1A 0x0A` (`\x89LPK\r\n\x1a\n`) |
 | 8 | 2 | version_major | 1 |
-| 10 | 2 | version_minor | the revision the writer wrote under: 0, 1 for revision 1.1, or 2 for revision 1.2 (see "Revisions") |
+| 10 | 2 | version_minor | the revision the writer wrote under: 0, 1 for revision 1.1, 2 for revision 1.2, or 3 for revision 1.3 (see "Revisions") |
 | 12 | 4 | flags | see below |
 | 16 | 16 | archive_id | 16 random bytes chosen by the writer |
 
@@ -85,7 +87,9 @@ Revisions. Version 1 grows by revisions that add the decoding of primitives the 
 `zstd` and `lzma`. Revision 1.1 (minor 1) adds the decoding of `jpeg-reconstruct` (0x0007, section 8 "Decoding
 `jpeg-reconstruct`") and nothing else. Revision 1.2 (minor 2) adds the decoding of `deflate-reconstruct` (0x0008,
 section 8 "Decoding `deflate-reconstruct`") and the output bound of the step before it (section 8, "Bounds"), and
-nothing else. `version_minor` is the revision the writer wrote under, a declaration and
+nothing else. Revision 1.3 (minor 3) adds the decoding of `bwt` (0x0003, section 8 "Decoding `bwt`") and the
+output bound of the step before it (section 8, "Bounds"), and nothing else. `version_minor` is the revision the
+writer wrote under, a declaration and
 not a fact about the archive's blocks: the archive may use any primitive of that revision or an earlier one, and
 none of a later one (section 8). A reader does not infer from the minor which primitives occur; it checks the
 primitives of each block as section 8 says, and never consults the minor to decide what to decode: an archive of
@@ -99,7 +103,11 @@ names `jpeg-reconstruct`, exactly as for any primitive it does not run. Revision
 of revision 1.2 writes 2 whether or not any block names `deflate-reconstruct` (informative: the reference pipeline
 writes 2 whenever its Deflate peel is enabled), and a reader of revision 1.0 or 1.1 accepts an archive of minor 2,
 lists it, verifies its frames and records, and reports `UnimplementedPrimitive` with the ID 8 for every block whose
-graph names `deflate-reconstruct`.
+graph names `deflate-reconstruct`. Revision 1.3 follows it too: a writer of revision 1.3 writes 3 whether or not
+any block names `bwt` (informative: the reference pipeline writes 3 whenever its BWT stage is enabled), and a
+reader of revision 1.0, 1.1 or 1.2 accepts an archive of minor 3, lists it, verifies its frames and records, and
+reports `UnimplementedPrimitive` with the ID 3 for every block whose graph names `bwt`. A graph that names several
+primitives the reader does not run reports the first of them in step order.
 
 A revision of the text that changes no byte and no reader outcome, only how completely something is described, does
 not change `version_minor`: the specification revision of 2026-10-16 writes out the Reed-Solomon code of the
@@ -619,7 +627,7 @@ data. The registry gives each primitive a 16-bit ID, a name, a parameter layout 
 | 0x0000 | `store` | none (length 0) | none |
 | 0x0001 | `zstd` | `window_log: u8` (window = 2^window_log bytes; 10..=31), `dictionary: [u8; 32]` (BLAKE3 id of a prior, all zeros = none) | window = 2^window_log |
 | 0x0002 | `lzma` | `dict_size: u32` LE, `lc: u8`, `lp: u8`, `pb: u8` (the LZMA1 properties; lc <= 8, lp <= 4, pb <= 4, lc + lp <= 4) | window = dict_size |
-| 0x0003 | `bwt` | `block_size: u32` LE (bytes; not 0) | bwt block = block_size |
+| 0x0003 | `bwt` | `block_size: u32` LE (bytes; not 0) | bwt block = block_size; memory per step, declared by `decode_memory` |
 | 0x0004 | `bcj-x86` | none | none |
 | 0x0005 | `bcj-arm64` | none | none |
 | 0x0006 | `delta` | `base_chunk: u64` LE (the chunk the patch applies to), `patch_format: u8` (0 = zstd patch, 1 = suffix-array patch) | none |
@@ -642,7 +650,8 @@ reason. A `params` whose length differs from the layout's is `BadParams` with th
 
 Primitives 3 to 12. Revision 1.0 gives `bwt`, `bcj-x86`, `bcj-arm64`, `delta` and the six reconstruction
 primitives an ID, a parameter layout and their resources, but no decoding. Revision 1.1 specifies the decoding of
-`jpeg-reconstruct` (below), and revision 1.2 that of `deflate-reconstruct` (below). A writer MUST NOT emit a primitive whose decoding no revision up to the archive's
+`jpeg-reconstruct` (below), revision 1.2 that of `deflate-reconstruct` (below), and revision 1.3 that of `bwt`
+(below). A writer MUST NOT emit a primitive whose decoding no revision up to the archive's
 `version_minor` specifies, and a reader MUST report `UnimplementedPrimitive` with the ID for a graph that names a
 primitive it does not run, before it runs any step (it still validates their parameters as above). Whether a
 reader runs a primitive depends on the reader alone, never on the archive's `version_minor` (section 2): a block
@@ -669,8 +678,8 @@ step's decoder, its output into the second step's, and the last output is the bl
 compressed with `bcj-x86` and then with `lzma` therefore writes the graph `[lzma, bcj-x86]`.
 
 Bounds. Every intermediate output is bounded by the archive's envelope `max_block_plain` (section 7), which the
-reader has already compared with its own resource; a larger one is `PayloadTooLarge` (revision 1.2 makes one
-exception, below). So whether a block decodes
+reader has already compared with its own resource; a larger one is `PayloadTooLarge` (revisions 1.2 and 1.3
+make exceptions, below). So whether a block decodes
 never depends on the reader's resources beyond the checks that refuse the archive. The last step must produce
 exactly `plain_len` bytes; any other length, including a decoder
 that would produce more, is `BlockLengthMismatch`. A block whose `plain_len` exceeds `max_block_plain` is
@@ -682,8 +691,8 @@ Revision 1.2. A step whose next step is `deflate-reconstruct` has, as its output
 record that step names instead of `max_block_plain`. Before the step runs, and before any of that step's own rules
 (its parameters' resources against the reader, its prior, its input), the reader applies checks (1) to (5) of
 "Decoding `deflate-reconstruct`" to that record, with the `deflate-reconstruct` step's own output bound in check (3):
-the block's `plain_len` when that step is the last, `max_block_plain` otherwise, never a bound derived from a later
-step (such as the `plain_len` of a record that a step after it names); an error there is the block's error
+the block's `plain_len` when that step is the last, otherwise the bound the look-ahead of revision 1.3 gives it
+(below; `max_block_plain` when the step after it gives none); an error there is the block's error
 and the step does not run. The step's output longer than `plain_len` is `PayloadTooLarge`; a shorter one is
 reported by the reconstruction step (check (6), `BadRecord` `plain_len`). Check (5) is what bounds `plain_len`: a
 record whose `plain_len` the archive's decode memory cannot hold is refused before the step that would produce it
@@ -693,6 +702,29 @@ its actual output bound, which may be tighter than `max_block_plain` (the `plain
 that step is `deflate-reconstruct` too); an `original_len` that passes one bound and not the other fails with the
 same class, `PayloadTooLarge`, at the step or before the step before it. When `deflate-reconstruct` is the first
 step, its input is the encoded bytes and checks (1) to (5) run at the step itself.
+
+Revision 1.3. A step whose next step is `bwt` has, as its output bound, I(O, B) of "Decoding `bwt`" (the exact
+length of that step's input for an output of O bytes in BWT blocks of B, its `block_size`) instead of
+`max_block_plain`, where O is the `bwt` step's own output bound; before the step runs, and before any of its own
+rules, the reader applies check (1) of "Decoding `bwt`" (the memory term) with that O, and an error there is the
+block's error and the step does not run. The bound is exact: an output longer than I(O, B) is `PayloadTooLarge`,
+and a shorter one fails check (4) at the `bwt` step (`BwtError`, `length`). When `bwt` is the first step, its input
+is the encoded bytes and check (1) runs at the step itself.
+
+The look-ahead. Revision 1.3 also states how a bounding step's own output bound is found, for every graph and
+whatever the archive's `version_minor`: by one level of look-ahead. Let S be a step that bounds its input
+(`deflate-reconstruct` or `bwt`) and let the step before S be about to run. S's own output bound is the block's
+`plain_len` when S is the last step; otherwise it is the input bound the step after S gives, when that step gives
+one, asked with the block's `plain_len` when it is the last step and `max_block_plain` otherwise (the look-ahead
+goes no further); otherwise `max_block_plain`. The step after S is asked before S's own pre-checks, so an error
+of its pre-checks (its record, its term) is the block's error before anything runs. So in `[M, bwt,
+deflate-reconstruct]` the `bwt` step's O is the record's `plain_len` (checks (1) to (5) of
+"Decoding `deflate-reconstruct`" having run), and `M` is bounded by I(`plain_len`, B): a text longer than
+`max_block_plain` can be transformed and recreated. This replaces revision 1.2's sentence that the bound of the
+pre-checks is never derived from a later step; the classes are unchanged (`PayloadTooLarge` either way), and no
+graph a conforming writer produces is read differently (section 9: `deflate-reconstruct` is written last, `bwt`
+last or directly before it), only a graph with a bounding step followed by another, which no revision's writer
+emits. Every other intermediate output stays bounded by `max_block_plain`.
 
 Unknown IDs. A primitive ID that is not in the table is `UnknownPrimitive`, raised as soon as the ID is read
 while the graph is parsed, before any later byte of the graph or any encoded byte is looked at; a graph that is
@@ -745,9 +777,9 @@ in exactly one of two groups (informative; the normative rule for 3 to 12 is abo
 
 For a primitive without a decoder the reference decoder reports `UnimplementedPrimitive` with the ID, before it
 runs any step of the graph. The reference decoder (`lpk-format`, `lpk-decode`) stays a revision 1.0 reader; the
-full reader of revisions 1.1 and 1.2 is `lpk-core` (informative: it registers its `jpeg-reconstruct` and
-`deflate-reconstruct` decoders on an opened archive, and the `lpk` tool extracts and tests through it).
-`deflate-reconstruct` needs the full reader.
+full reader of revisions 1.1, 1.2 and 1.3 is `lpk-core` (informative: it registers its `jpeg-reconstruct`,
+`deflate-reconstruct` and `bwt` decoders on an opened archive, and the `lpk` tool extracts and tests through it).
+`deflate-reconstruct` and `bwt` need the full reader.
 
 ### Decoding `jpeg-reconstruct` (revision 1.1)
 
@@ -943,6 +975,82 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   (hash chains, Huffman tables, CABAC contexts) and small buffers. The output is the block's own buffer, counted in
   `max_block_plain`. The reference's test measures a recreation with a counting allocator against the term.
 
+### Decoding `bwt` (revision 1.3)
+
+The step's input is the Burrows-Wheeler transform of its output, laid out as below; its output is `out_len` bytes of
+text: the block's plain bytes when the step is the last, otherwise the next step's input. The step's parameter
+`block_size` (B; not 0) is the length of its BWT blocks. The transform is defined here, not by a library:
+Burrows and Wheeler (1994, "A block-sorting lossless data compression algorithm", DEC SRC Research Report 124) is
+its origin and libsais 2.10 (<https://github.com/IlyaGrebnov/libsais>) the reference writer's implementation,
+both named as information only.
+
+- Definition. For a text T of n >= 1 bytes, take the n + 1 rotations of T·$, where $ is a sentinel below every
+  byte value, and sort them (all are distinct, since $ occurs once); the rows are numbered 0..=n, and row 0 is
+  $·T. The transformed bytes are the last column of the sorted rotations without the sentinel's entry (n bytes).
+  r(n) is the smallest power of two at least max(2, ceil(n / 32)) and c(n) = ceil(n / r(n)), at most 32. The
+  block's indices are index[j] for j in 0..c(n): the row of the rotation that starts at text position j·r(n).
+  index[0] is the primary index, the row of T·$ (the rotation whose last character is the sentinel); its value is
+  in 1..=n. The indices are derived from the text, not chosen by a writer: any writer that computes the transform
+  can produce them (a suffix array gives the row of every position), and they let a decoder run c(n) independent
+  walks of at most r(n) bytes each. Example: "banana" gives the transformed bytes "annbaa", r = 2 and the indices
+  4, 6, 5.
+- Input. `out_len` (u64 LE), then k = ceil(out_len / B) BWT blocks: block j holds n_j = B bytes, except the last,
+  which holds out_len − (k − 1)·B; each block is its c(n_j) indices (each u32 LE, index[0] first) followed by its
+  n_j transformed bytes. The input length is therefore exactly I(out_len, B) = 8 + out_len + 4·Σ c(n_j) over the
+  blocks. An `out_len` of 0 has no block and an input of 8 bytes. Output: the k texts, in order.
+- Inverse (what a block's bytes and indices mean). Let L be the transformed bytes with the sentinel inserted at
+  row index[0], so L[i] is the last character of row i (n + 1 entries). Let C[c] = 1 + the number of transformed
+  bytes whose value is below c, and for every row i other than index[0] let LF(i) = C[L[i]] + the number of
+  occurrences of L[i] in L[0..i); LF(index[0]) = 0. Set p_n = 0 and p_k = LF(p_{k+1}) for k from n − 1 down to
+  0. The block is valid if and only if p_0 = index[0], p_k ≠ index[0] for 0 < k < n, and p_{j·r(n)} = index[j]
+  for every j in 0..c(n); then T[k] = L[p_{k+1}] for k in 0..n. Informative: p_k is the row of the rotation
+  starting at position k, and LF maps a row to the row of the rotation starting one position earlier. A decoder
+  may instead walk forward from all c(n) indices at once with the successor LF⁻¹ (next[LF(i)] = i, a
+  permutation of the rows whatever the input), reading each byte from L at the row it lands on; the conditions
+  then read: chain j, walking r(n) steps from index[j] (the last chain n − (c(n) − 1)·r(n) steps), ends on
+  index[j + 1], the last chain ends on row 0, and no earlier step of any chain lands on row 0. Every decoder gives
+  the same bytes or the same error. A decoder that walks from the primary index alone ignores the auxiliary
+  indices and does not conform: a block whose auxiliary indices are wrong MUST be refused
+  (`malformed-bwt-inverse.lpk`, section 11), so that every reader agrees on what is damaged.
+- Order of checks, exactly as the reference performs them. O is the step's output bound: the block's `plain_len`
+  when the step is the last; otherwise the bound "Bounds" gives it (the next step's input bound when that step
+  gives one, else `max_block_plain`). (1) Resources: the step's term ("Resources" below) above the decode memory
+  left after `max_block_plain` is `Refused`, field `decode_memory`, and nothing is read (informative: section 16
+  makes the class and its `field` normative; the reference reports `needed` = `max_block_plain` + the term,
+  saturating at 2^64 - 1, and `allowed` = the decode memory it compared against, the archive's `decode_memory`
+  or its own memory resource if smaller). When a step precedes the `bwt` step, check (1) runs before that step
+  too, with the same O (section 8, "Bounds"). (2) An input shorter than 8 bytes is `BwtError`, `length`. (3)
+  `out_len` against O: on the last step an `out_len` that differs from the block's `plain_len` is
+  `BlockLengthMismatch`; on a step that is not the last an `out_len` above O is `PayloadTooLarge`. Nothing is
+  allocated before this check, and it keeps the arithmetic of check (4) within what check (1) admitted. (4) An
+  input length other than I(out_len, B) is `BwtError`, `length` (informative: a reader whose address space
+  cannot hold `out_len` bytes reports `length` here, which a 64-bit reader never meets, since `out_len` is
+  within the memory of check (1)). (5) Per block, in input order: an index that is 0 or above n_j is `BwtError`,
+  `index`, every index of the block being checked before its inverse runs; a block that fails a validity
+  condition of the inverse is `BwtError`, `inverse`. The first block at fault in input order decides, and within
+  a block the index check precedes the inverse. A block's length needs no check of its own: n_j <= B, B is at
+  most the envelope's `max_bwt_block` (step 5 of "Order of checks for a block", `EnvelopeMismatch`), and
+  `max_bwt_block` is at most the reader's resource (`Refused` at open); check (1) bounds the successor table
+  before it is allocated and check (3) the output.
+- Resources: a BWT block of `block_size` bytes (the envelope's `max_bwt_block`), and memory per step, declared
+  by the envelope's `decode_memory` (section 7). A step's term is term(O, B) = I(O, B) + 4·min(O, B) + 1048576
+  bytes, computed in 64-bit unsigned arithmetic that saturates at 2^64 - 1 (as the reference does, so a term
+  too large for 64 bits is refused): the step's input, a successor table of 4 bytes per byte of the largest
+  block, and a fixed allowance of 1 MiB for the counts, the first-column lookup and the chain cursors. The term
+  is a threshold every revision 1.3 reader applies, whatever its own decoder needs: it compares the term with
+  the archive's `decode_memory`, never above its own memory resource, minus `max_block_plain`, and refuses a
+  step whose term exceeds it with `Refused` (field `decode_memory`, the class `Archive::open` uses for an
+  envelope the reader cannot meet, section 7), without reading it, exactly as for `deflate-reconstruct`. The
+  figure is lasting: a revision 1.3 reader refuses the step of any archive that declares less, whatever
+  revision wrote it. The output is the block's own buffer, counted in `max_block_plain`. The reference writer
+  declares `max_block_plain` plus the largest working memory any of its blocks declares, a block with a `bwt`
+  step contributing the larger of term(`plain_len`, B) and its model step's own figure (section 9). Informative:
+  at the reference reader's defaults (O = 268435456, B = 67108864) the term is 537920008 bytes; the reference's
+  test measures its decoder on a 64 MiB block with a counting allocator against the term.
+- Position. A writer writes `bwt` as the last step of a graph or directly before a last `deflate-reconstruct`
+  step (section 9; the reference writer refuses it elsewhere, `BadGraph`, `bwt position`), because the reader's
+  look-ahead goes one step ("Bounds"); a reader decodes the step in any position, by the rules above.
+
 ### Normative decoders
 
 The decoding of a `zstd` step is that of RFC 8878 (Zstandard frames), and the decoding of an `lzma` step is that of
@@ -990,8 +1098,9 @@ into at most the step's output bound. It applies these rules, in this order:
    `PayloadTooLarge`, or `BlockLengthMismatch` on the last step; otherwise `ZstdError`).
 
 Errors of this section: `UnknownPrimitive`, `UnimplementedPrimitive`, `BadGraph`, `BadParams`,
-`BlockLengthMismatch`, `PayloadTooLarge`, `WindowTooLarge`, `ZstdError`, `LzmaError`, and `Truncated` with the
-`what` strings `graph` and `block header`.
+`BlockLengthMismatch`, `PayloadTooLarge`, `WindowTooLarge`, `ZstdError`, `LzmaError`, `BwtError`, `Refused` and
+`BadRecord` of the reconstruction and `bwt` steps, and `Truncated` with the `what` strings `graph` and
+`block header`.
 
 ### What the reference decoder enforces for `lzma`
 
@@ -999,7 +1108,8 @@ The encoded bytes of an `lzma` step are a raw LZMA1 stream: no `.lzma` or `.xz` 
 the step's parameters, the output length is the step's output bound). In the last step of a graph the output
 bound is the block's `plain_len` and the decoder stops when it has produced exactly that many bytes. A step that
 is not the last has only a bound (the envelope's `max_block_plain`, or in revision 1.2 the `plain_len` of the
-record of a following `deflate-reconstruct` step, section 8 "Bounds"), so its stream MUST end with the
+record of a following `deflate-reconstruct` step, or in revision 1.3 the input length I(O, B) of a following
+`bwt` step, section 8 "Bounds"), so its stream MUST end with the
 end-of-payload marker: a stream without it that reaches the bound is `LzmaError` with the reason
 `marker required`, and one that ends early without it is `LzmaError` with `truncated`. Precisely, in a step that
 is not the last, once the output has reached the bound: a literal or match decoded next is `PayloadTooLarge` (rule
@@ -1165,6 +1275,25 @@ refuses it, its recreation differs, its inflated text is above the writer's limi
 framing; a file without a kept stream is written as it is. With deduplication, a stream whose chunks the archive
 already stores (every span's) is referenced through those chunks, with no new record or block.
 
+### How a writer lays out a BWT block (revision 1.3, informative)
+
+The reference writer's Balanced tier transforms a block whose first cluster is classified as text, and only when
+its trial on the block's sample finds the transformed encoding strictly smaller than both of its plain candidates
+(a tie keeps the plain one); the Fast tier, stored blocks and the Deflate peel's part encoder never use it. Such a
+block is written with the graph `[lzma {dict}, bwt {B}]`, B = min(the writer's BWT block size, default 67108864,
+and the block's `plain_len`): the block's plain bytes are cut into BWT blocks of B bytes (the last shorter), each
+transformed with its indices at r(n_j) (section 8, "Decoding `bwt`"; the reference uses libsais), the step's
+input is assembled as section 8 lays it out, and the `lzma` step encodes it with the end-of-payload marker (a
+step that is not the last must carry one). The block's `plain_len` and chunk records are those of the plain
+bytes, so the chunk table hashes the original bytes and verification is unchanged. For the block the writer
+declares the larger of term(`plain_len`, B) and the model step's working memory with its input of I(`plain_len`,
+B) bytes; the envelope's `max_bwt_block` is the largest B of any block, and `decode_memory` is `max_block_plain`
+plus the largest figure any block declares. The result is a function of the block's bytes and the settings alone:
+the same archive bytes at any thread count. A reader before revision 1.3 extracts every file that has no chunk
+in such a block. A writer of a `[lzma, bwt, deflate-reconstruct]` block (a peeled stream whose text is
+transformed; the reference writer does not produce one in revision 1.3) lays the stream out as the Deflate peel
+does and transforms its plain text before the model step.
+
 ### Reading one block at a time
 
 A reader reads a chunk by finding its block in the chunk index, reading that block's frame, decoding the block
@@ -1252,7 +1381,7 @@ does not check that. `BadPriorList` as above.
 The archives under `crates/lpk-format/tests/vectors/` are written by the reference writer with a zstd or an LZMA encoder
 (zstd level 3 or LZMA preset 6, chunk size 4096, archive id 0x5A repeated, entry mtime 1000). Their plain contents are generated by
 the tests from seeded patterns, so the repository holds the archives and their side files (the dictionary,
-the keyfile, `vectors.toml`, `expected.toml`, `expected-1.1.toml` and `expected-1.2.toml`), not the contents. These are the zstd and LZMA vectors; the others
+the keyfile, `vectors.toml`, `expected.toml`, `expected-1.1.toml`, `expected-1.2.toml` and `expected-1.3.toml`), not the contents. These are the zstd and LZMA vectors; the others
 are listed in `docs/spec/CONFORMANCE.md`:
 
 - `zstd-basic.lpk`: three files in one block, `window_log` 20.
@@ -1277,6 +1406,18 @@ are listed in `docs/spec/CONFORMANCE.md`:
   "Bounds"). Its inputs are committed fixtures (`doc.zip`, `image.png`, `notes.txt.gz` and `readme.txt` in
   `crates/lpk-core/tests/fixtures/deflate/`), so the bytes do not depend on the `flate2` backend; `cargo test -p lpk-core --test deflate_vector -- --ignored` regenerates it,
   and the same liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce its bytes.
+- `bwt-text.lpk` (revision 1.3): `prose.txt` (40000 bytes of generated text) in three blocks `[lzma (64 KiB
+  dictionary, lc 3, lp 0, pb 2, end marker), bwt {4096}]`, four BWT blocks per full block, the two full blocks
+  exactly `max_block_plain` long with their `lzma` output longer than it (section 8, "Bounds"); `log.txt` (21384
+  bytes of generated log lines) `[lzma, bwt {16384}]`, its second block a short BWT block; `tiny.txt` (1 byte)
+  `[bwt {1}]`, a first step with n = 1; `runs.bin` (3000 bytes of one value, then every byte value once) `[zstd
+  (level 3, window_log 17), bwt {8192}]`; `notes.txt.gz` (the Deflate fixture) with its stream as `[lzma, bwt
+  {16384}, deflate-reconstruct]`, its inflated text above `max_block_plain` (the look-ahead of section 8,
+  "Bounds"); and `readme.txt`, a plain block every reader extracts. Built by `crates/lpk-core/tests/bwt_vector.rs`
+  with explicit encoders (chunk size 4096, block size 16 KiB, minor 3); `cargo test -p lpk-core --test bwt_vector
+  -- --ignored regenerate` regenerates it and the two malformed revision 1.3 vectors (`docs/spec/CONFORMANCE.md`),
+  and the same liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce the bytes
+  (the transform itself is unique by definition).
 
 The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts
 it (with `--prior tests/vectors/zstd-dict.prior` for the dictionary one). The full list of vectors, including the
@@ -2081,7 +2222,7 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `Truncated` | `what`: `header`, `frame header`, `payload`, `hash`, `entry table`, `chunk table`, `index`, `trailer`, `graph`, `block header`, `records`, `record body`, `recovery`, `frames` | input or a payload ends inside the named part (2 to 15) |
 | `HashMismatch` | `kind` | a frame's payload does not match its hash (3, 6, 9) |
 | `UnknownMustUnderstand` | `kind` | an unknown kind with MUST_UNDERSTAND (3) |
-| `PayloadTooLarge` | `len`, `max` | a `payload_len` above the frame limit (3); a block `plain_len` or an intermediate output above `max_block_plain`, a non-final step's output past its bound, a non-final `deflate-reconstruct` record's `original_len` above the step's bound (8) |
+| `PayloadTooLarge` | `len`, `max` | a `payload_len` above the frame limit (3); a block `plain_len` or an intermediate output above `max_block_plain`, a non-final step's output past its bound (a record's `plain_len`, a `bwt` step's I(O, B)), a non-final `deflate-reconstruct` record's `original_len` or a non-final `bwt` step's `out_len` above the step's bound (8) |
 | `UnsortedEntries` | `index` | entry table: a path not greater than the previous one (4) |
 | `UnsupportedEntryKind` | `kind`, `index` | entry table: an unknown entry kind (4) |
 | `ReservedEntryBits` | `bits`, `index` | entry table: a reserved entry flag bit (4) |
@@ -2105,14 +2246,15 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `GenerationMismatch` | `expected`, `found` | trailer chain: a generation number not one lower (15) |
 | `BadFrameLocation` | `what`: `index`, `entry table`, `records`, `recovery`, `trailer`, `ChunkData`, `Recovery`, `frames` | a recorded location out of range, overlapping, or not matching the frame there (6, 13, 14, 15) |
 | `EnvelopeMismatch` | `field` | the envelope against the archive, or a block graph against the envelope (7, 9) |
-| `Refused` | `field`, `needed`, `allowed` | the archive needs more than the reader allows: an envelope field, `argon2_m`, `recovery group`; a reconstruction step's term, `decode_memory` (7, 8, 13, 14) |
+| `Refused` | `field`, `needed`, `allowed` | the archive needs more than the reader allows: an envelope field, `argon2_m`, `recovery group`; a reconstruction step's or a `bwt` step's term, `decode_memory` (7, 8, 13, 14) |
 | `UnknownPrimitive` | `id` | a primitive ID not in the registry (8) |
 | `UnimplementedPrimitive` | `id` | a primitive the reader does not run (8) |
-| `BadGraph` | `reason`: `step count`, `step flags`, `params length`; writer: `deflate-reconstruct not last` | the decode graph (8) |
+| `BadGraph` | `reason`: `step count`, `step flags`, `params length`; writer: `deflate-reconstruct not last`, `undecoded primitive`, `bwt position` | the decode graph (8) |
 | `BadParams` | `id`, `reason` | a primitive's parameters break its layout; `frame window exceeds declared` (8) |
 | `WindowTooLarge` | `needed`, `allowed` | a step's window above the reader's `max_window` (8) |
 | `ZstdError` | `reason` | a `zstd` step's input (8) |
 | `LzmaError` | `reason` | an `lzma` step's input (8) |
+| `BwtError` | `reason`: `length`, `index`, `inverse` | a `bwt` step's input: its length, an index out of range, a failed condition of the inverse (8) |
 | `MissingPrior` | `id` | a prior the caller's store does not hold (8, 10) |
 | `UnlistedPrior` | `id` | a block names a prior the index does not list (10) |
 | `BadPriorList` | `reason`: `zero id`, `not ascending and unique` | the index's prior list (10) |

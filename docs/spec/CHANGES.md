@@ -201,3 +201,48 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
     non-final step and `truncated` for a marker before the bound in the last step (was lzma-rs's own text, or in the
     last step `PayloadTooLarge` with a length below the bound); a `zstd`
     frame cut inside its checksum counts its last block (it was counted as damaged). No byte of a vector changed.
+
+## 2026-10-18 — revision 1.3: bwt decoding
+
+1. `version_minor` 3 for revision 1.3, with the declaration rule of 1.1 and 1.2: a 1.3 writer writes 3 whether or
+   not a block names `bwt`; a reader of revision 1.0, 1.1 or 1.2 accepts minor 3, lists the archive, verifies its
+   frames and records, and reports `UnimplementedPrimitive` (3) for the blocks that name the primitive; a graph with
+   several primitives the reader does not run reports the first in step order (section 2; code: the writer refuses
+   0x0003 under a minor below 3, and refuses it anywhere but last or directly before a last `deflate-reconstruct`,
+   `BadGraph` `bwt position`).
+2. `bwt` (0x0003) decodes the Burrows-Wheeler transform, written out in the text (the sorted rotations of T·$, the
+   transformed bytes without the sentinel, the derived indices at r(n) = the smallest power of two at least
+   max(2, ⌈n/32⌉), c(n) = ⌈n/r(n)⌉ ≤ 32 of them per block, index[0] the primary index; the inverse through LF with
+   its validity conditions, and the forward walk as an informative equivalent); Burrows and Wheeler (1994) and
+   libsais 2.10 are named as information only. The step's input: `out_len` (u64 LE), then ⌈out_len/B⌉ BWT blocks of
+   B = `block_size` bytes (the last shorter), each its c(n_j) indices (u32 LE) then its bytes, exactly I(out_len, B)
+   = 8 + out_len + 4·Σ c(n_j) bytes. Checks (1) to (5) in the reference's order: the memory term (`Refused`,
+   `decode_memory`), an input under 8 bytes (`BwtError` `length`), `out_len` against the bound (`BlockLengthMismatch`
+   on the last step, `PayloadTooLarge` otherwise), the input length against I (`BwtError` `length`), and per block
+   the index range (`BwtError` `index`) and the inverse's conditions (`BwtError` `inverse`); a decoder that walks
+   from the primary index alone does not conform. The term term(O, B) = I(O, B) + 4·min(O, B) + 1048576 is a lasting
+   threshold with its derivation; the registry row's resources become "bwt block = block_size; memory per step,
+   declared by `decode_memory`" (section 8). `BwtError { reason }` is a new error class, additive within D-49
+   (section 16).
+3. The step before `bwt` is bounded by I(O, B) instead of `max_block_plain`, with check (1) applied before it runs
+   (code; section 8 "Bounds", and the bound in the `lzma` section). The look-ahead: a bounding step's own output
+   bound is found one level ahead for every graph whatever the minor (the next step's input bound when it gives one,
+   asked with `plain_len` when it is last and `max_block_plain` otherwise), so `[M, bwt, deflate-reconstruct]`
+   decodes an inflated text above `max_block_plain`; this replaces revision 1.2's sentence that the pre-checks'
+   bound is never derived from a later step. No graph a conforming writer produces is read differently; a graph
+   with a bounding step followed by another, which no writer emits, may report an error of the later step's
+   pre-checks before the first step runs, with the same classes (code: task A of E2-15, PR #73).
+4. How the reference writer lays out a BWT block: Balanced text blocks by a trial, `[lzma, bwt {B}]` with
+   B = min(the BWT block size, `plain_len`), the term and the model step's memory declared (section 9, informative;
+   the pipeline's stage is task D of E2-15).
+5. New vector `bwt-text.lpk` (section 11) with `expected-1.3.toml` (full reader: `files`, `verify`) and a
+   `["bwt-text.lpk"]` table in `expected.toml` (a pre-1.3 reader: `list`, `info`, `UnimplementedPrimitive` (3),
+   `files_1_0`); two malformed vectors, `malformed-bwt-bound.lpk` (the `lzma` output past I(O, B):
+   `PayloadTooLarge` before `bwt` runs) and `malformed-bwt-inverse.lpk` (one auxiliary index wrong, the primary walk
+   valid: `BwtError` `inverse`), with their `expected-1.3.toml` and `expected.toml` tables and CONFORMANCE rows.
+   No byte of an earlier vector changed.
+6. Section 16 lists `BwtError` and extends the `PayloadTooLarge`, `Refused` and `BadGraph` rows (the writer's
+   `undecoded primitive` of task A and `bwt position`).
+7. The independent-decoder gate (D-49 item 5) is task E of E2-15: `lpk-check` adds the inverse, the layout, the
+   checks, the term, the bound and its look-ahead from the text alone, with `--revision 0..3`; the revision is final
+   when it passes.
