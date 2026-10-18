@@ -721,7 +721,12 @@ whatever the archive's `version_minor`: by one level of look-ahead. Let S be a s
 (`deflate-reconstruct` or `bwt`) and let the step before S be about to run. S's own output bound is the block's
 `plain_len` when S is the last step; otherwise it is the input bound the step after S gives, when that step gives
 one, asked with the block's `plain_len` when it is the last step and `max_block_plain` otherwise (the look-ahead
-goes no further); otherwise `max_block_plain`. The step after S is asked before S's own pre-checks, so an error
+goes no further); otherwise `max_block_plain`. This is the rule of a reader of revision 1.3; a reader of revision
+1.2 keeps that revision's rule (the bound of the pre-checks never derived from a later step). The two differ only
+on a graph with a bounding step followed by another, which no writer emits. The step after S is asked only
+because S bounds its input: after a step that bounds nothing (any step but `deflate-reconstruct` or `bwt`) no
+later step is asked, and that step's output bound is `max_block_plain`, or `plain_len` when it is the last step.
+The step after S is asked before S's own pre-checks, so an error
 of its pre-checks (its record, its term) is the block's error before anything runs. So in `[M, bwt,
 deflate-reconstruct]` the `bwt` step's O is the record's `plain_len` (checks (1) to (5) of
 "Decoding `deflate-reconstruct`" having run), and `M` is bounded by I(`plain_len`, B): a text longer than

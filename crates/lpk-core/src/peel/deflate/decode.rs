@@ -190,6 +190,10 @@ impl PrimitiveDecoder for DeflateDecoder {
         Ok(out)
     }
 
+    fn bounds_input(&self) -> bool {
+        true
+    }
+
     fn input_bound(
         &self,
         params: &[u8],

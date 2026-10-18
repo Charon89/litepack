@@ -52,9 +52,9 @@ pub struct Options {
     pub priors: HashMap<[u8; 32], Vec<u8>>,
     /// Resources.
     pub resources: Resources,
-    /// The revision this reader runs (its minor, 0 to 2; default 2): a lower revision reports
+    /// The revision this reader runs (its minor, 0 to 3; default 3): a lower revision reports
     /// `UnimplementedPrimitive` for the primitives it does not run (`jpeg-reconstruct` below 1,
-    /// `deflate-reconstruct` below 2).
+    /// `deflate-reconstruct` below 2, `bwt` below 3).
     pub revision: u8,
     /// Alias of `revision` 0, kept for callers of the earlier field: when set, the reader runs
     /// revision 1.0 whatever `revision` says.
@@ -68,7 +68,7 @@ impl Default for Options {
             keyfile: None,
             priors: HashMap::new(),
             resources: Resources::default(),
-            revision: 2,
+            revision: 3,
             revision_1_0: false,
         }
     }
@@ -711,6 +711,7 @@ impl Archive {
             } else {
                 self.opts.revision
             },
+            memory: self.memory(),
         };
         block::decode(&h, &ctx, &mut Steps { archive: self, b })
     }

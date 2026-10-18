@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-18, about 06:00 UTC (2026-10-18, 02:00 local on the measuring machine). No measurement is running.
+Last updated: 2026-10-18, about 14:35 UTC (2026-10-18, 10:35 local on the measuring machine). No measurement is running; implementers build on this machine.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -35,30 +35,21 @@ E3-8 is done (D-75, PR #77).
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Next: **revision 1.3** (`docs/notes/e2-15-revision-1.3-design.md` section 6: A → C → D ∥ E). Task A (the
-   look-ahead, the writer's refusal of undecoded primitives at every minor, `check_bwt_steps`, libsais behind the
-   `encode` feature) is merged (PR #73; three LOWs ruled into C, D and E); next C (the text, `BwtDecoder`, the
-   vectors, the fuzz targets), D (the pipeline; its `small` row ticks E2-15) and E (`lpk-check` from the text alone).
-   E2-16 and E2-17: the probes' code (task P of `docs/notes/e2-16-design.md` and `docs/notes/e2-17-design.md`) is
-   merged (PRs #74 and #75); the probes run on this machine's `small` after E2-22's baseline (`lpk-bench probe
-   png-filter` and `probe text-encodings`, from a release build of `main`). No build runs here while a
-   measurement does, so revision 1.3 task C waits for the baseline to end. `png-filter` joins revision 1.3 only if E2-16's gate opens (its margin is the
-   owner's, below); E2-17's gates are expected to close on `small`.
-3. E2-22: the incumbents' baseline on `full` is running (`target/acceptance/e2-22-full-baseline.sh`, started
-   2026-10-17 20:34 UTC, most of a day; its results directory is `bench/results/2026-10-17-megatron-15`). The
-   `lpk` rows follow on the final engine (after revision 1.3), pooled with it (same corpus, host and threads), then
-   the gate table and a `D-NN`. Keep the machine idle until the status log says `== DONE`.
-   Rows measured between 21:59:57 and 22:31 UTC overlapped local builds (agents meant to run in the cloud ran on
-   this machine): `encrypted-random`'s xz/9 and zpaqfranz m1/m5, every `game-assets` row, and `logs-text`'s
-   store, 7z mx5/ultra and rar m3/best/best-solid (`target/acceptance/e2-22-contaminated.txt`). Their sizes stand;
-   their timings are re-measured on the idle machine after the baseline (`--classes
-   encrypted-random,game-assets,logs-text`), and the report takes the re-measured rows in their place and says
-   so through `supersedes.toml` in the re-measured directory (D-74, PR #76; list every combination of the three
-   classes, the contaminated ones with that reason and the rest as "class re-measured as a whole").
-4. E3 (adopted 2026-10-17): E3-8 done (PR #77); next E3-1 and E3-7 (both add dependencies and want local builds),
-   then E3-2, E3-3, E3-4, E3-5, E3-6; E3-9 is a measuring-machine run after E2-22. E2-9 (deltas) waits for two things from the owner (below);
-   D-59 adds a third reason to want it: a changed chunk in an appended generation is coded without its previous
-   version in the window.
+2. Revision 1.3 (`docs/notes/e2-15-revision-1.3-design.md` section 6): tasks A and C are merged (PRs #73, #80;
+   D-78: `bwt` decoding, its text, vectors and fuzz targets). Running: task D (the pipeline writes `bwt`; its
+   release rows on `small`, `lpk/balanced` against `lpk/balanced-no-bwt` on every class, tick E2-15) and task E
+   (`lpk-check` from the text alone; the revision is final when it passes). `png-filter` stays out of 1.3: E2-16's
+   probe saves 3.03% of `photo-raw-png`'s `lpk/balanced` archive and its margin is the owner's (below); a yes
+   makes it revision 1.4. E2-17 closed as a negative result (D-76).
+3. E2-22: the incumbents' baseline on `full` is committed (`bench/results/2026-10-17-megatron-15`, with the
+   rows that overlapped local builds re-measured in `2026-10-18-megatron` and replaced through its
+   `supersedes.toml`, D-74; PR #78). Next: the `lpk` rows on the final engine (after task D), pooled with both
+   directories (same corpus, host and threads), then the gate table, its D-entry and the Phase 1 verdict input.
+   A measurement needs the machine idle: no agent builds or tests while it runs.
+4. E3: E3-1, E3-7 and E3-8 done (PRs #77, #81; D-75, D-77); E3-2 (the extraction policy module and the
+   overwrite modes) in review (PR #82); then E3-3, E3-4, E3-5, E3-6; E3-9 re-runs the harness after E2-22.
+   E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
+   chunk in an appended generation is coded without its previous version in the window.
 5. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
    recorded rulings → a `D-NN` → PLAN tick with evidence → PR → CI green → `main` fast-forwarded (merge `main`
    into the branch first; squash only when a branch commit message carries figures). Learned on 2026-10-13: the
@@ -108,9 +99,9 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- None open on GitHub. E2-22's incumbent baseline on `full` runs in the main checkout ("How to resume" 3 above);
-  merged overnight without local builds (GitHub CI compiled and tested each): revision 1.3 task A (PR #73), the
-  E2-16 and E2-17 probes (PRs #74, #75), the report's supersede option (PR #76, D-74), E3-8 (PR #77, D-75).
+- `task/e3-2` (PR #82): E3-2, a scoped re-review of its first fix round running.
+- `task/rev13-d`, `task/rev13-e`: revision 1.3 tasks D and E, being implemented.
+- Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
 ## How to resume
 
