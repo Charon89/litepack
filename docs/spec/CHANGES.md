@@ -232,6 +232,9 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    bound is never derived from a later step. No graph a conforming writer produces is read differently; a graph
    with a bounding step followed by another, which no writer emits, may report an error of the later step's
    pre-checks before the first step runs, with the same classes (code: task A of E2-15, PR #73).
+   Clarified (R36): the step after a step is asked only when that step bounds its input; after a step that bounds
+   nothing no later step is asked, and a reader of revision 1.2 keeps that revision's rule (code: the reference
+   decoder's `bounds_input`).
 4. How the reference writer lays out a BWT block: Balanced text blocks by a trial, `[lzma, bwt {B}]` with
    B = min(the BWT block size, `plain_len`), the term and the model step's memory declared (section 9, informative;
    the pipeline's stage is task D of E2-15).
