@@ -334,6 +334,13 @@ pub enum FormatError {
         /// Short reason (`truncated`, `trailing input`, or the decoder's text).
         reason: String,
     },
+    /// A `bwt` step's input breaks its layout or does not invert (revision 1.3,
+    /// spec section 8 "Decoding `bwt`").
+    #[error("bwt: {reason}")]
+    BwtError {
+        /// The normative reason: `length`, `index` or `inverse`.
+        reason: &'static str,
+    },
     /// The writer was given options it cannot honour.
     #[error("bad writer options ({reason})")]
     BadOptions {

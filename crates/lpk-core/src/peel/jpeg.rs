@@ -778,16 +778,21 @@ fn stream_frame(stream: &[u8], primary_len: u64) -> Option<Frame> {
 }
 
 /// Register the full reader's decoders (revision 1.1's `jpeg-reconstruct`, revision 1.2's
-/// `deflate-reconstruct`) on `archive`, so its
+/// `deflate-reconstruct`, revision 1.3's `bwt`) on `archive`, so its
 /// peeled files extract and verify. Call it after `set_priors` (which keeps it anyway).
 pub fn register_full_reader<R: std::io::Read + std::io::Seek>(
     archive: &mut lpk_format::Archive<R>,
 ) {
-    archive
-        .registry_mut()
-        .register(PrimitiveId::JpegReconstruct, Box::new(JpegDecoder));
-    archive.registry_mut().register(
+    register_full_decoders(archive.registry_mut());
+}
+
+/// The decoders of [`register_full_reader`] on a bare registry (a decode without an archive
+/// behind it, as the fuzz targets run).
+pub fn register_full_decoders(registry: &mut lpk_format::Registry) {
+    registry.register(PrimitiveId::JpegReconstruct, Box::new(JpegDecoder));
+    registry.register(
         PrimitiveId::DeflateReconstruct,
         Box::new(super::deflate::DeflateDecoder),
     );
+    registry.register(PrimitiveId::Bwt, Box::new(crate::bwt::BwtDecoder));
 }

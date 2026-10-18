@@ -188,6 +188,7 @@ fn format_table() -> Vec<(FormatError, i32, &'static str)> {
         ),
         (ZstdError { reason: "x".into() }, f, "ZstdError"),
         (LzmaError { reason: "x".into() }, f, "LzmaError"),
+        (BwtError { reason: "inverse" }, f, "BwtError"),
         (BadOptions { reason: "x" }, f, "BadOptions"),
         (BadChunk { reason: "x" }, f, "BadChunk"),
         (BadRecovery { reason: "x" }, f, "BadRecovery"),
@@ -327,7 +328,7 @@ fn core_table() -> Vec<(CoreError, i32, &'static str)> {
 #[test]
 fn every_format_error_variant_has_a_code_and_a_kind() {
     let table = format_table();
-    assert_eq!(table.len(), 74, "one row per FormatError variant");
+    assert_eq!(table.len(), 75, "one row per FormatError variant");
     for (e, code, kind) in table {
         assert_eq!(format_exit(&e), code, "{e}");
         let failure = Failure::format(&e, None);

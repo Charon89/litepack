@@ -214,6 +214,7 @@ pub fn format_exit(e: &FormatError) -> i32 {
         | FormatError::WindowTooLarge { .. }
         | FormatError::ZstdError { .. }
         | FormatError::LzmaError { .. }
+        | FormatError::BwtError { .. }
         | FormatError::BadOptions { .. }
         | FormatError::BadChunk { .. }
         | FormatError::BadRecovery { .. }
@@ -327,6 +328,7 @@ pub fn format_kind(e: &FormatError) -> &'static str {
         FormatError::WindowTooLarge { .. } => "WindowTooLarge",
         FormatError::ZstdError { .. } => "ZstdError",
         FormatError::LzmaError { .. } => "LzmaError",
+        FormatError::BwtError { .. } => "BwtError",
         FormatError::BadOptions { .. } => "BadOptions",
         FormatError::BadChunk { .. } => "BadChunk",
         FormatError::BadRecovery { .. } => "BadRecovery",
