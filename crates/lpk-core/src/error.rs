@@ -59,6 +59,16 @@ pub enum CoreError {
     /// An extraction's internal step failed (a decode worker stopped without a result).
     #[error("extraction: {0}")]
     Extract(&'static str),
+    /// The sink of an export (the ZIP or 7z writer) failed on an entry.
+    #[error("{}: export: {entry:?}: {message}", path.display())]
+    Export {
+        /// The archive being written.
+        path: PathBuf,
+        /// The archive path of the entry being written (empty for the archive as a whole).
+        entry: String,
+        /// The writer's error.
+        message: String,
+    },
     /// Something of another kind exists where an extracted entry goes (a directory where a
     /// file goes, a file or a link where a directory goes); refused before any output in every
     /// overwrite mode but `skip`.

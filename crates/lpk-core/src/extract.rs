@@ -499,19 +499,19 @@ impl<'s> Out<'s> {
     }
 }
 
-/// A counting semaphore that can be cancelled.
-struct Permits {
+/// A counting semaphore that can be cancelled (shared with [`crate::export`]).
+pub(crate) struct Permits {
     free: Mutex<usize>,
     cv: Condvar,
     cancelled: AtomicBool,
     /// Permits in all.
     cap: usize,
     /// Most permits out at once.
-    peak: AtomicUsize,
+    pub(crate) peak: AtomicUsize,
 }
 
 impl Permits {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Permits {
             free: Mutex::new(n),
             cv: Condvar::new(),
@@ -521,11 +521,11 @@ impl Permits {
         }
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
 
-    fn acquire(&self) -> bool {
+    pub(crate) fn acquire(&self) -> bool {
         let Ok(mut n) = self.free.lock() else {
             return false;
         };
@@ -546,14 +546,14 @@ impl Permits {
         }
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         if let Ok(mut n) = self.free.lock() {
             *n += 1;
         }
         self.cv.notify_one();
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         // Take the lock so a worker between its check and its wait sees the flag.
         drop(self.free.lock());
@@ -946,16 +946,19 @@ pub struct Pool {
 }
 
 /// What the plan gives the pool's sizing.
-struct Shape<'a> {
+pub(crate) struct Shape<'a> {
     /// The needed blocks.
-    needed: &'a [usize],
+    pub(crate) needed: &'a [usize],
     /// File targets, and those with content.
-    targets: usize,
-    with_content: usize,
+    pub(crate) targets: usize,
+    pub(crate) with_content: usize,
     /// Chunk placements.
-    placements: u64,
+    pub(crate) placements: u64,
     /// The targets' name and path bytes.
-    name_bytes: u64,
+    pub(crate) name_bytes: u64,
+    /// A cap on the writers: `usize::MAX` for an extraction (the module's rule applies), 1 for
+    /// an export, whose one consumer is the calling thread ([`crate::export`]).
+    pub(crate) max_writers: usize,
 }
 
 /// The bytes of `index` outside the shared chunk table: what each fork copies.
@@ -980,7 +983,11 @@ fn index_bytes(index: &lpk_format::Index) -> u64 {
 
 /// The pool for `archive` under `opts` and the plan's shape, with its memory model (module
 /// documentation, "The memory bound").
-fn pool_size<R: Read + Seek>(archive: &Archive<R>, opts: &ExtractOptions, shape: &Shape) -> Pool {
+pub(crate) fn pool_size<R: Read + Seek>(
+    archive: &Archive<R>,
+    opts: &ExtractOptions,
+    shape: &Shape,
+) -> Pool {
     use std::mem::size_of;
     let threads = opts
         .threads
@@ -1023,6 +1030,7 @@ fn pool_size<R: Read + Seek>(archive: &Archive<R>, opts: &ExtractOptions, shape:
             .clamp(1, 4)
             .min(opts.max_open_files.max(1))
             .min(shape.with_content.max(1))
+            .min(shape.max_writers.max(1))
     };
     let index_copy = index_bytes(index);
     let per_worker = index_copy.saturating_add(WORKER_ALLOWANCE);
@@ -1083,7 +1091,7 @@ fn pool_size<R: Read + Seek>(archive: &Archive<R>, opts: &ExtractOptions, shape:
 }
 
 /// How a run ended.
-enum Outcome {
+pub(crate) enum Outcome {
     Done,
     Failed(CoreError),
     Panicked(Box<dyn Any + Send>),
@@ -1127,6 +1135,7 @@ where
         with_content: shared.targets.iter().filter(|t| t.chunks > 0).count(),
         placements,
         name_bytes,
+        max_writers: usize::MAX,
     };
     let pool = pool_size(archive, opts, &shape);
     // A given budget below one block in flight is refused with the figure, before anything is
@@ -1265,10 +1274,10 @@ type Decoded = (usize, Result<Vec<u8>, FormatError>);
 
 /// A decoded block on its way to the writers; its permit is returned when the last writer
 /// drops it.
-struct Held<'p> {
-    block: usize,
-    plain: Vec<u8>,
-    permits: &'p Permits,
+pub(crate) struct Held<'p> {
+    pub(crate) block: usize,
+    pub(crate) plain: Vec<u8>,
+    pub(crate) permits: &'p Permits,
 }
 
 impl Drop for Held<'_> {
@@ -1278,7 +1287,7 @@ impl Drop for Held<'_> {
 }
 
 const WRITER_STOPPED: &str = "a file writer stopped";
-const DECODER_STOPPED: &str = "a decode worker stopped";
+pub(crate) const DECODER_STOPPED: &str = "a decode worker stopped";
 
 /// Everything a parallel run needs.
 struct Run<'a, R: Read + Seek> {
@@ -1297,7 +1306,7 @@ struct Run<'a, R: Read + Seek> {
 }
 
 /// Keep the first panic payload.
-fn keep(slot: &Mutex<Option<Box<dyn Any + Send>>>, p: Box<dyn Any + Send>) {
+pub(crate) fn keep(slot: &Mutex<Option<Box<dyn Any + Send>>>, p: Box<dyn Any + Send>) {
     if let Ok(mut s) = slot.lock() {
         if s.is_none() {
             *s = Some(p);

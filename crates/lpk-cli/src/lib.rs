@@ -23,11 +23,17 @@
 //! `--long` for the flags and the generation, `--json` for one object per entry per line; a
 //! listable sealed archive lists without its key, a sealed one that is not says
 //! `PasswordRequired`.
+//! Export: `export <archive> <out.zip|out.7z>` streams the archive's entries, in entry order,
+//! into a ZIP or a 7z file through `lpk-core`'s export engine ([`export`]: the same plan and
+//! memory bound as `x`, the blocks decoded in parallel and cached by a schedule computed from
+//! the whole plan) without a tree on disk; `--method`, `--encrypt` with the archive's
+//! password, `--force` to replace an existing output.
 //! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation ([`failure`]: one line
 //! `error: ...` on stderr, or with the global `--json` flag one JSON object line). Nothing is
 //! ever prompted; progress goes to stderr and only with `-v`.
 #![forbid(unsafe_code)]
 
+pub mod export;
 pub mod failure;
 pub mod list;
 
@@ -41,6 +47,7 @@ use lpk_core::{
 };
 use lpk_format::{Argon2Params, Credentials, FormatError, Resources, Suite};
 
+pub use export::{Container, Method};
 pub use failure::{core_exit, format_exit, EntryFailure, Failure};
 pub use list::{list_archive, ListOptions};
 
@@ -104,7 +111,32 @@ enum Command {
     Rollback(RollbackArgs),
     /// Print an archive's header, envelope, counts and generations.
     Info(InfoArgs),
+    /// Write every entry of an archive into a ZIP or 7z file (by the output's extension),
+    /// streamed in entry order: no tree on disk, the blocks decoded as for `x`.
+    #[command(long_about = EXPORT_ABOUT)]
+    Export(ExportArgs),
 }
+
+/// The long help of `export`.
+const EXPORT_ABOUT: &str = "\
+Write every entry of an archive into a ZIP or a 7z file, chosen by the output's extension \
+(.zip or .7z; anything else is a usage error). The entries are streamed in entry order \
+through the extraction engine (the same plan, thread budget and memory budget as `x`; the \
+decoded blocks are cached under the budget by a schedule computed from the whole plan, so a \
+deduplicated chunk referring back to an earlier block is decoded again only when the cache \
+cannot hold it): no tree is written on disk and no whole file is held in memory.
+
+ZIP: one entry per archive entry, Zip64 where an entry or the directory needs it, UTF-8 \
+names, the modification time as DOS time and as the extended-timestamp field, a Unix mode \
+with the executable flag and the DOS read-only, hidden and system bits; a symlink entry is a \
+ZIP symlink (its target as the stored content); --method deflate (default), zstd (method 93) \
+or store; --encrypt writes AES-256 (AE-2) entries with the archive's password.
+
+7z: one entry per archive entry, each in its own stream (an empty file as a stream-less \
+entry); --method lzma2 (default), deflate or store (zstd inside 7z is a fork extension 7-Zip \
+does not read: refused); --encrypt writes AES-256 with an encrypted header. Both writers run \
+in process. An existing output is refused unless --force replaces it. A failed export removes \
+the output.";
 
 /// The long help of `l`: the columns and the keys of a `--json` line.
 const LIST_ABOUT: &str = "\
@@ -587,6 +619,42 @@ struct InfoArgs {
     /// The key material of an encrypted archive; without it the sealed counts are not shown.
     #[command(flatten)]
     credentials: CredentialArgs,
+}
+
+#[derive(Debug, Args)]
+struct ExportArgs {
+    /// The archive.
+    archive: PathBuf,
+    /// The file to write: `.zip` or `.7z` by its extension; must not exist unless --force.
+    out: PathBuf,
+    /// The compression method of the entries: deflate (ZIP's default), zstd (ZIP only),
+    /// store, or lzma2 (7z's default; 7z only).
+    #[arg(long, value_enum, value_name = "METHOD")]
+    method: Option<Method>,
+    /// Encrypt every entry with the archive's password (AES-256: ZIP's AE-2, 7z's with the
+    /// header encrypted). Needs a credential with a password; a keyfile alone is refused.
+    #[arg(long, requires = "credential")]
+    encrypt: bool,
+    /// Replace an existing output file.
+    #[arg(long)]
+    force: bool,
+    /// The thread budget: 1 decodes on the calling thread; from 2 on, N - 1 threads decode
+    /// blocks ahead of the writer (capped by the memory budget), as for `x`.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    threads: Option<u64>,
+    /// A prior file (for example a zstd dictionary) the archive needs; may be repeated.
+    #[arg(long = "prior", value_name = "FILE")]
+    priors: Vec<PathBuf>,
+    /// The key material of an encrypted archive; checked before anything is written.
+    #[command(flatten)]
+    credentials: CredentialArgs,
+    /// The memory budget, as for `x`: the decoded blocks held at once (cached or in flight)
+    /// are derived from it; the writer's own memory (its compressor) is outside the count.
+    #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
+    memory: Option<u64>,
+    /// Print the plan's counts, the cache schedule's outcome and the memory terms to stderr.
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1093,6 +1161,145 @@ fn extract(
     Ok(())
 }
 
+/// `lpk export`: the container by the output's extension, the method by the container, the
+/// credentials as `x` takes them, the output created (refused when it exists unless
+/// `--force`), the engine's export into the writer, then the writer's trailer. A failure at
+/// any point after the output was created removes it.
+fn export(x: &mut ExportArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Failure> {
+    let container = Container::of(&x.out).ok_or_else(|| {
+        Failure::usage(format!(
+            "{}: the output must end in .zip or .7z",
+            x.out.display()
+        ))
+    })?;
+    let method = x.method.unwrap_or_else(|| container.default_method());
+    if container == Container::Zip && method == Method::Lzma2 {
+        return Err(Failure::usage(
+            "--method lzma2 is a 7z method; ZIP takes deflate, zstd or store",
+        ));
+    }
+    if container == Container::SevenZ && method == Method::Zstd {
+        return Err(Failure::usage(
+            "--method zstd inside 7z is a 7-Zip-ZS extension that 7-Zip does not read; 7z takes lzma2, deflate or store",
+        ));
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let max = u64::try_from(cores.saturating_mul(4)).unwrap_or(u64::MAX);
+    if x.threads.is_some_and(|n| n > max) {
+        return Err(Failure::usage(format!(
+            "--threads: at most {max} (four times the logical cores) on this machine"
+        )));
+    }
+    let credentials = x.credentials.take()?;
+    let password = if x.encrypt {
+        match credentials.as_ref().map(|c| c.password.as_slice()) {
+            Some(p) if !p.is_empty() => Some(p),
+            _ => {
+                return Err(Failure::usage(
+                    "--encrypt needs a password (a keyfile alone gives none)",
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    let mut priors = Vec::with_capacity(x.priors.len());
+    for p in &x.priors {
+        let b = std::fs::read(p)
+            .map_err(|e| Failure::failed("Io", format!("{}: {e}", p.display()), Some(p)))?;
+        priors.push(b);
+    }
+    let opts = lpk_core::ExtractOptions {
+        threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+        memory: x.memory,
+        ..lpk_core::ExtractOptions::default()
+    };
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true);
+    if x.force {
+        open.create(true).truncate(true);
+    } else {
+        open.create_new(true);
+    }
+    let file = open.open(&x.out).map_err(|e| {
+        let message = if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("{}: exists (--force replaces it)", x.out.display())
+        } else {
+            format!("{}: {e}", x.out.display())
+        };
+        Failure::failed("Io", message, Some(&x.out))
+    })?;
+    let settings = export::Settings { method, password };
+    let run = || -> Result<lpk_core::ExportSummary, lpk_core::CoreError> {
+        let mut writer = export::open(container, file, &x.out, settings)?;
+        let s = lpk_core::export_file(
+            &x.archive,
+            &priors,
+            credentials.as_ref(),
+            writer.as_mut(),
+            &opts,
+        )?;
+        writer.finish()?;
+        Ok(s)
+    };
+    let s = match run() {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_file(&x.out);
+            return Err(Failure::core(&e, Some(&x.archive)));
+        }
+    };
+    if x.verbose {
+        let _ = writeln!(
+            err,
+            "{}: {} files, {} directories, {} symlinks, {} bytes into {} ({}, {}{}); plan: {} chunk placements, {} block visits over {} of {} blocks; {} workers, {} blocks held at most (peak {}); {} blocks decoded ({} again for back references), {} nested decodes",
+            x.archive.display(),
+            s.files,
+            s.directories,
+            s.symlinks,
+            s.bytes,
+            x.out.display(),
+            container.name(),
+            method.name(),
+            if password.is_some() { ", AES-256" } else { "" },
+            s.placements,
+            s.visits,
+            s.blocks_needed,
+            s.blocks,
+            s.workers,
+            s.in_flight,
+            s.peak_in_flight,
+            s.blocks_decoded,
+            s.redecodes,
+            s.nested_decodes
+        );
+        let m = &s.memory;
+        let _ = writeln!(
+            err,
+            "memory: budget {} bytes ({}); envelope tier {}; per block {} bytes; fixed {} bytes (shared {}, per worker {}); counted {} bytes for {} blocks held and {} workers; the writer's own memory is not counted",
+            m.budget.bytes,
+            m.budget.source.name(),
+            m.tier.name(),
+            m.per_block,
+            m.fixed,
+            m.fixed_shared,
+            m.per_worker,
+            s.counted(),
+            s.in_flight,
+            s.workers
+        );
+    }
+    let _ = writeln!(
+        out,
+        "exported {} files, {} directories, {} symlinks to {}",
+        s.files,
+        s.directories,
+        s.symlinks,
+        x.out.display()
+    );
+    Ok(())
+}
+
 /// Run the reference tool with `sub` (`verify`, `check`, `repair`, `rollback` or `info`), the
 /// prior files, the credentials and the positional paths; its summary goes to `out`. Its
 /// error line becomes a [`Failure`] of kind `Reference` (its variant does not reach this
@@ -1242,6 +1449,7 @@ where
             &[i.archive.into()],
             out,
         ),
+        Command::Export(mut x) => export(&mut x, out, err),
     };
     match result {
         Ok(()) => EXIT_OK,

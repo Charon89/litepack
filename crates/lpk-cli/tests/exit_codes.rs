@@ -306,6 +306,15 @@ fn core_table() -> Vec<(CoreError, i32, &'static str)> {
         ),
         (Extract("worker stopped"), f, "Extract"),
         (
+            Export {
+                path: PathBuf::from("out.zip"),
+                entry: "a/b".into(),
+                message: "zip error".into(),
+            },
+            f,
+            "Export",
+        ),
+        (
             InTheWay {
                 path: "out/a".into(),
                 found: "directory",
@@ -362,7 +371,7 @@ fn every_format_error_variant_has_a_code_and_a_kind() {
 #[test]
 fn every_core_error_variant_has_a_code_and_a_kind() {
     let table = core_table();
-    assert_eq!(table.len(), 13, "one row per CoreError variant");
+    assert_eq!(table.len(), 14, "one row per CoreError variant");
     for (e, code, kind) in table {
         assert_eq!(core_exit(&e), code, "{e}");
         let failure = Failure::core(&e, Some(std::path::Path::new("x.lpk")));
@@ -383,6 +392,7 @@ fn every_core_error_variant_has_a_code_and_a_kind() {
                 | CoreError::Decode { .. }
                 | CoreError::NotADirectory { .. }
                 | CoreError::InTheWay { .. }
+                | CoreError::Export { .. }
                 | CoreError::CaseCollision { .. }
                 | CoreError::AppendLeftCut { .. }
         );
