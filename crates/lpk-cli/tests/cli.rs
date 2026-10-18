@@ -434,6 +434,128 @@ fn balanced_flags_are_exclusive_and_checked() {
     assert!(text(&h.stdout).contains("--balanced"));
 }
 
+/// E3-8: `--strong` and `--tier strong` are reserved for Phase 2 and refused as a usage error
+/// (exit 1, one line) before anything exists, on `a` and on `append`.
+#[test]
+fn strong_is_reserved_and_refused_before_any_output() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("t.lpk");
+    let (a, s) = (arch.to_str().unwrap(), src.path().to_str().unwrap());
+    for args in [
+        vec!["a", a, s, "--strong"],
+        vec!["a", a, s, "--tier", "strong"],
+        vec!["a", a, s, "--tier=strong", "-v"],
+        // The refusal comes before the archive is looked at: the archive does not exist.
+        vec!["append", a, s, "--strong"],
+        vec!["append", a, s, "--tier", "strong"],
+    ] {
+        let r = run(&args);
+        let e = text(&r.stderr);
+        assert_eq!(r.status.code(), Some(1), "{args:?}: {e}");
+        assert!(e.contains("Strong tier arrives in Phase 2"), "{args:?}: {e}");
+        assert_eq!(e.trim_end().lines().count(), 1, "{args:?}: {e}");
+        assert!(r.stdout.is_empty(), "{args:?}: {}", text(&r.stdout));
+        assert!(!arch.exists(), "{args:?}");
+    }
+}
+
+/// E3-8: `--tier` is exclusive with each tier flag and with `--strong`, takes only the four
+/// names, and refuses a setting of another tier as the flags do.
+#[test]
+fn tier_conflicts_with_the_tier_flags_and_checks_the_settings() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("t.lpk");
+    let (a, s) = (arch.to_str().unwrap(), src.path().to_str().unwrap());
+    for extra in [
+        &["--tier", "fast", "--fast"][..],
+        &["--tier", "fast", "--balanced"][..],
+        &["--tier", "balanced", "--store"][..],
+        &["--tier", "store", "--strong"][..],
+        &["--tier", "strong", "--fast"][..],
+        &["--fast", "--strong"][..],
+        &["--balanced", "--strong"][..],
+        &["--store", "--strong"][..],
+        &["--tier", "bogus"][..],
+        &["--tier"][..],
+        &["--tier", "store", "--level", "3"][..],
+        &["--tier", "store", "--window-log", "20"][..],
+        &["--tier", "store", "--deflate-peel", "on"][..],
+        &["--tier", "fast", "--dict-size", "1048576"][..],
+        &["--tier", "balanced", "--no-dictionaries"][..],
+    ] {
+        let mut args = vec!["a", a, s];
+        args.extend_from_slice(extra);
+        let r = run(&args);
+        assert_eq!(r.status.code(), Some(1), "{extra:?}: {}", text(&r.stderr));
+        assert!(!arch.exists(), "{extra:?}");
+    }
+}
+
+/// E3-8: the help of every command that writes an archive names the reservation.
+#[test]
+fn help_says_strong_is_reserved_for_phase_2() {
+    for cmd in ["a", "append"] {
+        let h = run(&[cmd, "--help"]);
+        assert_eq!(h.status.code(), Some(0));
+        let t = text(&h.stdout);
+        assert!(t.contains("--strong"), "{cmd}: {t}");
+        assert!(t.contains("Strong tier (Phase 2)"), "{cmd}: {t}");
+        assert!(t.contains("--tier <TIER>"), "{cmd}: {t}");
+        assert!(t.contains("long form of --fast"), "{cmd}: {t}");
+    }
+}
+
+/// E3-8: `--tier X` writes the archive `--X` writes, byte for byte, for each of the three.
+#[test]
+fn tier_long_form_writes_the_same_archive_as_the_flag() {
+    // Flat: a directory entry carries a modification time the file system moves between walks.
+    let src = tempfile::tempdir().unwrap();
+    for i in 0..3u64 {
+        fs::write(src.path().join(format!("t{i}.txt")), prose(i + 1, 200_000)).unwrap();
+    }
+    fs::write(src.path().join("r.bin"), random(100_000)).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut archives = Vec::new();
+    for tier in ["fast", "balanced", "store"] {
+        let flag = format!("--{tier}");
+        let flag_form = [flag.as_str()];
+        let long_form = ["--tier", tier];
+        let mut pair = Vec::new();
+        for (form, spelling) in [(&flag_form[..], "flag"), (&long_form[..], "long")] {
+            let arch = work.path().join(format!("{tier}-{spelling}.lpk"));
+            let mut args = vec!["a", arch.to_str().unwrap(), src.path().to_str().unwrap()];
+            args.extend_from_slice(form);
+            if tier == "balanced" {
+                // A setting of the tier, accepted with its long form too.
+                args.extend(["--dict-size", "1048576"]);
+            }
+            let r = run(&args);
+            assert_eq!(r.status.code(), Some(0), "{args:?}: {}", text(&r.stderr));
+            pair.push(fs::read(&arch).unwrap());
+        }
+        assert_eq!(pair[0], pair[1], "{tier}");
+        archives.push(pair.remove(0));
+    }
+    assert_ne!(archives[0], archives[1], "fast and balanced differ");
+    assert_ne!(archives[0], archives[2], "fast and store differ");
+    // `-v` names the tier's ordering line for both forms alike (store has none).
+    let arch = work.path().join("v.lpk");
+    let r = run(&[
+        "a",
+        arch.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        "--tier",
+        "store",
+        "-v",
+    ]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert!(!text(&r.stderr).contains("ordering:"), "{}", text(&r.stderr));
+}
+
 #[test]
 fn ordering_values_are_checked_and_verbose_reports_the_pass() {
     let h = run(&["a", "--help"]);

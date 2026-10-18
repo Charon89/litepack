@@ -14,6 +14,9 @@
 //! alone means an empty password) and passed through to the reference tool for `t`, `check`
 //! and `repair`. A password is never printed or logged. `x` opens the key slot before anything
 //! is written: a wrong or missing password leaves no output directory.
+//! Tiers: `--fast` (the default), `--balanced`, `--store`, or `--tier <name>` as their long form
+//! (what the GUI mirrors); `--strong` and `--tier strong` are reserved for the Strong tier
+//! (Phase 2) and refused as a usage error.
 //! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation. Nothing is ever prompted;
 //! progress goes to stderr and only with `-v`.
 #![forbid(unsafe_code)]
@@ -182,20 +185,61 @@ impl From<SuiteArg> for Suite {
 /// The format's default suite (D-39: AES-256-GCM).
 const DEFAULT_SUITE: Suite = Suite::AesGcm;
 
+/// The one-line refusal of `--strong` and `--tier strong` (PLAN E3: reserved for Phase 2).
+const STRONG_RESERVED: &str =
+    "the Strong tier arrives in Phase 2; --strong and --tier strong are reserved until then";
+
+/// The value of `--tier`: the long form of the tier flags, which the GUI mirrors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum TierArg {
+    Fast,
+    Balanced,
+    Store,
+    /// Reserved (Phase 2): refused.
+    Strong,
+}
+
+/// A tier the tool can run today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    Fast,
+    Balanced,
+    Store,
+}
+
+impl Tier {
+    /// The value `--tier` takes for this tier.
+    fn name(self) -> &'static str {
+        match self {
+            Tier::Fast => "fast",
+            Tier::Balanced => "balanced",
+            Tier::Store => "store",
+        }
+    }
+}
+
 /// The tier and its settings; `a` and `append` take the same ones.
 #[derive(Debug, Args)]
 struct TierArgs {
+    /// The tier by name: the long form of --fast, --balanced and --store (one or the other;
+    /// `strong` is reserved for the Strong tier, Phase 2, and refused).
+    #[arg(long, value_enum, value_name = "TIER",
+          conflicts_with_all = ["fast", "balanced", "store", "strong"])]
+    tier: Option<TierArg>,
     /// The Fast tier (zstd with a long window; the default).
-    #[arg(long, conflicts_with_all = ["store", "balanced"])]
+    #[arg(long, conflicts_with_all = ["store", "balanced", "strong"])]
     fast: bool,
     /// The Balanced tier (LZMA with a large dictionary, or zstd --ultra --long per block by a
     /// trial on a sample). Memory: about the block size plus several times the dictionary to
     /// compress; the block size plus the dictionary to extract.
-    #[arg(long, conflicts_with = "store")]
+    #[arg(long, conflicts_with_all = ["store", "strong"])]
     balanced: bool,
     /// Store every block without compression.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "strong")]
     store: bool,
+    /// Reserved for the Strong tier (Phase 2): refused with exit 1 until it arrives.
+    #[arg(long)]
+    strong: bool,
     /// Blocks encoded at once at most (default: the machine's logical cores; 1 is sequential).
     /// The archive is the same whatever the count. The memory budget may allow fewer (shown
     /// with -v).
@@ -235,6 +279,46 @@ struct TierArgs {
     /// --balanced, off with --fast. An append runs it only on a revision 1.2 archive.
     #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
     deflate_peel: Option<OnOff>,
+}
+
+impl TierArgs {
+    /// The tier chosen, or the usage error that refuses the command line before anything is
+    /// written: `--strong` and `--tier strong` (the Strong tier arrives in Phase 2), and a
+    /// setting of one tier given with `--tier` naming another (the rules clap applies to the
+    /// tier flags, so `--tier X` and `--X` accept the same command lines).
+    fn tier(&self) -> Result<Tier, String> {
+        if self.strong {
+            return Err(STRONG_RESERVED.to_string());
+        }
+        let tier = match self.tier {
+            Some(TierArg::Strong) => return Err(STRONG_RESERVED.to_string()),
+            Some(TierArg::Fast) => Tier::Fast,
+            Some(TierArg::Balanced) => Tier::Balanced,
+            Some(TierArg::Store) => Tier::Store,
+            None if self.store => Tier::Store,
+            None if self.balanced => Tier::Balanced,
+            None => Tier::Fast,
+        };
+        if self.tier.is_some() {
+            let settings: &[(&str, bool)] = match tier {
+                Tier::Fast => &[("--dict-size", self.dict_size.is_some())],
+                Tier::Balanced => &[("--no-dictionaries", self.no_dictionaries)],
+                Tier::Store => &[
+                    ("--level", self.level.is_some()),
+                    ("--window-log", self.window_log.is_some()),
+                    ("--dict-size", self.dict_size.is_some()),
+                    ("--deflate-peel", self.deflate_peel.is_some()),
+                ],
+            };
+            if let Some((flag, _)) = settings.iter().find(|(_, given)| *given) {
+                return Err(format!(
+                    "the argument '{flag}' cannot be used with '--tier {}'",
+                    tier.name()
+                ));
+            }
+        }
+        Ok(tier)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -420,13 +504,13 @@ fn core_exit(e: &CoreError) -> i32 {
 }
 
 /// The pipeline of a tier and its settings (the seal stage untouched).
-fn build_pipeline(a: &TierArgs) -> Pipeline {
-    let mut pipeline = if a.store {
+fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
+    let mut pipeline = if tier == Tier::Store {
         Pipeline::store(StoreOptions {
             threads: a.threads,
             ..StoreOptions::default()
         })
-    } else if a.balanced {
+    } else if tier == Tier::Balanced {
         let mut o = BalancedOptions {
             threads: a.threads,
             ..BalancedOptions::default()
@@ -475,6 +559,13 @@ fn build_pipeline(a: &TierArgs) -> Pipeline {
 }
 
 fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
+    let tier = match a.tier.tier() {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return EXIT_USAGE;
+        }
+    };
     // Decided before `take` moves the password out of the arguments: what the `-v` report
     // says the archive is sealed with.
     let sealing = a.credentials.given().then(|| {
@@ -491,7 +582,7 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
             return EXIT_FAILED;
         }
     };
-    let mut pipeline = build_pipeline(&a.tier);
+    let mut pipeline = build_pipeline(&a.tier, tier);
     if let Some(credentials) = credentials {
         pipeline.seal.writer.seal = Some(lpk_format::SealOptions {
             suite: a.suite.map_or(DEFAULT_SUITE, Suite::from),
@@ -505,7 +596,7 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
         Ok(s) => {
             records_cap_note(err, &s.peel.deflate);
             if a.verbose {
-                report(err, &a.archive, &a.tier, sealing, a.recovery, &s);
+                report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
             }
             EXIT_OK
         }
@@ -517,6 +608,13 @@ fn add(a: &mut AddArgs, err: &mut dyn Write) -> i32 {
 }
 
 fn append(a: &mut AppendArgs, err: &mut dyn Write) -> i32 {
+    let tier = match a.tier.tier() {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return EXIT_USAGE;
+        }
+    };
     // The new generation is sealed with the archive's own key (the suite is the archive's).
     let sealing = a
         .credentials
@@ -529,13 +627,13 @@ fn append(a: &mut AppendArgs, err: &mut dyn Write) -> i32 {
             return EXIT_FAILED;
         }
     };
-    let mut pipeline = build_pipeline(&a.tier);
+    let mut pipeline = build_pipeline(&a.tier, tier);
     pipeline.seal.writer.recovery.percent = a.recovery;
     match pipeline.append_file(&a.input, &a.archive, credentials.as_ref()) {
         Ok(s) => {
             records_cap_note(err, &s.peel.deflate);
             if a.verbose {
-                report(err, &a.archive, &a.tier, sealing, a.recovery, &s);
+                report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
             }
             EXIT_OK
         }
@@ -550,6 +648,7 @@ fn report(
     err: &mut dyn Write,
     archive: &Path,
     a: &TierArgs,
+    tier: Tier,
     sealing: Option<String>,
     recovery: u8,
     s: &RunSummary,
@@ -625,7 +724,7 @@ fn report(
         s.writer.deduped_chunks, s.writer.deduped_bytes, s.writer.new_chunks, s.writer.reused_chunks
     );
     // Only a mode that was applied: --store and --no-dedup have no fold stage to order by.
-    if !a.store && !a.no_dedup {
+    if tier != Tier::Store && !a.no_dedup {
         let _ = writeln!(
             err,
             "ordering: {}",
