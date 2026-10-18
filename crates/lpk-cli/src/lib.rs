@@ -4,9 +4,11 @@
 //! generation and `info` lists them.
 //!
 //! Extraction goes through `lpk-core`'s block-ordered engine (`lpk_core::extract_file`: each
-//! needed block decoded once, blocks decoded in parallel under a memory bound) with the default
-//! policy, which calls the format tool's own refusals (unsafe paths, devices, symlinks, existing
-//! files). Testing goes through the reference tool's code (`lpk_format::cli::run_with`). Both use
+//! needed block decoded once, blocks decoded in parallel under a memory bound) with the
+//! engine's policy module (`lpk_core::policy`: the reference tool's path rules, case
+//! collisions on a case-insensitive target, `--overwrite refuse|skip|rename|replace`, symlink
+//! entries skipped with a warning unless `--symlinks`). Testing goes through the reference
+//! tool's code (`lpk_format::cli::run_with`). Both use
 //! `lpk-core`'s full reader (revision 1.1's `jpeg-reconstruct`), so peeled files extract and
 //! verify.
 //! Encryption: `--password`, `--password-file` and `--keyfile` are read here for `a` and `x`
@@ -82,7 +84,8 @@ enum Command {
     /// List an archive, one line per entry: kind, size, mtime (UTC), path (tab-separated).
     #[command(name = "l", long_about = LIST_ABOUT)]
     List(ListArgs),
-    /// Extract every entry of an archive into a directory; never overwrites a file.
+    /// Extract every entry of an archive into a directory; an existing file is refused unless
+    /// --overwrite says otherwise, and symlink entries are skipped unless --symlinks is given.
     #[command(name = "x")]
     Extract(ExtractArgs),
     /// Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shards.
@@ -451,9 +454,43 @@ struct ExtractArgs {
     /// a budget below what one block in flight needs is refused with that figure.
     #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
     memory: Option<u64>,
+    /// What an existing file at a target gets. refuse: the extraction is refused before any
+    /// output (the default). skip: the file is left as it is and counted. rename: the entry is
+    /// written beside it as `<stem> (<k>)<.ext>` with the smallest free k, and counted.
+    /// replace: the file is replaced (a link at the target is removed as a link, never
+    /// followed). A directory where a file goes, or a file where a directory goes, is refused
+    /// in every mode but skip, which skips it (and everything below a skipped directory).
+    /// Directories are created or reused whatever the mode.
+    #[arg(long, value_enum, value_name = "MODE", default_value_t = OverwriteArg::Refuse)]
+    overwrite: OverwriteArg,
+    /// Create symlink entries with the target the archive holds. Without this flag every
+    /// symlink entry is skipped with a warning on stderr. A link that cannot be created (for
+    /// example without the privilege on Windows) fails the extraction.
+    #[arg(long)]
+    symlinks: bool,
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
     #[arg(short, long)]
     verbose: bool,
+}
+
+/// `lpk x --overwrite`: the modes of [`lpk_core::Overwrite`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OverwriteArg {
+    Refuse,
+    Skip,
+    Rename,
+    Replace,
+}
+
+impl From<OverwriteArg> for lpk_core::Overwrite {
+    fn from(o: OverwriteArg) -> Self {
+        match o {
+            OverwriteArg::Refuse => lpk_core::Overwrite::Refuse,
+            OverwriteArg::Skip => lpk_core::Overwrite::Skip,
+            OverwriteArg::Rename => lpk_core::Overwrite::Rename,
+            OverwriteArg::Replace => lpk_core::Overwrite::Replace,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -926,22 +963,43 @@ fn extract(x: &mut ExtractArgs, out: &mut dyn Write, err: &mut dyn Write) -> Res
         memory: x.memory,
         ..lpk_core::ExtractOptions::default()
     };
-    let s = lpk_core::extract_file(
+    let symlinks = if x.symlinks {
+        lpk_core::Symlinks::Create
+    } else {
+        lpk_core::Symlinks::Skip
+    };
+    let policy = lpk_core::Policy::new(x.overwrite.into(), symlinks);
+    let r = lpk_core::extract_file(
         &x.archive,
         &x.outdir,
         &priors,
         credentials.as_ref(),
-        &lpk_core::DefaultPolicy,
+        &policy,
         &opts,
-    )
-    .map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    );
+    // One warning per skipped symlink entry, whether or not the extraction went through.
+    for p in policy.skipped_symlinks() {
+        let _ = writeln!(
+            err,
+            "warning: {}: symlink entry skipped (--symlinks creates it)",
+            lpk_format::cli::escape_path(&p)
+        );
+    }
+    let s = r.map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    if s.skipped > 0 {
+        let _ = writeln!(err, "skipped {} existing file(s)", s.skipped);
+    }
+    if s.renamed > 0 {
+        let _ = writeln!(err, "renamed {} existing file(s)", s.renamed);
+    }
     if x.verbose {
         let _ = writeln!(
             err,
-            "{}: {} files, {} directories, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} nested decodes, {} files reopened",
+            "{}: {} files, {} directories, {} symlinks, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} nested decodes, {} files reopened",
             x.archive.display(),
             s.files,
             s.directories,
+            s.symlinks,
             s.bytes,
             s.placements,
             s.blocks_needed,

@@ -1694,3 +1694,113 @@ fn extract_with_a_memory_limit_below_one_block_is_a_usage_error() {
     assert_eq!(r.status.code(), Some(1));
     assert_eq!(json_error(&r)["kind"], "InvalidOption");
 }
+
+/// E3-2: `lpk x --overwrite skip` over a half-extracted tree completes, restores what is
+/// missing, leaves what exists and prints the count; the other modes and a bad mode.
+#[test]
+fn overwrite_skip_over_a_half_extracted_tree_prints_the_skipped_count() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("t.lpk");
+    let out = work.path().join("out");
+    let (arch_s, src_s, out_s) = (
+        arch.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        out.to_str().unwrap(),
+    );
+    assert_eq!(run(&["a", arch_s, src_s]).status.code(), Some(0));
+    assert_eq!(run(&["x", arch_s, out_s]).status.code(), Some(0));
+    // Half extracted: two of the four files gone, one changed.
+    fs::remove_file(out.join("docs/b.md")).unwrap();
+    fs::remove_file(out.join("docs/deep/r.bin")).unwrap();
+    fs::write(out.join("a.txt"), b"changed").unwrap();
+    // The default refuses (as before) and leaves the tree as it was.
+    let refused = run(&["x", arch_s, out_s]);
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+    assert!(!out.join("docs/b.md").exists());
+    // skip: completes, exit 0, the count on stderr, the changed file left alone.
+    let skip = run(&["x", "--overwrite", "skip", arch_s, out_s]);
+    assert_eq!(skip.status.code(), Some(0), "{}", text(&skip.stderr));
+    assert_eq!(text(&skip.stderr), "skipped 2 existing file(s)\n");
+    assert_eq!(text(&skip.stdout), "extracted 2 files, 3 directories\n");
+    assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"changed");
+    assert_eq!(
+        fs::read(out.join("docs/b.md")).unwrap(),
+        fs::read(src.path().join("docs/b.md")).unwrap()
+    );
+    // replace: the changed file is restored; nothing on stderr.
+    let replace = run(&["x", "--overwrite", "replace", arch_s, out_s]);
+    assert_eq!(replace.status.code(), Some(0), "{}", text(&replace.stderr));
+    assert!(replace.stderr.is_empty(), "{}", text(&replace.stderr));
+    assert_eq!(tree_hash(&out), tree_hash(src.path()));
+    // rename: every file written beside its existing twin.
+    let rename = run(&["x", "--overwrite", "rename", arch_s, out_s]);
+    assert_eq!(rename.status.code(), Some(0), "{}", text(&rename.stderr));
+    assert_eq!(text(&rename.stderr), "renamed 4 existing file(s)\n");
+    assert_eq!(
+        fs::read(out.join("a (1).txt")).unwrap(),
+        fs::read(src.path().join("a.txt")).unwrap()
+    );
+    assert!(out.join("docs/deep/r (1).bin").exists());
+    assert!(out.join("zero (1)").exists());
+    // A mode that does not exist is a usage error.
+    let bad = run(&["x", "--overwrite", "clobber", arch_s, out_s]);
+    assert_eq!(bad.status.code(), Some(1), "{}", text(&bad.stderr));
+    // A directory where a file goes: refused, naming it, kind InTheWay.
+    let blocked = work.path().join("blocked");
+    fs::create_dir_all(blocked.join("a.txt")).unwrap();
+    let r = run(&["--json", "x", arch_s, blocked.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(2));
+    let e = json_error(&r);
+    assert_eq!(e["kind"], "InTheWay", "{e}");
+    assert!(e["path"].as_str().unwrap().ends_with("a.txt"), "{e}");
+    assert!(!blocked.join("docs").exists());
+}
+
+/// E3-2: a symlink entry is skipped with one warning line unless `--symlinks` creates it.
+#[test]
+fn symlink_entries_are_skipped_with_a_warning_unless_symlinks_is_given() {
+    use lpk_format::{EntryFlags, Writer, WriterOptions};
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("links.lpk");
+    {
+        let mut out = std::fs::File::create(&arch).unwrap();
+        let mut w = Writer::new(&mut out, WriterOptions::default()).unwrap();
+        w.add_file("a.txt", EntryFlags::EMPTY, 0, &mut &b"target"[..])
+            .unwrap();
+        w.add_symlink("link", EntryFlags::EMPTY, 0, b"a.txt")
+            .unwrap();
+        w.finish().unwrap();
+    }
+    let arch_s = arch.to_str().unwrap();
+    let out = work.path().join("out");
+    let r = run(&["x", arch_s, out.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert_eq!(
+        text(&r.stderr),
+        "warning: link: symlink entry skipped (--symlinks creates it)\n"
+    );
+    assert_eq!(text(&r.stdout), "extracted 1 files, 0 directories\n");
+    assert!(fs::symlink_metadata(out.join("link")).is_err());
+    let with = work.path().join("with");
+    let r = run(&["x", "--symlinks", arch_s, with.to_str().unwrap()]);
+    match r.status.code() {
+        Some(0) => {
+            assert!(r.stderr.is_empty(), "{}", text(&r.stderr));
+            let l = with.join("link");
+            assert!(fs::symlink_metadata(&l).unwrap().file_type().is_symlink());
+            assert_eq!(fs::read(&l).unwrap(), b"target");
+        }
+        code => {
+            // Windows without the symlink privilege: the extraction fails naming the link,
+            // before any file is written.
+            if !cfg!(windows) {
+                panic!("{code:?}: {}", text(&r.stderr));
+            }
+            assert_eq!(code, Some(2), "{}", text(&r.stderr));
+            assert!(text(&r.stderr).contains("link"), "{}", text(&r.stderr));
+            assert!(!with.join("a.txt").exists());
+        }
+    }
+}

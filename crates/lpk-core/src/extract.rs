@@ -3,10 +3,14 @@
 //! writer, every writer in block order.
 //!
 //! **The plan.** The entry table is read and every entry passes the [`ExtractPolicy`] before
-//! anything is written: path, device name, symlink, then the format tool's conflicting-name
-//! rule, then — when the output directory already exists — the linked-parent hook for every
-//! existing parent directory below it that is a symlink or a reparse point (a junction), and the
-//! overwrite hook for every file target that already exists. Every file's chunk list is resolved
+//! anything is written: path, device name, symlink, then the conflicting-name rule and (on a
+//! case-insensitive target) the case-collision rule of [`crate::policy`], then — when the
+//! output directory already exists — the linked-parent hook for every existing parent directory
+//! below it that is a symlink or a reparse point (a junction), the existing hook for a parent
+//! that is not a directory, and the existing hook for every file (or symlink to create) whose
+//! target already exists, whose answer skips the entry, renames it beside the target or marks
+//! the target for replacement at the file's creation (E3-2). Symlink entries the policy lets
+//! pass are created after the directories and before any file, or skipped and counted. Every file's chunk list is resolved
 //! against the chunk table (indices in range, lengths adding up to the file size) and turned
 //! into placements — (offset and length in the block, file, offset in the file) — filed under
 //! the block that holds the chunk. A deduplicated chunk is simply placed several times; a file
@@ -106,61 +110,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lpk_format::{cli, Archive, Credentials, Entry, EntryKind, FormatError, MemoryPriors};
+use lpk_format::{Archive, Credentials, Entry, EntryKind, FormatError, MemoryPriors};
 
 use crate::memory::{Budget, BudgetSource, EnvelopeTier};
+use crate::policy::{self, Existing, Found, SymlinkAction, Wanted};
+pub use crate::policy::{DefaultPolicy, ExtractPolicy};
 use crate::CoreError;
-
-/// What an extraction may write. Every hook is called before anything is written; an `Err`
-/// refuses the whole extraction with that error.
-pub trait ExtractPolicy: Sync {
-    /// The archive path of every entry (the format's own path rules were checked when the entry
-    /// table was parsed).
-    fn check_path(&self, path: &str) -> Result<(), FormatError>;
-    /// Every symlink entry.
-    fn symlink(&self, entry: &Entry) -> Result<(), FormatError>;
-    /// A file target that already exists. Returning `Ok` accepts it, but the file is still
-    /// opened create-new: a policy that replaces must remove the target itself.
-    fn overwrite(&self, target: &Path) -> Result<(), FormatError>;
-    /// The archive path of every entry, for device names.
-    fn device(&self, path: &str) -> Result<(), FormatError>;
-    /// An existing directory below the output directory, on the way to a target, that is a
-    /// symlink or a reparse point (writing through it could leave the output directory).
-    fn linked_parent(&self, dir: &Path) -> Result<(), FormatError>;
-}
-
-/// The format tool's refusals, called from `lpk_format::cli`: unsafe paths
-/// (`check_extraction_path`), Windows device names (`check_reserved_device`), every symlink
-/// (`refuse_symlink`) and every existing file (`check_no_overwrite`); and every linked parent
-/// (`UnsafePath` with the reason "linked parent"). Conflicting names (`check_conflicting_names`)
-/// are refused by the plan for every policy.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DefaultPolicy;
-
-impl ExtractPolicy for DefaultPolicy {
-    fn check_path(&self, path: &str) -> Result<(), FormatError> {
-        cli::check_extraction_path(path)
-    }
-
-    fn symlink(&self, entry: &Entry) -> Result<(), FormatError> {
-        cli::refuse_symlink(entry)
-    }
-
-    fn overwrite(&self, target: &Path) -> Result<(), FormatError> {
-        cli::check_no_overwrite(target)
-    }
-
-    fn device(&self, path: &str) -> Result<(), FormatError> {
-        cli::check_reserved_device(path)
-    }
-
-    fn linked_parent(&self, dir: &Path) -> Result<(), FormatError> {
-        Err(FormatError::UnsafePath {
-            path: dir.display().to_string(),
-            reason: "linked parent",
-        })
-    }
-}
 
 /// How an extraction runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +176,16 @@ pub struct ExtractSummary {
     pub writers: usize,
     /// Times a file closed by the open-file bound was opened again.
     pub reopened: u64,
+    /// Entries left out because something existed at their target and the policy answered
+    /// [`Existing::Skip`] (files, symlink entries to create, and a directory with everything
+    /// below it when a file is in its way).
+    pub skipped: u64,
+    /// Entries written beside an existing target under a new name ([`Existing::Rename`]).
+    pub renamed: u64,
+    /// Symlink entries created.
+    pub symlinks: u64,
+    /// Symlink entries the policy let pass and did not create ([`SymlinkAction::Skip`]).
+    pub symlinks_skipped: u64,
     /// Most decoded blocks held at once, measured (permits taken and not yet returned): never
     /// above `in_flight`. 1 on the sequential path when a block was decoded, else 0.
     pub peak_in_flight: usize,
@@ -334,6 +299,16 @@ struct Target {
     size: u64,
     chunks: u64,
     mtime_ns: i64,
+    /// What is at `path` is removed (as a link when it is one) just before the file is created.
+    replace: bool,
+}
+
+/// A symlink entry to create, after the directories and before the files.
+#[derive(Debug)]
+struct Link {
+    path: PathBuf,
+    target: Vec<u8>,
+    replace: bool,
 }
 
 /// What every thread sees: the targets, their states and the counters. Cleanup reads the
@@ -364,15 +339,24 @@ impl Shared {
         }
     }
 
-    /// Create and finish a file with no chunk.
-    fn create_empty(&self, file: usize) -> Result<(), CoreError> {
+    /// Create a target's file (create-new; what a replaced target held is removed first).
+    fn create(&self, file: usize) -> Result<File, CoreError> {
         let t = &self.targets[file];
+        if t.replace {
+            policy::remove_existing(&t.path).map_err(|e| io(&t.path, e))?;
+        }
         let f = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&t.path)
             .map_err(|e| io(&t.path, e))?;
         self.set(file, PARTIAL);
+        Ok(f)
+    }
+
+    /// Create and finish a file with no chunk.
+    fn create_empty(&self, file: usize) -> Result<(), CoreError> {
+        let f = self.create(file)?;
         finish(self, file, &f)
     }
 }
@@ -459,12 +443,7 @@ impl<'s> Out<'s> {
             let s = self.shared;
             let t = &s.targets[file];
             let f = if s.state(file) == NOT_CREATED {
-                let f = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&t.path)
-                    .map_err(|e| io(&t.path, e))?;
-                s.set(file, PARTIAL);
+                let f = s.create(file)?;
                 if t.chunks > 1 {
                     f.set_len(t.size).map_err(|e| io(&t.path, e))?;
                 }
@@ -593,6 +572,127 @@ struct Plan {
     name_bytes: u64,
     /// The directories to create, the output directory first.
     mkdirs: Vec<PathBuf>,
+    /// The symlink entries to create, in entry order.
+    links: Vec<Link>,
+    /// Entries skipped because of what existed at their target.
+    skipped: u64,
+    /// Entries written under a new name.
+    renamed: u64,
+    /// Symlink entries let pass and not created.
+    symlinks_skipped: u64,
+}
+
+/// What the plan decided for one entry's target after looking at what exists there.
+enum Decision {
+    /// Nothing there, or the policy said write (create-new, as before).
+    Write,
+    Skip,
+    /// The path to write instead.
+    Rename(PathBuf),
+    Replace,
+}
+
+/// The plan's view of the output directory while it decides each entry: the existing parents
+/// already looked at, those found blocked (a file where a directory goes, skipped by the
+/// policy: everything below is skipped), and the paths this extraction will write (built when a
+/// rename needs a free name).
+struct OutDir<'p> {
+    policy: &'p dyn ExtractPolicy,
+    dir: &'p Path,
+    fresh: bool,
+    looked: HashSet<PathBuf>,
+    blocked: HashSet<PathBuf>,
+    planned: Option<HashSet<PathBuf>>,
+}
+
+impl OutDir<'_> {
+    /// The policy's answer for `wanted` at `path`, when something is there.
+    fn ask(&self, path: &Path, wanted: Wanted) -> Result<Option<Existing>, CoreError> {
+        if self.fresh {
+            return Ok(None);
+        }
+        match std::fs::symlink_metadata(path) {
+            // An existing directory where a directory goes is reused, as before: no question.
+            Ok(m) if Found::of(&m) == Found::Directory && wanted == Wanted::Directory => Ok(None),
+            Ok(m) => self.policy.existing(path, Found::of(&m), wanted).map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Every existing parent below the output directory, once each: a link is the policy's
+    /// linked-parent question; a file (or anything but a directory) the policy's existing
+    /// question for a directory, whose `Skip` blocks everything below it. `Ok(false)` when
+    /// the entry is to be skipped.
+    fn parents_ok(&mut self, path: &Path) -> Result<bool, CoreError> {
+        if self.fresh {
+            return Ok(true);
+        }
+        let mut blocked_by_parent = false;
+        for p in path.ancestors().skip(1) {
+            if p == self.dir || !p.starts_with(self.dir) {
+                break;
+            }
+            if self.blocked.contains(p) {
+                blocked_by_parent = true;
+                break;
+            }
+            if !self.looked.insert(p.to_path_buf()) {
+                continue;
+            }
+            if let Ok(m) = std::fs::symlink_metadata(p) {
+                if is_link(&m) {
+                    self.policy.linked_parent(p)?;
+                } else if !m.is_dir() {
+                    match self.policy.existing(p, Found::of(&m), Wanted::Directory)? {
+                        Existing::Skip => {
+                            self.blocked.insert(p.to_path_buf());
+                            blocked_by_parent = true;
+                        }
+                        Existing::Write | Existing::Rename | Existing::Replace => {}
+                    }
+                }
+            }
+        }
+        Ok(!blocked_by_parent)
+    }
+
+    /// Decide an entry at `path` (a file or a symlink to create).
+    fn decide(
+        &mut self,
+        path: &Path,
+        wanted: Wanted,
+        targets: &[Target],
+        links: &[Link],
+    ) -> Result<Decision, CoreError> {
+        if !self.parents_ok(path)? {
+            return Ok(Decision::Skip);
+        }
+        let d = match self.ask(path, wanted)? {
+            None | Some(Existing::Write) => Decision::Write,
+            Some(Existing::Skip) => Decision::Skip,
+            Some(Existing::Replace) => Decision::Replace,
+            Some(Existing::Rename) => {
+                let planned = self.planned.get_or_insert_with(|| {
+                    targets
+                        .iter()
+                        .map(|t| t.path.clone())
+                        .chain(links.iter().map(|l| l.path.clone()))
+                        .collect()
+                });
+                let renamed = policy::rename_target(path, |p| {
+                    planned.contains(p) || std::fs::symlink_metadata(p).is_ok()
+                });
+                Decision::Rename(renamed)
+            }
+        };
+        if let Some(planned) = &mut self.planned {
+            planned.insert(match &d {
+                Decision::Rename(p) => p.clone(),
+                _ => path.to_path_buf(),
+            });
+        }
+        Ok(d)
+    }
 }
 
 fn plan<R: Read + Seek>(
@@ -612,38 +712,81 @@ fn plan<R: Read + Seek>(
         policy.check_path(&e.path)?;
         policy.device(&e.path)?;
     }
-    cli::check_conflicting_names(&entries)?;
+    policy::check_conflicting_names(&entries)?;
+    if policy::case_insensitive_target(dir) {
+        policy::check_case_collisions(&entries)?;
+    }
     // A directory this extraction creates holds nothing yet: only an existing one is looked in.
-    let fresh = std::fs::symlink_metadata(dir).is_err();
-    let mut looked: HashSet<PathBuf> = HashSet::new();
+    let mut existing = OutDir {
+        policy,
+        dir,
+        fresh: std::fs::symlink_metadata(dir).is_err(),
+        looked: HashSet::new(),
+        blocked: HashSet::new(),
+        planned: None,
+    };
     let table = archive.chunks();
     let blocks = archive.index().blocks.len();
     let mut per_block: Vec<Vec<Place>> = vec![Vec::new(); blocks];
-    let mut targets = Vec::new();
+    let mut targets: Vec<Target> = Vec::new();
+    let mut links: Vec<Link> = Vec::new();
     let mut dirs = Vec::new();
     let mut placements = 0u64;
+    let (mut skipped, mut renamed, mut symlinks_skipped) = (0u64, 0u64, 0u64);
     for e in &entries {
         let path = join_components(dir, &e.path);
-        if !fresh && e.kind != EntryKind::Symlink {
-            // Every existing parent below the output directory, once each.
-            for p in path.ancestors().skip(1) {
-                if p == dir || !p.starts_with(dir) || !looked.insert(p.to_path_buf()) {
-                    break;
+        match e.kind {
+            EntryKind::Directory => {
+                if !existing.parents_ok(&path)? {
+                    skipped += 1;
+                    continue;
                 }
-                if let Ok(m) = std::fs::symlink_metadata(p) {
-                    if is_link(&m) {
-                        policy.linked_parent(p)?;
+                match existing.ask(&path, Wanted::Directory)? {
+                    Some(Existing::Skip) => {
+                        existing.blocked.insert(path);
+                        skipped += 1;
                     }
+                    _ => dirs.push(path),
                 }
             }
-        }
-        match e.kind {
-            EntryKind::Directory => dirs.push(path),
-            EntryKind::Symlink => {}
-            EntryKind::File => {
-                if !fresh && std::fs::symlink_metadata(&path).is_ok() {
-                    policy.overwrite(&path)?;
+            EntryKind::Symlink => {
+                if policy.symlink_action(e) == SymlinkAction::Skip {
+                    symlinks_skipped += 1;
+                    continue;
                 }
+                let (path, replace) =
+                    match existing.decide(&path, Wanted::Symlink, &targets, &links)? {
+                        Decision::Write => (path, false),
+                        Decision::Replace => (path, true),
+                        Decision::Rename(p) => {
+                            renamed += 1;
+                            (p, false)
+                        }
+                        Decision::Skip => {
+                            skipped += 1;
+                            continue;
+                        }
+                    };
+                links.push(Link {
+                    path,
+                    target: e.symlink_target.clone().unwrap_or_default(),
+                    replace,
+                });
+            }
+            EntryKind::File => {
+                let (path, replace) =
+                    match existing.decide(&path, Wanted::File, &targets, &links)? {
+                        Decision::Write => (path, false),
+                        Decision::Replace => (path, true),
+                        Decision::Rename(p) => {
+                            renamed += 1;
+                            (p, false)
+                        }
+                        Decision::Skip => {
+                            skipped += 1;
+                            continue;
+                        }
+                    };
                 let file = targets.len();
                 let mut off = Some(0u64);
                 for &c in &e.chunks {
@@ -677,15 +820,20 @@ fn plan<R: Read + Seek>(
                     size: e.size,
                     chunks: e.chunks.len() as u64,
                     mtime_ns: e.mtime_ns,
+                    replace,
                 });
             }
         }
     }
-    // Directories: the root, every directory entry, every file's parent; each once. Created
-    // by `make_dirs` after the memory check, so a refused budget leaves nothing behind.
+    // Directories: the root, every directory entry, every file's and link's parent; each
+    // once. Created by `make_dirs` after the memory check, so a refused budget leaves nothing
+    // behind.
     let mut made: HashSet<PathBuf> = HashSet::new();
     let mut mkdirs = vec![dir.to_path_buf()];
-    let parents = targets.iter().filter_map(|t| t.path.parent());
+    let parents = targets
+        .iter()
+        .filter_map(|t| t.path.parent())
+        .chain(links.iter().filter_map(|l| l.path.parent()));
     for d in dirs.iter().map(PathBuf::as_path).chain(parents) {
         if made.insert(d.to_path_buf()) {
             mkdirs.push(d.to_path_buf());
@@ -712,6 +860,10 @@ fn plan<R: Read + Seek>(
         placements,
         name_bytes,
         mkdirs,
+        links,
+        skipped,
+        renamed,
+        symlinks_skipped,
     })
 }
 
@@ -721,6 +873,52 @@ fn make_dirs(mkdirs: &[PathBuf]) -> Result<(), CoreError> {
         std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
     }
     Ok(())
+}
+
+/// Create the plan's symlinks, in entry order (after the directories, before the files). On
+/// Windows the target is read as UTF-8 and the link is a directory link when the target,
+/// resolved against the link's directory, is a directory now, else a file link.
+fn make_links(links: &[Link]) -> Result<(), CoreError> {
+    for l in links {
+        if l.replace {
+            policy::remove_existing(&l.path).map_err(|e| io(&l.path, e))?;
+        }
+        make_link(&l.path, &l.target).map_err(|e| io(&l.path, e))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_link(path: &Path, target: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), path)
+}
+
+#[cfg(windows)]
+fn make_link(path: &Path, target: &[u8]) -> std::io::Result<()> {
+    let target = std::str::from_utf8(target).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "symlink target is not UTF-8",
+        )
+    })?;
+    let resolved = path
+        .parent()
+        .map(|p| p.join(target))
+        .unwrap_or_else(|| PathBuf::from(target));
+    if std::fs::metadata(&resolved).is_ok_and(|m| m.is_dir()) {
+        std::os::windows::fs::symlink_dir(target, path)
+    } else {
+        std::os::windows::fs::symlink_file(target, path)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn make_link(_path: &Path, _target: &[u8]) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
 }
 
 /// The pool for `archive` under `opts`: decode workers, decoded blocks in flight, file writers.
@@ -910,6 +1108,10 @@ where
         placements,
         name_bytes,
         mkdirs,
+        links,
+        skipped,
+        renamed,
+        symlinks_skipped,
     } = plan(archive, dir, policy)?;
     let shape = Shape {
         needed: &needed,
@@ -932,6 +1134,9 @@ where
         )));
     }
     make_dirs(&mkdirs)?;
+    // Links are created before any file: a failure here (no privilege on Windows, a target
+    // that is not UTF-8) fails the extraction with nothing to clean up.
+    make_links(&links)?;
     let first_file: Vec<usize> = per_block
         .iter()
         .map(|p| p.first().map_or(usize::MAX, |p| p.file))
@@ -1036,6 +1241,10 @@ where
         in_flight: pool.in_flight,
         writers: pool.writers,
         reopened: shared.reopened.load(Ordering::Relaxed),
+        skipped,
+        renamed,
+        symlinks: links.len() as u64,
+        symlinks_skipped,
         peak_in_flight: peak.load(Ordering::Relaxed),
         memory: pool.memory,
     })

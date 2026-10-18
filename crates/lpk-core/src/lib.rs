@@ -23,6 +23,7 @@ pub mod ingest;
 pub mod memory;
 pub mod peel;
 pub mod pipeline;
+pub mod policy;
 pub mod priors;
 pub mod source;
 pub mod store;
@@ -34,10 +35,7 @@ pub use balanced::{
 pub use classify::{classify, Class, Features};
 pub use cluster::{cluster, Cluster, DictionaryKind};
 pub use error::CoreError;
-pub use extract::{
-    extract_archive, extract_file, DefaultPolicy, ExtractMemory, ExtractOptions, ExtractPolicy,
-    ExtractSummary,
-};
+pub use extract::{extract_archive, extract_file, ExtractMemory, ExtractOptions, ExtractSummary};
 pub use fast::{
     archive_fast, archive_fast_file, DictionaryPolicy, FastHandle, FastOptions, FastSummary,
     ZstdEncoder,
@@ -51,6 +49,7 @@ pub use peel::{
     PeelSummary,
 };
 pub use pipeline::{ClassifyStage, ModelStage, Pipeline, RunSummary, SealOptions, StageTimings};
+pub use policy::{DefaultPolicy, ExtractPolicy, Overwrite, Policy, Symlinks};
 pub use priors::ProvidedDictionaries;
 pub use source::Source;
 pub use store::{archive_store, archive_store_file, write_inputs, StoreOptions};
