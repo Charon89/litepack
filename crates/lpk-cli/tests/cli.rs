@@ -1672,3 +1672,25 @@ fn json_errors_are_one_object_line_and_text_errors_are_unchanged() {
     assert!(text(&ok.stdout).starts_with("ok: "), "{}", text(&ok.stdout));
     assert!(ok.stderr.is_empty());
 }
+
+#[test]
+fn extract_with_a_memory_limit_below_one_block_is_a_usage_error() {
+    // E3-7: an invalid option of `x` (`--memory` that the archive's envelope allows but below
+    // what one block in flight needs) is `CoreError::InvalidOption`, exit 1 as the same option
+    // on `a` (before E3-7 `x` gave 2); a limit below the envelope stays a refusal, exit 2.
+    let arch = vectors().join("zstd-basic.lpk");
+    let arch = arch.to_str().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let out = work.path().join("out");
+    let out = out.to_str().unwrap();
+    let r = run(&["x", arch, out, "--memory", "20000"]);
+    assert_eq!(r.status.code(), Some(1), "{}", text(&r.stderr));
+    assert!(
+        text(&r.stderr).contains("invalid option"),
+        "{}",
+        text(&r.stderr)
+    );
+    let r = run(&["--json", "x", arch, out, "--memory", "20000"]);
+    assert_eq!(r.status.code(), Some(1));
+    assert_eq!(json_error(&r)["kind"], "InvalidOption");
+}
