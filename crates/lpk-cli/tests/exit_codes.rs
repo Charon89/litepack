@@ -399,3 +399,21 @@ fn the_usage_failure_is_exit_1_and_a_failed_one_exit_2() {
     assert_eq!(Failure::usage("x").code, EXIT_USAGE);
     assert_eq!(Failure::failed("Io", "x", None).code, EXIT_FAILED);
 }
+
+/// E3-5's kinds of the tool's own (not a `CoreError` or `FormatError` variant): a
+/// `--keyfile` the archive does not take is a refused operation (2, `UnneededKeyfile`); a
+/// prompt asked for through a pipe is a usage error (1, `Usage`).
+#[test]
+fn the_cli_s_own_credential_kinds_have_their_codes() {
+    let f = Failure::failed(
+        lpk_cli::UNNEEDED_KEYFILE,
+        "x",
+        Some(&PathBuf::from("a.lpk")),
+    );
+    assert_eq!((f.code, f.kind.as_str()), (EXIT_FAILED, "UnneededKeyfile"));
+    let e = lpk_cli::Terminal::none()
+        .read_password(std::path::Path::new("a.lpk"), false)
+        .unwrap_err();
+    assert_eq!((e.code, e.kind.as_str()), (EXIT_USAGE, "Usage"));
+    assert_eq!(e.message, lpk_cli::prompt::NOT_A_TERMINAL);
+}
