@@ -17,7 +17,7 @@ fi
 
 all="frame_read header_read varint_read entry_table chunk_table records_table index_parse \
 trailer_read_tail block_header_and_decode zstd_decode lzma_decode recovery_frame key_slot \
-archive_open archive_mutate deflate_walk deflate_recreate"
+archive_open archive_mutate deflate_walk deflate_recreate bwt_decode bwt_roundtrip"
 targets="${*:-$all}"
 toolchain="${LPK_FUZZ_TOOLCHAIN:-nightly}"
 vectors="../crates/lpk-format/tests/vectors"
@@ -27,11 +27,13 @@ mkdir -p artifacts/logs
 for t in $targets; do
   mkdir -p "corpus/$t"
   extra=""
+  # A target's own seeds are optional (libFuzzer exits on a missing directory).
+  if [ -d "seeds/$t" ]; then extra="seeds/$t"; fi
   # archive_mutate reads the vectors itself; its input is a mutation list, not an archive.
-  if [ "$t" != "archive_mutate" ]; then extra="$vectors"; fi
+  if [ "$t" != "archive_mutate" ]; then extra="$extra $vectors"; fi
   echo "== $t (${secs}s)"
   # shellcheck disable=SC2086
-  if cargo "+$toolchain" fuzz run "$t" "corpus/$t" "seeds/$t" $extra -- \
+  if cargo "+$toolchain" fuzz run "$t" "corpus/$t" $extra -- \
     -max_total_time="$secs" -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 \
     >"artifacts/logs/$t.log" 2>&1; then
     grep -E "stat::number_of_executed_units|Done [0-9]+ runs" "artifacts/logs/$t.log" | tail -n 2

@@ -655,11 +655,13 @@ fn bad_options(reason: &'static str) -> FormatError {
 
 /// The checks a reader makes of a block's graph: step count, parameters and
 /// the records it names (`record_count` is how many the archive will have);
-/// then the writer's own: no primitive that no revision decodes (`bwt`,
-/// `bcj-x86`, `bcj-arm64`, `delta`, `png-filter`, `base64`, `utf16`,
+/// then the writer's own: no primitive that no revision decodes (`bcj-x86`,
+/// `bcj-arm64`, `delta`, `png-filter`, `base64`, `utf16`,
 /// `container-reconstruct`; `BadGraph`, `undecoded primitive`, at every
-/// minor, spec section 8), and every primitive belongs to a revision no later
-/// than the archive's `version_minor` (`BadOptions`, `version_minor`).
+/// minor, spec section 8), `bwt` only last or directly before a last
+/// `deflate-reconstruct` (`BadGraph`, `bwt position`, revision 1.3), and
+/// every primitive belongs to a revision no later than the archive's
+/// `version_minor` (`BadOptions`, `version_minor`).
 fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(), FormatError> {
     if graph.steps.is_empty() || graph.steps.len() > MAX_STEPS {
         return Err(FormatError::BadGraph {
@@ -690,9 +692,8 @@ fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(
 /// directly before a last `deflate-reconstruct` (the look-ahead of the
 /// reader's bounds goes one step, so only there is the step before `bwt`
 /// bounded by the inflated length); anywhere else is `BadGraph`,
-/// `bwt position`. Until revision 1.3 lands, `bwt` is refused before this
-/// rule as a primitive no revision decodes; the rule is checked on its own in
-/// the tests.
+/// `bwt position`. A reader decodes `bwt` in any position (spec section 8,
+/// "Decoding `bwt`").
 fn check_bwt_steps(graph: &Graph) -> Result<(), FormatError> {
     let last = graph.steps.len().saturating_sub(1);
     for (i, s) in graph.steps.iter().enumerate() {
@@ -3428,9 +3429,10 @@ mod deflate_rule_tests {
     }
 
     #[test]
-    fn deflate_reconstruct_is_revision_2() {
+    fn deflate_reconstruct_is_revision_2_and_bwt_revision_3() {
         assert_eq!(PrimitiveId::DeflateReconstruct.revision(), 2);
-        assert_eq!(FormatVersion::LATEST.minor, 2);
+        assert_eq!(PrimitiveId::Bwt.revision(), 3);
+        assert_eq!(FormatVersion::LATEST.minor, 3);
     }
 
     #[test]
@@ -3544,10 +3546,6 @@ mod undecoded_rule_tests {
     fn undecoded() -> Vec<Step> {
         vec![
             Step {
-                primitive: PrimitiveId::Bwt,
-                params: vec![0, 0, 1, 0],
-            },
-            Step {
                 primitive: PrimitiveId::BcjX86,
                 params: Vec::new(),
             },
@@ -3606,8 +3604,8 @@ mod undecoded_rule_tests {
     }
 
     #[test]
-    fn each_undecoded_primitive_is_refused_at_minors_0_1_and_2() {
-        for minor in [0u16, 1, 2] {
+    fn each_undecoded_primitive_is_refused_at_minors_0_to_3() {
+        for minor in [0u16, 1, 2, 3] {
             for step in undecoded() {
                 let p = step.primitive;
                 // Alone, and after a decoded step.
@@ -3642,7 +3640,7 @@ mod undecoded_rule_tests {
             primitive: PrimitiveId::Store,
             params: Vec::new(),
         };
-        for minor in [0u16, 1, 2] {
+        for minor in [0u16, 1, 2, 3] {
             assert!(write(minor, vec![store.clone()]).is_ok(), "minor {minor}");
         }
     }
@@ -3673,9 +3671,8 @@ mod undecoded_rule_tests {
 
 #[cfg(test)]
 mod bwt_rule_tests {
-    //! Revision 1.3's position rule for `bwt`, checked on the function itself:
-    //! through the writer, `bwt` is refused first as a primitive no revision
-    //! decodes until revision 1.3 lands.
+    //! Revision 1.3's position rule for `bwt`, checked on the function itself
+    //! and through the writer's graph check.
     #![allow(clippy::unwrap_used)]
     use super::*;
 
@@ -3740,20 +3737,39 @@ mod bwt_rule_tests {
     }
 
     #[test]
-    fn through_the_writer_bwt_is_still_refused_as_undecoded_first() {
-        // `check_graph` runs the undecoded rule before the position rule, so
-        // a misplaced `bwt` reports `undecoded primitive` until revision 1.3.
-        for ps in [
-            &[PrimitiveId::Bwt, PrimitiveId::Lzma][..],
-            &[PrimitiveId::Lzma, PrimitiveId::Bwt],
-        ] {
+    fn through_the_graph_check_bwt_needs_minor_3_and_its_position() {
+        use PrimitiveId::*;
+        // A misplaced `bwt` is `bwt position` at the latest minor.
+        for ps in [&[Bwt, Lzma][..], &[Bwt, Store], &[Lzma, Bwt, Store]] {
             assert!(matches!(
                 check_graph(&graph(ps), 1, FormatVersion::LATEST.minor),
                 Err(FormatError::BadGraph {
-                    reason: "undecoded primitive"
+                    reason: "bwt position"
                 })
             ));
         }
+        // Well placed: refused under minors 0 to 2 (`version_minor`), written under 3.
+        for ps in [&[Bwt][..], &[Lzma, Bwt], &[Lzma, Bwt, DeflateReconstruct]] {
+            for minor in [0u16, 1, 2] {
+                assert!(
+                    matches!(
+                        check_graph(&graph(ps), 1, minor),
+                        Err(FormatError::BadOptions {
+                            reason: "version_minor"
+                        })
+                    ),
+                    "{ps:?} at minor {minor}"
+                );
+            }
+            assert!(check_graph(&graph(ps), 1, 3).is_ok(), "{ps:?}");
+        }
+        // The position rule comes before the minor rule.
+        assert!(matches!(
+            check_graph(&graph(&[Bwt, Lzma]), 1, 0),
+            Err(FormatError::BadGraph {
+                reason: "bwt position"
+            })
+        ));
     }
 }
 

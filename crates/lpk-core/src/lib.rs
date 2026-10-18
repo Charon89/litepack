@@ -12,6 +12,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod balanced;
+pub mod bwt;
 pub mod classify;
 pub mod cluster;
 pub mod error;
@@ -32,6 +33,7 @@ pub use balanced::{
     archive_balanced, archive_balanced_file, BalancedEncoder, BalancedHandle, BalancedOptions,
     BalancedSummary, LzmaEncoder,
 };
+pub use bwt::BwtDecoder;
 pub use classify::{classify, Class, Features};
 pub use cluster::{cluster, Cluster, DictionaryKind};
 pub use error::CoreError;
@@ -43,7 +45,7 @@ pub use fast::{
 pub use fold::{ChunkerKind, Dedup, FastCdcChunker, FileOrder, FoldOptions, FoldStage};
 pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
 pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
-pub use peel::jpeg::register_full_reader;
+pub use peel::jpeg::{register_full_decoders, register_full_reader};
 pub use peel::{
     Cause, Count, DeflateDecoder, Fallback, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage,
     PeelSummary,

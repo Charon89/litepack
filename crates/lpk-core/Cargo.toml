@@ -16,6 +16,9 @@ flate2 = { version = "1.1.10", features = ["zlib"] }
 # Pinned: the jpeg-reconstruct decoder reads the stream header layout of 0.5.8 (spec section 8).
 lepton_jpeg = "=0.5.8"
 liblzma = { version = "0.4.8", features = ["static", "parallel"] }
+# The `bwt` decoder of revision 1.3 (safe Rust; the `encode` feature and its C library stay off
+# in the reader, the tests turn it on for the vector and the round trips).
+lpk-codecs-bwt = { path = "../lpk-codecs-bwt", version = "0.0.1", default-features = false }
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
 # Pinned: deflate-reconstruct records carry this version's corrections (design section 2.2).
 preflate-rs = "=0.7.6"
@@ -35,6 +38,8 @@ libc = "0.2.189"
 [dev-dependencies]
 blake3 = "1.8.7"
 lpk-check = { path = "../lpk-check", version = "0.0.1" }
+# libsais's forward transform for the bwt vector, the 64 MiB round trip and the memory test.
+lpk-codecs-bwt = { path = "../lpk-codecs-bwt", version = "0.0.1", features = ["encode"] }
 # Its counting allocator, for the deflate-reconstruct memory term test (the one crate allowed unsafe).
 lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
 serde_json = "1.0.151"

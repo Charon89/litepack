@@ -110,23 +110,24 @@ impl PrimitiveId {
 
     /// The format revision (the header's `version_minor`) that specifies this
     /// primitive's decoding: 1 for `jpeg-reconstruct` (revision 1.1), 2 for
-    /// `deflate-reconstruct` (revision 1.2), 0 for
-    /// the primitives of revision 1.0 and for those no revision decodes yet.
-    /// A writer refuses a graph that names a primitive of a revision above the
-    /// archive's `version_minor` (spec section 2).
+    /// `deflate-reconstruct` (revision 1.2), 3 for `bwt` (revision 1.3), 0
+    /// for the primitives of revision 1.0 and for those no revision decodes
+    /// yet. A writer refuses a graph that names a primitive of a revision
+    /// above the archive's `version_minor` (spec section 2).
     pub fn revision(self) -> u16 {
         match self {
             PrimitiveId::JpegReconstruct => 1,
             PrimitiveId::DeflateReconstruct => 2,
+            PrimitiveId::Bwt => 3,
             _ => 0,
         }
     }
 
     /// True when some revision of the specification decodes this primitive:
-    /// `store`, `zstd` and `lzma` (revision 1.0), `jpeg-reconstruct` (1.1)
-    /// and `deflate-reconstruct` (1.2). The others have an ID and a
-    /// parameter layout but no decoding yet, and a writer MUST NOT emit them
-    /// at any minor (spec section 8); the reference writer refuses them
+    /// `store`, `zstd` and `lzma` (revision 1.0), `jpeg-reconstruct` (1.1),
+    /// `deflate-reconstruct` (1.2) and `bwt` (1.3). The others have an ID
+    /// and a parameter layout but no decoding yet, and a writer MUST NOT emit
+    /// them at any minor (spec section 8); the reference writer refuses them
     /// (`BadGraph`, `undecoded primitive`).
     pub fn is_decoded(self) -> bool {
         matches!(
@@ -134,6 +135,7 @@ impl PrimitiveId {
             PrimitiveId::Store
                 | PrimitiveId::Zstd
                 | PrimitiveId::Lzma
+                | PrimitiveId::Bwt
                 | PrimitiveId::JpegReconstruct
                 | PrimitiveId::DeflateReconstruct
         )
@@ -234,7 +236,7 @@ pub fn primitive_table() -> String {
      | 0x0000 | `store` | none (length 0) | none |\n\
      | 0x0001 | `zstd` | `window_log: u8` (window = 2^window_log bytes; 10..=31), `dictionary: [u8; 32]` (BLAKE3 id of a prior, all zeros = none) | window = 2^window_log |\n\
      | 0x0002 | `lzma` | `dict_size: u32` LE, `lc: u8`, `lp: u8`, `pb: u8` (the LZMA1 properties; lc <= 8, lp <= 4, pb <= 4, lc + lp <= 4) | window = dict_size |\n\
-     | 0x0003 | `bwt` | `block_size: u32` LE (bytes; not 0) | bwt block = block_size |\n\
+     | 0x0003 | `bwt` | `block_size: u32` LE (bytes; not 0) | bwt block = block_size; memory per step, declared by `decode_memory` |\n\
      | 0x0004 | `bcj-x86` | none | none |\n\
      | 0x0005 | `bcj-arm64` | none | none |\n\
      | 0x0006 | `delta` | `base_chunk: u64` LE (the chunk the patch applies to), `patch_format: u8` (0 = zstd patch, 1 = suffix-array patch) | none |\n\
@@ -364,6 +366,22 @@ mod tests {
         ] {
             assert_eq!(reason(p, &[0]), "length");
         }
+    }
+
+    /// Ruling R23 of revision 1.3's task A: the two tables agree once `bwt`
+    /// enters both.
+    #[test]
+    fn decoded_is_revision_1_0_or_a_later_revision() {
+        for p in PrimitiveId::ALL {
+            let base = matches!(
+                p,
+                PrimitiveId::Store | PrimitiveId::Zstd | PrimitiveId::Lzma
+            );
+            assert_eq!(p.is_decoded(), base || p.revision() > 0, "{p:?}");
+        }
+        assert_eq!(PrimitiveId::Bwt.revision(), 3);
+        assert!(PrimitiveId::Bwt.is_decoded());
+        assert!(!PrimitiveId::PngFilter.is_decoded());
     }
 
     #[test]

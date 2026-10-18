@@ -24,7 +24,7 @@ jobs:
   fuzz:
     name: fuzz all targets (ubuntu-24.04)
     runs-on: ubuntu-24.04
-    # 15 targets x at most 1200 s, plus the builds.
+    # 19 targets x at most 1200 s, plus the builds.
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
