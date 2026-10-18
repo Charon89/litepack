@@ -32,7 +32,11 @@
 //!   query for the dictionary and match finder used, plus the zstd candidate's context sized by
 //!   the trial's stripe — the job drops the zstd context's tables before the full LZMA encode)
 //!   or zstd wins (the zstd context at the level and window used, plus the LZMA encoder of the
-//!   stripe, dropped after the trial);
+//!   stripe, dropped after the trial), or, when the BWT stage is on and a `Text` cluster is
+//!   present ([`BwtMemory`], revision 1.3), BWT wins (the transform phase — the suffix array of
+//!   a BWT block, libsais's allowance and the transformed buffer — or the transformed buffer
+//!   beside the LZMA encoder, whichever is larger; the trial's stripe likewise); the BWT path
+//!   reserves its LZMA output for the transformed input;
 //! - `fixed` with one block in flight (the sequential path): the writer's spare block buffer and
 //!   read buffer (D-61: `block_size` and `block_size + chunk_size`), the output buffer
 //!   ([`crate::store`]'s `OUT_BUF`), the peel's working set when a peel stage runs (the file it
@@ -279,7 +283,45 @@ pub enum EncoderMemory {
         zstd_level: i32,
         /// Its effective window log for a full block.
         zstd_window_log: u32,
+        /// The BWT stage's terms (revision 1.3), `None` when the stage is off or no `Text`
+        /// cluster is present (the pipeline sets it as D-69 (4) does for the Deflate peel).
+        bwt: Option<BwtMemory>,
     },
+}
+
+/// The BWT stage's working set per block in flight (design `e2-15-revision-1.3-design.md`,
+/// section 4, "Memory"): on a `Text` block the transform phase holds libsais's `i32` suffix
+/// array (4 bytes per byte of a BWT block) plus its allowance and the transformed buffer of
+/// I(`block_size`, B) bytes; the LZMA phase holds the transformed buffer and the encoder. Every
+/// BWT block is transformed before the encoder exists, so the two phases are a `max`, not a
+/// sum. The trial's stripe adds the same terms at the stripe's size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BwtMemory {
+    /// The stage's BWT block (`BalancedOptions::bwt_block`); a block uses
+    /// min(`block`, its `plain_len`).
+    pub block: u64,
+    /// The trial's stripe length.
+    pub stripe: u64,
+    /// liblzma's figure for the encoder of a transformed stripe (its dictionary sized to
+    /// I(`stripe`, `stripe`), one power of two above the plain stripe's).
+    pub lzma_sample: u64,
+}
+
+impl BwtMemory {
+    /// The transformed input of a text of `len` bytes: I(len, min(block, len)).
+    pub fn input(&self, len: u64) -> u64 {
+        lpk_codecs_bwt::layout::input_len(len, self.block.min(len).max(1))
+    }
+
+    /// The transform phase of a text of `len` bytes: the suffix array of its largest BWT
+    /// block, libsais's allowance and the transformed buffer.
+    pub fn transform(&self, len: u64) -> u64 {
+        self.block
+            .min(len)
+            .saturating_mul(4)
+            .saturating_add(lpk_codecs_bwt::layout::MEMORY_ALLOWANCE)
+            .saturating_add(self.input(len))
+    }
 }
 
 /// The Deflate peel's working set (design 3.2; it runs on the feeding thread, one file at a
@@ -536,7 +578,11 @@ impl ModelInputs {
         match self.encoder {
             EncoderMemory::Store => 0,
             EncoderMemory::Zstd { .. } => zstd_bound(b),
-            EncoderMemory::Balanced { .. } => zstd_bound(b).max(lzma_out_reserve(b)),
+            EncoderMemory::Balanced { bwt, .. } => {
+                // The BWT path's LZMA output is reserved for the transformed input.
+                let lzma = lzma_out_reserve(bwt.map_or(b, |w| w.input(b)));
+                zstd_bound(b).max(lzma)
+            }
         }
     }
 
@@ -558,12 +604,28 @@ impl ModelInputs {
                 zstd_sample_window_log,
                 zstd_level,
                 zstd_window_log,
+                bwt,
             } => {
-                let lzma_wins =
-                    lzma.saturating_add(zstd_cctx_memory(zstd_level, zstd_sample_window_log, true));
+                let zstd_small = zstd_cctx_memory(zstd_level, zstd_sample_window_log, true);
+                // The trial's BWT candidate on a stripe: its transform, then LZMA on the
+                // transformed stripe (the stripe's suffix array is freed before).
+                let sample = bwt.map_or(lzma_sample, |w| {
+                    let s = w.stripe;
+                    w.transform(s)
+                        .max(w.input(s).saturating_add(w.lzma_sample))
+                        .max(lzma_sample)
+                });
+                let lzma_wins = lzma.saturating_add(zstd_small);
                 let zstd_wins =
-                    zstd_cctx_memory(zstd_level, zstd_window_log, true).saturating_add(lzma_sample);
-                lzma_wins.max(zstd_wins)
+                    zstd_cctx_memory(zstd_level, zstd_window_log, true).saturating_add(sample);
+                // The BWT path on a `Text` block: the transform phase, then the transformed
+                // buffer beside the LZMA encoder (the zstd context rebuilt small before).
+                let bwt_wins = bwt.map_or(0, |w| {
+                    let b = self.block_size;
+                    w.transform(b)
+                        .max(w.input(b).saturating_add(lzma).saturating_add(zstd_small))
+                });
+                lzma_wins.max(zstd_wins).max(bwt_wins)
             }
         }
     }
@@ -965,6 +1027,7 @@ mod tests {
                 zstd_sample_window_log: 20,
                 zstd_level: 22,
                 zstd_window_log: 26,
+                bwt: None,
             },
         );
         // LZMA wins: the full LZMA encoder plus the stripe-sized zstd context.
@@ -984,6 +1047,7 @@ mod tests {
                 zstd_sample_window_log: 20,
                 zstd_level: 22,
                 zstd_window_log: 26,
+                bwt: None,
             },
         );
         assert_eq!(z.encoder_memory(), zstd_wins);
@@ -991,6 +1055,73 @@ mod tests {
             .plan(given(m.fixed_pipelined() + 2 * m.per_block()), 24)
             .unwrap();
         assert_eq!(p.blocks_in_flight, 2);
+    }
+
+    /// The BWT stage's terms (revision 1.3): with a `Text` cluster a block in flight holds the
+    /// larger of the transform phase (4 bytes per byte of a BWT block, the allowance, the
+    /// transformed buffer) and the LZMA phase (the transformed buffer beside the encoder);
+    /// the LZMA output is reserved for the transformed input; without `Text` nothing changes.
+    #[test]
+    fn balanced_counts_the_bwt_stage_on_text_blocks() {
+        use lpk_codecs_bwt::layout::{input_len, MEMORY_ALLOWANCE};
+        let bal = |lzma: u64, lzma_sample: u64, zwl: u32, bwt: Option<BwtMemory>| {
+            EncoderMemory::Balanced {
+                lzma,
+                lzma_sample,
+                zstd_sample_window_log: 20,
+                zstd_level: 22,
+                zstd_window_log: zwl,
+                bwt,
+            }
+        };
+        let w = BwtMemory {
+            block: 64 * MIB,
+            stripe: MIB,
+            lzma_sample: 24 * MIB,
+        };
+        let (m, t) = (
+            inputs(256 * MIB, bal(700 * MIB, 12 * MIB, 26, None)),
+            inputs(256 * MIB, bal(700 * MIB, 12 * MIB, 26, Some(w))),
+        );
+        let i = input_len(256 * MIB, 64 * MIB);
+        assert_eq!(w.input(256 * MIB), i);
+        assert_eq!(w.transform(256 * MIB), 4 * 64 * MIB + MEMORY_ALLOWANCE + i);
+        let lzma_phase = i + 700 * MIB + zstd_cctx_memory(22, 20, true);
+        assert!(lzma_phase > w.transform(256 * MIB));
+        assert_eq!(t.encoder_memory(), lzma_phase);
+        assert_eq!(t.encoded(), lzma_out_reserve(i));
+        assert!(t.per_block() > m.per_block());
+        // A small dictionary and a small zstd window: the transform phase decides.
+        let small = inputs(
+            256 * MIB,
+            bal(
+                10 * MIB,
+                MIB,
+                16,
+                Some(BwtMemory {
+                    lzma_sample: MIB,
+                    ..w
+                }),
+            ),
+        );
+        assert_eq!(small.encoder_memory(), w.transform(256 * MIB));
+        // A block shorter than the BWT block is one BWT block.
+        let short = BwtMemory {
+            block: 64 * MIB,
+            stripe: MIB,
+            lzma_sample: MIB,
+        };
+        assert_eq!(short.input(1000), input_len(1000, 1000));
+        assert_eq!(
+            short.transform(1000),
+            4000 + MEMORY_ALLOWANCE + input_len(1000, 1000)
+        );
+        // The plan at the ceiling on a machine of 8 GiB or more, with and without the stage
+        // (the integration test `memory_budget` prints the real figures).
+        let budget = || Budget::default_for(BALANCED_CEILING, Some(8 << 30));
+        let (p, q) = (t.plan(budget(), 24).unwrap(), m.plan(budget(), 24).unwrap());
+        assert!(p.blocks_in_flight >= 1 && p.blocks_in_flight <= q.blocks_in_flight);
+        assert!(p.fixed() + p.per_block * p.blocks_in_flight as u64 <= BALANCED_CEILING);
     }
 
     #[test]

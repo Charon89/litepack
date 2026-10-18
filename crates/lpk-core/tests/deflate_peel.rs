@@ -251,7 +251,8 @@ fn every_kind_round_trips_and_the_streams_are_partitioned() {
     let (bytes, s) = run(balanced(1), dir.path());
     let d = &s.peel.deflate;
     let a = open(&bytes, None);
-    assert_eq!(a.header().version.minor, 2);
+    // Revision 1.3: the Balanced tier's BWT stage is on by default.
+    assert_eq!(a.header().version.minor, 3);
     check(&bytes, dir.path(), None);
     assert_eq!(peeled_blocks(&bytes) as u64, d.outcomes.kept, "{d:?}");
     // The partition of reconstructed (design 3.3).
@@ -460,7 +461,8 @@ fn an_append_to_a_revision_1_1_archive_runs_without_the_deflate_stage() {
     let v2 = tempfile::tempdir().unwrap();
     make_tree(v2.path());
     let s1 = balanced(1).append_file(v2.path(), &archive, None).unwrap();
-    assert_eq!(s1.peel.dropped_stages, ["deflate"]);
+    // The BWT stage (revision 1.3) is dropped too, named first.
+    assert_eq!(s1.peel.dropped_stages, ["bwt", "deflate"]);
     assert_eq!(s1.peel.deflate.outcomes.kept, 0);
     let bytes = std::fs::read(&archive).unwrap();
     assert_eq!(open(&bytes, None).header().version.minor, 1);

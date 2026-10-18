@@ -60,9 +60,32 @@ fn default_settings_fit_their_ceilings() {
             zstd_sample_window_log: window_for(b.dict_size.ilog2(), enc.stripe_len() as u64),
             zstd_level: b.zstd_level,
             zstd_window_log: window_for(b.dict_size.ilog2(), b.block_size),
+            bwt: None,
         },
         Some(b.jpeg_max_file),
     );
+    // Balanced with a `Text` cluster: the BWT stage's terms (revision 1.3, design section 4).
+    let balanced_bwt = ModelInputs {
+        encoder: match balanced.encoder {
+            EncoderMemory::Balanced {
+                lzma,
+                lzma_sample,
+                zstd_sample_window_log,
+                zstd_level,
+                zstd_window_log,
+                ..
+            } => EncoderMemory::Balanced {
+                lzma,
+                lzma_sample,
+                zstd_sample_window_log,
+                zstd_level,
+                zstd_window_log,
+                bwt: Some(enc.bwt_memory().unwrap()),
+            },
+            _ => unreachable!(),
+        },
+        ..balanced
+    };
     // Balanced with its default Deflate peel (design 3.2, note 3 of task D).
     let d = lpk_core::peel::deflate::DeflatePeel::default();
     let part = lpk_core::peel::deflate::PartEncoder::balanced(&b, d.plain_limit()).unwrap();
@@ -80,6 +103,11 @@ fn default_settings_fit_their_ceilings() {
         ("fast", fast, FAST_CEILING),
         ("balanced", balanced, BALANCED_CEILING),
         ("balanced+deflate", balanced_deflate, BALANCED_CEILING),
+        (
+            "balanced+bwt (a Text cluster)",
+            balanced_bwt,
+            BALANCED_CEILING,
+        ),
     ] {
         let p = m.plan(ceiling(c), 24).unwrap();
         println!(

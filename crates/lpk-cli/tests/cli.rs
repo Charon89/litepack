@@ -370,8 +370,10 @@ fn the_deflate_peel_flag_defaults_per_tier() {
         .join("../lpk-core/tests/fixtures/deflate/doc.zip");
     fs::write(src.path().join("doc.zip"), fs::read(zip).unwrap()).unwrap();
     let work = tempfile::tempdir().unwrap();
-    let cases: [(&str, &[&str], u16); 4] = [
-        ("b", &["--balanced", "--dict-size", "1048576"], 2),
+    // Each row: the flags, the header's minor (3 whenever the Balanced tier's BWT stage is
+    // on, revision 1.3; else 2 with the Deflate peel, else 1) and whether the peel walked.
+    let cases: [(&str, &[&str], u16, bool); 6] = [
+        ("b", &["--balanced", "--dict-size", "1048576"], 3, true),
         (
             "b-off",
             &[
@@ -381,12 +383,33 @@ fn the_deflate_peel_flag_defaults_per_tier() {
                 "--deflate-peel",
                 "off",
             ],
-            1,
+            3,
+            false,
         ),
-        ("f", &["--fast"], 1),
-        ("f-on", &["--fast", "--deflate-peel", "on"], 2),
+        (
+            "b-no-bwt",
+            &["--balanced", "--dict-size", "1048576", "--bwt", "off"],
+            2,
+            true,
+        ),
+        (
+            "b-neither",
+            &[
+                "--balanced",
+                "--dict-size",
+                "1048576",
+                "--bwt",
+                "off",
+                "--deflate-peel",
+                "off",
+            ],
+            1,
+            false,
+        ),
+        ("f", &["--fast"], 1, false),
+        ("f-on", &["--fast", "--deflate-peel", "on"], 2, true),
     ];
-    for (name, flags, minor) in cases {
+    for (name, flags, minor, walks) in cases {
         let arch = work.path().join(format!("{name}.lpk"));
         let mut args = vec![
             "a",
@@ -398,7 +421,7 @@ fn the_deflate_peel_flag_defaults_per_tier() {
         let a = run(&args);
         assert_eq!(a.status.code(), Some(0), "{name}: {}", text(&a.stderr));
         let walked = text(&a.stderr).contains("deflate peel: ");
-        assert_eq!(walked, minor == 2, "{name}: {}", text(&a.stderr));
+        assert_eq!(walked, walks, "{name}: {}", text(&a.stderr));
         let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
         assert_eq!(archive.header().version.minor, minor, "{name}");
         let out = work.path().join(format!("{name}-out"));
@@ -499,6 +522,15 @@ fn tier_conflicts_with_the_tier_flags_and_checks_the_settings() {
         (&["--fast", "--dict-size", "1048576"][..], DICT),
         (&["--store", "--dict-size", "1048576"][..], DICT),
         (&["--dict-size", "1048576"][..], DICT),
+        (
+            &["--fast", "--bwt", "on"][..],
+            "'--bwt' requires the Balanced tier",
+        ),
+        (
+            &["--tier", "fast", "--bwt", "off"][..],
+            "'--bwt' requires the Balanced tier",
+        ),
+        (&["--store", "--bwt", "on"][..], "cannot be used with"),
         (
             &["--tier", "balanced", "--no-dictionaries"][..],
             "'--no-dictionaries' cannot be used with '--tier balanced'",
