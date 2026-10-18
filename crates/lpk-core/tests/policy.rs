@@ -397,3 +397,26 @@ fn rename_skips_names_later_entries_take() {
         }
     }
 }
+
+/// On a case-insensitive target the names later entries take are compared as the disk
+/// compares them: existing `n`, entries `n` then `N (1)` (no case collision between them):
+/// `n` is written as `n (2)`, not `n (1)`, which `N (1)` takes.
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn rename_folds_case_on_a_case_insensitive_target() {
+    let bytes = packed_with(|w| {
+        w.add_file("N (1)", EntryFlags::EMPTY, 0, &mut &b"second"[..])
+            .unwrap();
+        w.add_file("n", EntryFlags::EMPTY, 0, &mut &b"first"[..])
+            .unwrap();
+    });
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("n"), b"old").unwrap();
+    let s = extract(&bytes, &out, &policy(Overwrite::Rename)).unwrap();
+    assert_eq!((s.files, s.renamed), (2, 1), "{s:?}");
+    assert_eq!(std::fs::read(out.join("n")).unwrap(), b"old");
+    assert_eq!(std::fs::read(out.join("N (1)")).unwrap(), b"second");
+    assert_eq!(std::fs::read(out.join("n (2)")).unwrap(), b"first");
+}

@@ -603,6 +603,18 @@ struct OutDir<'p> {
     looked: HashSet<PathBuf>,
     blocked: HashSet<PathBuf>,
     planned: Option<HashSet<PathBuf>>,
+    /// The target is case-insensitive: `planned` holds folded paths and is looked up folded,
+    /// as the disk compares (the folding of `policy::check_case_collisions`).
+    fold: bool,
+}
+
+/// `p` as `planned` keys it: lower-cased on a case-insensitive target, else itself.
+fn folded(p: &Path, fold: bool) -> PathBuf {
+    if fold {
+        PathBuf::from(p.to_string_lossy().to_lowercase())
+    } else {
+        p.to_path_buf()
+    }
 }
 
 impl OutDir<'_> {
@@ -674,17 +686,17 @@ impl OutDir<'_> {
                 // A free name is one that neither the disk nor any entry of the archive
                 // (earlier or later, of any kind) nor an earlier rename takes. Built on the
                 // first rename only, so an extraction without one costs nothing more.
-                let dir = self.dir;
+                let (dir, fold) = (self.dir, self.fold);
                 let planned = self.planned.get_or_insert_with(|| {
                     entries
                         .iter()
-                        .map(|e| join_components(dir, &e.path))
+                        .map(|e| folded(&join_components(dir, &e.path), fold))
                         .collect()
                 });
                 let renamed = policy::rename_target(path, |p| {
-                    planned.contains(p) || std::fs::symlink_metadata(p).is_ok()
+                    planned.contains(&folded(p, fold)) || std::fs::symlink_metadata(p).is_ok()
                 });
-                planned.insert(renamed.clone());
+                planned.insert(folded(&renamed, fold));
                 Decision::Rename(renamed)
             }
         };
@@ -721,6 +733,7 @@ fn plan<R: Read + Seek>(
         looked: HashSet::new(),
         blocked: HashSet::new(),
         planned: None,
+        fold: policy::case_insensitive_target(dir),
     };
     let table = archive.chunks();
     let blocks = archive.index().blocks.len();
