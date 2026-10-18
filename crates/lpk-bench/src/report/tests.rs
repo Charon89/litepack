@@ -537,6 +537,7 @@ fn inputs(k: &Knobs, with_probes: bool) -> Inputs {
             results: res,
             pooled: vec![],
             tool_srcs: Default::default(),
+            superseded: vec![],
         },
         probes,
         mixes: mixes::Mixes::parse(MIXES).expect("mixes"),
@@ -2157,10 +2158,16 @@ fn a_merged_tool_is_cited_to_the_directory_that_holds_its_rows() {
 fn rows_of_one_tool_at_two_versions_are_refused() {
     let tmp = tempfile::tempdir().expect("tmp");
     let a = dir_under(tmp.path(), "a", &real_class_results());
-    let b = dir_under(tmp.path(), "b", &second_results());
+    // The result file and tools.json both say 27.00, so only the pool's version rule refuses.
+    let mut r = second_results();
+    r[0].tool.version = Some("27.00".into());
+    let b = dir_under(tmp.path(), "b", &r);
     set_tool_version(&b, "7z", "27.00");
     let err = load(&pooled_args(tmp.path(), vec![a, b])).expect_err("versions");
-    assert!(format!("{err:#}").contains("version"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("has rows at version"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -2204,6 +2211,193 @@ fn a_duplicate_combination_and_a_host_mismatch_are_refused() {
     std::fs::write(other.join("host.json"), render_json(&host)).expect("host");
     let err = load(&pooled_args(tmp.path(), vec![a, other])).expect_err("host");
     assert!(format!("{err:#}").contains("otherbox"), "{err:#}");
+}
+
+/// Write `dir/supersedes.toml` listing `entries` as (tool, setting, class, from).
+fn write_supersedes(dir: &Path, entries: &[(&str, &str, &str, &str)]) {
+    let mut text = String::new();
+    for (tool, setting, class, from) in entries {
+        text.push_str(&format!(
+            "[[supersede]]\ntool = \"{tool}\"\nsetting = \"{setting}\"\nclass = \"{class}\"\n\
+             from = \"{from}\"\nreason = \"re-measured on the idle machine\"\n\n"
+        ));
+    }
+    std::fs::write(dir.join("supersedes.toml"), text).expect("supersedes");
+}
+
+/// A re-measurement of the sample row `7z/mx5/audio` (the first of `real_class_results`).
+fn remeasured_mx5() -> Vec<ToolResult> {
+    let mut r = samples::measured();
+    r.class = "audio".into();
+    vec![r]
+}
+
+#[test]
+fn a_listed_row_of_a_later_directory_replaces_the_earlier_one_and_the_report_says_so() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let b = dir_under(tmp.path(), "b", &remeasured_mx5());
+    write_supersedes(&b, &[("7z", "mx5", "audio", "2026-10-01-testbox")]);
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
+    let base = &inputs.baseline;
+    // Three rows in `a`, one in `b`: the pool holds three, `a` supplies two.
+    assert_eq!(base.results.len(), 3);
+    assert_eq!(rows(base).len(), 3);
+    assert_eq!(base.run.combinations.len(), 3);
+    assert_eq!(base.pooled[0].rows.len(), 2);
+    assert_eq!(base.pooled[1].rows.len(), 1);
+    let a_row = source_index(&inputs, "a/2026-10-01-testbox/7z-mx5-audio.json");
+    let b_row = source_index(&inputs, "b/2026-10-01-testbox/7z-mx5-audio.json");
+    let (mx5, src) = base
+        .results
+        .iter()
+        .find(|(r, _)| r.file_name() == "7z-mx5-audio.json")
+        .expect("the row");
+    assert_eq!((*src, mx5.class.as_str()), (b_row, "audio"));
+    assert!(!base.results.iter().any(|(_, s)| *s == a_row));
+    assert_eq!(base.superseded.len(), 1);
+    let e = &base.superseded[0];
+    assert_eq!(e.combination(), "7z/mx5/audio");
+    assert_eq!(
+        (e.from.as_str(), e.from_src),
+        ("a/2026-10-01-testbox", a_row)
+    );
+    assert_eq!((e.by.as_str(), e.by_src), ("b/2026-10-01-testbox", b_row));
+    let text = report_text(&inputs);
+    assert!(text.contains("- Superseded rows"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "  - `7z/mx5/audio`: from `a/2026-10-01-testbox` [{a_row}], by \
+             `b/2026-10-01-testbox` [{b_row}]: re-measured on the idle machine\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "rows each directory supplies after the replacements: `a/2026-10-01-testbox` 2, \
+             `b/2026-10-01-testbox` 1\n"
+        ),
+        "{text}"
+    );
+    // The table row of mx5 cites the later directory only.
+    let row = text
+        .lines()
+        .skip_while(|l| !l.starts_with("## 2."))
+        .take_while(|l| !l.starts_with("## 3."))
+        .find(|l| l.starts_with("| 7z/mx5"))
+        .expect("table row");
+    // A cell's citations are one bracket list (`[2,7]`, runs written `2-4`), so read them as a set.
+    let cited: std::collections::BTreeSet<usize> = row
+        .split('[')
+        .skip(1)
+        .filter_map(|t| t.split(']').next())
+        .flat_map(|list| list.split(','))
+        .flat_map(|part| match part.split_once('-') {
+            Some((lo, hi)) => match (lo.trim().parse::<usize>(), hi.trim().parse::<usize>()) {
+                (Ok(lo), Ok(hi)) => (lo..=hi).collect::<Vec<_>>(),
+                _ => Vec::new(),
+            },
+            None => part.trim().parse::<usize>().into_iter().collect(),
+        })
+        .collect();
+    assert!(cited.contains(&b_row) && !cited.contains(&a_row), "{row}");
+}
+
+#[test]
+fn without_a_supersedes_file_the_pooled_report_is_unchanged() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let b = dir_under(tmp.path(), "b", &second_results());
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
+    assert!(inputs.baseline.superseded.is_empty());
+    let text = report_text(&inputs);
+    assert!(!text.contains("Superseded rows"), "{text}");
+    assert!(!text.contains("supersedes.toml"), "{text}");
+}
+
+#[test]
+fn an_unlisted_duplicate_is_still_refused_next_to_a_listed_one() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let b = dir_under(tmp.path(), "b", &real_class_results());
+    write_supersedes(&b, &[("7z", "mx5", "audio", "2026-10-01-testbox")]);
+    let err = load(&pooled_args(tmp.path(), vec![a, b])).expect_err("duplicate");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("also in an earlier"), "{msg}");
+    assert!(msg.contains("zstd/3/audio"), "{msg}");
+}
+
+#[test]
+fn a_listed_row_missing_on_either_side_or_naming_no_directory_is_refused() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    // Listed, but the later directory has no such row.
+    let b = dir_under(tmp.path(), "b", &remeasured_mx5());
+    write_supersedes(&b, &[("7z", "ultra", "audio", "2026-10-01-testbox")]);
+    // (The validator refuses the directory before the pool looks at it.)
+    let err = load(&pooled_args(tmp.path(), vec![a.clone(), b])).expect_err("not in b");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("7z/ultra/audio") && msg.contains("superseding"),
+        "{msg}"
+    );
+    assert!(msg.contains("no such result file"), "{msg}");
+    // Listed and in the later directory, but the earlier one never measured it.
+    let c = dir_under(tmp.path(), "c", &second_results());
+    write_supersedes(&c, &[("7z", "ultra", "audio", "2026-10-01-testbox")]);
+    let err = load(&pooled_args(tmp.path(), vec![a.clone(), c])).expect_err("not in a");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("7z/ultra/audio") && msg.contains("superseded"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("`a/2026-10-01-testbox` has no such row"),
+        "{msg}"
+    );
+    // `from` names no earlier directory.
+    let d = dir_under(tmp.path(), "d", &remeasured_mx5());
+    write_supersedes(&d, &[("7z", "mx5", "audio", "2026-10-01-otherbox")]);
+    let err = load(&pooled_args(tmp.path(), vec![a.clone(), d])).expect_err("no such dir");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("names no earlier"), "{msg}");
+    assert!(msg.contains("`a/2026-10-01-testbox`"), "{msg}");
+    // A wildcard entry is refused by the file's own rules.
+    let e = dir_under(tmp.path(), "e", &remeasured_mx5());
+    write_supersedes(&e, &[("7z", "*", "audio", "2026-10-01-testbox")]);
+    let err = load(&pooled_args(tmp.path(), vec![a.clone(), e])).expect_err("wildcard");
+    assert!(format!("{err:#}").contains("wildcard"), "{err:#}");
+    // The first directory cannot carry the file: there is nothing before it to replace.
+    let first = b_with_file(tmp.path());
+    let err = load(&pooled_args(tmp.path(), vec![first, a])).expect_err("first");
+    assert!(
+        format!("{err:#}").contains("give that directory first"),
+        "{err:#}"
+    );
+}
+
+/// A fresh later directory carrying a supersedes.toml for `7z/mx5/audio`.
+fn b_with_file(tmp: &Path) -> std::path::PathBuf {
+    let f = dir_under(tmp, "f", &remeasured_mx5());
+    write_supersedes(&f, &[("7z", "mx5", "audio", "2026-10-01-testbox")]);
+    f
+}
+
+#[test]
+fn a_superseding_row_from_another_tool_version_is_refused() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    // The result file and tools.json both say 27.00, so only the pool's version rule refuses.
+    let mut r = remeasured_mx5();
+    r[0].tool.version = Some("27.00".into());
+    let b = dir_under(tmp.path(), "b", &r);
+    set_tool_version(&b, "7z", "27.00");
+    write_supersedes(&b, &[("7z", "mx5", "audio", "2026-10-01-testbox")]);
+    let err = load(&pooled_args(tmp.path(), vec![a, b])).expect_err("versions");
+    assert!(
+        format!("{err:#}").contains("has rows at version"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -2251,6 +2445,7 @@ fn pool_reasons_name_the_threads_and_the_lpk_build_and_the_loader_uses_them() {
         threads,
         settle_ms: 1,
         antivirus_changed: false,
+        rows: vec![],
     };
     let (d1, d2) = (d(4), d(8));
     i.baseline.pooled = vec![d1, d2];

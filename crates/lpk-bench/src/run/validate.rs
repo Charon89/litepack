@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use super::catalogue::Mode;
 use super::result::{RunFile, Sample, ToolResult};
+use crate::report::supersede::{Supersedes, FILE_NAME as SUPERSEDES};
 
 /// The committed schema, embedded so the binary and the file cannot disagree.
 pub const SCHEMA_TEXT: &str = include_str!("../../../../bench/results/schema.json");
@@ -456,6 +457,7 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
     let mut names: Vec<String> = Vec::new();
     let mut probe_json: Vec<String> = Vec::new();
     let mut probe_md: Vec<String> = Vec::new();
+    let mut supersedes: Option<std::path::PathBuf> = None;
     for entry in std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(|e| e.ok())
@@ -467,6 +469,8 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
                 "{name}: unexpected directory in a results directory"
             ));
         } else if name == "host.json" || name == "tools.json" || name == "run.json" {
+        } else if name == SUPERSEDES {
+            supersedes = Some(entry.path());
         } else if name.starts_with("probe-") && name.ends_with(".json") {
             probe_json.push(name);
         } else if name.starts_with("probe-") && name.ends_with(".md") {
@@ -476,7 +480,7 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
         } else {
             report.problems.push(format!(
                 "{name}: unexpected file (a results directory holds host.json, tools.json, \
-                 result files, probe-*.json and probe-*.md)"
+                 result files, probe-*.json, probe-*.md and supersedes.toml)"
             ));
         }
     }
@@ -669,6 +673,29 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
                     "run.json: /combinations: result file for `{tool}/{setting}/{class}` is not listed"
                 ));
             }
+        }
+    }
+    // supersedes.toml names rows of this directory that replace an earlier directory's when the
+    // report pools the two (checked against that directory by `lpk-bench report`); here: the
+    // file's own rules, and every listed row exists in this directory.
+    if let Some(path) = supersedes {
+        match std::fs::read_to_string(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| Supersedes::parse(&text))
+        {
+            Ok(file) => {
+                for e in &file.supersede {
+                    let key = (e.tool.clone(), e.setting.clone(), e.class.clone());
+                    if !seen.contains_key(&key) {
+                        report.problems.push(format!(
+                            "{SUPERSEDES}: `{}` is listed as superseding, but this directory has \
+                             no such result file",
+                            e.combination()
+                        ));
+                    }
+                }
+            }
+            Err(e) => report.problems.push(format!("{SUPERSEDES}: (root): {e:#}")),
         }
     }
     Ok(report)
@@ -1500,6 +1527,29 @@ mod tests {
         assert!(problems(&dir)
             .iter()
             .any(|m| m.contains("/measurement/tar: present")));
+    }
+
+    #[test]
+    fn a_supersedes_file_is_accepted_and_checked_against_the_result_files() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = write_dir(tmp.path(), &[samples::measured()]);
+        let entry = |setting: &str| {
+            format!(
+                "[[supersede]]\ntool = \"7z\"\nsetting = \"{setting}\"\nclass = \"text\"\n\
+                 from = \"2026-10-01-earlier\"\nreason = \"re-measured idle\"\n"
+            )
+        };
+        let r = samples::measured();
+        std::fs::write(dir.join("supersedes.toml"), entry(r.setting.id.as_str())).expect("good");
+        assert!(problems(&dir).is_empty(), "{:?}", problems(&dir));
+        std::fs::write(dir.join("supersedes.toml"), entry("nonesuch")).expect("absent");
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.contains("7z/nonesuch/text") && m.contains("no such result file")));
+        std::fs::write(dir.join("supersedes.toml"), entry("*")).expect("wildcard");
+        assert!(problems(&dir)
+            .iter()
+            .any(|m| m.starts_with("supersedes.toml: (root)") && m.contains("wildcard")));
     }
 
     #[test]
