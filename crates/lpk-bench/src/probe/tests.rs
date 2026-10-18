@@ -850,3 +850,137 @@ fn bwt_end_to_end_on_two_text_classes_validates_and_a_wrong_verdict_is_a_problem
         .iter()
         .any(|m| m.contains("/data/gate_open")));
 }
+
+/// Words with a small vocabulary: compressible, unlike random bytes, so a base64 run of them
+/// passes the stream gate (M(payload) well below M(text alone)).
+fn word_salad(len: usize, seed: u64) -> Vec<u8> {
+    let words: [&str; 8] = [
+        "alpha ", "bravo ", "charlie ", "delta ", "echo ", "foxtrot ", "golf ", "hotel\n",
+    ];
+    let mut x = seed | 1;
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out.extend_from_slice(words[(x % 8) as usize].as_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+#[test]
+fn text_encodings_end_to_end_on_a_pem_bundle_and_a_utf16_text_validates() {
+    use lpk_core::peel::text::base64::{Alphabet, Layout, LineEnding};
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path().join("textenc");
+    // A PEM bundle of six certificates (64-character LF lines), and a plain text beside it.
+    let layout = Layout {
+        alphabet: Alphabet::Standard,
+        line_len: 64,
+        line_ending: Some(LineEnding::Lf),
+        padding: true,
+    };
+    let mut pem = String::new();
+    for i in 0..6u64 {
+        let body = String::from_utf8(layout.encode(&word_salad(6000, 11 + i))).expect("ascii");
+        pem.push_str("-----BEGIN CERTIFICATE-----\n");
+        pem.push_str(&body);
+        pem.push_str("\n-----END CERTIFICATE-----\n");
+    }
+    let readme = word_salad(3000, 99);
+    // A UTF-16LE text with a mark and an odd trailing byte.
+    let ascii = String::from_utf8(word_salad(20_000, 7)).expect("ascii");
+    let mut utf16: Vec<u8> = vec![0xFF, 0xFE];
+    for u in ascii.encode_utf16() {
+        utf16.extend_from_slice(&u.to_le_bytes());
+    }
+    utf16.push(0x0A);
+    let mut files = Vec::new();
+    for (class, rel, data) in [
+        ("certs", "bundle.pem", pem.as_bytes()),
+        ("certs", "readme.txt", readme.as_slice()),
+        ("win-text", "export.reg", utf16.as_slice()),
+    ] {
+        let p = dir.join(class).join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, data).expect("write");
+        files.push((
+            class.to_string(),
+            manifest_file(&format!("{class}/{rel}"), data),
+        ));
+    }
+    let m = Manifest::with_profile_name("small", files);
+    std::fs::write(dir.join("manifest.json"), m.render()).expect("manifest");
+    let cfg = config(dir, tmp.path().join("results"), &["text-encodings"]);
+    let out = execute(&cfg).expect("execute");
+    assert!(out.failed.is_empty(), "{:?}", out.failed);
+    assert_eq!(out.problems, 0, "{:?}", problems(&out.results_dir));
+    let path = out.results_dir.join("probe-text-encodings.json");
+    let json = std::fs::read_to_string(&path).expect("json");
+    let env: Envelope<text_encodings::Data> = serde_json::from_str(&json).expect("typed");
+    let d = &env.data;
+    assert_eq!(d.base64_record_bytes, text_encodings::base64_record_bytes());
+    assert_eq!(d.mismatches, 0);
+    assert_eq!(d.classes.len(), 2);
+    // The certificate class: six regular PEM runs, every one kept, the file kept, and block
+    // rows from a real Balanced archive of the class.
+    let certs = &d.classes[0];
+    assert_eq!(certs.class, "certs");
+    assert_eq!(certs.base64.files_scanned, 2);
+    assert_eq!(certs.base64.candidates, 6);
+    assert_eq!(certs.base64.regular, 6);
+    assert_eq!(certs.base64.hex_only, 0);
+    assert_eq!(certs.streams.len(), 6);
+    for s in &certs.streams {
+        assert_eq!(s.label, "pem");
+        assert_eq!(
+            (s.line_len, s.line_ending.as_str(), s.padding),
+            (64, "lf", true)
+        );
+        assert_eq!(s.payload_len, 6000);
+        assert!(s.kept, "{s:?}");
+    }
+    assert_eq!(certs.base64.kept_streams, 6);
+    assert_eq!(certs.base64.kept_files, 1);
+    let pem_label = certs
+        .base64
+        .by_label
+        .iter()
+        .find(|n| n.id == "pem")
+        .expect("pem label");
+    assert_eq!(pem_label.runs, 6);
+    let archive = certs.archive.as_ref().expect("archive rows");
+    assert!(archive.blocks >= 1 && archive.a_total > 0);
+    assert!(archive.utf16.blocks.is_empty());
+    assert_eq!(archive.base64.files_unmapped, 0);
+    assert_eq!(archive.base64.blocks.len(), 1);
+    assert_eq!(archive.base64.blocks[0].streams, 6);
+    // The bundle's framing closes a segment; the plain text beside it is the other segment
+    // when it follows the bundle in the block (the prose cluster comes first, so it may not).
+    assert!((1..=2).contains(&archive.base64.blocks[0].segments));
+    // The UTF-16 class: one little-endian text with a mark, its odd byte left as framing.
+    let win = &d.classes[1];
+    assert_eq!(win.class, "win-text");
+    assert_eq!(win.base64.candidates, 0);
+    assert_eq!(win.utf16_files.len(), 1);
+    let u = &win.utf16_files[0];
+    assert_eq!((u.endian.as_str(), u.bom, u.odd_tail), ("le", true, true));
+    assert_eq!(u.bytes, (utf16.len() - 1) as u64);
+    assert_eq!(u.code_points, u.bytes / 2);
+    assert_eq!(u.cjk_code_points, 0);
+    assert_eq!(u.wtf8_len, u.bytes / 2 + 2);
+    assert!(u.verified);
+    assert!(u.a_prime <= u.a_lzma_default);
+    let cluster = win.utf16_cluster.as_ref().expect("cluster rows");
+    assert_eq!((cluster.files, cluster.b_sum), (1, u.b));
+    // The table is written and a flipped gate is a validation problem.
+    assert!(out.results_dir.join("probe-text-encodings.md").exists());
+    let flipped = !d.base64_gate_open;
+    edit_json(&path, |v| {
+        v["data"]["base64_gate_open"] = Value::from(flipped)
+    });
+    assert!(problems(&out.results_dir)
+        .iter()
+        .any(|m| m.contains("/data/base64_gate_open")));
+}
