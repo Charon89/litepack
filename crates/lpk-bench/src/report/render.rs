@@ -174,6 +174,33 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
                 brackets(&BTreeSet::from([d.run_src]))
             ));
         }
+        if !b.superseded.is_empty() {
+            s.push_str(
+                "- Superseded rows (a later directory's re-measurement replaces an earlier \
+                 directory's row, as listed in its supersedes.toml; the replaced file stays on \
+                 disk and is cited here only):\n",
+            );
+            for e in &b.superseded {
+                s.push_str(&format!(
+                    "  - `{}`: from `{}` {}, by `{}` {}: {}\n",
+                    e.combination(),
+                    e.from,
+                    brackets(&BTreeSet::from([e.from_src])),
+                    e.by,
+                    brackets(&BTreeSet::from([e.by_src])),
+                    e.reason
+                ));
+            }
+            let supplied: Vec<String> = b
+                .pooled
+                .iter()
+                .map(|d| format!("`{}` {}", d.label, d.rows.len()))
+                .collect();
+            s.push_str(&format!(
+                "  - rows each directory supplies after the replacements: {}\n",
+                supplied.join(", ")
+            ));
+        }
         s.push_str(
             "- rules: rows may come from several runs of the same corpus on the same machine, and \
              the comparison is still per class.\n",
