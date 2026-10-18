@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-18, about 01:45 UTC (2026-10-17, 21:45 local on the measuring machine). A measurement is running: E2-22's incumbent baseline on `full` (`target/acceptance/e2-22-run-status.log`).
+Last updated: 2026-10-18, about 06:00 UTC (2026-10-18, 02:00 local on the measuring machine). No measurement is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -86,14 +86,8 @@ E3-8 is done (D-75, PR #77).
   primitive. The alternative folds the probe's MTF + zero-run + arithmetic coder into `bwt` itself for about 3.2% more
   on the text classes, but freezes that untuned coder in v1 for good. Say so before revision 1.3's text is final if
   the fold is wanted.
-- **E2-17's gate and corpus** (`docs/notes/e2-17-design.md` section 7): the same 1% margin is recommended for the
-  base64 and UTF-16 primitives. `small` holds base64 only in two certificate bundles and no UTF-16 text, so both
-  gates are expected to close; testing them on real mail, notebooks, data URIs or Windows UTF-16 text would need a
-  new corpus class, which is a corpus spec change and the owner's to approve. The probe runs on `small` regardless.
-- **E2-16's gate margin** (`docs/notes/e2-16-design.md` section 5): a new gate threshold, so the owner's. Recommended:
-  open the PNG-filter revision only if the probe's per-stream saving on `photo-raw-png` is at least 1% of that
-  class's `lpk/balanced` bytes. And for a closed gate: the "with" figure is the probe's committed prediction, the
-  "without" row E2-10's `lpk/balanced`, recorded with the negative result. The probe (task P) runs regardless.
+- **E2-17's corpus** (`docs/notes/e2-17-design.md` section 7): both gates closed on `small` (D-76, a negative result; E2-17 ticked). Testing the transforms on real mail, notebooks, data URIs or Windows UTF-16 text would need a new corpus class, a corpus spec change and the owner's to approve; nothing waits on it.
+- **E2-16's gate margin** (`docs/notes/e2-16-design.md` section 5): a new gate threshold, so the owner's. The probe ran on 2026-10-18 (`bench/results/2026-10-18-megatron-2`): undoing the PNG row filters saves 1,814,618 bytes per stream on `photo-raw-png`, 3.03% of that class's `lpk/balanced` archive in E2-10's row (1.59% of the per-stream baseline). Recommended margin 1%: the gate would open, and `png-filter` would land in a revision 1.4 (1.3 carries `bwt` alone) with the PLAN's with/without rows. Say yes, or name another margin.
 - **Counsel on US 9,798,731** (`docs/LICENSING.md`, sketch-based similarity clustering with deltas): gates E2-9
   (deltas) and any return of the similarity sketch (E2-8, D-55).
 - **Decisions for E4 to E9** (`docs/notes/phase1-e3-e9-breakdown.md` section 2; none blocks E2 or E3). The one
