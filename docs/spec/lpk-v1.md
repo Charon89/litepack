@@ -707,9 +707,13 @@ Revision 1.3. A step whose next step is `bwt` has, as its output bound, I(O, B) 
 length of that step's input for an output of O bytes in BWT blocks of B, its `block_size`) instead of
 `max_block_plain`, where O is the `bwt` step's own output bound; before the step runs, and before any of its own
 rules, the reader applies check (1) of "Decoding `bwt`" (the memory term) with that O, and an error there is the
-block's error and the step does not run. The bound is exact: an output longer than I(O, B) is `PayloadTooLarge`,
-and a shorter one fails check (4) at the `bwt` step (`BwtError`, `length`). When `bwt` is the first step, its input
-is the encoded bytes and check (1) runs at the step itself.
+block's error and the step does not run. An output longer than I(O, B) is `PayloadTooLarge`; a shorter one is
+checked at the `bwt` step against I(out_len, B), the length its own `out_len` field implies (check (4),
+`BwtError`, `length`). On a last step, where `out_len` must equal `plain_len` = O, that is any length below
+I(O, B). I is not monotone in O (one more output byte can need fewer indices: I(64, B) = 200 and I(65, B) = 141
+for B >= 65), so on a step that is not the last an output below I(O, B) may still be exactly I(out_len, B) for
+its smaller `out_len` and decode. When `bwt` is the first step, its input is the encoded bytes and check (1)
+runs at the step itself.
 
 The look-ahead. Revision 1.3 also states how a bounding step's own output bound is found, for every graph and
 whatever the archive's `version_minor`: by one level of look-ahead. Let S be a step that bounds its input
@@ -1042,7 +1046,8 @@ both named as information only.
   step whose term exceeds it with `Refused` (field `decode_memory`, the class `Archive::open` uses for an
   envelope the reader cannot meet, section 7), without reading it, exactly as for `deflate-reconstruct`. The
   figure is lasting: a revision 1.3 reader refuses the step of any archive that declares less, whatever
-  revision wrote it. The output is the block's own buffer, counted in `max_block_plain`. The reference writer
+  revision wrote it. The output is the block's own buffer, counted in `max_block_plain`, when the step is the
+  last; otherwise it is the next step's input, counted by that step's term. The reference writer
   declares `max_block_plain` plus the largest working memory any of its blocks declares, a block with a `bwt`
   step contributing the larger of term(`plain_len`, B) and its model step's own figure (section 9). Informative:
   at the reference reader's defaults (O = 268435456, B = 67108864) the term is 537920008 bytes; the reference's
