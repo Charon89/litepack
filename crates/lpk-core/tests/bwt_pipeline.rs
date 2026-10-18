@@ -414,6 +414,40 @@ fn balanced_no_bwt() -> Pipeline {
     p
 }
 
+/// A default Balanced archive of a tree with no `Text` cluster, the stage on against off,
+/// differs only at the header's minor (a u16 LE at offset 10, spec section 2; its low byte): no
+/// block runs the candidate and the
+/// stage's terms stay out of the plan and the envelope (ruling R38).
+#[test]
+fn without_a_text_cluster_the_stage_changes_only_the_minor_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    binary_tree(dir.path());
+    let pipeline = |bwt: bool| {
+        Pipeline::balanced(BalancedOptions {
+            threads: Some(1),
+            bwt,
+            ..BalancedOptions::default()
+        })
+    };
+    let (on, s_on) = run(pipeline(true), dir.path());
+    let (off, s_off) = run(pipeline(false), dir.path());
+    assert_eq!(on.len(), off.len());
+    let differing: Vec<usize> = on
+        .iter()
+        .zip(&off)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(differing, [10], "{}", explain(&on, &off));
+    assert_eq!((on[10], off[10]), (3, 2), "the minor bytes");
+    assert_eq!(open(&on, None).header().version.minor, 3);
+    assert_eq!(open(&off, None).header().version.minor, 2);
+    assert_eq!(s_on.memory.per_block, s_off.memory.per_block);
+    assert_eq!(s_on.balanced.unwrap().bwt_sample_bytes, 0);
+    assert_eq!(s_off.balanced.unwrap().bwt_sample_bytes, 0);
+}
+
 /// The D-67 plan with and without a `Text` cluster (the stage's terms enter only with one),
 /// and with the stage off; the blocks in flight and the terms are printed.
 #[test]

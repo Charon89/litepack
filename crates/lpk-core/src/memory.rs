@@ -291,7 +291,7 @@ pub enum EncoderMemory {
 
 /// The BWT stage's working set per block in flight (design `e2-15-revision-1.3-design.md`,
 /// section 4, "Memory"): on a `Text` block the transform phase holds libsais's `i32` suffix
-/// array (4 bytes per byte of a BWT block) plus its allowance and the transformed buffer of
+/// array (4 bytes per byte of a BWT block) beside libsais's output of it (one more) plus its allowance and the transformed buffer of
 /// I(`block_size`, B) bytes; the LZMA phase holds the transformed buffer and the encoder. Every
 /// BWT block is transformed before the encoder exists, so the two phases are a `max`, not a
 /// sum. The trial's stripe adds the same terms at the stripe's size.
@@ -313,12 +313,14 @@ impl BwtMemory {
         lpk_codecs_bwt::layout::input_len(len, self.block.min(len).max(1))
     }
 
-    /// The transform phase of a text of `len` bytes: the suffix array of its largest BWT
-    /// block, libsais's allowance and the transformed buffer.
+    /// The transform phase of a text of `len` bytes: the suffix array of its largest BWT block
+    /// (4 bytes per byte) beside libsais's own output of that block (one more byte per byte,
+    /// copied into the transformed buffer afterwards), libsais's allowance and the transformed
+    /// buffer: 5·min(block, len) + 1 MiB + I(len, B).
     pub fn transform(&self, len: u64) -> u64 {
         self.block
             .min(len)
-            .saturating_mul(4)
+            .saturating_mul(5)
             .saturating_add(lpk_codecs_bwt::layout::MEMORY_ALLOWANCE)
             .saturating_add(self.input(len))
     }
@@ -1058,7 +1060,7 @@ mod tests {
     }
 
     /// The BWT stage's terms (revision 1.3): with a `Text` cluster a block in flight holds the
-    /// larger of the transform phase (4 bytes per byte of a BWT block, the allowance, the
+    /// larger of the transform phase (5 bytes per byte of a BWT block, the allowance, the
     /// transformed buffer) and the LZMA phase (the transformed buffer beside the encoder);
     /// the LZMA output is reserved for the transformed input; without `Text` nothing changes.
     #[test]
@@ -1085,7 +1087,7 @@ mod tests {
         );
         let i = input_len(256 * MIB, 64 * MIB);
         assert_eq!(w.input(256 * MIB), i);
-        assert_eq!(w.transform(256 * MIB), 4 * 64 * MIB + MEMORY_ALLOWANCE + i);
+        assert_eq!(w.transform(256 * MIB), 5 * 64 * MIB + MEMORY_ALLOWANCE + i);
         let lzma_phase = i + 700 * MIB + zstd_cctx_memory(22, 20, true);
         assert!(lzma_phase > w.transform(256 * MIB));
         assert_eq!(t.encoder_memory(), lzma_phase);
@@ -1114,7 +1116,7 @@ mod tests {
         assert_eq!(short.input(1000), input_len(1000, 1000));
         assert_eq!(
             short.transform(1000),
-            4000 + MEMORY_ALLOWANCE + input_len(1000, 1000)
+            5000 + MEMORY_ALLOWANCE + input_len(1000, 1000)
         );
         // The plan at the ceiling on a machine of 8 GiB or more, with and without the stage
         // (the integration test `memory_budget` prints the real figures).
