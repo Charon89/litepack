@@ -136,6 +136,10 @@ impl PrimitiveDecoder for BwtDecoder {
         Self::run(params, input, expected_len, last, limits, ctx.block())
     }
 
+    fn bounds_input(&self) -> bool {
+        true
+    }
+
     fn input_bound(
         &self,
         params: &[u8],

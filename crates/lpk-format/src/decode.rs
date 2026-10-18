@@ -136,6 +136,20 @@ pub trait PrimitiveDecoder: Send + Sync {
         let _ = (params, expected_len, last, limits, ctx);
         Ok(None)
     }
+
+    /// Whether this decoder bounds its input: true for a decoder whose
+    /// [`input_bound`] can return `Some` (`deflate-reconstruct`, `bwt`). The
+    /// reader's look-ahead asks the step after a step for its input bound
+    /// only when that step bounds its input (spec section 8, revision 1.3's
+    /// Bounds); after a step that bounds nothing, no later step is asked and
+    /// its output bound is `max_block_plain` (`plain_len` when it is last).
+    /// The default is false; a decoder that overrides `input_bound` to return
+    /// `Some` must override this too.
+    ///
+    /// [`input_bound`]: PrimitiveDecoder::input_bound
+    fn bounds_input(&self) -> bool {
+        false
+    }
 }
 
 /// The identity decoder of `store`.
@@ -292,13 +306,17 @@ impl Registry {
 /// (`BlockLengthMismatch`, also when the decoder reports too much output).
 ///
 /// The next step is asked with its own output bound, found by one level of
-/// look-ahead: when it is not the last step, the step after it is asked for
-/// its input bound first (with `plain_len` when that one is the last step,
-/// `max_block_plain` otherwise; the look-ahead goes no further), and its
-/// error, when it has one, is the block's error before anything else runs.
-/// So in `[M, bwt, deflate-reconstruct]` the `bwt` step learns the inflated
-/// length before `M` runs (revision 1.3's Bounds); in a graph whose later
-/// steps give no bound every step is asked exactly as before.
+/// look-ahead when the next step bounds its input
+/// ([`PrimitiveDecoder::bounds_input`]): when it is not the last step, the
+/// step after it is asked for its input bound first (with `plain_len` when
+/// that one is the last step, `max_block_plain` otherwise; the look-ahead
+/// goes no further), and its error, when it has one, is the block's error
+/// before anything else runs. After a next step that bounds nothing no later
+/// step is asked, and that step's output bound is `max_block_plain`
+/// (`plain_len` when it is last). So in `[M, bwt, deflate-reconstruct]` the
+/// `bwt` step learns the inflated length before `M` runs (revision 1.3's
+/// Bounds); in a graph whose later steps give no bound every step is asked
+/// exactly as before.
 pub fn decode_block(
     registry: &Registry,
     header: &BlockHeader,
@@ -352,15 +370,20 @@ pub fn decode_block_in(
             // The next step may bound its input, and so this step's output,
             // by something other than `max_block_plain`. Its own output
             // bound comes from one level of look-ahead: the step after it.
+            // The look-ahead is asked only when the next step bounds its
+            // input; after a step that bounds nothing no later step is
+            // asked (spec section 8, "The look-ahead").
             let next = &steps[i + 1];
             let next_last = i + 1 == last;
+            let next_decoder = registry.decoder(next.primitive);
             let next_expected = if next_last {
                 header.plain_len
-            } else {
+            } else if next_decoder.bounds_input() {
                 output_bound(registry, header, steps, i + 1, limits, ctx)?
+            } else {
+                limits.max_block_plain
             };
-            registry
-                .decoder(next.primitive)
+            next_decoder
                 .input_bound(&next.params, next_expected, next_last, limits, ctx)?
                 .unwrap_or(limits.max_block_plain)
         };
@@ -390,7 +413,8 @@ pub fn decode_block_in(
     Ok(data.into_owned())
 }
 
-/// The output bound of step `i` of `steps` (not the last step) as the
+/// The output bound of step `i` of `steps` (not the last step, and a step
+/// that bounds its input) as the
 /// look-ahead sees it: the input bound of step `i + 1` when that decoder
 /// gives one, otherwise `limits.max_block_plain`. Step `i + 1` is asked with
 /// what is known of it without looking further: the block's `plain_len` when
@@ -665,6 +689,10 @@ mod tests {
                 reason: "hook",
             })
         }
+
+        fn bounds_input(&self) -> bool {
+            true
+        }
     }
 
     /// Returns `n` bytes and records that it ran.
@@ -792,6 +820,10 @@ mod tests {
             self.bound
                 .map_err(|reason| FormatError::BadRecord { record: 9, reason })
         }
+
+        fn bounds_input(&self) -> bool {
+            true
+        }
     }
 
     /// `[BcjX86 = first, BcjArm64 = middle, Bwt = last]` over `max_block_plain`
@@ -909,6 +941,64 @@ mod tests {
         ));
         assert!(!first.ran.load(Ordering::SeqCst));
         assert_eq!(asked(&last), vec![(2, true)]);
+    }
+
+    #[test]
+    fn look_ahead_is_not_asked_after_a_step_that_bounds_nothing() {
+        // R36: `[A (9 bytes), store, probe whose hook errors]` over
+        // `max_block_plain` 4. `store` bounds nothing, so the probe after it
+        // is never asked before `A` runs: `A` runs, and its 9 bytes over the
+        // `store` step's bound (`max_block_plain`) are the block's outcome,
+        // not the probe's hook error.
+        let small = Resources {
+            max_block_plain: 4,
+            ..Resources::default()
+        };
+        let ran = Arc::new(AtomicBool::new(false));
+        let third = Probe::new(Err("third hook"));
+        let mut r = Registry::v1();
+        r.register(PrimitiveId::BcjX86, Box::new(OverFlag(9, ran.clone())));
+        r.register(
+            PrimitiveId::Bwt,
+            Box::new(Probe {
+                bound: third.bound,
+                asked: third.asked.clone(),
+                ran: third.ran.clone(),
+            }),
+        );
+        let h = header(vec![step(PrimitiveId::BcjX86), store(), bwt()], 2, 2);
+        assert!(matches!(
+            decode_block(&r, &h, 0, b"ab", &small).unwrap_err(),
+            FormatError::PayloadTooLarge { len: 9, max: 4 }
+        ));
+        assert!(ran.load(Ordering::SeqCst));
+        assert!(asked(&third).is_empty());
+        assert!(!third.ran.load(Ordering::SeqCst));
+
+        // The same graph with the first step's output within the bound: the
+        // probe is asked only before `store` runs (as the last step), and its
+        // error is then the block's.
+        let ran = Arc::new(AtomicBool::new(false));
+        let third = Probe::new(Err("third hook"));
+        let mut r = Registry::v1();
+        r.register(PrimitiveId::BcjX86, Box::new(OverFlag(3, ran.clone())));
+        r.register(
+            PrimitiveId::Bwt,
+            Box::new(Probe {
+                bound: third.bound,
+                asked: third.asked.clone(),
+                ran: third.ran.clone(),
+            }),
+        );
+        assert!(matches!(
+            decode_block(&r, &h, 0, b"ab", &small).unwrap_err(),
+            FormatError::BadRecord {
+                record: 9,
+                reason: "third hook"
+            }
+        ));
+        assert!(ran.load(Ordering::SeqCst));
+        assert_eq!(asked(&third), vec![(2, true)]);
     }
 
     #[test]

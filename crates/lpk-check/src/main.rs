@@ -23,10 +23,10 @@ struct Cli {
     /// A prior (repeatable); matched by its BLAKE3.
     #[arg(long, global = true)]
     prior: Vec<PathBuf>,
-    /// The revision this reader runs: 0 (store, zstd, lzma), 1 (adds jpeg-reconstruct) or 2
-    /// (adds deflate-reconstruct). A primitive a lower revision does not run is
+    /// The revision this reader runs: 0 (store, zstd, lzma), 1 (adds jpeg-reconstruct), 2
+    /// (adds deflate-reconstruct) or 3 (adds bwt). A primitive a lower revision does not run is
     /// `UnimplementedPrimitive`.
-    #[arg(long, global = true, default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=2))]
+    #[arg(long, global = true, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=3))]
     revision: u8,
     /// Alias of `--revision 0`.
     #[arg(long, global = true, conflicts_with = "revision")]
