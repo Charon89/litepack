@@ -1,8 +1,8 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 //! The block header and the graph over arbitrary bytes, under the 1.0 registry and under the
 //! full reader's decoders (revision 1.3's `bwt` runs without an archive; the reconstruction
 //! decoders report their record as out of range).
+use libfuzzer_sys::fuzz_target;
 use lpk_format::{decode_block, BlockHeader, Registry, Resources};
 
 fn tight() -> Resources {

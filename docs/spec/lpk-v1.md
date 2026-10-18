@@ -710,9 +710,10 @@ rules, the reader applies check (1) of "Decoding `bwt`" (the memory term) with t
 block's error and the step does not run. An output longer than I(O, B) is `PayloadTooLarge`; a shorter one is
 checked at the `bwt` step against I(out_len, B), the length its own `out_len` field implies (check (4),
 `BwtError`, `length`). On a last step, where `out_len` must equal `plain_len` = O, that is any length below
-I(O, B). I is not monotone in O (one more output byte can need fewer indices: I(64, B) = 200 and I(65, B) = 141
-for B >= 65), so on a step that is not the last an output below I(O, B) may still be exactly I(out_len, B) for
-its smaller `out_len` and decode. When `bwt` is the first step, its input is the encoded bytes and check (1)
+I(O, B). On a step that is not the last, an output below I(O, B) that is exactly I(out_len, B) for a smaller
+`out_len` decodes. I is not monotone in O (one more output byte can need fewer indices: I(64, B) = 200 and
+I(65, B) = 141 for B >= 65), so an `out_len` below O can imply more input than I(O, B): such an output is longer
+than the bound and is `PayloadTooLarge` at the step before, and check (4) is never reached. When `bwt` is the first step, its input is the encoded bytes and check (1)
 runs at the step itself.
 
 The look-ahead. Revision 1.3 also states how a bounding step's own output bound is found, for every graph and
@@ -1047,7 +1048,8 @@ both named as information only.
   envelope the reader cannot meet, section 7), without reading it, exactly as for `deflate-reconstruct`. The
   figure is lasting: a revision 1.3 reader refuses the step of any archive that declares less, whatever
   revision wrote it. The output is the block's own buffer, counted in `max_block_plain`, when the step is the
-  last; otherwise it is the next step's input, counted by that step's term. The reference writer
+  last; otherwise it is the next step's input, counted by that step's term, or by `max_block_plain` when that
+  step declares none (`lzma`, `zstd`). The reference writer
   declares `max_block_plain` plus the largest working memory any of its blocks declares, a block with a `bwt`
   step contributing the larger of term(`plain_len`, B) and its model step's own figure (section 9). Informative:
   at the reference reader's defaults (O = 268435456, B = 67108864) the term is 537920008 bytes; the reference's
