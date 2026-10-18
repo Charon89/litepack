@@ -369,8 +369,20 @@ fn the_header_minor_follows_the_stages() {
         let (bytes, s) = run(p, dir.path());
         (open(&bytes, None).header().version.minor, s)
     };
-    assert_eq!(minor(balanced(1)).0, 2);
+    // Revision 1.3: 3 whenever the Balanced tier's BWT stage is on, whatever the peel.
+    assert_eq!(minor(balanced(1)).0, 3);
     let mut b = balanced(1);
+    b.deflate = None;
+    assert_eq!(minor(b).0, 3);
+    let no_bwt = || {
+        let mut b = balanced(1);
+        if let lpk_core::ModelStage::Balanced(o) = &mut b.model {
+            o.bwt = false;
+        }
+        b
+    };
+    assert_eq!(minor(no_bwt()).0, 2);
+    let mut b = no_bwt();
     b.deflate = None;
     assert_eq!(minor(b).0, 1);
     let fast = || {
@@ -655,13 +667,20 @@ const PINNED_TREE: [(&str, &str); 2] = [
     ),
 ];
 
+/// The pins predate revision 1.3's BWT stage (which changes the header's minor and the text
+/// blocks): both pipelines run with it off, as the pinned archives were written.
 fn pinned_pipelines(threads: usize) -> [Pipeline; 2] {
     let mut d = Pipeline::balanced(BalancedOptions {
         threads: Some(threads),
+        bwt: false,
         ..BalancedOptions::default()
     });
     d.deflate = Some(DeflatePeel::default());
-    [balanced(threads), d]
+    let mut b = balanced(threads);
+    if let lpk_core::ModelStage::Balanced(o) = &mut b.model {
+        o.bwt = false;
+    }
+    [b, d]
 }
 
 #[test]

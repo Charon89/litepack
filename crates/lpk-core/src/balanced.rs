@@ -1273,6 +1273,7 @@ mod tests {
         assert_eq!(s.lzma_blocks + s.zstd_blocks + s.bwt_blocks, 1, "{s:?}");
         assert_eq!(s.stored_by_class + s.stored_no_gain, 1, "{s:?}");
         let mut a = Archive::open(Cursor::new(&out[..]), &Resources::default()).unwrap();
+        crate::register_full_reader(&mut a);
         assert_eq!(a.index().blocks.len(), 2);
         let env = a.index().envelope;
         // The declared window is the dictionary used: the next power of two above the block.
