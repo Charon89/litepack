@@ -574,31 +574,47 @@ fn the_malformed_inverse_vector_is_bwt_error_inverse() {
     assert_eq!(lpk_codecs_bwt::inverse(&one).unwrap(), &p[..BLOCK]);
 }
 
-/// A reader before revision 1.3 (`lpk-format` alone, and `lpk-decode`): the archive opens and
-/// lists; `verify` and every entry in a `bwt` block are `UnimplementedPrimitive` (3);
-/// `readme.txt` extracts.
+/// A reader before revision 1.3 (`lpk-format` alone, a revision 1.2 full reader with
+/// `jpeg-reconstruct` and `deflate-reconstruct` registered but not `bwt`, and `lpk-decode`): the
+/// archive opens and lists; `verify` and every entry in a `bwt` block (the
+/// `[lzma, bwt, deflate-reconstruct]` one included: the first unrun primitive in step order)
+/// are `UnimplementedPrimitive` (3); `readme.txt` extracts.
 #[test]
 fn a_1_2_reader_reports_unimplemented_primitive_3() {
     for name in [VECTOR, MALFORMED_BOUND, MALFORMED_INVERSE] {
         let bytes = std::fs::read(vectors().join(name)).unwrap();
-        let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
-        assert!(matches!(
-            a.verify().unwrap_err(),
-            FormatError::UnimplementedPrimitive { id: 3 }
-        ));
-        let t = a.entry_table().unwrap();
-        let entries: Vec<_> = t.table().unwrap().iter().map(|e| e.unwrap()).collect();
-        for e in &entries {
-            let mut got = Vec::new();
-            if e.path == README {
-                a.extract(e, &mut got).unwrap();
-                assert!(got == readme());
-            } else {
-                assert!(matches!(
-                    a.extract(e, &mut got).unwrap_err(),
-                    FormatError::UnimplementedPrimitive { id: 3 }
-                ));
+        let mut plain = Archive::open(Cursor::new(bytes.clone()), &Resources::default()).unwrap();
+        let mut full_1_2 = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
+        full_1_2.registry_mut().register(
+            PrimitiveId::JpegReconstruct,
+            Box::new(lpk_core::JpegDecoder),
+        );
+        full_1_2.registry_mut().register(
+            PrimitiveId::DeflateReconstruct,
+            Box::new(lpk_core::DeflateDecoder),
+        );
+        for a in [&mut plain, &mut full_1_2] {
+            assert!(matches!(
+                a.verify().unwrap_err(),
+                FormatError::UnimplementedPrimitive { id: 3 }
+            ));
+            let t = a.entry_table().unwrap();
+            let entries: Vec<_> = t.table().unwrap().iter().map(|e| e.unwrap()).collect();
+            let mut seen_notes = false;
+            for e in &entries {
+                let mut got = Vec::new();
+                if e.path == README {
+                    a.extract(e, &mut got).unwrap();
+                    assert!(got == readme());
+                } else {
+                    seen_notes |= e.path == "notes.txt.gz";
+                    assert!(matches!(
+                        a.extract(e, &mut got).unwrap_err(),
+                        FormatError::UnimplementedPrimitive { id: 3 }
+                    ));
+                }
             }
+            assert_eq!(seen_notes, name == VECTOR);
         }
         // The 1.0 tool.
         let (mut out, mut err) = (Vec::new(), Vec::new());

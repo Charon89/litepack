@@ -43,7 +43,15 @@ fn text(n: usize) -> Vec<u8> {
     out
 }
 
+/// One test, so no other test allocates while these measure (`cargo test` runs the tests of a
+/// binary in parallel threads of one process; the allocator's counters are global).
 #[test]
+fn decoder_peaks_are_within_the_term_and_the_inverse_agrees_with_libsais() {
+    decoder_peak_is_within_the_term_plus_the_output_on_a_64_mib_block();
+    decoder_peak_is_within_the_term_for_small_block_sizes();
+    the_inverse_agrees_with_libsais_on_64_mib();
+}
+
 fn decoder_peak_is_within_the_term_plus_the_output_on_a_64_mib_block() {
     let n = 64usize << 20;
     let block_size = n as u64;
@@ -102,8 +110,42 @@ fn decoder_peak_is_within_the_term_plus_the_output_on_a_64_mib_block() {
     assert!(needed <= term, "needed {needed} > term {term}");
 }
 
+/// Small block sizes (review R31 item 1): a step of B = 1 has one block per output byte, so the
+/// decoder must hold nothing per block; the term is then about 5 bytes per output byte.
+fn decoder_peak_is_within_the_term_for_small_block_sizes() {
+    let n = 2usize << 20;
+    let plain = text(n);
+    for block_size in [1u64, 16, 64, 4096] {
+        let input = encode(&plain, block_size as u32).unwrap();
+        assert_eq!(input.len() as u64, input_len(n as u64, block_size));
+        let term = memory_term(n as u64, block_size);
+        let limits = Resources {
+            max_block_plain: n as u64,
+            memory: n as u64 + term,
+            ..Resources::default()
+        };
+        let params = (block_size as u32).to_le_bytes();
+        ALLOC.reset_peak();
+        let before = ALLOC.current();
+        let out = BwtDecoder
+            .decode_step(&params, &input, n as u64, true, &limits)
+            .unwrap();
+        let peak = (ALLOC.peak() - before) as u64;
+        assert_eq!(out, plain);
+        drop(out);
+        let needed = input.len() as u64 + peak - n as u64;
+        println!(
+            "bwt B = {block_size} on {n} bytes: input {}, peak {peak}, needed beyond output {needed}, term {term}",
+            input.len()
+        );
+        assert!(
+            needed <= term,
+            "B = {block_size}: needed {needed} > term {term}"
+        );
+    }
+}
+
 /// The inverse equals libsais's own inverse on 64 MiB of text (design section 6, task C).
-#[test]
 fn the_inverse_agrees_with_libsais_on_64_mib() {
     let n = 64usize << 20;
     let plain = text(n);

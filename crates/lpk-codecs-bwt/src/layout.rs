@@ -198,53 +198,90 @@ pub struct Block<'a> {
     pub bwt: &'a [u8],
 }
 
-/// The step's input split into its blocks, after `out_len` was read and checked by the caller:
-/// `None` when `input` (the bytes after the `out_len` field) is not exactly Σ (4·c(n_j) + n_j)
-/// bytes (`BwtError`, `length`).
-pub fn split_blocks(input: &[u8], out_len: u64, block_size: u64) -> Option<Vec<Block<'_>>> {
-    let (full, last) = blocks(out_len, block_size);
-    let full = usize::try_from(full).ok()?;
-    let mut out = Vec::with_capacity(full + usize::from(last > 0));
-    let mut rest = input;
-    let lengths = std::iter::repeat_n(block_size.max(1), full).chain((last > 0).then_some(last));
-    for n in lengths {
-        let n = usize::try_from(n).ok()?;
-        let c = usize::try_from(index_count(n as u64)).ok()?;
-        let (indices, after) = rest.split_at_checked(4 * c)?;
-        let (bwt, after) = after.split_at_checked(n)?;
-        out.push(Block { indices, bwt });
-        rest = after;
-    }
-    rest.is_empty().then_some(out)
+/// The blocks of a step's input, walked lazily: nothing is allocated per block (a step of B = 1
+/// has one block per output byte, far more than its memory term could hold as a list).
+/// Made by [`blocks_of`], which checks the total length first (check (4) of the text), so every
+/// block the iterator yields is complete.
+#[derive(Debug, Clone)]
+pub struct Blocks<'a> {
+    rest: &'a [u8],
+    full: u64,
+    last: u64,
+    block_size: u64,
 }
 
-/// The indices of a block as `u32`s (`indices.len()` is a multiple of 4).
-pub fn parse_indices(indices: &[u8]) -> Vec<u32> {
-    indices
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| u32::from_le_bytes(*c))
-        .collect()
+impl<'a> Iterator for Blocks<'a> {
+    type Item = Block<'a>;
+
+    fn next(&mut self) -> Option<Block<'a>> {
+        let n = if self.full > 0 {
+            self.full -= 1;
+            self.block_size
+        } else if self.last > 0 {
+            std::mem::take(&mut self.last)
+        } else {
+            return None;
+        };
+        // `blocks_of` checked the exact total length, so the splits cannot fail.
+        let n = usize::try_from(n).ok()?;
+        let c = usize::try_from(index_count(n as u64)).ok()?;
+        let (indices, after) = self.rest.split_at_checked(4 * c)?;
+        let (bwt, after) = after.split_at_checked(n)?;
+        self.rest = after;
+        Some(Block { indices, bwt })
+    }
+}
+
+/// The step's blocks, after `out_len` was read and checked by the caller: `None` when `input`
+/// (the bytes after the `out_len` field) is not exactly I(out_len, B) - 8 = Σ (4·c(n_j) + n_j)
+/// bytes (`BwtError`, `length`), computed from the lengths alone before any block is looked at.
+pub fn blocks_of(input: &[u8], out_len: u64, block_size: u64) -> Option<Blocks<'_>> {
+    if (input.len() as u64).saturating_add(OUT_LEN_FIELD) != input_len(out_len, block_size) {
+        return None;
+    }
+    let (full, last) = blocks(out_len, block_size);
+    Some(Blocks {
+        rest: input,
+        full,
+        last,
+        block_size: block_size.max(1),
+    })
+}
+
+/// The indices of a block as `u32`s on the stack: the first `c` entries of the array, `c` =
+/// `indices.len() / 4` (at most [`CHAINS`]; more are ignored).
+pub fn parse_indices(indices: &[u8]) -> ([u32; CHAINS], usize) {
+    let mut out = [0u32; CHAINS];
+    let mut c = 0;
+    for (slot, bytes) in out.iter_mut().zip(indices.as_chunks::<4>().0) {
+        *slot = u32::from_le_bytes(*bytes);
+        c += 1;
+    }
+    (out, c)
 }
 
 /// The whole step: `input` is the step's input after the `out_len` field (the caller read and
 /// checked `out_len` against its bound), `out` has `out_len` bytes. Checks (4) and (5) of the
-/// text: the length, then per block in order the index range and the inverse.
+/// text: the length (arithmetically, before any block is read), then per block in order the
+/// index range and the inverse. Beyond `out` and the caller's input it allocates the successor
+/// table once, for the largest block: the term's 4·min(O, B).
 pub fn decode_blocks(
     input: &[u8],
     out_len: u64,
     block_size: u64,
     out: &mut [u8],
 ) -> Result<(), Reason> {
-    let blocks = split_blocks(input, out_len, block_size).ok_or(Reason::Length)?;
+    if out.len() as u64 != out_len {
+        return Err(Reason::Length);
+    }
+    let blocks = blocks_of(input, out_len, block_size).ok_or(Reason::Length)?;
     let mut next = Vec::new();
     let mut at = 0usize;
     for b in blocks {
-        let indices = parse_indices(b.indices);
+        let (indices, c) = parse_indices(b.indices);
         let n = b.bwt.len();
         let dst = out.get_mut(at..at + n).ok_or(Reason::Length)?;
-        inverse_block(b.bwt, &indices, &mut next, dst)?;
+        inverse_block(b.bwt, &indices[..c], &mut next, dst)?;
         at += n;
     }
     if at != out.len() {
@@ -402,24 +439,36 @@ mod tests {
     }
 
     #[test]
-    fn split_blocks_checks_the_exact_length() {
+    fn blocks_of_checks_the_exact_length_first() {
         // Two blocks of 4 (c = 2 each: r = 2) in a 4-byte block size, out_len 8.
         let mut v = Vec::new();
         for _ in 0..2 {
             v.extend_from_slice(&[1, 0, 0, 0, 2, 0, 0, 0]);
             v.extend_from_slice(b"abcd");
         }
-        let b = split_blocks(&v, 8, 4).unwrap();
+        let b: Vec<Block<'_>> = blocks_of(&v, 8, 4).unwrap().collect();
         assert_eq!(b.len(), 2);
         assert_eq!(b[1].bwt, b"abcd");
-        assert_eq!(parse_indices(b[1].indices), vec![1, 2]);
-        assert!(split_blocks(&v[..v.len() - 1], 8, 4).is_none());
+        let (idx, c) = parse_indices(b[1].indices);
+        assert_eq!(&idx[..c], &[1, 2]);
+        assert!(blocks_of(&v[..v.len() - 1], 8, 4).is_none());
         let mut longer = v.clone();
         longer.push(0);
-        assert!(split_blocks(&longer, 8, 4).is_none());
+        assert!(blocks_of(&longer, 8, 4).is_none());
         // out_len 0 has no block: only an empty rest passes.
-        assert_eq!(split_blocks(&[], 0, 4).unwrap().len(), 0);
-        assert!(split_blocks(&[0], 0, 4).is_none());
+        assert_eq!(blocks_of(&[], 0, 4).unwrap().count(), 0);
+        assert!(blocks_of(&[0], 0, 4).is_none());
+        // Blocks of 1 byte: one block per output byte, c = 1 each.
+        let mut v = Vec::new();
+        for b in b"xyz" {
+            v.extend_from_slice(&[1, 0, 0, 0, *b]);
+        }
+        let b: Vec<Block<'_>> = blocks_of(&v, 3, 1).unwrap().collect();
+        assert_eq!(b.len(), 3);
+        assert_eq!(b[2].bwt, b"z");
+        let mut out = [0u8; 3];
+        decode_blocks(&v, 3, 1, &mut out).unwrap();
+        assert_eq!(&out, b"xyz");
     }
 
     /// A naive BWT by sorting the rotations of `text + $`: the transformed bytes and, for every
