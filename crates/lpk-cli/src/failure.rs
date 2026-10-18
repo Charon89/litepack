@@ -151,6 +151,8 @@ pub fn core_exit(e: &CoreError) -> i32 {
         | CoreError::ChangedWhileReading { .. }
         | CoreError::Decode { .. }
         | CoreError::Extract(_)
+        | CoreError::InTheWay { .. }
+        | CoreError::CaseCollision { .. }
         | CoreError::NotADirectory { .. }
         | CoreError::AppendLeftCut { .. } => EXIT_FAILED,
     }
@@ -250,6 +252,8 @@ pub fn core_kind(e: &CoreError) -> &'static str {
         CoreError::InvalidOption(_) => "InvalidOption",
         CoreError::Decode { .. } => "Decode",
         CoreError::Extract(_) => "Extract",
+        CoreError::InTheWay { .. } => "InTheWay",
+        CoreError::CaseCollision { .. } => "CaseCollision",
         CoreError::NotADirectory { .. } => "NotADirectory",
         CoreError::AppendLeftCut { .. } => "AppendLeftCut",
     }
@@ -263,9 +267,11 @@ pub fn core_path(e: &CoreError) -> Option<String> {
         | CoreError::SpecialFile { path }
         | CoreError::ChangedWhileReading { path }
         | CoreError::NotADirectory { path }
+        | CoreError::InTheWay { path, .. }
         | CoreError::AppendLeftCut { path, .. } => Some(path.display().to_string()),
         CoreError::UnportableName { path, .. }
         | CoreError::DuplicatePath { path }
+        | CoreError::CaseCollision { first: path, .. }
         | CoreError::Decode { path, .. } => Some(path.clone()),
         CoreError::InvalidOption(_) | CoreError::Extract(_) => None,
     }

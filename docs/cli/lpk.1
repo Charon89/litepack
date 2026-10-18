@@ -26,7 +26,7 @@ lpk\-l(1)
 List an archive, one line per entry: kind, size, mtime (UTC), path (tab\-separated)
 .TP
 lpk\-x(1)
-Extract every entry of an archive into a directory; never overwrites a file
+Extract every entry of an archive into a directory; an existing file is refused unless \-\-overwrite says otherwise, and symlink entries are skipped unless \-\-symlinks is given
 .TP
 lpk\-t(1)
 Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shards

@@ -59,6 +59,29 @@ pub enum CoreError {
     /// An extraction's internal step failed (a decode worker stopped without a result).
     #[error("extraction: {0}")]
     Extract(&'static str),
+    /// Something of another kind exists where an extracted entry goes (a directory where a
+    /// file goes, a file or a link where a directory goes); refused before any output in every
+    /// overwrite mode but `skip`.
+    #[error("{}: a {found} exists where a {wanted} goes", path.display())]
+    InTheWay {
+        /// The target on disk.
+        path: PathBuf,
+        /// What is there: "file", "directory" or "symlink".
+        found: &'static str,
+        /// What the entry is: "file", "directory" or "symlink".
+        wanted: &'static str,
+    },
+    /// Two entries whose paths differ only by case, refused before any output because the
+    /// target is case-insensitive.
+    #[error(
+        "entries {first:?} and {second:?} differ only by case; the target is case-insensitive"
+    )]
+    CaseCollision {
+        /// The first of the two in entry order.
+        first: String,
+        /// The second.
+        second: String,
+    },
     /// The root given to a walk is not a directory.
     #[error("{}: not a directory", path.display())]
     NotADirectory {
