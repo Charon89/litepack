@@ -11,9 +11,13 @@
 //!   ranks (bzip2's structure with arithmetic coding instead of Huffman tables).
 //! * `encode_block` (feature `encode`) / [`decode_block`]: candidate (b) of the gate, a whole
 //!   block: the primary index (4 bytes, little-endian) followed by the entropy stage's output.
+//! * [`layout`]: revision 1.3 of the `.lpk` format (spec section 8, "Decoding `bwt`"): the
+//!   layout of a `bwt` step's input, the input bound I(O, B), the memory term and the inverse
+//!   in `u32` (4 bytes per block byte, the term the format declares); the reference reader's
+//!   `BwtDecoder` in `lpk-core` is built on it.
 //!
-//! Nothing here is part of the `.lpk` format yet: shipping it is a format revision (D-49), which
-//! follows only if the gate opens.
+//! The entropy stage and `decode_block` are the gate's candidate (b) and stay bench-only: no
+//! revision of the format uses them (D-73, revision 1.3 pairs `bwt` with `lzma`).
 //!
 //! libsais convention (`libsais` crate documentation): the text is treated as if a unique
 //! smallest sentinel followed it, and the sentinel's entry is left out of the output, so the BWT
@@ -25,6 +29,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod entropy;
+pub mod layout;
 mod rc;
 
 #[cfg(feature = "encode")]
@@ -179,6 +184,32 @@ pub fn forward(block: &[u8]) -> Result<Transformed, BwtError> {
         rate_log2,
         aux,
     })
+}
+
+/// libsais's own round trip of `block` (feature `encode`): its forward transform without
+/// sampled indices, then its inverse (`unbwt`), as `(bwt, primary index, text back)`. For the
+/// tests that compare this crate's inverses with the library's; the library's inverse takes
+/// only a BWT its own forward call produced (its constructor for any other is `unsafe`).
+#[cfg(feature = "encode")]
+pub fn libsais_round_trip(block: &[u8]) -> Result<(Vec<u8>, u32, Vec<u8>), BwtError> {
+    if block.len() > MAX_BLOCK {
+        return Err(BwtError::TooLarge(block.len()));
+    }
+    let res = BwtConstruction::for_text(block)
+        .with_owned_temporary_array_buffer32()
+        .single_threaded()
+        .run()
+        .map_err(|e| BwtError::Libsais(e.to_string()))?;
+    let bwt = res.bwt().to_vec();
+    let primary = u32::try_from(res.primary_index())
+        .map_err(|_| BwtError::Corrupt("negative index from libsais"))?;
+    let back = res
+        .unbwt()
+        .with_owned_temporary_array_buffer32()
+        .single_threaded()
+        .run()
+        .map_err(|e| BwtError::Libsais(e.to_string()))?;
+    Ok((bwt, primary, back.as_slice().to_vec()))
 }
 
 /// The block of `t` (its BWT and auxiliary indices).

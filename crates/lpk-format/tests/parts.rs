@@ -230,8 +230,9 @@ fn version_minor_rules() {
             reason: "version_minor"
         })
     ));
+    // A minor above the latest revision this writer knows (1.3) is refused.
     assert!(matches!(
-        Writer::new_revision(Vec::new(), options(), 3),
+        Writer::new_revision(Vec::new(), options(), 4),
         Err(FormatError::BadOptions {
             reason: "version_minor"
         })
