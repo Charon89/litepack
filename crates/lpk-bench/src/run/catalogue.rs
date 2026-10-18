@@ -409,6 +409,7 @@ mod tests {
                 "balanced",
                 "balanced-extension",
                 "balanced-no-deflate",
+                "balanced-no-bwt",
                 "store",
                 "fast-encrypted"
             ]

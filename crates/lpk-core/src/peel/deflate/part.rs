@@ -15,7 +15,7 @@
 
 use lpk_format::{Encoded, FormatError};
 
-use crate::balanced::{trial, BalancedOptions, LzmaEncoder};
+use crate::balanced::{trial, BalancedOptions, Candidate, LzmaEncoder};
 use crate::error::CoreError;
 use crate::fast::{FastOptions, ZstdCore};
 use crate::memory::{lzma_out_reserve, window_for, zstd_bound, zstd_cctx_memory};
@@ -217,15 +217,17 @@ impl PartEncoder {
                 sample_len,
                 ..
             } => {
-                let (encoded, zstd_won, sample_bytes) =
-                    trial(lzma, zstd, *sample_len, plain, |z, st| z.encode_raw(st))?;
+                // No BWT candidate: the part encoder stays `[M]` in revision 1.3 (D-69 (6)).
+                let (encoded, chosen, sample_bytes) =
+                    trial(lzma, zstd, *sample_len, None, plain, |z, st| {
+                        z.encode_raw(st)
+                    })?;
                 zstd.release().map_err(io)?;
                 PartEncoded {
                     encoded,
-                    model: if zstd_won {
-                        PartModel::Zstd
-                    } else {
-                        PartModel::Lzma
+                    model: match chosen {
+                        Candidate::Zstd => PartModel::Zstd,
+                        Candidate::Lzma | Candidate::Bwt => PartModel::Lzma,
                     },
                     sample_bytes,
                 }

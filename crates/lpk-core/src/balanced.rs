@@ -19,8 +19,21 @@
 //! dictionary, 64 MiB, is the one the 7-Zip Ultra catalogue row uses, so a parity check compares
 //! like with like. No filters (BCJ waits for a format revision).
 //!
+//! The BWT stage (revision 1.3, E2-15 task D; spec section 9 "How a writer lays out a BWT
+//! block"): on a block hinted `Text`, and only when [`BalancedOptions::bwt`] is on, the trial
+//! runs a third candidate on each stripe — the stripe transformed as one BWT block, then LZMA
+//! at the stripe's dictionary — and that candidate wins only when its sum is strictly smaller
+//! than both plain candidates' (a tie keeps the plain one). When it wins, the block is cut into
+//! BWT blocks of B = min(`bwt_block`, `plain_len`) bytes, each transformed with libsais (one
+//! thread), the step's input assembled as section 8 lays it out, and the `lzma` step encodes
+//! it with the end marker: the graph `[lzma {dict_for(input)}, bwt {B}]`; the stored-no-gain
+//! rule applies as to any winner. The Fast tier, stored blocks and the Deflate peel's part
+//! encoder never use it. Every BWT block is transformed before the LZMA encoder exists, so a
+//! block in flight holds the suffix array or the encoder, never both.
+//!
 //! Memory, qualitatively: compressing needs about the block size plus several times the
-//! dictionary; extracting needs the block size plus the dictionary.
+//! dictionary; extracting needs the block size plus the dictionary (with the BWT stage, the
+//! transformed input plus four bytes per byte of a BWT block, the term of section 8).
 
 use std::io::Write;
 use std::path::Path;
@@ -75,6 +88,13 @@ pub struct BalancedOptions {
     /// [`crate::memory`]): each block in flight holds an LZMA encoder of several times the
     /// dictionary and a zstd candidate. The archive is the same whatever the count.
     pub threads: Option<usize>,
+    /// The BWT stage (revision 1.3): a third candidate in the trial of a block hinted `Text`,
+    /// `[lzma, bwt]` when it wins. On by default; the header's `version_minor` is 3 whenever it
+    /// is on. An append onto an archive of an earlier revision runs without it.
+    pub bwt: bool,
+    /// The BWT block in bytes (1 to the reader's default `max_bwt_block`, 64 MiB); a block
+    /// shorter than it is one BWT block. Default 64 MiB.
+    pub bwt_block: u32,
 }
 
 impl Default for BalancedOptions {
@@ -89,8 +109,19 @@ impl Default for BalancedOptions {
             min_block_before_boundary: None,
             jpeg_max_file: crate::peel::LEPTON_MAX_FILE,
             threads: None,
+            bwt: true,
+            bwt_block: DEFAULT_BWT_BLOCK,
         }
     }
+}
+
+/// The default BWT block of the Balanced tier: the reader's default `max_bwt_block`, 64 MiB.
+pub const DEFAULT_BWT_BLOCK: u32 = lpk_format::DEFAULT_MAX_BWT_BLOCK as u32;
+
+/// The BWT block of a block hinted `class`: `bwt` (the stage's block when the stage is on) for
+/// a `Text` block, none otherwise (D-05: a block takes its first cluster's hint).
+fn bwt_for(bwt: Option<u32>, class: Class) -> Option<u32> {
+    bwt.filter(|_| class == Class::Text)
 }
 
 /// What the Balanced encoder did with the blocks.
@@ -100,6 +131,12 @@ pub struct BalancedSummary {
     pub lzma_blocks: u64,
     /// Blocks coded with zstd.
     pub zstd_blocks: u64,
+    /// Blocks coded as `[lzma, bwt]` (revision 1.3's BWT stage; `Text` blocks whose trial
+    /// found the transformed candidate strictly smaller than both plain ones).
+    pub bwt_blocks: u64,
+    /// Plain bytes the trials fed to the BWT candidate (on `Text` blocks with the stage on; a
+    /// part of `sample_bytes`, which every candidate of a trial receives).
+    pub bwt_sample_bytes: u64,
     /// Always zero in this tier (it has no entropy gate); kept so the counts match the Fast tier's.
     pub stored_by_gate: u64,
     /// Blocks stored without a trial because their class is already compressed.
@@ -265,6 +302,37 @@ impl LzmaEncoder {
             bytes: self.compress(plain, dict)?,
         })
     }
+
+    /// Encode one block as `[lzma {dict_for(input)}, bwt {B}]`, B = min(`bwt_block`,
+    /// `plain.len()`) (spec section 9, "How a writer lays out a BWT block"): the plain bytes cut
+    /// into BWT blocks of B, each transformed with libsais, the step's input assembled, then
+    /// the raw LZMA stream with the end marker. The block declares the larger of the step's
+    /// term (section 8) and the `lzma` step's own figure for its input of I(`plain_len`, B)
+    /// bytes. A function of `plain` and the settings alone. `plain` must not be empty.
+    pub fn encode_bwt(&self, plain: &[u8], bwt_block: u32) -> Result<Encoded, FormatError> {
+        let b = u32::try_from(plain.len())
+            .unwrap_or(u32::MAX)
+            .min(bwt_block)
+            .max(1);
+        // Every BWT block is transformed (and libsais's suffix array freed) here, before the
+        // LZMA encoder is built.
+        let input = lpk_codecs_bwt::layout::encode(plain, b).map_err(io_err)?;
+        let dict = self.dict_for(input.len());
+        let mut graph = self.graph(dict);
+        graph.steps.push(Step {
+            primitive: PrimitiveId::Bwt,
+            params: b.to_le_bytes().to_vec(),
+        });
+        let input_len = input.len() as u64;
+        let term = lpk_codecs_bwt::layout::memory_term(plain.len() as u64, u64::from(b));
+        let lzma = input_len.saturating_add(crate::memory::lzma_decode_memory(dict, input_len));
+        Ok(Encoded {
+            resources: graph.resources(),
+            memory: term.max(lzma),
+            graph,
+            bytes: self.compress(&input, dict)?,
+        })
+    }
 }
 
 impl BlockEncoder for LzmaEncoder {
@@ -323,6 +391,8 @@ pub struct BalancedEncoder {
     lzma: LzmaEncoder,
     zstd: ZstdEncoder,
     sample_len: usize,
+    /// The BWT stage's block, `None` when the stage is off.
+    bwt: Option<u32>,
     shared: Arc<Mutex<Shared>>,
 }
 
@@ -332,6 +402,7 @@ impl std::fmt::Debug for BalancedEncoder {
             .field("lzma", &self.lzma)
             .field("zstd", &self.zstd)
             .field("sample_len", &self.sample_len)
+            .field("bwt", &self.bwt)
             .finish_non_exhaustive()
     }
 }
@@ -361,6 +432,37 @@ impl BalancedEncoder {
         (self.sample_len / 4).max(1)
     }
 
+    /// The BWT stage's block, `None` when the stage is off.
+    pub fn bwt_block(&self) -> Option<u32> {
+        self.bwt
+    }
+
+    /// Turn the BWT stage off (an append onto an archive of a revision below 1.3).
+    pub(crate) fn disable_bwt(&mut self) {
+        self.bwt = None;
+    }
+
+    /// The BWT stage's terms for the memory budget ([`crate::memory::BwtMemory`]), `None` when
+    /// the stage is off: the block, the trial's stripe and liblzma's figure for the encoder of
+    /// a transformed stripe.
+    pub fn bwt_memory(&self) -> Option<crate::memory::BwtMemory> {
+        let block = u64::from(self.bwt?);
+        let stripe = self.stripe_len() as u64;
+        let input = lpk_codecs_bwt::layout::input_len(stripe, block.min(stripe));
+        let lzma_sample = match self
+            .lzma
+            .memory_usage_for_len(usize::try_from(input).unwrap_or(usize::MAX))
+        {
+            0 => u64::from(self.lzma.dict_size).saturating_mul(12),
+            m => m,
+        };
+        Some(crate::memory::BwtMemory {
+            block,
+            stripe,
+            lzma_sample,
+        })
+    }
+
     /// A new encoder and the handle that steers it; every option is checked here
     /// (`InvalidOption`).
     pub fn new(o: &BalancedOptions) -> Result<(Self, BalancedHandle), CoreError> {
@@ -374,6 +476,14 @@ impl BalancedEncoder {
                 "dict_size {} is above the reader's default max_window ({})",
                 o.dict_size,
                 lpk_format::DEFAULT_MAX_WINDOW
+            )));
+        }
+        if o.bwt && (o.bwt_block == 0 || u64::from(o.bwt_block) > lpk_format::DEFAULT_MAX_BWT_BLOCK)
+        {
+            return Err(CoreError::InvalidOption(format!(
+                "bwt_block {} is outside 1..={} (the reader's default max_bwt_block)",
+                o.bwt_block,
+                lpk_format::DEFAULT_MAX_BWT_BLOCK
             )));
         }
         let window_log = o.zstd_window_log.unwrap_or(o.dict_size.ilog2());
@@ -390,6 +500,7 @@ impl BalancedEncoder {
             lzma,
             zstd,
             sample_len: o.sample_len,
+            bwt: o.bwt.then_some(o.bwt_block),
             shared: Arc::clone(&shared),
         };
         Ok((
@@ -417,17 +528,41 @@ fn zstd_wins(lzma_len: usize, zstd_len: usize) -> bool {
     zstd_len < lzma_len
 }
 
+/// The candidate the trial chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Candidate {
+    /// Raw LZMA (the winner of a tie).
+    Lzma,
+    /// zstd, strictly smaller than LZMA on the sample.
+    Zstd,
+    /// `[lzma, bwt]`, strictly smaller than both plain candidates on the sample.
+    Bwt,
+}
+
+/// The candidate for the sums `lzma`, `zstd` and (when tried) `bwt`: BWT only when strictly
+/// smaller than both, otherwise [`zstd_wins`]'s rule.
+fn choose(lzma: usize, zstd: usize, bwt: Option<usize>) -> Candidate {
+    match bwt {
+        Some(b) if b < lzma && b < zstd => Candidate::Bwt,
+        _ if zstd_wins(lzma, zstd) => Candidate::Zstd,
+        _ => Candidate::Lzma,
+    }
+}
+
 /// What a block became and what its trial cost, for the summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BalancedOutcome {
     kind: BalancedKind,
     sample_bytes: u64,
+    /// The plain bytes the BWT candidate received (0 when it was not tried).
+    bwt_sample_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BalancedKind {
     Lzma,
     Zstd,
+    Bwt,
     StoredByClass,
     StoredNoGain,
 }
@@ -435,59 +570,64 @@ enum BalancedKind {
 impl BalancedOutcome {
     fn count(&self, s: &mut BalancedSummary) {
         s.sample_bytes += self.sample_bytes;
+        s.bwt_sample_bytes += self.bwt_sample_bytes;
         match self.kind {
             BalancedKind::Lzma => s.lzma_blocks += 1,
             BalancedKind::Zstd => s.zstd_blocks += 1,
+            BalancedKind::Bwt => s.bwt_blocks += 1,
             BalancedKind::StoredByClass => s.stored_by_class += 1,
             BalancedKind::StoredNoGain => s.stored_no_gain += 1,
         }
     }
 }
 
-/// The Balanced encoding of one block: the class rule, the trial on the stripes, the winner.
+/// The Balanced encoding of one block: the class rule, the trial on the stripes (with the BWT
+/// candidate when `bwt` is set: a `Text` block with the stage on), the winner.
 fn balanced_block(
     lzma: &LzmaEncoder,
     zstd: &mut ZstdCore,
     class: Class,
     sample_len: usize,
+    bwt: Option<u32>,
     plain: &[u8],
 ) -> Result<(Encoded, BalancedOutcome), FormatError> {
-    let mut outcome = BalancedOutcome {
-        kind: BalancedKind::StoredByClass,
-        sample_bytes: 0,
-    };
+    let mut outcome = STORED_BY_CLASS;
     if stored_by_class(class) {
         return Ok((StoreEncoder.encode(plain)?, outcome));
     }
     // The zstd encoder's own no-gain store counts as the stripe's length.
-    let (winner, zstd_won, sample_bytes) = trial(lzma, zstd, sample_len, plain, |z, st| {
+    let (winner, chosen, sample_bytes) = trial(lzma, zstd, sample_len, bwt, plain, |z, st| {
         Ok(z.encode(class, DictionaryKind::None, st)?.0)
     })?;
     outcome.sample_bytes = sample_bytes;
+    outcome.bwt_sample_bytes = if bwt.is_some() { sample_bytes } else { 0 };
     if winner.bytes.len() >= plain.len() {
         outcome.kind = BalancedKind::StoredNoGain;
         return Ok((StoreEncoder.encode(plain)?, outcome));
     }
-    outcome.kind = if zstd_won {
-        BalancedKind::Zstd
-    } else {
-        BalancedKind::Lzma
+    outcome.kind = match chosen {
+        Candidate::Lzma => BalancedKind::Lzma,
+        Candidate::Zstd => BalancedKind::Zstd,
+        Candidate::Bwt => BalancedKind::Bwt,
     };
     Ok((winner, outcome))
 }
 
 /// The Balanced trial on `plain`: four stripes (at 0, 1/4, 1/2 and 3/4, each a quarter of
 /// `sample_len`; the whole of `plain` when it fits the sample), each compressed separately by
-/// LZMA and by `zstd_encode`, the outputs summed; the smaller sum encodes `plain` (`lzma` on a
-/// tie). Returns the winner's encoding, true when zstd won, and the plain bytes the trial fed
-/// to each candidate. No class rule and no store: the callers decide those.
+/// LZMA, by `zstd_encode` and, when `bwt` is set, as one BWT block followed by LZMA
+/// ([`LzmaEncoder::encode_bwt`]), the outputs summed; the smallest sum encodes `plain`: BWT
+/// only when strictly smaller than both plain sums, `lzma` on a tie with zstd. Returns the
+/// winner's encoding, the candidate, and the plain bytes the trial fed to each candidate. No
+/// class rule and no store: the callers decide those.
 pub(crate) fn trial(
     lzma: &LzmaEncoder,
     zstd: &mut ZstdCore,
     sample_len: usize,
+    bwt: Option<u32>,
     plain: &[u8],
     mut zstd_encode: impl FnMut(&mut ZstdCore, &[u8]) -> Result<Encoded, FormatError>,
-) -> Result<(Encoded, bool, u64), FormatError> {
+) -> Result<(Encoded, Candidate, u64), FormatError> {
     let mut sample_bytes = 0u64;
     let whole = plain.len() <= sample_len;
     let stripes: Vec<&[u8]> = if whole {
@@ -501,30 +641,42 @@ pub(crate) fn trial(
             })
             .collect()
     };
-    let (mut l_len, mut z_len) = (0usize, 0usize);
+    let (mut l_len, mut z_len, mut b_len) = (0usize, 0usize, 0usize);
     let mut first = None;
+    // The BWT candidate: an empty stripe (an empty block) has no transform.
+    let bwt = bwt.filter(|_| !plain.is_empty());
     for st in &stripes {
         let l = lzma.encode_block(st)?;
         let z = zstd_encode(zstd, st)?;
+        // Each stripe as one BWT block, LZMA at the stripe's dictionary.
+        let b = bwt.map(|bb| lzma.encode_bwt(st, bb)).transpose()?;
         l_len += l.bytes.len();
         z_len += z.bytes.len();
-        first.get_or_insert((l, z));
+        b_len += b.as_ref().map_or(0, |b| b.bytes.len());
+        first.get_or_insert((l, z, b));
         sample_bytes += st.len() as u64;
     }
-    let zstd_won = zstd_wins(l_len, z_len);
-    let winner = match (whole, zstd_won) {
-        (true, true) => first.map(|(_, z)| z).ok_or_else(|| io_err("no stripe"))?,
-        (true, false) => first.map(|(l, _)| l).ok_or_else(|| io_err("no stripe"))?,
-        (false, true) => zstd_encode(zstd, plain)?,
-        (false, false) => {
+    let chosen = choose(l_len, z_len, bwt.map(|_| b_len));
+    let winner = match (whole, chosen) {
+        (true, Candidate::Zstd) => first.map(|(_, z, _)| z),
+        (true, Candidate::Lzma) => first.map(|(l, _, _)| l),
+        (true, Candidate::Bwt) => first.and_then(|(_, _, b)| b),
+        (false, Candidate::Zstd) => Some(zstd_encode(zstd, plain)?),
+        (false, Candidate::Lzma) => {
             // The zstd context's tables go before the full LZMA encode, so a block holds one
             // full-size encoder at a time (E2-20); the context is rebuilt empty with the same
             // parameters, which gives the same output.
             zstd.release().map_err(io_err)?;
-            lzma.encode_block(plain)?
+            Some(lzma.encode_block(plain)?)
         }
-    };
-    Ok((winner, zstd_won, sample_bytes))
+        (false, Candidate::Bwt) => {
+            // Likewise before the transform: the suffix array, then the LZMA encoder.
+            zstd.release().map_err(io_err)?;
+            Some(lzma.encode_bwt(plain, bwt.unwrap_or(1))?)
+        }
+    }
+    .ok_or_else(|| io_err("no stripe"))?;
+    Ok((winner, chosen, sample_bytes))
 }
 
 /// One block's Balanced encoding on a pool thread.
@@ -532,6 +684,8 @@ struct BalancedJob {
     class: Class,
     lzma: LzmaEncoder,
     sample_len: usize,
+    /// The BWT block when the block is hinted `Text` and the stage is on.
+    bwt: Option<u32>,
     config: ZstdConfig,
     core: Option<ZstdCore>,
 }
@@ -545,11 +699,7 @@ struct BalancedReturn {
 
 /// A stored-by-class block's encoding and outcome: no trial, no compressor.
 fn stored_by_class_block(plain: &[u8]) -> Result<(Encoded, BalancedOutcome), FormatError> {
-    let outcome = BalancedOutcome {
-        kind: BalancedKind::StoredByClass,
-        sample_bytes: 0,
-    };
-    Ok((StoreEncoder.encode(plain)?, outcome))
+    Ok((StoreEncoder.encode(plain)?, STORED_BY_CLASS))
 }
 
 impl EncodeJob for BalancedJob {
@@ -567,8 +717,14 @@ impl EncodeJob for BalancedJob {
             Some(c) => c,
             None => ZstdCore::build(&self.config).map_err(io_err)?,
         };
-        let (encoded, outcome) =
-            balanced_block(&self.lzma, &mut core, self.class, self.sample_len, plain)?;
+        let (encoded, outcome) = balanced_block(
+            &self.lzma,
+            &mut core,
+            self.class,
+            self.sample_len,
+            self.bwt,
+            plain,
+        )?;
         let back = BalancedReturn {
             core: Some(core),
             outcome,
@@ -594,6 +750,7 @@ impl EncodeJob for BalancedJob {
 const STORED_BY_CLASS: BalancedOutcome = BalancedOutcome {
     kind: BalancedKind::StoredByClass,
     sample_bytes: 0,
+    bwt_sample_bytes: 0,
 };
 
 impl BlockEncoder for BalancedEncoder {
@@ -608,7 +765,14 @@ impl BlockEncoder for BalancedEncoder {
             Some(c) => c,
             None => ZstdCore::build(self.zstd.config()).map_err(io_err)?,
         };
-        let r = balanced_block(&self.lzma, &mut core, class, self.sample_len, plain);
+        let r = balanced_block(
+            &self.lzma,
+            &mut core,
+            class,
+            self.sample_len,
+            bwt_for(self.bwt, class),
+            plain,
+        );
         self.zstd.return_core(core);
         let (encoded, outcome) = r?;
         self.bump(&outcome);
@@ -636,6 +800,7 @@ impl BlockEncoder for BalancedEncoder {
             class,
             lzma: self.lzma.clone(),
             sample_len: self.sample_len,
+            bwt: bwt_for(self.bwt, class),
             config: self.zstd.config().clone(),
             core,
         }))
@@ -744,7 +909,8 @@ mod tests {
             ..WriterOptions::default()
         };
         let mut out = Vec::new();
-        let mut w = Writer::new(&mut out, wopts).unwrap();
+        // Revision 1.3: a `[lzma, bwt]` graph needs minor 3.
+        let mut w = Writer::new_revision(&mut out, wopts, 3).unwrap();
         w.add_file("p.txt", Default::default(), 0, &mut &data[..])
             .unwrap();
         w.finish().unwrap();
@@ -753,6 +919,7 @@ mod tests {
 
     fn read_back(bytes: &[u8], limits: &Resources) -> Vec<u8> {
         let mut a = Archive::open(Cursor::new(bytes), limits).unwrap();
+        crate::register_full_reader(&mut a);
         let table = a.entry_table().unwrap();
         let e = table.table().unwrap().iter().next().unwrap().unwrap();
         let mut out = Vec::new();
@@ -776,6 +943,7 @@ mod tests {
         let (out, s) = write_one(
             &BalancedOptions {
                 dict_size: 1 << 24,
+                bwt: false,
                 ..BalancedOptions::default()
             },
             Class::Text,
@@ -820,7 +988,11 @@ mod tests {
     #[test]
     fn the_trial_picks_lzma_on_text_and_zstd_where_its_sample_is_smaller() {
         let text = logs(2, 1 << 20);
-        let opts = BalancedOptions::default();
+        // The plain candidates alone (the BWT stage has its own test).
+        let opts = BalancedOptions {
+            bwt: false,
+            ..BalancedOptions::default()
+        };
         let (_, s) = write_one(&opts, Class::Text, &text);
         assert_eq!((s.lzma_blocks, s.zstd_blocks), (1, 0));
         assert_eq!(s.sample_bytes, text.len() as u64);
@@ -831,6 +1003,7 @@ mod tests {
         let opts = BalancedOptions {
             dict_size: 4096,
             zstd_window_log: Some(20),
+            bwt: false,
             ..BalancedOptions::default()
         };
         let (out, s) = write_one(&opts, Class::Text, &repeated);
@@ -850,6 +1023,155 @@ mod tests {
         assert!(!zstd_wins(100, 100));
         assert!(!zstd_wins(100, 101));
         assert!(zstd_wins(100, 99));
+        // BWT only when strictly smaller than both; a tie with either keeps the plain rule.
+        assert_eq!(choose(100, 100, None), Candidate::Lzma);
+        assert_eq!(choose(100, 99, None), Candidate::Zstd);
+        assert_eq!(choose(100, 100, Some(99)), Candidate::Bwt);
+        assert_eq!(choose(100, 100, Some(100)), Candidate::Lzma);
+        assert_eq!(choose(100, 99, Some(99)), Candidate::Zstd);
+        assert_eq!(choose(100, 90, Some(95)), Candidate::Zstd);
+        assert_eq!(choose(90, 100, Some(95)), Candidate::Lzma);
+    }
+
+    /// The `[lzma, bwt]` encoding of a block decodes through the format's full reader, with
+    /// B = min(bwt_block, plain_len), the end marker, and the declared term.
+    #[test]
+    fn a_bwt_block_round_trips_through_the_formats_decoder() {
+        use lpk_codecs_bwt::layout::{input_len, memory_term};
+        let data = prose_seeded(11, 100_000);
+        let enc = LzmaEncoder::with_dict(1 << 24).unwrap();
+        for (bwt_block, b) in [(1u32 << 16, 1u32 << 16), (1 << 20, 100_000)] {
+            let e = enc.encode_bwt(&data, bwt_block).unwrap();
+            let steps = &e.graph.steps;
+            assert_eq!(steps.len(), 2);
+            assert_eq!(steps[0].primitive, PrimitiveId::Lzma);
+            assert_eq!(steps[1].primitive, PrimitiveId::Bwt);
+            assert_eq!(steps[1].params, b.to_le_bytes());
+            assert_eq!(e.resources.bwt_block, u64::from(b));
+            let i = input_len(data.len() as u64, u64::from(b));
+            let dict = u32::from_le_bytes(steps[0].params[..4].try_into().unwrap());
+            assert_eq!(u64::from(dict), i.next_power_of_two(), "dict_for(input)");
+            let lzma = i + crate::memory::lzma_decode_memory(dict, i);
+            assert_eq!(
+                e.memory,
+                memory_term(data.len() as u64, u64::from(b)).max(lzma)
+            );
+            assert!(e.bytes.len() < data.len() / 2);
+        }
+        // Through the Balanced encoder and the full reader.
+        let opts = BalancedOptions {
+            dict_size: 1 << 24,
+            bwt_block: 1 << 16,
+            ..BalancedOptions::default()
+        };
+        let (out, s) = write_one(&opts, Class::Text, &data);
+        assert_eq!(
+            (s.lzma_blocks, s.zstd_blocks, s.bwt_blocks),
+            (0, 0, 1),
+            "{s:?}"
+        );
+        assert_eq!(s.bwt_sample_bytes, data.len() as u64);
+        let mut a = Archive::open(Cursor::new(&out[..]), &Resources::default()).unwrap();
+        assert_eq!(a.header().version.minor, 3);
+        assert_eq!(a.index().envelope.max_bwt_block, 1 << 16);
+        crate::register_full_reader(&mut a);
+        let table = a.entry_table().unwrap();
+        let e = table.table().unwrap().iter().next().unwrap().unwrap();
+        let mut got = Vec::new();
+        a.extract(&e, &mut got).unwrap();
+        assert_eq!(got, data);
+    }
+
+    /// Synthetic text chooses BWT; binary data in a `Text`-hinted block (a repeated random
+    /// unit, where a match finder sees everything and a transform only runs of six) chooses a
+    /// plain candidate; with the stage off, or under any other hint, BWT is never tried.
+    #[test]
+    fn the_trial_chooses_bwt_on_text_and_a_plain_candidate_on_binary() {
+        let text = logs(12, 1 << 20);
+        let opts = BalancedOptions::default();
+        let (_, s) = write_one(&opts, Class::Text, &text);
+        assert_eq!(
+            (s.bwt_blocks, s.lzma_blocks + s.zstd_blocks),
+            (1, 0),
+            "{s:?}"
+        );
+        assert_eq!(s.bwt_sample_bytes, text.len() as u64);
+        let unit = random(40_000);
+        let binary: Vec<u8> = unit.iter().cycle().take(unit.len() * 6).copied().collect();
+        let (_, s) = write_one(&opts, Class::Text, &binary);
+        assert_eq!(
+            (s.bwt_blocks, s.lzma_blocks + s.zstd_blocks),
+            (0, 1),
+            "{s:?}"
+        );
+        assert_eq!(s.bwt_sample_bytes, binary.len() as u64, "tried, not chosen");
+        let off = BalancedOptions {
+            bwt: false,
+            ..BalancedOptions::default()
+        };
+        let (_, s) = write_one(&off, Class::Text, &text);
+        assert_eq!((s.bwt_blocks, s.bwt_sample_bytes, s.lzma_blocks), (0, 0, 1));
+        let (_, s) = write_one(&opts, Class::Other, &text);
+        assert_eq!((s.bwt_blocks, s.bwt_sample_bytes, s.lzma_blocks), (0, 0, 1));
+        // The stage's block is checked at construction.
+        for bwt_block in [0u32, DEFAULT_BWT_BLOCK + 1] {
+            let bad = BalancedOptions {
+                bwt_block,
+                ..BalancedOptions::default()
+            };
+            match BalancedEncoder::new(&bad) {
+                Err(CoreError::InvalidOption(m)) => assert!(m.contains("bwt_block"), "{m}"),
+                other => panic!("{other:?}"),
+            }
+            let bad_off = BalancedOptions { bwt: false, ..bad };
+            assert!(BalancedEncoder::new(&bad_off).is_ok(), "off: not checked");
+        }
+    }
+
+    /// Byte identity: text in several blocks, some of them BWT, at one block in flight and at
+    /// eight, with a sample shorter than the block (the stripes decide) and a BWT block
+    /// shorter than the block (several BWT blocks per step).
+    #[test]
+    fn bwt_archives_are_identical_at_one_and_eight_threads() {
+        let mut data = logs(13, 3 << 20);
+        data.extend_from_slice(&prose_seeded(14, 1 << 20));
+        let opts = BalancedOptions {
+            dict_size: 1 << 22,
+            sample_len: 1 << 16,
+            bwt_block: 1 << 18,
+            ..BalancedOptions::default()
+        };
+        let mut archives = Vec::new();
+        for threads in [1usize, 8] {
+            let (enc, h) = BalancedEncoder::new(&opts).unwrap();
+            h.set_hint(Class::Text, DictionaryKind::None);
+            let wopts = WriterOptions {
+                encoder: Box::new(enc),
+                chunk_size: 1 << 16,
+                block_size: 1 << 20,
+                encode_threads: threads,
+                ..WriterOptions::default()
+            };
+            let mut out = Vec::new();
+            let mut w = Writer::new_revision(&mut out, wopts, 3).unwrap();
+            w.add_file("p.txt", Default::default(), 0, &mut &data[..])
+                .unwrap();
+            let blocks = w.finish().unwrap().blocks;
+            let s = h.summary();
+            assert_eq!(blocks, 4);
+            assert!(s.bwt_blocks >= 1, "{s:?}");
+            assert_eq!(s.bwt_blocks + s.lzma_blocks + s.zstd_blocks, 4, "{s:?}");
+            let mut a = Archive::open(Cursor::new(&out[..]), &Resources::default()).unwrap();
+            crate::register_full_reader(&mut a);
+            let table = a.entry_table().unwrap();
+            let e = table.table().unwrap().iter().next().unwrap().unwrap();
+            let mut got = Vec::new();
+            a.extract(&e, &mut got).unwrap();
+            assert_eq!(got, data, "threads {threads}");
+            archives.push((out, s));
+        }
+        assert_eq!(archives[0].1, archives[1].1, "the summaries");
+        assert!(archives[0].0 == archives[1].0, "the archives differ");
     }
 
     #[test]
@@ -861,7 +1183,7 @@ mod tests {
         };
         let (out, s) = write_one(&opts, Class::Text, &data);
         assert_eq!(s.sample_bytes, 64 << 10);
-        assert_eq!(s.lzma_blocks + s.zstd_blocks, 1);
+        assert_eq!(s.lzma_blocks + s.zstd_blocks + s.bwt_blocks, 1);
         assert_eq!(read_back(&out, &Resources::default()), data);
     }
 
@@ -905,7 +1227,7 @@ mod tests {
                     ..WriterOptions::default()
                 };
                 let mut out = Vec::new();
-                let mut w = Writer::new(&mut out, wopts).unwrap();
+                let mut w = Writer::new_revision(&mut out, wopts, 3).unwrap();
                 w.add_file("p.txt", Default::default(), 0, &mut &data[..])
                     .unwrap();
                 let blocks = w.finish().unwrap().blocks;
@@ -948,9 +1270,10 @@ mod tests {
         assert_eq!(ws.entries, 4);
         // The prose-like and source clusters share one block (soft boundary); the random file
         // is stored, in a block of its own.
-        assert_eq!(s.lzma_blocks + s.zstd_blocks, 1, "{s:?}");
+        assert_eq!(s.lzma_blocks + s.zstd_blocks + s.bwt_blocks, 1, "{s:?}");
         assert_eq!(s.stored_by_class + s.stored_no_gain, 1, "{s:?}");
         let mut a = Archive::open(Cursor::new(&out[..]), &Resources::default()).unwrap();
+        crate::register_full_reader(&mut a);
         assert_eq!(a.index().blocks.len(), 2);
         let env = a.index().envelope;
         // The declared window is the dictionary used: the next power of two above the block.

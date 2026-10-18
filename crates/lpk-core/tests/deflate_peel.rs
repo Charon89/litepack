@@ -251,7 +251,8 @@ fn every_kind_round_trips_and_the_streams_are_partitioned() {
     let (bytes, s) = run(balanced(1), dir.path());
     let d = &s.peel.deflate;
     let a = open(&bytes, None);
-    assert_eq!(a.header().version.minor, 2);
+    // Revision 1.3: the Balanced tier's BWT stage is on by default.
+    assert_eq!(a.header().version.minor, 3);
     check(&bytes, dir.path(), None);
     assert_eq!(peeled_blocks(&bytes) as u64, d.outcomes.kept, "{d:?}");
     // The partition of reconstructed (design 3.3).
@@ -368,8 +369,20 @@ fn the_header_minor_follows_the_stages() {
         let (bytes, s) = run(p, dir.path());
         (open(&bytes, None).header().version.minor, s)
     };
-    assert_eq!(minor(balanced(1)).0, 2);
+    // Revision 1.3: 3 whenever the Balanced tier's BWT stage is on, whatever the peel.
+    assert_eq!(minor(balanced(1)).0, 3);
     let mut b = balanced(1);
+    b.deflate = None;
+    assert_eq!(minor(b).0, 3);
+    let no_bwt = || {
+        let mut b = balanced(1);
+        if let lpk_core::ModelStage::Balanced(o) = &mut b.model {
+            o.bwt = false;
+        }
+        b
+    };
+    assert_eq!(minor(no_bwt()).0, 2);
+    let mut b = no_bwt();
     b.deflate = None;
     assert_eq!(minor(b).0, 1);
     let fast = || {
@@ -460,7 +473,8 @@ fn an_append_to_a_revision_1_1_archive_runs_without_the_deflate_stage() {
     let v2 = tempfile::tempdir().unwrap();
     make_tree(v2.path());
     let s1 = balanced(1).append_file(v2.path(), &archive, None).unwrap();
-    assert_eq!(s1.peel.dropped_stages, ["deflate"]);
+    // The BWT stage (revision 1.3) is dropped too, named first.
+    assert_eq!(s1.peel.dropped_stages, ["bwt", "deflate"]);
     assert_eq!(s1.peel.deflate.outcomes.kept, 0);
     let bytes = std::fs::read(&archive).unwrap();
     assert_eq!(open(&bytes, None).header().version.minor, 1);
@@ -653,13 +667,20 @@ const PINNED_TREE: [(&str, &str); 2] = [
     ),
 ];
 
+/// The pins predate revision 1.3's BWT stage (which changes the header's minor and the text
+/// blocks): both pipelines run with it off, as the pinned archives were written.
 fn pinned_pipelines(threads: usize) -> [Pipeline; 2] {
     let mut d = Pipeline::balanced(BalancedOptions {
         threads: Some(threads),
+        bwt: false,
         ..BalancedOptions::default()
     });
     d.deflate = Some(DeflatePeel::default());
-    [balanced(threads), d]
+    let mut b = balanced(threads);
+    if let lpk_core::ModelStage::Balanced(o) = &mut b.model {
+        o.bwt = false;
+    }
+    [b, d]
 }
 
 #[test]

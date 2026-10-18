@@ -259,6 +259,12 @@ extract = []
 id = "balanced-no-deflate"
 compress = ["--balanced", "--deflate-peel", "off"]
 extract = []
+# The BWT stage's A/B (E2-15, revision 1.3): `balanced` carries the stage by default; this row
+# turns it off.
+[[tool.setting]]
+id = "balanced-no-bwt"
+compress = ["--balanced", "--bwt", "off"]
+extract = []
 [[tool.setting]]
 id = "store"
 compress = ["--store"]

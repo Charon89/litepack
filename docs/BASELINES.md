@@ -168,6 +168,11 @@ classes; the difference is what the extension order buys.
 before E2-10 (the build hash in the version separates the measurement eras). The two rows are
 measured in one run on the same classes; the difference is what the peel buys.
 
+`balanced-no-bwt` (`--balanced --bwt off`) is the A/B row of the BWT stage (E2-15, revision
+1.3): the same as `balanced` with the BWT stage turned off, which is what `balanced` was before
+E2-15's task D. The two rows are measured in one run on the same classes; the difference is what
+the stage buys on the text classes, and the rows' extraction times and peak memory what it costs.
+
 `fast-encrypted` (`--fast --password lpk-bench-password`, the same credential on extraction) is
 the sealed row of the encryption task (E2-12): the same as `fast` with the archive encrypted
 (AES-256-GCM, the format's default Argon2id parameters). The password is a fixed benchmark

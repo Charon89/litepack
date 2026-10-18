@@ -347,6 +347,10 @@ const STRONG_RESERVED: &str =
 const DICT_SIZE_BALANCED: &str =
     "the argument '--dict-size' requires the Balanced tier (--balanced or --tier balanced)";
 
+/// The refusal of `--bwt` under a tier other than Balanced (the Fast tier never uses it).
+const BWT_BALANCED: &str =
+    "the argument '--bwt' requires the Balanced tier (--balanced or --tier balanced)";
+
 /// The value of `--tier`: the long form of the tier flags, which the GUI mirrors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum TierArg {
@@ -437,6 +441,12 @@ struct TierArgs {
     /// --balanced, off with --fast. An append runs it only on a revision 1.2 archive.
     #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
     deflate_peel: Option<OnOff>,
+    /// The Balanced tier's BWT stage (revision 1.3): a block of text is also tried as a
+    /// Burrows-Wheeler transform followed by LZMA and written so when that is smaller. Default:
+    /// on with --balanced; the Fast tier never uses it. An append runs it only on a revision
+    /// 1.3 archive.
+    #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
+    bwt: Option<OnOff>,
 }
 
 impl TierArgs {
@@ -460,6 +470,9 @@ impl TierArgs {
         };
         if self.dict_size.is_some() && tier != Tier::Balanced {
             return Err(DICT_SIZE_BALANCED.to_string());
+        }
+        if self.bwt.is_some() && tier != Tier::Balanced {
+            return Err(BWT_BALANCED.to_string());
         }
         if self.tier.is_some() {
             let settings: &[(&str, bool)] = match tier {
@@ -728,6 +741,9 @@ fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
         if let Some(d) = a.dict_size {
             o.dict_size = d;
         }
+        if let Some(b) = a.bwt {
+            o.bwt = b == OnOff::On;
+        }
         Pipeline::balanced(o)
     } else {
         let mut o = FastOptions {
@@ -879,12 +895,14 @@ fn report(
     if let Some(b) = &s.balanced {
         let _ = writeln!(
             err,
-            "blocks: {} lzma, {} zstd, {} stored by class, {} stored without gain; trial sample bytes {}; encoder memory about {} bytes (approximate: liblzma LZMA2 encoder query at one thread, not measured)",
+            "blocks: {} lzma, {} zstd, {} bwt, {} stored by class, {} stored without gain; trial sample bytes {} (bwt candidate {}); encoder memory about {} bytes (approximate: liblzma LZMA2 encoder query at one thread, not measured)",
             b.lzma_blocks,
             b.zstd_blocks,
+            b.bwt_blocks,
             b.stored_by_class,
             b.stored_no_gain,
             b.sample_bytes,
+            b.bwt_sample_bytes,
             b.lzma_encoder_memory
         );
     }
@@ -930,7 +948,7 @@ fn report(
     if !p.dropped_stages.is_empty() {
         let _ = writeln!(
             err,
-            "append: peel stages not run, the archive's revision does not allow them: {}",
+            "append: stages not run, the archive's revision does not allow them: {}",
             p.dropped_stages.join(", ")
         );
     }
