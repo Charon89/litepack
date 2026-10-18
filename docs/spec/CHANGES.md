@@ -248,4 +248,5 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    `undecoded primitive` of task A and `bwt position`).
 7. The independent-decoder gate (D-49 item 5) is task E of E2-15: `lpk-check` adds the inverse, the layout, the
    checks, the term, the bound and its look-ahead from the text alone, with `--revision 0..3`; the revision is final
-   when it passes.
+   when it passes. Passed on 2026-10-18 (D-78 (8)): every outcome of `expected-1.3.toml` at revision 3, the
+   `UnimplementedPrimitive` 3 outcomes at revisions 0-2; its two points are item 3's R36 clarification.
