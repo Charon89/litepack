@@ -10,6 +10,7 @@ use crate::priors::MemoryPriors;
 use crate::recovery::{repair_with_credentials, RepairReport};
 use crate::trailer::TRAILER_FRAME_LEN;
 use clap::{Parser, Subcommand};
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -48,8 +49,10 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Debug, Subcommand)]
-enum Command {
+/// The tool's commands: what the command line names, and the typed form another
+/// program hands to [`run_with_credentials`].
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum Command {
     /// One line per entry: kind, size, path.
     List {
         /// The archive.
@@ -92,6 +95,36 @@ enum Command {
         /// The repaired copy; must not exist.
         out: PathBuf,
     },
+}
+
+impl Command {
+    /// The archive the command works on.
+    pub fn archive(&self) -> &Path {
+        match self {
+            Command::List { archive }
+            | Command::Verify { archive }
+            | Command::Extract { archive, .. }
+            | Command::Info { archive }
+            | Command::Check { archive }
+            | Command::Rollback { archive, .. }
+            | Command::Repair { archive, .. } => archive,
+        }
+    }
+}
+
+/// What [`run_with_credentials`] runs a [`Command`] with: the tool's global
+/// options as typed values. The credentials are borrowed from the caller (a
+/// value the format wipes on drop), never an argument string and never copied.
+#[derive(Debug, Default)]
+pub struct ToolOptions<'a> {
+    /// The prior files the archive may need (each matched by the BLAKE3 of its content).
+    pub priors: Vec<PathBuf>,
+    /// The decode memory limit (`Resources::memory`); `None` for the default.
+    pub memory: Option<u64>,
+    /// The credentials of an encrypted archive; `None` opens it keyless.
+    pub credentials: Option<&'a Credentials>,
+    /// Applied to every archive the tool opens, after the priors (a full reader's decoders).
+    pub hook: Option<OpenHook>,
 }
 
 const RESERVED: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
@@ -212,14 +245,30 @@ pub type OpenHook = fn(&mut Archive<File>);
 /// The key material the command line gave for an encrypted archive, and the
 /// hook every opened archive goes through.
 #[derive(Debug, Default)]
-struct Keys {
-    credentials: Option<Credentials>,
+struct Keys<'a> {
+    /// Owned when the command line read them, borrowed from the caller of
+    /// [`run_with_credentials`] (no copy of a password is made here).
+    credentials: Option<Cow<'a, Credentials>>,
     hook: Option<OpenHook>,
     /// The reader's limits (`--memory` sets the decode memory).
     resources: Resources,
 }
 
-fn credentials(cli: &mut Cli) -> Result<Keys, FormatError> {
+impl<'a> From<ToolOptions<'a>> for Keys<'a> {
+    fn from(o: ToolOptions<'a>) -> Self {
+        let mut resources = Resources::default();
+        if let Some(m) = o.memory {
+            resources.memory = m;
+        }
+        Keys {
+            credentials: o.credentials.map(Cow::Borrowed),
+            hook: o.hook,
+            resources,
+        }
+    }
+}
+
+fn credentials(cli: &mut Cli) -> Result<Keys<'static>, FormatError> {
     // The password string is moved out of the parsed arguments into a wiping
     // wrapper; the bytes handed on live in `Credentials`, which wipes them too.
     let given: Option<Zeroizing<String>> = cli.password.take().map(Zeroizing::new);
@@ -243,10 +292,10 @@ fn credentials(cli: &mut Cli) -> Result<Keys, FormatError> {
     };
     let credentials = match (password, keyfile) {
         (None, None) => None,
-        (p, keyfile) => Some(Credentials {
+        (p, keyfile) => Some(Cow::Owned(Credentials {
             password: p.unwrap_or_default(),
             keyfile,
-        }),
+        })),
     };
     let mut resources = Resources::default();
     if let Some(m) = cli.memory {
@@ -263,7 +312,7 @@ fn open(path: &Path, priors: &[PathBuf], keys: &Keys) -> Result<Archive<File>, F
     let mut a = Archive::open_with(
         File::open(path)?,
         &keys.resources,
-        keys.credentials.as_ref(),
+        keys.credentials.as_deref(),
     )?;
     if !priors.is_empty() {
         // The prior files are the caller's: named on the command line, each
@@ -385,7 +434,7 @@ fn repair_cmd(
         .write(true)
         .create_new(true)
         .open(target)?;
-    match repair_with_credentials(input, file, &keys.resources, keys.credentials.as_ref()) {
+    match repair_with_credentials(input, file, &keys.resources, keys.credentials.as_deref()) {
         // The copy carries the repairs that were possible; keep it.
         Ok((report, unrepairable)) => {
             print_report(out, &report)?;
@@ -576,12 +625,45 @@ where
             return 1;
         }
     };
-    let result = match &cli.command {
-        Command::List { archive } => list(archive, &cli.priors, &keys, out),
-        Command::Verify { archive } => verify(archive, &cli.priors, &keys, out),
-        Command::Extract { archive, dir } => extract(archive, dir, &cli.priors, &keys, out),
-        Command::Info { archive } => info(archive, &cli.priors, &keys, out),
-        Command::Check { archive } => check(archive, &keys, out),
+    match run_command(&cli.command, &cli.priors, &keys, out) {
+        Ok(()) => 0,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            1
+        }
+    }
+}
+
+/// Run one typed [`Command`] with typed [`ToolOptions`] and return the tool's
+/// own error: the entry for a program that already holds the credentials as a
+/// value (the `lpk` tool), so no password passes through an argument string
+/// and the caller classifies the [`FormatError`] itself. The tool's policy
+/// (extraction refusals, listing, verification, what is printed to `out`) is
+/// exactly that of [`run`]; the command line's credential reading and the exit
+/// codes are the caller's.
+pub fn run_with_credentials(
+    command: &Command,
+    options: ToolOptions<'_>,
+    out: &mut dyn Write,
+) -> Result<(), FormatError> {
+    let mut options = options;
+    let priors = std::mem::take(&mut options.priors);
+    let keys = Keys::from(options);
+    run_command(command, &priors, &keys, out)
+}
+
+fn run_command(
+    command: &Command,
+    priors: &[PathBuf],
+    keys: &Keys,
+    out: &mut dyn Write,
+) -> Result<(), FormatError> {
+    match command {
+        Command::List { archive } => list(archive, priors, keys, out),
+        Command::Verify { archive } => verify(archive, priors, keys, out),
+        Command::Extract { archive, dir } => extract(archive, dir, priors, keys, out),
+        Command::Info { archive } => info(archive, priors, keys, out),
+        Command::Check { archive } => check(archive, keys, out),
         Command::Rollback {
             archive,
             generation,
@@ -589,13 +671,6 @@ where
         Command::Repair {
             archive,
             out: target,
-        } => repair_cmd(archive, target, &keys, out),
-    };
-    match result {
-        Ok(()) => 0,
-        Err(e) => {
-            let _ = writeln!(err, "error: {e}");
-            1
-        }
+        } => repair_cmd(archive, target, keys, out),
     }
 }
