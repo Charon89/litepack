@@ -85,6 +85,18 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+/// E3-5: no output of a credential test carries the password's bytes (stdout and stderr,
+/// `-v` lines included).
+fn assert_no_secret(r: &Output, secret: &[u8]) {
+    for (name, bytes) in [("stdout", &r.stdout), ("stderr", &r.stderr)] {
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret),
+            "the password appears on {name}: {}",
+            text(bytes)
+        );
+    }
+}
+
 #[test]
 fn add_extract_test_round_trip_is_bit_exact() {
     let src = tempfile::tempdir().unwrap();
@@ -748,7 +760,7 @@ fn encrypted_round_trip_with_password_file_keyfile_and_listable() {
         msg.contains("encrypted: XChaCha20-Poly1305, listable"),
         "{msg}"
     );
-    assert!(!msg.contains("sesame"), "{msg}");
+    assert_no_secret(&a, b"open sesame");
     let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
     assert!(archive.is_encrypted() && archive.is_listable() && archive.is_keyless());
     assert_eq!(archive.suite(), Some(lpk_format::Suite::XChaCha));
@@ -776,6 +788,7 @@ fn encrypted_round_trip_with_password_file_keyfile_and_listable() {
         keyfile.to_str().unwrap(),
     ]);
     assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    assert_no_secret(&x, b"open sesame");
     assert_eq!(tree_hash(&out), tree_hash(src.path()));
     let t = run(&[
         "t",
@@ -787,6 +800,7 @@ fn encrypted_round_trip_with_password_file_keyfile_and_listable() {
     ]);
     assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
     assert!(text(&t.stdout).starts_with("ok: "), "{}", text(&t.stdout));
+    assert_no_secret(&t, b"open sesame");
 }
 
 #[test]
@@ -806,7 +820,7 @@ fn a_wrong_or_missing_password_leaves_no_output_and_is_never_echoed() {
     assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
     let msg = text(&a.stderr);
     assert!(msg.contains("encrypted: AES-256-GCM\n"), "{msg}");
-    assert!(!msg.contains("hunter"), "{msg}");
+    assert_no_secret(&a, b"hunter");
     let archive = Archive::open(fs::File::open(&arch).unwrap(), &Resources::default()).unwrap();
     assert!(archive.is_encrypted() && !archive.is_listable());
     assert_eq!(archive.suite(), Some(lpk_format::Suite::AesGcm));
@@ -820,12 +834,25 @@ fn a_wrong_or_missing_password_leaves_no_output_and_is_never_echoed() {
         assert!(!out.exists() && !out.parent().unwrap().exists());
         let err = text(&x.stderr);
         assert!(err.starts_with("error: "), "{err}");
-        assert!(!err.contains("hunter"), "{err}");
+        assert_no_secret(&x, b"hunter");
     }
-    // `t` with the wrong password is refused at the key slot too.
+    // `t` with the wrong password is refused at the key slot too, with the key slot's own
+    // error as the kind (E3-5: the reference tool's error reaches the tool typed).
     let t = run(&["t", arch.to_str().unwrap(), "--password", "hunter3"]);
     assert_eq!(t.status.code(), Some(2));
-    assert!(!text(&t.stderr).contains("hunter"));
+    assert_no_secret(&t, b"hunter");
+    let t = run(&[
+        "t",
+        arch.to_str().unwrap(),
+        "--password",
+        "hunter3",
+        "--json",
+    ]);
+    assert_eq!(t.status.code(), Some(2));
+    assert_no_secret(&t, b"hunter");
+    let e = json_error(&t);
+    assert_eq!(e["kind"], "WrongKey", "{e}");
+    assert_eq!(e["path"], arch.to_str().unwrap());
     // A missing password file is a failed operation, not a usage error.
     let gone = work.path().join("no-such-file");
     let x = run(&[
@@ -1660,14 +1687,14 @@ fn json_errors_are_one_object_line_and_text_errors_are_unchanged() {
         format!("error: {}\n", e["message"].as_str().unwrap())
     );
 
-    // The reference tool's commands: kind Reference, the archive as the path, the same
-    // message as the text line.
+    // The reference tool's commands (E3-5): the error's own variant as the kind, the archive
+    // as the path, the same message as the text line.
     let bad = v.join("malformed-hashflip.lpk");
     let bad = bad.to_str().unwrap();
     let r = run(&["t", bad, "--json"]);
     assert_eq!(r.status.code(), Some(2));
     let e = json_error(&r);
-    assert_eq!(e["kind"], "Reference");
+    assert_eq!(e["kind"], "HashMismatch");
     assert_eq!(e["path"], bad);
     assert_eq!(e["message"], "payload hash mismatch in frame kind 2");
     let plain = run(&["t", bad]);

@@ -21,7 +21,7 @@ LitePack archiver: create, extract and test .lpk archives
 
 **Usage:** `lpk [OPTIONS] <COMMAND>`
 
-Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure is one line on stderr, `error: <message>`; with --json it is one JSON object line instead: {"error":{"code":1|2,"kind":"<the error's variant name; Usage for a command-line error; Reference for a failure reported by the reference tool's code>","message":"...","path":"<the path the error names, else the archive>","entries":[{"path","kind","message"}, the per-entry errors of a partial extraction, when there are some]}}.
+Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure is one line on stderr, `error: <message>`; with --json it is one JSON object line instead: {"error":{"code":1|2,"kind":"<the error's variant name; Usage for a command-line error; UnneededKeyfile for a --keyfile the archive does not take>","message":"...","path":"<the path the error names, else the archive>","entries":[{"path","kind","message"}, the per-entry errors of a partial extraction, when there are some]}}. A password is asked for on the terminal only with --password-prompt, or when stdin and stderr are terminals and the archive needs one that was not given; never through a pipe.
 
 ###### **Subcommands:**
 
@@ -32,7 +32,7 @@ Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure
 * `check` — Hash the data shards the recovery frames cover and report the damage (exit 2 if any)
 * `repair` — Write a copy of an archive with its damaged shards rebuilt from the recovery frames
 * `append` — Append the contents of a directory to an archive as its next generation: a snapshot (paths the directory no longer has are removed), deduplicated against the archive's chunks. A failed append leaves the archive as it was
-* `rollback` — Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short
+* `rollback` — Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short. No key is needed: the credential flags, --password-prompt included, are accepted and ignored
 * `info` — Print an archive's header, envelope, counts and generations
 
 ###### **Options:**
@@ -88,9 +88,10 @@ Create an archive from the contents of a directory (not the directory itself)
 
   Possible values: `on`, `off`
 
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 * `--suite <SUITE>` — The cipher suite of an encrypted archive (default aes-256-gcm)
 
   Possible values: `aes-256-gcm`, `xchacha20-poly1305`
@@ -120,9 +121,10 @@ A sealed archive written with --listable lists without its key; one that was not
 ###### **Options:**
 
 * `--long` — Add the flags column and the symlink targets, after a first line with the archive's generation
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 
 
 
@@ -141,9 +143,10 @@ Extract every entry of an archive into a directory; an existing file is refused 
 
 * `--threads <N>` — The total thread budget, decoders plus file writers (default: the machine's logical cores; at most four times that). 1 decodes and writes on one thread; from 2 on, clamp(N/4, 1, 4) threads write files and the rest decode blocks, the decoders capped so that the extraction stays within its memory budget (see --memory)
 * `--prior <FILE>` — A prior file (for example a zstd dictionary) the archive needs; may be repeated
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 * `--memory <SIZE>` — The memory budget of the extraction, for example 512M or 2G or plain bytes; also the reader's decode memory limit (an archive whose envelope needs more is refused before anything is written). Default: half of the physical memory, at most the ceiling of the tier the archive's envelope shows: 1 GiB (stored blocks only), 2 GiB (Fast-sized blocks and windows) or 4 GiB (larger); the reader is then limited to half of the physical memory, at most 4 GiB. The decoders in flight are derived from the budget (shown with -v); a budget below what one block in flight needs is refused with that figure
 * `--overwrite <MODE>` — What an existing file at a target gets. refuse: the extraction is refused before any output (the default). skip: the file is left as it is and counted (`skipped <n> existing entries` on stderr; with --json one `{"summary":{...}}` line). rename: the entry is written beside it as `<stem> (<k>)<.ext>` with the smallest free k, and counted. replace: the file is replaced (a link at the target is removed as a link, never followed). A directory where a file goes, or a file where a directory goes, is refused in every mode but skip, which skips it (and everything below a skipped directory). Directories are created or reused whatever the mode
 
@@ -169,9 +172,10 @@ Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shar
 ###### **Options:**
 
 * `--prior <FILE>` — A prior file (for example a zstd dictionary) the archive needs; may be repeated
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 * `--memory <SIZE>` — The decode memory limit, as for `x`: an archive whose envelope needs more is refused
 
 
@@ -188,9 +192,10 @@ Hash the data shards the recovery frames cover and report the damage (exit 2 if 
 
 ###### **Options:**
 
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 
 
 
@@ -207,9 +212,10 @@ Write a copy of an archive with its damaged shards rebuilt from the recovery fra
 
 ###### **Options:**
 
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 
 
 
@@ -260,9 +266,10 @@ Append the contents of a directory to an archive as its next generation: a snaps
 
   Possible values: `on`, `off`
 
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 * `--recovery <PERCENT>` — Recovery records for the new generation as a percentage of its data, 0 (none, the default) to 20, as for `a`
 
   Default value: `0`
@@ -272,7 +279,7 @@ Append the contents of a directory to an archive as its next generation: a snaps
 
 ## `lpk rollback`
 
-Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short
+Truncate an archive to the end of an earlier generation (in place; `info` lists them). Also recovers an archive whose last append was cut short. No key is needed: the credential flags, --password-prompt included, are accepted and ignored
 
 **Usage:** `lpk rollback [OPTIONS] <ARCHIVE> <GENERATION>`
 
@@ -283,9 +290,10 @@ Truncate an archive to the end of an earlier generation (in place; `info` lists 
 
 ###### **Options:**
 
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 
 
 
@@ -302,9 +310,10 @@ Print an archive's header, envelope, counts and generations
 ###### **Options:**
 
 * `--prior <FILE>` — A prior file (for example a zstd dictionary) the archive needs; may be repeated
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 
 
 

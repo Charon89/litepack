@@ -282,9 +282,12 @@ fn unseal(
     })
 }
 
-/// Read the key slot frame that must follow the header; returns it parsed and
-/// the offset after it. Nothing beyond the key slot is read.
-fn read_key_slot<R: Read + Seek>(reader: &mut R) -> Result<(KeySlot, u64), FormatError> {
+/// Read the key slot frame that must follow the header of an encrypted archive
+/// (`MissingKeySlot` when none is there); returns it parsed and the offset
+/// after it. Nothing beyond the key slot is read, and nothing is derived from
+/// it: a program that wants to know what credentials the archive takes (its
+/// `keyfile_required`) reads this without opening the archive.
+pub fn read_key_slot<R: Read + Seek>(reader: &mut R) -> Result<(KeySlot, u64), FormatError> {
     reader.seek(SeekFrom::Start(Header::LEN as u64))?;
     let mut kind = [0u8; 2];
     match reader.read_exact(&mut kind) {
