@@ -925,8 +925,6 @@ pub struct Model {
     pub dedup_known: bool,
     pub classes: Vec<ClassView>,
     pub mixes: Vec<MixView>,
-    /// Rows of an earlier pooled directory replaced by a later one (`supersedes.toml`).
-    pub superseded: Vec<Superseded>,
 }
 
 impl Model {
@@ -1010,7 +1008,6 @@ impl Model {
             dedup_known,
             classes,
             mixes,
-            superseded: inputs.baseline.superseded.clone(),
         }
     }
 

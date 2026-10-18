@@ -2263,7 +2263,6 @@ fn a_listed_row_of_a_later_directory_replaces_the_earlier_one_and_the_report_say
         ("a/2026-10-01-testbox", a_row)
     );
     assert_eq!((e.by.as_str(), e.by_src), ("b/2026-10-01-testbox", b_row));
-    assert_eq!(Model::build(&inputs).superseded, base.superseded);
     let text = report_text(&inputs);
     assert!(text.contains("- Superseded rows"), "{text}");
     assert!(
@@ -2297,7 +2296,6 @@ fn without_a_supersedes_file_the_pooled_report_is_unchanged() {
     let b = dir_under(tmp.path(), "b", &second_results());
     let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
     assert!(inputs.baseline.superseded.is_empty());
-    assert!(Model::build(&inputs).superseded.is_empty());
     let text = report_text(&inputs);
     assert!(!text.contains("Superseded rows"), "{text}");
     assert!(!text.contains("supersedes.toml"), "{text}");
