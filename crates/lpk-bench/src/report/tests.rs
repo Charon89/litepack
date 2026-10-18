@@ -2286,7 +2286,21 @@ fn a_listed_row_of_a_later_directory_replaces_the_earlier_one_and_the_report_say
         .take_while(|l| !l.starts_with("## 3."))
         .find(|l| l.starts_with('|') && l.contains("mx5"))
         .expect("table row");
-    assert!(row.contains(&format!("[{b_row}]")) && !row.contains(&format!("[{a_row}]")));
+    // A cell's citations are one bracket list (`[2,7]`, runs written `2-4`), so read them as a set.
+    let cited: std::collections::BTreeSet<usize> = row
+        .split('[')
+        .skip(1)
+        .filter_map(|t| t.split(']').next())
+        .flat_map(|list| list.split(','))
+        .flat_map(|part| match part.split_once('-') {
+            Some((lo, hi)) => match (lo.trim().parse::<usize>(), hi.trim().parse::<usize>()) {
+                (Ok(lo), Ok(hi)) => (lo..=hi).collect::<Vec<_>>(),
+                _ => Vec::new(),
+            },
+            None => part.trim().parse::<usize>().into_iter().collect(),
+        })
+        .collect();
+    assert!(cited.contains(&b_row) && !cited.contains(&a_row), "{row}");
 }
 
 #[test]
