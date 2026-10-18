@@ -389,7 +389,9 @@ fn step_bound(
 /// `s`: the block's `plain_len` when it is the last step; otherwise the input bound the step
 /// after it gives, when that step gives one (its pre-checks run here), asked with the block's
 /// `plain_len` when that step is the last and `max_block_plain` otherwise; otherwise
-/// `max_block_plain`. The look-ahead goes no further.
+/// `max_block_plain`. The look-ahead goes no further. It is the rule of a reader of revision
+/// 1.3; a reader of revision 1.2 or below keeps that revision's rule (the bound of the
+/// pre-checks never derived from a later step: `max_block_plain` when `s` is not the last).
 fn own_bound(
     h: &BlockHeader<'_>,
     ctx: &DecodeCtx<'_>,
@@ -399,6 +401,9 @@ fn own_bound(
     let last_i = h.steps.len() - 1;
     if s == last_i {
         return Ok(h.plain_len);
+    }
+    if ctx.revision < 3 {
+        return Ok(ctx.max_block_plain);
     }
     let after = s + 1;
     let after_bound = if after == last_i {
@@ -668,5 +673,72 @@ mod tests {
         two.extend_from_slice(&f);
         assert_eq!(class(&two, 1399, false), "PayloadTooLarge");
         assert_eq!(class(&two, 1400, false), "ZstdError");
+    }
+
+    /// A `Recon` that records the (record id, bound, last) every record check is asked with and
+    /// answers with a record of `plain_len` 100 + id.
+    struct Asked(Vec<(u64, u64, bool)>);
+
+    impl Recon for Asked {
+        fn jpeg(&mut self, _: u64, _: &[u8], _: u64, _: bool) -> Result<Vec<u8>> {
+            Err(Error::new("Internal", "not asked"))
+        }
+        fn deflate_record(&mut self, id: u64, bound: u64, last: bool) -> Result<DeflateRecord> {
+            self.0.push((id, bound, last));
+            Ok(DeflateRecord {
+                original_len: 0,
+                plain_len: 100 + id,
+                corrections: Vec::new(),
+                original_hash: [0; 32],
+            })
+        }
+    }
+
+    /// The look-ahead (section 8, "Bounds") is the rule of a revision 1.3 reader: on
+    /// `[store, deflate-reconstruct 0, deflate-reconstruct 1]` the bound of step 0 is record 0's
+    /// `plain_len` either way, but record 0's own bound is record 1's `plain_len` (record 1
+    /// asked first, with the block's `plain_len`) at revision 3 and `max_block_plain` below it,
+    /// where record 1 is not asked before step 0; a `bwt` after `deflate-reconstruct` the same.
+    #[test]
+    fn look_ahead_is_gated_on_revision_3() {
+        let p = HashMap::new();
+        let h = BlockHeader {
+            steps: vec![
+                Prim::Store,
+                Prim::Deflate { record_id: 0 },
+                Prim::Deflate { record_id: 1 },
+            ],
+            bwt_block: 0,
+            plain_len: 7,
+            encoded: &[],
+            reconstruction: true,
+            record_ids: vec![0, 1],
+        };
+        let mut c3 = ctx(&p);
+        let mut asked = Asked(Vec::new());
+        assert_eq!(step_bound(&h, &c3, 0, &mut asked).unwrap(), 100);
+        assert_eq!(asked.0, vec![(1, 7, true), (0, 101, false)]);
+        c3.revision = 2;
+        let mut asked = Asked(Vec::new());
+        assert_eq!(step_bound(&h, &c3, 0, &mut asked).unwrap(), 100);
+        assert_eq!(asked.0, vec![(0, 1 << 20, false)]);
+        // `[store, deflate-reconstruct 0, bwt]`: step 0 is bounded by record 0's plain_len, and
+        // record 0 by I(plain_len, B) at revision 3, max_block_plain at revision 2.
+        let h = BlockHeader {
+            steps: vec![
+                Prim::Store,
+                Prim::Deflate { record_id: 0 },
+                Prim::Bwt { block_size: 16 },
+            ],
+            ..h
+        };
+        c3.revision = 3;
+        let mut asked = Asked(Vec::new());
+        assert_eq!(step_bound(&h, &c3, 0, &mut asked).unwrap(), 100);
+        assert_eq!(asked.0, vec![(0, crate::bwt::input_len(7, 16), false)]);
+        c3.revision = 2;
+        let mut asked = Asked(Vec::new());
+        assert_eq!(step_bound(&h, &c3, 0, &mut asked).unwrap(), 100);
+        assert_eq!(asked.0, vec![(0, 1 << 20, false)]);
     }
 }

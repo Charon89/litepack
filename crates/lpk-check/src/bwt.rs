@@ -121,10 +121,9 @@ pub fn decode(
 fn inverse(l: &[u8], indices: &[u32], out: &mut Vec<u8>) -> Result<()> {
     let n = l.len();
     let primary = indices[0] as usize;
-    let rows = n + 1;
-    let Ok(_) = u32::try_from(rows) else {
-        return Err(Error::new("Internal", "bwt block beyond the row table"));
-    };
+    // n + 1 rows: n is at most B (a u32), so every row fits a u32 (the LF table below); only an
+    // address space that cannot count the rows refuses, with `length` as check (4) says.
+    let rows = n.checked_add(1).ok_or_else(|| bwt_error("length"))?;
     // L with the sentinel at row `primary`: row i < primary reads l[i], row i > primary l[i - 1].
     let at = |i: usize| -> Option<u8> {
         match i.cmp(&primary) {
@@ -134,23 +133,24 @@ fn inverse(l: &[u8], indices: &[u32], out: &mut Vec<u8>) -> Result<()> {
         }
     };
     // C[c] = 1 + the number of transformed bytes below c.
-    let mut counts = [0u32; 256];
+    let mut counts = [0usize; 256];
     for &b in l {
         counts[usize::from(b)] += 1;
     }
-    let mut first = [0u32; 256];
-    let mut acc = 1u32;
+    let mut first = [0usize; 256];
+    let mut acc = 1usize;
     for (c, f) in first.iter_mut().enumerate() {
         *f = acc;
-        acc += counts[c];
+        acc = acc.saturating_add(counts[c]);
     }
-    // LF(i) = C[L[i]] + occurrences of L[i] in L[0..i); LF(primary) = 0.
+    // LF(i) = C[L[i]] + occurrences of L[i] in L[0..i); LF(primary) = 0. Every value is a row
+    // (at most n), so the table holds u32 entries: 4 bytes per byte of the block, as the term says.
     let mut lf = vec![0u32; rows];
-    let mut occ = [0u32; 256];
+    let mut occ = [0usize; 256];
     for (i, slot) in lf.iter_mut().enumerate() {
         if let Some(b) = at(i) {
             let bi = usize::from(b);
-            *slot = first[bi] + occ[bi];
+            *slot = u32::try_from(first[bi] + occ[bi]).map_err(|_| bwt_error("length"))?;
             occ[bi] += 1;
         }
     }

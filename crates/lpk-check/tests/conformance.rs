@@ -1081,6 +1081,13 @@ fn bwt_vectors_revision_1_3() {
             if name == BWT_INVERSE {
                 assert_eq!(e.detail, t["message"].as_str().unwrap(), "{name}");
             }
+            // The bound is I(16384, 4096) = 16904, the limit the reference's message ends with.
+            if name == BWT_BOUND {
+                let want = t["message"].as_str().unwrap();
+                let limit = &want[want.rfind("limit").unwrap()..];
+                assert_eq!(limit, "limit 16904");
+                assert!(e.detail.ends_with(limit), "{name}: {}", e.detail);
+            }
             let (code, out, err) = bin(&["verify".into(), path.clone()]);
             assert_eq!(code, 1, "{name}");
             assert!(
