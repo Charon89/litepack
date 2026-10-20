@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-20, about 03:35 UTC (2026-10-19, 23:35 local on the measuring machine). A measurement is running: E2-22's `lpk` rows on `full` (`target/acceptance/e2-22-lpk-full-status.log`, started 03:19 UTC); keep the machine idle until it says `== DONE`.
+Last updated: 2026-10-20, about 05:20 UTC. No measurement is running. **E2-22's `lpk` rows on `full` are done** (fast and balanced, 36 measured, 0 failed, every round trip verified; `bench/results/2026-10-20-megatron-2` on branch `task/e2-22-lpk-rows`, pushed). Next: `lpk-bench report` must compute the D-07/D-27/D-43 gates from these measured rows (today section 6 uses the Phase 0 probe estimates, G3 the probe's read rate, G4 the zstd/3 proxy), then the pooled report of the three directories, the gate table, its D-entry and the verdict input; PR #87 (E3-6, approved) merges when CI is green.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
