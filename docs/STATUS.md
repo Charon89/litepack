@@ -54,7 +54,10 @@ E3-8 is done (D-75, PR #77).
    with the prompt rules; open the archive before creating the output and refuse the archive itself as the
    output; a Zip64 margin for entries that grow; bit-exact checks of the peeled vectors and a 70,000-entry test;
    three small points): all done, the tests corrected after CI and the CLI reference taken from CI's generated
-   text; next a scoped re-review of the round and CI green, then merge.
+   text; the scoped re-review approved (two LOWs parked: the `--force --memory 1000` test hits the envelope
+   refusal, not the plan's, so add the 20000-byte case on `zstd-basic.lpk`; the help's "a panic leaves the
+   output in place" could say it may be a readable ZIP missing entries). Merge when CI is green on both runners
+   (the last push fixed the 7-Zip skip to read stderr), then tick E3-6 with a D-entry.
    E3-3 (progress, cancellation) and E3-4 (several inputs, selective extraction) can start now that PR #86 is merged; E3-9 re-runs the harness after E2-22.
    E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
    chunk in an appended generation is coded without its previous version in the window.
@@ -107,7 +110,7 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e3-6` (PR #87): E3-6, the review round done; re-review and CI next.
+- `task/e3-6` (PR #87): E3-6, re-review approved; merge when CI is green.
 - `task/e2-15-rows`: E2-15's results, report and tick (D-82).
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
