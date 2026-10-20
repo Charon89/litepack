@@ -170,7 +170,8 @@ fn seven_zip_round_trip(
         t.arg(pw);
     }
     let r = t.arg(archive).output().unwrap();
-    if r.status.code() != Some(0) && text(&r.stdout).contains("Unsupported Method") {
+    let said = format!("{}{}", text(&r.stdout), text(&r.stderr));
+    if r.status.code() != Some(0) && said.contains("Unsupported Method") {
         // An older 7-Zip (23.01 on the Linux runner) cannot read every method the writer
         // offers (zstd inside ZIP): recorded as a skip, as for a missing tool.
         eprintln!(
