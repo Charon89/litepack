@@ -902,16 +902,23 @@ mod tests {
 
     #[test]
     fn belady_evicts_the_block_used_farthest_away() {
-        // With two slots: 0, 1, then 2 evicts 1 (0 is used next), 0 hits, 1 misses.
+        // With two slots: 0 and 1 are cached; 2 is never used again, so it is dropped after
+        // its run and evicts nothing; 0 and 1 then hit (each its last use: dropped).
         let mut r = runs(&[0, 1, 2, 0, 1]);
         let misses = schedule(&mut r, 2);
-        assert_eq!(misses, [0, 1, 2, 1]);
-        // Block 2 is never used again: dropped after its run, nothing evicted for it.
+        assert_eq!(misses, [0, 1, 2]);
         assert_eq!(r[2].evict, None);
         assert!(r[2].last);
         assert!(r[3].hit && r[3].last);
-        assert_eq!(r[4].evict, None);
-        assert_eq!(replay(&r, 2), 4);
+        assert!(r[4].hit && r[4].last);
+        assert_eq!(replay(&r, 2), 3);
+        // With one slot the same sequence: 1 evicts 0 (used again at run 3), 2 is dropped,
+        // 0 and 1 miss again.
+        let mut r = runs(&[0, 1, 2, 0, 1]);
+        let misses = schedule(&mut r, 1);
+        assert_eq!(misses, [0, 1, 2, 0, 1]);
+        assert_eq!(r[1].evict, Some(0));
+        assert_eq!(replay(&r, 1), 5);
     }
 
     #[test]
@@ -932,14 +939,16 @@ mod tests {
 
     #[test]
     fn a_hit_refreshes_the_next_use_so_it_is_not_evicted_early() {
-        // Capacity 2: 0, 1, 0 (hit: 0's next use is now run 4), 2 must evict 1 (next use 5)
-        // rather than 0 (next use 4)? Belady evicts the farthest: 1 at 5. Then 0 hits, 1 misses.
+        // Capacity 2: 0, 1, then 0 hits (its next use moves to run 4); 2 is never used
+        // again, so it is dropped and evicts nothing; 0 and 1 hit on their last uses.
         let mut r = runs(&[0, 1, 0, 2, 0, 1]);
         let misses = schedule(&mut r, 2);
-        assert_eq!(misses, [0, 1, 2, 1]);
+        assert_eq!(misses, [0, 1, 2]);
+        assert!(r[2].hit && !r[2].last);
         assert_eq!(r[3].evict, None, "2 is last: not cached, nothing evicted");
-        assert!(r[4].hit);
-        assert_eq!(replay(&r, 2), 4);
+        assert!(r[4].hit && r[4].last);
+        assert!(r[5].hit && r[5].last);
+        assert_eq!(replay(&r, 2), 3);
         // With one slot: 0, 1 evicts 0, 0 evicts 1, 2 (last, dropped), 0 hit and last, 1 miss.
         let mut r = runs(&[0, 1, 0, 2, 0, 1]);
         let misses = schedule(&mut r, 1);

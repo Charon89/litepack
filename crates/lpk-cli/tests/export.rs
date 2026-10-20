@@ -316,7 +316,7 @@ fn zip_export_round_trips_with_every_method_and_the_external_tools() {
         let v = text(&r.stderr);
         assert!(v.contains(&format!("(ZIP, {method})")), "{v}");
         assert!(
-            v.contains("blocks decoded") && v.contains("the writer's own memory is not counted"),
+            v.contains("blocks decoded") && v.contains("not counted: the writer's own memory"),
             "{v}"
         );
         assert!(
@@ -863,6 +863,9 @@ fn refusals_and_usage_errors_exit_as_the_contract_says() {
         let xdir = work.path().join(format!("{v}.x"));
         let x = lpk(&["x", p.to_str().unwrap(), xdir.to_str().unwrap()]);
         assert_eq!(x.status.code(), Some(0), "{v}: {}", text(&x.stderr));
+        // `lpk x` creates the parents of every file; the archive's entry table may hold no
+        // directory entry for them (the vectors have none), so the parents implied by the
+        // paths are added on the archive side before the trees are compared.
         let want = tree(&xdir);
         let got: BTreeMap<String, Option<[u8; 32]>> = read_zip(&out, None)
             .into_iter()
@@ -874,6 +877,7 @@ fn refusals_and_usage_errors_exit_as_the_contract_says() {
                 }
             })
             .collect();
+        let got = with_implied_parents(got);
         assert_eq!(got, want, "{v}: the ZIP differs from lpk x");
         assert!(want.values().any(|h| h.is_some()), "{v}");
         unzip_test(&out);
@@ -898,9 +902,25 @@ fn refusals_and_usage_errors_exit_as_the_contract_says() {
             Ok(true)
         })
         .unwrap();
+        let got7 = with_implied_parents(got7);
         assert_eq!(got7, want, "{v}: the 7z differs from lpk x");
         seven_zip_round_trip(&out7, None, &want);
     }
+}
+
+/// `got` with every parent directory its paths imply added (as `lpk x` creates them).
+fn with_implied_parents(
+    got: BTreeMap<String, Option<[u8; 32]>>,
+) -> BTreeMap<String, Option<[u8; 32]>> {
+    let mut all = got.clone();
+    for name in got.keys() {
+        let mut parent = name.as_str();
+        while let Some(i) = parent.rfind('/') {
+            parent = &parent[..i];
+            all.entry(parent.to_string()).or_insert(None);
+        }
+    }
+    all
 }
 
 /// More entries than a ZIP's 16-bit count holds: 70,000 empty files, the central directory
