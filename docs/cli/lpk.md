@@ -325,7 +325,9 @@ Write every entry of an archive into a ZIP or a 7z file, chosen by the output's 
 
 ZIP: one entry per archive entry, Zip64 where an entry or the directory needs it, UTF-8 names, the modification time as DOS time and as the extended-timestamp field, a Unix mode with the executable flag and the DOS read-only, hidden and system bits; a symlink entry is a ZIP symlink (its target as the stored content); --method deflate (default), zstd (method 93) or store; --encrypt writes AES-256 (AE-2) entries with the archive's password.
 
-7z: one entry per archive entry, each in its own stream (an empty file as a stream-less entry); --method lzma2 (default), deflate or store (zstd inside 7z is a fork extension 7-Zip does not read: refused); --encrypt writes AES-256 with an encrypted header. Both writers run in process. An existing output is refused unless --force replaces it. A failed export removes the output.
+7z: one entry per archive entry, each in its own stream (an empty file as a stream-less entry); --method lzma2 (default), deflate or store (zstd inside 7z is a fork extension 7-Zip does not read: refused); --encrypt writes AES-256 with an encrypted header.
+
+Names are written as the archive stores them: the format's reader already refuses absolute paths and `..`; a colon, a device name or a trailing dot or space goes through as-is for the consumer's extractor to sanitise. Both writers run in process. The archive, its key slot and the plan are checked before the output exists; the output is refused when it is the archive itself, and when it exists unless --force replaces it (touched only once the export writes). A failed export removes the output; a panic leaves it in place. Outside the memory budget: the writer's directory, kept until the end (ZIP's central directory about 200 bytes plus the name per entry, 7z's entry table about 100 plus the name), and its compressor (Deflate under 1 MiB, zstd a few MiB, LZMA2 about eleven times its 16 MiB dictionary); -v prints the figures.
 
 **Usage:** `lpk export [OPTIONS] <ARCHIVE> <OUT>`
 
@@ -349,9 +351,10 @@ ZIP: one entry per archive entry, Zip64 where an entry or the directory needs it
 * `--force` — Replace an existing output file
 * `--threads <N>` — The thread budget: 1 decodes on the calling thread; from 2 on, N - 1 threads decode blocks ahead of the writer (capped by the memory budget), as for `x`
 * `--prior <FILE>` — A prior file (for example a zstd dictionary) the archive needs; may be repeated
-* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file
+* `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
-* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty)
+* `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
+* `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
 * `--memory <SIZE>` — The memory budget, as for `x`: the decoded blocks held at once (cached or in flight) are derived from it; the writer's own memory (its compressor) is outside the count
 * `-v`, `--verbose` — Print the plan's counts, the cache schedule's outcome and the memory terms to stderr
 
