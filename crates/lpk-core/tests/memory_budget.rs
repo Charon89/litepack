@@ -60,9 +60,32 @@ fn default_settings_fit_their_ceilings() {
             zstd_sample_window_log: window_for(b.dict_size.ilog2(), enc.stripe_len() as u64),
             zstd_level: b.zstd_level,
             zstd_window_log: window_for(b.dict_size.ilog2(), b.block_size),
+            bwt: None,
         },
         Some(b.jpeg_max_file),
     );
+    // Balanced with a `Text` cluster: the BWT stage's terms (revision 1.3, design section 4).
+    let balanced_bwt = ModelInputs {
+        encoder: match balanced.encoder {
+            EncoderMemory::Balanced {
+                lzma,
+                lzma_sample,
+                zstd_sample_window_log,
+                zstd_level,
+                zstd_window_log,
+                ..
+            } => EncoderMemory::Balanced {
+                lzma,
+                lzma_sample,
+                zstd_sample_window_log,
+                zstd_level,
+                zstd_window_log,
+                bwt: Some(enc.bwt_memory().unwrap()),
+            },
+            _ => unreachable!(),
+        },
+        ..balanced
+    };
     // Balanced with its default Deflate peel (design 3.2, note 3 of task D).
     let d = lpk_core::peel::deflate::DeflatePeel::default();
     let part = lpk_core::peel::deflate::PartEncoder::balanced(&b, d.plain_limit()).unwrap();
@@ -80,6 +103,11 @@ fn default_settings_fit_their_ceilings() {
         ("fast", fast, FAST_CEILING),
         ("balanced", balanced, BALANCED_CEILING),
         ("balanced+deflate", balanced_deflate, BALANCED_CEILING),
+        (
+            "balanced+bwt (a Text cluster)",
+            balanced_bwt,
+            BALANCED_CEILING,
+        ),
     ] {
         let p = m.plan(ceiling(c), 24).unwrap();
         println!(
@@ -304,7 +332,22 @@ fn balanced_envelope_follows_the_formula() {
     let e = envelope(&bytes);
     let p = e.max_block_plain;
     assert!(p > MIB / 2 && p <= MIB, "{p}");
-    if b.zstd_blocks == 0 {
+    if b.bwt_blocks > 0 {
+        // A `[lzma, bwt]` block declares the larger of section 8's term for its plain length
+        // and one BWT block (the block is shorter than the stage's 64 MiB) and the `lzma`
+        // step's own figure: above any plain block's figure, at most the term of the largest
+        // block (c(n) varies by a few indices).
+        let term = lpk_codecs_bwt::layout::memory_term(p, p);
+        assert!(
+            e.decode_memory > p + lzma_decode_memory(1 << 20, p)
+                && e.decode_memory <= p + term + 4 * 32,
+            "{e:?}"
+        );
+        assert!(
+            e.max_bwt_block >= 1 && e.max_bwt_block <= p,
+            "B = min(bwt_block, plain_len): {e:?}"
+        );
+    } else if b.zstd_blocks == 0 {
         assert_eq!(e.decode_memory, p + lzma_decode_memory(1 << 20, p));
     } else {
         // Both decoders keep at most the block as their window: between the allowance and the

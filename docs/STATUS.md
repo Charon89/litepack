@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-18, about 14:35 UTC (2026-10-18, 10:35 local on the measuring machine). No measurement is running; implementers build on this machine.
+Last updated: 2026-10-18, about 16:15 UTC (2026-10-18, 12:15 local on the measuring machine). The owner paused the session; no measurement and no agent is running.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -35,19 +35,27 @@ E3-8 is done (D-75, PR #77).
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Revision 1.3 (`docs/notes/e2-15-revision-1.3-design.md` section 6): tasks A and C are merged (PRs #73, #80;
-   D-78: `bwt` decoding, its text, vectors and fuzz targets). Running: task D (the pipeline writes `bwt`; its
-   release rows on `small`, `lpk/balanced` against `lpk/balanced-no-bwt` on every class, tick E2-15) and task E
-   (`lpk-check` from the text alone; the revision is final when it passes). `png-filter` stays out of 1.3: E2-16's
-   probe saves 3.03% of `photo-raw-png`'s `lpk/balanced` archive and its margin is the owner's (below); a yes
-   makes it revision 1.4. E2-17 closed as a negative result (D-76).
-3. E2-22: the incumbents' baseline on `full` is committed (`bench/results/2026-10-17-megatron-15`, with the
-   rows that overlapped local builds re-measured in `2026-10-18-megatron` and replaced through its
-   `supersedes.toml`, D-74; PR #78). Next: the `lpk` rows on the final engine (after task D), pooled with both
-   directories (same corpus, host and threads), then the gate table, its D-entry and the Phase 1 verdict input.
-   A measurement needs the machine idle: no agent builds or tests while it runs.
-4. E3: E3-1, E3-7 and E3-8 done (PRs #77, #81; D-75, D-77); E3-2 (the extraction policy module and the
-   overwrite modes) in review (PR #82); then E3-3, E3-4, E3-5, E3-6; E3-9 re-runs the harness after E2-22.
+2. Revision 1.3 is final (D-78 (8): tasks A, C and E merged, PRs #73, #80, #83, and the reference's look-ahead
+   correction R36, PR #84). Task D (the Balanced tier writes `[lzma, bwt]` on text) is in `main`, PR #86
+   (merged, D-81). Next, on the idle
+   machine, the rows that tick E2-15: a release build of `main`, a trimmed catalogue with `lpk`'s `balanced` and
+   `balanced-no-bwt` (as `target/acceptance/tools-e2-21.toml` trims to `fast` and `balanced`), `lpk-bench run
+   --tools lpk --profile small --catalogue <it>`, results committed, the report; tick when `lpk/balanced` is
+   smaller than `lpk/balanced-no-bwt` on `text-prose` and `logs-text`, with both rows' compress and extraction
+   times and peak memory, and run `lpk-check` over those two classes' archives. `png-filter` would be revision 1.4 if the owner accepts E2-16's margin (below). E2-17 closed
+   (D-76).
+3. E2-22: the incumbents' baseline on `full` is committed (`bench/results/2026-10-17-megatron-15` with the
+   re-measured `2026-10-18-megatron` and its `supersedes.toml`, D-74; PR #78). Next: the `lpk` rows
+   on the final engine (`fast` and `balanced` on `full`, a trimmed catalogue, a detached script with a status file
+   since it takes hours, the machine idle), pooled with both directories (same corpus, host and threads); then the
+   report's gate table, its D-entry and the Phase 1 verdict input. A measurement needs the machine idle: no agent
+   builds or tests while it runs.
+4. E3: E3-1, E3-2, E3-5, E3-7 and E3-8 done (D-75, D-77, D-79, D-80). E3-6 (`lpk export` to ZIP and 7z) is in
+   PR #87; its review asked for changes (ruling R39: merge `main` and route credentials through E3-5's `resolve`
+   with the prompt rules; open the archive before creating the output and refuse the archive itself as the
+   output; a Zip64 margin for entries that grow; bit-exact checks of the peeled vectors and a 70,000-entry test;
+   three small points); the implementer was stopped mid-round and its branch's last commit lists what remains.
+   E3-3 (progress, cancellation) and E3-4 (several inputs, selective extraction) can start now that PR #86 is merged; E3-9 re-runs the harness after E2-22.
    E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
    chunk in an appended generation is coded without its previous version in the window.
 5. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
@@ -99,8 +107,7 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e3-2` (PR #82): E3-2, a scoped re-review of its first fix round running.
-- `task/rev13-d`, `task/rev13-e`: revision 1.3 tasks D and E, being implemented.
+- `task/e3-6` (PR #87): E3-6, fix round R39 in progress (see "How to resume" 4).
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
 ## How to resume

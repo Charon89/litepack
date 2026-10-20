@@ -248,10 +248,21 @@ impl Pipeline {
         }
     }
 
-    /// Drop the peel stages the archive's revision `minor` does not allow (the Deflate stage
-    /// needs 2, the JPEG stage 1; design 3.8, amending D-56 (3)); the summary names them.
-    fn restrict_to_revision(&mut self, minor: u16) {
+    /// Drop the stages the archive's revision `minor` does not allow (the BWT stage needs 3,
+    /// the Deflate stage 2, the JPEG stage 1; design 3.8, amending D-56 (3)); the summary names
+    /// them. The BWT stage is turned off on the encoder `prepared` built from the options too.
+    fn restrict_to_revision(&mut self, prepared: &mut Prepared, minor: u16) {
         let mut dropped = Vec::new();
+        if minor < 3 {
+            if let (ModelStage::Balanced(o), Prepared::Balanced(e, _)) = (&mut self.model, prepared)
+            {
+                if o.bwt {
+                    o.bwt = false;
+                    e.disable_bwt();
+                    dropped.push("bwt");
+                }
+            }
+        }
         if minor < 2 && self.deflate.take().is_some() {
             dropped.push("deflate");
         }
@@ -309,8 +320,8 @@ impl Pipeline {
         out: W,
         credentials: Option<&Credentials>,
     ) -> Result<RunSummary, CoreError> {
-        let prepared = self.prepare()?;
-        self.restrict_to_revision(existing.header().version.minor);
+        let mut prepared = self.prepare()?;
+        self.restrict_to_revision(&mut prepared, existing.header().version.minor);
         let paths = old_paths(&mut existing)?;
         self.seal.base = base_inventory(&existing, &paths);
         let t = Instant::now();
@@ -348,7 +359,7 @@ impl Pipeline {
         archive_path: &Path,
         credentials: Option<&Credentials>,
     ) -> Result<RunSummary, CoreError> {
-        let prepared = self.prepare()?;
+        let mut prepared = self.prepare()?;
         let start = Instant::now();
         let io = |e| CoreError::io(archive_path, e);
         let mut existing = Archive::open_with(
@@ -359,7 +370,7 @@ impl Pipeline {
         if existing.is_keyless() {
             return Err(FormatError::AppendNeedsCredentials.into());
         }
-        self.restrict_to_revision(existing.header().version.minor);
+        self.restrict_to_revision(&mut prepared, existing.header().version.minor);
         let old_paths: Vec<String> = old_paths(&mut existing)?;
         self.seal.base = base_inventory(&existing, &old_paths);
         // The handle that cuts the file back: a plain write handle (an append-mode handle
@@ -465,6 +476,7 @@ impl Pipeline {
             ..
         } = self;
         let dropped = seal.dropped;
+        let bwt_on = matches!(&model, ModelStage::Balanced(o) if o.bwt);
         let mut wopts = seal.writer;
         let source = Source::new();
         let (files, path_bytes, input_bytes) = inventory(&inputs);
@@ -575,6 +587,7 @@ impl Pipeline {
                             let enc = EncoderMemory::Balanced {
                                 lzma: e.lzma_memory(),
                                 lzma_sample: e.lzma_sample_memory(),
+                                bwt: e.bwt_memory(),
                                 zstd_sample_window_log: window_for(
                                     o.zstd_window_log.unwrap_or(o.dict_size.ilog2()),
                                     e.stripe_len() as u64,
@@ -628,7 +641,14 @@ impl Pipeline {
                 }
                 wopts.block_size = block_size;
                 wopts.encoder = encoder;
-                let (enc, peel_cap, ceiling) = memory;
+                let (mut enc, peel_cap, ceiling) = memory;
+                // The BWT stage's terms count only when a `Text` cluster is present (as the
+                // Deflate stage's below, D-69 (4)): no other block runs the candidate.
+                if let EncoderMemory::Balanced { bwt, .. } = &mut enc {
+                    if !clusters.iter().any(|c| c.class == Class::Text) {
+                        *bwt = None;
+                    }
+                }
                 let (chunk_size, avg_chunk) = if fold.is_some() {
                     (
                         crate::fold::chunker::MAX_CHUNK as u64,
@@ -742,9 +762,12 @@ impl Pipeline {
                 wopts.threads_hint = model.threads_hint(ceiling);
                 let max_part = wopts.block_size;
                 // The header's version_minor is the revision this writer writes under (spec
-                // section 2), whether or not a stage peels: 2 whenever the Deflate peel is
-                // enabled, else 1 whenever a peel stage is, else 0.
-                let minor = if deflate.is_some() {
+                // section 2), whether or not a stage peels or a block uses `bwt`: 3 whenever
+                // the Balanced tier's BWT stage is enabled (the header precedes every block),
+                // else 2 whenever the Deflate peel is, else 1 whenever a peel stage is, else 0.
+                let minor = if bwt_on {
+                    3
+                } else if deflate.is_some() {
                     2
                 } else if peel.is_empty() {
                     0

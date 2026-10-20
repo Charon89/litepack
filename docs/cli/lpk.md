@@ -86,6 +86,10 @@ Create an archive from the contents of a directory (not the directory itself)
 
   Possible values: `on`, `off`
 
+* `--bwt <ON|OFF>` — The Balanced tier's BWT stage (revision 1.3): a block of text is also tried as a Burrows-Wheeler transform followed by LZMA and written so when that is smaller. Default: on with --balanced; the Fast tier never uses it. An append runs it only on a revision 1.3 archive
+
+  Possible values: `on`, `off`
+
 * `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
@@ -257,6 +261,10 @@ Append the contents of a directory to an archive as its next generation: a snaps
   Possible values: `none`, `extension`
 
 * `--deflate-peel <ON|OFF>` — The Deflate peel: Deflate streams inside ZIP, Office, JAR, PNG, gzip and PDF files (and zlib streams found in other binary files) stored as their plain text plus a reconstruction record that restores them bit for bit (revision 1.2). Default: on with --balanced, off with --fast. An append runs it only on a revision 1.2 archive
+
+  Possible values: `on`, `off`
+
+* `--bwt <ON|OFF>` — The Balanced tier's BWT stage (revision 1.3): a block of text is also tried as a Burrows-Wheeler transform followed by LZMA and written so when that is smaller. Default: on with --balanced; the Fast tier never uses it. An append runs it only on a revision 1.3 archive
 
   Possible values: `on`, `off`
 

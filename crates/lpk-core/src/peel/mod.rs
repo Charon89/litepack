@@ -152,8 +152,8 @@ pub struct PeelSummary {
     pub fallbacks: [Count; Fallback::ALL.len()],
     /// What the Deflate peel did (empty when it is off).
     pub deflate: deflate::DeflateSummary,
-    /// Peel stages an append did not run because the archive's revision does not allow them
-    /// (`"deflate"` below minor 2, `"jpeg"` below minor 1; design 3.8).
+    /// Stages an append did not run because the archive's revision does not allow them
+    /// (`"bwt"` below minor 3, `"deflate"` below minor 2, `"jpeg"` below minor 1; design 3.8).
     pub dropped_stages: Vec<&'static str>,
 }
 
