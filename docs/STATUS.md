@@ -111,7 +111,6 @@ E3-8 is done (D-75, PR #77).
 
 ## Branches in flight
 - `task/e3-6` (PR #87): E3-6, re-review approved; merge when CI is green.
-- `task/e2-15-rows`: E2-15's results, report and tick (D-82).
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
 ## How to resume
