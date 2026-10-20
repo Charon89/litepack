@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-20, about 03:45 UTC (2026-10-19, 23:45 local). **The current resume steps are in PR #88 (`task/e2-15-rows`): merge it first.** A measurement is running: E2-22's `lpk` rows on `full` (`target/acceptance/e2-22-lpk-full-status.log`, started 03:19 UTC); keep the machine idle until `== DONE`.
+Last updated: 2026-10-20, about 03:35 UTC (2026-10-19, 23:35 local on the measuring machine). A measurement is running: E2-22's `lpk` rows on `full` (`target/acceptance/e2-22-lpk-full-status.log`, started 03:19 UTC); keep the machine idle until it says `== DONE`.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -35,26 +35,29 @@ E3-8 is done (D-75, PR #77).
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Revision 1.3 is final (D-78 (8): tasks A, C and E merged, PRs #73, #80, #83, and the reference's look-ahead
-   correction R36, PR #84). Task D (the Balanced tier writes `[lzma, bwt]` on text) is in `main`, PR #86
-   (merged, D-81). Next, on the idle
-   machine, the rows that tick E2-15: a release build of `main`, a trimmed catalogue with `lpk`'s `balanced` and
-   `balanced-no-bwt` (as `target/acceptance/tools-e2-21.toml` trims to `fast` and `balanced`), `lpk-bench run
-   --tools lpk --profile small --catalogue <it>`, results committed, the report; tick when `lpk/balanced` is
-   smaller than `lpk/balanced-no-bwt` on `text-prose` and `logs-text`, with both rows' compress and extraction
-   times and peak memory, and run `lpk-check` over those two classes' archives. `png-filter` would be revision 1.4 if the owner accepts E2-16's margin (below). E2-17 closed
-   (D-76).
+2. Revision 1.3 is final (D-78 (8)) and the Balanced tier writes it (D-81); E2-15 is done (D-82: on `small`,
+   2.36% smaller on `text-prose`, 9.35% on `logs-text`; extraction slower; `lpk-check` clean on both). **Open:**
+   in that run `lpk/balanced/office-pdf` failed one round trip (two files different; the class has no `bwt`
+   block and its archive does not vary), and twelve later round trips on the same build passed
+   (`bench/results/2026-10-20-megatron-3`). Next: a stress loop of `lpk x` on that archive at 24 threads, and a
+   runner option that keeps the archive and the tree of a failed verification for diagnosis. `png-filter` would
+   be revision 1.4 if the owner accepts E2-16's margin (below). E2-17 closed (D-76).
 3. E2-22: the incumbents' baseline on `full` is committed (`bench/results/2026-10-17-megatron-15` with the
-   re-measured `2026-10-18-megatron` and its `supersedes.toml`, D-74; PR #78). Next: the `lpk` rows
-   on the final engine (`fast` and `balanced` on `full`, a trimmed catalogue, a detached script with a status file
-   since it takes hours, the machine idle), pooled with both directories (same corpus, host and threads); then the
-   report's gate table, its D-entry and the Phase 1 verdict input. A measurement needs the machine idle: no agent
-   builds or tests while it runs.
+   re-measured `2026-10-18-megatron` and its `supersedes.toml`, D-74). The `lpk` rows (`fast`, `balanced`) on
+   the final engine are running (`target/acceptance/e2-22-lpk-full.sh`, started 2026-10-20 03:19 UTC, several
+   hours; the build `a9c9c60` of revision 1.3 with task D). When the status log says `== DONE`: validate,
+   commit the directory, the pooled report of the three directories (same corpus, host and threads), the gate
+   table, its D-entry and the Phase 1 verdict input. A failed round trip, if the office-pdf one recurs, is
+   recorded per combination and must be explained before those rows count.
 4. E3: E3-1, E3-2, E3-5, E3-7 and E3-8 done (D-75, D-77, D-79, D-80). E3-6 (`lpk export` to ZIP and 7z) is in
    PR #87; its review asked for changes (ruling R39: merge `main` and route credentials through E3-5's `resolve`
    with the prompt rules; open the archive before creating the output and refuse the archive itself as the
    output; a Zip64 margin for entries that grow; bit-exact checks of the peeled vectors and a 70,000-entry test;
-   three small points); the implementer was stopped mid-round and its branch's last commit lists what remains.
+   three small points): all done, the tests corrected after CI and the CLI reference taken from CI's generated
+   text; the scoped re-review approved (two LOWs parked: the `--force --memory 1000` test hits the envelope
+   refusal, not the plan's, so add the 20000-byte case on `zstd-basic.lpk`; the help's "a panic leaves the
+   output in place" could say it may be a readable ZIP missing entries). Merge when CI is green on both runners
+   (the last push fixed the 7-Zip skip to read stderr), then tick E3-6 with a D-entry.
    E3-3 (progress, cancellation) and E3-4 (several inputs, selective extraction) can start now that PR #86 is merged; E3-9 re-runs the harness after E2-22.
    E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
    chunk in an appended generation is coded without its previous version in the window.
@@ -107,7 +110,8 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e3-6` (PR #87): E3-6, fix round R39 in progress (see "How to resume" 4).
+- `task/e3-6` (PR #87): E3-6, re-review approved; merge when CI is green.
+- `task/e2-15-rows`: E2-15's results, report and tick (D-82).
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
 ## How to resume

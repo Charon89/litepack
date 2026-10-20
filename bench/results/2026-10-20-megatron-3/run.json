@@ -1,0 +1,40 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "dd03c9d4288ba8d1db32f05db0e7c4f7176d19eeb954dae6dce410a482743f64",
+  "classes": [
+    "office-pdf"
+  ],
+  "combinations": [
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "balanced-no-bwt",
+      "tool": "lpk"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 100000,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}
