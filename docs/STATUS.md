@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-18, about 16:15 UTC (2026-10-18, 12:15 local on the measuring machine). The owner paused the session; no measurement and no agent is running.
+Last updated: 2026-10-20, about 03:45 UTC (2026-10-19, 23:45 local). **The current resume steps are in PR #88 (`task/e2-15-rows`): merge it first.** A measurement is running: E2-22's `lpk` rows on `full` (`target/acceptance/e2-22-lpk-full-status.log`, started 03:19 UTC); keep the machine idle until `== DONE`.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
