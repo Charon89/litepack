@@ -912,13 +912,15 @@ mod tests {
         assert!(r[3].hit && r[3].last);
         assert!(r[4].hit && r[4].last);
         assert_eq!(replay(&r, 2), 3);
-        // With one slot the same sequence: 1 evicts 0 (used again at run 3), 2 is dropped,
-        // 0 and 1 miss again.
+        // With one slot the same sequence: block 1 is held while its run is written, so it
+        // evicts 0 (used again at run 3); 2 is dropped after its run; 0 misses again (its last
+        // use: dropped) and 1 hits.
         let mut r = runs(&[0, 1, 2, 0, 1]);
         let misses = schedule(&mut r, 1);
-        assert_eq!(misses, [0, 1, 2, 0, 1]);
+        assert_eq!(misses, [0, 1, 2, 0]);
         assert_eq!(r[1].evict, Some(0));
-        assert_eq!(replay(&r, 1), 5);
+        assert!(r[4].hit && r[4].last);
+        assert_eq!(replay(&r, 1), 4);
     }
 
     #[test]
