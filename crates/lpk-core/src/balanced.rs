@@ -828,7 +828,8 @@ pub fn archive_balanced(
 
 /// Like [`archive_balanced`], writing to a new file at `archive_path` with the guarantees of
 /// `archive_store_file`: create-new, the output left out of its own archive, data synced before
-/// the trailer, a failed write removes the file; options are validated before the file exists.
+/// the trailer, a failed write (an error, or a panic, which is re-raised) removes the file;
+/// options are validated before the file exists.
 pub fn archive_balanced_file(
     root: &Path,
     archive_path: &Path,
