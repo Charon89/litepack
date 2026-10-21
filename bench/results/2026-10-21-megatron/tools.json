@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "store",
+      "local_override": false,
+      "manual": false,
+      "name": "tar (store, control)",
+      "status": "found",
+      "version": "bsdtar 3.8.9"
+    },
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "lpk",
+      "local_override": false,
+      "manual": false,
+      "name": "LitePack",
+      "status": "found",
+      "version": "0.0.1+a9c9c60d397d"
+    }
+  ]
+}

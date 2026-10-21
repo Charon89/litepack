@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-20, about 05:20 UTC. No measurement is running. **E2-22's `lpk` rows on `full` are done** (fast and balanced, 36 measured, 0 failed, every round trip verified; `bench/results/2026-10-20-megatron-2` on branch `task/e2-22-lpk-rows`, pushed). Next: `lpk-bench report` must compute the D-07/D-27/D-43 gates from these measured rows (today section 6 uses the Phase 0 probe estimates, G3 the probe's read rate, G4 the zstd/3 proxy), then the pooled report of the three directories, the gate table, its D-entry and the verdict input; PR #87 (E3-6, approved) merges when CI is green.
+Last updated: 2026-10-21, about 22:30 UTC. No measurement is running. **E2-22 is done: the Phase 1 verdict input is D-85** (`bench/reports/phase1-2026-10-21-full-gates.md`): G1 PASS; G2, G3, G4 FAIL. The owner's decisions on the FAILs are the first item below.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -35,21 +35,21 @@ E3-8 is done (D-75, PR #77).
 
 **How to resume (in this order).**
 1. `git pull --ff-only`; read this file and `docs/PLAN.md`'s Phase 1 list.
-2. Revision 1.3 is final (D-78 (8)) and the Balanced tier writes it (D-81); E2-15 is done (D-82: on `small`,
-   2.36% smaller on `text-prose`, 9.35% on `logs-text`; extraction slower; `lpk-check` clean on both). **Open:**
-   in that run `lpk/balanced/office-pdf` failed one round trip (two files different; the class has no `bwt`
-   block and its archive does not vary), and twelve later round trips on the same build passed
-   (`bench/results/2026-10-20-megatron-3`). Next: a stress loop of `lpk x` on that archive at 24 threads, and a
-   runner option that keeps the archive and the tree of a failed verification for diagnosis. `png-filter` would
-   be revision 1.4 if the owner accepts E2-16's margin (below). E2-17 closed (D-76).
-3. E2-22: the incumbents' baseline on `full` is committed (`bench/results/2026-10-17-megatron-15` with the
-   re-measured `2026-10-18-megatron` and its `supersedes.toml`, D-74). The `lpk` rows (`fast`, `balanced`) on
-   the final engine are running (`target/acceptance/e2-22-lpk-full.sh`, started 2026-10-20 03:19 UTC, several
-   hours; the build `a9c9c60` of revision 1.3 with task D). When the status log says `== DONE`: validate,
-   commit the directory, the pooled report of the three directories (same corpus, host and threads), the gate
-   table, its D-entry and the Phase 1 verdict input. A failed round trip, if the office-pdf one recurs, is
-   recorded per combination and must be explained before those rows count.
-4. E3: E3-1, E3-2, E3-5, E3-7 and E3-8 done (D-75, D-77, D-79, D-80). E3-6 (`lpk export` to ZIP and 7z) is in
+2. Revision 1.3 is final (D-78 (8)), the Balanced tier writes it (D-81) and E2-15 is done (D-82). **Open:** the
+   one failed round trip of 2026-10-20 (`lpk/balanced/office-pdf`, two files different; 52 later round trips
+   clean, 40 of them a stress loop at 24 threads). The runner now keeps a failed verification's archive and
+   tree and records each difference's kind (D-86, PR #90), so the next occurrence is diagnosable; no cause yet.
+   `png-filter` would be revision 1.4 if the owner accepts E2-16's margin (below). E2-17 closed (D-76).
+3. E2-22 is done (D-85). The `lpk` rows (`bench/results/2026-10-20-megatron-2`) and the single-run G3 row
+   (`2026-10-21-megatron`) are committed with the report. The report's gate table comes from `lpk-bench report`'s
+   Phase 1 form (PR #89: measured `lpk` rows; G3 names each row's run). What follows depends on the owner's
+   decisions above; a re-measurement after any engine change is one detached run of `lpk` on `full` plus the
+   same-run G3 script (`target/acceptance/e2-22-lpk-full.sh`, `e2-22-g3.sh`), pooled with the committed
+   incumbents' baseline. A measurement needs the machine idle: no agent builds or tests while it runs.
+4. E3: E3-1, E3-2, E3-5, E3-6, E3-7 and E3-8 done (D-75, D-77, D-79, D-80, D-84). Next E3-3 (progress,
+   cancellation) and E3-4 (several inputs, selective extraction); E3-9 re-runs the harness after the owner's
+   gate decisions. E2-9 (deltas) waits for two things from the owner (below); D-59 and G2 add reasons to
+   want it. (The lines below about E3-6 are history.)
    PR #87; its review asked for changes (ruling R39: merge `main` and route credentials through E3-5's `resolve`
    with the prompt rules; open the archive before creating the output and refuse the archive itself as the
    output; a Zip64 margin for entries that grow; bit-exact checks of the peeled vectors and a 70,000-entry test;
@@ -75,6 +75,19 @@ E3-8 is done (D-75, PR #77).
    tests pushed branches.
 
 **Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16, one for revision 1.3, one for E2-17 and the E4–E9 decisions added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
+- **The Phase 1 gates (D-85, the verdict input).** G1 holds (photographs and documents: 84.5% of the best
+  incumbent, 81.9% of 7-Zip Ultra). G2 fails: on the versioned set `lpk/balanced` is 137.6% of 7-Zip Ultra,
+  because 7-Zip's `-mqs` sorts a file's versions next to each other inside its window (D-43's premise does not
+  hold against it) and `lpk` codes a changed file whole (E2-9, the delta stage, is not built; E2-8's ordering
+  keeps versions 500 MB apart). G3 fails at 74.2% of the store control in one run (E2-18 had met it at 88.3%
+  against a slower control; `lpk/fast` is the same in every run): the store path needs about 8% more throughput.
+  G4 fails on the `photo-doc` mix only (`photo-jpeg` extracts at 136 MB/s against 7-Zip's 1427 MB/s copy of a
+  stored JPEG: Lepton decoding buys G1's 22%) and passes on `developer` and `video-heavy`. The gates are yours:
+  for each FAIL, say whether the work is done (G2: E2-9 deltas plus an ordering that puts a file's versions
+  together, then re-measure; G3: a store-path round on the cut and the hashing, or a gate re-stated against a
+  control measured in the same run with repeats; G4: a Fast tier without the JPEG peel, a faster Lepton decode,
+  or the gate kept as a known trade), the gate re-stated, or the threshold changed. Nothing in E3 to E9 waits
+  on this; E2-9 does.
 - **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
   (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
   consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
