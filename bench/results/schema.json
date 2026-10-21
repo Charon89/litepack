@@ -84,7 +84,26 @@
       "properties": {
         "verified": { "type": "boolean", "description": "True when every file of the class was extracted and its BLAKE3 hash matched (files_ok = files_checked = corpus.class_files)." },
         "files_checked": { "$ref": "#/$defs/count", "description": "Number of files compared, a count." },
-        "files_ok": { "$ref": "#/$defs/count", "description": "Number of files whose hash matched, a count." }
+        "files_ok": { "$ref": "#/$defs/count", "description": "Number of files whose hash matched, a count." },
+        "differences": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/difference" },
+          "description": "The differing files of a failed verification, up to the first 20 in the order missing, size or content, extra. Absent when verified and in result files written before the field existed."
+        }
+      }
+    },
+    "difference": {
+      "type": "object",
+      "description": "One differing file of a failed verification.",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["missing", "extra", "size", "content"], "description": "missing: a manifest file the extraction lacks; extra: an entry the manifest does not list; size: present with another size; content: present with the manifest's size but another BLAKE3." },
+        "path": { "$ref": "#/$defs/text", "description": "The path in the extracted tree (`/` separators). Absent for a private corpus." },
+        "manifest_index": { "$ref": "#/$defs/count", "description": "Private corpus: the position of the expected file in the class's manifest list (absent for an extra file)." },
+        "expected_bytes": { "$ref": "#/$defs/count", "description": "The manifest's size (absent for an extra file)." },
+        "actual_bytes": { "$ref": "#/$defs/count", "description": "The extracted file's size (absent for a missing file or an unreadable entry)." }
       }
     },
     "tool_ref": {
@@ -203,7 +222,8 @@
         "step": { "enum": ["compress", "extract", "verify"], "description": "The step that failed." },
         "repeat": { "type": "integer", "minimum": 1, "description": "The repeat that failed, counting from 1." },
         "timed_out": { "type": "boolean", "description": "True when the failing step hit the timeout and the process tree was killed." },
-        "descendants_killed": { "type": "boolean", "description": "True when processes started by the failing step were still running when it exited and were killed." }
+        "descendants_killed": { "type": "boolean", "description": "True when processes started by the failing step were still running when it exited and were killed." },
+        "evidence_dir": { "$ref": "#/$defs/text", "description": "Where the runner kept the failing repeat's archive and extracted tree, relative to the run's temporary directory (--tmp): failed/<results dir>/<tool>-<setting>-<class>-r<repeat>. Only for a verification failure with --keep-failed on (the default); absent otherwise and in result files written before the field existed." }
       }
     },
     "tool_entry": {

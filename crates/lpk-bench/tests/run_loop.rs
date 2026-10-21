@@ -67,6 +67,18 @@ id = "orphan"
 compress = ["--mode=orphan"]
 
 [[tool]]
+id = "fake-broken"
+name = "fake archiver, broken extraction"
+version = { args = ["version"], pattern = 'fake-archiver (\d+\.\d+)' }
+extension = ".fk"
+mode = "directory"
+create = ["create", "{archive}", "{input}"]
+extract = ["extract", "--mode=broken", "{archive}", "{outdir}"]
+licence = "test"
+[[tool.setting]]
+id = "b"
+
+[[tool]]
 id = "fake-env"
 name = "fake archiver, environment check"
 version = { args = ["version"], pattern = 'fake-archiver (\d+\.\d+)' }
@@ -254,7 +266,9 @@ fn command(e: &Env) -> Command {
         .arg("--tmp")
         .arg(&e.work)
         // The suite must not wait for the file system to settle (a later value overrides this).
-        .args(["--settle-ms-per-1000-files", "0"]);
+        .args(["--settle-ms-per-1000-files", "0"])
+        // Nor leave the evidence of its deliberate failures behind (a later value overrides this).
+        .args(["--keep-failed", "off"]);
     c
 }
 
@@ -561,6 +575,129 @@ fn failures_are_recorded_with_their_reason_and_do_not_stop_the_run() {
             .unwrap()
             .contains("still running"),
         "{r}"
+    );
+    assert_tmp_clean(&e);
+}
+
+/// The four kinds of difference, recorded in the result, and the evidence kept under
+/// `<tmp>/failed/<results dir>/<tool>-<setting>-<class>-r<repeat>/`.
+#[test]
+fn a_verification_failure_records_each_difference_and_keeps_the_evidence() {
+    let e = env_with(&["fake-broken"]);
+    let out = measure(
+        &e,
+        &[
+            "--tools",
+            "fake-broken",
+            "--repeats",
+            "2",
+            "--classes",
+            "text",
+            "--keep-failed",
+            "on",
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("0 measured, 1 failed, 0 skipped; 0 validation problem(s)"),
+        "{}",
+        text(&out)
+    );
+    let dir = results_dir(&e);
+    let r = result(&dir, "fake-broken-b-text.json");
+    let why = r["failed"]["reason"].as_str().unwrap();
+    assert!(
+        why.starts_with("verification: 1 missing (first: ")
+            && why.contains("; 2 different (first: ")
+            && why.contains("; 1 extra (first: __extra.txt)"),
+        "{why}"
+    );
+    assert_eq!(r["failed"]["step"], "verify");
+    assert_eq!(r["failed"]["repeat"], 1);
+    assert_eq!(r["verification"]["verified"], false);
+    assert_eq!(r["verification"]["files_checked"], 4);
+    assert_eq!(r["verification"]["files_ok"], 1);
+    let diffs = r["verification"]["differences"].as_array().unwrap();
+    let mut kinds: Vec<&str> = diffs.iter().map(|d| d["kind"].as_str().unwrap()).collect();
+    // Missing first, extra last; size and content in path order between them.
+    assert_eq!((kinds[0], kinds[3]), ("missing", "extra"), "{r}");
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["content", "extra", "missing", "size"], "{r}");
+    for d in diffs {
+        let path = d["path"].as_str().unwrap();
+        match d["kind"].as_str().unwrap() {
+            "missing" => {
+                assert!(d["expected_bytes"].as_u64().unwrap() > 0, "{d}");
+                assert!(d.get("actual_bytes").is_none(), "{d}");
+            }
+            "size" => {
+                let (want, got) = (
+                    d["expected_bytes"].as_u64().unwrap(),
+                    d["actual_bytes"].as_u64().unwrap(),
+                );
+                assert_eq!(got, want / 2, "{d}");
+            }
+            "content" => {
+                assert_eq!(d["expected_bytes"], d["actual_bytes"], "{d}");
+            }
+            "extra" => {
+                assert_eq!(path, "__extra.txt");
+                assert!(d.get("expected_bytes").is_none(), "{d}");
+                assert_eq!(d["actual_bytes"], 19, "{d}");
+            }
+            k => panic!("unknown kind {k}"),
+        }
+        assert!(d.get("manifest_index").is_none(), "public corpus: {d}");
+    }
+
+    // The evidence: archive and tree moved out of the scratch directory, named in the result.
+    let results_name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let evidence_rel = format!("failed/{results_name}/fake-broken-b-text-r1");
+    assert_eq!(r["failed"]["evidence_dir"], evidence_rel.as_str(), "{r}");
+    let evidence = e
+        .work
+        .join("failed")
+        .join(&results_name)
+        .join("fake-broken-b-text-r1");
+    assert!(
+        evidence.join("archive.fk").is_file(),
+        "{}",
+        evidence.display()
+    );
+    assert!(
+        evidence.join("tree").join("__extra.txt").is_file(),
+        "{}",
+        evidence.display()
+    );
+    let kept = std::fs::read_dir(evidence.join("tree")).unwrap().count();
+    assert!(kept >= 2, "the extracted tree was kept: {kept} entries");
+    // Nothing else of the run is left under the temporary directory.
+    let left: Vec<String> = std::fs::read_dir(&e.work)
+        .unwrap()
+        .map(|d| d.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["failed"], "{left:?}");
+
+    // --keep-failed off: the old behaviour, nothing kept and nothing named.
+    let e = env_with(&["fake-broken"]);
+    let out = measure(
+        &e,
+        &[
+            "--tools",
+            "fake-broken",
+            "--repeats",
+            "1",
+            "--classes",
+            "text",
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out));
+    let dir = results_dir(&e);
+    let r = result(&dir, "fake-broken-b-text.json");
+    assert!(r["failed"].get("evidence_dir").is_none(), "{r}");
+    assert_eq!(
+        r["verification"]["differences"].as_array().unwrap().len(),
+        4
     );
     assert_tmp_clean(&e);
 }

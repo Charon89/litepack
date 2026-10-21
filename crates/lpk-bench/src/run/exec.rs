@@ -15,8 +15,15 @@
 //!   the sum of the steps, the published peak memory the larger of the two.
 //! * Every repeat is extracted into an empty directory and verified by BLAKE3 of every file; a
 //!   missing, extra or different file fails the combination. A failed combination is recorded with
-//!   the reason and the run goes on.
+//!   the reason and the run goes on. The failure record lists the differing files (up to the first
+//!   20) with the kind of difference: `missing`, `extra`, `size` (expected and actual sizes) or
+//!   `content` (same size, another hash).
 //! * Temporary files live under `<tmp>/<run>/` and are removed after each repeat and at the end.
+//!   Exception, outside any timing: with `--keep-failed on` (the default) the archive and the
+//!   extracted tree of a repeat that failed verification are moved (renamed, same volume) to
+//!   `<tmp>/failed/<results dir name>/<tool>-<setting>-<class>-r<repeat>/` as `archive<ext>` and
+//!   `tree/`, and the failure record names that directory (`failed.evidence_dir`, relative to
+//!   `<tmp>`). `--keep-failed off` deletes them as before.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -30,9 +37,9 @@ use super::catalogue::{Layout, Mode, Setting, Tool};
 use super::discover::{self, Discovered, Status};
 use super::host;
 use super::result::{
-    render, CorpusRef, Failure, Measure, Measurement, PeakMemoryKind, RunCombination, RunFile,
-    Sample, SettingRef, StepTimes, TarInfo, ToolRef, ToolResult, ToolsFile, Verification,
-    SCHEMA_VERSION,
+    render, CorpusRef, Difference, DifferenceKind, Failure, Measure, Measurement, PeakMemoryKind,
+    RunCombination, RunFile, Sample, SettingRef, StepTimes, TarInfo, ToolRef, ToolResult,
+    ToolsFile, Verification, MAX_DIFFERENCES, SCHEMA_VERSION,
 };
 use super::validate;
 use super::{load_catalogue, select, RunArgs};
@@ -79,6 +86,9 @@ pub struct Config {
     pub results_root: PathBuf,
     pub tmp_root: PathBuf,
     pub allow_dirty: bool,
+    /// Keep the archive and the extracted tree of a repeat that failed verification under
+    /// `<tmp>/failed/`.
+    pub keep_failed: bool,
 }
 
 /// What a run did.
@@ -317,12 +327,34 @@ fn tree_path<'a>(corpus: &Corpus, class: &str, f: &'a ManifestFile) -> &'a str {
 // ---------------------------------------------------------------------------------------------
 // Verification
 
+/// What the manifest says about one file of the class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expected {
+    pub blake3: String,
+    pub bytes: u64,
+}
+
+/// Tree path -> what the manifest expects there.
+pub type ExpectedTree = BTreeMap<String, Expected>;
+
+/// One differing file, as [`verify_tree`] found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diff {
+    pub path: String,
+    pub kind: DifferenceKind,
+    pub expected_bytes: Option<u64>,
+    pub actual_bytes: Option<u64>,
+}
+
 #[derive(Debug, Default)]
 pub struct Findings {
     pub ok: u64,
     pub missing: Vec<String>,
     pub different: Vec<String>,
     pub extra: Vec<String>,
+    /// Every differing file with its kind, in the order missing, different (size or content),
+    /// extra, each group sorted by path.
+    pub details: Vec<Diff>,
 }
 
 impl Findings {
@@ -358,12 +390,41 @@ impl Findings {
         }
         format!("verification: {}", parts.join("; "))
     }
+
+    /// The first [`MAX_DIFFERENCES`] differing files for the result file. With `private_index`
+    /// (tree path -> manifest position) no path appears: expected files carry their manifest
+    /// position, extra files only their kind and size.
+    pub fn differences(&self, private_index: Option<&BTreeMap<String, usize>>) -> Vec<Difference> {
+        self.details
+            .iter()
+            .take(MAX_DIFFERENCES)
+            .map(|d| match private_index {
+                None => Difference {
+                    kind: d.kind,
+                    path: Some(d.path.clone()),
+                    manifest_index: None,
+                    expected_bytes: d.expected_bytes,
+                    actual_bytes: d.actual_bytes,
+                },
+                Some(index) => Difference {
+                    kind: d.kind,
+                    path: None,
+                    manifest_index: index.get(&d.path).map(|i| *i as u64),
+                    expected_bytes: d.expected_bytes,
+                    actual_bytes: d.actual_bytes,
+                },
+            })
+            .collect()
+    }
 }
 
-/// Compare the files under `base` with `expected` (relative path with `/` -> BLAKE3).
-pub fn verify_tree(base: &Path, expected: &BTreeMap<String, String>) -> Findings {
+/// Compare the files under `base` with `expected` (relative path with `/` -> BLAKE3 and size).
+/// A present file with another hash is a `size` difference when its size differs from the
+/// manifest's, otherwise a `content` difference.
+pub fn verify_tree(base: &Path, expected: &ExpectedTree) -> Findings {
     let mut found = Findings::default();
     let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut diffs: Vec<Diff> = Vec::new();
     let mut stack = vec![base.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else {
@@ -385,17 +446,48 @@ pub fn verify_tree(base: &Path, expected: &BTreeMap<String, String>) -> Findings
                         .join("/")
                 })
                 .unwrap_or_default();
+            let actual_bytes = ft
+                .is_file()
+                .then(|| entry.metadata().ok().map(|m| m.len()))
+                .flatten();
             if !ft.is_file() {
+                diffs.push(Diff {
+                    path: rel.clone(),
+                    kind: DifferenceKind::Extra,
+                    expected_bytes: None,
+                    actual_bytes: None,
+                });
                 found.extra.push(rel);
                 continue;
             }
             match expected.get(&rel) {
-                None => found.extra.push(rel),
+                None => {
+                    diffs.push(Diff {
+                        path: rel.clone(),
+                        kind: DifferenceKind::Extra,
+                        expected_bytes: None,
+                        actual_bytes,
+                    });
+                    found.extra.push(rel);
+                }
                 Some(want) => {
                     seen.insert(rel.clone());
                     match hash_file(&path) {
-                        Ok(got) if &got == want => found.ok += 1,
-                        _ => found.different.push(rel),
+                        Ok(got) if got == want.blake3 => found.ok += 1,
+                        _ => {
+                            let kind = if actual_bytes == Some(want.bytes) {
+                                DifferenceKind::Content
+                            } else {
+                                DifferenceKind::Size
+                            };
+                            diffs.push(Diff {
+                                path: rel.clone(),
+                                kind,
+                                expected_bytes: Some(want.bytes),
+                                actual_bytes,
+                            });
+                            found.different.push(rel);
+                        }
                     }
                 }
             }
@@ -409,6 +501,23 @@ pub fn verify_tree(base: &Path, expected: &BTreeMap<String, String>) -> Findings
     found.missing.sort();
     found.different.sort();
     found.extra.sort();
+    let rank = |k: DifferenceKind| match k {
+        DifferenceKind::Missing => 0,
+        DifferenceKind::Size | DifferenceKind::Content => 1,
+        DifferenceKind::Extra => 2,
+    };
+    diffs.sort_by(|a, b| rank(a.kind).cmp(&rank(b.kind)).then(a.path.cmp(&b.path)));
+    found.details = found
+        .missing
+        .iter()
+        .map(|m| Diff {
+            path: m.clone(),
+            kind: DifferenceKind::Missing,
+            expected_bytes: expected.get(m).map(|e| e.bytes),
+            actual_bytes: None,
+        })
+        .chain(diffs)
+        .collect();
     found
 }
 
@@ -491,6 +600,9 @@ struct Ctx<'a> {
     work: PathBuf,
     work_rel: String,
     tar: Option<&'a TarTool>,
+    /// Where the evidence of a failed verification is kept (absolute, under `<tmp>/failed/`) and
+    /// the same relative to `<tmp>`; `None` with `--keep-failed off`.
+    failed_dir: Option<(PathBuf, String)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -510,6 +622,7 @@ impl<'a> Ctx<'a> {
             work: self.work.clone(),
             work_rel: ".".to_string(),
             tar: self.tar,
+            failed_dir: self.failed_dir.clone(),
         }
     }
 }
@@ -837,7 +950,7 @@ fn one_repeat(
     tool: &Tool,
     exe: &Path,
     setting: &Setting,
-    expected: &BTreeMap<String, String>,
+    expected: &ExpectedTree,
     record: &mut ArgRecord,
 ) -> Result<Sample, Fail> {
     remove_and_settle(&ctx.work, ctx.cfg);
@@ -925,6 +1038,7 @@ fn one_repeat(
             verified: false,
             files_checked: checked,
             files_ok: found.ok,
+            differences: found.differences(index.as_ref()),
         });
         return Err(f);
     }
@@ -1013,13 +1127,54 @@ fn measurement_info(tar: Option<&TarTool>, d: &Discovered) -> Measurement {
     }
 }
 
+/// Name of the evidence directory of one failed repeat under `<tmp>/failed/<results dir>/`.
+pub fn evidence_dir_name(tool: &str, setting: &str, class: &str, repeat: u32) -> String {
+    format!("{tool}-{setting}-{class}-r{repeat}")
+}
+
+/// Move (rename, never copy) the archive and the extracted tree of the repeat that just failed
+/// verification from the scratch directory to the evidence directory. Runs outside any timing,
+/// after the failing repeat; the combination is over, so nothing measured changes. Returns the
+/// evidence directory relative to `<tmp>` for the result file, or `None` when nothing could be
+/// kept (a warning says why).
+fn keep_evidence(ctx: &Ctx<'_>, tool: &Tool, setting: &Setting, repeat: u32) -> Option<String> {
+    let (root, root_rel) = ctx.failed_dir.as_ref()?;
+    let name = evidence_dir_name(&tool.id, &setting.id, ctx.class, repeat);
+    let dest = root.join(&name);
+    let dest_rel = format!("{root_rel}/{name}");
+    let moves = [
+        (
+            ctx.work.join(format!("a{}", tool.extension)),
+            dest.join(format!("archive{}", tool.extension)),
+        ),
+        (ctx.work.join(OUTDIR), dest.join("tree")),
+    ];
+    let attempt = || -> std::io::Result<()> {
+        std::fs::create_dir_all(&dest)?;
+        for (from, to) in &moves {
+            std::fs::rename(from, to)?;
+        }
+        Ok(())
+    };
+    match attempt() {
+        Ok(()) => Some(dest_rel),
+        Err(e) => {
+            eprintln!(
+                "warning: the evidence of the failed verification could not be kept under {}: {e}",
+                dest.display()
+            );
+            None
+        }
+    }
+}
+
 /// Run one tool x setting x class combination.
 fn run_combination(
     ctx: &Ctx<'_>,
     d: &Discovered,
     exe: &Path,
     setting: &Setting,
-    expected: &BTreeMap<String, String>,
+    expected: &ExpectedTree,
 ) -> ToolResult {
     let mut result = base_result(ctx.cfg, ctx.corpus, ctx.entry, ctx.class, d, setting);
     result.measurement = Some(measurement_info(ctx.tar, d));
@@ -1058,11 +1213,18 @@ fn run_combination(
                 verified: true,
                 files_checked: expected.len() as u64,
                 files_ok: expected.len() as u64,
+                differences: Vec::new(),
             });
             result.repeats = Some(samples);
             result.repeats_short = short;
         }
         Some((n, f)) => {
+            // Outside any timing: the failing repeat is over and the combination ends here.
+            let evidence_dir = if f.step == "verify" {
+                keep_evidence(ctx, &d.tool, setting, n)
+            } else {
+                None
+            };
             result.repeats = (!samples.is_empty()).then_some(samples);
             result.verification = f.verification;
             result.failed = Some(Failure {
@@ -1071,6 +1233,7 @@ fn run_combination(
                 repeat: n,
                 timed_out: f.timed_out,
                 descendants_killed: f.descendants_killed,
+                evidence_dir,
             });
         }
     }
@@ -1181,9 +1344,18 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
 
     // Not named after the results directory: the recorded arguments contain this path and a host
     // name would end up in them.
-    let tmp_run = absolute(&cfg.tmp_root)?.join(format!("run{}", std::process::id()));
+    let tmp_root = absolute(&cfg.tmp_root)?;
+    let tmp_run = tmp_root.join(format!("run{}", std::process::id()));
     std::fs::create_dir_all(&tmp_run).with_context(|| format!("creating {}", tmp_run.display()))?;
     let _guard = TmpGuard(tmp_run.clone());
+    // Evidence of failed verifications outlives the run: `<tmp>/failed/<results dir name>/`,
+    // created only when something is kept.
+    let failed_dir: Option<(PathBuf, String)> = cfg.keep_failed.then(|| {
+        (
+            tmp_root.join("failed").join(&name),
+            format!("failed/{name}"),
+        )
+    });
 
     let mut out = Outcome {
         results_dir: results_dir.clone(),
@@ -1228,10 +1400,18 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
             println!("{class}: no files, skipped");
             continue;
         }
-        let expected: BTreeMap<String, String> = entry
+        let expected: ExpectedTree = entry
             .files
             .iter()
-            .map(|f| (tree_path(&corpus, class, f).to_string(), f.blake3.clone()))
+            .map(|f| {
+                (
+                    tree_path(&corpus, class, f).to_string(),
+                    Expected {
+                        blake3: f.blake3.clone(),
+                        bytes: f.bytes,
+                    },
+                )
+            })
             .collect();
         let non_ascii = entry.files.iter().any(|f| !f.path.is_ascii());
         for id in selected {
@@ -1282,6 +1462,7 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                                 work,
                                 work_rel,
                                 tar: tar.as_ref(),
+                                failed_dir: failed_dir.clone(),
                             };
                             let r = run_combination(&ctx, d, path, setting, &expected);
                             remove_and_settle(&ctx.work, cfg);
@@ -1387,6 +1568,7 @@ pub fn measure_command(args: &RunArgs) -> Result<ExitCode> {
         results_root: args.results.clone(),
         tmp_root: args.tmp.clone(),
         allow_dirty: args.allow_dirty_build,
+        keep_failed: args.keep_failed == "on",
     };
     let out = execute(&cfg, &discovered, &ids)?;
     println!("results written to {}", out.results_dir.display());
@@ -1503,8 +1685,11 @@ mod tests {
         w("a.txt", b"same");
         w("d/b.txt", b"changed");
         w("d/extra.txt", b"x");
-        let h = |d: &[u8]| blake3::hash(d).to_hex().to_string();
-        let expected: BTreeMap<String, String> = [
+        let h = |d: &[u8]| Expected {
+            blake3: blake3::hash(d).to_hex().to_string(),
+            bytes: d.len() as u64,
+        };
+        let expected: ExpectedTree = [
             ("a.txt", h(b"same")),
             ("d/b.txt", h(b"original")),
             ("gone.txt", h(b"gone")),
@@ -1526,10 +1711,90 @@ mod tests {
         // An empty directory is not a file.
         std::fs::create_dir_all(dir.path().join("empty")).expect("mkdir");
         std::fs::remove_file(dir.path().join("d/extra.txt")).expect("rm");
-        let only: BTreeMap<String, String> =
-            [("a.txt".to_string(), h(b"same"))].into_iter().collect();
+        let only: ExpectedTree = [("a.txt".to_string(), h(b"same"))].into_iter().collect();
         std::fs::remove_dir_all(dir.path().join("d")).expect("rm");
         assert!(verify_tree(dir.path(), &only).is_clean());
+    }
+
+    #[test]
+    fn verification_classifies_each_difference_and_caps_the_list() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let w = |rel: &str, data: &[u8]| {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, data).expect("write");
+        };
+        let h = |d: &[u8]| Expected {
+            blake3: blake3::hash(d).to_hex().to_string(),
+            bytes: d.len() as u64,
+        };
+        w("ok.txt", b"same");
+        w("short.bin", b"12345");
+        w("d/wrong.bin", b"ABCDEFGHIJ");
+        w("d/extra.txt", b"xyz");
+        let expected: ExpectedTree = [
+            ("ok.txt", h(b"same")),
+            ("short.bin", h(b"1234567890")),
+            ("d/wrong.bin", h(b"abcdefghij")),
+            ("gone.txt", h(b"gone")),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let f = verify_tree(dir.path(), &expected);
+        assert_eq!(f.ok, 1);
+        let got: Vec<(&str, DifferenceKind, Option<u64>, Option<u64>)> = f
+            .details
+            .iter()
+            .map(|d| (d.path.as_str(), d.kind, d.expected_bytes, d.actual_bytes))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("gone.txt", DifferenceKind::Missing, Some(4), None),
+                ("d/wrong.bin", DifferenceKind::Content, Some(10), Some(10)),
+                ("short.bin", DifferenceKind::Size, Some(10), Some(5)),
+                ("d/extra.txt", DifferenceKind::Extra, None, Some(3)),
+            ]
+        );
+        // The summary line is unchanged by the details.
+        assert_eq!(
+            f.reason(),
+            "verification: 1 missing (first: gone.txt); 2 different (first: d/wrong.bin); \
+             1 extra (first: d/extra.txt)"
+        );
+        // Public corpus: paths; private corpus: manifest positions and no path at all.
+        let public = f.differences(None);
+        assert_eq!(public.len(), 4);
+        assert_eq!(public[0].path.as_deref(), Some("gone.txt"));
+        assert_eq!(public[0].manifest_index, None);
+        let index: BTreeMap<String, usize> =
+            [("gone.txt", 2), ("short.bin", 1), ("d/wrong.bin", 0)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
+        let private = f.differences(Some(&index));
+        assert!(private.iter().all(|d| d.path.is_none()));
+        assert_eq!(
+            private.iter().map(|d| d.manifest_index).collect::<Vec<_>>(),
+            [Some(2), Some(0), Some(1), None]
+        );
+        assert_eq!(private[2].actual_bytes, Some(5));
+        // The list stops at MAX_DIFFERENCES: many missing files.
+        let many: ExpectedTree = (0..MAX_DIFFERENCES + 5)
+            .map(|i| (format!("m{i:03}.txt"), h(b"m")))
+            .collect();
+        let f = verify_tree(dir.path(), &many);
+        assert_eq!(f.missing.len(), MAX_DIFFERENCES + 5);
+        assert_eq!(f.differences(None).len(), MAX_DIFFERENCES);
+    }
+
+    #[test]
+    fn the_evidence_directory_is_named_after_the_combination_and_repeat() {
+        assert_eq!(
+            evidence_dir_name("lpk", "balanced", "office-pdf", 1),
+            "lpk-balanced-office-pdf-r1"
+        );
     }
 
     #[test]

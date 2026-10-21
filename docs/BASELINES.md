@@ -25,7 +25,7 @@ cargo run -p lpk-bench -- run --validate bench/results/<date>-<host>
 
 ```text
 cargo run -p lpk-bench -- run --tools all --profile small [--corpus DIR] [--classes a,b]
-    [--repeats 3] [--threads N] [--timeout-s N] [--long-run-s 120] [--results DIR] [--tmp DIR] [--allow-dirty-build]
+    [--repeats 3] [--threads N] [--timeout-s N] [--long-run-s 120] [--results DIR] [--tmp DIR] [--allow-dirty-build] [--keep-failed on|off]
 cargo run -p lpk-bench -- run --compare <dirA> <dirB> [--max-diff-pct 3]
 ```
 
@@ -68,6 +68,14 @@ How a combination is measured:
 - A combination fails, and is recorded as `failed` with the reason, when a step exits non-zero,
   times out, leaves descendants running, the archive is missing or empty, or verification finds a
   missing, extra or different file. A failed combination carries no median and the run goes on.
+- A failed verification is recorded in detail: `verification.differences` lists the differing
+  files (up to the first 20, in the order missing, size or content, extra) with the kind of
+  difference, `missing`, `extra`, `size` (expected and actual sizes) or `content` (same size,
+  another BLAKE3); a private corpus records manifest positions instead of paths. With
+  `--keep-failed on` (the default) the failing repeat's archive and extracted tree are moved,
+  outside any timing, to `bench/tmp/failed/<results dir>/<tool>-<setting>-<class>-r<repeat>/`
+  (`archive<ext>` and `tree/`), and `failed.evidence_dir` names that directory relative to
+  `--tmp`; `--keep-failed off` deletes them like every other repeat. `bench/tmp` is git-ignored.
   The repeats completed before the failure stay in the file.
 - After the loop deletes a tree of extracted files (between repeats and when a combination's
   scratch directory is removed) it pauses before the next timed step, by default 500 ms per 1000

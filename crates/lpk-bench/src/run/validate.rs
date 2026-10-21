@@ -982,18 +982,19 @@ mod tests {
         let mut short = samples::measured();
         short.repeats_short = Some("measured once: long run".into());
         short.repeats = short.repeats.map(|r| r[..1].to_vec());
-        let (m, s, z, f, sh) = (
+        let (m, s, z, f, sh, u) = (
             to_value(&samples::measured()),
             to_value(&samples::skipped()),
             to_value(&samples::tar_stream()),
             to_value(&samples::failed()),
             to_value(&short),
+            to_value(&samples::unverified()),
         );
-        assert_agree(&schema, "result", &[&m, &s, &z, &f, &sh]);
+        assert_agree(&schema, "result", &[&m, &s, &z, &f, &sh, &u]);
         let run = to_value(&samples::run_file(&[samples::measured()]));
         assert_agree(&schema, "run", &[&run]);
         assert_agree(&schema, "run_combination", &[&run["combinations"][0]]);
-        assert_agree(&schema, "failure", &[&f["failed"]]);
+        assert_agree(&schema, "failure", &[&f["failed"], &u["failed"]]);
         assert_agree(&schema, "tool_ref", &[&m["tool"], &s["tool"]]);
         assert_agree(&schema, "setting_ref", &[&m["setting"]]);
         assert_agree(&schema, "corpus_ref", &[&m["corpus"]]);
@@ -1015,7 +1016,22 @@ mod tests {
             &[&m["measurement"], &z["measurement"]],
         );
         assert_agree(&schema, "tar_info", &[&z["measurement"]["tar"]]);
-        assert_agree(&schema, "verification", &[&m["verification"]]);
+        assert_agree(
+            &schema,
+            "verification",
+            &[&m["verification"], &u["verification"]],
+        );
+        // The four kinds of difference, public shape and private shape.
+        let mut private = u["verification"]["differences"][0].clone();
+        private.as_object_mut().expect("object").remove("path");
+        private["manifest_index"] = serde_json::json!(3);
+        let diffs: Vec<&serde_json::Value> = u["verification"]["differences"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .chain(std::iter::once(&private))
+            .collect();
+        assert_agree(&schema, "difference", &diffs);
         let t = to_value(&samples::tools());
         assert_agree(&schema, "tools", &[&t]);
         assert_agree(&schema, "tool_entry", &[&t["tools"][0], &t["tools"][2]]);
@@ -1034,6 +1050,7 @@ mod tests {
             "measurement",
             "tar_info",
             "verification",
+            "difference",
             "failure",
             "av_product",
             "run",
@@ -1160,6 +1177,7 @@ mod tests {
             verified: true,
             files_checked: 10,
             files_ok: 9,
+            differences: Vec::new(),
         });
         let dir = write_dir(tmp.path(), &[lying]);
         assert!(problems(&dir)
@@ -1208,6 +1226,7 @@ mod tests {
             verified: false,
             files_checked: 10,
             files_ok: 10,
+            differences: Vec::new(),
         });
         let dir = write_dir(tmp.path(), &[extra]);
         assert!(problems(&dir).is_empty(), "{:?}", problems(&dir));
