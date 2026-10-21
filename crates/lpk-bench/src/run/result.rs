@@ -126,6 +126,8 @@ pub enum DifferenceKind {
     Size,
     /// Present with the manifest's size but another BLAKE3.
     Content,
+    /// Present but could not be read (`note` carries the error); its size is not recorded.
+    Unreadable,
 }
 
 /// One differing file of a failed verification.
@@ -146,6 +148,9 @@ pub struct Difference {
     /// The extracted file's size (absent for a missing file or an unreadable entry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_bytes: Option<u64>,
+    /// `unreadable`: the read error's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,9 +203,11 @@ pub struct Failure {
     pub repeat: u32,
     pub timed_out: bool,
     pub descendants_killed: bool,
-    /// Where the runner kept the failing repeat's archive and extracted tree, relative to the
-    /// temporary directory (`--tmp`): `failed/<results dir>/<tool>-<setting>-<class>-r<repeat>`.
-    /// Only for a verification failure with `--keep-failed on` (the default).
+    /// Where the runner kept the failing repeat's extracted tree (`tree/`) and archive
+    /// (`archive<ext>`, which may be absent when its move failed; the run's output says so),
+    /// relative to the temporary directory (`--tmp`):
+    /// `failed/<results dir>/<tool>-<setting>-<class>-r<repeat>`. Only for a verification failure
+    /// with `--keep-failed on` (the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_dir: Option<String>,
 }
@@ -613,7 +620,7 @@ pub mod samples {
         r.verification = Some(Verification {
             verified: false,
             files_checked: 10,
-            files_ok: 7,
+            files_ok: 6,
             differences: vec![
                 Difference {
                     kind: DifferenceKind::Missing,
@@ -621,6 +628,15 @@ pub mod samples {
                     manifest_index: None,
                     expected_bytes: Some(10),
                     actual_bytes: None,
+                    note: None,
+                },
+                Difference {
+                    kind: DifferenceKind::Unreadable,
+                    path: Some("locked.bin".into()),
+                    manifest_index: None,
+                    expected_bytes: Some(30),
+                    actual_bytes: None,
+                    note: Some("The process cannot access the file (os error 32)".into()),
                 },
                 Difference {
                     kind: DifferenceKind::Size,
@@ -628,6 +644,7 @@ pub mod samples {
                     manifest_index: None,
                     expected_bytes: Some(1000),
                     actual_bytes: Some(512),
+                    note: None,
                 },
                 Difference {
                     kind: DifferenceKind::Content,
@@ -635,6 +652,7 @@ pub mod samples {
                     manifest_index: None,
                     expected_bytes: Some(20),
                     actual_bytes: Some(20),
+                    note: None,
                 },
                 Difference {
                     kind: DifferenceKind::Extra,
@@ -642,11 +660,12 @@ pub mod samples {
                     manifest_index: None,
                     expected_bytes: None,
                     actual_bytes: Some(3),
+                    note: None,
                 },
             ],
         });
         r.failed = Some(Failure {
-            reason: "verification: 1 missing (first: gone.txt); 2 different (first: short.bin);                      1 extra (first: __extra.txt)"
+            reason: "verification: 1 missing (first: gone.txt); 3 different (first: locked.bin); 1 extra (first: __extra.txt)"
                 .into(),
             step: "verify".into(),
             repeat: 1,

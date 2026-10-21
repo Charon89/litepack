@@ -70,12 +70,15 @@ How a combination is measured:
   missing, extra or different file. A failed combination carries no median and the run goes on.
 - A failed verification is recorded in detail: `verification.differences` lists the differing
   files (up to the first 20, in the order missing, size or content, extra) with the kind of
-  difference, `missing`, `extra`, `size` (expected and actual sizes) or `content` (same size,
-  another BLAKE3); a private corpus records manifest positions instead of paths. With
-  `--keep-failed on` (the default) the failing repeat's archive and extracted tree are moved,
-  outside any timing, to `bench/tmp/failed/<results dir>/<tool>-<setting>-<class>-r<repeat>/`
-  (`archive<ext>` and `tree/`), and `failed.evidence_dir` names that directory relative to
-  `--tmp`; `--keep-failed off` deletes them like every other repeat. `bench/tmp` is git-ignored.
+  difference, `missing`, `extra`, `size` (expected and actual sizes), `content` (same size,
+  another BLAKE3) or `unreadable` (present, could not be read; the error in `note`); a private
+  corpus records manifest positions instead of paths. With `--keep-failed on` (the default) the
+  failing repeat's extracted tree and then its archive are moved (renamed, retried a few times
+  for a scanner's handle), outside any timing, to
+  `bench/tmp/failed/<results dir>/<tool>-<setting>-<class>-r<repeat>/` (`tree/` and
+  `archive<ext>`), and `failed.evidence_dir` names that directory relative to `--tmp` once the
+  tree is there (the archive may be absent; the run's output says what could not be moved);
+  `--keep-failed off` deletes them like every other repeat. `bench/tmp` is git-ignored.
   The repeats completed before the failure stay in the file.
 - After the loop deletes a tree of extracted files (between repeats and when a combination's
   scratch directory is removed) it pauses before the next timed step, by default 500 ms per 1000

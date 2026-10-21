@@ -16,14 +16,17 @@
 //! * Every repeat is extracted into an empty directory and verified by BLAKE3 of every file; a
 //!   missing, extra or different file fails the combination. A failed combination is recorded with
 //!   the reason and the run goes on. The failure record lists the differing files (up to the first
-//!   20) with the kind of difference: `missing`, `extra`, `size` (expected and actual sizes) or
-//!   `content` (same size, another hash).
+//!   20) with the kind of difference: `missing`, `extra`, `size` (expected and actual sizes),
+//!   `content` (same size, another hash) or `unreadable` (present, could not be read; the error in
+//!   `note`).
 //! * Temporary files live under `<tmp>/<run>/` and are removed after each repeat and at the end.
 //!   Exception, outside any timing: with `--keep-failed on` (the default) the archive and the
 //!   extracted tree of a repeat that failed verification are moved (renamed, same volume) to
-//!   `<tmp>/failed/<results dir name>/<tool>-<setting>-<class>-r<repeat>/` as `archive<ext>` and
-//!   `tree/`, and the failure record names that directory (`failed.evidence_dir`, relative to
-//!   `<tmp>`). `--keep-failed off` deletes them as before.
+//!   `<tmp>/failed/<results dir name>/<tool>-<setting>-<class>-r<repeat>/` as `tree/` and
+//!   `archive<ext>` (the tree first; each rename is retried as a deletion is, since a scanner may
+//!   hold a handle in the just-written tree), and the failure record names that directory
+//!   (`failed.evidence_dir`, relative to `<tmp>`) once at least the tree is there; a warning says
+//!   what could not be moved. `--keep-failed off` deletes them as before.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -344,6 +347,8 @@ pub struct Diff {
     pub kind: DifferenceKind,
     pub expected_bytes: Option<u64>,
     pub actual_bytes: Option<u64>,
+    /// `unreadable`: the read error.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -352,8 +357,8 @@ pub struct Findings {
     pub missing: Vec<String>,
     pub different: Vec<String>,
     pub extra: Vec<String>,
-    /// Every differing file with its kind, in the order missing, different (size or content),
-    /// extra, each group sorted by path.
+    /// Every differing file with its kind, in the order missing, different (size, content or
+    /// unreadable), extra, each group sorted by path.
     pub details: Vec<Diff>,
 }
 
@@ -405,6 +410,7 @@ impl Findings {
                     manifest_index: None,
                     expected_bytes: d.expected_bytes,
                     actual_bytes: d.actual_bytes,
+                    note: d.note.clone(),
                 },
                 Some(index) => Difference {
                     kind: d.kind,
@@ -412,6 +418,7 @@ impl Findings {
                     manifest_index: index.get(&d.path).map(|i| *i as u64),
                     expected_bytes: d.expected_bytes,
                     actual_bytes: d.actual_bytes,
+                    note: d.note.clone(),
                 },
             })
             .collect()
@@ -420,7 +427,8 @@ impl Findings {
 
 /// Compare the files under `base` with `expected` (relative path with `/` -> BLAKE3 and size).
 /// A present file with another hash is a `size` difference when its size differs from the
-/// manifest's, otherwise a `content` difference.
+/// manifest's, otherwise a `content` difference; a present file that cannot be read is
+/// `unreadable`.
 pub fn verify_tree(base: &Path, expected: &ExpectedTree) -> Findings {
     let mut found = Findings::default();
     let mut seen: std::collections::BTreeSet<String> = Default::default();
@@ -456,6 +464,7 @@ pub fn verify_tree(base: &Path, expected: &ExpectedTree) -> Findings {
                     kind: DifferenceKind::Extra,
                     expected_bytes: None,
                     actual_bytes: None,
+                    note: None,
                 });
                 found.extra.push(rel);
                 continue;
@@ -467,6 +476,7 @@ pub fn verify_tree(base: &Path, expected: &ExpectedTree) -> Findings {
                         kind: DifferenceKind::Extra,
                         expected_bytes: None,
                         actual_bytes,
+                        note: None,
                     });
                     found.extra.push(rel);
                 }
@@ -474,7 +484,7 @@ pub fn verify_tree(base: &Path, expected: &ExpectedTree) -> Findings {
                     seen.insert(rel.clone());
                     match hash_file(&path) {
                         Ok(got) if got == want.blake3 => found.ok += 1,
-                        _ => {
+                        Ok(_) => {
                             let kind = if actual_bytes == Some(want.bytes) {
                                 DifferenceKind::Content
                             } else {
@@ -485,6 +495,17 @@ pub fn verify_tree(base: &Path, expected: &ExpectedTree) -> Findings {
                                 kind,
                                 expected_bytes: Some(want.bytes),
                                 actual_bytes,
+                                note: None,
+                            });
+                            found.different.push(rel);
+                        }
+                        Err(e) => {
+                            diffs.push(Diff {
+                                path: rel.clone(),
+                                kind: DifferenceKind::Unreadable,
+                                expected_bytes: Some(want.bytes),
+                                actual_bytes: None,
+                                note: Some(e.to_string()),
                             });
                             found.different.push(rel);
                         }
@@ -503,7 +524,7 @@ pub fn verify_tree(base: &Path, expected: &ExpectedTree) -> Findings {
     found.extra.sort();
     let rank = |k: DifferenceKind| match k {
         DifferenceKind::Missing => 0,
-        DifferenceKind::Size | DifferenceKind::Content => 1,
+        DifferenceKind::Size | DifferenceKind::Content | DifferenceKind::Unreadable => 1,
         DifferenceKind::Extra => 2,
     };
     diffs.sort_by(|a, b| rank(a.kind).cmp(&rank(b.kind)).then(a.path.cmp(&b.path)));
@@ -515,6 +536,7 @@ pub fn verify_tree(base: &Path, expected: &ExpectedTree) -> Findings {
             kind: DifferenceKind::Missing,
             expected_bytes: expected.get(m).map(|e| e.bytes),
             actual_bytes: None,
+            note: None,
         })
         .chain(diffs)
         .collect();
@@ -1132,40 +1154,72 @@ pub fn evidence_dir_name(tool: &str, setting: &str, class: &str, repeat: u32) ->
     format!("{tool}-{setting}-{class}-r{repeat}")
 }
 
-/// Move (rename, never copy) the archive and the extracted tree of the repeat that just failed
-/// verification from the scratch directory to the evidence directory. Runs outside any timing,
-/// after the failing repeat; the combination is over, so nothing measured changes. Returns the
-/// evidence directory relative to `<tmp>` for the result file, or `None` when nothing could be
-/// kept (a warning says why).
+/// Rename with the retries of [`rm_rf`]: on Windows a scanner or indexer holding a handle inside
+/// a just-written tree answers with a sharing violation or access denied for a moment.
+fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut last = None;
+    for attempt in 0..5 {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                if attempt < 4 {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("rename failed")))
+}
+
+/// Move (rename, never copy) the extracted tree and then the archive of the repeat that just
+/// failed verification from the scratch directory to the evidence directory. Runs outside any
+/// timing, after the failing repeat; the combination is over, so nothing measured changes.
+/// Returns the evidence directory relative to `<tmp>` for the result file once at least the tree
+/// (the larger item) is there, `None` otherwise; a warning names what could not be moved.
 fn keep_evidence(ctx: &Ctx<'_>, tool: &Tool, setting: &Setting, repeat: u32) -> Option<String> {
     let (root, root_rel) = ctx.failed_dir.as_ref()?;
     let name = evidence_dir_name(&tool.id, &setting.id, ctx.class, repeat);
     let dest = root.join(&name);
     let dest_rel = format!("{root_rel}/{name}");
+    if let Err(e) = std::fs::create_dir_all(&dest) {
+        eprintln!(
+            "warning: the evidence of the failed verification could not be kept: creating {}: {e}",
+            dest.display()
+        );
+        return None;
+    }
     let moves = [
         (
+            "the extracted tree",
+            ctx.work.join(OUTDIR),
+            dest.join("tree"),
+        ),
+        (
+            "the archive",
             ctx.work.join(format!("a{}", tool.extension)),
             dest.join(format!("archive{}", tool.extension)),
         ),
-        (ctx.work.join(OUTDIR), dest.join("tree")),
     ];
-    let attempt = || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dest)?;
-        for (from, to) in &moves {
-            std::fs::rename(from, to)?;
-        }
-        Ok(())
-    };
-    match attempt() {
-        Ok(()) => Some(dest_rel),
-        Err(e) => {
-            eprintln!(
-                "warning: the evidence of the failed verification could not be kept under {}: {e}",
-                dest.display()
-            );
-            None
+    let mut moved: Vec<&str> = Vec::new();
+    for (what, from, to) in &moves {
+        match rename_with_retries(from, to) {
+            Ok(()) => moved.push(what),
+            Err(e) => {
+                let done = if moved.is_empty() {
+                    "nothing was moved".to_string()
+                } else {
+                    format!("moved: {}", moved.join(", "))
+                };
+                eprintln!(
+                    "warning: {what} of the failed verification could not be moved to {}: {e} \
+                     ({done})",
+                    dest.display()
+                );
+            }
         }
     }
+    moved.contains(&"the extracted tree").then_some(dest_rel)
 }
 
 /// Run one tool x setting x class combination.
@@ -1743,6 +1797,7 @@ mod tests {
         .collect();
         let f = verify_tree(dir.path(), &expected);
         assert_eq!(f.ok, 1);
+        assert!(f.details.iter().all(|d| d.note.is_none()));
         let got: Vec<(&str, DifferenceKind, Option<u64>, Option<u64>)> = f
             .details
             .iter()
@@ -1787,6 +1842,38 @@ mod tests {
         let f = verify_tree(dir.path(), &many);
         assert_eq!(f.missing.len(), MAX_DIFFERENCES + 5);
         assert_eq!(f.differences(None).len(), MAX_DIFFERENCES);
+    }
+
+    /// Windows: a file opened without sharing cannot be read by another handle.
+    #[cfg(windows)]
+    #[test]
+    fn a_present_file_that_cannot_be_read_is_unreadable_with_the_error() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("locked.bin"), b"0123456789").expect("write");
+        let _hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.path().join("locked.bin"))
+            .expect("open exclusively");
+        let expected: ExpectedTree = [(
+            "locked.bin".to_string(),
+            Expected {
+                blake3: blake3::hash(b"0123456789").to_hex().to_string(),
+                bytes: 10,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let f = verify_tree(dir.path(), &expected);
+        assert_eq!(f.different, ["locked.bin"]);
+        let d = &f.details[0];
+        assert_eq!(d.kind, DifferenceKind::Unreadable);
+        assert_eq!((d.expected_bytes, d.actual_bytes), (Some(10), None));
+        assert!(d.note.as_deref().is_some_and(|n| !n.is_empty()), "{d:?}");
+        let out = f.differences(None);
+        assert_eq!(out[0].kind, DifferenceKind::Unreadable);
+        assert_eq!(out[0].note, d.note);
     }
 
     #[test]

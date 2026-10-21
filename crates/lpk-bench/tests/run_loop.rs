@@ -79,6 +79,18 @@ licence = "test"
 id = "b"
 
 [[tool]]
+id = "fake-exit3"
+name = "fake archiver, extraction exits 3"
+version = { args = ["version"], pattern = 'fake-archiver (\d+\.\d+)' }
+extension = ".fk"
+mode = "directory"
+create = ["create", "{archive}", "{input}"]
+extract = ["extract", "--mode=exit3", "{archive}", "{outdir}"]
+licence = "test"
+[[tool.setting]]
+id = "e"
+
+[[tool]]
 id = "fake-env"
 name = "fake archiver, environment check"
 version = { args = ["version"], pattern = 'fake-archiver (\d+\.\d+)' }
@@ -698,6 +710,37 @@ fn a_verification_failure_records_each_difference_and_keeps_the_evidence() {
     assert_eq!(
         r["verification"]["differences"].as_array().unwrap().len(),
         4
+    );
+    assert_tmp_clean(&e);
+}
+
+/// Only a verification failure keeps evidence: a step that fails (extract exits 3) with
+/// `--keep-failed on` leaves nothing under `<tmp>/failed/`.
+#[test]
+fn a_step_failure_keeps_no_evidence() {
+    let e = env_with(&["fake-exit3"]);
+    let out = measure(
+        &e,
+        &[
+            "--tools",
+            "fake-exit3",
+            "--repeats",
+            "2",
+            "--classes",
+            "text",
+            "--keep-failed",
+            "on",
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out));
+    let dir = results_dir(&e);
+    let r = result(&dir, "fake-exit3-e-text.json");
+    assert_eq!(r["failed"]["step"], "extract", "{r}");
+    assert!(r["failed"].get("evidence_dir").is_none(), "{r}");
+    assert!(r.get("verification").is_none(), "{r}");
+    assert!(
+        !e.work.join("failed").exists(),
+        "evidence kept for a step failure"
     );
     assert_tmp_clean(&e);
 }
