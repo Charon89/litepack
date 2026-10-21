@@ -395,6 +395,45 @@ pub struct Incumbent {
 /// The tool the gates judge: never an incumbent. Its rows are shown next to the incumbents and
 /// compared with them, but they never define "the best measured incumbent" (D-23, D-48).
 pub const SUBJECT_TOOL: &str = "lpk";
+/// The subject's Balanced tier: the rows G1 and G2 judge (D-07, D-27, D-43).
+pub const SUBJECT_BALANCED: (&str, &str) = (SUBJECT_TOOL, "balanced");
+/// The subject's Fast tier: the rows G3 and G4 judge (D-07, D-27).
+pub const SUBJECT_FAST: (&str, &str) = (SUBJECT_TOOL, "fast");
+
+/// The pooled rows hold a planned row of the subject tool, in any state: the gates then take
+/// their Phase 1 form (measured `lpk` rows instead of the Phase 0 estimates and proxies).
+pub fn has_subject_rows(rows: &[Row]) -> bool {
+    rows.iter().any(|r| r.tool == SUBJECT_TOOL)
+}
+
+/// The subject's measured row on a class, or why it is not there (naming the row), for a gate's
+/// `not evaluable` reason.
+pub fn subject_row<'a>(
+    rows: &'a [Row],
+    key: (&str, &str),
+    class: &str,
+) -> Result<(&'a Row, &'a Measured), String> {
+    let label = format!("{}/{}", key.0, key.1);
+    let row = find(rows, key, class).ok_or(format!("no {label} row on {class}"))?;
+    match &row.state {
+        RowState::Measured(m) => Ok((row, m)),
+        RowState::Failed { step, reason, .. } => {
+            Err(format!("{label} on {class} failed ({step}): {reason}"))
+        }
+        RowState::Skipped { reason, .. } => {
+            Err(format!("{label} on {class} was skipped: {reason}"))
+        }
+    }
+}
+
+/// `*` when the row rests on one measurement.
+fn star(m: &Measured) -> &'static str {
+    if m.single.is_some() {
+        "*"
+    } else {
+        ""
+    }
+}
 
 /// The smallest archive among the measured incumbent rows of the class (every tool but
 /// [`SUBJECT_TOOL`]); the value carries the sources of every row compared.
@@ -925,6 +964,8 @@ pub struct Model {
     pub dedup_known: bool,
     pub classes: Vec<ClassView>,
     pub mixes: Vec<MixView>,
+    /// The pooled rows hold rows of the subject tool: the gates take their Phase 1 form.
+    pub subject_rows: bool,
 }
 
 impl Model {
@@ -1002,12 +1043,14 @@ impl Model {
             .tools
             .iter()
             .any(|t| t.dedup.is_some());
+        let subject_rows = has_subject_rows(&rows);
         Model {
             rows,
             dedup_tools,
             dedup_known,
             classes,
             mixes,
+            subject_rows,
         }
     }
 
@@ -1499,7 +1542,437 @@ fn gate4(m: &Model, inputs: &Inputs) -> GateRow {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Gates, Phase 1 form: measured `lpk` rows pooled with the incumbents' baseline (D-27, D-43,
+// D-48). Chosen when the pooled rows hold any row of the subject tool; the thresholds and the
+// incumbents compared are those of the Phase 0 form, only the subject's figure changes.
+
+/// The subject row's label with its single-measurement mark, for the number lines.
+fn subject_label(key: (&str, &str), m: &Measured) -> String {
+    format!("{}/{}{}", key.0, key.1, star(m))
+}
+
+/// `G1 inputs, ...` and the subject's one-measurement rows of the classes, as notes.
+fn subject_notes(rows: &[Row], id: &str, key: (&str, &str), classes: &[&str]) -> Vec<String> {
+    let mut notes: Vec<String> = problem_rows(rows, classes)
+        .map(|p| format!("{id} inputs, {p}"))
+        .into_iter()
+        .collect();
+    for c in classes {
+        if let Ok((_, m)) = subject_row(rows, key, c) {
+            if let Some(why) = &m.single {
+                notes.push(format!(
+                    "{id} input: {}/{} on {c} rests on one measurement ({why})",
+                    key.0, key.1
+                ));
+            }
+        }
+    }
+    notes
+}
+
+fn gate1_measured(m: &Model) -> GateRow {
+    let title = format!(
+        "G1 photo/document size (measured `lpk` rows): on photo-jpeg, photo-jpeg-edited and \
+         office-pdf together, lpk/balanced at most {G1_VS_BEST_PCT:.0}% of the best measured \
+         incumbent (the best single tool x setting over the combined bytes; D-07's fallback \
+         wording: WinZip and PowerArchiver were not measured) and at most {G1_VS_ULTRA_PCT:.0}% \
+         of 7-Zip Ultra; the sum of the per-class bests (stricter) and the three classes alone \
+         are shown for information"
+    );
+    let mut numbers = Vec::new();
+    let notes = subject_notes(&m.rows, "G1", SUBJECT_BALANCED, &G1_CLASSES);
+    let mut parts: Vec<(&str, Traced, Traced, Traced)> = Vec::new();
+    let mut single = false;
+    let mut why: Option<String> = None;
+    for c in G1_CLASSES {
+        let Some(v) = m.class(c) else {
+            why.get_or_insert(format!("class {c} is not in the corpus"));
+            continue;
+        };
+        match (subject_row(&m.rows, SUBJECT_BALANCED, c), &v.best, &v.ultra) {
+            (Ok((_, s)), Some(b), Some(u)) => {
+                single |= s.single.is_some();
+                parts.push((c, s.size_bytes.clone(), b.bytes.clone(), u.clone()));
+            }
+            (Err(e), _, _) => {
+                why.get_or_insert(e);
+            }
+            (_, None, _) => {
+                why.get_or_insert(format!("no measured incumbent for {c}"));
+            }
+            (_, _, None) => {
+                why.get_or_insert(format!("no 7z/ultra result for {c}"));
+            }
+        }
+    }
+    if let Some(w) = why {
+        return GateRow {
+            id: "G1",
+            title,
+            numbers,
+            notes,
+            verdict: Verdict::NotEvaluable(w),
+        };
+    }
+    let (Some(e), Some(sum_b), Some(u), Some(best)) = (
+        Traced::sum(parts.iter().map(|p| &p.1)),
+        Traced::sum(parts.iter().map(|p| &p.2)),
+        Traced::sum(parts.iter().map(|p| &p.3)),
+        best_single(&m.rows, &G1_CLASSES),
+    ) else {
+        return GateRow {
+            id: "G1",
+            title,
+            numbers,
+            notes,
+            verdict: Verdict::NotEvaluable("no tool has a measured result on every class".into()),
+        };
+    };
+    let label = format!("lpk/balanced{}", if single { "*" } else { "" });
+    let b = best.bytes.clone();
+    numbers.push(format!("combined {label}: {}", e.show(bytes_s)));
+    numbers.push(format!(
+        "combined best single tool ({}): {}",
+        best.name,
+        b.show(bytes_s)
+    ));
+    numbers.push(format!("combined 7-Zip Ultra: {}", u.show(bytes_s)));
+    numbers.push(format!(
+        "combined {label} / best single tool: {}",
+        ratio_pct(&e, &b).show(pct1)
+    ));
+    numbers.push(format!(
+        "combined {label} / 7-Zip Ultra: {}",
+        ratio_pct(&e, &u).show(pct1)
+    ));
+    numbers.push(format!(
+        "stricter, sum of the per-class bests (no single tool): {}",
+        sum_b.show(bytes_s)
+    ));
+    numbers.push(format!(
+        "combined {label} / sum of the per-class bests: {}",
+        ratio_pct(&e, &sum_b).show(pct1)
+    ));
+    for (c, e, b, u) in &parts {
+        let l = subject_row(&m.rows, SUBJECT_BALANCED, c)
+            .map(|(_, s)| subject_label(SUBJECT_BALANCED, s))
+            .unwrap_or_default();
+        numbers.push(format!(
+            "{c} alone, {l} / best incumbent: {}",
+            ratio_pct(e, b).show(pct1)
+        ));
+        numbers.push(format!(
+            "{c} alone, {l} / 7-Zip Ultra: {}",
+            ratio_pct(e, u).show(pct1)
+        ));
+    }
+    let pass =
+        within(e.value, b.value, G1_VS_BEST_PCT) && within(e.value, u.value, G1_VS_ULTRA_PCT);
+    GateRow {
+        id: "G1",
+        title,
+        numbers,
+        notes,
+        verdict: if pass { Verdict::Pass } else { Verdict::Fail },
+    }
+}
+
+fn gate2_measured(m: &Model, probes: &Probes) -> GateRow {
+    let title = format!(
+        "G2 versioned backup (D-27, D-43; measured `lpk` rows): on {G2_CLASS}, lpk/balanced at \
+         most {G2_VS_BEST_PCT:.0}% of the best measured tool x setting among the tools that do \
+         not deduplicate across files"
+    );
+    let mut numbers = Vec::new();
+    let is_dedup = |t: &str| m.dedup_tools.contains(t);
+    let verdict = match m.class(G2_CLASS) {
+        None => Verdict::NotEvaluable(format!(
+            "class {G2_CLASS} is not in the baseline directory (G2 is not evaluated on \
+             backup-versions any more)"
+        )),
+        Some(_) => {
+            let mut refs: Vec<&str> = m
+                .rows
+                .iter()
+                .filter(|r| r.class == G2_CLASS && is_dedup(&r.tool))
+                .map(|r| r.tool.as_str())
+                .collect();
+            refs.sort_unstable();
+            refs.dedup();
+            let compared =
+                best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t) && t != SUBJECT_TOOL);
+            if m.dedup_known {
+                numbers.push(format!(
+                    "tools treated as deduplicating: {}",
+                    if m.dedup_tools.is_empty() {
+                        "none".to_string()
+                    } else {
+                        m.dedup_tools.iter().cloned().collect::<Vec<_>>().join(", ")
+                    }
+                ));
+            }
+            // D-43's premise, when the dedup probe is given: every version exceeds the largest
+            // incumbent window (a catalogue constant, stated in the rules paragraph).
+            let mut too_small = false;
+            if let Some(pf) = &probes.dedup {
+                const ORDINALS: [&str; 6] =
+                    ["first", "second", "third", "fourth", "fifth", "sixth"];
+                for (n, ver) in pf.env.data.versions_large.iter().enumerate() {
+                    numbers.push(format!(
+                        "{} version of the class: {}",
+                        ORDINALS.get(n).copied().unwrap_or("a later"),
+                        Traced::from_u64(ver.bytes, pf.src).show(bytes_s)
+                    ));
+                    too_small |= ver.bytes < LARGEST_INCUMBENT_WINDOW_BYTES;
+                }
+            }
+            let subject = subject_row(&m.rows, SUBJECT_BALANCED, G2_CLASS);
+            let verdict = match (&subject, &compared) {
+                (Err(e), _) => Verdict::NotEvaluable(e.clone()),
+                _ if !m.dedup_known => {
+                    Verdict::NotEvaluable("tools.json predates D-43 (no dedup flags)".into())
+                }
+                _ if too_small => Verdict::NotEvaluable(
+                    "a version is smaller than the largest incumbent window".into(),
+                ),
+                (_, None) => Verdict::NotEvaluable(
+                    "no measured incumbent among the tools not flagged dedup".into(),
+                ),
+                (Ok((_, s)), Some(b)) => {
+                    let label = subject_label(SUBJECT_BALANCED, s);
+                    numbers.push(format!("{label}: {}", s.size_bytes.show(bytes_s)));
+                    numbers.push(format!(
+                        "best incumbent, not deduplicating ({}): {}",
+                        b.name,
+                        b.bytes.show(bytes_s)
+                    ));
+                    numbers.push(format!(
+                        "{label} / best incumbent: {}",
+                        ratio_pct(&s.size_bytes, &b.bytes).show(pct1)
+                    ));
+                    if within(s.size_bytes.value, b.bytes.value, G2_VS_BEST_PCT) {
+                        Verdict::Pass
+                    } else {
+                        Verdict::Fail
+                    }
+                }
+            };
+            for t in refs {
+                match best_incumbent_where(&m.rows, G2_CLASS, |x| x == t) {
+                    Some(b) => numbers.push(format!(
+                        "reference, not compared (deduplicating tool {}): {}",
+                        b.name,
+                        b.bytes.show(bytes_s)
+                    )),
+                    None => numbers.push(format!(
+                        "reference, not compared (deduplicating tool {t}): no measured row"
+                    )),
+                }
+            }
+            verdict
+        }
+    };
+    let notes = subject_notes(&m.rows, "G2", SUBJECT_BALANCED, &[G2_CLASS]);
+    GateRow {
+        id: "G2",
+        title,
+        numbers,
+        notes,
+        verdict,
+    }
+}
+
+/// The label of the pooled results directory that holds the source file `src` (a single
+/// directory: the baseline's own).
+pub fn dir_of(b: &Baseline, src: SourceId) -> String {
+    b.pooled
+        .iter()
+        .find(|d| d.rows.contains(&src))
+        .map_or(b.dir.clone(), |d| d.label.clone())
+}
+
+fn gate3_measured(m: &Model, inputs: &Inputs) -> GateRow {
+    let p = &inputs.probes;
+    let title = format!(
+        "G3 video store speed (D-27; measured `lpk` rows): lpk/fast's compress MB/s on video is \
+         at least {G3_MIN_PCT:.0}% of the store control's compress MB/s on video (a real program \
+         reading and writing the files) in the same run or, pooled per D-48, the same baseline \
+         (the directories are named)"
+    );
+    let mut numbers = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    for (key, role) in [(SUBJECT_FAST, ""), (STORE, " (the control)")] {
+        let label = format!("{}/{}", key.0, key.1);
+        match find(&m.rows, key, "video").map(|r| &r.state) {
+            Some(RowState::Failed { step, reason, .. }) => notes.push(format!(
+                "G3 input: {label} on video{role} failed ({step}): {reason}"
+            )),
+            Some(RowState::Skipped { reason, .. }) => notes.push(format!(
+                "G3 input: {label} on video{role} was skipped: {reason}"
+            )),
+            Some(RowState::Measured(x)) => {
+                if let Some(why) = &x.single {
+                    notes.push(format!(
+                        "G3 input: {label} on video{role} rests on one measurement ({why})"
+                    ));
+                }
+            }
+            None => {}
+        }
+    }
+    let subject = subject_row(&m.rows, SUBJECT_FAST, "video");
+    let control = subject_row(&m.rows, STORE, "video");
+    let raw = raw_video_rate(p, "video");
+    let verdict = match (&subject, &control) {
+        (Err(e), _) => Verdict::NotEvaluable(e.clone()),
+        (_, Err(e)) => Verdict::NotEvaluable(format!("the store control: {e}")),
+        (Ok((row, s)), Ok((crow, c))) => {
+            let (ls, lc) = (subject_label(SUBJECT_FAST, s), subject_label(STORE, c));
+            // D-27 asks for one run: name the directory of each row (its result file's source).
+            let (src_s, src_c) = (&row.class_bytes, &crow.class_bytes);
+            let dir = |t: &Traced| {
+                t.sources
+                    .iter()
+                    .next()
+                    .map(|s| dir_of(&inputs.baseline, *s))
+                    .unwrap_or_default()
+            };
+            let (dir_s, dir_c) = (dir(src_s), dir(src_c));
+            if dir_s == dir_c {
+                numbers.push(format!(
+                    "rows compared: both from `{dir_s}` (one run, as D-27 asks)"
+                ));
+            } else {
+                numbers.push(format!(
+                    "rows compared: lpk/fast from `{dir_s}` {}, store/store from `{dir_c}` {}: \
+                     two runs of one pooled baseline (D-27 asks for one run; D-48's pooling \
+                     stands in for it: same host, corpus manifest, thread count and catalogue, \
+                     checked when the directories were pooled)",
+                    src_s.tag(),
+                    src_c.tag()
+                ));
+                notes.push(format!(
+                    "G3: the two rows are from different runs (`{dir_s}`, `{dir_c}`); the \
+                     comparison rests on D-48's pooling checks, not on D-27's same run"
+                ));
+            }
+            numbers.push(format!(
+                "{ls} compress on video: {}",
+                s.compress_mbps.show(mbps_s)
+            ));
+            numbers.push(format!(
+                "{lc} compress on video: {}",
+                c.compress_mbps.show(mbps_s)
+            ));
+            numbers.push(format!(
+                "video class bytes: {}",
+                row.class_bytes.show(bytes_s)
+            ));
+            for (l, x) in [(&ls, s), (&lc, c)] {
+                numbers.push(format!(
+                    "{l} median compress wall seconds on video: {}",
+                    x.compress_seconds.show(|v| format!("{v:.3} s"))
+                ));
+                numbers.push(format!(
+                    "{l} first repeat compress on video: {}",
+                    x.first_compress_mbps.show(mbps_s)
+                ));
+            }
+            numbers.push(format!(
+                "{ls} / {lc}: {}",
+                ratio_pct(&s.compress_mbps, &c.compress_mbps).show(pct1)
+            ));
+            if at_least_pct(s.compress_mbps.value, c.compress_mbps.value, G3_MIN_PCT) {
+                Verdict::Pass
+            } else {
+                Verdict::Fail
+            }
+        }
+    };
+    if let Some(r) = &raw {
+        numbers.push(format!(
+            "raw read of video, median of the probe's passes, including opens (information \
+             only, not the gate): {}",
+            r.show(mbps_s)
+        ));
+    }
+    GateRow {
+        id: "G3",
+        title,
+        numbers,
+        notes,
+        verdict,
+    }
+}
+
+fn gate4_measured(m: &Model, inputs: &Inputs) -> GateRow {
+    let title = "G4 fast-tier extraction (measured `lpk` rows): the lpk/fast extraction MB/s is \
+                 at least the 7z/mx5 extraction MB/s, blended over each disk mix"
+        .to_string();
+    let mut numbers = Vec::new();
+    let mut notes = Vec::new();
+    let (mut any_fail, mut why) = (false, None::<String>);
+    for mix in &inputs.mixes.mix {
+        let z = blend(&m.rows, SUBJECT_FAST, mix, inputs.mixes_src);
+        let s = blend(&m.rows, MX5, mix, inputs.mixes_src);
+        match (z, s) {
+            (Ok(z), Ok(s)) => {
+                numbers.push(format!(
+                    "{}: lpk/fast{} extract: {}",
+                    mix.name,
+                    if z.single { "*" } else { "" },
+                    z.extract_mbps.show(mbps_s)
+                ));
+                numbers.push(format!(
+                    "{}: 7z/mx5{} extract: {}",
+                    mix.name,
+                    if s.single { "*" } else { "" },
+                    s.extract_mbps.show(mbps_s)
+                ));
+                if z.extract_mbps.value < s.extract_mbps.value {
+                    any_fail = true;
+                }
+            }
+            (z, s) => {
+                let e = match (z, s) {
+                    (Err(e), _) => format!("lpk/fast: {e}"),
+                    (_, Err(e)) => format!("7z/mx5: {e}"),
+                    _ => String::new(),
+                };
+                let line = format!("mix {}: {e}", mix.name);
+                notes.push(format!("G4: not evaluable on {line}"));
+                why.get_or_insert(line);
+            }
+        }
+    }
+    let verdict = if any_fail {
+        Verdict::Fail
+    } else if let Some(w) = why {
+        Verdict::NotEvaluable(w)
+    } else {
+        Verdict::Pass
+    };
+    GateRow {
+        id: "G4",
+        title,
+        numbers,
+        notes,
+        verdict,
+    }
+}
+
+/// The four gates: the Phase 1 form (measured `lpk` rows) when the pooled rows hold any, the
+/// Phase 0 form (probe estimates and proxies) otherwise.
 pub fn gates(m: &Model, inputs: &Inputs) -> Vec<GateRow> {
+    if m.subject_rows {
+        return vec![
+            gate1_measured(m),
+            gate2_measured(m, &inputs.probes),
+            gate3_measured(m, inputs),
+            gate4_measured(m, inputs),
+        ];
+    }
     vec![
         gate1(m),
         gate2(m, &inputs.probes),

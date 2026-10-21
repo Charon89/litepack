@@ -639,6 +639,24 @@ fn gate_section(s: &mut String, m: &Model, inputs: &Inputs) {
             s.push_str(&format!("- {n}\n"));
         }
     }
+    if m.subject_rows {
+        s.push_str(
+            "\nPASS needs the stated numbers; a gate whose data is missing is `not evaluable` and \
+             is never a PASS. A `*` after a tool name marks a row that rests on one measurement. \
+             The gates are in their Phase 1 form: the pooled baseline holds measured rows of \
+             `lpk`, so each gate compares those rows (not the Phase 0 estimates or proxies) with \
+             the incumbents measured in the same pooled baseline (D-48). G1 uses the fallback \
+             wording of D-07 with the best single tool x setting over the combined bytes; the \
+             stricter sum of per-class bests is printed beneath it. G2 compares `lpk/balanced` \
+             with the best measured tool that does not deduplicate across files (D-43); \
+             deduplicating tools are printed as references. G3 compares `lpk/fast` with the \
+             baseline `store` control, a real program reading and writing the files, in the same \
+             pooled baseline (D-27); the probe's raw read rate, when a probe is given, is \
+             information only. G4 compares `lpk/fast` with 7-Zip `-mx5` (D-07). The verdict is \
+             recorded by a person in a decision.\n\n",
+        );
+        return;
+    }
     s.push_str(
         "\nPASS needs the stated numbers; a gate whose data is missing is `not evaluable` and is \
          never a PASS. A `*` after a tool name marks a row that rests on one measurement. G1 uses \

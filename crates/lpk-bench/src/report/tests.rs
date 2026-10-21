@@ -843,7 +843,6 @@ fn add_subject_tool(i: &mut Inputs, class: &str, bytes: u64) {
 #[test]
 fn the_subject_tool_is_never_the_best_incumbent() {
     let mut i = inputs(&Knobs::default(), true);
-    let before = verdict_of(&i, "G1");
     add_subject_tool(&mut i, "photo-jpeg", 1_000_000);
     let first = rows(&i.baseline);
     let best = best_incumbent(&first, "photo-jpeg").expect("an incumbent");
@@ -857,7 +856,11 @@ fn the_subject_tool_is_never_the_best_incumbent() {
         "{}",
         combined.name
     );
-    assert_eq!(verdict_of(&i, "G1"), before);
+    // The rows switch G1 to its Phase 1 form, which wants the Balanced tier: these are `fast`.
+    assert_eq!(
+        verdict_of(&i, "G1"),
+        Verdict::NotEvaluable("no lpk/balanced row on photo-jpeg".into())
+    );
 }
 
 #[test]
@@ -2482,4 +2485,554 @@ fn the_measured_lpk_build_must_be_clean_and_match_the_runner() {
     assert!(reasons("0.0.1+abcdef012345-dirty")[0].contains("dirty or unknown"));
     assert!(reasons("0.0.1+unknown")[0].contains("dirty or unknown"));
     assert!(reasons("0.0.1+abcdef012345")[0].contains("differs from the runner's build"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gates, Phase 1 form (measured `lpk` rows; E2-22)
+
+/// Adds a measured `lpk/<setting>` row on `class` (the class's bytes, three equal repeats) with
+/// the archive bytes and the compress and extract wall seconds; the tool entry once.
+fn add_subject(i: &mut Inputs, setting: &str, class: &str, archive: u64, cw: f64, ew: f64) {
+    if !i.baseline.tools.tools.iter().any(|t| t.id == SUBJECT_TOOL) {
+        i.baseline.tools.tools.push(crate::run::result::ToolEntry {
+            id: SUBJECT_TOOL.into(),
+            name: "LitePack".into(),
+            status: "found".into(),
+            reason: None,
+            version: Some("0.0.1+abcdefabcdef".into()),
+            catalogue_verified: true,
+            manual: false,
+            local_override: false,
+            dedup: Some(false),
+        });
+    }
+    let cb = CLASSES.iter().find(|c| c.0 == class).map_or(MB, |c| c.1);
+    i.sources.push(format!("e/lpk-{setting}-{class}.json"));
+    let src = i.sources.len();
+    i.baseline.results.push((
+        result(SUBJECT_TOOL, setting, class, cb, archive, cw, ew),
+        src,
+    ));
+    i.baseline
+        .run
+        .combinations
+        .push(crate::run::result::RunCombination {
+            tool: SUBJECT_TOOL.into(),
+            setting: setting.into(),
+            class: class.into(),
+            outcome: "measured".into(),
+        });
+}
+
+/// The default fixture plus passing `lpk` rows: `balanced` on the G1 classes (6.0 + 2.4 + 3.4 MB
+/// against 7z/ultra's 17.6 MB combined) and on the G2 class (4.0 MB, half of 7z/ultra's 8.0 MB);
+/// `fast` on every class, compressing in 1 s and extracting in 0.5 s (7z/mx5 extracts in 2 s).
+fn subject_inputs(with_probes: bool) -> Inputs {
+    let mut i = inputs(&Knobs::default(), with_probes);
+    for (class, bytes) in [
+        ("photo-jpeg", 6_000_000),
+        ("photo-jpeg-edited", 2_400_000),
+        ("office-pdf", 3_400_000),
+        (G2_CLASS, 4_000_000),
+    ] {
+        add_subject(&mut i, "balanced", class, bytes, 20.0, 4.0);
+    }
+    for (class, cb, _) in CLASSES {
+        add_subject(&mut i, "fast", class, cb - 1_000, 1.0, 0.5);
+    }
+    i
+}
+
+fn mixes_without_absent() -> mixes::Mixes {
+    mixes::Mixes::parse(
+        MIXES
+            .split("[[mix]]\nname = \"absent\"")
+            .next()
+            .unwrap_or(""),
+    )
+    .expect("mixes")
+}
+
+#[test]
+fn without_lpk_rows_the_phase_0_gate_section_is_byte_identical_to_the_golden() {
+    // The golden was rendered from this fixture by the code before the Phase 1 form existed.
+    let i = inputs(&Knobs::default(), true);
+    assert!(!Model::build(&i).subject_rows);
+    let text = report_text(&i);
+    let start = text.find("## 6. Gates").expect("section 6");
+    let end = text[start..].find("## 7.").expect("section 7") + start;
+    let golden = include_str!("testdata/gates-phase0.md");
+    assert_eq!(&text[start..end], golden);
+    assert!(!golden.contains("measured `lpk` rows"));
+}
+
+#[test]
+fn any_lpk_row_switches_every_gate_to_the_phase_1_form() {
+    let i = subject_inputs(true);
+    let m = Model::build(&i);
+    assert!(m.subject_rows);
+    for g in gates(&m, &i) {
+        assert!(
+            g.title.contains("measured `lpk` rows"),
+            "{}: {}",
+            g.id,
+            g.title
+        );
+        assert!(!g.title.contains("estimate"), "{}: {}", g.id, g.title);
+    }
+    let text = report_text(&i);
+    assert!(text.contains("The gates are in their Phase 1 form"));
+    assert!(!text.contains("G4 uses zstd level 3 as the proxy"));
+    // A failed lpk row (no measured one) still selects the form: the gate then names the row.
+    let mut f = inputs(&Knobs::default(), true);
+    add_subject(&mut f, "balanced", "photo-jpeg", 1, 1.0, 1.0);
+    set_row(&mut f, SUBJECT_TOOL, "balanced", "photo-jpeg", |r| {
+        r.median = None;
+        r.failed = samples::failed().failed;
+    });
+    let g = gate(&f, "G1");
+    assert!(g.title.contains("measured `lpk` rows"));
+    match g.verdict {
+        Verdict::NotEvaluable(why) => assert!(
+            why.starts_with("lpk/balanced on photo-jpeg failed"),
+            "{why}"
+        ),
+        v => panic!("{v:?}"),
+    }
+}
+
+#[test]
+fn g1_measured_passes_and_fails_around_both_limits_and_names_a_missing_row() {
+    let mut i = subject_inputs(true);
+    i.mixes = mixes_without_absent();
+    assert_eq!(verdict_of(&i, "G1"), Verdict::Pass);
+    let g = gate(&i, "G1");
+    // Combined 11.8 MB against 17.6 MB (7z/ultra is the best single tool): 67.0% of both.
+    for want in [
+        "combined lpk/balanced: 11800000 bytes [",
+        "combined best single tool (7z/ultra): 17600000 bytes [",
+        "combined 7-Zip Ultra: 17600000 bytes [",
+        "combined lpk/balanced / best single tool: 67.0% [",
+        "combined lpk/balanced / 7-Zip Ultra: 67.0% [",
+        "stricter, sum of the per-class bests (no single tool): 17600000 bytes [",
+        "photo-jpeg alone, lpk/balanced / best incumbent: 66.7% [",
+        "office-pdf alone, lpk/balanced / 7-Zip Ultra: 68.0% [",
+    ] {
+        assert!(
+            g.numbers.iter().any(|n| n.starts_with(want)),
+            "missing `{want}` in {:?}",
+            g.numbers
+        );
+    }
+    assert!(g.numbers.iter().all(|n| !n.contains("estimate")));
+    // The subject's bytes cite the lpk row's file, the ratio both.
+    let lpk_src = source_index(&i, "e/lpk-balanced-photo-jpeg.json");
+    assert!(
+        g.numbers[0].contains(&format!("{lpk_src}")),
+        "{}",
+        g.numbers[0]
+    );
+    // Make the best-single rule bind: zstd/3's office-pdf row at 3.0 MB makes zstd/3 the best
+    // single tool (9.5 + 3.8 + 3.0 = 16.3 MB; 90% is 14.67 MB), distinct from the sum of the
+    // per-class bests (9.0 + 3.6 + 3.0 = 15.6 MB; 90% is 14.04 MB) and from Ultra (17.6 MB;
+    // 85% is 14.96 MB). Combined lpk 14.5 MB passes (it would fail against the sum of bests);
+    // 14.8 MB fails best-single while passing Ultra.
+    let at = |office: u64| {
+        let mut j = subject_inputs(true);
+        set_row(&mut j, "zstd", "3", "office-pdf", |r| {
+            set_archive(r, 3_000_000)
+        });
+        set_row(&mut j, SUBJECT_TOOL, "balanced", "office-pdf", |r| {
+            set_archive(r, office)
+        });
+        gate(&j, "G1")
+    };
+    let g = at(14_500_000 - 8_400_000);
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    for want in [
+        "combined best single tool (zstd/3): 16300000 bytes [",
+        "stricter, sum of the per-class bests (no single tool): 15600000 bytes [",
+        "combined lpk/balanced / sum of the per-class bests: 92.9% [",
+    ] {
+        assert!(
+            g.numbers.iter().any(|n| n.starts_with(want)),
+            "missing `{want}` in {:?}",
+            g.numbers
+        );
+    }
+    assert_eq!(at(14_800_000 - 8_400_000).verdict, Verdict::Fail);
+    // No lpk/balanced row on one class: not evaluable, naming it; the fast rows do not count.
+    let mut k = inputs(&Knobs::default(), true);
+    add_subject(&mut k, "balanced", "photo-jpeg", 6_000_000, 20.0, 4.0);
+    add_subject(
+        &mut k,
+        "balanced",
+        "photo-jpeg-edited",
+        2_400_000,
+        20.0,
+        4.0,
+    );
+    add_subject(&mut k, "fast", "office-pdf", 5_900_000, 1.0, 0.5);
+    assert_eq!(
+        verdict_of(&k, "G1"),
+        Verdict::NotEvaluable("no lpk/balanced row on office-pdf".into())
+    );
+    // A one-measurement lpk row is starred and noted.
+    let mut one = subject_inputs(true);
+    set_row(&mut one, SUBJECT_TOOL, "balanced", "photo-jpeg", one_repeat);
+    let g = gate(&one, "G1");
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("combined lpk/balanced*: ")));
+    // The per-class lines star only the class that rests on one measurement.
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("photo-jpeg alone, lpk/balanced* / best incumbent: ")));
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("office-pdf alone, lpk/balanced / best incumbent: ")));
+    assert!(g
+        .notes
+        .iter()
+        .any(|n| n.contains("lpk/balanced on photo-jpeg rests on one measurement")));
+}
+
+#[test]
+fn g2_measured_compares_lpk_balanced_with_the_best_non_deduplicating_incumbent() {
+    // 7z/ultra at 8.0 MB is the best incumbent; the reference dedup tool is smaller (2.0 MB).
+    let mut i = subject_inputs(true);
+    add_dedup_tool(&mut i, G2_CLASS);
+    let g = gate(&i, "G2");
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    for want in [
+        "tools treated as deduplicating: zpaqfranz",
+        "lpk/balanced: 4000000 bytes [",
+        "best incumbent, not deduplicating (7z/ultra): 8000000 bytes [",
+        "lpk/balanced / best incumbent: 50.0% [",
+        "reference, not compared (deduplicating tool zpaqfranz/m5): 2000000 bytes [",
+    ] {
+        assert!(
+            g.numbers.iter().any(|n| n.starts_with(want)),
+            "missing `{want}` in {:?}",
+            g.numbers
+        );
+    }
+    assert!(g.title.contains("D-27, D-43; measured `lpk` rows"));
+    // One byte over half: FAIL.
+    let mut j = subject_inputs(true);
+    set_row(&mut j, SUBJECT_TOOL, "balanced", G2_CLASS, |r| {
+        let mut reps = r.repeats.take().expect("reps");
+        for s in &mut reps {
+            s.archive_bytes = 4_000_001;
+        }
+        r.median = Some(Sample::median_of(&reps));
+        r.repeats = Some(reps);
+    });
+    assert_eq!(verdict_of(&j, "G2"), Verdict::Fail);
+    // Without the lpk/balanced row on the class: not evaluable, naming it; the incumbents'
+    // failed rows are still listed under the table.
+    let mut k = inputs(&Knobs::default(), true);
+    add_subject(&mut k, "fast", G2_CLASS, 9_000_000, 1.0, 0.5);
+    set_row(&mut k, "zstd", "3", G2_CLASS, |r| {
+        r.median = None;
+        r.failed = samples::failed().failed;
+    });
+    let g = gate(&k, "G2");
+    assert_eq!(
+        g.verdict,
+        Verdict::NotEvaluable(format!("no lpk/balanced row on {G2_CLASS}"))
+    );
+    assert!(
+        g.notes.iter().any(|n| n.contains("failed: zstd/3 on")),
+        "{:?}",
+        g.notes
+    );
+    // Only deduplicating incumbents measured the class: not evaluable, lpk alone is no incumbent.
+    let mut d = subject_inputs(true);
+    add_dedup_tool(&mut d, G2_CLASS);
+    for (t, s) in [
+        ("store", "store"),
+        ("7z", "ultra"),
+        ("7z", "mx5"),
+        ("zstd", "3"),
+    ] {
+        set_row(&mut d, t, s, G2_CLASS, |r| {
+            r.median = None;
+            r.failed = samples::failed().failed;
+        });
+    }
+    assert!(matches!(
+        verdict_of(&d, "G2"),
+        Verdict::NotEvaluable(w) if w.contains("no measured incumbent")
+    ));
+}
+
+#[test]
+fn g3_measured_compares_lpk_fast_with_the_store_control_at_eighty_percent() {
+    // store on video: 50 MB in 1 s; lpk/fast in 1.25 s is exactly 80%, 1.26 s just below.
+    let at = |cw: f64, with_probes: bool| {
+        let mut i = subject_inputs(with_probes);
+        set_row(&mut i, SUBJECT_TOOL, "fast", "video", |r| {
+            let mut reps = r.repeats.take().expect("reps");
+            for s in &mut reps {
+                s.compress = samples::measure(cw);
+            }
+            r.median = Some(Sample::median_of(&reps));
+            r.repeats = Some(reps);
+        });
+        gate(&i, "G3")
+    };
+    assert_eq!(at(1.25, true).verdict, Verdict::Pass);
+    assert_eq!(at(1.26, true).verdict, Verdict::Fail);
+    // No probe needed: the control is in the baseline.
+    let g = at(1.25, false);
+    assert_eq!(g.verdict, Verdict::Pass);
+    for want in [
+        "lpk/fast compress on video: 40.0 MB/s [",
+        "store/store compress on video: 50.0 MB/s [",
+        "video class bytes: 50000000 bytes [",
+        "lpk/fast median compress wall seconds on video: 1.250 s [",
+        "store/store median compress wall seconds on video: 1.000 s [",
+        "lpk/fast first repeat compress on video: 40.0 MB/s [",
+        "store/store first repeat compress on video: 50.0 MB/s [",
+        "lpk/fast / store/store: 80.0% [",
+        "rows compared: both from `2026-10-02-testbox` (one run, as D-27 asks)",
+    ] {
+        assert!(
+            g.numbers.iter().any(|n| n.starts_with(want)),
+            "missing `{want}` in {:?}",
+            g.numbers
+        );
+    }
+    assert!(!g.numbers.iter().any(|n| n.contains("raw read")));
+    // With a probe the raw read rate is printed as information, not the gate.
+    let g = at(1.26, true);
+    assert_eq!(g.verdict, Verdict::Fail);
+    assert!(g.numbers.iter().any(|n| n.starts_with(
+        "raw read of video, median of the probe's passes, including opens (information only, \
+         not the gate): 50.0 MB/s ["
+    )));
+    assert!(!g.numbers.iter().any(|n| n.contains("gate cost")));
+    // The store control missing or failed: not evaluable, naming the control.
+    let mut f = subject_inputs(true);
+    set_row(&mut f, "store", "store", "video", |r| {
+        r.median = None;
+        r.failed = samples::failed().failed;
+    });
+    let g = gate(&f, "G3");
+    assert!(
+        matches!(&g.verdict, Verdict::NotEvaluable(w) if w.starts_with("the store control: store/store on video failed")),
+        "{:?}",
+        g.verdict
+    );
+    assert!(g
+        .notes
+        .iter()
+        .any(|n| n.starts_with("G3 input: store/store on video (the control) failed")));
+    // No lpk/fast row on video: not evaluable, naming it.
+    let mut n = inputs(&Knobs::default(), true);
+    add_subject(&mut n, "fast", "audio", 4_000_000, 1.0, 0.5);
+    assert_eq!(
+        verdict_of(&n, "G3"),
+        Verdict::NotEvaluable("no lpk/fast row on video".into())
+    );
+    // A one-measurement subject row is starred and noted.
+    let mut one = subject_inputs(true);
+    set_row(&mut one, SUBJECT_TOOL, "fast", "video", one_repeat);
+    let g = gate(&one, "G3");
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("lpk/fast* compress on video: ")));
+    assert!(g
+        .notes
+        .iter()
+        .any(|n| n.contains("lpk/fast on video rests on one measurement")));
+}
+
+#[test]
+fn g4_measured_compares_lpk_fast_with_7z_mx5_on_every_mix() {
+    let mut i = subject_inputs(true);
+    i.mixes = mixes_without_absent();
+    let g = gate(&i, "G4");
+    assert_eq!(g.verdict, Verdict::Pass);
+    assert!(g.title.contains("lpk/fast") && !g.title.contains("zstd"));
+    for want in [
+        // Bytes-weighted harmonic means: docs 50/50 of 20 and 12 MB/s (lpk/fast), 5 and 3 MB/s
+        // (7z/mx5); media 60/40 of 100 and 10 MB/s, 25 and 2.5 MB/s.
+        "docs: lpk/fast extract: 15.0 MB/s [",
+        "docs: 7z/mx5 extract: 3.8 MB/s [",
+        "media: lpk/fast extract: 21.7 MB/s [",
+        "media: 7z/mx5 extract: 5.4 MB/s [",
+    ] {
+        assert!(
+            g.numbers.iter().any(|n| n.starts_with(want)),
+            "missing `{want}` in {:?}",
+            g.numbers
+        );
+    }
+    // Slower than 7z/mx5 on one class of the docs mix (3 s against 2 s): FAIL.
+    let mut j = subject_inputs(true);
+    j.mixes = mixes_without_absent();
+    set_row(&mut j, SUBJECT_TOOL, "fast", "office-pdf", |r| {
+        let mut reps = r.repeats.take().expect("reps");
+        for s in &mut reps {
+            s.extract = samples::measure(3.0);
+        }
+        r.median = Some(Sample::median_of(&reps));
+        r.repeats = Some(reps);
+    });
+    assert_eq!(verdict_of(&j, "G4"), Verdict::Fail);
+    // Equal speed passes; the default fixture's absent mix is still not evaluable.
+    assert!(matches!(
+        verdict_of(&subject_inputs(true), "G4"),
+        Verdict::NotEvaluable(w) if w.starts_with("mix absent: lpk/fast: no result")
+    ));
+    // Without the lpk/fast row on a class of a mix: not evaluable on that mix, naming the row.
+    let mut k = inputs(&Knobs::default(), true);
+    k.mixes = mixes_without_absent();
+    for class in ["photo-jpeg", "office-pdf", "video"] {
+        add_subject(&mut k, "fast", class, MB, 1.0, 0.5);
+    }
+    let g = gate(&k, "G4");
+    assert_eq!(
+        g.verdict,
+        Verdict::NotEvaluable("mix media: lpk/fast: no result for class `audio`".into())
+    );
+    assert!(g.notes.iter().any(|n| n.contains("mix media: lpk/fast")));
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("docs: lpk/fast extract: ")));
+}
+
+#[test]
+fn the_phase_1_verdict_line_keeps_its_wording() {
+    let mut i = subject_inputs(true);
+    i.mixes = mixes_without_absent();
+    let m = Model::build(&i);
+    assert_eq!(verdict_line(&gates(&m, &i)), "Verdict proposal: GO");
+    let text = report_text(&i);
+    assert!(text.contains("Verdict proposal: GO**"), "{text}");
+    let mut n = inputs(&Knobs::default(), true);
+    add_subject(&mut n, "fast", "audio", 4_000_000, 1.0, 0.5);
+    let m = Model::build(&n);
+    let line = verdict_line(&gates(&m, &n));
+    assert_eq!(
+        line,
+        "NO-GO proposal: not evaluable (the data is incomplete, not a failure): G1, G2, G3, G4"
+    );
+}
+
+/// Every repeat's archive at `bytes`, the median recomputed.
+fn set_archive(r: &mut ToolResult, bytes: u64) {
+    let mut reps = r.repeats.take().expect("reps");
+    for s in &mut reps {
+        s.archive_bytes = bytes;
+    }
+    r.median = Some(Sample::median_of(&reps));
+    r.repeats = Some(reps);
+}
+
+/// The G3 rows of a pooled baseline: `store/store` on video in `a`, `lpk/fast` on video in `b`
+/// (or both in `a`, with `b` holding another row): the gate names the directory of each row.
+fn g3_pooled(same_dir: bool) -> Inputs {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let store = result("store", "store", "video", 50 * MB, 50_000_100, 1.0, 1.0);
+    let fast = result(SUBJECT_TOOL, "fast", "video", 50 * MB, 49_999_000, 1.0, 0.5);
+    let (a_rows, b_rows) = if same_dir {
+        (vec![store, fast], second_results())
+    } else {
+        (vec![store], vec![fast])
+    };
+    let a = dir_under(tmp.path(), "a", &a_rows);
+    let b = dir_under(tmp.path(), "b", &b_rows);
+    add_tool_entries(&a, &a_rows);
+    add_tool_entries(&b, &b_rows);
+    // The directories are read before `tmp` is dropped; the Inputs hold no path.
+    load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled")
+}
+
+/// Adds to the directory's `tools.json` an entry (found, at the result's version) for every
+/// tool of `results` the sample file does not list, as the validator requires.
+fn add_tool_entries(dir: &Path, results: &[ToolResult]) {
+    let mut tools: ToolsFile =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("tools.json")).expect("read"))
+            .expect("parse");
+    for r in results {
+        if !tools.tools.iter().any(|t| t.id == r.tool.id) {
+            tools.tools.push(crate::run::result::ToolEntry {
+                id: r.tool.id.clone(),
+                name: r.tool.id.clone(),
+                status: "found".into(),
+                reason: None,
+                version: r.tool.version.clone(),
+                catalogue_verified: true,
+                manual: false,
+                local_override: false,
+                dedup: Some(false),
+            });
+        }
+    }
+    std::fs::write(dir.join("tools.json"), render_json(&tools)).expect("tools");
+}
+
+#[test]
+fn g3_measured_names_the_directory_of_each_row_when_the_rows_come_from_two_runs() {
+    let i = g3_pooled(false);
+    let base = &i.baseline;
+    assert_eq!(base.pooled.len(), 2);
+    let (dir_a, dir_b) = (base.pooled[0].label.clone(), base.pooled[1].label.clone());
+    assert_ne!(dir_a, dir_b);
+    let src_of = |name: &str| {
+        base.results
+            .iter()
+            .find(|(r, _)| r.file_name() == name)
+            .map(|(_, s)| *s)
+            .expect("row")
+    };
+    let (src_store, src_fast) = (
+        src_of("store-store-video.json"),
+        src_of("lpk-fast-video.json"),
+    );
+    assert_eq!(dir_of(base, src_store), dir_a);
+    assert_eq!(dir_of(base, src_fast), dir_b);
+    let g = gate(&i, "G3");
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    assert!(g
+        .title
+        .contains("in the same run or, pooled per D-48, the same baseline"));
+    let want = format!(
+        "rows compared: lpk/fast from `{dir_b}` [{src_fast}], store/store from `{dir_a}` \
+         [{src_store}]: two runs of one pooled baseline (D-27 asks for one run; D-48's pooling \
+         stands in for it: same host, corpus manifest, thread count and catalogue, checked when \
+         the directories were pooled)"
+    );
+    assert!(g.numbers.contains(&want), "{:?}", g.numbers);
+    let note = format!(
+        "G3: the two rows are from different runs (`{dir_b}`, `{dir_a}`); the comparison rests \
+         on D-48's pooling checks, not on D-27's same run"
+    );
+    assert!(g.notes.contains(&note), "{:?}", g.notes);
+    assert!(report_text(&i).contains(&note));
+}
+
+#[test]
+fn g3_measured_says_one_run_when_both_rows_come_from_the_same_directory() {
+    let i = g3_pooled(true);
+    let base = &i.baseline;
+    assert_eq!(base.pooled.len(), 2);
+    let dir_a = base.pooled[0].label.clone();
+    let g = gate(&i, "G3");
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    let want = format!("rows compared: both from `{dir_a}` (one run, as D-27 asks)");
+    assert!(g.numbers.contains(&want), "{:?}", g.numbers);
+    assert!(
+        !g.notes.iter().any(|n| n.contains("different runs")),
+        "{:?}",
+        g.notes
+    );
 }
