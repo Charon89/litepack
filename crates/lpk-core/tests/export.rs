@@ -391,3 +391,51 @@ fn files_sharing_every_chunk_are_served_from_the_same_blocks() {
     assert!(got.values().all(|d| *d == one));
     assert_eq!(s.blocks_decoded, s.blocks_needed, "{s:?}");
 }
+
+#[test]
+fn a_last_use_block_under_a_full_cache_does_not_wait_for_a_permit() {
+    // Runs A, B, A: A is cached after its first run (it comes back), B is used once, so the
+    // schedule does not cache it — but B's run holds a permit. With one permit (a budget of
+    // one block) the cache held it all and B's decode waited for the eviction that never
+    // came: the sequential path hung. The export runs on a helper thread and fails by a
+    // deadline instead of hanging the test; the thread count is explicit, not the host's.
+    let x = noise(21, 30_000);
+    let y = noise(22, 30_000);
+    let files = vec![
+        ("1-x.bin".to_string(), x.clone()),
+        ("2-y.bin".to_string(), y),
+        ("3-x-again.bin".to_string(), x),
+    ];
+    let bytes = pack(&files, options());
+    let wide = export(&bytes, &mut Collect::default(), &threads(1)).unwrap();
+    assert!(wide.blocks_needed >= 2 && wide.visits >= 3, "{wide:?}");
+    let one = wide.memory.total(1);
+    let want = expect(&files);
+    for n in [1, 2] {
+        let bytes = bytes.clone();
+        let want = want.clone();
+        let worker = std::thread::spawn(move || {
+            let mut sink = Collect::default();
+            let opts = ExtractOptions {
+                threads: Some(n),
+                memory: Some(one),
+                ..ExtractOptions::default()
+            };
+            let s = export(&bytes, &mut sink, &opts).unwrap();
+            assert_eq!(sink.got, want, "threads {n}");
+            s
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !worker.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "threads {n}: the export did not finish in 120 s (a permit never returned)"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let s = worker.join().unwrap();
+        assert_eq!(s.in_flight, 1, "{s:?}");
+        assert_eq!(s.peak_in_flight, 1, "{s:?}");
+        assert_eq!(s.blocks_decoded, s.visits, "{s:?}");
+    }
+}

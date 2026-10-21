@@ -30,6 +30,9 @@
 //! cache (or, for a block the cache does not keep, when its run is over), so at most `held`
 //! decoded blocks exist at any time (decoding, waiting, cached). The cache then keeps
 //! `held - 1` blocks, so one permit is always free for the miss the calling thread waits for.
+//! On the sequential path the cache keeps `held` blocks; a block used for the last time is
+//! held outside it for its run, so when the cache is full such a run evicts a block first
+//! (the schedule's rule, [`schedule`]) — the permit it needs cannot come from anywhere else.
 //!
 //! **The sink.** [`Sink::file`] receives the entry and a [`Read`] that yields the file's bytes
 //! in order; the sink must read it to the end (an export where it did not is an error, since
@@ -247,11 +250,19 @@ fn plan<R: Read + Seek>(archive: &mut Archive<R>) -> Result<Plan, CoreError> {
     })
 }
 
-/// Belady's schedule over `runs` for a cache of `capacity` blocks: marks each run a hit or a
-/// miss, names the block a miss evicts, marks a run after which its block is never used
-/// again (dropped, not cached), and returns the misses' blocks in order (what the decoders
-/// decode). With capacity 0 every run is a miss and nothing is kept.
-fn schedule(runs: &mut [Run], capacity: usize) -> Vec<usize> {
+/// Belady's schedule over `runs` for a cache of `capacity` blocks among `held` permits
+/// (`held >= capacity`): marks each run a hit or a miss, names the block a miss evicts,
+/// marks a run after which its block is never used again (dropped, not cached), and returns
+/// the misses' blocks in order (what the decoders decode). With capacity 0 every run is a
+/// miss and nothing is kept.
+///
+/// A last-use miss is not cached, but its block holds a permit for its run; when the cache
+/// already holds every permit (`capacity == held`, the sequential path), such a run evicts
+/// the farthest block too — else the decode would wait for a permit only the cache can
+/// return. The invariant the engine relies on: at every run, the cached blocks plus the
+/// run's block (when it is not one of them) never exceed `held`.
+fn schedule(runs: &mut [Run], capacity: usize, held: usize) -> Vec<usize> {
+    debug_assert!(held >= capacity);
     // The next run of each block after run i (`usize::MAX`: none).
     let mut next_use = vec![usize::MAX; runs.len()];
     let mut later: HashMap<usize, usize> = HashMap::new();
@@ -280,10 +291,11 @@ fn schedule(runs: &mut [Run], capacity: usize) -> Vec<usize> {
             continue;
         }
         misses.push(r.block);
-        if capacity == 0 || r.last {
-            continue;
-        }
-        if cached.len() >= capacity {
+        // The run's block takes a permit of its own unless this miss caches it, so the room
+        // the cache must leave is one of `held` for a last-use block (held for its run only)
+        // and one of `capacity` for a block the cache keeps.
+        let room = if r.last { held } else { capacity };
+        if cached.len() >= room {
             while let Some((nu, b)) = heap.pop() {
                 if cached.get(&b) == Some(&nu) {
                     cached.remove(&b);
@@ -291,6 +303,9 @@ fn schedule(runs: &mut [Run], capacity: usize) -> Vec<usize> {
                     break;
                 }
             }
+        }
+        if capacity == 0 || r.last {
+            continue;
         }
         cached.insert(r.block, next_use[i]);
         heap.push((next_use[i], r.block));
@@ -648,7 +663,7 @@ where
         1
     };
     let capacity = if parallel { held - 1 } else { held };
-    let misses = schedule(&mut runs, capacity);
+    let misses = schedule(&mut runs, capacity, held);
     let memory = ExtractMemory {
         fixed: m
             .fixed_shared
@@ -864,8 +879,9 @@ mod tests {
     }
 
     /// Replay a schedule with a real cache set: every hit is cached, every eviction names a
-    /// cached block, the cache never exceeds the capacity.
-    fn replay(runs: &[Run], capacity: usize) -> usize {
+    /// cached block, the cache never exceeds the capacity, and the permits out at a run (the
+    /// cache plus the run's block when the cache does not hold it) never exceed `held`.
+    fn replay(runs: &[Run], capacity: usize, held: usize) -> usize {
         let mut cache: std::collections::HashSet<usize> = Default::default();
         let mut misses = 0;
         for (i, r) in runs.iter().enumerate() {
@@ -884,10 +900,16 @@ mod tests {
             if let Some(x) = r.evict {
                 assert!(cache.remove(&x), "evicting {x} not cached");
             }
-            if capacity > 0 && !r.last {
+            let kept = capacity > 0 && !r.last;
+            if kept {
                 cache.insert(r.block);
             }
-            assert!(cache.len() <= capacity);
+            assert!(cache.len() <= capacity, "run {i}");
+            assert!(
+                cache.len() + usize::from(!kept) <= held,
+                "run {i}: {} cached and the run's block held, {held} permits",
+                cache.len()
+            );
         }
         misses
     }
@@ -895,9 +917,9 @@ mod tests {
     #[test]
     fn capacity_zero_misses_every_run_and_keeps_nothing() {
         let mut r = runs(&[0, 1, 0, 1]);
-        let misses = schedule(&mut r, 0);
+        let misses = schedule(&mut r, 0, 1);
         assert_eq!(misses, [0, 1, 0, 1]);
-        assert_eq!(replay(&r, 0), 4);
+        assert_eq!(replay(&r, 0, 1), 4);
     }
 
     #[test]
@@ -905,37 +927,71 @@ mod tests {
         // With two slots: 0 and 1 are cached; 2 is never used again, so it is dropped after
         // its run and evicts nothing; 0 and 1 then hit (each its last use: dropped).
         let mut r = runs(&[0, 1, 2, 0, 1]);
-        let misses = schedule(&mut r, 2);
+        let misses = schedule(&mut r, 2, 3);
         assert_eq!(misses, [0, 1, 2]);
         assert_eq!(r[2].evict, None);
         assert!(r[2].last);
         assert!(r[3].hit && r[3].last);
         assert!(r[4].hit && r[4].last);
-        assert_eq!(replay(&r, 2), 3);
+        assert_eq!(replay(&r, 2, 3), 3);
         // With one slot the same sequence: block 1 is held while its run is written, so it
         // evicts 0 (used again at run 3); 2 is dropped after its run; 0 misses again (its last
         // use: dropped) and 1 hits.
         let mut r = runs(&[0, 1, 2, 0, 1]);
-        let misses = schedule(&mut r, 1);
+        let misses = schedule(&mut r, 1, 2);
         assert_eq!(misses, [0, 1, 2, 0]);
         assert_eq!(r[1].evict, Some(0));
         assert!(r[4].hit && r[4].last);
-        assert_eq!(replay(&r, 1), 4);
+        assert_eq!(replay(&r, 1, 2), 4);
+    }
+
+    #[test]
+    fn a_last_use_miss_evicts_when_the_cache_holds_every_permit() {
+        // The sequential path: `held == capacity`. Two slots, 0 and 1 cached and holding
+        // both permits; 2 is used once, so it is not cached, but it needs a permit for its
+        // run: the farthest block (1, next used at run 4) goes. Before this rule the run
+        // waited for a permit only the cache could return (the hang of E3-6's tests).
+        let mut r = runs(&[0, 1, 2, 0, 1]);
+        let misses = schedule(&mut r, 2, 2);
+        assert_eq!(misses, [0, 1, 2, 1]);
+        assert!(r[2].last && !r[2].hit);
+        assert_eq!(r[2].evict, Some(1));
+        assert!(r[3].hit && r[3].last);
+        assert!(!r[4].hit && r[4].last);
+        assert_eq!(replay(&r, 2, 2), 4);
+        // One slot, one permit: every run is a miss and the last-use runs evict the one
+        // cached block first.
+        let mut r = runs(&[0, 1, 2, 0, 1]);
+        let misses = schedule(&mut r, 1, 1);
+        assert_eq!(misses, [0, 1, 2, 0, 1]);
+        assert_eq!(r[1].evict, Some(0));
+        assert_eq!(r[2].evict, Some(1));
+        assert_eq!(r[3].evict, None);
+        assert_eq!(replay(&r, 1, 1), 5);
+        // A last-use miss into a cache with room evicts nothing.
+        let mut r = runs(&[0, 2, 0]);
+        let misses = schedule(&mut r, 2, 2);
+        assert_eq!(misses, [0, 2]);
+        assert_eq!(r[1].evict, None);
+        assert_eq!(replay(&r, 2, 2), 2);
     }
 
     #[test]
     fn a_cache_large_enough_decodes_each_block_once() {
         let seq = [3usize, 1, 3, 2, 1, 0, 3, 2];
         let mut r = runs(&seq);
-        let misses = schedule(&mut r, 4);
+        let misses = schedule(&mut r, 4, 5);
         assert_eq!(misses, [3, 1, 2, 0]);
-        assert_eq!(replay(&r, 4), 4);
-        // And a smaller cache never beats the number of distinct blocks.
+        assert_eq!(replay(&r, 4, 5), 4);
+        // And a smaller cache never beats the number of distinct blocks, with the permits
+        // one more than the cache (the parallel path) or as many (the sequential path).
         for c in 1..4 {
-            let mut r = runs(&seq);
-            let m = schedule(&mut r, c);
-            assert_eq!(m.len(), replay(&r, c));
-            assert!(m.len() >= 4);
+            for held in [c + 1, c] {
+                let mut r = runs(&seq);
+                let m = schedule(&mut r, c, held);
+                assert_eq!(m.len(), replay(&r, c, held));
+                assert!(m.len() >= 4);
+            }
         }
     }
 
@@ -944,17 +1000,17 @@ mod tests {
         // Capacity 2: 0, 1, then 0 hits (its next use moves to run 4); 2 is never used
         // again, so it is dropped and evicts nothing; 0 and 1 hit on their last uses.
         let mut r = runs(&[0, 1, 0, 2, 0, 1]);
-        let misses = schedule(&mut r, 2);
+        let misses = schedule(&mut r, 2, 3);
         assert_eq!(misses, [0, 1, 2]);
         assert!(r[2].hit && !r[2].last);
         assert_eq!(r[3].evict, None, "2 is last: not cached, nothing evicted");
         assert!(r[4].hit && r[4].last);
         assert!(r[5].hit && r[5].last);
-        assert_eq!(replay(&r, 2), 3);
+        assert_eq!(replay(&r, 2, 3), 3);
         // With one slot: 0, 1 evicts 0, 0 evicts 1, 2 (last, dropped), 0 hit and last, 1 miss.
         let mut r = runs(&[0, 1, 0, 2, 0, 1]);
-        let misses = schedule(&mut r, 1);
+        let misses = schedule(&mut r, 1, 2);
         assert_eq!(misses, [0, 1, 0, 2, 1]);
-        assert_eq!(replay(&r, 1), 5);
+        assert_eq!(replay(&r, 1, 2), 5);
     }
 }
