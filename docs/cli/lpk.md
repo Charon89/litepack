@@ -40,6 +40,8 @@ Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure
 ###### **Options:**
 
 * `--json` — Machine-readable output: `l` prints one JSON object per entry per line, and any failing command prints exactly one JSON object line on stderr instead of `error: ...`
+* `--quiet` — Print nothing but errors: no summary on stdout, no warning or note on stderr, no progress line, and no -v report
+* `--no-progress` — No progress line. (The line is shown only when stderr is a terminal: never through a pipe, and not with --json or --quiet.)
 
 
 

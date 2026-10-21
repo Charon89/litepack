@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
+# Ctrl-C (E3-3): the handler cancels the engine's token (MIT OR Apache-2.0).
+ctrlc = "3.5.2"
 lpk-core = { path = "../lpk-core", version = "0.0.1" }
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
 rpassword = "7.5.4"

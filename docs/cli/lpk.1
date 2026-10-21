@@ -4,13 +4,19 @@
 .SH NAME
 lpk \- LitePack archiver: create, extract and test .lpk archives
 .SH SYNOPSIS
-\fBlpk\fR [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+\fBlpk\fR [\fB\-\-json\fR] [\fB\-\-quiet\fR] [\fB\-\-no\-progress\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
 LitePack archiver: create, extract and test .lpk archives
 .SH OPTIONS
 .TP
 \fB\-\-json\fR
 Machine\-readable output: `l` prints one JSON object per entry per line, and any failing command prints exactly one JSON object line on stderr instead of `error: ...`
+.TP
+\fB\-\-quiet\fR
+Print nothing but errors: no summary on stdout, no warning or note on stderr, no progress line, and no \-v report
+.TP
+\fB\-\-no\-progress\fR
+No progress line. (The line is shown only when stderr is a terminal: never through a pipe, and not with \-\-json or \-\-quiet.)
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

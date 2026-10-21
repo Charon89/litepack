@@ -36,10 +36,14 @@
 //! the whole plan) without a tree on disk; `--method`, `--encrypt` with the archive's
 //! password, `--force` to replace an existing output.
 //! Exit codes: 0 ok, 1 usage error, 2 a refused or failed operation ([`failure`]: one line
-//! `error: ...` on stderr, or with the global `--json` flag one JSON object line). Progress
-//! goes to stderr and only with `-v`.
+//! `error: ...` on stderr, or with the global `--json` flag one JSON object line).
+//! Console ([`console`]): a progress line on stderr, rewritten in place, only when stderr is
+//! a terminal (never through a pipe) and not under `--quiet`, `--no-progress` or `--json`;
+//! `--quiet` prints nothing but errors; Ctrl-C cancels the running command through the
+//! engine's token (exit 2, `cancelled`); the `-v` reports are unchanged.
 #![forbid(unsafe_code)]
 
+pub mod console;
 pub mod export;
 pub mod failure;
 pub mod list;
@@ -51,11 +55,12 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use lpk_core::{
-    BalancedOptions, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions,
+    BalancedOptions, CancelToken, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions,
 };
 use lpk_format::{Argon2Params, Credentials, FormatError, Resources, Suite};
 use zeroize::Zeroizing;
 
+pub use console::Console;
 pub use export::{Container, Method};
 pub use failure::{core_exit, format_exit, EntryFailure, Failure};
 pub use list::{list_archive, ListOptions};
@@ -92,6 +97,14 @@ struct Cli {
     /// command prints exactly one JSON object line on stderr instead of `error: ...`.
     #[arg(long, global = true)]
     json: bool,
+    /// Print nothing but errors: no summary on stdout, no warning or note on stderr, no
+    /// progress line, and no -v report.
+    #[arg(long, global = true)]
+    quiet: bool,
+    /// No progress line. (The line is shown only when stderr is a terminal: never through a
+    /// pipe, and not with --json or --quiet.)
+    #[arg(long, global = true)]
+    no_progress: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -854,7 +867,12 @@ fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
     pipeline
 }
 
-fn add(a: &AddArgs, credentials: Option<Credentials>, err: &mut dyn Write) -> Result<(), Failure> {
+fn add(
+    a: &AddArgs,
+    credentials: Option<Credentials>,
+    console: &Console,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
     let tier = a.tier.tier().map_err(Failure::usage)?;
     // What the `-v` report says the archive is sealed with.
     let sealing = credentials.is_some().then(|| {
@@ -874,9 +892,10 @@ fn add(a: &AddArgs, credentials: Option<Credentials>, err: &mut dyn Write) -> Re
         });
     }
     pipeline.seal.writer.recovery.percent = a.recovery;
-    let s = pipeline
-        .run_file(&a.input, &a.archive)
-        .map_err(|e| Failure::core(&e, Some(&a.archive)))?;
+    pipeline.monitor = console.monitor();
+    let r = pipeline.run_file(&a.input, &a.archive);
+    console.clear();
+    let s = r.map_err(|e| Failure::core(&e, Some(&a.archive)))?;
     records_cap_note(err, &s.peel.deflate);
     if a.verbose {
         report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
@@ -887,6 +906,7 @@ fn add(a: &AddArgs, credentials: Option<Credentials>, err: &mut dyn Write) -> Re
 fn append(
     a: &AppendArgs,
     credentials: Option<&Credentials>,
+    console: &Console,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
     let tier = a.tier.tier().map_err(Failure::usage)?;
@@ -896,9 +916,10 @@ fn append(
         .then(|| "the archive's key".to_string());
     let mut pipeline = build_pipeline(&a.tier, tier);
     pipeline.seal.writer.recovery.percent = a.recovery;
-    let s = pipeline
-        .append_file(&a.input, &a.archive, credentials)
-        .map_err(|e| Failure::core(&e, Some(&a.archive)))?;
+    pipeline.monitor = console.monitor();
+    let r = pipeline.append_file(&a.input, &a.archive, credentials);
+    console.clear();
+    let s = r.map_err(|e| Failure::core(&e, Some(&a.archive)))?;
     records_cap_note(err, &s.peel.deflate);
     if a.verbose {
         report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
@@ -1149,6 +1170,7 @@ fn extract(
     x: &ExtractArgs,
     credentials: Option<&Credentials>,
     json: bool,
+    console: &Console,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
@@ -1176,7 +1198,16 @@ fn extract(
         lpk_core::Symlinks::Skip
     };
     let policy = lpk_core::Policy::new(x.overwrite.into(), symlinks);
-    let r = lpk_core::extract_file(&x.archive, &x.outdir, &priors, credentials, &policy, &opts);
+    let r = lpk_core::extract_file_with(
+        &x.archive,
+        &x.outdir,
+        &priors,
+        credentials,
+        &policy,
+        &opts,
+        &console.monitor(),
+    );
+    console.clear();
     // On failure the error line is the only stderr output (D-77 (3)): the warnings are
     // printed only after success, one line per skipped symlink entry, then the counts.
     let s = r.map_err(|e| Failure::core(&e, Some(&x.archive)))?;
@@ -1294,6 +1325,7 @@ fn extract(
 fn export(
     x: &ExportArgs,
     credentials: Option<&Credentials>,
+    console: &Console,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
@@ -1384,12 +1416,14 @@ fn export(
             .open(&out_path)
     };
     let mut writer = export::open(container, Box::new(opener), &x.out, settings);
-    let r = lpk_core::export_archive(
+    let r = lpk_core::export_archive_with(
         &mut archive,
         || std::fs::File::open(&x.archive),
         writer.as_mut(),
         &opts,
+        &console.monitor(),
     );
+    console.clear();
     // Only an output this export created (or truncated under --force) is removed on
     // failure; an existing one a refusal left untouched stays as it was.
     let created = writer.created();
@@ -1523,8 +1557,26 @@ pub fn command() -> clap::Command {
     Cli::command().version(env!("CARGO_PKG_VERSION"))
 }
 
-/// Run the tool with `args` (the first is the program name); returns the exit code.
+/// Run the tool with `args` (the first is the program name); returns the exit code. The
+/// cancel token is a fresh one (nothing cancels it): `main` uses [`run_with_cancel`] with the
+/// Ctrl-C handler's token.
 pub fn run<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_with_cancel(args, out, err, CancelToken::new())
+}
+
+/// [`run`] with the token the running command polls: cancelling it (Ctrl-C) stops the
+/// engine at its next file or block, cleans up as a failure does, and exits 2 with
+/// `cancelled`.
+pub fn run_with_cancel<I, T>(
+    args: I,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    cancel: CancelToken,
+) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -1550,7 +1602,19 @@ where
     };
     let json = cli.json;
     let terminal = Terminal::detect();
-    match dispatch(cli.command, json, &terminal, out, err) {
+    let console = Console::new(cancel, !cli.quiet && !cli.no_progress && !json);
+    // Under --quiet the command's own output (summaries, warnings, notes, -v reports) goes
+    // nowhere; a failure's line still goes to `err`.
+    let mut quiet_out = std::io::sink();
+    let mut quiet_err = std::io::sink();
+    let (o, e): (&mut dyn Write, &mut dyn Write) = if cli.quiet {
+        (&mut quiet_out, &mut quiet_err)
+    } else {
+        (out, err)
+    };
+    let r = dispatch(cli.command, json, &terminal, &console, o, e);
+    console.clear();
+    match r {
         Ok(()) => EXIT_OK,
         Err(f) => {
             f.write(json, err);
@@ -1566,6 +1630,7 @@ fn dispatch(
     command: Command,
     json: bool,
     terminal: &Terminal,
+    console: &Console,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
@@ -1573,7 +1638,7 @@ fn dispatch(
     match command {
         Command::Add(mut a) => {
             let credentials = a.credentials.resolve(terminal, &a.archive, Use::Create)?;
-            add(&a, credentials, err)
+            add(&a, credentials, console, err)
         }
         Command::List(mut l) => {
             let given = l.credentials.resolve(terminal, &l.archive, Use::Open)?;
@@ -1584,7 +1649,7 @@ fn dispatch(
         Command::Extract(mut x) => {
             let given = x.credentials.resolve(terminal, &x.archive, Use::Open)?;
             with_credentials(given, &x.credentials, &x.archive, terminal, |c| {
-                extract(&x, c, json, out, err)
+                extract(&x, c, json, console, out, err)
             })
         }
         Command::Test(mut t) => {
@@ -1618,7 +1683,7 @@ fn dispatch(
         Command::Append(mut a) => {
             let given = a.credentials.resolve(terminal, &a.archive, Use::Open)?;
             with_credentials(given, &a.credentials, &a.archive, terminal, |c| {
-                append(&a, c, err)
+                append(&a, c, console, err)
             })
         }
         Command::Rollback(r) => {
@@ -1642,7 +1707,7 @@ fn dispatch(
         Command::Export(mut x) => {
             let given = x.credentials.resolve(terminal, &x.archive, Use::Open)?;
             with_credentials(given, &x.credentials, &x.archive, terminal, |c| {
-                export(&x, c, out, err)
+                export(&x, c, console, out, err)
             })
         }
     }
