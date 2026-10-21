@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lpk_format::prefetch::{NextFileError, OpenFn, Prefetch, PrefetchOptions};
@@ -320,6 +321,7 @@ impl Pipeline {
             new_archive(),
             &rep,
         )
+        .map_err(|e| rep.map_cancelled(e))
     }
 
     /// Walk `root` and append its entries as the next generation of `existing` (spec section
@@ -360,6 +362,7 @@ impl Pipeline {
             })
         });
         self.run_inputs(inputs, out, None, prepared, t.elapsed(), opener, &rep)
+            .map_err(|e| rep.map_cancelled(e))
     }
 
     /// Like [`append`](Self::append), on the archive at `archive_path` in place, with the
@@ -443,7 +446,8 @@ impl Pipeline {
                 opener,
                 &rep,
             )
-        })();
+        })()
+        .map_err(|e| rep.map_cancelled(e));
         // The writer (and its buffer) is gone by now: whatever reached the file past the old
         // trailer is cut off. A panic inside the closure unwinds through `restore`'s Drop.
         match r {
@@ -484,6 +488,7 @@ impl Pipeline {
                 &rep,
             )
         })
+        .map_err(|e| rep.map_cancelled(e))
     }
 
     /// Run the stages over already-walked inputs; `opener` opens the writer (a new archive, or
@@ -498,7 +503,7 @@ impl Pipeline {
         prepared: Prepared,
         walk_time: Duration,
         opener: Opener<'_, W>,
-        rep: &Reporter<'_>,
+        rep: &Arc<Reporter>,
     ) -> Result<RunSummary, CoreError> {
         let mut timings = StageTimings {
             walk: walk_time,
@@ -550,6 +555,7 @@ impl Pipeline {
                 let mut reads = ReadAhead::spawn(
                     inputs.iter().filter(|i| i.kind == EntryKind::File),
                     in_flight > 1,
+                    rep,
                 )?;
                 let io_threads = reads.threads() + usize::from(writer.has_write_thread());
                 let mut fed = Fed::default();
@@ -868,6 +874,7 @@ impl Pipeline {
                         })
                     }),
                     in_flight > 1,
+                    rep,
                 )?;
                 let io_threads = reads.threads() + usize::from(writer.has_write_thread());
                 // Plain bytes fed since the last block boundary (approximate across the
@@ -927,15 +934,17 @@ impl Pipeline {
                                         Some(Outcome::Peeled(..)) => Err(CoreError::InvalidOption(
                                             "the peel pool out of step with the run".into(),
                                         )),
-                                        None => read_all(&source, input).and_then(|data| {
-                                            peel_file(
-                                                &mut writer,
-                                                cx,
-                                                input,
-                                                &data,
-                                                &mut summary.deflate,
-                                            )
-                                        }),
+                                        None => {
+                                            read_all_watched(&source, input, rep).and_then(|data| {
+                                                peel_file(
+                                                    &mut writer,
+                                                    cx,
+                                                    input,
+                                                    &data,
+                                                    &mut summary.deflate,
+                                                )
+                                            })
+                                        }
                                     };
                                     pool.publish(published);
                                     pool.committed(k);
@@ -944,7 +953,7 @@ impl Pipeline {
                                     fed.note(rep, Stage::Peel, input.len, &writer);
                                     continue;
                                 }
-                                let data = read_all(&source, input)?;
+                                let data = read_all_watched(&source, input, rep)?;
                                 let r = match dcx.as_mut() {
                                     Some(cx) => peel_file(
                                         &mut writer,
@@ -992,22 +1001,24 @@ impl Pipeline {
                                     Some(Outcome::Ready(..)) => Err(CoreError::InvalidOption(
                                         "the peel pool out of step with the run".into(),
                                     )),
-                                    None => read_all(&source, input).and_then(|data| {
-                                        commit_peel(
-                                            &mut writer,
-                                            stage,
-                                            input,
-                                            &data,
-                                            None,
-                                            &mut summary,
-                                            max_part,
-                                        )
-                                    }),
+                                    None => {
+                                        read_all_watched(&source, input, rep).and_then(|data| {
+                                            commit_peel(
+                                                &mut writer,
+                                                stage,
+                                                input,
+                                                &data,
+                                                None,
+                                                &mut summary,
+                                                max_part,
+                                            )
+                                        })
+                                    }
                                 };
                                 pool.committed(k);
                                 r
                             }
-                            None => read_all(&source, input).and_then(|data| {
+                            None => read_all_watched(&source, input, rep).and_then(|data| {
                                 commit_peel(
                                     &mut writer,
                                     stage,
@@ -1072,13 +1083,7 @@ struct Fed {
 impl Fed {
     /// A file of `len` bytes was handed to the writer: an event of `stage` with the writer's
     /// position and blocks (rate-limited by the reporter).
-    fn note<W: Write>(
-        &mut self,
-        rep: &Reporter<'_>,
-        stage: Stage,
-        len: u64,
-        writer: &OutWriter<W>,
-    ) {
+    fn note<W: Write>(&mut self, rep: &Reporter, stage: Stage, len: u64, writer: &OutWriter<W>) {
         self.files += 1;
         self.bytes += len;
         rep.set(
@@ -1091,14 +1096,17 @@ impl Fed {
     }
 }
 
-/// The seal stage: a `Seal` event, the token polled (a run cancelled here never seals), the
-/// writer finished, the stage's last event.
+/// The seal stage: the last `Peel` and `Encode` events (of the stages that ran), a `Seal`
+/// event, the token polled (a run cancelled here never seals), the writer finished, the
+/// stage's last event.
 fn seal_stage<W: Write>(
-    rep: &Reporter<'_>,
+    rep: &Reporter,
     fed: &Fed,
     writer: OutWriter<W>,
 ) -> Result<WriterSummary, CoreError> {
     rep.check()?;
+    rep.done_if_started(Stage::Peel);
+    rep.done_if_started(Stage::Encode);
     rep.set(
         Stage::Seal,
         fed.files,
@@ -1282,9 +1290,21 @@ fn add_symlink<W: Write>(writer: &mut OutWriter<W>, input: &Input) -> Result<(),
 /// `ChangedWhileReading`, the walk's changed-file rule. At most one byte past the walked length
 /// is read, so a file that grew is never read whole.
 pub(crate) fn read_all(source: &Source, input: &Input) -> Result<Vec<u8>, CoreError> {
+    read_all_from(source.open(input)?, input)
+}
+
+/// [`read_all`] through a reader `rep` watches (the token polled before every read).
+fn read_all_watched(
+    source: &Source,
+    input: &Input,
+    rep: &Arc<Reporter>,
+) -> Result<Vec<u8>, CoreError> {
+    read_all_from(rep.watch(source.open(input)?), input)
+}
+
+fn read_all_from(reader: Box<dyn Read + Send>, input: &Input) -> Result<Vec<u8>, CoreError> {
     let mut data = Vec::with_capacity(usize::try_from(input.len).unwrap_or(0));
-    source
-        .open(input)?
+    reader
         .take(input.len.saturating_add(1))
         .read_to_end(&mut data)
         .map_err(|e| CoreError::io(&input.source, e))?;
@@ -1397,9 +1417,13 @@ fn write_peeled<W: Write>(
 
 /// Add a file read on this thread as it is added (the sequential path); a length that changed
 /// since the walk is `ChangedWhileReading`, after its bytes were added.
-fn add_file_here<W: Write>(writer: &mut OutWriter<W>, input: &Input) -> Result<(), CoreError> {
+fn add_file_here<W: Write>(
+    writer: &mut OutWriter<W>,
+    input: &Input,
+    rep: &Arc<Reporter>,
+) -> Result<(), CoreError> {
     let mut r = Counting {
-        inner: Source::new().open(input)?,
+        inner: rep.watch(Source::new().open(input)?),
         n: 0,
     };
     writer.add_file(&input.path, input.flags, input.mtime_ns, &mut r)?;
@@ -1471,6 +1495,8 @@ struct ReadAhead {
     prefetch: Option<Prefetch<CoreError>>,
     /// Files handed to the writer so far: the id the next file must carry.
     next: usize,
+    /// Watches every reader (the token polled before each read, the bytes counted).
+    rep: Arc<Reporter>,
 }
 
 impl ReadAhead {
@@ -1478,18 +1504,22 @@ impl ReadAhead {
     fn spawn<'a>(
         files: impl Iterator<Item = &'a Input>,
         pipelined: bool,
+        rep: &Arc<Reporter>,
     ) -> Result<Self, CoreError> {
         if !pipelined {
             return Ok(ReadAhead {
                 prefetch: None,
                 next: 0,
+                rep: Arc::clone(rep),
             });
         }
         let list: Vec<(usize, OpenFn<CoreError>)> = files
             .enumerate()
             .map(|(id, input)| {
                 let input = input.clone();
-                let open: OpenFn<CoreError> = Box::new(move || Source::new().open(&input));
+                let rep = Arc::clone(rep);
+                let open: OpenFn<CoreError> =
+                    Box::new(move || Source::new().open(&input).map(|r| rep.watch(r)));
                 (id, open)
             })
             .collect();
@@ -1498,6 +1528,7 @@ impl ReadAhead {
         Ok(ReadAhead {
             prefetch: Some(prefetch),
             next: 0,
+            rep: Arc::clone(rep),
         })
     }
 
@@ -1514,7 +1545,7 @@ impl ReadAhead {
         input: &Input,
     ) -> Result<(), CoreError> {
         let Some(prefetch) = &mut self.prefetch else {
-            return add_file_here(writer, input);
+            return add_file_here(writer, input, &self.rep);
         };
         let mut file = match prefetch.next_file() {
             Ok(f) => f,

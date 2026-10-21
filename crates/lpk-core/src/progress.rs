@@ -7,13 +7,14 @@
 //! total when known). The engine, not the observer, limits the rate: the first event of a
 //! stage and the stage's last event (`done`) are always delivered, the rest at most one per
 //! [`MIN_INTERVAL`] per stage, so an observer that writes a console line never has to drop
-//! anything itself. Events are delivered on the engine's coordinating thread (the feeding
-//! thread of a create or append, the dispatching thread of an extraction or export), never
-//! from a worker, so an observer sees them in order; it must still be `Send + Sync`, as the
-//! engine's scoped threads borrow the monitor.
+//! anything itself. Events are delivered one at a time, in order: from the engine's
+//! coordinating thread (the feeding thread of a create or append, the dispatching thread of
+//! an extraction or export) and, while a file is being read, from the thread reading it (an
+//! `Encode` event as the bytes of a large file go by); the observer must be `Send + Sync`.
 //!
 //! **Cancellation.** A [`CancelToken`] is cloneable and thread-safe (a shared flag); the
-//! engine polls it between files and between blocks in every long loop, and its decode
+//! engine polls it between files and between blocks in every long loop, before every read
+//! of a file being archived (so a file of many gigabytes is cut short), and its decode
 //! workers poll it before each block. A cancelled run fails with [`CoreError::Cancelled`] and
 //! cleans up exactly as a failure does: a new archive is removed, an append's generation is
 //! cut off (D-59), an extraction keeps its finished files and removes the unfinished ones
@@ -24,6 +25,7 @@
 //! No event and no token changes a byte of any archive: the counters are read from the
 //! writer's position and the loops' own counts.
 
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -183,12 +185,12 @@ impl Monitor {
         }
     }
 
-    /// The engine's side: counters and the rate limit.
-    pub(crate) fn reporter(&self) -> Reporter<'_> {
-        Reporter {
-            monitor: self,
+    /// The engine's side: counters and the rate limit, shared by the run's threads.
+    pub(crate) fn reporter(&self) -> Arc<Reporter> {
+        Arc::new(Reporter {
+            monitor: self.clone(),
             state: Mutex::new(State::default()),
-        }
+        })
     }
 }
 
@@ -201,20 +203,26 @@ struct State {
     files_done: u64,
     files_total: Option<u64>,
     bytes_in: u64,
+    /// Bytes read of the file in progress ([`Reporter::reading`]), on top of `bytes_in`.
+    in_progress: u64,
+    /// The largest bytes-in figure shown, so the figure never goes back.
+    shown_in: u64,
     bytes_out: u64,
     blocks_done: u64,
     blocks_total: Option<u64>,
     last: [Option<Instant>; 6],
 }
 
-/// The engine's counters and the rate limit over a [`Monitor`]; shared by reference with the
-/// run's threads (every method takes `&self`).
-pub(crate) struct Reporter<'m> {
-    monitor: &'m Monitor,
+/// The engine's counters and the rate limit over a [`Monitor`]; shared by reference (or by
+/// `Arc`, with the readers it watches) with the run's threads: every method takes `&self`
+/// and events are delivered one at a time under the state lock, so an observer never sees
+/// two at once, whichever thread reads.
+pub(crate) struct Reporter {
+    monitor: Monitor,
     state: Mutex<State>,
 }
 
-impl Reporter<'_> {
+impl Reporter {
     /// The token's [`check`](CancelToken::check).
     pub(crate) fn check(&self) -> Result<(), CoreError> {
         self.monitor.cancel.check()
@@ -230,11 +238,13 @@ impl Reporter<'_> {
         &self.monitor.cancel
     }
 
-    /// Set the totals once they are known.
+    /// Set the totals once they are known; the files-done count starts over (the walk's
+    /// entries found are not the files fed).
     pub(crate) fn totals(&self, files: Option<u64>, blocks: Option<u64>) {
         if let Ok(mut s) = self.state.lock() {
             s.files_total = files;
             s.blocks_total = blocks;
+            s.files_done = 0;
         }
     }
 
@@ -247,8 +257,8 @@ impl Reporter<'_> {
         });
     }
 
-    /// Set the counters from absolute figures and deliver an event of `stage` if the rate
-    /// limit allows.
+    /// Set the counters from absolute figures (a file completed: its bytes in progress are
+    /// folded into `bytes_in`) and deliver an event of `stage` if the rate limit allows.
     pub(crate) fn set(
         &self,
         stage: Stage,
@@ -260,9 +270,17 @@ impl Reporter<'_> {
         self.update(stage, false, |s| {
             s.files_done = files_done;
             s.bytes_in = bytes_in;
+            s.in_progress = 0;
             s.bytes_out = bytes_out;
             s.blocks_done = blocks_done;
         });
+    }
+
+    /// `n` more bytes of the file in progress were read (a watched reader, on whichever
+    /// thread reads): an `Encode` event if the rate limit allows, so a file of many
+    /// gigabytes reports while it is read.
+    fn reading(&self, n: u64) {
+        self.update(Stage::Encode, false, |s| s.in_progress += n);
     }
 
     /// Deliver the stage's last event, whatever the rate limit.
@@ -270,37 +288,103 @@ impl Reporter<'_> {
         self.update(stage, true, |_| {});
     }
 
+    /// [`done`](Self::done) for a stage that delivered an event already (nothing for one
+    /// that never ran).
+    pub(crate) fn done_if_started(&self, stage: Stage) {
+        let started = self
+            .state
+            .lock()
+            .map(|s| s.last[stage.index()].is_some())
+            .unwrap_or(false);
+        if started {
+            self.done(stage);
+        }
+    }
+
+    /// Wrap a file's reader so that every read polls the token (a cancelled read fails with
+    /// an I/O error [`map_cancelled`](Self::map_cancelled) turns into
+    /// [`CoreError::Cancelled`]) and counts toward the bytes in progress.
+    pub(crate) fn watch(self: &Arc<Self>, inner: Box<dyn Read + Send>) -> Box<dyn Read + Send> {
+        Box::new(Watched {
+            inner,
+            rep: Arc::clone(self),
+        })
+    }
+
+    /// An I/O error met while the token is cancelled is the cancellation (a watched reader
+    /// failed its read, whichever variant wrapped it); any other error stands.
+    pub(crate) fn map_cancelled(&self, e: CoreError) -> CoreError {
+        if !self.is_cancelled() {
+            return e;
+        }
+        match &e {
+            CoreError::Io { .. } | CoreError::Format(lpk_format::FormatError::Io(_)) => {
+                CoreError::Cancelled
+            }
+            _ => e,
+        }
+    }
+
     fn update(&self, stage: Stage, done: bool, f: impl FnOnce(&mut State)) {
         let Some(progress) = &self.monitor.progress else {
             return;
         };
-        let event = {
-            let Ok(mut s) = self.state.lock() else {
-                return;
-            };
-            f(&mut s);
-            let i = stage.index();
-            let now = Instant::now();
-            let due = match s.last[i] {
-                None => true,
-                Some(t) => done || now.duration_since(t) >= MIN_INTERVAL,
-            };
-            if !due {
-                return;
-            }
-            s.last[i] = Some(now);
-            Event {
-                stage,
-                files_done: s.files_done,
-                files_total: s.files_total,
-                bytes_in: s.bytes_in,
-                bytes_out: s.bytes_out,
-                blocks_done: s.blocks_done,
-                blocks_total: s.blocks_total,
-                done,
-            }
+        let Ok(mut s) = self.state.lock() else {
+            return;
         };
+        f(&mut s);
+        let i = stage.index();
+        let now = Instant::now();
+        let due = match s.last[i] {
+            None => true,
+            Some(t) => done || now.duration_since(t) >= MIN_INTERVAL,
+        };
+        if !due {
+            return;
+        }
+        s.last[i] = Some(now);
+        s.shown_in = s.shown_in.max(s.bytes_in.saturating_add(s.in_progress));
+        let event = Event {
+            stage,
+            files_done: s.files_done,
+            files_total: s.files_total,
+            bytes_in: s.shown_in,
+            bytes_out: s.bytes_out,
+            blocks_done: s.blocks_done,
+            blocks_total: s.blocks_total,
+            done,
+        };
+        // Delivered under the lock: one event at a time, in order.
         progress.event(&event);
+    }
+}
+
+/// The error a watched reader fails with once the token is cancelled.
+#[derive(Debug)]
+struct CancelledRead;
+
+impl std::fmt::Display for CancelledRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for CancelledRead {}
+
+/// A reader that polls the token before each read and counts what it reads.
+struct Watched {
+    inner: Box<dyn Read + Send>,
+    rep: Arc<Reporter>,
+}
+
+impl Read for Watched {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.rep.is_cancelled() {
+            return Err(std::io::Error::other(CancelledRead));
+        }
+        let n = self.inner.read(buf)?;
+        self.rep.reading(n as u64);
+        Ok(n)
     }
 }
 
@@ -334,6 +418,9 @@ mod tests {
         let m = Monitor::new(collect.clone(), CancelToken::new());
         let r = m.reporter();
         r.totals(Some(10), None);
+        // A stage that never ran gets no last event.
+        r.done_if_started(Stage::Peel);
+        assert!(collect.0.lock().unwrap().is_empty());
         for _ in 0..49 {
             r.add(Stage::Encode, 1, 100, 0);
         }
@@ -366,6 +453,40 @@ mod tests {
         r.done(Stage::Walk);
         assert_eq!(r.state.lock().unwrap().files_done, 0);
         assert!(!r.is_cancelled());
+    }
+
+    #[test]
+    fn a_watched_reader_counts_and_fails_once_the_token_is_cancelled() {
+        let collect = Arc::new(Collect(Mutex::new(Vec::new())));
+        let token = CancelToken::new();
+        let m = Monitor::new(collect.clone(), token.clone());
+        let r = m.reporter();
+        let mut w = r.watch(Box::new(std::io::Cursor::new(vec![7u8; 10_000])));
+        let mut buf = [0u8; 4096];
+        assert_eq!(w.read(&mut buf).unwrap(), 4096);
+        let first = collect.0.lock().unwrap()[0];
+        assert_eq!((first.stage, first.bytes_in), (Stage::Encode, 4096));
+        // The file completes: its bytes fold into the absolute figure, never going back.
+        r.set(Stage::Encode, 1, 10_000, 0, 0);
+        r.done(Stage::Encode);
+        assert_eq!(collect.0.lock().unwrap().last().unwrap().bytes_in, 10_000);
+        token.cancel();
+        let e = w.read(&mut buf).unwrap_err();
+        assert_eq!(e.to_string(), "cancelled");
+        let mapped = r.map_cancelled(CoreError::Io {
+            path: "f".into(),
+            source: e,
+        });
+        assert!(matches!(mapped, CoreError::Cancelled));
+        let kept = r.map_cancelled(CoreError::Extract("x"));
+        assert!(matches!(kept, CoreError::Extract("x")));
+        // Without a cancelled token an I/O error stands.
+        let r2 = Monitor::default().reporter();
+        let kept = r2.map_cancelled(CoreError::Io {
+            path: "f".into(),
+            source: std::io::Error::other("disk"),
+        });
+        assert!(matches!(kept, CoreError::Io { .. }));
     }
 
     #[test]

@@ -104,7 +104,7 @@ fn with_stderr_redirected_no_progress_byte_is_written() {
 }
 
 #[test]
-fn quiet_prints_nothing_but_errors() {
+fn quiet_leaves_nothing_on_stderr_but_errors_and_stdout_untouched() {
     let dir = tempfile::tempdir().unwrap();
     make_tree(dir.path());
     let out = tempfile::tempdir().unwrap();
@@ -118,6 +118,7 @@ fn quiet_prints_nothing_but_errors() {
         text(&a.stdout),
         text(&a.stderr)
     );
+    // Stdout is untouched: the counts of x, the listing of l (--json too).
     let x = run(&[
         "--quiet",
         "x",
@@ -126,12 +127,22 @@ fn quiet_prints_nothing_but_errors() {
         out.path().join("x").to_str().unwrap(),
     ]);
     assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
-    assert!(
-        x.stdout.is_empty() && x.stderr.is_empty(),
-        "{:?} {:?}",
+    assert_eq!(
         text(&x.stdout),
-        text(&x.stderr)
+        "extracted 21 files, 2 directories
+"
     );
+    assert!(x.stderr.is_empty(), "{:?}", text(&x.stderr));
+    let l = run(&["--quiet", "--json", "l", arch_s]);
+    assert_eq!(l.status.code(), Some(0), "{}", text(&l.stderr));
+    assert_eq!(text(&l.stdout).lines().count(), 23);
+    for line in text(&l.stdout).lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(v["path"].is_string());
+    }
+    assert!(l.stderr.is_empty());
+    let l = run(&["--quiet", "l", arch_s]);
+    assert_eq!(text(&l.stdout).lines().count(), 23);
     // An error is still printed: the target exists (refused).
     let again = run(&[
         "--quiet",
@@ -159,17 +170,25 @@ fn quiet_prints_nothing_but_errors() {
     assert_eq!(line["error"]["code"], 2);
 }
 
-/// Run in process with a token already cancelled: what `main`'s Ctrl-C handler does, with
-/// the cancellation taking effect at the engine's first poll.
-fn cancelled(args: &[&str]) -> (i32, String, String) {
-    let token = CancelToken::new();
-    token.cancel();
+/// Run in process with the token cancelled as soon as it is handed out: what `main`'s
+/// Ctrl-C handler does, with the cancellation taking effect at the engine's first poll.
+/// Returns the exit code, stdout, stderr and whether a token was handed out at all.
+fn cancelled(args: &[&str]) -> (i32, String, String, bool) {
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut argv = vec!["lpk"];
     argv.extend_from_slice(args);
-    let code = lpk_cli::run_with_cancel(argv, &mut out, &mut err, token);
-    (code, text(&out), text(&err))
+    let handed = std::sync::atomic::AtomicBool::new(false);
+    let code = lpk_cli::run_with_cancel(argv, &mut out, &mut err, |token: CancelToken| {
+        handed.store(true, std::sync::atomic::Ordering::SeqCst);
+        token.cancel();
+    });
+    (
+        code,
+        text(&out),
+        text(&err),
+        handed.load(std::sync::atomic::Ordering::SeqCst),
+    )
 }
 
 #[test]
@@ -181,13 +200,19 @@ fn a_cancelled_command_exits_2_with_cancelled_and_leaves_no_partial_output() {
     let arch_s = arch.to_str().unwrap();
     let input = dir.path().to_str().unwrap();
     // a: the archive is not left behind.
-    let (code, o, e) = cancelled(&["a", arch_s, input]);
+    let (code, o, e, handed) = cancelled(&["a", arch_s, input]);
     assert_eq!(
         (code, o.as_str(), e.as_str()),
-        (2, "", "error: cancelled\n")
+        (
+            2,
+            "",
+            "error: cancelled
+"
+        )
     );
+    assert!(handed);
     assert!(!arch.exists());
-    let (code, _, e) = cancelled(&["--json", "a", arch_s, input]);
+    let (code, _, e, _) = cancelled(&["--json", "a", arch_s, input]);
     assert_eq!(code, 2);
     let line: serde_json::Value = serde_json::from_str(e.trim()).unwrap();
     assert_eq!(line["error"]["kind"], "Cancelled");
@@ -200,26 +225,63 @@ fn a_cancelled_command_exits_2_with_cancelled_and_leaves_no_partial_output() {
     assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
     let before = std::fs::read(&arch).unwrap();
     // append: the archive is as it was.
-    let (code, _, e) = cancelled(&["append", arch_s, input]);
-    assert_eq!((code, e.as_str()), (2, "error: cancelled\n"));
+    let (code, _, e, _) = cancelled(&["append", arch_s, input]);
+    assert_eq!(
+        (code, e.as_str()),
+        (
+            2,
+            "error: cancelled
+"
+        )
+    );
     assert_eq!(std::fs::read(&arch).unwrap(), before);
     // x: no output directory content.
     let target = out.path().join("x");
-    let (code, o, e) = cancelled(&["x", arch_s, target.to_str().unwrap()]);
+    let (code, o, e, _) = cancelled(&["x", arch_s, target.to_str().unwrap()]);
     assert_eq!(
         (code, o.as_str(), e.as_str()),
-        (2, "", "error: cancelled\n")
+        (
+            2,
+            "",
+            "error: cancelled
+"
+        )
     );
     assert!(!target.join("d").exists());
+    // The commands that poll no token are never handed one: Ctrl-C stays the process
+    // default there (`t`, `l`, `info`, `check`; `rollback` and `repair` run the same path).
+    for args in [
+        vec!["t", arch_s],
+        vec!["l", arch_s],
+        vec!["info", arch_s],
+        vec!["check", arch_s],
+    ] {
+        let (code, _, e, handed) = cancelled(&args);
+        assert_eq!(code, 0, "{args:?}: {e}");
+        assert!(!handed, "{args:?}: a token was handed out");
+    }
     // export: the output file is removed.
     let zip = out.path().join("c.zip");
-    let (code, _, e) = cancelled(&["export", arch_s, zip.to_str().unwrap()]);
-    assert_eq!((code, e.as_str()), (2, "error: cancelled\n"));
+    let (code, _, e, handed) = cancelled(&["export", arch_s, zip.to_str().unwrap()]);
+    assert!(handed);
+    assert_eq!(
+        (code, e.as_str()),
+        (
+            2,
+            "error: cancelled
+"
+        )
+    );
     assert!(!zip.exists());
     // --quiet keeps the error line.
-    let (code, o, e) = cancelled(&["--quiet", "x", arch_s, target.to_str().unwrap()]);
+    let (code, o, e, _) = cancelled(&["--quiet", "x", arch_s, target.to_str().unwrap()]);
     assert_eq!(
         (code, o.as_str(), e.as_str()),
-        (2, "", "error: cancelled\n")
+        (
+            2,
+            "",
+            "error: cancelled
+"
+        )
     );
 }

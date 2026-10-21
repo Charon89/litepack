@@ -429,3 +429,78 @@ fn the_token_is_shared_across_threads() {
     let f: Result<(), CoreError> = token.check();
     assert!(matches!(f, Err(CoreError::Cancelled)));
 }
+
+/// Trips the token on the first `Encode` event with no file completed: inside the first file.
+struct TripInFile {
+    token: CancelToken,
+    seen: Mutex<Vec<Event>>,
+}
+
+impl Progress for TripInFile {
+    fn event(&self, e: &Event) {
+        self.seen.lock().unwrap().push(*e);
+        if e.stage == Stage::Encode && e.files_done == 0 && e.bytes_in > 0 {
+            self.token.cancel();
+        }
+    }
+}
+
+#[test]
+fn a_single_large_file_reports_while_it_is_read_and_is_cut_short_when_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    // One file of 24 MiB (compressible, so a run is short): events must come before it
+    // completes, and the cancellation must take effect inside it, sequential and pipelined.
+    let big = dir.path().join("big.bin");
+    std::fs::write(&big, noise(5, 1 << 20).repeat(24)).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    for threads in [1usize, 4] {
+        let token = CancelToken::new();
+        let trip = Arc::new(TripInFile {
+            token: token.clone(),
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut p = Pipeline::fast(FastOptions {
+            block_size: BLOCK,
+            threads: Some(threads),
+            ..FastOptions::default()
+        });
+        p.monitor = Monitor::new(trip.clone(), token);
+        let archive = out.path().join(format!("big{threads}.lpk"));
+        let e = p.run_file(dir.path(), &archive).unwrap_err();
+        assert!(matches!(e, CoreError::Cancelled), "{threads}: {e}");
+        assert!(!archive.exists(), "{threads}: the archive was left behind");
+        let seen = trip.seen.lock().unwrap().clone();
+        let inside = seen
+            .iter()
+            .find(|e| e.stage == Stage::Encode && e.files_done == 0)
+            .unwrap();
+        assert!(
+            inside.bytes_in > 0 && inside.bytes_in < 24 << 20,
+            "{threads}: {inside:?}"
+        );
+        // No event of a completed file: the read was cut short.
+        assert!(
+            seen.iter()
+                .all(|e| e.stage == Stage::Walk || e.files_done == 0),
+            "{threads}: {seen:?}"
+        );
+    }
+    // Without a trip the same file completes with its bytes reported in full.
+    let (trip, m) = monitor(None);
+    let mut p = Pipeline::fast(FastOptions {
+        block_size: BLOCK,
+        threads: Some(4),
+        ..FastOptions::default()
+    });
+    p.monitor = m;
+    let archive = out.path().join("big-done.lpk");
+    p.run_file(dir.path(), &archive).unwrap();
+    let all = events(&trip);
+    assert!(all.iter().any(|e| e.stage == Stage::Encode && e.done));
+    assert_eq!(all.last().unwrap().bytes_in, 24 << 20);
+    assert!(
+        all.iter()
+            .any(|e| e.stage == Stage::Encode && e.files_done == 0 && e.bytes_in > 0),
+        "an event inside the file"
+    );
+}

@@ -1359,7 +1359,7 @@ struct Run<'a, R: Read + Seek> {
     /// Receives the most permits out at once.
     peak: &'a AtomicUsize,
     decode_error: &'a (dyn Fn(usize, FormatError) -> CoreError + Sync),
-    rep: &'a Reporter<'a>,
+    rep: &'a Reporter,
     /// Every block's frame length, for the bytes-in figure.
     frame_len: &'a [u64],
 }
@@ -1430,7 +1430,7 @@ fn parallel_with<R: Read + Seek + Send>(
     reads: &AtomicU64,
     decode_error: &(dyn Fn(usize, FormatError) -> CoreError + Sync),
     permits: &Permits,
-    rep: &Reporter<'_>,
+    rep: &Reporter,
     frame_len: &[u64],
 ) -> Outcome {
     let n = pool.writers.max(1);
@@ -1610,7 +1610,7 @@ fn dispatch<'p>(
     permits: &'p Permits,
     decode_error: &dyn Fn(usize, FormatError) -> CoreError,
     panic_at: Option<usize>,
-    rep: &Reporter<'_>,
+    rep: &Reporter,
     frame_len: &[u64],
     shared: &Shared,
 ) -> Result<(), CoreError> {

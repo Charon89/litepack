@@ -139,7 +139,7 @@ pub fn walk(root: &Path, options: &IngestOptions) -> Result<Vec<Input>, CoreErro
 pub(crate) fn walk_with(
     root: &Path,
     options: &IngestOptions,
-    reporter: &crate::progress::Reporter<'_>,
+    reporter: &crate::progress::Reporter,
 ) -> Result<Vec<Input>, CoreError> {
     let md = std::fs::metadata(root).map_err(|e| CoreError::io(root, e))?;
     if !md.is_dir() {

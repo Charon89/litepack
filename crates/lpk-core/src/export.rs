@@ -339,7 +339,7 @@ enum Source<'a, R: Read + Seek> {
 
 /// What the plan holds for the calling thread, whichever path runs.
 struct Fixed<'a> {
-    rep: &'a Reporter<'a>,
+    rep: &'a Reporter,
     /// Every block's frame length, for the bytes-in figure.
     frame_len: &'a [u64],
     bytes_in: &'a AtomicU64,
@@ -403,7 +403,7 @@ fn decode_error(
 struct Stream<'a, 'p, R: Read + Seek> {
     source: Source<'a, R>,
     permits: &'p Permits,
-    rep: &'a Reporter<'a>,
+    rep: &'a Reporter,
     frame_len: &'a [u64],
     bytes_in: &'a AtomicU64,
     places: &'a [Place],

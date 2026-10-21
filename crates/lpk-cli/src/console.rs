@@ -8,9 +8,11 @@
 //! ([`lpk_core::progress::MIN_INTERVAL`]); the console prints every event it receives and
 //! clears the line before any other output.
 //!
-//! Ctrl-C: `main` installs a handler (the `ctrlc` crate) that cancels the token; the engine
-//! stops at its next poll and cleans up, and the command fails with exit 2 and `cancelled`
-//! (D-77's contract: one line, or the JSON error line with `kind: "Cancelled"`).
+//! Ctrl-C: `main` installs a handler (the `ctrlc` crate) for the commands that poll the
+//! token (`a`, `append`, `x`, `export`); it cancels the token, the engine stops at its next
+//! poll and cleans up, and the command fails with exit 2 and `cancelled` (D-77's contract:
+//! one line, or the JSON error line with `kind: "Cancelled"`). A second Ctrl-C exits at
+//! once. The other commands keep the process default.
 
 use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};

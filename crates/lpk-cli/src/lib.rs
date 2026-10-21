@@ -39,8 +39,9 @@
 //! `error: ...` on stderr, or with the global `--json` flag one JSON object line).
 //! Console ([`console`]): a progress line on stderr, rewritten in place, only when stderr is
 //! a terminal (never through a pipe) and not under `--quiet`, `--no-progress` or `--json`;
-//! `--quiet` prints nothing but errors; Ctrl-C cancels the running command through the
-//! engine's token (exit 2, `cancelled`); the `-v` reports are unchanged.
+//! `--quiet` leaves nothing on stderr but errors (stdout untouched); Ctrl-C cancels `a`,
+//! `append`, `x` and `export` through the engine's token (exit 2, `cancelled`; a second
+//! Ctrl-C exits at once); the `-v` reports are unchanged.
 #![forbid(unsafe_code)]
 
 pub mod console;
@@ -90,15 +91,19 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("LPK_GIT_COMM
                   per-entry errors of a partial extraction, when there are some]}}. A password \
                   is asked for on the terminal only with --password-prompt, or when stdin and \
                   stderr are terminals and the archive needs one that was not given; never \
-                  through a pipe."
+                  through a pipe. Ctrl-C during a, append, x or export cancels the command: \
+                  it cleans up (a new archive removed, an append cut back, unfinished files \
+                  removed, an export's output removed) and exits 2 with `cancelled`; a second \
+                  Ctrl-C exits at once with code 2, skipping the cleanup. The other commands \
+                  end at Ctrl-C as any process does."
 )]
 struct Cli {
     /// Machine-readable output: `l` prints one JSON object per entry per line, and any failing
     /// command prints exactly one JSON object line on stderr instead of `error: ...`.
     #[arg(long, global = true)]
     json: bool,
-    /// Print nothing but errors: no summary on stdout, no warning or note on stderr, no
-    /// progress line, and no -v report.
+    /// Nothing on stderr but errors: no progress line, no warning, no note, no -v report.
+    /// Stdout is untouched (the listing, the counts, info).
     #[arg(long, global = true)]
     quiet: bool,
     /// No progress line. (The line is shown only when stderr is a terminal: never through a
@@ -1557,25 +1562,26 @@ pub fn command() -> clap::Command {
     Cli::command().version(env!("CARGO_PKG_VERSION"))
 }
 
-/// Run the tool with `args` (the first is the program name); returns the exit code. The
-/// cancel token is a fresh one (nothing cancels it): `main` uses [`run_with_cancel`] with the
-/// Ctrl-C handler's token.
+/// Run the tool with `args` (the first is the program name); returns the exit code. Nothing
+/// cancels the command: `main` uses [`run_with_cancel`] with the Ctrl-C handler.
 pub fn run<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    run_with_cancel(args, out, err, CancelToken::new())
+    run_with_cancel(args, out, err, |_| {})
 }
 
-/// [`run`] with the token the running command polls: cancelling it (Ctrl-C) stops the
-/// engine at its next file or block, cleans up as a failure does, and exits 2 with
+/// [`run`] with `install` called, with the token the command polls, only for a command that
+/// polls one (`a`, `append`, `x`, `export`), before it runs: `main` installs the Ctrl-C
+/// handler there, so the other commands keep the process default. Cancelling the token stops
+/// the engine at its next file, read or block, cleans up as a failure does, and exits 2 with
 /// `cancelled`.
 pub fn run_with_cancel<I, T>(
     args: I,
     out: &mut dyn Write,
     err: &mut dyn Write,
-    cancel: CancelToken,
+    install: impl FnOnce(CancelToken),
 ) -> i32
 where
     I: IntoIterator<Item = T>,
@@ -1602,17 +1608,19 @@ where
     };
     let json = cli.json;
     let terminal = Terminal::detect();
+    let cancel = CancelToken::new();
+    if matches!(
+        cli.command,
+        Command::Add(_) | Command::Append(_) | Command::Extract(_) | Command::Export(_)
+    ) {
+        install(cancel.clone());
+    }
     let console = Console::new(cancel, !cli.quiet && !cli.no_progress && !json);
-    // Under --quiet the command's own output (summaries, warnings, notes, -v reports) goes
-    // nowhere; a failure's line still goes to `err`.
-    let mut quiet_out = std::io::sink();
+    // Under --quiet the command's own stderr output (warnings, notes, -v reports) goes
+    // nowhere; stdout is untouched and a failure's line still goes to `err`.
     let mut quiet_err = std::io::sink();
-    let (o, e): (&mut dyn Write, &mut dyn Write) = if cli.quiet {
-        (&mut quiet_out, &mut quiet_err)
-    } else {
-        (out, err)
-    };
-    let r = dispatch(cli.command, json, &terminal, &console, o, e);
+    let e: &mut dyn Write = if cli.quiet { &mut quiet_err } else { err };
+    let r = dispatch(cli.command, json, &terminal, &console, out, e);
     console.clear();
     match r {
         Ok(()) => EXIT_OK,

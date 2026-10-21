@@ -85,7 +85,7 @@ pub(crate) fn create_new_and_run<T>(
     root: &Path,
     archive_path: &Path,
     ingest: &IngestOptions,
-    reporter: &crate::progress::Reporter<'_>,
+    reporter: &crate::progress::Reporter,
     f: impl FnOnce(Vec<Input>, std::fs::File, SyncFn) -> Result<T, CoreError>,
 ) -> Result<T, CoreError> {
     let file = OpenOptions::new()
