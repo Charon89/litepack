@@ -94,7 +94,7 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("LPK_GIT_COMM
                   through a pipe. Ctrl-C during a, append, x or export cancels the command: \
                   it cleans up (a new archive removed, an append cut back, unfinished files \
                   removed, an export's output removed) and exits 2 with `cancelled`; a second \
-                  Ctrl-C exits at once with code 2, skipping the cleanup. The other commands \
+                  Ctrl-C exits at once with code 2, skipping the cleanup (an append cut this way is \n                  restored with `lpk rollback`). The other commands \
                   end at Ctrl-C as any process does."
 )]
 struct Cli {
