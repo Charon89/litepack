@@ -92,6 +92,7 @@ fn the_password_prompt_is_refused_through_a_pipe_and_nothing_is_prompted_without
     assert_no_secret(&a, b"sesame-7");
     let out = work.path().join("out");
     let o = out.to_str().unwrap();
+    let exported = work.path().join("e.zip");
     for args in [
         vec!["a", new.to_str().unwrap(), s, "--password-prompt"],
         vec!["x", archive, o, "--password-prompt"],
@@ -106,6 +107,12 @@ fn the_password_prompt_is_refused_through_a_pipe_and_nothing_is_prompted_without
             "--password-prompt",
         ],
         vec!["append", archive, s, "--password-prompt"],
+        vec![
+            "export",
+            archive,
+            exported.to_str().unwrap(),
+            "--password-prompt",
+        ],
     ] {
         let r = run(&args);
         assert_eq!(r.status.code(), Some(1), "{args:?}: {}", text(&r.stderr));
@@ -118,7 +125,7 @@ fn the_password_prompt_is_refused_through_a_pipe_and_nothing_is_prompted_without
         let e = json_error(&r);
         assert_eq!(e["kind"], "Usage", "{e}");
     }
-    assert!(!new.exists() && !out.exists());
+    assert!(!new.exists() && !out.exists() && !exported.exists());
     // `rollback` needs no key: its credential flags, the prompt included, are accepted and
     // ignored, so nothing is asked for and nothing is refused through the pipe.
     let r = run(&["rollback", archive, "0", "--password-prompt"]);
@@ -140,6 +147,9 @@ fn the_password_prompt_is_refused_through_a_pipe_and_nothing_is_prompted_without
     assert!(!out.exists());
     let r = run(&["--json", "l", archive]);
     assert_eq!(json_error(&r)["kind"], "PasswordRequired");
+    let r = run(&["--json", "export", archive, exported.to_str().unwrap()]);
+    assert_eq!(json_error(&r)["kind"], "PasswordRequired");
+    assert!(!exported.exists());
     let r = run(&["--json", "append", archive, s]);
     assert_eq!(json_error(&r)["kind"], "AppendNeedsCredentials");
 }
@@ -165,6 +175,7 @@ fn an_unneeded_keyfile_is_refused_on_a_password_only_archive() {
     let out = work.path().join("out");
     let o = out.to_str().unwrap();
     let repaired = work.path().join("r.lpk");
+    let exported = work.path().join("e.zip");
     let pw = ["--password", "only-a-password"];
     for args in [
         vec!["x", archive, o, pw[0], pw[1], "--keyfile", kf],
@@ -180,6 +191,15 @@ fn an_unneeded_keyfile_is_refused_on_a_password_only_archive() {
             kf,
         ],
         vec!["append", archive, s, pw[0], pw[1], "--keyfile", kf],
+        vec![
+            "export",
+            archive,
+            exported.to_str().unwrap(),
+            pw[0],
+            pw[1],
+            "--keyfile",
+            kf,
+        ],
     ] {
         let r = run(&args);
         assert_eq!(r.status.code(), Some(2), "{args:?}: {}", text(&r.stderr));
@@ -196,7 +216,7 @@ fn an_unneeded_keyfile_is_refused_on_a_password_only_archive() {
         assert_eq!(e["kind"], "UnneededKeyfile", "{e}");
         assert_eq!(e["path"], archive);
     }
-    assert!(!out.exists() && !repaired.exists());
+    assert!(!out.exists() && !repaired.exists() && !exported.exists());
     let x = run(&["x", archive, o, pw[0], pw[1]]);
     assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
     assert_eq!(tree(&out), tree(src.path()));

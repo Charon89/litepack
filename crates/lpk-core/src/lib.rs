@@ -16,6 +16,7 @@ pub mod bwt;
 pub mod classify;
 pub mod cluster;
 pub mod error;
+pub mod export;
 pub mod extract;
 pub mod fast;
 pub mod fold;
@@ -37,6 +38,7 @@ pub use bwt::BwtDecoder;
 pub use classify::{classify, Class, Features};
 pub use cluster::{cluster, Cluster, DictionaryKind};
 pub use error::CoreError;
+pub use export::{export_archive, export_file, ExportSummary, Sink};
 pub use extract::{extract_archive, extract_file, ExtractMemory, ExtractOptions, ExtractSummary};
 pub use fast::{
     archive_fast, archive_fast_file, DictionaryPolicy, FastHandle, FastOptions, FastSummary,
