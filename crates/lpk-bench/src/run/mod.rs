@@ -5,7 +5,7 @@
 //! lpk-bench run --validate <results-dir>
 //! lpk-bench run --tools <list|all> --profile <small|full> [--corpus DIR] [--classes a,b]
 //!               [--repeats N] [--threads N] [--timeout-s N] [--results DIR] [--tmp DIR]
-//!               [--allow-dirty-build]                    (the measuring loop, [`exec`])
+//!               [--allow-dirty-build] [--keep-failed on|off]   (the measuring loop, [`exec`])
 //! lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]   ([`compare`])
 //! ```
 //!
@@ -85,6 +85,17 @@ pub struct RunArgs {
     /// Write results from a dirty or unknown build (recorded in host.json)
     #[arg(long)]
     pub allow_dirty_build: bool,
+    /// When a repeat fails verification, keep its archive and extracted tree (moved, outside any
+    /// timing) under <tmp>/failed/<results dir>/<tool>-<setting>-<class>-r<repeat>/ and name that
+    /// directory in the result (failed.evidence_dir); `off` deletes them like every other repeat
+    #[arg(
+        long,
+        value_name = "on|off",
+        default_value = "on",
+        value_parser = ["on", "off"],
+        overrides_with = "keep_failed"
+    )]
+    pub keep_failed: String,
     /// Compare two result directories of the same corpus and exit
     #[arg(long, num_args = 2, value_names = ["DIR_A", "DIR_B"])]
     pub compare: Vec<PathBuf>,

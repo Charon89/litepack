@@ -10,7 +10,9 @@
 //! Modes: `ok` (default); create: `noarchive` (exit 0, nothing written), `empty` (empty archive),
 //! `exit1`, `sleep` (until killed), `orphan` (starts a sleeping child and exits 0), `envcheck` (exit 17 when a tool-configuration variable is set);
 //! extract: `miss` (leaves out the first file), `alter` (changes a byte of the first non-empty
-//! file), `extra` (adds a file), `exit3`; stream: `exit1`.
+//! file), `extra` (adds a file), `broken` (of the non-empty files leaves out the first, cuts the
+//! second to half its size and changes a byte of the third, and adds a file), `exit3`; stream:
+//! `exit1`.
 //! An input of `@file` archives the relative paths listed in the file (flat, like a tool given a
 //! list). `--nested` extracts into `<outdir>/<name of the archived directory>`.
 
@@ -135,6 +137,7 @@ fn extract(mode: &str, nested: bool, archive: &str, outdir: &str) {
     }
     let mut index = 0usize;
     let mut altered = false;
+    let mut non_empty = 0usize;
     while at < buf.len() {
         let name = String::from_utf8_lossy(take(&buf, &mut at)).into_owned();
         let mut data = take(&buf, &mut at).to_vec();
@@ -146,6 +149,17 @@ fn extract(mode: &str, nested: bool, archive: &str, outdir: &str) {
             data[0] ^= 0xFF;
             altered = true;
         }
+        // `broken`: of the non-empty files, the first is left out, the second cut to half its
+        // size, the third gets one byte flipped; an extra file is added below.
+        if mode == "broken" && !data.is_empty() {
+            non_empty += 1;
+            match non_empty {
+                1 => continue,
+                2 => data.truncate(data.len() / 2),
+                3 => data[0] ^= 0xFF,
+                _ => {}
+            }
+        }
         let path = root.join(&name);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -154,7 +168,7 @@ fn extract(mode: &str, nested: bool, archive: &str, outdir: &str) {
             exit(2);
         }
     }
-    if mode == "extra" {
+    if mode == "extra" || mode == "broken" {
         let _ = fs::create_dir_all(&root);
         let _ = fs::write(root.join("__extra.txt"), b"not in the manifest");
     }
