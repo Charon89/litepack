@@ -2514,6 +2514,18 @@ impl<W: Write> Writer<W> {
         self.version_minor
     }
 
+    /// The archive's position: the bytes written (or handed to the write thread) so far.
+    /// A figure for progress reports; it changes nothing.
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    /// Blocks closed so far, the blocks in flight included. A figure for progress reports;
+    /// it changes nothing.
+    pub fn blocks_closed(&self) -> u64 {
+        (self.blocks.len() + self.queue.len()) as u64
+    }
+
     fn add_file_inner(
         &mut self,
         path: &str,

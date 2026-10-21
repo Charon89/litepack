@@ -96,6 +96,15 @@
 //! failed); then the error is returned, or the panic resumed. Finished files and the directories
 //! stay, as the format tool keeps the files it finished; no partial file is ever left behind.
 //!
+//! **Progress and cancellation** ([`crate::progress`]; [`extract_archive_with`]). An
+//! `Extract` event per block dispatched (files finished, encoded bytes decoded, file bytes
+//! written, blocks dispatched of the blocks needed), rate-limited. The token is polled after
+//! the plan (before any directory is made), before each block on the dispatching thread, by
+//! each decode worker before each block and by each writer between blocks; a cancelled run
+//! stops the pool, joins every thread and cleans up as a failure does (the unfinished files
+//! removed, the finished ones and the directories kept), then fails with
+//! [`CoreError::Cancelled`].
+//!
 //! The linked-parent rule checks the existing parent chain once, before writing; opening every
 //! target relative to a verified directory handle is the stronger rule, left to the policy tasks
 //! (E3/E6).
@@ -115,6 +124,7 @@ use lpk_format::{Archive, Credentials, Entry, EntryKind, FormatError, MemoryPrio
 use crate::memory::{Budget, BudgetSource, EnvelopeTier};
 use crate::policy::{self, Existing, Found, SymlinkAction, Wanted};
 pub use crate::policy::{DefaultPolicy, ExtractPolicy};
+use crate::progress::{Monitor, Reporter, Stage};
 use crate::CoreError;
 
 /// How an extraction runs.
@@ -1111,11 +1121,29 @@ where
     R: Read + Seek + Send,
     F: Fn() -> std::io::Result<R>,
 {
+    extract_archive_with(archive, reopen, dir, policy, opts, &Monitor::default())
+}
+
+/// [`extract_archive`] with a progress observer and a cancel token (see the module
+/// documentation).
+pub fn extract_archive_with<R, F>(
+    archive: &mut Archive<R>,
+    reopen: F,
+    dir: &Path,
+    policy: &dyn ExtractPolicy,
+    opts: &ExtractOptions,
+    monitor: &Monitor,
+) -> Result<ExtractSummary, CoreError>
+where
+    R: Read + Seek + Send,
+    F: Fn() -> std::io::Result<R>,
+{
     // An encrypted archive opened without its key has no index to plan from: refused here,
     // before anything is created, so nothing is written.
     if archive.is_keyless() {
         return Err(CoreError::Format(FormatError::PasswordRequired));
     }
+    let rep = monitor.reporter();
     let Plan {
         shared,
         per_block,
@@ -1150,6 +1178,10 @@ where
             m.fixed_shared.saturating_add(m.per_worker)
         )));
     }
+    // Cancelled before anything exists: nothing to clean up.
+    rep.check()?;
+    rep.totals(Some(shared.targets.len() as u64), Some(needed.len() as u64));
+    let frame_len: Vec<u64> = archive.index().blocks.iter().map(|b| b.frame_len).collect();
     make_dirs(&mkdirs)?;
     // Links are created after every directory and before any file: a failure here (no
     // privilege on Windows, a target that is not UTF-8) fails the extraction with nothing to
@@ -1189,12 +1221,22 @@ where
                 let before = archive.decode_count();
                 let r = catch_unwind(AssertUnwindSafe(|| {
                     let mut out = Out::new(shared, 0, 1, opts.max_open_files);
-                    for &b in &needed {
+                    let mut bytes_in = 0;
+                    for (k, &b) in needed.iter().enumerate() {
+                        rep.check()?;
                         let plain = archive.decode_block_checked(b);
                         decoded.fetch_add(1, Ordering::Relaxed);
                         peak.store(1, Ordering::Relaxed);
                         let plain = plain.map_err(|e| decode_error(b, e))?;
                         out.write_block(b, &per_block[b], &plain)?;
+                        bytes_in += frame_len.get(b).copied().unwrap_or(0);
+                        rep.set(
+                            Stage::Extract,
+                            shared.files.load(Ordering::Relaxed),
+                            bytes_in,
+                            shared.bytes.load(Ordering::Relaxed),
+                            k as u64 + 1,
+                        );
                     }
                     Ok(())
                 }));
@@ -1222,6 +1264,8 @@ where
                         reads: &reads,
                         peak: &peak,
                         decode_error: &decode_error,
+                        rep: &rep,
+                        frame_len: &frame_len,
                     }),
                     Err(e) => Outcome::Failed(FormatError::from(e).into()),
                 }
@@ -1247,6 +1291,18 @@ where
             resume_unwind(p);
         }
     }
+    // The writers ran behind the dispatch: the last event carries the final counts.
+    rep.set(
+        Stage::Extract,
+        shared.files.load(Ordering::Relaxed),
+        needed
+            .iter()
+            .map(|&b| frame_len.get(b).copied().unwrap_or(0))
+            .sum(),
+        shared.bytes.load(Ordering::Relaxed),
+        needed.len() as u64,
+    );
+    rep.done(Stage::Extract);
     let decoded = decoded.load(Ordering::Relaxed);
     Ok(ExtractSummary {
         files: shared.files.load(Ordering::Relaxed),
@@ -1303,6 +1359,9 @@ struct Run<'a, R: Read + Seek> {
     /// Receives the most permits out at once.
     peak: &'a AtomicUsize,
     decode_error: &'a (dyn Fn(usize, FormatError) -> CoreError + Sync),
+    rep: &'a Reporter<'a>,
+    /// Every block's frame length, for the bytes-in figure.
+    frame_len: &'a [u64],
 }
 
 /// Keep the first panic payload.
@@ -1327,6 +1386,8 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         reads,
         peak,
         decode_error,
+        rep,
+        frame_len,
     } = run;
     let n = pool.writers.max(1);
     // The placements of writer w in block b.
@@ -1349,6 +1410,8 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         reads,
         decode_error,
         &permits,
+        rep,
+        frame_len,
     );
     peak.store(permits.peak.load(Ordering::SeqCst), Ordering::Relaxed);
     outcome
@@ -1367,11 +1430,14 @@ fn parallel_with<R: Read + Seek + Send>(
     reads: &AtomicU64,
     decode_error: &(dyn Fn(usize, FormatError) -> CoreError + Sync),
     permits: &Permits,
+    rep: &Reporter<'_>,
+    frame_len: &[u64],
 ) -> Outcome {
     let n = pool.writers.max(1);
     let panic: Mutex<Option<Box<dyn Any + Send>>> = Mutex::new(None);
     let next = AtomicUsize::new(0);
     let per_writer_open = (max_open / n).max(1);
+    let token = rep.token();
     std::thread::scope(|s| {
         let (permits, panic, next, split) = (&permits, &panic, &next, &split);
         let mut spawn_error = None;
@@ -1382,7 +1448,7 @@ fn parallel_with<R: Read + Seek + Send>(
             let job = move || -> Result<(), CoreError> {
                 let mut out = Out::new(shared, w, n, per_writer_open);
                 for held in wrx {
-                    if permits.is_cancelled() {
+                    if permits.is_cancelled() || token.is_cancelled() {
                         break;
                     }
                     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -1424,6 +1490,12 @@ fn parallel_with<R: Read + Seek + Send>(
                 let tx = tx.clone();
                 let job = move || -> u64 {
                     loop {
+                        // The token is seen here too, so a worker stops before its next
+                        // block whichever thread noticed the cancellation first.
+                        if token.is_cancelled() {
+                            permits.cancel();
+                            break;
+                        }
                         if !permits.acquire() {
                             break;
                         }
@@ -1476,6 +1548,9 @@ fn parallel_with<R: Read + Seek + Send>(
                     permits,
                     decode_error,
                     panic_at,
+                    rep,
+                    frame_len,
+                    shared,
                 )
             }))
             .unwrap_or_else(|p| {
@@ -1512,15 +1587,21 @@ fn parallel_with<R: Read + Seek + Send>(
             return Outcome::Panicked(p);
         }
         // A writer's own error explains an internal stop of the dispatcher; a decode error
-        // (or any other) stands.
+        // (or any other) stands; an internal stop while the token is cancelled is the
+        // cancellation (a worker or a writer saw the token before the dispatcher did).
         match (r, writer_error) {
             (Err(CoreError::Extract(_)) | Ok(()), Some(w)) => Outcome::Failed(w),
+            (Err(CoreError::Extract(_)), None) if token.is_cancelled() => {
+                Outcome::Failed(CoreError::Cancelled)
+            }
             (Err(e), _) => Outcome::Failed(e),
+            (Ok(()), None) if token.is_cancelled() => Outcome::Failed(CoreError::Cancelled),
             (Ok(()), None) => Outcome::Done,
         }
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch<'p>(
     rx: &mpsc::Receiver<Decoded>,
     needed: &[usize],
@@ -1529,13 +1610,21 @@ fn dispatch<'p>(
     permits: &'p Permits,
     decode_error: &dyn Fn(usize, FormatError) -> CoreError,
     panic_at: Option<usize>,
+    rep: &Reporter<'_>,
+    frame_len: &[u64],
+    shared: &Shared,
 ) -> Result<(), CoreError> {
     let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    let mut bytes_in = 0;
     for (want, &b) in needed.iter().enumerate() {
         assert!(
             panic_at != Some(want),
             "test hook: dispatcher panics at block {want}"
         );
+        if rep.is_cancelled() {
+            permits.cancel();
+            return Err(CoreError::Cancelled);
+        }
         let plain = loop {
             if let Some(p) = pending.remove(&want) {
                 break p;
@@ -1564,6 +1653,15 @@ fn dispatch<'p>(
                 return Err(CoreError::Extract(WRITER_STOPPED));
             }
         }
+        bytes_in += frame_len.get(b).copied().unwrap_or(0);
+        // The files and bytes are the writers' counts so far (they run behind the dispatch).
+        rep.set(
+            Stage::Extract,
+            shared.files.load(Ordering::Relaxed),
+            bytes_in,
+            shared.bytes.load(Ordering::Relaxed),
+            want as u64 + 1,
+        );
     }
     Ok(())
 }
@@ -1580,6 +1678,27 @@ pub fn extract_file(
     credentials: Option<&Credentials>,
     policy: &dyn ExtractPolicy,
     opts: &ExtractOptions,
+) -> Result<ExtractSummary, CoreError> {
+    extract_file_with(
+        path,
+        dir,
+        priors,
+        credentials,
+        policy,
+        opts,
+        &Monitor::default(),
+    )
+}
+
+/// [`extract_file`] with a progress observer and a cancel token ([`extract_archive_with`]).
+pub fn extract_file_with(
+    path: &Path,
+    dir: &Path,
+    priors: &[Vec<u8>],
+    credentials: Option<&Credentials>,
+    policy: &dyn ExtractPolicy,
+    opts: &ExtractOptions,
+    monitor: &Monitor,
 ) -> Result<ExtractSummary, CoreError> {
     let file = File::open(path).map_err(|e| io(path, e))?;
     // `opts.memory` is the reader's decode memory too: an archive whose envelope needs more is
@@ -1601,5 +1720,5 @@ pub fn extract_file(
         a.set_priors(Box::new(store));
     }
     crate::register_full_reader(&mut a);
-    extract_archive(&mut a, || File::open(path), dir, policy, opts)
+    extract_archive_with(&mut a, || File::open(path), dir, policy, opts, monitor)
 }

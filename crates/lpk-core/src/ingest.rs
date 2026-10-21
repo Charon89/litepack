@@ -131,6 +131,16 @@ fn path_identity(path: &Path) -> Result<u64, CoreError> {
 
 /// Every directory, file and symlink under `root` (not `root` itself), sorted by path bytes.
 pub fn walk(root: &Path, options: &IngestOptions) -> Result<Vec<Input>, CoreError> {
+    walk_with(root, options, &crate::Monitor::default().reporter())
+}
+
+/// [`walk`], reporting a [`Stage::Walk`](crate::Stage::Walk) event per directory listed
+/// (`files_done` the entries found so far) and polling the token before each directory.
+pub(crate) fn walk_with(
+    root: &Path,
+    options: &IngestOptions,
+    reporter: &crate::progress::Reporter<'_>,
+) -> Result<Vec<Input>, CoreError> {
     let md = std::fs::metadata(root).map_err(|e| CoreError::io(root, e))?;
     if !md.is_dir() {
         return Err(CoreError::NotADirectory {
@@ -148,8 +158,13 @@ pub fn walk(root: &Path, options: &IngestOptions) -> Result<Vec<Input>, CoreErro
     }
     let mut stack = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, prefix)) = stack.pop() {
+        reporter.check()?;
+        let before = w.out.len();
         w.list(&dir, &prefix, &mut stack)?;
+        reporter.add(crate::Stage::Walk, (w.out.len() - before) as u64, 0, 0);
     }
+    reporter.check()?;
+    reporter.done(crate::Stage::Walk);
     let mut out = w.out;
     out.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
     for pair in out.windows(2) {

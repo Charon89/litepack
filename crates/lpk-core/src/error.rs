@@ -92,6 +92,11 @@ pub enum CoreError {
         /// The second.
         second: String,
     },
+    /// The run was cancelled through its [`CancelToken`](crate::CancelToken); what it had
+    /// written is cleaned up as after a failure (a new archive removed, an append cut back,
+    /// an extraction's unfinished files removed).
+    #[error("cancelled")]
+    Cancelled,
     /// The root given to a walk is not a directory.
     #[error("{}: not a directory", path.display())]
     NotADirectory {

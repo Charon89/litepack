@@ -27,6 +27,7 @@ pub mod peel;
 pub mod pipeline;
 pub mod policy;
 pub mod priors;
+pub mod progress;
 pub mod source;
 pub mod store;
 
@@ -38,8 +39,13 @@ pub use bwt::BwtDecoder;
 pub use classify::{classify, Class, Features};
 pub use cluster::{cluster, Cluster, DictionaryKind};
 pub use error::CoreError;
-pub use export::{export_archive, export_file, ExportSummary, Sink};
-pub use extract::{extract_archive, extract_file, ExtractMemory, ExtractOptions, ExtractSummary};
+pub use export::{
+    export_archive, export_archive_with, export_file, export_file_with, ExportSummary, Sink,
+};
+pub use extract::{
+    extract_archive, extract_archive_with, extract_file, extract_file_with, ExtractMemory,
+    ExtractOptions, ExtractSummary,
+};
 pub use fast::{
     archive_fast, archive_fast_file, DictionaryPolicy, FastHandle, FastOptions, FastSummary,
     ZstdEncoder,
@@ -55,5 +61,6 @@ pub use peel::{
 pub use pipeline::{ClassifyStage, ModelStage, Pipeline, RunSummary, SealOptions, StageTimings};
 pub use policy::{DefaultPolicy, ExtractPolicy, Overwrite, Policy, Symlinks};
 pub use priors::ProvidedDictionaries;
+pub use progress::{CancelToken, Event, Monitor, Progress, Stage};
 pub use source::Source;
 pub use store::{archive_store, archive_store_file, write_inputs, StoreOptions};

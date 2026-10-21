@@ -7,7 +7,9 @@ use std::path::Path;
 use lpk_format::{WriterOptions, WriterSummary};
 
 use crate::error::CoreError;
-use crate::ingest::{file_identity, walk, IngestOptions, Input};
+#[cfg(test)]
+use crate::ingest::walk;
+use crate::ingest::{file_identity, walk_with, IngestOptions, Input};
 use crate::pipeline::Pipeline;
 
 /// Output buffer: writes reach the file in large sequential pieces.
@@ -49,6 +51,7 @@ pub fn write_inputs(
     options: StoreOptions,
     sync: Option<SyncFn>,
 ) -> Result<WriterSummary, CoreError> {
+    let monitor = crate::Monitor::default();
     let s = Pipeline::store(options).run_inputs(
         inputs.to_vec(),
         out,
@@ -56,6 +59,7 @@ pub fn write_inputs(
         crate::pipeline::Prepared::Store,
         std::time::Duration::ZERO,
         crate::pipeline::new_archive(),
+        &monitor.reporter(),
     )?;
     Ok(s.writer)
 }
@@ -81,6 +85,7 @@ pub(crate) fn create_new_and_run<T>(
     root: &Path,
     archive_path: &Path,
     ingest: &IngestOptions,
+    reporter: &crate::progress::Reporter<'_>,
     f: impl FnOnce(Vec<Input>, std::fs::File, SyncFn) -> Result<T, CoreError>,
 ) -> Result<T, CoreError> {
     let file = OpenOptions::new()
@@ -93,7 +98,7 @@ pub(crate) fn create_new_and_run<T>(
         let sync_file = file
             .try_clone()
             .map_err(|e| CoreError::io(archive_path, e))?;
-        let mut inputs = walk(root, ingest)?;
+        let mut inputs = walk_with(root, ingest, reporter)?;
         inputs.retain(|i| i.identity != Some(own_id));
         let sync: SyncFn = Box::new(move || sync_file.sync_data());
         f(inputs, file, sync)
