@@ -2632,23 +2632,35 @@ fn g1_measured_passes_and_fails_around_both_limits_and_names_a_missing_row() {
         "{}",
         g.numbers[0]
     );
-    // 90% of 17.6 MB is 15.84 MB and 85% is 14.96 MB: 15.0 MB fails the Ultra limit only,
-    // 14.96 MB passes both, 15.85 MB fails both.
+    // Make the best-single rule bind: zstd/3's office-pdf row at 3.0 MB makes zstd/3 the best
+    // single tool (9.5 + 3.8 + 3.0 = 16.3 MB; 90% is 14.67 MB), distinct from the sum of the
+    // per-class bests (9.0 + 3.6 + 3.0 = 15.6 MB; 90% is 14.04 MB) and from Ultra (17.6 MB;
+    // 85% is 14.96 MB). Combined lpk 14.5 MB passes (it would fail against the sum of bests);
+    // 14.8 MB fails best-single while passing Ultra.
     let at = |office: u64| {
         let mut j = subject_inputs(true);
-        set_row(&mut j, SUBJECT_TOOL, "balanced", "office-pdf", |r| {
-            let mut reps = r.repeats.take().expect("reps");
-            for s in &mut reps {
-                s.archive_bytes = office;
-            }
-            r.median = Some(Sample::median_of(&reps));
-            r.repeats = Some(reps);
+        set_row(&mut j, "zstd", "3", "office-pdf", |r| {
+            set_archive(r, 3_000_000)
         });
-        verdict_of(&j, "G1")
+        set_row(&mut j, SUBJECT_TOOL, "balanced", "office-pdf", |r| {
+            set_archive(r, office)
+        });
+        gate(&j, "G1")
     };
-    assert_eq!(at(14_960_000 - 8_400_000), Verdict::Pass);
-    assert_eq!(at(15_000_000 - 8_400_000), Verdict::Fail);
-    assert_eq!(at(15_850_000 - 8_400_000), Verdict::Fail);
+    let g = at(14_500_000 - 8_400_000);
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    for want in [
+        "combined best single tool (zstd/3): 16300000 bytes [",
+        "stricter, sum of the per-class bests (no single tool): 15600000 bytes [",
+        "combined lpk/balanced / sum of the per-class bests: 92.9% [",
+    ] {
+        assert!(
+            g.numbers.iter().any(|n| n.starts_with(want)),
+            "missing `{want}` in {:?}",
+            g.numbers
+        );
+    }
+    assert_eq!(at(14_800_000 - 8_400_000).verdict, Verdict::Fail);
     // No lpk/balanced row on one class: not evaluable, naming it; the fast rows do not count.
     let mut k = inputs(&Knobs::default(), true);
     add_subject(&mut k, "balanced", "photo-jpeg", 6_000_000, 20.0, 4.0);
@@ -2673,6 +2685,15 @@ fn g1_measured_passes_and_fails_around_both_limits_and_names_a_missing_row() {
         .numbers
         .iter()
         .any(|n| n.starts_with("combined lpk/balanced*: ")));
+    // The per-class lines star only the class that rests on one measurement.
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("photo-jpeg alone, lpk/balanced* / best incumbent: ")));
+    assert!(g
+        .numbers
+        .iter()
+        .any(|n| n.starts_with("office-pdf alone, lpk/balanced / best incumbent: ")));
     assert!(g
         .notes
         .iter()
@@ -2778,6 +2799,7 @@ fn g3_measured_compares_lpk_fast_with_the_store_control_at_eighty_percent() {
         "lpk/fast first repeat compress on video: 40.0 MB/s [",
         "store/store first repeat compress on video: 50.0 MB/s [",
         "lpk/fast / store/store: 80.0% [",
+        "rows compared: both from `2026-10-02-testbox` (one run, as D-27 asks)",
     ] {
         assert!(
             g.numbers.iter().any(|n| n.starts_with(want)),
@@ -2902,5 +2924,115 @@ fn the_phase_1_verdict_line_keeps_its_wording() {
     assert_eq!(
         line,
         "NO-GO proposal: not evaluable (the data is incomplete, not a failure): G1, G2, G3, G4"
+    );
+}
+
+/// Every repeat's archive at `bytes`, the median recomputed.
+fn set_archive(r: &mut ToolResult, bytes: u64) {
+    let mut reps = r.repeats.take().expect("reps");
+    for s in &mut reps {
+        s.archive_bytes = bytes;
+    }
+    r.median = Some(Sample::median_of(&reps));
+    r.repeats = Some(reps);
+}
+
+/// The G3 rows of a pooled baseline: `store/store` on video in `a`, `lpk/fast` on video in `b`
+/// (or both in `a`, with `b` holding another row): the gate names the directory of each row.
+fn g3_pooled(same_dir: bool) -> Inputs {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let store = result("store", "store", "video", 50 * MB, 50_000_100, 1.0, 1.0);
+    let fast = result(SUBJECT_TOOL, "fast", "video", 50 * MB, 49_999_000, 1.0, 0.5);
+    let (a_rows, b_rows) = if same_dir {
+        (vec![store, fast], second_results())
+    } else {
+        (vec![store], vec![fast])
+    };
+    let a = dir_under(tmp.path(), "a", &a_rows);
+    let b = dir_under(tmp.path(), "b", &b_rows);
+    add_tool_entries(&a, &a_rows);
+    add_tool_entries(&b, &b_rows);
+    // The directories are read before `tmp` is dropped; the Inputs hold no path.
+    load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled")
+}
+
+/// Adds to the directory's `tools.json` an entry (found, at the result's version) for every
+/// tool of `results` the sample file does not list, as the validator requires.
+fn add_tool_entries(dir: &Path, results: &[ToolResult]) {
+    let mut tools: ToolsFile =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("tools.json")).expect("read"))
+            .expect("parse");
+    for r in results {
+        if !tools.tools.iter().any(|t| t.id == r.tool.id) {
+            tools.tools.push(crate::run::result::ToolEntry {
+                id: r.tool.id.clone(),
+                name: r.tool.id.clone(),
+                status: "found".into(),
+                reason: None,
+                version: r.tool.version.clone(),
+                catalogue_verified: true,
+                manual: false,
+                local_override: false,
+                dedup: Some(false),
+            });
+        }
+    }
+    std::fs::write(dir.join("tools.json"), render_json(&tools)).expect("tools");
+}
+
+#[test]
+fn g3_measured_names_the_directory_of_each_row_when_the_rows_come_from_two_runs() {
+    let i = g3_pooled(false);
+    let base = &i.baseline;
+    assert_eq!(base.pooled.len(), 2);
+    let (dir_a, dir_b) = (base.pooled[0].label.clone(), base.pooled[1].label.clone());
+    assert_ne!(dir_a, dir_b);
+    let src_of = |name: &str| {
+        base.results
+            .iter()
+            .find(|(r, _)| r.file_name() == name)
+            .map(|(_, s)| *s)
+            .expect("row")
+    };
+    let (src_store, src_fast) = (
+        src_of("store-store-video.json"),
+        src_of("lpk-fast-video.json"),
+    );
+    assert_eq!(dir_of(base, src_store), dir_a);
+    assert_eq!(dir_of(base, src_fast), dir_b);
+    let g = gate(&i, "G3");
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    assert!(g
+        .title
+        .contains("in the same run or, pooled per D-48, the same baseline"));
+    let want = format!(
+        "rows compared: lpk/fast from `{dir_b}` [{src_fast}], store/store from `{dir_a}` \
+         [{src_store}]: two runs of one pooled baseline (D-27 asks for one run; D-48's pooling \
+         stands in for it: same host, corpus manifest, thread count and catalogue, checked when \
+         the directories were pooled)"
+    );
+    assert!(g.numbers.contains(&want), "{:?}", g.numbers);
+    let note = format!(
+        "G3: the two rows are from different runs (`{dir_b}`, `{dir_a}`); the comparison rests \
+         on D-48's pooling checks, not on D-27's same run"
+    );
+    assert!(g.notes.contains(&note), "{:?}", g.notes);
+    assert!(report_text(&i).contains(&note));
+}
+
+#[test]
+fn g3_measured_says_one_run_when_both_rows_come_from_the_same_directory() {
+    let i = g3_pooled(true);
+    let base = &i.baseline;
+    assert_eq!(base.pooled.len(), 2);
+    let dir_a = base.pooled[0].label.clone();
+    let g = gate(&i, "G3");
+    assert_eq!(g.verdict, Verdict::Pass, "{:?}", g.numbers);
+    let want = format!("rows compared: both from `{dir_a}` (one run, as D-27 asks)");
+    assert!(g.numbers.contains(&want), "{:?}", g.numbers);
+    assert!(
+        !g.notes.iter().any(|n| n.contains("different runs")),
+        "{:?}",
+        g.notes
     );
 }

@@ -1655,12 +1655,15 @@ fn gate1_measured(m: &Model) -> GateRow {
         ratio_pct(&e, &sum_b).show(pct1)
     ));
     for (c, e, b, u) in &parts {
+        let l = subject_row(&m.rows, SUBJECT_BALANCED, c)
+            .map(|(_, s)| subject_label(SUBJECT_BALANCED, s))
+            .unwrap_or_default();
         numbers.push(format!(
-            "{c} alone, lpk/balanced / best incumbent: {}",
+            "{c} alone, {l} / best incumbent: {}",
             ratio_pct(e, b).show(pct1)
         ));
         numbers.push(format!(
-            "{c} alone, lpk/balanced / 7-Zip Ultra: {}",
+            "{c} alone, {l} / 7-Zip Ultra: {}",
             ratio_pct(e, u).show(pct1)
         ));
     }
@@ -1780,11 +1783,22 @@ fn gate2_measured(m: &Model, probes: &Probes) -> GateRow {
     }
 }
 
-fn gate3_measured(m: &Model, p: &Probes) -> GateRow {
+/// The label of the pooled results directory that holds the source file `src` (a single
+/// directory: the baseline's own).
+pub fn dir_of(b: &Baseline, src: SourceId) -> String {
+    b.pooled
+        .iter()
+        .find(|d| d.rows.contains(&src))
+        .map_or(b.dir.clone(), |d| d.label.clone())
+}
+
+fn gate3_measured(m: &Model, inputs: &Inputs) -> GateRow {
+    let p = &inputs.probes;
     let title = format!(
         "G3 video store speed (D-27; measured `lpk` rows): lpk/fast's compress MB/s on video is \
          at least {G3_MIN_PCT:.0}% of the store control's compress MB/s on video (a real program \
-         reading and writing the files) in the same pooled baseline"
+         reading and writing the files) in the same run or, pooled per D-48, the same baseline \
+         (the directories are named)"
     );
     let mut numbers = Vec::new();
     let mut notes: Vec<String> = Vec::new();
@@ -1813,8 +1827,36 @@ fn gate3_measured(m: &Model, p: &Probes) -> GateRow {
     let verdict = match (&subject, &control) {
         (Err(e), _) => Verdict::NotEvaluable(e.clone()),
         (_, Err(e)) => Verdict::NotEvaluable(format!("the store control: {e}")),
-        (Ok((row, s)), Ok((_, c))) => {
+        (Ok((row, s)), Ok((crow, c))) => {
             let (ls, lc) = (subject_label(SUBJECT_FAST, s), subject_label(STORE, c));
+            // D-27 asks for one run: name the directory of each row (its result file's source).
+            let (src_s, src_c) = (&row.class_bytes, &crow.class_bytes);
+            let dir = |t: &Traced| {
+                t.sources
+                    .iter()
+                    .next()
+                    .map(|s| dir_of(&inputs.baseline, *s))
+                    .unwrap_or_default()
+            };
+            let (dir_s, dir_c) = (dir(src_s), dir(src_c));
+            if dir_s == dir_c {
+                numbers.push(format!(
+                    "rows compared: both from `{dir_s}` (one run, as D-27 asks)"
+                ));
+            } else {
+                numbers.push(format!(
+                    "rows compared: lpk/fast from `{dir_s}` {}, store/store from `{dir_c}` {}: \
+                     two runs of one pooled baseline (D-27 asks for one run; D-48's pooling \
+                     stands in for it: same host, corpus manifest, thread count and catalogue, \
+                     checked when the directories were pooled)",
+                    src_s.tag(),
+                    src_c.tag()
+                ));
+                notes.push(format!(
+                    "G3: the two rows are from different runs (`{dir_s}`, `{dir_c}`); the \
+                     comparison rests on D-48's pooling checks, not on D-27's same run"
+                ));
+            }
             numbers.push(format!(
                 "{ls} compress on video: {}",
                 s.compress_mbps.show(mbps_s)
@@ -1927,7 +1969,7 @@ pub fn gates(m: &Model, inputs: &Inputs) -> Vec<GateRow> {
         return vec![
             gate1_measured(m),
             gate2_measured(m, &inputs.probes),
-            gate3_measured(m, &inputs.probes),
+            gate3_measured(m, inputs),
             gate4_measured(m, inputs),
         ];
     }
