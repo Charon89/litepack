@@ -1091,7 +1091,9 @@ fn write_public_non_ascii(e: &Env) -> PathBuf {
 fn a_class_the_system_tar_rejects_gets_its_rows_through_the_runners_own_tar() {
     let e = env_with(&["fake-stream", "store"]);
     let corpus = write_public_non_ascii(&e);
+    // The stand-in reports itself as GNU tar: the dry run decides on every OS.
     let out = command(&e)
+        .env("LPK_FAKE_TAR_FLAVOUR", "gnu")
         .arg("--corpus")
         .arg(&corpus)
         .arg("--allow-dirty-build")
@@ -1105,14 +1107,26 @@ fn a_class_the_system_tar_rejects_gets_its_rows_through_the_runners_own_tar() {
         stdout.contains("unicode: the tar stream of `store` and of the tar-stream tools is written by lpk-bench"),
         "{stdout}"
     );
-    assert!(stdout.contains("dry run") || cfg!(windows), "{stdout}");
+    assert!(
+        stdout.contains("dry run") && stdout.contains("tar exited 139"),
+        "{stdout}"
+    );
     assert!(!stdout.contains("ascii: the tar stream"), "{stdout}");
+    // No file name of the class in the console output (D-20's rule, counts only).
+    assert!(
+        !stdout.contains("snapshot") && !stdout.contains("日本語"),
+        "{stdout}"
+    );
     let dir = results_dir(&e);
     for name in ["store-store-unicode.json", "fake-stream-ok-unicode.json"] {
         let r = result(&dir, name);
         assert_eq!(r["verification"]["verified"], true, "{name}: {r}");
         assert_eq!(r["measurement"]["tar"]["tool"], "lpk-bench", "{name}: {r}");
         assert_eq!(r["measurement"]["tar"]["format"], "pax", "{name}: {r}");
+        assert_eq!(
+            r["measurement"]["tar"]["note"], "dry run: tar exited 139",
+            "{name}: {r}"
+        );
         assert_eq!(r["repeats"].as_array().unwrap().len(), 2, "{name}");
         assert!(
             r["median"]["compress"]["wall_seconds"].as_f64().unwrap() > 0.0,
@@ -1122,7 +1136,14 @@ fn a_class_the_system_tar_rejects_gets_its_rows_through_the_runners_own_tar() {
     let s = result(&dir, "store-store-unicode.json");
     assert_eq!(s["setting"]["compress_args"][0], "tar", "{s}");
     assert_eq!(s["setting"]["extract_args"][0], "tar", "{s}");
-    assert_eq!(s["tool"]["version"], "bsdtar 0.0", "{s}");
+    // The program that ran is recorded, not the system tar that was set aside.
+    assert!(
+        s["tool"]["version"]
+            .as_str()
+            .unwrap()
+            .starts_with("lpk-bench "),
+        "{s}"
+    );
     let z = result(&dir, "fake-stream-ok-unicode.json");
     assert!(z["median"]["compress"]["tar_step"].is_object(), "{z}");
     // The ASCII class: the system tar as before, no provenance on `store`.
@@ -1130,9 +1151,11 @@ fn a_class_the_system_tar_rejects_gets_its_rows_through_the_runners_own_tar() {
     assert_eq!(s["verification"]["verified"], true, "{s}");
     assert!(s["measurement"].get("tar").is_none(), "{s}");
     assert_eq!(s["setting"]["compress_args"][0], "-cf", "{s}");
+    assert_eq!(s["tool"]["version"], "GNU tar 0.0", "{s}");
     let z = result(&dir, "fake-stream-ok-ascii.json");
     assert_eq!(z["verification"]["verified"], true, "{z}");
-    assert_eq!(z["measurement"]["tar"]["tool"], "bsdtar 0.0", "{z}");
+    assert_eq!(z["measurement"]["tar"]["tool"], "GNU tar 0.0", "{z}");
+    assert!(z["measurement"]["tar"].get("note").is_none(), "{z}");
     // `run --validate` accepts the directory.
     let v = Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
         .args(["run", "--validate"])
@@ -1144,6 +1167,7 @@ fn a_class_the_system_tar_rejects_gets_its_rows_through_the_runners_own_tar() {
 
     // `--tar system`: the stand-in's rejection fails the rows as the Windows tar did.
     let out = command(&e)
+        .env("LPK_FAKE_TAR_FLAVOUR", "gnu")
         .arg("--corpus")
         .arg(&corpus)
         .arg("--allow-dirty-build")
@@ -1208,8 +1232,34 @@ fn a_class_the_system_tar_rejects_gets_its_rows_through_the_runners_own_tar() {
         let r = result(&dir, name);
         assert_eq!(r["verification"]["verified"], true, "{name}: {r}");
         assert_eq!(r["measurement"]["tar"]["tool"], "lpk-bench", "{name}: {r}");
+        assert_eq!(
+            r["measurement"]["tar"]["note"], "--tar lpk-bench",
+            "{name}: {r}"
+        );
     }
     assert_tmp_clean(&e);
+
+    // The stand-in as `bsdtar` on Windows: the known rejection, no dry run, the note says so.
+    if cfg!(windows) {
+        let out = command(&e)
+            .arg("--corpus")
+            .arg(&corpus)
+            .arg("--allow-dirty-build")
+            .args(["--tools", "store", "--repeats", "1", "--classes", "unicode"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("dry run"), "{stdout}");
+        let dir = results_dir(&e);
+        let s = result(&dir, "store-store-unicode.json");
+        assert_eq!(s["verification"]["verified"], true, "{s}");
+        assert_eq!(
+            s["measurement"]["tar"]["note"], "known rejection on windows (bsdtar 0.0)",
+            "{s}"
+        );
+        assert_tmp_clean(&e);
+    }
 }
 
 /// E2-23 with the real system tar: on Windows the class with non-ASCII names gets the runner's
@@ -1236,18 +1286,55 @@ fn the_real_system_tar_is_kept_where_it_takes_the_names_and_replaced_where_it_do
     let s = result(&dir, "store-store-ascii.json");
     assert_eq!(s["verification"]["verified"], true, "{s}");
     assert!(s["measurement"].get("tar").is_none(), "{s}");
-    for name in ["store-store-unicode.json", "fake-stream-ok-unicode.json"] {
-        let r = result(&dir, name);
-        assert_eq!(r["verification"]["verified"], true, "{name}: {r}");
-        let tar = r["measurement"]["tar"]["tool"].as_str().unwrap_or("");
-        if cfg!(windows) {
-            assert_eq!(tar, "lpk-bench", "{name}: {r}");
-        } else {
+    let s = result(&dir, "store-store-unicode.json");
+    let z = result(&dir, "fake-stream-ok-unicode.json");
+    assert_eq!(s["verification"]["verified"], true, "{s}");
+    assert_eq!(z["verification"]["verified"], true, "{z}");
+    let system_version = s["tool"]["version"].as_str().unwrap_or("").to_string();
+    let is_bsdtar = {
+        // The discovered tar, as tools.json records it (the store row's own version is the
+        // harness's when the harness ran it).
+        let t = result(&dir, "tools.json");
+        t["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|x| x["id"] == "store")
+            .and_then(|x| x["version"].as_str())
+            .is_some_and(|v| v.starts_with("bsdtar"))
+    };
+    if cfg!(windows) && is_bsdtar {
+        // The Windows bsdtar: the known rejection, no dry run; the harness wrote both rows,
+        // the store row records the program that ran.
+        assert!(system_version.starts_with("lpk-bench "), "{s}");
+        for (name, r) in [("store", &s), ("fake-stream", &z)] {
+            assert_eq!(r["measurement"]["tar"]["tool"], "lpk-bench", "{name}: {r}");
+            let note = r["measurement"]["tar"]["note"].as_str().unwrap_or("");
             assert!(
-                tar.starts_with("GNU tar") || tar.starts_with("bsdtar"),
+                note.starts_with("known rejection on windows (bsdtar "),
                 "{name}: {r}"
             );
         }
+    } else {
+        // Any other tar (GNU tar on the Linux runner): the dry run over the full relative
+        // paths passes, the system tar is kept, the store row carries no provenance key and
+        // the tar-stream row names the system tar without a note.
+        assert!(
+            system_version.starts_with("GNU tar") || system_version.starts_with("bsdtar"),
+            "{s}"
+        );
+        assert!(s["measurement"].get("tar").is_none(), "{s}");
+        let tar = z["measurement"]["tar"]["tool"].as_str().unwrap_or("");
+        assert!(
+            tar.starts_with("GNU tar") || tar.starts_with("bsdtar"),
+            "{z}"
+        );
+        assert!(z["measurement"]["tar"].get("note").is_none(), "{z}");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("written by lpk-bench"),
+            "{}",
+            text(&out)
+        );
     }
     let v = Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
         .args(["run", "--validate"])

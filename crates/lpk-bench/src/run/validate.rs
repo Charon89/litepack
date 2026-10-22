@@ -701,6 +701,16 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
     Ok(report)
 }
 
+/// A `store` row whose archive the runner's own tar wrote (E2-23): `measurement.tar.tool`
+/// is `lpk-bench`.
+fn own_tar_store(r: &ToolResult) -> bool {
+    r.tool.id == "store"
+        && r.measurement
+            .as_ref()
+            .and_then(|m| m.tar.as_ref())
+            .is_some_and(|t| t.tool == crate::run::harness_tar::HARNESS_TAR)
+}
+
 fn semantic_checks(
     name: &str,
     r: &ToolResult,
@@ -725,6 +735,21 @@ fn semantic_checks(
                     "{name}: /tool/id: `{}` is marked skipped in tools.json but has measurements",
                     r.tool.id
                 ));
+            } else if own_tar_store(r) {
+                // E2-23: the `store` control written by the runner's own tar records the
+                // program that ran (`lpk-bench <version>`), not the system tar of tools.json.
+                if !r
+                    .tool
+                    .version
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with("lpk-bench "))
+                {
+                    out.push(format!(
+                        "{name}: /tool/version: {:?} must be `lpk-bench <version>` for a store \
+                         row whose tar is lpk-bench",
+                        r.tool.version
+                    ));
+                }
             } else if state.version != r.tool.version {
                 out.push(format!(
                     "{name}: /tool/version: {:?} differs from tools.json ({:?})",
@@ -1555,6 +1580,7 @@ mod tests {
             tool: "lpk-bench".into(),
             format: "pax".into(),
             in_published_time: true,
+            note: Some("known rejection on windows (bsdtar 3.8.9)".into()),
         });
         let dir = write_dir(tmp.path(), &[store]);
         // (the sample tools.json has no `store` entry; that finding is not the one under test)

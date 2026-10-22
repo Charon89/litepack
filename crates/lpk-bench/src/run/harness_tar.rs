@@ -6,7 +6,11 @@
 //! for a symlink) for every name that is not ASCII or does not fit the ustar fields. The same
 //! entries in the same order the system tar writes for `-cf A -C DIR .` (the entry `./`, then
 //! the directory's entries in file-system order, a directory's header before its contents) or
-//! for `-cf A -T LIST` (the listed paths, in list order), and the same file bytes.
+//! for `-cf A -T LIST` (the listed paths, in list order), and the same file bytes. One known
+//! difference: a hard link is written as a full regular file where GNU tar and bsdtar write a
+//! link entry (the file data is the same; the stream differs on a class with hard links; none
+//! is known in `full`). The stream is flushed to the OS and not fsynced, like the system tar's:
+//! the runner flushes between steps, outside the timing.
 //!
 //! The stream is produced by a child process, `lpk-bench tar ...`, with the store row's own
 //! argument shapes (`-cf {archive} -C {input} .`, `-cf {archive} -T {list}`,
@@ -16,9 +20,13 @@
 //!
 //! The choice is per class and automatic ([`choose`]): a class without a non-ASCII name always
 //! gets the system tar (nothing changes on such classes: G3 is measured against the system
-//! tar's rate); on Windows a non-ASCII name is a known rejection (no process is run); elsewhere
-//! a dry run of the system tar over the class's non-ASCII names decides. The row records the
-//! provenance in `measurement.tar.tool`: [`HARNESS_TAR`], or the system tar's version as before.
+//! tar's rate); with the Windows bsdtar a non-ASCII name is a known rejection (no process is
+//! run); with any other tar a dry run over the class's non-ASCII relative paths decides. A dry
+//! run that cannot be set up (the tar missing, the temporary directory unwritable) is an error
+//! that aborts the run: the control is never changed silently. The row records the provenance
+//! in `measurement.tar.tool` ([`HARNESS_TAR`], or the system tar's version as before) and the
+//! reason in `measurement.tar.note`. No reason text carries a file name (D-20: a private
+//! corpus's names reach neither a result file nor the console).
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -49,8 +57,18 @@ const PREFIX_AT: usize = 345;
 pub enum TarChoice {
     /// The system tar (the `store` tool as discovered).
     System,
-    /// The runner's own writer, with why the system tar was set aside.
-    Harness { reason: String },
+    /// The runner's own writer, with why the system tar was set aside (`reason`, for the
+    /// console) and the short form recorded in the row (`note`, `measurement.tar.note`).
+    Harness { reason: String, note: String },
+}
+
+/// What a dry run of the system tar found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DryRun {
+    /// Every name came back unchanged.
+    Accepted,
+    /// The tar failed or changed a name: why, without any name.
+    Rejected(String),
 }
 
 /// How the choice is made (`lpk-bench run --tar`).
@@ -77,75 +95,82 @@ impl TarPolicy {
     }
 }
 
-/// The non-ASCII names of a class, by base name, each once.
-pub fn non_ascii_basenames<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut set = BTreeSet::new();
-    for p in paths {
-        if !p.is_ascii() {
-            let base = p.rsplit('/').next().unwrap_or(p);
-            set.insert(base.to_string());
-        }
-    }
+/// The non-ASCII relative paths of a class (a directory component counts), each once.
+pub fn non_ascii_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let set: BTreeSet<String> = paths
+        .into_iter()
+        .filter(|p| !p.is_ascii())
+        .map(str::to_string)
+        .collect();
     set.into_iter().collect()
 }
 
-/// Choose the tar of a class. `names` are the class's non-ASCII base names
-/// ([`non_ascii_basenames`]); `windows` says whether the system tar is the Windows bsdtar (a
-/// known rejection of every non-ASCII name: it crashes on a name outside the ANSI code page
-/// and rewrites one inside it); `dry_run` runs the system tar over those names and reports
-/// why it failed, when it did. A class without a non-ASCII name always gets the system tar.
+/// Choose the tar of a class. `paths` are the class's non-ASCII relative paths
+/// ([`non_ascii_paths`]); `known_rejection` says the system tar is the Windows bsdtar, which
+/// rejects every non-ASCII name (it crashes on a name outside the ANSI code page and rewrites
+/// one inside it); otherwise `dry_run` runs the system tar over those paths. A class without
+/// a non-ASCII path always gets the system tar. `Err`: the dry run could not be set up (the
+/// caller aborts the run; the control is never changed silently). No text carries a name.
 pub fn choose(
     policy: TarPolicy,
-    names: &[String],
-    windows: bool,
-    dry_run: impl FnOnce(&[String]) -> std::result::Result<(), String>,
-) -> TarChoice {
+    paths: &[String],
+    known_rejection: Option<&str>,
+    dry_run: impl FnOnce(&[String]) -> std::result::Result<DryRun, String>,
+) -> std::result::Result<TarChoice, String> {
     match policy {
-        TarPolicy::System => return TarChoice::System,
+        TarPolicy::System => return Ok(TarChoice::System),
         TarPolicy::Harness => {
-            return TarChoice::Harness {
+            return Ok(TarChoice::Harness {
                 reason: "--tar lpk-bench".to_string(),
-            }
+                note: "--tar lpk-bench".to_string(),
+            })
         }
         TarPolicy::Auto => {}
     }
-    if names.is_empty() {
-        return TarChoice::System;
+    if paths.is_empty() {
+        return Ok(TarChoice::System);
     }
-    if windows {
-        return TarChoice::Harness {
+    if let Some(tar) = known_rejection {
+        return Ok(TarChoice::Harness {
             reason: format!(
-                "the Windows tar crashes on or rewrites non-ASCII names; the class has {} such \
-                 name(s)",
-                names.len()
+                "the Windows bsdtar crashes on or rewrites non-ASCII names; the class has {} \
+                 such path(s)",
+                paths.len()
             ),
-        };
+            note: format!("known rejection on {} ({tar})", std::env::consts::OS),
+        });
     }
-    match dry_run(names) {
-        Ok(()) => TarChoice::System,
-        Err(why) => TarChoice::Harness {
+    match dry_run(paths)? {
+        DryRun::Accepted => Ok(TarChoice::System),
+        DryRun::Rejected(why) => Ok(TarChoice::Harness {
             reason: format!(
-                "the system tar failed a dry run over the class's {} non-ASCII name(s): {why}",
-                names.len()
+                "the system tar failed a dry run over the class's {} non-ASCII path(s): {why}",
+                paths.len()
             ),
-        },
+            note: format!("dry run: {why}"),
+        }),
     }
 }
 
-/// The dry run: the system tar over a temporary tree holding one empty file per name, read
-/// back with the `tar` crate; every name must come back byte-equal.
+/// The dry run: the system tar over a temporary tree holding one empty file per path (the
+/// directories included), read back with the `tar` crate; every path must come back
+/// byte-equal. `Err` when the run could not be set up (no name in any text).
 pub fn dry_run_system_tar(
     exe: &Path,
-    names: &[String],
+    paths: &[String],
     tmp: &Path,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<DryRun, String> {
     let dir = tmp.join(format!("tar-probe-{}", std::process::id()));
     let tree = dir.join("t");
     let _ = fs::remove_dir_all(&dir);
     let result = (|| {
-        fs::create_dir_all(&tree).map_err(|e| format!("probe tree: {e}"))?;
-        for n in names {
-            fs::write(tree.join(n), b"").map_err(|e| format!("probe file {n:?}: {e}"))?;
+        fs::create_dir_all(&tree).map_err(|e| format!("the probe tree: {e}"))?;
+        for (i, p) in paths.iter().enumerate() {
+            let full = p.split('/').fold(tree.clone(), |a, c| a.join(c));
+            let parent = full.parent().unwrap_or(&tree);
+            fs::create_dir_all(parent)
+                .and_then(|()| fs::write(&full, b""))
+                .map_err(|e| format!("probe path {i} could not be written: {e}"))?;
         }
         let archive = dir.join("probe.tar");
         let out = std::process::Command::new(exe)
@@ -156,23 +181,38 @@ pub fn dry_run_system_tar(
             .arg(".")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .output()
             .map_err(|e| format!("could not run the tar: {e}"))?;
         if !out.status.success() {
-            return Err(match out.status.code() {
-                Some(c) => format!("exit code {c}"),
-                None => "ended without an exit code".to_string(),
-            });
+            return Ok(DryRun::Rejected(match out.status.code() {
+                Some(c) => format!("tar exited {c}"),
+                None => "tar ended without an exit code".to_string(),
+            }));
         }
-        let found = entry_names(&archive).map_err(|e| format!("the probe archive: {e}"))?;
-        for n in names {
-            let want = format!("./{n}");
-            if !found.iter().any(|f| f == want.as_bytes()) {
-                return Err(format!("the name {n:?} did not come back unchanged"));
+        let found = match entry_names(&archive) {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(DryRun::Rejected(format!(
+                    "the probe archive could not be read: {e}"
+                )))
             }
-        }
-        Ok(())
+        };
+        let changed = paths
+            .iter()
+            .filter(|p| {
+                let want = format!("./{p}");
+                !found.iter().any(|f| f == want.as_bytes())
+            })
+            .count();
+        Ok(if changed == 0 {
+            DryRun::Accepted
+        } else {
+            DryRun::Rejected(format!(
+                "{changed} of {} path(s) did not come back unchanged",
+                paths.len()
+            ))
+        })
     })();
     let _ = fs::remove_dir_all(&dir);
     result
@@ -374,8 +414,11 @@ fn write_items(archive: &Path, items: &[Item]) -> io::Result<()> {
     for item in items {
         append_item(&mut b, item)?;
     }
+    // Flushed to the OS, not fsynced: the system tar does not fsync either, and the runner
+    // flushes between steps outside the timing.
     let w = b.into_inner()?;
-    w.into_inner().map_err(|e| e.into_error())?.sync_all()
+    w.into_inner().map_err(|e| e.into_error())?;
+    Ok(())
 }
 
 /// `-cf archive -C root .`
@@ -608,46 +651,65 @@ mod tests {
     #[test]
     fn the_choice_is_system_without_non_ascii_names_and_follows_the_rejection_otherwise() {
         let none: Vec<String> = Vec::new();
-        let some = vec!["日本.txt".to_string()];
-        let never = |_: &[String]| -> std::result::Result<(), String> {
+        let some = vec!["日本語/plain.txt".to_string()];
+        let never = |_: &[String]| -> std::result::Result<DryRun, String> {
             panic!("the dry run must not be called")
         };
+        let bsd = Some("bsdtar 3.8.9");
         assert_eq!(
-            choose(TarPolicy::Auto, &none, true, never),
+            choose(TarPolicy::Auto, &none, bsd, never).expect("ok"),
             TarChoice::System
         );
         assert_eq!(
-            choose(TarPolicy::Auto, &none, false, never),
+            choose(TarPolicy::Auto, &none, None, never).expect("ok"),
             TarChoice::System
         );
-        // Windows: a known rejection, no dry run.
-        match choose(TarPolicy::Auto, &some, true, never) {
-            TarChoice::Harness { reason } => assert!(reason.contains("Windows tar"), "{reason}"),
-            other => panic!("{other:?}"),
-        }
-        // Elsewhere the dry run decides.
-        assert_eq!(
-            choose(TarPolicy::Auto, &some, false, |_| Ok(())),
-            TarChoice::System
-        );
-        match choose(TarPolicy::Auto, &some, false, |_| {
-            Err("exit code 139".into())
-        }) {
-            TarChoice::Harness { reason } => {
+        // The Windows bsdtar: a known rejection, no dry run; the note names the platform.
+        match choose(TarPolicy::Auto, &some, bsd, never).expect("ok") {
+            TarChoice::Harness { reason, note } => {
                 assert!(
-                    reason.contains("dry run") && reason.contains("139"),
+                    reason.contains("bsdtar") && reason.contains("1 such"),
                     "{reason}"
-                )
+                );
+                assert!(
+                    note.starts_with("known rejection on ") && note.ends_with("(bsdtar 3.8.9)"),
+                    "{note}"
+                );
             }
             other => panic!("{other:?}"),
         }
+        // Any other tar: the dry run decides.
+        assert_eq!(
+            choose(TarPolicy::Auto, &some, None, |_| Ok(DryRun::Accepted)).expect("ok"),
+            TarChoice::System
+        );
+        match choose(TarPolicy::Auto, &some, None, |_| {
+            Ok(DryRun::Rejected("tar exited 139".into()))
+        })
+        .expect("ok")
+        {
+            TarChoice::Harness { reason, note } => {
+                assert!(
+                    reason.contains("dry run") && reason.contains("139"),
+                    "{reason}"
+                );
+                assert_eq!(note, "dry run: tar exited 139");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A dry run that could not be set up is an error, never a silent change of the control.
+        let err = choose(TarPolicy::Auto, &some, None, |_| {
+            Err("could not run the tar: not found".into())
+        })
+        .expect_err("setup failure");
+        assert!(err.contains("could not run the tar"), "{err}");
         // The overrides.
         assert_eq!(
-            choose(TarPolicy::System, &some, true, never),
+            choose(TarPolicy::System, &some, bsd, never).expect("ok"),
             TarChoice::System
         );
         assert!(matches!(
-            choose(TarPolicy::Harness, &none, false, never),
+            choose(TarPolicy::Harness, &none, None, never).expect("ok"),
             TarChoice::Harness { .. }
         ));
         assert_eq!(TarPolicy::parse("lpk-bench"), Some(TarPolicy::Harness));
@@ -655,9 +717,50 @@ mod tests {
     }
 
     #[test]
-    fn non_ascii_basenames_are_unique_and_sorted() {
-        let got = non_ascii_basenames(["a/ü.txt", "b/ü.txt", "c/plain.txt", "日/本.txt"]);
-        assert_eq!(got, vec!["ü.txt".to_string(), "本.txt".to_string()]);
+    fn non_ascii_paths_keep_the_directory_component_and_are_unique_and_sorted() {
+        let got = non_ascii_paths([
+            "a/ü.txt",
+            "a/ü.txt",
+            "c/plain.txt",
+            "日本語/plain.txt",
+            "日/本.txt",
+        ]);
+        assert_eq!(
+            got,
+            vec![
+                "a/ü.txt".to_string(),
+                "日/本.txt".to_string(),
+                "日本語/plain.txt".to_string()
+            ]
+        );
+    }
+
+    /// The dry run over nested paths: a missing tar is a setup error (no name in the text); the
+    /// harness's own `tar` subcommand, used as the tar under test, accepts every path.
+    #[test]
+    fn the_dry_run_distinguishes_a_missing_tar_from_a_rejection_and_probes_full_paths() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let paths = vec!["日本語/plain.txt".to_string(), "marks/café.txt".to_string()];
+        let err = dry_run_system_tar(Path::new("no-such-tar-binary-xyz"), &paths, tmp.path())
+            .expect_err("missing tar");
+        assert!(err.starts_with("could not run the tar"), "{err}");
+        assert!(!err.contains("日本語") && !err.contains("café"), "{err}");
+        // This executable (the test binary) is not a tar: it exits non-zero, a rejection.
+        let me = std::env::current_exe().expect("exe");
+        match dry_run_system_tar(&me, &paths, tmp.path()).expect("ran") {
+            DryRun::Rejected(why) => {
+                assert!(
+                    why.starts_with("tar exited") || why.starts_with("tar ended"),
+                    "{why}"
+                );
+                assert!(!why.contains("日本語") && !why.contains("café"), "{why}");
+            }
+            DryRun::Accepted => panic!("a test binary is not a tar"),
+        }
+        assert!(!tmp
+            .path()
+            .join(format!("tar-probe-{}", std::process::id()))
+            .exists());
     }
 
     #[test]

@@ -671,6 +671,7 @@ fn rows_from_the_runners_own_tar_are_listed_with_their_provenance() {
         tool: tool.into(),
         format: "pax".into(),
         in_published_time: true,
+        note: Some("dry run: tar exited 139".into()),
     };
     let mut marked = Vec::new();
     for (r, _) in &mut i.baseline.results {

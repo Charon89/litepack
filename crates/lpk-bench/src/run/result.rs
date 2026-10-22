@@ -172,6 +172,10 @@ pub struct TarInfo {
     pub format: String,
     /// Always true: published time = tar step + tool step.
     pub in_published_time: bool,
+    /// Why the runner's own tar was chosen (E2-23): `known rejection on <os> (<tar>)`,
+    /// `dry run: tar exited <code>`, or `--tar lpk-bench`. Absent on a system-tar row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// How the numbers were taken.
@@ -692,6 +696,9 @@ pub mod samples {
             tool: "bsdtar 3.7.7".into(),
             format: "pax".into(),
             in_published_time: true,
+            // (E2-23: a note is emitted when the runner's own tar wrote the stream; the sample
+            // carries one so that the schema's property is covered)
+            note: Some("dry run: tar exited 139".into()),
         });
         r.measurement = Some(m);
         r

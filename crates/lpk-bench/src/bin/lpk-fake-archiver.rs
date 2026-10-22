@@ -207,7 +207,15 @@ fn fake_tar(args: &[&str]) {
         }
     }
     match args {
-        ["--version"] => println!("bsdtar 0.0 (lpk-fake-archiver stand-in)"),
+        // `LPK_FAKE_TAR_FLAVOUR=gnu` makes it report itself as GNU tar, so the runner's dry
+        // run (not the Windows known-rejection shortcut) decides on every OS.
+        ["--version"] => {
+            if std::env::var("LPK_FAKE_TAR_FLAVOUR").as_deref() == Ok("gnu") {
+                println!("tar (GNU tar) 0.0 (lpk-fake-archiver stand-in)");
+            } else {
+                println!("bsdtar 0.0 (lpk-fake-archiver stand-in)");
+            }
+        }
         ["-cf", archive, "-C", dir, "."] => {
             let mut names = Vec::new();
             walk(Path::new(dir), Path::new(dir), &mut names);

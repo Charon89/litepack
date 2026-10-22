@@ -622,6 +622,13 @@ struct TarTool {
     version: String,
     /// The runner's own writer (`lpk-bench tar`).
     harness: bool,
+    /// Why the runner's own writer was chosen for the class (`measurement.tar.note`).
+    note: Option<String>,
+}
+
+/// What the `store` row records as `tool.version` when the runner's own tar ran it.
+fn harness_version() -> String {
+    format!("{HARNESS_TAR} {}", env!("CARGO_PKG_VERSION"))
 }
 
 impl TarTool {
@@ -640,6 +647,7 @@ impl TarTool {
             tool,
             version: HARNESS_TAR.to_string(),
             harness: true,
+            note: None,
         })
     }
 
@@ -654,6 +662,7 @@ impl TarTool {
                 "gnu".to_string()
             },
             in_published_time: true,
+            note: self.note.clone(),
         }
     }
 }
@@ -1416,6 +1425,7 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
             tool: d.tool.clone(),
             version: version.clone(),
             harness: false,
+            note: None,
         }),
         Status::Skipped { .. } => None,
     });
@@ -1509,42 +1519,63 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
             })
             .collect();
         // The class's tar (E2-23): the system tar unless a name of the class is one it rejects.
-        let non_ascii =
-            harness_tar::non_ascii_basenames(entry.files.iter().map(|f| f.path.as_str()));
+        // No name reaches the console or the row: the reasons carry counts only (D-20).
+        let non_ascii = harness_tar::non_ascii_paths(entry.files.iter().map(|f| f.path.as_str()));
         let choice = match (&system_tar, &harness_tar) {
             (_, None) => TarChoice::System,
             (None, Some(_)) if cfg.tar != TarPolicy::Harness => TarChoice::System,
             (system, Some(_)) => {
-                harness_tar::choose(cfg.tar, &non_ascii, cfg!(windows), |names| match system {
-                    Some(t) => harness_tar::dry_run_system_tar(&t.exe, names, &tmp_run),
+                // The Windows bsdtar is the known rejection; any other tar gets the dry run.
+                let known = system
+                    .as_ref()
+                    .filter(|t| cfg!(windows) && t.version.starts_with("bsdtar"))
+                    .map(|t| t.version.as_str());
+                harness_tar::choose(cfg.tar, &non_ascii, known, |paths| match system {
+                    Some(t) => harness_tar::dry_run_system_tar(&t.exe, paths, &tmp_run),
                     None => Err("the system tar was not found".to_string()),
                 })
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "class `{class}`: the dry run of the system tar over the class's {} \
+                         non-ASCII path(s) could not be set up ({e}); the control is not \
+                         changed silently: fix this or run with --tar system|lpk-bench",
+                        non_ascii.len()
+                    )
+                })?
             }
         };
-        let tar: Option<&TarTool> = match &choice {
-            TarChoice::System => system_tar.as_ref(),
-            TarChoice::Harness { reason } => {
+        let class_harness: Option<TarTool> = match &choice {
+            TarChoice::System => None,
+            TarChoice::Harness { reason, note } => {
                 println!(
                     "{class}: the tar stream of `store` and of the tar-stream tools is written \
                      by lpk-bench ({reason})"
                 );
-                harness_tar.as_ref()
+                harness_tar.clone().map(|mut t| {
+                    t.note = Some(note.clone());
+                    t
+                })
             }
+        };
+        let tar: Option<&TarTool> = match &class_harness {
+            Some(t) => Some(t),
+            None => system_tar.as_ref(),
         };
         let harness = tar.is_some_and(|t| t.harness);
         for id in selected {
             let Some(d) = discovered.iter().find(|d| &d.tool.id == id) else {
                 continue;
             };
-            // The `store` row under the runner's own writer: the harness's templates and
-            // executable, the rest of the row as catalogued.
+            // The `store` row under the runner's own writer: the harness's templates,
+            // executable and version (the program that ran), the rest of the row as
+            // catalogued.
             let own: Option<Discovered> = (harness && d.tool.id == "store")
                 .then(|| {
                     tar.map(|t| Discovered {
                         tool: t.tool.clone(),
                         status: match &d.status {
-                            Status::Found { version, .. } => Status::Found {
-                                version: version.clone(),
+                            Status::Found { .. } => Status::Found {
+                                version: harness_version(),
                                 path: t.exe.clone(),
                             },
                             other => other.clone(),
