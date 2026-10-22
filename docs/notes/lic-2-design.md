@@ -29,7 +29,7 @@ taken under MIT.
 
 Preflate needs little from the coder: two trait bounds (`cabac_codec.rs:111-263`), three concrete types
 (`VP8Context`, `VP8Reader`, `VP8Writer`; `stream_processor.rs:12`) and six methods (`grep -ohE
-"\.(put|get)(_[a-z_]+)?\(" src/*.rs | sort | uniq -c`): `put`/`get`, `put_n_bits`/`get_n_bits`,
+"\.(put|get)(_[a-z_]+)?\(" cabac_codec.rs stream_processor.rs | sort | uniq -c`): `put`/`get`, `put_n_bits`/`get_n_bits`,
 `put_unary_encoded`/`get_unary_encoded`. Both callers wrap every library call in `catch_unwind`
 (`crates/lpk-core/src/peel/deflate/analyse.rs:280,319`, `decode.rs:31`, `crates/lpk-check/src/deflate.rs:100`) and
 call once per stream (`analyse.rs:280-283`, `decode.rs:37`).
