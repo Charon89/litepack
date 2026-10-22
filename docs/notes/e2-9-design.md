@@ -155,6 +155,8 @@ S_est ≤ S_ord − μ and ≤ 0.5 · B; (iii) else both estimates are reported 
 criterion on `small` is "not larger" (ordering shows only past the dictionary, D-55 (3)); its `full` row and **the
 row that ticks E2-9 are F's.**
 
+**Amendment (D-91, 2026-10-22).** Condition (iii) of the decision rule — the estimate at or under 0.5·B — is not a build condition: E0-2's measurement shows the bound out of reach by arithmetic on a set of this shape (the first version alone costs 85% of 7-Zip Ultra's total; a delta's per-version increment is 78% of the incumbent's), so the writer is built when the estimate beats the ordering alone by the margin, and G2's figure is reported from the measurement whatever it is.
+
 ## 6. Tasks
 Order: A and E first; B after A; C and D after B (D's `lpk-check` half last); F in
 E3-9's measurement of `full`.

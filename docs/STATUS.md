@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-22, about 02:46 UTC. **A measurement is running since 02:36 UTC** (E0-2: every incumbent on the re-pinned `backup-versions-large` and `probe dedup`, `target/acceptance/e0-2-measure.sh`, status in `e0-2-measure-status.log`; no builds or tests on this machine until it says DONE). **E3-4 is done (D-90, PR #95); E3 is complete but for E3-9. The D-89 work has started: the versioned class is re-pinned and rebuilt (E0-2, PR #94), its re-measurement runs detached when the machine is idle; E2-23 is next, E2-9's design note is being written.** The owner's rulings are D-89; E2-22's verdict input is D-85.
+Last updated: 2026-10-22, about 03:49 UTC. No measurement is running. **E0-2 is done (D-91): the versioned class re-pinned and measured — G2 114.4% of 7-Zip Ultra, and the delta route's own estimate 99.8%, so the gate's bound is out of reach by arithmetic on this set (an owner item below). E2-23 and E2-24 are in flight (`task/e2-23`, `task/e2-24`); the E2-9 and LIC-2 design notes are merged (reviewed).** E3 is complete but for E3-9 (D-90); the owner's rulings are D-89.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -47,10 +47,9 @@ E3-8 is done (D-75, PR #77).
    same-run G3 script (`target/acceptance/e2-22-lpk-full.sh`, `e2-22-g3.sh`), pooled with the committed
    incumbents' baseline. A measurement needs the machine idle: no agent builds or tests while it runs.
 4. E3: every task but E3-9 done (D-75, D-77, D-79, D-80, D-84, D-87, D-90). **Next: the D-89 work in PLAN's
-   order** — E2-23 (names and the harness's own tar; brief in the session's scratchpad, its rulings in the PLAN
-   line), E0-2's measurement (the class rebuilt and re-pinned, PR #94; `target/acceptance/e0-2-measure.sh`:
-   the incumbents on the class and `probe dedup`, detached on the idle machine), E2-9 (design note first,
-   `docs/notes/e2-9-design.md`, on the spec's reserved `delta` primitive 0x0006 as revision 1.5), E2-24, E2-25,
+   order** — E2-23 and E2-24 (in flight; briefs in the session's scratchpad, rulings in the PLAN lines), E0-2
+   done (D-91: G2 114.4% of 7-Zip Ultra, the delta route's estimate 99.8%; the tar-based rows wait for
+   E2-23), E2-9 (design `docs/notes/e2-9-design.md` merged and amended by D-91; its probe is task A), E2-25,
    E2-16 (revision 1.4), E3-9, LIC-2; then E4–E9 as adopted in PLAN. E2-9's deltas pair versions by path and
    name (no similarity sketch).
    Housekeeping found on the way: the ignored corpus tests (`fast_corpus`, `store_path_corpus`,
@@ -75,6 +74,12 @@ E3-8 is done (D-75, PR #77).
    tests pushed branches.
 
 **Open for the owner (the 2026-10-22 answers are D-89; what remains):**
+- **G2's threshold on this set (D-91).** On the re-pinned class the first version alone costs 85% of 7-Zip
+  Ultra's total and a delta's per-version increment is 78% of the incumbent's (the probe's rows), so no delta
+  stage halves the archive against an incumbent that sorts a file's versions together or compresses solid;
+  E2-9 is built for its real gains and G2 is reported as measured. Say whether G2 stays a FAIL with its
+  margin (the default, D-89 (1)) or is restated (for example against the best non-solid incumbent, where
+  `lpk/balanced` at 5.4% of the class against WinRAR `m3`'s 23.5% already passes 2×) — a gate change is yours.
 - **The publisher's legal name and the product name** for the code-signing certificate (E7-1: a certificate
   in the publisher's name, Azure Artifact Signing or an OV certificate, since a later version may be closed,
   D-89 (6)). Identity validation takes weeks; the earlier the better.
@@ -98,7 +103,8 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e0-2` (PR #94, the re-pinned lock) until merged; `docs/e2-9-design` (the design note) when pushed.
+- `task/e2-23` (names, the harness's own tar) and `task/e2-24` (the store path round): implementers in flight,
+  2026-10-22; nothing else of this session's (PR #94 and both design notes merged).
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
 ## How to resume
