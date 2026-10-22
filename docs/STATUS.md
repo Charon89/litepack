@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-22, about 01:45 UTC. No measurement is running. **E3-3 is done (D-87, PR #92), the three stale corpus pins are re-pinned (D-88, PR #93), and the owner answered the gate and product questions on 2026-10-22: D-89.** E2-22's verdict input is D-85 (`bench/reports/phase1-2026-10-21-full-gates.md`): G1 PASS; G2, G3, G4 FAIL, each now with its work ruled (D-89). E3-4 is next; the D-89 work is planned in PLAN after it.
+Last updated: 2026-10-22, about 02:40 UTC. **A measurement is running since 02:36 UTC** (E0-2: every incumbent on the re-pinned `backup-versions-large` and `probe dedup`, `target/acceptance/e0-2-measure.sh`, status in `e0-2-measure-status.log`; no builds or tests on this machine until it says DONE; about three hours). E3-3 is done (D-87, PR #92), the three stale corpus pins are re-pinned (D-88, PR #93), the owner answered the gate and product questions on 2026-10-22 (D-89), E4–E9 are adopted into PLAN, the versioned class is re-pinned and rebuilt (E0-2, PR #94). E3-4 is approved and merges when its CI is green (PR #95); E2-9's design note is being written.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
