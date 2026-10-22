@@ -971,7 +971,9 @@ fn add(
 /// The inputs of `lpk a` (the rules of `ADD_ABOUT`): one directory given on the command line
 /// alone is archived by its contents; otherwise every input, the list file's included, is
 /// entered under its own name. The list file is read here, so an unreadable one is refused
-/// before any output; its lines are trimmed of a trailing CR, and empty or `#` lines dropped.
+/// before any output; a leading UTF-8 BOM (PowerShell 5's `Out-File`) is dropped, so are
+/// empty and `#` lines (`str::lines` drops a trailing CR). No input at all (a list naming
+/// none) is a usage error: never a silent empty archive.
 fn sources(a: &AddArgs) -> Result<lpk_core::Sources, Failure> {
     let core = |e: lpk_core::CoreError| Failure::core(&e, None);
     let exclude = lpk_core::Selection::new(&a.exclude).map_err(core)?;
@@ -981,13 +983,22 @@ fn sources(a: &AddArgs) -> Result<lpk_core::Sources, Failure> {
             .map_err(|e| Failure::failed("Io", format!("{}: {e}", list.display()), Some(list)))?;
         let text = String::from_utf8(text)
             .map_err(|_| Failure::usage(format!("--list {}: not UTF-8", list.display())))?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
         for line in text.lines() {
-            let line = line.strip_suffix('\r').unwrap_or(line);
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             paths.push(PathBuf::from(line));
         }
+    }
+    if paths.is_empty() {
+        return Err(Failure::usage(match &a.list {
+            Some(list) => format!(
+                "--list {}: no inputs (the file names no path)",
+                list.display()
+            ),
+            None => "no inputs".to_string(),
+        }));
     }
     if a.list.is_none() && paths.len() == 1 && paths[0].is_dir() {
         return Ok(lpk_core::Sources {

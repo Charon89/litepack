@@ -5,7 +5,7 @@
 //! recorded as `Symlink` entries unless `follow_symlinks` is on.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, Metadata};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
@@ -198,11 +198,6 @@ pub struct Sources {
     pub exclude: Selection,
 }
 
-/// True when `inner` lies below the entry path `outer` (`a/b` below `a`).
-fn lies_under(inner: &str, outer: &str) -> bool {
-    inner.len() > outer.len() && inner.starts_with(outer) && inner.as_bytes()[outer.len()] == b'/'
-}
-
 impl Sources {
     /// The contents of one directory (the single-directory form), nothing excluded.
     pub fn contents_of(dir: &Path) -> Self {
@@ -215,39 +210,88 @@ impl Sources {
     /// Several roots: two that would be entered under the same name, or one under the other
     /// (`a` and `a/b`), are refused with `InvalidOption` naming both; a contents root (empty
     /// name) is refused beside any other.
+    ///
+    /// Also refused: two roots that are the same file-system object (two spellings of one
+    /// path, a link and its target; compared by identity, `same_file`, when both can be
+    /// opened), and, on a host whose file system is case-insensitive
+    /// ([`policy::case_insensitive_target`](crate::policy::case_insensitive_target)), two
+    /// names equal under simple case folding (`docs` and `DOCS`, which `lpk x` there could
+    /// not tell apart); on a case-sensitive host those stay distinct inputs.
+    ///
+    /// The checks are hash-based, O(n · depth) over the roots (a list file may name every
+    /// file of a tree).
     pub fn new(roots: Vec<Root>, exclude: Selection) -> Result<Self, CoreError> {
-        for (i, a) in roots.iter().enumerate() {
-            for b in &roots[i + 1..] {
-                if a.name.is_empty() || b.name.is_empty() {
-                    return Err(CoreError::InvalidOption(format!(
-                        "{} and {}: a directory's contents cannot be archived beside another input",
-                        a.path.display(),
-                        b.path.display()
-                    )));
+        let fold = crate::policy::case_insensitive_target(Path::new("."));
+        let key = |name: &str| {
+            if fold {
+                name.to_lowercase()
+            } else {
+                name.to_string()
+            }
+        };
+        let both = |a: &Root, b: &Root, what: &str| {
+            CoreError::InvalidOption(format!(
+                "{} and {}: {what}",
+                a.path.display(),
+                b.path.display()
+            ))
+        };
+        // Per folded name, the root entered under it; per folded ancestor prefix of a name,
+        // the first root whose name has it.
+        let mut names: HashMap<String, usize> = HashMap::with_capacity(roots.len());
+        let mut prefixes: HashMap<String, usize> = HashMap::new();
+        let mut objects: HashMap<u64, usize> = HashMap::with_capacity(roots.len());
+        if roots.len() > 1 {
+            if let Some(r) = roots.iter().find(|r| r.name.is_empty()) {
+                let other = roots.iter().find(|o| !std::ptr::eq(*o, r)).unwrap_or(r);
+                return Err(both(
+                    r,
+                    other,
+                    "a directory's contents cannot be archived beside another input",
+                ));
+            }
+        }
+        for (i, r) in roots.iter().enumerate() {
+            if let Ok(h) = Handle::from_path(&r.path) {
+                if let Some(&j) = objects.get(&handle_id(&h)) {
+                    return Err(both(&roots[j], r, "the same input given twice"));
                 }
-                if a.name == b.name {
-                    return Err(CoreError::InvalidOption(format!(
-                        "{} and {} would both be entered as {:?}",
-                        a.path.display(),
-                        b.path.display(),
-                        a.name
-                    )));
-                }
-                let (under, over) = if lies_under(&b.name, &a.name) {
-                    (b, a)
-                } else if lies_under(&a.name, &b.name) {
-                    (a, b)
-                } else {
-                    continue;
-                };
+                objects.insert(handle_id(&h), i);
+            }
+            let k = key(&r.name);
+            if let Some(&j) = names.get(&k) {
+                return Err(both(
+                    &roots[j],
+                    r,
+                    &format!("would both be entered as {:?}", roots[j].name),
+                ));
+            }
+            if let Some(&j) = prefixes.get(&k) {
                 return Err(CoreError::InvalidOption(format!(
                     "{} ({:?}) lies under {} ({:?})",
-                    under.path.display(),
-                    under.name,
-                    over.path.display(),
-                    over.name
+                    roots[j].path.display(),
+                    roots[j].name,
+                    r.path.display(),
+                    r.name
                 )));
             }
+            for (at, b) in k.bytes().enumerate() {
+                if b != b'/' || at == 0 {
+                    continue;
+                }
+                let p = &k[..at];
+                if let Some(&j) = names.get(p) {
+                    return Err(CoreError::InvalidOption(format!(
+                        "{} ({:?}) lies under {} ({:?})",
+                        r.path.display(),
+                        r.name,
+                        roots[j].path.display(),
+                        roots[j].name
+                    )));
+                }
+                prefixes.entry(p.to_string()).or_insert(i);
+            }
+            names.insert(k, i);
         }
         Ok(Sources { roots, exclude })
     }
@@ -860,6 +904,110 @@ pub(crate) mod tests {
         // Different names that share a prefix string are fine.
         let s = Sources::new(vec![r("docs"), r("docs2"), r("doc")], Selection::all()).unwrap();
         assert_eq!(s.roots.len(), 3);
+        // A prefix arriving after the name below it is caught too.
+        let m = err(vec![r("a/b/c.txt"), r("x"), r("a/b")]);
+        assert!(m.contains("lies under") && m.contains("a/b/c.txt"), "{m}");
+    }
+
+    /// Fix round 1 (a): two roots that are one file-system object (two spellings) are a
+    /// duplicate input on every platform; (b) on a case-insensitive host two names equal
+    /// under case folding are refused as well, on a case-sensitive one they stay distinct.
+    #[test]
+    fn the_same_object_twice_is_refused_and_case_folds_on_a_case_insensitive_host() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("docs")).unwrap();
+        write(dir.path(), "notes.txt", 3);
+        let spelled = |p: &str| Root {
+            path: dir.path().join(p),
+            name: p.to_string(),
+        };
+        let err = |roots: Vec<Root>| match Sources::new(roots, Selection::all()) {
+            Err(CoreError::InvalidOption(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        // One object under two names: `docs` and `./docs` (a different name string).
+        let m = err(vec![
+            spelled("docs"),
+            Root {
+                path: dir.path().join("./docs"),
+                name: "d2".to_string(),
+            },
+        ]);
+        assert!(m.contains("given twice") && m.contains("docs"), "{m}");
+        // A file through the same object.
+        let m = err(vec![
+            spelled("notes.txt"),
+            Root {
+                path: dir.path().join("./notes.txt"),
+                name: "n2".to_string(),
+            },
+        ]);
+        assert!(m.contains("given twice"), "{m}");
+        // Case: refused where the host folds, allowed where it does not.
+        let pair = || {
+            vec![
+                spelled("docs"),
+                Root {
+                    path: dir.path().join("other"),
+                    name: "DOCS".to_string(),
+                },
+            ]
+        };
+        if crate::policy::case_insensitive_target(dir.path()) {
+            let m = err(pair());
+            assert!(m.contains("would both be entered"), "{m}");
+            let m = err(vec![
+                spelled("docs"),
+                Root {
+                    path: dir.path().join("other2"),
+                    name: "DOCS/x.txt".to_string(),
+                },
+            ]);
+            assert!(m.contains("lies under"), "{m}");
+        } else {
+            assert!(Sources::new(pair(), Selection::all()).is_ok());
+        }
+        // Paths that do not exist are not identity-checked (the walk reports them).
+        assert!(Sources::new(
+            vec![spelled("missing-a"), spelled("missing-b")],
+            Selection::all()
+        )
+        .is_ok());
+    }
+
+    /// Fix round 1: the conflict check over a list-file-sized input set (20,000 roots) runs,
+    /// and still catches a duplicate and a prefix among them.
+    #[test]
+    fn twenty_thousand_roots_are_checked_and_conflicts_among_them_found() {
+        let r = |p: String| Root {
+            path: PathBuf::from(&p),
+            name: p,
+        };
+        let many = || -> Vec<Root> {
+            (0..20_000)
+                .map(|i| {
+                    r(format!(
+                        "tree/dir{:03}/sub{:02}/file{i:05}.txt",
+                        i % 200,
+                        i % 37
+                    ))
+                })
+                .collect()
+        };
+        let s = Sources::new(many(), Selection::all()).unwrap();
+        assert_eq!(s.roots.len(), 20_000);
+        let mut dup = many();
+        dup.push(r("tree/dir017/sub17/file00017.txt".to_string()));
+        let e = Sources::new(dup, Selection::all()).unwrap_err();
+        assert!(e.to_string().contains("would both be entered"), "{e}");
+        let mut over = many();
+        over.push(r("tree/dir100".to_string()));
+        let e = Sources::new(over, Selection::all()).unwrap_err();
+        assert!(e.to_string().contains("lies under"), "{e}");
+        let mut under = vec![r("tree/dir050/sub13".to_string())];
+        under.extend(many());
+        let e = Sources::new(under, Selection::all()).unwrap_err();
+        assert!(e.to_string().contains("lies under"), "{e}");
     }
 
     /// E3-4: several roots, each under its name; a directory root is an entry itself; the

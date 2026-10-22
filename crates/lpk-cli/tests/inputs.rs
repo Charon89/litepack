@@ -145,8 +145,11 @@ fn conflicting_inputs_are_refused_naming_both_before_any_output() {
     // absolute one that gives its last component).
     let abs = src.join("docs");
     for (args, what) in [
-        (vec!["docs", "./docs"], "would both be entered"),
-        (vec!["docs", s(&abs)], "would both be entered"),
+        // Two spellings of one directory are one object (fix round 1), caught first.
+        (vec!["docs", "./docs"], "given twice"),
+        (vec!["docs", s(&abs)], "given twice"),
+        // The same object reached through `..` (its name would be `docs` too).
+        (vec!["docs", "../src/docs/../docs"], "given twice"),
         (vec!["docs/b.md", "docs"], "lies under"),
         (vec!["docs", "docs/deep/r.bin"], "lies under"),
     ] {
@@ -219,6 +222,24 @@ fn a_list_file_names_inputs_relative_to_the_current_directory() {
     // error.
     let r = lpk(&src, &["a", "../l5.lpk"]);
     assert_eq!(r.status.code(), Some(1), "{}", text(&r.stderr));
+    // Fix round 1: a UTF-8 BOM (PowerShell 5's Out-File) is dropped; a list naming no
+    // path is a usage error, never an empty archive.
+    fs::write(wd.join("bom.txt"), "\u{feff}a.txt\r\nzero\r\n").unwrap();
+    ok(&lpk(&src, &["a", "../l6.lpk", "--list", "../bom.txt"]));
+    assert_eq!(list(wd, &["l6.lpk"]), ["a.txt", "zero"]);
+    fs::write(wd.join("empty.txt"), "\u{feff}# nothing\r\n\r\n").unwrap();
+    let r = lpk(&src, &["a", "../l7.lpk", "--list", "../empty.txt"]);
+    assert_eq!(r.status.code(), Some(1), "{}", text(&r.stderr));
+    assert!(text(&r.stderr).contains("no inputs"), "{}", text(&r.stderr));
+    assert!(!wd.join("l7.lpk").exists());
+    // Two spellings of one directory are one object: refused (exit 1) naming both.
+    let r = lpk(&src, &["a", "../l8.lpk", "docs", "DOCS"]);
+    if cfg!(windows) {
+        assert_eq!(r.status.code(), Some(1), "{}", text(&r.stderr));
+        let err = text(&r.stderr);
+        assert!(err.contains("docs") && err.contains("DOCS"), "{err}");
+        assert!(!wd.join("l8.lpk").exists());
+    }
     // The list's round trip through `x` (the runner's private-corpus shape: files by their
     // relative paths, no directory entries, the parents created on extraction).
     ok(&lpk(wd, &["x", "l.lpk", "out"]));
