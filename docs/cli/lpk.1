@@ -4,13 +4,19 @@
 .SH NAME
 lpk \- LitePack archiver: create, extract and test .lpk archives
 .SH SYNOPSIS
-\fBlpk\fR [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+\fBlpk\fR [\fB\-\-json\fR] [\fB\-\-quiet\fR] [\fB\-\-no\-progress\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
 LitePack archiver: create, extract and test .lpk archives
 .SH OPTIONS
 .TP
 \fB\-\-json\fR
 Machine\-readable output: `l` prints one JSON object per entry per line, and any failing command prints exactly one JSON object line on stderr instead of `error: ...`
+.TP
+\fB\-\-quiet\fR
+Nothing on stderr but errors: no progress line, no warning, no note, no \-v report. Stdout is untouched (the listing, the counts, info)
+.TP
+\fB\-\-no\-progress\fR
+No progress line. (The line is shown only when stderr is a terminal: never through a pipe, and not with \-\-json or \-\-quiet.)
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
@@ -52,6 +58,7 @@ Write every entry of an archive into a ZIP or 7z file (by the output\*(Aqs exten
 lpk\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH EXTRA
-Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure is one line on stderr, `error: <message>`; with \-\-json it is one JSON object line instead: {"error":{"code":1|2,"kind":"<the error\*(Aqs variant name; Usage for a command\-line error; UnneededKeyfile for a \-\-keyfile the archive does not take>","message":"...","path":"<the path the error names, else the archive>","entries":[{"path","kind","message"}, the per\-entry errors of a partial extraction, when there are some]}}. A password is asked for on the terminal only with \-\-password\-prompt, or when stdin and stderr are terminals and the archive needs one that was not given; never through a pipe.
+Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure is one line on stderr, `error: <message>`; with \-\-json it is one JSON object line instead: {"error":{"code":1|2,"kind":"<the error\*(Aqs variant name; Usage for a command\-line error; UnneededKeyfile for a \-\-keyfile the archive does not take>","message":"...","path":"<the path the error names, else the archive>","entries":[{"path","kind","message"}, the per\-entry errors of a partial extraction, when there are some]}}. A password is asked for on the terminal only with \-\-password\-prompt, or when stdin and stderr are terminals and the archive needs one that was not given; never through a pipe. Ctrl\-C during a, append, x or export cancels the command: it cleans up (a new archive removed, an append cut back, unfinished files removed, an export\*(Aqs output removed) and exits 2 with `cancelled`; a second Ctrl\-C exits at once with code 2, skipping the cleanup (an append cut this way is 
+                  restored with `lpk rollback`). The other commands end at Ctrl\-C as any process does.
 .SH VERSION
 v0.0.1

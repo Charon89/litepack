@@ -305,6 +305,8 @@ fn core_table() -> Vec<(CoreError, i32, &'static str)> {
             "Decode",
         ),
         (Extract("worker stopped"), f, "Extract"),
+        // E3-3: a run cancelled through its token (Ctrl-C) is a failed operation, `cancelled`.
+        (Cancelled, f, "Cancelled"),
         (
             Export {
                 path: PathBuf::from("out.zip"),
@@ -371,7 +373,7 @@ fn every_format_error_variant_has_a_code_and_a_kind() {
 #[test]
 fn every_core_error_variant_has_a_code_and_a_kind() {
     let table = core_table();
-    assert_eq!(table.len(), 14, "one row per CoreError variant");
+    assert_eq!(table.len(), 15, "one row per CoreError variant");
     for (e, code, kind) in table {
         assert_eq!(core_exit(&e), code, "{e}");
         let failure = Failure::core(&e, Some(std::path::Path::new("x.lpk")));

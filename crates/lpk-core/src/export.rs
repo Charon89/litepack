@@ -44,6 +44,13 @@
 //! thread is joined, then the error is returned or the panic resumed. What the sink wrote is
 //! the sink's to remove (the command line removes the output file).
 //!
+//! **Progress and cancellation** ([`crate::progress`]; [`export_archive_with`]). An `Export`
+//! event per entry written (files and bytes streamed, encoded bytes and blocks decoded of the
+//! decodes scheduled), rate-limited. The token is polled after the plan (before the sink is
+//! touched), before each entry and before each decode on the calling thread, and by each
+//! decode worker before each block; a cancelled export stops the pool, joins every worker
+//! and fails with [`CoreError::Cancelled`], the sink's output being its caller's to remove.
+//!
 //! No extraction policy applies: the export writes nothing on the user's disk tree; the
 //! container's names are the archive's paths as the format validated them.
 
@@ -61,6 +68,7 @@ use crate::extract::{
     keep, pool_size, ExtractMemory, ExtractOptions, Held, Outcome, Permits, Shape, DECODER_STOPPED,
 };
 use crate::memory::{Budget, BudgetSource};
+use crate::progress::{Monitor, Reporter, Stage};
 use crate::CoreError;
 
 /// Where an export's entries go, in entry order.
@@ -331,6 +339,10 @@ enum Source<'a, R: Read + Seek> {
 
 /// What the plan holds for the calling thread, whichever path runs.
 struct Fixed<'a> {
+    rep: &'a Reporter,
+    /// Every block's frame length, for the bytes-in figure.
+    frame_len: &'a [u64],
+    bytes_in: &'a AtomicU64,
     places: &'a [Place],
     runs: &'a [Run],
     capacity: usize,
@@ -348,6 +360,9 @@ impl<'a> Fixed<'a> {
         Stream {
             source,
             permits,
+            rep: self.rep,
+            frame_len: self.frame_len,
+            bytes_in: self.bytes_in,
             places: self.places,
             runs: self.runs,
             capacity: self.capacity,
@@ -388,6 +403,9 @@ fn decode_error(
 struct Stream<'a, 'p, R: Read + Seek> {
     source: Source<'a, R>,
     permits: &'p Permits,
+    rep: &'a Reporter,
+    frame_len: &'a [u64],
+    bytes_in: &'a AtomicU64,
     places: &'a [Place],
     runs: &'a [Run],
     capacity: usize,
@@ -407,8 +425,14 @@ struct Stream<'a, 'p, R: Read + Seek> {
 }
 
 impl<R: Read + Seek> Stream<'_, '_, R> {
-    /// The decoded block of a miss, holding one permit.
+    /// The decoded block of a miss, holding one permit. The token is polled first: between
+    /// blocks on the calling thread.
     fn fetch(&mut self, block: usize) -> Result<Vec<u8>, CoreError> {
+        self.rep.check()?;
+        self.bytes_in.fetch_add(
+            self.frame_len.get(block).copied().unwrap_or(0),
+            Ordering::Relaxed,
+        );
         let (permits, first_entry, entries) = (self.permits, self.first_entry, self.entries);
         match &mut self.source {
             Source::Sequential(archive) => {
@@ -564,6 +588,8 @@ fn consume<R: Read + Seek>(
 ) -> Result<(), CoreError> {
     let entries = stream.entries;
     for (i, e) in entries.iter().enumerate() {
+        // Between entries on the calling thread.
+        stream.rep.check()?;
         match e.kind {
             EntryKind::Directory => {
                 sink.directory(e)?;
@@ -596,6 +622,13 @@ fn consume<R: Read + Seek>(
                 counts.bytes += e.size;
             }
         }
+        stream.rep.set(
+            Stage::Export,
+            counts.files,
+            stream.bytes_in.load(Ordering::Relaxed),
+            counts.bytes,
+            stream.decoded.load(Ordering::Relaxed),
+        );
     }
     // The last run's block goes back before the pool is joined.
     stream.current = None;
@@ -616,9 +649,26 @@ where
     R: Read + Seek + Send,
     F: Fn() -> std::io::Result<R>,
 {
+    export_archive_with(archive, reopen, sink, opts, &Monitor::default())
+}
+
+/// [`export_archive`] with a progress observer and a cancel token (see the module
+/// documentation).
+pub fn export_archive_with<R, F>(
+    archive: &mut Archive<R>,
+    reopen: F,
+    sink: &mut dyn Sink,
+    opts: &ExtractOptions,
+    monitor: &Monitor,
+) -> Result<ExportSummary, CoreError>
+where
+    R: Read + Seek + Send,
+    F: Fn() -> std::io::Result<R>,
+{
     if archive.is_keyless() {
         return Err(CoreError::Format(FormatError::PasswordRequired));
     }
+    let rep = monitor.reporter();
     let Plan {
         entries,
         ranges,
@@ -670,11 +720,20 @@ where
             .saturating_add((workers as u64).saturating_mul(m.per_worker)),
         ..m
     };
+    // Cancelled before the sink is touched: nothing was written.
+    rep.check()?;
+    rep.totals(Some(files as u64), Some(misses.len() as u64));
+    let frame_len: Vec<u64> = archive.index().blocks.iter().map(|b| b.frame_len).collect();
+    let token = rep.token();
     let permits = Permits::new(held);
     let decoded = AtomicU64::new(0);
     let reads = AtomicU64::new(0);
+    let bytes_in = AtomicU64::new(0);
     let mut counts = Counts::default();
     let fixed = Fixed {
+        rep: &rep,
+        frame_len: &frame_len,
+        bytes_in: &bytes_in,
         places: &places,
         runs: &runs,
         capacity,
@@ -713,6 +772,10 @@ where
                         let tx = tx.clone();
                         let job = move || -> u64 {
                             loop {
+                                if token.is_cancelled() {
+                                    permits.cancel();
+                                    break;
+                                }
                                 if !permits.acquire() {
                                     break;
                                 }
@@ -784,6 +847,10 @@ where
                         return Outcome::Panicked(p);
                     }
                     match r {
+                        // A worker saw the token first: its stop is the cancellation.
+                        Err(CoreError::Extract(_)) if token.is_cancelled() => {
+                            Outcome::Failed(CoreError::Cancelled)
+                        }
                         Ok(()) => Outcome::Done,
                         Err(e) => Outcome::Failed(e),
                     }
@@ -796,6 +863,7 @@ where
         Outcome::Failed(e) => return Err(e),
         Outcome::Panicked(p) => resume_unwind(p),
     }
+    rep.done(Stage::Export);
     let decoded = decoded.load(Ordering::Relaxed);
     Ok(ExportSummary {
         files: counts.files,
@@ -856,8 +924,20 @@ pub fn export_file(
     sink: &mut dyn Sink,
     opts: &ExtractOptions,
 ) -> Result<ExportSummary, CoreError> {
+    export_file_with(path, priors, credentials, sink, opts, &Monitor::default())
+}
+
+/// [`export_file`] with a progress observer and a cancel token ([`export_archive_with`]).
+pub fn export_file_with(
+    path: &Path,
+    priors: &[Vec<u8>],
+    credentials: Option<&Credentials>,
+    sink: &mut dyn Sink,
+    opts: &ExtractOptions,
+    monitor: &Monitor,
+) -> Result<ExportSummary, CoreError> {
     let mut a = open_file(path, priors, credentials, opts)?;
-    export_archive(&mut a, || std::fs::File::open(path), sink, opts)
+    export_archive_with(&mut a, || std::fs::File::open(path), sink, opts, monitor)
 }
 
 #[cfg(test)]

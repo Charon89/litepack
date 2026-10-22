@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lpk_format::prefetch::{NextFileError, OpenFn, Prefetch, PrefetchOptions};
@@ -31,7 +32,7 @@ use crate::fast::{resolve_threads, stored_by_class};
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::fold::ordering::order_cluster;
 use crate::fold::{Dedup, FoldStage};
-use crate::ingest::{file_identity, validate_input, walk, IngestOptions, Input};
+use crate::ingest::{file_identity, validate_input, walk_with, IngestOptions, Input};
 use crate::memory::{
     window_for, Budget, DeflateMemory, EncoderMemory, MemoryPlan, ModelInputs, BALANCED_CEILING,
     FAST_CEILING, STORE_CEILING,
@@ -42,6 +43,7 @@ use crate::peel::deflate::stage::{
 };
 use crate::peel::deflate::{DeflatePeel, PartEncoder};
 use crate::peel::{JpegPeel, PeelPlan, PeelStage, PeelSummary};
+use crate::progress::{Monitor, Reporter, Stage};
 use crate::source::Source;
 use crate::store::{create_new_and_run, StoreOptions, SyncFn, OUT_BUF};
 
@@ -169,6 +171,10 @@ pub struct Pipeline {
     pub model: ModelStage,
     /// The writer's settings.
     pub seal: SealOptions,
+    /// The run's progress observer and cancel token ([`crate::progress`]): events per
+    /// stage, rate-limited, and a token polled between files and blocks; a cancelled run
+    /// fails with [`CoreError::Cancelled`] and cleans up as a failure does.
+    pub monitor: Monitor,
 }
 
 impl std::fmt::Debug for Pipeline {
@@ -180,6 +186,7 @@ impl std::fmt::Debug for Pipeline {
             .field("fold", &self.fold)
             .field("model", &self.model)
             .field("seal", &self.seal)
+            .field("monitor", &self.monitor)
             .finish()
     }
 }
@@ -210,6 +217,7 @@ impl Pipeline {
                 base: (0, 0, 0),
                 dropped: Vec::new(),
             },
+            monitor: Monitor::default(),
         }
     }
 
@@ -228,6 +236,7 @@ impl Pipeline {
             fold: Some(Box::new(Dedup::default())),
             model: ModelStage::Fast(options),
             seal: SealOptions::default(),
+            monitor: Monitor::default(),
         }
     }
 
@@ -245,6 +254,7 @@ impl Pipeline {
             fold: Some(Box::new(Dedup::default())),
             model: ModelStage::Balanced(options),
             seal: SealOptions::default(),
+            monitor: Monitor::default(),
         }
     }
 
@@ -298,9 +308,20 @@ impl Pipeline {
     /// Walk `root` and write the archive to `out`.
     pub fn run(self, root: &Path, out: impl Write) -> Result<RunSummary, CoreError> {
         let prepared = self.prepare()?;
+        let monitor = self.monitor.clone();
+        let rep = monitor.reporter();
         let t = Instant::now();
-        let inputs = walk(root, &self.classify.ingest)?;
-        self.run_inputs(inputs, out, None, prepared, t.elapsed(), new_archive())
+        let inputs = walk_with(root, &self.classify.ingest, &rep)?;
+        self.run_inputs(
+            inputs,
+            out,
+            None,
+            prepared,
+            t.elapsed(),
+            new_archive(),
+            &rep,
+        )
+        .map_err(|e| rep.map_cancelled(e))
     }
 
     /// Walk `root` and append its entries as the next generation of `existing` (spec section
@@ -324,8 +345,10 @@ impl Pipeline {
         self.restrict_to_revision(&mut prepared, existing.header().version.minor);
         let paths = old_paths(&mut existing)?;
         self.seal.base = base_inventory(&existing, &paths);
+        let monitor = self.monitor.clone();
+        let rep = monitor.reporter();
         let t = Instant::now();
-        let inputs = walk(root, &self.classify.ingest)?;
+        let inputs = walk_with(root, &self.classify.ingest, &rep)?;
         let opener: Opener<'_, W> = Box::new(move |out, wopts, minor, chunker| {
             if existing.header().version.minor < minor {
                 return Err(FormatError::BadOptions {
@@ -338,7 +361,8 @@ impl Pipeline {
                 None => Writer::append(existing, out, wopts, credentials)?,
             })
         });
-        self.run_inputs(inputs, out, None, prepared, t.elapsed(), opener)
+        self.run_inputs(inputs, out, None, prepared, t.elapsed(), opener, &rep)
+            .map_err(|e| rep.map_cancelled(e))
     }
 
     /// Like [`append`](Self::append), on the archive at `archive_path` in place, with the
@@ -383,8 +407,10 @@ impl Pipeline {
             .map_err(io)?;
         let own_id = file_identity(&file).map_err(io)?;
         let sync_file = file.try_clone().map_err(io)?;
+        let monitor = self.monitor.clone();
+        let rep = monitor.reporter();
         let r = (|| {
-            let mut inputs = walk(root, &self.classify.ingest)?;
+            let mut inputs = walk_with(root, &self.classify.ingest, &rep)?;
             inputs.retain(|i| i.identity != Some(own_id));
             let kept: HashSet<&str> = inputs.iter().map(|i| i.path.as_str()).collect();
             let deleted: Vec<String> = old_paths
@@ -411,8 +437,17 @@ impl Pipeline {
                 Ok(if pipelined { w.with_write_thread() } else { w })
             });
             let sync: SyncFn = Box::new(move || sync_file.sync_data());
-            self.run_inputs(inputs, file, Some(sync), prepared, start.elapsed(), opener)
-        })();
+            self.run_inputs(
+                inputs,
+                file,
+                Some(sync),
+                prepared,
+                start.elapsed(),
+                opener,
+                &rep,
+            )
+        })()
+        .map_err(|e| rep.map_cancelled(e));
         // The writer (and its buffer) is gone by now: whatever reached the file past the old
         // trailer is cut off. A panic inside the closure unwinds through `restore`'s Drop.
         match r {
@@ -439,8 +474,10 @@ impl Pipeline {
     pub fn run_file(self, root: &Path, archive_path: &Path) -> Result<RunSummary, CoreError> {
         let prepared = self.prepare()?;
         let ingest = self.classify.ingest;
+        let monitor = self.monitor.clone();
+        let rep = monitor.reporter();
         let start = Instant::now();
-        create_new_and_run(root, archive_path, &ingest, |inputs, file, sync| {
+        create_new_and_run(root, archive_path, &ingest, &rep, |inputs, file, sync| {
             self.run_inputs(
                 inputs,
                 file,
@@ -448,12 +485,16 @@ impl Pipeline {
                 prepared,
                 start.elapsed(),
                 new_archive_file(),
+                &rep,
             )
         })
+        .map_err(|e| rep.map_cancelled(e))
     }
 
     /// Run the stages over already-walked inputs; `opener` opens the writer (a new archive, or
-    /// an append).
+    /// an append). `rep` receives a `Peel` or `Encode` event per file and the `Seal` events,
+    /// and is polled for cancellation before each file and before the seal.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_inputs<W: Write>(
         self,
         inputs: Vec<Input>,
@@ -462,6 +503,7 @@ impl Pipeline {
         prepared: Prepared,
         walk_time: Duration,
         opener: Opener<'_, W>,
+        rep: &Arc<Reporter>,
     ) -> Result<RunSummary, CoreError> {
         let mut timings = StageTimings {
             walk: walk_time,
@@ -480,6 +522,10 @@ impl Pipeline {
         let mut wopts = seal.writer;
         let source = Source::new();
         let (files, path_bytes, input_bytes) = inventory(&inputs);
+        rep.totals(
+            Some(inputs.iter().filter(|i| i.kind == EntryKind::File).count() as u64),
+            None,
+        );
         let (base_chunks, base_entries, base_paths) = seal.base;
         let (files, path_bytes) = (files + base_entries, path_bytes + base_paths);
         let recovery = crate::memory::recovery_memory(&wopts.recovery);
@@ -509,21 +555,27 @@ impl Pipeline {
                 let mut reads = ReadAhead::spawn(
                     inputs.iter().filter(|i| i.kind == EntryKind::File),
                     in_flight > 1,
+                    rep,
                 )?;
                 let io_threads = reads.threads() + usize::from(writer.has_write_thread());
+                let mut fed = Fed::default();
                 for input in &inputs {
+                    rep.check()?;
                     validate_input(input)?;
                     match input.kind {
                         EntryKind::Directory => {
                             writer.add_directory(&input.path, input.flags, input.mtime_ns)?;
                         }
                         EntryKind::Symlink => add_symlink(&mut writer, input)?,
-                        EntryKind::File => reads.add_file(&mut writer, input)?,
+                        EntryKind::File => {
+                            reads.add_file(&mut writer, input)?;
+                            fed.note(rep, Stage::Encode, input.len, &writer);
+                        }
                     }
                 }
                 timings.model = t.elapsed();
                 let t = Instant::now();
-                let writer = writer.finish()?;
+                let writer = seal_stage(rep, &fed, writer)?;
                 timings.seal = t.elapsed();
                 Ok(RunSummary {
                     writer,
@@ -801,6 +853,7 @@ impl Pipeline {
                     .collect();
                 meta.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
                 for input in meta {
+                    rep.check()?;
                     if input.kind == EntryKind::Directory {
                         writer.add_directory(&input.path, input.flags, input.mtime_ns)?;
                     } else {
@@ -821,17 +874,20 @@ impl Pipeline {
                         })
                     }),
                     in_flight > 1,
+                    rep,
                 )?;
                 let io_threads = reads.threads() + usize::from(writer.has_write_thread());
                 // Plain bytes fed since the last block boundary (approximate across the
                 // writer's own size splits).
                 let mut in_block = 0u64;
+                let mut fed = Fed::default();
                 for (i, c) in clusters.iter().enumerate() {
                     if in_block == 0 {
                         // A block takes the hint of its first cluster.
                         steer(c.class, c.dictionary);
                     }
                     for input in &c.inputs {
+                        rep.check()?;
                         in_block += input.len;
                         if in_block >= block_size {
                             in_block %= block_size;
@@ -843,12 +899,14 @@ impl Pipeline {
                                     summary.note_fallback(cause, input.len);
                                 }
                                 reads.add_file(&mut writer, input)?;
+                                fed.note(rep, Stage::Encode, input.len, &writer);
                                 continue;
                             }
                             Feed::DeflateCap => {
                                 // Above the Deflate peel's size cap: refused unread.
                                 summary.deflate.note_size_cap(input.len);
                                 reads.add_file(&mut writer, input)?;
+                                fed.note(rep, Stage::Encode, input.len, &writer);
                                 continue;
                             }
                             Feed::Deflate => {
@@ -876,23 +934,26 @@ impl Pipeline {
                                         Some(Outcome::Peeled(..)) => Err(CoreError::InvalidOption(
                                             "the peel pool out of step with the run".into(),
                                         )),
-                                        None => read_all(&source, input).and_then(|data| {
-                                            peel_file(
-                                                &mut writer,
-                                                cx,
-                                                input,
-                                                &data,
-                                                &mut summary.deflate,
-                                            )
-                                        }),
+                                        None => {
+                                            read_all_watched(&source, input, rep).and_then(|data| {
+                                                peel_file(
+                                                    &mut writer,
+                                                    cx,
+                                                    input,
+                                                    &data,
+                                                    &mut summary.deflate,
+                                                )
+                                            })
+                                        }
                                     };
                                     pool.publish(published);
                                     pool.committed(k);
                                     peel_time += tp.elapsed();
                                     r?;
+                                    fed.note(rep, Stage::Peel, input.len, &writer);
                                     continue;
                                 }
-                                let data = read_all(&source, input)?;
+                                let data = read_all_watched(&source, input, rep)?;
                                 let r = match dcx.as_mut() {
                                     Some(cx) => peel_file(
                                         &mut writer,
@@ -912,6 +973,7 @@ impl Pipeline {
                                 };
                                 peel_time += tp.elapsed();
                                 r?;
+                                fed.note(rep, Stage::Peel, input.len, &writer);
                                 continue;
                             }
                             Feed::Peel(stage) => stage,
@@ -939,22 +1001,24 @@ impl Pipeline {
                                     Some(Outcome::Ready(..)) => Err(CoreError::InvalidOption(
                                         "the peel pool out of step with the run".into(),
                                     )),
-                                    None => read_all(&source, input).and_then(|data| {
-                                        commit_peel(
-                                            &mut writer,
-                                            stage,
-                                            input,
-                                            &data,
-                                            None,
-                                            &mut summary,
-                                            max_part,
-                                        )
-                                    }),
+                                    None => {
+                                        read_all_watched(&source, input, rep).and_then(|data| {
+                                            commit_peel(
+                                                &mut writer,
+                                                stage,
+                                                input,
+                                                &data,
+                                                None,
+                                                &mut summary,
+                                                max_part,
+                                            )
+                                        })
+                                    }
                                 };
                                 pool.committed(k);
                                 r
                             }
-                            None => read_all(&source, input).and_then(|data| {
+                            None => read_all_watched(&source, input, rep).and_then(|data| {
                                 commit_peel(
                                     &mut writer,
                                     stage,
@@ -968,6 +1032,7 @@ impl Pipeline {
                         };
                         peel_time += tp.elapsed();
                         r?;
+                        fed.note(rep, Stage::Peel, input.len, &writer);
                     }
                     let next_stored = clusters.get(i + 1).is_none_or(|n| stored_by_class(n.class));
                     let close = match soft {
@@ -987,7 +1052,7 @@ impl Pipeline {
                 // Cancel (nothing is left) and join the workers before sealing.
                 drop(pool);
                 let t = Instant::now();
-                let written = writer.finish()?;
+                let written = seal_stage(rep, &fed, writer)?;
                 timings.seal = t.elapsed();
                 let (fast, balanced) = finish(summary.clone());
                 Ok(RunSummary {
@@ -1006,6 +1071,60 @@ impl Pipeline {
             }
         }
     }
+}
+
+/// The run's file and byte counts so far, for the progress events.
+#[derive(Default)]
+struct Fed {
+    files: u64,
+    bytes: u64,
+}
+
+impl Fed {
+    /// A file of `len` bytes was handed to the writer: an event of `stage` with the writer's
+    /// position and blocks (rate-limited by the reporter).
+    fn note<W: Write>(&mut self, rep: &Reporter, stage: Stage, len: u64, writer: &OutWriter<W>) {
+        self.files += 1;
+        self.bytes += len;
+        rep.set(
+            stage,
+            self.files,
+            self.bytes,
+            writer.position(),
+            writer.blocks_closed(),
+        );
+    }
+}
+
+/// The seal stage: the last `Peel` and `Encode` events (of the stages that ran), a `Seal`
+/// event, the token polled (a run cancelled here never seals), the writer finished, the
+/// stage's last event.
+fn seal_stage<W: Write>(
+    rep: &Reporter,
+    fed: &Fed,
+    writer: OutWriter<W>,
+) -> Result<WriterSummary, CoreError> {
+    rep.check()?;
+    rep.done_if_started(Stage::Peel);
+    rep.done_if_started(Stage::Encode);
+    rep.set(
+        Stage::Seal,
+        fed.files,
+        fed.bytes,
+        writer.position(),
+        writer.blocks_closed(),
+    );
+    rep.check()?;
+    let written = writer.finish()?;
+    rep.set(
+        Stage::Seal,
+        fed.files,
+        fed.bytes,
+        written.archive_len,
+        written.blocks,
+    );
+    rep.done(Stage::Seal);
+    Ok(written)
 }
 
 /// The paths of an archive's entry table.
@@ -1171,9 +1290,21 @@ fn add_symlink<W: Write>(writer: &mut OutWriter<W>, input: &Input) -> Result<(),
 /// `ChangedWhileReading`, the walk's changed-file rule. At most one byte past the walked length
 /// is read, so a file that grew is never read whole.
 pub(crate) fn read_all(source: &Source, input: &Input) -> Result<Vec<u8>, CoreError> {
+    read_all_from(source.open(input)?, input)
+}
+
+/// [`read_all`] through a reader `rep` watches (the token polled before every read).
+fn read_all_watched(
+    source: &Source,
+    input: &Input,
+    rep: &Arc<Reporter>,
+) -> Result<Vec<u8>, CoreError> {
+    read_all_from(rep.watch(source.open(input)?), input)
+}
+
+fn read_all_from(reader: Box<dyn Read + Send>, input: &Input) -> Result<Vec<u8>, CoreError> {
     let mut data = Vec::with_capacity(usize::try_from(input.len).unwrap_or(0));
-    source
-        .open(input)?
+    reader
         .take(input.len.saturating_add(1))
         .read_to_end(&mut data)
         .map_err(|e| CoreError::io(&input.source, e))?;
@@ -1286,9 +1417,13 @@ fn write_peeled<W: Write>(
 
 /// Add a file read on this thread as it is added (the sequential path); a length that changed
 /// since the walk is `ChangedWhileReading`, after its bytes were added.
-fn add_file_here<W: Write>(writer: &mut OutWriter<W>, input: &Input) -> Result<(), CoreError> {
+fn add_file_here<W: Write>(
+    writer: &mut OutWriter<W>,
+    input: &Input,
+    rep: &Arc<Reporter>,
+) -> Result<(), CoreError> {
     let mut r = Counting {
-        inner: Source::new().open(input)?,
+        inner: rep.watch(Source::new().open(input)?),
         n: 0,
     };
     writer.add_file(&input.path, input.flags, input.mtime_ns, &mut r)?;
@@ -1360,6 +1495,8 @@ struct ReadAhead {
     prefetch: Option<Prefetch<CoreError>>,
     /// Files handed to the writer so far: the id the next file must carry.
     next: usize,
+    /// Watches every reader (the token polled before each read, the bytes counted).
+    rep: Arc<Reporter>,
 }
 
 impl ReadAhead {
@@ -1367,18 +1504,22 @@ impl ReadAhead {
     fn spawn<'a>(
         files: impl Iterator<Item = &'a Input>,
         pipelined: bool,
+        rep: &Arc<Reporter>,
     ) -> Result<Self, CoreError> {
         if !pipelined {
             return Ok(ReadAhead {
                 prefetch: None,
                 next: 0,
+                rep: Arc::clone(rep),
             });
         }
         let list: Vec<(usize, OpenFn<CoreError>)> = files
             .enumerate()
             .map(|(id, input)| {
                 let input = input.clone();
-                let open: OpenFn<CoreError> = Box::new(move || Source::new().open(&input));
+                let rep = Arc::clone(rep);
+                let open: OpenFn<CoreError> =
+                    Box::new(move || Source::new().open(&input).map(|r| rep.watch(r)));
                 (id, open)
             })
             .collect();
@@ -1387,6 +1528,7 @@ impl ReadAhead {
         Ok(ReadAhead {
             prefetch: Some(prefetch),
             next: 0,
+            rep: Arc::clone(rep),
         })
     }
 
@@ -1403,7 +1545,7 @@ impl ReadAhead {
         input: &Input,
     ) -> Result<(), CoreError> {
         let Some(prefetch) = &mut self.prefetch else {
-            return add_file_here(writer, input);
+            return add_file_here(writer, input, &self.rep);
         };
         let mut file = match prefetch.next_file() {
             Ok(f) => f,

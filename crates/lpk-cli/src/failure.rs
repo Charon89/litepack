@@ -155,6 +155,7 @@ pub fn core_exit(e: &CoreError) -> i32 {
         | CoreError::InTheWay { .. }
         | CoreError::CaseCollision { .. }
         | CoreError::NotADirectory { .. }
+        | CoreError::Cancelled
         | CoreError::AppendLeftCut { .. } => EXIT_FAILED,
     }
 }
@@ -257,6 +258,7 @@ pub fn core_kind(e: &CoreError) -> &'static str {
         CoreError::InTheWay { .. } => "InTheWay",
         CoreError::CaseCollision { .. } => "CaseCollision",
         CoreError::NotADirectory { .. } => "NotADirectory",
+        CoreError::Cancelled => "Cancelled",
         CoreError::AppendLeftCut { .. } => "AppendLeftCut",
     }
 }
@@ -276,7 +278,7 @@ pub fn core_path(e: &CoreError) -> Option<String> {
         | CoreError::DuplicatePath { path }
         | CoreError::CaseCollision { first: path, .. }
         | CoreError::Decode { path, .. } => Some(path.clone()),
-        CoreError::InvalidOption(_) | CoreError::Extract(_) => None,
+        CoreError::InvalidOption(_) | CoreError::Extract(_) | CoreError::Cancelled => None,
     }
 }
 

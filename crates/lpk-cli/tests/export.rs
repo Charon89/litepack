@@ -290,15 +290,30 @@ fn zip_view(src: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
         .collect()
 }
 
-fn mtime_secs(p: &Path) -> i64 {
-    let m = fs::metadata(p).unwrap().modified().unwrap();
-    m.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+/// The archive's entries' mtimes in whole seconds, from `lpk l --json`: what a sink must carry.
+/// (The live tree's mtimes can move after the walk: NTFS updates a directory's last-write time
+/// when a handle closes, so the comparison is against the archive, not the disk.)
+fn archived_mtimes(arch: &Path) -> BTreeMap<String, i64> {
+    let r = lpk(&["l", "--json", arch.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    text(&r.stdout)
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .map(|v| {
+            let ns = v["mtime_ns"].as_i64().unwrap();
+            (
+                v["path"].as_str().unwrap().to_string(),
+                ns.div_euclid(1_000_000_000),
+            )
+        })
+        .collect()
 }
 
 #[test]
 fn zip_export_round_trips_with_every_method_and_the_external_tools() {
     let (work, src, arch) = archived(&[]);
     let want = tree(&src);
+    let in_archive = archived_mtimes(&arch);
     for (method, zip_method) in [
         ("deflate", zip::CompressionMethod::Deflated),
         ("zstd", zip::CompressionMethod::Zstd),
@@ -352,7 +367,7 @@ fn zip_export_round_trips_with_every_method_and_the_external_tools() {
                 assert_eq!(mode.map(|m| m & 0o170_777), Some(0o040_755), "{name}");
             }
             // The mtime: the DOS time within two seconds, the extended timestamp exact.
-            let on_disk = mtime_secs(&src.join(name.trim_end_matches('/')));
+            let on_disk = in_archive[name.trim_end_matches('/')];
             assert_eq!(*ext, Some(on_disk as u32), "{name}");
             let d = dos.unwrap();
             let (y, mo, da, h, mi, s) = lpk_cli::export::civil(on_disk);
@@ -374,6 +389,7 @@ fn zip_export_round_trips_with_every_method_and_the_external_tools() {
 fn sevenz_export_round_trips_with_every_method_and_the_external_tool() {
     let (work, src, arch) = archived(&["--balanced"]);
     let want = tree(&src);
+    let in_archive = archived_mtimes(&arch);
     for method in ["lzma2", "deflate", "store"] {
         let out = work.path().join(format!("t-{method}.7z"));
         let r = lpk(&[
@@ -424,7 +440,7 @@ fn sevenz_export_round_trips_with_every_method_and_the_external_tool() {
         .unwrap();
         assert_eq!(got, want, "{method}");
         for (name, secs) in &mtimes {
-            assert_eq!(*secs, mtime_secs(&src.join(name)), "{name}");
+            assert_eq!(*secs, in_archive[name.as_str()], "{name}");
         }
         seven_zip_round_trip(&out, None, &want);
     }
