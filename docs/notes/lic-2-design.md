@@ -147,11 +147,12 @@ and `vendor/`, absent from CI today (`grep -rni gpl .github/workflows` finds not
    `cabac` leaves `Cargo.lock` and `fuzz/Cargo.lock`. Acceptance: `cabac` absent from both lockfiles; the replay
    test, `the_vector_regenerates_identically`, `preflate_patch`, `expected-1.2.toml` and `expected-1.3.toml` green
    under `cargo nextest run --workspace`.
-2. **The spec.** Section 8 states the two coder rules as normative text (the tail: after the last symbol,
-   bypass-code zero bits until the low register is zero, then flush; the composite methods: n-bit fields
+2. **The spec.** Unconditional: section 8 states the two coder rules as normative text (the tail: after the last
+   symbol, bypass-code zero bits until the low register is zero, then flush; the composite methods: n-bit fields
    most-significant bit first, unary as ones then a zero, the context index `min(A - 1, i)`), so the format no
-   longer depends on `cabac`'s behaviour; `lpk-v1.md:921,1420,1431` name `lpk-codecs-vp8` instead; a dated
-   `CHANGES.md` entry (no reader outcome changes). Unconditional.
+   longer depends on `cabac`'s behaviour, with a dated `CHANGES.md` entry (no reader outcome changes). Following
+   the outcome: the three naming lines `lpk-v1.md:921,1420,1431` name `lpk-codecs-vp8` under B-prime and keep
+   `cabac` under A.
 3. **A, only if task 1 fails.** The two crates of section 2. Acceptance: the two-parent `cargo tree` line asserted
    in CI; `cargo deny check` green with the wrappers; the strings check green, the DLL its positive control; with
    the DLL renamed, `lpk l` passes and `lpk x` and `lpk t` on `deflate-peel.lpk` fail with
