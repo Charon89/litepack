@@ -27,9 +27,14 @@ fn noise(seed: u64, len: usize) -> Vec<u8> {
 }
 
 /// A mixed tree: empty, small, compressible, incompressible, a segment's exact
-/// multiple, several blocks long, and duplicates (whole and partial).
+/// multiple, several blocks long, and duplicates (whole, partial, and new bytes
+/// around a duplicate run, so a segment's leading chunks are new and a later
+/// one is already stored).
 fn tree() -> Vec<(String, Vec<u8>)> {
     let big = noise(1, 5 << 20);
+    let mut mixed = noise(5, (1 << 20) + 4321);
+    mixed.extend_from_slice(&big[(1 << 20)..(3 << 20)]);
+    mixed.extend_from_slice(&noise(6, 1 << 20));
     vec![
         ("empty".into(), Vec::new()),
         ("tiny.txt".into(), b"hello".to_vec()),
@@ -39,6 +44,7 @@ fn tree() -> Vec<(String, Vec<u8>)> {
         ("odd.bin".into(), noise(3, 777_777)),
         ("dup.bin".into(), big.clone()),
         ("part.bin".into(), big[..(2 << 20) + 12_345].to_vec()),
+        ("mixed.bin".into(), mixed),
         ("last.bin".into(), noise(4, 1_234_567)),
     ]
 }

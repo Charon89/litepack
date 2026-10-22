@@ -135,11 +135,12 @@ pub struct RunSummary {
     /// write thread only for an archive file (`run_file`, `append_file`). They mostly wait on
     /// I/O; 0, 1 or 2.
     pub io_threads: usize,
-    /// The most threads that may hash the chunks of a read-ahead segment, the feeding thread
-    /// included: 1 with one block in flight or without a reader thread, else the blocks in
-    /// flight capped at [`lpk_format::writer::MAX_HASH_THREADS`]. An upper bound: a segment
-    /// with few chunk bytes, or a run whose files are all read whole for a peel, uses fewer;
-    /// the threads are scoped to one segment at a time.
+    /// The most threads that may cut a read-ahead segment, then hash its chunks and copy
+    /// them into the block (E2-24), the feeding thread included: 1 with one block in flight
+    /// or without a reader thread, else the blocks in flight capped at
+    /// [`lpk_format::writer::MAX_HASH_THREADS`]. An upper bound: a segment with few chunk
+    /// bytes, or a run whose files are all read whole for a peel, uses fewer; the threads are
+    /// scoped to one segment at a time.
     pub hash_threads: usize,
     /// The Deflate peel pool's figures and counters (`workers` 0: no pool; design
     /// `docs/notes/e2-10-peel-pool-design.md`).

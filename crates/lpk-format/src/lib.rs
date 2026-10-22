@@ -26,6 +26,7 @@ mod parhash;
 pub mod prefetch;
 pub mod primitive;
 pub mod priors;
+pub mod profile;
 pub mod reader;
 pub mod record;
 pub mod recovery;

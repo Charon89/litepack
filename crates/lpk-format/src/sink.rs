@@ -135,7 +135,11 @@ impl<W: Write> Sink<W> {
     /// Write `buf` whole (staged with a write thread).
     pub(crate) fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
-            Sink::Direct(w) => w.write_all(buf),
+            Sink::Direct(w) => {
+                let mut writing = crate::profile::Timer::start(crate::profile::Stage::Write);
+                writing.bytes = buf.len() as u64;
+                w.write_all(buf)
+            }
             Sink::Thread(t) => {
                 if let Some(e) = sticky_error(&t.sticky) {
                     return Err(e);
@@ -160,7 +164,10 @@ impl<W: Write> Sink<W> {
     ) -> std::io::Result<Option<Vec<u8>>> {
         match self {
             Sink::Direct(w) => {
+                let mut writing = crate::profile::Timer::start(crate::profile::Stage::Write);
+                writing.bytes = buf.len() as u64;
                 w.write_all(&buf)?;
+                drop(writing);
                 Ok(back.then_some(buf))
             }
             Sink::Thread(t) => {
@@ -287,15 +294,22 @@ fn write_loop<W: Write>(
                 back: give_back,
             } => {
                 if !failed {
+                    let mut writing = crate::profile::Timer::start(crate::profile::Stage::Write);
+                    writing.bytes = (small.len() + big.as_ref().map_or(0, Vec::len)) as u64;
                     let r = out
                         .write_all(&small)
                         .and_then(|()| big.as_ref().map_or(Ok(()), |b| out.write_all(b)));
+                    drop(writing);
                     if let Err(e) = r {
                         failed = true;
                         set_sticky(sticky, e.kind(), e.to_string());
                     }
                 }
-                if let Some(b) = big.filter(|_| give_back) {
+                if let Some(mut b) = big.filter(|_| give_back) {
+                    // Restored to its full capacity here, off the writer's
+                    // thread, so the pool hands it out without touching it
+                    // (the writer's pending block keeps its full length).
+                    b.resize(b.capacity(), 0);
                     // A writer that is gone no longer needs it.
                     let _ = back.send(b);
                 }

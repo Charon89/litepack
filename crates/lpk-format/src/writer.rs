@@ -4,7 +4,7 @@
 use crate::archive::Archive;
 use crate::chunk::{ChunkRecord, ChunkTableWriter};
 pub use crate::chunkhash::MAX_HASH_THREADS;
-use crate::chunkhash::{hash_ranges, hash_two, Two};
+use crate::chunkhash::{hash_and_copy, hash_ranges, hash_two, HashFn, Two};
 use crate::crypto::{
     index_sequence, sealing_rule, ArchiveKey, Argon2Params, Credentials, KeySlot, Sealer, Suite,
 };
@@ -19,6 +19,7 @@ use crate::merkle::merkle_root;
 use crate::parhash::frame_payload_hash;
 use crate::prefetch::{SegmentError, Segments};
 use crate::primitive::{GraphResources, PrimitiveId};
+use crate::profile;
 use crate::record::{Record, RecordBody, RecordsWriter};
 use crate::recovery::{GroupEncoder, RecoveryFrame, RecoveryOptions};
 use crate::sink::Sink;
@@ -29,6 +30,7 @@ use rand::RngCore;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 /// Smallest `chunk_size` a writer accepts.
 pub const MIN_CHUNK_SIZE: u64 = 4096;
@@ -296,10 +298,14 @@ pub struct WriterOptions {
     /// of the chunks of a segment given to [`Writer::add_file_segments`] is
     /// computed on up to [`MAX_HASH_THREADS`] threads, the feeding thread
     /// included, scoped to that segment and joined before its chunks are
-    /// looked up and added in order (`crate::chunkhash`); they hold no memory
-    /// beyond 32 bytes per chunk of the segment. LitePack's pipeline
-    /// starts them only above one block in flight, so one block in flight is
-    /// one thread doing everything.
+    /// looked up and added in order (`crate::chunkhash`); the same threads
+    /// copy the segment's leading chunks into the pending block in the same
+    /// pass (the copy stands when the lookups store them all, as on
+    /// incompressible data; from the first chunk already stored the rest are
+    /// copied in order, E2-24), and a chunker may cut on as many threads
+    /// (LitePack's FastCDC does). They hold no memory beyond 32 bytes per
+    /// chunk of the segment. LitePack's pipeline starts them only above one
+    /// block in flight, so one block in flight is one thread doing everything.
     pub encode_threads: usize,
     /// The most blocks the archive tells a reader it may decode at once: the
     /// envelope's `threads_hint` is the smaller of this and the number of
@@ -462,7 +468,15 @@ pub struct Writer<W: Write> {
     /// Paths of the entries added so far, to refuse one twice (a second copy
     /// of the paths: a known cost for the memory task).
     seen: HashSet<String>,
+    /// The block being filled. Its length may exceed the fill
+    /// (`pending_len`): a buffer from the pool keeps its full capacity,
+    /// initialised, so chunks are copied into place — by the hash threads, in
+    /// parallel, on the segment path — without a resize on the feeding thread;
+    /// the bytes past the fill are stale. It is truncated to the fill when
+    /// the block closes.
     pending: Vec<u8>,
+    /// Bytes of the pending block filled so far.
+    pending_len: usize,
     pending_chunks: u64,
     /// The first I/O error seen; every later call fails with it.
     failed: Option<(std::io::ErrorKind, String)>,
@@ -523,6 +537,9 @@ pub struct Writer<W: Write> {
     spares: Vec<Vec<u8>>,
     /// The read buffer of `chunk_stream`, kept across files.
     read_buf: Vec<u8>,
+    /// When the stage profile is on ([`crate::profile`]): when this writer
+    /// started, and the plain bytes it was fed.
+    profile: Option<(Instant, u64)>,
     /// Tests only: skip the record chunk checks at block close, to build the
     /// archives the reader must refuse.
     #[cfg(test)]
@@ -921,6 +938,7 @@ impl<W: Write> Writer<W> {
             write_records,
             seen: HashSet::new(),
             pending: Vec::new(),
+            pending_len: 0,
             pending_chunks: 0,
             failed: None,
             bad_chunk: None,
@@ -952,6 +970,10 @@ impl<W: Write> Writer<W> {
             queue: VecDeque::new(),
             spares: Vec::new(),
             read_buf: Vec::new(),
+            profile: profile::on().then(|| {
+                profile::reset();
+                (Instant::now(), 0)
+            }),
             #[cfg(test)]
             unchecked_records: false,
             #[cfg(test)]
@@ -1208,6 +1230,7 @@ impl<W: Write> Writer<W> {
             write_records,
             seen: HashSet::new(),
             pending: Vec::new(),
+            pending_len: 0,
             pending_chunks: 0,
             failed: None,
             bad_chunk: None,
@@ -1234,6 +1257,10 @@ impl<W: Write> Writer<W> {
             queue: VecDeque::new(),
             spares: Vec::new(),
             read_buf: Vec::new(),
+            profile: profile::on().then(|| {
+                profile::reset();
+                (Instant::now(), 0)
+            }),
             #[cfg(test)]
             unchecked_records: false,
             #[cfg(test)]
@@ -1470,8 +1497,12 @@ impl<W: Write> Writer<W> {
         if self.pending_chunks == 0 {
             return Ok(());
         }
+        let mut closing = profile::Timer::start(profile::Stage::BlockClose);
+        closing.bytes = self.pending_len as u64;
         let next = self.take_spare();
-        let plain = std::mem::replace(&mut self.pending, next);
+        let mut plain = std::mem::replace(&mut self.pending, next);
+        plain.truncate(self.pending_len);
+        self.pending_len = 0;
         let chunk_count = std::mem::take(&mut self.pending_chunks);
         let first_chunk = self.records.len() as u64 - chunk_count;
         let plain_len = plain.len() as u64;
@@ -1536,11 +1567,17 @@ impl<W: Write> Writer<W> {
                         let spawned = std::thread::Builder::new()
                             .name("lpk-encode".to_string())
                             .spawn(move || {
+                                let mut encoding = profile::Timer::start(profile::Stage::Encode);
+                                encoding.bytes = plain_len;
                                 let (result, plain) = job.run_owned(plain);
+                                drop(encoding);
+                                let mut hashing = profile::Timer::start(profile::Stage::FrameHash);
+                                hashing.bytes = plain_len;
                                 let frame_hash = match (&result, hasher) {
                                     (Ok((e, _)), Some(h)) => Some(h.hash(e)),
                                     _ => None,
                                 };
+                                drop(hashing);
                                 PoolOutput {
                                     result,
                                     plain,
@@ -1618,6 +1655,8 @@ impl<W: Write> Writer<W> {
         else {
             return Ok(());
         };
+        let mut waiting = profile::Timer::start(profile::Stage::BlockWait);
+        waiting.bytes = plain_len;
         let output = match work {
             Work::Done(r) => r,
             Work::Running(handle) => match handle.join() {
@@ -1672,8 +1711,16 @@ impl<W: Write> Writer<W> {
             buf.clear();
             buf.resize(buf.capacity(), POISON);
         }
-        buf.clear();
-        if self.pending.is_empty() && self.pending.capacity() < buf.capacity() {
+        // With blocks in flight a pool buffer is at its full capacity (see
+        // `pending`); the write thread restores a buffer it hands back, so
+        // this is a no-op there and a fill only for a buffer a job returned.
+        // One block in flight copies in order and keeps the buffer cleared.
+        if self.threads() > 1 {
+            buf.resize(buf.capacity(), 0);
+        } else {
+            buf.clear();
+        }
+        if self.pending_len == 0 && self.pending.capacity() < buf.capacity() {
             buf = std::mem::replace(&mut self.pending, buf);
             if buf.capacity() < RECYCLE_MIN {
                 return;
@@ -2063,9 +2110,18 @@ impl<W: Write> Writer<W> {
             self.note_known(len, old);
             return Ok(i);
         }
-        if self.pending_chunks > 0 && self.pending.len() as u64 + len > self.options.block_size {
+        if self.pending_chunks > 0 && self.pending_len as u64 + len > self.options.block_size {
             self.flush_block()?;
         }
+        let index = self.note_record(hash, len)?;
+        self.put(head);
+        self.put(tail);
+        Ok(index)
+    }
+
+    /// Record a chunk of `len` bytes that goes to the pending block (its
+    /// record and, with dedup, its index); the caller puts its bytes.
+    fn note_record(&mut self, hash: [u8; 32], len: u64) -> Result<u64, FormatError> {
         let index = self.records.len() as u64;
         self.records.push(ChunkRecord {
             plain_len: len,
@@ -2085,10 +2141,22 @@ impl<W: Write> Writer<W> {
                 Some(_) => {}
             }
         }
-        self.pending.extend_from_slice(head);
-        self.pending.extend_from_slice(tail);
         self.pending_chunks += 1;
         Ok(index)
+    }
+
+    /// Append `src` to the pending block at its fill: in place when the
+    /// buffer is long enough (a pool buffer), else by growing it.
+    fn put(&mut self, src: &[u8]) {
+        let at = self.pending_len;
+        let end = at + src.len();
+        if self.pending.len() >= end {
+            self.pending[at..end].copy_from_slice(src);
+        } else {
+            self.pending.truncate(at);
+            self.pending.extend_from_slice(src);
+        }
+        self.pending_len = end;
     }
 
     /// Cut `plain` with the chunker into `(start, end)` ranges, checked as the
@@ -2437,7 +2505,7 @@ impl<W: Write> Writer<W> {
                     plain_len: data.len() as u64,
                     hash: *blake3::hash(data).as_bytes(),
                 });
-                self.pending.extend_from_slice(data);
+                self.put(data);
                 self.pending_chunks += 1;
             }
             per_span.push(first..chunks.len());
@@ -2576,7 +2644,8 @@ impl<W: Write> Writer<W> {
                 // A whole segment read: the input fills blocks, so the pending
                 // block takes its full size at once instead of growing by
                 // doubling (each step a copy into untouched memory).
-                let want = self.options.block_size as usize - self.pending.len();
+                self.pending.truncate(self.pending_len);
+                let want = self.options.block_size as usize - self.pending_len;
                 self.pending.reserve_exact(want);
             }
             let cuts = self.chunker.feed(&buf[before..], eof);
@@ -2677,18 +2746,23 @@ impl<W: Write> Writer<W> {
         let chunk_size = self.options.chunk_size as usize;
         let block_size = self.options.block_size as usize;
         if self.pending.capacity() < block_size
-            && len_hint >= (block_size - self.pending.len()) as u64
+            && len_hint >= (block_size - self.pending_len).min(RECYCLE_MIN) as u64
         {
-            // The input fills a block: the pending block takes its full size at
-            // once instead of growing by doubling.
-            let want = block_size - self.pending.len();
-            self.pending.reserve_exact(want);
+            // A file of a block's remainder, or of at least a pool buffer's
+            // size: the pending block takes its full size at once instead of
+            // growing by doubling (each step a copy into untouched memory). A
+            // zeroed allocation: its pages are first touched by the copies
+            // into it, on the hash threads.
+            let mut full = vec![0u8; block_size];
+            full[..self.pending_len].copy_from_slice(&self.pending[..self.pending_len]);
+            self.pending = full;
         }
         self.chunker.reset();
         let mut carry: Vec<u8> = std::mem::take(&mut self.read_buf);
         carry.clear();
         let mut size = 0u64;
         loop {
+            let waiting = profile::Timer::start(profile::Stage::FeedWait);
             let seg = match data.next_segment() {
                 Ok(s) => s,
                 Err(SegmentError::Io(e)) => return Err(FormatError::Io(e)),
@@ -2700,13 +2774,17 @@ impl<W: Write> Writer<W> {
                     std::panic::resume_unwind(p);
                 }
             };
+            drop(waiting);
             // The end is fed with the last bytes when the reader knew them to be
             // the last (as `chunk_stream` does after a short read), else alone.
             // Only a buffer the reader handed out goes back to it.
             let from_reader = seg.is_some();
             let (seg, eof) = seg.unwrap_or((Vec::new(), true));
             size += seg.len() as u64;
+            let mut cutting = profile::Timer::start(profile::Stage::Cut);
+            cutting.bytes = seg.len() as u64;
             let cuts = self.chunker.feed(&seg, eof);
+            drop(cutting);
             let held = carry.len();
             let total = held + seg.len();
             let mut ranges = Vec::with_capacity(cuts.len());
@@ -2740,11 +2818,74 @@ impl<W: Write> Writer<W> {
                 carry: &carry,
                 seg: &seg,
             };
-            let hashes = self.hash_chunks(bytes, &ranges);
-            for (&(a, b), hash) in ranges.iter().zip(hashes) {
+            let cut_bytes = start as u64;
+            // With blocks in flight, the leading chunks that fit the current
+            // block whatever the lookups say are copied into place by the hash
+            // threads along with their hashes (one pass over the bytes, off
+            // this thread); the lookups then confirm each in order, and from
+            // the first chunk already stored (then the copies are stale) the
+            // rest take the in-order path, which overwrites them.
+            let threads = self.threads();
+            let room = block_size - self.pending_len;
+            let ahead = if threads > 1 {
+                ranges.iter().take_while(|&&(_, b)| b <= room).count()
+            } else {
+                0
+            };
+            let ahead_end = ahead.checked_sub(1).map_or(0, |i| ranges[i].1);
+            let mut hashing = profile::Timer::start(profile::Stage::Hash);
+            hashing.bytes = cut_bytes;
+            let hashed = if ahead_end > 0 {
+                let fill = self.pending_len;
+                if self.pending.len() < fill + ahead_end {
+                    if self.pending.capacity() < block_size && fill + ahead_end >= RECYCLE_MIN {
+                        // Not a pool buffer (none had come back when the last
+                        // block closed): a full block at once, zeroed by the
+                        // allocator, rather than grown by doubling — each
+                        // step a copy and a fill of untouched memory.
+                        let mut full = vec![0u8; block_size];
+                        full[..fill].copy_from_slice(&self.pending[..fill]);
+                        self.pending = full;
+                    } else {
+                        let to = (fill + ahead_end).max(self.pending.capacity());
+                        self.pending.resize(to, 0);
+                    }
+                }
+                let dst = &mut self.pending[fill..fill + ahead_end];
+                hash_and_copy(bytes, &ranges, threads, hash_fn(), dst)
+            } else {
+                hash_ranges(bytes, &ranges, threads, hash_fn())
+            };
+            let hashes = self.hashed(hashed);
+            drop(hashing);
+            let mut adding = profile::Timer::start(profile::Stage::Add);
+            adding.bytes = cut_bytes;
+            let mut in_place = ahead;
+            for (j, (&(a, b), hash)) in ranges.iter().zip(hashes).enumerate() {
+                if j < in_place {
+                    let len = (b - a) as u64;
+                    match self.find_known(&hash, len, true)? {
+                        Some((i, old)) => {
+                            self.note_known(len, old);
+                            chunks.push(i);
+                            in_place = 0;
+                        }
+                        None => {
+                            // Fits by construction (`room`): no block close here.
+                            let i = self.note_record(hash, len)?;
+                            self.pending_len += b - a;
+                            chunks.push(i);
+                        }
+                    }
+                    continue;
+                }
                 let (head, tail) = bytes.piece(a, b);
                 let i = self.add_chunk_hashed(head, tail, hash, true)?;
                 chunks.push(i);
+            }
+            drop(adding);
+            if let Some((_, fed)) = &mut self.profile {
+                *fed += seg.len() as u64;
             }
             // The uncut rest becomes the carry.
             if start >= held {
@@ -2776,17 +2917,10 @@ impl<W: Write> Writer<W> {
     /// [`MAX_HASH_THREADS`] scoped threads that are joined
     /// before this returns. A hashing thread's panic marks the writer failed
     /// and is re-raised here.
-    fn hash_chunks(&mut self, bytes: Two<'_>, ranges: &[(usize, usize)]) -> Vec<[u8; 32]> {
-        #[cfg(test)]
-        let hash: &crate::chunkhash::HashFn<'_> =
-            if crate::chunkhash::HASH_FAULT.with(std::cell::Cell::get) {
-                &crate::chunkhash::faulty_hash
-            } else {
-                &hash_two
-            };
-        #[cfg(not(test))]
-        let hash = &hash_two;
-        match hash_ranges(bytes, ranges, self.threads(), hash) {
+    /// The hashes a segment's hash threads computed; a thread's panic marks
+    /// the writer failed and is re-raised here.
+    fn hashed(&mut self, r: Result<Vec<[u8; 32]>, crate::chunkhash::Panic>) -> Vec<[u8; 32]> {
+        match r {
             Ok(h) => h,
             Err(p) => {
                 self.failed = Some((
@@ -2905,6 +3039,15 @@ impl<W: Write> Writer<W> {
     /// Close the last block and write the entry table, the recovery frames, the
     /// index and the trailer.
     pub fn finish(mut self) -> Result<WriterSummary, FormatError> {
+        let r = self.finish_inner();
+        if let Some((started, fed)) = self.profile {
+            eprint!("{}", profile::table(started.elapsed(), fed));
+        }
+        r
+    }
+
+    fn finish_inner(&mut self) -> Result<WriterSummary, FormatError> {
+        let _finishing = profile::Timer::start(profile::Stage::Finish);
         self.check_alive()?;
         self.no_open_entry()?;
         let (entry_table, entry_table_hash, records) = self.write_covered_tail()?;
@@ -3026,6 +3169,15 @@ impl<W: Write> Writer<W> {
             deduped_bytes: self.deduped_bytes,
         })
     }
+}
+
+/// The chunk hash function of the segment path: [`hash_two`] outside tests.
+fn hash_fn() -> &'static HashFn<'static> {
+    #[cfg(test)]
+    if crate::chunkhash::HASH_FAULT.with(std::cell::Cell::get) {
+        return &crate::chunkhash::faulty_hash;
+    }
+    &hash_two
 }
 
 /// `max_frame_payload` as `for_archive` computes it without the index term.

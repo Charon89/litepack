@@ -102,7 +102,9 @@ impl FoldStage for Dedup {
         options.dedup = self.options.dedup;
         match self.options.chunker {
             ChunkerKind::Cdc { min, avg, max } => {
-                let c = FastCdcChunker::new(min, avg, max)?;
+                // The cut fans out with the blocks in flight (one: sequential,
+                // D-63); the cuts are the same whatever the count.
+                let c = FastCdcChunker::new(min, avg, max)?.with_threads(options.encode_threads);
                 options.chunk_size = max as u64;
                 Ok(Box::new(c))
             }
