@@ -1703,7 +1703,7 @@ impl<W: Write> Writer<W> {
     /// holds nothing yet and is smaller, else a spare. Buffers under 1 MiB or
     /// larger than a block are dropped; a full pool drops its smallest buffer.
     fn recycle(&mut self, mut buf: Vec<u8>) {
-        if buf.capacity() < RECYCLE_MIN || buf.capacity() as u64 > self.options.block_size {
+        if !self.pool_sized(buf.capacity()) {
             return;
         }
         #[cfg(test)]
@@ -1711,15 +1711,10 @@ impl<W: Write> Writer<W> {
             buf.clear();
             buf.resize(buf.capacity(), POISON);
         }
-        // With blocks in flight a pool buffer is at its full capacity (see
-        // `pending`); the write thread restores a buffer it hands back, so
-        // this is a no-op there and a fill only for a buffer a job returned.
-        // One block in flight copies in order and keeps the buffer cleared.
-        if self.threads() > 1 {
-            buf.resize(buf.capacity(), 0);
-        } else {
-            buf.clear();
-        }
+        // Cleared, never filled: a block it later holds grows it only as far
+        // as that block's bytes go (`put`, the segment path's resize), so no
+        // thread touches more of it than is written.
+        buf.clear();
         if self.pending_len == 0 && self.pending.capacity() < buf.capacity() {
             buf = std::mem::replace(&mut self.pending, buf);
             if buf.capacity() < RECYCLE_MIN {
@@ -1738,6 +1733,13 @@ impl<W: Write> Writer<W> {
         {
             *small = buf;
         }
+    }
+
+    /// Whether a buffer of `capacity` bytes belongs in the pool: at least
+    /// [`RECYCLE_MIN`] and at most a block (a compressor's output above a
+    /// block is dropped once written, and never sent back).
+    fn pool_sized(&self, capacity: usize) -> bool {
+        capacity >= RECYCLE_MIN && capacity as u64 <= self.options.block_size
     }
 
     /// The largest buffer of the pool, for the next pending block (empty when
@@ -1846,14 +1848,16 @@ impl<W: Write> Writer<W> {
                 sequence: self.seq,
             };
             let hash = hash.unwrap_or_else(|| frame_payload_hash(&head, &encoded, 1));
+            // The block buffer moves to the write thread, if any, and comes
+            // back to the pool once written when the pool would keep it (a
+            // compressor's output, larger than a block, is dropped there).
+            let back = self.pool_sized(encoded.capacity());
             let w = &mut self.out;
             w.write_all(&(FrameKind::ChunkData as u16).to_le_bytes())?;
             w.write_all(&FrameFlags::EMPTY.bits().to_le_bytes())?;
             varint::write(w, payload_len)?;
             w.write_all(&head)?;
-            // The block buffer moves to the write thread, if any, and comes
-            // back to the pool once written.
-            if let Some(b) = w.write_owned(encoded, true)? {
+            if let Some(b) = w.write_owned(encoded, back)? {
                 self.recycle(b);
             }
             self.out.write_all(&hash)?;
@@ -2847,8 +2851,9 @@ impl<W: Write> Writer<W> {
                         full[..fill].copy_from_slice(&self.pending[..fill]);
                         self.pending = full;
                     } else {
-                        let to = (fill + ahead_end).max(self.pending.capacity());
-                        self.pending.resize(to, 0);
+                        // A pool buffer (cleared when recycled): only what
+                        // this segment writes, never the whole capacity.
+                        self.pending.resize(fill + ahead_end, 0);
                     }
                 }
                 let dst = &mut self.pending[fill..fill + ahead_end];

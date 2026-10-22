@@ -263,6 +263,78 @@ fn recycled_buffers_are_never_reused_while_referenced() {
     }
 }
 
+/// A recycled buffer is cleared, never filled: its length is 0 and its
+/// capacity unchanged, at 1 and at N threads; one above a block is dropped.
+#[test]
+fn recycle_clears_a_buffer_and_keeps_its_capacity() {
+    for threads in [1usize, 4] {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut w =
+            Writer::new_with_rng(Shared::default(), options(case(threads)), &mut rng).unwrap();
+        let block = w.options.block_size as usize;
+        let mut buf = Vec::with_capacity(block);
+        buf.extend_from_slice(&noise(1, 100));
+        w.recycle(buf);
+        let got = w
+            .spares
+            .pop()
+            .unwrap_or_else(|| std::mem::take(&mut w.pending));
+        assert_eq!((got.len(), got.capacity()), (0, block), "threads {threads}");
+        let mut big = Vec::with_capacity(block + 1);
+        big.extend_from_slice(&noise(2, 100));
+        w.recycle(big);
+        assert!(w.spares.is_empty() && w.pending.capacity() <= block);
+    }
+}
+
+/// An encoder whose output has the capacity a compressor reserves: above a
+/// block.
+struct Oversized;
+
+impl BlockEncoder for Oversized {
+    fn encode(&mut self, plain: &[u8]) -> Result<Encoded, FormatError> {
+        let mut v = Vec::with_capacity(plain.len() * 2 + 64);
+        v.extend_from_slice(plain);
+        Ok(StoreEncoder::wrap(v))
+    }
+}
+
+/// The write thread hands back only pool-sized buffers, as written (no fill
+/// to capacity): a block whose encoding is larger than a block is dropped
+/// there, a stored block's buffer comes back with its written length.
+#[test]
+fn the_write_thread_hands_back_only_pool_sized_buffers() {
+    let data = noise(3, 1 << 20);
+    for oversized in [false, true] {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut opts = options(case(2));
+        if oversized {
+            opts.encoder = Box::new(Oversized);
+        }
+        let mut w = Writer::new_with_rng(Shared::default(), opts, &mut rng)
+            .unwrap()
+            .with_write_thread();
+        w.add_file("f", EntryFlags::default(), 0, &mut &data[..])
+            .unwrap();
+        w.close_block().unwrap();
+        w.drain().unwrap();
+        w.out.inner.flush().unwrap();
+        let back = w.out.inner.returned();
+        if oversized {
+            assert!(back.is_empty(), "an oversized encoding came back");
+        } else {
+            assert_eq!(back.len(), 1);
+            let b = &back[0];
+            assert!(b.capacity() <= w.options.block_size as usize);
+            assert_eq!(
+                b.len(),
+                data.len(),
+                "filled to capacity on the write thread"
+            );
+        }
+    }
+}
+
 /// An output that fails, or panics, once `limit` bytes were written; `dropped`
 /// is raised when the output is dropped (with a write thread: when that thread
 /// ends). `delay` slows every write, so the queue fills.

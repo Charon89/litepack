@@ -305,12 +305,9 @@ fn write_loop<W: Write>(
                         set_sticky(sticky, e.kind(), e.to_string());
                     }
                 }
-                if let Some(mut b) = big.filter(|_| give_back) {
-                    // Restored to its full capacity here, off the writer's
-                    // thread, so the pool hands it out without touching it
-                    // (the writer's pending block keeps its full length).
-                    b.resize(b.capacity(), 0);
-                    // A writer that is gone no longer needs it.
+                if let Some(b) = big.filter(|_| give_back) {
+                    // As written, untouched (the writer clears it when it
+                    // recycles it); a writer that is gone no longer needs it.
                     let _ = back.send(b);
                 }
                 queued.fetch_sub(1, Ordering::SeqCst);
