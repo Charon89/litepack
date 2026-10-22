@@ -170,12 +170,17 @@ struct Plan {
     name_bytes: u64,
 }
 
-fn plan<R: Read + Seek>(archive: &mut Archive<R>) -> Result<Plan, CoreError> {
-    let mut entries: Vec<Entry> = archive
+fn plan<R: Read + Seek>(
+    archive: &mut Archive<R>,
+    select: &crate::select::Selection,
+) -> Result<Plan, CoreError> {
+    let entries: Vec<Entry> = archive
         .entry_table()?
         .table()?
         .iter()
         .collect::<Result<_, _>>()?;
+    // The selection first (as `x` plans): a pattern without a match is refused here.
+    let mut entries = select.filter(entries, |e| e.path.as_str())?;
     let table = archive.chunks();
     let blocks = archive.index().blocks.len();
     let mut places = Vec::new();
@@ -679,7 +684,7 @@ where
         files,
         with_content,
         name_bytes,
-    } = plan(archive)?;
+    } = plan(archive, &opts.select)?;
     let shape = Shape {
         needed: &needed,
         targets: files,

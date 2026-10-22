@@ -123,7 +123,7 @@ fn listing_a_million_entries_adds_a_constant_to_the_readers_open() {
         let (list_peak, sink) = peak_growth(|| {
             let mut a = Archive::open(Cursor::new(&archive[..]), &resources).unwrap();
             let mut sink = LineCount { lines: 0, bytes: 0 };
-            list_archive(&mut a, options, &mut sink).unwrap();
+            list_archive(&mut a, options, &lpk_core::Selection::all(), &mut sink).unwrap();
             sink
         });
         let expected_lines = ENTRIES + usize::from(options.long && !options.json);

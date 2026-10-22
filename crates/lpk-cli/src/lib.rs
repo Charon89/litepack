@@ -64,7 +64,7 @@ use zeroize::Zeroizing;
 pub use console::Console;
 pub use export::{Container, Method};
 pub use failure::{core_exit, format_exit, EntryFailure, Failure};
-pub use list::{list_archive, ListOptions};
+pub use list::{list_archive, ListError, ListOptions};
 pub use prompt::Terminal;
 
 /// Exit code: success.
@@ -116,15 +116,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create an archive from the contents of a directory (not the directory itself).
-    #[command(name = "a")]
+    /// Create an archive: from the contents of one directory (not the directory itself), or
+    /// from several inputs, files and directories, each entered under its own name.
+    #[command(name = "a", long_about = ADD_ABOUT)]
     Add(AddArgs),
     /// List an archive, one line per entry: kind, size, mtime (UTC), path (tab-separated).
     #[command(name = "l", long_about = LIST_ABOUT)]
     List(ListArgs),
-    /// Extract every entry of an archive into a directory; an existing file is refused unless
-    /// --overwrite says otherwise, and symlink entries are skipped unless --symlinks is given.
-    #[command(name = "x")]
+    /// Extract an archive (every entry, or those the patterns select) into a directory; an
+    /// existing file is refused unless --overwrite says otherwise, and symlink entries are
+    /// skipped unless --symlinks is given.
+    #[command(name = "x", long_about = EXTRACT_ABOUT)]
     Extract(ExtractArgs),
     /// Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shards.
     #[command(name = "t")]
@@ -178,6 +180,38 @@ the writer's directory, kept until the end (ZIP's central directory about 200 by
 name per entry, 7z's entry table about 100 plus the name), and its compressor (Deflate under \
 1 MiB, zstd a few MiB, LZMA2 about eleven times its 16 MiB dictionary); -v prints the figures.";
 
+/// The long help of `a`: the naming rule of several inputs, the list file and the excludes.
+const ADD_ABOUT: &str = "\
+Create an archive. With one directory as the input, its contents are archived (not the \
+directory itself: `lpk a out.lpk D:\\x\\photos` holds `IMG_1.jpg`, not `photos/IMG_1.jpg`). \
+With several inputs, or a file, or --list, every input is entered under its own name: a \
+relative path as given (`sub/photos` becomes `sub/photos/...`, `notes.txt` becomes \
+`notes.txt`), an absolute path or one leaving the current directory through `..` under its \
+last component (`D:\\x\\photos` becomes `photos/...`). Two inputs that would be entered \
+under the same name, or one under the other (`a` and `a/b`), are refused before any output \
+(exit 1, naming both).
+
+--list FILE reads more inputs from FILE, one path per line (UTF-8, CRLF tolerated; a line \
+starting with `#` and an empty line are ignored), each treated as above, a relative path \
+resolved against the current directory.
+
+--exclude GLOB (repeatable) leaves out every entry whose archive path matches: globs over \
+the entry path with `/` separators, `*` and `?` within one component, `**` across \
+components, a backslash read as `/`, case-sensitive; an excluded directory is not walked \
+into. The exclude applies to the inputs' own names too.";
+
+/// The long help of `x`: the patterns.
+const EXTRACT_ABOUT: &str = "\
+Extract an archive into a directory, created if missing. Without a pattern every entry is \
+extracted. Each PATTERN is a glob over entry paths (`/` separators; `*` and `?` within one \
+component, `**` across components, `[...]` a class, `{a,b}` an alternation, a backslash read \
+as `/`, case-sensitive) and selects every entry it matches and, for a directory, the subtree \
+below it: `docs` selects `docs/b.md` and `docs/deep/r.bin`, `**/*.jpg` every JPEG. Only the \
+blocks the selected entries need are decoded; the directories a selected path implies are \
+created. A pattern that matches no entry is refused before any output (exit 2, naming it). An \
+existing file is refused unless --overwrite says otherwise; symlink entries are skipped \
+unless --symlinks is given.";
+
 /// The long help of `l`: the columns and the keys of a `--json` line.
 const LIST_ABOUT: &str = "\
 List an archive, one line per entry, streamed in table order: kind (File, Directory or \
@@ -193,6 +227,10 @@ null), \"mtime_ns\" (nanoseconds since the Unix epoch, or null), \"flags\" (an a
 \"executable\", \"hidden\", \"read-only\", \"system\"), \"flag_bits\" (the raw flag word), \
 \"path\" (unescaped: a JSON string), \"symlink_target\" (a symlink's target, else null), \
 \"chunks\" (the number of chunks the file references) and \"generation\" (the archive's).
+
+Each PATTERN is a glob over entry paths, as for `x` (a directory's match lists its subtree); \
+only the matching entries are listed, and a pattern that matches no entry is refused before \
+any line is written (exit 2, naming it).
 
 A sealed archive written with --listable lists without its key; one that was not is refused \
 with PasswordRequired (exit 2) unless a credential is given.";
@@ -563,8 +601,18 @@ enum OnOff {
 struct AddArgs {
     /// The archive to create; must not exist.
     archive: PathBuf,
-    /// The directory whose contents are archived.
-    input: PathBuf,
+    /// The inputs: one directory whose contents are archived, or several files and
+    /// directories each entered under its own name (see the long help, --help).
+    #[arg(value_name = "PATH", required_unless_present = "list")]
+    inputs: Vec<PathBuf>,
+    /// A file naming more inputs, one path per line (`#` lines ignored), each entered under
+    /// its own name.
+    #[arg(long, value_name = "FILE")]
+    list: Option<PathBuf>,
+    /// Leave out every entry whose archive path matches this glob (repeatable; a matched
+    /// directory is not walked into).
+    #[arg(long, value_name = "GLOB")]
+    exclude: Vec<String>,
     #[command(flatten)]
     tier: TierArgs,
     /// Encrypt the archive with these (AEAD per frame; the key is derived with Argon2id at the
@@ -609,6 +657,10 @@ struct ExtractArgs {
     archive: PathBuf,
     /// The directory to extract into; created if missing.
     outdir: PathBuf,
+    /// Globs over entry paths selecting what to extract (a directory's match selects its
+    /// subtree); none selects everything.
+    #[arg(value_name = "PATTERN")]
+    patterns: Vec<String>,
     /// The total thread budget, decoders plus file writers (default: the machine's logical
     /// cores; at most four times that). 1 decodes and writes on one thread; from 2 on,
     /// clamp(N/4, 1, 4) threads write files and the rest decode blocks, the decoders capped so
@@ -675,6 +727,10 @@ impl From<OverwriteArg> for lpk_core::Overwrite {
 struct ListArgs {
     /// The archive.
     archive: PathBuf,
+    /// Globs over entry paths selecting what to list (a directory's match lists its
+    /// subtree); none lists everything.
+    #[arg(value_name = "PATTERN")]
+    patterns: Vec<String>,
     /// Add the flags column and the symlink targets, after a first line with the archive's
     /// generation.
     #[arg(long)]
@@ -772,6 +828,9 @@ struct ExportArgs {
     archive: PathBuf,
     /// The file to write: `.zip` or `.7z` by its extension; must not exist unless --force.
     out: PathBuf,
+    /// Globs over entry paths selecting what to export, as for `x`; none exports everything.
+    #[arg(value_name = "PATTERN")]
+    patterns: Vec<String>,
     /// The compression method of the entries: deflate (ZIP's default), zstd (ZIP only),
     /// store, or lzma2 (7z's default; 7z only).
     #[arg(long, value_enum, value_name = "METHOD")]
@@ -898,7 +957,8 @@ fn add(
     }
     pipeline.seal.writer.recovery.percent = a.recovery;
     pipeline.monitor = console.monitor();
-    let r = pipeline.run_file(&a.input, &a.archive);
+    let sources = sources(a)?;
+    let r = pipeline.run_file_sources(&sources, &a.archive);
     console.clear();
     let s = r.map_err(|e| Failure::core(&e, Some(&a.archive)))?;
     records_cap_note(err, &s.peel.deflate);
@@ -906,6 +966,51 @@ fn add(
         report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
     }
     Ok(())
+}
+
+/// The inputs of `lpk a` (the rules of `ADD_ABOUT`): one directory given on the command line
+/// alone is archived by its contents; otherwise every input, the list file's included, is
+/// entered under its own name. The list file is read here, so an unreadable one is refused
+/// before any output; a leading UTF-8 BOM (PowerShell 5's `Out-File`) is dropped, so are
+/// empty and `#` lines (`str::lines` drops a trailing CR). No input at all (a list naming
+/// none) is a usage error: never a silent empty archive.
+fn sources(a: &AddArgs) -> Result<lpk_core::Sources, Failure> {
+    let core = |e: lpk_core::CoreError| Failure::core(&e, None);
+    let exclude = lpk_core::Selection::new(&a.exclude).map_err(core)?;
+    let mut paths: Vec<PathBuf> = a.inputs.clone();
+    if let Some(list) = &a.list {
+        let text = std::fs::read(list)
+            .map_err(|e| Failure::failed("Io", format!("{}: {e}", list.display()), Some(list)))?;
+        let text = String::from_utf8(text)
+            .map_err(|_| Failure::usage(format!("--list {}: not UTF-8", list.display())))?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        for line in text.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            paths.push(PathBuf::from(line));
+        }
+    }
+    if paths.is_empty() {
+        return Err(Failure::usage(match &a.list {
+            Some(list) => format!(
+                "--list {}: no inputs (the file names no path)",
+                list.display()
+            ),
+            None => "no inputs".to_string(),
+        }));
+    }
+    if a.list.is_none() && paths.len() == 1 && paths[0].is_dir() {
+        return Ok(lpk_core::Sources {
+            roots: vec![lpk_core::Root::contents(&paths[0])],
+            exclude,
+        });
+    }
+    let mut roots = Vec::with_capacity(paths.len());
+    for p in &paths {
+        roots.push(lpk_core::Root::named(p).map_err(core)?);
+    }
+    lpk_core::Sources::new(roots, exclude).map_err(core)
 }
 
 fn append(
@@ -1193,6 +1298,8 @@ fn extract(
         )));
     }
     let opts = lpk_core::ExtractOptions {
+        select: lpk_core::Selection::new(&x.patterns)
+            .map_err(|e| Failure::core(&e, Some(&x.archive)))?,
         threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
         memory: x.memory,
         ..lpk_core::ExtractOptions::default()
@@ -1377,6 +1484,8 @@ fn export(
         priors.push(b);
     }
     let opts = lpk_core::ExtractOptions {
+        select: lpk_core::Selection::new(&x.patterns)
+            .map_err(|e| Failure::core(&e, Some(&x.archive)))?,
         threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
         memory: x.memory,
         ..lpk_core::ExtractOptions::default()
@@ -1539,11 +1648,16 @@ fn list(
         f.message = format!("{}: {} ({})", l.archive.display(), f.message, f.kind);
         f
     };
+    let select =
+        lpk_core::Selection::new(&l.patterns).map_err(|e| Failure::core(&e, Some(&l.archive)))?;
     let file = std::fs::File::open(&l.archive).map_err(|e| failed(FormatError::Io(e)))?;
     let mut archive =
         lpk_format::Archive::open_with(file, &Resources::default(), credentials).map_err(failed)?;
     let options = ListOptions { long: l.long, json };
-    list_archive(&mut archive, options, out).map_err(failed)
+    list_archive(&mut archive, options, &select, out).map_err(|e| match e {
+        list::ListError::Format(e) => failed(e),
+        list::ListError::Core(e) => Failure::core(&e, Some(&l.archive)),
+    })
 }
 
 /// True when the raw command line carries `--json` (before any `--`), so a usage error clap

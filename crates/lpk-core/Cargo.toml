@@ -13,6 +13,9 @@ fastcdc = "5.0.0"
 # C zlib: the backend lpk-bench enables and the probe and the committed vectors were produced
 # with, so a build of lpk-cli alone and a workspace build inflate (and walk) identically.
 flate2 = { version = "1.1.10", features = ["zlib"] }
+# Globs over entry paths (E3-4: `--exclude`, the patterns of `x`, `l` and `export`);
+# Unlicense OR MIT, already in the tree for lpk-bench.
+globset = "0.4.20"
 # Pinned: the jpeg-reconstruct decoder reads the stream header layout of 0.5.8 (spec section 8).
 lepton_jpeg = "=0.5.8"
 liblzma = { version = "0.4.8", features = ["static", "parallel"] }

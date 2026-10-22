@@ -125,11 +125,17 @@ use crate::memory::{Budget, BudgetSource, EnvelopeTier};
 use crate::policy::{self, Existing, Found, SymlinkAction, Wanted};
 pub use crate::policy::{DefaultPolicy, ExtractPolicy};
 use crate::progress::{Monitor, Reporter, Stage};
+use crate::select::Selection;
 use crate::CoreError;
 
 /// How an extraction runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ExtractOptions {
+    /// The entries to extract ([`Selection`]: globs over entry paths, a directory's match
+    /// selecting its subtree; the default is everything). Only the blocks the selected
+    /// entries need are decoded; a pattern matching nothing is [`CoreError::NoMatch`],
+    /// refused before any output.
+    pub select: Selection,
     /// The total thread budget (decoders plus writers); `None` is the machine's logical cores.
     /// 1 is the sequential path.
     pub threads: Option<usize>,
@@ -151,6 +157,7 @@ pub struct ExtractOptions {
 impl Default for ExtractOptions {
     fn default() -> Self {
         ExtractOptions {
+            select: Selection::all(),
             threads: None,
             memory: None,
             max_open_files: 128,
@@ -718,12 +725,16 @@ fn plan<R: Read + Seek>(
     archive: &mut Archive<R>,
     dir: &Path,
     policy: &dyn ExtractPolicy,
+    select: &Selection,
 ) -> Result<Plan, CoreError> {
     let entries: Vec<Entry> = archive
         .entry_table()?
         .table()?
         .iter()
         .collect::<Result<_, _>>()?;
+    // The selection first: the policy's rules and the placements concern only what is
+    // extracted, and a pattern without a match is refused here, before any output.
+    let entries = select.filter(entries, |e| e.path.as_str())?;
     for e in &entries {
         if e.kind == EntryKind::Symlink {
             policy.symlink(e)?;
@@ -1156,7 +1167,7 @@ where
         skipped,
         renamed,
         symlinks_skipped,
-    } = plan(archive, dir, policy)?;
+    } = plan(archive, dir, policy, &opts.select)?;
     let shape = Shape {
         needed: &needed,
         targets: shared.targets.len(),

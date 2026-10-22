@@ -9,7 +9,7 @@ use lpk_format::{WriterOptions, WriterSummary};
 use crate::error::CoreError;
 #[cfg(test)]
 use crate::ingest::walk;
-use crate::ingest::{file_identity, walk_with, IngestOptions, Input};
+use crate::ingest::{file_identity, walk_sources_with, IngestOptions, Input, Sources};
 use crate::pipeline::Pipeline;
 
 /// Output buffer: writes reach the file in large sequential pieces.
@@ -78,11 +78,11 @@ pub fn archive_store_file(
         .writer)
 }
 
-/// Create `archive_path` (create-new), walk `root` leaving the new file out of the inputs, and
-/// run `f` with the inputs, the file and a data-sync hook. A failure removes the file. Shared by
-/// the store and Fast paths.
+/// Create `archive_path` (create-new), walk `sources` leaving the new file out of the inputs,
+/// and run `f` with the inputs, the file and a data-sync hook. A failure removes the file.
+/// Shared by the store and Fast paths.
 pub(crate) fn create_new_and_run<T>(
-    root: &Path,
+    sources: &Sources,
     archive_path: &Path,
     ingest: &IngestOptions,
     reporter: &crate::progress::Reporter,
@@ -98,7 +98,7 @@ pub(crate) fn create_new_and_run<T>(
         let sync_file = file
             .try_clone()
             .map_err(|e| CoreError::io(archive_path, e))?;
-        let mut inputs = walk_with(root, ingest, reporter)?;
+        let mut inputs = walk_sources_with(sources, ingest, reporter)?;
         inputs.retain(|i| i.identity != Some(own_id));
         let sync: SyncFn = Box::new(move || sync_file.sync_data());
         f(inputs, file, sync)

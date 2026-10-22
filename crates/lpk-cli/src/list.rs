@@ -15,6 +15,7 @@
 
 use std::io::{BufWriter, Read, Seek, Write};
 
+use lpk_core::Selection;
 use lpk_format::cli::escape_path;
 use lpk_format::entry::{Entry, EntryFlags};
 use lpk_format::{Archive, FormatError};
@@ -125,22 +126,56 @@ fn json_line(w: &mut impl Write, e: &Entry, generation: u64) -> std::io::Result<
     writeln!(w)
 }
 
+/// What a listing can fail with: the reader, or a selection pattern matching nothing.
+#[derive(Debug)]
+pub enum ListError {
+    /// The archive could not be read or opened.
+    Format(FormatError),
+    /// A pattern matched no entry ([`lpk_core::CoreError::NoMatch`]).
+    Core(lpk_core::CoreError),
+}
+
+impl From<FormatError> for ListError {
+    fn from(e: FormatError) -> Self {
+        ListError::Format(e)
+    }
+}
+
+impl From<std::io::Error> for ListError {
+    fn from(e: std::io::Error) -> Self {
+        ListError::Format(FormatError::Io(e))
+    }
+}
+
 /// List an opened archive to `out`: the entry table is read once (hash-checked by the
 /// reader; `PasswordRequired` when the archive is sealed, not listable and was opened
-/// without its key) and its entries are written as they are parsed, none held.
+/// without its key) and its entries are written as they are parsed, none held. With a
+/// selection the table is passed twice: once to find a pattern that matches nothing (refused
+/// before any line is written), then to write the matching entries.
 pub fn list_archive<R: Read + Seek>(
     archive: &mut Archive<R>,
     options: ListOptions,
+    select: &Selection,
     out: &mut dyn Write,
-) -> Result<(), FormatError> {
+) -> Result<(), ListError> {
     let table = archive.entry_table()?;
     let generation = archive.generation();
+    if !select.is_all() {
+        let mut hits = select.hits();
+        for entry in table.table()?.iter() {
+            hits.record(&entry?.path);
+        }
+        hits.check().map_err(ListError::Core)?;
+    }
     let mut w = BufWriter::new(out);
     if options.long && !options.json {
         writeln!(w, "generation\t{generation}")?;
     }
     for entry in table.table()?.iter() {
         let e = entry?;
+        if !select.matches(&e.path) {
+            continue;
+        }
         if options.json {
             json_line(&mut w, &e, generation)?;
         } else {

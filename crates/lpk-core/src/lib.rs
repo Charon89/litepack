@@ -28,6 +28,7 @@ pub mod pipeline;
 pub mod policy;
 pub mod priors;
 pub mod progress;
+pub mod select;
 pub mod source;
 pub mod store;
 
@@ -52,7 +53,9 @@ pub use fast::{
 };
 pub use fold::{ChunkerKind, Dedup, FastCdcChunker, FileOrder, FoldOptions, FoldStage};
 pub use gate::{entropy, is_incompressible, sampled_entropy, Gate, GATE_BLOCK};
-pub use ingest::{file_identity, validate_input, walk, IngestOptions, Input};
+pub use ingest::{
+    file_identity, validate_input, walk, walk_sources, IngestOptions, Input, Root, Sources,
+};
 pub use peel::jpeg::{register_full_decoders, register_full_reader};
 pub use peel::{
     Cause, Count, DeflateDecoder, Fallback, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage,
@@ -62,5 +65,6 @@ pub use pipeline::{ClassifyStage, ModelStage, Pipeline, RunSummary, SealOptions,
 pub use policy::{DefaultPolicy, ExtractPolicy, Overwrite, Policy, Symlinks};
 pub use priors::ProvidedDictionaries;
 pub use progress::{CancelToken, Event, Monitor, Progress, Stage};
+pub use select::{Hits, Selection};
 pub use source::Source;
 pub use store::{archive_store, archive_store_file, write_inputs, StoreOptions};

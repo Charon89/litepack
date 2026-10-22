@@ -26,13 +26,13 @@ Print version
 .SH SUBCOMMANDS
 .TP
 lpk\-a(1)
-Create an archive from the contents of a directory (not the directory itself)
+Create an archive: from the contents of one directory (not the directory itself), or from several inputs, files and directories, each entered under its own name
 .TP
 lpk\-l(1)
 List an archive, one line per entry: kind, size, mtime (UTC), path (tab\-separated)
 .TP
 lpk\-x(1)
-Extract every entry of an archive into a directory; an existing file is refused unless \-\-overwrite says otherwise, and symlink entries are skipped unless \-\-symlinks is given
+Extract an archive (every entry, or those the patterns select) into a directory; an existing file is refused unless \-\-overwrite says otherwise, and symlink entries are skipped unless \-\-symlinks is given
 .TP
 lpk\-t(1)
 Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shards
