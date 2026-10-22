@@ -40,6 +40,7 @@ struct Fast {
     raw: u64,
     archive: u64,
     blocks: u64,
+    chunks: u64,
     summary: FastSummary,
     secs: f64,
 }
@@ -75,6 +76,7 @@ fn run_fast(dir: &Path, name: &str) -> Fast {
         raw,
         archive: s.archive_len,
         blocks: a.index().blocks.len() as u64,
+        chunks: a.index().blocks.iter().map(|b| b.chunk_count).sum(),
         summary: fs,
         secs,
     }
@@ -112,10 +114,18 @@ fn fast_round_trip_every_class() {
             f.secs
         );
         // The Fast archive is at most the store-path archive plus 64 bytes per block (the zstd
-        // step's header is longer than store's).
+        // step's header is longer than store's) plus the chunk table's cost: since D-53 the Fast
+        // tier cuts every file into FastCDC chunks (the store path keeps one chunk per block),
+        // and each chunk costs one record in the index's chunk table (the 32-byte BLAKE3 and a
+        // varint `plain_len`, at most 10 bytes) and one varint chunk id (at most 10 bytes) in
+        // its entry's chunk list. The count is the archive's own, so the bound follows the
+        // data; 1 KiB covers the tables' counts and the frames' headers. On an incompressible
+        // class this is about 0.05% of the archive — a regression of a few percent still trips it.
+        let chunks = f.chunks;
+        let bound = store + 64 * f.blocks + (32 + 10 + 10) * chunks + 1024;
         assert!(
-            f.archive <= store + 64 * f.blocks,
-            "{name}: {} > {store} + 64 * {}",
+            f.archive <= bound,
+            "{name}: {} > {store} + 64 * {} + 52 * {chunks} + 1024 = {bound}",
             f.archive,
             f.blocks
         );

@@ -48,10 +48,13 @@ fn stored_classes_are_identical_at_one_thread_and_twenty_four() {
         let same = runs[0].0 == runs[1].0 && runs[0].1.writer == runs[1].1.writer;
         println!("{class}: blake3 {}", blake3::hash(&runs[0].0).to_hex());
         // Round 1's archives (the sequential writer before the pipeline) of the locked
-        // `small` corpus, byte for byte.
+        // `small` corpus, byte for byte, except the index envelope's `threads_hint`: D-67 (3)
+        // made store-only archives carry it (0 became 1), which moves the three hashes that
+        // follow from it (the index frame's, the trailer's `index_hash`, the trailer frame's).
+        // Every data byte and the length are round 1's.
         let want = match class {
-            "video" => "76c5b9a1e88dca34a47911a05a3ee7ce4e84ee8122b900dae94a07777c0de9fb",
-            _ => "964c82a6e7956ad21e20bc599ad1193143263377b2310a02070ca950c644196f",
+            "video" => "5e9e959c6d23687c8a52918d56dd3bd6b6680cd1d46ce3c8baf5647f64f1ab6f",
+            _ => "e642c44583d6d1df415d03390a43a3f258f20667a1f49b7ea1e64dec505049c3",
         };
         assert_eq!(blake3::hash(&runs[0].0).to_hex().as_str(), want, "{class}");
         println!(

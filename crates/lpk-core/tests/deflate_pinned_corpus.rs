@@ -1,9 +1,10 @@
 //! The Deflate peel's pinned archives on the corpus, run by hand (release build):
 //! `LPK_CORPUS=<path to bench/corpus/small> cargo test -p lpk-core --release --test deflate_pinned_corpus -- --ignored --nocapture`
 //!
-//! `office-pdf` and `photo-raw-png` through the default Balanced pipeline (its Deflate peel on) at
-//! one thread: the archives' BLAKE3 must equal the values pinned from the serial peel (D-70,
-//! `main` 54b1163) before the peel pool (design `docs/notes/e2-10-peel-pool-design.md`, task 1).
+//! `office-pdf` and `photo-raw-png` through the Balanced pipeline (its Deflate peel on, the BWT
+//! stage off, see `hash_of`) at one thread: the archives' BLAKE3 must equal the values pinned
+//! from the serial peel (D-70, `main` 54b1163) before the peel pool (design
+//! `docs/notes/e2-10-peel-pool-design.md`, task 1).
 //! The archive holds every file's modification time, so the pins hold for the `small` corpus
 //! of the machine that pinned them (host `Megatron`); set `LPK_PIN_PRINT=1` to print the hashes
 //! without checking them on another corpus build.
@@ -29,8 +30,12 @@ pub const PINNED: [(&str, &str); 2] = [
 fn hash_of(dir: &Path, threads: usize, skips: bool) -> (String, f64) {
     let t0 = Instant::now();
     let mut out = Vec::new();
+    // The pins are the Deflate peel's one-thread archives without the BWT stage: D-81 (3)
+    // makes the header say minor 3 whenever the stage is on (the default since then), which
+    // would move every hash by that one header byte.
     let mut p = Pipeline::balanced(BalancedOptions {
         threads: Some(threads),
+        bwt: false,
         ..BalancedOptions::default()
     });
     if let Some(d) = p.deflate.as_mut() {
