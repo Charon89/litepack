@@ -97,6 +97,13 @@ pub enum CoreError {
     /// an extraction's unfinished files removed).
     #[error("cancelled")]
     Cancelled,
+    /// A selection pattern (`lpk x`, `lpk l`, `lpk export`) that matches no entry of the
+    /// archive; refused before any output.
+    #[error("pattern {pattern:?} matches no entry")]
+    NoMatch {
+        /// The pattern as given.
+        pattern: String,
+    },
     /// The root given to a walk is not a directory.
     #[error("{}: not a directory", path.display())]
     NotADirectory {

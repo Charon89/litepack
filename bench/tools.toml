@@ -236,6 +236,9 @@ extension = ".lpk"
 mode = "directory"
 layout = "flat"
 create = ["a", "{archive}", "{input}", "{settings}", "{threads}"]
+# A private corpus (D-20 (6)): the inputs come from the runner's list file, one relative path
+# per line, each entered under that path (E3-4's `--list`).
+create_list = ["a", "{archive}", "--list", "{list}", "{settings}", "{threads}"]
 extract = ["x", "{archive}", "{outdir}", "{settings}", "{threads}"]
 threads = ["--threads", "{n}"]
 ratio_depends_on_threads = false

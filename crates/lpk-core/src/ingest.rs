@@ -8,13 +8,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::fs::{File, Metadata};
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use lpk_format::{validate_path, EntryFlags, EntryKind};
 use same_file::Handle;
 
 use crate::error::CoreError;
+use crate::select::Selection;
 
 /// How a tree is walked.
 ///
@@ -129,6 +130,129 @@ fn path_identity(path: &Path) -> Result<u64, CoreError> {
         .map_err(|e| CoreError::io(path, e))
 }
 
+/// One input of a run (E3-4): the file or directory at `path`, entered under `name` (a
+/// directory's entries below `name/`). The empty name is the contents of a directory, not
+/// the directory itself (the single-directory form of `lpk a`; [`walk`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Root {
+    /// Where the input is read from.
+    pub path: PathBuf,
+    /// The archive path it is entered under; empty for a directory's contents.
+    pub name: String,
+}
+
+impl Root {
+    /// The contents of the directory at `dir`.
+    pub fn contents(dir: &Path) -> Self {
+        Root {
+            path: dir.to_path_buf(),
+            name: String::new(),
+        }
+    }
+
+    /// The input at `path` under its own name: a relative path is entered as given (`/`
+    /// separators, `.` components dropped: `sub/photos` is `sub/photos/...`); an absolute
+    /// path, or one leaving the current directory through `..`, is entered under its last
+    /// component (`D:\x\photos` is `photos/...`). A path with no name to enter it under (`.`,
+    /// `..`, a drive root) is `InvalidOption`; a name the format refuses is `UnportableName`.
+    pub fn named(path: &Path) -> Result<Self, CoreError> {
+        let mut parts: Vec<String> = Vec::new();
+        let mut last_only = false;
+        for c in path.components() {
+            match c {
+                Component::Normal(n) => parts.push(n.to_string_lossy().into_owned()),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    last_only = true;
+                }
+            }
+        }
+        if last_only {
+            parts = parts.pop().into_iter().collect();
+        }
+        if parts.is_empty() {
+            return Err(CoreError::InvalidOption(format!(
+                "{}: no name to enter it under (give a file or a directory by name)",
+                path.display()
+            )));
+        }
+        let name = parts.join("/");
+        validate_path(&name).map_err(|reason| CoreError::UnportableName {
+            path: name.clone(),
+            reason: reason.to_string(),
+        })?;
+        Ok(Root {
+            path: path.to_path_buf(),
+            name,
+        })
+    }
+}
+
+/// What a run archives: its roots, each under its name, minus the entries `exclude` matches
+/// (a matching directory is not walked into).
+#[derive(Debug, Clone, Default)]
+pub struct Sources {
+    /// The inputs, in the order given.
+    pub roots: Vec<Root>,
+    /// Entry paths left out.
+    pub exclude: Selection,
+}
+
+/// True when `inner` lies below the entry path `outer` (`a/b` below `a`).
+fn lies_under(inner: &str, outer: &str) -> bool {
+    inner.len() > outer.len() && inner.starts_with(outer) && inner.as_bytes()[outer.len()] == b'/'
+}
+
+impl Sources {
+    /// The contents of one directory (the single-directory form), nothing excluded.
+    pub fn contents_of(dir: &Path) -> Self {
+        Sources {
+            roots: vec![Root::contents(dir)],
+            exclude: Selection::all(),
+        }
+    }
+
+    /// Several roots: two that would be entered under the same name, or one under the other
+    /// (`a` and `a/b`), are refused with `InvalidOption` naming both; a contents root (empty
+    /// name) is refused beside any other.
+    pub fn new(roots: Vec<Root>, exclude: Selection) -> Result<Self, CoreError> {
+        for (i, a) in roots.iter().enumerate() {
+            for b in &roots[i + 1..] {
+                if a.name.is_empty() || b.name.is_empty() {
+                    return Err(CoreError::InvalidOption(format!(
+                        "{} and {}: a directory's contents cannot be archived beside another input",
+                        a.path.display(),
+                        b.path.display()
+                    )));
+                }
+                if a.name == b.name {
+                    return Err(CoreError::InvalidOption(format!(
+                        "{} and {} would both be entered as {:?}",
+                        a.path.display(),
+                        b.path.display(),
+                        a.name
+                    )));
+                }
+                let (under, over) = if lies_under(&b.name, &a.name) {
+                    (b, a)
+                } else if lies_under(&a.name, &b.name) {
+                    (a, b)
+                } else {
+                    continue;
+                };
+                return Err(CoreError::InvalidOption(format!(
+                    "{} ({:?}) lies under {} ({:?})",
+                    under.path.display(),
+                    under.name,
+                    over.path.display(),
+                    over.name
+                )));
+            }
+        }
+        Ok(Sources { roots, exclude })
+    }
+}
+
 /// Every directory, file and symlink under `root` (not `root` itself), sorted by path bytes.
 pub fn walk(root: &Path, options: &IngestOptions) -> Result<Vec<Input>, CoreError> {
     walk_with(root, options, &crate::Monitor::default().reporter())
@@ -141,27 +265,88 @@ pub(crate) fn walk_with(
     options: &IngestOptions,
     reporter: &crate::progress::Reporter,
 ) -> Result<Vec<Input>, CoreError> {
-    let md = std::fs::metadata(root).map_err(|e| CoreError::io(root, e))?;
-    if !md.is_dir() {
-        return Err(CoreError::NotADirectory {
-            path: root.to_path_buf(),
-        });
-    }
+    walk_sources_with(&Sources::contents_of(root), options, reporter)
+}
+
+/// The inputs of every root of `sources`, each under its name, minus the excluded entries,
+/// sorted by path bytes (two roots never give the same path: [`Sources::new`] refuses the
+/// names that could). A directory root is an entry itself, then its tree below its name; a
+/// file root is one entry (a symlink to a file is read through). The contents root
+/// ([`Root::contents`]) must be a directory.
+pub fn walk_sources(sources: &Sources, options: &IngestOptions) -> Result<Vec<Input>, CoreError> {
+    walk_sources_with(sources, options, &crate::Monitor::default().reporter())
+}
+
+/// [`walk_sources`] with the progress reporting of [`walk_with`].
+pub(crate) fn walk_sources_with(
+    sources: &Sources,
+    options: &IngestOptions,
+    reporter: &crate::progress::Reporter,
+) -> Result<Vec<Input>, CoreError> {
     let mut w = Walker {
         options,
+        exclude: &sources.exclude,
         out: Vec::new(),
         visited: HashSet::new(),
-        root_volume: volume_key(root, &md).map_err(|e| CoreError::io(root, e))?,
+        root_volume: None,
     };
-    if options.follow_symlinks {
-        w.visited.insert(path_identity(root)?);
-    }
-    let mut stack = vec![(root.to_path_buf(), String::new())];
-    while let Some((dir, prefix)) = stack.pop() {
-        reporter.check()?;
-        let before = w.out.len();
-        w.list(&dir, &prefix, &mut stack)?;
-        reporter.add(crate::Stage::Walk, (w.out.len() - before) as u64, 0, 0);
+    for root in &sources.roots {
+        let path = root.path.as_path();
+        let md = std::fs::metadata(path).map_err(|e| CoreError::io(path, e))?;
+        if root.name.is_empty() {
+            if !md.is_dir() {
+                return Err(CoreError::NotADirectory {
+                    path: path.to_path_buf(),
+                });
+            }
+            w.descend(path, &md, "", reporter)?;
+            continue;
+        }
+        if w.exclude.is_match(&root.name) {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let flags = attribute_flags(&md, &file_name);
+        if md.is_dir() {
+            w.out.push(Input {
+                path: root.name.clone(),
+                kind: EntryKind::Directory,
+                len: 0,
+                mtime_ns: mtime_ns(&md),
+                flags: strip_file_only(flags),
+                source: path.to_path_buf(),
+                symlink_target: None,
+                identity: None,
+            });
+            w.descend(path, &md, &root.name, reporter)?;
+        } else if md.is_file() {
+            // A root that is a symlink to a file is read through it: the source is the
+            // target, as the followed-link case of the walk records it.
+            let linked = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+            let source = if linked {
+                std::fs::canonicalize(path).map_err(|e| CoreError::io(path, e))?
+            } else {
+                path.to_path_buf()
+            };
+            w.out.push(Input {
+                path: root.name.clone(),
+                kind: EntryKind::File,
+                len: md.len(),
+                mtime_ns: mtime_ns(&md),
+                flags,
+                identity: Some(walked_identity(&source, &md)?),
+                source,
+                symlink_target: None,
+            });
+            reporter.add(crate::Stage::Walk, 1, 0, 0);
+        } else {
+            return Err(CoreError::SpecialFile {
+                path: path.to_path_buf(),
+            });
+        }
     }
     reporter.check()?;
     reporter.done(crate::Stage::Walk);
@@ -179,6 +364,7 @@ pub(crate) fn walk_with(
 
 struct Walker<'a> {
     options: &'a IngestOptions,
+    exclude: &'a Selection,
     out: Vec<Input>,
     visited: HashSet<u64>,
     root_volume: Option<String>,
@@ -191,6 +377,29 @@ struct Child {
 }
 
 impl Walker<'_> {
+    /// Walk the tree under the directory `root` (whose metadata is `md`), its entries below
+    /// `prefix`, reporting per directory listed and polling the token before each.
+    fn descend(
+        &mut self,
+        root: &Path,
+        md: &Metadata,
+        prefix: &str,
+        reporter: &crate::progress::Reporter,
+    ) -> Result<(), CoreError> {
+        self.root_volume = volume_key(root, md).map_err(|e| CoreError::io(root, e))?;
+        if self.options.follow_symlinks {
+            self.visited.insert(path_identity(root)?);
+        }
+        let mut stack = vec![(root.to_path_buf(), prefix.to_string())];
+        while let Some((dir, prefix)) = stack.pop() {
+            reporter.check()?;
+            let before = self.out.len();
+            self.list(&dir, &prefix, &mut stack)?;
+            reporter.add(crate::Stage::Walk, (self.out.len() - before) as u64, 0, 0);
+        }
+        Ok(())
+    }
+
     fn list(
         &mut self,
         dir: &Path,
@@ -235,8 +444,12 @@ impl Walker<'_> {
     ) -> Result<(), CoreError> {
         let path = join(prefix, &c.name);
         let flags = attribute_flags(&c.md, &c.name);
-        // An excluded entry is never name-validated.
+        // An excluded entry (hidden, or matched by an exclude pattern; a matched directory
+        // is not walked into) is never name-validated.
         if !self.options.include_hidden && flags.contains(EntryFlags::HIDDEN) {
+            return Ok(());
+        }
+        if self.exclude.is_match(&path) {
             return Ok(());
         }
         validate_path(&path).map_err(|reason| CoreError::UnportableName {
@@ -593,6 +806,136 @@ pub(crate) mod tests {
             symlink_target: None,
             identity: None,
         }
+    }
+
+    /// E3-4: the naming rule of an input given by path.
+    #[test]
+    fn a_root_is_named_by_its_relative_path_or_its_last_component() {
+        let name = |p: &str| Root::named(Path::new(p)).map(|r| r.name);
+        assert_eq!(name("notes.txt").unwrap(), "notes.txt");
+        assert_eq!(name("sub/photos").unwrap(), "sub/photos");
+        assert_eq!(name("./sub/./photos/").unwrap(), "sub/photos");
+        assert_eq!(name("../x/photos").unwrap(), "photos");
+        assert_eq!(name("a/../photos").unwrap(), "photos");
+        #[cfg(windows)]
+        {
+            assert_eq!(name(r"D:\x\photos").unwrap(), "photos");
+            assert_eq!(name(r"sub\photos").unwrap(), "sub/photos");
+            assert!(matches!(name(r"C:\"), Err(CoreError::InvalidOption(_))));
+        }
+        #[cfg(unix)]
+        assert_eq!(name("/x/photos").unwrap(), "photos");
+        for p in [".", "..", "./"] {
+            assert!(matches!(name(p), Err(CoreError::InvalidOption(_))), "{p}");
+        }
+        // A name the format refuses (a NUL byte) is an unportable name.
+        assert!(matches!(
+            name("a\u{0}b"),
+            Err(CoreError::UnportableName { .. })
+        ));
+        // A path too long for the format (the limit is the format's, not the OS's).
+        let long = "x".repeat(70_000);
+        assert!(matches!(name(&long), Err(CoreError::UnportableName { .. })));
+    }
+
+    /// E3-4: two inputs under the same name, or one under the other, are refused naming both.
+    #[test]
+    fn conflicting_roots_are_refused_naming_both() {
+        let r = |p: &str| Root::named(Path::new(p)).unwrap();
+        let err = |roots: Vec<Root>| match Sources::new(roots, Selection::all()) {
+            Err(CoreError::InvalidOption(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        let m = err(vec![r("docs"), r("../y/docs")]);
+        assert!(
+            m.contains("docs") && m.contains("y/docs") && m.contains("\"docs\""),
+            "{m}"
+        );
+        // Different directories whose names differ are no conflict.
+        assert!(Sources::new(vec![r("x/docs"), r("../y/docs")], Selection::all()).is_ok());
+        let m = err(vec![r("docs/b.md"), r("docs")]);
+        assert!(m.contains("docs/b.md") && m.contains("lies under"), "{m}");
+        let m = err(vec![Root::contents(Path::new("d")), r("a.txt")]);
+        assert!(m.contains("contents"), "{m}");
+        // Different names that share a prefix string are fine.
+        let s = Sources::new(vec![r("docs"), r("docs2"), r("doc")], Selection::all()).unwrap();
+        assert_eq!(s.roots.len(), 3);
+    }
+
+    /// E3-4: several roots, each under its name; a directory root is an entry itself; the
+    /// exclude prunes a subtree and leaves out matching files; the contents root is unchanged.
+    #[test]
+    fn several_roots_walk_under_their_names_and_excludes_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        let expect = make_tree(&tree);
+        write(dir.path(), "notes.txt", 4);
+        let roots = vec![
+            Root::named(&tree).unwrap(),
+            Root::named(&dir.path().join("notes.txt")).unwrap(),
+        ];
+        let sources = Sources::new(roots.clone(), Selection::all()).unwrap();
+        let got = walk_sources(&sources, &IngestOptions::default()).unwrap();
+        let mut want: Vec<String> = expect.iter().map(|p| format!("tree/{p}")).collect();
+        want.push("tree".to_string());
+        want.push("notes.txt".to_string());
+        want.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let paths: Vec<&str> = got.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, want);
+        assert_eq!(find(&got, "tree").kind, EntryKind::Directory);
+        assert_eq!(find(&got, "notes.txt").kind, EntryKind::File);
+        assert_eq!(find(&got, "notes.txt").len, 4);
+        assert!(find(&got, "notes.txt").identity.is_some());
+        // The same inputs listed once more give the same paths (the walk is stable; the
+        // directory mtimes are not compared, NTFS settles them lazily).
+        let again = walk_sources(&sources, &IngestOptions::default()).unwrap();
+        let again: Vec<&str> = again.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(again, paths);
+        // Excludes: a directory match prunes its subtree, `**` reaches every depth, and a
+        // root's own name is subject to it too.
+        let exclude = Selection::new(&["tree/a/b", "**/*.bin", "notes.txt"]).unwrap();
+        let sources = Sources::new(roots, exclude).unwrap();
+        let got = walk_sources(&sources, &IngestOptions::default()).unwrap();
+        let paths: Vec<&str> = got.iter().map(|i| i.path.as_str()).collect();
+        assert!(paths.contains(&"tree/a"), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.starts_with("tree/a/b")),
+            "{paths:?}"
+        );
+        assert!(!paths.iter().any(|p| p.ends_with(".bin")), "{paths:?}");
+        assert!(!paths.contains(&"notes.txt"), "{paths:?}");
+        assert!(paths.contains(&"tree/ro.txt"), "{paths:?}");
+        // The contents root with the exclude: the same tree minus the matches, no prefix.
+        let sources = Sources {
+            roots: vec![Root::contents(&tree)],
+            exclude: Selection::new(&["a/b", "**/*.bin"]).unwrap(),
+        };
+        let got = walk_sources(&sources, &IngestOptions::default()).unwrap();
+        let paths: Vec<&str> = got.iter().map(|i| i.path.as_str()).collect();
+        let want: Vec<&str> = expect
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !p.starts_with("a/b") && !p.ends_with(".bin"))
+            .collect();
+        assert_eq!(paths, want);
+        // A contents root that is a file, and a named root that is missing.
+        let e = walk_sources(
+            &Sources::contents_of(&dir.path().join("notes.txt")),
+            &IngestOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(e, CoreError::NotADirectory { .. }), "{e}");
+        let e = walk_sources(
+            &Sources::new(
+                vec![Root::named(&dir.path().join("missing")).unwrap()],
+                Selection::all(),
+            )
+            .unwrap(),
+            &IngestOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(e, CoreError::Io { .. }), "{e}");
+        clear_readonly(&tree.join("ro.txt"));
     }
 
     #[test]

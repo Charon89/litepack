@@ -27,9 +27,9 @@ Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure
 
 ###### **Subcommands:**
 
-* `a` — Create an archive from the contents of a directory (not the directory itself)
+* `a` — Create an archive: from the contents of one directory (not the directory itself), or from several inputs, files and directories, each entered under its own name
 * `l` — List an archive, one line per entry: kind, size, mtime (UTC), path (tab-separated)
-* `x` — Extract every entry of an archive into a directory; an existing file is refused unless --overwrite says otherwise, and symlink entries are skipped unless --symlinks is given
+* `x` — Extract an archive (every entry, or those the patterns select) into a directory; an existing file is refused unless --overwrite says otherwise, and symlink entries are skipped unless --symlinks is given
 * `t` — Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shards
 * `check` — Hash the data shards the recovery frames cover and report the damage (exit 2 if any)
 * `repair` — Write a copy of an archive with its damaged shards rebuilt from the recovery frames
@@ -48,17 +48,23 @@ Exit codes: 0 ok, 1 usage error, 2 an operation was refused or failed. A failure
 
 ## `lpk a`
 
-Create an archive from the contents of a directory (not the directory itself)
+Create an archive. With one directory as the input, its contents are archived (not the directory itself: `lpk a out.lpk D:\x\photos` holds `IMG_1.jpg`, not `photos/IMG_1.jpg`). With several inputs, or a file, or --list, every input is entered under its own name: a relative path as given (`sub/photos` becomes `sub/photos/...`, `notes.txt` becomes `notes.txt`), an absolute path or one leaving the current directory through `..` under its last component (`D:\x\photos` becomes `photos/...`). Two inputs that would be entered under the same name, or one under the other (`a` and `a/b`), are refused before any output (exit 1, naming both).
 
-**Usage:** `lpk a [OPTIONS] <ARCHIVE> <INPUT>`
+--list FILE reads more inputs from FILE, one path per line (UTF-8, CRLF tolerated; a line starting with `#` and an empty line are ignored), each treated as above, a relative path resolved against the current directory.
+
+--exclude GLOB (repeatable) leaves out every entry whose archive path matches: globs over the entry path with `/` separators, `*` and `?` within one component, `**` across components, a backslash read as `/`, case-sensitive; an excluded directory is not walked into. The exclude applies to the inputs' own names too.
+
+**Usage:** `lpk a [OPTIONS] <ARCHIVE> [PATH]...`
 
 ###### **Arguments:**
 
 * `<ARCHIVE>` — The archive to create; must not exist
-* `<INPUT>` — The directory whose contents are archived
+* `<PATH>` — The inputs: one directory whose contents are archived, or several files and directories each entered under its own name (see the long help, --help)
 
 ###### **Options:**
 
+* `--list <FILE>` — A file naming more inputs, one path per line (`#` lines ignored), each entered under its own name
+* `--exclude <GLOB>` — Leave out every entry whose archive path matches this glob (repeatable; a matched directory is not walked into)
 * `--tier <TIER>` — The tier by name: the long form of --fast, --balanced and --store (one or the other; `strong` is reserved for the Strong tier, Phase 2, and refused)
 
   Possible values:
@@ -115,13 +121,16 @@ List an archive, one line per entry, streamed in table order: kind (File, Direct
 
 With --json each line is one object: "kind", "size", "mtime" (the string above, or null), "mtime_ns" (nanoseconds since the Unix epoch, or null), "flags" (an array of "executable", "hidden", "read-only", "system"), "flag_bits" (the raw flag word), "path" (unescaped: a JSON string), "symlink_target" (a symlink's target, else null), "chunks" (the number of chunks the file references) and "generation" (the archive's).
 
+Each PATTERN is a glob over entry paths, as for `x` (a directory's match lists its subtree); only the matching entries are listed, and a pattern that matches no entry is refused before any line is written (exit 2, naming it).
+
 A sealed archive written with --listable lists without its key; one that was not is refused with PasswordRequired (exit 2) unless a credential is given.
 
-**Usage:** `lpk l [OPTIONS] <ARCHIVE>`
+**Usage:** `lpk l [OPTIONS] <ARCHIVE> [PATTERN]...`
 
 ###### **Arguments:**
 
 * `<ARCHIVE>` — The archive
+* `<PATTERN>` — Globs over entry paths selecting what to list (a directory's match lists its subtree); none lists everything
 
 ###### **Options:**
 
@@ -135,14 +144,15 @@ A sealed archive written with --listable lists without its key; one that was not
 
 ## `lpk x`
 
-Extract every entry of an archive into a directory; an existing file is refused unless --overwrite says otherwise, and symlink entries are skipped unless --symlinks is given
+Extract an archive into a directory, created if missing. Without a pattern every entry is extracted. Each PATTERN is a glob over entry paths (`/` separators; `*` and `?` within one component, `**` across components, `[...]` a class, `{a,b}` an alternation, a backslash read as `/`, case-sensitive) and selects every entry it matches and, for a directory, the subtree below it: `docs` selects `docs/b.md` and `docs/deep/r.bin`, `**/*.jpg` every JPEG. Only the blocks the selected entries need are decoded; the directories a selected path implies are created. A pattern that matches no entry is refused before any output (exit 2, naming it). An existing file is refused unless --overwrite says otherwise; symlink entries are skipped unless --symlinks is given.
 
-**Usage:** `lpk x [OPTIONS] <ARCHIVE> <OUTDIR>`
+**Usage:** `lpk x [OPTIONS] <ARCHIVE> <OUTDIR> [PATTERN]...`
 
 ###### **Arguments:**
 
 * `<ARCHIVE>` — The archive
 * `<OUTDIR>` — The directory to extract into; created if missing
+* `<PATTERN>` — Globs over entry paths selecting what to extract (a directory's match selects its subtree); none selects everything
 
 ###### **Options:**
 
@@ -332,12 +342,13 @@ ZIP: one entry per archive entry, Zip64 where an entry or the directory needs it
 
 Names are written as the archive stores them: the format's reader already refuses absolute paths and `..`; a colon, a device name or a trailing dot or space goes through as-is for the consumer's extractor to sanitise. Both writers run in process. The archive, its key slot and the plan are checked before the output exists; the output is refused when it is the archive itself, and when it exists unless --force replaces it (touched only once the export writes). A failed export removes the output; a panic leaves it in place. Outside the memory budget: the writer's directory, kept until the end (ZIP's central directory about 200 bytes plus the name per entry, 7z's entry table about 100 plus the name), and its compressor (Deflate under 1 MiB, zstd a few MiB, LZMA2 about eleven times its 16 MiB dictionary); -v prints the figures.
 
-**Usage:** `lpk export [OPTIONS] <ARCHIVE> <OUT>`
+**Usage:** `lpk export [OPTIONS] <ARCHIVE> <OUT> [PATTERN]...`
 
 ###### **Arguments:**
 
 * `<ARCHIVE>` — The archive
 * `<OUT>` — The file to write: `.zip` or `.7z` by its extension; must not exist unless --force
+* `<PATTERN>` — Globs over entry paths selecting what to export, as for `x`; none exports everything
 
 ###### **Options:**
 

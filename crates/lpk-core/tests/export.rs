@@ -439,3 +439,35 @@ fn a_last_use_block_under_a_full_cache_does_not_wait_for_a_permit() {
         assert_eq!(s.blocks_decoded, s.visits, "{s:?}");
     }
 }
+
+/// E3-4: `lpk export` takes the same selection as `x`: only the selected entries reach the
+/// sink and only their blocks are decoded; a pattern matching nothing is refused before the
+/// sink sees an entry.
+#[test]
+fn a_selection_exports_its_entries_only() {
+    let files = mixed();
+    let bytes = pack(&files, options());
+    let all = export(&bytes, &mut Collect::default(), &threads(1)).unwrap();
+    let mut sink = Collect::default();
+    let opts = ExtractOptions {
+        select: lpk_core::Selection::new(&["a", "small.txt"]).unwrap(),
+        ..threads(2)
+    };
+    let s = export(&bytes, &mut sink, &opts).unwrap();
+    let got: Vec<&str> = sink.got.iter().map(|g| g.1.as_str()).collect();
+    assert_eq!(got, ["a", "a/one.bin", "a/sub/two.bin", "small.txt"]);
+    assert_eq!((s.files, s.directories, s.symlinks), (3, 1, 0));
+    assert!(s.blocks_needed < all.blocks_needed, "{s:?} vs {all:?}");
+    assert_eq!(s.blocks_decoded, s.blocks_needed, "{s:?}");
+    let mut sink = Collect::default();
+    let opts = ExtractOptions {
+        select: lpk_core::Selection::new(&["a", "none"]).unwrap(),
+        ..threads(2)
+    };
+    let e = export(&bytes, &mut sink, &opts).unwrap_err();
+    assert!(
+        matches!(e, CoreError::NoMatch { ref pattern } if pattern == "none"),
+        "{e}"
+    );
+    assert!(sink.got.is_empty());
+}

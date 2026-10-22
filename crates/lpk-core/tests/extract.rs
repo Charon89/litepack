@@ -719,3 +719,99 @@ fn a_panic_in_the_dispatcher_does_not_hang_and_cleans_up() {
         }
     }
 }
+
+/// The distinct blocks holding the chunks of the entry `path`, in index order.
+fn blocks_of(bytes: &[u8], path: &str) -> Vec<usize> {
+    let mut a = Archive::open(Cursor::new(bytes.to_vec()), &Resources::default()).unwrap();
+    let entries: Vec<Entry> = a
+        .entry_table()
+        .unwrap()
+        .table()
+        .unwrap()
+        .iter()
+        .map(|e| e.unwrap())
+        .collect();
+    let e = entries.iter().find(|e| e.path == path).unwrap();
+    let table = a.chunks();
+    let mut blocks: Vec<usize> = e
+        .chunks
+        .iter()
+        .map(|&c| table.locate(c).unwrap().block)
+        .collect();
+    blocks.sort_unstable();
+    blocks.dedup();
+    blocks
+}
+
+/// E3-4: a selection is fed to the plan, so only the blocks the selected entries need are
+/// decoded: one file selected out of an archive of several blocks, the decode count equals
+/// the blocks that hold it; a directory pattern selects its subtree and the directories a
+/// selected path implies are created; a pattern matching nothing is refused before any output.
+#[test]
+fn a_selection_decodes_only_the_blocks_its_entries_need() {
+    let files = mixed();
+    let bytes = pack(&files, options());
+    let a = Archive::open(Cursor::new(bytes.clone()), &Resources::default()).unwrap();
+    let blocks = a.index().blocks.len() as u64;
+    assert!(blocks >= 5, "{blocks}");
+    // One file: c.txt lies in one block; a/one.bin in several (40 000 bytes over 16 KiB
+    // blocks), fewer than the archive has.
+    for (path, data) in [("c.txt", &files[4].1), ("a/one.bin", &files[0].1)] {
+        let held = blocks_of(&bytes, path);
+        assert!(
+            !held.is_empty() && held.len() < blocks as usize,
+            "{path}: {held:?}"
+        );
+        for n in [1, 8] {
+            let d = tempfile::tempdir().unwrap();
+            let out = d.path().join("out");
+            let opts = ExtractOptions {
+                select: lpk_core::Selection::new(&[path]).unwrap(),
+                ..threads(n)
+            };
+            let s = extract(&bytes, &out, &opts).unwrap();
+            assert_eq!(
+                s.blocks_needed,
+                held.len() as u64,
+                "{path}, threads {n}: {s:?}"
+            );
+            assert_eq!(
+                s.blocks_decoded,
+                held.len() as u64,
+                "{path}, threads {n}: {s:?}"
+            );
+            assert_eq!(s.files, 1);
+            assert_eq!(s.blocks, blocks);
+            let want = expect(&[(path.to_string(), data.clone())]);
+            assert_eq!(tree(&out), want, "{path}, threads {n}");
+        }
+    }
+    // A directory pattern: the subtree, with the directories its paths imply.
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    let opts = ExtractOptions {
+        select: lpk_core::Selection::new(&["a"]).unwrap(),
+        ..threads(2)
+    };
+    let s = extract(&bytes, &out, &opts).unwrap();
+    assert_eq!(s.files, 2);
+    let mut held = blocks_of(&bytes, "a/one.bin");
+    held.extend(blocks_of(&bytes, "a/sub/two.bin"));
+    held.sort_unstable();
+    held.dedup();
+    assert_eq!(s.blocks_decoded, held.len() as u64, "{s:?}");
+    assert_eq!(tree(&out), expect(&files[..2]));
+    // No match: refused by name, nothing created.
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    let opts = ExtractOptions {
+        select: lpk_core::Selection::new(&["a", "nothing/*"]).unwrap(),
+        ..threads(2)
+    };
+    let e = extract(&bytes, &out, &opts).unwrap_err();
+    assert!(
+        matches!(e, CoreError::NoMatch { ref pattern } if pattern == "nothing/*"),
+        "{e}"
+    );
+    assert!(!out.exists());
+}

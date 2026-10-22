@@ -32,7 +32,9 @@ use crate::fast::{resolve_threads, stored_by_class};
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
 use crate::fold::ordering::order_cluster;
 use crate::fold::{Dedup, FoldStage};
-use crate::ingest::{file_identity, validate_input, walk_with, IngestOptions, Input};
+use crate::ingest::{
+    file_identity, validate_input, walk_sources_with, walk_with, IngestOptions, Input, Sources,
+};
 use crate::memory::{
     window_for, Budget, DeflateMemory, EncoderMemory, MemoryPlan, ModelInputs, BALANCED_CEILING,
     FAST_CEILING, STORE_CEILING,
@@ -307,11 +309,17 @@ impl Pipeline {
 
     /// Walk `root` and write the archive to `out`.
     pub fn run(self, root: &Path, out: impl Write) -> Result<RunSummary, CoreError> {
+        self.run_sources(&Sources::contents_of(root), out)
+    }
+
+    /// Walk `sources` ([`walk_sources`](crate::walk_sources): every root under its name,
+    /// the excluded entries left out) and write the archive to `out`.
+    pub fn run_sources(self, sources: &Sources, out: impl Write) -> Result<RunSummary, CoreError> {
         let prepared = self.prepare()?;
         let monitor = self.monitor.clone();
         let rep = monitor.reporter();
         let t = Instant::now();
-        let inputs = walk_with(root, &self.classify.ingest, &rep)?;
+        let inputs = walk_sources_with(sources, &self.classify.ingest, &rep)?;
         self.run_inputs(
             inputs,
             out,
@@ -472,22 +480,38 @@ impl Pipeline {
     /// before the trailer, a failed write removes the file. Invalid options are refused before
     /// the file exists. The walk time then includes creating the file.
     pub fn run_file(self, root: &Path, archive_path: &Path) -> Result<RunSummary, CoreError> {
+        self.run_file_sources(&Sources::contents_of(root), archive_path)
+    }
+
+    /// [`run_file`](Self::run_file) over [`Sources`]: every root under its name, the
+    /// excluded entries left out ([`walk_sources`](crate::walk_sources)).
+    pub fn run_file_sources(
+        self,
+        sources: &Sources,
+        archive_path: &Path,
+    ) -> Result<RunSummary, CoreError> {
         let prepared = self.prepare()?;
         let ingest = self.classify.ingest;
         let monitor = self.monitor.clone();
         let rep = monitor.reporter();
         let start = Instant::now();
-        create_new_and_run(root, archive_path, &ingest, &rep, |inputs, file, sync| {
-            self.run_inputs(
-                inputs,
-                file,
-                Some(sync),
-                prepared,
-                start.elapsed(),
-                new_archive_file(),
-                &rep,
-            )
-        })
+        create_new_and_run(
+            sources,
+            archive_path,
+            &ingest,
+            &rep,
+            |inputs, file, sync| {
+                self.run_inputs(
+                    inputs,
+                    file,
+                    Some(sync),
+                    prepared,
+                    start.elapsed(),
+                    new_archive_file(),
+                    &rep,
+                )
+            },
+        )
         .map_err(|e| rep.map_cancelled(e))
     }
 

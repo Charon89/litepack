@@ -1231,3 +1231,82 @@ fn the_system_tar_round_trips_non_ascii_private_names_through_the_list_path() {
     }
     assert_tmp_clean(&e);
 }
+
+/// This repository's `lpk` binary beside `lpk-bench` (the same build profile), built with
+/// cargo when it is not there yet (a run of this test file alone).
+fn lpk_binary() -> PathBuf {
+    let bench = Path::new(env!("CARGO_BIN_EXE_lpk-bench"));
+    let name = if cfg!(windows) { "lpk.exe" } else { "lpk" };
+    let lpk = bench.with_file_name(name);
+    if !lpk.exists() {
+        let mut c = Command::new(env!("CARGO"));
+        c.args(["build", "-p", "lpk-cli", "--bin", "lpk"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"));
+        if bench.parent().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("release")) {
+            c.arg("--release");
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+    }
+    assert!(lpk.exists(), "{}", lpk.display());
+    lpk
+}
+
+/// The `lpk` row of the committed catalogue (`bench/tools.toml`), its templates as they are,
+/// trimmed to its first setting (`fast`): the row the acceptance of E3-4 names.
+fn lpk_row() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/tools.toml");
+    let cat = std::fs::read_to_string(&path).unwrap();
+    let id = cat.find("\nid = \"lpk\"\n").expect("the lpk row");
+    let start = cat[..id].rfind("[[tool]]").unwrap();
+    let rest = &cat[start..];
+    let first_setting = rest.find("[[tool.setting]]").unwrap();
+    let after = &rest[first_setting + "[[tool.setting]]".len()..];
+    let end = after.find("[[tool.setting]]").unwrap_or(after.len());
+    format!(
+        "{}[[tool.setting]]{}",
+        &rest[..first_setting],
+        &after[..end]
+    )
+}
+
+/// E3-4: `lpk-bench run --tools lpk` on a private corpus (the runner's `{list}` template,
+/// D-20 (6)) succeeds with this repository's binary: the committed row's `create_list`
+/// hands `lpk a --list` the runner's list file, and the extraction verifies.
+#[test]
+fn a_private_corpus_runs_with_lpk_through_its_list_template() {
+    let lpk = lpk_binary();
+    let e = env_with(&[]);
+    let row = lpk_row();
+    assert!(row.contains("create_list"), "{row}");
+    std::fs::write(&e.catalogue, format!("{CATALOGUE}\n{row}")).unwrap();
+    std::fs::write(
+        &e.local,
+        format!("[[tool]]\nid = \"lpk\"\npath = '{}'\n", lpk.display()),
+    )
+    .unwrap();
+    let root = e.tmp.path().join("private-root");
+    let corpus = e.tmp.path().join("private-corpus");
+    let files: Vec<(&str, Vec<u8>)> = vec![
+        ("one/a.txt", b"private a".to_vec()),
+        ("one/two/b.bin", bytes(4, 3000)),
+        ("c.txt", b"c".to_vec()),
+    ];
+    write_corpus(&corpus, &[("mixed", files.as_slice())], Some(&root));
+    let out = command(&e)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--allow-dirty-build")
+        .args(["--tools", "lpk", "--repeats", "1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let dir = results_dir(&e);
+    let r = result(&dir, "lpk-fast-mixed.json");
+    assert_eq!(r["private"], true, "{r}");
+    assert!(r.get("skipped").is_none(), "{r}");
+    assert_eq!(r["verification"]["verified"], true, "{r}");
+    assert_eq!(r["verification"]["files_ok"], 3, "{r}");
+    assert!(r["median"]["archive_bytes"].as_u64().unwrap() > 0, "{r}");
+    assert_tmp_clean(&e);
+}

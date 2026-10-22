@@ -1566,6 +1566,7 @@ dependencies = [
  "blake3",
  "fastcdc",
  "flate2",
+ "globset",
  "lepton_jpeg",
  "libc",
  "liblzma",
