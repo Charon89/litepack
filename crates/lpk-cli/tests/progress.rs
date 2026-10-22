@@ -285,3 +285,63 @@ fn a_cancelled_command_exits_2_with_cancelled_and_leaves_no_partial_output() {
         )
     );
 }
+
+/// On a terminal (a pty, through `script`) the progress line is written and the command
+/// completes: the line's writes come from the engine's threads, so `main` must not hold the
+/// stderr lock across the run (the deadlock PR #92's Linux job showed: the walk's line, then
+/// nothing until the job timeout).
+#[cfg(unix)]
+#[test]
+fn a_terminal_receives_the_progress_line_and_the_command_completes() {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: `script` is not installed");
+        return;
+    }
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("tty.lpk");
+    let cmd = format!(
+        "'{}' a '{}' '{}'",
+        env!("CARGO_BIN_EXE_lpk"),
+        arch.display(),
+        src.path().display()
+    );
+    let mut child = Command::new("script")
+        .args(["-qec", &cmd, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take());
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut all = Vec::new();
+        stdout.read_to_end(&mut all).unwrap();
+        all
+    });
+    // A deadlock would otherwise hold the job until its timeout: bound the wait.
+    let start = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if start.elapsed() > Duration::from_secs(120) {
+            let _ = child.kill();
+            panic!("lpk did not complete under the pty within 120 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let out = text(&reader.join().unwrap());
+    assert_eq!(status.code(), Some(0), "{out}");
+    assert!(out.contains('\r'), "no carriage return: {out}");
+    assert!(
+        out.contains(" files, ") && out.contains(" blocks"),
+        "no progress line: {out}"
+    );
+    assert!(arch.is_file());
+}

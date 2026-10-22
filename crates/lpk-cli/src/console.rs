@@ -6,7 +6,10 @@
 //! a carriage return and padded over the previous line's width: no VT escape sequence and no
 //! colour in Phase 1, so it needs nothing of the console's mode. The engine limits the rate
 //! ([`lpk_core::progress::MIN_INTERVAL`]); the console prints every event it receives and
-//! clears the line before any other output.
+//! clears the line before any other output. Each write locks stderr for its own duration,
+//! from whichever engine thread reports: nothing may hold `stderr().lock()` across a
+//! command (`main` passes the unlocked handles), or the first event from another thread
+//! blocks on the lock for good.
 //!
 //! Ctrl-C: `main` installs a handler (the `ctrlc` crate) for the commands that poll the
 //! token (`a`, `append`, `x`, `export`); it cancels the token, the engine stops at its next

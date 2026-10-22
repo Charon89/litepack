@@ -5,10 +5,14 @@
 #![forbid(unsafe_code)]
 
 fn main() {
+    // The handles are passed unlocked: the progress line (`lpk_cli::console`) writes to
+    // stderr from the engine's threads, and a lock held here for the whole run would block
+    // their first event for good (found by the pseudo-terminal test on Linux). Each write
+    // locks for its own duration.
     let code = lpk_cli::run_with_cancel(
         std::env::args_os(),
-        &mut std::io::stdout().lock(),
-        &mut std::io::stderr().lock(),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
         |token| {
             // A handler that cannot be installed leaves Ctrl-C to the default.
             let _ = ctrlc::set_handler(move || {
