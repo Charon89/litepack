@@ -1,0 +1,64 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "4f4925bd30d1c0121d441b478db14339c91a0d572babc7ebf5265e6bb9f0b45a",
+  "classes": [
+    "backup-versions-large"
+  ],
+  "combinations": [
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}

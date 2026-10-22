@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-22, about 03:49 UTC. No measurement is running. **E0-2 is done (D-91): the versioned class re-pinned and measured — G2 114.4% of 7-Zip Ultra, and the delta route's own estimate 99.8%, so the gate's bound is out of reach by arithmetic on this set (an owner item below). E2-23 and E2-24 are in flight (`task/e2-23`, `task/e2-24`); the E2-9 and LIC-2 design notes are merged (reviewed).** E3 is complete but for E3-9 (D-90); the owner's rulings are D-89.
+Last updated: 2026-10-22, about 05:38 UTC. No measurement is running. **E2-23 is done (D-92, PR #96): the names test and the runner's own tar; the tar-based rows on the versioned class are committed.** E0-2 is done (D-91; the G2 arithmetic is an owner item below); E2-24 and the next tasks follow PLAN's D-89 order; the E2-9 and LIC-2 design notes are merged. E3 is complete but for E3-9 (D-90); the owner's rulings are D-89.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -47,7 +47,7 @@ E3-8 is done (D-75, PR #77).
    same-run G3 script (`target/acceptance/e2-22-lpk-full.sh`, `e2-22-g3.sh`), pooled with the committed
    incumbents' baseline. A measurement needs the machine idle: no agent builds or tests while it runs.
 4. E3: every task but E3-9 done (D-75, D-77, D-79, D-80, D-84, D-87, D-90). **Next: the D-89 work in PLAN's
-   order** — E2-23 and E2-24 (in flight; briefs in the session's scratchpad, rulings in the PLAN lines), E0-2
+   order** — E2-23 done (D-92), E2-24 (in flight or next; brief in the session's scratchpad), E0-2
    done (D-91: G2 114.4% of 7-Zip Ultra, the delta route's estimate 99.8%; the tar-based rows wait for
    E2-23), E2-9 (design `docs/notes/e2-9-design.md` merged and amended by D-91; its probe is task A), E2-25,
    E2-16 (revision 1.4), E3-9, LIC-2; then E4–E9 as adopted in PLAN. E2-9's deltas pair versions by path and

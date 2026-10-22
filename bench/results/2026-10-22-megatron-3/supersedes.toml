@@ -1,0 +1,45 @@
+# E2-23 (D-74): every combination of this directory replaces the same combination of 2026-10-22-megatron,
+# where the Windows tar crashed on the class's non-ASCII names (the rows there are recorded as failed); these rows
+# come from the runner's own tar stream (measurement.tar.tool = "lpk-bench").
+
+[[supersede]]
+tool = "store"
+setting = "store"
+class = "backup-versions-large"
+from = "2026-10-22-megatron"
+reason = "the system tar crashed on the class's non-ASCII names; re-measured through the runner's own tar (E2-23)"
+
+[[supersede]]
+tool = "zstd"
+setting = "3"
+class = "backup-versions-large"
+from = "2026-10-22-megatron"
+reason = "the system tar crashed on the class's non-ASCII names; re-measured through the runner's own tar (E2-23)"
+
+[[supersede]]
+tool = "zstd"
+setting = "19"
+class = "backup-versions-large"
+from = "2026-10-22-megatron"
+reason = "the system tar crashed on the class's non-ASCII names; re-measured through the runner's own tar (E2-23)"
+
+[[supersede]]
+tool = "zstd"
+setting = "ultra22-long27"
+class = "backup-versions-large"
+from = "2026-10-22-megatron"
+reason = "the system tar crashed on the class's non-ASCII names; re-measured through the runner's own tar (E2-23)"
+
+[[supersede]]
+tool = "xz"
+setting = "6"
+class = "backup-versions-large"
+from = "2026-10-22-megatron"
+reason = "the system tar crashed on the class's non-ASCII names; re-measured through the runner's own tar (E2-23)"
+
+[[supersede]]
+tool = "xz"
+setting = "9"
+class = "backup-versions-large"
+from = "2026-10-22-megatron"
+reason = "the system tar crashed on the class's non-ASCII names; re-measured through the runner's own tar (E2-23)"

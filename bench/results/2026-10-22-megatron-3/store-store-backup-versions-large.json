@@ -1,0 +1,158 @@
+{
+  "class": "backup-versions-large",
+  "corpus": {
+    "class_bytes": 1658978348,
+    "class_files": 130215,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "tar": {
+      "format": "pax",
+      "in_published_time": true,
+      "note": "known rejection on windows (bsdtar 3.8.9)",
+      "tool": "lpk-bench"
+    },
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 1766223360,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 24.453125,
+      "peak_job_memory_bytes": 91885568,
+      "peak_memory_bytes": 81219584,
+      "peak_process_commit_bytes": 91885568,
+      "timed_out": false,
+      "user_cpu_seconds": 0.625,
+      "wall_seconds": 26.018886
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 21.640625,
+      "peak_job_memory_bytes": 22523904,
+      "peak_memory_bytes": 24096768,
+      "peak_process_commit_bytes": 22523904,
+      "timed_out": false,
+      "user_cpu_seconds": 1.859375,
+      "wall_seconds": 28.6632027
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 1766223360,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 24.453125,
+        "peak_job_memory_bytes": 92008448,
+        "peak_memory_bytes": 81252352,
+        "peak_process_commit_bytes": 92008448,
+        "timed_out": false,
+        "user_cpu_seconds": 0.59375,
+        "wall_seconds": 26.018886
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 21.703125,
+        "peak_job_memory_bytes": 22523904,
+        "peak_memory_bytes": 24010752,
+        "peak_process_commit_bytes": 22523904,
+        "timed_out": false,
+        "user_cpu_seconds": 1.859375,
+        "wall_seconds": 28.820007
+      }
+    },
+    {
+      "archive_bytes": 1766223360,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 25.5,
+        "peak_job_memory_bytes": 91742208,
+        "peak_memory_bytes": 81027072,
+        "peak_process_commit_bytes": 91742208,
+        "timed_out": false,
+        "user_cpu_seconds": 0.703125,
+        "wall_seconds": 26.9513051
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 21.015625,
+        "peak_job_memory_bytes": 22536192,
+        "peak_memory_bytes": 24096768,
+        "peak_process_commit_bytes": 22536192,
+        "timed_out": false,
+        "user_cpu_seconds": 2.0,
+        "wall_seconds": 28.6632027
+      }
+    },
+    {
+      "archive_bytes": 1766223360,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 24.203125,
+        "peak_job_memory_bytes": 91885568,
+        "peak_memory_bytes": 81219584,
+        "peak_process_commit_bytes": 91885568,
+        "timed_out": false,
+        "user_cpu_seconds": 0.625,
+        "wall_seconds": 25.5700996
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 21.640625,
+        "peak_job_memory_bytes": 22462464,
+        "peak_memory_bytes": 24100864,
+        "peak_process_commit_bytes": 22462464,
+        "timed_out": false,
+        "user_cpu_seconds": 1.703125,
+        "wall_seconds": 28.468374
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "tar",
+      "-cf",
+      "../../tmp/run44712/c1/a.tar",
+      "-C",
+      "backup-versions-large",
+      "."
+    ],
+    "extract_args": [
+      "tar",
+      "-xf",
+      "a.tar",
+      "-C",
+      "x"
+    ],
+    "id": "store"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "store",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "lpk-bench 0.0.1"
+  },
+  "verification": {
+    "files_checked": 130215,
+    "files_ok": 130215,
+    "verified": true
+  }
+}
