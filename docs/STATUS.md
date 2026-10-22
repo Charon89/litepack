@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-21, about 22:30 UTC. No measurement is running. **E2-22 is done: the Phase 1 verdict input is D-85** (`bench/reports/phase1-2026-10-21-full-gates.md`): G1 PASS; G2, G3, G4 FAIL. The owner's decisions on the FAILs are the first item below.
+Last updated: 2026-10-22, about 01:45 UTC. No measurement is running. **E3-3 is done (D-87, PR #92), the three stale corpus pins are re-pinned (D-88, PR #93), and the owner answered the gate and product questions on 2026-10-22: D-89.** E2-22's verdict input is D-85 (`bench/reports/phase1-2026-10-21-full-gates.md`): G1 PASS; G2, G3, G4 FAIL, each now with its work ruled (D-89). E3-4 is next; the D-89 work is planned in PLAN after it.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -42,25 +42,31 @@ E3-8 is done (D-75, PR #77).
    `png-filter` would be revision 1.4 if the owner accepts E2-16's margin (below). E2-17 closed (D-76).
 3. E2-22 is done (D-85). The `lpk` rows (`bench/results/2026-10-20-megatron-2`) and the single-run G3 row
    (`2026-10-21-megatron`) are committed with the report. The report's gate table comes from `lpk-bench report`'s
-   Phase 1 form (PR #89: measured `lpk` rows; G3 names each row's run). What follows depends on the owner's
-   decisions above; a re-measurement after any engine change is one detached run of `lpk` on `full` plus the
+   Phase 1 form (PR #89: measured `lpk` rows; G3 names each row's run). The owner's rulings are D-89 (G2: E2-9 and the ordering; G3 and G4: engine
+   rounds, then the class re-measured); a re-measurement after any engine change is one detached run of `lpk` on `full` plus the
    same-run G3 script (`target/acceptance/e2-22-lpk-full.sh`, `e2-22-g3.sh`), pooled with the committed
    incumbents' baseline. A measurement needs the machine idle: no agent builds or tests while it runs.
-4. E3: E3-1, E3-2, E3-5, E3-6, E3-7 and E3-8 done (D-75, D-77, D-79, D-80, D-84). Next E3-3 (progress,
-   cancellation) and E3-4 (several inputs, selective extraction); E3-9 re-runs the harness after the owner's
-   gate decisions. E2-9 (deltas) waits for two things from the owner (below); D-59 and G2 add reasons to
-   want it. (The lines below about E3-6 are history.)
-   PR #87; its review asked for changes (ruling R39: merge `main` and route credentials through E3-5's `resolve`
-   with the prompt rules; open the archive before creating the output and refuse the archive itself as the
-   output; a Zip64 margin for entries that grow; bit-exact checks of the peeled vectors and a 70,000-entry test;
-   three small points): all done, the tests corrected after CI and the CLI reference taken from CI's generated
-   text; the scoped re-review approved (two LOWs parked: the `--force --memory 1000` test hits the envelope
-   refusal, not the plan's, so add the 20000-byte case on `zstd-basic.lpk`; the help's "a panic leaves the
-   output in place" could say it may be a readable ZIP missing entries). Merge when CI is green on both runners
-   (the last push fixed the 7-Zip skip to read stderr), then tick E3-6 with a D-entry.
-   E3-3 (progress, cancellation) and E3-4 (several inputs, selective extraction) can start now that PR #86 is merged; E3-9 re-runs the harness after E2-22.
-   E2-9 (deltas) waits for two things from the owner (below); D-59 adds a third reason to want it: a changed
-   chunk in an appended generation is coded without its previous version in the window.
+4. E3: E3-1, E3-2, E3-3, E3-5, E3-6, E3-7 and E3-8 done (D-75, D-77, D-79, D-80, D-84, D-87). **Next E3-4**
+   (several inputs, a list file, selective extraction); its rulings, so a new machine can brief it: `lpk a`
+   takes several inputs, each entered under its own name (a directory `D:\x\photos` gives `photos/...`, a
+   file its name; two inputs with the same entry name, or one a prefix path of another, refused before any
+   output, exit 1), the single-directory form unchanged (so every archive and pin stays byte-identical);
+   `--list <file>` one path per line (UTF-8, CRLF tolerated, `#` lines ignored, relative to the current
+   directory), and the catalogue row gains the runner's private-corpus template (D-20 (6)); `--exclude <glob>`
+   repeatable over entry paths with `/`, a directory match prunes its subtree (an allow-listed glob crate);
+   `lpk x|l|export <archive> ... [<pattern>...]` globs over entry paths (a directory pattern selects its
+   subtree), fed to the engine's plan so only the blocks the selection needs are decoded (asserted in a test),
+   a pattern matching nothing refused (exit 2). E3-9 re-runs the harness after the G3 and G4 rounds (D-89).
+   E2-9 (deltas) is unblocked by D-89 (1): E0-1's re-pin first, then the delta stage with versions paired by
+   path and name (no similarity sketch), then the class re-measured.
+   Housekeeping found on the way: the ignored corpus tests (`fast_corpus`, `store_path_corpus`,
+   `deflate_pinned_corpus`) were stale on `main` for decided reasons and are re-pinned (D-88); run them by
+   hand with an absolute `LPK_CORPUS` (a test's working directory is its crate's). E3-6's export tests
+   compared mtimes with the live tree and flaked on NTFS (a directory's last-write time moves after the
+   walk); they compare with the archive's entries now (PR #92, `a424845`). E3-3's progress line deadlocked
+   when stderr was a terminal (`main` held the stderr lock across the run while the engine's threads wrote
+   the line; found by the Linux pseudo-terminal test): `main` passes the unlocked handles now, and a pty test
+   pins it.
 5. The method: implementer in a worktree from a brief with exact values → read-only review → fix rounds with
    recorded rulings → a `D-NN` → PLAN tick with evidence → PR → CI green → `main` fast-forwarded (merge `main`
    into the branch first; squash only when a branch commit message carries figures). Learned on 2026-10-13: the
@@ -74,45 +80,20 @@ E3-8 is done (D-75, PR #77).
    protection. Read-only agents (designs, static reviews told not to run cargo) are fine; GitHub CI builds and
    tests pushed branches.
 
-**Open for the owner (three asked on 2026-10-04, unanswered; two for E2-16, one for revision 1.3, one for E2-17 and the E4–E9 decisions added on 2026-10-17; the patched `preflate-rs` was answered on 2026-10-16, D-66):**
-- **The Phase 1 gates (D-85, the verdict input).** G1 holds (photographs and documents: 84.5% of the best
-  incumbent, 81.9% of 7-Zip Ultra). G2 fails: on the versioned set `lpk/balanced` is 137.6% of 7-Zip Ultra,
-  because 7-Zip's `-mqs` sorts a file's versions next to each other inside its window (D-43's premise does not
-  hold against it) and `lpk` codes a changed file whole (E2-9, the delta stage, is not built; E2-8's ordering
-  keeps versions 500 MB apart). G3 fails at 74.2% of the store control in one run (E2-18 had met it at 88.3%
-  against a slower control; `lpk/fast` is the same in every run): the store path needs about 8% more throughput.
-  G4 fails on the `photo-doc` mix only (`photo-jpeg` extracts at 136 MB/s against 7-Zip's 1427 MB/s copy of a
-  stored JPEG: Lepton decoding buys G1's 22%) and passes on `developer` and `video-heavy`. The gates are yours:
-  for each FAIL, say whether the work is done (G2: E2-9 deltas plus an ordering that puts a file's versions
-  together, then re-measure; G3: a store-path round on the cut and the hashing, or a gate re-stated against a
-  control measured in the same run with repeats; G4: a Fast tier without the JPEG peel, a faster Lepton decode,
-  or the gate kept as a known trade), the gate re-stated, or the threshold changed. Nothing in E3 to E9 waits
-  on this; E2-9 does.
-- **The versioned set (E0-1, G2).** On node v22/v23/v24 the Phase 0 estimate is 100.3% of 7-Zip Ultra
-  (`phase1-2026-10-04-full-versioned.md`): releases six months apart share little at chunk level. Recommended:
-  consecutive patch releases of one line (`v22.0.0`, `v22.1.0`, `v22.2.0`), a backup-like series, each still above
-  the 256 MiB window. "patch releases" → re-pin (sources, lock, CORPUS row, D-NN), rebuild `full` twice, re-run the
-  baseline on the class and `probe dedup` (about three hours of machine time), report; "keep" → tick E0-1 as is.
-- **Nine file names.** The Windows `tar` crashes on node's emoji and CJK test-file names, so the `store` control and
-  the tar-stream tools (zstd, xz) have no rows on the class. Recommended: exclude names outside ASCII from this
-  class's export (nine of 127153 files), re-run the three tools.
-- **Revision 1.3's entropy stage** (`docs/notes/e2-15-revision-1.3-design.md` sections 1 and 7): ruled for now as
-  `[lzma, bwt]` (BWT then the existing LZMA; ruling R21), because v1's frozen registry has no ID for a new coder
-  primitive. The alternative folds the probe's MTF + zero-run + arithmetic coder into `bwt` itself for about 3.2% more
-  on the text classes, but freezes that untuned coder in v1 for good. Say so before revision 1.3's text is final if
-  the fold is wanted.
-- **E2-17's corpus** (`docs/notes/e2-17-design.md` section 7): both gates closed on `small` (D-76, a negative result; E2-17 ticked). Testing the transforms on real mail, notebooks, data URIs or Windows UTF-16 text would need a new corpus class, a corpus spec change and the owner's to approve; nothing waits on it.
-- **E2-16's gate margin** (`docs/notes/e2-16-design.md` section 5): a new gate threshold, so the owner's. The probe ran on 2026-10-18 (`bench/results/2026-10-18-megatron-2`): undoing the PNG row filters saves 1,814,618 bytes per stream on `photo-raw-png`, 3.03% of that class's `lpk/balanced` archive in E2-10's row (1.59% of the per-stream baseline). Recommended margin 1%: the gate would open, and `png-filter` would land in a revision 1.4 (1.3 carries `bwt` alone) with the PLAN's with/without rows. Say yes, or name another margin.
-- **Counsel on US 9,798,731** (`docs/LICENSING.md`, sketch-based similarity clustering with deltas): gates E2-9
-  (deltas) and any return of the similarity sketch (E2-8, D-55).
-- **Decisions for E4 to E9** (`docs/notes/phase1-e3-e9-breakdown.md` section 2; none blocks E2 or E3). The one
-  with the longest lead time is E7-1: the code-signing route (Azure Artifact Signing — public trust for
-  organisations or for individuals in the US and Canada, eligibility to be checked — or an OV certificate, or
-  SignPath Foundation for open source), the publisher's legal name and the product name; the certificate subject
-  becomes the MSIX publisher, and identity validation can take weeks. Next: E4's parser stack (pure Rust for ZIP,
-  7z and tar; RAR and ISO only through libarchive in an AppContainer worker, or not in Phase 1) and E5's minimum
-  Windows (Windows 10 22H2 and 11, or 11 only). E3's five decisions are ruled for adoption (PLAN, the E3 header)
-  and can be overturned.
+**Open for the owner (the 2026-10-22 answers are D-89; what remains):**
+- **The publisher's legal name and the product name** for the code-signing certificate (E7-1: a certificate
+  in the publisher's name, Azure Artifact Signing or an OV certificate, since a later version may be closed,
+  D-89 (6)). Identity validation takes weeks; the earlier the better.
+- **US 9,798,731** (`docs/LICENSING.md`): E2-9's deltas pair a file's versions by path and name, with no
+  similarity sketch, so as far as this session can read it the claimed method is not practised; counsel's
+  reading is still the owner's to get if sketch-based clustering (E2-8, D-55) is ever wanted back.
+- **Idle time for the measurements:** E0-1's rebuild and re-measurement (about three hours), E3-9, and every
+  re-measurement after an engine change need the machine to itself; say when it can sit idle, or they run
+  detached overnight as before, announced in this file.
+- Optional, nothing waits: E2-17's extra corpus class (D-76); the `bsc`/`hdiffz` probe baselines; the antivirus
+  setting during measurements; the corpus gaps in the P0-2 notes; WinZip and PowerArchiver (unmeasured, the D-07
+  fallback wording stands); the method document's "xEnc3" (marked unusable in `docs/LICENSING.md`); the IJG
+  licence option (D-18); the bundled xz fast paths. Revision 1.3's coder fold is closed by 1.3 being final.
 
 ## Summary
 - **P0-1, P0-2, P0-3, P0-4, P0-6 done** and on `main` (PRs #2, #3, #4, #5 merged; every box ticked with evidence in PLAN; decisions D-19 to D-26).
@@ -123,7 +104,7 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e3-6` (PR #87): E3-6, re-review approved; merge when CI is green.
+- `task/e3-4` (E3-4) once it is dispatched; nothing else of this session's (PRs #92 and #93 merged).
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
 ## How to resume
