@@ -5,14 +5,18 @@
 //! lpk-bench run --validate <results-dir>
 //! lpk-bench run --tools <list|all> --profile <small|full> [--corpus DIR] [--classes a,b]
 //!               [--repeats N] [--threads N] [--timeout-s N] [--results DIR] [--tmp DIR]
-//!               [--allow-dirty-build] [--keep-failed on|off]   (the measuring loop, [`exec`])
+//!               [--allow-dirty-build] [--keep-failed on|off] [--tar auto|system|lpk-bench]
+//!               (the measuring loop, [`exec`])
 //! lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]   ([`compare`])
+//! lpk-bench tar -cf A -C DIR . | -cf A -T LIST | -xf A -C DIR   (hidden; [`harness_tar`])
 //! ```
 //!
 //! * [`catalogue`]: `bench/tools.toml` and the untracked `bench/tools.local.toml`.
 //! * [`discover`]: finding each tool and reading its version.
 //! * [`result`]: the result-file types; [`validate`]: checking a results directory against
 //!   `bench/results/schema.json`; [`host`]: `host.json` contents and results-directory names.
+//! * [`harness_tar`]: the runner's own tar stream for a class whose names the system tar
+//!   rejects (E2-23).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -24,6 +28,7 @@ pub mod catalogue;
 pub mod compare;
 pub mod discover;
 pub mod exec;
+pub mod harness_tar;
 pub mod host;
 pub mod result;
 pub mod validate;
@@ -96,6 +101,18 @@ pub struct RunArgs {
         overrides_with = "keep_failed"
     )]
     pub keep_failed: String,
+    /// Which tar writes the `store` control and the stream of the tar-stream tools: `auto`
+    /// (per class: the system tar, unless a name of the class is one it is known to reject or
+    /// a dry run rejects it, then the runner's own PAX writer), `system` (always the system
+    /// tar) or `lpk-bench` (always the runner's own writer). The row records which
+    /// (measurement.tar.tool)
+    #[arg(
+        long,
+        value_name = "auto|system|lpk-bench",
+        default_value = "auto",
+        value_parser = ["auto", "system", "lpk-bench"]
+    )]
+    pub tar: String,
     /// Compare two result directories of the same corpus and exit
     #[arg(long, num_args = 2, value_names = ["DIR_A", "DIR_B"])]
     pub compare: Vec<PathBuf>,
@@ -179,6 +196,24 @@ fn validate_cmd(dir: &Path) -> Result<ExitCode> {
     } else {
         eprintln!("{} problem(s) in {}", report.problems.len(), dir.display());
         Ok(ExitCode::FAILURE)
+    }
+}
+
+/// `lpk-bench tar ...`: the runner's own tar as a child process (hidden; [`harness_tar`]).
+#[derive(Debug, Args)]
+pub struct TarArgs {
+    /// `-cf ARCHIVE -C DIR .`, `-cf ARCHIVE -T LIST` or `-xf ARCHIVE -C DIR`
+    #[arg(allow_hyphen_values = true, num_args = 1.., trailing_var_arg = true)]
+    pub args: Vec<String>,
+}
+
+pub fn tar(args: TarArgs) -> ExitCode {
+    match harness_tar::command(&args.args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
     }
 }
 

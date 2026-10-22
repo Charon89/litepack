@@ -1044,14 +1044,217 @@ fn non_ascii_private_names_round_trip_through_the_list_path_and_the_system_tar_r
         let r = result(&dir, &format!("fake-list-ok-{class}.json"));
         assert_eq!(r["verification"]["verified"], true, "{class}: {r}");
         let s = result(&dir, &format!("store-store-{class}.json"));
+        assert_eq!(s["verification"]["verified"], true, "{class}: {s}");
         if cfg!(windows) && class == "unicode" {
-            assert!(s["skipped"].as_str().unwrap().contains("non-ASCII"), "{s}");
-            let z = result(&dir, "fake-stream-ok-unicode.json");
-            assert!(z["skipped"].as_str().unwrap().contains("non-ASCII"), "{z}");
+            // The Windows bsdtar cannot read the names from the list: the runner's own tar
+            // wrote the control (E2-23), and the row says so.
+            assert_eq!(s["measurement"]["tar"]["tool"], "lpk-bench", "{s}");
+            assert_eq!(s["setting"]["compress_args"][0], "tar", "{s}");
         } else {
-            assert_eq!(s["verification"]["verified"], true, "{class}: {s}");
+            assert!(s["measurement"].get("tar").is_none(), "{s}");
+        }
+        // Tar-stream tools never run on a private corpus.
+        let z = result(&dir, &format!("fake-stream-ok-{class}.json"));
+        assert!(z["skipped"].as_str().unwrap().contains("private"), "{z}");
+    }
+    assert_tmp_clean(&e);
+}
+
+/// A public corpus with a class whose names include emoji, CJK and Cyrillic (the kind the
+/// Windows bsdtar crashes on) and an ASCII class.
+fn write_public_non_ascii(e: &Env) -> PathBuf {
+    let corpus = e.tmp.path().join("public-corpus-u");
+    let uni: Vec<(&str, Vec<u8>)> = vec![
+        ("unicode/😀 emoji/snapshot 🚀.txt", b"rocket".to_vec()),
+        ("unicode/日本語/ファイル.bin", bytes(5, 3000)),
+        ("unicode/привет/мир.txt", b"cyrillic".to_vec()),
+        ("unicode/plain.txt", b"plain".to_vec()),
+    ];
+    let plain: Vec<(&str, Vec<u8>)> = vec![
+        ("ascii/a b.txt", b"plain".to_vec()),
+        ("ascii/sub/c.bin", bytes(2, 500)),
+    ];
+    write_corpus(
+        &corpus,
+        &[("unicode", uni.as_slice()), ("ascii", plain.as_slice())],
+        None,
+    );
+    corpus
+}
+
+/// E2-23: with a stand-in system tar that rejects non-ASCII names (the fake archiver, exit 139,
+/// the Windows bsdtar's crash simulated on every OS), `store` and the tar-stream tool get rows
+/// on the class through the runner's own tar, the provenance is in the row, nothing changes
+/// on the ASCII class, and `run --validate` accepts the directory. `--tar system` shows the
+/// rejection is real; `--tar lpk-bench` puts the provenance on every class.
+#[test]
+fn a_class_the_system_tar_rejects_gets_its_rows_through_the_runners_own_tar() {
+    let e = env_with(&["fake-stream", "store"]);
+    let corpus = write_public_non_ascii(&e);
+    let out = command(&e)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--allow-dirty-build")
+        .args(["--tools", "store,fake-stream", "--repeats", "2"])
+        .output()
+        .unwrap();
+    // fake-stream/exit1 fails on purpose; everything else must be consistent.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("0 validation problem(s)"), "{}", text(&out));
+    assert!(
+        stdout.contains("unicode: the tar stream of `store` and of the tar-stream tools is written by lpk-bench"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("dry run") || cfg!(windows), "{stdout}");
+    assert!(!stdout.contains("ascii: the tar stream"), "{stdout}");
+    let dir = results_dir(&e);
+    for name in ["store-store-unicode.json", "fake-stream-ok-unicode.json"] {
+        let r = result(&dir, name);
+        assert_eq!(r["verification"]["verified"], true, "{name}: {r}");
+        assert_eq!(r["measurement"]["tar"]["tool"], "lpk-bench", "{name}: {r}");
+        assert_eq!(r["measurement"]["tar"]["format"], "pax", "{name}: {r}");
+        assert_eq!(r["repeats"].as_array().unwrap().len(), 2, "{name}");
+        assert!(
+            r["median"]["compress"]["wall_seconds"].as_f64().unwrap() > 0.0,
+            "{name}: {r}"
+        );
+    }
+    let s = result(&dir, "store-store-unicode.json");
+    assert_eq!(s["setting"]["compress_args"][0], "tar", "{s}");
+    assert_eq!(s["setting"]["extract_args"][0], "tar", "{s}");
+    assert_eq!(s["tool"]["version"], "bsdtar 0.0", "{s}");
+    let z = result(&dir, "fake-stream-ok-unicode.json");
+    assert!(z["median"]["compress"]["tar_step"].is_object(), "{z}");
+    // The ASCII class: the system tar as before, no provenance on `store`.
+    let s = result(&dir, "store-store-ascii.json");
+    assert_eq!(s["verification"]["verified"], true, "{s}");
+    assert!(s["measurement"].get("tar").is_none(), "{s}");
+    assert_eq!(s["setting"]["compress_args"][0], "-cf", "{s}");
+    let z = result(&dir, "fake-stream-ok-ascii.json");
+    assert_eq!(z["verification"]["verified"], true, "{z}");
+    assert_eq!(z["measurement"]["tar"]["tool"], "bsdtar 0.0", "{z}");
+    // `run --validate` accepts the directory.
+    let v = Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
+        .args(["run", "--validate"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(v.status.success(), "{}", text(&v));
+    assert_tmp_clean(&e);
+
+    // `--tar system`: the stand-in's rejection fails the rows as the Windows tar did.
+    let out = command(&e)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--allow-dirty-build")
+        .args([
+            "--tools",
+            "store,fake-stream",
+            "--repeats",
+            "1",
+            "--tar",
+            "system",
+        ])
+        .args(["--classes", "unicode"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    let dir = results_dir(&e);
+    let s = result(&dir, "store-store-unicode.json");
+    assert!(
+        s["failed"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("exit code 139"),
+        "{s}"
+    );
+    let z = result(&dir, "fake-stream-ok-unicode.json");
+    assert!(
+        z["failed"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("tar step: exit code 139"),
+        "{z}"
+    );
+    assert_tmp_clean(&e);
+
+    // `--tar lpk-bench`: the runner's own tar on every class.
+    let out = command(&e)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--allow-dirty-build")
+        .args([
+            "--tools",
+            "store,fake-stream",
+            "--repeats",
+            "1",
+            "--tar",
+            "lpk-bench",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("0 validation problem(s)"),
+        "{}",
+        text(&out)
+    );
+    let dir = results_dir(&e);
+    for name in [
+        "store-store-unicode.json",
+        "fake-stream-ok-unicode.json",
+        "store-store-ascii.json",
+        "fake-stream-ok-ascii.json",
+    ] {
+        let r = result(&dir, name);
+        assert_eq!(r["verification"]["verified"], true, "{name}: {r}");
+        assert_eq!(r["measurement"]["tar"]["tool"], "lpk-bench", "{name}: {r}");
+    }
+    assert_tmp_clean(&e);
+}
+
+/// E2-23 with the real system tar: on Windows the class with non-ASCII names gets the runner's
+/// own tar (the known rejection, no process run); elsewhere the dry run passes and the system
+/// tar keeps the rows. Either way every row is verified and `run --validate` accepts them.
+#[test]
+fn the_real_system_tar_is_kept_where_it_takes_the_names_and_replaced_where_it_does_not() {
+    let e = env();
+    let corpus = write_public_non_ascii(&e);
+    let out = command(&e)
+        .arg("--corpus")
+        .arg(&corpus)
+        .arg("--allow-dirty-build")
+        .args(["--tools", "store,fake-stream", "--repeats", "1"])
+        .output()
+        .unwrap();
+    // fake-stream/exit1 fails on purpose; everything else must be consistent.
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("0 validation problem(s)"),
+        "{}",
+        text(&out)
+    );
+    let dir = results_dir(&e);
+    let s = result(&dir, "store-store-ascii.json");
+    assert_eq!(s["verification"]["verified"], true, "{s}");
+    assert!(s["measurement"].get("tar").is_none(), "{s}");
+    for name in ["store-store-unicode.json", "fake-stream-ok-unicode.json"] {
+        let r = result(&dir, name);
+        assert_eq!(r["verification"]["verified"], true, "{name}: {r}");
+        let tar = r["measurement"]["tar"]["tool"].as_str().unwrap_or("");
+        if cfg!(windows) {
+            assert_eq!(tar, "lpk-bench", "{name}: {r}");
+        } else {
+            assert!(
+                tar.starts_with("GNU tar") || tar.starts_with("bsdtar"),
+                "{name}: {r}"
+            );
         }
     }
+    let v = Command::new(env!("CARGO_BIN_EXE_lpk-bench"))
+        .args(["run", "--validate"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(v.status.success(), "{}", text(&v));
     assert_tmp_clean(&e);
 }
 

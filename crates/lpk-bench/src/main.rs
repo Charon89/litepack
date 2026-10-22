@@ -35,11 +35,15 @@ enum Command {
     Probe(probe::ProbeArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
     Report(report::ReportArgs),
+    /// The runner's own tar stream as a child process (E2-23; used by `run` itself)
+    #[command(hide = true)]
+    Tar(run::TarArgs),
 }
 
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Run(args) => run::run(args),
+        Command::Tar(args) => run::tar(args),
         Command::Probe(args) => probe::command(&args),
         Command::Corpus(args) => corpus::run(args),
         Command::Report(args) => report::command(&args),
@@ -66,10 +70,13 @@ mod tests {
 
     #[test]
     fn documented_invocations_parse() {
-        let documented: [&[&str]; 3] = [
+        let documented: [&[&str]; 6] = [
             &["corpus", "build", "--profile", "small"],
             &["run", "--tools", "all"],
+            &["run", "--tools", "store", "--tar", "lpk-bench"],
             &["report", "--results", "bench/results/d"],
+            &["tar", "-cf", "a.tar", "-C", "dir", "."],
+            &["tar", "-xf", "a.tar", "-C", "dir"],
         ];
         for args in documented {
             let argv = std::iter::once("lpk-bench").chain(args.iter().copied());

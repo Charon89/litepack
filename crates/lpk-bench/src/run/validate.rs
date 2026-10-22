@@ -827,17 +827,17 @@ fn semantic_checks(
         }
     }
     // Tar-stream tools: the tar must be recorded and the steps must add up in every repeat.
+    // The `store` control may record one too (E2-23: the runner's own writer, `lpk-bench`,
+    // where the system tar rejects a name of the class); other directory tools never.
     let tar_stream = r.tool.mode == Mode::TarStream;
     let has_tar = r.measurement.as_ref().is_some_and(|m| m.tar.is_some());
-    if tar_stream != has_tar {
+    if tar_stream && !has_tar {
         out.push(format!(
-            "{name}: /measurement/tar: {} for a {} tool",
-            if has_tar { "present" } else { "missing" },
-            if tar_stream {
-                "tar-stream"
-            } else {
-                "directory"
-            }
+            "{name}: /measurement/tar: missing for a tar-stream tool"
+        ));
+    } else if !tar_stream && has_tar && r.tool.id != "store" {
+        out.push(format!(
+            "{name}: /measurement/tar: present for a directory tool other than `store`"
         ));
     }
     for (i, s) in repeats.iter().enumerate() {
@@ -886,7 +886,7 @@ fn semantic_checks(
 mod tests {
     use super::*;
     use crate::run::result::samples;
-    use crate::run::result::{render, ToolResult};
+    use crate::run::result::{render, TarInfo, ToolResult};
     use serde_json::json;
     use std::collections::BTreeSet;
 
@@ -1546,6 +1546,23 @@ mod tests {
         assert!(problems(&dir)
             .iter()
             .any(|m| m.contains("/measurement/tar: present")));
+
+        // The `store` control may record the runner's own tar (E2-23), with no steps.
+        let mut store = samples::measured();
+        store.tool.id = "store".into();
+        store.setting.id = "store".into();
+        store.measurement.as_mut().expect("m").tar = Some(TarInfo {
+            tool: "lpk-bench".into(),
+            format: "pax".into(),
+            in_published_time: true,
+        });
+        let dir = write_dir(tmp.path(), &[store]);
+        // (the sample tools.json has no `store` entry; that finding is not the one under test)
+        let p: Vec<String> = problems(&dir)
+            .into_iter()
+            .filter(|m| !m.contains("tools.json"))
+            .collect();
+        assert!(p.is_empty(), "{p:?}");
     }
 
     #[test]
