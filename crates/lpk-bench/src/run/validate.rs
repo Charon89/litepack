@@ -701,6 +701,16 @@ fn validate_one(schemas: &Schemas, dir: &Path) -> Result<Report> {
     Ok(report)
 }
 
+/// A `store` row whose archive the runner's own tar wrote (E2-23): `measurement.tar.tool`
+/// is `lpk-bench`.
+fn own_tar_store(r: &ToolResult) -> bool {
+    r.tool.id == "store"
+        && r.measurement
+            .as_ref()
+            .and_then(|m| m.tar.as_ref())
+            .is_some_and(|t| t.tool == crate::run::harness_tar::HARNESS_TAR)
+}
+
 fn semantic_checks(
     name: &str,
     r: &ToolResult,
@@ -725,6 +735,21 @@ fn semantic_checks(
                     "{name}: /tool/id: `{}` is marked skipped in tools.json but has measurements",
                     r.tool.id
                 ));
+            } else if own_tar_store(r) {
+                // E2-23: the `store` control written by the runner's own tar records the
+                // program that ran (`lpk-bench <version>`), not the system tar of tools.json.
+                if !r
+                    .tool
+                    .version
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with("lpk-bench "))
+                {
+                    out.push(format!(
+                        "{name}: /tool/version: {:?} must be `lpk-bench <version>` for a store \
+                         row whose tar is lpk-bench",
+                        r.tool.version
+                    ));
+                }
             } else if state.version != r.tool.version {
                 out.push(format!(
                     "{name}: /tool/version: {:?} differs from tools.json ({:?})",
@@ -827,18 +852,28 @@ fn semantic_checks(
         }
     }
     // Tar-stream tools: the tar must be recorded and the steps must add up in every repeat.
+    // The `store` control may record one too (E2-23: the runner's own writer, `lpk-bench`,
+    // where the system tar rejects a name of the class); other directory tools never.
     let tar_stream = r.tool.mode == Mode::TarStream;
     let has_tar = r.measurement.as_ref().is_some_and(|m| m.tar.is_some());
-    if tar_stream != has_tar {
+    if tar_stream && !has_tar {
         out.push(format!(
-            "{name}: /measurement/tar: {} for a {} tool",
-            if has_tar { "present" } else { "missing" },
-            if tar_stream {
-                "tar-stream"
-            } else {
-                "directory"
-            }
+            "{name}: /measurement/tar: missing for a tar-stream tool"
         ));
+    } else if !tar_stream && has_tar && r.tool.id != "store" {
+        out.push(format!(
+            "{name}: /measurement/tar: present for a directory tool other than `store`"
+        ));
+    }
+    // The note says why the runner's own tar was chosen: only such a row carries one.
+    if let Some(t) = r.measurement.as_ref().and_then(|m| m.tar.as_ref()) {
+        if t.note.is_some() && t.tool != crate::run::harness_tar::HARNESS_TAR {
+            out.push(format!(
+                "{name}: /measurement/tar/note: present on a system-tar row ({:?}); only a row \
+                 whose tar is `lpk-bench` carries a note",
+                t.tool
+            ));
+        }
     }
     for (i, s) in repeats.iter().enumerate() {
         for (what, m) in [("compress", &s.compress), ("extract", &s.extract)] {
@@ -1015,7 +1050,13 @@ mod tests {
             "measurement",
             &[&m["measurement"], &z["measurement"]],
         );
-        assert_agree(&schema, "tar_info", &[&z["measurement"]["tar"]]);
+        // The note is emitted only on a row the runner's own tar wrote: both shapes.
+        let own = to_value(&samples::own_tar_store());
+        assert_agree(
+            &schema,
+            "tar_info",
+            &[&z["measurement"]["tar"], &own["measurement"]["tar"]],
+        );
         assert_agree(
             &schema,
             "verification",
@@ -1546,6 +1587,35 @@ mod tests {
         assert!(problems(&dir)
             .iter()
             .any(|m| m.contains("/measurement/tar: present")));
+
+        // The `store` control may record the runner's own tar (E2-23), with no steps and
+        // with its note.
+        let dir = write_dir(tmp.path(), &[samples::own_tar_store()]);
+        // (the sample tools.json has no `store` entry; that finding is not the one under test)
+        let p: Vec<String> = problems(&dir)
+            .into_iter()
+            .filter(|m| !m.contains("tools.json"))
+            .collect();
+        assert!(p.is_empty(), "{p:?}");
+
+        // A note on a system-tar row contradicts its meaning: refused.
+        let mut noted = samples::tar_stream();
+        noted
+            .measurement
+            .as_mut()
+            .expect("m")
+            .tar
+            .as_mut()
+            .expect("tar")
+            .note = Some("dry run: tar exited 139".into());
+        let dir = write_dir(tmp.path(), &[noted]);
+        assert!(
+            problems(&dir)
+                .iter()
+                .any(|m| m.contains("/measurement/tar/note: present on a system-tar row")),
+            "{:?}",
+            problems(&dir)
+        );
     }
 
     #[test]

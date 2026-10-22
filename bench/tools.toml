@@ -33,9 +33,16 @@
 #   create_list     optional, directory mode: the create template for a private corpus, where the
 #                   runner gives the tool a list file of relative paths (placeholder `{list}`)
 #                   and runs it in the corpus root. Tools without it are skipped for private
-#                   corpora. The extracted tree is then flat, whatever `layout` says. On Windows
-#                   the tar of `store` cannot read non-ASCII names from a list: such a class is
-#                   skipped for `store` (and for tar-stream tools).
+#                   corpora. The extracted tree is then flat, whatever `layout` says.
+#   The tar of a class (E2-23): `store`'s tar writes the control and the stream of every
+#                   tar-stream tool, unless a name of the class is one the system tar is known
+#                   to reject (on Windows the bsdtar crashes on a name outside the ANSI code page
+#                   and rewrites one inside it: every non-ASCII name) or a dry run over the
+#                   class's non-ASCII names fails; then the runner's own PAX writer (`lpk-bench
+#                   tar`, run as a child process and measured the same way) takes the same
+#                   argument shapes. The row records which in `measurement.tar.tool`
+#                   (`lpk-bench`, or the system tar's version). `run --tar system|lpk-bench`
+#                   overrides the choice.
 #   threads         thread-count template; `{n}` is the number; expands to one or more arguments
 #   ratio_depends_on_threads
 #                   true when the thread count changes the archive size, not only the speed.

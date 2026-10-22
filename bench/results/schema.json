@@ -144,13 +144,14 @@
     },
     "tar_info": {
       "type": "object",
-      "description": "The tar that made the stream for a tar-stream tool.",
+      "description": "The tar that made the stream for a tar-stream tool, or the store control's archive when the runner wrote it itself (E2-23).",
       "additionalProperties": false,
       "required": ["tool", "format", "in_published_time"],
       "properties": {
-        "tool": { "$ref": "#/$defs/text", "description": "Flavour and version of the tar executable, for example bsdtar 3.7.7." },
+        "tool": { "$ref": "#/$defs/text", "description": "Flavour and version of the tar executable, for example bsdtar 3.7.7; lpk-bench when the runner's own PAX writer made the stream (E2-23)." },
         "format": { "$ref": "#/$defs/text", "description": "Tar format written (for example pax or ustar)." },
-        "in_published_time": { "const": true, "description": "Always true: the published time is the tar step plus the compressor step; each is also recorded separately." }
+        "in_published_time": { "const": true, "description": "Always true: the published time is the tar step plus the compressor step; each is also recorded separately." },
+        "note": { "$ref": "#/$defs/text", "description": "Why the runner's own tar was chosen (E2-23): known rejection on <os> (<tar>), dry run: tar exited <code>, or --tar lpk-bench. Absent on a system-tar row." }
       }
     },
     "measurement": {
@@ -163,7 +164,7 @@
         "peak_memory_kind": { "enum": ["peak-working-set", "max-rss"], "description": "peak-working-set: Windows peak working set of the tool's main process; max-rss: Linux ru_maxrss. Unit of peak_memory_bytes: bytes." },
         "every_repeat_verified": { "const": true, "description": "Always true: every repeat was extracted and verified, not only one." },
         "env_stripped": { "type": "array", "items": { "$ref": "#/$defs/id_upper" }, "description": "Names (never values) of the tool-configuration environment variables removed from the child's environment before every run." },
-        "tar": { "$ref": "#/$defs/tar_info", "description": "Present for tar-stream tools." }
+        "tar": { "$ref": "#/$defs/tar_info", "description": "Present for tar-stream tools, and for the store control when the runner's own tar wrote its archive (tool = lpk-bench, E2-23)." }
       }
     },
     "result": {

@@ -5,7 +5,13 @@
 //! lpk-fake-archiver create  [--mode=M] <archive> <input-dir | @list-file>
 //! lpk-fake-archiver extract [--mode=M] [--nested] <archive> <outdir>
 //! lpk-fake-archiver stream  compress|decompress [--mode=M]     (stdin to stdout)
+//! lpk-fake-archiver --version | -cf <archive> -C <dir> . | -cf <archive> -T <list> |
+//!                   -xf <archive> -C <dir>                   (a stand-in system tar)
 //! ```
+//!
+//! The tar stand-in (E2-23's tests) behaves like the Windows bsdtar: it refuses every tree or
+//! list holding a non-ASCII name (exit 139, the crash) and otherwise writes a plain tar with
+//! the `tar` crate; `--version` answers `bsdtar 0.0`, which the catalogue's pattern accepts.
 //!
 //! Modes: `ok` (default); create: `noarchive` (exit 0, nothing written), `empty` (empty archive),
 //! `exit1`, `sleep` (until killed), `orphan` (starts a sleeping child and exits 0), `envcheck` (exit 17 when a tool-configuration variable is set);
@@ -192,7 +198,92 @@ fn stream(direction: &str, mode: &str) {
     }
 }
 
+/// The stand-in system tar: a non-ASCII name anywhere is "rejected" with exit code 139.
+fn fake_tar(args: &[&str]) {
+    fn reject_non_ascii(names: &[String]) {
+        if let Some(n) = names.iter().find(|n| !n.is_ascii()) {
+            eprintln!("fake tar: cannot take the name {n:?} (simulated crash)");
+            exit(139);
+        }
+    }
+    match args {
+        // `LPK_FAKE_TAR_FLAVOUR=gnu` makes it report itself as GNU tar, so the runner's dry
+        // run (not the Windows known-rejection shortcut) decides on every OS.
+        ["--version"] => {
+            if std::env::var("LPK_FAKE_TAR_FLAVOUR").as_deref() == Ok("gnu") {
+                println!("tar (GNU tar) 0.0 (lpk-fake-archiver stand-in)");
+            } else {
+                println!("bsdtar 0.0 (lpk-fake-archiver stand-in)");
+            }
+        }
+        ["-cf", archive, "-C", dir, "."] => {
+            let mut names = Vec::new();
+            walk(Path::new(dir), Path::new(dir), &mut names);
+            reject_non_ascii(&names);
+            let f = fs::File::create(archive).unwrap_or_else(|e| {
+                eprintln!("fake tar: {e}");
+                exit(2)
+            });
+            let mut b = tar::Builder::new(f);
+            if let Err(e) = b.append_dir_all(".", dir).and_then(|()| b.finish()) {
+                eprintln!("fake tar: {e}");
+                exit(2);
+            }
+        }
+        ["-cf", archive, "-T", list] => {
+            let text = fs::read_to_string(list).unwrap_or_else(|e| {
+                eprintln!("fake tar: {e}");
+                exit(2)
+            });
+            let names: Vec<String> = text
+                .lines()
+                .map(|l| l.trim_end_matches('\r').to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            reject_non_ascii(&names);
+            let f = fs::File::create(archive).unwrap_or_else(|e| {
+                eprintln!("fake tar: {e}");
+                exit(2)
+            });
+            let mut b = tar::Builder::new(f);
+            for n in &names {
+                if let Err(e) = b.append_path(n) {
+                    eprintln!("fake tar: {n}: {e}");
+                    exit(2);
+                }
+            }
+            if let Err(e) = b.finish() {
+                eprintln!("fake tar: {e}");
+                exit(2);
+            }
+        }
+        ["-xf", archive, "-C", dir] => {
+            let f = fs::File::open(archive).unwrap_or_else(|e| {
+                eprintln!("fake tar: {e}");
+                exit(2)
+            });
+            if let Err(e) = tar::Archive::new(f).unpack(dir) {
+                eprintln!("fake tar: {e}");
+                exit(2);
+            }
+        }
+        other => {
+            eprintln!("fake tar: usage error: {other:?}");
+            exit(64);
+        }
+    }
+}
+
 fn main() {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw
+        .first()
+        .is_some_and(|a| a == "--version" || a == "-cf" || a == "-xf")
+    {
+        let refs: Vec<&str> = raw.iter().map(String::as_str).collect();
+        fake_tar(&refs);
+        return;
+    }
     let mut mode = "ok".to_string();
     let mut nested = false;
     let mut positional = Vec::new();

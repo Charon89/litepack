@@ -13,6 +13,11 @@
 //!   steps, outside the timed intervals.
 //! * Tar-stream tools run in two sequential steps through a temporary file; the published time is
 //!   the sum of the steps, the published peak memory the larger of the two.
+//! * The tar of a class (the `store` control and the tar step of the tar-stream tools) is the
+//!   system tar, unless a name of the class is one it is known to reject or a dry run rejects
+//!   it: then the runner's own PAX writer, `lpk-bench tar`, run as a child process and measured
+//!   the same way ([`super::harness_tar`], E2-23). `measurement.tar.tool` records which
+//!   (`lpk-bench` or the system tar's version), on tar-stream rows and on the `store` row.
 //! * Every repeat is extracted into an empty directory and verified by BLAKE3 of every file; a
 //!   missing, extra or different file fails the combination. A failed combination is recorded with
 //!   the reason and the run goes on. The failure record lists the differing files (up to the first
@@ -38,6 +43,7 @@ use lpk_procstat_sys as ps;
 
 use super::catalogue::{Layout, Mode, Setting, Tool};
 use super::discover::{self, Discovered, Status};
+use super::harness_tar::{self, TarChoice, TarPolicy, HARNESS_FORMAT, HARNESS_TAR};
 use super::host;
 use super::result::{
     render, CorpusRef, Difference, DifferenceKind, Failure, Measure, Measurement, PeakMemoryKind,
@@ -92,6 +98,8 @@ pub struct Config {
     /// Keep the archive and the extracted tree of a repeat that failed verification under
     /// `<tmp>/failed/`.
     pub keep_failed: bool,
+    /// Which tar writes the `store` control and the tar-stream tools' stream (E2-23).
+    pub tar: TarPolicy,
 }
 
 /// What a run did.
@@ -605,10 +613,58 @@ impl Fail {
     }
 }
 
+/// The tar of a class: the system tar as discovered, or the runner's own writer.
+#[derive(Debug, Clone)]
 struct TarTool {
     exe: PathBuf,
     tool: Tool,
+    /// What `measurement.tar.tool` records: the system tar's version, or `lpk-bench`.
     version: String,
+    /// The runner's own writer (`lpk-bench tar`).
+    harness: bool,
+    /// Why the runner's own writer was chosen for the class (`measurement.tar.note`).
+    note: Option<String>,
+}
+
+/// What the `store` row records as `tool.version` when the runner's own tar ran it.
+fn harness_version() -> String {
+    format!("{HARNESS_TAR} {}", env!("CARGO_PKG_VERSION"))
+}
+
+impl TarTool {
+    /// The runner's own writer: this executable, with the `store` row's argument shapes behind
+    /// the hidden `tar` subcommand; the rest of the row (id, extension, settings) as catalogued.
+    fn harness(store: &Tool) -> Result<TarTool> {
+        let exe = std::env::current_exe().context("the path of this executable")?;
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut tool = store.clone();
+        tool.create = args(&["tar", "-cf", "{archive}", "-C", "{input}", "."]);
+        tool.create_list = Some(args(&["tar", "-cf", "{archive}", "-T", "{list}"]));
+        tool.extract = args(&["tar", "-xf", "{archive}", "-C", "{outdir}"]);
+        tool.threads = Vec::new();
+        Ok(TarTool {
+            exe,
+            tool,
+            version: HARNESS_TAR.to_string(),
+            harness: true,
+            note: None,
+        })
+    }
+
+    fn info(&self) -> TarInfo {
+        TarInfo {
+            tool: self.version.clone(),
+            format: if self.harness {
+                HARNESS_FORMAT.to_string()
+            } else if self.version.starts_with("bsdtar") {
+                "pax-restricted".to_string()
+            } else {
+                "gnu".to_string()
+            },
+            in_published_time: true,
+            note: self.note.clone(),
+        }
+    }
 }
 
 struct Ctx<'a> {
@@ -1133,19 +1189,13 @@ fn measurement_info(tar: Option<&TarTool>, d: &Discovered) -> Measurement {
         },
         every_repeat_verified: true,
         env_stripped: STRIPPED_ENV.iter().map(|s| s.to_string()).collect(),
-        tar: (d.tool.mode == Mode::TarStream)
-            .then(|| {
-                tar.map(|t| TarInfo {
-                    tool: t.version.clone(),
-                    format: if t.version.starts_with("bsdtar") {
-                        "pax-restricted".to_string()
-                    } else {
-                        "gnu".to_string()
-                    },
-                    in_published_time: true,
-                })
-            })
-            .flatten(),
+        // Recorded on every tar-stream row, and on the `store` row when the runner's own writer
+        // made it (the provenance of E2-23; a system-tar `store` row is as before).
+        tar: match tar {
+            Some(t) if d.tool.mode == Mode::TarStream => Some(t.info()),
+            Some(t) if d.tool.id == "store" && t.harness => Some(t.info()),
+            _ => None,
+        },
     }
 }
 
@@ -1368,17 +1418,18 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
     };
 
     // The store tool's tar serves the tar-stream tools whatever was selected.
-    let tar = discovered
-        .iter()
-        .find(|d| d.tool.id == "store")
-        .and_then(|d| match &d.status {
-            Status::Found { version, path } => Some(TarTool {
-                exe: path.clone(),
-                tool: d.tool.clone(),
-                version: version.clone(),
-            }),
-            Status::Skipped { .. } => None,
-        });
+    let store = discovered.iter().find(|d| d.tool.id == "store");
+    let system_tar = store.and_then(|d| match &d.status {
+        Status::Found { version, path } => Some(TarTool {
+            exe: path.clone(),
+            tool: d.tool.clone(),
+            version: version.clone(),
+            harness: false,
+            note: None,
+        }),
+        Status::Skipped { .. } => None,
+    });
+    let harness_tar = store.map(|d| TarTool::harness(&d.tool)).transpose()?;
 
     let host_file = host::collect(cfg.allow_dirty);
     std::fs::create_dir_all(&cfg.results_root)
@@ -1467,13 +1518,76 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                 )
             })
             .collect();
-        let non_ascii = entry.files.iter().any(|f| !f.path.is_ascii());
+        // The class's tar (E2-23): the system tar unless a name of the class is one it rejects.
+        // No name reaches the console or the row: the reasons carry counts only (D-20).
+        let non_ascii = harness_tar::non_ascii_paths(entry.files.iter().map(|f| f.path.as_str()));
+        let choice = match (&system_tar, &harness_tar) {
+            (_, None) => TarChoice::System,
+            (None, Some(_)) if cfg.tar != TarPolicy::Harness => TarChoice::System,
+            (system, Some(_)) => {
+                // The Windows bsdtar is the known rejection; any other tar gets the dry run.
+                let known = system
+                    .as_ref()
+                    .filter(|t| cfg!(windows) && t.version.starts_with("bsdtar"))
+                    .map(|t| t.version.as_str());
+                harness_tar::choose(cfg.tar, &non_ascii, known, |paths| match system {
+                    Some(t) => harness_tar::dry_run_system_tar(&t.exe, paths, &tmp_run),
+                    None => Err("the system tar was not found".to_string()),
+                })
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "class `{class}`: the dry run of the system tar over the class's {} \
+                         non-ASCII path(s) could not be set up ({e}); the control is not \
+                         changed silently: fix this or run with --tar system|lpk-bench",
+                        non_ascii.len()
+                    )
+                })?
+            }
+        };
+        let class_harness: Option<TarTool> = match &choice {
+            TarChoice::System => None,
+            TarChoice::Harness { reason, note } => {
+                println!(
+                    "{class}: the tar stream of `store` and of the tar-stream tools is written \
+                     by lpk-bench ({reason})"
+                );
+                harness_tar.clone().map(|mut t| {
+                    t.note = Some(note.clone());
+                    t
+                })
+            }
+        };
+        let tar: Option<&TarTool> = match &class_harness {
+            Some(t) => Some(t),
+            None => system_tar.as_ref(),
+        };
+        let harness = tar.is_some_and(|t| t.harness);
         for id in selected {
             let Some(d) = discovered.iter().find(|d| &d.tool.id == id) else {
                 continue;
             };
+            // The `store` row under the runner's own writer: the harness's templates,
+            // executable and version (the program that ran), the rest of the row as
+            // catalogued.
+            let own: Option<Discovered> = (harness && d.tool.id == "store")
+                .then(|| {
+                    tar.map(|t| Discovered {
+                        tool: t.tool.clone(),
+                        status: match &d.status {
+                            Status::Found { .. } => Status::Found {
+                                version: harness_version(),
+                                path: t.exe.clone(),
+                            },
+                            other => other.clone(),
+                        },
+                        local_override: d.local_override,
+                    })
+                })
+                .flatten();
+            let d = own.as_ref().unwrap_or(d);
             for setting in &d.tool.settings {
-                let uses_system_tar = d.tool.id == "store" || d.tool.mode == Mode::TarStream;
+                let uses_system_tar =
+                    !harness && (d.tool.id == "store" || d.tool.mode == Mode::TarStream);
                 let result = match &d.status {
                     Status::Skipped { reason } => {
                         let mut r = base_result(cfg, &corpus, entry, class, d, setting);
@@ -1481,7 +1595,11 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                         r
                     }
                     Status::Found { path, .. } => {
-                        if corpus.is_private() && cfg!(windows) && non_ascii && uses_system_tar {
+                        if corpus.is_private()
+                            && cfg!(windows)
+                            && !non_ascii.is_empty()
+                            && uses_system_tar
+                        {
                             let mut r = base_result(cfg, &corpus, entry, class, d, setting);
                             r.skipped = Some(SKIP_NON_ASCII.to_string());
                             r
@@ -1515,7 +1633,7 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                                 cwd: cwd_base.clone(),
                                 work,
                                 work_rel,
-                                tar: tar.as_ref(),
+                                tar,
                                 failed_dir: failed_dir.clone(),
                             };
                             let r = run_combination(&ctx, d, path, setting, &expected);
@@ -1623,6 +1741,8 @@ pub fn measure_command(args: &RunArgs) -> Result<ExitCode> {
         tmp_root: args.tmp.clone(),
         allow_dirty: args.allow_dirty_build,
         keep_failed: args.keep_failed == "on",
+        tar: TarPolicy::parse(&args.tar)
+            .with_context(|| format!("--tar: unknown value `{}`", args.tar))?,
     };
     let out = execute(&cfg, &discovered, &ids)?;
     println!("results written to {}", out.results_dir.display());

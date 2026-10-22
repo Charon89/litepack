@@ -182,6 +182,9 @@ pub struct Measured {
     pub first_compress_mbps: Traced,
     /// Set when the row rests on one measurement: why.
     pub single: Option<String>,
+    /// The tar that made the row's stream when it was not the system tar (E2-23): the
+    /// `measurement.tar.tool` of a row the runner's own writer produced (`lpk-bench`).
+    pub own_tar: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +268,12 @@ fn row_of(r: &ToolResult, src: SourceId) -> Row {
                         .clone()
                         .unwrap_or_else(|| "one repeat recorded".to_string())
                 }),
+                own_tar: r
+                    .measurement
+                    .as_ref()
+                    .and_then(|m| m.tar.as_ref())
+                    .filter(|t| t.tool == crate::run::harness_tar::HARNESS_TAR)
+                    .map(|t| t.tool.clone()),
             }))
         }
     } else {

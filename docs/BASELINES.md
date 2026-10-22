@@ -100,9 +100,24 @@ How a combination is measured:
   (`create_list` in the catalogue: tar, 7-Zip, WinRAR); the others are recorded as skipped with
   the reason. Their results carry `private: true`. Nothing derived from file names or tool output
   reaches a result file of a private corpus: failure reasons name a file by its position in the
-  manifest. The system tar on Windows (bsdtar) cannot read non-ASCII names from a `-T` list, so a
-  private class with any non-ASCII path is recorded as skipped for `store` and for the tar-stream
-  tools there; classes with only ASCII paths run normally, and 7-Zip and WinRAR handle both.
+  manifest. The system tar on Windows (bsdtar) cannot read non-ASCII names from a `-T` list; such
+  a class gets the runner's own tar (next point) for `store`; 7-Zip and WinRAR handle both.
+- The tar of a class (E2-23, D-89 (4)): the `store` control and the stream of the tar-stream
+  tools come from the system tar, unless a name of the class is one it is known to reject (on
+  Windows the bsdtar crashes on a name outside the ANSI code page and rewrites one inside it, so
+  every non-ASCII name counts) or a dry run of the system tar over the class's non-ASCII names
+  fails. Then `lpk-bench` writes the stream itself with the `tar` crate (ustar headers, a PAX
+  `path` record for every name that is not ASCII or does not fit the ustar fields), as a child
+  process (`lpk-bench tar`, the `store` row's own argument shapes) measured like the system tar,
+  the same entries in the same order and the same file bytes; extraction uses the crate's reader.
+  One known difference: the runner's tar writes a hard link's second occurrence as a full file
+  where GNU tar and bsdtar write a link entry (the file data is identical; the stream differs
+  on a class with hard links, none known in `full`).
+  Every such row records `measurement.tar.tool = "lpk-bench"` (the `store` row too; a system-tar
+  row records the tar's version as before), the run prints the choice per class, the report
+  lists those rows, and `run --validate` accepts them. On a class without such a name nothing
+  changes (G3 is measured against the system tar's control). `run --tar system|lpk-bench`
+  overrides the automatic choice.
 
 `--compare` prints, for each tool and setting present in both directories, the sum over classes of
 the median compress and of the median extract wall time, and the percentage difference

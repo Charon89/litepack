@@ -1539,6 +1539,7 @@ dependencies = [
  "clap-markdown",
  "clap_mangen",
  "ctrlc",
+ "lpk-check",
  "lpk-core",
  "lpk-format",
  "lpk-procstat-sys",

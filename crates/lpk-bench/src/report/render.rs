@@ -698,12 +698,16 @@ fn caveats(s: &mut String, m: &Model, inputs: &Inputs) {
     ));
     let mut failed: Vec<String> = Vec::new();
     let mut single: Vec<String> = Vec::new();
+    let mut own_tar: Vec<String> = Vec::new();
     for r in &m.rows {
         match &r.state {
             RowState::Failed { .. } => failed.push(format!("{} on {}", r.label(), r.class)),
             RowState::Measured(x) => {
                 if let Some(why) = &x.single {
                     single.push(format!("{} on {} ({why})", r.label(), r.class));
+                }
+                if let Some(tar) = &x.own_tar {
+                    own_tar.push(format!("{} on {} (tar: {tar})", r.label(), r.class));
                 }
             }
             RowState::Skipped { .. } => {}
@@ -723,6 +727,15 @@ fn caveats(s: &mut String, m: &Model, inputs: &Inputs) {
             "none".to_string()
         } else {
             single.join("; ")
+        }
+    ));
+    s.push_str(&format!(
+        "- rows whose tar stream the runner wrote itself, the system tar rejecting a name of \
+         the class (E2-23; `measurement.tar.tool`): {}\n",
+        if own_tar.is_empty() {
+            "none".to_string()
+        } else {
+            own_tar.join("; ")
         }
     ));
     let missing = inputs.probes.missing();

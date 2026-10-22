@@ -656,6 +656,50 @@ fn failed_skipped_and_single_measurement_rows_are_marked() {
     assert!(text.contains("combinations that failed: 7z/ultra on photo-jpeg"));
 }
 
+/// E2-23: a row whose stream the runner's own tar wrote (`measurement.tar.tool = lpk-bench`)
+/// is listed with its provenance; a system-tar row is not.
+#[test]
+fn rows_from_the_runners_own_tar_are_listed_with_their_provenance() {
+    let mut i = inputs(&Knobs::default(), false);
+    let text = report_text(&i);
+    assert!(
+        text.contains("rows whose tar stream the runner wrote itself")
+            && text.contains("`measurement.tar.tool`): none"),
+        "{text}"
+    );
+    let own = |tool: &str| crate::run::result::TarInfo {
+        tool: tool.into(),
+        format: "pax".into(),
+        in_published_time: true,
+        note: Some("dry run: tar exited 139".into()),
+    };
+    let mut marked = Vec::new();
+    for (r, _) in &mut i.baseline.results {
+        if r.class == "backup-versions-large" && r.tool.id == "store" {
+            r.measurement.as_mut().expect("m").tar = Some(own("lpk-bench"));
+            marked.push(format!("{}/{} on {}", r.tool.id, r.setting.id, r.class));
+        }
+        if r.class == "backup-versions-large" && r.tool.id == "zstd" {
+            r.measurement.as_mut().expect("m").tar = Some(own("lpk-bench"));
+            marked.push(format!("{}/{} on {}", r.tool.id, r.setting.id, r.class));
+        }
+        if r.class == "text" && r.tool.id == "zstd" {
+            // The system tar: not listed.
+            r.measurement.as_mut().expect("m").tar = Some(own("bsdtar 3.7.7"));
+        }
+    }
+    assert_eq!(marked.len(), 2, "{marked:?}");
+    let text = report_text(&i);
+    let line = text
+        .lines()
+        .find(|l| l.contains("rows whose tar stream the runner wrote itself"))
+        .expect("the provenance line");
+    for m in &marked {
+        assert!(line.contains(&format!("{m} (tar: lpk-bench)")), "{line}");
+    }
+    assert!(!line.contains("on text"), "{line}");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Estimates
 

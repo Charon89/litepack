@@ -29,6 +29,8 @@ zip = { version = "9.0.4", default-features = false, features = ["deflate", "zst
 
 [dev-dependencies]
 blake3 = "1.8.7"
+# The names test (E2-23) reads the archive back with the independent decoder.
+lpk-check = { path = "../lpk-check", version = "0.0.1" }
 clap-markdown = "0.1.5"
 clap_mangen = "0.3.3"
 lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }

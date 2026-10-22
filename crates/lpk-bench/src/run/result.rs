@@ -172,6 +172,10 @@ pub struct TarInfo {
     pub format: String,
     /// Always true: published time = tar step + tool step.
     pub in_published_time: bool,
+    /// Why the runner's own tar was chosen (E2-23): `known rejection on <os> (<tar>)`,
+    /// `dry run: tar exited <code>`, or `--tar lpk-bench`. Absent on a system-tar row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// How the numbers were taken.
@@ -692,6 +696,25 @@ pub mod samples {
             tool: "bsdtar 3.7.7".into(),
             format: "pax".into(),
             in_published_time: true,
+            note: None,
+        });
+        r.measurement = Some(m);
+        r
+    }
+
+    /// A `store` row whose archive the runner's own tar wrote (E2-23): the program that ran
+    /// as the version, the provenance key with its note.
+    pub fn own_tar_store() -> ToolResult {
+        let mut r = measured();
+        r.tool.id = "store".into();
+        r.tool.version = Some("lpk-bench 0.0.1".into());
+        r.setting.id = "store".into();
+        let mut m = measurement();
+        m.tar = Some(TarInfo {
+            tool: "lpk-bench".into(),
+            format: "pax".into(),
+            in_published_time: true,
+            note: Some("known rejection on windows (bsdtar 3.8.9)".into()),
         });
         r.measurement = Some(m);
         r
