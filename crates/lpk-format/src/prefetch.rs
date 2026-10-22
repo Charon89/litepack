@@ -334,6 +334,7 @@ fn read_files<E>(
         loop {
             // A buffer: one kept back, one returned, a new one while fewer
             // than `buffers` exist, else wait for one to come back.
+            let blocked = crate::profile::Timer::start(crate::profile::Stage::ReaderBlocked);
             let mut buf = loop {
                 if let Some(b) = spare.take() {
                     break b;
@@ -360,7 +361,9 @@ fn read_files<E>(
                     Err(TryRecvError::Disconnected) => return,
                 }
             };
+            drop(blocked);
             buf.clear();
+            let mut reading = crate::profile::Timer::start(crate::profile::Stage::ReaderRead);
             let n = match (&mut input).take(segment as u64).read_to_end(&mut buf) {
                 Ok(n) => n,
                 Err(e) => {
@@ -368,6 +371,8 @@ fn read_files<E>(
                     return;
                 }
             };
+            reading.bytes = n as u64;
+            drop(reading);
             total += n as u64;
             if n == 0 {
                 spare = Some(buf);
@@ -377,9 +382,11 @@ fn read_files<E>(
             // the segment's size).
             let last = n < segment;
             out += 1;
+            let queueing = crate::profile::Timer::start(crate::profile::Stage::ReaderBlocked);
             if tx.send(Msg::Data(buf, last)).is_err() {
                 return;
             }
+            drop(queueing);
             if last {
                 break;
             }

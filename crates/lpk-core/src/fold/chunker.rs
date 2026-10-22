@@ -28,7 +28,13 @@ pub struct FastCdcChunker {
     avg: usize,
     max: usize,
     held: Vec<u8>,
+    /// Threads a call's cut fans out to at most (1: this thread only).
+    threads: usize,
 }
+
+/// Bytes of a call each cutting thread takes (at least the maximum chunk, so
+/// a chunk that crosses a piece's end ends in the next piece).
+const CUT_PIECE: usize = 2 << 20;
 
 impl FastCdcChunker {
     /// A chunker with the given sizes in bytes. The crate's limits apply (minimum 64 to 1 MiB,
@@ -55,6 +61,7 @@ impl FastCdcChunker {
             avg,
             max,
             held: Vec::new(),
+            threads: 1,
         })
     }
 
@@ -65,54 +72,155 @@ impl FastCdcChunker {
             avg: AVG_CHUNK,
             max: MAX_CHUNK,
             held: Vec::new(),
+            threads: 1,
         }
+    }
+
+    /// Cut each call on up to `threads` scoped threads (this one included;
+    /// at most 1 is sequential; never more than the writer's hash threads,
+    /// `MAX_HASH_THREADS`, one per [`CUT_PIECE`]). The cuts are the same: each thread cuts its
+    /// piece of the call from the piece's start, and the pieces are joined in
+    /// order by the rule that a cut sequence depends only on its start — the
+    /// true sequence enters a piece at a known chunk start, and from the first
+    /// of its cuts the piece's thread also produced, the thread's cuts are the
+    /// true ones; until then the chunks are cut here, one at a time (on data
+    /// where no cut ever coincides, such as a run of one byte value, the whole
+    /// call is cut here, as with one thread). A thread that cannot be created
+    /// leaves its piece to this thread.
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
     }
 
     /// The largest chunk this chunker makes (the writer's `chunk_size`).
     pub fn max(&self) -> usize {
         self.max
     }
+
+    /// The cuts of `bytes` from `at` on, in place: every chunk start with at
+    /// least the maximum ahead of it (or any, at `eof`) is cut, as the crate's
+    /// iterator cuts it; the positions are `bytes`'s.
+    fn cut_in_place(&self, bytes: &[u8], at: usize, eof: bool) -> Vec<usize> {
+        let len = bytes.len();
+        let can_cut = |p: usize| p < len && (eof || len - p >= self.max);
+        let cdc = FastCDC::new(bytes, self.min, self.avg, self.max);
+        let pieces = (len - at)
+            .div_ceil(CUT_PIECE)
+            .min(self.threads)
+            .min(lpk_format::writer::MAX_HASH_THREADS);
+        if pieces <= 1 {
+            let mut cuts = Vec::new();
+            let mut p = at;
+            while can_cut(p) {
+                p = cdc.cut(p, len - p).1;
+                cuts.push(p);
+            }
+            return cuts;
+        }
+        // Piece k is `[start(k), start(k + 1))`; its thread cuts from
+        // `start(k)` up to and including the first cut at or past its end.
+        let piece = (len - at).div_ceil(pieces);
+        let start = |k: usize| (at + k * piece).min(len);
+        let cut_piece = |k: usize| -> Vec<usize> {
+            let end = start(k + 1);
+            let mut cuts = Vec::new();
+            let mut p = start(k);
+            while can_cut(p) {
+                p = cdc.cut(p, len - p).1;
+                cuts.push(p);
+                if p >= end {
+                    break;
+                }
+            }
+            cuts
+        };
+        let lists: Vec<Vec<usize>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (1..pieces)
+                .map(|k| {
+                    std::thread::Builder::new()
+                        .name("lpk-cut".to_string())
+                        .spawn_scoped(s, move || cut_piece(k))
+                        .ok()
+                })
+                .collect();
+            let mut lists = vec![cut_piece(0)];
+            for (k, h) in (1..pieces).zip(handles) {
+                lists.push(match h {
+                    // A cutting thread's panic is a bug; re-raised as a panic here.
+                    Some(h) => h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                    None => cut_piece(k),
+                });
+            }
+            lists
+        });
+        // Join the pieces: `p` is always a true chunk start.
+        let mut cuts = Vec::with_capacity(lists.iter().map(Vec::len).sum());
+        let mut p = at;
+        while can_cut(p) {
+            let k = ((p - at) / piece).min(pieces - 1);
+            let list = &lists[k];
+            let from = if p == start(k) {
+                Some(0)
+            } else {
+                list.binary_search(&p).ok().map(|i| i + 1)
+            };
+            match from {
+                Some(i) if i < list.len() => {
+                    cuts.extend_from_slice(&list[i..]);
+                    p = list[list.len() - 1];
+                }
+                _ => {
+                    p = cdc.cut(p, len - p).1;
+                    cuts.push(p);
+                }
+            }
+        }
+        cuts
+    }
 }
 
 impl Chunker for FastCdcChunker {
     fn feed(&mut self, bytes: &[u8], eof: bool) -> Vec<usize> {
         let mut cuts = Vec::new();
-        // Stream position where `held` starts.
-        let mut base = 0usize;
-        let mut off = 0usize;
-        // First the held-back tail: top it up to the maximum with the new bytes and cut.
-        while !self.held.is_empty() {
-            let take = self
-                .max
-                .saturating_sub(self.held.len())
-                .min(bytes.len() - off);
-            self.held.extend_from_slice(&bytes[off..off + take]);
-            off += take;
-            if self.held.len() < self.max && !(eof && off == bytes.len()) {
-                return cuts;
-            }
-            let (_, end) =
-                FastCDC::new(&self.held, self.min, self.avg, self.max).cut(0, self.held.len());
-            cuts.push(base + end);
-            base += end;
-            self.held.drain(..end);
-        }
-        // Then the rest of the call, in place.
-        let rest = &bytes[off..];
-        let cdc = FastCDC::new(rest, self.min, self.avg, self.max);
+        // Positions are relative to the start of the held-back tail.
+        let held_len = self.held.len();
+        let total = held_len + bytes.len();
+        // The next chunk's start.
         let mut start = 0usize;
-        loop {
-            let remaining = rest.len() - start;
-            if remaining == 0 || (!eof && remaining < self.max) {
+        // The chunks that start inside the held-back tail are cut from the tail
+        // topped up with what the cut may look at (at most the maximum); the
+        // copy is bounded by the maximum per call, whatever the call's size.
+        while start < held_len {
+            let avail = total - start;
+            if !eof && avail < self.max {
                 break;
             }
-            let (_, end) = cdc.cut(start, remaining);
-            cuts.push(base + end);
-            start = end;
+            let need = avail.min(self.max);
+            let want = start + need;
+            if self.held.len() < want {
+                let from = self.held.len() - held_len;
+                self.held.extend_from_slice(&bytes[from..want - held_len]);
+            }
+            let (_, end) =
+                FastCDC::new(&self.held[start..want], self.min, self.avg, self.max).cut(0, need);
+            cuts.push(start + end);
+            start += end;
         }
-        if !eof {
-            self.held.extend_from_slice(&rest[start..]);
+        if start < held_len {
+            // Held back: the uncut tail, then the whole call.
+            self.held.truncate(held_len);
+            self.held.drain(..start);
+            self.held.extend_from_slice(bytes);
+            return cuts;
         }
+        // The rest starts inside the call: cut in place, no copy.
+        let mut at = start - held_len;
+        for end in self.cut_in_place(bytes, at, eof) {
+            cuts.push(held_len + end);
+            at = end;
+        }
+        self.held.clear();
+        self.held.extend_from_slice(&bytes[at..]);
         cuts
     }
 
@@ -238,6 +346,72 @@ mod tests {
         c.reset();
         let data = noise(6, 200_000);
         assert_eq!(c.feed(&data, true), reference(&data));
+    }
+
+    /// Data whose cut sequences from different starts never meet (runs of one
+    /// byte value), do meet (noise), and both in turn.
+    fn mixed(seed: u64, len: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(len);
+        let mut i = 0u64;
+        while v.len() < len {
+            let n = (300_000 + (i * 7919) % 900_000) as usize;
+            if i % 3 == 1 {
+                v.extend(std::iter::repeat_n((i % 251) as u8, n));
+            } else {
+                v.extend_from_slice(&noise(seed + i, n));
+            }
+            i += 1;
+        }
+        v.truncate(len);
+        v
+    }
+
+    /// The parallel cut (threads 2, 3, 4, 24) is the sequential cut, whole and
+    /// streamed in pieces, on noise, on one byte value (no sequence ever meets
+    /// another's: every chunk cut on the calling thread), and on a mix; a call
+    /// shorter than a piece and the end of a file at any position.
+    #[test]
+    fn the_parallel_cut_equals_the_sequential_cut() {
+        let len = 11_000_000 + 12_345;
+        for (name, data) in [
+            ("noise", noise(11, len)),
+            ("zeros", vec![0u8; len]),
+            ("mixed", mixed(12, len)),
+        ] {
+            let want = reference(&data);
+            for threads in [2usize, 3, 4, 24] {
+                let mut c = FastCdcChunker::standard().with_threads(threads);
+                assert_eq!(c.feed(&data, true), want, "{name} whole t{threads}");
+                // Streamed: every call ends inside a piece, the last at eof.
+                for sizes in [
+                    vec![8 << 20],
+                    vec![(3 << 20) + 7],
+                    vec![CUT_PIECE + 1, 100_003],
+                ] {
+                    let mut c = FastCdcChunker::standard().with_threads(threads);
+                    let mut out = Vec::new();
+                    let (mut at, mut base, mut i) = (0usize, 0usize, 0usize);
+                    while at < data.len() {
+                        let n = sizes[i % sizes.len()].min(data.len() - at);
+                        i += 1;
+                        let eof = at + n == data.len();
+                        for cut in c.feed(&data[at..at + n], eof) {
+                            out.push(base + cut);
+                        }
+                        if let Some(&last) = out.last() {
+                            base = last;
+                        }
+                        at += n;
+                    }
+                    assert_eq!(out, want, "{name} streamed {sizes:?} t{threads}");
+                }
+            }
+        }
+        // Shorter than a piece: one thread's worth, cut here.
+        let short = noise(13, CUT_PIECE - 1);
+        let mut c = FastCdcChunker::standard().with_threads(4);
+        assert_eq!(c.feed(&short, true), reference(&short));
+        assert!(FastCdcChunker::standard().with_threads(0).threads == 1);
     }
 
     #[test]
