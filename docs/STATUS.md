@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-22, about 02:40 UTC. **A measurement is running since 02:36 UTC** (E0-2: every incumbent on the re-pinned `backup-versions-large` and `probe dedup`, `target/acceptance/e0-2-measure.sh`, status in `e0-2-measure-status.log`; no builds or tests on this machine until it says DONE; about three hours). E3-3 is done (D-87, PR #92), the three stale corpus pins are re-pinned (D-88, PR #93), the owner answered the gate and product questions on 2026-10-22 (D-89), E4–E9 are adopted into PLAN, the versioned class is re-pinned and rebuilt (E0-2, PR #94). E3-4 is approved and merges when its CI is green (PR #95); E2-9's design note is being written.
+Last updated: 2026-10-22, about 02:46 UTC. **A measurement is running since 02:36 UTC** (E0-2: every incumbent on the re-pinned `backup-versions-large` and `probe dedup`, `target/acceptance/e0-2-measure.sh`, status in `e0-2-measure-status.log`; no builds or tests on this machine until it says DONE). **E3-4 is done (D-90, PR #95); E3 is complete but for E3-9. The D-89 work has started: the versioned class is re-pinned and rebuilt (E0-2, PR #94), its re-measurement runs detached when the machine is idle; E2-23 is next, E2-9's design note is being written.** The owner's rulings are D-89; E2-22's verdict input is D-85.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -46,19 +46,13 @@ E3-8 is done (D-75, PR #77).
    rounds, then the class re-measured); a re-measurement after any engine change is one detached run of `lpk` on `full` plus the
    same-run G3 script (`target/acceptance/e2-22-lpk-full.sh`, `e2-22-g3.sh`), pooled with the committed
    incumbents' baseline. A measurement needs the machine idle: no agent builds or tests while it runs.
-4. E3: E3-1, E3-2, E3-3, E3-5, E3-6, E3-7 and E3-8 done (D-75, D-77, D-79, D-80, D-84, D-87). **Next E3-4**
-   (several inputs, a list file, selective extraction); its rulings, so a new machine can brief it: `lpk a`
-   takes several inputs, each entered under its own name (a directory `D:\x\photos` gives `photos/...`, a
-   file its name; two inputs with the same entry name, or one a prefix path of another, refused before any
-   output, exit 1), the single-directory form unchanged (so every archive and pin stays byte-identical);
-   `--list <file>` one path per line (UTF-8, CRLF tolerated, `#` lines ignored, relative to the current
-   directory), and the catalogue row gains the runner's private-corpus template (D-20 (6)); `--exclude <glob>`
-   repeatable over entry paths with `/`, a directory match prunes its subtree (an allow-listed glob crate);
-   `lpk x|l|export <archive> ... [<pattern>...]` globs over entry paths (a directory pattern selects its
-   subtree), fed to the engine's plan so only the blocks the selection needs are decoded (asserted in a test),
-   a pattern matching nothing refused (exit 2). E3-9 re-runs the harness after the G3 and G4 rounds (D-89).
-   E2-9 (deltas) is unblocked by D-89 (1): E0-1's re-pin first, then the delta stage with versions paired by
-   path and name (no similarity sketch), then the class re-measured.
+4. E3: every task but E3-9 done (D-75, D-77, D-79, D-80, D-84, D-87, D-90). **Next: the D-89 work in PLAN's
+   order** — E2-23 (names and the harness's own tar; brief in the session's scratchpad, its rulings in the PLAN
+   line), E0-2's measurement (the class rebuilt and re-pinned, PR #94; `target/acceptance/e0-2-measure.sh`:
+   the incumbents on the class and `probe dedup`, detached on the idle machine), E2-9 (design note first,
+   `docs/notes/e2-9-design.md`, on the spec's reserved `delta` primitive 0x0006 as revision 1.5), E2-24, E2-25,
+   E2-16 (revision 1.4), E3-9, LIC-2; then E4–E9 as adopted in PLAN. E2-9's deltas pair versions by path and
+   name (no similarity sketch).
    Housekeeping found on the way: the ignored corpus tests (`fast_corpus`, `store_path_corpus`,
    `deflate_pinned_corpus`) were stale on `main` for decided reasons and are re-pinned (D-88); run them by
    hand with an absolute `LPK_CORPUS` (a test's working directory is its crate's). E3-6's export tests
@@ -104,7 +98,7 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e3-4` (E3-4) once it is dispatched; nothing else of this session's (PRs #92 and #93 merged).
+- `task/e0-2` (PR #94, the re-pinned lock) until merged; `docs/e2-9-design` (the design note) when pushed.
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
 
 ## How to resume
