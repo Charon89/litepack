@@ -110,6 +110,9 @@ How a combination is measured:
   `path` record for every name that is not ASCII or does not fit the ustar fields), as a child
   process (`lpk-bench tar`, the `store` row's own argument shapes) measured like the system tar,
   the same entries in the same order and the same file bytes; extraction uses the crate's reader.
+  One known difference: the runner's tar writes a hard link's second occurrence as a full file
+  where GNU tar and bsdtar write a link entry (the file data is identical; the stream differs
+  on a class with hard links, none known in `full`).
   Every such row records `measurement.tar.tool = "lpk-bench"` (the `store` row too; a system-tar
   row records the tar's version as before), the run prints the choice per class, the report
   lists those rows, and `run --validate` accepts them. On a class without such a name nothing
