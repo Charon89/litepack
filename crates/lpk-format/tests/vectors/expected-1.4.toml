@@ -49,3 +49,13 @@ message = "record 1: bad record (original_hash)"
 ["malformed-png-filter-lookahead.lpk"]
 error = "PayloadTooLarge"
 message = "payload length 3630 exceeds limit 208"
+
+["malformed-png-filter-kind.lpk"]
+error = "BadRecord"
+reason = "kind"
+message = "record 0: bad record (kind)"
+
+["malformed-png-filter-input-filter.lpk"]
+error = "BadRecord"
+reason = "scanlines"
+message = "record 1: bad record (scanlines)"

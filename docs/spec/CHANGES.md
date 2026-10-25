@@ -315,3 +315,5 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    as the bound, where `max_block_plain` would let it through).
 9. Fix round 1: check (4) states the last-step case of an F past 2^64 − 1 (`BlockLengthMismatch`, as the reference
    does), and Paeth's q, pa, pb, pc are computed in signed integers wide enough for the sums.
+10. Fix round 1: new vectors `malformed-png-filter-kind.lpk` (`BadRecord` `kind`) and
+    `malformed-png-filter-input-filter.lpk` (an input filter byte of 7: `BadRecord` `scanlines`, check (6)).

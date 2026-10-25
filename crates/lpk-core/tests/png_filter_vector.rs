@@ -50,7 +50,7 @@ const MTIME: i64 = 1000;
 const BLOCK: usize = 8 * 1024;
 
 /// The malformed vectors: name, fault.
-const MALFORMED: [(&str, Fault); 8] = [
+const MALFORMED: [(&str, Fault); 10] = [
     ("malformed-png-filter-bound.lpk", Fault::Bound),
     ("malformed-png-filter-width.lpk", Fault::Width),
     ("malformed-png-filter-height.lpk", Fault::Height),
@@ -59,6 +59,8 @@ const MALFORMED: [(&str, Fault); 8] = [
     ("malformed-png-filter-scanlines.lpk", Fault::Scanlines),
     ("malformed-png-filter-hash.lpk", Fault::Hash),
     ("malformed-png-filter-lookahead.lpk", Fault::Lookahead),
+    ("malformed-png-filter-kind.lpk", Fault::Kind),
+    ("malformed-png-filter-input-filter.lpk", Fault::InputFilter),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -74,6 +76,10 @@ enum Fault {
     /// `[lzma, png-filter, bwt {4096}]`: the image's filtered length (3630) above the `bwt`
     /// step's input bound I(100, 4096) = 208, within `max_block_plain`.
     Lookahead,
+    /// The `png-filter` step names the `deflate` record: `BadRecord` `kind`.
+    Kind,
+    /// The step input's first filter byte is 7: `BadRecord` `scanlines` (check (6)), never None.
+    InputFilter,
 }
 
 fn vectors() -> PathBuf {
@@ -315,7 +321,8 @@ fn add_png(
         original_hash: *blake3::hash(&deflate).as_bytes(),
     };
     match fault {
-        Fault::None | Fault::Lookahead => {}
+        Fault::None | Fault::Lookahead | Fault::Kind => {}
+        Fault::InputFilter => input[0] = 7,
         Fault::Bound => dr.plain_len -= 1,
         Fault::Width => png.width = 0,
         Fault::Height => {
@@ -353,7 +360,7 @@ fn add_png(
             step,
             Step {
                 primitive: PrimitiveId::PngFilter,
-                params: record_param(p),
+                params: record_param(if fault == Fault::Kind { d } else { p }),
             },
             Step {
                 primitive: PrimitiveId::DeflateReconstruct,
@@ -575,6 +582,14 @@ fn the_malformed_vectors_fail_by_reason() {
             (Fault::Bound, FormatError::PayloadTooLarge { len, max }) => {
                 assert_eq!(*len, max + 1, "{name}")
             }
+            (Fault::Kind, FormatError::BadRecord { reason: "kind", .. })
+            | (
+                Fault::InputFilter,
+                FormatError::BadRecord {
+                    reason: "scanlines",
+                    ..
+                },
+            ) => {}
             (Fault::Lookahead, FormatError::PayloadTooLarge { len, max }) => {
                 assert_eq!((*len, *max), (3630, 208), "{name}")
             }
