@@ -1561,6 +1561,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpk-codecs-vp8"
+version = "0.0.1"
+dependencies = [
+ "flate2",
+ "serde_json",
+]
+
+[[package]]
 name = "lpk-core"
 version = "0.0.1"
 dependencies = [

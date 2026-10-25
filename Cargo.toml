@@ -4,6 +4,7 @@ members = [
   "crates/lpk-bench",
   "crates/lpk-check",
   "crates/lpk-codecs-bwt",
+  "crates/lpk-codecs-vp8",
   "crates/lpk-cli",
   "crates/lpk-core",
   "crates/lpk-format",
