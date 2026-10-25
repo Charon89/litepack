@@ -89,3 +89,19 @@ reader over `bytes` with fresh groups under the same `ops` and compare each valu
   values in all, the largest 70 above `len`, for every group length listed above. The library wrote these without
   error and read every one back as the exact value written (no clamp to `len`); the coded stream grows with the
   excess. All 360 streams round-tripped; none was rejected. `note` gives the count of such values in the stream.
+- (e) 680 reader-only streams in a separate file, `cases-e.jsonl.gz` (ids 5775 to 6454; 2,224,808 bytes
+  uncompressed; sha256 of the gzip `22560d170c40be84b37911667de29bee7dfbee6e5ad422f48a85217c12b821ec`, identical over
+  two runs, generated on 2026-10-25 by the same scratch program and library). These show what the library's reader
+  does with byte strings its writer does not produce, so they test the reader only: there is nothing to encode.
+  Each line has the schema above plus `"reader_only": true`; `bytes` is the reader's input, `ops` gives the kind,
+  group and width (or context index) of each read with its fourth element always 0 (no value is written), and the
+  values the library's reader returned, in order, are in `"values": [...]` (`u64`, one per operation; for `nbits` the
+  `w`-bit field, for `unary` the count). A case on which the library failed or stopped would carry
+  `"outcome": "error"` and no `values`; none did: the reader returned values for every operation of every case,
+  including the 7 empty inputs and reads far past the end of the input. A replay creates fresh groups, runs the
+  reader over `bytes` under `ops` and compares each value read with `values`. (e1) 340 streams (seeds
+  `0x4C494332E100 + k`) whose first byte is `0x80` or above, so the initial marker symbol decodes as one; (e2) 340
+  streams (seeds `0x4C494332E200 + k`) of arbitrary bytes. In both, 332 inputs are 1 (e1) or 0 (e2) to 64 random
+  bytes with 0 to 400 operations and 8 are 4,096 random bytes with 0 to 40,000 operations (log-uniform, about 3%
+  with none); 1 to 6 groups of the lengths listed above; per-stream weights for the three kinds; 106,872 values in
+  all. `unary` reads on such input return values above the group's length 2,316 times, up to 907 above `len`.
