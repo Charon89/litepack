@@ -1462,6 +1462,7 @@ mod tests {
             scratch: tmp.path().to_path_buf(),
             local_tools: PathBuf::from("none.toml"),
             tool_timeout: Duration::from_secs(60),
+            rows: Vec::new(),
         };
         let out = run(&ctx).expect("run");
         f(&ctx, out);
@@ -1586,6 +1587,7 @@ mod tests {
             scratch: tmp.path().to_path_buf(),
             local_tools: PathBuf::from("none.toml"),
             tool_timeout: Duration::from_secs(60),
+            rows: Vec::new(),
         };
         let md = render(&envelope(run(&ctx).expect("run").data));
         assert!(md.contains("no other class with a block of at least 64 KiB"));

@@ -264,6 +264,11 @@ extract = []
 id = "balanced-extension"
 compress = ["--balanced", "--ordering", "extension"]
 extract = []
+# The version ordering's A/B (E2-9 task E): a file's versions adjacent inside the window.
+[[tool.setting]]
+id = "balanced-versions"
+compress = ["--balanced", "--ordering", "versions"]
+extract = []
 # The Deflate peel's A/B (E2-10): `balanced` carries the peel by default; this row turns it off.
 [[tool.setting]]
 id = "balanced-no-deflate"

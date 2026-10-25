@@ -2,10 +2,13 @@
 //!
 //! Two orders: [`FileOrder::None`] keeps the path order of the clustering (directory locality);
 //! [`FileOrder::Extension`] sorts by extension (lower-cased), then file name (lower-cased), then
-//! path, the order 7-Zip uses for solid archives. Neither reads a file. (A similarity order that
+//! path, the order 7-Zip uses for solid archives; [`FileOrder::Versions`] puts a file's versions
+//! next to each other when the run's inputs hold version groups (E2-9 task E,
+//! [`super::versions`]), and leaves a run without them in path order. None reads a file. (A similarity order that
 //! sketched file contents was built and measured on this branch's history and is not part of the
 //! tree.) Ordering never changes what deduplicates: that is content-addressed in the writer.
 
+use super::versions::{versions_order, Versions};
 use crate::ingest::Input;
 
 /// How files are ordered inside a cluster.
@@ -16,6 +19,9 @@ pub enum FileOrder {
     None,
     /// Extension (lower-cased), then name, then path.
     Extension,
+    /// Path order, except that the files of a version group are keyed by their path inside
+    /// their version root, then the version's rank (adjacent versions).
+    Versions,
 }
 
 impl FileOrder {
@@ -24,6 +30,7 @@ impl FileOrder {
         match self {
             FileOrder::None => "none",
             FileOrder::Extension => "extension",
+            FileOrder::Versions => "versions",
         }
     }
 }
@@ -40,11 +47,13 @@ pub fn extension_order(inputs: &mut [Input]) {
     });
 }
 
-/// Order one cluster's files (given in path order).
-pub fn order_cluster(inputs: &mut [Input], mode: FileOrder) {
+/// Order one cluster's files (given in path order); `versions` are the run's version groups
+/// (used by [`FileOrder::Versions`] only).
+pub fn order_cluster(inputs: &mut [Input], mode: FileOrder, versions: &Versions) {
     match mode {
         FileOrder::None => {}
         FileOrder::Extension => extension_order(inputs),
+        FileOrder::Versions => versions_order(inputs, versions),
     }
 }
 
@@ -81,13 +90,13 @@ mod tests {
             input(".hidden"),
             input("b/a.txt"),
         ];
-        order_cluster(&mut v, FileOrder::Extension);
+        order_cluster(&mut v, FileOrder::Extension, &Versions::default());
         assert_eq!(
             paths(&v),
             [".hidden", "m/README", "a/a.c", "b/a.txt", "a/b.txt", "z/b.TXT"]
         );
         let mut v = vec![input("y/f.txt"), input("x/f.txt")];
-        order_cluster(&mut v, FileOrder::Extension);
+        order_cluster(&mut v, FileOrder::Extension, &Versions::default());
         assert_eq!(paths(&v), ["x/f.txt", "y/f.txt"]);
     }
 
@@ -95,7 +104,7 @@ mod tests {
     fn none_keeps_the_given_order_and_is_the_default() {
         assert_eq!(FileOrder::default(), FileOrder::None);
         let mut v = vec![input("b.z"), input("a.y")];
-        order_cluster(&mut v, FileOrder::None);
+        order_cluster(&mut v, FileOrder::None, &Versions::default());
         assert_eq!(paths(&v), ["b.z", "a.y"]);
     }
 }

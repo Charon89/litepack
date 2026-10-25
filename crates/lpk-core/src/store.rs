@@ -54,6 +54,7 @@ pub fn write_inputs(
     let monitor = crate::Monitor::default();
     let s = Pipeline::store(options).run_inputs(
         inputs.to_vec(),
+        crate::fold::versions::RootSpec::Children(String::new()),
         out,
         sync,
         crate::pipeline::Prepared::Store,

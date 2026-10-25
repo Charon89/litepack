@@ -301,6 +301,26 @@ pub fn inverse(t: &Transformed) -> Result<Vec<u8>, BwtError> {
     Ok(out)
 }
 
+/// The suffix array of `text` (libsais, one thread, `i32` entries): `sa[k]` is the start of the
+/// `k`-th smallest suffix, as if a unique smallest sentinel followed the text (libsais's
+/// convention), so the array has the text's length. For the delta stage's format-1 encoder
+/// (E2-9), which looks up the longest match of the new bytes in a base chunk. Feature `encode`.
+#[cfg(feature = "encode")]
+pub fn suffix_array(text: &[u8]) -> Result<Vec<i32>, BwtError> {
+    if text.len() > MAX_BLOCK {
+        return Err(BwtError::TooLarge(text.len()));
+    }
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let res = libsais::SuffixArrayConstruction::for_text(text)
+        .in_owned_buffer32()
+        .single_threaded()
+        .run()
+        .map_err(|e| BwtError::Libsais(e.to_string()))?;
+    Ok(res.into_vec())
+}
+
 /// Candidate (b): `block` transformed and entropy-coded, after the index header
 /// ([`Transformed::header`]). Feature `encode`.
 #[cfg(feature = "encode")]
@@ -334,6 +354,22 @@ pub fn decode_to_transformed(data: &[u8], len: usize) -> Result<Transformed, Bwt
 #[cfg(all(test, feature = "encode"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suffix_array_matches_a_naive_sort() {
+        for text in [
+            &b""[..],
+            b"a",
+            b"banana",
+            b"aaaaaaaa",
+            b"abracadabra abracadabra",
+            b"\x00\xff\x00\xff\x00",
+        ] {
+            let mut want: Vec<i32> = (0..text.len() as i32).collect();
+            want.sort_by(|&a, &b| text[a as usize..].cmp(&text[b as usize..]));
+            assert_eq!(suffix_array(text).unwrap(), want, "{text:?}");
+        }
+    }
 
     /// The BWT by sorting the rotations of `text + $` (sentinel smallest), libsais convention:
     /// the BWT without the sentinel and the row of every text position.
