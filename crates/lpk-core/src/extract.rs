@@ -1286,26 +1286,30 @@ where
             Err(e) => Outcome::Failed(e),
             Ok(()) if pool.threads == 1 => {
                 let before = archive.decode_count();
+                // One thread in all: a JPEG stream decodes on this thread alone (E2-25).
+                let one = Some(crate::peel::jpeg::DecodeThreads::new(1));
                 let r = catch_unwind(AssertUnwindSafe(|| {
-                    let mut out = Out::new(shared, 0, 1, opts.max_open_files);
-                    let mut bytes_in = 0;
-                    for (k, &b) in needed.iter().enumerate() {
-                        rep.check()?;
-                        let plain = archive.decode_block_checked(b);
-                        decoded.fetch_add(1, Ordering::Relaxed);
-                        peak.store(1, Ordering::Relaxed);
-                        let plain = plain.map_err(|e| decode_error(b, e))?;
-                        out.write_block(b, &per_block[b], &plain)?;
-                        bytes_in += frame_len.get(b).copied().unwrap_or(0);
-                        rep.set(
-                            Stage::Extract,
-                            shared.files.load(Ordering::Relaxed),
-                            bytes_in,
-                            shared.bytes.load(Ordering::Relaxed),
-                            k as u64 + 1,
-                        );
-                    }
-                    Ok(())
+                    crate::peel::jpeg::with_decode_threads(one, || {
+                        let mut out = Out::new(shared, 0, 1, opts.max_open_files);
+                        let mut bytes_in = 0;
+                        for (k, &b) in needed.iter().enumerate() {
+                            rep.check()?;
+                            let plain = archive.decode_block_checked(b);
+                            decoded.fetch_add(1, Ordering::Relaxed);
+                            peak.store(1, Ordering::Relaxed);
+                            let plain = plain.map_err(|e| decode_error(b, e))?;
+                            out.write_block(b, &per_block[b], &plain)?;
+                            bytes_in += frame_len.get(b).copied().unwrap_or(0);
+                            rep.set(
+                                Stage::Extract,
+                                shared.files.load(Ordering::Relaxed),
+                                bytes_in,
+                                shared.bytes.load(Ordering::Relaxed),
+                                k as u64 + 1,
+                            );
+                        }
+                        Ok(())
+                    })
                 }));
                 reads.fetch_add(archive.decode_count() - before, Ordering::Relaxed);
                 match r {
@@ -1562,12 +1566,17 @@ fn parallel_with<R: Read + Seek + Send>(
             }
         }
         let (tx, rx) = mpsc::channel::<Decoded>();
+        // The decode threads never exceed N: N tokens shared by the workers and the JPEG
+        // streams' partition threads (E2-25; the writers, which wait on I/O, are not counted).
+        let budget = crate::peel::jpeg::DecodeThreads::new(pool.threads);
         let mut decoders = Vec::with_capacity(forks.len());
         if spawn_error.is_none() {
             for (i, mut fork) in forks.into_iter().enumerate() {
                 let tx = tx.clone();
+                let budget = Arc::clone(&budget);
                 let job = move || -> u64 {
-                    loop {
+                    let lend = Some(Arc::clone(&budget));
+                    crate::peel::jpeg::with_decode_threads(lend, || loop {
                         // The token is seen here too, so a worker stops before its next
                         // block whichever thread noticed the cancellation first.
                         if token.is_cancelled() {
@@ -1582,7 +1591,10 @@ fn parallel_with<R: Read + Seek + Send>(
                             permits.release();
                             break;
                         };
-                        let r = catch_unwind(AssertUnwindSafe(|| fork.decode_block_checked(b)));
+                        let r = catch_unwind(AssertUnwindSafe(|| {
+                            let _token = budget.hold();
+                            fork.decode_block_checked(b)
+                        }));
                         decoded.fetch_add(1, Ordering::Relaxed);
                         match r {
                             Ok(r) => {
@@ -1596,7 +1608,7 @@ fn parallel_with<R: Read + Seek + Send>(
                                 break;
                             }
                         }
-                    }
+                    });
                     fork.decode_count()
                 };
                 match std::thread::Builder::new()
