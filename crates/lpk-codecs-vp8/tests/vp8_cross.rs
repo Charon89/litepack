@@ -30,6 +30,8 @@ struct Case {
     groups: Vec<usize>,
     ops: Vec<Op>,
     bytes: Vec<u8>,
+    /// Family (e): no writer direction; each op's `value` is the value the oracle's reader returned.
+    reader_only: bool,
 }
 
 fn fixture_dir() -> PathBuf {
@@ -68,11 +70,21 @@ fn load(path: &std::path::Path) -> Vec<Case> {
     let mut cases = Vec::new();
     for line in reader.lines() {
         let v: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+        let reader_only = v["reader_only"].as_bool().unwrap_or(false);
+        let values: Option<Vec<u64>> = v["values"]
+            .as_array()
+            .map(|a| a.iter().map(|x| x.as_u64().expect("a u64 value")).collect());
+        if reader_only {
+            assert!(v.get("outcome").is_none(), "an oracle error case");
+            let values = values.as_ref().expect("a reader-only case carries values");
+            assert_eq!(values.len(), v["ops"].as_array().unwrap().len());
+        }
         let ops = v["ops"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|o| {
+            .enumerate()
+            .map(|(k, o)| {
                 let o = o.as_array().unwrap();
                 let kind = match o[0].as_str().unwrap() {
                     "bit" => Kind::Bit,
@@ -85,7 +97,11 @@ fn load(path: &std::path::Path) -> Vec<Case> {
                     group: o[1].as_u64().unwrap() as usize,
                     width: o[2].as_u64().unwrap(),
                     // u64, never through f64
-                    value: o[3].as_u64().expect("a u64 value"),
+                    value: if reader_only {
+                        values.as_ref().unwrap()[k]
+                    } else {
+                        o[3].as_u64().expect("a u64 value")
+                    },
                 }
             })
             .collect();
@@ -100,6 +116,7 @@ fn load(path: &std::path::Path) -> Vec<Case> {
                 .collect(),
             ops,
             bytes: hex(v["bytes"].as_str().unwrap()),
+            reader_only,
         });
     }
     cases
@@ -182,11 +199,21 @@ fn every_vp8_cross_case_replays_in_both_directions() {
     // family -> (cases, writer equal, reader equal)
     let mut tally: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     let mut failures = Vec::new();
+    let mut reader_only_families = std::collections::BTreeSet::new();
     for case in &cases {
         let t = tally.entry(case.family.clone()).or_default();
         t.0 += 1;
-        let written = write(case);
-        if written == case.bytes {
+        if case.reader_only {
+            reader_only_families.insert(case.family.clone());
+        }
+        let written = if case.reader_only {
+            Vec::new()
+        } else {
+            write(case)
+        };
+        if case.reader_only {
+            // no writer direction
+        } else if written == case.bytes {
             t.1 += 1;
         } else if failures.len() < 10 {
             failures.push(format!(
@@ -209,11 +236,13 @@ fn every_vp8_cross_case_replays_in_both_directions() {
     assert!(failures.is_empty(), "{failures:#?}\n{tally:?}");
     for (family, &(n, w, r)) in &tally {
         assert!(
-            n > 0 && n == w && n == r,
+            n > 0 && n == r && (n == w || reader_only_families.contains(family)),
             "family {family}: {:?}",
             (n, w, r)
         );
     }
+    let reader_only = tally.get("e").copied();
+    assert_eq!(reader_only, Some((680, 0, 680)), "family e (reader only)");
     let expected = [("a", 2400), ("b", 3002), ("c", 13), ("d", 360)];
     for (family, n) in expected {
         assert_eq!(
