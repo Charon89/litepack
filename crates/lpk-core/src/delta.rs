@@ -24,21 +24,55 @@
 //! it divided by 3 ([`PatchFault::CoverCount`]); per cover, a non-canonical varint
 //! ([`PatchFault::Varint`]), `len` 0 ([`PatchFault::ZeroLen`]), a span past `L_b`
 //! ([`PatchFault::Span`]); the `tail` varint; the sum of gaps, lens and tail differing from
-//! `out_len`, an overflowing sum included ([`PatchFault::Sum`]); an input length other than the
-//! layout's ([`PatchFault::Length`]). Input that ends inside a varint is a wrong input length
-//! ([`PatchFault::Length`]). Nothing is allocated before the header is checked; the output is
-//! allocated at `out_len` only after it.
+//! `out_len` ([`PatchFault::Sum`]; the sum saturates, so an overflowing sum differs from any
+//! `out_len` below `u64::MAX`, and `out_len = u64::MAX` fails the length check next); an input
+//! length other than the layout's ([`PatchFault::Length`]). Input that ends inside a varint is a
+//! wrong input length ([`PatchFault::Length`]).
 //!
-//! The encoder ([`encode`], feature of this crate's libsais link): the method of HDiffPatch and
-//! bsdiff, written from the algorithm (no code taken from either): the suffix array of the base
-//! chunk (libsais, `lpk_codecs_bwt::suffix_array`) gives, per position of the new bytes, the
-//! longest exact match by binary search; a match replaces the current alignment when it is
-//! longer than what the current alignment already matches over the same span by more than 8
-//! bytes (or equals it exactly); between two accepted matches the previous cover is extended
-//! forward and the next backward as long as at least half of the bytes agree (approximate
-//! matches: the disagreeing bytes become non-zero `diff` bytes, which the tier's coder
-//! compresses well), the overlap split where the agreement count is best. Memory: the base's
-//! suffix array (4 bytes per base byte), the patch, nothing per new byte beyond the output.
+//! Decode memory is the base and the input, no table (section 3): [`parse`] reads the covers
+//! once to check them and the sums and keeps none ([`Header`] is `Copy`: it cannot hold one);
+//! [`apply`] re-reads them from the patch ([`Header::covers`]) as it writes the output, which is
+//! allocated at `out_len` (at most the input's length) only after the header passed.
+//!
+//! The encoder ([`encode`], over this crate's libsais link): the suffix array of the base chunk
+//! (libsais, `lpk_codecs_bwt::suffix_array`) and, in [`covers_with`], a port of the diff loop of
+//! Colin Percival's bsdiff 4.3 (`bsdiff.c`, BSD-2-Clause, notice below and in `NOTICE` beside
+//! this crate; `docs/LICENSING.md`): per position of the new bytes the longest exact match by
+//! binary search over the suffix array; a match replaces the current alignment when it is longer
+//! than what the current alignment already matches over the same span by more than 8 bytes (or
+//! equals it exactly); between two accepted matches the previous cover is extended forward and
+//! the next backward as long as at least half of the bytes agree, the overlap split where the
+//! agreement count is best. bsdiff's own patch framing (control, diff and extra streams under
+//! bzip2) is not used: the covers are laid out as above. Memory: the base's suffix array (4
+//! bytes per base byte), the patch, nothing per new byte beyond the output.
+//!
+//! The diff loop of [`covers_with`] is ported from bsdiff 4.3, under this notice:
+//!
+//! ```text
+//! Copyright 2003-2005 Colin Percival
+//! All rights reserved
+//!
+//! Redistribution and use in source and binary forms, with or without
+//! modification, are permitted providing that the following conditions
+//! are met:
+//! 1. Redistributions of source code must retain the above copyright
+//!    notice, this list of conditions and the following disclaimer.
+//! 2. Redistributions in binary form must reproduce the above copyright
+//!    notice, this list of conditions and the following disclaimer in the
+//!    documentation and/or other materials provided with the distribution.
+//!
+//! THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+//! IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+//! WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+//! ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+//! DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//! DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+//! OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+//! HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+//! STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+//! IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+//! POSSIBILITY OF SUCH DAMAGE.
+//! ```
 
 use std::fmt;
 
@@ -296,6 +330,11 @@ fn at_offset(base: &[u8], pos: usize, offset: isize) -> Option<u8> {
 
 /// The covers of `new` against `base` given the base's suffix array (see the module
 /// documentation for the method), as `(new position, base offset, length)`.
+///
+/// Ported from the diff loop of bsdiff 4.3 (`bsdiff.c`, Copyright 2003-2005 Colin Percival,
+/// BSD-2-Clause; the notice is in the module documentation and in this crate's `NOTICE`): the
+/// scan, the forward and backward extension and the overlap split follow it; the output is the
+/// covers instead of bsdiff's control triples.
 pub fn covers_with(base: &[u8], sa: &[i32], new: &[u8]) -> Vec<(usize, usize, usize)> {
     let (n, m) = (new.len(), base.len());
     let mut covers = Vec::new();
