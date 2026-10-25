@@ -196,6 +196,94 @@ files_1_0 = [
   "readme.txt 1403 d2cbf024bbfaf864a4b7e70b3b6857e14f44086bff73646a8b49431b08c6213d",
 ]
 
+["png-filter.lpk"]
+list = "File\t115\tgrey2-adam7.png\nFile\t8261\timage.png\nFile\t188\treadme.txt\nFile\t305\trgba16.png\nFile\t1312\tsprite.png\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 3961 bytes\nentries: 5\nchunks: 19\nblocks: 9\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 654c923dd4e729355274ad6233d4ab6799591d7f30cfd2960bd11a71bb6c1b6b\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 8174\nenvelope max_frame_payload: 904\nenvelope decode_memory: 16859554\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
+["malformed-png-filter-bound.lpk"]
+list = "File\t188\treadme.txt\nFile\t1312\tsprite.png\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 1568 bytes\nentries: 2\nchunks: 6\nblocks: 3\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 8a22591472730e4f0bd150bc46980c1f2dde6cd579b6f5960fd315e92180a0f5\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 1237\nenvelope max_frame_payload: 336\nenvelope decode_memory: 16807571\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
+["malformed-png-filter-width.lpk"]
+list = "File\t188\treadme.txt\nFile\t1312\tsprite.png\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 1568 bytes\nentries: 2\nchunks: 6\nblocks: 3\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 8a22591472730e4f0bd150bc46980c1f2dde6cd579b6f5960fd315e92180a0f5\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 1237\nenvelope max_frame_payload: 336\nenvelope decode_memory: 16807579\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
+["malformed-png-filter-height.lpk"]
+list = "File\t188\treadme.txt\nFile\t1312\tsprite.png\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 1538 bytes\nentries: 2\nchunks: 6\nblocks: 3\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 8a22591472730e4f0bd150bc46980c1f2dde6cd579b6f5960fd315e92180a0f5\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 1237\nenvelope max_frame_payload: 336\nenvelope decode_memory: 16807579\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
+["malformed-png-filter-bit-depth.lpk"]
+list = "File\t188\treadme.txt\nFile\t1312\tsprite.png\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 1568 bytes\nentries: 2\nchunks: 6\nblocks: 3\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 8a22591472730e4f0bd150bc46980c1f2dde6cd579b6f5960fd315e92180a0f5\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 1237\nenvelope max_frame_payload: 336\nenvelope decode_memory: 16807579\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
+["malformed-png-filter-filters.lpk"]
+list = "File\t188\treadme.txt\nFile\t1312\tsprite.png\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 1568 bytes\nentries: 2\nchunks: 6\nblocks: 3\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 8a22591472730e4f0bd150bc46980c1f2dde6cd579b6f5960fd315e92180a0f5\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 1237\nenvelope max_frame_payload: 336\nenvelope decode_memory: 16807579\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
+["malformed-png-filter-scanlines.lpk"]
+list = "File\t188\treadme.txt\nFile\t1312\tsprite.png\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 1568 bytes\nentries: 2\nchunks: 6\nblocks: 3\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 8a22591472730e4f0bd150bc46980c1f2dde6cd579b6f5960fd315e92180a0f5\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 1237\nenvelope max_frame_payload: 336\nenvelope decode_memory: 16807579\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
+["malformed-png-filter-hash.lpk"]
+list = "File\t188\treadme.txt\nFile\t1312\tsprite.png\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 1568 bytes\nentries: 2\nchunks: 6\nblocks: 3\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: 8a22591472730e4f0bd150bc46980c1f2dde6cd579b6f5960fd315e92180a0f5\nenvelope max_window: 131072\nenvelope max_bwt_block: 0\nenvelope max_block_plain: 1237\nenvelope max_frame_payload: 336\nenvelope decode_memory: 16807579\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
 ["malformed-truncated.lpk"]
 error = "Truncated"
 message = "input truncated in trailer"

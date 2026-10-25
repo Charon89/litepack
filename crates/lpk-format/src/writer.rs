@@ -544,6 +544,9 @@ pub struct Writer<W: Write> {
     /// archives the reader must refuse.
     #[cfg(test)]
     unchecked_records: bool,
+    /// Skip revision 1.4's `png-filter` record checks (conformance vectors
+    /// only, [`Writer::allow_malformed_png_records`]).
+    unchecked_png: bool,
     /// Tests only: the pool threads hand back a wrong frame hash.
     #[cfg(test)]
     corrupt_pool_hash: bool,
@@ -998,6 +1001,7 @@ impl<W: Write> Writer<W> {
                 profile::reset();
                 (Instant::now(), 0)
             }),
+            unchecked_png: false,
             #[cfg(test)]
             unchecked_records: false,
             #[cfg(test)]
@@ -1285,6 +1289,7 @@ impl<W: Write> Writer<W> {
                 profile::reset();
                 (Instant::now(), 0)
             }),
+            unchecked_png: false,
             #[cfg(test)]
             unchecked_records: false,
             #[cfg(test)]
@@ -2017,7 +2022,7 @@ impl<W: Write> Writer<W> {
     /// a longer one as `PayloadTooLarge` and a shorter one as the deflate
     /// step's `plain_len`).
     fn check_png_step(&self, step: &Step, plain_len: u64) -> Result<(), FormatError> {
-        if step.primitive != PrimitiveId::PngFilter {
+        if step.primitive != PrimitiveId::PngFilter || self.unchecked_png {
             return Ok(());
         }
         let Some(record) = step.primitive.record_id(&step.params) else {
@@ -2626,6 +2631,16 @@ impl<W: Write> Writer<W> {
         entry.size = at;
         self.push_entry(entry);
         Ok(())
+    }
+
+    /// Skip revision 1.4's record checks of `png-filter` steps (the record's
+    /// kind, its image and its filtered length against the deflate record's
+    /// `plain_len`) for the rest of this write; the position rule stays. For
+    /// building the malformed conformance vectors a reader must refuse
+    /// (`docs/spec/CONFORMANCE.md`), never for archives meant to be read.
+    #[doc(hidden)]
+    pub fn allow_malformed_png_records(&mut self) {
+        self.unchecked_png = true;
     }
 
     /// Add a reconstruction record while writing; returns its id, its
