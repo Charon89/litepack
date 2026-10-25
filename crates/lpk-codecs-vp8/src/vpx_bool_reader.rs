@@ -24,6 +24,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 
 // Modified by LitePack (2026-10-25) from lepton_jpeg 0.5.8, `src/structs/vpx_bool_reader.rs`
 // (LIC-2; spec section 8):
+// - `new` decodes the marker symbol and discards its value (lepton_jpeg refuses a marker of one);
 // - the metrics, the tracing hash, the model-component argument and `get_grid` removed; errors
 //   are `std::io::Error` (lepton_jpeg's error type is not carried);
 // - the per-symbol step renamed `decode_bit` (the public `get` is the one-symbol method);
@@ -52,8 +53,19 @@ pub struct VPXBoolReader<R> {
 }
 
 impl<R: Read> VPXBoolReader<R> {
-    /// A reader at the start of a stream; fails if the stream's first (marker) symbol is not a
-    /// zero.
+    /// A reader at the start of a stream before its marker symbol (for the tests).
+    #[cfg(test)]
+    pub(crate) fn raw(reader: R) -> Self {
+        VPXBoolReader {
+            upstream_reader: reader,
+            value: 1 << (BITS_IN_VALUE - 1), // guard bit
+            range: 255 << BITS_IN_VALUE_MINUS_LAST_BYTE,
+        }
+    }
+
+    /// A reader at the start of a stream. The stream's first symbol (the marker, coded with a
+    /// fresh context of its own) is decoded and its value discarded, as the cited decoder does:
+    /// a writer always codes a zero there, but a stream whose marker decodes as one is read on.
     pub fn new(reader: R) -> Result<Self> {
         let mut r = VPXBoolReader {
             upstream_reader: reader,
@@ -62,10 +74,8 @@ impl<R: Read> VPXBoolReader<R> {
         };
 
         let mut dummy_branch = Branch::new();
-        let bit = r.get_bit(&mut dummy_branch)?; // marker false bit
-        if bit {
-            return Err(Error::new(ErrorKind::InvalidData, "StreamInconsistent"));
-        }
+        // the marker symbol: decoded, its value not checked
+        let _marker = r.get_bit(&mut dummy_branch)?;
 
         Ok(r)
     }
@@ -125,6 +135,14 @@ impl<R: Read> VPXBoolReader<R> {
     /// end of the stream every symbol reads as zero once the code value is exhausted).
     #[inline(always)]
     pub fn get_unary_encoded(&mut self, branches: &mut [Branch]) -> Result<usize> {
+        self.get_unary_encoded_max(branches, usize::MAX)
+    }
+
+    /// [`get_unary_encoded`](Self::get_unary_encoded) for a caller that accepts no value above
+    /// `max`: decoding stops with an error (`InvalidData`) at the one that would make the value
+    /// `max + 1`, so a crafted run of ones costs at most `max + 1` symbols.
+    #[inline(always)]
+    pub fn get_unary_encoded_max(&mut self, branches: &mut [Branch], max: usize) -> Result<usize> {
         let a = branches.len();
         if a == 0 {
             return Err(Error::new(
@@ -147,6 +165,14 @@ impl<R: Read> VPXBoolReader<R> {
                 &mut tmp_range,
             ) {
                 break;
+            }
+            if value == max {
+                self.value = tmp_value;
+                self.range = tmp_range;
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "get_unary_encoded: value above the caller's maximum",
+                ));
             }
             value += 1;
         }

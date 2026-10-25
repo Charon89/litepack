@@ -35,8 +35,9 @@ pub trait Vp8Encode<C> {
     /// Codes the low `num_bits` bits of `bits` (1 to 64), most significant first, bit `i` with
     /// `contexts[min(contexts.len() - 1, i)]`.
     fn put_n_bits(&mut self, bits: u64, num_bits: usize, contexts: &mut [C]) -> Result<()>;
-    /// Codes `value` (at most `contexts.len()`) as ones then a zero, symbol `i` with
-    /// `contexts[min(contexts.len() - 1, i)]`.
+    /// Codes `value` as `value` ones then a zero, symbol `i` with
+    /// `contexts[min(contexts.len() - 1, i)]` (a value of `contexts.len()` or more reuses the last
+    /// context).
     fn put_unary_encoded(&mut self, value: usize, contexts: &mut [C]) -> Result<()>;
     /// Ends the stream and writes it.
     fn finish(&mut self) -> Result<()>;
@@ -50,6 +51,9 @@ pub trait Vp8Decode<C> {
     fn get_n_bits(&mut self, num_bits: usize, contexts: &mut [C]) -> Result<u64>;
     /// Decodes a value coded by [`Vp8Encode::put_unary_encoded`].
     fn get_unary_encoded(&mut self, contexts: &mut [C]) -> Result<usize>;
+    /// [`get_unary_encoded`](Vp8Decode::get_unary_encoded) refusing (`InvalidData`) a value above
+    /// `max` as soon as the run of ones passes it.
+    fn get_unary_encoded_max(&mut self, contexts: &mut [C], max: usize) -> Result<usize>;
 }
 
 impl<W: Write> Vp8Encode<Branch> for VPXBoolWriter<W> {
@@ -87,6 +91,11 @@ impl<R: Read> Vp8Decode<Branch> for VPXBoolReader<R> {
     #[inline(always)]
     fn get_unary_encoded(&mut self, contexts: &mut [Branch]) -> Result<usize> {
         VPXBoolReader::get_unary_encoded(self, contexts)
+    }
+
+    #[inline(always)]
+    fn get_unary_encoded_max(&mut self, contexts: &mut [Branch], max: usize) -> Result<usize> {
+        VPXBoolReader::get_unary_encoded_max(self, contexts, max)
     }
 }
 

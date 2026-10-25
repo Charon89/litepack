@@ -167,9 +167,51 @@ fn unary_on_an_exhausted_stream_ends() {
 }
 
 #[test]
-fn a_stream_whose_marker_symbol_is_one_is_refused() {
-    assert!(VPXBoolReader::new(&[0xFFu8][..]).is_err());
-    assert!(VPXBoolReader::new(&[0x7Fu8][..]).is_ok());
+fn a_stream_whose_marker_symbol_is_one_is_read_on() {
+    // byte 0 at 0x80 or more decodes the marker as one; the reader discards it and goes on
+    // decoding from the state that symbol left
+    for first in [0x80u8, 0xC3, 0xFF] {
+        let bytes = [first, 0x5A, 0x00, 0xE7, 0x11];
+        let mut r = VPXBoolReader::new(&bytes[..]).unwrap();
+        let mut c = ctx(8);
+        let got: Vec<u64> = (0..4).map(|_| r.get_n_bits(8, &mut c).unwrap()).collect();
+        let mut r2 = VPXBoolReader::raw(&bytes[..]);
+        assert!(
+            r2.get_bit(&mut Branch::new()).unwrap(),
+            "marker of {first:#x} is one"
+        );
+        let mut c2 = ctx(8);
+        let want: Vec<u64> = (0..4).map(|_| r2.get_n_bits(8, &mut c2).unwrap()).collect();
+        assert_eq!(got, want);
+    }
+    let mut r = VPXBoolReader::raw(&[0x7Fu8][..]);
+    assert!(!r.get_bit(&mut Branch::new()).unwrap());
+}
+
+#[test]
+fn a_bounded_unary_refuses_a_run_past_its_maximum() {
+    let out = encode(|wr| {
+        let mut c = ctx(32);
+        wr.put_unary_encoded(70, &mut c).unwrap();
+        wr.put_unary_encoded(65, &mut c).unwrap();
+    });
+    let mut r = VPXBoolReader::new(&out[..]).unwrap();
+    assert!(r.get_unary_encoded_max(&mut ctx(32), 65).is_err());
+    let mut r = VPXBoolReader::new(&out[..]).unwrap();
+    let mut c = ctx(32);
+    assert_eq!(r.get_unary_encoded_max(&mut c, 70).unwrap(), 70);
+    assert_eq!(r.get_unary_encoded_max(&mut c, 65).unwrap(), 65);
+    // a long run of ones: the bound stops it after max + 1 symbols
+    let out = encode(|wr| wr.put_unary_encoded(100_000, &mut ctx(1)).unwrap());
+    let mut r = VPXBoolReader::new(&out[..]).unwrap();
+    assert!(r.get_unary_encoded_max(&mut ctx(1), 65).is_err());
+}
+
+#[test]
+fn a_field_wider_than_64_bits_is_refused() {
+    let mut r = VPXBoolReader::new(&[0x12u8, 0x34][..]).unwrap();
+    assert!(r.get_n_bits(65, &mut ctx(32)).is_err());
+    assert!(r.get_n_bits(64, &mut ctx(32)).is_ok());
 }
 
 #[test]
