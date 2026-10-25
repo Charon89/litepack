@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-25, about 20:37 UTC. **E4-1 is done (D-97, PR #102): the sandboxed worker launch.** LIC-2 (D-96), E2-25's code (D-95) and E2-9's tasks A and E (D-94) are merged. In flight: E2-16 (revision 1.4; review next). Next measurements on the idle machine: the delta probe on `full`, E2-16's A/B on `small`, then E3-9. Next code: E4-2 (the broker protocol and the worker). The owner's open items are below.
+Last updated: 2026-10-25, about 21:47 UTC. **E2-16's code is merged (D-98, PR #104): revision 1.4, the PNG row-filter re-encoding.** In flight: E4-2 (fix round), the E5 design note (fix round), E2-16 task E (the independent decoder). Next measurements on the idle machine: E2-16's A/B on `small`, the delta probe on `full`, then E3-9. The owner's open items are below.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on

@@ -61,7 +61,7 @@ pub use ingest::{
 pub use peel::jpeg::{register_full_decoders, register_full_reader};
 pub use peel::{
     Cause, Count, DeflateDecoder, Fallback, JpegDecoder, JpegPeel, NestedPart, PeelPlan, PeelStage,
-    PeelSummary,
+    PeelSummary, PngFilterDecoder,
 };
 pub use pipeline::{ClassifyStage, ModelStage, Pipeline, RunSummary, SealOptions, StageTimings};
 pub use policy::{DefaultPolicy, ExtractPolicy, Overwrite, Policy, Symlinks};

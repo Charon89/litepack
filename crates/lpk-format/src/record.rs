@@ -458,7 +458,103 @@ impl PngFilterRecord {
     pub fn verify_hash(&self, original: &[u8]) -> bool {
         hash_matches(original, &self.original_hash)
     }
+
+    /// The passes of the image as (pixels per scanline, scanlines), PNG
+    /// specification section 8.2: the whole image, or Adam7's seven passes,
+    /// an empty pass (no pixel column or no row) having no scanline.
+    pub fn passes(&self) -> Vec<(u32, u32)> {
+        if self.interlace == 0 {
+            return vec![(self.width, self.height)];
+        }
+        ADAM7
+            .iter()
+            .map(|&(x0, y0, dx, dy)| {
+                let extent = |n: u32, start: u32, step: u32| {
+                    if n > start {
+                        (n - start).div_ceil(step)
+                    } else {
+                        0
+                    }
+                };
+                let (w, h) = (extent(self.width, x0, dx), extent(self.height, y0, dy));
+                if w == 0 || h == 0 {
+                    (0, 0)
+                } else {
+                    (w, h)
+                }
+            })
+            .collect()
+    }
+
+    /// Bits per pixel: samples per pixel (1, 3, 1, 2, 4 for colour types 0,
+    /// 2, 3, 4, 6) times `bit_depth`.
+    pub fn bits_per_pixel(&self) -> u64 {
+        let channels: u64 = match self.color_type {
+            2 => 3,
+            4 => 2,
+            6 => 4,
+            _ => 1,
+        };
+        channels * u64::from(self.bit_depth)
+    }
+
+    /// The scanlines of the image: one filter byte each (Adam7's empty passes
+    /// have none).
+    pub fn scanlines(&self) -> u64 {
+        self.passes().iter().map(|&(_, h)| u64::from(h)).sum()
+    }
+
+    /// The filtered length of the image (the bytes `png-filter` outputs): over
+    /// the passes, scanlines × (1 + ⌈width × bits per pixel / 8⌉); `None`
+    /// past 2^64 − 1.
+    pub fn filtered_len(&self) -> Option<u64> {
+        let bits = self.bits_per_pixel();
+        self.passes().iter().try_fold(0u64, |acc, &(w, h)| {
+            let row = u64::from(w).checked_mul(bits)?.div_ceil(8).checked_add(1)?;
+            acc.checked_add(u64::from(h).checked_mul(row)?)
+        })
+    }
+
+    /// Check (3) of "Decoding `png-filter`" (spec section 8, revision 1.4),
+    /// what the 1.0 parse rules lack, in this order: `width` at least 1
+    /// (`BadRecord`, `width`), `height` at least 1 (`height`), a bit depth the
+    /// colour type allows (`bit_depth`), then one filter byte per scanline
+    /// (`filters`; the parse checks it for an image that is not interlaced)
+    /// and every filter byte at most 4 (`filters`). `record` is the id.
+    pub fn check_image(&self, record: u64) -> Result<(), FormatError> {
+        let bad = |reason| FormatError::BadRecord { record, reason };
+        if self.width == 0 {
+            return Err(bad("width"));
+        }
+        if self.height == 0 {
+            return Err(bad("height"));
+        }
+        let pair = match self.color_type {
+            0 => matches!(self.bit_depth, 1 | 2 | 4 | 8 | 16),
+            3 => matches!(self.bit_depth, 1 | 2 | 4 | 8),
+            _ => matches!(self.bit_depth, 8 | 16),
+        };
+        if !pair {
+            return Err(bad("bit_depth"));
+        }
+        if self.filters.len() as u64 != self.scanlines() || self.filters.iter().any(|&f| f > 4) {
+            return Err(bad("filters"));
+        }
+        Ok(())
+    }
 }
+
+/// Adam7 (PNG specification, section 8.2): `(x_start, y_start, x_step,
+/// y_step)` of the seven passes, in order.
+pub const ADAM7: [(u32, u32, u32, u32); 7] = [
+    (0, 0, 8, 8),
+    (4, 0, 8, 8),
+    (0, 4, 4, 8),
+    (2, 0, 4, 4),
+    (0, 2, 2, 4),
+    (1, 0, 2, 2),
+    (0, 1, 1, 2),
+];
 
 // ----------------------------------------------------------------- base64
 
@@ -1117,6 +1213,69 @@ mod tests {
             filters: vec![0, 1, 4],
             original_hash: h(2),
         }
+    }
+
+    /// Revision 1.4's check (3) of `png-filter` and the image's lengths.
+    #[test]
+    fn png_filter_image_check_and_lengths() {
+        let p = png();
+        p.check_image(4).unwrap();
+        assert_eq!(p.scanlines(), 3);
+        assert_eq!(p.filtered_len(), Some(3 * (1 + 640 * 4)));
+        let cases: [Case<PngFilterRecord>; 7] = [
+            (|p| p.width = 0, "width"),
+            (|p| p.height = 0, "height"),
+            (|p| p.bit_depth = 16, "filters"),
+            (|p| p.bit_depth = 4, "bit_depth"),
+            (|p| p.filters[1] = 5, "filters"),
+            (|p| p.interlace = 1, "filters"),
+            (
+                |p| {
+                    p.color_type = 3;
+                    p.bit_depth = 16;
+                },
+                "bit_depth",
+            ),
+        ];
+        for (i, (f, reason)) in cases.into_iter().enumerate() {
+            let mut q = png();
+            f(&mut q);
+            if i == 2 {
+                // 16-bit RGBA is allowed: the case is a control.
+                q.check_image(4).unwrap();
+                continue;
+            }
+            assert!(
+                matches!(q.check_image(4), Err(FormatError::BadRecord { record: 4, reason: r }) if r == reason),
+                "{i}"
+            );
+        }
+        // Adam7: 1 x 1 has one scanline (pass 1), 8 x 8 fifteen; 5 x 1 four.
+        let mut a = png();
+        a.interlace = 1;
+        for ((w, h), n, len) in [
+            ((1, 1), 1, 1 + 4),
+            ((8, 8), 15, 15 + 64 * 4),
+            ((5, 1), 4, 4 + 5 * 4),
+        ] {
+            a.width = w;
+            a.height = h;
+            assert_eq!(a.scanlines(), n);
+            assert_eq!(a.filtered_len(), Some(len));
+            a.filters = vec![0; n as usize];
+            a.check_image(0).unwrap();
+        }
+        // Sub-byte rows are packed; the largest images overflow.
+        let mut g = png();
+        g.color_type = 0;
+        g.bit_depth = 1;
+        g.width = 17;
+        assert_eq!(g.filtered_len(), Some(3 * (1 + 3)));
+        g.width = u32::MAX;
+        g.height = u32::MAX;
+        g.color_type = 6;
+        g.bit_depth = 16;
+        assert_eq!(g.filtered_len(), None);
     }
 
     fn b64() -> Base64Record {

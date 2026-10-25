@@ -455,6 +455,86 @@ impl Layout {
         Ok(out)
     }
 
+    /// Re-filter a filtered text of the image (`input`: each scanline's filter byte, at most 4,
+    /// then its filtered bytes) with `filters`, one per scanline: each scanline is undone with
+    /// its own filter byte and filtered again with the new one, keeping only two raw rows, so
+    /// the memory is the input, the output (both the filtered length) and two rows. This is
+    /// revision 1.4's `png-filter` decoding (spec section 8): the writer gives it the text with
+    /// every scanline filtered with Up, the decoder the record's filter bytes.
+    pub fn transcode(&self, input: &[u8], filters: &[u8]) -> Result<Vec<u8>, PngError> {
+        let expected = self.filtered_len().ok_or(PngError::Overflow)?;
+        if expected != input.len() as u64 {
+            return Err(PngError::LengthMismatch {
+                expected,
+                found: input.len() as u64,
+            });
+        }
+        let scanlines = self.scanlines();
+        if scanlines != filters.len() as u64 {
+            return Err(PngError::FilterCount {
+                expected: scanlines,
+                found: filters.len() as u64,
+            });
+        }
+        if let Some((i, &f)) = filters.iter().enumerate().find(|(_, f)| **f > FILTER_PAETH) {
+            return Err(PngError::BadFilter {
+                scanline: i as u64,
+                filter: f,
+            });
+        }
+        let mut out = vec![0u8; input.len()];
+        let bpp = self.filter_unit();
+        let (mut at, mut line) = (0usize, 0usize);
+        for pass in self.passes() {
+            if pass.scanlines() == 0 {
+                continue;
+            }
+            // The filtered length was checked, so every row fits in a usize.
+            let rb = pass.row_bytes as usize;
+            let mut prior = vec![0u8; rb];
+            let mut row = vec![0u8; rb];
+            for _ in 0..pass.scanlines() {
+                let given = input[at];
+                if given > FILTER_PAETH {
+                    return Err(PngError::BadFilter {
+                        scanline: line as u64,
+                        filter: given,
+                    });
+                }
+                row.copy_from_slice(&input[at + 1..at + 1 + rb]);
+                unfilter_row(given, bpp, &prior, &mut row);
+                let filter = filters[line];
+                out[at] = filter;
+                filter_row(filter, bpp, &prior, &row, &mut out[at + 1..at + 1 + rb]);
+                std::mem::swap(&mut prior, &mut row);
+                at += 1 + rb;
+                line += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The filter byte of every scanline of a filtered text of the image (the text must have
+    /// the filtered length; bytes are returned as found).
+    pub fn filter_bytes(&self, filtered: &[u8]) -> Result<Vec<u8>, PngError> {
+        let expected = self.filtered_len().ok_or(PngError::Overflow)?;
+        if expected != filtered.len() as u64 {
+            return Err(PngError::LengthMismatch {
+                expected,
+                found: filtered.len() as u64,
+            });
+        }
+        let mut out = Vec::with_capacity(usize::try_from(self.scanlines()).unwrap_or(0));
+        let mut at = 0usize;
+        for pass in self.passes() {
+            for _ in 0..pass.scanlines() {
+                out.push(filtered[at]);
+                at += 1 + pass.row_bytes as usize;
+            }
+        }
+        Ok(out)
+    }
+
     /// The raw rows with every scanline given filter `filter`.
     pub fn refilter_uniform(&self, raw: &[u8], filter: u8) -> Result<Vec<u8>, PngError> {
         let n = usize::try_from(self.scanlines()).map_err(|_| PngError::Overflow)?;
@@ -710,6 +790,47 @@ mod tests {
             }
         }
         assert_eq!(layouts, 15 * 2 * 17 * 9);
+    }
+
+    #[test]
+    fn transcode_refilters_any_filtered_text_over_every_layout() {
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        for (depth, ct) in PAIRS {
+            for interlace in 0..=1u8 {
+                for w in 1..=11u32 {
+                    for h in 1..=7u32 {
+                        let l = layout(w, h, depth, ct, interlace);
+                        let raw = rng.bytes(l.raw_len().unwrap() as usize);
+                        let n = l.scanlines() as usize;
+                        let a: Vec<u8> = (0..n).map(|_| rng.filter()).collect();
+                        let b: Vec<u8> = (0..n).map(|_| rng.filter()).collect();
+                        let from = l.refilter(&raw, &a).unwrap();
+                        let want = l.refilter(&raw, &b).unwrap();
+                        assert_eq!(l.transcode(&from, &b).unwrap(), want, "{l:?}");
+                        let up = l.refilter_uniform(&raw, FILTER_UP).unwrap();
+                        assert_eq!(l.transcode(&from, &vec![FILTER_UP; n]).unwrap(), up);
+                        assert_eq!(l.transcode(&up, &b).unwrap(), want);
+                        assert_eq!(l.filter_bytes(&from).unwrap(), a);
+                    }
+                }
+            }
+        }
+        let l = layout(2, 2, 8, 0, 0);
+        assert_eq!(
+            l.transcode(&[0, 1, 2, 7, 3, 4], &[0, 0]),
+            Err(PngError::BadFilter {
+                scanline: 1,
+                filter: 7
+            })
+        );
+        assert!(matches!(
+            l.transcode(&[0, 1, 2], &[0, 0]),
+            Err(PngError::LengthMismatch { .. })
+        ));
+        assert!(matches!(
+            l.transcode(&[0; 6], &[0, 5]),
+            Err(PngError::BadFilter { .. })
+        ));
     }
 
     #[test]

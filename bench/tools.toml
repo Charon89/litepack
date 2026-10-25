@@ -286,6 +286,12 @@ extract = []
 id = "balanced-no-bwt"
 compress = ["--balanced", "--bwt", "off"]
 extract = []
+# The PNG row-filter re-encoding's A/B (E2-16, revision 1.4): `balanced` carries it by default;
+# this row turns it off.
+[[tool.setting]]
+id = "balanced-no-png-filter"
+compress = ["--balanced", "--png-filter", "off"]
+extract = []
 [[tool.setting]]
 id = "store"
 compress = ["--store"]

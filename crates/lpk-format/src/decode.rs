@@ -138,7 +138,8 @@ pub trait PrimitiveDecoder: Send + Sync {
     }
 
     /// Whether this decoder bounds its input: true for a decoder whose
-    /// [`input_bound`] can return `Some` (`deflate-reconstruct`, `bwt`). The
+    /// [`input_bound`] can return `Some` (`deflate-reconstruct`, `bwt`,
+    /// revision 1.4's `png-filter`). The
     /// reader's look-ahead asks the step after a step for its input bound
     /// only when that step bounds its input (spec section 8, revision 1.3's
     /// Bounds); after a step that bounds nothing, no later step is asked and
@@ -999,6 +1000,100 @@ mod tests {
         ));
         assert!(ran.load(Ordering::SeqCst));
         assert_eq!(asked(&third), vec![(2, true)]);
+    }
+
+    /// Task A of revision 1.4 (`docs/notes/e2-16-design.md`, section 3): in
+    /// `[M, png-filter, deflate-reconstruct]` the reader asks the
+    /// `deflate-reconstruct` step for its input bound (as the last step, with
+    /// the block's `plain_len`) before `M` runs, and passes that bound to the
+    /// `png-filter` step's `input_bound` as its output bound; the
+    /// `deflate-reconstruct` step's checks come first and its error, or the
+    /// `png-filter` step's, is the block's, with `M` not run.
+    #[test]
+    fn png_filter_is_asked_with_the_deflate_records_bound_before_m_runs() {
+        let small = Resources {
+            max_block_plain: 4,
+            ..Resources::default()
+        };
+        let record = |id: u8| vec![id];
+        let run = |png: Result<Option<u64>, &'static str>,
+                   deflate: Result<Option<u64>, &'static str>| {
+            let m = Arc::new(AtomicBool::new(false));
+            let png = Probe::new(png);
+            let deflate = Probe::new(deflate);
+            let mut r = Registry::v1();
+            r.register(PrimitiveId::BcjX86, Box::new(OverFlag(9, m.clone())));
+            r.register(
+                PrimitiveId::PngFilter,
+                Box::new(Probe {
+                    bound: png.bound,
+                    asked: png.asked.clone(),
+                    ran: png.ran.clone(),
+                }),
+            );
+            r.register(
+                PrimitiveId::DeflateReconstruct,
+                Box::new(Probe {
+                    bound: deflate.bound,
+                    asked: deflate.asked.clone(),
+                    ran: deflate.ran.clone(),
+                }),
+            );
+            let h = header(
+                vec![
+                    step(PrimitiveId::BcjX86),
+                    Step {
+                        primitive: PrimitiveId::PngFilter,
+                        params: record(0),
+                    },
+                    Step {
+                        primitive: PrimitiveId::DeflateReconstruct,
+                        params: record(1),
+                    },
+                ],
+                2,
+                2,
+            );
+            let out = decode_block(&r, &h, 0, b"ab", &small);
+            (out, m.load(Ordering::SeqCst), png, deflate)
+        };
+        // The deflate record's `plain_len` (20) is the png-filter step's
+        // output bound; its input bound (9) lets M's 9 bytes through,
+        // although they pass `max_block_plain` (4).
+        let (out, m, png, deflate) = run(Ok(Some(9)), Ok(Some(20)));
+        assert_eq!(out.unwrap(), vec![7, 7]);
+        assert!(m);
+        assert_eq!(asked(&png), vec![(20, false)]);
+        assert_eq!(asked(&deflate), vec![(2, true), (2, true)]);
+        // A png-filter bound below M's output: PayloadTooLarge before the
+        // png-filter step runs.
+        let (out, _, png, _) = run(Ok(Some(8)), Ok(Some(20)));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::PayloadTooLarge { len: 9, max: 8 }
+        ));
+        assert!(!png.ran.load(Ordering::SeqCst));
+        // The deflate step's checks fail: its error, nothing run, png-filter
+        // never asked.
+        let (out, m, png, _) = run(Ok(Some(9)), Err("deflate"));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::BadRecord {
+                reason: "deflate",
+                ..
+            }
+        ));
+        assert!(!m);
+        assert!(asked(&png).is_empty());
+        // The png-filter step's checks fail (with the deflate bound): its
+        // error, M not run.
+        let (out, m, png, _) = run(Err("png"), Ok(Some(20)));
+        assert!(matches!(
+            out.unwrap_err(),
+            FormatError::BadRecord { reason: "png", .. }
+        ));
+        assert!(!m);
+        assert_eq!(asked(&png), vec![(20, false)]);
     }
 
     #[test]
