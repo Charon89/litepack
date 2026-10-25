@@ -253,7 +253,10 @@ impl Pipeline {
                 max_file: options.jpeg_max_file,
                 ..JpegPeel::default()
             })],
-            deflate: Some(DeflatePeel::default()),
+            deflate: Some(DeflatePeel {
+                png_filter: true,
+                ..DeflatePeel::default()
+            }),
             fold: Some(Box::new(Dedup::default())),
             model: ModelStage::Balanced(options),
             seal: SealOptions::default(),
@@ -261,11 +264,18 @@ impl Pipeline {
         }
     }
 
-    /// Drop the stages the archive's revision `minor` does not allow (the BWT stage needs 3,
+    /// Drop the stages the archive's revision `minor` does not allow (the PNG row-filter
+    /// re-encoding needs 4, the BWT stage 3,
     /// the Deflate stage 2, the JPEG stage 1; design 3.8, amending D-56 (3)); the summary names
     /// them. The BWT stage is turned off on the encoder `prepared` built from the options too.
     fn restrict_to_revision(&mut self, prepared: &mut Prepared, minor: u16) {
         let mut dropped = Vec::new();
+        if minor < 4 {
+            if let Some(d) = self.deflate.as_mut().filter(|d| d.png_filter) {
+                d.png_filter = false;
+                dropped.push("png-filter");
+            }
+        }
         if minor < 3 {
             if let (ModelStage::Balanced(o), Prepared::Balanced(e, _)) = (&mut self.model, prepared)
             {
@@ -760,7 +770,13 @@ impl Pipeline {
                                 DeflateMemory {
                                     max_file: largest,
                                     plain_limit: plain,
-                                    encoder: p.memory_for(plain),
+                                    // The PNG re-encoding holds the Up text and the first
+                                    // encoding beside the encoder's set: two more texts.
+                                    encoder: p.memory_for(plain).saturating_add(if d.png_filter {
+                                        plain.saturating_mul(2)
+                                    } else {
+                                        0
+                                    }),
                                     records: d.records_cap,
                                 }
                             }),
@@ -839,10 +855,13 @@ impl Pipeline {
                 wopts.threads_hint = model.threads_hint(ceiling);
                 let max_part = wopts.block_size;
                 // The header's version_minor is the revision this writer writes under (spec
-                // section 2), whether or not a stage peels or a block uses `bwt`: 3 whenever
+                // section 2), whether or not a stage peels or a block uses `bwt`: 4 whenever the
+                // Deflate peel's PNG row-filter re-encoding is enabled (revision 1.4), else 3 whenever
                 // the Balanced tier's BWT stage is enabled (the header precedes every block),
                 // else 2 whenever the Deflate peel is, else 1 whenever a peel stage is, else 0.
-                let minor = if bwt_on {
+                let minor = if deflate.as_ref().is_some_and(|d| d.png_filter) {
+                    4
+                } else if bwt_on {
                     3
                 } else if deflate.is_some() {
                     2

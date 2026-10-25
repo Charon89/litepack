@@ -447,6 +447,14 @@ const DICT_SIZE_BALANCED: &str =
 const BWT_BALANCED: &str =
     "the argument '--bwt' requires the Balanced tier (--balanced or --tier balanced)";
 
+/// The refusal of `--png-filter` under a tier other than Balanced.
+const PNG_FILTER_BALANCED: &str =
+    "the argument '--png-filter' requires the Balanced tier (--balanced or --tier balanced)";
+
+/// The refusal of `--png-filter on` with the Deflate peel off (the re-encoding is part of it).
+const PNG_FILTER_NEEDS_PEEL: &str =
+    "the argument '--png-filter on' needs the Deflate peel (it cannot be used with '--deflate-peel off')";
+
 /// The value of `--tier`: the long form of the tier flags, which the GUI mirrors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum TierArg {
@@ -543,6 +551,13 @@ struct TierArgs {
     /// 1.3 archive.
     #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
     bwt: Option<OnOff>,
+    /// The Balanced tier's PNG row-filter re-encoding (revision 1.4), part of the Deflate peel:
+    /// a PNG's image data is also tried with every row filtered with Up, and written so (with
+    /// the original filter bytes in a record that restores them) when that is smaller. Default:
+    /// on with --balanced; the Fast tier never uses it. An append runs it only on a revision 1.4
+    /// archive.
+    #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
+    png_filter: Option<OnOff>,
 }
 
 impl TierArgs {
@@ -569,6 +584,12 @@ impl TierArgs {
         }
         if self.bwt.is_some() && tier != Tier::Balanced {
             return Err(BWT_BALANCED.to_string());
+        }
+        if self.png_filter.is_some() && tier != Tier::Balanced {
+            return Err(PNG_FILTER_BALANCED.to_string());
+        }
+        if self.png_filter == Some(OnOff::On) && self.deflate_peel == Some(OnOff::Off) {
+            return Err(PNG_FILTER_NEEDS_PEEL.to_string());
         }
         if self.tier.is_some() {
             let settings: &[(&str, bool)] = match tier {
@@ -920,6 +941,10 @@ fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
         Some(OnOff::Off) => pipeline.deflate = None,
         None => {}
     }
+    // The PNG row-filter re-encoding: on by default with the Balanced tier's Deflate peel.
+    if let Some(d) = pipeline.deflate.as_mut() {
+        d.png_filter = tier == Tier::Balanced && a.png_filter != Some(OnOff::Off);
+    }
     if a.no_dedup {
         pipeline.fold = None;
     } else if pipeline.fold.is_some() {
@@ -1268,6 +1293,11 @@ fn deflate_report(err: &mut dyn Write, d: &lpk_core::peel::deflate::DeflateSumma
         d.zstd_blocks,
         s.zip_deflate64_members,
         s.zip_other_method_members
+    );
+    let _ = writeln!(
+        err,
+        "  png filters: {} streams tried with every row Up, {} written re-filtered (png-filter records {} bytes)",
+        d.png_tried, d.png_filtered, d.png_record_bytes
     );
     let _ = writeln!(
         err,

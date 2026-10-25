@@ -24,12 +24,15 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
 use lpk_format::envelope::DEFAULT_MEMORY;
-use lpk_format::{DeflateRecord, Encoded, PrimitiveId, Record, RecordBody, Step, Writer};
+use lpk_format::{
+    DeflateRecord, Encoded, PngFilterRecord, PrimitiveId, Record, RecordBody, Step, Writer,
+};
 
 use super::{examine_with, memory_term, Counts, Limits, PartEncoder, PartModel, Reconstructed};
 use crate::classify::{classify, Class};
 use crate::error::CoreError;
 use crate::ingest::Input;
+use crate::peel::png::{Header, FILTER_UP};
 use crate::peel::Count;
 
 /// The largest file the stage reads whole; a longer one is refused unread (streamed through
@@ -59,6 +62,9 @@ pub const CLASSIFY_LEN: usize = 1 << 20;
 /// The most record bytes (as encoded in the `Records` frame) one run keeps (see the module
 /// text).
 pub const RECORDS_CAP: u64 = 64 << 20;
+/// The bytes counted for a `png-filter` graph step in a stream's cost: an upper bound (ID 2,
+/// flags 1, params length 1, a record id varint below 2^21), as E2-16's probe counted it.
+pub const PNG_STEP_BYTES: u64 = 7;
 
 /// The Deflate peel stage's settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +83,11 @@ pub struct DeflatePeel {
     /// The peel pool's hints (design section 1: a worker skips what the commits already wrote;
     /// the archive is the same either way).
     pub hints: bool,
+    /// The PNG row-filter re-encoding (E2-16, revision 1.4): a PNG's IDAT stream is also encoded
+    /// with every scanline filtered with Up, and written `[M, png-filter, deflate-reconstruct]`
+    /// when that costs less, side information counted ([`png_candidate`] for the images tried).
+    /// Off by default; [`crate::Pipeline::balanced`] turns it on. Needs an archive of minor 4.
+    pub png_filter: bool,
 }
 
 impl Default for DeflatePeel {
@@ -88,6 +99,7 @@ impl Default for DeflatePeel {
             records_cap: RECORDS_CAP,
             exact_skips: true,
             hints: true,
+            png_filter: false,
         }
     }
 }
@@ -219,6 +231,12 @@ pub struct DeflateSummary {
     pub model_bytes: u64,
     /// Correction bytes of the kept streams.
     pub correction_bytes: u64,
+    /// Kept streams written with their row filters re-encoded (`png-filter`, revision 1.4).
+    pub png_filtered: u64,
+    /// Encoded bytes of their `png-filter` records (also counted in `record_bytes`).
+    pub png_record_bytes: u64,
+    /// Streams whose Up text was encoded too (a PNG image the re-encoding tries), kept or not.
+    pub png_tried: u64,
     /// Encoded bytes of the kept streams' records in the `Records` frame.
     pub record_bytes: u64,
     /// Part blocks whose M is `lzma`.
@@ -280,6 +298,9 @@ impl DeflateSummary {
                 self.model_bytes,
                 self.correction_bytes,
                 self.record_bytes,
+                self.png_filtered,
+                self.png_record_bytes,
+                self.png_tried,
                 self.lzma_blocks,
                 self.zstd_blocks,
                 self.sample_bytes,
@@ -357,6 +378,7 @@ fn extension(path: &str) -> String {
 enum Kind {
     Stored,
     Kept {
+        png: Option<Box<(PngFilterRecord, u64)>>,
         record: DeflateRecord,
         encoded: Encoded,
         class: Class,
@@ -414,6 +436,7 @@ impl Settings {
             pregate: pregate(),
             skips: stage.exact_skips,
             share: true,
+            png_filter: stage.png_filter,
         }
     }
 }
@@ -430,6 +453,8 @@ pub(crate) struct Settings {
     /// With `skips`, the share bound too (off when a share-bound file with a stored stream is
     /// prepared again; the gate bound stays).
     pub(crate) share: bool,
+    /// The PNG row-filter re-encoding ([`DeflatePeel::png_filter`]).
+    pub(crate) png_filter: bool,
 }
 
 /// An error or a panic met while preparing, raised by the commit only where the sequential
@@ -463,6 +488,10 @@ impl std::fmt::Debug for Failure {
 /// A stream's model encoding with what the commit needs to judge it.
 #[derive(Debug)]
 pub(crate) struct Coded {
+    /// The `png-filter` record and its cost (record and step) when the Up text won.
+    png: Option<(PngFilterRecord, u64)>,
+    /// The Up text was encoded too.
+    png_tried: bool,
     record: DeflateRecord,
     record_len: u64,
     class: Class,
@@ -496,6 +525,8 @@ pub(crate) enum Verdict {
         sample_bytes: u64,
         /// Seconds in the part encoder.
         seconds: f64,
+        /// The Up text was encoded too.
+        png_tried: bool,
     },
     /// Encoded, and below the stream's length.
     Encoded(Box<Coded>),
@@ -713,24 +744,67 @@ impl<H: Hooks> Prep<'_, H> {
         let (encoder, path) = (&mut *self.encoder, self.path);
         let r = catch_unwind(AssertUnwindSafe(|| encode_hook(encoder, path, plain)));
         let seconds = t.elapsed().as_secs_f64();
+        let mut seconds = seconds;
         let failure = match r {
-            Ok(Ok(p)) => {
-                let cost = (p.encoded.bytes.len() as u64)
+            Ok(Ok(mut p)) => {
+                let mut cost = (p.encoded.bytes.len() as u64)
                     .saturating_add(record_len)
                     .saturating_add(STREAM_OVERHEAD);
+                let mut sample_bytes = p.sample_bytes;
+                let mut png = None;
+                // The PNG row-filter re-encoding (E2-16): the Up text through the same encoder,
+                // kept when it costs less with its record and step counted.
+                let candidate = if self.set.png_filter {
+                    png_candidate(data, plain)
+                } else {
+                    None
+                };
+                let png_tried = candidate.is_some();
+                if let Some((rec, up)) = candidate {
+                    let side = record_len_png(&rec).saturating_add(PNG_STEP_BYTES);
+                    let t = Instant::now();
+                    let (encoder, path) = (&mut *self.encoder, self.path);
+                    let q = catch_unwind(AssertUnwindSafe(|| encode_hook(encoder, path, &up)));
+                    seconds += t.elapsed().as_secs_f64();
+                    match q {
+                        Ok(Ok(q)) => {
+                            sample_bytes += q.sample_bytes;
+                            let cost_b = (q.encoded.bytes.len() as u64)
+                                .saturating_add(record_len)
+                                .saturating_add(side)
+                                .saturating_add(STREAM_OVERHEAD);
+                            if cost_b < cost {
+                                cost = cost_b;
+                                p = q;
+                                png = Some((rec, side));
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            self.stale = true;
+                            return Verdict::Failed(Failure::Error(e.into()));
+                        }
+                        Err(e) => {
+                            self.stale = true;
+                            return Verdict::Failed(Failure::Panic(e));
+                        }
+                    }
+                }
                 if cost >= len {
                     return Verdict::NoGain {
-                        sample_bytes: p.sample_bytes,
+                        sample_bytes,
                         seconds,
+                        png_tried,
                     };
                 }
                 return Verdict::Encoded(Box::new(Coded {
+                    png,
+                    png_tried,
                     record,
                     record_len,
                     class,
                     encoded: p.encoded,
                     model: p.model,
-                    sample_bytes: p.sample_bytes,
+                    sample_bytes,
                     seconds,
                 }));
             }
@@ -740,6 +814,49 @@ impl<H: Hooks> Prep<'_, H> {
         self.stale = true;
         Verdict::Failed(failure)
     }
+}
+
+/// The encoded length of a `png-filter` record in the `Records` frame.
+fn record_len_png(rec: &PngFilterRecord) -> u64 {
+    record_len(&Record::new(RecordBody::PngFilter(rec.clone())))
+}
+
+/// Whether a reconstructed stream of `data` is a PNG image the row-filter re-encoding tries,
+/// and then its `png-filter` record and the Up text (every scanline filtered with Up): `data` is
+/// a PNG whose IHDR gives compression and filter method 0, an allowed pair, a non-empty image
+/// at depth 8 or 16 and not a palette (the PNG specification recommends filter None below
+/// depth 8 and for palettes, and E2-16's probe found no gain there), the stream's inflated text
+/// `plain` is exactly the image's filtered length with every filter byte at most 4 and not all
+/// 0 (an image filtered with None throughout: no gain in the probe either), and the Up text
+/// re-filters back to `plain` byte for byte (the decoder's own code, checked before it is kept).
+pub fn png_candidate(data: &[u8], plain: &[u8]) -> Option<(PngFilterRecord, Vec<u8>)> {
+    let l = Header::parse(data).ok()?.layout().ok()?;
+    if l.bit_depth() < 8 || l.color_type() == 3 {
+        return None;
+    }
+    if l.filtered_len()? != plain.len() as u64 {
+        return None;
+    }
+    let filters = l.filter_bytes(plain).ok()?;
+    if filters.iter().all(|&f| f == 0) || filters.iter().any(|&f| f > 4) {
+        return None;
+    }
+    let up = l.transcode(plain, &vec![FILTER_UP; filters.len()]).ok()?;
+    if l.transcode(&up, &filters).ok()? != plain {
+        return None;
+    }
+    Some((
+        PngFilterRecord {
+            width: l.width(),
+            height: l.height(),
+            bit_depth: l.bit_depth(),
+            color_type: l.color_type(),
+            interlace: l.interlace(),
+            filters,
+            original_hash: *blake3::hash(plain).as_bytes(),
+        },
+        up,
+    ))
 }
 
 /// Test hook, for every thread (pool workers too): the part encoder fails on the texts that
@@ -890,6 +1007,8 @@ enum Decision {
         encode_seconds: f64,
         /// A stream left unencoded by the file's bound was not stored.
         bound_hit: bool,
+        /// Streams whose Up text was encoded too.
+        png_tried: u64,
     },
 }
 
@@ -906,6 +1025,7 @@ fn decide<O: Write>(
     let mut out = Outcomes::default();
     let (mut sample_bytes, mut encode_seconds) = (0u64, 0f64);
     let mut pending = 0u64;
+    let mut png_tried = 0u64;
     let mut bound_hit = false;
     for st in &mut prepared.streams {
         if matches!(st.verdict, Verdict::Empty) {
@@ -946,31 +1066,38 @@ fn decide<O: Write>(
             Verdict::NoGain {
                 sample_bytes: b,
                 seconds,
+                png_tried: tried,
             } => {
                 encode_seconds += seconds;
                 sample_bytes += b;
+                png_tried += u64::from(tried);
                 out.no_gain += 1;
             }
             Verdict::Encoded(c) => {
                 let c = *c;
                 encode_seconds += c.seconds;
                 sample_bytes += c.sample_bytes;
+                png_tried += u64::from(c.png_tried);
+                let side = c.png.as_ref().map_or(0, |(_, side)| *side);
                 let cost = (c.encoded.bytes.len() as u64)
                     .saturating_add(c.record_len)
+                    .saturating_add(side)
                     .saturating_add(STREAM_OVERHEAD);
                 if cost >= st.len {
                     out.no_gain += 1;
                     continue;
                 }
-                if record_bytes + pending + c.record_len > records_cap {
+                let records = c.record_len + side.saturating_sub(PNG_STEP_BYTES);
+                if record_bytes + pending + records > records_cap {
                     out.records_cap += 1;
                     continue;
                 }
-                pending += c.record_len;
+                pending += records;
                 decided.push(Decided {
                     spans: std::mem::take(&mut st.spans),
                     gain: st.len - cost,
                     kind: Kind::Kept {
+                        png: c.png.map(Box::new),
                         record: c.record,
                         encoded: c.encoded,
                         class: c.class,
@@ -996,6 +1123,7 @@ fn decide<O: Write>(
         sample_bytes,
         encode_seconds,
         bound_hit,
+        png_tried,
     })
 }
 
@@ -1142,7 +1270,7 @@ pub(crate) fn commit<O: Write>(
             Err(f) => return f.raise(),
         },
     };
-    let (decided, mut out, sample_bytes, encode_seconds, bound_hit) =
+    let (decided, mut out, sample_bytes, encode_seconds, bound_hit, png_tried) =
         match decide(w, data, &mut prepared, s.record_bytes, records_cap)? {
             Decision::Ready {
                 decided,
@@ -1150,7 +1278,15 @@ pub(crate) fn commit<O: Write>(
                 sample_bytes,
                 encode_seconds,
                 bound_hit,
-            } => (decided, out, sample_bytes, encode_seconds, bound_hit),
+                png_tried,
+            } => (
+                decided,
+                out,
+                sample_bytes,
+                encode_seconds,
+                bound_hit,
+                png_tried,
+            ),
             Decision::Rerun => {
                 waste.reruns += 1;
                 // Without the share bound (the gate bound, a function of the bytes, stays): every
@@ -1163,7 +1299,15 @@ pub(crate) fn commit<O: Write>(
                         sample_bytes,
                         encode_seconds,
                         bound_hit,
-                    } => (decided, out, sample_bytes, encode_seconds, bound_hit),
+                        png_tried,
+                    } => (
+                        decided,
+                        out,
+                        sample_bytes,
+                        encode_seconds,
+                        bound_hit,
+                        png_tried,
+                    ),
                     // Not reachable: the writer's own probe skipped only stored streams.
                     Decision::Rerun => {
                         return Err(CoreError::InvalidOption(
@@ -1188,6 +1332,7 @@ pub(crate) fn commit<O: Write>(
     } = prepared;
     s.sample_bytes += sample_bytes;
     s.encode_seconds += encode_seconds;
+    s.png_tried += png_tried;
     let gain: u64 = decided.iter().map(|d| d.gain).sum();
     *s.walked_by_kind.entry(kind).or_default() += 1;
     let kept = decided.iter().any(|d| matches!(d.kind, Kind::Kept { .. }));
@@ -1286,6 +1431,7 @@ fn write_peeled<O: Write>(
                 }
             }
             Kind::Kept {
+                png,
                 record,
                 encoded,
                 class,
@@ -1309,6 +1455,20 @@ fn write_peeled<O: Write>(
                 let mut params = Vec::new();
                 lpk_format::varint::write(&mut params, id)?;
                 let mut graph = encoded.graph;
+                // Revision 1.4: the deflate record, then the png-filter record; the block
+                // `[M, png-filter, deflate-reconstruct]` (spec section 9).
+                if let Some((rec, side)) = png.map(|b| *b) {
+                    s.png_filtered += 1;
+                    s.png_record_bytes += side - PNG_STEP_BYTES;
+                    s.record_bytes += side - PNG_STEP_BYTES;
+                    let pid = w.add_record(Record::new(RecordBody::PngFilter(rec)))?;
+                    let mut pparams = Vec::new();
+                    lpk_format::varint::write(&mut pparams, pid)?;
+                    graph.steps.push(Step {
+                        primitive: PrimitiveId::PngFilter,
+                        params: pparams,
+                    });
+                }
                 graph.steps.push(Step {
                     primitive: PrimitiveId::DeflateReconstruct,
                     params,
@@ -1440,6 +1600,7 @@ mod tests {
             pregate: true,
             skips: false,
             share: true,
+            png_filter: false,
         };
         let p = prepare(
             &data,
