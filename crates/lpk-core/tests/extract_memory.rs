@@ -177,10 +177,24 @@ fn measure_as(
     memory: Option<u64>,
     credentials: Option<&Credentials>,
 ) -> (ExtractSummary, u64) {
+    measure_with(arch, out, threads, memory, credentials, false)
+}
+
+/// [`measure_as`], with the engine's test hook that fills every permit before the first
+/// dispatch when `fill` is set (so blocks are held past the workers whatever the timing).
+fn measure_with(
+    arch: &Path,
+    out: &Path,
+    threads: usize,
+    memory: Option<u64>,
+    credentials: Option<&Credentials>,
+    fill: bool,
+) -> (ExtractSummary, u64) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let opts = ExtractOptions {
         threads: Some(threads),
         memory,
+        fill_permits_before_dispatch: fill,
         ..ExtractOptions::default()
     };
     let Some(creds) = credentials else {
@@ -286,17 +300,33 @@ fn small_budget_case(name: &str, tier: Tier, files: u64, mib: u64, expect: Envel
     assert_eq!(s.workers, 3, "{name}");
     check_bound(name, &s, peak);
     // Room for held blocks but not for a fourth worker: the permits grow past the workers
-    // (E2-25) and the measured peak stays within the count with them.
+    // (E2-25). The engine's hook fills every permit before the first dispatch, so blocks are
+    // held past the workers, and the measured peak stays within the count with them.
     let m = &s.memory;
     let k = ((m.per_block + m.per_worker - 1) / m.held).max(1);
-    let (h, peak) = measure(
+    let (h, peak) = measure_with(
         &arch,
         &work.path().join("o3"),
         THREADS,
         Some(budget + k * m.held),
+        None,
+        true,
     );
     assert_eq!(h.workers, 3, "{name}");
     assert!(h.in_flight > h.workers, "{name}: {} permits", h.in_flight);
+    assert!(
+        h.peak_in_flight > h.workers,
+        "{name}: peak {} of {} permits, {} workers",
+        h.peak_in_flight,
+        h.in_flight,
+        h.workers
+    );
+    let hm = &h.memory;
+    let held_peak = hm.total(h.workers) + (h.peak_in_flight - h.workers) as u64 * hm.held;
+    assert!(
+        peak <= held_peak,
+        "{name}: measured {peak} above total(workers) + held blocks {held_peak}"
+    );
     check_bound(name, &h, peak);
     let (one, peak) = measure(&arch, &work.path().join("o2"), 1, Some(budget));
     check_one(name, &one, peak);

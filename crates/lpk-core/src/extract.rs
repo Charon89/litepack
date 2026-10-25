@@ -161,6 +161,11 @@ pub struct ExtractOptions {
     /// file. Always `None` outside tests.
     #[doc(hidden)]
     pub panic_in_dispatch_at: Option<usize>,
+    /// Test hook: the dispatcher hands on no block until every permit is taken (the workers
+    /// have decoded the blocks after the first and hold them), so a test sees blocks held past
+    /// the workers whatever the timing. Always `false` outside tests.
+    #[doc(hidden)]
+    pub fill_permits_before_dispatch: bool,
 }
 
 impl Default for ExtractOptions {
@@ -171,6 +176,7 @@ impl Default for ExtractOptions {
             memory: None,
             max_open_files: 128,
             panic_in_dispatch_at: None,
+            fill_permits_before_dispatch: false,
         }
     }
 }
@@ -1320,7 +1326,10 @@ where
                         per_block,
                         pool,
                         max_open: opts.max_open_files,
-                        panic_at: opts.panic_in_dispatch_at,
+                        hooks: Hooks {
+                            panic_at: opts.panic_in_dispatch_at,
+                            fill_first: opts.fill_permits_before_dispatch,
+                        },
                         decoded: &decoded,
                         reads: &reads,
                         peak: &peak,
@@ -1404,6 +1413,14 @@ impl Drop for Held<'_> {
 }
 
 const WRITER_STOPPED: &str = "a file writer stopped";
+
+/// The parallel path's test hooks ([`ExtractOptions::panic_in_dispatch_at`] and
+/// [`ExtractOptions::fill_permits_before_dispatch`]).
+#[derive(Clone, Copy)]
+struct Hooks {
+    panic_at: Option<usize>,
+    fill_first: bool,
+}
 pub(crate) const DECODER_STOPPED: &str = "a decode worker stopped";
 
 /// Everything a parallel run needs.
@@ -1414,7 +1431,7 @@ struct Run<'a, R: Read + Seek> {
     per_block: Vec<Vec<Place>>,
     pool: Pool,
     max_open: usize,
-    panic_at: Option<usize>,
+    hooks: Hooks,
     decoded: &'a AtomicU64,
     reads: &'a AtomicU64,
     /// Receives the most permits out at once.
@@ -1442,7 +1459,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         per_block,
         pool,
         max_open,
-        panic_at,
+        hooks,
         decoded,
         reads,
         peak,
@@ -1466,7 +1483,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         split,
         &pool,
         max_open,
-        panic_at,
+        hooks,
         decoded,
         reads,
         decode_error,
@@ -1486,7 +1503,7 @@ fn parallel_with<R: Read + Seek + Send>(
     split: Vec<Vec<Vec<Place>>>,
     pool: &Pool,
     max_open: usize,
-    panic_at: Option<usize>,
+    hooks: Hooks,
     decoded: &AtomicU64,
     reads: &AtomicU64,
     decode_error: &(dyn Fn(usize, FormatError) -> CoreError + Sync),
@@ -1608,7 +1625,7 @@ fn parallel_with<R: Read + Seek + Send>(
                     &senders,
                     permits,
                     decode_error,
-                    panic_at,
+                    hooks,
                     rep,
                     frame_len,
                     shared,
@@ -1670,16 +1687,30 @@ fn dispatch<'p>(
     senders: &[mpsc::Sender<Arc<Held<'p>>>],
     permits: &'p Permits,
     decode_error: &dyn Fn(usize, FormatError) -> CoreError,
-    panic_at: Option<usize>,
+    hooks: Hooks,
     rep: &Reporter,
     frame_len: &[u64],
     shared: &Shared,
 ) -> Result<(), CoreError> {
     let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     let mut bytes_in = 0;
+    // Test hook: wait until every permit holds a decoded block (none is released before its
+    // dispatch, so the workers stop exactly there).
+    while hooks.fill_first && pending.len() < permits.cap.min(needed.len()) {
+        let (k, r) = rx.recv().map_err(|_| CoreError::Extract(DECODER_STOPPED))?;
+        match r {
+            Ok(p) => {
+                pending.insert(k, p);
+            }
+            Err(e) => {
+                let block = needed.get(k).copied().unwrap_or(0);
+                return Err(decode_error(block, e));
+            }
+        }
+    }
     for (want, &b) in needed.iter().enumerate() {
         assert!(
-            panic_at != Some(want),
+            hooks.panic_at != Some(want),
             "test hook: dispatcher panics at block {want}"
         );
         if rep.is_cancelled() {
