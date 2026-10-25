@@ -927,9 +927,12 @@ fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
         Some(OnOff::Off) => pipeline.deflate = None,
         None => {}
     }
-    // The pipelines of both tiers carry the JPEG peel; off removes it (on keeps it).
+    // The pipelines of both tiers carry the JPEG peel; off removes every stage that peels the
+    // JPEG class (a typed check, so a renamed stage cannot make it a no-op); on keeps it.
     if a.jpeg_peel == Some(OnOff::Off) {
-        pipeline.peel.retain(|p| p.name() != "jpeg");
+        pipeline
+            .peel
+            .retain(|p| !p.applies_to(lpk_core::Class::Jpeg));
     }
     if a.no_dedup {
         pipeline.fold = None;
@@ -1860,5 +1863,41 @@ mod records_cap_tests {
         super::records_cap_note(&mut out, &d);
         let text = String::from_utf8_lossy(&out);
         assert!(text.starts_with("records cap: 3 Deflate streams"), "{text}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod jpeg_peel_tests {
+    use clap::Parser;
+
+    /// The stages that peel JPEGs in the pipeline `lpk a <args>` builds.
+    fn jpeg_stages(args: &[&str]) -> usize {
+        let cli = super::Cli::try_parse_from(
+            ["lpk", "a"]
+                .iter()
+                .chain(args)
+                .chain(["out.lpk", "in"].iter()),
+        )
+        .unwrap();
+        let super::Command::Add(a) = cli.command else {
+            panic!("not an add");
+        };
+        let tier = a.tier.tier().unwrap();
+        super::build_pipeline(&a.tier, tier)
+            .peel
+            .iter()
+            .filter(|p| p.applies_to(lpk_core::Class::Jpeg))
+            .count()
+    }
+
+    #[test]
+    fn jpeg_peel_off_removes_the_stage_and_on_keeps_it_in_both_tiers() {
+        for tier in ["--fast", "--balanced"] {
+            assert_eq!(jpeg_stages(&[tier]), 1, "{tier}");
+            assert_eq!(jpeg_stages(&[tier, "--jpeg-peel", "on"]), 1, "{tier}");
+            assert_eq!(jpeg_stages(&[tier, "--jpeg-peel", "off"]), 0, "{tier}");
+        }
+        assert_eq!(jpeg_stages(&["--store"]), 0);
     }
 }
