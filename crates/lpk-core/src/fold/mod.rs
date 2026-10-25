@@ -5,6 +5,7 @@
 
 pub mod chunker;
 pub mod ordering;
+pub mod versions;
 
 pub use chunker::{FastCdcChunker, AVG_CHUNK, MAX_CHUNK, MIN_CHUNK};
 pub use ordering::FileOrder;

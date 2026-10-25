@@ -527,8 +527,11 @@ struct TierArgs {
     #[arg(long)]
     no_dedup: bool,
     /// How files are ordered inside a cluster before they are written: `none` (the default:
-    /// path order, which keeps directory locality) or `extension` (by extension, then name, the
-    /// order 7-Zip uses for solid archives). Ignored with --no-dedup and --store.
+    /// path order, which keeps directory locality), `extension` (by extension, then name, the
+    /// order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least
+    /// half of the smaller one's files are versions: a file's versions are written next to each
+    /// other, in the natural order of the folder names; without such folders, path order).
+    /// Ignored with --no-dedup and --store.
     #[arg(long, value_enum, value_name = "ORDER", default_value = "none")]
     ordering: OrderingArg,
     /// The Deflate peel: Deflate streams inside ZIP, Office, JAR, PNG, gzip and PDF files (and
@@ -640,6 +643,7 @@ struct AddArgs {
 enum OrderingArg {
     None,
     Extension,
+    Versions,
 }
 
 impl From<OrderingArg> for lpk_core::FileOrder {
@@ -647,6 +651,7 @@ impl From<OrderingArg> for lpk_core::FileOrder {
         match o {
             OrderingArg::None => lpk_core::FileOrder::None,
             OrderingArg::Extension => lpk_core::FileOrder::Extension,
+            OrderingArg::Versions => lpk_core::FileOrder::Versions,
         }
     }
 }

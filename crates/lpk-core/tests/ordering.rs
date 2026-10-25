@@ -93,3 +93,57 @@ fn both_orders_round_trip_and_the_layouts_differ() {
 fn the_default_fold_keeps_path_order() {
     assert_eq!(FoldOptions::default().ordering, FileOrder::None);
 }
+
+/// Three versions of a two-file tree (v1, v2, v10: natural order) beside an unrelated folder.
+fn make_versions(root: &Path) {
+    for (v, seed) in [("v1", 10), ("v2", 20), ("v10", 30)] {
+        std::fs::create_dir_all(root.join(v).join("lib")).unwrap();
+        std::fs::write(root.join(v).join("README.txt"), letters(seed, 100_000)).unwrap();
+        std::fs::write(
+            root.join(v).join("lib").join("x.txt"),
+            letters(seed + 1, 100_000),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs").join("notes.txt"), letters(99, 100_000)).unwrap();
+}
+
+#[test]
+fn the_versions_order_puts_a_files_versions_together() {
+    let dir = tempfile::tempdir().unwrap();
+    make_versions(dir.path());
+    for balanced in [false, true] {
+        let v = first_chunks(&run(balanced, FileOrder::Versions, dir.path()), dir.path());
+        // (relative path, rank): README.txt of v1, v2, v10, then docs/notes.txt, then
+        // lib/x.txt of v1, v2, v10.
+        let order = [
+            "v1/README.txt",
+            "v2/README.txt",
+            "v10/README.txt",
+            "docs/notes.txt",
+            "v1/lib/x.txt",
+            "v2/lib/x.txt",
+            "v10/lib/x.txt",
+        ];
+        for w in order.windows(2) {
+            assert!(v[w[0]] < v[w[1]], "{} before {}", w[0], w[1]);
+        }
+    }
+}
+
+#[test]
+fn the_versions_order_without_sibling_roots_is_the_default_byte_for_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    make_tree(dir.path());
+    for balanced in [false, true] {
+        // A first walk right after the tree is written can see different directory times (the
+        // entry table records them) than the next: compare two runs after a settling one.
+        let _settle = run(balanced, FileOrder::None, dir.path());
+        let (a, b) = (
+            run(balanced, FileOrder::Versions, dir.path()),
+            run(balanced, FileOrder::None, dir.path()),
+        );
+        assert!(a == b, "balanced {balanced}: the archives differ");
+    }
+}
