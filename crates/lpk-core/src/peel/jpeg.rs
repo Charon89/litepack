@@ -432,6 +432,29 @@ impl DecodeThreads {
         self.cv.notify_one();
     }
 
+    /// Wait until every token is free again, at most `timeout`; whether they all came back.
+    /// A partition task gives its token back when its closure ends, which can be just after
+    /// the decoder received the task's result, so a check right after a decode may see a token
+    /// still out for a moment.
+    #[cfg(test)]
+    fn wait_all_free(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free < self.total {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let step = (deadline - now).min(std::time::Duration::from_millis(10));
+            free = self
+                .cv
+                .wait_timeout(free, step)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        true
+    }
+
     /// Take a token for this thread until the guard drops (blocks while none is free).
     pub fn hold(self: &std::sync::Arc<Self>) -> DecodeToken {
         self.acquire();
@@ -1020,7 +1043,12 @@ mod decode_threads_tests {
                 });
             }
         });
-        assert_eq!(budget.free(), budget.total());
+        assert!(
+            budget.wait_all_free(std::time::Duration::from_secs(10)),
+            "tokens still out: {} of {} free",
+            budget.free(),
+            budget.total()
+        );
         assert_eq!(decode(&s, jpeg.len()), jpeg);
     }
 }

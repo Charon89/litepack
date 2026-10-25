@@ -1618,6 +1618,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpk-sandbox-sys"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "tempfile",
+ "windows",
+]
+
+[[package]]
 name = "lzma-rs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
