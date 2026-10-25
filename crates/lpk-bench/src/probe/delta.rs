@@ -48,7 +48,7 @@
 //! best row among the other tools without `dedup = true`; S_est(rule) = S_bal - sum X_v +
 //! sum (Y_v + n_v O_block); S_ord = S_bal - sum X_v + sum X_v^adj; mu = 0.02 B; the decision: (i)
 //! S_ord <= 0.5 B: the ordering alone meets G2; (ii) else the writer (task C) is built when the
-//! smallest S_est <= S_ord - mu (D-91's amendment: 0.5 B is reported, not a build condition);
+//! smallest format-1 S_est (the winning rule recorded; F0 for reference) <= S_ord - mu (D-91's amendment: 0.5 B is reported, not a build condition);
 //! (iii) else both are reported to the owner.
 //!
 //! Memory: one path's versions at a time, a suffix array per base chunk (never per file), one
@@ -222,6 +222,10 @@ pub struct Gate {
     pub sum_changed_adjacent: u64,
     pub s_ord: u64,
     pub estimates: Vec<Estimate>,
+    /// The F1 rule with the smallest estimate (the design builds format 1 only; the F0
+    /// estimates are for reference) and that estimate: what the decision compares.
+    pub best_rule: String,
+    pub best_estimate: u64,
     pub margin: u64,
     pub half_b: u64,
     pub decision: String,
@@ -421,21 +425,30 @@ pub fn read_rows(dirs: &[PathBuf], class: &str, manifest: &str) -> Result<GateRo
                     .collect(),
                 Err(_) => HashMap::new(),
             };
+        // The runner names a row `<tool>-<setting>-<class>.json`: the class's rows are selected
+        // by name, and each must read as a row of this class.
+        let suffix = format!("-{class}.json");
         let mut names: Vec<PathBuf> = std::fs::read_dir(dir)
             .with_context(|| format!("reading {}", dir.display()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(&suffix) && !n.starts_with("probe-"))
+            })
             .collect();
         names.sort();
         for p in names {
-            let Ok(text) = std::fs::read_to_string(&p) else {
-                continue;
-            };
-            let Ok(r) = serde_json::from_str::<ToolResult>(&text) else {
-                continue;
-            };
+            let text = std::fs::read_to_string(&p)
+                .with_context(|| format!("{}: cannot be read", p.display()))?;
+            let r = serde_json::from_str::<ToolResult>(&text)
+                .with_context(|| format!("{}: not a result row", p.display()))?;
             if r.class != class {
-                continue;
+                bail!(
+                    "{}: a row of class `{}`, not `{class}` as its name says",
+                    p.display(),
+                    r.class
+                );
             }
             if r.corpus.manifest_blake3 != manifest {
                 bail!(
@@ -489,8 +502,14 @@ pub fn gate(s_bal: u64, b: u64, versions: &[VersionRow]) -> Gate {
         .collect();
     let margin = (MARGIN_FRACTION * b as f64).round() as u64;
     let half_b = b / 2;
-    let best = estimates.iter().map(|e| e.s_est).min().unwrap_or(u64::MAX);
-    let decision = decide(s_ord, best, margin, half_b);
+    let best = estimates
+        .iter()
+        .filter(|e| e.format == "F1")
+        .min_by_key(|e| e.s_est)
+        .expect("F1 rules");
+    let best_rule = format!("{}/{}/{}", best.pairing, best.base, best.format);
+    let best_estimate = best.s_est;
+    let decision = decide(s_ord, best_estimate, margin, half_b);
     Gate {
         s_bal,
         b,
@@ -498,6 +517,8 @@ pub fn gate(s_bal: u64, b: u64, versions: &[VersionRow]) -> Gate {
         sum_changed_adjacent: sum_adj,
         s_ord,
         estimates,
+        best_rule,
+        best_estimate,
         margin,
         half_b,
         decision: decision.to_string(),
@@ -1229,13 +1250,27 @@ pub fn render(e: &Envelope<Data>) -> String {
             ];
             for est in &g.estimates {
                 rows.push(vec![
-                    format!("S_est {}/{}/{}", est.pairing, est.base, est.format),
+                    format!(
+                        "S_est {}/{}/{}{}",
+                        est.pairing,
+                        est.base,
+                        est.format,
+                        if est.format == "F0" {
+                            " (reference)"
+                        } else {
+                            ""
+                        }
+                    ),
                     est.s_est.to_string(),
                     super::pct(est.s_est, g.b),
                 ]);
             }
             s.push_str(&md_table(&["quantity", "bytes", "of B"], &rows));
-            s.push('\n');
+            s.push_str(&format!(
+                "\nThe decision compares the best format-1 estimate, `{}` ({} bytes), with \
+                 S_ord; format 0's estimates are for reference (format 0 stays reserved).\n",
+                g.best_rule, g.best_estimate
+            ));
         }
         s.push_str(&format!("Decision: {}.\n\n", c.decision));
     }
@@ -1478,7 +1513,27 @@ mod tests {
             .sum();
         assert_eq!(g.estimates[0].s_est, 900_000 - sum_x + y);
         assert_eq!(g.margin, 20_000);
+        assert!(g.best_rule.ends_with("/F1"), "{}", g.best_rule);
+        let f1_min = g
+            .estimates
+            .iter()
+            .filter(|e| e.format == "F1")
+            .map(|e| e.s_est)
+            .min();
+        assert_eq!(Some(g.best_estimate), f1_min);
         assert_eq!(c.decision, g.decision);
+        // A file named as a row of the class that is not one is an error, not skipped.
+        let bad = tmp.path().join("bad-rows");
+        rows_dir(&bad, &manifest);
+        std::fs::write(bad.join("7z-mx5-backup-versions.json"), "{}").expect("bad");
+        let cfg = config(corpus.clone(), tmp.path().join("results3"), vec![bad]);
+        let out = super::super::execute(&cfg).expect("execute");
+        assert_eq!(out.failed.len(), 1, "{:?}", out.failed);
+        assert!(
+            out.failed[0].1.contains("not a result row"),
+            "{:?}",
+            out.failed
+        );
         // Rows of another manifest are refused.
         let other = tmp.path().join("other-rows");
         rows_dir(&other, &"cd".repeat(32));
