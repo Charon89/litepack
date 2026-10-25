@@ -1514,6 +1514,8 @@ dependencies = [
  "flate2",
  "hkdf",
  "lepton_jpeg",
+ "lpk-core",
+ "lpk-format",
  "lzma-rs",
  "preflate-rs",
  "ruzstd",

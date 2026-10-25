@@ -46,6 +46,25 @@ pub struct DeflateRecord {
     pub original_hash: [u8; 32],
 }
 
+/// A `png-filter` record body (kind 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PngRecord {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// 1, 2, 4, 8 or 16.
+    pub bit_depth: u8,
+    /// 0, 2, 3, 4 or 6.
+    pub color_type: u8,
+    /// 0 none, 1 Adam7.
+    pub interlace: u8,
+    /// One filter byte per scanline, in order (per pass for interlaced images).
+    pub filters: Vec<u8>,
+    /// BLAKE3 of the filtered scanline bytes.
+    pub original_hash: [u8; 32],
+}
+
 /// A parsed record body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Body {
@@ -53,9 +72,11 @@ pub enum Body {
     Jpeg(JpegRecord),
     /// Kind 8.
     Deflate(DeflateRecord),
+    /// Kind 9.
+    Png(PngRecord),
     /// Kind 12: per member, its length and chunks (the rest is not needed by this decoder).
     Container(Vec<(u64, Vec<u64>)>),
-    /// Kinds 9 to 11: no chunk lists.
+    /// Kinds 10 and 11: no chunk lists.
     Other,
 }
 
@@ -83,7 +104,7 @@ impl Record {
                 v
             }
             Body::Container(m) => m.iter().map(|(len, c)| (&c[..], *len)).collect(),
-            Body::Deflate(_) | Body::Other => Vec::new(),
+            Body::Deflate(_) | Body::Png(_) | Body::Other => Vec::new(),
         }
     }
 }
@@ -191,23 +212,33 @@ fn parse_body(id: u64, kind: u16, body: &[u8]) -> Result<Body> {
             })
         }
         9 => {
-            c.u32()?;
+            let width = c.u32()?;
             let height = c.u32()?;
-            let bd = c.u8()?;
-            if ![1, 2, 4, 8, 16].contains(&bd) {
+            let bit_depth = c.u8()?;
+            if ![1, 2, 4, 8, 16].contains(&bit_depth) {
                 return Err(bad_record(id, "bit_depth"));
             }
-            let ct = c.u8()?;
-            if ![0, 2, 3, 4, 6].contains(&ct) {
+            let color_type = c.u8()?;
+            if ![0, 2, 3, 4, 6].contains(&color_type) {
                 return Err(bad_record(id, "color_type"));
             }
             let interlace = u8_in(&mut c, id, "interlace", 1)?;
-            let filters = byte_string(&mut c)?;
-            c.array::<32>()?;
+            let filters = byte_string(&mut c)?.to_vec();
+            // Section 12: the non-interlaced count is applied as soon as `filters` is read,
+            // before `original_hash` (a body cut inside the hash with a wrong count is `filters`).
             if interlace == 0 && filters.len() as u64 != u64::from(height) {
                 return Err(bad_record(id, "filters"));
             }
-            Body::Other
+            let original_hash = c.array::<32>()?;
+            Body::Png(PngRecord {
+                width,
+                height,
+                bit_depth,
+                color_type,
+                interlace,
+                filters,
+                original_hash,
+            })
         }
         10 => {
             u8_in(&mut c, id, "variant", 1)?;
@@ -396,6 +427,43 @@ mod tests {
         assert_eq!(reason(&b), "trailing bytes after record body");
         b.truncate(20);
         assert_eq!(reason(&b), "input truncated in records");
+    }
+
+    /// A `png-filter` body: width, height, depth, colour type, interlace, filters, hash.
+    fn png(h: u32, bd: u8, ct: u8, il: u8, filters: &[u8], hash_len: usize) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&4u32.to_le_bytes());
+        b.extend_from_slice(&h.to_le_bytes());
+        b.extend_from_slice(&[bd, ct, il, filters.len() as u8]);
+        b.extend_from_slice(filters);
+        b.extend(std::iter::repeat_n(0u8, hash_len));
+        b
+    }
+
+    /// Section 12 (clarified): each rule as its field is read, in the table's order.
+    #[test]
+    fn png_filter_field_rules_in_order() {
+        let r = |b: &[u8]| match parse_body(3, 9, b) {
+            Ok(_) => "ok".to_string(),
+            Err(e) => e.detail,
+        };
+        assert_eq!(r(&png(2, 8, 0, 0, &[0, 1], 32)), "ok");
+        // A wrong count is `filters` as soon as `filters` is read, even when the body ends
+        // inside `original_hash` or has no hash at all.
+        assert_eq!(r(&png(2, 8, 0, 0, &[0], 32)), "bad record 3: filters");
+        assert_eq!(r(&png(2, 8, 0, 0, &[0], 31)), "bad record 3: filters");
+        assert_eq!(r(&png(2, 8, 0, 0, &[0], 0)), "bad record 3: filters");
+        // The right count with a short hash is `Truncated`.
+        assert_eq!(
+            r(&png(2, 8, 0, 0, &[0, 0], 31)),
+            "input truncated in records"
+        );
+        // Interlaced: no count rule at parse time.
+        assert_eq!(r(&png(2, 8, 0, 1, &[0], 32)), "ok");
+        // bit_depth before color_type before interlace.
+        assert_eq!(r(&png(1, 3, 1, 2, &[0], 32)), "bad record 3: bit_depth");
+        assert_eq!(r(&png(1, 8, 1, 2, &[0], 32)), "bad record 3: color_type");
+        assert_eq!(r(&png(1, 8, 0, 2, &[0], 32)), "bad record 3: interlace");
     }
 
     #[test]

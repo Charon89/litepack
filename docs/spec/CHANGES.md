@@ -317,3 +317,8 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    does), and Paeth's q, pa, pb, pc are computed in signed integers wide enough for the sums.
 10. Fix round 1: new vectors `malformed-png-filter-kind.lpk` (`BadRecord` `kind`) and
     `malformed-png-filter-input-filter.lpk` (an input filter byte of 7: `BadRecord` `scanlines`, check (6)).
+
+## 2026-10-25 — Revision 1.4's independence gate passed; three clarifications (no outcome change)
+
+1. `lpk-check` decoded `png-filter` from this text alone (D-49): every outcome of `expected-1.4.toml` at revision 4 and the `_1_0` outcomes at revisions 0-3, and 79 crafted records agreeing with the reference on class and normative reason. Revision 1.4 is final.
+2. Its three points are clarified in section 8 and section 12: the bound a `png-filter` step gives to a `png-filter` before it ("Bounds"); that check (3)'s filter count is reached only by an interlaced record, since for a non-interlaced one the count is a section 12 rule raised at the lookup; and the order of the rules within a record body (each applied as its field is read; a non-interlaced `png-filter` record's `filters` length before `original_hash`). The reference already behaves so.
