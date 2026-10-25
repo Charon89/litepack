@@ -731,7 +731,7 @@ any of its own rules, the reader applies checks (1) to (4) of "Decoding `png-fil
 input bound the step after it gives (the look-ahead, below; `max_block_plain` when it gives none): when the step
 after it is `deflate-reconstruct`, that record's `plain_len`, checks (1) to (5) of "Decoding `deflate-reconstruct`"
 having run first; when it is `bwt`, I(O, B) of that step with its own O, check (1) of "Decoding `bwt`" having run
-first (`malformed-png-filter-lookahead.lpk`, section 11 and CONFORMANCE, is such a block). An error there
+first (`malformed-png-filter-lookahead.lpk`, section 11 and CONFORMANCE, is such a block); when it is `png-filter`, the filtered length of that step's record, checks (1) to (4) of "Decoding `png-filter`" having run first on that record with that step's own output bound (the block's `plain_len` when it is the last step, otherwise `max_block_plain`; the look-ahead goes no further). An error there
 is the block's error and the step does not run. The step's output longer than the filtered length is
 `PayloadTooLarge`; a shorter one is reported by the `png-filter` step (check (5), `BadRecord` `scanlines`). Checks
 (1) to (4) run again at the `png-filter` step with its actual output bound; a filtered length that passes one bound
@@ -1170,7 +1170,10 @@ sections 7.2, 8.2 and 9, cited normatively; what a decoder needs of it is writte
   `Records` frame, section 12); (2) its kind is `png-filter` (`BadRecord`, `kind`); (3) the image, in this order:
   `width` at least 1 (`BadRecord`, `width`), `height` at least 1 (`height`), a pair the list above allows
   (`bit_depth`), one filter byte per scanline of the image, interlaced or not, and every filter byte at most 4
-  (`filters`); (4) F against the step's output bound: on the last step an F that differs from the block's
+  (`filters`) (for a non-interlaced record the count is also a rule of section 12, raised with the same reason by
+  the lookup of check (1), before `width` and `height` are examined, and by `verify`'s walk of the records; so a
+  non-interlaced record with a wrong count is `filters` whatever its `width` and `height`, and this part of check
+  (3) is reached only by an interlaced record); (4) F against the step's output bound: on the last step an F that differs from the block's
   `plain_len`, or an F past 2^64 − 1 (which has no value), is `BlockLengthMismatch`; on a step that is not the last an F above the step's bound
   (`max_block_plain`, or the bound "Bounds" gives), or an F past 2^64 − 1, is `PayloadTooLarge`; (5) the input
   must be exactly F bytes (`BadRecord`, `scanlines`); (6) the re-filtering, scanline by scanline: an input
@@ -1721,7 +1724,11 @@ left in a body after its last field are `TrailingBytes` for "record body". A `ki
 before the body is looked at. Within a body, a `u8` that is outside its list of values (a `library` other than 0,
 a `bit_depth` outside 1, 2, 4, 8, 16, a `color_type` outside 0, 2, 3, 4, 6, an `interlace`, `variant`, `padding`,
 `endian` or `bom` above 1, a `line_ending` above 2, a container `format` above 3) is `BadRecord` with the id and
-the field's name as `reason`. So are these inconsistencies: a JPEG `primary_len` above `original_len`
+the field's name as `reason`. Within a body each rule is applied as its field is read, in the table's order: a
+list rule when its field is read (so a `png-filter` `bit_depth` outside its list is reported before a
+`color_type` outside its list, and both before `interlace`), and a non-interlaced `png-filter` record's `filters`
+length as soon as `filters` is read, before `original_hash` (a body that ends inside `original_hash` with a wrong
+count is `filters`, not `Truncated`). So are these inconsistencies: a JPEG `primary_len` above `original_len`
 (`primary_len`); a JPEG with both raw `trailing` bytes and `nested_trailing_chunks` (`nested_trailing_chunks`);
 a secondary image or member whose `offset + len` overflows or exceeds `original_len`, that is out of order, overlaps
 another or (for a secondary image) starts before `primary_len` (`gainmaps`, `members`); the sums of the assembly rules
