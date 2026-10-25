@@ -77,12 +77,12 @@
 //! entry table, read and dropped by the plan before any block is decoded, is
 //! not counted. An encrypted archive's key derivation (the key slot's Argon2 memory,
 //! `key_derivation`) runs at open and is freed before the plan, so the process peak is
-//! `max(key_derivation, total(workers))` ([`ExtractMemory::peak`]). The derivation cannot be
+//! `max(key_derivation, total_in_flight(workers, in_flight))`
+//! ([`ExtractMemory::peak_in_flight`]). The derivation cannot be
 //! held to the tier's budget: a sealed archive's index, and with it the envelope that shows the
 //! tier, is readable only with the derived key, so at the derivation the only limit known is the
 //! reader's (`--memory`, else [`crate::memory::EXTRACT_CEILING`] resolved), against which the
-//! key slot's `argon2_m` is checked (an archive asking more is refused at open); with held
-//! blocks the peak's second term is [`ExtractMemory::total_in_flight`]. A given
+//! key slot's `argon2_m` is checked (an archive asking more is refused at open). A given
 //! budget below one block in flight (`total(1)`: `fixed_shared + per_block + per_worker`) is
 //! refused with that figure before any directory or file is created, as the compress side
 //! refuses (D-67 (1)); a default budget that small runs one worker.
@@ -251,7 +251,7 @@ pub struct ExtractMemory {
     pub fixed: u64,
     /// A sealed archive's key derivation at open: the key slot's Argon2 memory (`argon2_m`, in
     /// bytes); 0 for an archive that is not encrypted. Freed before the plan, so not part of
-    /// [`ExtractMemory::total`]; the process peak is [`ExtractMemory::peak`].
+    /// [`ExtractMemory::total`]; the process peak is [`ExtractMemory::peak_in_flight`].
     pub key_derivation: u64,
 }
 
@@ -279,18 +279,15 @@ impl Default for ExtractMemory {
 }
 
 impl ExtractMemory {
-    /// What `workers` blocks in flight and their workers hold: `fixed_shared + workers *
-    /// (per_block + per_worker)`.
+    /// What `workers` decoding blocks and their workers hold: `fixed_shared + workers *
+    /// (per_block + per_worker)`. This is the whole count only when every permit is a worker's
+    /// (the sequential path, or a budget with no room for a held block); it is the yardstick of
+    /// "one block in flight" in the `--memory` refusal and the base the held term adds to. The
+    /// count of a run is [`ExtractMemory::total_in_flight`].
     pub fn total(&self, workers: usize) -> u64 {
         let w = u64::try_from(workers).unwrap_or(u64::MAX);
         self.fixed_shared
             .saturating_add(w.saturating_mul(self.per_block.saturating_add(self.per_worker)))
-    }
-
-    /// The process's counted peak with `workers` workers: the larger of the key derivation at
-    /// open and [`ExtractMemory::total`] (the two never overlap).
-    pub fn peak(&self, workers: usize) -> u64 {
-        self.key_derivation.max(self.total(workers))
     }
 
     /// What `workers` workers and `in_flight` permits hold: [`ExtractMemory::total`] of the
@@ -302,7 +299,8 @@ impl ExtractMemory {
     }
 
     /// The process's counted peak with `workers` workers and `in_flight` permits: the larger
-    /// of the key derivation and [`ExtractMemory::total_in_flight`].
+    /// of the key derivation at open and [`ExtractMemory::total_in_flight`] (the two never
+    /// overlap).
     pub fn peak_in_flight(&self, workers: usize, in_flight: usize) -> u64 {
         self.key_derivation
             .max(self.total_in_flight(workers, in_flight))
@@ -310,9 +308,10 @@ impl ExtractMemory {
 }
 
 /// The most permits per decode worker (decoding plus decoded blocks held for the dispatcher
-/// and the writers), when the budget pays for them: E2-25's local A/B on `photo-jpeg` (one
-/// Lepton stream per block, 9 workers) went from one to eight per worker with extraction
-/// faster at each step.
+/// and the writers), when the budget pays for them. The dispatcher hands blocks on in index
+/// order, so a block that decodes slowly holds back the blocks after it; held permits let the
+/// other workers keep decoding meanwhile. The cap bounds how far ahead of the dispatch the
+/// workers run (the reorder map's size).
 pub const HELD_PER_WORKER: usize = 8;
 
 /// Each decode worker's frame reader (its `BufReader` and the frame header's reads), file
