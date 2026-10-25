@@ -526,7 +526,8 @@ mod process {
         clear_tree(&temp).map_err(|e| format!("emptying {}: {e}", temp.display()))
     }
 
-    /// Remove everything in `dir` without following a reparse point.
+    /// Remove everything in `dir` without following a reparse point: a reparse point is
+    /// removed as a link, a real directory with `remove_dir_all`.
     #[cfg(windows)]
     pub(super) fn clear_tree(dir: &Path) -> std::io::Result<()> {
         let mut first_err = None;
@@ -538,7 +539,9 @@ mod process {
                 Ok(m) if is_reparse(&m) => {
                     std::fs::remove_dir(&p).or_else(|_| std::fs::remove_file(&p))
                 }
-                Ok(m) if m.is_dir() => clear_tree(&p).and_then(|()| std::fs::remove_dir(&p)),
+                // A real directory: std's remove_dir_all, which removes relative to the parent
+                // handle and does not follow links inside (since the CVE-2022-21658 fix).
+                Ok(m) if m.is_dir() => std::fs::remove_dir_all(&p),
                 Ok(_) => std::fs::remove_file(&p),
                 Err(e) => Err(e),
             };
@@ -769,6 +772,9 @@ struct Conv<'m, P: Peer> {
     memory: u64,
     /// `Data` bytes received.
     data: u64,
+    /// Members finished (`MemberEnd`), each credited as progress (at most the members asked
+    /// for, which the stream checks index by index).
+    ends: u64,
     /// The progress figure last seen, and when it last grew.
     seen: u64,
     last: Instant,
@@ -791,6 +797,7 @@ impl<'m, P: Peer> Conv<'m, P> {
             monitor,
             memory,
             data: 0,
+            ends: 0,
             seen: 0,
             last: Instant::now(),
             cpu_limit: CPU_STEP.min(cpu_max),
@@ -828,7 +835,12 @@ impl<'m, P: Peer> Conv<'m, P> {
         if let Some(u) = self.peer.usage() {
             self.usage = u;
         }
-        let progress = self.usage.read_bytes.min(self.archive_len) + self.data;
+        let progress = self
+            .usage
+            .read_bytes
+            .min(self.archive_len)
+            .saturating_add(self.data)
+            .saturating_add(self.ends);
         if progress > self.seen {
             self.seen = progress;
             self.last = Instant::now();
@@ -1575,6 +1587,7 @@ fn stream<P: Peer>(
                             .into());
                         }
                         out.finish(t.mtime_ns)?;
+                        conv.ends += 1;
                         summary.files += 1;
                         break;
                     }

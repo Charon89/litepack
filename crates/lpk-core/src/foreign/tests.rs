@@ -551,3 +551,141 @@ fn the_protocol_roles_equal_the_launchers() {
         (s::REQUESTS, s::RESPONSES, s::STDERR, s::ARCHIVE)
     );
 }
+
+/// A worker whose request writer never frees up (the channel full, the writer blocked on a
+/// pipe the worker does not read): `send` must not block, and ends at the watchdog or the
+/// cancel token. (With the old blocking write this test would hang.)
+struct BusyPeer;
+
+impl Peer for BusyPeer {
+    fn try_send(&mut self, frame: Frame) -> Result<Option<Frame>, RecvError> {
+        Ok(Some(frame))
+    }
+    fn recv(&mut self, tick: Duration) -> Result<Option<Response>, RecvError> {
+        std::thread::sleep(tick);
+        Ok(None)
+    }
+    fn usage(&self) -> Option<Usage> {
+        None
+    }
+    fn set_cpu_limit(&self, _d: Duration) {}
+    fn exit_code(&self, _wait: Duration) -> Option<u32> {
+        None
+    }
+    fn kill(&self) {}
+    fn stderr(&self) -> String {
+        String::new()
+    }
+}
+
+#[test]
+fn a_full_request_channel_ends_at_the_watchdog_or_the_cancel() {
+    let limits = Limits {
+        no_progress: Duration::from_millis(300),
+        ..Limits::default()
+    };
+    let monitor = Monitor::default();
+    let mut conv = Conv::new(BusyPeer, limits.clone(), 100, &monitor);
+    let t = Instant::now();
+    let e = conv
+        .send(&Request::ReadMember {
+            indices: (0..MEMBER_BATCH as u64).collect(),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(e, CoreError::Worker(WorkerError::Timeout { .. })),
+        "{e}"
+    );
+    assert!(t.elapsed() >= limits.no_progress);
+    assert!(
+        t.elapsed() < limits.no_progress + Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
+    let cancel = crate::CancelToken::new();
+    cancel.cancel();
+    let monitor = Monitor::with_cancel(cancel);
+    let mut conv = Conv::new(BusyPeer, limits, 100, &monitor);
+    let e = conv.send(&Request::Close).unwrap_err();
+    assert!(matches!(e, CoreError::Cancelled), "{e}");
+}
+
+/// Recorded output delivered slowly: each frame after `delay`.
+struct SlowPeer<'a> {
+    inner: ScriptPeer<'a>,
+    delay: Duration,
+}
+
+impl Peer for SlowPeer<'_> {
+    fn try_send(&mut self, frame: Frame) -> Result<Option<Frame>, RecvError> {
+        self.inner.try_send(frame)
+    }
+    fn recv(&mut self, tick: Duration) -> Result<Option<Response>, RecvError> {
+        std::thread::sleep(self.delay);
+        self.inner.recv(tick)
+    }
+    fn usage(&self) -> Option<Usage> {
+        None
+    }
+    fn set_cpu_limit(&self, _d: Duration) {}
+    fn exit_code(&self, _wait: Duration) -> Option<u32> {
+        Some(0)
+    }
+    fn kill(&self) {}
+    fn stderr(&self) -> String {
+        String::new()
+    }
+}
+
+/// Many empty members: no byte is read or received after the listing, yet each finished
+/// member is progress, so a stream longer than the watchdog's limit finishes.
+#[test]
+fn many_empty_members_are_progress() {
+    let n = 40u64;
+    let mut f = vec![
+        hello(),
+        opened(),
+        entries((0..n).map(|i| rec(&format!("e{i}"), 0, 0)).collect()),
+    ];
+    for i in 0..n {
+        f.push(Response::MemberStart { index: i });
+        f.push(Response::MemberEnd {
+            index: i,
+            checked: false,
+        });
+    }
+    let bytes = script(&f);
+    let limits = Limits {
+        no_progress: Duration::from_millis(250),
+        ..Limits::default()
+    };
+    let monitor = Monitor::default();
+    let peer = SlowPeer {
+        inner: ScriptPeer {
+            input: &bytes,
+            buf: Vec::new(),
+        },
+        delay: Duration::from_millis(40),
+    };
+    let mut conv = Conv::new(peer, limits, 10_000, &monitor);
+    let t = Instant::now();
+    conv.handshake().unwrap();
+    conv.open(None).unwrap();
+    let records = conv.list(Format::TestFixture).unwrap();
+    let mut out = NullOut::default();
+    let mut summary = ForeignSummary::default();
+    run_extract(
+        &mut conv,
+        records,
+        Path::new("lpk-replay\0nowhere"),
+        false,
+        &mut out,
+        &crate::DefaultPolicy,
+        &Selection::all(),
+        &mut summary,
+    )
+    .unwrap();
+    assert_eq!(summary.files, n);
+    // Far longer than the watchdog's limit: the finished members kept it fed.
+    assert!(t.elapsed() > Duration::from_secs(2), "{:?}", t.elapsed());
+}
