@@ -66,7 +66,9 @@ pub fn own_user_cpu() -> Duration {
 }
 
 #[cfg(windows)]
-pub use win::{handle_path, handle_type, own_handles, own_user_cpu, HandleEntry};
+pub use win::{
+    current_thread_id, handle_path, handle_type, own_handles, own_user_cpu, HandleEntry,
+};
 
 #[cfg(windows)]
 mod win {
@@ -237,6 +239,12 @@ mod win {
             .take(len)
             .collect();
         Some(String::from_utf16_lossy(&units))
+    }
+
+    /// The calling thread's OS id.
+    pub fn current_thread_id() -> u32 {
+        // SAFETY: no preconditions.
+        unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }
     }
 
     /// The worker's own user-mode CPU time.

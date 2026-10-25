@@ -27,6 +27,8 @@ const BUILTIN_USERS: &str = "S-1-5-32-545";
 const ALL_APPLICATION_PACKAGES: &str = "S-1-15-2-1";
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 const STATUS_QUOTA_EXCEEDED: u32 = 0xC000_0044;
+/// The exception the test worker's `threads <n> raise` ends with.
+const TEST_EXCEPTION: u32 = 0xE000_1234;
 
 /// An AppContainer profile created for one test and deleted when the test ends (also on panic).
 /// A profile is needed: a SID derived without one fails `CreateProcessW` with
@@ -194,13 +196,37 @@ fn token_shape_restricted() {
 /// asked for (same mode, so the same package SID or the same user and integrity); the broker can.
 fn workers_cannot_open_each_other(mode: Mode) {
     let s = stage();
-    let (victim, _vr) = sleeper(&s, mode);
+    // The victim makes a thread of its own (created under the worker's default DACL), reports
+    // its id, then sleeps.
+    let (vr, vw) = std::io::pipe().expect("pipe");
+    let victim = s
+        .launch()
+        .mode(mode)
+        .limits(limits())
+        .args(["threadsleep", "60000"])
+        .handle(roles::RESPONSES, vw.as_handle(), Access::Write)
+        .spawn()
+        .expect("spawn victim");
+    drop(vw);
+    let mut vr = BufReader::new(vr);
+    let mut line = String::new();
+    vr.read_line(&mut line).expect("read");
+    let own_tid: u32 = line
+        .trim()
+        .strip_prefix("thread ")
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_else(|| panic!("no thread id: {line:?}"));
+    line.clear();
+    vr.read_line(&mut line).expect("read");
+    assert_eq!(line.trim(), "sleeping");
+
     let pid = victim.id().to_string();
     let tid = victim.thread_id().to_string();
-    let (code, text) = run(&s, mode, limits(), &["open", &pid, &tid]);
+    let own = own_tid.to_string();
+    let (code, text) = run(&s, mode, limits(), &["open", &pid, &tid, &own]);
     assert_eq!(code, 0, "{text}");
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 11, "{text}");
+    assert_eq!(lines.len(), 6 + 2 * 5, "{text}");
     for l in &lines {
         assert!(
             l.ends_with(&format!("err {ERROR_ACCESS_DENIED}")),
@@ -211,6 +237,51 @@ fn workers_cannot_open_each_other(mode: Mode) {
     lpk_sandbox_sys::probe_open_process(victim.id(), 0x10 | 0x1000).expect("broker opens process");
     lpk_sandbox_sys::probe_open_thread(victim.thread_id(), 0x8 | 0x800)
         .expect("broker opens thread");
+}
+
+/// The worker's reduced self-access (its default DACL grants neither its package SID nor
+/// RESTRICTED) breaks neither threading nor die-on-unhandled-exception: eight threads finish, and
+/// an unhandled SEH exception on one of them ends the worker with that exception's code.
+fn threads_and_unhandled_exception(mode: Mode) {
+    let s = stage();
+    let (code, text) = run(&s, mode, limits(), &["threads", "8", "ok"]);
+    assert_eq!((code, text.trim()), (0, "threads done 8"));
+    let (code, text) = run(&s, mode, limits(), &["threads", "8", "raise"]);
+    assert_eq!(code, TEST_EXCEPTION, "{code:#x} {text}");
+    assert!(!text.contains("threads done"), "{text}");
+}
+
+#[test]
+fn threads_and_unhandled_exception_lpac() {
+    threads_and_unhandled_exception(Mode::Lpac);
+}
+
+#[test]
+fn threads_and_unhandled_exception_restricted() {
+    threads_and_unhandled_exception(Mode::RestrictedToken);
+}
+
+/// A missing worker executable is reported as such, never as a missing profile.
+#[test]
+fn missing_executable_is_not_a_missing_profile() {
+    let s = stage();
+    let (_r, w) = std::io::pipe().expect("pipe");
+    let err = Launch::new(s.exe.with_file_name("no-such-worker.exe"))
+        .appcontainer_name(&s.profile.0)
+        .handle(roles::RESPONSES, w.as_handle(), Access::Write)
+        .spawn()
+        .expect_err("no executable");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        err.get_ref()
+            .and_then(|e| e.downcast_ref::<lpk_sandbox_sys::ProfileMissing>())
+            .is_none(),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("worker executable not found"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -482,8 +553,14 @@ fn only_passed_handles(mode: Mode) {
     // The table is the one the worker had when `main` began, every type included. No handle to
     // the host's objects: no process, thread or token handle, nothing naming the inheritable
     // sentinel, and no File-type handle (files, pipes, devices) but the passed ones, apart from
-    // KNOWN_LOADER_FILE_HANDLES (opened by the worker's own DLLs while loading) and a
-    // current-directory handle if the loader opened one (SYNCHRONIZE | FILE_TRAVERSE).
+    // KNOWN_LOADER_FILE_HANDLES, named, which the worker's own DLLs open while loading, and the
+    // current directory, named.
+    let cwd_name = s
+        .exe
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str())
+        .expect("staged dir name");
     let not_passed = || table.iter().filter(|e| !passed.iter().any(|p| p.1 == e.0));
     let foreign: Vec<_> = not_passed()
         .filter(|e| {
@@ -497,7 +574,10 @@ fn only_passed_handles(mode: Mode) {
     );
     let extra: Vec<_> = not_passed()
         .filter(|e| e.2 == "File")
-        .filter(|e| !KNOWN_LOADER_FILE_HANDLES.contains(&e.3) && e.1 != 0x0010_0020)
+        .filter(|e| !KNOWN_LOADER_FILE_HANDLES.contains(&e.3))
+        // The process's current directory (the worker's own folder, which `Launch` makes its
+        // working directory), by name and with SYNCHRONIZE | FILE_TRAVERSE only.
+        .filter(|e| !(e.1 == 0x0010_0020 && e.3.ends_with(&format!(r"\{cwd_name}"))))
         .collect();
     assert!(
         extra.is_empty(),

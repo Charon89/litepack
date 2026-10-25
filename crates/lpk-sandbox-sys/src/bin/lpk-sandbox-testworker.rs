@@ -76,15 +76,65 @@ fn main() {
         #[cfg(windows)]
         Some("open") => {
             let id = |i: usize| cmd.get(i).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-            let (pid, tid) = (id(1), id(2));
+            let pid = id(1);
             for access in PROCESS_PROBES {
                 let r = lpk_sandbox_sys::probe_open_process(pid, access);
                 let _ = writeln!(out, "openp {access:#x} {}", outcome(r));
             }
-            for access in THREAD_PROBES {
-                let r = lpk_sandbox_sys::probe_open_thread(tid, access);
-                let _ = writeln!(out, "opent {access:#x} {}", outcome(r));
+            // Every thread id given: the victim's initial thread and the ones it made itself.
+            for tid in cmd.iter().skip(2).filter_map(|s| s.parse::<u32>().ok()) {
+                for access in THREAD_PROBES {
+                    let r = lpk_sandbox_sys::probe_open_thread(tid, access);
+                    let _ = writeln!(out, "opent {tid} {access:#x} {}", outcome(r));
+                }
             }
+        }
+        #[cfg(windows)]
+        Some("threadsleep") => {
+            // A thread of the worker's own making (created with the worker's default DACL).
+            let ms: u64 = cmd.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let t = std::thread::spawn(move || {
+                let _ = tx.send(child::current_thread_id());
+                std::thread::sleep(Duration::from_millis(ms));
+            });
+            let tid = rx.recv().unwrap_or(0);
+            let _ = writeln!(out, "thread {tid}");
+            let _ = writeln!(out, "sleeping");
+            let _ = out.flush();
+            let _ = t.join();
+        }
+        #[cfg(windows)]
+        Some("threads") => {
+            // Several threads of the worker's own; with `raise`, one ends in an unhandled SEH
+            // exception, which the job's die-on-unhandled-exception turns into the exit status.
+            let n: u32 = cmd.get(1).and_then(|s| s.parse().ok()).unwrap_or(4);
+            let raise = cmd.get(2).copied() == Some("raise");
+            let workers: Vec<_> = (0..n)
+                .map(|i| {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(50));
+                        if raise && i == 0 {
+                            // SAFETY: raising a non-continuable, non-C++ exception with no
+                            // arguments; Rust frames do not catch it, so it is unhandled.
+                            unsafe {
+                                windows::Win32::System::Diagnostics::Debug::RaiseException(
+                                    TEST_EXCEPTION,
+                                    1,
+                                    None,
+                                )
+                            };
+                        }
+                        let mut x = 0u64;
+                        for k in 0..1_000_000u64 {
+                            x = x.wrapping_add(k * u64::from(i));
+                        }
+                        std::hint::black_box(x)
+                    })
+                })
+                .collect();
+            let ok = workers.into_iter().filter_map(|t| t.join().ok()).count();
+            let _ = writeln!(out, "threads done {ok}");
         }
         #[cfg(windows)]
         Some("reg") => {
@@ -172,6 +222,9 @@ fn raw_value(h: &child::Owned) -> u64 {
     h.as_raw_fd() as u64
 }
 
+/// The exception code `threads <n> raise` ends with.
+#[cfg(windows)]
+const TEST_EXCEPTION: u32 = 0xE000_1234;
 /// PROCESS_VM_READ, PROCESS_VM_WRITE | PROCESS_VM_OPERATION, PROCESS_DUP_HANDLE,
 /// PROCESS_TERMINATE, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE.
 #[cfg(windows)]

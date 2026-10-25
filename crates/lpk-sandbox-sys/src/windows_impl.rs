@@ -45,6 +45,7 @@ use windows::Win32::System::Memory::{
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
 };
+use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows::Win32::System::SystemServices::{SECURITY_DESCRIPTOR_REVISION, SE_GROUP_INTEGRITY};
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
@@ -466,23 +467,33 @@ pub fn probe_registry_read(hklm: bool, path: &str) -> io::Result<()> {
 
 /// The minimal environment of a worker: `SystemRoot` only, so no host variable (tokens, proxy
 /// credentials) reaches it.
-fn worker_environment(mode: Mode) -> Vec<u16> {
+fn worker_environment(mode: Mode) -> io::Result<Vec<u16>> {
     let mut env: Vec<u16> = Vec::new();
-    let mut put = |name: &str, fallback: &str| {
-        let v = std::env::var_os(name).unwrap_or_else(|| fallback.into());
+    let mut put = |name: &str, value: &[u16]| {
         env.extend(OsStr::new(name).encode_wide());
         env.push(b'=' as u16);
-        env.extend(v.encode_wide());
+        env.extend_from_slice(value);
         env.push(0);
     };
-    put("SystemRoot", "C:\\Windows");
+    // SystemRoot from the system, not from the host's (caller-controlled) environment.
+    let mut buf = [0u16; 512];
+    // SAFETY: `buf` is writable for its length.
+    let n = unsafe { GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+    if n == 0 || n >= buf.len() {
+        return Err(io::Error::last_os_error());
+    }
+    put("SystemRoot", &buf[..n]);
     if mode == Mode::Lpac {
         // The AppContainer launch rewrites LOCALAPPDATA (and TEMP/TMP) to the package's own
         // folders and fails with ERROR_ENVVAR_NOT_FOUND when the block lacks it (measured).
-        put("LOCALAPPDATA", "");
+        let v: Vec<u16> = std::env::var_os("LOCALAPPDATA")
+            .unwrap_or_default()
+            .encode_wide()
+            .collect();
+        put("LOCALAPPDATA", &v);
     }
     env.push(0);
-    env
+    Ok(env)
 }
 
 /// An ACL allocated by `SetEntriesInAclW`, freed on drop.
@@ -626,6 +637,14 @@ pub struct Worker {
 
 impl Worker {
     pub(crate) fn spawn(l: &Launch<'_>) -> io::Result<Worker> {
+        // A missing image also fails CreateProcess with ERROR_FILE_NOT_FOUND: name it here, so
+        // that error is never mistaken for a missing AppContainer profile.
+        if !l.exe.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("worker executable not found: {}", l.exe.display()),
+            ));
+        }
         let job = Job::sandbox(l.limits.memory, l.limits.cpu_time)?;
         let addrs = candidate_addresses();
 
@@ -643,7 +662,7 @@ impl Worker {
             .or_else(|| l.exe.parent().map(Path::to_path_buf))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "exe has no parent"))?;
         let cwd_w = wide(cwd.as_os_str());
-        let env = worker_environment(l.mode);
+        let env = worker_environment(l.mode)?;
 
         // The worker's process and thread objects grant the broker's user and SYSTEM only: no
         // RESTRICTED, no package SID, no ALL APPLICATION PACKAGES, so no other worker opens them.
@@ -780,7 +799,9 @@ impl Worker {
             // Another process may be creating the profile right now: retry once.
             std::thread::sleep(Duration::from_millis(100));
             created = create();
-            if matches!(&created, Err(e) if e.code() == ERROR_FILE_NOT_FOUND.to_hresult()) {
+            if l.exe.is_file()
+                && matches!(&created, Err(e) if e.code() == ERROR_FILE_NOT_FOUND.to_hresult())
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     crate::ProfileMissing(l.appcontainer_name.clone()),
