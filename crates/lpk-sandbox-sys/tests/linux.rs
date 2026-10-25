@@ -24,7 +24,7 @@ fn run(lim: Limits, args: &[&str]) -> (u32, String) {
     let worker = Launch::new(exe())
         .limits(lim)
         .args(args)
-        .handle(roles::RESPONSES, w.as_fd(), Access::Same)
+        .handle(roles::RESPONSES, w.as_fd(), Access::Write)
         .spawn()
         .expect("spawn");
     drop(w);
@@ -85,7 +85,7 @@ fn cpu_limit_can_be_raised_while_running() {
     let worker = Launch::new(exe())
         .limits(lim)
         .args(["spin", "2500"])
-        .handle(roles::RESPONSES, w.as_fd(), Access::Same)
+        .handle(roles::RESPONSES, w.as_fd(), Access::Write)
         .spawn()
         .expect("spawn");
     drop(w);
@@ -108,7 +108,7 @@ fn worker_dies_with_its_handle() {
     let worker = Launch::new(exe())
         .limits(limits())
         .args(["sleep", "60000"])
-        .handle(roles::RESPONSES, w.as_fd(), Access::Same)
+        .handle(roles::RESPONSES, w.as_fd(), Access::Write)
         .spawn()
         .expect("spawn");
     let pid = worker.id();

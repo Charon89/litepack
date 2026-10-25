@@ -128,7 +128,13 @@ pub fn decode(page: &[u8]) -> Result<Vec<(u32, u64)>, BootstrapError> {
         if u32_at(page, at + 4) != 0 {
             return Err(BootstrapError::Malformed("reserved"));
         }
-        out.push((u32_at(page, at), u64_at(page, at + 8)));
+        let value = u64_at(page, at + 8);
+        // 0 and -1 (the current-process pseudo-handle) are never duplicated handles, and a
+        // handle owned twice would be closed twice.
+        if value == 0 || value == u64::MAX || out.iter().any(|&(_, v)| v == value) {
+            return Err(BootstrapError::Malformed("handle value"));
+        }
+        out.push((u32_at(page, at), value));
     }
     Ok(out)
 }
@@ -196,7 +202,15 @@ mod tests {
         let mut b = good.clone();
         b.truncate(good.len() - 1);
         assert!(decode(&b).is_err());
-        assert!(encode(&[(0, 0); MAX_HANDLES + 1]).is_err());
+        assert!(encode(&[(0, 4); MAX_HANDLES + 1]).is_err());
+        for bad in [vec![(1, 0)], vec![(1, u64::MAX)], vec![(1, 8), (2, 8)]] {
+            let b = encode(&bad).expect("encode");
+            assert_eq!(
+                decode(&b),
+                Err(BootstrapError::Malformed("handle value")),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

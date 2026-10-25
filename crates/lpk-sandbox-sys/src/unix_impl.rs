@@ -7,7 +7,7 @@ use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Open files the worker may hold beyond its passed fds.
@@ -23,6 +23,7 @@ pub struct Worker {
     child: Mutex<Child>,
     pid: u32,
     cpu_ceiling: Duration,
+    keeper: Option<(mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
 }
 
 impl Worker {
@@ -93,11 +94,31 @@ impl Worker {
                 Ok(())
             });
         }
-        let child = cmd.spawn()?;
+        // PR_SET_PDEATHSIG fires when the *thread* that forked the worker exits, not the
+        // process. So the worker is forked from a keeper thread that lives exactly as long as
+        // the `Worker`: a caller spawning from a short-lived thread does not kill its worker,
+        // and the worker still dies if the whole host dies.
+        let (child_tx, child_rx) = mpsc::channel::<io::Result<Child>>();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let keeper = std::thread::Builder::new()
+            .name("lpk-worker-keeper".into())
+            .spawn(move || {
+                let r = cmd.spawn();
+                let ok = r.is_ok();
+                let _ = child_tx.send(r);
+                if ok {
+                    // Returns when the Worker drops its sender.
+                    let _ = stop_rx.recv();
+                }
+            })?;
+        let child = child_rx
+            .recv()
+            .map_err(|_| io::Error::other("worker keeper thread died"))??;
         Ok(Worker {
             pid: child.id(),
             child: Mutex::new(child),
             cpu_ceiling: l.limits.cpu_ceiling,
+            keeper: Some((stop_tx, keeper)),
         })
     }
 
@@ -166,8 +187,14 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let mut c = self.lock();
-        let _ = c.kill();
-        let _ = c.wait();
+        {
+            let mut c = self.lock();
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        if let Some((stop, keeper)) = self.keeper.take() {
+            drop(stop);
+            let _ = keeper.join();
+        }
     }
 }

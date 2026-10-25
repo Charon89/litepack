@@ -66,32 +66,21 @@ pub fn own_user_cpu() -> Duration {
 }
 
 #[cfg(windows)]
-pub use win::{handle_path, own_handles, own_user_cpu, token_report, HandleEntry, TokenReport};
+pub use win::{handle_path, handle_type, own_handles, own_user_cpu, HandleEntry};
 
 #[cfg(windows)]
 mod win {
     use super::*;
     use crate::job::werr;
-    use crate::windows_impl::{sid_to_string, token_info};
     use std::os::windows::io::FromRawHandle;
     use windows::Wdk::Foundation::{NtQueryObject, OBJECT_INFORMATION_CLASS};
     use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessHandleInformation};
     use windows::Win32::Foundation::{FILETIME, HANDLE, STATUS_INFO_LENGTH_MISMATCH};
-    use windows::Win32::Security::{
-        IsTokenRestricted, TokenAppContainerSid, TokenIntegrityLevel, TokenIsAppContainer,
-        TokenPrivileges, TokenRestrictedSids, PSID, TOKEN_APPCONTAINER_INFORMATION,
-        TOKEN_MANDATORY_LABEL,
-    };
     use windows::Win32::System::Memory::{
         VirtualFree, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_RELEASE,
         PAGE_READONLY, PAGE_READWRITE,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-
-    /// `GetCurrentProcessToken()`: a pseudo-handle valid for queries, never closed.
-    fn current_token() -> HANDLE {
-        HANDLE(-4isize as *mut _)
-    }
 
     /// The page at `addr` if it is committed and readable as a whole.
     fn committed_page(addr: u64) -> Option<&'static [u8]> {
@@ -113,8 +102,10 @@ mod win {
             return None;
         }
         // SAFETY: VirtualQuery just reported a committed, readable region of at least a page
-        // starting at `addr`; the broker's page is never freed except by `take` below, after the
-        // last use of this slice.
+        // starting at `addr`, and nothing frees memory during this single-threaded start-up
+        // before the slice's last use. A candidate the broker did not take may be any region of
+        // ours: its bytes are untrusted until `bootstrap::decode` validates magic, version,
+        // length and checksum, and only a validated block is acted on.
         Some(unsafe { std::slice::from_raw_parts(addr as *const u8, bootstrap::PAGE) })
     }
 
@@ -144,65 +135,6 @@ mod win {
             }
         }
         Err(malformed.unwrap_or(BootstrapError::NoPage))
-    }
-
-    /// The shape of the worker's token.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct TokenReport {
-        /// `TokenIsAppContainer`.
-        pub appcontainer: bool,
-        /// The AppContainer SID, if any.
-        pub package_sid: Option<String>,
-        /// The integrity RID (0x1000 Low, 0x2000 Medium, ...).
-        pub integrity: u32,
-        /// `IsTokenRestricted`.
-        pub restricted: bool,
-        /// Number of restricting SIDs.
-        pub restricted_sids: u32,
-        /// Number of privileges present.
-        pub privileges: u32,
-    }
-
-    fn u32_info(class: windows::Win32::Security::TOKEN_INFORMATION_CLASS) -> std::io::Result<u32> {
-        let b = token_info(current_token(), class)?;
-        Ok(b[0] as u32)
-    }
-
-    /// Describe the worker's own token.
-    pub fn token_report() -> std::io::Result<TokenReport> {
-        let appcontainer = u32_info(TokenIsAppContainer)? != 0;
-        let package_sid = if appcontainer {
-            let b = token_info(current_token(), TokenAppContainerSid)?;
-            // SAFETY: the kernel wrote a TOKEN_APPCONTAINER_INFORMATION at the start of `b`.
-            let sid: PSID = unsafe {
-                (*(b.as_ptr() as *const TOKEN_APPCONTAINER_INFORMATION)).TokenAppContainer
-            };
-            Some(sid_to_string(sid)?)
-        } else {
-            None
-        };
-        let b = token_info(current_token(), TokenIntegrityLevel)?;
-        // SAFETY: the kernel wrote a TOKEN_MANDATORY_LABEL whose SID lies inside `b`.
-        let label: PSID = unsafe { (*(b.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid };
-        let s = sid_to_string(label)?;
-        let integrity = s
-            .rsplit('-')
-            .next()
-            .and_then(|r| r.parse().ok())
-            .unwrap_or(u32::MAX);
-        // SAFETY: query on a valid pseudo-handle.
-        let restricted = unsafe { IsTokenRestricted(current_token()) }.is_ok();
-        // TOKEN_GROUPS and TOKEN_PRIVILEGES both start with a u32 count.
-        let restricted_sids = u32_info(TokenRestrictedSids)?;
-        let privileges = u32_info(TokenPrivileges)?;
-        Ok(TokenReport {
-            appcontainer,
-            package_sid,
-            integrity,
-            restricted,
-            restricted_sids,
-            privileges,
-        })
     }
 
     /// One entry of the worker's handle table.
@@ -264,16 +196,27 @@ mod win {
     /// The NT path of a file or device handle the worker holds (`None` when it has none, as for
     /// pipes). Do not call it on a synchronous pipe handle another thread is blocked on.
     pub fn handle_path(value: u64) -> Option<String> {
-        // ObjectNameInformation: a UNICODE_STRING {Length, MaximumLength (u16), Buffer} whose
-        // characters the kernel places right after it.
-        let mut buf = [0u64; 260];
+        object_string(value, 1)
+    }
+
+    /// The object type name of a handle the worker holds (`File`, `Process`, `Key`, ...).
+    pub fn handle_type(value: u64) -> Option<String> {
+        object_string(value, 2)
+    }
+
+    /// ObjectNameInformation (1) and ObjectTypeInformation (2) both start with a UNICODE_STRING
+    /// {Length, MaximumLength (u16), Buffer} whose characters the kernel places right after the
+    /// fixed part; for the type the fixed part is longer, so the characters are found through
+    /// the Buffer pointer's offset from the start of our buffer.
+    fn object_string(value: u64, class: i32) -> Option<String> {
+        let mut buf = [0u64; 512];
         let mut ret = 0u32;
         // SAFETY: `value` is a handle in our own table (from `own_handles`); `buf` is writable
         // for its full size and 8-aligned.
         let st = unsafe {
             NtQueryObject(
                 Some(HANDLE(value as usize as *mut _)),
-                OBJECT_INFORMATION_CLASS(1),
+                OBJECT_INFORMATION_CLASS(class),
                 Some(buf.as_mut_ptr().cast()),
                 std::mem::size_of_val(&buf) as u32,
                 Some(&mut ret),
@@ -283,12 +226,17 @@ mod win {
             return None;
         }
         let len = (buf[0] & 0xFFFF) as usize / 2;
-        let units: Vec<u16> = buf[2..]
+        let start = (buf[1] as usize).checked_sub(buf.as_ptr() as usize)?;
+        if len == 0 || start % 2 != 0 || start + len * 2 > std::mem::size_of_val(&buf) {
+            return None;
+        }
+        let units: Vec<u16> = buf
             .iter()
             .flat_map(|w| (0..4).map(move |i| (w >> (16 * i)) as u16))
+            .skip(start / 2)
             .take(len)
             .collect();
-        (len > 0).then(|| String::from_utf16_lossy(&units))
+        Some(String::from_utf16_lossy(&units))
     }
 
     /// The worker's own user-mode CPU time.

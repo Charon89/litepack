@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    DuplicateHandle, GetLastError, LocalFree, DUPLICATE_HANDLE_OPTIONS, DUPLICATE_SAME_ACCESS,
+    DuplicateHandle, GetLastError, LocalFree, DUPLICATE_HANDLE_OPTIONS, ERROR_FILE_NOT_FOUND,
     GENERIC_ALL, HANDLE, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::{
@@ -23,30 +23,39 @@ use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::{
-    CreateRestrictedToken, EqualSid, FreeSid, GetLengthSid, GetTokenInformation,
-    SetTokenInformation, TokenDefaultDacl, TokenGroups, TokenIntegrityLevel, TokenUser, ACL,
-    DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID,
-    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-    TOKEN_ACCESS_MASK, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL,
-    TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    TOKEN_USER,
+    CopySid, CreateRestrictedToken, EqualSid, FreeSid, GetLengthSid, GetTokenInformation,
+    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SetTokenInformation,
+    TokenAppContainerSid, TokenCapabilities, TokenDefaultDacl, TokenGroups, TokenIntegrityLevel,
+    TokenIsAppContainer, TokenPrivileges, TokenRestrictedSids, TokenUser, ACL,
+    DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, NO_INHERITANCE,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR, SID_AND_ATTRIBUTES,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_ACCESS_MASK, TOKEN_ADJUST_DEFAULT,
+    TOKEN_APPCONTAINER_INFORMATION, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE,
+    TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
 };
-use windows::Win32::Storage::FileSystem::{FILE_GENERIC_READ, READ_CONTROL, WRITE_DAC};
+use windows::Win32::Storage::FileSystem::{
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, READ_CONTROL, WRITE_DAC,
+};
 use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, VirtualProtectEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
     PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
 };
-use windows::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
+};
+use windows::Win32::System::SystemServices::{SECURITY_DESCRIPTOR_REVISION, SE_GROUP_INTEGRITY};
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
-    GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, DETACHED_PROCESS,
-    EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcess, OpenProcessToken,
+    OpenThread, ResumeThread, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_ACCESS_RIGHTS, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
     PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_JOB_LIST,
     PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, THREAD_ACCESS_RIGHTS,
 };
 use windows::Win32::System::WindowsProgramming::{
     PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT, PROCESS_CREATION_CHILD_PROCESS_RESTRICTED,
@@ -165,8 +174,112 @@ pub(crate) fn token_info(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::R
     Ok(buf)
 }
 
-/// The caller's token restricted as the opt-in mode requires.
-fn restricted_token() -> io::Result<OwnedHandle> {
+/// The broker's user SID, in its own buffer.
+pub(crate) struct UserSid(Vec<u64>);
+
+impl UserSid {
+    pub(crate) fn of_current_process() -> io::Result<UserSid> {
+        Ok(UserSid(token_info(current_token(), TokenUser)?))
+    }
+
+    pub(crate) fn ptr(&self) -> PSID {
+        // SAFETY: the kernel wrote a TOKEN_USER (whose SID lies inside the buffer) at its start.
+        unsafe { (*(self.0.as_ptr() as *const TOKEN_USER)).User.Sid }
+    }
+}
+
+/// `GetCurrentProcessToken()`: a pseudo-handle valid for queries, never closed.
+pub(crate) fn current_token() -> HANDLE {
+    HANDLE(-4isize as *mut _)
+}
+
+/// A random SID, unique to one launch, used as the restricted worker's third restricting SID
+/// (Chromium's `unique_restricted_sid`): objects granted to it are reachable by that worker only.
+fn unique_sid() -> io::Result<(Sid, String)> {
+    use std::hash::BuildHasher;
+    let state = std::hash::RandomState::new();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let r: Vec<u32> = (0..3u8)
+        .map(|i| state.hash_one((i, std::process::id(), nanos)) as u32)
+        .collect();
+    let s = format!("S-1-5-21-{}-{}-{}", r[0], r[1], r[2]);
+    Ok((Sid::from_string(&s)?, s))
+}
+
+/// Set a token's integrity level to Low, with the label and its SID in one buffer.
+fn set_low_integrity(token: HANDLE) -> io::Result<()> {
+    let low = Sid::from_string("S-1-16-4096")?;
+    // SAFETY: `low.ptr` is a valid SID.
+    let sid_len = unsafe { GetLengthSid(low.ptr) } as usize;
+    let head = std::mem::size_of::<TOKEN_MANDATORY_LABEL>();
+    let mut buf = vec![0u64; (head + sid_len).div_ceil(8)];
+    let base = buf.as_mut_ptr().cast::<u8>();
+    // SAFETY: `buf` holds `head + sid_len` bytes, so offset `head` is inside it.
+    let sid_dst = unsafe { base.add(head) };
+    // SAFETY: the destination has exactly `sid_len` bytes left in `buf`; the source is valid.
+    unsafe { CopySid(sid_len as u32, PSID(sid_dst.cast()), low.ptr) }.map_err(werr)?;
+    let label = TOKEN_MANDATORY_LABEL {
+        Label: SID_AND_ATTRIBUTES {
+            Sid: PSID(sid_dst.cast()),
+            Attributes: SE_GROUP_INTEGRITY as u32,
+        },
+    };
+    // SAFETY: the 8-aligned start of `buf` has room for the header, which the SID follows.
+    unsafe { std::ptr::write(base.cast::<TOKEN_MANDATORY_LABEL>(), label) };
+    // SAFETY: `buf` is one allocation holding the label and the SID it points to; the length
+    // covers both and `buf` outlives the call.
+    unsafe {
+        SetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            base.cast_const().cast(),
+            (head + sid_len) as u32,
+        )
+    }
+    .map_err(werr)
+}
+
+/// Replace a token's default DACL (the DACL of every object it creates without one).
+fn set_default_dacl(token: HANDLE, acl: &LocalAcl) -> io::Result<()> {
+    let dd = TOKEN_DEFAULT_DACL { DefaultDacl: acl.0 };
+    // SAFETY: `dd` points at a valid ACL; both outlive the call.
+    unsafe {
+        SetTokenInformation(
+            token,
+            TokenDefaultDacl,
+            &dd as *const _ as *const c_void,
+            std::mem::size_of::<TOKEN_DEFAULT_DACL>() as u32,
+        )
+    }
+    .map_err(werr)
+}
+
+/// Replace the (protected) DACL of a kernel object we hold with WRITE_DAC.
+fn set_object_dacl(h: HANDLE, acl: &LocalAcl) -> io::Result<()> {
+    // SAFETY: `h` is a valid handle with WRITE_DAC; `acl` is valid through the call.
+    let r = unsafe {
+        SetSecurityInfo(
+            h,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(acl.0),
+            None,
+        )
+    };
+    if r.0 != 0 {
+        return Err(io::Error::from_raw_os_error(r.0 as i32));
+    }
+    Ok(())
+}
+
+/// The caller's token restricted as the opt-in mode requires, with `unique` as the third
+/// restricting SID in place of RESTRICTED (shared by every restricted process of the session).
+fn restricted_token(unique: &Sid, user: &UserSid) -> io::Result<OwnedHandle> {
     let mut cur = HANDLE::default();
     // SAFETY: opening our own process token; `cur` is writable.
     unsafe {
@@ -183,17 +296,7 @@ fn restricted_token() -> io::Result<OwnedHandle> {
     .map_err(werr)?;
     let cur = owned(cur);
     let groups_buf = token_info(raw(&cur), TokenGroups)?;
-    let gp = groups_buf.as_ptr() as *const TOKEN_GROUPS;
-    // SAFETY: the kernel wrote a TOKEN_GROUPS at the start of `groups_buf` (8-aligned).
-    let count = unsafe { (*gp).GroupCount } as usize;
-    // SAFETY: `count` SID_AND_ATTRIBUTES follow in the buffer the kernel sized for them; the
-    // SIDs they point to live inside `groups_buf`, which outlives every use below.
-    let groups = unsafe {
-        std::slice::from_raw_parts(
-            std::ptr::addr_of!((*gp).Groups).cast::<SID_AND_ATTRIBUTES>(),
-            count,
-        )
-    };
+    let groups = group_entries(&groups_buf);
     // Every group deny-only except Everyone and BUILTIN\Users: the restricted token passes an
     // access check only when both the normal and the restricting-SID checks grant it, so with
     // those two deny-only as well nothing (System32 included) is readable and the loader fails
@@ -213,11 +316,10 @@ fn restricted_token() -> io::Result<OwnedHandle> {
             Attributes: 0,
         })
         .collect();
-    let restricted = Sid::from_string("S-1-5-12")?;
-    let restrict: Vec<SID_AND_ATTRIBUTES> = [&everyone, &users, &restricted]
+    let restrict: Vec<SID_AND_ATTRIBUTES> = [everyone.ptr, users.ptr, unique.ptr]
         .iter()
-        .map(|s| SID_AND_ATTRIBUTES {
-            Sid: s.ptr,
+        .map(|&s| SID_AND_ATTRIBUTES {
+            Sid: s,
             Attributes: 0,
         })
         .collect();
@@ -236,62 +338,151 @@ fn restricted_token() -> io::Result<OwnedHandle> {
     }
     .map_err(werr)?;
     let new = owned(new);
-    let low = Sid::from_string("S-1-16-4096")?;
-    let label = TOKEN_MANDATORY_LABEL {
-        Label: SID_AND_ATTRIBUTES {
-            Sid: low.ptr,
-            Attributes: SE_GROUP_INTEGRITY as u32,
-        },
-    };
-    // SAFETY: `low.ptr` is a valid SID.
-    let sid_len = unsafe { GetLengthSid(low.ptr) };
-    // SAFETY: `label` and the SID it points to outlive the call; the length covers both.
-    unsafe {
-        SetTokenInformation(
-            raw(&new),
-            TokenIntegrityLevel,
-            &label as *const _ as *const c_void,
-            std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 + sid_len,
-        )
-    }
-    .map_err(werr)?;
-
-    // Objects the worker creates, and its token itself, must pass the restricted access check
-    // too, or the loader fails with STATUS_ACCESS_DENIED: grant GENERIC_ALL to the user, SYSTEM
-    // and RESTRICTED (as Chromium's sandbox does for its restricted tokens).
-    let user_buf = token_info(raw(&cur), TokenUser)?;
-    // SAFETY: the kernel wrote a TOKEN_USER (whose SID lies inside `user_buf`) at its start.
-    let user_sid = unsafe { (*(user_buf.as_ptr() as *const TOKEN_USER)).User.Sid };
+    set_low_integrity(raw(&new))?;
+    // The worker's own objects and its token: the user, SYSTEM and this launch's SID only.
     let system = Sid::from_string("S-1-5-18")?;
-    let acl = LocalAcl::granting(&[user_sid, system.ptr, restricted.ptr], GENERIC_ALL.0)?;
-    let dd = TOKEN_DEFAULT_DACL { DefaultDacl: acl.0 };
-    // SAFETY: `dd` points at a valid ACL that outlives the call.
+    let acl = LocalAcl::granting(&[user.ptr(), system.ptr, unique.ptr], GENERIC_ALL.0)?;
+    set_default_dacl(raw(&new), &acl)?;
+    set_object_dacl(raw(&new), &acl)?;
+    Ok(new)
+}
+
+/// The SID_AND_ATTRIBUTES entries of a TOKEN_GROUPS the kernel wrote into `buf`.
+fn group_entries(buf: &[u64]) -> &[SID_AND_ATTRIBUTES] {
+    let gp = buf.as_ptr() as *const TOKEN_GROUPS;
+    // SAFETY: the kernel wrote a TOKEN_GROUPS at the start of `buf` (8-aligned).
+    let count = unsafe { (*gp).GroupCount } as usize;
+    // SAFETY: `count` entries follow in the buffer the kernel sized for them; the SIDs they point
+    // to live inside `buf`, which the returned slice borrows.
     unsafe {
-        SetTokenInformation(
-            raw(&new),
-            TokenDefaultDacl,
-            &dd as *const _ as *const c_void,
-            std::mem::size_of::<TOKEN_DEFAULT_DACL>() as u32,
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!((*gp).Groups).cast::<SID_AND_ATTRIBUTES>(),
+            count,
         )
     }
-    .map_err(werr)?;
-    // SAFETY: `new` inherits our handle's access, which includes WRITE_DAC; `acl` is valid
-    // through the call.
-    let r = unsafe {
-        SetSecurityInfo(
-            raw(&new),
-            SE_KERNEL_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            Some(acl.0),
-            None,
-        )
+}
+
+/// A token as the host sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenView {
+    /// `TokenIsAppContainer`.
+    pub appcontainer: bool,
+    /// The AppContainer SID, if any.
+    pub package_sid: Option<String>,
+    /// Capability SIDs.
+    pub capabilities: Vec<String>,
+    /// The integrity RID (0x1000 Low, 0x2000 Medium, ...).
+    pub integrity: u32,
+    /// Groups as (SID, attributes).
+    pub groups: Vec<(String, u32)>,
+    /// Restricting SIDs.
+    pub restricting: Vec<String>,
+    /// Number of privileges present.
+    pub privileges: u32,
+}
+
+fn sids_of(buf: &[u64]) -> io::Result<Vec<(String, u32)>> {
+    group_entries(buf)
+        .iter()
+        .map(|g| Ok((sid_to_string(g.Sid)?, g.Attributes)))
+        .collect()
+}
+
+pub(crate) fn token_view(token: HANDLE) -> io::Result<TokenView> {
+    let appcontainer = token_info(token, TokenIsAppContainer)?[0] as u32 != 0;
+    let package_sid = if appcontainer {
+        let b = token_info(token, TokenAppContainerSid)?;
+        // SAFETY: the kernel wrote a TOKEN_APPCONTAINER_INFORMATION (SID inside `b`) at its start.
+        let sid =
+            unsafe { (*(b.as_ptr() as *const TOKEN_APPCONTAINER_INFORMATION)).TokenAppContainer };
+        Some(sid_to_string(sid)?)
+    } else {
+        None
     };
+    let capabilities = sids_of(&token_info(token, TokenCapabilities)?)?
+        .into_iter()
+        .map(|s| s.0)
+        .collect();
+    let b = token_info(token, TokenIntegrityLevel)?;
+    // SAFETY: the kernel wrote a TOKEN_MANDATORY_LABEL whose SID lies inside `b`.
+    let label = unsafe { (*(b.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid };
+    let integrity = sid_to_string(label)?
+        .rsplit('-')
+        .next()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(u32::MAX);
+    let groups = sids_of(&token_info(token, TokenGroups)?)?;
+    let restricting = sids_of(&token_info(token, TokenRestrictedSids)?)?
+        .into_iter()
+        .map(|s| s.0)
+        .collect();
+    // TOKEN_PRIVILEGES starts with a u32 count.
+    let privileges = token_info(token, TokenPrivileges)?[0] as u32;
+    Ok(TokenView {
+        appcontainer,
+        package_sid,
+        capabilities,
+        integrity,
+        groups,
+        restricting,
+        privileges,
+    })
+}
+
+/// Try `OpenProcess(access, pid)`; the handle is closed at once. For the isolation tests.
+pub fn probe_open_process(pid: u32, access: u32) -> io::Result<()> {
+    // SAFETY: plain open; the result is checked and closed.
+    let h = unsafe { OpenProcess(PROCESS_ACCESS_RIGHTS(access), false, pid) }.map_err(werr)?;
+    drop(owned(h));
+    Ok(())
+}
+
+/// Try `OpenThread(access, tid)`; the handle is closed at once. For the isolation tests.
+pub fn probe_open_thread(tid: u32, access: u32) -> io::Result<()> {
+    // SAFETY: plain open; the result is checked and closed.
+    let h = unsafe { OpenThread(THREAD_ACCESS_RIGHTS(access), false, tid) }.map_err(werr)?;
+    drop(owned(h));
+    Ok(())
+}
+
+/// Try to open `HKCU\path` (`hklm` false) or `HKLM\path` for reading. For the residual tests.
+pub fn probe_registry_read(hklm: bool, path: &str) -> io::Result<()> {
+    let w = wide(OsStr::new(path));
+    let root = if hklm {
+        HKEY_LOCAL_MACHINE
+    } else {
+        HKEY_CURRENT_USER
+    };
+    let mut key = HKEY::default();
+    // SAFETY: `w` is NUL-terminated and outlives the call; `key` is writable.
+    let r = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), None, KEY_READ, &mut key) };
     if r.0 != 0 {
         return Err(io::Error::from_raw_os_error(r.0 as i32));
     }
-    Ok(new)
+    // SAFETY: closing the key just opened.
+    let _ = unsafe { RegCloseKey(key) };
+    Ok(())
+}
+
+/// The minimal environment of a worker: `SystemRoot` only, so no host variable (tokens, proxy
+/// credentials) reaches it.
+fn worker_environment(mode: Mode) -> Vec<u16> {
+    let mut env: Vec<u16> = Vec::new();
+    let mut put = |name: &str, fallback: &str| {
+        let v = std::env::var_os(name).unwrap_or_else(|| fallback.into());
+        env.extend(OsStr::new(name).encode_wide());
+        env.push(b'=' as u16);
+        env.extend(v.encode_wide());
+        env.push(0);
+    };
+    put("SystemRoot", "C:\\Windows");
+    if mode == Mode::Lpac {
+        // The AppContainer launch rewrites LOCALAPPDATA (and TEMP/TMP) to the package's own
+        // folders and fails with ERROR_ENVVAR_NOT_FOUND when the block lacks it (measured).
+        put("LOCALAPPDATA", "");
+    }
+    env.push(0);
+    env
 }
 
 /// An ACL allocated by `SetEntriesInAclW`, freed on drop.
@@ -428,6 +619,8 @@ pub struct Worker {
     process: OwnedHandle,
     job: Job,
     pid: u32,
+    tid: u32,
+    restricting_sid: Option<String>,
     cpu_ceiling: Duration,
 }
 
@@ -450,15 +643,42 @@ impl Worker {
             .or_else(|| l.exe.parent().map(Path::to_path_buf))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "exe has no parent"))?;
         let cwd_w = wide(cwd.as_os_str());
+        let env = worker_environment(l.mode);
+
+        // The worker's process and thread objects grant the broker's user and SYSTEM only: no
+        // RESTRICTED, no package SID, no ALL APPLICATION PACKAGES, so no other worker opens them.
+        let user = UserSid::of_current_process()?;
+        let system = Sid::from_string("S-1-5-18")?;
+        let broker_acl = LocalAcl::granting(&[user.ptr(), system.ptr], GENERIC_ALL.0)?;
+        let mut sd = SECURITY_DESCRIPTOR::default();
+        let psd = PSECURITY_DESCRIPTOR((&mut sd as *mut SECURITY_DESCRIPTOR).cast());
+        // SAFETY: `sd` is a writable SECURITY_DESCRIPTOR that outlives every use of `psd`.
+        unsafe { InitializeSecurityDescriptor(psd, SECURITY_DESCRIPTOR_REVISION) }.map_err(werr)?;
+        // SAFETY: `psd` is initialised; `broker_acl` outlives the descriptor's use.
+        unsafe { SetSecurityDescriptorDacl(psd, true, Some(broker_acl.0), false) }.map_err(werr)?;
+        let object_attrs = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: psd.0,
+            bInheritHandle: false.into(),
+        };
 
         // Attribute values: all locals that outlive CreateProcess* below.
         let job_list = [job.raw()];
         let mitigations: u64 = MITIGATIONS;
         let child_policy: u32 = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
         let aap_policy: u32 = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
-        let (sid, token) = match l.mode {
-            Mode::Lpac => (Some(Sid::appcontainer(&l.appcontainer_name)?), None),
-            Mode::RestrictedToken => (None, Some(restricted_token()?)),
+        let (sid, token, unique) = match l.mode {
+            Mode::Lpac => (Some(Sid::appcontainer(&l.appcontainer_name)?), None, None),
+            Mode::RestrictedToken => {
+                let (unique, text) = unique_sid()?;
+                let token = restricted_token(&unique, &user)?;
+                (None, Some(token), Some((unique, text)))
+            }
+        };
+        // What the worker's own objects (threads, events, sections) are created with.
+        let child_acl = match &unique {
+            Some((u, _)) => LocalAcl::granting(&[user.ptr(), system.ptr, u.ptr], GENERIC_ALL.0)?,
+            None => LocalAcl::granting(&[user.ptr(), system.ptr], GENERIC_ALL.0)?,
         };
         let caps = SECURITY_CAPABILITIES {
             AppContainerSid: sid.as_ref().map(|s| s.ptr).unwrap_or_default(),
@@ -513,20 +733,24 @@ impl Worker {
         // Null standard handles: the worker gets none of ours.
         si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         si.lpAttributeList = attrs.list();
-        let flags = CREATE_SUSPENDED | DETACHED_PROCESS | EXTENDED_STARTUPINFO_PRESENT;
+        let flags = CREATE_SUSPENDED
+            | DETACHED_PROCESS
+            | EXTENDED_STARTUPINFO_PRESENT
+            | CREATE_UNICODE_ENVIRONMENT;
         let mut pi = PROCESS_INFORMATION::default();
-        let created = match &token {
-            // SAFETY: every pointer is to a live local (NUL-terminated strings, the startup info
-            // with its attribute list); no handle is inherited.
+        let mut create = || match &token {
+            // SAFETY: every pointer is to a live local (NUL-terminated strings, the environment
+            // block, the security attributes, the startup info with its attribute list); no
+            // handle is inherited.
             None => unsafe {
                 CreateProcessW(
                     PCWSTR(exe_w.as_ptr()),
                     Some(PWSTR(cmd.as_mut_ptr())),
-                    None,
-                    None,
+                    Some(&object_attrs),
+                    Some(&object_attrs),
                     false,
                     flags,
-                    None,
+                    Some(env.as_ptr().cast()),
                     PCWSTR(cwd_w.as_ptr()),
                     &si.StartupInfo,
                     &mut pi,
@@ -538,17 +762,31 @@ impl Worker {
                     Some(raw(t)),
                     PCWSTR(exe_w.as_ptr()),
                     Some(PWSTR(cmd.as_mut_ptr())),
-                    None,
-                    None,
+                    Some(&object_attrs),
+                    Some(&object_attrs),
                     false,
                     flags,
-                    None,
+                    Some(env.as_ptr().cast()),
                     PCWSTR(cwd_w.as_ptr()),
                     &si.StartupInfo,
                     &mut pi,
                 )
             },
         };
+        let mut created = create();
+        if l.mode == Mode::Lpac
+            && matches!(&created, Err(e) if e.code() == ERROR_FILE_NOT_FOUND.to_hresult())
+        {
+            // Another process may be creating the profile right now: retry once.
+            std::thread::sleep(Duration::from_millis(100));
+            created = create();
+            if matches!(&created, Err(e) if e.code() == ERROR_FILE_NOT_FOUND.to_hresult()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    crate::ProfileMissing(l.appcontainer_name.clone()),
+                ));
+            }
+        }
         created.map_err(werr)?;
         drop(attrs);
         let thread = owned(pi.hThread);
@@ -556,10 +794,19 @@ impl Worker {
             process: owned(pi.hProcess),
             job,
             pid: pi.dwProcessId,
+            tid: pi.dwThreadId,
+            restricting_sid: unique.map(|u| u.1),
             cpu_ceiling: l.limits.cpu_ceiling,
         };
         // From here every failure kills the suspended child (the job also does on drop).
-        let setup = worker.bootstrap(l, &addrs);
+        let setup = (|| {
+            // The kernel may add ACEs for an AppContainer's own SID: set the broker-only DACL
+            // again, protected, on the created objects.
+            set_object_dacl(raw(&worker.process), &broker_acl)?;
+            set_object_dacl(raw(&thread), &broker_acl)?;
+            worker.set_child_default_dacl(&child_acl)?;
+            worker.bootstrap(l, &addrs)
+        })();
         if let Err(e) = setup {
             let _ = worker.job.terminate(1);
             return Err(e);
@@ -573,14 +820,50 @@ impl Worker {
         Ok(worker)
     }
 
+    /// Replace the suspended child's default DACL (LPAC's would grant its package SID, so every
+    /// worker of the package could open the objects another creates).
+    fn set_child_default_dacl(&self, acl: &LocalAcl) -> io::Result<()> {
+        let mut t = HANDLE::default();
+        // SAFETY: the child's process handle has full access; `t` is writable.
+        unsafe {
+            OpenProcessToken(
+                raw(&self.process),
+                TOKEN_ADJUST_DEFAULT | TOKEN_QUERY,
+                &mut t,
+            )
+        }
+        .map_err(werr)?;
+        let t = owned(t);
+        set_default_dacl(raw(&t), acl)
+    }
+
+    /// The worker's token as the host sees it.
+    pub fn token_view(&self) -> io::Result<TokenView> {
+        let mut t = HANDLE::default();
+        // SAFETY: the worker's process handle has full access; `t` is writable.
+        unsafe { OpenProcessToken(raw(&self.process), TOKEN_QUERY, &mut t) }.map_err(werr)?;
+        let t = owned(t);
+        token_view(raw(&t))
+    }
+
+    /// The id of the worker's initial thread.
+    pub fn thread_id(&self) -> u32 {
+        self.tid
+    }
+
+    /// The per-launch restricting SID (restricted mode only).
+    pub fn restricting_sid(&self) -> Option<&str> {
+        self.restricting_sid.as_deref()
+    }
+
     /// Duplicate the lent handles into the child and commit the bootstrap page.
     fn bootstrap(&self, l: &Launch<'_>, addrs: &[u64; 4]) -> io::Result<()> {
         let proc = raw(&self.process);
         let mut entries = Vec::with_capacity(l.handles.len());
         for (role, h, access) in &l.handles {
             let (mask, opts) = match access {
-                Access::Same => (0, DUPLICATE_SAME_ACCESS),
-                Access::ReadOnly => (FILE_GENERIC_READ.0, DUPLICATE_HANDLE_OPTIONS(0)),
+                Access::Read => (FILE_GENERIC_READ.0, DUPLICATE_HANDLE_OPTIONS(0)),
+                Access::Write => (FILE_GENERIC_WRITE.0, DUPLICATE_HANDLE_OPTIONS(0)),
             };
             let mut out = HANDLE::default();
             // SAFETY: `h` is a valid handle borrowed for the launch; `proc` is the child's

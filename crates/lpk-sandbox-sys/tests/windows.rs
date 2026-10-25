@@ -18,6 +18,10 @@ use std::time::Duration;
 
 const FILE_GENERIC_READ: u32 = 0x0012_0089;
 const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
+const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+/// File-type handles the worker's own DLLs open while loading: bcryptprimitives.dll (linked by
+/// Rust's std) opens the CNG device.
+const KNOWN_LOADER_FILE_HANDLES: &[&str] = &[r"\Device\CNG"];
 const ERROR_ACCESS_DENIED: &str = "5";
 const BUILTIN_USERS: &str = "S-1-5-32-545";
 const ALL_APPLICATION_PACKAGES: &str = "S-1-15-2-1";
@@ -98,7 +102,7 @@ fn run(s: &Staged, mode: Mode, lim: Limits, args: &[&str]) -> (u32, String) {
         .mode(mode)
         .limits(lim)
         .args(args)
-        .handle(roles::RESPONSES, w.as_handle(), Access::Same)
+        .handle(roles::RESPONSES, w.as_handle(), Access::Write)
         .spawn()
         .expect("spawn");
     drop(w);
@@ -111,36 +115,197 @@ fn run(s: &Staged, mode: Mode, lim: Limits, args: &[&str]) -> (u32, String) {
     (code, text)
 }
 
-fn token_line(text: &str) -> &str {
-    text.lines()
-        .find(|l| l.starts_with("token "))
-        .unwrap_or_else(|| panic!("no token line in {text:?}"))
+/// A worker that sleeps until the test ends (its pipe end is returned to keep it open).
+fn sleeper(s: &Staged, mode: Mode) -> (lpk_sandbox_sys::Worker, BufReader<std::io::PipeReader>) {
+    let (r, w) = std::io::pipe().expect("pipe");
+    let worker = s
+        .launch()
+        .mode(mode)
+        .limits(limits())
+        .args(["sleep", "60000"])
+        .handle(roles::RESPONSES, w.as_handle(), Access::Write)
+        .spawn()
+        .expect("spawn");
+    drop(w);
+    let mut r = BufReader::new(r);
+    let mut line = String::new();
+    r.read_line(&mut line).expect("read");
+    assert_eq!(line.trim(), "sleeping");
+    (worker, r)
 }
 
+const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x10;
+const SE_GROUP_INTEGRITY: u32 = 0x20;
+
+/// The LPAC worker's token, read by the host: an AppContainer with the profile's package SID, no
+/// capability, Low integrity, no restricting SID.
 #[test]
 fn token_shape_lpac() {
     let s = stage();
-    let (code, text) = run(&s, Mode::Lpac, limits(), &["report"]);
-    assert_eq!(code, 0, "{text}");
+    let (worker, _r) = sleeper(&s, Mode::Lpac);
+    let t = worker.token_view().expect("token");
     let sid = appcontainer_sid_string(&s.profile.0).expect("sid");
-    let t = token_line(&text);
-    assert!(t.contains("appcontainer=1 integrity="), "{t}");
-    assert!(t.contains("integrity=0x1000 "), "{t}");
-    assert!(t.ends_with(&format!("package={sid}")), "{t}");
+    assert!(t.appcontainer, "{t:?}");
+    assert_eq!(t.package_sid.as_deref(), Some(sid.as_str()), "{t:?}");
+    assert!(t.capabilities.is_empty(), "{t:?}");
+    assert_eq!(t.integrity, 0x1000, "{t:?}");
+    assert!(t.restricting.is_empty(), "{t:?}");
 }
 
+/// The restricted worker's token, read by the host: every group deny-only except Everyone, Users
+/// and the integrity label (an elevated host's Administrators included), restricting SIDs exactly
+/// {Everyone, Users, the launch's unique SID}, Low integrity, SeChangeNotifyPrivilege only.
 #[test]
 fn token_shape_restricted() {
     let s = stage();
-    let (code, text) = run(&s, Mode::RestrictedToken, limits(), &["report"]);
+    let (worker, _r) = sleeper(&s, Mode::RestrictedToken);
+    let t = worker.token_view().expect("token");
+    assert!(!t.appcontainer, "{t:?}");
+    assert_eq!(t.integrity, 0x1000, "{t:?}");
+    assert_eq!(t.privileges, 1, "{t:?}");
+    let unique = worker.restricting_sid().expect("unique sid").to_string();
+    assert!(unique.starts_with("S-1-5-21-"), "{unique}");
+    let mut restricting = t.restricting.clone();
+    restricting.sort();
+    let mut want = vec!["S-1-1-0".to_string(), BUILTIN_USERS.to_string(), unique];
+    want.sort();
+    assert_eq!(restricting, want);
+    for (sid, attrs) in &t.groups {
+        let exempt = sid == "S-1-1-0" || sid == BUILTIN_USERS || attrs & SE_GROUP_INTEGRITY != 0;
+        if !exempt {
+            assert!(
+                attrs & SE_GROUP_USE_FOR_DENY_ONLY != 0,
+                "{sid} enabled: {t:?}"
+            );
+        }
+        if sid == "S-1-5-32-544" {
+            assert!(
+                attrs & SE_GROUP_USE_FOR_DENY_ONLY != 0,
+                "Administrators enabled"
+            );
+        }
+    }
+    // A second launch gets a different unique SID.
+    let (other, _r2) = sleeper(&s, Mode::RestrictedToken);
+    assert_ne!(other.restricting_sid(), worker.restricting_sid());
+}
+
+/// A running worker cannot open another running worker's process or thread, whatever the access
+/// asked for (same mode, so the same package SID or the same user and integrity); the broker can.
+fn workers_cannot_open_each_other(mode: Mode) {
+    let s = stage();
+    let (victim, _vr) = sleeper(&s, mode);
+    let pid = victim.id().to_string();
+    let tid = victim.thread_id().to_string();
+    let (code, text) = run(&s, mode, limits(), &["open", &pid, &tid]);
     assert_eq!(code, 0, "{text}");
-    let t = token_line(&text);
-    assert!(t.contains("appcontainer=0 integrity="), "{t}");
-    assert!(t.contains("integrity=0x1000 "), "{t}");
-    assert!(t.contains("restricted=1 restricted_sids=3 "), "{t}");
-    // DISABLE_MAX_PRIVILEGE leaves SeChangeNotifyPrivilege only.
-    assert!(t.contains("privileges=1 "), "{t}");
-    assert!(t.ends_with("package=-"), "{t}");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 11, "{text}");
+    for l in &lines {
+        assert!(
+            l.ends_with(&format!("err {ERROR_ACCESS_DENIED}")),
+            "a worker opened another: {l}\n{text}"
+        );
+    }
+    // The broker still can.
+    lpk_sandbox_sys::probe_open_process(victim.id(), 0x10 | 0x1000).expect("broker opens process");
+    lpk_sandbox_sys::probe_open_thread(victim.thread_id(), 0x8 | 0x800)
+        .expect("broker opens thread");
+}
+
+#[test]
+fn workers_cannot_open_each_other_lpac() {
+    workers_cannot_open_each_other(Mode::Lpac);
+}
+
+#[test]
+fn workers_cannot_open_each_other_restricted() {
+    workers_cannot_open_each_other(Mode::RestrictedToken);
+}
+
+/// The worker's environment is `SystemRoot` alone: a variable set in the host never reaches it.
+fn environment_is_minimal(mode: Mode) {
+    // nextest runs each test in its own process, so this does not leak into other tests.
+    std::env::set_var("LPK_SANDBOX_SENTINEL_SECRET", "do-not-leak");
+    let s = stage();
+    let (code, text) = run(&s, mode, limits(), &["env"]);
+    assert_eq!(code, 0, "{text}");
+    let names: Vec<&str> = text
+        .lines()
+        .map(|l| l.split('=').next().unwrap_or(l))
+        .collect();
+    if mode == Mode::Lpac {
+        // The launch adds TEMP and TMP and points all three at the package's own folders.
+        assert_eq!(
+            names,
+            ["env SystemRoot", "env LOCALAPPDATA", "env TEMP", "env TMP"],
+            "{text}"
+        );
+        let pkg = format!(r"\packages\{}", s.profile.0.to_lowercase());
+        for l in text.lines().skip(1) {
+            assert!(
+                l.to_lowercase().contains(&pkg),
+                "{l} is outside the package folder"
+            );
+        }
+    } else {
+        assert_eq!(names, ["env SystemRoot"], "{text}");
+    }
+}
+
+#[test]
+fn environment_is_minimal_lpac() {
+    environment_is_minimal(Mode::Lpac);
+}
+
+#[test]
+fn environment_is_minimal_restricted() {
+    environment_is_minimal(Mode::RestrictedToken);
+}
+
+/// The registry: HKCU (whose default ACL grants RESTRICTED read) is closed to both modes now
+/// that the restricted worker's third restricting SID is unique; HKLM\SOFTWARE stays readable to
+/// the opt-in (Users may read it) — its residual, pinned — and closed to LPAC.
+#[test]
+fn registry_reach_lpac_and_restricted() {
+    let s = stage();
+    let reg = |mode, hive: &str, path: &str| run(&s, mode, limits(), &["reg", hive, path]).1;
+    let denied = format!("reg err {ERROR_ACCESS_DENIED}");
+    assert_eq!(reg(Mode::Lpac, "hkcu", "Software").trim(), denied);
+    assert_eq!(
+        reg(Mode::RestrictedToken, "hkcu", "Software").trim(),
+        denied
+    );
+    assert_eq!(
+        reg(Mode::RestrictedToken, "hkcu", "Environment").trim(),
+        denied
+    );
+    let nt = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    assert_eq!(
+        reg(Mode::RestrictedToken, "hklm", nt).trim(),
+        "reg ok",
+        "residual changed"
+    );
+    assert_eq!(reg(Mode::Lpac, "hklm", nt).trim(), denied);
+}
+
+/// An LPAC launch without its profile fails with the named error, not a bare "file not found".
+#[test]
+fn missing_profile_is_a_named_error() {
+    let s = stage();
+    let (_r, w) = std::io::pipe().expect("pipe");
+    let err = Launch::new(&s.exe)
+        .appcontainer_name("LitePack.Test.NoSuchProfile")
+        .args(["report"])
+        .handle(roles::RESPONSES, w.as_handle(), Access::Write)
+        .spawn()
+        .expect_err("no profile");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    let inner = err
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<lpk_sandbox_sys::ProfileMissing>())
+        .expect("ProfileMissing");
+    assert_eq!(inner.0, "LitePack.Test.NoSuchProfile");
 }
 
 fn memory_limit_kills(mode: Mode) {
@@ -173,7 +338,7 @@ fn dies_with_job(mode: Mode) {
         .mode(mode)
         .limits(limits())
         .args(["sleep", "60000"])
-        .handle(roles::RESPONSES, w.as_handle(), Access::Same)
+        .handle(roles::RESPONSES, w.as_handle(), Access::Write)
         .spawn()
         .expect("spawn");
     drop(w);
@@ -216,11 +381,30 @@ fn cannot_spawn_restricted() {
     cannot_spawn(Mode::RestrictedToken);
 }
 
+/// A handle the host made inheritable before the launch (as a careless host might): it must
+/// not reach the worker, since nothing is inherited.
+fn inheritable_sentinel(path: &std::path::Path) -> std::fs::File {
+    use windows::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+    std::fs::write(path, b"sentinel").expect("write sentinel");
+    let f = std::fs::File::open(path).expect("open sentinel");
+    // SAFETY: `f` owns a valid file handle for the duration of the call.
+    unsafe {
+        SetHandleInformation(
+            HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(&f)),
+            HANDLE_FLAG_INHERIT.0,
+            HANDLE_FLAG_INHERIT,
+        )
+    }
+    .expect("make the sentinel inheritable");
+    f
+}
+
 fn only_passed_handles(mode: Mode) {
     let s = stage();
     let archive_path = s.exe.with_file_name("archive.bin");
     std::fs::write(&archive_path, b"archive").expect("write archive");
     let archive = std::fs::File::open(&archive_path).expect("open archive");
+    let _sentinel = inheritable_sentinel(&s.exe.with_file_name("inheritable-sentinel.txt"));
     let (req_r, _req_w) = std::io::pipe().expect("pipe");
     let (mut resp_r, resp_w) = std::io::pipe().expect("pipe");
     let (_err_r, err_w) = std::io::pipe().expect("pipe");
@@ -229,10 +413,10 @@ fn only_passed_handles(mode: Mode) {
         .mode(mode)
         .limits(limits())
         .args(["report"])
-        .handle(roles::REQUESTS, req_r.as_handle(), Access::Same)
-        .handle(roles::RESPONSES, resp_w.as_handle(), Access::Same)
-        .handle(roles::STDERR, err_w.as_handle(), Access::Same)
-        .handle(roles::ARCHIVE, archive.as_handle(), Access::ReadOnly)
+        .handle(roles::REQUESTS, req_r.as_handle(), Access::Read)
+        .handle(roles::RESPONSES, resp_w.as_handle(), Access::Write)
+        .handle(roles::STDERR, err_w.as_handle(), Access::Write)
+        .handle(roles::ARCHIVE, archive.as_handle(), Access::Read)
         .spawn()
         .expect("spawn");
     drop((req_r, resp_w, err_w));
@@ -262,18 +446,17 @@ fn only_passed_handles(mode: Mode) {
             roles::ARCHIVE
         ]
     );
-    // (value, type index, access)
-    // (value, type index, access, object name or "-")
-    let table: Vec<(u64, u32, u32, &str)> = text
+    // (value, access, type name, object name or "-")
+    let table: Vec<(u64, u32, &str, &str)> = text
         .lines()
         .filter_map(|l| l.strip_prefix("handle "))
         .map(|h| {
-            let f: Vec<&str> = h.splitn(4, ' ').collect();
+            let f: Vec<&str> = h.splitn(5, ' ').collect();
             (
                 f[0].parse().expect("value"),
-                f[1].parse().expect("type"),
                 u32::from_str_radix(f[2].trim_start_matches("0x"), 16).expect("access"),
                 f[3],
+                f[4],
             )
         })
         .collect();
@@ -283,24 +466,46 @@ fn only_passed_handles(mode: Mode) {
             .find(|e| e.0 == v)
             .unwrap_or_else(|| panic!("{v} not in table: {text}"))
     };
-    let archive_entry = find(passed[3].1);
-    assert_eq!(
-        archive_entry.2, FILE_GENERIC_READ,
-        "archive handle is read-only: {text}"
+    // Each passed handle carries exactly the access asked for, never the host's.
+    for (i, want) in [
+        FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE,
+        FILE_GENERIC_WRITE,
+        FILE_GENERIC_READ,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = find(passed[i].1);
+        assert_eq!((e.1, e.2), (want, "File"), "role {}: {text}", passed[i].0);
+    }
+    // The table is the one the worker had when `main` began, every type included. No handle to
+    // the host's objects: no process, thread or token handle, nothing naming the inheritable
+    // sentinel, and no File-type handle (files, pipes, devices) but the passed ones, apart from
+    // KNOWN_LOADER_FILE_HANDLES (opened by the worker's own DLLs while loading) and a
+    // current-directory handle if the loader opened one (SYNCHRONIZE | FILE_TRAVERSE).
+    let not_passed = || table.iter().filter(|e| !passed.iter().any(|p| p.1 == e.0));
+    let foreign: Vec<_> = not_passed()
+        .filter(|e| {
+            matches!(e.2, "Process" | "Thread" | "Token")
+                || e.3.ends_with("inheritable-sentinel.txt")
+        })
+        .collect();
+    assert!(
+        foreign.is_empty(),
+        "host objects in the worker {foreign:?}:\n{text}"
     );
-    // The table is the one the worker had when `main` began. Every File-type handle there
-    // (files, pipes, devices) is a passed one, except `\Device\CNG`, which bcryptprimitives.dll
-    // (linked by Rust's std) opens while loading, and a current-directory handle if the loader
-    // opened one (SYNCHRONIZE | FILE_TRAVERSE).
-    let file_type = archive_entry.1;
-    let extra: Vec<_> = table
-        .iter()
-        .filter(|e| e.1 == file_type && !passed.iter().any(|p| p.1 == e.0))
-        .filter(|e| e.3 != "\\Device\\CNG" && e.2 != 0x0010_0020)
+    let extra: Vec<_> = not_passed()
+        .filter(|e| e.2 == "File")
+        .filter(|e| !KNOWN_LOADER_FILE_HANDLES.contains(&e.3) && e.1 != 0x0010_0020)
         .collect();
     assert!(
         extra.is_empty(),
         "unexpected File handles {extra:?} in\n{text}"
+    );
+    assert!(
+        table.iter().all(|e| e.2 != "?"),
+        "a handle type could not be named:\n{text}"
     );
 }
 
@@ -435,7 +640,7 @@ fn cpu_limit_kills_and_can_be_raised_while_running() {
         .launch()
         .limits(lim)
         .args(["spin", "8000"])
-        .handle(roles::RESPONSES, w.as_handle(), Access::Same)
+        .handle(roles::RESPONSES, w.as_handle(), Access::Write)
         .spawn()
         .expect("spawn");
     drop(w);

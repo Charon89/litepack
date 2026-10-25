@@ -2,7 +2,8 @@
 //! when absent or malformed) and reports over its response pipe what it can and cannot do.
 //!
 //! Commands (after the bootstrap argument): `report`, `read <path>`, `spawn`, `alloc <MiB>`,
-//! `spin <cpu-ms>`, `sleep <ms>`. Unsandboxed helper mode: `host <lpac|restricted> <out-file> [appcontainer-name]`
+//! `spin <cpu-ms>`, `sleep <ms>`, `env`, `open <pid> <tid>` (Windows), `reg <hkcu|hklm> <path>`
+//! (Windows). Unsandboxed helper mode: `host <lpac|restricted> <out-file> [appcontainer-name]`
 //! launches a sandboxed copy of itself the way a console-less host would and writes the number of
 //! processes in its job to `out-file` (Windows only).
 
@@ -57,6 +58,39 @@ fn main() {
                 let _ = writeln!(out, "passed {role}={v}");
             }
             report(out, &passed);
+        }
+        Some("env") => {
+            for (k, _) in std::env::vars_os() {
+                // Names only, except the folders the AppContainer launch rewrites.
+                let k = k.to_string_lossy().into_owned();
+                match std::env::var(&k) {
+                    Ok(v) if matches!(k.as_str(), "LOCALAPPDATA" | "TEMP" | "TMP") => {
+                        let _ = writeln!(out, "env {k}={v}");
+                    }
+                    _ => {
+                        let _ = writeln!(out, "env {k}");
+                    }
+                }
+            }
+        }
+        #[cfg(windows)]
+        Some("open") => {
+            let id = |i: usize| cmd.get(i).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let (pid, tid) = (id(1), id(2));
+            for access in PROCESS_PROBES {
+                let r = lpk_sandbox_sys::probe_open_process(pid, access);
+                let _ = writeln!(out, "openp {access:#x} {}", outcome(r));
+            }
+            for access in THREAD_PROBES {
+                let r = lpk_sandbox_sys::probe_open_thread(tid, access);
+                let _ = writeln!(out, "opent {access:#x} {}", outcome(r));
+            }
+        }
+        #[cfg(windows)]
+        Some("reg") => {
+            let hklm = cmd.get(1).copied() == Some("hklm");
+            let r = lpk_sandbox_sys::probe_registry_read(hklm, cmd.get(2).copied().unwrap_or(""));
+            let _ = writeln!(out, "reg {}", outcome(r));
         }
         Some("read") => {
             let path = cmd.get(1).copied().unwrap_or("");
@@ -138,40 +172,44 @@ fn raw_value(h: &child::Owned) -> u64 {
     h.as_raw_fd() as u64
 }
 
+/// PROCESS_VM_READ, PROCESS_VM_WRITE | PROCESS_VM_OPERATION, PROCESS_DUP_HANDLE,
+/// PROCESS_TERMINATE, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE.
+#[cfg(windows)]
+const PROCESS_PROBES: [u32; 6] = [0x10, 0x28, 0x40, 0x1, 0x1000, 0x10_0000];
+/// THREAD_GET_CONTEXT, THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME,
+/// THREAD_QUERY_LIMITED_INFORMATION, SYNCHRONIZE.
+#[cfg(windows)]
+const THREAD_PROBES: [u32; 5] = [0x8, 0x10, 0x2, 0x800, 0x10_0000];
+
+#[cfg(windows)]
+fn outcome(r: std::io::Result<()>) -> String {
+    match r {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!("err {}", e.raw_os_error().unwrap_or(-1)),
+    }
+}
+
+/// Every handle of the table taken when `main` began: value, type index, access, type name and,
+/// for handles not passed by the broker, the object name (passed pipes are never queried).
 #[cfg(windows)]
 fn report(out: &mut File, passed: &[(u32, u64)]) {
-    match child::token_report() {
-        Ok(t) => {
-            let _ = writeln!(
-                out,
-                "token appcontainer={} integrity={:#x} restricted={} restricted_sids={} privileges={} package={}",
-                t.appcontainer as u8,
-                t.integrity,
-                t.restricted as u8,
-                t.restricted_sids,
-                t.privileges,
-                t.package_sid.as_deref().unwrap_or("-"),
-            );
-        }
-        Err(e) => {
-            let _ = writeln!(out, "token err {e}");
-        }
-    }
     match EARLY.get().expect("snapshot taken in main") {
         Ok(hs) => {
             for h in hs {
-                // Pipes have no path; only ask for the others (passed pipes are never queried).
-                let name = if passed.iter().any(|p| p.1 == h.value) {
+                let ours = passed.iter().any(|p| p.1 == h.value);
+                let ty = child::handle_type(h.value).unwrap_or_else(|| "?".into());
+                let name = if ours {
                     None
                 } else {
                     child::handle_path(h.value)
                 };
                 let _ = writeln!(
                     out,
-                    "handle {} {} {:#x} {}",
+                    "handle {} {} {:#x} {} {}",
                     h.value,
                     h.type_index,
                     h.access,
+                    ty.replace(' ', "_"),
                     name.as_deref().unwrap_or("-")
                 );
             }
@@ -222,7 +260,7 @@ fn host(args: &[String]) -> i32 {
         let worker = launch
             .mode(mode)
             .args(["sleep", "5000"])
-            .handle(roles::RESPONSES, w.as_handle(), Access::Same)
+            .handle(roles::RESPONSES, w.as_handle(), Access::Write)
             .spawn()?;
         drop(w);
         let mut line = String::new();

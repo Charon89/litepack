@@ -10,21 +10,28 @@
 //! * [`Mode::RestrictedToken`], an explicit opt-in (warn with [`RESTRICTED_WARNING`]): the caller's
 //!   token with every privilege but `SeChangeNotifyPrivilege` removed, every group deny-only but
 //!   Everyone and BUILTIN\Users (otherwise nothing, System32 included, passes the normal check),
-//!   restricting SIDs {Everyone, Users, RESTRICTED}, Low integrity. Its residual: whatever those
-//!   SIDs may read (files, registry, named objects) and the network.
+//!   restricting SIDs {Everyone, Users, a random SID unique to the launch} (not RESTRICTED, which
+//!   every restricted process of the session shares), Low integrity; the worker's own objects
+//!   grant the user, SYSTEM and that unique SID only. Its residual: whatever Everyone and Users
+//!   may read (files, HKLM\SOFTWARE, named objects), and the network; HKCU is closed to it.
 //!
 //! In both modes the child is created suspended, `DETACHED_PROCESS` (no console, so no
 //! `conhost.exe` joins the job), straight into a job ([`job::Job::sandbox`]: one process, memory and
 //! per-process user-time limits, every UI restriction, kill-on-close, die-on-unhandled-exception),
 //! with child-process creation blocked and the Win32k, extension-point, dynamic-code, remote/low
-//! image-load and strict-handle mitigations on. Nothing is inherited: the handles the caller
+//! image-load and strict-handle mitigations on. Its process and thread objects grant the broker's
+//! user and SYSTEM only (no other worker can open them), its own objects get a default DACL
+//! without the package SID or RESTRICTED, and its environment is `SystemRoot` alone (plus the
+//! package folders an AppContainer launch sets). Nothing is inherited: the handles the caller
 //! passes are duplicated into the suspended child and their values written to a page committed
 //! at the first free of four addresses named on its command line ([`bootstrap`]); the child takes
 //! them with [`child::take_handles`] and refuses to start without a valid page.
 //!
 //! **Linux** (decision (d)): a plain child under `setrlimit` (`RLIMIT_AS`, `RLIMIT_CPU`,
-//! `RLIMIT_CORE` 0, `RLIMIT_FSIZE` 0, `RLIMIT_NOFILE`) with `PR_SET_PDEATHSIG`, the passed fds
-//! moved to 3, 4, ... and named on the command line. **It is not sandboxed**; CI only.
+//! `RLIMIT_CORE` 0, `RLIMIT_FSIZE` 0, `RLIMIT_NOFILE`) with `PR_SET_PDEATHSIG` (forked from a
+//! keeper thread that lives as long as the `Worker`, since the signal follows the forking
+//! thread), the passed fds moved to 3, 4, ... and named on the command line. **It is not
+//! sandboxed**; CI only.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -49,7 +56,8 @@ pub use unix_impl::Worker;
 #[cfg(windows)]
 pub use windows_impl::{
     appcontainer_sid_string, create_appcontainer_profile, delete_appcontainer_profile,
-    grant_path_access, wait_handle, Worker,
+    grant_path_access, probe_open_process, probe_open_thread, probe_registry_read, wait_handle,
+    TokenView, Worker,
 };
 
 /// The warning shown on every use of the restricted-token mode.
@@ -91,14 +99,31 @@ impl Default for Limits {
 }
 
 /// The access a passed handle gets in the worker (Windows; on Linux fds keep their open mode).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Always explicit: a duplicate never carries the caller's full access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
-    /// The same access as the caller's handle.
-    #[default]
-    Same,
-    /// `FILE_GENERIC_READ` only (an archive handle).
-    ReadOnly,
+    /// `FILE_GENERIC_READ` only (the request pipe's read end, an archive handle).
+    Read,
+    /// `FILE_GENERIC_WRITE` only (the response and diagnostics pipes' write ends).
+    Write,
 }
+
+/// The LPAC launch found no AppContainer profile for its name (the profile is created once, at
+/// install, with `create_appcontainer_profile`). Carried inside the `io::Error` of `spawn`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileMissing(pub String);
+
+impl std::fmt::Display for ProfileMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AppContainer profile `{}` does not exist; create it once with create_appcontainer_profile",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ProfileMissing {}
 
 /// Well-known roles of passed handles (the worker finds its handles by role).
 pub mod roles {
