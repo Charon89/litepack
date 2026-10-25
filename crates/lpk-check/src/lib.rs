@@ -19,6 +19,7 @@ pub mod jpeg;
 pub mod keyless;
 pub mod lzma;
 pub mod merkle;
+pub mod png;
 pub mod record;
 pub mod recovery;
 pub mod rs;

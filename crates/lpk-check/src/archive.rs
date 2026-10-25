@@ -8,7 +8,7 @@ use crate::entries::{parse_entry_table, Entry, EntryKind};
 use crate::error::{Error, Result};
 use crate::index::{parse_index, Index};
 use crate::journal;
-use crate::record::{self, bad_record, Body, DeflateRecord, JpegRecord, Record};
+use crate::record::{self, bad_record, Body, DeflateRecord, JpegRecord, PngRecord, Record};
 use crate::wire::{
     kind, parse_frame, parse_header, read_recorded, trailer_ending_at, Frame, Header, Trailer,
     HEADER_LEN, MIN_FRAME_LEN, TRAILER_FRAME_LEN,
@@ -52,9 +52,9 @@ pub struct Options {
     pub priors: HashMap<[u8; 32], Vec<u8>>,
     /// Resources.
     pub resources: Resources,
-    /// The revision this reader runs (its minor, 0 to 3; default 3): a lower revision reports
+    /// The revision this reader runs (its minor, 0 to 4; default 4): a lower revision reports
     /// `UnimplementedPrimitive` for the primitives it does not run (`jpeg-reconstruct` below 1,
-    /// `deflate-reconstruct` below 2, `bwt` below 3).
+    /// `deflate-reconstruct` below 2, `bwt` below 3, `png-filter` below 4).
     pub revision: u8,
     /// Alias of `revision` 0, kept for callers of the earlier field: when set, the reader runs
     /// revision 1.0 whatever `revision` says.
@@ -68,7 +68,7 @@ impl Default for Options {
             keyfile: None,
             priors: HashMap::new(),
             resources: Resources::default(),
-            revision: 3,
+            revision: 4,
             revision_1_0: false,
         }
     }
@@ -563,6 +563,20 @@ impl Archive {
         Ok(crate::deflate::record_checks(id, rec, bound, last, &self.memory())?.clone())
     }
 
+    /// Checks (1) to (4) of `png-filter` (section 8) on record `id`, with a step's output bound
+    /// and whether that step is the last; returns the record and its filtered length F.
+    fn png_record(&self, id: u64, bound: u64, last: bool) -> Result<(PngRecord, u64)> {
+        // (1) the lookup, with the errors of the `Records` frame.
+        let r = self.record(id)?;
+        let rec = match &r.body {
+            Body::Png(p) => Some(p),
+            _ => None,
+        };
+        // (2) to (4).
+        let (p, f) = crate::png::record_checks(id, rec, bound, last)?;
+        Ok((p.clone(), f))
+    }
+
     /// Check 7 (assembly in file order) and check 8 (`original_len`, `original_hash`).
     fn assemble_check(&self, b: usize, id: u64, j: &JpegRecord, primary: &[u8]) -> Result<()> {
         let mut h = blake3::Hasher::new();
@@ -831,5 +845,9 @@ impl block::Recon for Steps<'_> {
 
     fn deflate_record(&mut self, id: u64, bound: u64, last: bool) -> Result<DeflateRecord> {
         self.archive.deflate_record(id, bound, last)
+    }
+
+    fn png_record(&mut self, id: u64, bound: u64, last: bool) -> Result<(PngRecord, u64)> {
+        self.archive.png_record(id, bound, last)
     }
 }

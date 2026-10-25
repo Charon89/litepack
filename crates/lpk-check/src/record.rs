@@ -46,6 +46,25 @@ pub struct DeflateRecord {
     pub original_hash: [u8; 32],
 }
 
+/// A `png-filter` record body (kind 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PngRecord {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// 1, 2, 4, 8 or 16.
+    pub bit_depth: u8,
+    /// 0, 2, 3, 4 or 6.
+    pub color_type: u8,
+    /// 0 none, 1 Adam7.
+    pub interlace: u8,
+    /// One filter byte per scanline, in order (per pass for interlaced images).
+    pub filters: Vec<u8>,
+    /// BLAKE3 of the filtered scanline bytes.
+    pub original_hash: [u8; 32],
+}
+
 /// A parsed record body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Body {
@@ -53,9 +72,11 @@ pub enum Body {
     Jpeg(JpegRecord),
     /// Kind 8.
     Deflate(DeflateRecord),
+    /// Kind 9.
+    Png(PngRecord),
     /// Kind 12: per member, its length and chunks (the rest is not needed by this decoder).
     Container(Vec<(u64, Vec<u64>)>),
-    /// Kinds 9 to 11: no chunk lists.
+    /// Kinds 10 and 11: no chunk lists.
     Other,
 }
 
@@ -83,7 +104,7 @@ impl Record {
                 v
             }
             Body::Container(m) => m.iter().map(|(len, c)| (&c[..], *len)).collect(),
-            Body::Deflate(_) | Body::Other => Vec::new(),
+            Body::Deflate(_) | Body::Png(_) | Body::Other => Vec::new(),
         }
     }
 }
@@ -191,23 +212,31 @@ fn parse_body(id: u64, kind: u16, body: &[u8]) -> Result<Body> {
             })
         }
         9 => {
-            c.u32()?;
+            let width = c.u32()?;
             let height = c.u32()?;
-            let bd = c.u8()?;
-            if ![1, 2, 4, 8, 16].contains(&bd) {
+            let bit_depth = c.u8()?;
+            if ![1, 2, 4, 8, 16].contains(&bit_depth) {
                 return Err(bad_record(id, "bit_depth"));
             }
-            let ct = c.u8()?;
-            if ![0, 2, 3, 4, 6].contains(&ct) {
+            let color_type = c.u8()?;
+            if ![0, 2, 3, 4, 6].contains(&color_type) {
                 return Err(bad_record(id, "color_type"));
             }
             let interlace = u8_in(&mut c, id, "interlace", 1)?;
-            let filters = byte_string(&mut c)?;
-            c.array::<32>()?;
+            let filters = byte_string(&mut c)?.to_vec();
+            let original_hash = c.array::<32>()?;
             if interlace == 0 && filters.len() as u64 != u64::from(height) {
                 return Err(bad_record(id, "filters"));
             }
-            Body::Other
+            Body::Png(PngRecord {
+                width,
+                height,
+                bit_depth,
+                color_type,
+                interlace,
+                filters,
+                original_hash,
+            })
         }
         10 => {
             u8_in(&mut c, id, "variant", 1)?;

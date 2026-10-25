@@ -1254,3 +1254,183 @@ fn bwt_step_negative_cases() {
         .unwrap();
     assert!(strings(&table("expected-1.3.toml")[BWT]["files"]).contains(&tiny_line));
 }
+
+const PNG: &str = "png-filter.lpk";
+
+/// The vectors of revision 1.4: `png-filter.lpk` and its ten malformed companions.
+fn png_vectors() -> Vec<String> {
+    let exp = table("expected-1.4.toml");
+    let names: Vec<String> = exp.keys().cloned().collect();
+    assert_eq!(names.len(), 11, "{names:?}");
+    assert!(names.iter().any(|n| n == PNG));
+    names
+}
+
+/// The record id and the reason of this decoder's `BadRecord` message (`bad record N: reason`).
+fn check_reason(detail: &str) -> (String, String) {
+    let rest = detail.strip_prefix("bad record ").unwrap();
+    let (id, reason) = rest.split_once(": ").unwrap();
+    (id.to_string(), reason.to_string())
+}
+
+/// The record id and the reason of the reference's message (`record N: bad record (reason)`).
+fn reference_reason(message: &str) -> (String, String) {
+    let rest = message.strip_prefix("record ").unwrap();
+    let (id, rest) = rest.split_once(": bad record (").unwrap();
+    (id.to_string(), rest.trim_end_matches(')').to_string())
+}
+
+/// A revision 1.4 decoder (this decoder's default) on every vector of `expected-1.4.toml`:
+/// `png-filter.lpk` extracts to `files` and verifies (`verify`), by the library and the tool; each
+/// malformed vector opens, its `verify` fails with `error` (and, for `BadRecord`, the normative
+/// `reason`, on the same record), every entry outside `files_1_0` fails the same way and those of
+/// `files_1_0` extract. `list` and `info` of `expected.toml` apply to all.
+#[test]
+fn png_vectors_revision_1_4() {
+    let exp = table("expected-1.4.toml");
+    let old = table("expected.toml");
+    let mut passed = 0;
+    for name in png_vectors() {
+        let t = exp[name.as_str()].as_table().unwrap();
+        let path = vectors().join(&name).display().to_string();
+        let t0 = old[name.as_str()].as_table().unwrap();
+        for (cmd, key) in [("list", "list"), ("info", "info")] {
+            let (code, out, err) = bin(&[cmd.into(), path.clone()]);
+            assert_eq!(
+                (code, out.as_str()),
+                (0, t0[key].as_str().unwrap()),
+                "{name} {cmd}: {err}"
+            );
+        }
+        let mut a = Archive::open(read(&name), Options::default()).unwrap();
+        assert_eq!(a.header.version_minor, 4, "{name}");
+        if let Some(want) = t.get("error") {
+            let want = want.as_str().unwrap();
+            let e = a.verify().unwrap_err();
+            assert_eq!(e.class, want, "{name}: {}", e.detail);
+            if let Some(reason) = t.get("reason") {
+                let reference = reference_reason(t["message"].as_str().unwrap());
+                assert_eq!(reference.1, reason.as_str().unwrap(), "{name}");
+                assert_eq!(check_reason(&e.detail), reference, "{name}");
+            } else {
+                // `PayloadTooLarge`: the same length and limit as the reference's message.
+                assert_eq!(e.detail, t["message"].as_str().unwrap(), "{name}");
+            }
+            let (code, out, err) = bin(&["verify".into(), path.clone()]);
+            assert_eq!(code, 1, "{name}");
+            assert_eq!(err, format!("error: {}\n", e.detail), "{name}");
+            assert!(out.is_empty(), "{name}");
+            let keep = strings(&t0["files_1_0"]);
+            let mut extracted = Vec::new();
+            for en in a.entries().unwrap() {
+                match entry_line(&mut a, &en) {
+                    Ok(l) => extracted.push(l),
+                    Err(c) => assert_eq!(c, want, "{name}: {}", en.path),
+                }
+            }
+            assert_eq!(extracted, keep, "{name}");
+            passed += 1;
+            continue;
+        }
+        let files = strings(&t["files"]);
+        assert_eq!(decoded_lines(&mut a).unwrap(), files, "{name}");
+        let s = a.verify().unwrap();
+        assert_eq!(
+            format!(
+                "ok: {} entries, {} chunks, {} blocks\n",
+                s.entries, s.chunks, s.blocks
+            ),
+            t["verify"].as_str().unwrap(),
+            "{name}"
+        );
+        for flags in [vec![], vec!["--revision".to_string(), "4".to_string()]] {
+            let mut v = flags.clone();
+            v.extend(["verify".to_string(), path.clone()]);
+            let (code, out, err) = bin(&v);
+            assert_eq!(
+                (code, out.as_str()),
+                (0, t["verify"].as_str().unwrap()),
+                "{name}: {err}"
+            );
+        }
+        for tool in [false, true] {
+            let dir = temp(&format!("{name}-{tool}"));
+            if tool {
+                let (code, _, err) =
+                    bin(&["extract".into(), path.clone(), dir.display().to_string()]);
+                assert_eq!(code, 0, "{name}: {err}");
+            } else {
+                let mut a = Archive::open(read(&name), Options::default()).unwrap();
+                let (done, err) = extract_all(&mut a, &dir).unwrap();
+                assert!(err.is_none() && done.len() == files.len(), "{name}");
+            }
+            for line in &files {
+                let mut it = line.split(' ');
+                let (p, size, h) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+                let b = std::fs::read(dir.join(p)).unwrap();
+                assert_eq!(b.len().to_string(), size, "{name}: {p}");
+                assert_eq!(blake3::hash(&b).to_hex().as_str(), h, "{name}: {p}");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        passed += 1;
+    }
+    assert_eq!(passed, 11);
+}
+
+/// Readers before revision 1.4 (this decoder under `--revision 3`, `2`, `1` and `0`) on the eleven
+/// revision 1.4 vectors: the `_1_0` keys of `expected.toml`: `verify` is `UnimplementedPrimitive`
+/// (9) with `message_1_0`, the tool's exit code and stderr; the entries of `files_1_0` extract
+/// bit-exactly, every other entry is `UnimplementedPrimitive`; `list` and `info` as for any reader.
+#[test]
+fn png_vectors_before_revision_1_4() {
+    let old = table("expected.toml");
+    let mut passed = 0;
+    for name in png_vectors() {
+        let t = old[name.as_str()].as_table().unwrap();
+        let path = vectors().join(&name).display().to_string();
+        let keep = strings(&t["files_1_0"]);
+        for rev in [0u8, 1, 2, 3] {
+            let mut a = Archive::open(read(&name), with_revision(rev)).unwrap();
+            let e = a.verify().unwrap_err();
+            assert_eq!(e.class, t["error_1_0"].as_str().unwrap(), "{name} {rev}");
+            assert_eq!(e.detail, t["message_1_0"].as_str().unwrap(), "{name} {rev}");
+            let mut extracted = Vec::new();
+            for e in a.entries().unwrap() {
+                match entry_line(&mut a, &e) {
+                    Ok(l) => extracted.push(l),
+                    Err(c) => assert_eq!(c, "UnimplementedPrimitive", "{name} {rev}"),
+                }
+            }
+            assert_eq!(extracted, keep, "{name} {rev}");
+            let mut flags = vec![vec!["--revision".to_string(), rev.to_string()]];
+            if rev == 0 {
+                flags.push(vec!["--revision-1-0".to_string()]);
+            }
+            for f in flags {
+                let mut v = f.clone();
+                v.extend(["verify".to_string(), path.clone()]);
+                let (code, out, err) = bin(&v);
+                assert_eq!(
+                    i64::from(code),
+                    t["verify_exit_1_0"].as_integer().unwrap(),
+                    "{name} {f:?}"
+                );
+                assert_eq!(
+                    err,
+                    t["verify_stderr_1_0"].as_str().unwrap(),
+                    "{name} {f:?}"
+                );
+                assert!(out.is_empty());
+                for (cmd, key) in [("list", "list"), ("info", "info")] {
+                    let mut v = f.clone();
+                    v.extend([cmd.to_string(), path.clone()]);
+                    let (code, out, _) = bin(&v);
+                    assert_eq!((code, out.as_str()), (0, t[key].as_str().unwrap()));
+                }
+            }
+            passed += 1;
+        }
+    }
+    assert_eq!(passed, 44);
+}

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::record::DeflateRecord;
+use crate::record::{DeflateRecord, PngRecord};
 use crate::wire::{read_varint, Cursor};
 
 /// A primitive of the registry with its parsed parameters.
@@ -41,6 +41,11 @@ pub enum Prim {
     },
     /// 0x0008 `deflate-reconstruct` (revision 1.2).
     Deflate {
+        /// The record in the `Records` frame.
+        record_id: u64,
+    },
+    /// 0x0009 `png-filter` (revision 1.4).
+    Png {
         /// The record in the `Records` frame.
         record_id: u64,
     },
@@ -193,6 +198,7 @@ pub fn parse_block<'a>(
                 match id {
                     0x0007 => Prim::Jpeg { record_id: rid },
                     0x0008 => Prim::Deflate { record_id: rid },
+                    0x0009 => Prim::Png { record_id: rid },
                     _ => Prim::Unimplemented(id),
                 }
             }
@@ -240,7 +246,8 @@ pub struct DecodeCtx<'a> {
     pub max_block_plain: u64,
     /// The revision this reader emulates (its minor): 0 runs `store`, `zstd` and `lzma`; 1 adds
     /// `jpeg-reconstruct`; 2 adds `deflate-reconstruct` and the bound of the step before it;
-    /// 3 adds `bwt`, the bound I(O, B) of the step before it and the look-ahead.
+    /// 3 adds `bwt`, the bound I(O, B) of the step before it and the look-ahead; 4 adds
+    /// `png-filter` and the bound F of the step before it.
     pub revision: u8,
     /// What the memory checks compare a step's term against (`deflate-reconstruct` check (5),
     /// `bwt` check (1)).
@@ -255,6 +262,9 @@ pub trait Recon {
     /// Checks (1) to (5) of `deflate-reconstruct` on record `id`, with a step's output bound and
     /// whether that step is the last; returns the record.
     fn deflate_record(&mut self, id: u64, bound: u64, last: bool) -> Result<DeflateRecord>;
+    /// Checks (1) to (4) of `png-filter` on record `id`, with a step's output bound and whether
+    /// that step is the last; returns the record and its filtered length F.
+    fn png_record(&mut self, id: u64, bound: u64, last: bool) -> Result<(PngRecord, u64)>;
 }
 
 /// The `UnimplementedPrimitive` error.
@@ -293,6 +303,7 @@ pub fn decode(h: &BlockHeader<'_>, ctx: &DecodeCtx<'_>, recon: &mut dyn Recon) -
             Prim::Jpeg { .. } if ctx.revision < 1 => return Err(unimplemented(0x0007)),
             Prim::Deflate { .. } if ctx.revision < 2 => return Err(unimplemented(0x0008)),
             Prim::Bwt { .. } if ctx.revision < 3 => return Err(unimplemented(0x0003)),
+            Prim::Png { .. } if ctx.revision < 4 => return Err(unimplemented(0x0009)),
             _ => {}
         }
     }
@@ -337,6 +348,11 @@ pub fn decode(h: &BlockHeader<'_>, ctx: &DecodeCtx<'_>, recon: &mut dyn Recon) -
             Prim::Bwt { block_size } => {
                 crate::bwt::decode(&data, *block_size, bound, last, &ctx.memory)?
             }
+            Prim::Png { record_id } => {
+                // Checks (1) to (4) again at the step, with its actual bound; then (5) to (7).
+                let (r, f) = recon.png_record(*record_id, bound, last)?;
+                crate::png::decode(*record_id, &r, f, data)?
+            }
             Prim::Unimplemented(_) => return Err(Error::new("Internal", "unreachable")),
         };
     }
@@ -356,8 +372,10 @@ pub fn decode(h: &BlockHeader<'_>, ctx: &DecodeCtx<'_>, recon: &mut dyn Recon) -
 /// The output bound of step `i` (section 8, "Bounds"): the block's `plain_len` on the last step;
 /// `max_block_plain` on any other, except a step whose next step S bounds its input:
 /// `deflate-reconstruct` (revision 1.2: checks (1) to (5) run on its record first, with S's own
-/// output bound, and the bound is the record's `plain_len`) or `bwt` (revision 1.3: check (1), the
-/// term, runs first with S's own output bound O, and the bound is I(O, B)). S's own output bound
+/// output bound, and the bound is the record's `plain_len`), `bwt` (revision 1.3: check (1), the
+/// term, runs first with S's own output bound O, and the bound is I(O, B)) or `png-filter`
+/// (revision 1.4: checks (1) to (4) run on its record first, with S's own output bound, and the
+/// bound is the record's filtered length F). S's own output bound
 /// comes from one level of look-ahead ([`own_bound`]), asked before S's pre-checks. Runs before
 /// any of step `i`'s own rules.
 fn step_bound(
@@ -380,6 +398,10 @@ fn step_bound(
             let o = own_bound(h, ctx, s, recon)?;
             crate::bwt::check_memory(o, *block_size, &ctx.memory)?;
             Ok(crate::bwt::input_len(o, *block_size))
+        }
+        Some(Prim::Png { record_id }) => {
+            let o = own_bound(h, ctx, s, recon)?;
+            Ok(recon.png_record(*record_id, o, s == last_i)?.1)
         }
         _ => Ok(ctx.max_block_plain),
     }
@@ -419,6 +441,9 @@ fn own_bound(
             crate::bwt::check_memory(after_bound, *block_size, &ctx.memory)?;
             Ok(crate::bwt::input_len(after_bound, *block_size))
         }
+        Some(Prim::Png { record_id }) => Ok(recon
+            .png_record(*record_id, after_bound, after == last_i)?
+            .1),
         _ => Ok(ctx.max_block_plain),
     }
 }
@@ -589,7 +614,7 @@ mod tests {
             priors,
             max_window: 1 << 30,
             max_block_plain: 1 << 20,
-            revision: 3,
+            revision: 4,
             memory: crate::deflate::Memory {
                 decode_memory: u64::MAX,
                 memory: u64::MAX,
@@ -691,6 +716,21 @@ mod tests {
                 corrections: Vec::new(),
                 original_hash: [0; 32],
             })
+        }
+        fn png_record(&mut self, id: u64, bound: u64, last: bool) -> Result<(PngRecord, u64)> {
+            self.0.push((id, bound, last));
+            Ok((
+                PngRecord {
+                    width: 1,
+                    height: 1,
+                    bit_depth: 8,
+                    color_type: 0,
+                    interlace: 0,
+                    filters: vec![0],
+                    original_hash: [0; 32],
+                },
+                200 + id,
+            ))
         }
     }
 
