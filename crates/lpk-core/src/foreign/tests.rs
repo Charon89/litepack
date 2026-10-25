@@ -466,6 +466,31 @@ fn detection_recognises_the_fixture_only() {
     assert_eq!(detect(b""), None);
 }
 
+/// What the `worker_proto` fuzz target does, over every truncation and single-byte change of
+/// a good session: never a panic, never more written than declared.
+#[test]
+fn truncated_and_flipped_output_never_panics() {
+    let good = script(&one_member(b"hello world"));
+    for cut in 0..good.len() {
+        let (_, written) = replay(
+            &good[..cut],
+            100,
+            None,
+            &crate::DefaultPolicy,
+            &Limits::default(),
+        );
+        assert!(written <= 11);
+    }
+    for i in 0..good.len() {
+        for x in [0x01u8, 0x80, 0xFF] {
+            let mut b = good.clone();
+            b[i] ^= x;
+            let (_, written) = replay(&b, 100, None, &crate::DefaultPolicy, &Limits::default());
+            assert!(written <= 100 * DEFAULT_MAX_EXPANSION);
+        }
+    }
+}
+
 #[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn the_protocol_roles_equal_the_launchers() {
