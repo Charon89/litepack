@@ -1433,7 +1433,7 @@ does and transforms its plain text before the model step.
 ### How a writer lays out a peeled PNG image (revision 1.4, informative but exact)
 
 A PNG's IDAT stream is peeled as "How a writer lays out a peeled Deflate stream" says. The reference writer's
-Balanced tier then also tries the stream's inflated text with its row filters re-encoded, when the PNG's IHDR (the
+Balanced tier then also tries the image-data stream's inflated text (the IDAT one; never an iCCP, zTXt or iTXt stream) with its row filters re-encoded, when the PNG's IHDR (the
 signature, then a 13-byte IHDR chunk) gives compression method 0, filter method 0, an allowed pair, a width and
 height of at least 1 and a filtered length equal to the inflated length, and every filter byte is at most 4; it
 skips images whose filter bytes are all 0 and palette images or images below depth 8 (the PNG specification

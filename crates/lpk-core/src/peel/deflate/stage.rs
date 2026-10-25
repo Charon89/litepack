@@ -692,6 +692,8 @@ impl<H: Hooks> Prep<'_, H> {
     fn verdict(&mut self, r: &mut Reconstructed) -> Verdict {
         let data = self.data;
         let len = r.deflate_len as u64;
+        // Where the stream's Deflate data starts (its first span), for the PNG gate.
+        let start = r.spans.first().map_or(0, |s| s.0);
         if r.spans.is_empty() || len == 0 {
             return Verdict::Empty;
         }
@@ -755,7 +757,7 @@ impl<H: Hooks> Prep<'_, H> {
                 // The PNG row-filter re-encoding (E2-16): the Up text through the same encoder,
                 // kept when it costs less with its record and step counted.
                 let candidate = if self.set.png_filter {
-                    png_candidate(data, plain)
+                    png_candidate(data, start, plain)
                 } else {
                     None
                 };
@@ -821,15 +823,24 @@ fn record_len_png(rec: &PngFilterRecord) -> u64 {
     record_len(&Record::new(RecordBody::PngFilter(rec.clone())))
 }
 
-/// Whether a reconstructed stream of `data` is a PNG image the row-filter re-encoding tries,
-/// and then its `png-filter` record and the Up text (every scanline filtered with Up): `data` is
-/// a PNG whose IHDR gives compression and filter method 0, an allowed pair, a non-empty image
+/// Whether a reconstructed stream of `data`, whose Deflate data starts at byte `start`, is a PNG
+/// image the row-filter re-encoding tries, and then its `png-filter` record and the Up text
+/// (every scanline filtered with Up): the stream is the image data (its first span is the
+/// payload of an IDAT chunk after the 2-byte zlib header, so an iCCP, zTXt or iTXt stream costs
+/// no trial encode), `data` is a PNG whose IHDR gives compression and filter method 0, an allowed pair, a non-empty image
 /// at depth 8 or 16 and not a palette (the PNG specification recommends filter None below
 /// depth 8 and for palettes, and E2-16's probe found no gain there), the stream's inflated text
 /// `plain` is exactly the image's filtered length with every filter byte at most 4 and not all
 /// 0 (an image filtered with None throughout: no gain in the probe either), and the Up text
 /// re-filters back to `plain` byte for byte (the decoder's own code, checked before it is kept).
-pub fn png_candidate(data: &[u8], plain: &[u8]) -> Option<(PngFilterRecord, Vec<u8>)> {
+pub fn png_candidate(
+    data: &[u8],
+    start: usize,
+    plain: &[u8],
+) -> Option<(PngFilterRecord, Vec<u8>)> {
+    if start < 6 || data.get(start - 6..start - 2)? != b"IDAT" {
+        return None;
+    }
     let l = Header::parse(data).ok()?.layout().ok()?;
     if l.bit_depth() < 8 || l.color_type() == 3 {
         return None;

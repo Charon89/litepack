@@ -231,16 +231,63 @@ fn the_gates_choose_the_images_tried() {
         (sprite(64, 48, 3), true),
     ] {
         let text = inflated(&bytes);
-        assert_eq!(png_candidate(&bytes, &text).is_some(), tried);
+        assert_eq!(
+            png_candidate(&bytes, idat_start(&bytes), &text).is_some(),
+            tried
+        );
     }
     let l = Layout::new(40, 10, 4, 0, 0).unwrap();
     let raw = Rng(5).bytes(l.raw_len().unwrap() as usize);
     let low = png(&l, &raw, &[1; 10], 6);
-    assert!(png_candidate(&low, &inflated(&low)).is_none());
+    assert!(png_candidate(&low, idat_start(&low), &inflated(&low)).is_none());
     // A text whose length is not the image's (an ancillary zlib stream) is not tried.
     let s = sprite(64, 48, 3);
-    assert!(png_candidate(&s, &inflated(&s)[1..]).is_none());
-    assert!(png_candidate(b"not a png", b"x").is_none());
+    assert!(png_candidate(&s, idat_start(&s), &inflated(&s)[1..]).is_none());
+    assert!(png_candidate(b"not a png", 0, b"x").is_none());
+}
+
+/// Where the Deflate data of the first IDAT chunk starts (after the 2-byte zlib header).
+fn idat_start(file: &[u8]) -> usize {
+    let mut at = 8;
+    while at + 8 <= file.len() {
+        let len = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+        if &file[at + 4..at + 8] == b"IDAT" {
+            return at + 8 + 2;
+        }
+        at += 12 + len;
+    }
+    panic!("no IDAT")
+}
+
+/// Review fix 6: an iCCP chunk's zlib stream is never tried, even one whose inflated text is
+/// the image's own filtered text (so only its chunk tells it apart): with the profile before
+/// the image data, the file's only tried stream is the IDAT one.
+#[test]
+fn an_iccp_stream_is_not_tried() {
+    let s = sprite(64, 48, 3);
+    let text = inflated(&s);
+    // The same file with an iCCP chunk (name, NUL, method 0, the zlib stream of the image's
+    // filtered text) after IHDR.
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+    z.write_all(&text).unwrap();
+    let mut body = b"icc\0\0".to_vec();
+    body.extend_from_slice(&z.finish().unwrap());
+    let ihdr_end = 8 + 12 + 13;
+    let mut file = s[..ihdr_end].to_vec();
+    let iccp_at = file.len();
+    chunk(&mut file, b"iCCP", &body);
+    file.extend_from_slice(&s[ihdr_end..]);
+    // The iCCP stream's Deflate data starts after the chunk header, the name, the NUL, the
+    // method and the zlib header.
+    let iccp_start = iccp_at + 8 + 5 + 2;
+    assert!(png_candidate(&file, iccp_start, &text).is_none());
+    assert!(png_candidate(&file, idat_start(&file), &text).is_some());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("iccp.png"), &file).unwrap();
+    pin_mtimes(dir.path());
+    let (bytes, s) = run(balanced(1), dir.path());
+    assert!(s.peel.deflate.png_tried <= 1, "{:?}", s.peel.deflate);
+    check(&bytes, dir.path(), None);
 }
 
 /// The inflated IDAT text of a one-IDAT PNG written by [`png`].
