@@ -48,3 +48,44 @@ jobs:
       - name: Third-party notices
         shell: bash
         run: scripts/third-party-notices.sh --check
+
+  # E4-2: the sandboxed workers live in their own workspace (workers/: own lockfile and deny.toml)
+  # so the main workspace's feature unification cannot pull a C codec into them.
+  workers:
+    name: workers (${{ matrix.os }})
+    timeout-minutes: 30
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    defaults:
+      run:
+        working-directory: workers
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: workers -> ../target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (default and faults)
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features faults -- -D warnings
+      - name: Test (default and faults)
+        run: |
+          cargo nextest run --locked --no-tests=pass
+          cargo nextest run --locked --no-tests=pass --features faults
+      - name: Licence and advisory policy (C codec crates banned)
+        run: cargo deny check
+      - name: No faults feature and no C codec symbol in the release worker
+        working-directory: .
+        run: bash scripts/check-worker-symbols.sh
