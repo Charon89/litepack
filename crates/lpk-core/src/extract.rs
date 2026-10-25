@@ -62,18 +62,27 @@
 //!   ([`DISPATCH_ALLOWANCE`]; the blocks it holds are counted per block), and the parsed records
 //!   (four times the records frame).
 //!
-//! The decode workers and the permits are `(budget - fixed_shared) / (per_block + per_worker)`,
-//! at least one, capped by the threads and the needed blocks; `fixed` is `fixed_shared` plus
-//! `per_worker` for each worker. A worker holds a permit from before it reads a frame until the
-//! last writer has written the block, so at most `workers` blocks are in flight, each at most
-//! `per_block`. The entry table, read and dropped by the plan before any block is decoded, is
+//! The decode workers are `(budget - fixed_shared) / (per_block + per_worker)`, at least one,
+//! capped by the threads and the needed blocks; `fixed` is `fixed_shared` plus `per_worker` for
+//! each worker. A worker holds a permit from before it reads a frame until the last writer has
+//! written the block. Only a decoding block holds the decode terms: a decoded block waiting for
+//! its turn at the dispatcher (which hands blocks on in index order) or for the writers holds
+//! its plain bytes and its bookkeeping (`held`: `plain +` [`BLOCK_ALLOWANCE`]). So the permits
+//! (`in_flight`) are the workers plus as many held blocks as the budget left after
+//! `total(workers)` pays for, at most [`HELD_PER_WORKER`] per worker in all and at most the
+//! needed blocks (E2-25: a slow block, a large photograph, no longer stalls the other workers
+//! once they have finished the blocks after it); at most `workers` blocks decode at once, each
+//! at most `per_block`, and the others hold at most `held` each, so the count is
+//! `total(workers) + (in_flight - workers) * held` ([`ExtractMemory::total_in_flight`]). The
+//! entry table, read and dropped by the plan before any block is decoded, is
 //! not counted. An encrypted archive's key derivation (the key slot's Argon2 memory,
 //! `key_derivation`) runs at open and is freed before the plan, so the process peak is
 //! `max(key_derivation, total(workers))` ([`ExtractMemory::peak`]). The derivation cannot be
 //! held to the tier's budget: a sealed archive's index, and with it the envelope that shows the
 //! tier, is readable only with the derived key, so at the derivation the only limit known is the
 //! reader's (`--memory`, else [`crate::memory::EXTRACT_CEILING`] resolved), against which the
-//! key slot's `argon2_m` is checked (an archive asking more is refused at open). A given
+//! key slot's `argon2_m` is checked (an archive asking more is refused at open); with held
+//! blocks the peak's second term is [`ExtractMemory::total_in_flight`]. A given
 //! budget below one block in flight (`total(1)`: `fixed_shared + per_block + per_worker`) is
 //! refused with that figure before any directory or file is created, as the compress side
 //! refuses (D-67 (1)); a default budget that small runs one worker.
@@ -231,6 +240,9 @@ pub struct ExtractMemory {
     pub step_input: u64,
     /// With records: the nested lower block (its plain bytes and frame); else 0.
     pub nested: u64,
+    /// A decoded block held past its decode (waiting for the dispatcher or the writers): its
+    /// plain bytes and its bookkeeping, `plain +` [`BLOCK_ALLOWANCE`].
+    pub held: u64,
     /// Held whatever the workers: the opened archive, the plan, the writers, the dispatcher.
     pub fixed_shared: u64,
     /// Each decode worker's reader and copy of the index.
@@ -257,6 +269,7 @@ impl Default for ExtractMemory {
             decoder: 0,
             step_input: 0,
             nested: 0,
+            held: 0,
             fixed_shared: 0,
             per_worker: 0,
             fixed: 0,
@@ -279,7 +292,28 @@ impl ExtractMemory {
     pub fn peak(&self, workers: usize) -> u64 {
         self.key_derivation.max(self.total(workers))
     }
+
+    /// What `workers` workers and `in_flight` permits hold: [`ExtractMemory::total`] of the
+    /// workers plus `held` for each permit beyond them (a decoded block waiting to be written).
+    pub fn total_in_flight(&self, workers: usize, in_flight: usize) -> u64 {
+        let extra = u64::try_from(in_flight.saturating_sub(workers)).unwrap_or(u64::MAX);
+        self.total(workers)
+            .saturating_add(extra.saturating_mul(self.held))
+    }
+
+    /// The process's counted peak with `workers` workers and `in_flight` permits: the larger
+    /// of the key derivation and [`ExtractMemory::total_in_flight`].
+    pub fn peak_in_flight(&self, workers: usize, in_flight: usize) -> u64 {
+        self.key_derivation
+            .max(self.total_in_flight(workers, in_flight))
+    }
 }
+
+/// The most permits per decode worker (decoding plus decoded blocks held for the dispatcher
+/// and the writers), when the budget pays for them: E2-25's local A/B on `photo-jpeg` (one
+/// Lepton stream per block, 9 workers) went from one to eight per worker with extraction
+/// faster at each step.
+pub const HELD_PER_WORKER: usize = 8;
 
 /// Each decode worker's frame reader (its `BufReader` and the frame header's reads), file
 /// handle and thread bookkeeping: an allowance.
@@ -958,7 +992,8 @@ pub struct Pool {
     /// Decode workers: `min(N - writers, (budget - fixed_shared) / (per_block + per_worker),
     /// needed blocks)`, at least one.
     pub workers: usize,
-    /// Decoded blocks in flight (decoding, waiting or being written): as many as the workers.
+    /// Decoded blocks in flight (decoding, waiting or being written): the workers plus the held
+    /// blocks the budget pays for (module documentation, "The memory bound").
     pub in_flight: usize,
     /// File writers: `clamp(N / 4, 1, 4)`, capped by the open-file bound and the files.
     pub writers: usize,
@@ -1075,6 +1110,7 @@ pub(crate) fn pool_size<R: Read + Seek>(
         .saturating_add((writers as u64).saturating_mul(WRITER_ALLOWANCE))
         .saturating_add(DISPATCH_ALLOWANCE)
         .saturating_add(records);
+    let held = plain.saturating_add(BLOCK_ALLOWANCE);
     let workers = if threads == 1 {
         1
     } else {
@@ -1086,6 +1122,20 @@ pub(crate) fn pool_size<R: Read + Seek>(
             .min(shape.needed.len().max(1))
             .max(1)
     };
+    let in_flight = if threads == 1 {
+        1
+    } else {
+        let w = u64::try_from(workers).unwrap_or(u64::MAX);
+        let paid =
+            fixed_shared.saturating_add(w.saturating_mul(per_block.saturating_add(per_worker)));
+        let extra = budget.bytes.saturating_sub(paid) / held.max(1);
+        let extra = usize::try_from(extra).unwrap_or(usize::MAX);
+        let cap = workers
+            .saturating_mul(HELD_PER_WORKER)
+            .min(shape.needed.len())
+            .max(workers);
+        workers.saturating_add(extra).min(cap)
+    };
     let memory = ExtractMemory {
         budget,
         tier,
@@ -1095,6 +1145,7 @@ pub(crate) fn pool_size<R: Read + Seek>(
         decoder,
         step_input,
         nested,
+        held,
         fixed_shared,
         per_worker,
         fixed: fixed_shared.saturating_add((workers as u64).saturating_mul(per_worker)),
@@ -1105,7 +1156,7 @@ pub(crate) fn pool_size<R: Read + Seek>(
     Pool {
         threads,
         workers,
-        in_flight: workers,
+        in_flight,
         writers,
         memory,
     }

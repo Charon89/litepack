@@ -318,6 +318,7 @@ fn the_memory_bound_reduces_the_pool() {
         m.per_block,
         m.encoded + m.plain + m.step_input + lpk_core::extract::BLOCK_ALLOWANCE
     );
+    assert_eq!(m.held, m.plain + lpk_core::extract::BLOCK_ALLOWANCE);
     let cost = m.per_block + m.per_worker;
     // A given budget below one block in flight is refused with the figure; nothing is created.
     for memory in [1, m.total(1) - 1] {
@@ -364,18 +365,30 @@ fn the_memory_bound_reduces_the_pool() {
             },
         )
         .unwrap();
-        assert_eq!((s.workers, s.in_flight), (workers, workers), "{memory}");
-        // Measured: the blocks held at once never exceed what the budget allows (E2-20).
+        // The permits: the workers plus the held blocks the rest of the budget pays for, at
+        // most eight per worker and at most the blocks (E2-25).
+        let held =
+            usize::try_from(memory.saturating_sub(m.total(workers)) / m.held).unwrap_or(usize::MAX);
+        let in_flight = workers
+            .saturating_add(held)
+            .min((workers * lpk_core::extract::HELD_PER_WORKER).min(blocks))
+            .max(workers);
+        assert_eq!((s.workers, s.in_flight), (workers, in_flight), "{memory}");
+        // Measured: the blocks held at once never exceed what the budget allows (E2-20): at
+        // most `workers` of them decoding, the others held.
         assert!(
-            (1..=workers).contains(&s.peak_in_flight),
-            "{memory}: peak {} of {workers}",
+            (1..=in_flight).contains(&s.peak_in_flight),
+            "{memory}: peak {} of {in_flight}",
             s.peak_in_flight
         );
+        let decoding = s.peak_in_flight.min(workers) as u64;
+        let waiting = s.peak_in_flight.saturating_sub(workers) as u64;
         assert!(
-            s.memory.fixed_shared + s.peak_in_flight as u64 * cost <= memory.max(m.total(1)),
+            s.memory.fixed_shared + decoding * cost + waiting * m.held <= memory.max(m.total(1)),
             "{memory}: peak {}",
             s.peak_in_flight
         );
+        assert!(s.memory.total_in_flight(s.workers, s.in_flight) <= memory.max(m.total(1)));
         assert_eq!(
             s.memory.fixed,
             m.fixed_shared + workers as u64 * m.per_worker

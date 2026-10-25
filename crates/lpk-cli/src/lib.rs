@@ -1399,14 +1399,14 @@ fn extract(
             format!(
                 "; key derivation at open: argon2_m {} bytes (process peak {} bytes)",
                 m.key_derivation,
-                m.peak(s.workers)
+                m.peak_in_flight(s.workers, s.in_flight)
             )
         } else {
             String::new()
         };
         let _ = writeln!(
             err,
-            "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}{key}",
+            "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}; held block {} bytes, blocks in flight {}{key}",
             m.budget.bytes,
             m.tier.name(),
             m.per_block,
@@ -1418,7 +1418,9 @@ fn extract(
             m.fixed,
             m.fixed_shared,
             m.per_worker,
-            s.workers
+            s.workers,
+            m.held,
+            s.in_flight
         );
     }
     let _ = writeln!(
