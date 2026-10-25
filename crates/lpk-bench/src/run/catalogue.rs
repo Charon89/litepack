@@ -406,6 +406,7 @@ mod tests {
             settings("lpk"),
             [
                 "fast",
+                "fast-no-jpeg",
                 "balanced",
                 "balanced-extension",
                 "balanced-no-deflate",

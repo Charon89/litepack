@@ -537,6 +537,12 @@ struct TierArgs {
     /// --balanced, off with --fast. An append runs it only on a revision 1.2 archive.
     #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
     deflate_peel: Option<OnOff>,
+    /// The JPEG peel: baseline and progressive JPEGs stored as a Lepton stream plus a
+    /// reconstruction record that restores them bit for bit (revision 1.1). Default: on with
+    /// --fast and --balanced. Off stores JPEGs as they are, so extracting them is a copy
+    /// (E2-25, the Fast tier's extraction on photographs).
+    #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
+    jpeg_peel: Option<OnOff>,
     /// The Balanced tier's BWT stage (revision 1.3): a block of text is also tried as a
     /// Burrows-Wheeler transform followed by LZMA and written so when that is smaller. Default:
     /// on with --balanced; the Fast tier never uses it. An append runs it only on a revision
@@ -578,6 +584,7 @@ impl TierArgs {
                     ("--level", self.level.is_some()),
                     ("--window-log", self.window_log.is_some()),
                     ("--deflate-peel", self.deflate_peel.is_some()),
+                    ("--jpeg-peel", self.jpeg_peel.is_some()),
                 ],
             };
             if let Some((flag, _)) = settings.iter().find(|(_, given)| *given) {
@@ -919,6 +926,10 @@ fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
         Some(OnOff::On) => pipeline.deflate = Some(lpk_core::peel::deflate::DeflatePeel::default()),
         Some(OnOff::Off) => pipeline.deflate = None,
         None => {}
+    }
+    // The pipelines of both tiers carry the JPEG peel; off removes it (on keeps it).
+    if a.jpeg_peel == Some(OnOff::Off) {
+        pipeline.peel.retain(|p| p.name() != "jpeg");
     }
     if a.no_dedup {
         pipeline.fold = None;

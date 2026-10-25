@@ -256,6 +256,12 @@ note = "This repository's own build (target/release, found relative to the curre
 id = "fast"
 compress = ["--fast"]
 extract = []
+# The JPEG peel's A/B on the Fast tier (E2-25, route (a)): `fast` carries the peel; this row
+# stores JPEGs as they are, so their extraction is a copy.
+[[tool.setting]]
+id = "fast-no-jpeg"
+compress = ["--fast", "--jpeg-peel", "off"]
+extract = []
 [[tool.setting]]
 id = "balanced"
 compress = ["--balanced"]
