@@ -1,0 +1,53 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "816f8ef16ecd87fb5543630c51102807aaffcb002e25e283d6180e7c58ee4142",
+  "classes": [
+    "photo-raw-png",
+    "game-assets"
+  ],
+  "combinations": [
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "balanced-no-png-filter",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "balanced-no-png-filter",
+      "tool": "lpk"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}

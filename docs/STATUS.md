@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-25, about 23:00 UTC. **A measurement round is running since 22:29 UTC** (`target/acceptance/measure-2026-10-25.sh`, status in `measure-2026-10-25-status.log`; several hours): E2-16's A/B on `small`, E2-9's delta probe on `full`, E3-9 on `full` (lpk fast, fast-no-jpeg, balanced and the store control in one run), the version-ordering A/B. No builds or tests on this machine until it says DONE; docs and reviews only. **Revision 1.4 is final (D-100).** Merged today: LIC-2 (D-96), E2-9 tasks A/E (D-94), E2-25's code (D-95), E4-1 (D-97), E2-16 (D-98, D-100), E4-2 (D-99), the E4 and E5 design notes. The owner's open items are below (new: restoring the `Apache-2.0 WITH LLVM-exception` licence for E5-2).
+Last updated: 2026-10-25, about 22:50 UTC. **A measurement round is running since 22:29 UTC** (`target/acceptance/measure-2026-10-25.sh`, status in `measure-2026-10-25-status.log`): stages A and B are done and committed — E2-16's A/B (D-101: the PNG re-encoding stays on; E2-16 done) and E2-9's delta probe on `full` (D-102: the patch does not beat the ordering, so the delta writer is not built for G2) — and stage C, E3-9 on `full` (lpk fast, fast-no-jpeg, balanced and the store control in one run), has run since 22:42 UTC; stage D, the version-ordering row, follows. No builds or tests on this machine until it says DONE; docs and reviews only. **Revision 1.4 is final (D-100).** Merged today: LIC-2 (D-96), E2-9 tasks A/E (D-94), E2-25's code (D-95), E4-1 (D-97), E2-16 (D-98, D-100, D-101), E4-2 (D-99), the E4 and E5 design notes. The owner's open items are below (new: restoring the `Apache-2.0 WITH LLVM-exception` licence for E5-2; deltas for appended generations).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -83,9 +83,15 @@ E3-8 is done (D-75, PR #77).
 - **G2's threshold on this set (D-91).** On the re-pinned class the first version alone costs 85% of 7-Zip
   Ultra's total and a delta's per-version increment is 78% of the incumbent's (the probe's rows), so no delta
   stage halves the archive against an incumbent that sorts a file's versions together or compresses solid;
-  E2-9 is built for its real gains and G2 is reported as measured. Say whether G2 stays a FAIL with its
+  E2-9's probe on `full` then found the patch no better than the ordering (D-102), so G2 is reported from
+  the ordering row of the 2026-10-25 round. Say whether G2 stays a FAIL with its
   margin (the default, D-89 (1)) or is restated (for example against the best non-solid incumbent, where
   `lpk/balanced` at 5.4% of the class against WinRAR `m3`'s 23.5% already passes 2×) — a gate change is yours.
+- **Deltas for appended generations (E2-9, new on 2026-10-25; D-102 (3)).** In a new archive the ordering
+  beats the patch, but an appended generation cannot be ordered next to the earlier one, and there the probe
+  estimates `node-v2` appended at 12.2 MB with patches against 16.8 MB without, and `node-v3` at 0.41 MB
+  against 2.65 MB (estimates, not measured archives). Say whether to build the delta writer for `lpk append`
+  only (E2-9's tasks B–D: revision 1.5, the writer, the reader and `lpk-check`), an incremental-backup feature.
 - **The publisher's legal name and the product name** for the code-signing certificate (E7-1: a certificate
   in the publisher's name, Azure Artifact Signing or an OV certificate, since a later version may be closed,
   D-89 (6)). Identity validation takes weeks; the earlier the better.
