@@ -46,8 +46,8 @@ file), one JSON object per line, 5,415 lines:
     `v mod 2^w`. A width of 0 is not in the set (preflate never passes it and the library's behaviour for it is
     not defined).
   - `["unary", g, 0, v]`: the value `v` written unary with group `g`'s contexts, `0 <= v <= len` (preflate
-    passes up to `len`; `v = len` is included for every length). The third element is always 0. Reading back
-    yields `v`.
+    passes up to `len`; `v = len` is included for every length) in `cases.jsonl.gz`, and up to `len + 70` in
+    `cases-d.jsonl.gz` (family (d)). The third element is always 0. Reading back yields `v`.
 - `bytes`: the complete coded stream after the writer's end-of-stream flush, lowercase hex; may be empty (an empty
   or short stream of highly probable symbols flushes to no bytes).
 
@@ -80,3 +80,12 @@ reader over `bytes` with fresh groups under the same `ops` and compare each valu
   miniz_oxide (through `flate2`) from `readme.txt` (levels 1, 6, 9), `bin.bin` (level 9) and synthetic numbered
   lines (levels 2 and 4). Each group is one context or context array of preflate's correction coder, numbered in
   order of first use; preflate's widths seen here are 1 to 10 and 16.
+- (d) 360 streams in a separate file, `cases-d.jsonl.gz` (same schema, `"family": "d"`, ids 5415 to 5774 continuing
+  after `cases.jsonl.gz`; 1,712,711 bytes uncompressed; sha256 of the gzip
+  `29b4bdc92bd43c54f0211290eb3ebf3d5751e4f6daadc86e7ebb8fdd0b6c8f5a`, identical over two runs, generated on
+  2026-10-25 by the same scratch program and library): random streams of family (a)'s kind (seeds
+  `0x4C494332D000 + k`, 1 to 600 operations, every tenth cut to 0 to 8 operations) with 1 to 12 `unary` operations
+  inserted at random positions whose value is above the group's length, by 1 to 3 (about 30%) or 1 to 70; 2,248 such
+  values in all, the largest 70 above `len`, for every group length listed above. The library wrote these without
+  error and read every one back as the exact value written (no clamp to `len`); the coded stream grows with the
+  excess. All 360 streams round-tripped; none was rejected. `note` gives the count of such values in the stream.
