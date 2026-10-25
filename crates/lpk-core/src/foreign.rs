@@ -254,6 +254,8 @@ pub struct ForeignSummary {
     pub renamed: u64,
     /// Symlink entries let pass and not created.
     pub symlinks_skipped: u64,
+    /// Warnings of the launch (an AppContainer temporary folder that could not be emptied).
+    pub warnings: Vec<String>,
 }
 
 /// A foreign archive's validated listing.
@@ -265,6 +267,8 @@ pub struct Listing {
     pub entries: Vec<Entry>,
     /// Parallel to `entries`: the member is encrypted.
     pub encrypted: Vec<bool>,
+    /// Warnings of the launch.
+    pub warnings: Vec<String>,
 }
 
 /// Escape control characters (and lossily decode) bytes from the worker for display.
@@ -442,19 +446,76 @@ mod process {
         Some(p)
     }
 
-    /// Empty the AppContainer's temporary folder (links removed as links, never followed).
-    pub(super) fn clear_dir(dir: &Path) -> std::io::Result<()> {
-        let rd = match std::fs::read_dir(dir) {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
+    /// A reparse point (a junction, a symlink, any other) on Windows; a symlink elsewhere.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn is_reparse(m: &std::fs::Metadata) -> bool {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || m.file_type().is_symlink()
+        }
+        #[cfg(not(windows))]
+        {
+            m.file_type().is_symlink()
+        }
+    }
+
+    /// Empty the AppContainer's temporary folder of `name` (D-97 (4)), as the full user on a
+    /// folder the sandbox may write: refused when `Packages\<name>`, `AC` or `Temp` is a
+    /// reparse point or not a directory (attributes read without following:
+    /// `symlink_metadata`); inside, every reparse point is removed as a link, never entered,
+    /// and directories are emptied one level at a time. `Err` is a warning for the caller.
+    /// Residual: a sandboxed worker running at the same time could swap a directory for a
+    /// junction between the check and a removal; workers run one per archive and the folder
+    /// is emptied before the launch, when no worker of this host runs.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(super) fn clear_appcontainer_temp(name: &str) -> Result<(), String> {
+        let Some(temp) = appcontainer_temp(name) else {
+            return Ok(());
         };
+        let mut chain = Vec::new();
+        let mut p = temp.clone();
+        for _ in 0..3 {
+            chain.push(p.clone());
+            if !p.pop() {
+                break;
+            }
+        }
+        chain.reverse();
+        for dir in &chain {
+            match std::fs::symlink_metadata(dir) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(format!("{}: {e}", dir.display())),
+                Ok(m) if is_reparse(&m) => {
+                    return Err(format!(
+                        "{} is a reparse point; temporary folder not emptied",
+                        dir.display()
+                    ))
+                }
+                Ok(m) if !m.is_dir() => {
+                    return Err(format!("{} is not a directory; not emptied", dir.display()))
+                }
+                Ok(_) => {}
+            }
+        }
+        clear_tree(&temp).map_err(|e| format!("emptying {}: {e}", temp.display()))
+    }
+
+    /// Remove everything in `dir` without following a reparse point.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(super) fn clear_tree(dir: &Path) -> std::io::Result<()> {
         let mut first_err = None;
-        for ent in rd.flatten() {
+        for ent in std::fs::read_dir(dir)?.flatten() {
             let p = ent.path();
             let r = match std::fs::symlink_metadata(&p) {
-                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => std::fs::remove_dir_all(&p),
-                Ok(_) => policy::remove_existing(&p),
+                // The link itself: a directory link (junction) goes with remove_dir, a file link
+                // with remove_file; neither follows it.
+                Ok(m) if is_reparse(&m) => {
+                    std::fs::remove_dir(&p).or_else(|_| std::fs::remove_file(&p))
+                }
+                Ok(m) if m.is_dir() => clear_tree(&p).and_then(|()| std::fs::remove_dir(&p)),
+                Ok(_) => std::fs::remove_file(&p),
                 Err(e) => Err(e),
             };
             if let Err(e) = r {
@@ -469,8 +530,10 @@ mod process {
         archive: &File,
         opts: &Options,
         memory: u64,
-    ) -> Result<ProcessPeer, CoreError> {
+    ) -> Result<(ProcessPeer, Vec<String>), CoreError> {
         use lpk_sandbox_sys::{roles, Access, Launch, Mode};
+        #[allow(unused_mut)]
+        let mut warnings = Vec::new();
         let pipe = |what: &str| {
             std::io::pipe().map_err(|e| {
                 CoreError::from(WorkerError::Spawn {
@@ -491,7 +554,7 @@ mod process {
         };
         #[cfg(windows)]
         if mode == Mode::Lpac {
-            prepare_lpac(exe, &name)?;
+            warnings.extend(prepare_lpac(exe, &name)?);
         }
         let cpu_ceiling = opts.limits.max_cpu.unwrap_or(CPU_OFF);
         let limits = lpk_sandbox_sys::Limits {
@@ -571,12 +634,15 @@ mod process {
             .map_err(|e| WorkerError::Spawn {
                 message: format!("request thread: {e}"),
             })?;
-        Ok(ProcessPeer {
-            worker,
-            requests: req_tx,
-            rx,
-            diag,
-        })
+        Ok((
+            ProcessPeer {
+                worker,
+                requests: req_tx,
+                rx,
+                diag,
+            },
+            warnings,
+        ))
     }
 
     /// The LPAC launch's prerequisites, as the installer will provide them (E7): the
@@ -585,20 +651,22 @@ mod process {
     /// The AppContainer's temporary folder is emptied first (D-97 (4): the worker never uses
     /// it; a file a compromised worker left there is gone before the next one starts).
     #[cfg(windows)]
-    fn prepare_lpac(exe: &Path, name: &str) -> Result<(), CoreError> {
+    /// What persists: the profile (per-user folders and registry) and the read/execute ACE
+    /// for its package SID on the worker image; E7's uninstaller and `lpk-worker
+    /// --remove-profile` remove the profile. A cleanup that cannot run is a warning.
+    fn prepare_lpac(exe: &Path, name: &str) -> Result<Vec<String>, CoreError> {
         const READ_EXECUTE: u32 = 0x0012_0089 | 0x0012_00A0;
         lpk_sandbox_sys::create_appcontainer_profile(name).map_err(|e| WorkerError::Sandbox {
             message: format!("AppContainer profile {name}: {e}"),
         })?;
-        if let Some(t) = appcontainer_temp(name) {
-            clear_dir(&t).map_err(|e| WorkerError::Sandbox {
-                message: format!("emptying {}: {e}", t.display()),
-            })?;
+        let mut warnings = Vec::new();
+        if let Err(w) = clear_appcontainer_temp(name) {
+            warnings.push(w);
         }
         if let Ok(sid) = lpk_sandbox_sys::appcontainer_sid_string(name) {
             let _ = lpk_sandbox_sys::grant_path_access(exe, &sid, READ_EXECUTE, false);
         }
-        Ok(())
+        Ok(warnings)
     }
 
     impl Peer for ProcessPeer {
@@ -684,6 +752,8 @@ struct Conv<'m, P: Peer> {
     cpu_max: Duration,
     usage: Usage,
     killed: bool,
+    /// Warnings of the launch.
+    warnings: Vec<String>,
 }
 
 impl<'m, P: Peer> Conv<'m, P> {
@@ -703,6 +773,7 @@ impl<'m, P: Peer> Conv<'m, P> {
             cpu_max,
             usage: Usage::default(),
             killed: false,
+            warnings: Vec::new(),
         }
     }
 
@@ -1521,9 +1592,10 @@ fn start<'m>(
         .ok_or(ForeignError::UnknownFormat)?;
     let exe = opts.worker_exe()?;
     let memory = opts.limits.budget();
-    let peer = process::spawn(&exe, &file, opts, memory)?;
+    let (peer, warnings) = process::spawn(&exe, &file, opts, memory)?;
     drop(file);
     let mut conv = Conv::new(peer, opts.limits.clone(), len, monitor);
+    conv.warnings = warnings;
     let r = conv.handshake().and_then(|()| conv.open(credentials));
     match r {
         Ok(name) => Ok((conv, format, name)),
@@ -1550,6 +1622,7 @@ pub fn extract_file(
     let (mut conv, format, name) = start(archive, opts, credentials, monitor)?;
     let mut summary = ForeignSummary {
         format: name,
+        warnings: conv.warnings.clone(),
         ..ForeignSummary::default()
     };
     let mut out = FsOut {
@@ -1614,6 +1687,7 @@ pub fn list_file(
         Ok(c) => {
             finish_run(&mut conv, &mut out, Ok(()))?;
             Ok(Listing {
+                warnings: std::mem::take(&mut conv.warnings),
                 format: name,
                 entries: c.entries,
                 encrypted: c.encrypted,

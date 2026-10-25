@@ -395,3 +395,89 @@ fn the_appcontainer_temp_folder_is_emptied_before_each_launch() {
         litter.display()
     );
 }
+
+/// A directory junction made with `mklink /J` (no privilege needed).
+#[cfg(windows)]
+fn junction(link: &Path, target: &Path) {
+    let st = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "{st:?}");
+}
+
+/// The cleanup removes a junction a worker planted in `Temp` as a link: what it points to
+/// (outside the sandbox's reach, the user's) is untouched.
+#[cfg(windows)]
+#[test]
+fn a_junction_planted_in_the_temp_folder_is_not_followed() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let archive = write_fixture(work.path(), &[Member::file("a", b"x")], None);
+    let m = Monitor::default();
+    // A first launch creates the profile's folders.
+    foreign::list_file(&archive, None, &s.options(None, Limits::default()), &m).unwrap();
+    let temp = foreign::appcontainer_temp(s.profile.as_deref()).unwrap();
+    std::fs::create_dir_all(&temp).unwrap();
+    let victim = work.path().join("victim");
+    std::fs::create_dir(&victim).unwrap();
+    std::fs::write(victim.join("keep.txt"), b"precious").unwrap();
+    let link = temp.join("planted");
+    junction(&link, &victim);
+    let listing =
+        foreign::list_file(&archive, None, &s.options(None, Limits::default()), &m).unwrap();
+    assert!(listing.warnings.is_empty(), "{:?}", listing.warnings);
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "the junction stayed"
+    );
+    assert_eq!(std::fs::read(victim.join("keep.txt")).unwrap(), b"precious");
+}
+
+/// When `Temp` itself is a reparse point the cleanup refuses to run; that is a warning, and
+/// the extraction goes on.
+#[cfg(windows)]
+#[test]
+fn a_cleanup_that_cannot_run_is_a_warning() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let archive = write_fixture(work.path(), &[Member::file("a", b"x")], None);
+    let m = Monitor::default();
+    foreign::list_file(&archive, None, &s.options(None, Limits::default()), &m).unwrap();
+    let temp = foreign::appcontainer_temp(s.profile.as_deref()).unwrap();
+    let real = temp.with_file_name("Temp.real");
+    if temp.exists() {
+        std::fs::rename(&temp, &real).unwrap();
+    } else {
+        std::fs::create_dir_all(&real).unwrap();
+    }
+    let victim = work.path().join("victim");
+    std::fs::create_dir(&victim).unwrap();
+    std::fs::write(victim.join("keep.txt"), b"precious").unwrap();
+    junction(&temp, &victim);
+    let out = work.path().join("out");
+    let r = foreign::extract_file(
+        &archive,
+        &out,
+        None,
+        &lpk_core::DefaultPolicy,
+        &Selection::all(),
+        &s.options(None, Limits::default()),
+        &m,
+    );
+    // Undo the junction before anything else (the profile's deletion must not meet it).
+    std::fs::remove_dir(&temp).unwrap();
+    std::fs::rename(&real, &temp).unwrap();
+    let sum = r.unwrap();
+    assert_eq!(sum.files, 1);
+    assert!(
+        sum.warnings.iter().any(|w| w.contains("reparse point")),
+        "{:?}",
+        sum.warnings
+    );
+    assert_eq!(std::fs::read(victim.join("keep.txt")).unwrap(), b"precious");
+}

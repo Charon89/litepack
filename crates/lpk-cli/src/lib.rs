@@ -898,6 +898,7 @@ fn foreign_extract(
     );
     console.clear();
     let s = r.map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    sandbox_warnings(&s.warnings, json, err);
     for p in policy.skipped_symlinks() {
         if json {
             let line = serde_json::json!({
@@ -939,12 +940,28 @@ fn foreign_extract(
     Ok(())
 }
 
+/// The broker's launch warnings (an AppContainer temporary folder it could not empty), one
+/// line each: `warning: ...`, or with --json `{"warning":{"kind":"SandboxCleanup",...}}`.
+fn sandbox_warnings(warnings: &[String], json: bool, err: &mut dyn Write) {
+    for w in warnings {
+        if json {
+            let line = serde_json::json!({
+                "warning": { "kind": "SandboxCleanup", "message": w }
+            });
+            let _ = writeln!(err, "{line}");
+        } else {
+            let _ = writeln!(err, "warning: {w}");
+        }
+    }
+}
+
 /// `lpk l` on a foreign archive: the checked listing from the sandboxed worker.
 fn foreign_list(
     l: &ListArgs,
     credentials: Option<&Credentials>,
     json: bool,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), Failure> {
     refuse_foreign_keyfile(&l.archive, credentials)?;
     let select =
@@ -956,6 +973,7 @@ fn foreign_list(
         &lpk_core::Monitor::default(),
     )
     .map_err(|e| Failure::core(&e, Some(&l.archive)))?;
+    sandbox_warnings(&listing.warnings, json, err);
     let options = ListOptions { long: l.long, json };
     list::list_entries(&listing.entries, options, &select, out).map_err(|e| match e {
         list::ListError::Format(e) => Failure::format(&e, Some(&l.archive)),
@@ -1877,9 +1895,10 @@ fn list(
     credentials: Option<&Credentials>,
     json: bool,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), Failure> {
     if is_foreign(&l.archive) {
-        return foreign_list(l, credentials, json, out);
+        return foreign_list(l, credentials, json, out, err);
     }
     let failed = |e: FormatError| {
         let mut f = Failure::format(&e, Some(&l.archive));
@@ -2003,7 +2022,7 @@ fn dispatch(
         Command::List(mut l) => {
             let given = l.credentials.resolve(terminal, &l.archive, Use::Open)?;
             with_credentials(given, &l.credentials, &l.archive, terminal, |c| {
-                list(&l, c, json, out)
+                list(&l, c, json, out, err)
             })
         }
         Command::Extract(mut x) => {
