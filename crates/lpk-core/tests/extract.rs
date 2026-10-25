@@ -828,3 +828,62 @@ fn a_selection_decodes_only_the_blocks_its_entries_need() {
     );
     assert!(!out.exists());
 }
+
+/// The permits at fixed budgets (E2-25): with room for `w` workers and two held blocks there
+/// are `w + 2`, one byte less gives `w + 1`, and an unbounded budget stops at eight per worker
+/// (or at the blocks).
+#[test]
+fn the_held_permits_at_fixed_budgets() {
+    let files: Vec<(String, Vec<u8>)> = (0..12u64)
+        .map(|i| (format!("f{i:02}.bin"), noise(100 + i, 256 << 10)))
+        .collect();
+    let o = WriterOptions {
+        chunk_size: 65536,
+        block_size: 256 << 10,
+        ..options()
+    };
+    let bytes = pack(&files, o);
+    let blocks = Archive::open(Cursor::new(bytes.clone()), &Resources::default())
+        .unwrap()
+        .index()
+        .blocks
+        .len();
+    assert!(blocks >= 12, "{blocks}");
+    let run = |threads: usize, memory: u64, dir: &str| {
+        let d = tempfile::tempdir().unwrap();
+        // Out directories of one length, so the plan's terms match across the runs.
+        let out = d.path().join(dir);
+        let s = extract(
+            &bytes,
+            &out,
+            &ExtractOptions {
+                threads: Some(threads),
+                memory: Some(memory),
+                ..ExtractOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tree(&out), expect(&files), "{threads} {memory}");
+        s
+    };
+    let m = run(8, u64::MAX, "o0").memory;
+    assert!(
+        2 * m.held < m.per_block + m.per_worker,
+        "two held blocks must not pay for another worker: {m:?}"
+    );
+    for w in [1usize, 2] {
+        let s = run(8, m.total(w) + 2 * m.held, "o1");
+        assert_eq!((s.workers, s.in_flight), (w, w + 2), "{w}");
+        let s = run(8, m.total(w) + 2 * m.held - 1, "o2");
+        assert_eq!((s.workers, s.in_flight), (w, w + 1), "{w}");
+    }
+    // Two threads: one writer, one worker, so the cap of eight per worker binds.
+    let s = run(2, u64::MAX, "o3");
+    assert_eq!(
+        (s.workers, s.in_flight),
+        (1, lpk_core::extract::HELD_PER_WORKER)
+    );
+    // Eight threads: two writers, six workers, the blocks bind.
+    let s = run(8, u64::MAX, "o4");
+    assert_eq!((s.workers, s.in_flight), (6, blocks.min(48)));
+}
