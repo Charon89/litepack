@@ -224,10 +224,12 @@ fn parse_body(id: u64, kind: u16, body: &[u8]) -> Result<Body> {
             }
             let interlace = u8_in(&mut c, id, "interlace", 1)?;
             let filters = byte_string(&mut c)?.to_vec();
-            let original_hash = c.array::<32>()?;
+            // Section 12: the non-interlaced count is applied as soon as `filters` is read,
+            // before `original_hash` (a body cut inside the hash with a wrong count is `filters`).
             if interlace == 0 && filters.len() as u64 != u64::from(height) {
                 return Err(bad_record(id, "filters"));
             }
+            let original_hash = c.array::<32>()?;
             Body::Png(PngRecord {
                 width,
                 height,
@@ -425,6 +427,43 @@ mod tests {
         assert_eq!(reason(&b), "trailing bytes after record body");
         b.truncate(20);
         assert_eq!(reason(&b), "input truncated in records");
+    }
+
+    /// A `png-filter` body: width, height, depth, colour type, interlace, filters, hash.
+    fn png(h: u32, bd: u8, ct: u8, il: u8, filters: &[u8], hash_len: usize) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&4u32.to_le_bytes());
+        b.extend_from_slice(&h.to_le_bytes());
+        b.extend_from_slice(&[bd, ct, il, filters.len() as u8]);
+        b.extend_from_slice(filters);
+        b.extend(std::iter::repeat_n(0u8, hash_len));
+        b
+    }
+
+    /// Section 12 (clarified): each rule as its field is read, in the table's order.
+    #[test]
+    fn png_filter_field_rules_in_order() {
+        let r = |b: &[u8]| match parse_body(3, 9, b) {
+            Ok(_) => "ok".to_string(),
+            Err(e) => e.detail,
+        };
+        assert_eq!(r(&png(2, 8, 0, 0, &[0, 1], 32)), "ok");
+        // A wrong count is `filters` as soon as `filters` is read, even when the body ends
+        // inside `original_hash` or has no hash at all.
+        assert_eq!(r(&png(2, 8, 0, 0, &[0], 32)), "bad record 3: filters");
+        assert_eq!(r(&png(2, 8, 0, 0, &[0], 31)), "bad record 3: filters");
+        assert_eq!(r(&png(2, 8, 0, 0, &[0], 0)), "bad record 3: filters");
+        // The right count with a short hash is `Truncated`.
+        assert_eq!(
+            r(&png(2, 8, 0, 0, &[0, 0], 31)),
+            "input truncated in records"
+        );
+        // Interlaced: no count rule at parse time.
+        assert_eq!(r(&png(2, 8, 0, 1, &[0], 32)), "ok");
+        // bit_depth before color_type before interlace.
+        assert_eq!(r(&png(1, 3, 1, 2, &[0], 32)), "bad record 3: bit_depth");
+        assert_eq!(r(&png(1, 8, 1, 2, &[0], 32)), "bad record 3: color_type");
+        assert_eq!(r(&png(1, 8, 0, 2, &[0], 32)), "bad record 3: interlace");
     }
 
     #[test]

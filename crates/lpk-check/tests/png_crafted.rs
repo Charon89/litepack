@@ -240,6 +240,14 @@ struct Case {
     /// The outcome this case is built to reach (class, reason) — a check of the case itself;
     /// the gate is the agreement of the two decoders.
     want: (&'static str, &'static str),
+    /// Bytes changed in record bodies after the write, (record id, offset in its body, new
+    /// byte), with the `body_hash` and the frame hash recomputed: how the records the writer
+    /// refuses to write (section 12's rules) are made.
+    patches: Vec<(usize, usize, u8)>,
+    /// Swap the last two steps of the block's graph after the write (the frame hash
+    /// recomputed): how graphs the writer refuses (a step before `png-filter` that is not a
+    /// model step) are made.
+    swap_last_two: bool,
 }
 
 fn case(
@@ -258,6 +266,8 @@ fn case(
         plain,
         memory: 0,
         want,
+        patches: Vec::new(),
+        swap_last_two: false,
     }
 }
 
@@ -302,7 +312,80 @@ fn build(c: &Case) -> Vec<u8> {
     )
     .unwrap();
     w.finish().unwrap();
+    if !c.patches.is_empty() {
+        patch_records(&mut out, &c.patches);
+    }
+    if c.swap_last_two {
+        swap_last_two_steps(&mut out);
+    }
     out
+}
+
+/// Swaps the last two steps of block 0's graph in place and recomputes the frame's hash.
+fn swap_last_two_steps(d: &mut [u8]) {
+    let a = lpk_check::Archive::open(d.to_vec(), lpk_check::Options::default()).unwrap();
+    let off = a.index.blocks[0].frame_offset as usize;
+    let f = lpk_check::wire::parse_frame(d, off, u64::MAX).unwrap();
+    let payload = f.end - 32 - f.payload.len()..f.end - 32;
+    // step_count (one byte), then per step: u16 id, u8 flags, params_len (one byte), params.
+    let n = usize::from(d[payload.start]);
+    let mut starts = Vec::new();
+    let mut pos = payload.start + 1;
+    for _ in 0..n {
+        starts.push(pos);
+        pos += 4 + usize::from(d[pos + 3]);
+    }
+    let (a0, b0, end) = (starts[n - 2], starts[n - 1], pos);
+    let mut swapped = d[b0..end].to_vec();
+    swapped.extend_from_slice(&d[a0..b0]);
+    d[a0..end].copy_from_slice(&swapped);
+    let h = blake3::hash(&d[payload.clone()]);
+    d[payload.end..payload.end + 32].copy_from_slice(h.as_bytes());
+}
+
+/// Applies `patches` to the record bodies of the `Records` frame, recomputing each changed
+/// body's `body_hash` and the frame's hash.
+fn patch_records(d: &mut [u8], patches: &[(usize, usize, u8)]) {
+    let a = lpk_check::Archive::open(d.to_vec(), lpk_check::Options::default()).unwrap();
+    let off = a.index.records.unwrap().offset as usize;
+    let f = lpk_check::wire::parse_frame(d, off, u64::MAX).unwrap();
+    let payload = f.end - 32 - f.payload.len()..f.end - 32;
+    let varint = |d: &[u8], pos: &mut usize| {
+        let (mut v, mut shift) = (0usize, 0);
+        loop {
+            let b = d[*pos];
+            *pos += 1;
+            v |= usize::from(b & 0x7F) << shift;
+            shift += 7;
+            if b & 0x80 == 0 {
+                return v;
+            }
+        }
+    };
+    let mut pos = payload.start;
+    let count = varint(d, &mut pos);
+    for id in 0..count {
+        pos += 4; // kind, flags
+        let len = varint(d, &mut pos);
+        let body = pos..pos + len;
+        let mine: Vec<_> = patches.iter().filter(|p| p.0 == id).collect();
+        for &&(_, at, byte) in &mine {
+            d[body.start + at] = byte;
+        }
+        if !mine.is_empty() {
+            let h = blake3::hash(&d[body.clone()]);
+            d[body.end..body.end + 32].copy_from_slice(h.as_bytes());
+        }
+        pos = body.end + 32;
+    }
+    let h = blake3::hash(&d[payload.clone()]);
+    d[payload.end..payload.end + 32].copy_from_slice(h.as_bytes());
+}
+
+/// A case with record bytes patched after the write.
+fn patched(mut c: Case, patches: &[(usize, usize, u8)]) -> Case {
+    c.patches = patches.to_vec();
+    c
 }
 
 /// The outcome as (class, normative reason, record id) — reason and id for `BadRecord` only —
@@ -310,11 +393,13 @@ fn build(c: &Case) -> Vec<u8> {
 type Outcome = (String, String, String, Option<Vec<u8>>);
 
 fn reference(bytes: &[u8]) -> Outcome {
-    let mut a = lpk_format::Archive::open(Cursor::new(bytes.to_vec()), &Resources::default())
-        .expect("the reference opens");
-    register_full_reader(&mut a);
-    match a.verify() {
-        Ok(_) => {
+    let opened = lpk_format::Archive::open(Cursor::new(bytes.to_vec()), &Resources::default());
+    let verified = opened.and_then(|mut a| {
+        register_full_reader(&mut a);
+        a.verify().map(|_| a)
+    });
+    match verified {
+        Ok(mut a) => {
             let t = a.entry_table().unwrap();
             let entries: Vec<_> = t.table().unwrap().iter().map(|e| e.unwrap()).collect();
             let e = entries
@@ -343,10 +428,10 @@ fn reference(bytes: &[u8]) -> Outcome {
 }
 
 fn check(bytes: &[u8]) -> Outcome {
-    let mut a =
-        lpk_check::Archive::open(bytes.to_vec(), lpk_check::Options::default()).expect("opens");
-    match a.verify() {
-        Ok(_) => {
+    let verified = lpk_check::Archive::open(bytes.to_vec(), lpk_check::Options::default())
+        .and_then(|mut a| a.verify().map(|_| a));
+    match verified {
+        Ok(mut a) => {
             let e = a
                 .entries()
                 .unwrap()
@@ -750,6 +835,124 @@ fn cases() -> Vec<Case> {
         c.records = vec![RecordBody::Deflate(d)];
         v.push(c);
     }
+
+    // Section 12's rules (clarified text): the non-interlaced count is raised by the lookup of
+    // check (1), before `width` and `height`; `bit_depth` before `color_type` before `interlace`.
+    // The writer refuses these records, so a valid one (4 x 3 grey 8-bit, three filter bytes) is
+    // written and its body patched: width at 0..4, height at 4..8, bit_depth 8, color_type 9,
+    // interlace 10.
+    let base = simple(4, 3, 8, 0, 0, 60);
+    for (name, p, want) in [
+        (
+            "non-interlaced count one short",
+            vec![(0, 4, 4)],
+            bad("filters"),
+        ),
+        (
+            "non-interlaced count one long, width 0",
+            vec![(0, 4, 2), (0, 0, 0)],
+            bad("filters"),
+        ),
+        (
+            "non-interlaced count wrong, width and height 0",
+            vec![(0, 0, 0), (0, 4, 0)],
+            bad("filters"),
+        ),
+        (
+            "bit_depth and color_type out of range",
+            vec![(0, 8, 3), (0, 9, 1), (0, 10, 2)],
+            bad("bit_depth"),
+        ),
+        (
+            "color_type and interlace out of range",
+            vec![(0, 9, 5), (0, 10, 2)],
+            bad("color_type"),
+        ),
+        ("interlace 2", vec![(0, 10, 2)], bad("interlace")),
+        (
+            "interlace 2 and a wrong count",
+            vec![(0, 10, 2), (0, 4, 9)],
+            bad("interlace"),
+        ),
+    ] {
+        v.push(patched(stored(name, &base, want), &p));
+    }
+    // Check (1): the lookup of record 1 walks record 0, which breaks a rule.
+    {
+        let good = simple(4, 3, 8, 0, 0, 62);
+        let c = case(
+            "lookup walks a broken earlier record",
+            vec![rec(&good), rec(&good)],
+            vec![store(), png(1)],
+            good.input.clone(),
+            good.output.clone(),
+            bad("interlace"),
+        );
+        v.push(patched(c, &[(0, 10, 2)]));
+    }
+    // The look-ahead reaching png-filter from a following bwt: `[store, bwt, png-filter]`, the
+    // bwt step's O is the record's F and the store step is bounded by I(F, B).
+    {
+        let i = simple(10, 4, 8, 0, 0, 63);
+        let f = i.output.len() as u64;
+        let b = 16u32;
+        let i_fb = lpk_check::bwt::input_len(f, b);
+        for (len, want) in [(i_fb + 1, ("PayloadTooLarge", "")), (i_fb, ("any", ""))] {
+            let mut c = case(
+                format!("bwt before png-filter, input {len}"),
+                vec![rec(&i)],
+                vec![store(), png(0), bwt(b)], // swapped after the write
+                vec![0x41; len as usize],
+                i.output.clone(),
+                want,
+            );
+            c.memory = lpk_check::bwt::term(f, b);
+            c.swap_last_two = true;
+            v.push(c);
+        }
+        // The png record's pre-checks run before the bwt's term is used: a bad width first.
+        let mut w0 = i.rec.clone();
+        w0.width = 0;
+        let mut c = case(
+            "bwt before png-filter, width 0",
+            vec![RecordBody::PngFilter(w0)],
+            vec![store(), png(0), bwt(b)], // swapped after the write
+            vec![0x41; i_fb as usize],
+            i.output.clone(),
+            bad("width"),
+        );
+        c.memory = lpk_check::bwt::term(f, b);
+        c.swap_last_two = true;
+        v.push(c);
+    }
+    // The look-ahead reaching png-filter from a following deflate-reconstruct:
+    // `[store, deflate-reconstruct 0, png-filter 1]`, the deflate record's own bound is the png
+    // record's F. Written as `[store, png-filter 1, deflate-reconstruct 0]` with F equal to the
+    // stream's length (what the writer accepts), then swapped; the deflate record's
+    // `original_len` patched one above F reaches PayloadTooLarge (its check (3) against the png
+    // record's F) before the store step runs.
+    {
+        let text = b"some text for a deflate stream, some text, some text".to_vec();
+        let (stream, d) = deflate_of(&text);
+        let l = stream.len() as u32;
+        let i = simple(l - 1, 1, 8, 0, 0, 64);
+        for (patch, want) in [(true, ("PayloadTooLarge", "")), (false, ("any", ""))] {
+            let mut c = case(
+                format!("deflate before png-filter, original_len patched {patch}"),
+                vec![RecordBody::Deflate(d.clone()), rec(&i)],
+                vec![store(), png(1), deflate(0)], // swapped after the write
+                text.clone(),
+                stream.clone(),
+                want,
+            );
+            c.memory = lpk_check::deflate::term(d.plain_len, d.corrections.len() as u64);
+            c.swap_last_two = true;
+            if patch {
+                c.patches = vec![(0, 0, (l + 1) as u8)];
+            }
+            v.push(c);
+        }
+    }
     v
 }
 
@@ -763,6 +966,7 @@ fn crafted_png_filter_records_agree_with_the_reference() {
     for c in &cases {
         let bytes = build(c);
         let r = reference(&bytes);
+        eprintln!("{}: {:?} {:?}", c.name, r.0, r.1);
         let k = check(&bytes);
         let summary = |o: &Outcome| {
             format!(
@@ -785,7 +989,7 @@ fn crafted_png_filter_records_agree_with_the_reference() {
             ));
         }
         // The case reaches the outcome it was built for (by this decoder).
-        if (k.0.as_str(), k.1.as_str()) != c.want
+        if (c.want.0 != "any" && (k.0.as_str(), k.1.as_str()) != c.want)
             || (k.0 == "ok" && k.3.as_deref() != Some(&c.plain[..]))
         {
             missed.push(format!("{}: {}", c.name, summary(&k)));
