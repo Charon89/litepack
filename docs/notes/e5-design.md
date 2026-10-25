@@ -155,7 +155,8 @@ none, it shares the renderer it would guard, and its docs are silent on binary p
 
 **Opening an entry (E5-3).** A double-click extracts that entry alone (no sibling or same-named folder) under
 E3-2's policy, which refuses a trailing dot or space (`crates/lpk-core/src/policy.rs:356–357`), into a fresh folder
-under `%LOCALAPPDATA%\LitePack\Open\`, zoned like the archive (Internet for a zoneless foreign one). The shell opens
+under `%LOCALAPPDATA%\LitePack\Open\`, zoned like the archive (Internet for a zoneless foreign one; only zones 3 and 4 are written, and the MoTW opt-out never
+applies to opened entries — `docs/notes/e6-design.md` section 4). The shell opens
 only allow-listed types (document, image, media, text) by the real last extension, the rest goes to the preview:
 `doc.pdf .cmd` (CVE-2023-38831's class [WRAR]) counts as `.cmd`. Cleaned at exit; no write-back.
 
