@@ -361,10 +361,10 @@ struct Target {
 
 /// A symlink entry to create, after the directories and before the files.
 #[derive(Debug)]
-struct Link {
-    path: PathBuf,
-    target: Vec<u8>,
-    replace: bool,
+pub(crate) struct Link {
+    pub(crate) path: PathBuf,
+    pub(crate) target: Vec<u8>,
+    pub(crate) replace: bool,
 }
 
 /// What every thread sees: the targets, their states and the counters. Cleanup reads the
@@ -429,7 +429,7 @@ fn finish(shared: &Shared, file: usize, f: &File) -> Result<(), CoreError> {
 
 /// `dir` with the archive path's components pushed one at a time (a `/` inside one `join`
 /// argument is not converted under a `\\?\` prefix on Windows).
-fn join_components(dir: &Path, path: &str) -> PathBuf {
+pub(crate) fn join_components(dir: &Path, path: &str) -> PathBuf {
     let mut p = dir.to_path_buf();
     for c in path.split('/') {
         p.push(c);
@@ -437,7 +437,7 @@ fn join_components(dir: &Path, path: &str) -> PathBuf {
     p
 }
 
-fn mtime(ns: i64) -> Option<SystemTime> {
+pub(crate) fn mtime(ns: i64) -> Option<SystemTime> {
     if ns == i64::MIN {
         return None;
     }
@@ -760,17 +760,74 @@ impl OutDir<'_> {
     }
 }
 
-fn plan<R: Read + Seek>(
-    archive: &mut Archive<R>,
+/// Where one selected entry goes after the policy pass.
+#[derive(Debug)]
+pub(crate) enum Placed {
+    /// A directory entry to create (or reuse).
+    Dir(PathBuf),
+    /// A symlink entry to create.
+    Link(Link),
+    /// A file to create at `path` (create-new; what is there is removed first when `replace`).
+    File { path: PathBuf, replace: bool },
+    /// Left out: skipped by the policy, or a symlink it lets pass without creating.
+    Skipped,
+}
+
+/// The policy pass's result: the selected entries and, for each, where it goes.
+#[derive(Debug)]
+pub(crate) struct PolicyPass {
+    /// The entries the selection kept, in entry order.
+    pub(crate) entries: Vec<Entry>,
+    /// Parallel to `entries`.
+    pub(crate) placed: Vec<Placed>,
+    /// Directory entries placed.
+    pub(crate) directories: u64,
+    /// Entries skipped because of what existed at their target.
+    pub(crate) skipped: u64,
+    /// Entries written under a new name.
+    pub(crate) renamed: u64,
+    /// Symlink entries let pass and not created.
+    pub(crate) symlinks_skipped: u64,
+}
+
+impl PolicyPass {
+    /// The directories to create, the output directory first: `dir`, every directory entry,
+    /// then the files' parents, then the links'; each once.
+    pub(crate) fn mkdirs(&self, dir: &Path) -> Vec<PathBuf> {
+        let mut made: HashSet<PathBuf> = HashSet::new();
+        let mut mkdirs = vec![dir.to_path_buf()];
+        let dirs = self.placed.iter().filter_map(|p| match p {
+            Placed::Dir(d) => Some(d.as_path()),
+            _ => None,
+        });
+        let files = self.placed.iter().filter_map(|p| match p {
+            Placed::File { path, .. } => path.parent(),
+            _ => None,
+        });
+        let links = self.placed.iter().filter_map(|p| match p {
+            Placed::Link(l) => l.path.parent(),
+            _ => None,
+        });
+        for d in dirs.chain(files).chain(links) {
+            if made.insert(d.to_path_buf()) {
+                mkdirs.push(d.to_path_buf());
+            }
+        }
+        mkdirs
+    }
+}
+
+/// E3-2's pass over `entries` before anything is written, shared by `.lpk` extraction and the
+/// foreign-archive broker (`crate::foreign`): the selection, then per entry the symlink rule,
+/// the path and device rules, then the conflicting-name rule and (on a case-insensitive
+/// target) the case-collision rule, then — when `dir` exists — the linked-parent and existing
+/// hooks that skip, rename or replace.
+pub(crate) fn policy_pass(
+    entries: Vec<Entry>,
     dir: &Path,
     policy: &dyn ExtractPolicy,
     select: &Selection,
-) -> Result<Plan, CoreError> {
-    let entries: Vec<Entry> = archive
-        .entry_table()?
-        .table()?
-        .iter()
-        .collect::<Result<_, _>>()?;
+) -> Result<PolicyPass, CoreError> {
     // The selection first: the policy's rules and the placements concern only what is
     // extracted, and a pattern without a match is refused here, before any output.
     let entries = select.filter(entries, |e| e.path.as_str())?;
@@ -795,66 +852,100 @@ fn plan<R: Read + Seek>(
         planned: None,
         fold: policy::case_insensitive_target(dir),
     };
+    let mut placed = Vec::with_capacity(entries.len());
+    let (mut directories, mut skipped, mut renamed, mut symlinks_skipped) = (0u64, 0, 0, 0);
+    for e in &entries {
+        let path = join_components(dir, &e.path);
+        let p = match e.kind {
+            EntryKind::Directory => {
+                if !existing.parents_ok(&path)? {
+                    skipped += 1;
+                    Placed::Skipped
+                } else {
+                    match existing.ask(&path, Wanted::Directory)? {
+                        Some(Existing::Skip) => {
+                            existing.blocked.insert(path);
+                            skipped += 1;
+                            Placed::Skipped
+                        }
+                        _ => {
+                            directories += 1;
+                            Placed::Dir(path)
+                        }
+                    }
+                }
+            }
+            EntryKind::Symlink if policy.symlink_action(e) == SymlinkAction::Skip => {
+                symlinks_skipped += 1;
+                Placed::Skipped
+            }
+            EntryKind::Symlink | EntryKind::File => {
+                let wanted = if e.kind == EntryKind::Symlink {
+                    Wanted::Symlink
+                } else {
+                    Wanted::File
+                };
+                let decided = match existing.decide(&path, wanted, &entries)? {
+                    Decision::Write => Some((path, false)),
+                    Decision::Replace => Some((path, true)),
+                    Decision::Rename(p) => {
+                        renamed += 1;
+                        Some((p, false))
+                    }
+                    Decision::Skip => {
+                        skipped += 1;
+                        None
+                    }
+                };
+                match decided {
+                    None => Placed::Skipped,
+                    Some((path, replace)) if e.kind == EntryKind::Symlink => Placed::Link(Link {
+                        path,
+                        target: e.symlink_target.clone().unwrap_or_default(),
+                        replace,
+                    }),
+                    Some((path, replace)) => Placed::File { path, replace },
+                }
+            }
+        };
+        placed.push(p);
+    }
+    Ok(PolicyPass {
+        entries,
+        placed,
+        directories,
+        skipped,
+        renamed,
+        symlinks_skipped,
+    })
+}
+
+fn plan<R: Read + Seek>(
+    archive: &mut Archive<R>,
+    dir: &Path,
+    policy: &dyn ExtractPolicy,
+    select: &Selection,
+) -> Result<Plan, CoreError> {
+    let entries: Vec<Entry> = archive
+        .entry_table()?
+        .table()?
+        .iter()
+        .collect::<Result<_, _>>()?;
+    let mut pass = policy_pass(entries, dir, policy, select)?;
+    // Directories: created by `make_dirs` after the memory check, so a refused budget leaves
+    // nothing behind.
+    let mkdirs = pass.mkdirs(dir);
     let table = archive.chunks();
     let blocks = archive.index().blocks.len();
     let mut per_block: Vec<Vec<Place>> = vec![Vec::new(); blocks];
     let mut targets: Vec<Target> = Vec::new();
     let mut links: Vec<Link> = Vec::new();
-    let mut dirs = Vec::new();
     let mut placements = 0u64;
-    let (mut skipped, mut renamed, mut symlinks_skipped) = (0u64, 0u64, 0u64);
-    for e in &entries {
-        let path = join_components(dir, &e.path);
-        match e.kind {
-            EntryKind::Directory => {
-                if !existing.parents_ok(&path)? {
-                    skipped += 1;
-                    continue;
-                }
-                match existing.ask(&path, Wanted::Directory)? {
-                    Some(Existing::Skip) => {
-                        existing.blocked.insert(path);
-                        skipped += 1;
-                    }
-                    _ => dirs.push(path),
-                }
-            }
-            EntryKind::Symlink => {
-                if policy.symlink_action(e) == SymlinkAction::Skip {
-                    symlinks_skipped += 1;
-                    continue;
-                }
-                let (path, replace) = match existing.decide(&path, Wanted::Symlink, &entries)? {
-                    Decision::Write => (path, false),
-                    Decision::Replace => (path, true),
-                    Decision::Rename(p) => {
-                        renamed += 1;
-                        (p, false)
-                    }
-                    Decision::Skip => {
-                        skipped += 1;
-                        continue;
-                    }
-                };
-                links.push(Link {
-                    path,
-                    target: e.symlink_target.clone().unwrap_or_default(),
-                    replace,
-                });
-            }
-            EntryKind::File => {
-                let (path, replace) = match existing.decide(&path, Wanted::File, &entries)? {
-                    Decision::Write => (path, false),
-                    Decision::Replace => (path, true),
-                    Decision::Rename(p) => {
-                        renamed += 1;
-                        (p, false)
-                    }
-                    Decision::Skip => {
-                        skipped += 1;
-                        continue;
-                    }
-                };
+    for (e, p) in pass.entries.iter().zip(std::mem::take(&mut pass.placed)) {
+        match p {
+            Placed::Dir(_) | Placed::Skipped => {}
+            Placed::Link(l) => links.push(l),
+            Placed::File { path, replace } => {
                 let file = targets.len();
                 let mut off = Some(0u64);
                 for &c in &e.chunks {
@@ -893,20 +984,6 @@ fn plan<R: Read + Seek>(
             }
         }
     }
-    // Directories: the root, every directory entry, every file's and link's parent; each
-    // once. Created by `make_dirs` after the memory check, so a refused budget leaves nothing
-    // behind.
-    let mut made: HashSet<PathBuf> = HashSet::new();
-    let mut mkdirs = vec![dir.to_path_buf()];
-    let parents = targets
-        .iter()
-        .filter_map(|t| t.path.parent())
-        .chain(links.iter().filter_map(|l| l.path.parent()));
-    for d in dirs.iter().map(PathBuf::as_path).chain(parents) {
-        if made.insert(d.to_path_buf()) {
-            mkdirs.push(d.to_path_buf());
-        }
-    }
     let needed = (0..blocks).filter(|&b| !per_block[b].is_empty()).collect();
     let name_bytes = targets
         .iter()
@@ -924,19 +1001,19 @@ fn plan<R: Read + Seek>(
         shared,
         per_block,
         needed,
-        directories: dirs.len() as u64,
+        directories: pass.directories,
         placements,
         name_bytes,
         mkdirs,
         links,
-        skipped,
-        renamed,
-        symlinks_skipped,
+        skipped: pass.skipped,
+        renamed: pass.renamed,
+        symlinks_skipped: pass.symlinks_skipped,
     })
 }
 
 /// Create the plan's directories, the output directory first.
-fn make_dirs(mkdirs: &[PathBuf]) -> Result<(), CoreError> {
+pub(crate) fn make_dirs(mkdirs: &[PathBuf]) -> Result<(), CoreError> {
     for d in mkdirs {
         std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
     }
@@ -946,7 +1023,7 @@ fn make_dirs(mkdirs: &[PathBuf]) -> Result<(), CoreError> {
 /// Create the plan's symlinks, in entry order (after the directories, before the files). On
 /// Windows the target is read as UTF-8 and the link is a directory link when the target,
 /// resolved against the link's directory, is a directory now, else a file link.
-fn make_links(links: &[Link]) -> Result<(), CoreError> {
+pub(crate) fn make_links(links: &[Link]) -> Result<(), CoreError> {
     for l in links {
         if l.replace {
             policy::remove_existing(&l.path).map_err(|e| io(&l.path, e))?;

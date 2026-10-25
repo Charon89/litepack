@@ -156,6 +156,20 @@ pub(crate) fn run(spec: &Spec) -> io::Result<Measurement> {
     })
 }
 
+/// Bytes free to an unprivileged caller on the file system of `path` (`statvfs`: `f_bavail`
+/// blocks of `f_frsize` bytes).
+pub(crate) fn free_space(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: a zeroed statvfs is a valid out buffer.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is NUL-terminated and outlives the call; `st` is writable.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    (st.f_bavail as u64).checked_mul(st.f_frsize as u64)
+}
+
 /// Total physical memory: `MemTotal` of `/proc/meminfo` (in KiB there), capped by the
 /// cgroup v2 limit `/sys/fs/cgroup/memory.max` when that holds a number (not `max`).
 pub(crate) fn physical_memory() -> Option<u64> {

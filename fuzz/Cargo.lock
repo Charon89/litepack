@@ -786,6 +786,8 @@ dependencies = [
  "lpk-codecs-bwt",
  "lpk-format",
  "lpk-procstat-sys",
+ "lpk-proto",
+ "lpk-sandbox-sys",
  "preflate-rs",
  "same-file",
  "thiserror",
@@ -827,6 +829,21 @@ dependencies = [
 
 [[package]]
 name = "lpk-procstat-sys"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "windows",
+]
+
+[[package]]
+name = "lpk-proto"
+version = "0.0.1"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "lpk-sandbox-sys"
 version = "0.0.1"
 dependencies = [
  "libc",

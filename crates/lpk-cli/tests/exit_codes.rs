@@ -9,7 +9,7 @@ use std::io::Error;
 use std::path::PathBuf;
 
 use lpk_cli::{core_exit, format_exit, Failure, EXIT_FAILED, EXIT_USAGE};
-use lpk_core::CoreError;
+use lpk_core::{CoreError, ForeignError, WorkerError};
 use lpk_format::{FormatError, Refusal};
 
 fn io() -> Error {
@@ -359,7 +359,99 @@ fn core_table() -> Vec<(CoreError, i32, &'static str)> {
             f,
             "AppendLeftCut",
         ),
+        (Foreign(ForeignError::UnknownFormat), f, "UnknownFormat"),
+        (
+            Worker(WorkerError::Pipe {
+                stderr: String::new(),
+            }),
+            f,
+            "Pipe",
+        ),
     ]
+}
+
+/// E4-2: every foreign and worker variant is exit 2 with its own name as the kind.
+#[test]
+fn every_foreign_and_worker_variant_has_its_kind() {
+    let s = || String::from("x");
+    let foreign = [
+        (ForeignError::UnknownFormat, "UnknownFormat"),
+        (ForeignError::Unsupported { message: s() }, "Unsupported"),
+        (ForeignError::Corrupt { message: s() }, "Corrupt"),
+        (
+            ForeignError::SizeMismatch {
+                path: s(),
+                declared: 1,
+                received: 2,
+            },
+            "SizeMismatch",
+        ),
+        (
+            ForeignError::OverlappingEntries {
+                first: s(),
+                second: s(),
+            },
+            "OverlappingEntries",
+        ),
+        (
+            ForeignError::LimitExceeded {
+                limit: "entries",
+                value: 2,
+                max: 1,
+                flag: "--max-entries",
+            },
+            "LimitExceeded",
+        ),
+        (
+            ForeignError::NoSpace {
+                needed: 2,
+                available: 1,
+            },
+            "NoSpace",
+        ),
+    ];
+    let worker = [
+        (WorkerError::Spawn { message: s() }, "Spawn"),
+        (WorkerError::Sandbox { message: s() }, "Sandbox"),
+        (WorkerError::Denied { message: s() }, "Denied"),
+        (
+            WorkerError::Crashed {
+                code: 1,
+                stderr: s(),
+            },
+            "Crashed",
+        ),
+        (WorkerError::Panicked { message: s() }, "Panicked"),
+        (WorkerError::MemoryLimit { limit: 1 }, "MemoryLimit"),
+        (WorkerError::CpuLimit { seconds: 1 }, "CpuLimit"),
+        (
+            WorkerError::Timeout {
+                seconds: 1.0,
+                waiting_for: "x",
+            },
+            "Timeout",
+        ),
+        (WorkerError::Protocol { message: s() }, "Protocol"),
+        (WorkerError::Pipe { stderr: s() }, "Pipe"),
+        (
+            WorkerError::BuildMismatch {
+                host: s(),
+                worker: s(),
+            },
+            "BuildMismatch",
+        ),
+    ];
+    let all: Vec<(CoreError, &str)> = foreign
+        .into_iter()
+        .map(|(e, k)| (CoreError::Foreign(e), k))
+        .chain(worker.into_iter().map(|(e, k)| (CoreError::Worker(e), k)))
+        .collect();
+    assert_eq!(all.len(), 18);
+    for (e, kind) in all {
+        let f = Failure::core(&e, Some(std::path::Path::new("x.zip")));
+        assert_eq!((f.code, f.kind.as_str()), (EXIT_FAILED, kind), "{e}");
+        assert_eq!(f.path.as_deref(), Some("x.zip"), "{e}");
+    }
 }
 
 #[test]
@@ -382,7 +474,7 @@ fn every_format_error_variant_has_a_code_and_a_kind() {
 #[test]
 fn every_core_error_variant_has_a_code_and_a_kind() {
     let table = core_table();
-    assert_eq!(table.len(), 16, "one row per CoreError variant");
+    assert_eq!(table.len(), 18, "one row per CoreError variant");
     for (e, code, kind) in table {
         assert_eq!(core_exit(&e), code, "{e}");
         let failure = Failure::core(&e, Some(std::path::Path::new("x.lpk")));

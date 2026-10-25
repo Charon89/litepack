@@ -98,6 +98,19 @@ impl Default for Limits {
     }
 }
 
+/// What the host observes of a running worker, from the OS (never from the worker's word):
+/// the broker's progress and limits are computed from these (E4-2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// Bytes the worker has read through any handle (Windows: the job's `ReadTransferCount`;
+    /// Linux: `rchar` of `/proc/<pid>/io`).
+    pub read_bytes: u64,
+    /// User-mode CPU time.
+    pub user_time: Duration,
+    /// Peak committed memory (Windows: the job's peak process commit; Linux: `VmPeak`).
+    pub peak_memory: u64,
+}
+
 /// The access a passed handle gets in the worker (Windows; on Linux fds keep their open mode).
 /// Always explicit: a duplicate never carries the caller's full access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

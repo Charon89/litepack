@@ -1,0 +1,4 @@
+# Built into the shared target directory, so that `lpk-worker` lands beside `lpk` (the host
+# starts the worker from its own directory). Applies when cargo runs inside workers/.
+[build]
+target-dir = "../target"

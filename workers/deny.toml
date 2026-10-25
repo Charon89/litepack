@@ -1,0 +1,49 @@
+# cargo-deny policy of the workers workspace (E4-2): the root policy (../deny.toml) plus a ban on every C codec
+# crate, so no worker links C zlib, zstd, bzip2 or liblzma (design section 3). Run inside workers/: cargo deny check
+# cargo-deny policy — see docs/LICENSING.md. Run: cargo deny check
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "workspace"
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "MIT-0",            # MIT without the attribution clause: borrow-or-share (via jsonschema), D-25
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Zlib",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "MPL-2.0",
+]
+confidence-threshold = 0.9
+# No exceptions: no copyleft crate is in the tree. The one LGPL-3.0 crate the engine had (`cabac`, behind the
+# vendored preflate-rs) was replaced by `lpk-codecs-vp8` (LIC-2, docs/LICENSING.md), so a closed build carries no
+# relinking duty. A future exception is allowed only by crate name, with its own recorded decision (D-25, D-26),
+# and must state what a closed build would then have to keep open.
+exceptions = []
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+  { crate = "libz-sys", reason = "no C codec in a worker (E4-2)" },
+  { crate = "libz-ng-sys", reason = "no C codec in a worker (E4-2)" },
+  { crate = "zstd-sys", reason = "no C codec in a worker (E4-2)" },
+  { crate = "bzip2-sys", reason = "no C codec in a worker (E4-2)" },
+  { crate = "lzma-sys", reason = "no C codec in a worker (E4-2)" },
+  { crate = "liblzma-sys", reason = "no C codec in a worker (E4-2)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

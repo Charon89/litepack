@@ -186,6 +186,34 @@ pub fn list_archive<R: Read + Seek>(
     Ok(())
 }
 
+/// List a foreign archive's checked entries (E4-2) in the same shapes: no generation header
+/// line (a foreign archive has none) and `"generation": 0` in the JSON form. A pattern that
+/// matches nothing is refused before any line is written.
+pub fn list_entries(
+    entries: &[Entry],
+    options: ListOptions,
+    select: &Selection,
+    out: &mut dyn Write,
+) -> Result<(), ListError> {
+    if !select.is_all() {
+        let mut hits = select.hits();
+        for e in entries {
+            hits.record(&e.path);
+        }
+        hits.check().map_err(ListError::Core)?;
+    }
+    let mut w = BufWriter::new(out);
+    for e in entries.iter().filter(|e| select.matches(&e.path)) {
+        if options.json {
+            json_line(&mut w, e, 0)?;
+        } else {
+            text_line(&mut w, e, options.long)?;
+        }
+    }
+    w.flush()?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

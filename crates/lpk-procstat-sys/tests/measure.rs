@@ -257,3 +257,12 @@ fn no_helper_processes_without_real_descendants() {
     assert!(m.timed_out, "{m:?}");
     assert!(!m.descendants_killed, "{m:?}");
 }
+
+/// The free space of an existing directory is known and positive; of a missing path, unknown.
+#[test]
+fn free_space_of_the_temp_volume() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let free = lpk_procstat_sys::free_space(dir.path()).expect("free space");
+    assert!(free > 0);
+    assert!(lpk_procstat_sys::free_space(&dir.path().join("missing/deeper")).is_none());
+}

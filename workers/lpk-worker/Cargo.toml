@@ -1,0 +1,27 @@
+[package]
+name = "lpk-worker"
+description = "LitePack's sandboxed foreign-format worker: reads one archive through its handle and answers the broker over pipes; never writes a file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about and cargo-deny's private rule leave our own crates out.
+publish = false
+
+[features]
+# Test-only fault injection (garbage, hangs, a closed pipe, endless pages). Never in a shipped
+# worker: the CI job fails when `cargo tree -e features` of a default build shows it.
+faults = ["lpk-proto/faults"]
+
+[dependencies]
+lpk-proto = { path = "../../crates/lpk-proto", version = "0.0.1" }
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+lpk-sandbox-sys = { path = "../../crates/lpk-sandbox-sys", version = "0.0.1" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

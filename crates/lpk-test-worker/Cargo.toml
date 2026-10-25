@@ -1,0 +1,25 @@
+[package]
+name = "lpk-test-worker"
+description = "Test-only foreign-format worker of the main workspace: the worker loop over the test fixture reader, with the faults feature on. Never shipped (the shipped worker is workers/lpk-worker)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about (about.toml `private.ignore`) leaves our own crates out of THIRD-PARTY-NOTICES.
+publish = false
+
+[[bin]]
+name = "lpk-test-worker"
+path = "src/main.rs"
+test = false
+doc = false
+
+[dependencies]
+lpk-proto = { path = "../lpk-proto", version = "0.0.1", features = ["faults"] }
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
+
+[lints]
+workspace = true

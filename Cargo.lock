@@ -1534,6 +1534,8 @@ dependencies = [
  "lpk-core",
  "lpk-format",
  "lpk-procstat-sys",
+ "lpk-proto",
+ "lpk-sandbox-sys",
  "rpassword",
  "serde_json",
  "sevenz-rust2",
@@ -1575,6 +1577,8 @@ dependencies = [
  "lpk-codecs-vp8",
  "lpk-format",
  "lpk-procstat-sys",
+ "lpk-proto",
+ "lpk-sandbox-sys",
  "preflate-rs",
  "same-file",
  "serde_json",
@@ -1618,12 +1622,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpk-proto"
+version = "0.0.1"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "lpk-sandbox-sys"
 version = "0.0.1"
 dependencies = [
  "libc",
  "tempfile",
  "windows",
+]
+
+[[package]]
+name = "lpk-test-worker"
+version = "0.0.1"
+dependencies = [
+ "lpk-proto",
+ "lpk-sandbox-sys",
 ]
 
 [[package]]

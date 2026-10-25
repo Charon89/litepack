@@ -222,6 +222,20 @@ pub fn run(spec: &Spec) -> io::Result<Measurement> {
     }
 }
 
+/// Bytes free to the caller on the volume holding `path` (which must exist), from the
+/// operating system (`GetDiskFreeSpaceExW` on Windows, `statvfs` on Linux); `None` when the
+/// query fails. The foreign-archive broker checks it before and while writing (E4-2).
+pub fn free_space(path: &std::path::Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        windows_impl::free_space(path)
+    }
+    #[cfg(unix)]
+    {
+        unix::free_space(path)
+    }
+}
+
 /// The machine's physical memory in bytes, from the operating system (`GlobalMemoryStatusEx` on
 /// Windows, `MemTotal` of `/proc/meminfo` on Linux, capped by the cgroup's `memory.max` when it
 /// is a number); `None` when the query fails. Used by the

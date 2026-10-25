@@ -9,11 +9,13 @@ members = [
   "crates/lpk-core",
   "crates/lpk-format",
   "crates/lpk-procstat-sys",
+  "crates/lpk-proto",
+  "crates/lpk-test-worker",
   "crates/lpk-sandbox-sys",
 ]
 # cargo-fuzz crate: built with nightly on Linux only (fuzz/README.md).
 # vendor/: patched third-party crates (below), built as dependencies, never as members.
-exclude = ["fuzz", "vendor"]
+exclude = ["fuzz", "vendor", "workers"]
 
 [workspace.package]
 version = "0.0.1"

@@ -177,3 +177,10 @@ path = "fuzz_targets/png_filter_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "worker_proto"
+path = "fuzz_targets/worker_proto.rs"
+test = false
+doc = false
+bench = false

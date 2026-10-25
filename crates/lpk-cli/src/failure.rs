@@ -5,7 +5,8 @@
 //!
 //! `kind` is the error's variant name (`Usage` for a command-line error; for a
 //! [`CoreError::Format`] wrapper the inner [`FormatError`]'s name, since the wrapper adds
-//! nothing; `Reference` for a failure the reference tool's code reported through its own
+//! nothing, and likewise the inner [`ForeignError`] or [`WorkerError`] name for a foreign
+//! archive's failure; `Reference` for a failure the reference tool's code reported through its own
 //! error line, whose variant does not reach this crate yet). `path` is the path the error
 //! names when it names one, else the archive the command was working on. `entries` lists the
 //! per-entry errors of a partial extraction (each `{"path","kind","message"}`); it is
@@ -17,7 +18,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use lpk_core::CoreError;
+use lpk_core::{CoreError, ForeignError, WorkerError};
 use lpk_format::FormatError;
 
 use crate::{EXIT_FAILED, EXIT_USAGE};
@@ -157,7 +158,9 @@ pub fn core_exit(e: &CoreError) -> i32 {
         | CoreError::NoMatch { .. }
         | CoreError::NotADirectory { .. }
         | CoreError::Cancelled
-        | CoreError::AppendLeftCut { .. } => EXIT_FAILED,
+        | CoreError::AppendLeftCut { .. }
+        | CoreError::Foreign(_)
+        | CoreError::Worker(_) => EXIT_FAILED,
     }
 }
 
@@ -262,6 +265,38 @@ pub fn core_kind(e: &CoreError) -> &'static str {
         CoreError::NotADirectory { .. } => "NotADirectory",
         CoreError::Cancelled => "Cancelled",
         CoreError::AppendLeftCut { .. } => "AppendLeftCut",
+        CoreError::Foreign(inner) => foreign_kind(inner),
+        CoreError::Worker(inner) => worker_kind(inner),
+    }
+}
+
+/// The variant name of a foreign-archive error (the inner name, as for `Format`).
+pub fn foreign_kind(e: &ForeignError) -> &'static str {
+    match e {
+        ForeignError::UnknownFormat => "UnknownFormat",
+        ForeignError::Unsupported { .. } => "Unsupported",
+        ForeignError::Corrupt { .. } => "Corrupt",
+        ForeignError::SizeMismatch { .. } => "SizeMismatch",
+        ForeignError::OverlappingEntries { .. } => "OverlappingEntries",
+        ForeignError::LimitExceeded { .. } => "LimitExceeded",
+        ForeignError::NoSpace { .. } => "NoSpace",
+    }
+}
+
+/// The variant name of a worker error (the inner name, as for `Format`).
+pub fn worker_kind(e: &WorkerError) -> &'static str {
+    match e {
+        WorkerError::Spawn { .. } => "Spawn",
+        WorkerError::Sandbox { .. } => "Sandbox",
+        WorkerError::Denied { .. } => "Denied",
+        WorkerError::Crashed { .. } => "Crashed",
+        WorkerError::Panicked { .. } => "Panicked",
+        WorkerError::MemoryLimit { .. } => "MemoryLimit",
+        WorkerError::CpuLimit { .. } => "CpuLimit",
+        WorkerError::Timeout { .. } => "Timeout",
+        WorkerError::Protocol { .. } => "Protocol",
+        WorkerError::Pipe { .. } => "Pipe",
+        WorkerError::BuildMismatch { .. } => "BuildMismatch",
     }
 }
 
@@ -283,7 +318,9 @@ pub fn core_path(e: &CoreError) -> Option<String> {
         CoreError::InvalidOption(_)
         | CoreError::Extract(_)
         | CoreError::NoMatch { .. }
-        | CoreError::Cancelled => None,
+        | CoreError::Cancelled
+        | CoreError::Foreign(_)
+        | CoreError::Worker(_) => None,
     }
 }
 

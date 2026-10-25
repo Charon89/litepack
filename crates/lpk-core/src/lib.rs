@@ -21,6 +21,7 @@ pub mod export;
 pub mod extract;
 pub mod fast;
 pub mod fold;
+pub mod foreign;
 pub mod gate;
 pub mod ingest;
 pub mod memory;
@@ -40,7 +41,7 @@ pub use balanced::{
 pub use bwt::BwtDecoder;
 pub use classify::{classify, Class, Features};
 pub use cluster::{cluster, Cluster, DictionaryKind};
-pub use error::CoreError;
+pub use error::{CoreError, ForeignError, WorkerError};
 pub use export::{
     export_archive, export_archive_with, export_file, export_file_with, ExportSummary, Sink,
 };
