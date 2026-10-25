@@ -202,6 +202,18 @@ fn lying_sizes_are_size_mismatches() {
 }
 
 #[test]
+fn an_empty_data_frame_is_a_protocol_error() {
+    let mut f = one_member(b"abc");
+    f.insert(4, Response::Data(Vec::new()));
+    let (r, written) = run(&f, 100);
+    assert!(matches!(
+        r,
+        Err(CoreError::Worker(WorkerError::Protocol { .. }))
+    ));
+    assert_eq!(written, 0);
+}
+
+#[test]
 fn declared_output_past_the_expansion_limit_is_refused_before_any_write() {
     let mut f = one_member(b"x");
     let mut r0 = rec("a", 4 << 30, 0);

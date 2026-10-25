@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lpk_format::{Credentials, Entry, EntryFlags, EntryKind, FormatError};
-use lpk_proto::frame::{FLAG_ENCRYPTED, MAX_INDICES, NO_BLOCK};
+use lpk_proto::frame::{FLAG_ENCRYPTED, NO_BLOCK};
 use lpk_proto::{ErrorCode, ProtoError, Record, RecordKind, Request, Response};
 
 use crate::error::{ForeignError, WorkerError};
@@ -87,6 +87,9 @@ pub const PAGE: u32 = 4096;
 /// What one listed entry is charged against the memory budget beyond its name and target
 /// bytes: the record and the `Entry` the host builds from it, with their allocations.
 pub const ENTRY_CHARGE: u64 = 256;
+/// The most member indices per `ReadMember` (8 KiB of indices: well below 64 KiB and below
+/// common pipe buffers).
+pub const MEMBER_BATCH: usize = 1024;
 /// How often the broker looks at the worker while it waits for a frame.
 const TICK: Duration = Duration::from_millis(50);
 
@@ -296,8 +299,20 @@ pub(crate) enum RecvError {
 }
 
 /// The worker: a sandboxed process, or (tests, fuzzing) a script of its output.
+/// An encoded request frame (it may hold a password: wiped on drop).
+pub(crate) type Frame = lpk_proto::Zeroizing<Vec<u8>>;
+
+fn encode(r: &Request) -> Frame {
+    let mut f = lpk_proto::Zeroizing::new(Vec::new());
+    // Writing to a vector cannot fail.
+    let _ = r.write_to(&mut *f);
+    f
+}
+
 pub(crate) trait Peer {
-    fn send(&mut self, r: &Request) -> Result<(), RecvError>;
+    /// Hand a frame to the writer without blocking: `Ok(Some(frame))` back when the writer is
+    /// still busy with earlier frames (the worker is not reading).
+    fn try_send(&mut self, frame: Frame) -> Result<Option<Frame>, RecvError>;
     /// The next frame if one comes within `tick`.
     fn recv(&mut self, tick: Duration) -> Result<Option<Response>, RecvError>;
     fn usage(&self) -> Option<Usage>;
@@ -316,8 +331,8 @@ struct ScriptPeer<'a> {
 }
 
 impl Peer for ScriptPeer<'_> {
-    fn send(&mut self, _r: &Request) -> Result<(), RecvError> {
-        Ok(())
+    fn try_send(&mut self, _frame: Frame) -> Result<Option<Frame>, RecvError> {
+        Ok(None)
     }
     fn recv(&mut self, _tick: Duration) -> Result<Option<Response>, RecvError> {
         match Response::read_from(&mut self.input, &mut self.buf) {
@@ -380,7 +395,7 @@ mod process {
 
     pub(super) struct ProcessPeer {
         worker: lpk_sandbox_sys::Worker,
-        requests: std::io::PipeWriter,
+        requests: mpsc::SyncSender<Frame>,
         rx: mpsc::Receiver<Result<Response, RecvError>>,
         diag: Arc<Mutex<Diag>>,
     }
@@ -539,9 +554,26 @@ mod process {
             .map_err(|e| WorkerError::Spawn {
                 message: format!("diagnostics thread: {e}"),
             })?;
+        // Requests: written by a thread from a channel of one frame, so a worker that stops
+        // reading blocks that thread, never the broker (which keeps polling its watchdog and
+        // the cancel token).
+        let (req_tx, req_rx) = mpsc::sync_channel::<Frame>(1);
+        let mut req_w = req_w;
+        std::thread::Builder::new()
+            .name("lpk-broker-requests".into())
+            .spawn(move || {
+                while let Ok(f) = req_rx.recv() {
+                    if req_w.write_all(&f).and_then(|()| req_w.flush()).is_err() {
+                        return;
+                    }
+                }
+            })
+            .map_err(|e| WorkerError::Spawn {
+                message: format!("request thread: {e}"),
+            })?;
         Ok(ProcessPeer {
             worker,
-            requests: req_w,
+            requests: req_tx,
             rx,
             diag,
         })
@@ -570,9 +602,12 @@ mod process {
     }
 
     impl Peer for ProcessPeer {
-        fn send(&mut self, r: &Request) -> Result<(), RecvError> {
-            r.write_to(&mut self.requests)
-                .map_err(|_| RecvError::Closed)
+        fn try_send(&mut self, frame: Frame) -> Result<Option<Frame>, RecvError> {
+            match self.requests.try_send(frame) {
+                Ok(()) => Ok(None),
+                Err(mpsc::TrySendError::Full(f)) => Ok(Some(f)),
+                Err(mpsc::TrySendError::Disconnected(_)) => Err(RecvError::Closed),
+            }
         }
         fn recv(&mut self, tick: Duration) -> Result<Option<Response>, RecvError> {
             match self.rx.recv_timeout(tick) {
@@ -676,8 +711,20 @@ impl<'m, P: Peer> Conv<'m, P> {
         self.killed = true;
     }
 
+    /// Queue a request; while the writer is busy (the worker is not reading), keep polling
+    /// the cancel token and the watchdog.
     fn send(&mut self, r: &Request) -> Result<(), CoreError> {
-        self.peer.send(r).map_err(|_| self.died())
+        let mut frame = encode(r);
+        loop {
+            match self.peer.try_send(frame) {
+                Ok(None) => return Ok(()),
+                Ok(Some(back)) => frame = back,
+                Err(_) => return Err(self.died()),
+            }
+            self.monitor.cancel.check()?;
+            std::thread::sleep(TICK);
+            self.watch("the worker to read a request")?;
+        }
     }
 
     /// Observe the worker: raise its CPU limit on progress, kill it after `no_progress`
@@ -753,7 +800,12 @@ impl<'m, P: Peer> Conv<'m, P> {
                     }
                     .into());
                 }
-                Ok(Some(r)) => return Ok(r),
+                Ok(Some(r)) => {
+                    // A frame is not progress by itself: a worker sending frames that move
+                    // nothing forward is stopped as one that sends nothing.
+                    self.watch(waiting_for)?;
+                    return Ok(r);
+                }
                 Ok(None) => {}
                 Err(RecvError::Closed) => return Err(self.died()),
                 Err(RecvError::Proto(e)) => {
@@ -884,7 +936,7 @@ impl<'m, P: Peer> Conv<'m, P> {
 
     /// `Cancel`, a grace period for `Cancelled`, then the kill.
     fn cancel(&mut self) {
-        if self.killed || self.peer.send(&Request::Cancel).is_err() {
+        if self.killed || !matches!(self.peer.try_send(encode(&Request::Cancel)), Ok(None)) {
             self.kill();
             return;
         }
@@ -901,7 +953,7 @@ impl<'m, P: Peer> Conv<'m, P> {
 
     fn close(&mut self) {
         if !self.killed {
-            let _ = self.peer.send(&Request::Close);
+            let _ = self.peer.try_send(encode(&Request::Close));
             let _ = self.peer.exit_code(Duration::from_millis(500));
         }
         self.kill();
@@ -1360,7 +1412,7 @@ fn stream<P: Peer>(
 ) -> Result<(), CoreError> {
     let mut written = 0u64;
     let mut next_space_check = FREE_SPACE_STEP;
-    for batch in targets.chunks(MAX_INDICES) {
+    for batch in targets.chunks(MEMBER_BATCH) {
         conv.send(&Request::ReadMember {
             indices: batch.iter().map(|t| t.index).collect(),
         })?;
@@ -1374,6 +1426,10 @@ fn stream<P: Peer>(
             let mut received = 0u64;
             loop {
                 match conv.next("member data")? {
+                    Response::Data(d) if d.is_empty() => {
+                        conv.kill();
+                        return Err(protocol("an empty Data frame".into()));
+                    }
                     Response::Data(d) => {
                         let n = d.len() as u64;
                         if received.saturating_add(n) > t.size {

@@ -43,6 +43,11 @@ pub enum Fault {
     Litter,
     /// Panic at `Open`.
     Panic,
+    /// Answer `ReadMember` with empty `Data` frames, slowly, forever.
+    EmptyData,
+    /// Stop reading requests once `Open` and the first `List` are read (the host's
+    /// `ReadMember` is never read; a large one would fill the pipe).
+    HangReadMember,
 }
 
 #[cfg(feature = "faults")]
@@ -58,6 +63,8 @@ impl Fault {
             "slow-data" => Fault::SlowData,
             "litter" => Fault::Litter,
             "panic" => Fault::Panic,
+            "empty-data" => Fault::EmptyData,
+            "hang-read-member" => Fault::HangReadMember,
             _ => return None,
         })
     }
@@ -118,6 +125,8 @@ mod F {
     pub const SlowData: () = ();
     pub const Litter: () = ();
     pub const Panic: () = ();
+    pub const EmptyData: () = ();
+    pub const HangReadMember: () = ();
 }
 
 /// What the request thread hands on.
@@ -160,11 +169,21 @@ where
     }
     let (tx, rx) = mpsc::sync_channel::<Incoming>(16);
     let mut requests = requests;
+    let deaf_after = if cfg.is(F::HangReadMember) {
+        Some(2)
+    } else {
+        None
+    };
     let spawned = std::thread::Builder::new()
         .name("lpk-requests".into())
         .spawn(move || {
             let mut buf = Vec::new();
+            let mut read = 0u32;
             loop {
+                if deaf_after == Some(read) {
+                    sleep_forever();
+                }
+                read += 1;
                 match Request::read_from(&mut requests, &mut buf) {
                     Ok(Some(r)) => {
                         if tx.send(Incoming::Req(r)).is_err() {
@@ -424,6 +443,14 @@ fn stream(
     }
     let mut stop = Stop::No;
     let slow = cfg.is(F::SlowData);
+    if cfg.is(F::EmptyData) {
+        loop {
+            if Response::Data(Vec::new()).write_to(out).is_err() {
+                return Streamed::Pipe;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
     for &index in indices {
         if (Response::MemberStart { index }).write_to(out).is_err() {
             return Streamed::Pipe;

@@ -242,6 +242,52 @@ fn a_hanging_worker_times_out_within_the_limit() {
     assert!(!out.exists());
 }
 
+/// Empty `Data` frames move nothing forward: refused as a protocol error at once (and the
+/// watchdog runs on every frame, so frames without progress cannot hold it off).
+#[test]
+fn a_worker_sending_empty_data_is_stopped() {
+    let lim = short();
+    let (e, took, out, _w) = fault("empty-data", lim.clone());
+    assert!(
+        matches!(e, CoreError::Worker(WorkerError::Protocol { .. })),
+        "{e}"
+    );
+    assert!(took < lim.no_progress + SLACK, "{took:?}");
+    assert!(!out.join("d/a.txt").exists());
+}
+
+/// A worker that stops reading requests (its `ReadMember` never read) cannot block the
+/// broker: the request goes through a writer thread and the watchdog stops the worker.
+#[test]
+fn a_worker_not_reading_its_requests_times_out() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let many: Vec<Member> = (0..3000)
+        .map(|i| Member::file(&format!("f{i:04}"), b"x"))
+        .collect();
+    let archive = write_fixture(work.path(), &many, None);
+    let out = work.path().join("out");
+    let lim = short();
+    let t = Instant::now();
+    let e = foreign::extract_file(
+        &archive,
+        &out,
+        None,
+        &lpk_core::DefaultPolicy,
+        &Selection::all(),
+        &s.options(Some("hang-read-member"), lim.clone()),
+        &Monitor::default(),
+    )
+    .unwrap_err();
+    let took = t.elapsed();
+    assert!(
+        matches!(e, CoreError::Worker(WorkerError::Timeout { .. })),
+        "{e}"
+    );
+    assert!(took < lim.no_progress + SLACK, "{took:?}");
+    assert!(!out.join("f0000").exists());
+}
+
 #[test]
 fn a_worker_closing_its_pipe_is_a_pipe_error() {
     let (e, took, out, _w) = fault("close", short());
