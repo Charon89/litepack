@@ -406,6 +406,53 @@ fn a_cancellation_and_a_failure_with_blocks_held_leave_no_partial_file() {
     complete(&target, "panicked");
 }
 
+/// E2-25's thread budget: at `--threads 1` an export and an extraction decode the peeled JPEG
+/// on the calling thread alone (no stream handed to a pool); at 4 threads they decode on the
+/// workers, not the calling thread.
+#[test]
+fn one_thread_decodes_jpeg_streams_on_the_calling_thread_for_export_and_extraction() {
+    let dir = tempfile::tempdir().unwrap();
+    make_tree(dir.path());
+    let source = tree_files(dir.path());
+    let out = tempfile::tempdir().unwrap();
+    let archive = out.path().join("x.lpk");
+    fast().run_file(dir.path(), &archive).unwrap();
+    let delta = |f: &mut dyn FnMut()| {
+        let (a, b) = lpk_core::peel::jpeg::decode_paths();
+        f();
+        let (c, d) = lpk_core::peel::jpeg::decode_paths();
+        (c - a, d - b)
+    };
+    for threads in [1usize, 4] {
+        let opts = ExtractOptions {
+            threads: Some(threads),
+            ..ExtractOptions::default()
+        };
+        let expect = if threads == 1 { (1, 0) } else { (0, 0) };
+        let mut sink = Collect::default();
+        let paths = delta(&mut || {
+            export_file_with(&archive, &[], None, &mut sink, &opts, &Monitor::default()).unwrap();
+        });
+        assert_eq!(paths, expect, "export at {threads}");
+        assert_eq!(sink.entries.len(), 29);
+        let target = out.path().join(format!("x{threads}"));
+        let paths = delta(&mut || {
+            extract_file_with(
+                &archive,
+                &target,
+                &[],
+                None,
+                &DefaultPolicy,
+                &opts,
+                &Monitor::default(),
+            )
+            .unwrap();
+        });
+        assert_eq!(paths, expect, "extraction at {threads}");
+        assert_eq!(tree_files(&target), source);
+    }
+}
+
 /// A sink that collects the entries it is given.
 #[derive(Default)]
 struct Collect {

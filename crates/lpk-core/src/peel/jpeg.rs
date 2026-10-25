@@ -478,6 +478,22 @@ impl Drop for Lend<'_> {
 thread_local! {
     static DECODE_THREADS: std::cell::RefCell<Option<std::sync::Arc<DecodeThreads>>> =
         const { std::cell::RefCell::new(None) };
+    /// The streams this thread decoded on itself and those it handed to a pool.
+    static DECODE_PATHS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Test hook: the JPEG streams the current thread has decoded on itself alone and those whose
+/// partitions it handed to a pool (the library's default pool or the budget's), so far.
+#[doc(hidden)]
+pub fn decode_paths() -> (u64, u64) {
+    DECODE_PATHS.with(std::cell::Cell::get)
+}
+
+fn count_path(own: bool) {
+    DECODE_PATHS.with(|c| {
+        let (a, b) = c.get();
+        c.set(if own { (a + 1, b) } else { (a, b + 1) });
+    });
 }
 
 /// Puts the thread's previous budget back on drop.
@@ -507,8 +523,10 @@ pub fn with_decode_threads<T>(
 /// Decode `stream` under this thread's budget ([`with_decode_threads`]).
 fn budgeted_decode(stream: &[u8], max: usize, f: &mut EnabledFeatures) -> Result<Vec<u8>, Fail> {
     let Some(budget) = DECODE_THREADS.with(|b| b.borrow().clone()) else {
+        count_path(false);
         return lepton_decode(stream, max, f, &DEFAULT_THREAD_POOL);
     };
+    count_path(budget.total == 1);
     if budget.total == 1 {
         f.max_processor_threads = 1;
         return lepton_decode(stream, max, f, &SingleThreadPool::default());
