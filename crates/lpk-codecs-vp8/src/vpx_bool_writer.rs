@@ -28,9 +28,9 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 //   `drain_stats` and `flush_non_final_data` removed (the whole stream is buffered);
 // - the per-symbol step renamed `code_bit` (the public `put` is the one-symbol method);
 // - `put_n_bits` takes the value as `u64` and a context slice of any length, coding bit `i` with
-//   context `min(len - 1, i)`; `put_unary_encoded` takes a slice and checks `v <= len`
-//   the unary code always ends with a zero, coded with context `min(len - 1, i)` (so a value equal
-//   to the number of contexts takes `len + 1` symbols; lepton_jpeg's stops after `len` ones);
+//   context `min(len - 1, i)`; `put_unary_encoded` takes a slice of any length and codes `v` ones
+//   then a zero, symbol `i` with context `min(len - 1, i)` (so the zero is coded even when `v` is
+//   `len` or more; lepton_jpeg's stops after `len` ones and refuses `v > len`);
 // - `finish` implements the stream tail of spec section 8 instead of the minimal flush;
 // - `carry` returns instead of asserting when it runs past the first byte.
 
@@ -185,22 +185,22 @@ impl<W: Write> VPXBoolWriter<W> {
 
     /// Codes `v` unary with `branches`: `v` ones then a zero, symbol `i` with context
     /// `branches[min(branches.len() - 1, i)]`, so `v == branches.len()` ends with a zero coded
-    /// with the last context. `v` above `branches.len()` is refused.
+    /// with the last context, and a larger `v` reuses the last context for every further symbol.
     #[inline(always)]
     pub fn put_unary_encoded(&mut self, v: usize, branches: &mut [Branch]) -> Result<()> {
         let a = branches.len();
-        if v > a || a == 0 {
+        if a == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "put_unary_encoded: value above the number of contexts",
+                "put_unary_encoded: no context",
             ));
         }
 
         let mut tmp_value = self.low_value;
         let mut tmp_range = self.range;
 
-        // `v` ones then a zero; the zero after `a` ones uses the last context
-        for i in 0..=a {
+        // `v` ones then a zero; from symbol `a - 1` on, the last context
+        for i in 0..=v {
             let cur_bit = v != i;
 
             (tmp_value, tmp_range) =

@@ -127,7 +127,6 @@ fn unary_is_ones_then_a_zero_with_the_last_context_reused() {
 fn invalid_arguments_are_refused() {
     let mut out = Vec::new();
     let mut w = VPXBoolWriter::new(&mut out).unwrap();
-    assert!(w.put_unary_encoded(5, &mut ctx(4)).is_err());
     assert!(w.put_unary_encoded(0, &mut ctx(0)).is_err());
     assert!(w.put_n_bits(1, 65, &mut ctx(4)).is_err());
     assert!(w.put_n_bits(1, 1, &mut ctx(0)).is_err());
@@ -142,15 +141,29 @@ fn invalid_arguments_are_refused() {
 }
 
 #[test]
-fn more_ones_than_contexts_is_refused_by_the_reader() {
-    let out = encode(|wr| {
-        let mut c = ctx(3);
-        for i in 0..4 {
-            wr.put(true, &mut c[i.min(2)]).unwrap();
-        }
-    });
-    let mut r = VPXBoolReader::new(&out[..]).unwrap();
-    assert!(r.get_unary_encoded(&mut ctx(3)).is_err());
+fn unary_values_above_the_contexts_reuse_the_last_context() {
+    for (a, v) in [(4usize, 7usize), (1, 40), (3, 100)] {
+        let composite = encode(|wr| wr.put_unary_encoded(v, &mut ctx(a)).unwrap());
+        let single = encode(|wr| {
+            let mut c = ctx(a);
+            for i in 0..v {
+                wr.put(true, &mut c[i.min(a - 1)]).unwrap();
+            }
+            wr.put(false, &mut c[a - 1]).unwrap();
+        });
+        assert_eq!(composite, single, "value {v} contexts {a}");
+        let mut r = VPXBoolReader::new(&composite[..]).unwrap();
+        assert_eq!(r.get_unary_encoded(&mut ctx(a)).unwrap(), v);
+    }
+}
+
+#[test]
+fn unary_on_an_exhausted_stream_ends() {
+    let mut r = VPXBoolReader::new(&[0x7Fu8, 0xFF, 0xFF][..]).unwrap();
+    let mut c = ctx(2);
+    for _ in 0..10 {
+        r.get_unary_encoded(&mut c).unwrap();
+    }
 }
 
 #[test]
@@ -203,7 +216,9 @@ fn carries_propagate_through_ff_bytes() {
     // highly probable ones followed by improbable symbols make long 0xFF runs and carries
     let mut rng = Rng(99);
     for _ in 0..50 {
-        let syms: Vec<bool> = (0..20_000).map(|_| !rng.next().is_multiple_of(1000)).collect();
+        let syms: Vec<bool> = (0..20_000)
+            .map(|_| !rng.next().is_multiple_of(1000))
+            .collect();
         let out = encode(|wr| {
             let mut c = Branch::new();
             for &s in &syms {

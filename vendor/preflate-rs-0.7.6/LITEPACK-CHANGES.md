@@ -68,6 +68,21 @@ lists) far beyond what the archive declares.
    `src/stream_processor.rs` also gains a test module, `litepack_crafted`, whose ignored test
    writes the crafted record LitePack's tests use for this change.
 
+7. **The coder from `lpk-codecs-vp8` instead of `cabac`** (LitePack LIC-2, 2026-10-25). Upstream codes
+   its corrections with `cabac` 0.15.0 (LGPL-3.0-or-later). This copy depends on LitePack's
+   `lpk-codecs-vp8` (`crates/lpk-codecs-vp8`, Apache-2.0: the VP8 bool coder of `lepton_jpeg` 0.5.8
+   with the conventions of LitePack's spec section 8) instead: `Cargo.toml` names it in place of
+   `cabac`; `src/cabac_codec.rs` bounds its generic encoder and decoder by `lpk_codecs_vp8::Vp8Encode`
+   and `Vp8Decode` instead of `cabac`'s two traits, and its tests use `VPXBoolWriter`,
+   `VPXBoolReader` and `Branch`; `src/stream_processor.rs` uses `VPXBoolWriter` and `VPXBoolReader`.
+   The test-only helpers that used `cabac`'s debugging coder (`roundtree_cabac_correction`,
+   `decompress_deflate_stream_assert`, `recompress_deflate_stream_assert`,
+   `analyze_compressed_data_verify`) use the VP8 coder instead, so they still round-trip but no
+   longer check that no context is mixed up. The bytes are unchanged: `lpk-codecs-vp8`'s replay of
+   5,415 oracle streams (13 captured from this crate's analysis) and LitePack's vectors show the same
+   corrections as with `cabac`. The vendored `Cargo.lock` is upstream's and is not used (the
+   LitePack workspace and `fuzz/` have their own lockfiles); it still lists `cabac`.
+
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.
 

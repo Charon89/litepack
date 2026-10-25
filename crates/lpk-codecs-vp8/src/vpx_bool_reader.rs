@@ -30,8 +30,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 // - `get_n_bits` takes a context slice of any length, decodes bit `i` with context
 //   `min(len - 1, i)` and returns `u64` (up to 64 bits);
 // - `get_unary_encoded` takes a slice, decodes ones until a zero with context `min(len - 1, i)`
-//   (the writer's code always ends with a zero) and refuses a stream with more than `len` ones;
-//   it refills before every symbol instead of every seventh, since `len` may exceed 14.
+//   (the writer's code always ends with a zero), with no bound on the value; it refills before every symbol instead of every seventh, since `len` may exceed 14.
 
 use std::io::{Error, ErrorKind, Read, Result};
 
@@ -122,8 +121,8 @@ impl<R: Read> VPXBoolReader<R> {
     }
 
     /// Decodes a value written unary with `branches`: ones until a zero, symbol `i` with context
-    /// `branches[min(branches.len() - 1, i)]`. A stream with more than `branches.len()` ones is
-    /// refused (the writer never produces it).
+    /// `branches[min(branches.len() - 1, i)]`. The value has no bound (the loop ends: past the
+    /// end of the stream every symbol reads as zero once the code value is exhausted).
     #[inline(always)]
     pub fn get_unary_encoded(&mut self, branches: &mut [Branch]) -> Result<usize> {
         let a = branches.len();
@@ -137,11 +136,8 @@ impl<R: Read> VPXBoolReader<R> {
         let mut tmp_value = self.value;
         let mut tmp_range = self.range;
 
-        let mut result = Err(Error::new(
-            ErrorKind::InvalidData,
-            "get_unary_encoded: more ones than contexts",
-        ));
-        for value in 0..=a {
+        let mut value = 0usize;
+        loop {
             if tmp_value & VALUE_MASK == 0 {
                 tmp_value = Self::vpx_reader_fill(tmp_value, &mut self.upstream_reader)?;
             }
@@ -150,15 +146,15 @@ impl<R: Read> VPXBoolReader<R> {
                 &mut tmp_value,
                 &mut tmp_range,
             ) {
-                result = Ok(value);
                 break;
             }
+            value += 1;
         }
 
         self.value = tmp_value;
         self.range = tmp_range;
 
-        result
+        Ok(value)
     }
 
     /// Decodes a field of `n` bits written by

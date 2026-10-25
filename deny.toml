@@ -21,11 +21,11 @@ allow = [
   "MPL-2.0",
 ]
 confidence-threshold = 0.9
-# LGPL exceptions are allowed only by crate name (we are open source, so relinking is satisfied).
-# `cabac` is required by preflate-rs (D-22, docs/LICENSING.md); any further crate needs its own recorded decision (D-25, D-26).
-exceptions = [
-  { crate = "cabac", allow = ["LGPL-3.0-or-later"] },
-]
+# No exceptions: no copyleft crate is in the tree. The one LGPL-3.0 crate the engine had (`cabac`, behind the
+# vendored preflate-rs) was replaced by `lpk-codecs-vp8` (LIC-2, docs/LICENSING.md), so a closed build carries no
+# relinking duty. A future exception is allowed only by crate name, with its own recorded decision (D-25, D-26),
+# and must state what a closed build would then have to keep open.
+exceptions = []
 
 [licenses.private]
 ignore = true
