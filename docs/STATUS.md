@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-25, about 22:28 UTC. **E4-2 is done (D-99, PR #105): the broker protocol and the sandboxed worker.** E2-16's code (D-98) and E4-1 (D-97) are merged; E2-16's task E (revision 1.4's independence gate) is in review; the E5 design note is in review. Next measurements on the idle machine: E2-16's A/B on `small`, the delta probe on `full`, then E3-9. The owner's open items are below.
+Last updated: 2026-10-25, about 22:35 UTC. **A measurement round is running since 22:29 UTC** (`target/acceptance/measure-2026-10-25.sh`, status in `measure-2026-10-25-status.log`; several hours): E2-16's A/B on `small`, E2-9's delta probe on `full`, E3-9 on `full` (lpk fast, fast-no-jpeg, balanced and the store control in one run), the version-ordering A/B. No builds or tests on this machine until it says DONE; docs and reviews only. Merged today: LIC-2 (D-96), E2-9 tasks A/E (D-94), E2-25's code (D-95), E4-1 (D-97), E2-16's code (D-98, revision 1.4 — final with task E, PR #106, merging), E4-2 (D-99), the E4 and E5 design notes. The owner's open items are below (new: restoring the `Apache-2.0 WITH LLVM-exception` licence for E5-2).
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
