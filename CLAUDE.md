@@ -32,6 +32,7 @@ No neural tier in the product (research track only). Full rationale: `docs/LiteP
 - Bench (Phase 0): `cargo run -p lpk-bench -- corpus build --profile small` · `cargo run --release -p lpk-bench -- run --tools all` · `cargo run --release -p lpk-bench -- probe all --profile small` · `cargo run --release -p lpk-bench -- report --results bench/results/<dir> --probes bench/results/<dir>`
   (measured runs come from release builds; the runner and the probes refuse debug or dirty builds unless told otherwise)
 - All four of build, test, clippy and deny must pass before a task is marked done.
+- Worker workspace (`workers/`, E4-2; run inside it): `cargo build` · `cargo nextest run` and `cargo nextest run --features faults` · `cargo fmt --all` · `cargo clippy --all-targets -- -D warnings` (and with `--features faults`) · `cargo deny check`; from the repository root, `bash scripts/check-worker-symbols.sh` (no C codec symbol and no `faults` in the release worker). All of these pass before a task touching `workers/` is done.
 
 ## How to work
 - One PLAN task at a time. Read the task's acceptance criteria first; implement; prove each criterion
