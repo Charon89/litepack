@@ -27,7 +27,11 @@ fuzz_target!(|data: &[u8]| {
     let peak = (ALLOC.peak() - before) as u64;
     match r {
         Ok(out) => {
-            assert!(peak <= out.len() as u64, "peak {peak} over the output {}", out.len());
+            assert!(
+                peak <= out.len() as u64,
+                "peak {peak} over the output {}",
+                out.len()
+            );
             assert!(out.len() <= patch.len());
             let h = parse(patch, base.len() as u64).expect("a patch that applied parses");
             assert_eq!(h.out_len, out.len() as u64);
