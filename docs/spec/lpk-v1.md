@@ -7,6 +7,8 @@ Revision 1.2 (section 2) adds the decoding of `deflate-reconstruct` and the outp
 (section 8) and nothing else.
 Revision 1.3 (section 2) adds the decoding of `bwt` and the output bound of the step before it (section 8) and
 nothing else.
+Revision 1.4 (section 2) adds the decoding of `png-filter` and the output bound of the step before it (section 8)
+and nothing else.
 The specification revision of 2026-10-16 (E1-15) defines the recovery frames' Reed-Solomon code normatively in
 section 13 instead of by reference to a library; it changes no byte and no reader outcome, and `version_minor` is
 unchanged. Two text revisions of E2-20 (D-67) state that `threads_hint` is the writer's choice for store-only
@@ -88,7 +90,9 @@ Revisions. Version 1 grows by revisions that add the decoding of primitives the 
 `jpeg-reconstruct`") and nothing else. Revision 1.2 (minor 2) adds the decoding of `deflate-reconstruct` (0x0008,
 section 8 "Decoding `deflate-reconstruct`") and the output bound of the step before it (section 8, "Bounds"), and
 nothing else. Revision 1.3 (minor 3) adds the decoding of `bwt` (0x0003, section 8 "Decoding `bwt`") and the
-output bound of the step before it (section 8, "Bounds"), and nothing else. `version_minor` is the revision the
+output bound of the step before it (section 8, "Bounds"), and nothing else. Revision 1.4 (minor 4) adds the
+decoding of `png-filter` (0x0009, section 8 "Decoding `png-filter`") and the output bound of the step before it
+(section 8, "Bounds"), and nothing else. `version_minor` is the revision the
 writer wrote under, a declaration and
 not a fact about the archive's blocks: the archive may use any primitive of that revision or an earlier one, and
 none of a later one (section 8). A reader does not infer from the minor which primitives occur; it checks the
@@ -106,8 +110,12 @@ lists it, verifies its frames and records, and reports `UnimplementedPrimitive` 
 graph names `deflate-reconstruct`. Revision 1.3 follows it too: a writer of revision 1.3 writes 3 whether or not
 any block names `bwt` (informative: the reference pipeline writes 3 whenever its BWT stage is enabled), and a
 reader of revision 1.0, 1.1 or 1.2 accepts an archive of minor 3, lists it, verifies its frames and records, and
-reports `UnimplementedPrimitive` with the ID 3 for every block whose graph names `bwt`. A graph that names several
-primitives the reader does not run reports the first of them in step order.
+reports `UnimplementedPrimitive` with the ID 3 for every block whose graph names `bwt`. Revision 1.4 follows it
+too: a writer of revision 1.4 writes 4 whether or not any block names `png-filter` (informative: the reference
+pipeline writes 4 whenever its PNG filter undo is enabled), and a reader of revision 1.0, 1.1, 1.2 or 1.3 accepts
+an archive of minor 4, lists it, verifies its frames and records, and reports `UnimplementedPrimitive` with the ID
+9 for every block whose graph names `png-filter`. A graph that names several primitives the reader does not run
+reports the first of them in step order.
 
 A revision of the text that changes no byte and no reader outcome, only how completely something is described, does
 not change `version_minor`: the specification revision of 2026-10-16 writes out the Reed-Solomon code of the
@@ -650,8 +658,8 @@ reason. A `params` whose length differs from the layout's is `BadParams` with th
 
 Primitives 3 to 12. Revision 1.0 gives `bwt`, `bcj-x86`, `bcj-arm64`, `delta` and the six reconstruction
 primitives an ID, a parameter layout and their resources, but no decoding. Revision 1.1 specifies the decoding of
-`jpeg-reconstruct` (below), revision 1.2 that of `deflate-reconstruct` (below), and revision 1.3 that of `bwt`
-(below). A writer MUST NOT emit a primitive whose decoding no revision up to the archive's
+`jpeg-reconstruct` (below), revision 1.2 that of `deflate-reconstruct` (below), revision 1.3 that of `bwt`
+(below), and revision 1.4 that of `png-filter` (below). A writer MUST NOT emit a primitive whose decoding no revision up to the archive's
 `version_minor` specifies, and a reader MUST report `UnimplementedPrimitive` with the ID for a graph that names a
 primitive it does not run, before it runs any step (it still validates their parameters as above). Whether a
 reader runs a primitive depends on the reader alone, never on the archive's `version_minor` (section 2): a block
@@ -678,8 +686,8 @@ step's decoder, its output into the second step's, and the last output is the bl
 compressed with `bcj-x86` and then with `lzma` therefore writes the graph `[lzma, bcj-x86]`.
 
 Bounds. Every intermediate output is bounded by the archive's envelope `max_block_plain` (section 7), which the
-reader has already compared with its own resource; a larger one is `PayloadTooLarge` (revisions 1.2 and 1.3
-make exceptions, below). So whether a block decodes
+reader has already compared with its own resource; a larger one is `PayloadTooLarge` (revisions 1.2, 1.3 and
+1.4 make exceptions, below). So whether a block decodes
 never depends on the reader's resources beyond the checks that refuse the archive. The last step must produce
 exactly `plain_len` bytes; any other length, including a decoder
 that would produce more, is `BlockLengthMismatch`. A block whose `plain_len` exceeds `max_block_plain` is
@@ -716,16 +724,30 @@ I(65, B) = 141 for B >= 65), so an `out_len` below O can imply more input than I
 than the bound and is `PayloadTooLarge` at the step before, and check (4) is never reached. When `bwt` is the first step, its input is the encoded bytes and check (1)
 runs at the step itself.
 
+Revision 1.4. A step whose next step is `png-filter` has, as its output bound, the filtered length of the record
+that step names (section 8, "Decoding `png-filter`") instead of `max_block_plain`. Before the step runs, and before
+any of its own rules, the reader applies checks (1) to (4) of "Decoding `png-filter`" to that record, with the
+`png-filter` step's own output bound in check (4): the block's `plain_len` when that step is the last; otherwise the
+bound the look-ahead gives it (below): when the step after it is `deflate-reconstruct`, that record's `plain_len`,
+checks (1) to (5) of "Decoding `deflate-reconstruct`" having run first; otherwise `max_block_plain`. An error there
+is the block's error and the step does not run. The step's output longer than the filtered length is
+`PayloadTooLarge`; a shorter one is reported by the `png-filter` step (check (5), `BadRecord` `scanlines`). Checks
+(1) to (4) run again at the `png-filter` step with its actual output bound; a filtered length that passes one bound
+and not the other fails with the same class, `PayloadTooLarge`, at the step or before the step before it. When
+`png-filter` is the first step, its input is the encoded bytes and checks (1) to (4) run at the step itself. So in
+`[M, png-filter, deflate-reconstruct]` the `M` step is bounded by the image's filtered length, which is at most the
+`deflate` record's `plain_len`, and a text longer than `max_block_plain` decodes.
+
 The look-ahead. Revision 1.3 also states how a bounding step's own output bound is found, for every graph and
 whatever the archive's `version_minor`: by one level of look-ahead. Let S be a step that bounds its input
-(`deflate-reconstruct` or `bwt`) and let the step before S be about to run. S's own output bound is the block's
+(`deflate-reconstruct` or `bwt`, and from revision 1.4 `png-filter`) and let the step before S be about to run. S's own output bound is the block's
 `plain_len` when S is the last step; otherwise it is the input bound the step after S gives, when that step gives
 one, asked with the block's `plain_len` when it is the last step and `max_block_plain` otherwise (the look-ahead
 goes no further); otherwise `max_block_plain`. This is the rule of a reader of revision 1.3; a reader of revision
 1.2 keeps that revision's rule (the bound of the pre-checks never derived from a later step). The two differ only
 on a graph with a bounding step followed by another, which no writer emits. The step after S is asked only
-because S bounds its input: after a step that bounds nothing (any step but `deflate-reconstruct` or `bwt`) no
-later step is asked, and that step's output bound is `max_block_plain`, or `plain_len` when it is the last step.
+because S bounds its input: after a step that bounds nothing (any step but `deflate-reconstruct`, `bwt` or
+`png-filter`) no later step is asked, and that step's output bound is `max_block_plain`, or `plain_len` when it is the last step.
 The step after S is asked before S's own pre-checks, so an error
 of its pre-checks (its record, its term) is the block's error before anything runs. So in `[M, bwt,
 deflate-reconstruct]` the `bwt` step's O is the record's `plain_len` (checks (1) to (5) of
@@ -733,7 +755,7 @@ deflate-reconstruct]` the `bwt` step's O is the record's `plain_len` (checks (1)
 `max_block_plain` can be transformed and recreated. This replaces revision 1.2's sentence that the bound of the
 pre-checks is never derived from a later step; the classes are unchanged (`PayloadTooLarge` either way), and no
 graph a conforming writer produces is read differently (section 9: `deflate-reconstruct` is written last, `bwt`
-last or directly before it), only a graph with a bounding step followed by another, which no revision's writer
+last or directly before it, `png-filter` directly before it), only a graph with a bounding step followed by another, which no revision's writer
 emits. Every other intermediate output stays bounded by `max_block_plain`.
 
 Unknown IDs. A primitive ID that is not in the table is `UnknownPrimitive`, raised as soon as the ID is read
@@ -787,9 +809,9 @@ in exactly one of two groups (informative; the normative rule for 3 to 12 is abo
 
 For a primitive without a decoder the reference decoder reports `UnimplementedPrimitive` with the ID, before it
 runs any step of the graph. The reference decoder (`lpk-format`, `lpk-decode`) stays a revision 1.0 reader; the
-full reader of revisions 1.1, 1.2 and 1.3 is `lpk-core` (informative: it registers its `jpeg-reconstruct`,
-`deflate-reconstruct` and `bwt` decoders on an opened archive, and the `lpk` tool extracts and tests through it).
-`deflate-reconstruct` and `bwt` need the full reader.
+full reader of revisions 1.1, 1.2, 1.3 and 1.4 is `lpk-core` (informative: it registers its `jpeg-reconstruct`,
+`deflate-reconstruct`, `bwt` and `png-filter` decoders on an opened archive, and the `lpk` tool extracts and tests
+through it). `deflate-reconstruct`, `bwt` and `png-filter` need the full reader.
 
 ### Decoding `jpeg-reconstruct` (revision 1.1)
 
@@ -1063,6 +1085,63 @@ both named as information only.
   step (section 9; the reference writer refuses it elsewhere, `BadGraph`, `bwt position`), because the reader's
   look-ahead goes one step ("Bounds"); a reader decodes the step in any position, by the rules above.
 
+### Decoding `png-filter` (revision 1.4)
+
+The step re-encodes the row filters of one PNG image. Its input is a filtered text of the image and its output is
+the same image filtered with the filter bytes of its record (section 12, kind 9): the inflated IDAT data of the PNG
+file, which a writer places directly before a `deflate-reconstruct` step (section 9). Filtering is filter method 0
+of the PNG specification (W3C, Portable Network Graphics (PNG) Specification, third edition; ISO/IEC 15948),
+sections 7.2, 8.2 and 9, cited normatively; what a decoder needs of it is written out here.
+
+- The image. From the record: `width` and `height` (pixels), `bit_depth`, `color_type` and `interlace`. Samples
+  per pixel: 1 for colour type 0, 3 for 2, 1 for 3, 2 for 4, 4 for 6; bits per pixel b = samples × `bit_depth`.
+  The allowed pairs (PNG specification table 11.1): colour type 0 with depth 1, 2, 4, 8 or 16; type 3 with 1, 2, 4
+  or 8; types 2, 4 and 6 with 8 or 16. A scanline of w pixels has ⌈w × b / 8⌉ bytes (pixels packed most
+  significant bit first below depth 8, samples big-endian at depth 16; the bits of the last byte past the last
+  pixel are part of the scanline). The filter unit u is max(1, b / 8) bytes (b / 8 rounded down).
+- Passes. When `interlace` is 0 the image is one pass of `height` scanlines of `width` pixels. When it is 1
+  (Adam7) it is seven passes in this order, pass k holding the pixels at x = x0 + i·dx, y = y0 + j·dy with
+  (x0, y0, dx, dy) = (0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2),
+  (0, 1, 1, 2); a pass's width is ⌈(`width` − x0) / dx⌉ and its height ⌈(`height` − y0) / dy⌉ (0 when
+  `width` ≤ x0 or `height` ≤ y0), and a pass of width 0 or height 0 is empty: it has no scanline. The scanlines
+  of the image are those of its passes in pass order, top to bottom; the image's scanline count is their number,
+  and its filtered length F is the sum over its scanlines of 1 + the scanline's bytes, computed in 64-bit
+  unsigned arithmetic (a length past 2^64 − 1 has no value).
+- Filtered text. A filtered text of the image is, for each scanline in order, a filter byte t (0 to 4) and then
+  the scanline's bytes filtered with t: exactly F bytes. With x the raw byte being filtered, a the raw byte u
+  bytes to its left in the same scanline, b the raw byte above it (same position in the previous scanline of the
+  same pass), c the raw byte u bytes left of b, every one of a, b, c being 0 where it does not exist (the first u
+  bytes of a scanline have no a or c; the first scanline of each pass has no b or c), the filtered byte is
+  x − p modulo 256 with p = 0 for type 0 (None), a for 1 (Sub), b for 2 (Up), ⌊(a + b) / 2⌋ (computed without
+  overflow) for 3 (Average), and for 4 (Paeth) the predictor of a, b, c: with q = a + b − c, pa = |q − a|,
+  pb = |q − b|, pc = |q − c|, it is a when pa ≤ pb and pa ≤ pc, else b when pb ≤ pc, else c. Undoing a filter
+  adds p modulo 256, left to right, with a, b and c taken from the raw bytes already undone.
+- Decoding. The step's input is a filtered text of the image, any filter byte 0 to 4 per scanline (informative:
+  the reference writer gives every scanline type 2, Up). The output is the image's raw scanlines (the input with
+  its own filter bytes undone) filtered again with the record's `filters`, the i-th filter byte for the i-th
+  scanline: exactly F bytes. The output is the record's original exactly when its BLAKE3-256 is `original_hash`.
+- Order of checks, exactly as the reference performs them. Checks (1) to (4) need only the record. When a step
+  precedes the `png-filter` step they run before that step (section 8, "Bounds"), and again at the step itself;
+  when it is the first step they run at the step. (1) The record is looked up by its id (the errors of the
+  `Records` frame, section 12); (2) its kind is `png-filter` (`BadRecord`, `kind`); (3) the image, in this order:
+  `width` at least 1 (`BadRecord`, `width`), `height` at least 1 (`height`), a pair the list above allows
+  (`bit_depth`), one filter byte per scanline of the image, interlaced or not, and every filter byte at most 4
+  (`filters`); (4) F against the step's output bound: on the last step an F that differs from the block's
+  `plain_len` is `BlockLengthMismatch`; on a step that is not the last an F above the step's bound
+  (`max_block_plain`, or the bound "Bounds" gives), or an F past 2^64 − 1, is `PayloadTooLarge`; (5) the input
+  must be exactly F bytes (`BadRecord`, `scanlines`); (6) the re-filtering, scanline by scanline: an input
+  scanline whose filter byte is above 4 is `BadRecord`, `scanlines` (the first such scanline in order decides);
+  (7) an output whose BLAKE3-256 differs from `original_hash` is `BadRecord`, `original_hash`.
+- One block holds one image (the record names no chunk). A writer writes the step directly before a last
+  `deflate-reconstruct` step whose record's `plain_len` is F (informative: after exactly one `lzma` or `zstd`
+  step), and refuses it in another position (`BadGraph`, `png-filter not before deflate-reconstruct`); a reader
+  decodes the step in any position, by the rules above and "Bounds".
+- Resources: none (the registry row stands). The step holds its input and its output, both F bytes, and two
+  scanlines; F is bounded by check (4): by the next record's `plain_len`, whose `deflate-reconstruct` term counts
+  that many bytes as its input and seven more per byte, or by `max_block_plain` (informative: the reference drops
+  the step's input before the `deflate-reconstruct` step runs, and its test measures the decoder with a counting
+  allocator: the output, two scanlines and the record's copy).
+
 ### Normative decoders
 
 The decoding of a `zstd` step is that of RFC 8878 (Zstandard frames), and the decoding of an `lzma` step is that of
@@ -1121,7 +1200,8 @@ the step's parameters, the output length is the step's output bound). In the las
 bound is the block's `plain_len` and the decoder stops when it has produced exactly that many bytes. A step that
 is not the last has only a bound (the envelope's `max_block_plain`, or in revision 1.2 the `plain_len` of the
 record of a following `deflate-reconstruct` step, or in revision 1.3 the input length I(O, B) of a following
-`bwt` step, section 8 "Bounds"), so its stream MUST end with the
+`bwt` step, or in revision 1.4 the filtered length of a following `png-filter` step's record, section 8
+"Bounds"), so its stream MUST end with the
 end-of-payload marker: a stream without it that reaches the bound is `LzmaError` with the reason
 `marker required`, and one that ends early without it is `LzmaError` with `truncated`. Precisely, in a step that
 is not the last, once the output has reached the bound: a literal or match decoded next is `PayloadTooLarge` (rule
@@ -1306,6 +1386,23 @@ in such a block. A writer of a `[lzma, bwt, deflate-reconstruct]` block (a peele
 transformed; the reference writer does not produce one in revision 1.3) lays the stream out as the Deflate peel
 does and transforms its plain text before the model step.
 
+### How a writer lays out a peeled PNG image (revision 1.4, informative but exact)
+
+A PNG's IDAT stream is peeled as "How a writer lays out a peeled Deflate stream" says. The reference writer's
+Balanced tier then also tries the stream's inflated text with its row filters re-encoded, when the PNG's IHDR (the
+signature, then a 13-byte IHDR chunk) gives compression method 0, filter method 0, an allowed pair, a width and
+height of at least 1 and a filtered length equal to the inflated length, and every filter byte is at most 4; it
+skips images whose filter bytes are all 0 and palette images or images below depth 8 (the PNG specification
+recommends filter None for them, and re-encoding them saved nothing in the reference's measurement). The text
+filtered with Up on every scanline is encoded by the same model step as the plain text, and the smaller cost wins,
+the side information counted: the `png-filter` record and its graph step. When the re-encoding wins, the stream's
+records are its `deflate` record (as above) and then its `png-filter` record: the IHDR's `width`, `height`,
+`bit_depth`, `color_type` and `interlace`, the filter byte of every scanline in order, and `original_hash` the
+BLAKE3-256 of the inflated text; the block's graph is `[M, png-filter {png record}, deflate-reconstruct {deflate
+record}]`, where `M` encodes the Up text; the writer declares the `deflate` record's term as for any peeled stream
+(`png-filter` adds none). It writes the step only when the re-filtering reproduces the inflated text byte for byte.
+A reader before revision 1.4 extracts every file that has no chunk in such a block.
+
 ### Reading one block at a time
 
 A reader reads a chunk by finding its block in the chunk index, reading that block's frame, decoding the block
@@ -1393,7 +1490,7 @@ does not check that. `BadPriorList` as above.
 The archives under `crates/lpk-format/tests/vectors/` are written by the reference writer with a zstd or an LZMA encoder
 (zstd level 3 or LZMA preset 6, chunk size 4096, archive id 0x5A repeated, entry mtime 1000). Their plain contents are generated by
 the tests from seeded patterns, so the repository holds the archives and their side files (the dictionary,
-the keyfile, `vectors.toml`, `expected.toml`, `expected-1.1.toml`, `expected-1.2.toml` and `expected-1.3.toml`), not the contents. These are the zstd and LZMA vectors; the others
+the keyfile, `vectors.toml`, `expected.toml`, `expected-1.1.toml`, `expected-1.2.toml`, `expected-1.3.toml` and `expected-1.4.toml`), not the contents. These are the zstd and LZMA vectors; the others
 are listed in `docs/spec/CONFORMANCE.md`:
 
 - `zstd-basic.lpk`: three files in one block, `window_log` 20.
@@ -1430,6 +1527,18 @@ are listed in `docs/spec/CONFORMANCE.md`:
   -- --ignored regenerate` regenerates it and the two malformed revision 1.3 vectors (`docs/spec/CONFORMANCE.md`),
   and the same liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce the bytes
   (the transform itself is unique by definition).
+- `png-filter.lpk` (revision 1.4): four PNG files, each IDAT stream peeled as one block `[M, png-filter,
+  deflate-reconstruct]` (section 9): `image.png` (the Deflate fixture, RGB 8-bit 64 × 48, filter None
+  throughout, three IDAT chunks; its inflated text, 9264 bytes, is above `max_block_plain`, 8174, the bound of
+  section 8, "Bounds"), M `lzma`; `sprite.png` (RGB 8-bit 40 × 30, the five filter types in turn, two IDAT chunks),
+  M `lzma`; `grey2-adam7.png` (grey 2-bit 400 × 3, Adam7 with an empty third pass, Sub and Paeth rows), M `zstd`,
+  its step input filtered with Paeth throughout rather than Up (a decoder undoes the input's own filter bytes);
+  `rgba16.png` (RGBA 16-bit 9 × 7, Average and Paeth rows), M `lzma`; and `readme.txt`, a plain block every
+  reader extracts. Built by `crates/lpk-core/tests/png_filter_vector.rs` with explicit encoders (chunk size 4096,
+  block size 8 KiB, archive id 0x5B repeated, minor 4); the three generated PNGs are deflated by the workspace's
+  `flate2` (zlib backend, level 9); `cargo test -p lpk-core --test png_filter_vector -- --ignored regenerate`
+  regenerates it and the seven malformed revision 1.4 vectors (`docs/spec/CONFORMANCE.md`), and the same zlib,
+  liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce the bytes.
 
 The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts
 it (with `--prior tests/vectors/zstd-dict.prior` for the dictionary one). The full list of vectors, including the
@@ -1638,7 +1747,8 @@ JPEG and Deflate libraries of the full reader; revision 1.1's full reader applie
 "Decoding `jpeg-reconstruct`"), reading the chunks a record names through the archive's blocks, which by the
 nesting rule above are plain blocks (the reference full reader refuses any other with `nested record`); revision
 1.2's full reader applies `deflate` records too (section 8, "Decoding `deflate-reconstruct`"), which name no
-chunks. Whole-archive
+chunks, and revision 1.4's full reader `png-filter` records (section 8, "Decoding `png-filter`"), which name none
+either. Whole-archive
 verification (section 9), whenever the index lists a
 `Records` frame, reads it and walks every record (a damaged frame is `HashMismatch`), checks the chunk indices,
 chunk sums and block order above, and checks the record ids of every block graph, all before it decodes a block,
@@ -2234,7 +2344,7 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `Truncated` | `what`: `header`, `frame header`, `payload`, `hash`, `entry table`, `chunk table`, `index`, `trailer`, `graph`, `block header`, `records`, `record body`, `recovery`, `frames` | input or a payload ends inside the named part (2 to 15) |
 | `HashMismatch` | `kind` | a frame's payload does not match its hash (3, 6, 9) |
 | `UnknownMustUnderstand` | `kind` | an unknown kind with MUST_UNDERSTAND (3) |
-| `PayloadTooLarge` | `len`, `max` | a `payload_len` above the frame limit (3); a block `plain_len` or an intermediate output above `max_block_plain`, a non-final step's output past its bound (a record's `plain_len`, a `bwt` step's I(O, B)), a non-final `deflate-reconstruct` record's `original_len` or a non-final `bwt` step's `out_len` above the step's bound (8) |
+| `PayloadTooLarge` | `len`, `max` | a `payload_len` above the frame limit (3); a block `plain_len` or an intermediate output above `max_block_plain`, a non-final step's output past its bound (a record's `plain_len`, a `bwt` step's I(O, B), a `png-filter` record's filtered length), a non-final `deflate-reconstruct` record's `original_len`, a non-final `bwt` step's `out_len` or a non-final `png-filter` record's filtered length above the step's bound (8) |
 | `UnsortedEntries` | `index` | entry table: a path not greater than the previous one (4) |
 | `UnsupportedEntryKind` | `kind`, `index` | entry table: an unknown entry kind (4) |
 | `ReservedEntryBits` | `bits`, `index` | entry table: a reserved entry flag bit (4) |
@@ -2261,7 +2371,7 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `Refused` | `field`, `needed`, `allowed` | the archive needs more than the reader allows: an envelope field, `argon2_m`, `recovery group`; a reconstruction step's or a `bwt` step's term, `decode_memory` (7, 8, 13, 14) |
 | `UnknownPrimitive` | `id` | a primitive ID not in the registry (8) |
 | `UnimplementedPrimitive` | `id` | a primitive the reader does not run (8) |
-| `BadGraph` | `reason`: `step count`, `step flags`, `params length`; writer: `deflate-reconstruct not last`, `undecoded primitive`, `bwt position` | the decode graph (8) |
+| `BadGraph` | `reason`: `step count`, `step flags`, `params length`; writer: `deflate-reconstruct not last`, `undecoded primitive`, `bwt position`, `png-filter not before deflate-reconstruct` | the decode graph (8) |
 | `BadParams` | `id`, `reason` | a primitive's parameters break its layout; `frame window exceeds declared` (8) |
 | `WindowTooLarge` | `needed`, `allowed` | a step's window above the reader's `max_window` (8) |
 | `ZstdError` | `reason` | a `zstd` step's input (8) |
@@ -2274,7 +2384,7 @@ text names one) is normative; the message text is not. "Reader" classes come fro
 | `ReservedRecordBits` | `bits`, `record` | records: non-zero record flags (12) |
 | `RecordHashMismatch` | `record` | records: a body that does not match `body_hash` (12) |
 | `RecordOutOfRange` | `record`, `count` | a block names a record the archive does not have (12) |
-| `BadRecord` | `record`, `reason` | a record body breaks its rules (12); a reconstruction step's checks (8), for `deflate-reconstruct` the reasons `kind`, `corrections`, `plain_len`, `original_len` and `original_hash` |
+| `BadRecord` | `record`, `reason` | a record body breaks its rules (12); a reconstruction step's checks (8), for `deflate-reconstruct` the reasons `kind`, `corrections`, `plain_len`, `original_len` and `original_hash`, for `png-filter` the reasons `kind`, `width`, `height`, `bit_depth`, `filters`, `scanlines` and `original_hash`; writer: `filtered length` (a `png-filter` record whose filtered length is not the `deflate` record's `plain_len`) |
 | `BadRecovery` | `reason` | a recovery payload breaks its rules (13) |
 | `Unrepairable` | `frame`, `damaged`, `capacity` | repair: more damaged shards than a frame can rebuild (13) |
 | `RecoveryError` | `reason` | repair: a rebuilt shard does not match its hash (13) |

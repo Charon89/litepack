@@ -11,10 +11,10 @@ An independent decoder passes the gate when, for every archive in the table belo
 2. it extracts every entry bit-exactly: for each line of `files` in `tests/vectors/expected.toml` the path,
    the byte length and the BLAKE3-256 of the extracted bytes are equal, in entry-table order;
 3. its `verify` is clean: every frame hash, every block's decoded length, every chunk hash, the index's Merkle
-   root and its `entry_table_hash` check out, for a revision 1.1, 1.2 or 1.3 vector every record's `original_hash`
+   root and its `entry_table_hash` check out, for a revision 1.1, 1.2, 1.3 or 1.4 vector every record's `original_hash`
    too (spec section 8), the extracted entries match the hashes of `files` in `expected.toml` (`expected-1.1.toml`
    for the revision 1.1 vectors, `expected-1.2.toml` for the revision 1.2 vector, `expected-1.3.toml` for the
-   revision 1.3 vector), and it reports no error;
+   revision 1.3 vector, `expected-1.4.toml` for the revision 1.4 vector), and it reports no error;
 4. its `list` output, if it has one in the reference format, is `list` of `expected.toml`; its `verify` summary,
    likewise, is `verify` (`ok: <entries> entries, <chunks> chunks, <blocks> blocks`). Only the facts matter (entry
    count, chunk count, block count); the wording of a different tool is free;
@@ -53,7 +53,8 @@ One TOML table per vector, named by the file name in quotes (`["zstd-basic.lpk"]
 | `check` | string | `recovery-groups.lpk` | the stdout of `lpk-decode check` |
 | `latest_generation` | integer | `journal-3gen.lpk` | the generation of the last trailer |
 | `files_at_generation_<g>` | array of strings | `journal-3gen.lpk` | `files` after a rollback to generation `<g>`, for each `<g>` below `latest_generation` |
-| `error` | string | `malformed-*` without `recovery` (for `malformed-deflate-bound.lpk`, in `expected-1.2.toml`; for `malformed-bwt-bound.lpk` and `malformed-bwt-inverse.lpk`, in `expected-1.3.toml`) | the error class |
+| `error` | string | `malformed-*` without `recovery` (for `malformed-deflate-bound.lpk`, in `expected-1.2.toml`; for `malformed-bwt-bound.lpk` and `malformed-bwt-inverse.lpk`, in `expected-1.3.toml`; for the seven `malformed-png-filter-*.lpk`, in `expected-1.4.toml`) | the error class |
+| `reason` | string | the `malformed-png-filter-*.lpk` tables of `expected-1.4.toml` whose `error` is `BadRecord` | the `reason` of the error (normative, spec section 16) |
 | `message` | string | the same | the reference reader's message (informative) |
 | `recovery_frames` | integer | `malformed-recovery-damaged.lpk` | recovery frames the index lists |
 | `shards_damaged` | integer | the same | damaged data shards `check` reports |
@@ -66,6 +67,7 @@ One TOML table per vector, named by the file name in quotes (`["zstd-basic.lpk"]
 | `info`, `error_1_0`, `message_1_0`, `verify_exit_1_0`, `verify_stderr_1_0` | as above | `deflate-peel.lpk`, `malformed-deflate-bound.lpk` | the same keys for every reader before revision 1.2 (`UnimplementedPrimitive`, ID 8) |
 | `files_1_0` | array of strings | `deflate-peel.lpk`, `malformed-deflate-bound.lpk` | the lines of `files` (same format) for the entries a reader before revision 1.2 extracts: those with no chunk in a `deflate-reconstruct` block |
 | `info`, `error_1_0`, `message_1_0`, `verify_exit_1_0`, `verify_stderr_1_0`, `files_1_0` | as above | `bwt-text.lpk`, `malformed-bwt-bound.lpk`, `malformed-bwt-inverse.lpk` | the same keys for every reader before revision 1.3 (`UnimplementedPrimitive`, ID 3; `files_1_0` the entries with no chunk in a `bwt` block) |
+| `info`, `error_1_0`, `message_1_0`, `verify_exit_1_0`, `verify_stderr_1_0`, `files_1_0` | as above | `png-filter.lpk` and the seven `malformed-png-filter-*.lpk` | the same keys for every reader before revision 1.4 (`UnimplementedPrimitive`, ID 9; `files_1_0` the entries with no chunk in a `png-filter` block) |
 
 A decoder needs only `files`, `latest_generation`, `files_at_generation_<g>`, `error` and the recovery counts; the
 stdout strings matter only to a decoder that prints the reference formats.
@@ -112,6 +114,7 @@ Graph = the block graph of the data blocks. Recovery = recovery frames present. 
 | `deflate-peel.lpk` | zstd, `[lzma, deflate-reconstruct]` and `[zstd, deflate-reconstruct]` (revision 1.2, header minor 2) | no | 1 | a revision 1.2 reader | four peeled Deflate streams (two ZIP members, a PNG's IDAT stream over three spans, a gzip member) as section 9 lays them out: both model steps as non-final steps, one inflated text above `max_block_plain` (the bound of section 8), ZIP, PNG and gzip framing as plain chunks, four `deflate` records; a plain text file every reader extracts; see below |
 | `journal-record.lpk` | store and `jpeg-reconstruct` (revision 1.1, header minor 1) | no | 2 | a revision 1.1 reader | generation 0 holds a store-encoded text file; generation 1 is an append that adds a peeled JPEG (as in `jpeg-peel.lpk`): an appended generation's `Records` frame restates the old records (none here) and adds one, and the appended blocks name a record by its position in that frame |
 | `bwt-text.lpk` | zstd, `[lzma, bwt]`, `[bwt]`, `[zstd, bwt]` and `[lzma, bwt, deflate-reconstruct]` (revision 1.3, header minor 3) | no | 1 | a revision 1.3 reader | text through the Burrows-Wheeler transform before LZMA or zstd, in BWT blocks of 4096, 16384, 1 and 8192 bytes: blocks exactly `max_block_plain` long whose `lzma` output is longer (the bound I(O, B) of spec section 8, "Bounds"), a short last BWT block, a first-step `bwt` of one byte, a long run and every byte value, and a peeled gzip stream whose inflated text is above `max_block_plain` and transformed (the look-ahead); a plain text file every reader extracts; see below |
+| `png-filter.lpk` | zstd, `[lzma, png-filter, deflate-reconstruct]` and `[zstd, png-filter, deflate-reconstruct]` (revision 1.4, header minor 4) | no | 1 | a revision 1.4 reader | four PNG files whose IDAT streams are peeled and whose row filters are re-encoded (spec section 9): RGB 8-bit with filter None and three IDAT chunks, its inflated text above `max_block_plain` (the bound of section 8); RGB 8-bit with all five filter types over two IDAT chunks; grey 2-bit Adam7 with an empty pass, its step input filtered with Paeth instead of Up; RGBA 16-bit with Average and Paeth rows; eight records (`deflate` then `png-filter` per image); a plain text file every reader extracts; see below |
 
 The passwords and the keyfile are also in `tests/vectors/vectors.toml` (test values, not secrets). The four sealed
 vectors (`sealed-*`) decode to the same three files.
@@ -122,7 +125,7 @@ Recovery expectations (`expected.toml`): for `recovery-groups.lpk` `check` print
 reports 1 damaged shard and exits 1, and `repair` writes a copy that is byte-identical to `recovery-groups.lpk`
 (1 shard repaired). The other vectors carry no recovery frames, so `check` finds nothing to scan on them.
 
-Apart from `jpeg-peel.lpk`, `journal-record.lpk`, `deflate-peel.lpk` and `bwt-text.lpk`, the vectors do not exercise the
+Apart from `jpeg-peel.lpk`, `journal-record.lpk`, `deflate-peel.lpk`, `bwt-text.lpk` and `png-filter.lpk` (and their malformed companions), the vectors do not exercise the
 primitives 3 to 12; a decoder that meets one it does not run reports `UnimplementedPrimitive` and does not guess.
 
 `jpeg-peel.lpk` and `journal-record.lpk` (revision 1.1). Which expectations apply depends on the decoder's
@@ -183,9 +186,32 @@ regenerate`, then `cargo test -p lpk-format --test conformance -- --ignored`; by
 liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions (the transform is unique by definition). Its
 contents are generated by the test, except `notes.txt.gz`, a committed fixture of the Deflate vector.
 
+`png-filter.lpk` (revision 1.4). For this vector and its seven malformed companions the `_1_0` keys of
+`expected.toml` describe every reader before revision 1.4 (a revision 1.1, 1.2 or 1.3 reader included: none runs
+`png-filter`):
+
+- A reader before revision 1.4 reads the `["png-filter.lpk"]` table of `expected.toml`. It MUST open the vector,
+  list it (key `list`), print `info` (key `info`: `format: 1.4`, `records: true`), verify its frames and records,
+  and report `UnimplementedPrimitive` with the ID 9 from `verify` (keys `error_1_0`, `message_1_0`,
+  `verify_exit_1_0`, `verify_stderr_1_0`) and from extracting any entry with a chunk in a `png-filter` block (the
+  first unrun primitive in step order: `png-filter` comes before `deflate-reconstruct`); it MUST extract the
+  entries of the key `files_1_0` (`readme.txt`) bit-exactly.
+- A revision 1.4 decoder reads `expected-1.4.toml` (keys `files` and `verify`); `list` and `info` of
+  `expected.toml` apply to it as well. It MUST extract every entry to the bytes of `files` and `verify` the vector
+  (exit code 0): each `png-filter` step undoes its input's own filter bytes and filters the rows again with the
+  record's, as spec section 8 ("Decoding `png-filter`") defines it; the `lzma` or `zstd` step before it is bounded
+  by the image's filtered length, learnt before that step runs from the `deflate` record after it (spec section 8,
+  "Bounds": `image.png`'s inflated text is above `max_block_plain`). `expected-1.4.toml` is checked by
+  `cargo test -p lpk-core --test png_filter_vector`.
+
+To regenerate the vector and its malformed companions: `cargo test -p lpk-core --test png_filter_vector --
+--ignored regenerate`, then `cargo test -p lpk-format --test conformance -- --ignored`; byte identity needs the
+same zlib (`flate2`), liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions. `image.png` is a committed
+fixture of the Deflate vector; the other contents are generated by the test.
+
 ## Malformed vectors
 
-The first two are derived from `zstd-basic.lpk` (the third from the recovery vector, see above; the fourth, fifth and sixth are built by lpk-core, see their rows) by `tests/conformance.rs` (the test checks the committed bytes against
+The first two are derived from `zstd-basic.lpk` (the third from the recovery vector, see above; the others are built by lpk-core, see their rows) by `tests/conformance.rs` (the test checks the committed bytes against
 the derivation, so they cannot drift).
 
 | Archive | Derivation | Required outcome |
@@ -195,6 +221,10 @@ the derivation, so they cannot drift).
 | `malformed-hashflip.lpk` | one bit flipped in the middle of the first block's frame | open succeeds (the damage is in the body); `verify`, and extracting any file of that block, fails with `HashMismatch` of kind 2 ("payload hash mismatch in frame kind 2", the `ChunkData` frame), never `ChunkMismatch` (spec section 9) |
 | `malformed-bwt-bound.lpk` | built by lpk-core's `tests/bwt_vector.rs` (revision 1.3, header minor 3): the first block of `prose.txt` as `[lzma, bwt {4096}]` with 64 junk bytes appended to the `bwt` step's input before the `lzma` step encodes it, and `readme.txt` | a revision 1.3 reader: open succeeds; `verify`, and extracting `prose.txt`, fail with `PayloadTooLarge` (the `lzma` step's output crosses its bound I(O, B), spec section 8 "Bounds" and lzma rule 6, before the `bwt` step runs; keys `error` and `message` of its table in `expected-1.3.toml`; only the class is normative; the reference reports `max` = I(O, B) = 16904); `readme.txt` extracts. A reader before revision 1.3: the `_1_0` keys of its `expected.toml` table, as for `bwt-text.lpk` (`UnimplementedPrimitive`, ID 3; `files_1_0` is `readme.txt`) |
 | `malformed-bwt-inverse.lpk` | built by the same test: the first block of `prose.txt` as `[lzma, bwt {16384}]`, one BWT block of 32 indices whose second index (index[1]) is replaced by the third (in range), and `readme.txt` | a revision 1.3 reader: open succeeds; `verify`, and extracting `prose.txt`, fail with `BwtError` `inverse` (check (5) of spec section 8 "Decoding `bwt`": the chain from index[1] does not end on index[2]; a decoder that walked from the primary index alone would produce the text and does not conform); `readme.txt` extracts. A reader before revision 1.3: the `_1_0` keys, as above |
+| `malformed-png-filter-bound.lpk` | built by lpk-core's `tests/png_filter_vector.rs` (revision 1.4, header minor 4): `sprite.png` as `[lzma, png-filter, deflate-reconstruct]` whose `deflate` record's `plain_len` is one below the image's filtered length, and `readme.txt` | a revision 1.4 reader: open succeeds; `verify`, and extracting `sprite.png`, fail with `PayloadTooLarge` (check (4) of "Decoding `png-filter`" against the bound the look-ahead gives, before the `lzma` step runs; spec section 8 "Bounds"; keys `error` and `message` of its table in `expected-1.4.toml`; the reference reports `len` = the filtered length, 3630, and `max` = the record's `plain_len`, 3629); `readme.txt` extracts. A reader before revision 1.4: the `_1_0` keys of its `expected.toml` table, as for `png-filter.lpk` (`UnimplementedPrimitive`, ID 9; `files_1_0` is `readme.txt`) |
+| `malformed-png-filter-width.lpk`, `-height`, `-bit-depth`, `-filters` | built by the same test: `sprite.png`'s `png-filter` record with `width` 0; `height` 0 (and no filter byte, so the record parses); `bit_depth` 4 with colour type 2; its fourth filter byte 5 | a revision 1.4 reader: `verify`, and extracting `sprite.png`, fail with `BadRecord` and the reason `width`, `height`, `bit_depth` or `filters` (check (3), before the `lzma` step runs; keys `error` and `reason`); `readme.txt` extracts. A reader before revision 1.4: the `_1_0` keys, as above |
+| `malformed-png-filter-scanlines.lpk` | built by the same test: `sprite.png`'s step input one byte short (the `lzma` step encodes the Up text less its last byte) | a revision 1.4 reader: `BadRecord` `scanlines` (check (5)); `readme.txt` extracts. A reader before revision 1.4: the `_1_0` keys, as above |
+| `malformed-png-filter-hash.lpk` | built by the same test: `sprite.png`'s `png-filter` record with one bit of `original_hash` flipped | a revision 1.4 reader: `BadRecord` `original_hash` (check (7)); `readme.txt` extracts. A reader before revision 1.4: the `_1_0` keys, as above |
 
 A decoder may name the errors differently; the class matters: a cut-off file is reported as truncated, a changed
 byte as a hash mismatch, and never as success or as a crash.

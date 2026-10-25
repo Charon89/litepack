@@ -250,3 +250,41 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    checks, the term, the bound and its look-ahead from the text alone, with `--revision 0..3`; the revision is final
    when it passes. Passed on 2026-10-18 (D-78 (8)): every outcome of `expected-1.3.toml` at revision 3, the
    `UnimplementedPrimitive` 3 outcomes at revisions 0-2; its two points are item 3's R36 clarification.
+
+## 2026-10-25 — revision 1.4: png-filter decoding (draft until its independence gate)
+
+1. `version_minor` 4 for revision 1.4, with the declaration rule of 1.1 to 1.3: a 1.4 writer writes 4 whether or
+   not a block names `png-filter`; a reader of revision 1.0 to 1.3 accepts minor 4, lists the archive, verifies its
+   frames and records, and reports `UnimplementedPrimitive` (9) for the blocks that name the primitive (section 2;
+   code: the writer refuses 0x0009 under a minor below 4, and anywhere but directly before a last
+   `deflate-reconstruct`, `BadGraph` `png-filter not before deflate-reconstruct`; with the records it holds it also
+   checks the `png-filter` record's kind, its image (check (3)) and that its filtered length is the `deflate`
+   record's `plain_len`, `BadRecord` `filtered length`).
+2. `png-filter` (0x0009) decodes: the input is a filtered text of the image under filter method 0 (any filter byte
+   0 to 4 per scanline; the reference writer gives every scanline Up, the layout E2-16's probe measured best), the
+   output the image filtered with the record's filter bytes; the geometry (samples per pixel, packed rows, the
+   filter unit, Adam7's passes with empty passes having no scanline), the five filter types and Paeth's tie order
+   are written out, the PNG specification (third edition, ISO/IEC 15948) cited normatively. Checks (1) to (7) in
+   the reference's order: the record, its kind, the image (`width`, `height`, `bit_depth`, `filters`), the filtered
+   length against the output bound (`BlockLengthMismatch` on the last step, `PayloadTooLarge` otherwise or past
+   2^64 − 1), the input length and the input's filter bytes (`scanlines`), the output's hash (`original_hash`).
+   Resources: none (the registry row stands); the record body is unchanged (section 12).
+3. The step before `png-filter` is bounded by the record's filtered length instead of `max_block_plain`, with checks
+   (1) to (4) applied before it runs, and `png-filter` joins the steps that bound their input in the look-ahead, so
+   in `[M, png-filter, deflate-reconstruct]` the `deflate` record's `plain_len` is the `png-filter` step's bound and
+   a text above `max_block_plain` decodes (section 8 "Bounds", and the bound in the `lzma` section). No graph
+   without `png-filter` is read differently (code: none in the reader; task A of E2-16 pins the look-ahead on the
+   real IDs).
+4. How the reference writer lays out a re-filtered PNG stream: its `deflate` record, then its `png-filter` record,
+   the block `[M, png-filter, deflate-reconstruct]` with M encoding the Up text, chosen per stream by the smaller
+   cost with the side information counted, never for images whose filter bytes are all 0, palette images or images
+   below depth 8 (section 9, informative).
+5. New vector `png-filter.lpk` (section 11) with `expected-1.4.toml` (full reader: `files`, `verify`) and a
+   `["png-filter.lpk"]` table in `expected.toml` (a pre-1.4 reader: `list`, `info`, `UnimplementedPrimitive` (9),
+   `files_1_0`); seven malformed vectors, one per outcome: `malformed-png-filter-bound.lpk` (`PayloadTooLarge`
+   before the model step runs), `-width`, `-height`, `-bit-depth`, `-filters`, `-scanlines` and `-hash`
+   (`BadRecord` with that reason), with their tables and CONFORMANCE rows; `expected-1.4.toml` carries a `reason`
+   key for the `BadRecord` ones. No byte of an earlier vector changed.
+6. Section 16 extends the `PayloadTooLarge`, `BadGraph` and `BadRecord` rows.
+7. The independent-decoder gate (D-49 item 5, D-78 (8)'s rule) is task E of E2-16: `lpk-check` adds the step, the
+   bound and its look-ahead from the text alone, with `--revision 0..4`; the revision is final when it passes.
