@@ -4,7 +4,7 @@
 //!   corpus   build the public corpus or scan a private folder (docs/CORPUS.md)
 //!   run      run baseline tools over the corpus with round-trip verification
 //!   probe    component probes: jpeg | deflate | dedup | text | weights | entropy-gate | bwt |
-//!            png-filter | text-encodings
+//!            png-filter | text-encodings | delta
 //!   report   generate bench/reports/phase0-<date>.md from bench/results
 //!
 //! Every number LitePack ever quotes must come from this tool's committed JSON output.
@@ -31,7 +31,7 @@ enum Command {
     Corpus(corpus::CorpusArgs),
     /// Run baseline tools over the corpus with round-trip verification (PLAN P0-3)
     Run(run::RunArgs),
-    /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate, bwt, png-filter, text-encodings (PLAN P0-4, E2-15 to E2-17)
+    /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate, bwt, png-filter, text-encodings, delta (PLAN P0-4, E2-15 to E2-17, E2-9)
     Probe(probe::ProbeArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
     Report(report::ReportArgs),
@@ -122,6 +122,7 @@ mod tests {
             "bwt",
             "png-filter",
             "text-encodings",
+            "delta",
             "all",
         ] {
             let cli = Cli::try_parse_from(["lpk-bench", "probe", name]).expect("parse");

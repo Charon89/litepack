@@ -835,6 +835,7 @@ mod tests {
             scratch,
             local_tools: PathBuf::from(local),
             tool_timeout: Duration::from_secs(120),
+            rows: Vec::new(),
         };
         run(&ctx).expect("run")
     }
@@ -1094,6 +1095,7 @@ mod tests {
             scratch: tmp.path().to_path_buf(),
             local_tools: PathBuf::from("none.toml"),
             tool_timeout: Duration::from_secs(60),
+            rows: Vec::new(),
         };
         let a = tar_bytes(&ctx, "text-prose", None).expect("tar");
         let mut b = Vec::new();

@@ -1513,6 +1513,7 @@ fn probe_files_load_through_the_validator_and_must_match_host_and_corpus() {
         allow_debug_build: true,
         local_tools: std::path::PathBuf::from("none.toml"),
         tool_timeout: std::time::Duration::from_secs(60),
+        rows: Vec::new(),
     };
     let probe_dir = crate::probe::execute(&cfg).expect("probe").results_dir;
     let hash = {
