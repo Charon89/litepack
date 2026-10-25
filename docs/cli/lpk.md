@@ -95,6 +95,10 @@ Create an archive. With one directory as the input, its contents are archived (n
 
   Possible values: `on`, `off`
 
+* `--jpeg-peel <ON|OFF>` — The JPEG peel: baseline and progressive JPEGs stored as a Lepton stream plus a reconstruction record that restores them bit for bit (revision 1.1). Default: on with --fast and --balanced. Off stores JPEGs as they are, so extracting them is a copy (E2-25, the Fast tier's extraction on photographs)
+
+  Possible values: `on`, `off`
+
 * `--bwt <ON|OFF>` — The Balanced tier's BWT stage (revision 1.3): a block of text is also tried as a Burrows-Wheeler transform followed by LZMA and written so when that is smaller. Default: on with --balanced; the Fast tier never uses it. An append runs it only on a revision 1.3 archive
 
   Possible values: `on`, `off`
@@ -274,6 +278,10 @@ Append the contents of a directory to an archive as its next generation: a snaps
   Possible values: `none`, `extension`, `versions`
 
 * `--deflate-peel <ON|OFF>` — The Deflate peel: Deflate streams inside ZIP, Office, JAR, PNG, gzip and PDF files (and zlib streams found in other binary files) stored as their plain text plus a reconstruction record that restores them bit for bit (revision 1.2). Default: on with --balanced, off with --fast. An append runs it only on a revision 1.2 archive
+
+  Possible values: `on`, `off`
+
+* `--jpeg-peel <ON|OFF>` — The JPEG peel: baseline and progressive JPEGs stored as a Lepton stream plus a reconstruction record that restores them bit for bit (revision 1.1). Default: on with --fast and --balanced. Off stores JPEGs as they are, so extracting them is a copy (E2-25, the Fast tier's extraction on photographs)
 
   Possible values: `on`, `off`
 

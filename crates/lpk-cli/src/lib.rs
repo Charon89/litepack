@@ -540,6 +540,12 @@ struct TierArgs {
     /// --balanced, off with --fast. An append runs it only on a revision 1.2 archive.
     #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
     deflate_peel: Option<OnOff>,
+    /// The JPEG peel: baseline and progressive JPEGs stored as a Lepton stream plus a
+    /// reconstruction record that restores them bit for bit (revision 1.1). Default: on with
+    /// --fast and --balanced. Off stores JPEGs as they are, so extracting them is a copy
+    /// (E2-25, the Fast tier's extraction on photographs).
+    #[arg(long, value_enum, value_name = "ON|OFF", conflicts_with = "store")]
+    jpeg_peel: Option<OnOff>,
     /// The Balanced tier's BWT stage (revision 1.3): a block of text is also tried as a
     /// Burrows-Wheeler transform followed by LZMA and written so when that is smaller. Default:
     /// on with --balanced; the Fast tier never uses it. An append runs it only on a revision
@@ -581,6 +587,7 @@ impl TierArgs {
                     ("--level", self.level.is_some()),
                     ("--window-log", self.window_log.is_some()),
                     ("--deflate-peel", self.deflate_peel.is_some()),
+                    ("--jpeg-peel", self.jpeg_peel.is_some()),
                 ],
             };
             if let Some((flag, _)) = settings.iter().find(|(_, given)| *given) {
@@ -924,6 +931,13 @@ fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
         Some(OnOff::On) => pipeline.deflate = Some(lpk_core::peel::deflate::DeflatePeel::default()),
         Some(OnOff::Off) => pipeline.deflate = None,
         None => {}
+    }
+    // The pipelines of both tiers carry the JPEG peel; off removes every stage that peels the
+    // JPEG class (a typed check, so a renamed stage cannot make it a no-op); on keeps it.
+    if a.jpeg_peel == Some(OnOff::Off) {
+        pipeline
+            .peel
+            .retain(|p| !p.applies_to(lpk_core::Class::Jpeg));
     }
     if a.no_dedup {
         pipeline.fold = None;
@@ -1404,14 +1418,14 @@ fn extract(
             format!(
                 "; key derivation at open: argon2_m {} bytes (process peak {} bytes)",
                 m.key_derivation,
-                m.peak(s.workers)
+                m.peak_in_flight(s.workers, s.in_flight)
             )
         } else {
             String::new()
         };
         let _ = writeln!(
             err,
-            "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}{key}",
+            "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}; held block {} bytes, blocks in flight {}{key}",
             m.budget.bytes,
             m.tier.name(),
             m.per_block,
@@ -1423,7 +1437,9 @@ fn extract(
             m.fixed,
             m.fixed_shared,
             m.per_worker,
-            s.workers
+            s.workers,
+            m.held,
+            s.in_flight
         );
     }
     let _ = writeln!(
@@ -1852,5 +1868,41 @@ mod records_cap_tests {
         super::records_cap_note(&mut out, &d);
         let text = String::from_utf8_lossy(&out);
         assert!(text.starts_with("records cap: 3 Deflate streams"), "{text}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod jpeg_peel_tests {
+    use clap::Parser;
+
+    /// The stages that peel JPEGs in the pipeline `lpk a <args>` builds.
+    fn jpeg_stages(args: &[&str]) -> usize {
+        let cli = super::Cli::try_parse_from(
+            ["lpk", "a"]
+                .iter()
+                .chain(args)
+                .chain(["out.lpk", "in"].iter()),
+        )
+        .unwrap();
+        let super::Command::Add(a) = cli.command else {
+            panic!("not an add");
+        };
+        let tier = a.tier.tier().unwrap();
+        super::build_pipeline(&a.tier, tier)
+            .peel
+            .iter()
+            .filter(|p| p.applies_to(lpk_core::Class::Jpeg))
+            .count()
+    }
+
+    #[test]
+    fn jpeg_peel_off_removes_the_stage_and_on_keeps_it_in_both_tiers() {
+        for tier in ["--fast", "--balanced"] {
+            assert_eq!(jpeg_stages(&[tier]), 1, "{tier}");
+            assert_eq!(jpeg_stages(&[tier, "--jpeg-peel", "on"]), 1, "{tier}");
+            assert_eq!(jpeg_stages(&[tier, "--jpeg-peel", "off"]), 0, "{tier}");
+        }
+        assert_eq!(jpeg_stages(&["--store"]), 0);
     }
 }

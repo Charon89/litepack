@@ -177,10 +177,24 @@ fn measure_as(
     memory: Option<u64>,
     credentials: Option<&Credentials>,
 ) -> (ExtractSummary, u64) {
+    measure_with(arch, out, threads, memory, credentials, false)
+}
+
+/// [`measure_as`], with the engine's test hook that fills every permit before the first
+/// dispatch when `fill` is set (so blocks are held past the workers whatever the timing).
+fn measure_with(
+    arch: &Path,
+    out: &Path,
+    threads: usize,
+    memory: Option<u64>,
+    credentials: Option<&Credentials>,
+    fill: bool,
+) -> (ExtractSummary, u64) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let opts = ExtractOptions {
         threads: Some(threads),
         memory,
+        fill_permits_before_dispatch: fill,
         ..ExtractOptions::default()
     };
     let Some(creds) = credentials else {
@@ -230,20 +244,26 @@ fn check_bound(name: &str, s: &ExtractSummary, peak: u64) {
         s.workers,
         s.blocks_needed,
         s.peak_in_flight,
-        m.total(s.workers)
+        m.total_in_flight(s.workers, s.in_flight)
     );
     assert!(
         s.workers + 2 <= room,
         "{name}: the bound must bind with blocks to spare"
     );
     assert!(
-        peak <= m.total(s.workers),
+        peak <= m.total_in_flight(s.workers, s.in_flight),
         "{name}: measured {peak} above counted {}",
-        m.total(s.workers)
+        m.total_in_flight(s.workers, s.in_flight)
     );
     assert!(
-        m.total(s.workers) <= m.budget.bytes,
+        m.total_in_flight(s.workers, s.in_flight) <= m.budget.bytes,
         "{name}: counted above budget"
+    );
+    assert!(
+        (s.workers..=s.workers * lpk_core::extract::HELD_PER_WORKER).contains(&s.in_flight),
+        "{name}: permits {} for {} workers",
+        s.in_flight,
+        s.workers
     );
 }
 
@@ -279,9 +299,38 @@ fn small_budget_case(name: &str, tier: Tier, files: u64, mib: u64, expect: Envel
     assert_eq!(s.memory.budget.source, BudgetSource::Given, "{name}");
     assert_eq!(s.workers, 3, "{name}");
     check_bound(name, &s, peak);
+    // Room for held blocks but not for a fourth worker: the permits grow past the workers
+    // (E2-25). The engine's hook fills every permit before the first dispatch, so blocks are
+    // held past the workers, and the measured peak stays within the count with them.
+    let m = &s.memory;
+    let k = ((m.per_block + m.per_worker - 1) / m.held).max(1);
+    let (h, peak) = measure_with(
+        &arch,
+        &work.path().join("o3"),
+        THREADS,
+        Some(budget + k * m.held),
+        None,
+        true,
+    );
+    assert_eq!(h.workers, 3, "{name}");
+    assert!(h.in_flight > h.workers, "{name}: {} permits", h.in_flight);
+    assert!(
+        h.peak_in_flight > h.workers,
+        "{name}: peak {} of {} permits, {} workers",
+        h.peak_in_flight,
+        h.in_flight,
+        h.workers
+    );
+    let hm = &h.memory;
+    let held_peak = hm.total(h.workers) + (h.peak_in_flight - h.workers) as u64 * hm.held;
+    assert!(
+        peak <= held_peak,
+        "{name}: measured {peak} above total(workers) + held blocks {held_peak}"
+    );
+    check_bound(name, &h, peak);
     let (one, peak) = measure(&arch, &work.path().join("o2"), 1, Some(budget));
     check_one(name, &one, peak);
-    for o in ["o0", "o1", "o2"] {
+    for o in ["o0", "o1", "o2", "o3"] {
         assert_eq!(hashes(&work.path().join(o)), want, "{name} {o}");
     }
 }
@@ -353,14 +402,14 @@ fn the_whole_process_peak_of_a_sealed_extraction_is_within_the_default_budget() 
         "sealed default: budget {}, key derivation {}, total {}, counted peak {}, measured whole-process peak {peak}",
         m.budget.bytes,
         m.key_derivation,
-        m.total(s.workers),
-        m.peak(s.workers)
+        m.total_in_flight(s.workers, s.in_flight),
+        m.peak_in_flight(s.workers, s.in_flight)
     );
     assert_eq!(m.key_derivation, u64::from(argon2.m_kib) * 1024);
     assert!(peak >= m.key_derivation, "the derivation is in the peak");
     assert!(peak <= m.budget.bytes, "{peak} above the default budget");
     assert!(
-        peak <= m.peak(s.workers) + BLOCK_ALLOWANCE,
+        peak <= m.peak_in_flight(s.workers, s.in_flight) + BLOCK_ALLOWANCE,
         "{peak} above the counted process peak"
     );
     assert_eq!(hashes(&out), want);

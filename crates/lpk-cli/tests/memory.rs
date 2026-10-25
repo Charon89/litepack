@@ -217,6 +217,31 @@ fn x_v_prints_the_extraction_budget_and_its_terms() {
     assert!(v.contains(&format!("budget {one} bytes (--memory)")), "{v}");
     assert_eq!(figure(&v, "; workers "), 1, "{v}");
     assert_eq!(figure(&v, "fixed "), shared + per_worker, "{v}");
+    // Room for one worker and two held blocks (E2-25): three blocks in flight, one worker.
+    let held = figure(&v, "held block ");
+    assert!(held > 0 && held < per_block, "{v}");
+    let held_dir = work.path().join("held"); // as long as "wide"
+    let x = run(&[
+        "x".as_ref(),
+        a,
+        held_dir.as_os_str(),
+        "--threads".as_ref(),
+        "8".as_ref(),
+        "--memory".as_ref(),
+        (one + 2 * held).to_string().as_ref(),
+        "-v".as_ref(),
+    ]);
+    assert_eq!(x.status.code(), Some(0), "{}", text(&x.stderr));
+    let v = text(&x.stderr);
+    assert_eq!(figure(&v, "; workers "), 1, "{v}");
+    assert_eq!(figure(&v, "blocks in flight "), 3, "{v}");
+    for i in 0..4u64 {
+        let name = format!("t{i}.txt");
+        assert_eq!(
+            fs::read(wide.join(&name)).unwrap(),
+            fs::read(held_dir.join(&name)).unwrap()
+        );
+    }
     for i in 0..4u64 {
         let name = format!("t{i}.txt");
         assert_eq!(

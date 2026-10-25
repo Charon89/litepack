@@ -33,6 +33,9 @@
 //! On the sequential path the cache keeps `held` blocks; a block used for the last time is
 //! held outside it for its run, so when the cache is full such a run evicts a block first
 //! (the schedule's rule, [`schedule`]) — the permit it needs cannot come from anywhere else.
+//! A JPEG stream's partitions decode under the same thread budget as `lpk x` (E2-25,
+//! [`crate::peel::jpeg::DecodeThreads`]): N tokens shared by the decode workers and the
+//! partition threads on the parallel path; on the sequential path the calling thread alone.
 //!
 //! **The sink.** [`Sink::file`] receives the entry and a [`Read`] that yields the file's bytes
 //! in order; the sink must read it to the end (an export where it did not is an error, since
@@ -748,9 +751,13 @@ where
     };
     let outcome = if !parallel {
         let before = archive.decode_count();
+        // One thread in all: a JPEG stream decodes on the calling thread alone (E2-25).
+        let one = Some(crate::peel::jpeg::DecodeThreads::new(1));
         let r = catch_unwind(AssertUnwindSafe(|| {
-            let mut stream = fixed.stream(Source::Sequential(&mut *archive), &permits);
-            consume(&mut stream, sink, &ranges, &mut counts)
+            crate::peel::jpeg::with_decode_threads(one, || {
+                let mut stream = fixed.stream(Source::Sequential(&mut *archive), &permits);
+                consume(&mut stream, sink, &ranges, &mut counts)
+            })
         }));
         reads.fetch_add(archive.decode_count() - before, Ordering::Relaxed);
         match r {
@@ -771,12 +778,17 @@ where
                     let (permits, panic, next, misses, decoded, fixed) =
                         (&permits, &panic, &next, &misses[..], &decoded, &fixed);
                     let (tx, rx) = mpsc::channel::<Decoded>();
+                    // The decode threads never exceed N: N tokens shared by the workers and
+                    // the JPEG streams' partition threads, as `lpk x` (E2-25).
+                    let budget = crate::peel::jpeg::DecodeThreads::new(pool.threads);
                     let mut decoders = Vec::with_capacity(forks.len());
                     let mut spawn_error = None;
                     for (i, mut fork) in forks.into_iter().enumerate() {
                         let tx = tx.clone();
+                        let budget = Arc::clone(&budget);
                         let job = move || -> u64 {
-                            loop {
+                            let lend = Some(Arc::clone(&budget));
+                            crate::peel::jpeg::with_decode_threads(lend, || loop {
                                 if token.is_cancelled() {
                                     permits.cancel();
                                     break;
@@ -789,8 +801,10 @@ where
                                     permits.release();
                                     break;
                                 };
-                                let r =
-                                    catch_unwind(AssertUnwindSafe(|| fork.decode_block_checked(b)));
+                                let r = catch_unwind(AssertUnwindSafe(|| {
+                                    let _token = budget.hold();
+                                    fork.decode_block_checked(b)
+                                }));
                                 decoded.fetch_add(1, Ordering::Relaxed);
                                 match r {
                                     Ok(r) => {
@@ -804,7 +818,7 @@ where
                                         break;
                                     }
                                 }
-                            }
+                            });
                             fork.decode_count()
                         };
                         match std::thread::Builder::new()
