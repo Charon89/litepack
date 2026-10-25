@@ -80,8 +80,16 @@ lists) far beyond what the archive declares.
    `analyze_compressed_data_verify`) use the VP8 coder instead, so they still round-trip but no
    longer check that no context is mixed up. The bytes are unchanged: `lpk-codecs-vp8`'s replay of
    5,415 oracle streams (13 captured from this crate's analysis) and LitePack's vectors show the same
-   corrections as with `cabac`. The vendored `Cargo.lock` is upstream's and is not used (the
-   LitePack workspace and `fuzz/` have their own lockfiles); it still lists `cabac`.
+   corrections as with `cabac`. The coder decodes a stream's first (marker) symbol and discards
+   its value, as `cabac`'s decoder does, so corrections whose first byte is 0x80 or more decode as
+   upstream's.
+8. **A bounded correction exponent** (LitePack LIC-2, 2026-10-25). `read_exp_value` in
+   `src/cabac_codec.rs` decodes the unary exponent with `get_unary_encoded_max(context, 65)`, so a
+   run of more than 65 ones is refused (a panic of the decoder, which LitePack's callers catch and
+   report as a refused record) instead of being decoded to its end; an exponent above 65 would ask
+   `get_n_bits` for a field wider than 64 bits, which `lpk-codecs-vp8` refuses (upstream's
+   behaviour there differs between debug and release builds). The analysis writes exponents of at
+   most 32 (its values are `u32`), so no valid record is affected.
 
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.
@@ -94,3 +102,5 @@ format and every output for a valid record are upstream's.
 - `LICENSE.txt` added: the Apache License 2.0 text that the source headers refer to (the
   published package does not include it). The package includes no `NOTICE.txt`.
 - This file added.
+- `Cargo.lock` (upstream's lockfile, unused: the LitePack workspace and `fuzz/` have their own)
+  removed, since it listed `cabac` after change 7.

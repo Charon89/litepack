@@ -77,7 +77,10 @@ impl<CTX> PredictionCabacContext<CTX> {
         context_bits: &mut [CTX; N],
         reader: &mut R,
     ) -> u32 {
-        let bits_found = reader.get_unary_encoded(context).unwrap();
+        // LitePack change 8 (LITEPACK-CHANGES.md): an exponent above 65 would ask for a field wider
+        // than 64 bits, which the coder refuses; the run of ones is refused there instead of being
+        // decoded to its end (no valid record has an exponent above 32).
+        let bits_found = reader.get_unary_encoded_max(context, 65).unwrap();
 
         match bits_found {
             0 => 0,
