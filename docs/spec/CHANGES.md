@@ -261,3 +261,10 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
 2. The informative sentence on the correction bytes and the regeneration notes of `deflate-peel.lpk` and
    `bwt-text.lpk` (section 11, CONFORMANCE) name `lpk-codecs-vp8` instead of `cabac`. No vector byte changed; no
    reader outcome changes.
+3. Fix round of the same day. The coder item states how the code value aligns with the bytes (an accumulator
+   written in P + 8 bits, byte 0 at the scale of the initial range), the decoder's steps, and that the marker
+   symbol is decoded and its value discarded (as the cited library does; a stream whose first byte is 0x80 or more
+   is read on). "Limits of a recreation" gains two permitted refusals on records no valid writer produces: an
+   n-bit field wider than 64 bits, and a correction exponent above 65 (refused at the 66th one of its run, before
+   such a field would follow); the cited library's behaviour there depends on its build. The resource derivation
+   says "correction stream" and "coder contexts" for "CABAC". No valid record is read differently.

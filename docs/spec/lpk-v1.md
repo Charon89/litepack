@@ -925,24 +925,37 @@ output, or the block's encoded bytes when it is the first step. Its output is th
 - The correction coder. The correction stream is coded with the VP8 adaptive binary arithmetic coder ("bool
   coder", RFC 6386 section 7) under the following rules, which are the cited library's behaviour, stated so that a
   decoder need not depend on it (a decoder that recreates through the library meets them by construction).
-  (1) A context holds two counts, f (zeros) and t (ones), each 1 to 255, starting at f = t = 1; the probability of
-  a zero is p = floor(256 f / (f + t)). After a symbol b the count of b is incremented if it is below 255;
-  otherwise, if the other count is 1, nothing changes; otherwise the count of b becomes 129 and the other count c
-  becomes floor((c + 1) / 2). (2) The encoder's range R starts at 255 and its low register at 0; a symbol with
-  zero-probability p splits R at s = 1 + floor((R - 1) p / 256): a zero sets R = s, a one adds s to the low
-  register and sets R = R - s; then R and the low register are doubled (a renormalisation shift) until R is at
-  least 128. The stream is the code value's bits, most significant first, packed into bytes from the most
-  significant bit; a carry out of the low register propagates into the bytes already formed. (3) Every stream
-  starts with one zero coded with a fresh context of its own (a marker). (4) Composite methods over an array of A
-  contexts: an n-bit field (n from 1 to 64) is coded most significant bit first, bit i with context min(A - 1, i);
-  a unary value v is coded as v ones then a zero, symbol i with context min(A - 1, i). (5) The tail: after the last
-  symbol the encoder codes zero bits with probability 1/2 (s = 1 + floor((R - 1) / 2), no context updated) until
-  its low register is zero, then flushes, writing no further byte; the low register holds the code value's bits
-  not yet emitted, and byte k (from 0) is emitted once the number P of renormalisation shifts since the start of
-  the stream is at least 8k + 24. Equivalently, the stream is the first max(m, floor((P - 16) / 8)) bytes of the
-  code value (0 when P < 16), P counted after the last symbol and m the number of bytes up to and including its
-  last nonzero byte (0 if none): a stream of only the marker, or of a short run of probable zeros, is empty. (6) A
-  decoder reads bytes past the end of the stream as zero bits.
+  (1) Contexts. A context holds two counts, f (zeros) and t (ones), each 1 to 255, starting at f = t = 1; the
+  probability of a zero is p = floor(256 f / (f + t)). After a symbol b the count of b is incremented if it is below
+  255; otherwise, if the other count is 1, nothing changes; otherwise the count of b becomes 129 and the other count
+  c becomes floor((c + 1) / 2).
+  (2) Encoding. The encoder keeps three integers: the range R (starts at 255), the accumulator L (an unbounded
+  non-negative integer, starts at 0) and the shift count P (starts at 0). A symbol coded with a context of
+  zero-probability p computes s = 1 + floor((R - 1) p / 256); a zero sets R = s, a one sets L = L + s and R = R - s;
+  then, while R < 128, R = 2R, L = 2L and P = P + 1 (a renormalisation shift). L + R never exceeds 2^(P+8), so L
+  has at most P + 8 bits; the code value is L written as a big-endian binary number of exactly P + 8 bits, byte 0
+  holding its 8 most significant bits. Byte 0 is thus at the scale of the initial range: before the first shift,
+  L and R are compared with byte 0 read as a number 0 to 255. Carries need no rule of their own: they are the
+  integer addition L + s.
+  (3) The marker. Every stream starts with one zero coded with a fresh context of its own. A decoder decodes this
+  symbol and discards its value, whatever it is (a stream whose first byte is 0x80 or more decodes it as a one and
+  is read on).
+  (4) Composite methods over an array of A contexts (A at least 1). An n-bit field (n from 1 to 64) is coded most
+  significant bit first, bit i (from n - 1 down to 0) with context min(A - 1, i); a writer passes a value whose bits
+  at or above n are ignored. A unary value v (any v at least 0) is coded as v ones then a zero, symbol i (from 0)
+  with context min(A - 1, i), so a value of A or more codes its later symbols with the last context. A field wider
+  than 64 bits is not defined: a decoder asked for one refuses the record (`BadRecord`, `corrections`, check (7)).
+  (5) The tail. Let P and L be their values after the last symbol and m the number of bytes of the code value up to
+  and including its last nonzero byte (0 if L = 0). The stream is the first max(m, floor((P - 16) / 8)) bytes of
+  the code value (floor((P - 16) / 8) counting as 0 when P < 16); nothing else follows. Informative: this is what
+  the cited library writes by coding, after the last symbol, zero bits with probability 1/2 until none of its
+  pending bits (the bits of the code value not yet in an emitted byte; byte k is emitted once P reaches 8k + 24) is
+  one, and then flushing without writing a further byte. A stream of only the marker, or of a short run of probable
+  zeros, is empty.
+  (6) Decoding. The decoder keeps R (starts at 255) and D, the stream read as a binary number at the scale of L: D
+  starts as byte 0 (0 to 255). For each symbol it computes s from R and the context as in (2); the symbol is a one
+  exactly when D >= s, in which case D = D - s and R = R - s, otherwise R = s; then the context is updated as in
+  (1), and while R < 128, R = 2R and D = 2D + the next bit of the stream. Bits past the end of the stream are zero.
 - Corrections are not canonical: two different correction records may recreate the same stream. The output is
   guaranteed by `original_len`, `original_hash` and the chunk hashes, never by the correction bytes.
 - One block holds exactly one stream, because a graph applies to the whole block: the block's `plain_len` is the
@@ -974,7 +987,11 @@ output, or the block's encoded bytes when it is the first step. Its output is th
 - Limits of a recreation. A reader MAY refuse, with `BadRecord` `corrections` in check (7), a recreation that would
   produce more Deflate blocks than `original_len`, one whose predictor parameters (the first part of `corrections`)
   lie outside the values 0.7.6's analysis produces, and one with a correction that asks for more hops along the
-  hash chain than the parameters' `max_chain`. A reader that calls the cited library cannot inspect these inside
+  hash chain than the parameters' `max_chain`; and, in the correction stream (the coder above), one whose exponent
+  (a unary value read before an n-bit field of that value minus 1 bits) exceeds 65, refused as soon as the run of
+  ones passes 65, because the field would be wider than 64 bits (the coder's item (4); the cited library's
+  behaviour there depends on how it was built). No valid writer produces these: 0.7.6's analysis writes exponents
+  of at most 32. A reader that calls the cited library cannot inspect these inside
   the corrections, so they are permitted refusals, not rules every reader applies. The reference refuses exactly
   there: it starts no block once it has produced `original_len` blocks (every Deflate block takes at least 10
   bits, so a stream of at most `original_len` bytes has at most that many; informative: a reader that recreates
@@ -983,8 +1000,9 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   of stored and Huffman-only streams, `window_bits` 9 to 15, `max_token_count` 2^k - 1 for k from 7 to 15,
   `max_chain` 1 to 4096, `min_len` 3 to 258 or 2^32 - 1, `max_dist_3_matches` at most 32768, and the nice lengths,
   lazy-matching rows, dictionary add policies and hash algorithms analysis constructs (the full list is change 3
-  of `vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`); and it refuses a hop count above `max_chain` before it walks
-  the chain. Informative: the parameter ranges are those 0.7.6's analysis constructs, and its analysis emitted no
+  of `vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`); it refuses a hop count above `max_chain` before it walks
+  the chain; and it refuses an exponent above 65 at the 66th one of its run (changes 7 and 8 of the same file).
+  Informative: the parameter ranges are those 0.7.6's analysis constructs, and its analysis emitted no
   hop count above `max_chain` on any stream LitePack checked, so a record a writer makes with 0.7.6's analysis is
   not expected to meet these refusals (the evidence: LitePack's check that every Deflate stream of its `small`
   benchmark corpus recreated under these limits to the same bytes as upstream); the records of `deflate-peel.lpk`
@@ -1003,8 +1021,8 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   layout of 0.7.6's recreation: per plain byte, 1 byte for the step's input, 1 for the library's own copy of it, and
   6 for the token list of the block being recreated (a token is 6 bytes, and one Deflate block may hold a token per
   plain byte, a block of literals only); per correction byte, 2 bytes, the decoder's parsed copy of the record and
-  the library's decoded copy of the CABAC stream; and a fixed allowance of 16777216 bytes for the library's tables
-  (hash chains, Huffman tables, CABAC contexts) and small buffers. The output is the block's own buffer, counted in
+  the library's decoded copy of the correction stream; and a fixed allowance of 16777216 bytes for the library's
+  tables (hash chains, Huffman tables, coder contexts) and small buffers. The output is the block's own buffer, counted in
   `max_block_plain`. The reference's test measures a recreation with a counting allocator against the term.
 
 ### Decoding `bwt` (revision 1.3)
