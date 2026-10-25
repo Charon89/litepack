@@ -1,0 +1,2 @@
+# Gzip of the cases: raw bytes, never normalised.
+*.gz binary

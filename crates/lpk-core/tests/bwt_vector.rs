@@ -29,7 +29,7 @@
 //! `files_1_0`) are in `expected.toml`, written by lpk-format's conformance test. Regenerate
 //! with `cargo test -p lpk-core --test bwt_vector -- --ignored regenerate`, then
 //! `cargo test -p lpk-format --test conformance -- --ignored`; byte identity needs the same
-//! liblzma, libzstd, preflate-rs, bitcode and cabac versions (the BWT is unique by definition).
+//! liblzma, libzstd, preflate-rs and bitcode versions and lpk-codecs-vp8 (the BWT is unique by definition).
 #![allow(clippy::unwrap_used)]
 
 use std::fmt::Write as _;

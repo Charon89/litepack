@@ -50,8 +50,11 @@ version = "0.6.3"
 [dependencies.byteorder]
 version = "1.4"
 
-[dependencies.cabac]
-version = "0.15.0"
+# LitePack change 7 (LITEPACK-CHANGES.md): the VP8 bool coder from LitePack's
+# lpk-codecs-vp8 (Apache-2.0, ported from lepton_jpeg 0.5.8) instead of cabac 0.15.0.
+[dependencies.lpk-codecs-vp8]
+version = "0.0.1"
+path = "../../crates/lpk-codecs-vp8"
 
 [dependencies.default-boxed]
 version = "0.2"

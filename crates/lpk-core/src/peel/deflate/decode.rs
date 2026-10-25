@@ -424,4 +424,71 @@ mod tests {
             Err(FormatError::UnimplementedPrimitive { id: 8 })
         ));
     }
+
+    /// A coded correction stream whose first correction read is the one `tail` codes: every
+    /// correction kind marked as seen, then the first read takes the correction branch. Every
+    /// context it touches is fresh whichever kind the recreation reads first, so the bytes do
+    /// not depend on it.
+    fn crafted(tail: impl FnOnce(&mut lpk_codecs_vp8::VPXBoolWriter<&mut Vec<u8>>)) -> Vec<u8> {
+        use lpk_codecs_vp8::{Branch, VPXBoolWriter, Vp8Encode};
+        let mut out = Vec::new();
+        {
+            let mut w = VPXBoolWriter::new(&mut out).unwrap();
+            let mut seen = Branch::new();
+            for _ in 0..preflate_rs::CodecCorrection::MAX as usize {
+                w.put(true, &mut seen).unwrap();
+            }
+            w.put(false, &mut Branch::new()).unwrap();
+            tail(&mut w);
+            // room for whatever is read after the refusal point
+            w.put_n_bits(0, 64, &mut [Branch::new(); 32]).unwrap();
+            Vp8Encode::finish(&mut w).unwrap();
+        }
+        out
+    }
+
+    /// The record of [`stream`] with `coded` as its correction stream: refused as `corrections`
+    /// through the decoder, and the library's panic is LitePack change 8's (the same in a debug
+    /// and a release build; run with `--release` too).
+    fn refused_by_change_8(coded: Vec<u8>, message: &str) {
+        let (plain, d) = stream();
+        let mut crafted = d.clone();
+        crafted.corrections =
+            preflate_rs::litepack_record_with_coded_corrections(&d.corrections, coded).unwrap();
+        assert_eq!(reason(run(&crafted, &plain)), "corrections");
+        let limit = d.original_len as usize;
+        let payload = catch_unwind(AssertUnwindSafe(|| {
+            recreate_whole_deflate_stream_limited(&plain, &crafted.corrections, limit)
+        }))
+        .expect_err("the library refuses with a panic");
+        let text = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(text.contains(message), "{text}");
+    }
+
+    #[test]
+    fn a_correction_exponent_above_32_is_refused() {
+        use lpk_codecs_vp8::Branch;
+        refused_by_change_8(
+            crafted(|w| w.put_unary_encoded(33, &mut [Branch::new(); 32]).unwrap()),
+            "value above the caller's maximum",
+        );
+    }
+
+    #[test]
+    fn a_decoded_correction_value_of_u32_max_is_refused() {
+        use lpk_codecs_vp8::Branch;
+        // exponent 32 and the 31 bits below the leading one all set: 2^32 - 1
+        refused_by_change_8(
+            crafted(|w| {
+                w.put_unary_encoded(32, &mut [Branch::new(); 32]).unwrap();
+                w.put_n_bits(u64::MAX, 31, &mut [Branch::new(); 32])
+                    .unwrap();
+            }),
+            "a correction value above 2^32 - 1",
+        );
+    }
 }
