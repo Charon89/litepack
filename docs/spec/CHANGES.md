@@ -250,3 +250,23 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    checks, the term, the bound and its look-ahead from the text alone, with `--revision 0..3`; the revision is final
    when it passes. Passed on 2026-10-18 (D-78 (8)): every outcome of `expected-1.3.toml` at revision 3, the
    `UnimplementedPrimitive` 3 outcomes at revisions 0-2; its two points are item 3's R36 clarification.
+
+## 2026-10-25 — Text revision of LIC-2: the correction coder stated (no outcome changes for a record a valid writer produces)
+
+1. Section 8, `deflate-reconstruct`: a new item states the correction coder normatively (the VP8 bool coder's
+   contexts, split and renormalisation, the marker, the composite methods' bit order and context index
+   min(A - 1, i), and the stream tail), so the format no longer depends on the `cabac` crate's behaviour. The
+   rules are what the cited library does: the reference's new coder (`lpk-codecs-vp8`, ported from `lepton_jpeg`
+   0.5.8) reproduces 5,415 oracle streams byte for byte in both directions and every committed vector unchanged.
+2. The informative sentence on the correction bytes and the regeneration notes of `deflate-peel.lpk` and
+   `bwt-text.lpk` (section 11, CONFORMANCE) name `lpk-codecs-vp8` instead of `cabac`. No vector byte changed; no
+   reader outcome changes.
+3. Fix round of the same day. The coder item states how the code value aligns with the bytes (an accumulator
+   written in P + 8 bits, byte 0 at the scale of the initial range), the decoder's steps, and that the marker
+   symbol is decoded and its value discarded (as the cited library does; a stream whose first byte is 0x80 or more
+   is read on). The coder item refuses an n-bit field wider than 64 bits. "Limits of a recreation" gains two
+   permitted refusals on records no valid writer produces: a correction exponent above 32 (the unary value read
+   before an n-bit field of that value minus 1 bits), refused at the 33rd one of its run, and a decoded correction
+   value of 2^32 - 1, to which the library adds 1. Corrections are u32 values, so no valid writer produces these;
+   the cited library's result for them depends on how it was built (an arithmetic overflow). The resource derivation
+   says "correction stream" and "coder contexts" for "CABAC". No valid record is read differently.

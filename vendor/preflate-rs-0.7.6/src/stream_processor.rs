@@ -9,7 +9,8 @@
 use std::io::{BufRead, Cursor};
 
 use bitcode::{Decode, Encode};
-use cabac::vp8::{VP8Reader, VP8Writer};
+// LitePack change 7 (LITEPACK-CHANGES.md): the VP8 coder of lpk-codecs-vp8 instead of cabac's.
+use lpk_codecs_vp8::{VPXBoolReader, VPXBoolWriter};
 
 use crate::{
     PreflateConfig, Result,
@@ -111,7 +112,7 @@ impl PreflateStreamProcessor {
         let mut cabac_encoded = Vec::new();
 
         let mut cabac_encoder =
-            PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
+            PredictionEncoderCabac::new(VPXBoolWriter::new(&mut cabac_encoded).unwrap());
 
         if let Some(predictor) = &mut self.predictor {
             let mut input = PreflateInput::new(&self.parser.plain_text());
@@ -276,7 +277,7 @@ impl RecreateStreamProcessor {
 
         if let Some(predictor) = &mut self.predictor {
             let mut cabac_decoder =
-                PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections)).unwrap());
+                PredictionDecoderCabac::new(VPXBoolReader::new(Cursor::new(corrections)).unwrap());
 
             predictor.add_missing_previous_hash(&input);
 
@@ -295,7 +296,7 @@ impl RecreateStreamProcessor {
             let mut predictor = TokenPredictor::new(&r.parameters);
 
             let mut cabac_decoder =
-                PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
+                PredictionDecoderCabac::new(VPXBoolReader::new(Cursor::new(r.corrections)).unwrap());
 
             let blocks = recreate_blocks(
                 &mut predictor,
@@ -355,6 +356,18 @@ pub fn recreate_whole_deflate_stream_limited(
     recreate_whole_deflate_stream_limited_report(plain_text, prediction_corrections, limit).0
 }
 
+/// LitePack change 8 (LITEPACK-CHANGES.md), for tests only: `record` (a record returned by the
+/// analysis) with its coded correction stream replaced by `coded`, so a test can make the
+/// recreation meet a crafted correction stream under valid parameters.
+#[doc(hidden)]
+pub fn litepack_record_with_coded_corrections(record: &[u8], coded: Vec<u8>) -> Result<Vec<u8>> {
+    let r = ReconstructionData::read(record)?;
+    Ok(bitcode::encode(&ReconstructionData {
+        parameters: r.parameters,
+        corrections: coded,
+    }))
+}
+
 /// LitePack change 5 (LITEPACK-CHANGES.md): [`recreate_whole_deflate_stream_limited`], also
 /// returning the capacity of the writer's buffer when the recreation ended (for tests and
 /// fuzzing: it never exceeds `limit + 8`).
@@ -390,7 +403,7 @@ fn recreate_limited_into(
     let mut predictor = TokenPredictor::new(&r.parameters);
     predictor.limit_hops_to_max_chain();
 
-    let reader = VP8Reader::new(Cursor::new(r.corrections)).map_err(|e| {
+    let reader = VPXBoolReader::new(Cursor::new(r.corrections)).map_err(|e| {
         PreflateError::new(ExitCode::InvalidPredictionData, e.to_string().as_str())
     })?;
     let mut cabac_decoder = PredictionDecoderCabac::new(reader);
@@ -517,21 +530,21 @@ fn recreate_blocks<D: PredictionDecoder>(
 }
 
 /// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
-/// This version uses DebugWriter and DebugReader, which are slower but can be used to debug the cabac encoding errors.
+/// This version used cabac's DebugWriter and DebugReader upstream; LitePack change 7 uses the VP8 coder.
 #[cfg(test)]
 fn decompress_deflate_stream_assert(
     compressed_data: &[u8],
     verify: bool,
 ) -> Result<(PreflateStreamChunkResult, PlainText)> {
     use crate::deflate::deflate_reader::parse_deflate_whole;
-    use cabac::debug::{DebugReader, DebugWriter};
+    // LitePack change 7: upstream's debugging coder of cabac replaced by the VP8 coder.
 
     use crate::preflate_error::AddContext;
 
     let mut cabac_encoded = Vec::new();
 
     let mut cabac_encoder =
-        PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
+        PredictionEncoderCabac::new(VPXBoolWriter::new(&mut cabac_encoded).unwrap());
 
     let (contents, plain_text) = parse_deflate_whole(compressed_data)?;
 
@@ -550,7 +563,7 @@ fn decompress_deflate_stream_assert(
         let r = ReconstructionData::read(&reconstruction_data)?;
 
         let mut cabac_decoder =
-            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+            PredictionDecoderCabac::new(VPXBoolReader::new(Cursor::new(&r.corrections)).unwrap());
 
         let params = r.parameters;
         let mut input = PreflateInput::new(&plain_text);
@@ -627,18 +640,18 @@ fn verify_file(filename: &str) {
 }
 
 /// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
-/// This version uses DebugWriter and DebugReader, which are slower and don't compress but can be used to debug the cabac encoding errors.
+/// This version used cabac's DebugReader upstream; LitePack change 7 uses the VP8 coder.
 #[cfg(test)]
 fn recompress_deflate_stream_assert(
     plain_text: &PlainText,
     prediction_corrections: &[u8],
 ) -> Result<Vec<u8>> {
-    use cabac::debug::DebugReader;
+    // LitePack change 7: upstream's debugging coder of cabac replaced by the VP8 coder.
 
     let r = ReconstructionData::read(prediction_corrections)?;
 
     let mut cabac_decoder =
-        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+        PredictionDecoderCabac::new(VPXBoolReader::new(Cursor::new(&r.corrections)).unwrap());
 
     let mut input = PreflateInput::new(plain_text);
     let (recompressed, _recreated_blocks) =
@@ -658,11 +671,12 @@ fn analyze_compressed_data_fast(
     };
     use std::io::Cursor;
 
-    use cabac::vp8::{VP8Reader, VP8Writer};
+    // LitePack change 7 (LITEPACK-CHANGES.md): the VP8 coder of lpk-codecs-vp8 instead of cabac's.
+use lpk_codecs_vp8::{VPXBoolReader, VPXBoolWriter};
 
     let mut buffer = Vec::new();
 
-    let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
+    let mut cabac_encoder = PredictionEncoderCabac::new(VPXBoolWriter::new(&mut buffer).unwrap());
 
     let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
 
@@ -686,7 +700,7 @@ fn analyze_compressed_data_fast(
     println!("buffer size: {}", buffer.len());
 
     let mut cabac_decoder =
-        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
+        PredictionDecoderCabac::new(VPXBoolReader::new(Cursor::new(&buffer)).unwrap());
 
     let mut input = PreflateInput::new(&plain_text);
 
@@ -711,12 +725,12 @@ fn analyze_compressed_data_verify(
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
         utils::assert_eq_array,
     };
-    use cabac::debug::{DebugReader, DebugWriter};
+    // LitePack change 7: upstream's debugging coder of cabac replaced by the VP8 coder.
     use std::io::Cursor;
 
     let mut buffer = Vec::new();
 
-    let cabac_encoder = PredictionEncoderCabac::new(DebugWriter::new(&mut buffer).unwrap());
+    let cabac_encoder = PredictionEncoderCabac::new(VPXBoolWriter::new(&mut buffer).unwrap());
     let debug_encoder = VerifyPredictionEncoder::new();
 
     let mut combined_encoder = (debug_encoder, cabac_encoder);
@@ -741,7 +755,7 @@ fn analyze_compressed_data_verify(
 
     let debug_decoder = VerifyPredictionDecoder::new(actions);
     let cabac_decoder =
-        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap());
+        PredictionDecoderCabac::new(VPXBoolReader::new(Cursor::new(&buffer)).unwrap());
 
     let mut combined_decoder = (debug_decoder, cabac_decoder);
     let mut input = PreflateInput::new(&plain_text);
@@ -1169,7 +1183,7 @@ mod litepack_crafted {
         let mut cabac = Vec::new();
         {
             let mut enc = Tamper {
-                inner: PredictionEncoderCabac::new(VP8Writer::new(&mut cabac).unwrap()),
+                inner: PredictionEncoderCabac::new(VPXBoolWriter::new(&mut cabac).unwrap()),
                 hops: params.max_chain + 4000,
             };
             let mut input = PreflateInput::new(&plain_text);

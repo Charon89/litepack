@@ -229,16 +229,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
-name = "cabac"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "606873b80c9b424f9b6ed0cd03da139edc26d325eb9b31969ebf27c2bdd98f68"
-dependencies = [
- "bytemuck",
- "byteorder",
-]
-
-[[package]]
 name = "cc"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -779,6 +769,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpk-codecs-vp8"
+version = "0.0.1"
+
+[[package]]
 name = "lpk-core"
 version = "0.0.1"
 dependencies = [
@@ -968,9 +962,9 @@ version = "0.7.6"
 dependencies = [
  "bitcode",
  "byteorder",
- "cabac",
  "default-boxed",
  "deranged",
+ "lpk-codecs-vp8",
 ]
 
 [[package]]

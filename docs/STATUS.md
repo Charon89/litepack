@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-25, about 19:10 UTC. **E2-25's code is merged (D-95, PR #99); E2-9's tasks A and E are merged (D-94).** In flight: E2-16 (task D), LIC-2 (last patch, then re-review), the E4 design note (fix round). Next measurements on the idle machine: the delta probe on `full` (E2-9's pre-gate; `target/acceptance/e2-9-probe-full.sh`), then E3-9 once E2-16 lands (it also decides E2-25's route). The owner's open items are below.
+Last updated: 2026-10-25, about 19:21 UTC. **LIC-2 is done (D-96, PR #101): no copyleft left in the engine; a later version can be closed without a boundary.** E2-9's tasks A and E (D-94) and E2-25's code are merged or merging. In flight: E2-16 (task D), the E4 design note (round 2). Next measurements on the idle machine: the delta probe on `full`, then E3-9. The owner's open items are below.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on

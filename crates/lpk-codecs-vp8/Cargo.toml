@@ -1,0 +1,22 @@
+[package]
+name = "lpk-codecs-vp8"
+description = "The VP8 adaptive binary arithmetic (bool) coder the deflate-reconstruct corrections use, ported from lepton_jpeg 0.5.8 (LIC-2, spec section 8)"
+version.workspace = true
+edition.workspace = true
+# Apache-2.0 only, not the workspace's `Apache-2.0 OR MIT`: the coder files are a modified copy of
+# lepton_jpeg 0.5.8's (Copyright (c) Microsoft Corporation, Apache-2.0), which also carry the WebM
+# project's BSD-3-Clause banner; NOTICE.txt is lepton_jpeg's repository notice file.
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+# The vp8-cross replay test reads the gzip'd JSON lines of the oracle fixtures.
+flate2 = "1.1.10"
+serde_json = "1.0.151"
+
+[lints]
+workspace = true
