@@ -459,6 +459,44 @@ fn hard_links_become_copies_or_are_refused() {
     assert_eq!(written, 0);
 }
 
+/// Hard links resolve through a map: 20,000 links and 20,000 files plan in well under a
+/// second (the quadratic search took minutes).
+#[test]
+fn many_hard_links_resolve_in_linear_time() {
+    let n = 20_000u64;
+    let mut recs: Vec<Record> = (0..n).map(|i| rec(&format!("f{i}"), 0, 0)).collect();
+    recs.extend((0..n).map(|i| Record {
+        kind: RecordKind::HardLink,
+        target: format!("f{}", n - 1 - i).into_bytes(),
+        ..rec(&format!("h{i}"), 0, 0)
+    }));
+    let mut f = vec![hello(), opened()];
+    for chunk in recs.chunks(PAGE as usize) {
+        f.push(Response::Entries {
+            records: chunk.to_vec(),
+            more: true,
+        });
+    }
+    if let Some(Response::Entries { more, .. }) = f.last_mut() {
+        *more = false;
+    }
+    for i in 0..n {
+        f.push(Response::MemberStart { index: i });
+        f.push(Response::MemberEnd {
+            index: i,
+            checked: false,
+        });
+    }
+    let t = std::time::Instant::now();
+    let (r, _) = run(&f, 10_000_000);
+    assert_eq!(r.unwrap().files, 2 * n);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
 #[test]
 fn duplicates_are_refused() {
     let mut f = one_member(b"abc");

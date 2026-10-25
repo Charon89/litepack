@@ -1324,13 +1324,22 @@ fn run_extract<P: Peer>(
         }
     }
     targets.sort_by_key(|t| t.index);
-    let hard: Vec<HardCopy> = hard
-        .into_iter()
-        .map(|(path, t, mtime_ns, replace)| {
-            let source = targets
-                .iter()
-                .find(|x| x.name == t)
-                .map(|x| x.path.clone())
+    // Hard links resolve by name to a file this run receives (one map lookup each, the
+    // cancel token polled as they go).
+    let by_target: std::collections::HashMap<&str, (&Path, u64)> = targets
+        .iter()
+        .map(|t| (t.name.as_str(), (t.path.as_path(), t.size)))
+        .collect();
+    let mut copies: Vec<HardCopy> = Vec::with_capacity(hard.len());
+    let mut total = targets.iter().fold(0u64, |a, t| a.saturating_add(t.size));
+    for (i, (path, t, mtime_ns, replace)) in hard.into_iter().enumerate() {
+        if i % 4096 == 0 {
+            conv.monitor.cancel.check()?;
+        }
+        let (source, size) =
+            by_target
+                .get(t.as_str())
+                .copied()
                 .ok_or_else(|| ForeignError::Unsupported {
                     message: format!(
                         "hard link {} to {}, a member that is not extracted",
@@ -1338,23 +1347,17 @@ fn run_extract<P: Peer>(
                         escape(t.as_bytes())
                     ),
                 })?;
-            Ok(HardCopy {
-                path,
-                source,
-                mtime_ns,
-                replace,
-            })
-        })
-        .collect::<Result<_, CoreError>>()?;
-    // The output cap and free space, from the declared total, before any write.
-    let mut total = targets.iter().fold(0u64, |a, t| a.saturating_add(t.size));
-    for h in &hard {
-        let s = targets
-            .iter()
-            .find(|t| t.path == h.source)
-            .map_or(0, |t| t.size);
-        total = total.saturating_add(s);
+        // The output cap and free space count each copy (from the declared sizes).
+        total = total.saturating_add(size);
+        copies.push(HardCopy {
+            path,
+            source: source.to_path_buf(),
+            mtime_ns,
+            replace,
+        });
     }
+    drop(by_target);
+    let hard = copies;
     if let Some(f) = conv.limits.max_expansion {
         let max = f.saturating_mul(conv.archive_len.max(1));
         if total > max {
