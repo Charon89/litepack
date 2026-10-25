@@ -1157,7 +1157,8 @@ sections 7.2, 8.2 and 9, cited normatively; what a decoder needs of it is writte
   bytes of a scanline have no a or c; the first scanline of each pass has no b or c), the filtered byte is
   x − p modulo 256 with p = 0 for type 0 (None), a for 1 (Sub), b for 2 (Up), ⌊(a + b) / 2⌋ (computed without
   overflow) for 3 (Average), and for 4 (Paeth) the predictor of a, b, c: with q = a + b − c, pa = |q − a|,
-  pb = |q − b|, pc = |q − c|, it is a when pa ≤ pb and pa ≤ pc, else b when pb ≤ pc, else c. Undoing a filter
+  pb = |q − b|, pc = |q − c|, all computed in signed integers wide enough for the sums (q lies in −255..510, no
+  modulo), it is a when pa ≤ pb and pa ≤ pc, else b when pb ≤ pc, else c. Undoing a filter
   adds p modulo 256, left to right, with a, b and c taken from the raw bytes already undone.
 - Decoding. The step's input is a filtered text of the image, any filter byte 0 to 4 per scanline (informative:
   the reference writer gives every scanline type 2, Up). The output is the image's raw scanlines (the input with
@@ -1170,7 +1171,7 @@ sections 7.2, 8.2 and 9, cited normatively; what a decoder needs of it is writte
   `width` at least 1 (`BadRecord`, `width`), `height` at least 1 (`height`), a pair the list above allows
   (`bit_depth`), one filter byte per scanline of the image, interlaced or not, and every filter byte at most 4
   (`filters`); (4) F against the step's output bound: on the last step an F that differs from the block's
-  `plain_len` is `BlockLengthMismatch`; on a step that is not the last an F above the step's bound
+  `plain_len`, or an F past 2^64 − 1 (which has no value), is `BlockLengthMismatch`; on a step that is not the last an F above the step's bound
   (`max_block_plain`, or the bound "Bounds" gives), or an F past 2^64 − 1, is `PayloadTooLarge`; (5) the input
   must be exactly F bytes (`BadRecord`, `scanlines`); (6) the re-filtering, scanline by scanline: an input
   scanline whose filter byte is above 4 is `BadRecord`, `scanlines` (the first such scanline in order decides);
