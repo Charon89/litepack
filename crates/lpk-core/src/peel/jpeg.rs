@@ -956,7 +956,7 @@ fn stream_frame(stream: &[u8], primary_len: u64) -> Option<Frame> {
 }
 
 /// Register the full reader's decoders (revision 1.1's `jpeg-reconstruct`, revision 1.2's
-/// `deflate-reconstruct`, revision 1.3's `bwt`) on `archive`, so its
+/// `deflate-reconstruct`, revision 1.3's `bwt`, revision 1.4's `png-filter`) on `archive`, so its
 /// peeled files extract and verify. Call it after `set_priors` (which keeps it anyway).
 pub fn register_full_reader<R: std::io::Read + std::io::Seek>(
     archive: &mut lpk_format::Archive<R>,
@@ -973,6 +973,10 @@ pub fn register_full_decoders(registry: &mut lpk_format::Registry) {
         Box::new(super::deflate::DeflateDecoder),
     );
     registry.register(PrimitiveId::Bwt, Box::new(crate::bwt::BwtDecoder));
+    registry.register(
+        PrimitiveId::PngFilter,
+        Box::new(super::png_filter::PngFilterDecoder),
+    );
 }
 
 #[cfg(test)]

@@ -219,8 +219,18 @@ struct PoolHooks<'a> {
 impl Hooks for PoolHooks<'_> {
     fn analysing(&mut self, plain: u64) -> bool {
         delay(self.file as u64 ^ plain);
+        // The PNG row-filter re-encoding holds the Up text and the first encoding too.
+        let png = if self.shared.settings.png_filter {
+            plain.saturating_mul(2)
+        } else {
+            0
+        };
         let r = memory_term(plain, 0)
-            .max(plain.saturating_add(self.sizer.memory_for(plain)))
+            .max(
+                plain
+                    .saturating_add(self.sizer.memory_for(plain))
+                    .saturating_add(png),
+            )
             .min(self.shared.reserve);
         if !self.shared.reserve_stream(self.file, r) {
             return false;

@@ -38,9 +38,12 @@ fn hash_of(dir: &Path, threads: usize, skips: bool) -> (String, f64) {
         bwt: false,
         ..BalancedOptions::default()
     });
+    // Likewise without revision 1.4's PNG row-filter re-encoding (E2-16): on, it makes the
+    // header say minor 4 and re-encodes some of photo-raw-png's streams.
     if let Some(d) = p.deflate.as_mut() {
         d.exact_skips = skips;
         d.hints = skips;
+        d.png_filter = false;
     }
     p.run(dir, &mut out).unwrap();
     (

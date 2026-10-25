@@ -103,6 +103,10 @@ Create an archive. With one directory as the input, its contents are archived (n
 
   Possible values: `on`, `off`
 
+* `--png-filter <ON|OFF>` — The Balanced tier's PNG row-filter re-encoding (revision 1.4), part of the Deflate peel: a PNG's image data is also tried with every row filtered with Up, and written so (with the original filter bytes in a record that restores them) when that is smaller. Default: on with --balanced; the Fast tier never uses it. An append runs it only on a revision 1.4 archive
+
+  Possible values: `on`, `off`
+
 * `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
@@ -286,6 +290,10 @@ Append the contents of a directory to an archive as its next generation: a snaps
   Possible values: `on`, `off`
 
 * `--bwt <ON|OFF>` — The Balanced tier's BWT stage (revision 1.3): a block of text is also tried as a Burrows-Wheeler transform followed by LZMA and written so when that is smaller. Default: on with --balanced; the Fast tier never uses it. An append runs it only on a revision 1.3 archive
+
+  Possible values: `on`, `off`
+
+* `--png-filter <ON|OFF>` — The Balanced tier's PNG row-filter re-encoding (revision 1.4), part of the Deflate peel: a PNG's image data is also tried with every row filtered with Up, and written so (with the original filter bytes in a record that restores them) when that is smaller. Default: on with --balanced; the Fast tier never uses it. An append runs it only on a revision 1.4 archive
 
   Possible values: `on`, `off`
 

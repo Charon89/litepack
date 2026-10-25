@@ -4,10 +4,12 @@
 pub mod deflate;
 pub mod jpeg;
 pub mod png;
+pub mod png_filter;
 pub mod text;
 
 pub use deflate::DeflateDecoder;
 pub use jpeg::{Cause, JpegDecoder, JpegPeel, LEPTON_MAX_FILE, LEPTON_VERSION, MODEL_ALLOWANCE};
+pub use png_filter::PngFilterDecoder;
 
 use lpk_format::{PrimitiveId, Record};
 

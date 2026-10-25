@@ -382,10 +382,29 @@ fn the_deflate_peel_flag_defaults_per_tier() {
         .join("../lpk-core/tests/fixtures/deflate/doc.zip");
     fs::write(src.path().join("doc.zip"), fs::read(zip).unwrap()).unwrap();
     let work = tempfile::tempdir().unwrap();
-    // Each row: the flags, the header's minor (3 whenever the Balanced tier's BWT stage is
-    // on, revision 1.3; else 2 with the Deflate peel, else 1) and whether the peel walked.
-    let cases: [(&str, &[&str], u16, bool); 6] = [
-        ("b", &["--balanced", "--dict-size", "1048576"], 3, true),
+    // Each row: the flags, the header's minor (4 whenever the Balanced tier's PNG row-filter
+    // re-encoding is on, revision 1.4; else 3 whenever its BWT stage is, revision 1.3; else 2
+    // with the Deflate peel, else 1) and whether the peel walked.
+    let cases: [(&str, &[&str], u16, bool); 8] = [
+        ("b", &["--balanced", "--dict-size", "1048576"], 4, true),
+        (
+            "b-no-png",
+            &[
+                "--balanced",
+                "--dict-size",
+                "1048576",
+                "--png-filter",
+                "off",
+            ],
+            3,
+            true,
+        ),
+        (
+            "b-png-on",
+            &["--balanced", "--dict-size", "1048576", "--png-filter", "on"],
+            4,
+            true,
+        ),
         (
             "b-off",
             &[
@@ -401,7 +420,7 @@ fn the_deflate_peel_flag_defaults_per_tier() {
         (
             "b-no-bwt",
             &["--balanced", "--dict-size", "1048576", "--bwt", "off"],
-            2,
+            4,
             true,
         ),
         (
@@ -445,6 +464,18 @@ fn the_deflate_peel_flag_defaults_per_tier() {
     assert_eq!(bad.status.code(), Some(1));
     let bad = run(&["a", "x.lpk", ".", "--deflate-peel", "maybe"]);
     assert_eq!(bad.status.code(), Some(1));
+    // `--png-filter` needs the Balanced tier, and `on` needs the Deflate peel.
+    for flags in [
+        &["--fast", "--png-filter", "on"][..],
+        &["--tier", "fast", "--png-filter", "off"],
+        &["--balanced", "--deflate-peel", "off", "--png-filter", "on"],
+    ] {
+        let mut args = vec!["a", "x.lpk", "."];
+        args.extend_from_slice(flags);
+        let bad = run(&args);
+        assert_eq!(bad.status.code(), Some(1), "{flags:?}");
+        assert!(text(&bad.stderr).contains("--png-filter"), "{flags:?}");
+    }
 }
 
 #[test]

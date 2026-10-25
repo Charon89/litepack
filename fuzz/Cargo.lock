@@ -816,6 +816,7 @@ dependencies = [
 name = "lpk-format-fuzz"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "libfuzzer-sys",
  "lpk-codecs-bwt",
  "lpk-core",

@@ -140,17 +140,23 @@ fn run_balanced(dir: &Path, threads: usize, memory: Option<u64>) -> (Vec<u8>, Ru
     (out, s, t0.elapsed().as_secs_f64())
 }
 
-/// The one-thread archives' BLAKE3 pinned from the serial peel (the same values as
-/// `deflate_pinned_corpus.rs`; they hold for the `small` corpus of the machine that pinned them,
-/// whose files' modification times the archives hold).
+/// The one-thread archives' BLAKE3 of the default Balanced pipeline (the BWT stage and, since
+/// E2-16, the PNG row-filter re-encoding on; header minor 4), re-pinned on 2026-10-25 on host
+/// `Megatron`'s `small` corpus (they hold for the corpus of the machine that pinned them, whose
+/// files' modification times the archives hold). The earlier values were
+/// `deflate_pinned_corpus.rs`'s minor-2 archives (BWT off), which this test's default pipeline
+/// no longer wrote. `office-pdf` has no PNG stream: its archive with the re-encoding off differs
+/// from this one in the header's minor byte alone (checked with `lpk a --balanced --png-filter
+/// on|off`, one differing byte at offset 10); `photo-raw-png`'s also holds the 19 re-encoded
+/// streams.
 const PINNED: [(&str, &str); 2] = [
     (
         "office-pdf",
-        "5c266d1461dffb9ff0468843e674affa9f3a78aef027b6d2b402bb3ff3cbc94c",
+        "9c4992f9aef65cb7f808e48a60e2f0ff67935d60b64b645f3ab167b17bb56f68",
     ),
     (
         "photo-raw-png",
-        "b9e0c17bb3b3dc422ce61b59b3d5464375d03653114893904b46dae4c4dce0d2",
+        "5a5f40ca4ee25364670821d3664e6f51dc7dc096136dd03e0f8ee5e39ac851ad",
     ),
 ];
 

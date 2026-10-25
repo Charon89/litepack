@@ -412,6 +412,7 @@ mod tests {
                 "balanced-versions",
                 "balanced-no-deflate",
                 "balanced-no-bwt",
+                "balanced-no-png-filter",
                 "store",
                 "fast-encrypted"
             ]

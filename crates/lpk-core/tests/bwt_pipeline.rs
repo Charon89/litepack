@@ -77,15 +77,24 @@ fn pin_mtimes(root: &Path) {
     }
 }
 
+/// The Balanced pipeline of these tests, with revision 1.4's PNG row-filter re-encoding off:
+/// these tests are about revision 1.3's minor (E2-16's tests cover minor 4).
 fn balanced(threads: usize) -> Pipeline {
-    Pipeline::balanced(BalancedOptions {
+    without_png_filter(Pipeline::balanced(BalancedOptions {
         block_size: 1 << 20,
         dict_size: 1 << 20,
         sample_len: 1 << 16,
         bwt_block: 1 << 18,
         threads: Some(threads),
         ..BalancedOptions::default()
-    })
+    }))
+}
+
+fn without_png_filter(mut p: Pipeline) -> Pipeline {
+    if let Some(d) = p.deflate.as_mut() {
+        d.png_filter = false;
+    }
+    p
 }
 
 fn run(p: Pipeline, root: &Path) -> (Vec<u8>, RunSummary) {
@@ -423,11 +432,11 @@ fn without_a_text_cluster_the_stage_changes_only_the_minor_byte() {
     let dir = tempfile::tempdir().unwrap();
     binary_tree(dir.path());
     let pipeline = |bwt: bool| {
-        Pipeline::balanced(BalancedOptions {
+        without_png_filter(Pipeline::balanced(BalancedOptions {
             threads: Some(1),
             bwt,
             ..BalancedOptions::default()
-        })
+        }))
     };
     let (on, s_on) = run(pipeline(true), dir.path());
     let (off, s_off) = run(pipeline(false), dir.path());

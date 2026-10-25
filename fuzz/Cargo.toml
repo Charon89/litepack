@@ -13,6 +13,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 lpk-format = { version = "0.0.1", path = "../crates/lpk-format" }
 lpk-core = { version = "0.0.1", path = "../crates/lpk-core" }
+# The hash `png_filter_decode` gives a well-formed record.
+blake3 = "1.8.7"
 # The forward transform (libsais) for `bwt_roundtrip`; the inverse and the layout for both bwt targets.
 lpk-codecs-bwt = { version = "0.0.1", path = "../crates/lpk-codecs-bwt", features = ["encode"] }
 # Its counting allocator: `bwt_decode` asserts nothing is allocated past the bound and the term.
@@ -165,6 +167,13 @@ bench = false
 [[bin]]
 name = "delta_patch_decode"
 path = "fuzz_targets/delta_patch_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png_filter_decode"
+path = "fuzz_targets/png_filter_decode.rs"
 test = false
 doc = false
 bench = false
