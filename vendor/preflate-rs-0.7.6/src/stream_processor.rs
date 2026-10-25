@@ -356,6 +356,18 @@ pub fn recreate_whole_deflate_stream_limited(
     recreate_whole_deflate_stream_limited_report(plain_text, prediction_corrections, limit).0
 }
 
+/// LitePack change 8 (LITEPACK-CHANGES.md), for tests only: `record` (a record returned by the
+/// analysis) with its coded correction stream replaced by `coded`, so a test can make the
+/// recreation meet a crafted correction stream under valid parameters.
+#[doc(hidden)]
+pub fn litepack_record_with_coded_corrections(record: &[u8], coded: Vec<u8>) -> Result<Vec<u8>> {
+    let r = ReconstructionData::read(record)?;
+    Ok(bitcode::encode(&ReconstructionData {
+        parameters: r.parameters,
+        corrections: coded,
+    }))
+}
+
 /// LitePack change 5 (LITEPACK-CHANGES.md): [`recreate_whole_deflate_stream_limited`], also
 /// returning the capacity of the writer's buffer when the recreation ended (for tests and
 /// fuzzing: it never exceeds `limit + 8`).

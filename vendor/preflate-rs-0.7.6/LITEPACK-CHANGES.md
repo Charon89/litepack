@@ -83,13 +83,17 @@ lists) far beyond what the archive declares.
    corrections as with `cabac`. The coder decodes a stream's first (marker) symbol and discards
    its value, as `cabac`'s decoder does, so corrections whose first byte is 0x80 or more decode as
    upstream's.
-8. **A bounded correction exponent** (LitePack LIC-2, 2026-10-25). `read_exp_value` in
-   `src/cabac_codec.rs` decodes the unary exponent with `get_unary_encoded_max(context, 65)`, so a
-   run of more than 65 ones is refused (a panic of the decoder, which LitePack's callers catch and
-   report as a refused record) instead of being decoded to its end; an exponent above 65 would ask
-   `get_n_bits` for a field wider than 64 bits, which `lpk-codecs-vp8` refuses (upstream's
-   behaviour there differs between debug and release builds). The analysis writes exponents of at
-   most 32 (its values are `u32`), so no valid record is affected.
+8. **Correction values bounded to `u32`** (LitePack LIC-2, 2026-10-25), so that no crafted record
+   gives different outcomes in debug and release builds. In `src/cabac_codec.rs`, `read_exp_value`
+   decodes the unary exponent with `get_unary_encoded_max(context, 32)`: an exponent above 32 is
+   refused at its 33rd one (upstream overflows `1 << (bits_found - 1)` on `u32`, which panics in a
+   debug build and wraps in a release build); and `decode_correction_slow` adds the `+ 1` to a
+   decoded value with `checked_add`, refusing a decoded 2^32 - 1 (upstream overflows there too).
+   Both refusals are panics, which LitePack's callers catch and report as refused corrections.
+   Corrections are `u32` values, so a valid record has exponents of at most 32 and decoded values
+   below 2^32 - 1: no valid record is affected. For tests, `src/stream_processor.rs` gains the
+   hidden function `litepack_record_with_coded_corrections(record, coded)`, exported from
+   `src/lib.rs`: the record with its coded correction stream replaced.
 
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.

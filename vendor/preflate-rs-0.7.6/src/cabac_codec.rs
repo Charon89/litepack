@@ -77,10 +77,11 @@ impl<CTX> PredictionCabacContext<CTX> {
         context_bits: &mut [CTX; N],
         reader: &mut R,
     ) -> u32 {
-        // LitePack change 8 (LITEPACK-CHANGES.md): an exponent above 65 would ask for a field wider
-        // than 64 bits, which the coder refuses; the run of ones is refused there instead of being
-        // decoded to its end (no valid record has an exponent above 32).
-        let bits_found = reader.get_unary_encoded_max(context, 65).unwrap();
+        // LitePack change 8 (LITEPACK-CHANGES.md): corrections are u32 values, so a valid exponent
+        // is at most 32; a larger one is refused at its 33rd one (a panic, which LitePack's callers
+        // report as refused corrections) instead of overflowing `1 << (bits_found - 1)` below,
+        // which panics in a debug build and wraps in a release build.
+        let bits_found = reader.get_unary_encoded_max(context, 32).unwrap();
 
         match bits_found {
             0 => 0,
@@ -244,20 +245,26 @@ impl<R: Vp8Decode<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
             .get(&mut self.context.default_signal_ctx[c])
             .unwrap()
         {
+            // LitePack change 8: checked, so a decoded 2^32 - 1 is refused in every build profile.
             let value = PredictionCabacContext::read_exp_value(
                 &mut self.context.default_ctx[c],
                 &mut self.context.default_ctx_bits[c],
                 &mut self.reader,
-            ) + 1;
+            )
+            .checked_add(1)
+            .expect("LitePack change 8: a correction value above 2^32 - 1");
 
             self.default_actions[c] = value - 1;
             return Err(0);
         } else {
+            // LitePack change 8: checked, so a decoded 2^32 - 1 is refused in every build profile.
             let value = PredictionCabacContext::read_exp_value(
                 &mut self.context.correction_ctx[c],
                 &mut self.context.correction_ctx_bits[c],
                 &mut self.reader,
-            ) + 1;
+            )
+            .checked_add(1)
+            .expect("LitePack change 8: a correction value above 2^32 - 1");
 
             return Err(value);
         }

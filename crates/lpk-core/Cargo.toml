@@ -43,6 +43,8 @@ libc = "0.2.189"
 
 [dev-dependencies]
 blake3 = "1.8.7"
+# Crafted correction streams for the refusals of LITEPACK-CHANGES change 8 (LIC-2).
+lpk-codecs-vp8 = { path = "../lpk-codecs-vp8", version = "0.0.1" }
 lpk-check = { path = "../lpk-check", version = "0.0.1" }
 # libsais's forward transform for the bwt vector, the 64 MiB round trip and the memory test.
 lpk-codecs-bwt = { path = "../lpk-codecs-bwt", version = "0.0.1", features = ["encode"] }

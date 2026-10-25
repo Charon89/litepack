@@ -1571,6 +1571,7 @@ dependencies = [
  "liblzma",
  "lpk-check",
  "lpk-codecs-bwt",
+ "lpk-codecs-vp8",
  "lpk-format",
  "lpk-procstat-sys",
  "preflate-rs",

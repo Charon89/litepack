@@ -264,7 +264,9 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
 3. Fix round of the same day. The coder item states how the code value aligns with the bytes (an accumulator
    written in P + 8 bits, byte 0 at the scale of the initial range), the decoder's steps, and that the marker
    symbol is decoded and its value discarded (as the cited library does; a stream whose first byte is 0x80 or more
-   is read on). "Limits of a recreation" gains two permitted refusals on records no valid writer produces: an
-   n-bit field wider than 64 bits, and a correction exponent above 65 (refused at the 66th one of its run, before
-   such a field would follow); the cited library's behaviour there depends on its build. The resource derivation
+   is read on). The coder item refuses an n-bit field wider than 64 bits. "Limits of a recreation" gains two
+   permitted refusals on records no valid writer produces: a correction exponent above 32 (the unary value read
+   before an n-bit field of that value minus 1 bits), refused at the 33rd one of its run, and a decoded correction
+   value of 2^32 - 1, to which the library adds 1. Corrections are u32 values, so no valid writer produces these;
+   the cited library's result for them depends on how it was built (an arithmetic overflow). The resource derivation
    says "correction stream" and "coder contexts" for "CABAC". No valid record is read differently.

@@ -987,11 +987,11 @@ output, or the block's encoded bytes when it is the first step. Its output is th
 - Limits of a recreation. A reader MAY refuse, with `BadRecord` `corrections` in check (7), a recreation that would
   produce more Deflate blocks than `original_len`, one whose predictor parameters (the first part of `corrections`)
   lie outside the values 0.7.6's analysis produces, and one with a correction that asks for more hops along the
-  hash chain than the parameters' `max_chain`; and, in the correction stream (the coder above), one whose exponent
-  (a unary value read before an n-bit field of that value minus 1 bits) exceeds 65, refused as soon as the run of
-  ones passes 65, because the field would be wider than 64 bits (the coder's item (4); the cited library's
-  behaviour there depends on how it was built). No valid writer produces these: 0.7.6's analysis writes exponents
-  of at most 32. A reader that calls the cited library cannot inspect these inside
+  hash chain than the parameters' `max_chain`; and, in the correction stream (the coder above), one with a
+  correction exponent above 32 (the unary value read before an n-bit field of that value minus 1 bits), refused at
+  the 33rd one of its run, and one with a decoded correction value of 2^32 - 1, to which the library adds 1.
+  Corrections are u32 values, so no valid writer produces these; the cited library's result for them depends on
+  how it was built (an arithmetic overflow). A reader that calls the cited library cannot inspect these inside
   the corrections, so they are permitted refusals, not rules every reader applies. The reference refuses exactly
   there: it starts no block once it has produced `original_len` blocks (every Deflate block takes at least 10
   bits, so a stream of at most `original_len` bytes has at most that many; informative: a reader that recreates
@@ -1001,7 +1001,8 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   `max_chain` 1 to 4096, `min_len` 3 to 258 or 2^32 - 1, `max_dist_3_matches` at most 32768, and the nice lengths,
   lazy-matching rows, dictionary add policies and hash algorithms analysis constructs (the full list is change 3
   of `vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`); it refuses a hop count above `max_chain` before it walks
-  the chain; and it refuses an exponent above 65 at the 66th one of its run (changes 7 and 8 of the same file).
+  the chain; and it refuses a correction exponent above 32 at the 33rd one of its run and a decoded correction
+  value of 2^32 - 1 (change 8 of the same file).
   Informative: the parameter ranges are those 0.7.6's analysis constructs, and its analysis emitted no
   hop count above `max_chain` on any stream LitePack checked, so a record a writer makes with 0.7.6's analysis is
   not expected to meet these refusals (the evidence: LitePack's check that every Deflate stream of its `small`
