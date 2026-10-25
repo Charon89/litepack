@@ -31,6 +31,10 @@ clap = { version = "4.6", features = ["derive"] }
 [dev-dependencies]
 toml = "1.1"
 lzma-rs = "0.3"
+# The reference full reader and writer, called as a black box by the crafted-record test of
+# revision 1.4 (tests/png_crafted.rs); never read for the decoder.
+lpk-format = { path = "../lpk-format", version = "0.0.1" }
+lpk-core = { path = "../lpk-core", version = "0.0.1" }
 
 [lints]
 workspace = true
