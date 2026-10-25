@@ -673,10 +673,12 @@ fn bad_options(reason: &'static str) -> FormatError {
 /// The checks a reader makes of a block's graph: step count, parameters and
 /// the records it names (`record_count` is how many the archive will have);
 /// then the writer's own: no primitive that no revision decodes (`bcj-x86`,
-/// `bcj-arm64`, `delta`, `png-filter`, `base64`, `utf16`,
+/// `bcj-arm64`, `delta`, `base64`, `utf16`,
 /// `container-reconstruct`; `BadGraph`, `undecoded primitive`, at every
 /// minor, spec section 8), `bwt` only last or directly before a last
-/// `deflate-reconstruct` (`BadGraph`, `bwt position`, revision 1.3), and
+/// `deflate-reconstruct` (`BadGraph`, `bwt position`, revision 1.3),
+/// `png-filter` only directly before a last `deflate-reconstruct`
+/// (`BadGraph`, `png-filter not before deflate-reconstruct`, revision 1.4), and
 /// every primitive belongs to a revision no later than the archive's
 /// `version_minor` (`BadOptions`, `version_minor`).
 fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(), FormatError> {
@@ -695,6 +697,7 @@ fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(
         });
     }
     check_bwt_steps(graph)?;
+    check_png_position(graph)?;
     if graph
         .steps
         .iter()
@@ -722,6 +725,27 @@ fn check_bwt_steps(graph: &Graph) -> Result<(), FormatError> {
         if !allowed {
             return Err(FormatError::BadGraph {
                 reason: "bwt position",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Revision 1.4's position rule for `png-filter`: a writer puts it directly
+/// before a last `deflate-reconstruct` (its output is that step's input, the
+/// inflated text, and the look-ahead bounds the step before it by the
+/// image's filtered length); anywhere else is `BadGraph`,
+/// `png-filter not before deflate-reconstruct`. A reader decodes it in any
+/// position (spec section 8, "Decoding `png-filter`").
+fn check_png_position(graph: &Graph) -> Result<(), FormatError> {
+    let last = graph.steps.len().saturating_sub(1);
+    for (i, s) in graph.steps.iter().enumerate() {
+        if s.primitive != PrimitiveId::PngFilter {
+            continue;
+        }
+        if !(i + 1 == last && graph.steps[last].primitive == PrimitiveId::DeflateReconstruct) {
+            return Err(FormatError::BadGraph {
+                reason: "png-filter not before deflate-reconstruct",
             });
         }
     }
@@ -1977,6 +2001,46 @@ impl<W: Write> Writer<W> {
                     reason: "corrections",
                 });
             }
+            if i > 0 {
+                self.check_png_step(&graph.steps[i - 1], d.plain_len)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Revision 1.4's record checks of a `png-filter` step directly before a
+    /// last `deflate-reconstruct` whose record's `plain_len` is `plain_len`,
+    /// for the records this writer holds: a `png-filter` record (`BadRecord`,
+    /// `kind`), check (3) of "Decoding `png-filter`" (`width`, `height`,
+    /// `bit_depth`, `filters`), and its filtered length equal to `plain_len`
+    /// (`BadRecord`, `filtered length`; the writer's own reason: a reader meets
+    /// a longer one as `PayloadTooLarge` and a shorter one as the deflate
+    /// step's `plain_len`).
+    fn check_png_step(&self, step: &Step, plain_len: u64) -> Result<(), FormatError> {
+        if step.primitive != PrimitiveId::PngFilter {
+            return Ok(());
+        }
+        let Some(record) = step.primitive.record_id(&step.params) else {
+            return Ok(());
+        };
+        let Some(r) = usize::try_from(record)
+            .ok()
+            .and_then(|i| self.options.records.get(i))
+        else {
+            return Ok(());
+        };
+        let RecordBody::PngFilter(p) = &r.body else {
+            return Err(FormatError::BadRecord {
+                record,
+                reason: "kind",
+            });
+        };
+        p.check_image(record)?;
+        if p.filtered_len() != Some(plain_len) {
+            return Err(FormatError::BadRecord {
+                record,
+                reason: "filtered length",
+            });
         }
         Ok(())
     }
@@ -3601,7 +3665,7 @@ mod deflate_rule_tests {
     fn deflate_reconstruct_is_revision_2_and_bwt_revision_3() {
         assert_eq!(PrimitiveId::DeflateReconstruct.revision(), 2);
         assert_eq!(PrimitiveId::Bwt.revision(), 3);
-        assert_eq!(FormatVersion::LATEST.minor, 3);
+        assert_eq!(FormatVersion::LATEST.minor, 4);
     }
 
     #[test]
@@ -3727,10 +3791,6 @@ mod undecoded_rule_tests {
                 params: vec![0; 9],
             },
             Step {
-                primitive: PrimitiveId::PngFilter,
-                params: vec![0],
-            },
-            Step {
                 primitive: PrimitiveId::Base64,
                 params: vec![0],
             },
@@ -3773,8 +3833,8 @@ mod undecoded_rule_tests {
     }
 
     #[test]
-    fn each_undecoded_primitive_is_refused_at_minors_0_to_3() {
-        for minor in [0u16, 1, 2, 3] {
+    fn each_undecoded_primitive_is_refused_at_minors_0_to_4() {
+        for minor in [0u16, 1, 2, 3, 4] {
             for step in undecoded() {
                 let p = step.primitive;
                 // Alone, and after a decoded step.
@@ -3809,7 +3869,7 @@ mod undecoded_rule_tests {
             primitive: PrimitiveId::Store,
             params: Vec::new(),
         };
-        for minor in [0u16, 1, 2, 3] {
+        for minor in [0u16, 1, 2, 3, 4] {
             assert!(write(minor, vec![store.clone()]).is_ok(), "minor {minor}");
         }
     }
@@ -3849,7 +3909,7 @@ mod bwt_rule_tests {
         let params = match p {
             PrimitiveId::Bwt => vec![0, 0, 1, 0],
             PrimitiveId::Lzma => vec![0, 0, 1, 0, 3, 0, 2],
-            PrimitiveId::DeflateReconstruct => vec![0],
+            PrimitiveId::DeflateReconstruct | PrimitiveId::PngFilter => vec![0],
             _ => Vec::new(),
         };
         Step {
@@ -3861,6 +3921,44 @@ mod bwt_rule_tests {
     fn graph(ps: &[PrimitiveId]) -> Graph {
         Graph {
             steps: ps.iter().map(|&p| st(p)).collect(),
+        }
+    }
+
+    /// Revision 1.4: `png-filter` only directly before a last
+    /// `deflate-reconstruct`, and only under minor 4.
+    #[test]
+    fn png_filter_position_and_minor() {
+        use PrimitiveId::*;
+        for ps in [
+            &[PngFilter][..],
+            &[Lzma, PngFilter],
+            &[PngFilter, Lzma, DeflateReconstruct],
+            &[Lzma, PngFilter, Store],
+            &[Lzma, PngFilter, DeflateReconstruct, Store],
+        ] {
+            assert!(
+                matches!(
+                    check_graph(&graph(ps), 1, 4),
+                    Err(FormatError::BadGraph {
+                        reason: "png-filter not before deflate-reconstruct"
+                    })
+                ),
+                "{ps:?}"
+            );
+        }
+        for ps in [
+            &[PngFilter, DeflateReconstruct][..],
+            &[Lzma, PngFilter, DeflateReconstruct],
+        ] {
+            for minor in [0u16, 1, 2, 3] {
+                assert!(matches!(
+                    check_graph(&graph(ps), 1, minor),
+                    Err(FormatError::BadOptions {
+                        reason: "version_minor"
+                    })
+                ));
+            }
+            assert!(check_graph(&graph(ps), 1, 4).is_ok(), "{ps:?}");
         }
     }
 

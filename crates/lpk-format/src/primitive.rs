@@ -110,8 +110,8 @@ impl PrimitiveId {
 
     /// The format revision (the header's `version_minor`) that specifies this
     /// primitive's decoding: 1 for `jpeg-reconstruct` (revision 1.1), 2 for
-    /// `deflate-reconstruct` (revision 1.2), 3 for `bwt` (revision 1.3), 0
-    /// for the primitives of revision 1.0 and for those no revision decodes
+    /// `deflate-reconstruct` (revision 1.2), 3 for `bwt` (revision 1.3), 4
+    /// for `png-filter` (revision 1.4), 0 for the primitives of revision 1.0 and for those no revision decodes
     /// yet. A writer refuses a graph that names a primitive of a revision
     /// above the archive's `version_minor` (spec section 2).
     pub fn revision(self) -> u16 {
@@ -119,13 +119,14 @@ impl PrimitiveId {
             PrimitiveId::JpegReconstruct => 1,
             PrimitiveId::DeflateReconstruct => 2,
             PrimitiveId::Bwt => 3,
+            PrimitiveId::PngFilter => 4,
             _ => 0,
         }
     }
 
     /// True when some revision of the specification decodes this primitive:
     /// `store`, `zstd` and `lzma` (revision 1.0), `jpeg-reconstruct` (1.1),
-    /// `deflate-reconstruct` (1.2) and `bwt` (1.3). The others have an ID
+    /// `deflate-reconstruct` (1.2), `bwt` (1.3) and `png-filter` (1.4). The others have an ID
     /// and a parameter layout but no decoding yet, and a writer MUST NOT emit
     /// them at any minor (spec section 8); the reference writer refuses them
     /// (`BadGraph`, `undecoded primitive`).
@@ -138,6 +139,7 @@ impl PrimitiveId {
                 | PrimitiveId::Bwt
                 | PrimitiveId::JpegReconstruct
                 | PrimitiveId::DeflateReconstruct
+                | PrimitiveId::PngFilter
         )
     }
 
@@ -381,7 +383,8 @@ mod tests {
         }
         assert_eq!(PrimitiveId::Bwt.revision(), 3);
         assert!(PrimitiveId::Bwt.is_decoded());
-        assert!(!PrimitiveId::PngFilter.is_decoded());
+        assert!(PrimitiveId::PngFilter.is_decoded());
+        assert_eq!(PrimitiveId::PngFilter.revision(), 4);
     }
 
     #[test]
