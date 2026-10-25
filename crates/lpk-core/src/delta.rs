@@ -716,12 +716,39 @@ mod tests {
     #[test]
     fn a_hand_written_patch_decodes_as_the_text_says() {
         // base "ABCDEFGH"; output: gap "xy", cover base[2..5] + diff [0,1,0] = "CEE", gap "",
-        // cover base[0..2] + 0 = "AB" (overlapping base spans are allowed), tail "z".
+        // cover base[0..2] + 0 = "AB" (a span before the first one), tail "z".
         let base = b"ABCDEFGH";
         let mut p = header(8, 2);
         p.extend_from_slice(&[2, 2, 3, 0, 0, 2, 1]);
         p.extend_from_slice(b"xyz");
         p.extend_from_slice(&[0, 1, 0, 0, 0]);
         assert_eq!(apply(base, &p).expect("apply"), b"xyCEEABz");
+    }
+
+    #[test]
+    fn overlapping_base_spans_decode() {
+        // base "ABCDEFGH"; cover 1 = base[2..5] "CDE" + diff [0,1,0] = "CEE"; cover 2 =
+        // base[3..7] "DEFG" (overlaps base[3..5] of cover 1) + diff [1,0,0,0] = "EEFG"; cover 3
+        // = base[2..4] "CD" again (inside cover 1's span); tail "z".
+        let base = b"ABCDEFGH";
+        let mut p = header(12, 3);
+        p.extend_from_slice(&[2, 2, 3, 0, 3, 4, 0, 2, 2, 1]);
+        p.extend_from_slice(b"xyz");
+        p.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0, 0]);
+        assert_eq!(apply(base, &p).expect("apply"), b"xyCEEEEFGCDz");
+        // The encoder's covers may overlap in the base too: a repeated block of the base.
+        let base: Vec<u8> = (0..=255u8).collect();
+        let new = [&base[10..200], &base[50..250], &base[10..100]].concat();
+        let p = round_trip(&base, &new);
+        let h = parse(&p, base.len() as u64).expect("parse");
+        let spans: Vec<(u64, u64)> = h
+            .covers(&p)
+            .map(|c| (c.base_off, c.base_off + c.len))
+            .collect();
+        let overlap = spans
+            .iter()
+            .enumerate()
+            .any(|(i, a)| spans[i + 1..].iter().any(|b| a.0 < b.1 && b.0 < a.1));
+        assert!(overlap, "{spans:?}");
     }
 }
