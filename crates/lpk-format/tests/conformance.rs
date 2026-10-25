@@ -36,7 +36,7 @@ const MALFORMED_BWT_BOUND: &str = "malformed-bwt-bound.lpk";
 const MALFORMED_BWT_INVERSE: &str = "malformed-bwt-inverse.lpk";
 /// The vectors an earlier reader opens, lists and reports `UnimplementedPrimitive` on, with the
 /// primitive's ID: the `_1_0` keys of `expected.toml`.
-const LATER_REVISION_VECTORS: [(&str, u16); 13] = [
+const LATER_REVISION_VECTORS: [(&str, u16); 14] = [
     (DEFLATE_VECTOR, 8),
     (MALFORMED_DEFLATE, 8),
     (BWT_VECTOR, 3),
@@ -52,6 +52,7 @@ const LATER_REVISION_VECTORS: [(&str, u16); 13] = [
     ("malformed-png-filter-filters.lpk", 9),
     ("malformed-png-filter-scanlines.lpk", 9),
     ("malformed-png-filter-hash.lpk", 9),
+    ("malformed-png-filter-lookahead.lpk", 9),
 ];
 
 fn read(name: &str) -> Vec<u8> {

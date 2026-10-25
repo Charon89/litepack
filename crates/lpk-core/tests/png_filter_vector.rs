@@ -50,7 +50,7 @@ const MTIME: i64 = 1000;
 const BLOCK: usize = 8 * 1024;
 
 /// The malformed vectors: name, fault.
-const MALFORMED: [(&str, Fault); 7] = [
+const MALFORMED: [(&str, Fault); 8] = [
     ("malformed-png-filter-bound.lpk", Fault::Bound),
     ("malformed-png-filter-width.lpk", Fault::Width),
     ("malformed-png-filter-height.lpk", Fault::Height),
@@ -58,6 +58,7 @@ const MALFORMED: [(&str, Fault); 7] = [
     ("malformed-png-filter-filters.lpk", Fault::Filters),
     ("malformed-png-filter-scanlines.lpk", Fault::Scanlines),
     ("malformed-png-filter-hash.lpk", Fault::Hash),
+    ("malformed-png-filter-lookahead.lpk", Fault::Lookahead),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -70,6 +71,9 @@ enum Fault {
     Filters,
     Scanlines,
     Hash,
+    /// `[lzma, png-filter, bwt {4096}]`: the image's filtered length (3630) above the `bwt`
+    /// step's input bound I(100, 4096) = 208, within `max_block_plain`.
+    Lookahead,
 }
 
 fn vectors() -> PathBuf {
@@ -311,7 +315,7 @@ fn add_png(
         original_hash: *blake3::hash(&deflate).as_bytes(),
     };
     match fault {
-        Fault::None => {}
+        Fault::None | Fault::Lookahead => {}
         Fault::Bound => dr.plain_len -= 1,
         Fault::Width => png.width = 0,
         Fault::Height => {
@@ -385,11 +389,75 @@ fn build() -> Vec<u8> {
     out
 }
 
-/// A malformed vector: `sprite.png` with `fault`, then `readme.txt`.
+/// `notes.txt` (100 bytes) as `[lzma, png-filter, bwt {4096}]` whose `png-filter` record is
+/// `sprite.png`'s and whose `lzma` step encodes sprite's Up text: the `png-filter` step's output
+/// bound is the `bwt` step's input bound I(100, 4096) = 208 (the look-ahead), which the
+/// filtered length 3630 passes although `max_block_plain` (above 4096, `filler.bin`) does not:
+/// `PayloadTooLarge` before `lzma` runs. A decoder that bounded the step by `max_block_plain`
+/// would run it and fail later with `BwtError` `length`.
+fn add_lookahead(w: &mut Writer<&mut Vec<u8>>) {
+    let bytes = sprite();
+    let mut streams = Vec::new();
+    examine(&bytes, "png", &Limits::standard(), |r| streams.push(r));
+    let r = streams.remove(0);
+    let text = r.plain.text().to_vec();
+    let l = Header::parse(&bytes).unwrap().layout().unwrap();
+    let filters = l.filter_bytes(&text).unwrap();
+    let up = l.transcode(&text, &vec![FILTER_UP; filters.len()]).unwrap();
+    let png = PngFilterRecord {
+        width: l.width(),
+        height: l.height(),
+        bit_depth: l.bit_depth(),
+        color_type: l.color_type(),
+        interlace: l.interlace(),
+        filters,
+        original_hash: *blake3::hash(&text).as_bytes(),
+    };
+    let notes = readme()[..100].to_vec();
+    let p = w
+        .add_record(Record::new(RecordBody::PngFilter(png)))
+        .unwrap();
+    let graph = Graph {
+        steps: vec![
+            lzma_step(),
+            Step {
+                primitive: PrimitiveId::PngFilter,
+                params: record_param(p),
+            },
+            Step {
+                primitive: PrimitiveId::Bwt,
+                params: 4096u32.to_le_bytes().to_vec(),
+            },
+        ],
+    };
+    let block = Encoded {
+        resources: graph.resources(),
+        memory: 0,
+        graph,
+        bytes: lzma_bytes(&up),
+    };
+    let memory = lpk_codecs_bwt::layout::memory_term(100, 4096);
+    w.begin_entry("notes.txt", EntryFlags::EMPTY, MTIME)
+        .unwrap();
+    w.add_part_encoded(0, &notes, block, memory).unwrap();
+    w.end_entry().unwrap();
+    let filler: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 251) as u8).collect();
+    w.add_file("filler.bin", EntryFlags::EMPTY, MTIME, &mut &filler[..])
+        .unwrap();
+}
+
+/// A malformed vector: `sprite.png` with `fault` (or the look-ahead block), then `readme.txt`.
 fn build_malformed(fault: Fault) -> Vec<u8> {
     let mut out = Vec::new();
     let mut w = Writer::new_revision(&mut out, options(), 4).unwrap();
     w.allow_malformed_png_records();
+    if fault == Fault::Lookahead {
+        add_lookahead(&mut w);
+        w.add_file(README, EntryFlags::EMPTY, MTIME, &mut &readme()[..])
+            .unwrap();
+        w.finish().unwrap();
+        return out;
+    }
     add_png(
         &mut w,
         "sprite.png",
@@ -507,6 +575,9 @@ fn the_malformed_vectors_fail_by_reason() {
             (Fault::Bound, FormatError::PayloadTooLarge { len, max }) => {
                 assert_eq!(*len, max + 1, "{name}")
             }
+            (Fault::Lookahead, FormatError::PayloadTooLarge { len, max }) => {
+                assert_eq!((*len, *max), (3630, 208), "{name}")
+            }
             (
                 Fault::Width,
                 FormatError::BadRecord {
@@ -553,9 +624,9 @@ fn the_malformed_vectors_fail_by_reason() {
         let entries: Vec<_> = t.table().unwrap().iter().map(|e| e.unwrap()).collect();
         for e in &entries {
             let mut got = Vec::new();
-            if e.path == README {
+            if e.path == README || e.path == "filler.bin" {
                 a.extract(e, &mut got).unwrap();
-                assert!(got == readme());
+                assert!(e.path != README || got == readme());
             } else {
                 check(a.extract(e, &mut got).unwrap_err());
             }
@@ -593,7 +664,7 @@ fn a_1_3_reader_reports_unimplemented_primitive_9() {
             let entries: Vec<_> = t.table().unwrap().iter().map(|e| e.unwrap()).collect();
             for e in &entries {
                 let mut got = Vec::new();
-                if e.path == README {
+                if e.path == README || e.path == "filler.bin" {
                     a.extract(e, &mut got).unwrap();
                 } else {
                     assert!(matches!(

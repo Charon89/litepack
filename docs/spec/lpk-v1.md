@@ -728,8 +728,10 @@ Revision 1.4. A step whose next step is `png-filter` has, as its output bound, t
 that step names (section 8, "Decoding `png-filter`") instead of `max_block_plain`. Before the step runs, and before
 any of its own rules, the reader applies checks (1) to (4) of "Decoding `png-filter`" to that record, with the
 `png-filter` step's own output bound in check (4): the block's `plain_len` when that step is the last; otherwise the
-bound the look-ahead gives it (below): when the step after it is `deflate-reconstruct`, that record's `plain_len`,
-checks (1) to (5) of "Decoding `deflate-reconstruct`" having run first; otherwise `max_block_plain`. An error there
+input bound the step after it gives (the look-ahead, below; `max_block_plain` when it gives none): when the step
+after it is `deflate-reconstruct`, that record's `plain_len`, checks (1) to (5) of "Decoding `deflate-reconstruct`"
+having run first; when it is `bwt`, I(O, B) of that step with its own O, check (1) of "Decoding `bwt`" having run
+first (`malformed-png-filter-lookahead.lpk`, section 11 and CONFORMANCE, is such a block). An error there
 is the block's error and the step does not run. The step's output longer than the filtered length is
 `PayloadTooLarge`; a shorter one is reported by the `png-filter` step (check (5), `BadRecord` `scanlines`). Checks
 (1) to (4) run again at the `png-filter` step with its actual output bound; a filtered length that passes one bound
@@ -1578,7 +1580,7 @@ are listed in `docs/spec/CONFORMANCE.md`:
   reader extracts. Built by `crates/lpk-core/tests/png_filter_vector.rs` with explicit encoders (chunk size 4096,
   block size 8 KiB, archive id 0x5B repeated, minor 4); the three generated PNGs are deflated by the workspace's
   `flate2` (zlib backend, level 9); `cargo test -p lpk-core --test png_filter_vector -- --ignored regenerate`
-  regenerates it and the seven malformed revision 1.4 vectors (`docs/spec/CONFORMANCE.md`), and the same zlib,
+  regenerates it and the malformed revision 1.4 vectors (`docs/spec/CONFORMANCE.md`), and the same zlib,
   liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce the bytes.
 
 The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts

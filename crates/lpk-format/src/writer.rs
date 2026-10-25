@@ -684,7 +684,19 @@ fn bad_options(reason: &'static str) -> FormatError {
 /// (`BadGraph`, `png-filter not before deflate-reconstruct`, revision 1.4), and
 /// every primitive belongs to a revision no later than the archive's
 /// `version_minor` (`BadOptions`, `version_minor`).
+#[cfg(test)]
 fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(), FormatError> {
+    check_graph_png(graph, record_count, version_minor, true)
+}
+
+/// [`check_graph`], with revision 1.4's `png-filter` position rule only when `png_position`
+/// (off under [`Writer::allow_malformed_png_records`], for the malformed vectors).
+fn check_graph_png(
+    graph: &Graph,
+    record_count: u64,
+    version_minor: u16,
+    png_position: bool,
+) -> Result<(), FormatError> {
     if graph.steps.is_empty() || graph.steps.len() > MAX_STEPS {
         return Err(FormatError::BadGraph {
             reason: "step count",
@@ -700,7 +712,9 @@ fn check_graph(graph: &Graph, record_count: u64, version_minor: u16) -> Result<(
         });
     }
     check_bwt_steps(graph)?;
-    check_png_position(graph)?;
+    if png_position {
+        check_png_position(graph)?;
+    }
     if graph
         .steps
         .iter()
@@ -1568,9 +1582,14 @@ impl<W: Write> Writer<W> {
         let item = match given {
             Some(e) => {
                 self.recycle(plain);
-                let checked = check_graph(&e.graph, self.record_count, self.version_minor)
-                    .and_then(|()| self.check_record_chunks(&e.graph, first_chunk))
-                    .and_then(|()| self.check_deflate_steps(&e.graph, plain_len));
+                let checked = check_graph_png(
+                    &e.graph,
+                    self.record_count,
+                    self.version_minor,
+                    !self.unchecked_png,
+                )
+                .and_then(|()| self.check_record_chunks(&e.graph, first_chunk))
+                .and_then(|()| self.check_deflate_steps(&e.graph, plain_len));
                 self.abandon_on_error(checked)?;
                 // Classified now: a later chunk's dedup lookup must know this
                 // block is a reconstruction block before it is written.
@@ -1822,10 +1841,15 @@ impl<W: Write> Writer<W> {
             memory,
         } = encoded;
         let checked = match commit {
-            Commit::Unchecked => check_graph(&graph, self.record_count, self.version_minor)
-                .and_then(|()| self.check_record_chunks(&graph, first_chunk))
-                .and_then(|()| self.check_deflate_steps(&graph, plain_len)),
-            Commit::Pool => check_graph(&graph, self.record_count, self.version_minor)
+            Commit::Unchecked => check_graph_png(
+                &graph,
+                self.record_count,
+                self.version_minor,
+                !self.unchecked_png,
+            )
+            .and_then(|()| self.check_record_chunks(&graph, first_chunk))
+            .and_then(|()| self.check_deflate_steps(&graph, plain_len)),
+            Commit::Pool => check_graph_png(&graph, self.record_count, self.version_minor, true)
                 .and_then(|()| pool_record_rule(&graph)),
             Commit::Checked => Ok(()),
         };
@@ -2635,7 +2659,7 @@ impl<W: Write> Writer<W> {
 
     /// Skip revision 1.4's record checks of `png-filter` steps (the record's
     /// kind, its image and its filtered length against the deflate record's
-    /// `plain_len`) for the rest of this write; the position rule stays. For
+    /// `plain_len`) and its position rule for the rest of this write. For
     /// building the malformed conformance vectors a reader must refuse
     /// (`docs/spec/CONFORMANCE.md`), never for archives meant to be read.
     #[doc(hidden)]

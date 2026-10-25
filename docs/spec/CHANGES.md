@@ -308,3 +308,8 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
 6. Section 16 extends the `PayloadTooLarge`, `BadGraph` and `BadRecord` rows.
 7. The independent-decoder gate (D-49 item 5, D-78 (8)'s rule) is task E of E2-16: `lpk-check` adds the step, the
    bound and its look-ahead from the text alone, with `--revision 0..4`; the revision is final when it passes.
+8. Fix round 1 of the review: the revision 1.4 Bounds paragraph states the `png-filter` step's output bound as the
+   look-ahead gives it (the input bound of the step after it, `max_block_plain` when it gives none), as the code
+   does, instead of "the `deflate` record's `plain_len`, otherwise `max_block_plain`"; new vector
+   `malformed-png-filter-lookahead.lpk` (`[lzma, png-filter, bwt]`, `PayloadTooLarge` with the `bwt` step's I(O, B)
+   as the bound, where `max_block_plain` would let it through).

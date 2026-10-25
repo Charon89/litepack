@@ -284,6 +284,18 @@ files_1_0 = [
   "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
 ]
 
+["malformed-png-filter-lookahead.lpk"]
+list = "File\t5000\tfiller.bin\nFile\t100\tnotes.txt\nFile\t188\treadme.txt\n"
+info = "format: 1.4\nheader flags: 0x0\narchive id: 5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b\ngeneration: 0\nchain length: 1\nlength: 1499 bytes\nentries: 3\nchunks: 4\nblocks: 2\nrecords: true\nrecovery frames: 0\npriors: 0\nmerkle root: e41a44b13484f580c657121496fbe6688399de251d92d44b9e8be5e31a336310\nenvelope max_window: 131072\nenvelope max_bwt_block: 4096\nenvelope max_block_plain: 5188\nenvelope max_frame_payload: 471\nenvelope decode_memory: 1054372\nenvelope threads_hint: 0\n"
+error_1_0 = "UnimplementedPrimitive"
+message_1_0 = "primitive 0x0009 is not implemented by this reader"
+verify_exit_1_0 = 1
+verify_stderr_1_0 = "error: primitive 0x0009 is not implemented by this reader\n"
+files_1_0 = [
+  "filler.bin 5000 7784cd98429d397eb64c7520bf62724a99496fb6efc294787c3f51a0307a1537",
+  "readme.txt 188 96cabb3ef0e29428ffe5a4c84e4887bb84a370460251f7d0c29037079454afde",
+]
+
 ["malformed-truncated.lpk"]
 error = "Truncated"
 message = "input truncated in trailer"
