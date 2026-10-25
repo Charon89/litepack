@@ -28,7 +28,7 @@
 //! `files_1_0`) are in `expected.toml`, written by lpk-format's conformance test. Regenerate
 //! with `cargo test -p lpk-core --test png_filter_vector -- --ignored regenerate`, then
 //! `cargo test -p lpk-format --test conformance -- --ignored`; byte identity needs the same
-//! zlib (flate2), liblzma, libzstd, preflate-rs, bitcode and cabac versions.
+//! zlib (flate2), liblzma, libzstd, preflate-rs, bitcode and lpk-codecs-vp8 versions.
 #![allow(clippy::unwrap_used)]
 
 use std::fmt::Write as _;

@@ -1582,7 +1582,7 @@ are listed in `docs/spec/CONFORMANCE.md`:
   block size 8 KiB, archive id 0x5B repeated, minor 4); the three generated PNGs are deflated by the workspace's
   `flate2` (zlib backend, level 9); `cargo test -p lpk-core --test png_filter_vector -- --ignored regenerate`
   regenerates it and the malformed revision 1.4 vectors (`docs/spec/CONFORMANCE.md`), and the same zlib,
-  liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce the bytes.
+  liblzma, libzstd, `preflate-rs`, `bitcode` and `lpk-codecs-vp8` versions are needed to reproduce the bytes.
 
 The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts
 it (with `--prior tests/vectors/zstd-dict.prior` for the dictionary one). The full list of vectors, including the
