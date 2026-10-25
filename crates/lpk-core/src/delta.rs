@@ -726,6 +726,43 @@ mod tests {
     }
 
     #[test]
+    fn random_garbage_and_damaged_patches_never_panic() {
+        let mut rng = Rng(0xdead_beef_cafe_f00d);
+        let base = rng.bytes(3000);
+        for _ in 0..20_000 {
+            let k = rng.below(64);
+            let mut p = rng.bytes(k);
+            // Half of them with a plausible out_len (the rest of the input) up front.
+            if p.len() >= 9 && rng.below(2) == 0 {
+                let rest = (p.len() - 9) as u64;
+                p[..8].copy_from_slice(&rest.to_le_bytes());
+                p[8] = rng.below(4) as u8;
+            }
+            let k = rng.below(base.len() + 1);
+            if let Ok(out) = apply(&base[..k], &p) {
+                assert_eq!(
+                    out.len() as u64,
+                    parse(&p, k as u64).expect("parse").out_len
+                );
+            }
+        }
+        let new = edit(&mut rng, &base, 8);
+        let good = encode(&base, &new).expect("encode");
+        for _ in 0..5_000 {
+            let mut p = good.clone();
+            for _ in 0..1 + rng.below(4) {
+                let i = rng.below(p.len());
+                p[i] = rng.next() as u8;
+            }
+            if rng.below(4) == 0 {
+                let k = rng.below(p.len());
+                p.truncate(k);
+            }
+            let _ = apply(&base, &p);
+        }
+    }
+
+    #[test]
     fn overlapping_base_spans_decode() {
         // base "ABCDEFGH"; cover 1 = base[2..5] "CDE" + diff [0,1,0] = "CEE"; cover 2 =
         // base[3..7] "DEFG" (overlaps base[3..5] of cover 1) + diff [1,0,0,0] = "EEFG"; cover 3
