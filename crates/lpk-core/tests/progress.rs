@@ -335,6 +335,77 @@ fn an_extraction_cancelled_after_its_first_event_leaves_no_partial_file() {
     assert_eq!(last.blocks_done, s.blocks_needed);
 }
 
+/// E2-25: with permits past the workers and every permit filled before the first dispatch
+/// (the engine's test hook), a cancellation at the first event and a dispatcher panic both
+/// stop the pool with decoded blocks held, and leave no partial file.
+#[test]
+fn a_cancellation_and_a_failure_with_blocks_held_leave_no_partial_file() {
+    let dir = tempfile::tempdir().unwrap();
+    make_tree(dir.path());
+    let source = tree_files(dir.path());
+    let out = tempfile::tempdir().unwrap();
+    let archive = out.path().join("x.lpk");
+    fast().run_file(dir.path(), &archive).unwrap();
+    // Four threads: one writer, three workers; the default budget pays for held blocks.
+    let opts = ExtractOptions {
+        threads: Some(4),
+        fill_permits_before_dispatch: true,
+        ..ExtractOptions::default()
+    };
+    let target = out.path().join("full");
+    let s = extract_file_with(
+        &archive,
+        &target,
+        &[],
+        None,
+        &DefaultPolicy,
+        &opts,
+        &Monitor::default(),
+    )
+    .unwrap();
+    assert_eq!(tree_files(&target), source);
+    assert!(s.in_flight > s.workers, "{} of {}", s.in_flight, s.workers);
+    assert!(
+        s.peak_in_flight > s.workers,
+        "{} of {}",
+        s.peak_in_flight,
+        s.workers
+    );
+    let complete = |target: &Path, what: &str| {
+        let left = tree_files(target);
+        for (path, bytes) in &left {
+            assert_eq!(Some(bytes), source.get(path), "{what}: {path} is partial");
+        }
+        assert!(left.len() < source.len(), "{what}: every file was written");
+    };
+    // Cancelled at the first event: the blocks after the first are held at that point.
+    let (_trip, m) = monitor(Some(Stage::Extract));
+    let target = out.path().join("cancel");
+    let e = extract_file_with(&archive, &target, &[], None, &DefaultPolicy, &opts, &m).unwrap_err();
+    assert!(matches!(e, CoreError::Cancelled), "{e}");
+    complete(&target, "cancelled");
+    // A panic in the dispatcher at the second block, with the others held: resumed after the
+    // cleanup, not hung.
+    let target = out.path().join("panic");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (a, t) = (archive.clone(), target.clone());
+    let o = ExtractOptions {
+        panic_in_dispatch_at: Some(1),
+        ..opts
+    };
+    std::thread::spawn(move || {
+        let r = std::panic::catch_unwind(|| {
+            extract_file_with(&a, &t, &[], None, &DefaultPolicy, &o, &Monitor::default())
+        });
+        let _ = tx.send(r.is_err());
+    });
+    let panicked = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the extraction hung");
+    assert!(panicked, "the panic was not resumed");
+    complete(&target, "panicked");
+}
+
 /// A sink that collects the entries it is given.
 #[derive(Default)]
 struct Collect {
