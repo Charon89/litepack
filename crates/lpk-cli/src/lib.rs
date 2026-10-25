@@ -713,6 +713,9 @@ struct ExtractArgs {
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
     #[arg(short, long)]
     verbose: bool,
+    /// The limits of a foreign archive's sandboxed worker.
+    #[command(flatten)]
+    foreign: ForeignArgs,
 }
 
 /// `lpk x --overwrite`: the modes of [`lpk_core::Overwrite`].
@@ -750,6 +753,214 @@ struct ListArgs {
     /// The key material of a sealed archive that was not written with --listable.
     #[command(flatten)]
     credentials: CredentialArgs,
+    /// The limits of a foreign archive's sandboxed worker.
+    #[command(flatten)]
+    foreign: ForeignArgs,
+}
+
+/// A limit's value, or `off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrOff {
+    Off,
+    Value(u64),
+}
+
+impl OrOff {
+    fn value(self) -> Option<u64> {
+        match self {
+            OrOff::Off => None,
+            OrOff::Value(v) => Some(v),
+        }
+    }
+}
+
+/// `--max-entries`, `--max-expansion`, `--max-cpu`: a positive integer or `off`.
+fn or_off(s: &str) -> Result<OrOff, String> {
+    if s.eq_ignore_ascii_case("off") {
+        return Ok(OrOff::Off);
+    }
+    match s.parse::<u64>() {
+        Ok(v) if v > 0 => Ok(OrOff::Value(v)),
+        _ => Err(format!("{s:?}: a positive integer or `off`")),
+    }
+}
+
+/// The limits of the sandboxed worker that reads a foreign archive (`x` and `l` route a file
+/// that is not an `.lpk` to it by its magic; E4-2 recognises only the test fixture, E4-3 adds
+/// ZIP, 7z and tar). The worker's progress is what the host observes (bytes it read of the
+/// archive, member bytes received); it is stopped after 60 s without progress.
+#[derive(Debug, Args)]
+struct ForeignArgs {
+    /// Foreign archives: the most entries a listing may have (default 10000000; the archive's
+    /// length over the format's smallest header always caps it).
+    #[arg(long, value_name = "N|off", value_parser = or_off)]
+    max_entries: Option<OrOff>,
+    /// Foreign archives: the most bytes an extraction writes, as a multiple of the archive's
+    /// length (default 10000); refused from the declared sizes before anything is written.
+    #[arg(long, value_name = "FACTOR|off", value_parser = or_off)]
+    max_expansion: Option<OrOff>,
+    /// Foreign archives: the worker's CPU-time ceiling in minutes (default 60); it may use 60 s
+    /// past its CPU time at its last progress, up to this.
+    #[arg(long, value_name = "MINUTES|off", value_parser = or_off)]
+    max_cpu: Option<OrOff>,
+}
+
+impl ForeignArgs {
+    /// The broker's options: these limits, `memory` as the worker's budget. A debug build
+    /// (tests only) also takes the worker, its AppContainer name and extra worker arguments
+    /// from `LPK_TEST_WORKER`, `LPK_TEST_APPCONTAINER` and `LPK_TEST_WORKER_ARGS`.
+    fn options(&self, memory: Option<u64>) -> lpk_core::foreign::Options {
+        let mut limits = lpk_core::foreign::Limits {
+            memory,
+            ..lpk_core::foreign::Limits::default()
+        };
+        if let Some(v) = self.max_entries {
+            limits.max_entries = v.value();
+        }
+        if let Some(v) = self.max_expansion {
+            limits.max_expansion = v.value();
+        }
+        if let Some(v) = self.max_cpu {
+            limits.max_cpu = v
+                .value()
+                .map(|m| std::time::Duration::from_secs(m.saturating_mul(60)));
+        }
+        #[allow(unused_mut)]
+        let mut o = lpk_core::foreign::Options {
+            limits,
+            ..lpk_core::foreign::Options::default()
+        };
+        #[cfg(debug_assertions)]
+        {
+            if let Some(w) = std::env::var_os("LPK_TEST_WORKER") {
+                o.worker = Some(PathBuf::from(w));
+            }
+            if let Ok(n) = std::env::var("LPK_TEST_APPCONTAINER") {
+                o.appcontainer = Some(n);
+            }
+            if let Ok(a) = std::env::var("LPK_TEST_WORKER_ARGS") {
+                o.worker_args = a.split_whitespace().map(str::to_string).collect();
+            }
+        }
+        o
+    }
+}
+
+/// True when `archive` is a foreign archive the broker reads (detection by magic).
+fn is_foreign(archive: &Path) -> bool {
+    matches!(lpk_core::foreign::detect_file(archive), Ok(Some(_)))
+}
+
+/// A `--keyfile` on a foreign archive: refused as on an `.lpk` whose key slot takes none.
+fn refuse_foreign_keyfile(
+    archive: &Path,
+    credentials: Option<&Credentials>,
+) -> Result<(), Failure> {
+    if credentials.is_some_and(|c| c.keyfile.is_some()) {
+        return Err(Failure::failed(
+            UNNEEDED_KEYFILE,
+            format!(
+                "{}: a foreign archive takes no keyfile; --keyfile is not needed",
+                archive.display()
+            ),
+            Some(archive),
+        ));
+    }
+    Ok(())
+}
+
+/// `lpk x` on a foreign archive: through the sandboxed worker (`lpk_core::foreign`).
+fn foreign_extract(
+    x: &ExtractArgs,
+    credentials: Option<&Credentials>,
+    json: bool,
+    console: &Console,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
+    refuse_foreign_keyfile(&x.archive, credentials)?;
+    let select =
+        lpk_core::Selection::new(&x.patterns).map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    let symlinks = if x.symlinks {
+        lpk_core::Symlinks::Create
+    } else {
+        lpk_core::Symlinks::Skip
+    };
+    let policy = lpk_core::Policy::new(x.overwrite.into(), symlinks);
+    let r = lpk_core::foreign::extract_file(
+        &x.archive,
+        &x.outdir,
+        credentials,
+        &policy,
+        &select,
+        &x.foreign.options(x.memory),
+        &console.monitor(),
+    );
+    console.clear();
+    let s = r.map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    for p in policy.skipped_symlinks() {
+        if json {
+            let line = serde_json::json!({
+                "warning": { "kind": "SymlinkSkipped", "path": p }
+            });
+            let _ = writeln!(err, "{line}");
+        } else {
+            let _ = writeln!(
+                err,
+                "warning: {}: symlink entry skipped (--symlinks creates it)",
+                lpk_format::cli::escape_path(&p)
+            );
+        }
+    }
+    if s.skipped > 0 {
+        let _ = writeln!(err, "skipped {} existing entries", s.skipped);
+    }
+    if s.renamed > 0 {
+        let _ = writeln!(err, "renamed {} existing entries", s.renamed);
+    }
+    if x.verbose {
+        let _ = writeln!(
+            err,
+            "{}: {} archive through the sandboxed worker: {} entries, {} files, {} directories, {} symlinks, {} bytes",
+            x.archive.display(),
+            s.format,
+            s.entries,
+            s.files,
+            s.directories,
+            s.symlinks,
+            s.bytes
+        );
+    }
+    let _ = writeln!(
+        out,
+        "extracted {} files, {} directories",
+        s.files, s.directories
+    );
+    Ok(())
+}
+
+/// `lpk l` on a foreign archive: the checked listing from the sandboxed worker.
+fn foreign_list(
+    l: &ListArgs,
+    credentials: Option<&Credentials>,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    refuse_foreign_keyfile(&l.archive, credentials)?;
+    let select =
+        lpk_core::Selection::new(&l.patterns).map_err(|e| Failure::core(&e, Some(&l.archive)))?;
+    let listing = lpk_core::foreign::list_file(
+        &l.archive,
+        credentials,
+        &l.foreign.options(None),
+        &lpk_core::Monitor::default(),
+    )
+    .map_err(|e| Failure::core(&e, Some(&l.archive)))?;
+    let options = ListOptions { long: l.long, json };
+    list::list_entries(&listing.entries, options, &select, out).map_err(|e| match e {
+        list::ListError::Format(e) => Failure::format(&e, Some(&l.archive)),
+        list::ListError::Core(e) => Failure::core(&e, Some(&l.archive)),
+    })
 }
 
 #[derive(Debug, Args)]
@@ -1303,6 +1514,9 @@ fn extract(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
+    if is_foreign(&x.archive) {
+        return foreign_extract(x, credentials, json, console, out, err);
+    }
     let mut priors = Vec::with_capacity(x.priors.len());
     for p in &x.priors {
         let b = std::fs::read(p)
@@ -1664,6 +1878,9 @@ fn list(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
+    if is_foreign(&l.archive) {
+        return foreign_list(l, credentials, json, out);
+    }
     let failed = |e: FormatError| {
         let mut f = Failure::format(&e, Some(&l.archive));
         f.message = format!("{}: {} ({})", l.archive.display(), f.message, f.kind);

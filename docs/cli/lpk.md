@@ -143,6 +143,9 @@ A sealed archive written with --listable lists without its key; one that was not
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
+* `--max-entries <N|off>` — Foreign archives: the most entries a listing may have (default 10000000; the archive's length over the format's smallest header always caps it)
+* `--max-expansion <FACTOR|off>` — Foreign archives: the most bytes an extraction writes, as a multiple of the archive's length (default 10000); refused from the declared sizes before anything is written
+* `--max-cpu <MINUTES|off>` — Foreign archives: the worker's CPU-time ceiling in minutes (default 60); it may use 60 s past its CPU time at its last progress, up to this
 
 
 
@@ -175,6 +178,9 @@ Extract an archive into a directory, created if missing. Without a pattern every
 
 * `--symlinks` — Create symlink entries with the target the archive holds. Without this flag every symlink entry is skipped with a warning on stderr (with --json one `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). A link that cannot be created (for example without the privilege on Windows) fails the extraction
 * `-v`, `--verbose` — Print the plan's counts, the memory budget and its terms, and the pool size to stderr
+* `--max-entries <N|off>` — Foreign archives: the most entries a listing may have (default 10000000; the archive's length over the format's smallest header always caps it)
+* `--max-expansion <FACTOR|off>` — Foreign archives: the most bytes an extraction writes, as a multiple of the archive's length (default 10000); refused from the declared sizes before anything is written
+* `--max-cpu <MINUTES|off>` — Foreign archives: the worker's CPU-time ceiling in minutes (default 60); it may use 60 s past its CPU time at its last progress, up to this
 
 
 

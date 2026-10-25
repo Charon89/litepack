@@ -1534,6 +1534,8 @@ dependencies = [
  "lpk-core",
  "lpk-format",
  "lpk-procstat-sys",
+ "lpk-proto",
+ "lpk-sandbox-sys",
  "rpassword",
  "serde_json",
  "sevenz-rust2",

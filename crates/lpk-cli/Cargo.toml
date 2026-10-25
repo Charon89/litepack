@@ -36,8 +36,14 @@ lpk-check = { path = "../lpk-check", version = "0.0.1" }
 clap-markdown = "0.1.5"
 clap_mangen = "0.3.3"
 lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
+# E4-2's routing test writes the test fixture.
+lpk-proto = { path = "../lpk-proto", version = "0.0.1" }
 tempfile = "3.27.0"
 zstd = { version = "0.14.0", default-features = false, features = ["zdict_builder"] }
+
+# E4-2's routing test creates an AppContainer profile per test and grants it the test worker.
+[target.'cfg(any(windows, target_os = "linux"))'.dev-dependencies]
+lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
 
 [lints]
 workspace = true
