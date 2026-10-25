@@ -214,7 +214,7 @@ fn every_vp8_cross_case_replays_in_both_directions() {
             (n, w, r)
         );
     }
-    let expected = [("a", 2400), ("b", 3002), ("c", 13)];
+    let expected = [("a", 2400), ("b", 3002), ("c", 13), ("d", 360)];
     for (family, n) in expected {
         assert_eq!(
             tally.get(family).copied(),
