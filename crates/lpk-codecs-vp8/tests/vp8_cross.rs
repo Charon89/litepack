@@ -32,14 +32,27 @@ struct Case {
     bytes: Vec<u8>,
 }
 
-fn fixture_path() -> PathBuf {
+fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("lpk-core")
         .join("tests")
         .join("fixtures")
         .join("vp8-cross")
-        .join("cases.jsonl.gz")
+}
+
+/// Every `cases*.jsonl.gz` of the fixture directory, in name order.
+fn fixture_files() -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(fixture_dir())
+        .expect("the vp8-cross fixture directory")
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            name.starts_with("cases") && name.ends_with(".jsonl.gz")
+        })
+        .collect();
+    files.sort();
+    files
 }
 
 fn hex(s: &str) -> Vec<u8> {
@@ -49,8 +62,8 @@ fn hex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-fn load() -> Vec<Case> {
-    let file = std::fs::File::open(fixture_path()).expect("the vp8-cross fixtures");
+fn load(path: &std::path::Path) -> Vec<Case> {
+    let file = std::fs::File::open(path).expect("a vp8-cross fixture file");
     let reader = BufReader::new(flate2::read::GzDecoder::new(file));
     let mut cases = Vec::new();
     for line in reader.lines() {
@@ -114,10 +127,14 @@ fn write(case: &Case) -> Vec<u8> {
     out
 }
 
-/// The index of the first operation whose value the reader does not return, if any.
-fn read(case: &Case) -> Option<usize> {
+/// Where the reader departs from the case, if it does: a failed construction or the first
+/// operation whose value it does not return.
+fn read(case: &Case) -> Option<String> {
     let mut groups = fresh(&case.groups);
-    let mut r = VPXBoolReader::new(&case.bytes[..]).ok()?;
+    let mut r = match VPXBoolReader::new(&case.bytes[..]) {
+        Ok(r) => r,
+        Err(e) => return Some(format!("the reader could not start: {e}")),
+    };
     for (k, op) in case.ops.iter().enumerate() {
         let g = &mut groups[op.group];
         let ok = match op.kind {
@@ -133,7 +150,7 @@ fn read(case: &Case) -> Option<usize> {
             Kind::Unary => r.get_unary_encoded(g).ok() == Some(op.value as usize),
         };
         if !ok {
-            return Some(k);
+            return Some(format!("the reader differs at operation {k}"));
         }
     }
     None
@@ -141,15 +158,31 @@ fn read(case: &Case) -> Option<usize> {
 
 #[test]
 fn every_vp8_cross_case_replays_in_both_directions() {
-    let cases = load();
-    assert_eq!(cases.len(), 5415, "the fixture holds 5,415 cases");
+    let files = fixture_files();
+    let mut cases = Vec::new();
+    for path in &files {
+        let these = load(path);
+        assert!(!these.is_empty(), "{} is empty", path.display());
+        for w in these.windows(2) {
+            assert!(w[0].id < w[1].id, "ids increase within {}", path.display());
+        }
+        if path.file_name().unwrap() == "cases.jsonl.gz" {
+            assert_eq!(these.len(), 5415, "cases.jsonl.gz holds 5,415 cases");
+            let empty = these.iter().filter(|c| c.bytes.is_empty()).count();
+            assert_eq!(empty, 1011, "cases.jsonl.gz has 1,011 empty streams");
+        }
+        cases.extend(these);
+    }
+    assert!(
+        files
+            .iter()
+            .any(|p| p.file_name().unwrap() == "cases.jsonl.gz"),
+        "cases.jsonl.gz is read"
+    );
     // family -> (cases, writer equal, reader equal)
     let mut tally: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     let mut failures = Vec::new();
-    let mut empty = 0;
-    for (n, case) in cases.iter().enumerate() {
-        assert_eq!(case.id, n as u64);
-        empty += usize::from(case.bytes.is_empty());
+    for case in &cases {
         let t = tally.entry(case.family.clone()).or_default();
         t.0 += 1;
         let written = write(case);
@@ -166,18 +199,21 @@ fn every_vp8_cross_case_replays_in_both_directions() {
         }
         match read(case) {
             None => t.2 += 1,
-            Some(k) if failures.len() < 10 => {
-                failures.push(format!(
-                    "case {} ({}): reader differs at operation {k}",
-                    case.id, case.family
-                ));
+            Some(why) if failures.len() < 10 => {
+                failures.push(format!("case {} ({}): {why}", case.id, case.family));
             }
             Some(_) => {}
         }
     }
     println!("vp8-cross replay (family: cases, writer equal, reader equal): {tally:?}");
-    assert_eq!(empty, 1011, "the fixture has 1,011 empty streams");
     assert!(failures.is_empty(), "{failures:#?}\n{tally:?}");
+    for (family, &(n, w, r)) in &tally {
+        assert!(
+            n > 0 && n == w && n == r,
+            "family {family}: {:?}",
+            (n, w, r)
+        );
+    }
     let expected = [("a", 2400), ("b", 3002), ("c", 13)];
     for (family, n) in expected {
         assert_eq!(
