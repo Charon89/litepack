@@ -8,6 +8,7 @@ members = [
   "crates/lpk-core",
   "crates/lpk-format",
   "crates/lpk-procstat-sys",
+  "crates/lpk-sandbox-sys",
 ]
 # cargo-fuzz crate: built with nightly on Linux only (fuzz/README.md).
 # vendor/: patched third-party crates (below), built as dependencies, never as members.
