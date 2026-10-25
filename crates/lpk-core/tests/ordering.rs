@@ -132,6 +132,70 @@ fn the_versions_order_puts_a_files_versions_together() {
     }
 }
 
+/// Runs the Balanced pipeline over the contents of `dir` minus `exclude`.
+fn run_excluding(ordering: FileOrder, dir: &Path, exclude: &[&str]) -> Vec<u8> {
+    let sources = lpk_core::Sources {
+        roots: vec![lpk_core::Root::contents(dir)],
+        exclude: if exclude.is_empty() {
+            lpk_core::Selection::all()
+        } else {
+            lpk_core::Selection::new(exclude).unwrap()
+        },
+    };
+    let mut out = Vec::new();
+    pipeline(true, ordering)
+        .run_sources(&sources, &mut out)
+        .unwrap();
+    out
+}
+
+#[test]
+fn the_sibling_threshold_counts_the_files_left_after_exclude() {
+    // a has six files; b shares two of them and has a third of its own plus two images.
+    // Counting the images, b's five files share two with a (under half): no group. With
+    // `--exclude **/*.iso` b has three files and shares two (at least half): a group.
+    let dir = tempfile::tempdir().unwrap();
+    for i in 1..=6 {
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::write(
+            dir.path().join("a").join(format!("{i}.txt")),
+            letters(i, 20_000),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(dir.path().join("b")).unwrap();
+    for (name, seed) in [("1.txt", 41), ("2.txt", 42), ("z.txt", 43)] {
+        std::fs::write(dir.path().join("b").join(name), letters(seed, 20_000)).unwrap();
+    }
+    for name in ["big1.iso", "big2.iso"] {
+        std::fs::write(dir.path().join("b").join(name), letters(7, 5_000)).unwrap();
+    }
+    let _settle = run_excluding(FileOrder::None, dir.path(), &[]);
+    // Without the exclusion: no group, the default bytes.
+    assert!(
+        run_excluding(FileOrder::Versions, dir.path(), &[])
+            == run_excluding(FileOrder::None, dir.path(), &[])
+    );
+    // With it: a/1.txt, b/1.txt, a/2.txt, b/2.txt, ... (relative path, rank).
+    let bytes = run_excluding(FileOrder::Versions, dir.path(), &["**/*.iso"]);
+    let none = run_excluding(FileOrder::None, dir.path(), &["**/*.iso"]);
+    assert!(bytes != none);
+    let mut a = Archive::open(Cursor::new(bytes), &Resources::default()).unwrap();
+    let t = a.entry_table().unwrap();
+    let first: BTreeMap<String, u64> = t
+        .table()
+        .unwrap()
+        .iter()
+        .map(|e| e.unwrap())
+        .filter(|e| e.kind == EntryKind::File)
+        .map(|e| (e.path.clone(), e.chunks[0]))
+        .collect();
+    assert!(!first.contains_key("b/big1.iso"));
+    assert!(first["a/1.txt"] < first["b/1.txt"]);
+    assert!(first["b/1.txt"] < first["a/2.txt"]);
+    assert!(first["a/2.txt"] < first["b/2.txt"]);
+}
+
 #[test]
 fn the_versions_order_without_sibling_roots_is_the_default_byte_for_byte() {
     let dir = tempfile::tempdir().unwrap();
