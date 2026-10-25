@@ -14,7 +14,7 @@ publish = false
 encode = ["dep:libsais"]
 
 [dependencies]
-# MIT OR Apache-2.0 (the C sources: Apache-2.0 with LLVM exceptions, docs/LICENSING.md); the
+# MIT OR Apache-2.0 (the C sources in libsais-sys: Apache-2.0, docs/LICENSING.md); the
 # `openmp` feature stays off. Linked only with the `encode` feature.
 libsais = { version = "0.2.0", default-features = false, optional = true }
 
