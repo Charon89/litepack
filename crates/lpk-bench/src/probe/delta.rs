@@ -343,13 +343,24 @@ pub fn ruzstd_template() -> Result<Vec<u8>> {
     zstd::dict::from_samples(&samples, 2048).context("training the ruzstd template dictionary")
 }
 
-/// Format 0 decoded by `ruzstd` 0.9.1: a `Dictionary` whose content is the base and whose
-/// repeat offsets are the frame defaults (1, 4, 8), forced onto a frame without a dictionary ID.
+/// Format 0 decoded by `ruzstd` 0.9.1 as a raw-content prefix: a `Dictionary` parsed from the
+/// template, then its entropy tables emptied (the public `reset` of every FSE table and of the
+/// Huffman table, the RLE modes cleared: a raw-content dictionary has no tables, so the frame
+/// starts from the decoder's default state), its content replaced by the base and its repeat
+/// offsets by the frame defaults (1, 4, 8), forced onto a frame without a dictionary ID
+/// (`force_dict`, which copies those empty tables into the decoder).
 pub fn ruzstd_apply(template: &[u8], base: &[u8], frame: &[u8]) -> Result<Vec<u8>, String> {
     use ruzstd::decoding::{BlockDecodingStrategy, Dictionary, FrameDecoder};
     const ID: u32 = 0x4C50_4B31;
     let mut d = Dictionary::decode_dict(template).map_err(|e| e.to_string())?;
     d.id = ID;
+    d.fse.offsets.reset();
+    d.fse.literal_lengths.reset();
+    d.fse.match_lengths.reset();
+    d.fse.of_rle = None;
+    d.fse.ll_rle = None;
+    d.fse.ml_rle = None;
+    d.huf.table.reset();
     d.dict_content = base.to_vec();
     d.offset_hist = [1, 4, 8];
     let mut dec = FrameDecoder::new();
@@ -1015,9 +1026,15 @@ pub fn run(ctx: &Ctx<'_>) -> Result<Output<Data>> {
     let ruzstd = RuzstdFact {
         version: "0.9.1".to_string(),
         method: "a zstd frame written against a raw prefix (libzstd ref_prefix, level 19), \
-                 decoded by ruzstd::decoding::FrameDecoder with a Dictionary parsed from a \
-                 trained template whose dict_content is replaced by the base and offset_hist by \
-                 [1, 4, 8], forced onto the frame (force_dict; the frame has no Dictionary_ID)"
+                 decoded by ruzstd::decoding::FrameDecoder. ruzstd has no raw-content \
+                 dictionary constructor, so the decode relies on public but undocumented \
+                 internals: a Dictionary parsed (Dictionary::decode_dict) from a libzstd-trained \
+                 template, then its public fields rewritten: the FSE tables (offsets, literal \
+                 lengths, match lengths) and the Huffman table emptied with their public \
+                 reset(), the RLE modes cleared, dict_content set to the base, offset_hist to \
+                 [1, 4, 8]; added with add_dict and forced onto the frame with force_dict (the \
+                 frame has no Dictionary_ID), which copies the emptied tables, the offsets and \
+                 the content into the decoder"
             .to_string(),
         crafted_decoded: crafted,
         corpus_tried: ruz.tried,
