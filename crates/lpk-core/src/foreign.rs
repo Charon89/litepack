@@ -18,7 +18,8 @@
 //! [`Limits::max_cpu`] ([`WorkerError::CpuLimit`]); its memory is the extraction budget (D-67,
 //! `--memory`). Entries are at most the archive's length over the format's smallest header
 //! and at most [`Limits::max_entries`]; the listing held by the host is charged
-//! [`ENTRY_CHARGE`] plus the name and target bytes per entry against the same budget; a page
+//! [`entry_charge`] per entry (the measured structures, the name held [`NAME_COPIES`] times)
+//! against the same budget; a page
 //! saying `more` past a cap is refused. Bytes written are at most [`Limits::max_expansion`]
 //! times the archive's length, refused from the declared total before any write; free space
 //! is checked against the declared total before writing and every [`FREE_SPACE_STEP`].
@@ -85,8 +86,31 @@ pub const STDERR_KEEP: usize = 32 << 10;
 /// The records asked for per `List` page.
 pub const PAGE: u32 = 4096;
 /// What one listed entry is charged against the memory budget beyond its name and target
-/// bytes: the record and the `Entry` the host builds from it, with their allocations.
-pub const ENTRY_CHARGE: u64 = 256;
+/// bytes: every structure that holds an entry during an extraction at once — the record, the
+/// `Entry` (twice: the checked list and the selection's), the policy pass's placement and
+/// the file target, the record position, declared size, hard-link target and encryption mark,
+/// the hash tables by name (duplicates, records, conflicting names, case folding, hard
+/// links: each slot counted twice for the tables' load factor), plus 16 bytes of allocator
+/// overhead for each of the entry's eight heap blocks. Measured against a counting allocator
+/// (`tests/foreign_charge.rs`).
+pub const ENTRY_CHARGE: u64 = (std::mem::size_of::<Record>()
+    + 2 * std::mem::size_of::<Entry>()
+    + std::mem::size_of::<crate::extract::Placed>()
+    + 3 * 32 // a file target: two strings and its sizes
+    + 8 + 16 + 24 + 1 // position, declared size, hard-link target, encryption mark
+    + 2 * (16 + 16 + 56 + 24 + 24 + 24) // the tables' slots
+    + 8 * 16) as u64;
+/// How many times an entry's name (and link target) is held at once during an extraction:
+/// the entry, the table by name, the placement's path, the target's name and path, the case
+/// folding's two tables, and one transient copy.
+pub const NAME_COPIES: u64 = 8;
+
+/// The listing charge of one entry with a name of `name` bytes and a link target of `target`
+/// bytes. (The output directory's path, which each placement also holds, is not known when
+/// the listing is charged; `NAME_COPIES` leaves a margin for it.)
+pub fn entry_charge(name: usize, target: usize) -> u64 {
+    ENTRY_CHARGE.saturating_add(NAME_COPIES.saturating_mul((name + target) as u64))
+}
 /// The most member indices per `ReadMember` (8 KiB of indices: well below 64 KiB and below
 /// common pipe buffers).
 pub const MEMBER_BATCH: usize = 1024;
@@ -447,7 +471,7 @@ mod process {
     }
 
     /// A reparse point (a junction, a symlink, any other) on Windows; a symlink elsewhere.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(windows)]
     fn is_reparse(m: &std::fs::Metadata) -> bool {
         #[cfg(windows)]
         {
@@ -469,7 +493,7 @@ mod process {
     /// Residual: a sandboxed worker running at the same time could swap a directory for a
     /// junction between the check and a removal; workers run one per archive and the folder
     /// is emptied before the launch, when no worker of this host runs.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(windows)]
     pub(super) fn clear_appcontainer_temp(name: &str) -> Result<(), String> {
         let Some(temp) = appcontainer_temp(name) else {
             return Ok(());
@@ -503,7 +527,7 @@ mod process {
     }
 
     /// Remove everything in `dir` without following a reparse point.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(windows)]
     pub(super) fn clear_tree(dir: &Path) -> std::io::Result<()> {
         let mut first_err = None;
         for ent in std::fs::read_dir(dir)?.flatten() {
@@ -979,10 +1003,8 @@ impl<'m, P: Peer> Conv<'m, P> {
                         .into());
                     }
                     for r in &page {
-                        charged = charged
-                            .saturating_add(ENTRY_CHARGE)
-                            .saturating_add(r.name.len() as u64)
-                            .saturating_add(r.target.len() as u64);
+                        charged =
+                            charged.saturating_add(entry_charge(r.name.len(), r.target.len()));
                     }
                     if charged > self.memory {
                         self.kill();
