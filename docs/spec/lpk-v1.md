@@ -917,10 +917,32 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   citation; a conforming decoder may use that library to recreate the stream (D-49), and a later release conforms
   if it recreates the same streams from the same bytes. The version is pinned exactly, not as a range: the layout of
   the correction bytes may change between patch releases. `library` 0 names this format (section 12). Informative:
-  the bytes are a `bitcode` 0.6 encoding of the predictor parameters followed by a CABAC-coded correction stream
-  (`cabac` 0.15); the reference locks `bitcode` 0.6.9 and `cabac` 0.15.0, and recreates with a bounded copy of
-  0.7.6 (`vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`) whose output equals upstream's for every record within the
-  limits below.
+  the bytes are a `bitcode` 0.6 encoding of the predictor parameters followed by a correction stream of the coder
+  the next item states; the reference locks `bitcode` 0.6.9, codes the stream with `lpk-codecs-vp8`
+  (`crates/lpk-codecs-vp8`, the coder of `lepton_jpeg` 0.5.8 with the rules below), and recreates with a bounded
+  copy of 0.7.6 (`vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`) whose output equals upstream's for every record
+  within the limits below.
+- The correction coder. The correction stream is coded with the VP8 adaptive binary arithmetic coder ("bool
+  coder", RFC 6386 section 7) under the following rules, which are the cited library's behaviour, stated so that a
+  decoder need not depend on it (a decoder that recreates through the library meets them by construction).
+  (1) A context holds two counts, f (zeros) and t (ones), each 1 to 255, starting at f = t = 1; the probability of
+  a zero is p = floor(256 f / (f + t)). After a symbol b the count of b is incremented if it is below 255;
+  otherwise, if the other count is 1, nothing changes; otherwise the count of b becomes 129 and the other count c
+  becomes floor((c + 1) / 2). (2) The encoder's range R starts at 255 and its low register at 0; a symbol with
+  zero-probability p splits R at s = 1 + floor((R - 1) p / 256): a zero sets R = s, a one adds s to the low
+  register and sets R = R - s; then R and the low register are doubled (a renormalisation shift) until R is at
+  least 128. The stream is the code value's bits, most significant first, packed into bytes from the most
+  significant bit; a carry out of the low register propagates into the bytes already formed. (3) Every stream
+  starts with one zero coded with a fresh context of its own (a marker). (4) Composite methods over an array of A
+  contexts: an n-bit field (n from 1 to 64) is coded most significant bit first, bit i with context min(A - 1, i);
+  a unary value v is coded as v ones then a zero, symbol i with context min(A - 1, i). (5) The tail: after the last
+  symbol the encoder codes zero bits with probability 1/2 (s = 1 + floor((R - 1) / 2), no context updated) until
+  its low register is zero, then flushes, writing no further byte; the low register holds the code value's bits
+  not yet emitted, and byte k (from 0) is emitted once the number P of renormalisation shifts since the start of
+  the stream is at least 8k + 24. Equivalently, the stream is the first max(m, floor((P - 16) / 8)) bytes of the
+  code value (0 when P < 16), P counted after the last symbol and m the number of bytes up to and including its
+  last nonzero byte (0 if none): a stream of only the marker, or of a short run of probable zeros, is empty. (6) A
+  decoder reads bytes past the end of the stream as zero bits.
 - Corrections are not canonical: two different correction records may recreate the same stream. The output is
   guaranteed by `original_len`, `original_hash` and the chunk hashes, never by the correction bytes.
 - One block holds exactly one stream, because a graph applies to the whole block: the block's `plain_len` is the
@@ -1417,7 +1439,7 @@ are listed in `docs/spec/CONFORMANCE.md`:
   `[zstd, deflate-reconstruct]`, one ZIP member's inflated text larger than `max_block_plain` (section 8,
   "Bounds"). Its inputs are committed fixtures (`doc.zip`, `image.png`, `notes.txt.gz` and `readme.txt` in
   `crates/lpk-core/tests/fixtures/deflate/`), so the bytes do not depend on the `flate2` backend; `cargo test -p lpk-core --test deflate_vector -- --ignored` regenerates it,
-  and the same liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce its bytes.
+  and the same liblzma, libzstd, `preflate-rs` and `bitcode` versions and `lpk-codecs-vp8` are needed to reproduce its bytes.
 - `bwt-text.lpk` (revision 1.3): `prose.txt` (40000 bytes of generated text) in three blocks `[lzma (64 KiB
   dictionary, lc 3, lp 0, pb 2, end marker), bwt {4096}]`, four BWT blocks per full block, the two full blocks
   exactly `max_block_plain` long with their `lzma` output longer than it (section 8, "Bounds"); `log.txt` (21384
@@ -1428,7 +1450,7 @@ are listed in `docs/spec/CONFORMANCE.md`:
   "Bounds"); and `readme.txt`, a plain block every reader extracts. Built by `crates/lpk-core/tests/bwt_vector.rs`
   with explicit encoders (chunk size 4096, block size 16 KiB, minor 3); `cargo test -p lpk-core --test bwt_vector
   -- --ignored regenerate` regenerates it and the two malformed revision 1.3 vectors (`docs/spec/CONFORMANCE.md`),
-  and the same liblzma, libzstd, `preflate-rs`, `bitcode` and `cabac` versions are needed to reproduce the bytes
+  and the same liblzma, libzstd, `preflate-rs` and `bitcode` versions and `lpk-codecs-vp8` are needed to reproduce the bytes
   (the transform itself is unique by definition).
 
 The normal tests check that each archive decodes to its generated contents and that `lpk-decode verify` accepts
