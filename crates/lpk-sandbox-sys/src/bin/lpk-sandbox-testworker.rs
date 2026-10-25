@@ -2,7 +2,7 @@
 //! when absent or malformed) and reports over its response pipe what it can and cannot do.
 //!
 //! Commands (after the bootstrap argument): `report`, `read <path>`, `spawn`, `alloc <MiB>`,
-//! `spin <cpu-ms>`, `sleep <ms>`. Unsandboxed helper mode: `host <lpac|restricted> <out-file>`
+//! `spin <cpu-ms>`, `sleep <ms>`. Unsandboxed helper mode: `host <lpac|restricted> <out-file> [appcontainer-name]`
 //! launches a sandboxed copy of itself the way a console-less host would and writes the number of
 //! processes in its job to `out-file` (Windows only).
 
@@ -144,9 +144,8 @@ fn report(out: &mut File, passed: &[(u32, u64)]) {
         Ok(t) => {
             let _ = writeln!(
                 out,
-                "token appcontainer={} lpac={} integrity={:#x} restricted={} restricted_sids={} privileges={} package={}",
+                "token appcontainer={} integrity={:#x} restricted={} restricted_sids={} privileges={} package={}",
                 t.appcontainer as u8,
-                t.lpac as u8,
                 t.integrity,
                 t.restricted as u8,
                 t.restricted_sids,
@@ -216,7 +215,11 @@ fn host(args: &[String]) -> i32 {
     let run = || -> std::io::Result<String> {
         let exe = std::env::current_exe()?;
         let (r, w) = std::io::pipe()?;
-        let worker = Launch::new(&exe)
+        let mut launch = Launch::new(&exe);
+        if let Some(name) = args.get(2) {
+            launch = launch.appcontainer_name(name);
+        }
+        let worker = launch
             .mode(mode)
             .args(["sleep", "5000"])
             .handle(roles::RESPONSES, w.as_handle(), Access::Same)

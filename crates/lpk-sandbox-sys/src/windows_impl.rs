@@ -559,7 +559,8 @@ impl Worker {
             cpu_ceiling: l.limits.cpu_ceiling,
         };
         // From here every failure kills the suspended child (the job also does on drop).
-        if let Err(e) = worker.bootstrap(l, &addrs) {
+        let setup = worker.bootstrap(l, &addrs);
+        if let Err(e) = setup {
             let _ = worker.job.terminate(1);
             return Err(e);
         }

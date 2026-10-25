@@ -3,9 +3,13 @@
 //! **Windows.** Two launch modes:
 //! * [`Mode::Lpac`], the default: an AppContainer process with no capability and the
 //!   ALL APPLICATION PACKAGES opt-out (a "less privileged AppContainer"). Its identity is the SID
-//!   `DeriveAppContainerSidFromAppContainerName("LitePack.Worker")`; no profile is created.
+//!   `DeriveAppContainerSidFromAppContainerName("LitePack.Worker")`. The launch needs the profile
+//!   to exist (without it `CreateProcessW` fails with ERROR_FILE_NOT_FOUND, measured on Windows 11
+//!   26200): create it once with [`create_appcontainer_profile`] (idempotent), reuse it, and
+//!   remove it on uninstall with [`delete_appcontainer_profile`]; never per launch.
 //! * [`Mode::RestrictedToken`], an explicit opt-in (warn with [`RESTRICTED_WARNING`]): the caller's
-//!   token with every privilege but `SeChangeNotifyPrivilege` removed, every group deny-only,
+//!   token with every privilege but `SeChangeNotifyPrivilege` removed, every group deny-only but
+//!   Everyone and BUILTIN\Users (otherwise nothing, System32 included, passes the normal check),
 //!   restricting SIDs {Everyone, Users, RESTRICTED}, Low integrity. Its residual: whatever those
 //!   SIDs may read (files, registry, named objects) and the network.
 //!
@@ -52,7 +56,7 @@ pub use windows_impl::{
 pub const RESTRICTED_WARNING: &str = "warning: the restricted-token sandbox is weaker than the \
 default: the worker can read whatever Everyone and Users may read and can reach the network";
 
-/// The AppContainer name of the LPAC worker (its SID is derived from it; no profile).
+/// The AppContainer name of the LPAC worker (its profile must exist; see the crate docs).
 pub const APPCONTAINER_NAME: &str = "LitePack.Worker";
 
 /// How the worker is sandboxed (Windows; ignored on Linux, which does not sandbox).

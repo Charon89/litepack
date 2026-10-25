@@ -74,14 +74,14 @@ mod win {
     use crate::job::werr;
     use crate::windows_impl::{sid_to_string, token_info};
     use std::os::windows::io::FromRawHandle;
+    use windows::Wdk::Foundation::{NtQueryObject, OBJECT_INFORMATION_CLASS};
     use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessHandleInformation};
     use windows::Win32::Foundation::{FILETIME, HANDLE, STATUS_INFO_LENGTH_MISMATCH};
     use windows::Win32::Security::{
         IsTokenRestricted, TokenAppContainerSid, TokenIntegrityLevel, TokenIsAppContainer,
-        TokenIsLessPrivilegedAppContainer, TokenPrivileges, TokenRestrictedSids, PSID,
-        TOKEN_APPCONTAINER_INFORMATION, TOKEN_MANDATORY_LABEL,
+        TokenPrivileges, TokenRestrictedSids, PSID, TOKEN_APPCONTAINER_INFORMATION,
+        TOKEN_MANDATORY_LABEL,
     };
-    use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, VOLUME_NAME_NT};
     use windows::Win32::System::Memory::{
         VirtualFree, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_RELEASE,
         PAGE_READONLY, PAGE_READWRITE,
@@ -151,8 +151,6 @@ mod win {
     pub struct TokenReport {
         /// `TokenIsAppContainer`.
         pub appcontainer: bool,
-        /// `TokenIsLessPrivilegedAppContainer`.
-        pub lpac: bool,
         /// The AppContainer SID, if any.
         pub package_sid: Option<String>,
         /// The integrity RID (0x1000 Low, 0x2000 Medium, ...).
@@ -173,7 +171,6 @@ mod win {
     /// Describe the worker's own token.
     pub fn token_report() -> std::io::Result<TokenReport> {
         let appcontainer = u32_info(TokenIsAppContainer)? != 0;
-        let lpac = u32_info(TokenIsLessPrivilegedAppContainer).unwrap_or(0) != 0;
         let package_sid = if appcontainer {
             let b = token_info(current_token(), TokenAppContainerSid)?;
             // SAFETY: the kernel wrote a TOKEN_APPCONTAINER_INFORMATION at the start of `b`.
@@ -200,7 +197,6 @@ mod win {
         let privileges = u32_info(TokenPrivileges)?;
         Ok(TokenReport {
             appcontainer,
-            lpac,
             package_sid,
             integrity,
             restricted,
@@ -268,12 +264,31 @@ mod win {
     /// The NT path of a file or device handle the worker holds (`None` when it has none, as for
     /// pipes). Do not call it on a synchronous pipe handle another thread is blocked on.
     pub fn handle_path(value: u64) -> Option<String> {
-        let mut buf = [0u16; 1024];
-        // SAFETY: `value` is a handle in our own table (from `own_handles`); `buf` is writable.
-        let n = unsafe {
-            GetFinalPathNameByHandleW(HANDLE(value as usize as *mut _), &mut buf, VOLUME_NAME_NT)
-        } as usize;
-        (n > 0 && n < buf.len()).then(|| String::from_utf16_lossy(&buf[..n]))
+        // ObjectNameInformation: a UNICODE_STRING {Length, MaximumLength (u16), Buffer} whose
+        // characters the kernel places right after it.
+        let mut buf = [0u64; 260];
+        let mut ret = 0u32;
+        // SAFETY: `value` is a handle in our own table (from `own_handles`); `buf` is writable
+        // for its full size and 8-aligned.
+        let st = unsafe {
+            NtQueryObject(
+                Some(HANDLE(value as usize as *mut _)),
+                OBJECT_INFORMATION_CLASS(1),
+                Some(buf.as_mut_ptr().cast()),
+                std::mem::size_of_val(&buf) as u32,
+                Some(&mut ret),
+            )
+        };
+        if st.0 < 0 {
+            return None;
+        }
+        let len = (buf[0] & 0xFFFF) as usize / 2;
+        let units: Vec<u16> = buf[2..]
+            .iter()
+            .flat_map(|w| (0..4).map(move |i| (w >> (16 * i)) as u16))
+            .take(len)
+            .collect();
+        (len > 0).then(|| String::from_utf16_lossy(&units))
     }
 
     /// The worker's own user-mode CPU time.
