@@ -81,6 +81,7 @@ fn config(corpus: PathBuf, root: PathBuf, probes: &[&str]) -> Config {
         allow_debug_build: true,
         local_tools: PathBuf::from("no-such-local-tools.toml"),
         tool_timeout: Duration::from_secs(60),
+        rows: Vec::new(),
     }
 }
 
@@ -117,6 +118,7 @@ pub(crate) fn with_ctx(corpus_dir: &Path, tmp: &Path, f: impl FnOnce(&Ctx<'_>)) 
         scratch,
         local_tools: PathBuf::from("none.toml"),
         tool_timeout: Duration::from_secs(60),
+        rows: Vec::new(),
     };
     f(&ctx);
 }

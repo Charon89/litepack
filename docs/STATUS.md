@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-22, about 05:50 UTC, when the owner asked to save and stop. No measurement is running; nothing is in flight; `main` is clean and pushed. **Today: E3-3 and E3-4 (E3 complete but for E3-9, D-87, D-90), the stale pins (D-88), the owner's rulings (D-89), E4–E9 adopted into PLAN, E0-2 (D-91: G2 114.4% of 7-Zip Ultra on the re-pinned class; the 2× bound is out of reach by arithmetic — an owner item below), E2-23 (D-92), E2-24 (D-93: G3 PASS at 126.4% of the store control in one run with three repeats), and the reviewed design notes for E2-9 and LIC-2.** Resume: `git pull --ff-only`; the next three tasks are ready to dispatch in parallel — E2-25 (G4 round), E2-16 (revision 1.4) and E2-9's tasks A and E (the probe and the ordering) — their briefs and this session's ledger, reports and research notes are machine-local in `target/acceptance/handoff-2026-10-22/` on the measuring machine (copy them into the new session's scratchpad); then E3-9, LIC-2, E4–E9 as PLAN orders. The owner's open items are below.
+Last updated: 2026-10-25, about 19:21 UTC. **LIC-2 is done (D-96, PR #101): no copyleft left in the engine; a later version can be closed without a boundary.** E2-9's tasks A and E (D-94) and E2-25's code are merged or merging. In flight: E2-16 (task D), the E4 design note (round 2). Next measurements on the idle machine: the delta probe on `full`, then E3-9. The owner's open items are below.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -74,6 +74,12 @@ E3-8 is done (D-75, PR #77).
    tests pushed branches.
 
 **Open for the owner (the 2026-10-22 answers are D-89; what remains):**
+- **RAR in the sandbox (E4, new on 2026-10-25).** libarchive 3.8.9, the planned reader, cannot read encrypted
+  RAR (RAR4 and RAR5), solid RAR4, RAR5 with dictionaries above 64 MiB, RAR 1.5/2.x archives, or filters inside
+  PPMd streams (`docs/notes/e4-design.md`). The alternative is RARLAB's unRAR library inside the AppContainer
+  worker: its licence allows extraction-only use without charge (also in a closed product) but is not on the
+  allow-list, and D-89 said no unRAR. Say whether to allow unRAR for extraction in the sandbox, or to keep
+  these as named gaps.
 - **G2's threshold on this set (D-91).** On the re-pinned class the first version alone costs 85% of 7-Zip
   Ultra's total and a delta's per-version increment is 78% of the incumbent's (the probe's rows), so no delta
   stage halves the archive against an incumbent that sorts a file's versions together or compresses solid;

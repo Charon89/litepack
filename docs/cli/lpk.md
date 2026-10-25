@@ -85,13 +85,17 @@ Create an archive. With one directory as the input, its contents are archived (n
 * `--dict-size <BYTES>` — The Balanced tier's LZMA dictionary in bytes (default 64 MiB)
 * `--no-dictionaries` — Use no dictionaries (what the Fast tier does today: none is bundled)
 * `--no-dedup` — Do not deduplicate chunks (the Fast and Balanced tiers cut files with content-defined chunking and store each distinct chunk once by default, across files and within a file). This also returns to the fixed 1 MiB cut
-* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (the default: path order, which keeps directory locality) or `extension` (by extension, then name, the order 7-Zip uses for solid archives). Ignored with --no-dedup and --store
+* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (the default: path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Ignored with --no-dedup and --store
 
   Default value: `none`
 
-  Possible values: `none`, `extension`
+  Possible values: `none`, `extension`, `versions`
 
 * `--deflate-peel <ON|OFF>` — The Deflate peel: Deflate streams inside ZIP, Office, JAR, PNG, gzip and PDF files (and zlib streams found in other binary files) stored as their plain text plus a reconstruction record that restores them bit for bit (revision 1.2). Default: on with --balanced, off with --fast. An append runs it only on a revision 1.2 archive
+
+  Possible values: `on`, `off`
+
+* `--jpeg-peel <ON|OFF>` — The JPEG peel: baseline and progressive JPEGs stored as a Lepton stream plus a reconstruction record that restores them bit for bit (revision 1.1). Default: on with --fast and --balanced. Off stores JPEGs as they are, so extracting them is a copy (E2-25, the Fast tier's extraction on photographs)
 
   Possible values: `on`, `off`
 
@@ -271,13 +275,17 @@ Append the contents of a directory to an archive as its next generation: a snaps
 * `--dict-size <BYTES>` — The Balanced tier's LZMA dictionary in bytes (default 64 MiB)
 * `--no-dictionaries` — Use no dictionaries (what the Fast tier does today: none is bundled)
 * `--no-dedup` — Do not deduplicate chunks (the Fast and Balanced tiers cut files with content-defined chunking and store each distinct chunk once by default, across files and within a file). This also returns to the fixed 1 MiB cut
-* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (the default: path order, which keeps directory locality) or `extension` (by extension, then name, the order 7-Zip uses for solid archives). Ignored with --no-dedup and --store
+* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (the default: path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Ignored with --no-dedup and --store
 
   Default value: `none`
 
-  Possible values: `none`, `extension`
+  Possible values: `none`, `extension`, `versions`
 
 * `--deflate-peel <ON|OFF>` — The Deflate peel: Deflate streams inside ZIP, Office, JAR, PNG, gzip and PDF files (and zlib streams found in other binary files) stored as their plain text plus a reconstruction record that restores them bit for bit (revision 1.2). Default: on with --balanced, off with --fast. An append runs it only on a revision 1.2 archive
+
+  Possible values: `on`, `off`
+
+* `--jpeg-peel <ON|OFF>` — The JPEG peel: baseline and progressive JPEGs stored as a Lepton stream plus a reconstruction record that restores them bit for bit (revision 1.1). Default: on with --fast and --balanced. Off stores JPEGs as they are, so extracting them is a copy (E2-25, the Fast tier's extraction on photographs)
 
   Possible values: `on`, `off`
 

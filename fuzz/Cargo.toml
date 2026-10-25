@@ -165,6 +165,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "delta_patch_decode"
+path = "fuzz_targets/delta_patch_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "png_filter_decode"
 path = "fuzz_targets/png_filter_decode.rs"
 test = false

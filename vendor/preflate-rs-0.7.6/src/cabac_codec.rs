@@ -4,7 +4,8 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use cabac::{CabacReader, CabacWriter};
+// LitePack change 7 (LITEPACK-CHANGES.md): the coder traits of lpk-codecs-vp8 instead of cabac's.
+use lpk_codecs_vp8::{Vp8Decode, Vp8Encode};
 
 use crate::{
     bit_helper::bit_length,
@@ -54,7 +55,7 @@ struct PredictionCabacContext<CTX> {
 }
 
 impl<CTX> PredictionCabacContext<CTX> {
-    fn write_exp_encoded<const N: usize, W: CabacWriter<CTX>>(
+    fn write_exp_encoded<const N: usize, W: Vp8Encode<CTX>>(
         value: u32,
         context: &mut [CTX; N],
         context_bits: &mut [CTX; N],
@@ -71,12 +72,16 @@ impl<CTX> PredictionCabacContext<CTX> {
         }
     }
 
-    fn read_exp_value<R: CabacReader<CTX>, const N: usize>(
+    fn read_exp_value<R: Vp8Decode<CTX>, const N: usize>(
         context: &mut [CTX; N],
         context_bits: &mut [CTX; N],
         reader: &mut R,
     ) -> u32 {
-        let bits_found = reader.get_unary_encoded(context).unwrap();
+        // LitePack change 8 (LITEPACK-CHANGES.md): corrections are u32 values, so a valid exponent
+        // is at most 32; a larger one is refused at its 33rd one (a panic, which LitePack's callers
+        // report as refused corrections) instead of overflowing `1 << (bits_found - 1)` below,
+        // which panics in a debug build and wraps in a release build.
+        let bits_found = reader.get_unary_encoded_max(context, 32).unwrap();
 
         match bits_found {
             0 => 0,
@@ -108,7 +113,7 @@ pub struct PredictionEncoderCabac<W, CTX> {
     writer: W,
 }
 
-impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
+impl<W: Vp8Encode<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
     pub fn new(writer: W) -> Self {
         Self {
             context: PredictionCabacContext::<CTX>::default(),
@@ -127,7 +132,7 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
     }
 }
 
-impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoder for PredictionEncoderCabac<W, CTX> {
+impl<W: Vp8Encode<CTX>, CTX: Default> PredictionEncoder for PredictionEncoderCabac<W, CTX> {
     fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn encode_correction(&mut self, c: CodecCorrection, value: u32) {
@@ -217,7 +222,7 @@ pub struct PredictionDecoderCabac<R, CTX> {
     default_actions: [u32; CodecCorrection::MAX as usize],
 }
 
-impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
+impl<R: Vp8Decode<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
     pub fn new(mut reader: R) -> Self {
         let mut actions_seen = [false; CodecCorrection::MAX as usize];
         let mut actions_seen_ctx = CTX::default();
@@ -240,27 +245,33 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
             .get(&mut self.context.default_signal_ctx[c])
             .unwrap()
         {
+            // LitePack change 8: checked, so a decoded 2^32 - 1 is refused in every build profile.
             let value = PredictionCabacContext::read_exp_value(
                 &mut self.context.default_ctx[c],
                 &mut self.context.default_ctx_bits[c],
                 &mut self.reader,
-            ) + 1;
+            )
+            .checked_add(1)
+            .expect("LitePack change 8: a correction value above 2^32 - 1");
 
             self.default_actions[c] = value - 1;
             return Err(0);
         } else {
+            // LitePack change 8: checked, so a decoded 2^32 - 1 is refused in every build profile.
             let value = PredictionCabacContext::read_exp_value(
                 &mut self.context.correction_ctx[c],
                 &mut self.context.correction_ctx_bits[c],
                 &mut self.reader,
-            ) + 1;
+            )
+            .checked_add(1)
+            .expect("LitePack change 8: a correction value above 2^32 - 1");
 
             return Err(value);
         }
     }
 }
 
-impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderCabac<R, CTX> {
+impl<R: Vp8Decode<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderCabac<R, CTX> {
     fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     #[inline]
@@ -287,7 +298,7 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderC
 #[test]
 fn roundtree_cabac_decoding() {
     use crate::statistical_codec::{CodecAction, drive_encoder, verify_decoder};
-    use cabac::vp8::{VP8Reader, VP8Writer};
+    use lpk_codecs_vp8::{VPXBoolReader, VPXBoolWriter};
     use std::io::Cursor;
 
     let mut buffer = Vec::new();
@@ -299,13 +310,13 @@ fn roundtree_cabac_decoding() {
         CodecAction::Correction(CodecCorrection::DistAfterLenCorrection, 0),
     ];
 
-    let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
+    let mut encoder = PredictionEncoderCabac::new(VPXBoolWriter::new(&mut buffer).unwrap());
 
     drive_encoder(&mut encoder, &test_codec_actions);
 
     encoder.finish();
 
-    let mut decoder = PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
+    let mut decoder = PredictionDecoderCabac::new(VPXBoolReader::new(Cursor::new(&buffer)).unwrap());
 
     verify_decoder(&mut decoder, &test_codec_actions);
 }
@@ -318,8 +329,9 @@ enum Operation {
 
 #[test]
 fn roundtree_cabac_correction() {
-    // use the debug version of the cabac writer/reader to make sure that the we don't mix up contexts anywhere
-    use cabac::debug::{DebugReader, DebugWriter};
+    // LitePack change 7: upstream used a debugging coder of cabac here, which checks that no
+    // context is mixed up; this round trip uses the VP8 coder of lpk-codecs-vp8.
+    use lpk_codecs_vp8::{VPXBoolReader, VPXBoolWriter};
     use std::io::Cursor;
 
     // generate a random set of operations
@@ -340,7 +352,7 @@ fn roundtree_cabac_correction() {
 
     let mut buffer = Vec::new();
 
-    let writer = DebugWriter::new(&mut buffer).unwrap();
+    let writer = VPXBoolWriter::new(&mut buffer).unwrap();
 
     let mut encoder = PredictionEncoderCabac::new(writer);
 
@@ -354,7 +366,7 @@ fn roundtree_cabac_correction() {
 
     encoder.finish();
 
-    let reader = DebugReader::new(Cursor::new(&buffer)).unwrap();
+    let reader = VPXBoolReader::new(Cursor::new(&buffer)).unwrap();
 
     let mut decoder = PredictionDecoderCabac::new(reader);
 
@@ -374,25 +386,25 @@ fn roundtree_cabac_correction() {
 
 #[test]
 fn roundtrip_cabac_write_value() {
-    use cabac::vp8::{VP8Context, VP8Reader, VP8Writer};
+    use lpk_codecs_vp8::{Branch, VPXBoolReader, VPXBoolWriter};
     use std::io::Cursor;
 
     let mut buffer = Vec::new();
 
-    let mut writer = VP8Writer::new(&mut buffer).unwrap();
+    let mut writer = VPXBoolWriter::new(&mut buffer).unwrap();
 
     let mut context = [
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
+        Branch::default(),
+        Branch::default(),
+        Branch::default(),
+        Branch::default(),
     ];
 
     let mut context_bits = [
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
+        Branch::default(),
+        Branch::default(),
+        Branch::default(),
+        Branch::default(),
     ];
 
     for i in 0..10 {
@@ -406,19 +418,19 @@ fn roundtrip_cabac_write_value() {
 
     writer.finish().unwrap();
 
-    let mut reader = VP8Reader::new(Cursor::new(&buffer)).unwrap();
+    let mut reader = VPXBoolReader::new(Cursor::new(&buffer)).unwrap();
     context = [
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
+        Branch::default(),
+        Branch::default(),
+        Branch::default(),
+        Branch::default(),
     ];
 
     context_bits = [
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
+        Branch::default(),
+        Branch::default(),
+        Branch::default(),
+        Branch::default(),
     ];
 
     for i in 0..10 {

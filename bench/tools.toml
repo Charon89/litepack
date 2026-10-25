@@ -256,6 +256,12 @@ note = "This repository's own build (target/release, found relative to the curre
 id = "fast"
 compress = ["--fast"]
 extract = []
+# The JPEG peel's A/B on the Fast tier (E2-25, route (a)): `fast` carries the peel; this row
+# stores JPEGs as they are, so their extraction is a copy.
+[[tool.setting]]
+id = "fast-no-jpeg"
+compress = ["--fast", "--jpeg-peel", "off"]
+extract = []
 [[tool.setting]]
 id = "balanced"
 compress = ["--balanced"]
@@ -263,6 +269,11 @@ extract = []
 [[tool.setting]]
 id = "balanced-extension"
 compress = ["--balanced", "--ordering", "extension"]
+extract = []
+# The version ordering's A/B (E2-9 task E): a file's versions adjacent inside the window.
+[[tool.setting]]
+id = "balanced-versions"
+compress = ["--balanced", "--ordering", "versions"]
 extract = []
 # The Deflate peel's A/B (E2-10): `balanced` carries the peel by default; this row turns it off.
 [[tool.setting]]

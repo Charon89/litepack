@@ -68,6 +68,33 @@ lists) far beyond what the archive declares.
    `src/stream_processor.rs` also gains a test module, `litepack_crafted`, whose ignored test
    writes the crafted record LitePack's tests use for this change.
 
+7. **The coder from `lpk-codecs-vp8` instead of `cabac`** (LitePack LIC-2, 2026-10-25). Upstream codes
+   its corrections with `cabac` 0.15.0 (LGPL-3.0-or-later). This copy depends on LitePack's
+   `lpk-codecs-vp8` (`crates/lpk-codecs-vp8`, Apache-2.0: the VP8 bool coder of `lepton_jpeg` 0.5.8
+   with the conventions of LitePack's spec section 8) instead: `Cargo.toml` names it in place of
+   `cabac`; `src/cabac_codec.rs` bounds its generic encoder and decoder by `lpk_codecs_vp8::Vp8Encode`
+   and `Vp8Decode` instead of `cabac`'s two traits, and its tests use `VPXBoolWriter`,
+   `VPXBoolReader` and `Branch`; `src/stream_processor.rs` uses `VPXBoolWriter` and `VPXBoolReader`.
+   The test-only helpers that used `cabac`'s debugging coder (`roundtree_cabac_correction`,
+   `decompress_deflate_stream_assert`, `recompress_deflate_stream_assert`,
+   `analyze_compressed_data_verify`) use the VP8 coder instead, so they still round-trip but no
+   longer check that no context is mixed up. The bytes are unchanged: `lpk-codecs-vp8`'s replay of
+   5,415 oracle streams (13 captured from this crate's analysis) and LitePack's vectors show the same
+   corrections as with `cabac`. The coder decodes a stream's first (marker) symbol and discards
+   its value, as `cabac`'s decoder does, so corrections whose first byte is 0x80 or more decode as
+   upstream's.
+8. **Correction values bounded to `u32`** (LitePack LIC-2, 2026-10-25), so that no crafted record
+   gives different outcomes in debug and release builds. In `src/cabac_codec.rs`, `read_exp_value`
+   decodes the unary exponent with `get_unary_encoded_max(context, 32)`: an exponent above 32 is
+   refused at its 33rd one (upstream overflows `1 << (bits_found - 1)` on `u32`, which panics in a
+   debug build and wraps in a release build); and `decode_correction_slow` adds the `+ 1` to a
+   decoded value with `checked_add`, refusing a decoded 2^32 - 1 (upstream overflows there too).
+   Both refusals are panics, which LitePack's callers catch and report as refused corrections.
+   Corrections are `u32` values, so a valid record has exponents of at most 32 and decoded values
+   below 2^32 - 1: no valid record is affected. For tests, `src/stream_processor.rs` gains the
+   hidden function `litepack_record_with_coded_corrections(record, coded)`, exported from
+   `src/lib.rs`: the record with its coded correction stream replaced.
+
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.
 
@@ -79,3 +106,5 @@ format and every output for a valid record are upstream's.
 - `LICENSE.txt` added: the Apache License 2.0 text that the source headers refer to (the
   published package does not include it). The package includes no `NOTICE.txt`.
 - This file added.
+- `Cargo.lock` (upstream's lockfile, unused: the LitePack workspace and `fuzz/` have their own)
+  removed, since it listed `cabac` after change 7.

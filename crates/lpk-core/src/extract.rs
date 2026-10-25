@@ -62,14 +62,23 @@
 //!   ([`DISPATCH_ALLOWANCE`]; the blocks it holds are counted per block), and the parsed records
 //!   (four times the records frame).
 //!
-//! The decode workers and the permits are `(budget - fixed_shared) / (per_block + per_worker)`,
-//! at least one, capped by the threads and the needed blocks; `fixed` is `fixed_shared` plus
-//! `per_worker` for each worker. A worker holds a permit from before it reads a frame until the
-//! last writer has written the block, so at most `workers` blocks are in flight, each at most
-//! `per_block`. The entry table, read and dropped by the plan before any block is decoded, is
+//! The decode workers are `(budget - fixed_shared) / (per_block + per_worker)`, at least one,
+//! capped by the threads and the needed blocks; `fixed` is `fixed_shared` plus `per_worker` for
+//! each worker. A worker holds a permit from before it reads a frame until the last writer has
+//! written the block. Only a decoding block holds the decode terms: a decoded block waiting for
+//! its turn at the dispatcher (which hands blocks on in index order) or for the writers holds
+//! its plain bytes and its bookkeeping (`held`: `plain +` [`BLOCK_ALLOWANCE`]). So the permits
+//! (`in_flight`) are the workers plus as many held blocks as the budget left after
+//! `total(workers)` pays for, at most [`HELD_PER_WORKER`] per worker in all and at most the
+//! needed blocks (E2-25: a slow block, a large photograph, no longer stalls the other workers
+//! once they have finished the blocks after it); at most `workers` blocks decode at once, each
+//! at most `per_block`, and the others hold at most `held` each, so the count is
+//! `total(workers) + (in_flight - workers) * held` ([`ExtractMemory::total_in_flight`]). The
+//! entry table, read and dropped by the plan before any block is decoded, is
 //! not counted. An encrypted archive's key derivation (the key slot's Argon2 memory,
 //! `key_derivation`) runs at open and is freed before the plan, so the process peak is
-//! `max(key_derivation, total(workers))` ([`ExtractMemory::peak`]). The derivation cannot be
+//! `max(key_derivation, total_in_flight(workers, in_flight))`
+//! ([`ExtractMemory::peak_in_flight`]). The derivation cannot be
 //! held to the tier's budget: a sealed archive's index, and with it the envelope that shows the
 //! tier, is readable only with the derived key, so at the derivation the only limit known is the
 //! reader's (`--memory`, else [`crate::memory::EXTRACT_CEILING`] resolved), against which the
@@ -152,6 +161,11 @@ pub struct ExtractOptions {
     /// file. Always `None` outside tests.
     #[doc(hidden)]
     pub panic_in_dispatch_at: Option<usize>,
+    /// Test hook: the dispatcher hands on no block until every permit is taken (the workers
+    /// have decoded the blocks after the first and hold them), so a test sees blocks held past
+    /// the workers whatever the timing. Always `false` outside tests.
+    #[doc(hidden)]
+    pub fill_permits_before_dispatch: bool,
 }
 
 impl Default for ExtractOptions {
@@ -162,6 +176,7 @@ impl Default for ExtractOptions {
             memory: None,
             max_open_files: 128,
             panic_in_dispatch_at: None,
+            fill_permits_before_dispatch: false,
         }
     }
 }
@@ -231,6 +246,9 @@ pub struct ExtractMemory {
     pub step_input: u64,
     /// With records: the nested lower block (its plain bytes and frame); else 0.
     pub nested: u64,
+    /// A decoded block held past its decode (waiting for the dispatcher or the writers): its
+    /// plain bytes and its bookkeeping, `plain +` [`BLOCK_ALLOWANCE`].
+    pub held: u64,
     /// Held whatever the workers: the opened archive, the plan, the writers, the dispatcher.
     pub fixed_shared: u64,
     /// Each decode worker's reader and copy of the index.
@@ -239,7 +257,7 @@ pub struct ExtractMemory {
     pub fixed: u64,
     /// A sealed archive's key derivation at open: the key slot's Argon2 memory (`argon2_m`, in
     /// bytes); 0 for an archive that is not encrypted. Freed before the plan, so not part of
-    /// [`ExtractMemory::total`]; the process peak is [`ExtractMemory::peak`].
+    /// [`ExtractMemory::total`]; the process peak is [`ExtractMemory::peak_in_flight`].
     pub key_derivation: u64,
 }
 
@@ -257,6 +275,7 @@ impl Default for ExtractMemory {
             decoder: 0,
             step_input: 0,
             nested: 0,
+            held: 0,
             fixed_shared: 0,
             per_worker: 0,
             fixed: 0,
@@ -266,20 +285,40 @@ impl Default for ExtractMemory {
 }
 
 impl ExtractMemory {
-    /// What `workers` blocks in flight and their workers hold: `fixed_shared + workers *
-    /// (per_block + per_worker)`.
+    /// What `workers` decoding blocks and their workers hold: `fixed_shared + workers *
+    /// (per_block + per_worker)`. This is the whole count only when every permit is a worker's
+    /// (the sequential path, or a budget with no room for a held block); it is the yardstick of
+    /// "one block in flight" in the `--memory` refusal and the base the held term adds to. The
+    /// count of a run is [`ExtractMemory::total_in_flight`].
     pub fn total(&self, workers: usize) -> u64 {
         let w = u64::try_from(workers).unwrap_or(u64::MAX);
         self.fixed_shared
             .saturating_add(w.saturating_mul(self.per_block.saturating_add(self.per_worker)))
     }
 
-    /// The process's counted peak with `workers` workers: the larger of the key derivation at
-    /// open and [`ExtractMemory::total`] (the two never overlap).
-    pub fn peak(&self, workers: usize) -> u64 {
-        self.key_derivation.max(self.total(workers))
+    /// What `workers` workers and `in_flight` permits hold: [`ExtractMemory::total`] of the
+    /// workers plus `held` for each permit beyond them (a decoded block waiting to be written).
+    pub fn total_in_flight(&self, workers: usize, in_flight: usize) -> u64 {
+        let extra = u64::try_from(in_flight.saturating_sub(workers)).unwrap_or(u64::MAX);
+        self.total(workers)
+            .saturating_add(extra.saturating_mul(self.held))
+    }
+
+    /// The process's counted peak with `workers` workers and `in_flight` permits: the larger
+    /// of the key derivation at open and [`ExtractMemory::total_in_flight`] (the two never
+    /// overlap).
+    pub fn peak_in_flight(&self, workers: usize, in_flight: usize) -> u64 {
+        self.key_derivation
+            .max(self.total_in_flight(workers, in_flight))
     }
 }
+
+/// The most permits per decode worker (decoding plus decoded blocks held for the dispatcher
+/// and the writers), when the budget pays for them. The dispatcher hands blocks on in index
+/// order, so a block that decodes slowly holds back the blocks after it; held permits let the
+/// other workers keep decoding meanwhile. The cap bounds how far ahead of the dispatch the
+/// workers run (the reorder map's size).
+pub const HELD_PER_WORKER: usize = 8;
 
 /// Each decode worker's frame reader (its `BufReader` and the frame header's reads), file
 /// handle and thread bookkeeping: an allowance.
@@ -958,7 +997,8 @@ pub struct Pool {
     /// Decode workers: `min(N - writers, (budget - fixed_shared) / (per_block + per_worker),
     /// needed blocks)`, at least one.
     pub workers: usize,
-    /// Decoded blocks in flight (decoding, waiting or being written): as many as the workers.
+    /// Decoded blocks in flight (decoding, waiting or being written): the workers plus the held
+    /// blocks the budget pays for (module documentation, "The memory bound").
     pub in_flight: usize,
     /// File writers: `clamp(N / 4, 1, 4)`, capped by the open-file bound and the files.
     pub writers: usize,
@@ -1075,6 +1115,7 @@ pub(crate) fn pool_size<R: Read + Seek>(
         .saturating_add((writers as u64).saturating_mul(WRITER_ALLOWANCE))
         .saturating_add(DISPATCH_ALLOWANCE)
         .saturating_add(records);
+    let held = plain.saturating_add(BLOCK_ALLOWANCE);
     let workers = if threads == 1 {
         1
     } else {
@@ -1086,6 +1127,20 @@ pub(crate) fn pool_size<R: Read + Seek>(
             .min(shape.needed.len().max(1))
             .max(1)
     };
+    let in_flight = if threads == 1 {
+        1
+    } else {
+        let w = u64::try_from(workers).unwrap_or(u64::MAX);
+        let paid =
+            fixed_shared.saturating_add(w.saturating_mul(per_block.saturating_add(per_worker)));
+        let extra = budget.bytes.saturating_sub(paid) / held.max(1);
+        let extra = usize::try_from(extra).unwrap_or(usize::MAX);
+        let cap = workers
+            .saturating_mul(HELD_PER_WORKER)
+            .min(shape.needed.len())
+            .max(workers);
+        workers.saturating_add(extra).min(cap)
+    };
     let memory = ExtractMemory {
         budget,
         tier,
@@ -1095,6 +1150,7 @@ pub(crate) fn pool_size<R: Read + Seek>(
         decoder,
         step_input,
         nested,
+        held,
         fixed_shared,
         per_worker,
         fixed: fixed_shared.saturating_add((workers as u64).saturating_mul(per_worker)),
@@ -1105,7 +1161,7 @@ pub(crate) fn pool_size<R: Read + Seek>(
     Pool {
         threads,
         workers,
-        in_flight: workers,
+        in_flight,
         writers,
         memory,
     }
@@ -1230,26 +1286,30 @@ where
             Err(e) => Outcome::Failed(e),
             Ok(()) if pool.threads == 1 => {
                 let before = archive.decode_count();
+                // One thread in all: a JPEG stream decodes on this thread alone (E2-25).
+                let one = Some(crate::peel::jpeg::DecodeThreads::new(1));
                 let r = catch_unwind(AssertUnwindSafe(|| {
-                    let mut out = Out::new(shared, 0, 1, opts.max_open_files);
-                    let mut bytes_in = 0;
-                    for (k, &b) in needed.iter().enumerate() {
-                        rep.check()?;
-                        let plain = archive.decode_block_checked(b);
-                        decoded.fetch_add(1, Ordering::Relaxed);
-                        peak.store(1, Ordering::Relaxed);
-                        let plain = plain.map_err(|e| decode_error(b, e))?;
-                        out.write_block(b, &per_block[b], &plain)?;
-                        bytes_in += frame_len.get(b).copied().unwrap_or(0);
-                        rep.set(
-                            Stage::Extract,
-                            shared.files.load(Ordering::Relaxed),
-                            bytes_in,
-                            shared.bytes.load(Ordering::Relaxed),
-                            k as u64 + 1,
-                        );
-                    }
-                    Ok(())
+                    crate::peel::jpeg::with_decode_threads(one, || {
+                        let mut out = Out::new(shared, 0, 1, opts.max_open_files);
+                        let mut bytes_in = 0;
+                        for (k, &b) in needed.iter().enumerate() {
+                            rep.check()?;
+                            let plain = archive.decode_block_checked(b);
+                            decoded.fetch_add(1, Ordering::Relaxed);
+                            peak.store(1, Ordering::Relaxed);
+                            let plain = plain.map_err(|e| decode_error(b, e))?;
+                            out.write_block(b, &per_block[b], &plain)?;
+                            bytes_in += frame_len.get(b).copied().unwrap_or(0);
+                            rep.set(
+                                Stage::Extract,
+                                shared.files.load(Ordering::Relaxed),
+                                bytes_in,
+                                shared.bytes.load(Ordering::Relaxed),
+                                k as u64 + 1,
+                            );
+                        }
+                        Ok(())
+                    })
                 }));
                 reads.fetch_add(archive.decode_count() - before, Ordering::Relaxed);
                 match r {
@@ -1270,7 +1330,10 @@ where
                         per_block,
                         pool,
                         max_open: opts.max_open_files,
-                        panic_at: opts.panic_in_dispatch_at,
+                        hooks: Hooks {
+                            panic_at: opts.panic_in_dispatch_at,
+                            fill_first: opts.fill_permits_before_dispatch,
+                        },
                         decoded: &decoded,
                         reads: &reads,
                         peak: &peak,
@@ -1354,6 +1417,14 @@ impl Drop for Held<'_> {
 }
 
 const WRITER_STOPPED: &str = "a file writer stopped";
+
+/// The parallel path's test hooks ([`ExtractOptions::panic_in_dispatch_at`] and
+/// [`ExtractOptions::fill_permits_before_dispatch`]).
+#[derive(Clone, Copy)]
+struct Hooks {
+    panic_at: Option<usize>,
+    fill_first: bool,
+}
 pub(crate) const DECODER_STOPPED: &str = "a decode worker stopped";
 
 /// Everything a parallel run needs.
@@ -1364,7 +1435,7 @@ struct Run<'a, R: Read + Seek> {
     per_block: Vec<Vec<Place>>,
     pool: Pool,
     max_open: usize,
-    panic_at: Option<usize>,
+    hooks: Hooks,
     decoded: &'a AtomicU64,
     reads: &'a AtomicU64,
     /// Receives the most permits out at once.
@@ -1392,7 +1463,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         per_block,
         pool,
         max_open,
-        panic_at,
+        hooks,
         decoded,
         reads,
         peak,
@@ -1416,7 +1487,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         split,
         &pool,
         max_open,
-        panic_at,
+        hooks,
         decoded,
         reads,
         decode_error,
@@ -1436,7 +1507,7 @@ fn parallel_with<R: Read + Seek + Send>(
     split: Vec<Vec<Vec<Place>>>,
     pool: &Pool,
     max_open: usize,
-    panic_at: Option<usize>,
+    hooks: Hooks,
     decoded: &AtomicU64,
     reads: &AtomicU64,
     decode_error: &(dyn Fn(usize, FormatError) -> CoreError + Sync),
@@ -1495,12 +1566,17 @@ fn parallel_with<R: Read + Seek + Send>(
             }
         }
         let (tx, rx) = mpsc::channel::<Decoded>();
+        // The decode threads never exceed N: N tokens shared by the workers and the JPEG
+        // streams' partition threads (E2-25; the writers, which wait on I/O, are not counted).
+        let budget = crate::peel::jpeg::DecodeThreads::new(pool.threads);
         let mut decoders = Vec::with_capacity(forks.len());
         if spawn_error.is_none() {
             for (i, mut fork) in forks.into_iter().enumerate() {
                 let tx = tx.clone();
+                let budget = Arc::clone(&budget);
                 let job = move || -> u64 {
-                    loop {
+                    let lend = Some(Arc::clone(&budget));
+                    crate::peel::jpeg::with_decode_threads(lend, || loop {
                         // The token is seen here too, so a worker stops before its next
                         // block whichever thread noticed the cancellation first.
                         if token.is_cancelled() {
@@ -1515,7 +1591,10 @@ fn parallel_with<R: Read + Seek + Send>(
                             permits.release();
                             break;
                         };
-                        let r = catch_unwind(AssertUnwindSafe(|| fork.decode_block_checked(b)));
+                        let r = catch_unwind(AssertUnwindSafe(|| {
+                            let _token = budget.hold();
+                            fork.decode_block_checked(b)
+                        }));
                         decoded.fetch_add(1, Ordering::Relaxed);
                         match r {
                             Ok(r) => {
@@ -1529,7 +1608,7 @@ fn parallel_with<R: Read + Seek + Send>(
                                 break;
                             }
                         }
-                    }
+                    });
                     fork.decode_count()
                 };
                 match std::thread::Builder::new()
@@ -1558,7 +1637,7 @@ fn parallel_with<R: Read + Seek + Send>(
                     &senders,
                     permits,
                     decode_error,
-                    panic_at,
+                    hooks,
                     rep,
                     frame_len,
                     shared,
@@ -1620,16 +1699,30 @@ fn dispatch<'p>(
     senders: &[mpsc::Sender<Arc<Held<'p>>>],
     permits: &'p Permits,
     decode_error: &dyn Fn(usize, FormatError) -> CoreError,
-    panic_at: Option<usize>,
+    hooks: Hooks,
     rep: &Reporter,
     frame_len: &[u64],
     shared: &Shared,
 ) -> Result<(), CoreError> {
     let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
     let mut bytes_in = 0;
+    // Test hook: wait until every permit holds a decoded block (none is released before its
+    // dispatch, so the workers stop exactly there).
+    while hooks.fill_first && pending.len() < permits.cap.min(needed.len()) {
+        let (k, r) = rx.recv().map_err(|_| CoreError::Extract(DECODER_STOPPED))?;
+        match r {
+            Ok(p) => {
+                pending.insert(k, p);
+            }
+            Err(e) => {
+                let block = needed.get(k).copied().unwrap_or(0);
+                return Err(decode_error(block, e));
+            }
+        }
+    }
     for (want, &b) in needed.iter().enumerate() {
         assert!(
-            panic_at != Some(want),
+            hooks.panic_at != Some(want),
             "test hook: dispatcher panics at block {want}"
         );
         if rep.is_cancelled() {

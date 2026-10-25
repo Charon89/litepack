@@ -29,7 +29,8 @@ use std::io::{Cursor, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use lepton_jpeg::{
-    decode_lepton, encode_lepton, EnabledFeatures, ExitCode, LeptonThreadPool, DEFAULT_THREAD_POOL,
+    decode_lepton, encode_lepton, EnabledFeatures, ExitCode, LeptonThreadPool, SingleThreadPool,
+    DEFAULT_THREAD_POOL,
 };
 use lpk_format::envelope::{Refusal, DEFAULT_MEMORY};
 use lpk_format::{
@@ -382,6 +383,161 @@ impl Default for JpegPeel {
     }
 }
 
+/// The decode threads of an extraction (E2-25, D-54's thread budget): `total` tokens, the
+/// `--threads N` of the extraction. A thread that decodes holds one:
+/// a decode worker for each block it decodes ([`DecodeThreads::hold`]), except while a JPEG
+/// stream of its block decodes, when it waits for the stream's partitions and lends its token;
+/// each of the stream's partition threads (on the library's pool, up to the preset's eight per
+/// stream) takes one before it runs and gives it back when the stream's work queue is empty.
+/// So the threads decoding at any moment never exceed `total`. With `total` 1 (`--threads 1`)
+/// a stream decodes on the calling thread alone.
+#[derive(Debug)]
+pub struct DecodeThreads {
+    free: std::sync::Mutex<usize>,
+    cv: std::sync::Condvar,
+    total: usize,
+}
+
+impl DecodeThreads {
+    /// A budget of `total` decode threads (at least one).
+    pub fn new(total: usize) -> std::sync::Arc<Self> {
+        let total = total.max(1);
+        std::sync::Arc::new(DecodeThreads {
+            free: std::sync::Mutex::new(total),
+            cv: std::sync::Condvar::new(),
+            total,
+        })
+    }
+
+    /// The tokens in all.
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    /// The tokens not held at the moment.
+    pub fn free(&self) -> usize {
+        *self.free.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn acquire(&self) {
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 {
+            free = self.cv.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+    }
+
+    fn release(&self) {
+        *self.free.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.cv.notify_one();
+    }
+
+    /// Take a token for this thread until the guard drops (blocks while none is free).
+    pub fn hold(self: &std::sync::Arc<Self>) -> DecodeToken {
+        self.acquire();
+        DecodeToken(std::sync::Arc::clone(self))
+    }
+}
+
+/// A token of [`DecodeThreads`], given back on drop.
+#[derive(Debug)]
+pub struct DecodeToken(std::sync::Arc<DecodeThreads>);
+
+impl Drop for DecodeToken {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// The library's pool, each task holding a token of the budget while it runs.
+struct BudgetPool(std::sync::Arc<DecodeThreads>);
+
+impl LeptonThreadPool for BudgetPool {
+    fn max_parallelism(&self) -> usize {
+        self.0.total
+    }
+
+    fn run(&self, f: Box<dyn FnOnce() + Send + 'static>) {
+        let budget = std::sync::Arc::clone(&self.0);
+        DEFAULT_THREAD_POOL.run(Box::new(move || {
+            let _token = budget.hold();
+            f();
+        }));
+    }
+}
+
+/// Takes the lent token back on drop (also when the decode unwinds).
+struct Lend<'a>(&'a DecodeThreads);
+
+impl Drop for Lend<'_> {
+    fn drop(&mut self) {
+        self.0.acquire();
+    }
+}
+
+thread_local! {
+    static DECODE_THREADS: std::cell::RefCell<Option<std::sync::Arc<DecodeThreads>>> =
+        const { std::cell::RefCell::new(None) };
+    /// The streams this thread decoded on itself and those it handed to a pool.
+    static DECODE_PATHS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Test hook: the JPEG streams the current thread has decoded on itself alone and those whose
+/// partitions it handed to a pool (the library's default pool or the budget's), so far.
+#[doc(hidden)]
+pub fn decode_paths() -> (u64, u64) {
+    DECODE_PATHS.with(std::cell::Cell::get)
+}
+
+fn count_path(own: bool) {
+    DECODE_PATHS.with(|c| {
+        let (a, b) = c.get();
+        c.set(if own { (a + 1, b) } else { (a, b + 1) });
+    });
+}
+
+/// Puts the thread's previous budget back on drop.
+struct Restore(Option<std::sync::Arc<DecodeThreads>>);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        let old = self.0.take();
+        DECODE_THREADS.with(|b| *b.borrow_mut() = old);
+    }
+}
+
+/// Run `f` with the `jpeg-reconstruct` decodes on this thread under `budget` (restored after
+/// `f`, also on a panic). The thread must hold one of the budget's tokens whenever it decodes
+/// a block ([`DecodeThreads::hold`]); a JPEG stream lends it while its partitions decode.
+/// Without a budget, the default, a stream decodes on up to eight of the library's pool
+/// threads.
+pub fn with_decode_threads<T>(
+    budget: Option<std::sync::Arc<DecodeThreads>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let old = DECODE_THREADS.with(|b| std::mem::replace(&mut *b.borrow_mut(), budget));
+    let _restore = Restore(old);
+    f()
+}
+
+/// Decode `stream` under this thread's budget ([`with_decode_threads`]).
+fn budgeted_decode(stream: &[u8], max: usize, f: &mut EnabledFeatures) -> Result<Vec<u8>, Fail> {
+    let Some(budget) = DECODE_THREADS.with(|b| b.borrow().clone()) else {
+        count_path(false);
+        return lepton_decode(stream, max, f, &DEFAULT_THREAD_POOL);
+    };
+    count_path(budget.total == 1);
+    if budget.total == 1 {
+        f.max_processor_threads = 1;
+        return lepton_decode(stream, max, f, &SingleThreadPool::default());
+    }
+    // Lend this thread's token while the partitions decode; take it back after, so the
+    // caller's guard gives back exactly one.
+    budget.release();
+    let _lend = Lend(&budget);
+    lepton_decode(stream, max, f, &BudgetPool(std::sync::Arc::clone(&budget)))
+}
+
 /// A writer that refuses to grow past `max` bytes.
 struct Bounded {
     buf: Vec<u8>,
@@ -656,8 +812,7 @@ impl PrimitiveDecoder for JpegDecoder {
         let mut f = features(u32::try_from(j.primary_len).unwrap_or(u32::MAX));
         f.max_jpeg_width = frame.width;
         f.max_jpeg_height = frame.height;
-        let primary = lepton_decode(input, max, &f, &DEFAULT_THREAD_POOL)
-            .map_err(|_| bad(id, "lepton stream"))?;
+        let primary = budgeted_decode(input, max, &mut f).map_err(|_| bad(id, "lepton stream"))?;
         if primary.len() as u64 != j.primary_len {
             return Err(bad(id, "primary_len"));
         }
@@ -799,4 +954,73 @@ pub fn register_full_decoders(registry: &mut lpk_format::Registry) {
         PrimitiveId::PngFilter,
         Box::new(super::png_filter::PngFilterDecoder),
     );
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod decode_threads_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn stream() -> (Vec<u8>, Vec<u8>) {
+        let jpeg = include_bytes!("../../tests/fixtures/baseline.jpg").to_vec();
+        let mut f = features(u32::try_from(jpeg.len()).unwrap());
+        f.max_processor_threads = 1;
+        let mut w = Cursor::new(Vec::new());
+        encode_lepton(
+            &mut Cursor::new(&jpeg[..]),
+            &mut w,
+            &f,
+            &DEFAULT_THREAD_POOL,
+        )
+        .unwrap();
+        (jpeg, w.into_inner())
+    }
+
+    fn decode(s: &[u8], len: usize) -> Vec<u8> {
+        let mut f = features(u32::try_from(len).unwrap());
+        budgeted_decode(s, len, &mut f).ok().unwrap()
+    }
+
+    /// One token: the stream decodes on the calling thread (the library's single-thread pool
+    /// panics if asked to run anything elsewhere), and the token is the caller's again after.
+    #[test]
+    fn one_thread_decodes_on_the_calling_thread() {
+        let (jpeg, s) = stream();
+        let budget = DecodeThreads::new(1);
+        let out = with_decode_threads(Some(Arc::clone(&budget)), || {
+            let _t = budget.hold();
+            let out = decode(&s, jpeg.len());
+            assert_eq!(
+                budget.free(),
+                0,
+                "the caller's token is held through the decode"
+            );
+            out
+        });
+        assert_eq!(out, jpeg);
+        assert_eq!(budget.free(), 1);
+    }
+
+    /// Several workers on a budget smaller than their streams' threads: every decode is right
+    /// and every token comes back; outside a budget the default pool is used.
+    #[test]
+    fn workers_share_the_budget_and_give_every_token_back() {
+        let (jpeg, s) = stream();
+        let budget = DecodeThreads::new(3);
+        std::thread::scope(|sc| {
+            for _ in 0..3 {
+                sc.spawn(|| {
+                    with_decode_threads(Some(Arc::clone(&budget)), || {
+                        for _ in 0..4 {
+                            let _t = budget.hold();
+                            assert_eq!(decode(&s, jpeg.len()), jpeg);
+                        }
+                    });
+                });
+            }
+        });
+        assert_eq!(budget.free(), budget.total());
+        assert_eq!(decode(&s, jpeg.len()), jpeg);
+    }
 }

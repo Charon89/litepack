@@ -406,8 +406,10 @@ mod tests {
             settings("lpk"),
             [
                 "fast",
+                "fast-no-jpeg",
                 "balanced",
                 "balanced-extension",
+                "balanced-versions",
                 "balanced-no-deflate",
                 "balanced-no-bwt",
                 "balanced-no-png-filter",

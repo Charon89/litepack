@@ -30,7 +30,8 @@ use crate::cluster::{cluster, DictionaryKind};
 use crate::error::CoreError;
 use crate::fast::{resolve_threads, stored_by_class};
 use crate::fast::{FastHandle, FastOptions, FastSummary, ZstdEncoder};
-use crate::fold::ordering::order_cluster;
+use crate::fold::ordering::{order_cluster, FileOrder};
+use crate::fold::versions::{RootSpec, Versions};
 use crate::fold::{Dedup, FoldStage};
 use crate::ingest::{
     file_identity, validate_input, walk_sources_with, walk_with, IngestOptions, Input, Sources,
@@ -333,6 +334,7 @@ impl Pipeline {
         let inputs = walk_sources_with(sources, &self.classify.ingest, &rep)?;
         self.run_inputs(
             inputs,
+            RootSpec::of_sources(sources),
             out,
             None,
             prepared,
@@ -380,8 +382,17 @@ impl Pipeline {
                 None => Writer::append(existing, out, wopts, credentials)?,
             })
         });
-        self.run_inputs(inputs, out, None, prepared, t.elapsed(), opener, &rep)
-            .map_err(|e| rep.map_cancelled(e))
+        self.run_inputs(
+            inputs,
+            RootSpec::Children(String::new()),
+            out,
+            None,
+            prepared,
+            t.elapsed(),
+            opener,
+            &rep,
+        )
+        .map_err(|e| rep.map_cancelled(e))
     }
 
     /// Like [`append`](Self::append), on the archive at `archive_path` in place, with the
@@ -458,6 +469,7 @@ impl Pipeline {
             let sync: SyncFn = Box::new(move || sync_file.sync_data());
             self.run_inputs(
                 inputs,
+                RootSpec::Children(String::new()),
                 file,
                 Some(sync),
                 prepared,
@@ -514,6 +526,7 @@ impl Pipeline {
             |inputs, file, sync| {
                 self.run_inputs(
                     inputs,
+                    RootSpec::of_sources(sources),
                     file,
                     Some(sync),
                     prepared,
@@ -533,6 +546,7 @@ impl Pipeline {
     pub(crate) fn run_inputs<W: Write>(
         self,
         inputs: Vec<Input>,
+        roots: RootSpec,
         out: W,
         sync: Option<SyncFn>,
         prepared: Prepared,
@@ -722,8 +736,15 @@ impl Pipeline {
                 timings.classify = t.elapsed();
                 if let Some(f) = fold.as_deref() {
                     let mode = f.ordering();
+                    // The version groups only when the mode uses them (finding them is a pass
+                    // over the paths).
+                    let versions = if mode == FileOrder::Versions {
+                        Versions::from_inputs(&roots, &inputs)
+                    } else {
+                        Versions::default()
+                    };
                     for c in &mut clusters {
-                        order_cluster(&mut c.inputs, mode);
+                        order_cluster(&mut c.inputs, mode, &versions);
                     }
                 }
                 wopts.block_size = block_size;

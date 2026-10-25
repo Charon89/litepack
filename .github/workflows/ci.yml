@@ -32,7 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-deny
+          tool: cargo-nextest,cargo-deny,cargo-about@0.9.2
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -43,3 +43,8 @@ jobs:
         run: cargo nextest run --locked --workspace --no-tests=pass
       - name: Licence and advisory policy
         run: cargo deny check
+      # LIC-2: THIRD-PARTY-NOTICES regenerated from Cargo.lock over the shipped packages; red when a dependency
+      # changed without regenerating it, or when a GPL-family licence text reaches the notices, crates/ or vendor/.
+      - name: Third-party notices
+        shell: bash
+        run: scripts/third-party-notices.sh --check
