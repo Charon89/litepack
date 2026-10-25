@@ -1,0 +1,22 @@
+[package]
+name = "lpk-proto"
+description = "The broker protocol between the LitePack host and its sandboxed foreign-format workers: frames, the ForeignReader trait and the worker loop (no parser)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about (about.toml `private.ignore`) leaves our own crates out of THIRD-PARTY-NOTICES.
+publish = false
+
+[features]
+# Test-only fault injection in the worker loop (garbage, hangs, a closed pipe, endless pages, ...).
+# Never enabled by a shipped worker: the `workers/` CI job checks `cargo tree -e features`.
+faults = []
+
+[dependencies]
+# The password of `Open` is wiped on drop on both sides of the pipe (design §2, "Credentials").
+zeroize = "1.9.0"
+
+[lints]
+workspace = true

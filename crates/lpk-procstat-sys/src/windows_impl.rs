@@ -271,3 +271,16 @@ pub(crate) fn physical_memory() -> Option<u64> {
     unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
     (status.ullTotalPhys > 0).then_some(status.ullTotalPhys)
 }
+
+/// Bytes free to the caller on the volume of `path` (`GetDiskFreeSpaceExW`).
+pub(crate) fn free_space(path: &std::path::Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut free = 0u64;
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call; `free` is a
+    // writable u64; the other outputs are optional and omitted.
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut free), None, None) }.ok()?;
+    Some(free)
+}

@@ -156,6 +156,40 @@ impl Worker {
         self.lock().kill()
     }
 
+    /// What `/proc` shows of the worker: bytes read (`rchar`), user time (`utime`), peak
+    /// address space (`VmPeak`). Fails once the worker has been reaped.
+    pub fn usage(&self) -> io::Result<crate::Usage> {
+        let dir = format!("/proc/{}", self.pid);
+        let io_text = std::fs::read_to_string(format!("{dir}/io"))?;
+        let read_bytes = io_text
+            .lines()
+            .find_map(|l| l.strip_prefix("rchar:"))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let stat = std::fs::read_to_string(format!("{dir}/stat"))?;
+        // Fields after the parenthesised command name; utime is field 14 (index 11 here).
+        let utime = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(11))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        // SAFETY: sysconf has no preconditions.
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        let hz = u64::try_from(hz).ok().filter(|&h| h > 0).unwrap_or(100);
+        let status = std::fs::read_to_string(format!("{dir}/status"))?;
+        let peak_kb = status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmPeak:"))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        Ok(crate::Usage {
+            read_bytes,
+            user_time: Duration::from_millis(utime.saturating_mul(1000) / hz),
+            peak_memory: peak_kb.saturating_mul(1024),
+        })
+    }
+
     /// Raise (or lower) the soft `RLIMIT_CPU` of the running worker; at most the ceiling.
     pub fn set_cpu_limit(&self, cpu: Duration) -> io::Result<()> {
         if cpu > self.cpu_ceiling {

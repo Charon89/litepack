@@ -968,6 +968,18 @@ impl Worker {
         self.job.set_process_time_limit(cpu)
     }
 
+    /// What the job has observed of the worker: bytes read, user time, peak commit.
+    pub fn usage(&self) -> io::Result<crate::Usage> {
+        let a = self.job.accounting()?;
+        let e = self.job.extended_limits()?;
+        let ticks = u64::try_from(a.BasicInfo.TotalUserTime).unwrap_or(0);
+        Ok(crate::Usage {
+            read_bytes: a.IoInfo.ReadTransferCount,
+            user_time: Duration::from_nanos(ticks.saturating_mul(100)),
+            peak_memory: e.PeakProcessMemoryUsed as u64,
+        })
+    }
+
     /// A second handle to the worker's process (for waiting on it after the `Worker` is gone).
     pub fn try_clone_process(&self) -> io::Result<OwnedHandle> {
         self.process.try_clone()

@@ -26,6 +26,8 @@ liblzma = { version = "0.4.8", features = ["static", "parallel"] }
 # writer links for it). `lpk-format` and `lpk-decode` stay without it.
 lpk-codecs-bwt = { path = "../lpk-codecs-bwt", version = "0.0.1", default-features = false, features = ["encode"] }
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
+# E4-2: the broker protocol (frames; no parser).
+lpk-proto = { path = "../lpk-proto", version = "0.0.1" }
 # Pinned: deflate-reconstruct records carry this version's corrections (design section 2.2).
 preflate-rs = "=0.7.6"
 same-file = "1.0.6"
@@ -37,6 +39,8 @@ zstd = { version = "0.14.0", default-features = false }
 # which supports Windows and Linux only; elsewhere the budget falls back to the ceiling).
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
+# E4-2: the sandboxed launch of the foreign-format worker (the workspace's -sys crate).
+lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"

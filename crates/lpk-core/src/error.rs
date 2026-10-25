@@ -126,6 +126,160 @@ pub enum CoreError {
         /// Why the truncation failed.
         truncation: std::io::Error,
     },
+    /// A foreign archive (read by a sandboxed worker, [`crate::foreign`]) was refused or is
+    /// damaged: its listing, its sizes or a limit.
+    #[error(transparent)]
+    Foreign(#[from] ForeignError),
+    /// The sandboxed worker of a foreign archive failed: it could not start, broke the
+    /// protocol, went silent, crashed or hit a limit.
+    #[error(transparent)]
+    Worker(#[from] WorkerError),
+}
+
+/// What is wrong with a foreign archive (D-77: each a named kind, exit 2).
+#[derive(Debug, thiserror::Error)]
+pub enum ForeignError {
+    /// The file is not an archive of a format this build reads.
+    #[error("not an archive of a format this build reads")]
+    UnknownFormat,
+    /// A method, feature or format version the reader does not implement.
+    #[error("unsupported: {message}")]
+    Unsupported {
+        /// The reader's or the broker's details (escaped).
+        message: String,
+    },
+    /// The archive is damaged (the reader's report, or a listing the broker refuses).
+    #[error("damaged archive: {message}")]
+    Corrupt {
+        /// Details (escaped).
+        message: String,
+    },
+    /// A member's data did not match its declared size; the file was removed.
+    #[error("{path:?}: declared {declared} bytes, the worker sent {received} or more")]
+    SizeMismatch {
+        /// The member's name.
+        path: String,
+        /// Its declared size.
+        declared: u64,
+        /// The bytes received when the mismatch was seen.
+        received: u64,
+    },
+    /// Two members whose packed ranges in different blocks overlap.
+    #[error("members {first:?} and {second:?} overlap in the archive")]
+    OverlappingEntries {
+        /// The member whose range starts first.
+        first: String,
+        /// The other member.
+        second: String,
+    },
+    /// A limit of the broker (raise it with the flag named in the message).
+    #[error("{limit}: {value} exceeds the limit of {max} (see {flag})")]
+    LimitExceeded {
+        /// What was limited.
+        limit: &'static str,
+        /// The value reached (at least).
+        value: u64,
+        /// The limit.
+        max: u64,
+        /// The option that changes it.
+        flag: &'static str,
+    },
+    /// Not enough free space at the destination for what the archive declares.
+    #[error("not enough free space: {needed} bytes needed, {available} available")]
+    NoSpace {
+        /// Bytes still to write.
+        needed: u64,
+        /// Bytes free.
+        available: u64,
+    },
+}
+
+/// How the sandboxed worker failed (D-77: each a named kind, exit 2).
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerError {
+    /// The worker could not be started (its executable missing, the OS refused).
+    #[error("worker could not start: {message}")]
+    Spawn {
+        /// Details.
+        message: String,
+    },
+    /// The sandbox could not be set up (the AppContainer profile, a mitigation).
+    #[error("worker sandbox: {message}")]
+    Sandbox {
+        /// Details.
+        message: String,
+    },
+    /// The worker reported that the sandbox refused something it tried.
+    #[error("worker was denied: {message}")]
+    Denied {
+        /// The worker's report (escaped).
+        message: String,
+    },
+    /// The worker died (exit status or exception code), not by a limit.
+    #[error("worker crashed (exit status {code:#x}){}", stderr_suffix(stderr))]
+    Crashed {
+        /// The exit status (Windows: the exception code when one killed it; Linux: 128 + the
+        /// signal number).
+        code: u32,
+        /// Its diagnostics, escaped (the first and last 32 KiB).
+        stderr: String,
+    },
+    /// The worker's reader panicked.
+    #[error("worker panicked: {message}")]
+    Panicked {
+        /// The panic message (escaped).
+        message: String,
+    },
+    /// The worker was stopped at its memory limit.
+    #[error("worker reached its memory limit of {limit} bytes (see --memory)")]
+    MemoryLimit {
+        /// The limit.
+        limit: u64,
+    },
+    /// The worker was stopped at its CPU-time limit.
+    #[error("worker reached its CPU-time limit of {seconds} s (see --max-cpu)")]
+    CpuLimit {
+        /// The limit in whole seconds.
+        seconds: u64,
+    },
+    /// The worker made no observable progress for too long and was stopped.
+    #[error(
+        "worker made no progress for {seconds:.1} s while the broker waited for {waiting_for}"
+    )]
+    Timeout {
+        /// How long it was silent.
+        seconds: f64,
+        /// What the broker was waiting for.
+        waiting_for: &'static str,
+    },
+    /// The worker sent something that is not the protocol.
+    #[error("worker broke the protocol: {message}")]
+    Protocol {
+        /// What was wrong.
+        message: String,
+    },
+    /// The worker closed its pipe without an answer.
+    #[error("worker closed its pipe{}", stderr_suffix(stderr))]
+    Pipe {
+        /// Its diagnostics, escaped.
+        stderr: String,
+    },
+    /// The worker is from another build than the host.
+    #[error("worker build {worker:?} does not match the host's {host:?}")]
+    BuildMismatch {
+        /// The host's build.
+        host: String,
+        /// The worker's (escaped).
+        worker: String,
+    },
+}
+
+fn stderr_suffix(s: &str) -> String {
+    if s.is_empty() {
+        String::new()
+    } else {
+        format!("; its diagnostics: {s}")
+    }
 }
 
 impl CoreError {
