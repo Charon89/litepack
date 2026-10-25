@@ -251,7 +251,7 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
    when it passes. Passed on 2026-10-18 (D-78 (8)): every outcome of `expected-1.3.toml` at revision 3, the
    `UnimplementedPrimitive` 3 outcomes at revisions 0-2; its two points are item 3's R36 clarification.
 
-## 2026-10-25 — Text revision of LIC-2: the correction coder stated (no reader outcome changes)
+## 2026-10-25 — Text revision of LIC-2: the correction coder stated (no outcome changes for a record a valid writer produces)
 
 1. Section 8, `deflate-reconstruct`: a new item states the correction coder normatively (the VP8 bool coder's
    contexts, split and renormalisation, the marker, the composite methods' bit order and context index
