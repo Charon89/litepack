@@ -135,55 +135,70 @@ pub struct Cover {
     pub len: u64,
 }
 
-/// A checked patch header. It holds no cover table (it is `Copy`): the covers are re-read from
-/// the patch by [`Header::covers`].
+/// A checked patch header, made only by [`parse`] (its fields are private to the crate). It
+/// holds no cover table (it is `Copy`): [`apply`] re-reads the covers from the patch, and a
+/// cover that does not read is a fault, never a short output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     /// The output length.
-    pub out_len: u64,
+    pub(crate) out_len: u64,
     /// The number of covers.
-    pub cover_count: u64,
+    pub(crate) cover_count: u64,
     /// Where the first cover starts in the patch.
-    pub covers_at: usize,
+    pub(crate) covers_at: usize,
     /// New bytes after the last cover.
-    pub tail: u64,
+    pub(crate) tail: u64,
     /// Where the `new` bytes start in the patch.
-    pub new_at: usize,
+    pub(crate) new_at: usize,
     /// Where the `diff` bytes start in the patch.
-    pub diff_at: usize,
+    pub(crate) diff_at: usize,
 }
 
 impl Header {
-    /// The covers of `patch` (the patch this header was parsed from), in output order.
-    pub fn covers<'p>(&self, patch: &'p [u8]) -> Covers<'p> {
+    /// The output length.
+    pub fn out_len(&self) -> u64 {
+        self.out_len
+    }
+
+    /// The number of covers.
+    pub fn cover_count(&self) -> u64 {
+        self.cover_count
+    }
+
+    /// The covers of `patch` (the patch this header was parsed from), in output order; a cover
+    /// that does not read or check is its fault.
+    pub(crate) fn covers<'p>(&self, patch: &'p [u8], base_len: u64) -> Covers<'p> {
         Covers {
             patch,
             at: self.covers_at,
             left: self.cover_count,
+            base_len,
         }
     }
 }
 
-/// The covers of a checked patch, read one at a time ([`Header::covers`]).
+/// The covers of a checked patch, read one at a time ([`Header::covers`]), each checked again.
 #[derive(Debug, Clone)]
-pub struct Covers<'p> {
+pub(crate) struct Covers<'p> {
     patch: &'p [u8],
     at: usize,
     left: u64,
+    base_len: u64,
 }
 
 impl Iterator for Covers<'_> {
-    type Item = Cover;
+    type Item = Result<Cover, PatchFault>;
 
-    fn next(&mut self) -> Option<Cover> {
+    fn next(&mut self) -> Option<Self::Item> {
         if self.left == 0 {
             return None;
         }
         self.left -= 1;
-        let gap = read_varint(self.patch, &mut self.at).ok()?;
-        let base_off = read_varint(self.patch, &mut self.at).ok()?;
-        let len = read_varint(self.patch, &mut self.at).ok()?;
-        Some(Cover { gap, base_off, len })
+        let c = read_cover(self.patch, &mut self.at, self.base_len);
+        if c.is_err() {
+            self.left = 0;
+        }
+        Some(c)
     }
 }
 
@@ -286,17 +301,26 @@ pub fn apply(base: &[u8], patch: &[u8]) -> Result<Vec<u8>, PatchFault> {
     let mut out = Vec::with_capacity(h.out_len as usize);
     let mut new_at = h.new_at;
     let mut diff_at = h.diff_at;
-    for c in h.covers(patch) {
+    for c in h.covers(patch, base.len() as u64) {
+        let c = c?;
         let gap = c.gap as usize;
+        if new_at + gap > h.diff_at {
+            return Err(PatchFault::Length);
+        }
         out.extend_from_slice(&patch[new_at..new_at + gap]);
         new_at += gap;
         let (off, len) = (c.base_off as usize, c.len as usize);
         let span = &base[off..off + len];
-        let diff = &patch[diff_at..diff_at + len];
+        let diff = patch
+            .get(diff_at..diff_at + len)
+            .ok_or(PatchFault::Length)?;
         out.extend(span.iter().zip(diff).map(|(b, d)| b.wrapping_add(*d)));
         diff_at += len;
     }
-    out.extend_from_slice(&patch[new_at..new_at + h.tail as usize]);
+    let tail = patch
+        .get(new_at..new_at + h.tail as usize)
+        .ok_or(PatchFault::Length)?;
+    out.extend_from_slice(tail);
     Ok(out)
 }
 
@@ -572,7 +596,9 @@ mod tests {
         let p = round_trip(&base, &base);
         let h = parse(&p, base.len() as u64).expect("parse");
         assert_eq!(
-            h.covers(&p).collect::<Vec<_>>(),
+            h.covers(&p, base.len() as u64)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("covers"),
             [Cover {
                 gap: 0,
                 base_off: 0,
@@ -779,7 +805,8 @@ mod tests {
         let p = round_trip(&base, &new);
         let h = parse(&p, base.len() as u64).expect("parse");
         let spans: Vec<(u64, u64)> = h
-            .covers(&p)
+            .covers(&p, base.len() as u64)
+            .map(|c| c.expect("cover"))
             .map(|c| (c.base_off, c.base_off + c.len))
             .collect();
         let overlap = spans

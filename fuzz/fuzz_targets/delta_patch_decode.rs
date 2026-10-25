@@ -34,7 +34,7 @@ fuzz_target!(|data: &[u8]| {
             );
             assert!(out.len() <= patch.len());
             let h = parse(patch, base.len() as u64).expect("a patch that applied parses");
-            assert_eq!(h.out_len, out.len() as u64);
+            assert_eq!(h.out_len(), out.len() as u64);
         }
         Err(_) => assert_eq!(peak, 0, "an error after an allocation of {peak} bytes"),
     }
