@@ -135,19 +135,56 @@ pub struct Cover {
     pub len: u64,
 }
 
-/// A checked patch header.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A checked patch header. It holds no cover table (it is `Copy`): the covers are re-read from
+/// the patch by [`Header::covers`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     /// The output length.
     pub out_len: u64,
-    /// The covers in output order.
-    pub covers: Vec<Cover>,
+    /// The number of covers.
+    pub cover_count: u64,
+    /// Where the first cover starts in the patch.
+    pub covers_at: usize,
     /// New bytes after the last cover.
     pub tail: u64,
     /// Where the `new` bytes start in the patch.
     pub new_at: usize,
     /// Where the `diff` bytes start in the patch.
     pub diff_at: usize,
+}
+
+impl Header {
+    /// The covers of `patch` (the patch this header was parsed from), in output order.
+    pub fn covers<'p>(&self, patch: &'p [u8]) -> Covers<'p> {
+        Covers {
+            patch,
+            at: self.covers_at,
+            left: self.cover_count,
+        }
+    }
+}
+
+/// The covers of a checked patch, read one at a time ([`Header::covers`]).
+#[derive(Debug, Clone)]
+pub struct Covers<'p> {
+    patch: &'p [u8],
+    at: usize,
+    left: u64,
+}
+
+impl Iterator for Covers<'_> {
+    type Item = Cover;
+
+    fn next(&mut self) -> Option<Cover> {
+        if self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        let gap = read_varint(self.patch, &mut self.at).ok()?;
+        let base_off = read_varint(self.patch, &mut self.at).ok()?;
+        let len = read_varint(self.patch, &mut self.at).ok()?;
+        Some(Cover { gap, base_off, len })
+    }
 }
 
 /// Read a canonical varint at `*at`: [`PatchFault::Length`] when the input ends inside it,
@@ -186,8 +223,22 @@ fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     out.push(v as u8);
 }
 
+/// Read one cover at `*at` and check it against a base of `base_len` bytes.
+fn read_cover(patch: &[u8], at: &mut usize, base_len: u64) -> Result<Cover, PatchFault> {
+    let gap = read_varint(patch, at)?;
+    let base_off = read_varint(patch, at)?;
+    let len = read_varint(patch, at)?;
+    if len == 0 {
+        return Err(PatchFault::ZeroLen);
+    }
+    match base_off.checked_add(len) {
+        Some(end) if end <= base_len => Ok(Cover { gap, base_off, len }),
+        _ => Err(PatchFault::Span),
+    }
+}
+
 /// Parse and check a patch's header against a base of `base_len` bytes (the checks of the
-/// module documentation, in order).
+/// module documentation, in order), reading every cover once and keeping none.
 pub fn parse(patch: &[u8], base_len: u64) -> Result<Header, PatchFault> {
     if patch.len() < MIN_PATCH {
         return Err(PatchFault::Short);
@@ -196,58 +247,46 @@ pub fn parse(patch: &[u8], base_len: u64) -> Result<Header, PatchFault> {
     le.copy_from_slice(&patch[..8]);
     let out_len = u64::from_le_bytes(le);
     let mut at = 8usize;
-    let count = read_varint(patch, &mut at)?;
-    if count > ((patch.len() - at) / 3) as u64 {
+    let cover_count = read_varint(patch, &mut at)?;
+    if cover_count > ((patch.len() - at) / 3) as u64 {
         return Err(PatchFault::CoverCount);
     }
-    let count = usize::try_from(count).map_err(|_| PatchFault::CoverCount)?;
-    let mut covers = Vec::with_capacity(count);
-    for _ in 0..count {
-        let gap = read_varint(patch, &mut at)?;
-        let base_off = read_varint(patch, &mut at)?;
-        let len = read_varint(patch, &mut at)?;
-        if len == 0 {
-            return Err(PatchFault::ZeroLen);
-        }
-        match base_off.checked_add(len) {
-            Some(end) if end <= base_len => {}
-            _ => return Err(PatchFault::Span),
-        }
-        covers.push(Cover { gap, base_off, len });
+    let covers_at = at;
+    let (mut new_total, mut diff_total) = (0u64, 0u64);
+    for _ in 0..cover_count {
+        let c = read_cover(patch, &mut at, base_len)?;
+        new_total = new_total.saturating_add(c.gap);
+        diff_total = diff_total.saturating_add(c.len);
     }
     let tail = read_varint(patch, &mut at)?;
-    let mut new_total: u64 = tail;
-    let mut diff_total: u64 = 0;
-    for c in &covers {
-        new_total = new_total.checked_add(c.gap).ok_or(PatchFault::Sum)?;
-        diff_total = diff_total.checked_add(c.len).ok_or(PatchFault::Sum)?;
-    }
-    if new_total.checked_add(diff_total) != Some(out_len) {
+    new_total = new_total.saturating_add(tail);
+    if new_total.saturating_add(diff_total) != out_len {
         return Err(PatchFault::Sum);
     }
-    let expect = (at as u64).checked_add(out_len).ok_or(PatchFault::Length)?;
-    if expect != patch.len() as u64 {
+    if (at as u64).checked_add(out_len) != Some(patch.len() as u64) {
         return Err(PatchFault::Length);
     }
-    let new_at = at;
+    // The layout fits the input: both totals are at most `out_len`, which fits after `at`.
     let diff_at = at + new_total as usize;
     Ok(Header {
         out_len,
-        covers,
+        cover_count,
+        covers_at,
         tail,
-        new_at,
+        new_at: at,
         diff_at,
     })
 }
 
-/// Apply a format-1 patch to `base`: the output bytes, or the first fault.
+/// Apply a format-1 patch to `base`: the output bytes, or the first fault. The covers are
+/// read twice (checked by [`parse`], then applied); nothing but the output is allocated.
 pub fn apply(base: &[u8], patch: &[u8]) -> Result<Vec<u8>, PatchFault> {
     let h = parse(patch, base.len() as u64)?;
     // `parse` proved the layout fits the input: every length below is within it.
     let mut out = Vec::with_capacity(h.out_len as usize);
     let mut new_at = h.new_at;
     let mut diff_at = h.diff_at;
-    for c in &h.covers {
+    for c in h.covers(patch) {
         let gap = c.gap as usize;
         out.extend_from_slice(&patch[new_at..new_at + gap]);
         new_at += gap;
@@ -533,7 +572,7 @@ mod tests {
         let p = round_trip(&base, &base);
         let h = parse(&p, base.len() as u64).expect("parse");
         assert_eq!(
-            h.covers,
+            h.covers(&p).collect::<Vec<_>>(),
             [Cover {
                 gap: 0,
                 base_off: 0,
@@ -627,6 +666,15 @@ mod tests {
         p.extend_from_slice(&[0, 1]);
         put_varint(&mut p, 5);
         assert_eq!(apply(&base, &p), Err(PatchFault::Sum));
+        // The sum saturates: with out_len = u64::MAX an overflowing sum equals it, and the
+        // length check refuses the patch.
+        let mut p = header(u64::MAX, 2);
+        p.push(0);
+        put_varint(&mut p, 0);
+        put_varint(&mut p, 1);
+        put_varint(&mut p, u64::MAX);
+        p.extend_from_slice(&[0, 1, 0]);
+        assert_eq!(apply(&base, &p), Err(PatchFault::Length));
         // A wrong input length: one byte short, one byte over, ending inside a varint.
         let good = encode(&base, &[1, 2, 9, 4, 5]).expect("encode");
         assert_eq!(apply(&base, &good).expect("apply"), [1, 2, 9, 4, 5]);
@@ -645,6 +693,24 @@ mod tests {
         p.extend_from_slice(&[0x80, 0x00, 0, 0, 0, 0]);
         assert_eq!(apply(&base, &p), Err(PatchFault::CoverCount));
         assert_eq!(PatchFault::ZeroLen.reason(), "len");
+    }
+
+    #[test]
+    fn many_short_covers_decode_without_a_table() {
+        // The header cannot hold a table (it is Copy); 100,000 one-byte covers of 3-byte
+        // varint triples decode against a one-byte base.
+        fn copy<T: Copy>(_: &T) {}
+        let n = 100_000u64;
+        let mut p = header(n, n);
+        for _ in 0..n {
+            p.extend_from_slice(&[0, 0, 1]);
+        }
+        p.push(0);
+        p.extend(std::iter::repeat_n(1u8, n as usize));
+        let h = parse(&p, 1).expect("parse");
+        copy(&h);
+        assert_eq!(h.cover_count, n);
+        assert_eq!(apply(&[41], &p).expect("apply"), vec![42u8; n as usize]);
     }
 
     #[test]
