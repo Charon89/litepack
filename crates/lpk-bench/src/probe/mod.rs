@@ -1,10 +1,10 @@
 //! Component probes (PLAN P0-4): `lpk-bench probe <name|all>`.
 //!
 //! ```text
-//! lpk-bench probe <jpeg|deflate|dedup|text|weights|entropy-gate|bwt|png-filter|text-encodings|all>
+//! lpk-bench probe <jpeg|deflate|dedup|text|weights|entropy-gate|bwt|png-filter|text-encodings|delta|all>
 //!     [--profile small|full]
 //!     [--corpus DIR] [--results ROOT | --into DIR] [--tmp DIR] [--threads N]
-//!     [--allow-dirty-build] [--allow-debug-build]
+//!     [--allow-dirty-build] [--allow-debug-build] [--rows DIR]...
 //! ```
 //!
 //! Run probes from a release build: `cargo run --release -p lpk-bench -- probe ...`.
@@ -45,6 +45,7 @@ pub mod bwt;
 pub mod codec;
 pub mod dedup;
 pub mod deflate;
+pub mod delta;
 pub mod entropy_gate;
 pub mod jpeg;
 pub mod png_filter;
@@ -59,8 +60,8 @@ pub const FORMAT_VERSION: u32 = 1;
 
 /// Every probe, in the order `probe all` runs them. `bwt` (the E2-15 gate, minutes of LZMA
 /// per class), `png-filter` (the E2-16 gate, several Balanced encodes per PNG stream) and
-/// `text-encodings` (E2-17; it writes a Balanced archive per affected class) run only when
-/// named.
+/// `text-encodings` (E2-17; it writes a Balanced archive per affected class) and `delta`
+/// (E2-9's pre-gate, patches per changed chunk) run only when named.
 pub const NAMES: [&str; 6] = [
     "jpeg",
     "deflate",
@@ -73,7 +74,7 @@ pub const NAMES: [&str; 6] = [
 #[derive(Debug, Args)]
 pub struct ProbeArgs {
     /// Probe to run, or `all`
-    #[arg(value_parser = ["jpeg", "deflate", "dedup", "text", "weights", "entropy-gate", "bwt", "png-filter", "text-encodings", "all"])]
+    #[arg(value_parser = ["jpeg", "deflate", "dedup", "text", "weights", "entropy-gate", "bwt", "png-filter", "text-encodings", "delta", "all"])]
     pub name: String,
     /// Corpus profile, `small` or `full`: selects bench/corpus/<profile> (default: small)
     #[arg(long, value_parser = ["small", "full"])]
@@ -107,6 +108,10 @@ pub struct ProbeArgs {
     /// Write results from a dirty or unknown build (recorded in host.json)
     #[arg(long)]
     pub allow_dirty_build: bool,
+    /// A results directory whose rows `probe delta` reads for its pre-gate (S_bal, B), from the
+    /// same manifest as the probe (rows of another manifest are refused); repeatable
+    #[arg(long, value_name = "DIR")]
+    pub rows: Vec<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -240,6 +245,8 @@ pub struct Ctx<'a> {
     pub local_tools: PathBuf,
     /// Timeout of one external program run.
     pub tool_timeout: Duration,
+    /// Results directories whose rows a probe reads (`--rows`; `probe delta`'s pre-gate).
+    pub rows: Vec<PathBuf>,
 }
 
 impl Ctx<'_> {
@@ -602,6 +609,7 @@ fn run_one(name: &str, ctx: &Ctx<'_>, info: &RunInfo) -> Result<String> {
         "bwt" => go!(bwt),
         "png-filter" => go!(png_filter),
         "text-encodings" => go!(text_encodings),
+        "delta" => go!(delta),
         other => bail!("unknown probe `{other}`"),
     }
 }
@@ -662,6 +670,7 @@ pub fn render_file(name: &str, json: &str) -> Result<String> {
         "bwt" => go!(bwt),
         "png-filter" => go!(png_filter),
         "text-encodings" => go!(text_encodings),
+        "delta" => go!(delta),
         other => bail!("unknown probe `{other}`"),
     }
 }
@@ -768,6 +777,7 @@ pub fn check_file(dir: &Path, json_name: &str) -> FileCheck {
         "bwt" => typed!(bwt),
         "png-filter" => typed!(png_filter),
         "text-encodings" => typed!(text_encodings),
+        "delta" => typed!(delta),
         _ => out.problems.push(format!(
             "{json_name}: (file name): `{stem}` is not a known probe"
         )),
@@ -930,6 +940,8 @@ pub struct Config {
     /// `bench/tools.local.toml`
     pub local_tools: PathBuf,
     pub tool_timeout: Duration,
+    /// Results directories whose rows a probe reads (`probe delta`'s pre-gate, `--rows`).
+    pub rows: Vec<PathBuf>,
 }
 
 /// What a run did.
@@ -1097,6 +1109,7 @@ pub fn execute(cfg: &Config) -> Result<Outcome> {
         scratch,
         local_tools: cfg.local_tools.clone(),
         tool_timeout: cfg.tool_timeout,
+        rows: cfg.rows.clone(),
     };
     let mut out = Outcome {
         results_dir: dir.clone(),
@@ -1180,6 +1193,7 @@ pub fn command(args: &ProbeArgs) -> ExitCode {
         allow_debug_build: args.allow_debug_build,
         local_tools: PathBuf::from(crate::run::DEFAULT_LOCAL),
         tool_timeout: Duration::from_secs(3600),
+        rows: args.rows.clone(),
     };
     match execute(&cfg) {
         Ok(o) => {

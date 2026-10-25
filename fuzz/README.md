@@ -19,6 +19,7 @@ are untouched. `cargo-fuzz` is Unix-only: use Linux, or WSL on Windows.
 | `archive_mutate` | structure-aware: byte mutations of a committed vector (every family, including sealed and journal), then open, verify, extract, `check_recovery`, `repair` |
 | `deflate_walk`, `deflate_recreate` | the Deflate peel's stream walk; the bounded recreation of D-66 with arbitrary corrections |
 | `bwt_decode` | revision 1.3's `bwt` step (`lpk_core::BwtDecoder`) over arbitrary input with a small block size and bounds; a counting allocator asserts nothing is allocated past the output bound plus the memory term |
+| `delta_patch_decode` | the delta stage's format-1 patch decoder (`lpk_core::delta::apply`, E2-9) over an arbitrary base and patch; a counting allocator asserts nothing is allocated past the output (no cover table) and nothing at all before an error |
 | `bwt_roundtrip` | libsais's forward transform of arbitrary text in arbitrary block sizes, then the layout and the `u32` inverse: the text comes back; one index or byte damaged: an error or other bytes, never a panic |
 
 Seeds: `seeds/<target>/` (real payloads cut from the vectors by `cargo test -p lpk-format --test gen_vectors --

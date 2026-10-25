@@ -15,6 +15,7 @@ pub mod balanced;
 pub mod bwt;
 pub mod classify;
 pub mod cluster;
+pub mod delta;
 pub mod error;
 pub mod export;
 pub mod extract;

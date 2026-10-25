@@ -1720,6 +1720,7 @@ mod tests {
             allow_debug_build: true,
             local_tools: PathBuf::from("no-such-local-tools.toml"),
             tool_timeout: Duration::from_secs(60),
+            rows: Vec::new(),
         };
         let out = execute(&cfg).expect("execute");
         assert!(out.failed.is_empty(), "{:?}", out.failed);
@@ -1808,6 +1809,7 @@ mod tests {
             scratch: tmp.path().to_path_buf(),
             local_tools: PathBuf::from("no-such-local-tools.toml"),
             tool_timeout: Duration::from_secs(60),
+            rows: Vec::new(),
         };
         let largest = ctx
             .class_files(GATE_CLASS)

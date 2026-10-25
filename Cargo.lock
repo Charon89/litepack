@@ -1499,6 +1499,7 @@ dependencies = [
  "quick-xml",
  "regex",
  "reqwest",
+ "ruzstd",
  "serde",
  "serde_json",
  "sevenz-rust2",

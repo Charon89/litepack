@@ -408,6 +408,7 @@ mod tests {
                 "fast",
                 "balanced",
                 "balanced-extension",
+                "balanced-versions",
                 "balanced-no-deflate",
                 "balanced-no-bwt",
                 "store",
