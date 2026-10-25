@@ -1237,6 +1237,7 @@ fn run_extract<P: Peer>(
         .map(|(e, (&i, h))| (e.path.clone(), (i, h.clone())))
         .collect();
     let mut pass = policy_pass(checked.entries, dir, policy, select)?;
+    let mkdirs = pass.mkdirs(dir);
     for e in &pass.entries {
         lpk_format::validate_path(&e.path).map_err(|reason| FormatError::UnsafePath {
             path: escape(e.path.as_bytes()),
@@ -1331,7 +1332,7 @@ fn run_extract<P: Peer>(
     summary.renamed = pass.renamed;
     summary.symlinks_skipped = pass.symlinks_skipped;
     if write_fs {
-        make_dirs(&pass.mkdirs(dir))?;
+        make_dirs(&mkdirs)?;
         make_links(&links)?;
     }
     summary.symlinks = links.len() as u64;
