@@ -59,8 +59,9 @@ pub fn archive_name(name: &str) -> Result<String, GuiError> {
 }
 
 /// Create the archive `out` from `inputs` through `<out>.partial`: published when complete
-/// (failing with `Exists`, the partial removed, if `out` appeared meanwhile), removed by the
-/// engine on failure or cancel. `Exists` up front when `out` or its partial exists.
+/// (if that fails, for example because `out` appeared meanwhile, the finished partial and its
+/// journal record are kept and the error names the partial), removed by the engine on failure
+/// or cancel. `Exists` up front when `out` or its partial exists.
 pub fn create_archive(
     inputs: &Sources,
     out: &Path,
@@ -100,13 +101,15 @@ pub fn create_archive(
         let partial_for = partial.clone();
         m.progress = Some(Arc::new(move |e: &Event| {
             if let Ok(mut g) = entry.lock() {
+                // Tried again on every event until it succeeds.
                 if !g.1 {
-                    g.1 = true;
                     if let Ok(id) = path_identity(&partial_for) {
-                        let _ = g.0.set(&Record::Partial {
-                            path: partial_for.clone(),
-                            identity: Some(Identity(id)),
-                        });
+                        g.1 =
+                            g.0.set(&Record::Partial {
+                                path: partial_for.clone(),
+                                identity: Some(Identity(id)),
+                            })
+                            .is_ok();
                     }
                 }
             }
@@ -117,11 +120,35 @@ pub fn create_archive(
     }
     let r = lpk_api::create(inputs, &partial, settings, &m);
     let result = match r {
-        Ok(summary) => match publish_no_replace(&partial, out) {
+        Ok(summary) => match publish(&partial, out) {
             Ok(()) => Ok(summary),
             Err(e) => {
-                let _ = std::fs::remove_file(&partial);
-                Err(io_error(e, out))
+                // The finished archive is never deleted: it stays as the partial, with its
+                // record, and the error names it.
+                drop(m);
+                if let Some(entry) = entry {
+                    if let Ok(entry) = Arc::try_unwrap(entry) {
+                        if let Ok((entry, _)) = entry.into_inner() {
+                            entry.keep();
+                        }
+                    }
+                }
+                let class = match e.kind() {
+                    std::io::ErrorKind::AlreadyExists => lpk_api::Class::Exists,
+                    std::io::ErrorKind::PermissionDenied => lpk_api::Class::AccessDenied,
+                    _ => lpk_api::Class::Io,
+                };
+                return Err(lpk_api::Error::new(
+                    class,
+                    "PublishFailed",
+                    format!(
+                        "{}: {e}; the finished archive is kept as {}",
+                        out.display(),
+                        partial.display()
+                    ),
+                    Some(&partial),
+                )
+                .into());
             }
         },
         Err(e) => Err(e.into()),
@@ -130,6 +157,32 @@ pub fn create_archive(
     drop(m);
     drop(entry);
     result
+}
+
+/// The attempts of [`publish`] while the partial is in use (a scanner or indexer holding it
+/// open): about 2 s in all.
+const PUBLISH_BACKOFF_MS: [u64; 8] = [10, 20, 40, 80, 160, 320, 500, 870];
+
+/// [`publish_no_replace`], retried with a bounded backoff on a sharing violation or access
+/// denied (transient on Windows while another process has the new file open).
+fn publish(partial: &Path, out: &Path) -> std::io::Result<()> {
+    let mut waits = PUBLISH_BACKOFF_MS.iter();
+    loop {
+        match publish_no_replace(partial, out) {
+            Ok(()) => return Ok(()),
+            Err(e) if transient(&e) => match waits.next() {
+                Some(ms) => std::thread::sleep(std::time::Duration::from_millis(*ms)),
+                None => return Err(e),
+            },
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// A sharing violation (Windows error 32) or access denied.
+fn transient(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && e.raw_os_error() == Some(32))
 }
 
 /// Append `dir` to the archive at `archive` as a new generation, recorded with the generation
@@ -247,6 +300,39 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_publish_keeps_the_finished_partial_and_its_record() {
+        // The final name appears while the archive is being written: the publish refuses to
+        // replace it, and the finished archive stays as the partial.
+        let d = tempfile::tempdir().unwrap();
+        let src = tree(d.path(), 2);
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let out = d.path().join("a.lpk");
+        let out2 = out.clone();
+        let m = Monitor::new(
+            Arc::new(move |_: &Event| {
+                if !out2.exists() {
+                    std::fs::write(&out2, b"the user's file").unwrap();
+                }
+            }),
+            CancelToken::new(),
+        );
+        let e = create_archive(&sources(&src), &out, &store(), &m, Some(&j)).unwrap_err();
+        assert!(e.is(lpk_api::Class::Exists), "{e}");
+        let partial = partial_path(&out);
+        assert!(e.detail.contains(&partial.display().to_string()), "{e}");
+        assert_eq!(std::fs::read(&out).unwrap(), b"the user's file");
+        let s = Session::open(&partial, &OpenOptions::default()).unwrap();
+        assert_eq!(s.info().latest_generation, 0);
+        drop(s);
+        let records = std::fs::read_dir(j.dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .count();
+        assert_eq!(records, 1, "the partial's record is kept");
+    }
+
+    #[test]
     fn a_cancelled_create_leaves_nothing() {
         let d = tempfile::tempdir().unwrap();
         let src = tree(d.path(), 2);
@@ -280,7 +366,7 @@ mod tests {
             identity: Some(id),
         })
         .unwrap()
-        .abandon();
+        .keep();
         // Another partial was recorded, then replaced by a different file of the same name.
         let replaced = d.path().join("b.lpk.partial");
         std::fs::write(&replaced, b"x").unwrap();
@@ -292,7 +378,7 @@ mod tests {
             identity: Some(old),
         })
         .unwrap()
-        .abandon();
+        .keep();
 
         let next = Journal::open(j.dir()).unwrap();
         let mut got = next.recover();
@@ -380,7 +466,7 @@ mod tests {
             generation: 0,
         })
         .unwrap()
-        .abandon();
+        .keep();
 
         // Committed: a full append whose record was never removed.
         let b = d.path().join("b.lpk");
@@ -393,7 +479,7 @@ mod tests {
             generation: 0,
         })
         .unwrap()
-        .abandon();
+        .keep();
 
         // Another file at the recorded path: untouched.
         let c = d.path().join("c.lpk");
@@ -408,7 +494,7 @@ mod tests {
             generation: 0,
         })
         .unwrap()
-        .abandon();
+        .keep();
 
         let mut got = Journal::open(j.dir()).unwrap().recover();
         got.sort_by_key(|r| format!("{r:?}"));
@@ -461,7 +547,7 @@ mod tests {
             generation: 0,
         })
         .unwrap()
-        .abandon();
+        .keep();
         let got = Journal::open(j.dir()).unwrap().recover();
         assert_eq!(got, [Recovered::Committed(a.clone())]);
         assert_eq!(std::fs::read(&a).unwrap(), before, "byte for byte");

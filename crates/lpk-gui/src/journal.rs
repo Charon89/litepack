@@ -103,9 +103,9 @@ impl Entry {
         std::fs::rename(&tmp, &self.json)
     }
 
-    /// What a process killed mid-write leaves: the record on disk, its lock released.
-    #[cfg(test)]
-    pub(crate) fn abandon(mut self) {
+    /// Leave the record on disk, its lock released (what a process killed mid-write leaves;
+    /// also a finished partial that could not be published, kept for the next start).
+    pub(crate) fn keep(mut self) {
         if let Some(f) = self.lock.take() {
             let _ = f.unlock();
         }
