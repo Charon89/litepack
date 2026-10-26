@@ -191,12 +191,26 @@ impl ZipReader {
             let mut f = self.zip.by_index_decrypt(i, &pw).map_err(zip_error)?;
             let limit = if size <= 1 << 20 { u64::MAX } else { 64 << 10 };
             let mut probe = (&mut f).take(limit);
-            std::io::copy(&mut probe, &mut std::io::sink()).map_err(|e| {
-                ReaderError::new(
-                    ErrorCode::WrongPassword,
-                    format!("wrong password (ZIP: {e})"),
-                )
-            })?;
+            // An error before the first decoded byte is a wrong password. One after output
+            // began does not fail Open: the check byte passed and data decoded, so the password
+            // is plausible, and that member alone fails when extracted (Corrupt, worded as
+            // damaged data or a wrong password).
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut out = 0u64;
+            loop {
+                match probe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => out += n as u64,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) if out == 0 => {
+                        return Err(ReaderError::new(
+                            ErrorCode::WrongPassword,
+                            format!("wrong password (ZIP: {e})"),
+                        ))
+                    }
+                    Err(_) => break,
+                }
+            }
         }
         Ok(())
     }

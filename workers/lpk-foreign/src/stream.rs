@@ -48,12 +48,14 @@ const BZ_LOOKAHEAD: usize = 16;
 pub struct Bzip2<R> {
     dec: bzip2_rs::decoder::Decoder,
     src: R,
-    /// Bytes read and not yet fed to the decoder, from the current position.
+    /// Bytes read; `buf[pos..]` are not yet fed to the decoder (consumed bytes are dropped in
+    /// bulk when the buffer is refilled, so many small streams cost no repeated moves).
     buf: Vec<u8>,
+    pos: usize,
     src_eof: bool,
-    /// Start offsets in `buf` already checked for a stream end.
+    /// Start offsets in `buf[pos..]` already checked for a stream end.
     scanned: usize,
-    /// Where the current stream ends in `buf`, once found.
+    /// Where the current stream ends in `buf[pos..]`, once found.
     seg_end: Option<usize>,
     empty_writes: u32,
 }
@@ -71,6 +73,7 @@ impl<R: Read> Bzip2<R> {
             dec: bzip2_rs::decoder::Decoder::new(),
             src,
             buf: Vec::new(),
+            pos: 0,
             src_eof: false,
             // A stream end cannot start inside the 4-byte `BZh9` header.
             scanned: 4,
@@ -79,10 +82,19 @@ impl<R: Read> Bzip2<R> {
         }
     }
 
-    /// Read up to 64 KiB more of the source.
+    /// The bytes not yet fed.
+    fn live(&self) -> &[u8] {
+        &self.buf[self.pos..]
+    }
+
+    /// Read up to 64 KiB more of the source (dropping the consumed prefix first).
     fn fill(&mut self) -> std::io::Result<()> {
         if self.src_eof {
             return Ok(());
+        }
+        if self.pos > 0 {
+            self.buf.drain(..self.pos);
+            self.pos = 0;
         }
         let old = self.buf.len();
         self.buf.resize(old + 64 * 1024, 0);
@@ -102,33 +114,50 @@ impl<R: Read> Bzip2<R> {
     }
 
     /// Look for the current stream's end among the unchecked offsets; stops where more
-    /// look-ahead is needed.
-    fn scan(&mut self) {
+    /// look-ahead is needed. A candidate is the end-of-stream magic, its 32-bit CRC, zero
+    /// padding bits to the byte boundary, then the end of the file or a `BZh1`..`BZh9` header.
+    ///
+    /// An end-of-stream magic followed by anything else is refused: `bzip2-rs` reads on past
+    /// a stream's end into whatever follows (it would take a cut CRC and the next stream's
+    /// blocks as one stream), so a magic that does not close a stream cleanly is damage. (The
+    /// 48-bit magic occurs inside compressed data by chance about once per 2^48 bit positions;
+    /// such an archive would be refused, never misread.)
+    fn scan(&mut self) -> std::io::Result<()> {
         while self.seg_end.is_none() {
+            let live = &self.buf[self.pos..];
             let i = self.scanned;
-            if i >= self.buf.len() || (!self.src_eof && self.buf.len() < i + BZ_LOOKAHEAD) {
-                return;
+            if i >= live.len() || (!self.src_eof && live.len() < i + BZ_LOOKAHEAD) {
+                return Ok(());
             }
             let mut w = 0u64;
             for k in 0..7 {
-                w = (w << 8) | u64::from(self.buf.get(i + k).copied().unwrap_or(0));
+                w = (w << 8) | u64::from(live.get(i + k).copied().unwrap_or(0));
             }
             for s in 0..8 {
                 if (w >> (8 - s)) & 0xFFFF_FFFF_FFFF != BZ_EOS {
                     continue;
                 }
-                let end = (i * 8 + s + 80).div_ceil(8);
-                let next = self.buf.get(end..end + 4);
-                let at_eof = self.src_eof && end == self.buf.len();
+                let end_bit = i * 8 + s + 80;
+                let end = end_bit.div_ceil(8);
+                let pad = end * 8 - end_bit;
+                let padded = live
+                    .get(end - 1)
+                    .is_some_and(|&last| last & ((1u8 << pad) - 1) == 0);
+                let next = live.get(end..end + 4);
+                let at_eof = self.src_eof && end == live.len();
                 let next_stream =
                     next.is_some_and(|n| &n[..3] == b"BZh" && (b'1'..=b'9').contains(&n[3]));
-                if at_eof || next_stream {
+                if padded && (at_eof || next_stream) {
                     self.seg_end = Some(end);
-                    return;
+                    return Ok(());
                 }
+                return Err(bad(
+                    "bzip2: a stream end not followed by the end of the file or another stream",
+                ));
             }
             self.scanned += 1;
         }
+        Ok(())
     }
 
     fn empty_write(&mut self) -> std::io::Result<()> {
@@ -162,10 +191,10 @@ impl<R: Read> Read for Bzip2<R> {
                     if self.seg_end != Some(0) {
                         return Err(bad("bzip2: data after the end of the stream"));
                     }
-                    if self.buf.is_empty() {
+                    if self.live().is_empty() {
                         self.fill()?;
                     }
-                    if self.buf.is_empty() && self.src_eof {
+                    if self.live().is_empty() && self.src_eof {
                         return Ok(0);
                     }
                     // The next stream (its `BZh` header was seen when this one's end was).
@@ -175,13 +204,14 @@ impl<R: Read> Read for Bzip2<R> {
                     self.empty_writes = 0;
                 }
                 ReadState::NeedsWrite(space) => loop {
-                    self.scan();
+                    self.scan()?;
+                    let len = self.live().len();
                     let limit = if self.src_eof {
-                        self.seg_end.unwrap_or(self.buf.len())
+                        self.seg_end.unwrap_or(len)
                     } else {
                         self.seg_end.unwrap_or(self.scanned)
                     }
-                    .min(self.buf.len());
+                    .min(len);
                     if limit == 0 {
                         if self.seg_end == Some(0) || self.src_eof {
                             self.empty_write()?;
@@ -191,14 +221,15 @@ impl<R: Read> Read for Bzip2<R> {
                         continue;
                     }
                     let take = limit.min(space.max(1));
+                    let chunk = &self.buf[self.pos..self.pos + take];
                     match self
                         .dec
-                        .write(&self.buf[..take])
+                        .write(chunk)
                         .map_err(|e| bad(format!("bzip2: {e}")))?
                     {
                         WriteState::Written(n) => {
                             let n = n.min(take);
-                            self.buf.drain(..n);
+                            self.pos += n;
                             self.seg_end = self.seg_end.map(|e| e - n);
                             self.scanned = self.scanned.saturating_sub(n);
                             self.empty_writes = 0;
@@ -666,6 +697,167 @@ mod tests {
         }
         // A cut stream is refused too.
         assert!(bunzip(&one[..one.len() - 3]).is_err());
+    }
+
+    /// Small streams written by 7-Zip 26.03 (`7z a -tbzip2`), one ending at each bit offset of
+    /// its last byte: (k, the stream of k copies of "litepack k ").
+    const SMALL: &[(u32, &[u8])] = &[
+        // 8 x "litepack 8 ", ends at bit 0 of its last byte
+        (
+            8,
+            &[
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 229, 208, 7, 156, 0, 0, 32, 25, 128, 64,
+                0, 0, 64, 42, 44, 68, 0, 32, 0, 49, 0, 48, 10, 168, 208, 54, 167, 69, 10, 22, 54,
+                32, 131, 195, 130, 196, 31, 23, 114, 69, 56, 80, 144, 229, 208, 7, 156,
+            ],
+        ),
+        // 2 x "litepack 2 ", ends at bit 1 of its last byte
+        (
+            2,
+            &[
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 188, 73, 96, 228, 0, 0, 8, 25, 128, 64, 0,
+                16, 0, 42, 44, 68, 0, 32, 0, 32, 170, 141, 3, 106, 16, 3, 14, 169, 75, 109, 17,
+                231, 22, 143, 139, 185, 34, 156, 40, 72, 94, 36, 176, 114, 0,
+            ],
+        ),
+        // 10 x "litepack 10 ", ends at bit 2 of its last byte
+        (
+            10,
+            &[
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 84, 181, 65, 192, 0, 0, 45, 25, 128, 64,
+                0, 96, 0, 42, 44, 68, 0, 32, 0, 32, 165, 81, 166, 134, 8, 0, 99, 228, 237, 48, 152,
+                77, 38, 83, 105, 180, 253, 50, 154, 77, 167, 5, 220, 145, 78, 20, 36, 21, 45, 80,
+                112, 0,
+            ],
+        ),
+        // 16 x "litepack 16 ", ends at bit 3 of its last byte
+        (
+            16,
+            &[
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 92, 107, 204, 101, 0, 0, 72, 25, 128, 64,
+                0, 33, 0, 42, 44, 68, 0, 32, 0, 80, 128, 6, 2, 170, 26, 6, 60, 16, 26, 8, 9, 14, 5,
+                5, 7, 195, 161, 33, 65, 98, 238, 72, 167, 10, 18, 11, 141, 121, 140, 160,
+            ],
+        ),
+        // 12 x "litepack 12 ", ends at bit 4 of its last byte
+        (
+            12,
+            &[
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 233, 77, 59, 141, 0, 0, 54, 25, 128, 64,
+                0, 48, 0, 42, 44, 68, 0, 32, 0, 32, 165, 81, 160, 109, 66, 0, 24, 244, 180, 92,
+                150, 139, 101, 217, 97, 97, 124, 94, 22, 203, 11, 241, 119, 36, 83, 133, 9, 14,
+                148, 211, 184, 208,
+            ],
+        ),
+        // 4 x "litepack 4 ", ends at bit 5 of its last byte
+        (
+            4,
+            &[
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 80, 250, 99, 146, 0, 0, 16, 25, 128, 64,
+                0, 4, 0, 42, 44, 68, 0, 32, 0, 49, 0, 48, 10, 168, 208, 54, 167, 74, 40, 179, 100,
+                33, 227, 133, 144, 248, 187, 146, 41, 194, 132, 130, 135, 211, 28, 144,
+            ],
+        ),
+        // 1 x "litepack 1 ", ends at bit 6 of its last byte
+        (
+            1,
+            &[
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 192, 205, 72, 212, 0, 0, 4, 25, 128, 64,
+                0, 32, 0, 42, 44, 68, 0, 32, 0, 34, 13, 3, 4, 0, 195, 128, 56, 151, 233, 76, 93,
+                201, 20, 225, 66, 67, 3, 53, 35, 80,
+            ],
+        ),
+        // 13 x "litepack 13 ", ends at bit 7 of its last byte
+        (
+            13,
+            &[
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 94, 53, 129, 11, 0, 0, 58, 153, 128, 64,
+                0, 40, 0, 42, 44, 68, 0, 32, 0, 49, 0, 12, 9, 170, 163, 64, 218, 158, 166, 147,
+                148, 210, 109, 59, 76, 76, 79, 147, 196, 218, 98, 126, 46, 228, 138, 112, 161, 32,
+                188, 107, 2, 22,
+            ],
+        ),
+    ];
+
+    /// An empty stream: `BZh9`, the end-of-stream magic and a zero CRC (14 bytes).
+    const EMPTY: &[u8] = &[
+        b'B', b'Z', b'h', b'9', 0x17, 0x72, 0x45, 0x38, 0x50, 0x90, 0, 0, 0, 0,
+    ];
+
+    fn small_content(k: u32) -> Vec<u8> {
+        format!("litepack {k} ").repeat(k as usize).into_bytes()
+    }
+
+    #[test]
+    fn streams_ending_at_every_bit_offset_decode_alone_and_concatenated() {
+        let mut all = Vec::new();
+        let mut want = Vec::new();
+        for &(k, s) in SMALL {
+            assert_eq!(bunzip(s).unwrap(), small_content(k), "k = {k}");
+            all.extend_from_slice(s);
+            want.extend(small_content(k));
+        }
+        assert_eq!(bunzip(&all).unwrap(), want);
+        // Every pair, both orders.
+        for &(a, sa) in SMALL {
+            for &(b, sb) in SMALL {
+                let mut v = sa.to_vec();
+                v.extend_from_slice(sb);
+                let mut w = small_content(a);
+                w.extend(small_content(b));
+                assert_eq!(bunzip(&v).unwrap(), w, "{a} then {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_streams_decode_to_nothing() {
+        assert_eq!(bunzip(EMPTY).unwrap(), b"");
+        let (k, s) = SMALL[3];
+        let mut v = EMPTY.to_vec();
+        v.extend_from_slice(s);
+        v.extend_from_slice(EMPTY);
+        assert_eq!(bunzip(&v).unwrap(), small_content(k));
+    }
+
+    #[test]
+    fn a_cut_stream_crc_is_refused() {
+        for &(k, s) in SMALL {
+            for cut in 1..=3 {
+                let short = &s[..s.len() - cut];
+                assert!(bunzip(short).is_err(), "k = {k}, cut {cut}");
+                let mut v = short.to_vec();
+                v.extend_from_slice(SMALL[0].1);
+                assert!(bunzip(&v).is_err(), "k = {k}, cut {cut}, then a stream");
+            }
+        }
+    }
+
+    #[test]
+    fn nonzero_padding_after_the_stream_crc_is_refused() {
+        // SMALL[o] ends at bit o of its last byte, so for o in 1..8 the lowest bit is padding.
+        for (o, &(k, s)) in SMALL.iter().enumerate().skip(1) {
+            let mut v = s.to_vec();
+            let last = v.len() - 1;
+            assert_eq!(v[last] & 1, 0, "k = {k}: 7-Zip pads with zeros");
+            v[last] |= 1;
+            assert!(bunzip(&v).is_err(), "k = {k}, offset {o}");
+        }
+    }
+
+    #[test]
+    fn a_long_run_of_empty_streams_is_linear() {
+        let n = 20_000;
+        let v: Vec<u8> = EMPTY.repeat(n);
+        let t = std::time::Instant::now();
+        assert_eq!(bunzip(&v).unwrap(), b"");
+        // Linear work is milliseconds even in a debug build; a quadratic one (re-scanning or
+        // moving the rest of the input per stream) would take far longer.
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t.elapsed()
+        );
     }
 
     #[test]

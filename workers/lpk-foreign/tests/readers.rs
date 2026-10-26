@@ -341,6 +341,47 @@ fn tar_bytes() -> Vec<u8> {
 }
 
 #[test]
+fn a_damaged_smallest_encrypted_member_does_not_make_the_password_wrong() {
+    use zip::write::SimpleFileOptions;
+    let d = tempfile::tempdir().unwrap();
+    let small: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i * 13 % 241) as u8).collect();
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let aes = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .with_aes_encryption(zip::AesMode::Aes256, "LitePack");
+    w.start_file("small.bin", aes).unwrap();
+    w.write_all(&small).unwrap();
+    w.start_file("big.bin", aes).unwrap();
+    w.write_all(&big).unwrap();
+    let mut bytes = w.finish().unwrap().into_inner();
+    // Flip a byte near the end of small.bin's data: it decodes for a while, then its
+    // authentication code fails.
+    let (start, len) = {
+        let mut z = zip::ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
+        let f = z.by_index_raw(0).unwrap();
+        (f.data_start().unwrap(), f.compressed_size())
+    };
+    bytes[(start + len - 10 - 1000) as usize] ^= 0x55;
+    let p = d.path().join("damaged.zip");
+    std::fs::write(&p, &bytes).unwrap();
+    // Opens with the right password; the other member extracts; the damaged one is Corrupt.
+    let mut r = open_file(&p, "zip", Some(PW)).unwrap();
+    let mut got = Vec::new();
+    r.read_member(1, &mut |b| {
+        got.extend_from_slice(b);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(blake3::hash(&got), blake3::hash(&big));
+    let e = r.read_member(0, &mut |_| Ok(())).err().unwrap();
+    assert_eq!(e.code, ErrorCode::Corrupt, "{e:?}");
+    // A wrong password is still refused at Open.
+    let e = open_file(&p, "zip", Some(b"bad")).err().unwrap();
+    assert_eq!(e.code, ErrorCode::WrongPassword);
+}
+
+#[test]
 fn written_zip_round_trips() {
     let d = tempfile::tempdir().unwrap();
     let p = write_zip(d.path());

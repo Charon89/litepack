@@ -41,7 +41,9 @@ could not be driven from the session; a follow-up).
   job's read bytes up to three times the archive's length as progress, so the second pass (and the
   skipping to a late member inside it) keeps the 60 s no-progress watchdog fed.
 - bzip2: every concatenated stream is decoded (as bzip2 and 7-Zip do); anything else after a stream
-  is refused. The stream CRC is not verified (`bzip2-rs` 0.1.2 exposes no block CRC to combine), so
+  is refused, as is an end-of-stream magic not closed by its CRC, zero padding and the end of the file
+  or a `BZh` header (the 48-bit magic occurring inside compressed data by chance, about once per 2^48
+  bit positions, would make such an archive refused, never misread). The stream CRC is not verified (`bzip2-rs` 0.1.2 exposes no block CRC to combine), so
   `.bz2` and `.tar.bz2` members report `checked = false`; block CRCs are checked.
 - Passwords are checked at `Open` when given: ZIP by decoding its smallest non-empty encrypted
   member whole (at most 1 MiB, else its first 64 KiB); a 7z with data-only encryption by decoding
