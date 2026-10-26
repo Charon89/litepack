@@ -12,9 +12,12 @@
 //! paths differ only by case are refused before any output when the target is
 //! case-insensitive ([`check_case_collisions`]; [`case_insensitive_target`] is Windows and
 //! macOS). Symlink entries are refused ([`refuse_symlink`], the reference tool's rule), skipped
-//! or created ([`Symlinks`]). An existing target is refused, skipped, written beside under a
-//! new name or replaced ([`Overwrite`]); the modes apply to files (and symlink entries); a
-//! directory where a file goes, or a file where a directory goes, is in the way
+//! or created ([`Symlinks`]); one to create whose target is absolute, UNC, a device path,
+//! drive-relative, rooted, with a `..` after a name or escaping is skipped and recorded, its
+//! kind on Windows read from the archive, never the file system ([`resolve_symlink_target`],
+//! E6-0). An existing target is refused, skipped, written beside under a new name or replaced
+//! ([`Overwrite`]); the modes apply to files (and symlink entries); a directory where a file
+//! goes, or a file where a directory goes, is in the way
 //! ([`CoreError::InTheWay`]) in every mode but `skip`.
 //!
 //! **The hook.** [`ExtractPolicy`] is what the engine asks; [`DefaultPolicy`] answers with the
@@ -54,6 +57,11 @@ pub trait ExtractPolicy: Sync {
     fn symlink_action(&self, entry: &Entry) -> SymlinkAction {
         let _ = entry;
         SymlinkAction::Skip
+    }
+    /// A symlink entry to create whose target [`resolve_symlink_target`] refuses: it is skipped
+    /// and counted, never created; the policy may record it for a warning. Default: nothing.
+    fn symlink_target_refused(&self, entry: &Entry, refusal: TargetRefusal) {
+        let _ = (entry, refusal);
     }
     /// Something exists where an entry goes: what to do. Default: [`ExtractPolicy::overwrite`]
     /// decides, and an accepted target is written as before (create-new, so the open fails).
@@ -173,7 +181,9 @@ pub enum Symlinks {
     /// Skipped, each one recorded for a warning (the command line's default).
     #[default]
     Skip,
-    /// Created (`lpk x --symlinks`); a creation that fails fails the extraction.
+    /// Created (`lpk x --symlinks`) when the target stays inside the destination
+    /// ([`resolve_symlink_target`]; a refused target is skipped with a record); a creation
+    /// that fails fails the extraction.
     Create,
 }
 
@@ -215,6 +225,7 @@ pub struct Policy {
     /// What symlink entries get.
     pub symlinks: Symlinks,
     skipped_symlinks: Mutex<Vec<String>>,
+    refused_targets: Mutex<Vec<(String, TargetRefusal)>>,
 }
 
 impl Policy {
@@ -224,6 +235,7 @@ impl Policy {
             overwrite,
             symlinks,
             skipped_symlinks: Mutex::new(Vec::new()),
+            refused_targets: Mutex::new(Vec::new()),
         }
     }
 
@@ -231,6 +243,15 @@ impl Policy {
     /// order.
     pub fn skipped_symlinks(&self) -> Vec<String> {
         self.skipped_symlinks
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// The archive paths of the symlink entries skipped because of their target, with the
+    /// reason, in entry order (for the warnings).
+    pub fn refused_symlink_targets(&self) -> Vec<(String, TargetRefusal)> {
+        self.refused_targets
             .lock()
             .map(|v| v.clone())
             .unwrap_or_default()
@@ -271,6 +292,12 @@ impl ExtractPolicy for Policy {
         match self.symlinks {
             Symlinks::Create => SymlinkAction::Create,
             Symlinks::Refuse | Symlinks::Skip => SymlinkAction::Skip,
+        }
+    }
+
+    fn symlink_target_refused(&self, entry: &Entry, refusal: TargetRefusal) {
+        if let Ok(mut v) = self.refused_targets.lock() {
+            v.push((entry.path.clone(), refusal));
         }
     }
 
@@ -384,6 +411,159 @@ pub fn refuse_symlink(entry: &Entry) -> Result<(), FormatError> {
         });
     }
     Ok(())
+}
+
+/// Why a symlink entry's target is not created (E6-0; `docs/notes/e6-design.md` section 5).
+/// The same forms are refused on every operating system (an archive made on one is extracted
+/// on another): the absolute ones whether written with `/` or `\`. Past those, `\` is a
+/// separator on Windows and refused elsewhere ([`TargetRefusal::Backslash`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetRefusal {
+    /// No target at all.
+    Empty,
+    /// A NUL byte, which no file system accepts in a path.
+    Nul,
+    /// A device path (`\\?\`, `\\.\`, `\??\`, or the same with `/`).
+    DevicePath,
+    /// A UNC path (`\\server\share`, `//server/share`): following it contacts a server.
+    Unc,
+    /// A drive-absolute path (`C:\x`).
+    Absolute,
+    /// A drive-relative path (`C:x`).
+    DriveRelative,
+    /// Rooted: starts with one `/` or `\` (an absolute path on Unix).
+    Rooted,
+    /// A component with a colon (an alternate data stream on Windows).
+    Colon,
+    /// A component ending in a dot or a space (Windows strips them, so the name the archive
+    /// shows is not the name followed).
+    TrailingDotOrSpace,
+    /// A component that is a Windows device name (`CON`, `NUL`, `COM1`, ...).
+    DeviceName,
+    /// Its leading `..` climb above the destination: more of them than the link's own depth
+    /// below it.
+    Escapes,
+    /// A `..` after a name (`a/../x`): where it lands depends on what the name is on disk
+    /// (a link renamed by `--overwrite rename`, one left by an earlier extraction, a case fold
+    /// the disk does not share), which the archive cannot tell, so it is never followed.
+    DotDotAfterName,
+    /// A backslash past the forms above, on a system where it is a name character, not a
+    /// separator (every one but Windows).
+    Backslash,
+}
+
+impl TargetRefusal {
+    /// The reason, as the warnings print it.
+    pub fn reason(self) -> &'static str {
+        match self {
+            TargetRefusal::Empty => "the target is empty",
+            TargetRefusal::Nul => "the target contains a NUL byte",
+            TargetRefusal::DevicePath => "the target is a device path",
+            TargetRefusal::Unc => "the target is a UNC path",
+            TargetRefusal::Absolute => "the target is an absolute path",
+            TargetRefusal::DriveRelative => "the target is drive-relative",
+            TargetRefusal::Rooted => "the target is rooted",
+            TargetRefusal::Colon => "the target contains a colon",
+            TargetRefusal::TrailingDotOrSpace => {
+                "a component of the target ends in a dot or a space"
+            }
+            TargetRefusal::DeviceName => "the target names a Windows device",
+            TargetRefusal::Escapes => "the target escapes the destination",
+            TargetRefusal::DotDotAfterName => "the target has `..` after a name",
+            TargetRefusal::Backslash => "the target contains a backslash",
+        }
+    }
+}
+
+impl std::fmt::Display for TargetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+fn is_sep(b: u8) -> bool {
+    b == b'/' || b == b'\\'
+}
+
+/// Judge the target of the symlink entry at archive path `link` (`/`-separated) and resolve it
+/// lexically from the link's own directory: the path it names relative to the destination
+/// (`""` for the destination itself), or why it is refused ([`TargetRefusal`]). The rule needs
+/// nothing but the two strings: every `..` comes before any name, and there are no more of
+/// them than the link's depth below the destination (the link's own parents are directories
+/// this extraction checked: a linked parent is refused), so the target can only name
+/// something at or below a directory of the link's own path, whatever the names after the
+/// `..` turn out to be on disk. Linear in the target's length; pure: no file-system call, so a
+/// refused target is never touched.
+pub fn resolve_symlink_target(link: &str, target: &[u8]) -> Result<String, TargetRefusal> {
+    if target.is_empty() {
+        return Err(TargetRefusal::Empty);
+    }
+    if target.contains(&0) {
+        return Err(TargetRefusal::Nul);
+    }
+    if target.len() >= 4
+        && is_sep(target[0])
+        && is_sep(target[3])
+        && ((is_sep(target[1]) && matches!(target[2], b'?' | b'.'))
+            || (target[1] == b'?' && target[2] == b'?'))
+    {
+        return Err(TargetRefusal::DevicePath);
+    }
+    if target.len() >= 2 && is_sep(target[0]) && is_sep(target[1]) {
+        return Err(TargetRefusal::Unc);
+    }
+    if is_sep(target[0]) {
+        return Err(TargetRefusal::Rooted);
+    }
+    if target.len() >= 2 && target[0].is_ascii_alphabetic() && target[1] == b':' {
+        return Err(if target.get(2).copied().is_some_and(is_sep) {
+            TargetRefusal::Absolute
+        } else {
+            TargetRefusal::DriveRelative
+        });
+    }
+    // Off Windows `\` is a name character, not a separator: a target holding one would walk
+    // into a directory named `\` (or `a\b`) the lexical rule cannot see. Entry paths never
+    // contain one, so no link lpk creates is lost.
+    if cfg!(not(windows)) && target.contains(&b'\\') {
+        return Err(TargetRefusal::Backslash);
+    }
+    // One pass: count the leading `..`, check each name's form, refuse a `..` after a name.
+    let mut ups = 0usize;
+    let mut names: Vec<&[u8]> = Vec::new();
+    for c in target.split(|&b| is_sep(b)) {
+        match c {
+            b"" | b"." => {}
+            b".." if names.is_empty() => ups += 1,
+            b".." => return Err(TargetRefusal::DotDotAfterName),
+            _ => {
+                if c.contains(&b':') {
+                    return Err(TargetRefusal::Colon);
+                }
+                if matches!(c.last(), Some(b'.' | b' ')) {
+                    return Err(TargetRefusal::TrailingDotOrSpace);
+                }
+                if is_reserved_device(&String::from_utf8_lossy(c)) {
+                    return Err(TargetRefusal::DeviceName);
+                }
+                names.push(c);
+            }
+        }
+    }
+    let mut parents: Vec<&str> = link.split('/').collect();
+    parents.pop();
+    if ups > parents.len() {
+        return Err(TargetRefusal::Escapes);
+    }
+    parents.truncate(parents.len() - ups);
+    let mut out = parents.join("/");
+    for n in names {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(&String::from_utf8_lossy(n));
+    }
+    Ok(out)
 }
 
 /// Nothing is replaced: a file target that already exists (a file, a directory, a symlink,
@@ -563,6 +743,137 @@ mod tests {
             size: 1,
             ..file(path)
         }
+    }
+
+    /// E6-0: every refused target form, with its reason, and the in-tree resolutions.
+    #[test]
+    fn symlink_target_table() {
+        use TargetRefusal as R;
+        let refused: &[(&str, &[u8], R)] = &[
+            ("l", b"\\\\server\\share\\x", R::Unc),
+            ("l", b"//server/share", R::Unc),
+            ("l", b"\\/server/share", R::Unc),
+            ("l", b"C:\\Windows\\x", R::Absolute),
+            ("l", b"c:/x", R::Absolute),
+            ("l", b"C:x", R::DriveRelative),
+            ("l", b"C:", R::DriveRelative),
+            ("l", b"\\x", R::Rooted),
+            ("l", b"/etc/passwd", R::Rooted),
+            ("l", b"\\\\?\\C:\\x", R::DevicePath),
+            ("l", b"\\\\.\\pipe\\x", R::DevicePath),
+            ("l", b"//?/C:/x", R::DevicePath),
+            ("l", b"\\??\\C:\\x", R::DevicePath),
+            ("a/l", b"../../x", R::Escapes),
+            ("l", b"..", R::Escapes),
+            ("a/b/c/l", b"../../../../x", R::Escapes),
+            ("l", b"a/../../x", R::DotDotAfterName),
+            ("l", b"a/..", R::DotDotAfterName),
+            ("a/b/l", b"../x/../..", R::DotDotAfterName),
+            ("l", b"a/b/s (1)/../..", R::DotDotAfterName),
+            ("a/b/l", b"../../d/x/../y", R::DotDotAfterName),
+            ("l", b"x/file:stream", R::Colon),
+            ("l", b"x./y", R::TrailingDotOrSpace),
+            ("l", b"x ", R::TrailingDotOrSpace),
+            ("l", b"...", R::TrailingDotOrSpace),
+            ("l", b"sub/CON", R::DeviceName),
+            ("l", b"nul.txt", R::DeviceName),
+            ("l", b"", R::Empty),
+            ("l", b"a\0b", R::Nul),
+        ];
+        for (link, target, want) in refused {
+            assert_eq!(
+                resolve_symlink_target(link, target),
+                Err(*want),
+                "{link} -> {}",
+                String::from_utf8_lossy(target)
+            );
+        }
+        let fine: &[(&str, &[u8], &str)] = &[
+            ("l", b"a.txt", "a.txt"),
+            ("l", b"./d/x", "d/x"),
+            ("d/l", b"../a.txt", "a.txt"),
+            ("d/l", b"..", ""),
+            ("l", b".", ""),
+            ("l", b"d/", "d"),
+            ("l", b"s", "s"),
+            ("a/b/l", b"../../d/./x/", "d/x"),
+            ("a/b/l", b"../..", ""),
+            ("a/b/l", b"./../s/x", "a/s/x"),
+            // Descending through a name that is a link on disk is safe without `..` after it.
+            ("l", b"s/x", "s/x"),
+        ];
+        for (link, target, want) in fine {
+            assert_eq!(
+                resolve_symlink_target(link, target).as_deref(),
+                Ok(*want),
+                "{link} -> {}",
+                String::from_utf8_lossy(target)
+            );
+        }
+        // A backslash past the absolute forms: a separator on Windows, a name character (and
+        // refused) elsewhere.
+        let backslashed: &[(&str, &[u8], Result<&str, R>)] = &[
+            ("a/b/l", b"./\\/../..", Ok("")),
+            ("d/e/l", b"..\\..\\x", Ok("x")),
+            ("a/b/l", b"..\\..\\..\\x", Err(R::Escapes)),
+            ("l", b"a\\..\\..\\x", Err(R::DotDotAfterName)),
+        ];
+        for (link, target, on_windows) in backslashed {
+            let want = if cfg!(windows) {
+                *on_windows
+            } else {
+                Err(R::Backslash)
+            };
+            assert_eq!(
+                resolve_symlink_target(link, target)
+                    .as_deref()
+                    .map_err(|e| *e),
+                want,
+                "{link} -> {}",
+                String::from_utf8_lossy(target)
+            );
+        }
+        assert_eq!(R::Unc.to_string(), "the target is a UNC path");
+        // The policy records each refusal for the warnings, in order.
+        let p = Policy::new(Overwrite::Refuse, Symlinks::Create);
+        p.symlink_target_refused(&link("a"), R::Unc);
+        p.symlink_target_refused(&link("b"), R::Escapes);
+        assert_eq!(
+            p.refused_symlink_targets(),
+            vec![("a".to_string(), R::Unc), ("b".to_string(), R::Escapes)]
+        );
+        assert!(p.skipped_symlinks().is_empty());
+        // The default hook records nothing and does not panic.
+        DefaultPolicy.symlink_target_refused(&link("a"), R::Unc);
+    }
+
+    /// E6-0: the resolver is linear: a 65,535-byte target (the format's longest) of 32,768
+    /// names, one of 21,845 leading `..` below a link as deep, and one with a `..` at the end
+    /// of 32,767 names each resolve well under a second in a debug build.
+    #[test]
+    fn symlink_target_resolution_is_linear() {
+        let mut names = "a/".repeat(32_767);
+        names.push('a');
+        assert_eq!(names.len(), 65_535);
+        let t = std::time::Instant::now();
+        let to = resolve_symlink_target("l", names.as_bytes()).unwrap();
+        assert_eq!(to.len(), 65_535);
+        let mut ups = "../".repeat(21_844);
+        ups.push_str("..");
+        assert_eq!(ups.len(), 65_534);
+        let link = format!("{}l", "d/".repeat(21_845));
+        assert_eq!(
+            resolve_symlink_target(&link, ups.as_bytes()).as_deref(),
+            Ok("")
+        );
+        let mut bad = "a/".repeat(32_766);
+        bad.push_str("..");
+        assert_eq!(
+            resolve_symlink_target("l", bad.as_bytes()),
+            Err(TargetRefusal::DotDotAfterName)
+        );
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
     }
 
     fn reason(r: Result<(), FormatError>) -> Option<&'static str> {
