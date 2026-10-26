@@ -420,3 +420,155 @@ fn rename_folds_case_on_a_case_insensitive_target() {
     assert_eq!(std::fs::read(out.join("N (1)")).unwrap(), b"second");
     assert_eq!(std::fs::read(out.join("n (2)")).unwrap(), b"first");
 }
+
+/// E6-0: under `Symlinks::Create` a target that is UNC, absolute, drive-relative, rooted, a
+/// device path or escaping is skipped, recorded with its reason and counted, and nothing is
+/// created for it; the extraction goes on. In-tree targets become links whose kind on Windows
+/// comes from the archive: a directory link to a directory entry (or an implied one), a file
+/// link otherwise.
+#[test]
+fn symlink_targets_leaving_the_destination_are_skipped() {
+    use lpk_core::policy::TargetRefusal as R;
+    // In the format's path order.
+    let refused: [(&str, &[u8], R); 9] = [
+        ("abs", b"C:\\Windows\\win.ini", R::Absolute),
+        ("dev", b"\\\\?\\C:\\x", R::DevicePath),
+        ("drive", b"C:x", R::DriveRelative),
+        ("pipe", b"\\\\.\\pipe\\x", R::DevicePath),
+        ("rooted", b"\\x", R::Rooted),
+        ("slash", b"/etc/passwd", R::Rooted),
+        ("sub/esc", b"../../x", R::Escapes),
+        ("unc", b"\\\\192.0.2.1\\share\\x", R::Unc),
+        ("unc2", b"//192.0.2.1/share/x", R::Unc),
+    ];
+    let bytes = packed_with(|w| {
+        w.add_file("a.txt", EntryFlags::EMPTY, 0, &mut &b"target"[..])
+            .unwrap();
+        for (p, t, _) in &refused[..2] {
+            w.add_symlink(p, EntryFlags::EMPTY, 0, t).unwrap();
+        }
+        w.add_directory("d", EntryFlags::EMPTY, 0).unwrap();
+        w.add_file("d/in.txt", EntryFlags::EMPTY, 0, &mut &b"inside"[..])
+            .unwrap();
+        w.add_symlink("drive", EntryFlags::EMPTY, 0, refused[2].1)
+            .unwrap();
+        w.add_file("e/f.txt", EntryFlags::EMPTY, 0, &mut &b"implied"[..])
+            .unwrap();
+        for (p, t, _) in &refused[3..7] {
+            w.add_symlink(p, EntryFlags::EMPTY, 0, t).unwrap();
+        }
+        w.add_symlink("sub/up_dir", EntryFlags::EMPTY, 0, b"../d")
+            .unwrap();
+        w.add_symlink("to_dir", EntryFlags::EMPTY, 0, b"d").unwrap();
+        w.add_symlink("to_file", EntryFlags::EMPTY, 0, b"a.txt")
+            .unwrap();
+        w.add_symlink("to_implied", EntryFlags::EMPTY, 0, b"e")
+            .unwrap();
+        for (p, t, _) in &refused[7..] {
+            w.add_symlink(p, EntryFlags::EMPTY, 0, t).unwrap();
+        }
+    });
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    let p = Policy::new(Overwrite::Refuse, Symlinks::Create);
+    let r = extract(&bytes, &out, &p);
+    // The refusals are decided in the policy pass, before any link is made: the same on every
+    // machine, whether links can be created or not.
+    let want: Vec<(String, R)> = refused
+        .iter()
+        .map(|(p, _, r)| (p.to_string(), *r))
+        .collect();
+    assert_eq!(p.refused_symlink_targets(), want);
+    for (path, _, _) in &refused {
+        assert!(std::fs::symlink_metadata(out.join(path)).is_err(), "{path}");
+    }
+    match r {
+        Ok(s) => {
+            assert_eq!((s.files, s.symlinks, s.symlinks_skipped), (3, 4, 9));
+            assert!(p.skipped_symlinks().is_empty());
+            assert_eq!(std::fs::read(out.join("to_file")).unwrap(), b"target");
+            assert_eq!(std::fs::read(out.join("to_dir/in.txt")).unwrap(), b"inside");
+            assert_eq!(
+                std::fs::read(out.join("sub/up_dir/in.txt")).unwrap(),
+                b"inside"
+            );
+            assert_eq!(
+                std::fs::read(out.join("to_implied/f.txt")).unwrap(),
+                b"implied"
+            );
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::FileTypeExt;
+                let kind = |p: &str| std::fs::symlink_metadata(out.join(p)).unwrap().file_type();
+                assert!(kind("to_dir").is_symlink_dir());
+                assert!(kind("sub/up_dir").is_symlink_dir());
+                assert!(kind("to_implied").is_symlink_dir());
+                assert!(kind("to_file").is_symlink_file());
+            }
+        }
+        Err(e) => {
+            // Windows without the privilege: the first in-tree link's creation fails the
+            // extraction; the refusals above were still made before it.
+            if !cfg!(windows) {
+                panic!("{e:?}");
+            }
+            assert!(matches!(&e, CoreError::Io { .. }), "{e:?}");
+            println!(
+                "SKIPPED: link kinds not checked, symlink creation refused on this machine ({e})"
+            );
+        }
+    }
+}
+
+/// E6-0, the rename bypass: `--overwrite rename` gives a link a name the archive does not
+/// know (`a/b/s` becomes `a/b/s (1)`), so a target that walks through that name and back up
+/// would resolve lexically inside the destination and physically outside it. A `..` after a
+/// name is refused whatever the name is, on the first extraction and the second; a plain one
+/// (`a/../f`) too.
+#[test]
+fn a_dot_dot_after_a_name_is_refused_even_through_a_renamed_link() {
+    use lpk_core::policy::TargetRefusal as R;
+    let bytes = packed_with(|w| {
+        w.add_symlink("a/b/s", EntryFlags::EMPTY, 0, b"../..")
+            .unwrap();
+        w.add_file("f", EntryFlags::EMPTY, 0, &mut &b"file"[..])
+            .unwrap();
+        w.add_symlink("l", EntryFlags::EMPTY, 0, b"a/b/s (1)/../..")
+            .unwrap();
+        w.add_symlink("m", EntryFlags::EMPTY, 0, b"a/../f").unwrap();
+    });
+    let want = vec![
+        ("l".to_string(), R::DotDotAfterName),
+        ("m".to_string(), R::DotDotAfterName),
+    ];
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    for round in 0..2 {
+        let p = Policy::new(Overwrite::Rename, Symlinks::Create);
+        let r = extract(&bytes, &out, &p);
+        assert_eq!(p.refused_symlink_targets(), want, "round {round}");
+        assert!(std::fs::symlink_metadata(out.join("l")).is_err());
+        assert!(std::fs::symlink_metadata(out.join("m")).is_err());
+        match r {
+            Ok(s) => {
+                assert_eq!((s.symlinks, s.symlinks_skipped), (1, 2), "round {round}");
+                // The second round writes `f (1)` and `a/b/s (1)` beside the first.
+                assert_eq!(s.renamed, round * 2, "round {round}");
+                if round == 1 {
+                    assert!(std::fs::symlink_metadata(out.join("a/b/s (1)"))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink());
+                }
+            }
+            Err(e) => {
+                if !cfg!(windows) {
+                    panic!("{e:?}");
+                }
+                assert!(matches!(&e, CoreError::Io { .. }), "{e:?}");
+                println!("SKIPPED: second round, symlink creation refused on this machine ({e})");
+                break;
+            }
+        }
+    }
+}
