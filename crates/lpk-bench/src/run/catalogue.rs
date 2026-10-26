@@ -75,6 +75,16 @@ pub struct Setting {
     pub compress: Vec<String>,
     #[serde(default)]
     pub extract: Vec<String>,
+    /// Mark of the Web (E6-5): the runner writes a `Zone.Identifier` stream with this
+    /// `ZoneId` (0 to 4) onto the setting's archive between compression and extraction, so the
+    /// extraction is measured from a zoned archive. Windows only; recorded in the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<u8>,
+}
+
+/// The bytes of the `Zone.Identifier` stream of `zone` (what Windows writes, `ZoneId` only).
+pub fn zone_stream(zone: u8) -> String {
+    format!("[ZoneTransfer]\r\nZoneId={zone}\r\n")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +355,9 @@ impl Tool {
             if !seen.insert(s.id.as_str()) {
                 bail!("tool `{id}`: duplicate setting `{}`", s.id);
             }
+            if s.zone.is_some_and(|z| z > 4) {
+                bail!("tool `{id}`: setting `{}`: zone must be 0 to 4", s.id);
+            }
         }
         if !self.manual {
             if self.create.is_empty() || self.extract.is_empty() {
@@ -406,6 +419,8 @@ mod tests {
             settings("lpk"),
             [
                 "fast",
+                "fast-zoned",
+                "fast-zoned-no-motw",
                 "fast-no-jpeg",
                 "balanced",
                 "balanced-extension",
@@ -533,6 +548,22 @@ mod tests {
         assert!(Catalogue::parse(&dup).is_err());
         let bad_ph = base("").replace("{archive}", "{nope}");
         assert!(Catalogue::parse(&bad_ph).is_err());
+        // E6-5: a setting's zone is 0 to 4.
+        assert!(Catalogue::parse(&format!("{}zone=3\n", base(""))).is_ok());
+        assert!(Catalogue::parse(&format!("{}zone=5\n", base(""))).is_err());
+    }
+
+    #[test]
+    fn the_motw_settings_zone_the_archive() {
+        let cat = Catalogue::parse(REAL).expect("catalogue");
+        let lpk = cat.get("lpk").expect("lpk");
+        let get = |id: &str| lpk.settings.iter().find(|s| s.id == id).expect(id);
+        assert_eq!(get("fast").zone, None);
+        assert_eq!(get("fast-zoned").zone, Some(3));
+        assert!(get("fast-zoned").extract.is_empty());
+        assert_eq!(get("fast-zoned-no-motw").zone, Some(3));
+        assert_eq!(get("fast-zoned-no-motw").extract, ["--motw", "off"]);
+        assert_eq!(zone_stream(3), "[ZoneTransfer]\r\nZoneId=3\r\n");
     }
 
     #[test]

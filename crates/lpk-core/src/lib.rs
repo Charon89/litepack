@@ -25,6 +25,7 @@ pub mod foreign;
 pub mod gate;
 pub mod ingest;
 pub mod memory;
+pub mod motw;
 pub mod outtree;
 pub mod peel;
 pub mod pipeline;

@@ -12,7 +12,7 @@ use windows::core::PWSTR;
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::{
     NtCreateFile, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-    FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT,
     NTCREATEFILE_CREATE_DISPOSITION, NTCREATEFILE_CREATE_OPTIONS,
 };
 use windows::Win32::Foundation::{
@@ -28,17 +28,17 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     FileAttributeTagInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdInfo,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, SetFileInformationByHandle,
-    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO,
-    FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, SYNCHRONIZE,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
+    SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ACCESS_RIGHTS,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, SYNCHRONIZE,
 };
 use windows::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
-use windows::Win32::System::SystemServices::IO_REPARSE_TAG_SYMLINK;
+use windows::Win32::System::SystemServices::{FILE_NAMED_STREAMS, IO_REPARSE_TAG_SYMLINK};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken, SetThreadToken,
 };
@@ -157,8 +157,8 @@ fn component(name: &OsStr) -> Result<Vec<u16>, FsError> {
 /// `NtCreateFile` of `name` (one component) relative to `root`, with `OBJ_DONT_REPARSE` and
 /// `OBJ_CASE_INSENSITIVE`, synchronous I/O, and `FILE_OPEN_REPARSE_POINT` always (the final
 /// component is opened as itself, never followed).
-fn nt_create(
-    root: &OwnedHandle,
+fn nt_create<H: AsRawHandle>(
+    root: &H,
     name: &[u16],
     access: FILE_ACCESS_RIGHTS,
     share: FILE_SHARE_MODE,
@@ -323,6 +323,11 @@ impl Dir {
         self.id
     }
 
+    /// Whether this directory's volume holds named streams ([`named_streams`]).
+    pub fn named_streams(&self) -> Result<bool, FsError> {
+        named_streams(&self.h)
+    }
+
     /// Open the child directory `name` (with `create`, create it when absent), relative to
     /// this one; a name-surrogate reparse point there is [`FsError::Linked`].
     pub fn open_dir(&self, name: &OsStr, create: bool) -> Result<Dir, FsError> {
@@ -462,6 +467,75 @@ impl Dir {
         }
         Ok(())
     }
+}
+
+/// Whether the volume `h` is on holds named streams (`FILE_NAMED_STREAMS` among the volume's
+/// flags, from `GetVolumeInformationByHandleW`): the probe Mark of the Web makes before it
+/// writes a `Zone.Identifier` stream (E6-5). No file system is named: a volume either has the
+/// flag or not.
+pub fn named_streams<H: AsRawHandle>(h: &H) -> Result<bool, FsError> {
+    let mut flags = 0u32;
+    // SAFETY: `flags` is a live output for the call; no name buffer is passed; `h` is an open
+    // handle borrowed for the call.
+    unsafe {
+        GetVolumeInformationByHandleW(
+            HANDLE(h.as_raw_handle()),
+            None,
+            None,
+            None,
+            Some(&raw mut flags),
+            None,
+        )
+    }?;
+    Ok(flags & FILE_NAMED_STREAMS != 0)
+}
+
+/// Write the named stream `stream` (a name without `:`, for example `Zone.Identifier`) of the
+/// open file `file` with `data`, opened relative to the file's own handle (`NtCreateFile` with
+/// the file as the root and the name `:<stream>`, `FILE_OVERWRITE_IF`), never by path: the
+/// stream lands on the file this handle is open on, whatever its name now is.
+pub fn write_stream(file: &File, stream: &str, data: &[u8]) -> Result<(), FsError> {
+    let w = component(OsStr::new(stream))?;
+    let mut name = Vec::with_capacity(w.len() + 1);
+    name.push(u16::from(b':'));
+    name.extend_from_slice(&w);
+    let h = nt_create(
+        file,
+        &name,
+        FILE_GENERIC_WRITE,
+        FILE_SHARE_ALL,
+        FILE_OVERWRITE_IF,
+        FILE_NON_DIRECTORY_FILE,
+    )?;
+    let mut s = File::from(h);
+    io::Write::write_all(&mut s, data)?;
+    Ok(())
+}
+
+/// Read at most `max` bytes of the named stream `stream` of the open file `file`, opened
+/// relative to the file's own handle (as [`write_stream`]), never by path: the stream of the
+/// file this handle is open on, whatever its name now is. `Ok(None)` when the file has no such
+/// stream (`STATUS_OBJECT_NAME_NOT_FOUND`); every other failure is an error.
+pub fn read_stream(file: &File, stream: &str, max: u64) -> Result<Option<Vec<u8>>, FsError> {
+    let w = component(OsStr::new(stream))?;
+    let mut name = Vec::with_capacity(w.len() + 1);
+    name.push(u16::from(b':'));
+    name.extend_from_slice(&w);
+    let h = match nt_create(
+        file,
+        &name,
+        FILE_GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE,
+    ) {
+        Ok(h) => h,
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut buf = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(File::from(h), max), &mut buf)?;
+    Ok(Some(buf))
 }
 
 /// A symlink reparse buffer (`REPARSE_DATA_BUFFER`, `SymbolicLinkReparseBuffer`) for a
@@ -621,6 +695,46 @@ mod tests {
             .output()
             .unwrap();
         assert!(st.status.success(), "{st:?}");
+    }
+
+    #[test]
+    fn a_stream_is_written_relative_to_the_file_handle() {
+        let d = tempfile::tempdir().unwrap();
+        let root = Dir::open_path(d.path()).unwrap();
+        // The temporary directory of a CI runner is on NTFS, which has named streams.
+        assert!(named_streams(&root.h).unwrap());
+        let (f, _) = root.create_file(OsStr::new("a.bin")).unwrap();
+        assert!(named_streams(&f).unwrap());
+        // Before the first data byte; the file is renamed first, so a path open would miss.
+        std::fs::rename(d.path().join("a.bin"), d.path().join("b.bin")).unwrap();
+        write_stream(&f, "Zone.Identifier", b"[ZoneTransfer]\r\nZoneId=3\r\n").unwrap();
+        let mut f = f;
+        io::Write::write_all(&mut f, b"data").unwrap();
+        drop(f);
+        let got = std::fs::read(d.path().join("b.bin:Zone.Identifier")).unwrap();
+        assert_eq!(got, b"[ZoneTransfer]\r\nZoneId=3\r\n");
+        assert_eq!(std::fs::read(d.path().join("b.bin")).unwrap(), b"data");
+        // Read back through a handle opened before the name changes again: the stream of the
+        // file the handle is on, not of whatever now has the name.
+        let h = File::open(d.path().join("b.bin")).unwrap();
+        std::fs::rename(d.path().join("b.bin"), d.path().join("moved.bin")).unwrap();
+        std::fs::write(d.path().join("b.bin"), b"impostor").unwrap();
+        assert_eq!(
+            read_stream(&h, "Zone.Identifier", 1024).unwrap().unwrap(),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n"
+        );
+        assert_eq!(
+            read_stream(&h, "Zone.Identifier", 4).unwrap().unwrap(),
+            b"[Zon"
+        );
+        let plain = File::open(d.path().join("b.bin")).unwrap();
+        assert!(read_stream(&plain, "Zone.Identifier", 1024)
+            .unwrap()
+            .is_none());
+        // A stream name with a separator is refused before any call.
+        let (f2, _) = root.create_file(OsStr::new("c.bin")).unwrap();
+        assert!(write_stream(&f2, "x:$DATA", b"").is_err());
+        assert!(write_stream(&f2, "..", b"").is_err());
     }
 
     #[test]

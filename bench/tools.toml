@@ -51,6 +51,10 @@
 #   dedup           true when the tool deduplicates across files (default false; D-43). Gate G2
 #                   is compared against the best tool without this flag; flagged tools' best
 #                   rows are printed as reference only. Recorded in `tools.json`.
+#   zone            per setting, optional (E6-5): a ZoneId 0-4 the runner writes as the archive's
+#                   Zone.Identifier stream between compression and extraction (untimed), so the
+#                   extraction runs from a zoned archive. Windows only (elsewhere the row fails
+#                   with the reason); recorded in the row's `setting.zone`.
 #
 # Working-directory rules. CREATE (every directory-mode tool and the tar step of tar-stream
 # tools): the runner executes the tool with its working directory set to the parent of the class
@@ -256,6 +260,24 @@ note = "This repository's own build (target/release, found relative to the curre
 id = "fast"
 compress = ["--fast"]
 extract = []
+# Mark of the Web's cost (E6-5, docs/notes/e6-design.md section 4): the runner writes a
+# Zone.Identifier stream with ZoneId=3 onto the archive before extraction (Windows only), so
+# `fast-zoned` extracts with propagation (every file gets the stream) and `fast-zoned-no-motw`
+# the same zoned archive with the opt-out; both against `fast` on `small-files`. Outside
+# Windows both rows are recorded as skipped ("zone streams need Windows"). They exist for that
+# one comparison: a full run that should leave them out names its settings with `--settings`
+# (for example `--settings fast,balanced,...`), and E6-5's row picks them the same way:
+# `--tools lpk --settings fast,fast-zoned,fast-zoned-no-motw --classes small-files`.
+[[tool.setting]]
+id = "fast-zoned"
+compress = ["--fast"]
+extract = []
+zone = 3
+[[tool.setting]]
+id = "fast-zoned-no-motw"
+compress = ["--fast"]
+extract = ["--motw", "off"]
+zone = 3
 # The JPEG peel's A/B on the Fast tier (E2-25, route (a)): `fast` carries the peel; this row
 # stores JPEGs as they are, so their extraction is a copy.
 [[tool.setting]]

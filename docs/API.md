@@ -13,6 +13,8 @@ this page is the overview. v0 is unstable: it changes with the GUI tasks.
 |---|---|
 | `Session::open(path, &OpenOptions)` | Opens an `.lpk` in process (credentials, decode-memory limit, priors, an earlier `generation` read-only) or a foreign archive through E4's sandboxed broker (by magic; listed only when first asked). |
 | `Session::open_file(File, path, &OpenOptions)` | The same for an `.lpk` the caller opened (its open error stays the caller's). |
+| `OpenOptions::motw_off` | Mark of the Web opted out (E6-5, `--motw off`): files the session derives from the archive (extraction, export, repair) do not get its zone. Default `false`: an archive whose `Zone.Identifier` gives zone 3 or 4 (or cannot be parsed or read: 3) passes `ZoneId` only to each output, written before its first byte; `ExtractReport::zone` and `motw_unmarked` report it. |
+| `Session::zone(&self)` / `zone_warning(&self)` | The archive's propagating zone, read once at open through the archive's handle (reported whatever `motw_off` says: an opened entry is zoned regardless), and the one warning when the stream could not be read and was taken as zone 3. |
 | `Session::unlock(&mut self, Credentials)` | Re-opens with credentials. |
 | `Session::info(&self)` | Format, generation (open and latest), encrypted, listable, keyless, length. |
 | `Session::for_each(&self, &Selection, f)` | Streams the entries, none collected (E3-1's bound); a glob matching nothing is `NoMatch` before `f` runs. |

@@ -187,6 +187,9 @@ pub struct Options {
     /// worker refuses them). Empty outside tests.
     #[doc(hidden)]
     pub worker_args: Vec<String>,
+    /// Mark of the Web (E6-5, [`crate::motw`]): the zone every file the host writes gets
+    /// before its first byte (the host writes the stream, never the worker); `None` writes none.
+    pub zone: Option<crate::motw::Zone>,
 }
 
 /// The worker's file name.
@@ -234,6 +237,9 @@ pub struct ForeignSummary {
     pub listing_charge: u64,
     /// Warnings of the launch (an AppContainer temporary folder that could not be emptied).
     pub warnings: Vec<String>,
+    /// Mark of the Web: a file could not carry [`Options::zone`] (the destination's volume
+    /// has no named streams, or the write failed); the caller prints one warning.
+    pub motw_unmarked: bool,
 }
 
 /// A foreign archive's validated listing.
@@ -1255,12 +1261,15 @@ struct FsOut {
     /// The files finished so far, by path: a hard link's source is opened through its entry
     /// here, never by path.
     done: HashMap<PathBuf, Created>,
+    /// The zone every created file gets (Mark of the Web).
+    zone: Option<crate::motw::Zone>,
 }
 
 impl FsOut {
-    fn new(dir: &Path) -> Self {
+    fn new(dir: &Path, zone: Option<crate::motw::Zone>) -> Self {
         FsOut {
             dir: dir.to_path_buf(),
+            zone,
             tree: None,
             cur: None,
             done: HashMap::new(),
@@ -1276,7 +1285,8 @@ impl FsOut {
 
 impl Out for FsOut {
     fn prepare(&mut self, mkdirs: &[PathBuf], links: &[Link]) -> Result<(), CoreError> {
-        let tree = make_dirs(&self.dir, mkdirs)?;
+        let mut tree = make_dirs(&self.dir, mkdirs)?;
+        tree.set_zone(self.zone);
         make_links(&tree, links)?;
         self.tree = Some(tree);
         Ok(())
@@ -1740,7 +1750,7 @@ pub fn extract_file(
         warnings: conv.warnings.clone(),
         ..ForeignSummary::default()
     };
-    let mut out = FsOut::new(dir);
+    let mut out = FsOut::new(dir, opts.zone);
     let r = conv.list().and_then(|records| {
         run_extract(
             &mut conv,
@@ -1753,7 +1763,9 @@ pub fn extract_file(
             &mut summary,
         )
     });
-    finish_run(&mut conv, &mut out, r).map(|()| summary)
+    let r = finish_run(&mut conv, &mut out, r);
+    summary.motw_unmarked = out.tree.as_ref().is_some_and(Tree::unmarked);
+    r.map(|()| summary)
 }
 
 /// Cleanup after a run: the partial file removed on failure, the worker told to cancel (on
@@ -1851,7 +1863,7 @@ pub fn replay(
     };
     match dir {
         Some(d) => {
-            let mut out = FsOut::new(d);
+            let mut out = FsOut::new(d, None);
             let r = run(&mut out, &mut conv, &mut summary);
             let r = finish_run(&mut conv, &mut out, r);
             let bytes = summary.bytes;

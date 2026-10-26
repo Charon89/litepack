@@ -28,7 +28,10 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::extract::Link;
+use crate::motw::Zone;
 use crate::CoreError;
 
 /// Directory handles held at once on Windows; past this the oldest is closed and its reopening
@@ -82,6 +85,11 @@ pub(crate) struct Tree {
     root: PathBuf,
     #[cfg(windows)]
     win: win::Held,
+    /// Mark of the Web (E6-5, [`crate::motw`]): the zone every created file gets before its
+    /// first byte, if any.
+    zone: Option<Zone>,
+    /// Set when a file could not carry the zone (no named streams, or the write failed).
+    unmarked: AtomicBool,
 }
 
 impl Tree {
@@ -93,15 +101,64 @@ impl Tree {
         let tree = Tree {
             root: dest.to_path_buf(),
             win: win::Held::open(dest)?,
+            zone: None,
+            unmarked: AtomicBool::new(false),
         };
         #[cfg(not(windows))]
         let tree = Tree {
             root: dest.to_path_buf(),
+            zone: None,
+            unmarked: AtomicBool::new(false),
         };
         for d in dirs {
             tree.make_dir(d)?;
         }
         Ok(tree)
+    }
+
+    /// Give every file created from now on the `Zone.Identifier` stream of `zone` (Mark of
+    /// the Web, E6-5), written relative to the new file's handle before its first byte. The
+    /// destination's volume is probed for named streams once, here: every output is on that
+    /// volume (a link or a mount point below the destination is refused). A volume without
+    /// them, or a failed probe, marks nothing and sets [`Tree::unmarked`] (one warning).
+    pub(crate) fn set_zone(&mut self, zone: Option<Zone>) {
+        self.zone = zone.filter(|_| {
+            let ok = self.holds_streams();
+            if !ok {
+                self.unmarked.store(true, Ordering::Relaxed);
+            }
+            ok
+        });
+    }
+
+    /// Whether the destination's volume holds named streams (probed through its held handle).
+    fn holds_streams(&self) -> bool {
+        #[cfg(test)]
+        if let Some(v) = crate::motw::seam::forced_streams() {
+            return v;
+        }
+        #[cfg(windows)]
+        {
+            self.win.root_streams()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    /// Whether a file was created that could not carry the zone (the caller's one warning).
+    pub(crate) fn unmarked(&self) -> bool {
+        self.unmarked.load(Ordering::Relaxed)
+    }
+
+    /// Mark a file just created (still empty) with the tree's zone, if any.
+    fn mark(&self, f: &File) {
+        if let Some(z) = self.zone {
+            if !crate::motw::write(f, z) {
+                self.unmarked.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     /// `path` relative to the destination, as components.
@@ -198,6 +255,7 @@ impl Tree {
             #[cfg(test)]
             seam::before_create(path);
             let (f, id) = parent.create_file(name).map_err(|e| win::fs_err(path, e))?;
+            self.mark(&f);
             Ok((
                 f,
                 Created {
@@ -219,6 +277,7 @@ impl Tree {
                 .create_new(true)
                 .open(path)
                 .map_err(|e| io(path, e))?;
+            self.mark(&f);
             Ok((
                 f,
                 Created {
@@ -409,6 +468,16 @@ mod win {
                 cur = d;
             }
             Ok(cur)
+        }
+
+        /// Whether the destination's volume holds named streams (a failed probe: no).
+        pub(super) fn root_streams(&self) -> bool {
+            let root = self
+                .cache
+                .lock()
+                .ok()
+                .and_then(|c| c.open.get(Path::new("")).cloned());
+            root.is_some_and(|d| d.named_streams().unwrap_or(false))
         }
 
         /// The held parent of `rel` and its last component.

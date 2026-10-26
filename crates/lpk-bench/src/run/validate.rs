@@ -1182,7 +1182,11 @@ mod tests {
         assert_agree(&schema, "run_combination", &[&run["combinations"][0]]);
         assert_agree(&schema, "failure", &[&f["failed"], &u["failed"]]);
         assert_agree(&schema, "tool_ref", &[&m["tool"], &s["tool"]]);
-        assert_agree(&schema, "setting_ref", &[&m["setting"]]);
+        // E6-5's `zone` is emitted only by a zoned setting.
+        let mut zoned = samples::measured();
+        zoned.setting.zone = Some(3);
+        let zoned = to_value(&zoned);
+        assert_agree(&schema, "setting_ref", &[&m["setting"], &zoned["setting"]]);
         assert_agree(&schema, "corpus_ref", &[&m["corpus"]]);
         assert_agree(&schema, "sample", &[&m["median"], &m["repeats"][0]]);
         // `measure` has Windows-only and tar-stream-only optional fields: union over both shapes.

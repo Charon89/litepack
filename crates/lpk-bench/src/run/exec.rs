@@ -1023,6 +1023,22 @@ struct ArgRecord {
 }
 
 /// One repeat: clean up, compress, extract, verify.
+/// E6-5's catalogue key `zone`: write the `Zone.Identifier` stream onto the archive (outside
+/// the timed steps, between compression and extraction). Windows only: elsewhere the
+/// combination is skipped before it runs ([`SKIP_ZONE`]); this refusal is a backstop.
+fn write_zone(archive: &Path, zone: u8) -> Result<(), Fail> {
+    if !cfg!(windows) {
+        return Err(Fail::new(
+            "extract",
+            "the setting's zone needs Windows (a Zone.Identifier stream)",
+        ));
+    }
+    let mut name = archive.as_os_str().to_owned();
+    name.push(":Zone.Identifier");
+    std::fs::write(&name, crate::run::catalogue::zone_stream(zone))
+        .map_err(|e| Fail::new("extract", format!("zone stream: {:?}", e.kind())))
+}
+
 fn one_repeat(
     ctx: &Ctx<'_>,
     tool: &Tool,
@@ -1083,6 +1099,9 @@ fn one_repeat(
     }
 
     let (compress_m, archive_bytes) = compress(ctx, tool, exe, setting, &archive, &archive_rel)?;
+    if let Some(z) = setting.zone {
+        write_zone(&archive, z)?;
+    }
     let extract_m = extract(
         &ctx.in_scratch(),
         tool,
@@ -1164,6 +1183,7 @@ fn base_result(
             id: setting.id.clone(),
             compress_args: setting.compress.clone(),
             extract_args: setting.extract.clone(),
+            zone: setting.zone,
         },
         class: class.to_string(),
         corpus: corpus_ref(corpus, entry),
@@ -1375,6 +1395,8 @@ fn write_result(dir: &Path, r: &ToolResult) -> Result<()> {
     std::fs::write(&path, render(r)).with_context(|| format!("writing {}", path.display()))
 }
 
+/// E6-5: a setting with `zone` outside Windows (no `Zone.Identifier` streams to write).
+const SKIP_ZONE: &str = "zone streams need Windows";
 const SKIP_PRIVATE: &str =
     "private corpus: this tool cannot take a list of files (run it on a public corpus)";
 const SKIP_NON_ASCII: &str = "private corpus on Windows: the system tar cannot read non-ASCII \
@@ -1596,7 +1618,11 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                         r
                     }
                     Status::Found { path, .. } => {
-                        if corpus.is_private()
+                        if setting.zone.is_some() && !cfg!(windows) {
+                            let mut r = base_result(cfg, &corpus, entry, class, d, setting);
+                            r.skipped = Some(SKIP_ZONE.to_string());
+                            r
+                        } else if corpus.is_private()
                             && cfg!(windows)
                             && !non_ascii.is_empty()
                             && uses_system_tar

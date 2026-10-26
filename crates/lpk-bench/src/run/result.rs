@@ -47,6 +47,10 @@ pub struct SettingRef {
     pub id: String,
     pub compress_args: Vec<String>,
     pub extract_args: Vec<String>,
+    /// The `ZoneId` the runner wrote onto the archive before extraction (E6-5's catalogue key
+    /// `zone`); absent when none was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,6 +584,7 @@ pub mod samples {
                     "text".into(),
                 ],
                 extract_args: vec!["x".into(), "-oout/x".into(), "out/a.7z".into()],
+                zone: None,
             },
             class: "text".into(),
             corpus: CorpusRef {
