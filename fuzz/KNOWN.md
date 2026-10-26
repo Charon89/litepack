@@ -11,5 +11,8 @@ first cells in backticks (the workflow reads them).
 
 | Target | SUMMARY kind | Signature | Finding | Found | Follow-up |
 |---|---|---|---|---|---|
-| `jpeg_reconstruct` | `out-of-memory` | `read_lepton_compressed_header` | A crafted Lepton stream makes the `jpeg-reconstruct` decode attempt a single allocation of about 4 GB (`malloc(3840140001)`, in Lepton's compressed-header read): the record's decode memory does not bound the Lepton decode | fuzz run 40272877553 (E4-6, symbolised stack), artefact `fuzz-artifacts-jpeg_reconstruct` | PR #121 (`fix/jpeg-decode-memory`) |
-| `jpeg_reconstruct` | `deadly signal` | `over the decode memory` | The same finding seen by the target's counting allocator: a peak of 1.2 to 2.0 GB against a decode memory of 112 MiB | fuzz runs 40267296061 and 40274460627 (E4-6) | PR #121 (`fix/jpeg-decode-memory`) |
+
+None open. The `jpeg_reconstruct` findings (out-of-memory in `read_lepton_compressed_header`, and the
+counting allocator's peak over the decode memory) are fixed by PR #121 (`fix/jpeg-decode-memory`): the
+Lepton header is checked before the library decodes it; the crashing input joined
+`seeds/jpeg_reconstruct/` with the fix.

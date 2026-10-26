@@ -222,6 +222,12 @@ pub struct ExtractSummary {
     /// Most decoded blocks held at once, measured (permits taken and not yet returned): never
     /// above `in_flight`. 1 on the sequential path when a block was decoded, else 0.
     pub peak_in_flight: usize,
+    /// Decodes that ran alone because they need more memory than the archive declares (a
+    /// `jpeg-reconstruct` record an earlier writer declared under revision 1.1).
+    pub alone_decodes: u64,
+    /// The most blocks decoding at once while a decode ran alone (itself included; 1 when the
+    /// gate held, 0 when no decode ran alone).
+    pub concurrent_while_alone: usize,
     /// The memory budget and what the engine counts against it.
     pub memory: ExtractMemory,
 }
@@ -580,6 +586,189 @@ impl<'s> Out<'s> {
     }
 }
 
+/// The pool's gate for decodes whose working memory exceeds what the archive declares
+/// ([`lpk_format::DecodeGate`]; a `jpeg-reconstruct` record an earlier writer declared under
+/// revision 1.1): such a decode waits until no other block decodes, keeps others from starting
+/// and runs alone, within [`AloneGate::alone_memory`]. Every other decode keeps the pool's
+/// concurrency. Decoded blocks waiting for the writers are not waited for (the writers may be
+/// waiting for the lone block); the lone decode's memory leaves room for all of them.
+#[derive(Debug)]
+pub(crate) struct AloneGate {
+    state: Mutex<GateState>,
+    cv: Condvar,
+    cancelled: AtomicBool,
+    alone_memory: u64,
+    budget: u64,
+    sizing: Sizing,
+    /// Decodes that ran alone.
+    alone_runs: AtomicU64,
+    /// The most blocks decoding at once while a decode ran alone (itself included).
+    concurrent_while_alone: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    /// Blocks decoding now (a decode waiting to run alone is not counted).
+    decoding: usize,
+    /// Decodes waiting to run alone: no decode starts meanwhile.
+    waiting: usize,
+    /// A decode runs alone.
+    alone: bool,
+}
+
+impl AloneGate {
+    /// The gate of a pool of `pool`'s size.
+    pub(crate) fn new(pool: &Pool) -> Arc<Self> {
+        Self::with_memory(pool, pool.sizing.alone_memory(pool.memory.budget.bytes))
+    }
+
+    /// The gate of a pool of `pool`'s budget whose lone decode may use `alone_memory` bytes
+    /// beyond its plain bytes (an export, which holds its own count of blocks).
+    pub(crate) fn with_memory(pool: &Pool, alone_memory: u64) -> Arc<Self> {
+        let budget = pool.memory.budget.bytes;
+        Arc::new(AloneGate {
+            state: Mutex::new(GateState::default()),
+            cv: Condvar::new(),
+            cancelled: AtomicBool::new(false),
+            alone_memory,
+            budget,
+            sizing: pool.sizing,
+            alone_runs: AtomicU64::new(0),
+            concurrent_while_alone: AtomicUsize::new(0),
+        })
+    }
+
+    /// Decodes that ran alone so far.
+    pub(crate) fn alone_runs(&self) -> u64 {
+        self.alone_runs.load(Ordering::SeqCst)
+    }
+
+    /// The most blocks decoding at once while a decode ran alone (0 when none did).
+    pub(crate) fn concurrent_while_alone(&self) -> usize {
+        self.concurrent_while_alone.load(Ordering::SeqCst)
+    }
+
+    /// Before a block decodes: waits while a decode runs alone or waits to.
+    pub(crate) fn begin(&self) -> bool {
+        let Ok(mut s) = self.state.lock() else {
+            return false;
+        };
+        while s.alone || s.waiting > 0 {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return false;
+            }
+            s = match self.cv.wait(s) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+        }
+        s.decoding += 1;
+        if s.alone {
+            self.concurrent_while_alone
+                .fetch_max(s.decoding, Ordering::SeqCst);
+        }
+        true
+    }
+
+    /// After a block decoded (whatever the outcome).
+    pub(crate) fn end(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.decoding = s.decoding.saturating_sub(1);
+        }
+        self.cv.notify_all();
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        drop(self.state.lock());
+        self.cv.notify_all();
+    }
+}
+
+impl lpk_format::DecodeGate for AloneGate {
+    fn alone_memory(&self) -> u64 {
+        self.alone_memory
+    }
+
+    fn budget_for(&self, need: u64) -> u64 {
+        self.sizing.budget_for(
+            need,
+            self.budget
+                .saturating_add(need.saturating_sub(self.alone_memory)),
+        )
+    }
+
+    fn enter_alone(&self) -> bool {
+        let Ok(mut s) = self.state.lock() else {
+            return false;
+        };
+        // This decode stops counting while it waits, so two decodes waiting to run alone do
+        // not wait for each other.
+        s.decoding = s.decoding.saturating_sub(1);
+        s.waiting += 1;
+        self.cv.notify_all();
+        while s.alone || s.decoding > 0 {
+            if self.cancelled.load(Ordering::SeqCst) {
+                s.waiting -= 1;
+                s.decoding += 1;
+                return false;
+            }
+            s = match self.cv.wait(s) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+        }
+        s.waiting -= 1;
+        s.decoding += 1;
+        s.alone = true;
+        self.alone_runs.fetch_add(1, Ordering::SeqCst);
+        self.concurrent_while_alone
+            .fetch_max(s.decoding, Ordering::SeqCst);
+        true
+    }
+
+    fn leave_alone(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.alone = false;
+        }
+        self.cv.notify_all();
+    }
+}
+
+/// The memory a lone decode may use beyond its plain bytes with `m`'s terms and `permits`
+/// permits: the budget less the fixed terms, one block's terms other than its decoder, and every
+/// other permit held as a decoded block (an export, [`crate::export`]).
+pub(crate) fn alone_memory_for(m: &ExtractMemory, permits: usize) -> u64 {
+    let others = u64::try_from(permits.saturating_sub(1)).unwrap_or(u64::MAX);
+    m.budget
+        .bytes
+        .saturating_sub(m.fixed)
+        .saturating_sub(m.per_block.saturating_sub(m.decoder))
+        .saturating_sub(others.saturating_mul(m.held))
+}
+
+/// True for the error of a decode that stopped waiting at the gate because the run was
+/// cancelled ([`lpk_format::DecodeGate::enter_alone`] returned `false`).
+pub(crate) fn is_cancelled_decode(e: &FormatError) -> bool {
+    matches!(e, FormatError::Io(io) if io.kind() == std::io::ErrorKind::Interrupted)
+}
+
+/// Runs `f` as one block's decode through `gate` ([`AloneGate::begin`] and
+/// [`AloneGate::end`]); `None` when the extraction was cancelled before it started.
+pub(crate) fn gated<T>(gate: &AloneGate, f: impl FnOnce() -> T) -> Option<T> {
+    struct End<'a>(&'a AloneGate);
+    impl Drop for End<'_> {
+        fn drop(&mut self) {
+            self.0.end();
+        }
+    }
+    if !gate.begin() {
+        return None;
+    }
+    let _end = End(gate);
+    Some(f())
+}
+
 /// A counting semaphore that can be cancelled (shared with [`crate::export`]).
 pub(crate) struct Permits {
     free: Mutex<usize>,
@@ -589,6 +778,8 @@ pub(crate) struct Permits {
     cap: usize,
     /// Most permits out at once.
     pub(crate) peak: AtomicUsize,
+    /// The pool's gate for decodes that run alone ([`AloneGate`]), cancelled with the permits.
+    gate: std::sync::OnceLock<Arc<AloneGate>>,
 }
 
 impl Permits {
@@ -599,6 +790,22 @@ impl Permits {
             cancelled: AtomicBool::new(false),
             cap: n,
             peak: AtomicUsize::new(0),
+            gate: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Attach the pool's gate: the workers' decodes go through it and [`Permits::cancel`]
+    /// cancels it.
+    pub(crate) fn attach_gate(&self, gate: Arc<AloneGate>) {
+        let _ = self.gate.set(gate);
+    }
+
+    /// Runs one block's decode through the attached gate (directly without one); `None` when
+    /// the extraction was cancelled before it started.
+    pub(crate) fn decode<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        match self.gate.get() {
+            Some(g) => gated(g, f),
+            None => Some(f()),
         }
     }
 
@@ -639,6 +846,9 @@ impl Permits {
         // Take the lock so a worker between its check and its wait sees the flag.
         drop(self.free.lock());
         self.cv.notify_all();
+        if let Some(g) = self.gate.get() {
+            g.cancel();
+        }
     }
 }
 
@@ -1224,6 +1434,8 @@ pub struct Pool {
     pub writers: usize,
     /// The budget and the terms counted against it.
     pub memory: ExtractMemory,
+    /// What the size depends on besides the budget.
+    pub(crate) sizing: Sizing,
 }
 
 /// What the plan gives the pool's sizing.
@@ -1336,31 +1548,17 @@ pub(crate) fn pool_size<R: Read + Seek>(
         .saturating_add(DISPATCH_ALLOWANCE)
         .saturating_add(records);
     let held = plain.saturating_add(BLOCK_ALLOWANCE);
-    let workers = if threads == 1 {
-        1
-    } else {
-        let by_memory =
-            budget.bytes.saturating_sub(fixed_shared) / per_block.saturating_add(per_worker).max(1);
-        let by_memory = usize::try_from(by_memory).unwrap_or(usize::MAX).max(1);
-        (threads - writers)
-            .min(by_memory)
-            .min(shape.needed.len().max(1))
-            .max(1)
+    let sizing = Sizing {
+        threads,
+        writers,
+        needed: shape.needed.len(),
+        fixed_shared,
+        per_block,
+        per_worker,
+        held,
+        decoder,
     };
-    let in_flight = if threads == 1 {
-        1
-    } else {
-        let w = u64::try_from(workers).unwrap_or(u64::MAX);
-        let paid =
-            fixed_shared.saturating_add(w.saturating_mul(per_block.saturating_add(per_worker)));
-        let extra = budget.bytes.saturating_sub(paid) / held.max(1);
-        let extra = usize::try_from(extra).unwrap_or(usize::MAX);
-        let cap = workers
-            .saturating_mul(HELD_PER_WORKER)
-            .min(shape.needed.len())
-            .max(workers);
-        workers.saturating_add(extra).min(cap)
-    };
+    let (workers, in_flight) = sizing.size(budget.bytes);
     let memory = ExtractMemory {
         budget,
         tier,
@@ -1384,6 +1582,79 @@ pub(crate) fn pool_size<R: Read + Seek>(
         in_flight,
         writers,
         memory,
+        sizing,
+    }
+}
+
+/// What the pool's size depends on besides the budget ([`pool_size`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Sizing {
+    threads: usize,
+    writers: usize,
+    needed: usize,
+    fixed_shared: u64,
+    per_block: u64,
+    per_worker: u64,
+    held: u64,
+    decoder: u64,
+}
+
+impl Sizing {
+    /// The decode workers and the permits a budget of `budget` bytes pays for (module
+    /// documentation, "The memory bound").
+    fn size(&self, budget: u64) -> (usize, usize) {
+        if self.threads == 1 {
+            return (1, 1);
+        }
+        let by_memory = budget.saturating_sub(self.fixed_shared)
+            / self.per_block.saturating_add(self.per_worker).max(1);
+        let by_memory = usize::try_from(by_memory).unwrap_or(usize::MAX).max(1);
+        let workers = (self.threads - self.writers)
+            .min(by_memory)
+            .min(self.needed.max(1))
+            .max(1);
+        let w = u64::try_from(workers).unwrap_or(u64::MAX);
+        let paid = self
+            .fixed_shared
+            .saturating_add(w.saturating_mul(self.per_block.saturating_add(self.per_worker)));
+        let extra = budget.saturating_sub(paid) / self.held.max(1);
+        let extra = usize::try_from(extra).unwrap_or(usize::MAX);
+        let cap = workers
+            .saturating_mul(HELD_PER_WORKER)
+            .min(self.needed)
+            .max(workers);
+        (workers, workers.saturating_add(extra).min(cap))
+    }
+
+    /// The memory a lone decode may use beyond its plain bytes under a budget of `budget`:
+    /// the budget less the shared and per-worker terms, one block's terms other than its
+    /// decoder, and every other permit held as a decoded block.
+    pub(crate) fn alone_memory(&self, budget: u64) -> u64 {
+        let (workers, in_flight) = self.size(budget);
+        let w = u64::try_from(workers).unwrap_or(u64::MAX);
+        let others = u64::try_from(in_flight.saturating_sub(1)).unwrap_or(u64::MAX);
+        budget
+            .saturating_sub(self.fixed_shared)
+            .saturating_sub(w.saturating_mul(self.per_worker))
+            .saturating_sub(self.per_block.saturating_sub(self.decoder))
+            .saturating_sub(others.saturating_mul(self.held))
+    }
+
+    /// The smallest budget, in whole MiB, under which a lone decode may use `need` bytes beyond
+    /// its plain bytes (more budget may pay for more held blocks first, so the step repeats
+    /// until the lone decode's share covers `need`).
+    pub(crate) fn budget_for(&self, need: u64, from: u64) -> u64 {
+        const MIB: u64 = 1 << 20;
+        let mut b = from;
+        for _ in 0..4096 {
+            b = b.div_ceil(MIB).saturating_mul(MIB);
+            let have = self.alone_memory(b);
+            if have >= need || b == u64::MAX {
+                return b;
+            }
+            b = b.saturating_add((need - have).max(MIB));
+        }
+        b
     }
 }
 
@@ -1453,6 +1724,10 @@ where
         max_writers: usize::MAX,
     };
     let pool = pool_size(archive, opts, &shape);
+    // Decodes that need more than the archive declares run alone ([`AloneGate`]); the forks
+    // share the gate.
+    let gate = AloneGate::new(&pool);
+    archive.set_decode_gate(Some(gate.clone()));
     // A given budget below one block in flight is refused with the figure, before anything is
     // written, as the compress side refuses (D-67 (1)); a default budget that small runs one.
     let m = pool.memory;
@@ -1483,14 +1758,19 @@ where
     let decoded = AtomicU64::new(0);
     let reads = AtomicU64::new(0);
     let peak = AtomicUsize::new(0);
-    let decode_error = |block: usize, source: FormatError| CoreError::Decode {
-        block,
-        path: shared
-            .targets
-            .get(first_file[block])
-            .map(|t| t.name.clone())
-            .unwrap_or_default(),
-        source,
+    let decode_error = |block: usize, source: FormatError| -> CoreError {
+        if is_cancelled_decode(&source) {
+            return CoreError::Cancelled;
+        }
+        CoreError::Decode {
+            block,
+            path: shared
+                .targets
+                .get(first_file[block])
+                .map(|t| t.name.clone())
+                .unwrap_or_default(),
+            source,
+        }
     };
     let outcome = {
         let shared = &shared;
@@ -1560,6 +1840,7 @@ where
                         decode_error: &decode_error,
                         rep: &rep,
                         frame_len: &frame_len,
+                        gate: gate.clone(),
                     }),
                     Err(e) => Outcome::Failed(FormatError::from(e).into()),
                 }
@@ -1616,6 +1897,8 @@ where
         symlinks: links.len() as u64,
         symlinks_skipped,
         peak_in_flight: peak.load(Ordering::Relaxed),
+        alone_decodes: gate.alone_runs(),
+        concurrent_while_alone: gate.concurrent_while_alone(),
         memory: pool.memory,
     })
 }
@@ -1664,6 +1947,8 @@ struct Run<'a, R: Read + Seek> {
     rep: &'a Reporter,
     /// Every block's frame length, for the bytes-in figure.
     frame_len: &'a [u64],
+    /// The pool's gate, already set on the forks.
+    gate: Arc<AloneGate>,
 }
 
 /// Keep the first panic payload.
@@ -1690,6 +1975,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         decode_error,
         rep,
         frame_len,
+        gate,
     } = run;
     let n = pool.writers.max(1);
     // The placements of writer w in block b.
@@ -1700,6 +1986,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         }
     }
     let permits = Permits::new(pool.in_flight);
+    permits.attach_gate(gate);
     let outcome = parallel_with(
         shared,
         forks,
@@ -1813,11 +2100,15 @@ fn parallel_with<R: Read + Seek + Send>(
                         };
                         let r = catch_unwind(AssertUnwindSafe(|| {
                             let _token = budget.hold();
-                            fork.decode_block_checked(b)
+                            permits.decode(|| fork.decode_block_checked(b))
                         }));
                         decoded.fetch_add(1, Ordering::Relaxed);
                         match r {
-                            Ok(r) => {
+                            Ok(None) => {
+                                permits.release();
+                                break;
+                            }
+                            Ok(Some(r)) => {
                                 if tx.send((k, r)).is_err() {
                                     break;
                                 }
