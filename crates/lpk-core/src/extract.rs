@@ -120,17 +120,18 @@
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lpk_format::{Archive, Credentials, Entry, EntryKind, FormatError, MemoryPriors};
 
 use crate::memory::{Budget, BudgetSource, EnvelopeTier};
+use crate::outtree::{can_create_symlinks, Created, Tree};
 use crate::policy::{self, Existing, Found, SymlinkAction, Wanted};
 pub use crate::policy::{DefaultPolicy, ExtractPolicy};
 use crate::progress::{Monitor, Reporter, Stage};
@@ -379,9 +380,26 @@ struct Shared {
     files: AtomicU64,
     bytes: AtomicU64,
     reopened: AtomicU64,
+    /// The output tree, made after the plan and the memory check ([`Shared::open_tree`]).
+    tree: OnceLock<Tree>,
+    /// Per target, the file the tree created (for reopens and cleanup).
+    created: Vec<OnceLock<Created>>,
 }
 
 impl Shared {
+    fn tree(&self) -> Result<&Tree, CoreError> {
+        self.tree
+            .get()
+            .ok_or(CoreError::Extract("the output tree is not open"))
+    }
+
+    /// Create the destination and the plan's directories: the output tree every file and
+    /// link of this extraction is created through.
+    fn open_tree(&self, dir: &Path, mkdirs: &[PathBuf]) -> Result<&Tree, CoreError> {
+        let tree = Tree::create(dir, mkdirs)?;
+        Ok(self.tree.get_or_init(|| tree))
+    }
+
     fn state(&self, file: usize) -> u8 {
         self.states[file].load(Ordering::SeqCst)
     }
@@ -390,11 +408,15 @@ impl Shared {
         self.states[file].store(s, Ordering::SeqCst);
     }
 
-    /// Remove every file created and not finished.
+    /// Remove every file created and not finished (through the tree: on Windows only the
+    /// file with the ID recorded at its creation).
     fn clean_up(&self) {
-        for (i, t) in self.targets.iter().enumerate() {
+        let Some(tree) = self.tree.get() else { return };
+        for i in 0..self.targets.len() {
             if self.state(i) == PARTIAL {
-                let _ = std::fs::remove_file(&t.path);
+                if let Some(c) = self.created[i].get() {
+                    tree.remove(c);
+                }
             }
         }
     }
@@ -402,16 +424,18 @@ impl Shared {
     /// Create a target's file (create-new; what a replaced target held is removed first).
     fn create(&self, file: usize) -> Result<File, CoreError> {
         let t = &self.targets[file];
-        if t.replace {
-            policy::remove_existing(&t.path).map_err(|e| io(&t.path, e))?;
-        }
-        let f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&t.path)
-            .map_err(|e| io(&t.path, e))?;
+        let (f, c) = self.tree()?.create_file(&t.path, t.replace)?;
+        let _ = self.created[file].set(c);
         self.set(file, PARTIAL);
         Ok(f)
+    }
+
+    /// Reopen a target's file created earlier (without create, without truncation).
+    fn reopen(&self, file: usize) -> Result<File, CoreError> {
+        let c = self.created[file]
+            .get()
+            .ok_or(CoreError::Extract("a file to reopen was not created"))?;
+        self.tree()?.reopen(c)
     }
 
     /// Create and finish a file with no chunk.
@@ -510,10 +534,7 @@ impl<'s> Out<'s> {
                 f
             } else {
                 s.reopened.fetch_add(1, Ordering::Relaxed);
-                OpenOptions::new()
-                    .write(true)
-                    .open(&t.path)
-                    .map_err(|e| io(&t.path, e))?
+                s.reopen(file)?
             };
             self.open.insert(file, (f, 0));
             self.order.push_back(file);
@@ -901,12 +922,27 @@ pub(crate) fn policy_pass(
     // The selection first: the policy's rules and the placements concern only what is
     // extracted, and a pattern without a match is refused here, before any output.
     let entries = select.filter(entries, |e| e.path.as_str())?;
+    // On Windows a name over 255 UTF-16 units or a total path over 32,767 is refused by name
+    // before output (E6-6); elsewhere the system's own limits answer at the create.
+    let dir_units = if cfg!(windows) {
+        std::path::absolute(dir)
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .count()
+    } else {
+        0
+    };
     for e in &entries {
         if e.kind == EntryKind::Symlink {
             policy.symlink(e)?;
         }
         policy.check_path(&e.path)?;
         policy.device(&e.path)?;
+        if cfg!(windows) {
+            policy::check_path_length(dir_units, &e.path)?;
+        }
     }
     policy::check_conflicting_names(&entries)?;
     if policy::case_insensitive_target(dir) {
@@ -923,6 +959,8 @@ pub(crate) fn policy_pass(
         fold: policy::case_insensitive_target(dir),
     };
     let mut placed = Vec::with_capacity(entries.len());
+    // The symlink privilege, probed once, at the first link to create.
+    let mut privileged: Option<bool> = None;
     let (mut directories, mut skipped, mut renamed, mut symlinks_skipped) = (0u64, 0, 0, 0);
     for e in &entries {
         let path = join_components(dir, &e.path);
@@ -951,10 +989,19 @@ pub(crate) fn policy_pass(
             }
             EntryKind::Symlink | EntryKind::File => {
                 // A link to create: its target is judged from the archive alone, before
-                // anything at the link's path is looked at; a refused one is skipped.
+                // anything at the link's path is looked at; a refused one is skipped. Then a
+                // process that cannot create links (on Windows a token without
+                // SeCreateSymbolicLinkPrivilege) skips it, recorded for a warning (D-79 (3)
+                // as amended by E6-6).
                 let link_dir = if e.kind == EntryKind::Symlink {
                     let target = e.symlink_target.as_deref().unwrap_or_default();
                     match namespace.resolve(&e.path, target) {
+                        Ok(_) if !*privileged.get_or_insert_with(can_create_symlinks) => {
+                            policy.symlink_unprivileged(e);
+                            symlinks_skipped += 1;
+                            placed.push(Placed::Skipped);
+                            continue;
+                        }
                         Ok(dir) => dir,
                         Err(refusal) => {
                             policy.symlink_target_refused(e, refusal);
@@ -975,6 +1022,20 @@ pub(crate) fn policy_pass(
                     Decision::Write => Some((path, false)),
                     Decision::Replace => Some((path, true)),
                     Decision::Rename(p) => {
+                        // The suffix may push the name or the path past the Windows limits:
+                        // checked again on the name the rename picked (E6-6).
+                        if cfg!(windows) {
+                            let rel = p
+                                .strip_prefix(dir)
+                                .map_err(|_| {
+                                    CoreError::Extract("a renamed target outside the destination")
+                                })?
+                                .components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/");
+                            policy::check_path_length(dir_units, &rel)?;
+                        }
                         renamed += 1;
                         Some((p, false))
                     }
@@ -1077,12 +1138,15 @@ fn plan<R: Read + Seek>(
         .map(|t| (t.name.len() + t.path.as_os_str().len()) as u64)
         .sum();
     let states = targets.iter().map(|_| AtomicU8::new(NOT_CREATED)).collect();
+    let created = targets.iter().map(|_| OnceLock::new()).collect();
     let shared = Shared {
         targets,
         states,
         files: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
         reopened: AtomicU64::new(0),
+        tree: OnceLock::new(),
+        created,
     };
     Ok(Plan {
         shared,
@@ -1099,28 +1163,19 @@ fn plan<R: Read + Seek>(
     })
 }
 
-/// Create the plan's directories, the output directory first.
-pub(crate) fn make_dirs(mkdirs: &[PathBuf]) -> Result<(), CoreError> {
-    for d in mkdirs {
-        std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
-    }
-    Ok(())
+/// Create the plan's directories, the output directory first, and return the output tree
+/// (shared with [`crate::foreign`]).
+pub(crate) fn make_dirs(dir: &Path, mkdirs: &[PathBuf]) -> Result<Tree, CoreError> {
+    Tree::create(dir, mkdirs)
 }
 
-/// Create the plan's symlinks, in entry order (after the directories, before the files). Every
-/// target here passed [`policy::resolve_symlink_target`] in the policy pass; a refused one
-/// never reaches this phase. On Windows the target is read as UTF-8 and the link kind is the
-/// plan's ([`Link::dir`], from the archive); nothing reads the target on any system.
-pub(crate) fn make_links(links: &[Link]) -> Result<(), CoreError> {
-    for l in links {
-        if l.replace {
-            policy::remove_existing(&l.path).map_err(|e| io(&l.path, e))?;
-        }
-        #[cfg(test)]
-        seam::record(&l.target);
-        make_link(&l.path, &l.target, l.dir).map_err(|e| io(&l.path, e))?;
-    }
-    Ok(())
+/// Create the plan's symlinks through `tree`, in entry order (after the directories, before
+/// the files). Every target here passed [`policy::resolve_symlink_target`] and the privilege
+/// check in the policy pass; a refused one never reaches this phase. On Windows the target is
+/// read as UTF-8 and the link kind is the plan's ([`Link::dir`], from the archive); nothing
+/// reads the target on any system.
+pub(crate) fn make_links(tree: &Tree, links: &[Link]) -> Result<(), CoreError> {
+    tree.make_links(links)
 }
 
 /// The test seam of the link phase: every target handed to the operating system by
@@ -1144,28 +1199,6 @@ pub(crate) mod seam {
     }
 }
 
-#[cfg(unix)]
-fn make_link(path: &Path, target: &[u8], _dir: bool) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), path)
-}
-
-#[cfg(windows)]
-fn make_link(path: &Path, target: &[u8], dir: bool) -> std::io::Result<()> {
-    let target = std::str::from_utf8(target).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "symlink target is not UTF-8",
-        )
-    })?;
-    let target = windows_link_target(target);
-    if dir {
-        std::os::windows::fs::symlink_dir(&target, path)
-    } else {
-        std::os::windows::fs::symlink_file(&target, path)
-    }
-}
-
 /// The target a Windows link is created with: the archive's, every `/` made `\`. Windows does
 /// not traverse a link whose target uses `/` (`ERROR_INVALID_NAME`), and the resolver
 /// ([`policy::resolve_symlink_target`]) already read both as separators on Windows, so the
@@ -1174,14 +1207,6 @@ fn make_link(path: &Path, target: &[u8], dir: bool) -> std::io::Result<()> {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn windows_link_target(target: &str) -> String {
     target.replace('/', "\\")
-}
-
-#[cfg(not(any(unix, windows)))]
-fn make_link(_path: &Path, _target: &[u8], _dir: bool) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "symlinks are not supported on this platform",
-    ))
 }
 
 /// The pool for `archive` under `opts`: decode workers, decoded blocks in flight, file writers.
@@ -1444,13 +1469,13 @@ where
     rep.check()?;
     rep.totals(Some(shared.targets.len() as u64), Some(needed.len() as u64));
     let frame_len: Vec<u64> = archive.index().blocks.iter().map(|b| b.frame_len).collect();
-    make_dirs(&mkdirs)?;
-    // Links are created after every directory and before any file: a failure here (no
-    // privilege on Windows, a target that is not UTF-8) fails the extraction with nothing to
+    let tree = shared.open_tree(dir, &mkdirs)?;
+    // Links are created after every directory and before any file: a failure here (a target
+    // that is not UTF-8, a link in the way) fails the extraction with nothing to
     // clean up, and the order is load-bearing: a directory that exists before any link is
     // made can never be a link this extraction created, so no file is written through one
     // (the plan's checks hold whatever the entry order or the target's case rules).
-    make_links(&links)?;
+    tree.make_links(&links)?;
     let first_file: Vec<usize> = per_block
         .iter()
         .map(|p| p.first().map_or(usize::MAX, |p| p.file))
@@ -2055,7 +2080,10 @@ mod tests {
         let out = tmp.path().join("out");
         let entries = vec![entry(EntryKind::Symlink, "sub/l", Some(b"../a/b"))];
         let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
-        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        crate::outtree::seam::force_symlink_privilege(Some(true));
+        let pass = policy_pass(entries, &out, &policy, &Selection::all());
+        crate::outtree::seam::force_symlink_privilege(None);
+        let pass = pass.unwrap();
         match &pass.placed[0] {
             Placed::Link(l) => assert_eq!(l.target, b"../a/b"),
             p => panic!("{p:?}"),
@@ -2105,7 +2133,11 @@ mod tests {
         // Something on disk named like a file entry's target: ignored for the kind.
         std::fs::create_dir_all(out.join("nothing")).unwrap();
         let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
-        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        // The links reach the link phase (the privilege is the system's answer there, E6-6).
+        crate::outtree::seam::force_symlink_privilege(Some(true));
+        let pass = policy_pass(entries, &out, &policy, &Selection::all());
+        crate::outtree::seam::force_symlink_privilege(None);
+        let pass = pass.unwrap();
         assert_eq!(pass.symlinks_skipped, refused.len() as u64);
         let want: Vec<(String, R)> = refused
             .iter()
@@ -2124,7 +2156,7 @@ mod tests {
         let want: Vec<(&[u8], bool)> = fine.iter().map(|(_, t, d)| (*t, *d)).collect();
         assert_eq!(kinds, want);
         // The link phase over the plan: only in-tree targets reach the operating system.
-        make_dirs(&pass.mkdirs(&out)).unwrap();
+        let tree = make_dirs(&out, &pass.mkdirs(&out)).unwrap();
         let owned: Vec<Link> = pass
             .placed
             .into_iter()
@@ -2134,7 +2166,7 @@ mod tests {
             })
             .collect();
         let _ = seam::take();
-        let made = make_links(&owned);
+        let made = make_links(&tree, &owned);
         let seen = seam::take();
         for (_, t, _) in &refused {
             assert!(!seen.iter().any(|s| s == t), "{seen:?}");

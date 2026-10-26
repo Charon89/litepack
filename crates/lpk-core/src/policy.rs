@@ -63,6 +63,13 @@ pub trait ExtractPolicy: Sync {
     fn symlink_target_refused(&self, entry: &Entry, refusal: TargetRefusal) {
         let _ = (entry, refusal);
     }
+    /// A symlink entry to create, its target accepted, that this process cannot create (on
+    /// Windows a token without `SeCreateSymbolicLinkPrivilege`; Developer Mode alone does not
+    /// count): it is skipped and counted, never attempted; the policy may record it for a
+    /// warning. Default: nothing.
+    fn symlink_unprivileged(&self, entry: &Entry) {
+        let _ = entry;
+    }
     /// Something exists where an entry goes: what to do. Default: [`ExtractPolicy::overwrite`]
     /// decides, and an accepted target is written as before (create-new, so the open fails).
     /// For a directory entry (or an implicit parent directory) only [`Existing::Write`] and
@@ -182,8 +189,10 @@ pub enum Symlinks {
     #[default]
     Skip,
     /// Created (`lpk x --symlinks`) when the target stays inside the destination
-    /// ([`resolve_symlink_target`]; a refused target is skipped with a record); a creation
-    /// that fails fails the extraction.
+    /// ([`resolve_symlink_target`]; a refused target is skipped with a record) and the
+    /// process can create links (on Windows its token holds `SeCreateSymbolicLinkPrivilege`;
+    /// otherwise skipped with a record, [`Policy::unprivileged_symlinks`]); a creation that
+    /// fails fails the extraction.
     Create,
 }
 
@@ -226,6 +235,7 @@ pub struct Policy {
     pub symlinks: Symlinks,
     skipped_symlinks: Mutex<Vec<String>>,
     refused_targets: Mutex<Vec<(String, TargetRefusal)>>,
+    unprivileged: Mutex<Vec<String>>,
 }
 
 impl Policy {
@@ -236,6 +246,7 @@ impl Policy {
             symlinks,
             skipped_symlinks: Mutex::new(Vec::new()),
             refused_targets: Mutex::new(Vec::new()),
+            unprivileged: Mutex::new(Vec::new()),
         }
     }
 
@@ -252,6 +263,16 @@ impl Policy {
     /// reason, in entry order (for the warnings).
     pub fn refused_symlink_targets(&self) -> Vec<(String, TargetRefusal)> {
         self.refused_targets
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// The archive paths of the symlink entries skipped because this process cannot create
+    /// links (on Windows: no `SeCreateSymbolicLinkPrivilege`), in entry order (for the
+    /// warnings).
+    pub fn unprivileged_symlinks(&self) -> Vec<String> {
+        self.unprivileged
             .lock()
             .map(|v| v.clone())
             .unwrap_or_default()
@@ -298,6 +319,12 @@ impl ExtractPolicy for Policy {
     fn symlink_target_refused(&self, entry: &Entry, refusal: TargetRefusal) {
         if let Ok(mut v) = self.refused_targets.lock() {
             v.push((entry.path.clone(), refusal));
+        }
+    }
+
+    fn symlink_unprivileged(&self, entry: &Entry) {
+        if let Ok(mut v) = self.unprivileged.lock() {
+            v.push(entry.path.clone());
         }
     }
 
@@ -386,6 +413,35 @@ pub fn check_extraction_path(path: &str) -> Result<(), FormatError> {
         if is_reserved_device(component) {
             return Err(unsafe_path("reserved device name"));
         }
+    }
+    Ok(())
+}
+
+/// The longest path Windows can name, in UTF-16 units (`UNICODE_STRING`'s limit).
+pub const MAX_PATH_UNITS: usize = 32_767;
+/// The usual limit of one name, in UTF-16 units (NTFS, ReFS, exFAT).
+pub const MAX_NAME_UNITS: usize = 255;
+
+/// The length rule of a Windows extraction (E6-6): a component of `path` over
+/// [`MAX_NAME_UNITS`] UTF-16 units is `UnsafePath` "name too long"; the destination's
+/// absolute path (`dir_units` long) joined with `path` over [`MAX_PATH_UNITS`] is
+/// "path too long". Nothing assumes `MAX_PATH` (260): output is opened one component at a
+/// time.
+pub fn check_path_length(dir_units: usize, path: &str) -> Result<(), FormatError> {
+    let unsafe_path = |reason| FormatError::UnsafePath {
+        path: path.to_string(),
+        reason,
+    };
+    let mut total = dir_units;
+    for c in path.split('/') {
+        let n = c.encode_utf16().count();
+        if n > MAX_NAME_UNITS {
+            return Err(unsafe_path("name too long"));
+        }
+        total = total.saturating_add(1 + n);
+    }
+    if total > MAX_PATH_UNITS {
+        return Err(unsafe_path("path too long"));
     }
     Ok(())
 }

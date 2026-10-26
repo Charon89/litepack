@@ -177,6 +177,9 @@ pub struct ExtractReport {
     pub skipped_symlinks: Vec<String>,
     /// The symlink entries not created because of their target (E6-0), with the reason.
     pub refused_symlink_targets: Vec<(String, lpk_core::policy::TargetRefusal)>,
+    /// The symlink entries not created because this process cannot create links (E6-6: on
+    /// Windows a token without `SeCreateSymbolicLinkPrivilege`), in entry order.
+    pub unprivileged_symlinks: Vec<String>,
 }
 
 /// The engine's counts of an extraction.
@@ -1234,6 +1237,7 @@ impl Session {
             outcome,
             skipped_symlinks: policy.skipped_symlinks(),
             refused_symlink_targets: policy.refused_symlink_targets(),
+            unprivileged_symlinks: policy.unprivileged_symlinks(),
         })
     }
 
