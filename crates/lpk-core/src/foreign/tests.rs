@@ -655,8 +655,11 @@ fn many_empty_members_are_progress() {
         });
     }
     let bytes = script(&f);
+    // The five frames before the first `MemberEnd` carry no progress: 5 x 40 ms, which a
+    // coarse Windows timer under load stretched past a 250 ms limit (a flake seen while E4-5's
+    // tests ran beside other builds); 500 ms keeps the stream (83 frames) far longer.
     let limits = Limits {
-        no_progress: Duration::from_millis(250),
+        no_progress: Duration::from_millis(500),
         ..Limits::default()
     };
     let monitor = Monitor::default();
