@@ -314,8 +314,23 @@ pub fn validate_dir(dir: &Path) -> Result<Report> {
 /// Where `run --validate` looks for a row's corpus when no `--corpus` is given.
 pub const DEFAULT_CORPUS_ROOT: &str = "bench/corpus";
 
+/// `bench/corpus` of the repository that holds `dir` (the nearest ancestor with `.git`), so the
+/// default does not depend on where the command runs; relative to the current directory only
+/// when `dir` is in no repository.
+pub fn corpus_root_for(dir: &Path) -> std::path::PathBuf {
+    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    canon
+        .ancestors()
+        .find(|a| a.join(".git").exists())
+        .map_or_else(
+            || Path::new(DEFAULT_CORPUS_ROOT).to_path_buf(),
+            |root| root.join(DEFAULT_CORPUS_ROOT),
+        )
+}
+
 /// Check every result row's `corpus.class_blake3` against the corpus manifest when that corpus is
-/// present (E8-10): `corpus` when given, else `bench/corpus/<profile>` (never for a private scan,
+/// present (E8-10): `corpus` when given, else `bench/corpus/<profile>` of the repository holding
+/// `dir` ([`corpus_root_for`]; never for a private scan,
 /// whose folder is only known through `--corpus`). A row is checked only when the corpus's
 /// manifest hashes to the row's `manifest_blake3`: then the digest must equal the class digest of
 /// that manifest. A row without a digest (schema version 1), a corpus that is not there, or one
@@ -335,6 +350,7 @@ pub fn check_class_digests(dir: &Path, corpus: Option<&Path>) -> Result<Report> 
         v
     };
     let single = dirs.len() == 1 && dirs[0] == dir;
+    let default_root = corpus_root_for(dir);
     // Corpus directory -> its manifest and the manifest's BLAKE3, or why it could not be read.
     let mut manifests: std::collections::BTreeMap<
         std::path::PathBuf,
@@ -400,7 +416,7 @@ pub fn check_class_digests(dir: &Path, corpus: Option<&Path>) -> Result<Report> 
                         .or_default() += 1;
                     continue;
                 }
-                (None, p) => Path::new(DEFAULT_CORPUS_ROOT).join(p),
+                (None, p) => default_root.join(p),
             };
             let entry = manifests.entry(root.clone()).or_insert_with(|| {
                 let bytes = std::fs::read(root.join("manifest.json")).ok()?;
@@ -1873,6 +1889,22 @@ mod tests {
         assert!(validate_dir(&dir).expect("validate").problems.is_empty());
         let r = check_class_digests(&dir, Some(&corpus)).expect("check");
         assert!(r.problems.is_empty() && r.notes.iter().any(|n| n.contains("schema version 1")));
+    }
+
+    /// The default corpus of `run --validate` is the results directory's repository's
+    /// `bench/corpus`, wherever the command runs.
+    #[test]
+    fn the_default_corpus_root_is_found_from_the_repository() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        let results = repo
+            .join("bench")
+            .join("results")
+            .join("2026-10-01-testbox");
+        std::fs::create_dir_all(&results).expect("dirs");
+        std::fs::create_dir_all(repo.join(".git")).expect("git");
+        let root = std::fs::canonicalize(&repo).expect("canon");
+        assert_eq!(corpus_root_for(&results), root.join("bench").join("corpus"));
     }
 
     /// The schema ties `class_blake3` to the result schema version.

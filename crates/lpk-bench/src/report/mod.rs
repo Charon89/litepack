@@ -278,9 +278,29 @@ fn load_probes_dir(
                 if env.host != base.host.host {
                     bail!("{file}: taken on host `{}`, not `{}`", env.host, base.host.host);
                 }
-                if env.corpus.manifest_blake3 != first.corpus.manifest_blake3
-                    || env.corpus.profile != first.corpus.profile
-                {
+                // E8-10: the probe counts for a class only when some pooled row of that class
+                // names the probe's manifest; a probe no pooled row's manifest matches is refused.
+                let named = |c: &str| {
+                    base.results.iter().any(|(r, _)| {
+                        r.class == c && r.corpus.manifest_blake3 == env.corpus.manifest_blake3
+                    })
+                };
+                let refused_for: BTreeSet<String> = base
+                    .results
+                    .iter()
+                    .map(|(r, _)| r.class.clone())
+                    .filter(|c| !named(c))
+                    .collect();
+                let any = base
+                    .results
+                    .iter()
+                    .any(|(r, _)| r.corpus.manifest_blake3 == env.corpus.manifest_blake3);
+                if !refused_for.is_empty() {
+                    probes
+                        .refused
+                        .insert($probe, (env.corpus.manifest_blake3.clone(), refused_for));
+                }
+                if !any || env.corpus.profile != first.corpus.profile {
                     bail!(
                         "{name}/{file}: another corpus than the baseline (profile `{}`, manifest {}; \
                          the baseline: `{}`, {})",

@@ -49,7 +49,7 @@ environment dumps.
   hash in lower-case hex; licence and source id are not part of it). `corpus build` and
   `corpus scan` record it per class in `build-info.json`'s `summary`. Rows of version 1 have no
   digest and stay valid. `run --validate DIR [--corpus C]` checks each digest against the corpus
-  manifest (`--corpus`, else `bench/corpus/<profile>`) when that corpus is present with the
+  manifest (`--corpus`, else `bench/corpus/<profile>` of the repository holding the results directory) when that corpus is present with the
   manifest the row names; otherwise it notes the row.
 - Pooling in `lpk-bench report` (D-48, E8-10): directories of one host and profile pool when their
   manifests are equal; when they differ, row by row: a row pools with the earlier rows of its class
@@ -58,7 +58,11 @@ environment dumps.
   digest pools only under the equal-manifest rule; a class whose digests differ is refused, naming
   the class. A later directory's `supersedes.toml` is applied first, so a re-pinned class's new rows
   (and a newer build's rows, before the tool-version check) can replace the old ones. The header
-  then lists each directory's manifest and the classes whose rows come from more than one.
+  then lists each directory's manifest, the manifest(s) each class was measured on, and the
+  classes whose rows come from more than one. A probe counts for a class only when some pooled row
+  of that class names the probe's manifest (a probe no pooled row names is refused); otherwise
+  the header says so and any estimate or gate that needs it for that class is `not evaluable`,
+  naming the class.
 - A gate's best incumbent never includes the subject (`lpk`) or the store control (`store`); with
   no other measured tool the gate is `not evaluable` (D-103).
 - Make a run with `lpk-bench run --tools all --profile small`; compare two runs of the same corpus

@@ -1,7 +1,7 @@
 //! What the report computes: baseline rows, blends over the disk mixes, the per-class estimates
 //! from the probes and the gate evaluation. Everything is a [`Traced`] value.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::mixes::{Mix, Mixes};
 use super::traced::{SourceId, Traced};
@@ -27,6 +27,9 @@ pub struct Probes {
     pub text: Option<ProbeFile<text::Data>>,
     pub weights: Option<ProbeFile<weights::Data>>,
     pub entropy_gate: Option<ProbeFile<entropy_gate::Data>>,
+    /// Per probe name: the corpus manifest it was taken on and the pooled classes it does not
+    /// count for, because no pooled row of the class names that manifest (E8-10).
+    pub refused: BTreeMap<&'static str, (String, BTreeSet<String>)>,
 }
 
 /// Name, build and source of every probe present, in the order of `probe all`.
@@ -42,6 +45,18 @@ pub struct ProbeInfo {
 }
 
 impl Probes {
+    /// Why probe `probe` does not count for `class` (E8-10): it was taken on a manifest that no
+    /// pooled row of the class names. `None` when it counts (or is absent).
+    pub fn refusal(&self, probe: &str, class: &str) -> Option<String> {
+        let (manifest, classes) = self.refused.get(probe)?;
+        classes.contains(class).then(|| {
+            format!(
+                "probe {probe} was taken on corpus manifest {manifest}, which no pooled row of \
+                 class {class} names (E8-10)"
+            )
+        })
+    }
+
     pub fn present(&self) -> Vec<ProbeInfo> {
         let mut out = Vec::new();
         macro_rules! add {
@@ -791,6 +806,18 @@ pub fn estimate(
     cb: &Traced,
     best: Option<&Incumbent>,
 ) -> Result<Est, String> {
+    let probe = match class {
+        "photo-jpeg" | "photo-jpeg-edited" => Some("jpeg"),
+        "office-pdf" | "archives-nested" | "software-installed" | "game-assets"
+        | "photo-raw-png" => Some("deflate"),
+        "backup-versions" | "backup-versions-large" => Some("dedup"),
+        "text-prose" | "logs-text" | "small-files" => Some("text"),
+        "model-weights" => Some("weights"),
+        _ => None,
+    };
+    if let Some(why) = probe.and_then(|n| probes.refusal(n, class)) {
+        return Err(why);
+    }
     match class {
         "photo-jpeg" | "photo-jpeg-edited" => jpeg_est(probes, class, cb),
         "office-pdf" | "archives-nested" | "software-installed" | "game-assets"
@@ -1297,7 +1324,8 @@ fn gate2(m: &Model, probes: &Probes) -> GateRow {
             let mut too_small = false;
             // The window itself is a catalogue constant, not a measured value: it is stated in
             // the rules paragraph, and only the measured version sizes appear here.
-            if let Some(pf) = &probes.dedup {
+            let refused = probes.refusal("dedup", G2_CLASS);
+            if let Some(pf) = probes.dedup.as_ref().filter(|_| refused.is_none()) {
                 const ORDINALS: [&str; 6] =
                     ["first", "second", "third", "fourth", "fifth", "sixth"];
                 for (n, ver) in pf.env.data.versions_large.iter().enumerate() {
@@ -1310,6 +1338,7 @@ fn gate2(m: &Model, probes: &Probes) -> GateRow {
                 }
             }
             let verdict = match (&v.est, &compared) {
+                _ if refused.is_some() => Verdict::NotEvaluable(refused.unwrap_or_default()),
                 (Err(e), _) => Verdict::NotEvaluable(format!("estimate: {e}")),
                 _ if !m.dedup_known => {
                     Verdict::NotEvaluable("tools.json predates D-43 (no dedup flags)".into())
@@ -1382,6 +1411,9 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 /// The class's own raw read rate: median over the passes of bytes / (read + open seconds), or of
 /// bytes / read seconds when `with_opens` is false.
 pub fn raw_rate(p: &Probes, class: &str, with_opens: bool) -> Option<Traced> {
+    if p.refusal("entropy-gate", class).is_some() {
+        return None;
+    }
     let pf = p.entropy_gate.as_ref()?;
     let secs = |c: &entropy_gate::RawClass| {
         if with_opens {
@@ -1442,9 +1474,10 @@ fn gate3(m: &Model, p: &Probes) -> GateRow {
     let raw = raw_video_rate(p, "video");
     let verdict = match (store, &raw) {
         (None, _) => Verdict::NotEvaluable("no measured store result on class video".into()),
-        (_, None) => {
-            Verdict::NotEvaluable("probe entropy-gate has no raw read rate for video".into())
-        }
+        (_, None) => Verdict::NotEvaluable(
+            p.refusal("entropy-gate", "video")
+                .unwrap_or_else(|| "probe entropy-gate has no raw read rate for video".into()),
+        ),
         (Some(s), Some(r)) => {
             let cb = store_row.map(|x| x.class_bytes.clone());
             numbers.push(format!(
@@ -1745,7 +1778,8 @@ fn gate2_measured(m: &Model, probes: &Probes) -> GateRow {
             // D-43's premise, when the dedup probe is given: every version exceeds the largest
             // incumbent window (a catalogue constant, stated in the rules paragraph).
             let mut too_small = false;
-            if let Some(pf) = &probes.dedup {
+            let refused = probes.refusal("dedup", G2_CLASS);
+            if let Some(pf) = probes.dedup.as_ref().filter(|_| refused.is_none()) {
                 const ORDINALS: [&str; 6] =
                     ["first", "second", "third", "fourth", "fifth", "sixth"];
                 for (n, ver) in pf.env.data.versions_large.iter().enumerate() {
@@ -1759,6 +1793,7 @@ fn gate2_measured(m: &Model, probes: &Probes) -> GateRow {
             }
             let subject = subject_row(&m.rows, SUBJECT_BALANCED, G2_CLASS);
             let verdict = match (&subject, &compared) {
+                _ if refused.is_some() => Verdict::NotEvaluable(refused.unwrap_or_default()),
                 (Err(e), _) => Verdict::NotEvaluable(e.clone()),
                 _ if !m.dedup_known => {
                     Verdict::NotEvaluable("tools.json predates D-43 (no dedup flags)".into())

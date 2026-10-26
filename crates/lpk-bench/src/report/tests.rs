@@ -516,6 +516,7 @@ fn inputs(k: &Knobs, with_probes: bool) -> Inputs {
                 entropy_data(vec![raw_pass(k.raw_seconds); 3]),
                 add("entropy-gate"),
             )),
+            refused: BTreeMap::new(),
         }
     } else {
         Probes::default()
@@ -1594,6 +1595,101 @@ fn probe_files_load_through_the_validator_and_must_match_host_and_corpus() {
     let other_host = baseline("host", "somebody-elses-box", &hash);
     let err = format!("{:#}", load(&args(other_host, true)).expect_err("host"));
     assert!(err.contains("one machine"), "{err}");
+
+    // E8-10: a pool across a re-pin of `model-weights` (the earlier directory's row superseded).
+    // The probe counts for a class only when a pooled row of that class names its manifest.
+    let leaf = format!("2026-10-01-{}", crate::run::host::sanitize_host(&machine));
+    let write = |name: &str, results: &[ToolResult]| {
+        let dir = baseline(name, &machine, &hash);
+        for f in std::fs::read_dir(&dir).expect("ls").filter_map(Result::ok) {
+            let n = f.file_name().to_string_lossy().into_owned();
+            if !matches!(n.as_str(), "host.json" | "tools.json") {
+                std::fs::remove_file(f.path()).expect("rm");
+            }
+        }
+        std::fs::write(
+            dir.join("run.json"),
+            render_json(&samples::run_file(results)),
+        )
+        .expect("run");
+        for r in results {
+            std::fs::write(dir.join(r.file_name()), render_json(r)).expect("result");
+        }
+        dir
+    };
+    let on = |mut r: ToolResult, manifest: &str, digest: &str| {
+        r.corpus.manifest_blake3 = manifest.to_string();
+        r.corpus.class_blake3 = Some(digest.repeat(32));
+        r
+    };
+    let weights_row = || {
+        let mut r = samples::measured();
+        r.class = "model-weights".into();
+        r
+    };
+    let repin = |tag: &str, old: &str, new: &str| {
+        let mut first: Vec<ToolResult> = real_class_results()
+            .into_iter()
+            .map(|r| on(r, old, "aa"))
+            .collect();
+        first.push(on(weights_row(), old, "01"));
+        let a = write(&format!("{tag}-a"), &first);
+        let b = write(&format!("{tag}-b"), &[on(weights_row(), new, "02")]);
+        write_supersedes(&b, &[("7z", "mx5", "model-weights", leaf.as_str())]);
+        let mut x = args(a, true);
+        x.results.push(b);
+        load(&x).expect("pooled across the re-pin")
+    };
+    let old = "cd".repeat(32);
+    // The probe was re-taken on the new manifest: it counts for the re-pinned class.
+    let fresh = repin("fresh", &old, &hash);
+    assert_eq!(fresh.probes.refusal("weights", "model-weights"), None);
+    assert!(fresh.probes.refusal("weights", "audio").is_some());
+    let m = Model::build(&fresh);
+    assert!(m.class("model-weights").expect("class").est.is_ok());
+    // The probe is from the old manifest: it does not count for the re-pinned class, whose
+    // estimate is then not available, naming the class.
+    let stale = repin("stale", &hash, &old);
+    let why = stale
+        .probes
+        .refusal("weights", "model-weights")
+        .expect("refused");
+    assert!(why.contains("class model-weights"), "{why}");
+    let m = Model::build(&stale);
+    let est = &m.class("model-weights").expect("class").est;
+    assert!(
+        matches!(est, Err(e) if e.contains("class model-weights")),
+        "{est:?}"
+    );
+    assert!(report_text(&stale).contains("so it does not count for them (E8-10): `model-weights`"));
+}
+
+/// E8-10: a `probe-dedup` that does not count for the G2 class (taken on a manifest no pooled row
+/// of the class names) leaves G2 without a verdict, in both forms, naming the class.
+#[test]
+fn a_dedup_probe_of_another_manifest_than_the_g2_rows_gives_no_g2_verdict() {
+    let refuse = |i: &mut Inputs| {
+        i.probes.refused.insert(
+            "dedup",
+            ("ef".repeat(32), BTreeSet::from([G2_CLASS.to_string()])),
+        );
+    };
+    let mut phase0 = inputs(&Knobs::default(), true);
+    assert_eq!(verdict_of(&phase0, "G2"), Verdict::Pass);
+    refuse(&mut phase0);
+    let mut measured = subject_inputs(true);
+    let before = verdict_of(&measured, "G2");
+    assert!(!matches!(before, Verdict::NotEvaluable(_)), "{before:?}");
+    refuse(&mut measured);
+    for i in [&phase0, &measured] {
+        match verdict_of(i, "G2") {
+            Verdict::NotEvaluable(why) => assert!(
+                why.contains("probe dedup") && why.contains(&format!("class {G2_CLASS}")),
+                "{why}"
+            ),
+            v => panic!("G2: {v:?}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3167,6 +3263,14 @@ fn rows_of_unchanged_classes_pool_across_a_re_pin_and_a_changed_class_is_refused
         text.contains("pooled by equal class digest: `audio`\n"),
         "{text}"
     );
+    assert!(
+        text.contains(&format!(
+            "  - class `audio` measured on manifest `{h1}` and `{h2}`\n"
+        )) || text.contains(&format!(
+            "  - class `audio` measured on manifest `{h2}` and `{h1}`\n"
+        )),
+        "{text}"
+    );
     // The changed class: refused, naming it.
     let c = dir_under(tmp.path(), "c", &[row_on(&m2, "ultra", "video")]);
     let err = format!(
@@ -3213,7 +3317,21 @@ fn a_re_pinned_class_pools_when_the_later_directory_supersedes_its_rows() {
     let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("re-pin superseded");
     assert_eq!(inputs.baseline.results.len(), 2);
     assert!(classes_pooled_by_digest(&inputs.baseline).is_empty());
-    assert!(report_text(&inputs).contains("pooled by equal class digest: none\n"));
+    // No class mixes manifests, but each class names the files it was measured on.
+    let text = report_text(&inputs);
+    assert!(
+        text.contains("pooled by equal class digest: none\n"),
+        "{text}"
+    );
+    let (h1, h2) = (manifest_hash(&m1), manifest_hash(&m2));
+    assert!(
+        text.contains(&format!("  - class `audio` measured on manifest `{h1}`\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("  - class `video` measured on manifest `{h2}`\n")),
+        "{text}"
+    );
 }
 
 #[test]
