@@ -59,3 +59,43 @@ pub fn exercise(data: &[u8], creds: Option<&Credentials>) {
         let _ = a.extract(&e, &mut std::io::sink());
     }
 }
+
+/// E4-3's reader targets: `data` written to a temporary file, opened as `format` by
+/// `lpk-foreign`, every listing page read and the first 256 file members streamed to a counting
+/// sink. Errors are expected; a panic is the finding.
+pub fn foreign(data: &[u8], format: &str) {
+    use lpk_proto::{OpenArgs, RecordKind};
+    let Ok(mut f) = tempfile::tempfile() else {
+        return;
+    };
+    if std::io::Write::write_all(&mut f, data).is_err() {
+        return;
+    }
+    let args = OpenArgs {
+        format,
+        name: b"fuzz",
+        password: Some(b"LitePack"),
+    };
+    let Ok(mut r) = lpk_foreign::open(f, &args) else {
+        return;
+    };
+    let mut records = Vec::new();
+    while let Ok((page, more)) = r.entries(records.len() as u64, 1024) {
+        if page.is_empty() && more {
+            return;
+        }
+        records.extend(page);
+        if !more {
+            break;
+        }
+    }
+    for (i, rec) in records.iter().enumerate().take(256) {
+        if rec.kind == RecordKind::File {
+            let mut n = 0u64;
+            let _ = r.read_member(i as u64, &mut |d: &[u8]| {
+                n += d.len() as u64;
+                Ok(())
+            });
+        }
+    }
+}

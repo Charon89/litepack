@@ -24,12 +24,12 @@ pub mod reader;
 pub mod worker;
 
 pub use frame::{ProtoError, Record, RecordKind, Request, Response};
-pub use reader::{ErrorCode, ForeignReader, ReaderError, Stopped};
+pub use reader::{ErrorCode, ForeignReader, OpenArgs, ReaderError, Stopped};
 pub use zeroize::Zeroizing;
 
 /// The protocol version both sides must speak (`Hello::proto`).
-pub const PROTO: u16 = 1;
+pub const PROTO: u16 = 2;
 
 /// The build identity the worker announces in `Hello` and the host requires to be its own:
 /// both sides are built from the same `lpk-proto`.
-pub const BUILD: &str = concat!("lpk-proto/", env!("CARGO_PKG_VERSION"), "/1");
+pub const BUILD: &str = concat!("lpk-proto/", env!("CARGO_PKG_VERSION"), "/2");

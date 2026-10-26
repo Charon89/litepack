@@ -1657,8 +1657,10 @@ dependencies = [
 name = "lpk-test-worker"
 version = "0.0.1"
 dependencies = [
+ "lpk-core",
  "lpk-proto",
  "lpk-sandbox-sys",
+ "tempfile",
 ]
 
 [[package]]

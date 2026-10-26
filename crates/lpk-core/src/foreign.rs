@@ -117,59 +117,8 @@ pub const MEMBER_BATCH: usize = 1024;
 /// How often the broker looks at the worker while it waits for a frame.
 const TICK: Duration = Duration::from_millis(50);
 
-/// A foreign format the broker recognises.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    /// `lpk_proto::fixture`: the test-only format the E4-2 worker serves.
-    TestFixture,
-}
-
-impl Format {
-    /// The format's name.
-    pub fn name(self) -> &'static str {
-        match self {
-            Format::TestFixture => lpk_proto::fixture::FORMAT,
-        }
-    }
-
-    /// The smallest member header of the format, for the entries cap.
-    pub fn min_header(self) -> u64 {
-        match self {
-            Format::TestFixture => lpk_proto::fixture::MIN_MEMBER,
-        }
-    }
-
-    /// Whether member headers are compressed (the entries cap is then multiplied by the
-    /// expansion limit).
-    pub fn compressed_headers(self) -> bool {
-        match self {
-            Format::TestFixture => false,
-        }
-    }
-}
-
-/// Byte comparisons on the first bytes of a file; `None` for anything this build does not
-/// read through a worker (an `.lpk`, or an unknown format).
-pub fn detect(head: &[u8]) -> Option<Format> {
-    if lpk_proto::fixture::detect(head) {
-        return Some(Format::TestFixture);
-    }
-    None
-}
-
-/// [`detect`] on the first bytes of the file at `path`.
-pub fn detect_file(path: &Path) -> std::io::Result<Option<Format>> {
-    let mut head = [0u8; 64];
-    let mut f = File::open(path)?;
-    let mut n = 0;
-    while n < head.len() {
-        match f.read(&mut head[n..])? {
-            0 => break,
-            m => n += m,
-        }
-    }
-    Ok(detect(&head[..n]))
-}
+mod detect;
+pub use detect::{detect, detect_file, Format, Ranges, HEAD, PE_SCAN};
 
 /// How the worker is sandboxed (Windows; Linux runs it unsandboxed, decision (d)).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -330,11 +279,13 @@ pub(crate) enum RecvError {
 /// An encoded request frame (it may hold a password: wiped on drop).
 pub(crate) type Frame = lpk_proto::Zeroizing<Vec<u8>>;
 
-fn encode(r: &Request) -> Frame {
+/// A request as one frame; a request the protocol refuses (an over-long format name) is a
+/// protocol error, never an empty or truncated frame.
+fn encode(r: &Request) -> Result<Frame, CoreError> {
     let mut f = lpk_proto::Zeroizing::new(Vec::new());
-    // Writing to a vector cannot fail.
-    let _ = r.write_to(&mut *f);
-    f
+    r.write_to(&mut *f)
+        .map_err(|e| protocol(format!("a request cannot be encoded: {e}")))?;
+    Ok(f)
 }
 
 pub(crate) trait Peer {
@@ -784,6 +735,10 @@ struct Conv<'m, P: Peer> {
     killed: bool,
     /// Warnings of the launch.
     warnings: Vec<String>,
+    /// The format the host detected (sent in `Open`; decides the record checks).
+    format: Format,
+    /// A password was sent in `Open`.
+    has_password: bool,
 }
 
 impl<'m, P: Peer> Conv<'m, P> {
@@ -805,6 +760,8 @@ impl<'m, P: Peer> Conv<'m, P> {
             usage: Usage::default(),
             killed: false,
             warnings: Vec::new(),
+            format: Format::TestFixture,
+            has_password: false,
         }
     }
 
@@ -816,7 +773,7 @@ impl<'m, P: Peer> Conv<'m, P> {
     /// Queue a request; while the writer is busy (the worker is not reading), keep polling
     /// the cancel token and the watchdog.
     fn send(&mut self, r: &Request) -> Result<(), CoreError> {
-        let mut frame = encode(r);
+        let mut frame = encode(r)?;
         loop {
             match self.peer.try_send(frame) {
                 Ok(None) => return Ok(()),
@@ -838,7 +795,7 @@ impl<'m, P: Peer> Conv<'m, P> {
         let progress = self
             .usage
             .read_bytes
-            .min(self.archive_len)
+            .min(self.archive_len.saturating_mul(self.format.read_passes()))
             .saturating_add(self.data)
             .saturating_add(self.ends);
         if progress > self.seen {
@@ -873,8 +830,12 @@ impl<'m, P: Peer> Conv<'m, P> {
             return WorkerError::Pipe { stderr }.into();
         };
         let margin = (self.memory / 16).max(1 << 20);
+        // The job's user-time kill ends the process with STATUS_QUOTA_EXCEEDED (E4-1, E4-5):
+        // named by the status too, in case the job's accounting could not be read.
+        const STATUS_QUOTA_EXCEEDED: u32 = 0xC000_0044;
         if self.usage.user_time + Duration::from_secs(1) >= self.cpu_limit
             || (cfg!(unix) && (code == 128 + 24 || code == 128 + 9))
+            || (cfg!(windows) && code == STATUS_QUOTA_EXCEEDED)
         {
             WorkerError::CpuLimit {
                 seconds: self.cpu_limit.as_secs(),
@@ -956,9 +917,20 @@ impl<'m, P: Peer> Conv<'m, P> {
         }
     }
 
-    fn open(&mut self, credentials: Option<&Credentials>) -> Result<String, CoreError> {
+    fn open(
+        &mut self,
+        format: Format,
+        name: &[u8],
+        credentials: Option<&Credentials>,
+    ) -> Result<String, CoreError> {
         let password = credentials.map(|c| lpk_proto::Zeroizing::new(c.password.clone()));
-        self.send(&Request::Open { password })?;
+        self.format = format;
+        self.has_password = password.is_some();
+        self.send(&Request::Open {
+            format: format.name().to_string(),
+            name: name.to_vec(),
+            password,
+        })?;
         match self.next("the archive to open")? {
             Response::Opened { format } => Ok(escape(format.as_bytes())),
             Response::NeedPassword => Err(FormatError::PasswordRequired.into()),
@@ -968,11 +940,17 @@ impl<'m, P: Peer> Conv<'m, P> {
     }
 
     /// Every page of the listing, under the entries cap and the listing charge.
-    fn list(&mut self, format: Format) -> Result<Vec<Record>, CoreError> {
-        let mut structural = self.archive_len / format.min_header().max(1);
-        if format.compressed_headers() {
-            structural = structural.saturating_mul(self.limits.max_expansion.unwrap_or(1));
-        }
+    fn list(&mut self) -> Result<Vec<Record>, CoreError> {
+        let format = self.format;
+        // Compressed headers: the archive's length times the expansion limit, over the
+        // smallest header (multiplied first, so a small compressed archive still has room).
+        let structural = if format.compressed_headers() {
+            self.archive_len
+                .saturating_mul(self.limits.max_expansion.unwrap_or(1))
+                .div_ceil(format.min_header().max(1))
+        } else {
+            self.archive_len / format.min_header().max(1)
+        };
         let (cap, flag) = match self.limits.max_entries {
             Some(m) if m < structural => (m, "--max-entries"),
             _ => (
@@ -1041,7 +1019,8 @@ impl<'m, P: Peer> Conv<'m, P> {
 
     /// `Cancel`, a grace period for `Cancelled`, then the kill.
     fn cancel(&mut self) {
-        if self.killed || !matches!(self.peer.try_send(encode(&Request::Cancel)), Ok(None)) {
+        let sent = encode(&Request::Cancel).map(|f| self.peer.try_send(f));
+        if self.killed || !matches!(sent, Ok(Ok(None))) {
             self.kill();
             return;
         }
@@ -1058,7 +1037,9 @@ impl<'m, P: Peer> Conv<'m, P> {
 
     fn close(&mut self) {
         if !self.killed {
-            let _ = self.peer.try_send(encode(&Request::Close));
+            if let Ok(f) = encode(&Request::Close) {
+                let _ = self.peer.try_send(f);
+            }
             let _ = self.peer.exit_code(Duration::from_millis(500));
         }
         self.kill();
@@ -1113,13 +1094,30 @@ struct Checked {
     encrypted: Vec<bool>,
 }
 
-fn check_records(records: Vec<Record>, archive_len: u64) -> Result<Checked, CoreError> {
+fn check_records(
+    records: Vec<Record>,
+    archive_len: u64,
+    format: Format,
+) -> Result<Checked, CoreError> {
     let corrupt = |m: String| CoreError::from(ForeignError::Corrupt { message: m });
-    // Packed ranges: inside the archive, and no overlap between blocks.
+    // Packed ranges: required where the format has them (D-99 (4)), inside the archive, and
+    // no overlap between blocks.
     let mut ranges: Vec<(u64, u64, u64, usize)> = Vec::new(); // (start, end, block, record)
     let mut by_block: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     for (i, r) in records.iter().enumerate() {
         if r.packed_len == 0 {
+            let required = match format.ranges() {
+                Ranges::Advisory => false,
+                Ranges::Every => true,
+                Ranges::NonEmptyFiles => r.kind == RecordKind::File && r.size > 0,
+            };
+            if required {
+                return Err(corrupt(format!(
+                    "{}: no packed range, which a {} archive's record must have",
+                    escape(&r.name),
+                    format.name()
+                )));
+            }
             continue;
         }
         let end = r
@@ -1376,7 +1374,7 @@ fn run_extract<P: Peer>(
         .enumerate()
         .map(|(i, r)| (i as u64, r.size))
         .collect();
-    let checked = check_records(records, conv.archive_len)?;
+    let checked = check_records(records, conv.archive_len, conv.format)?;
     // Duplicate names, refused before the policy pass (a second member would meet the first's
     // file at create-new).
     let mut seen = std::collections::HashSet::new();
@@ -1393,6 +1391,7 @@ fn run_extract<P: Peer>(
         .zip(checked.index.iter().zip(checked.hard_target.iter()))
         .map(|(e, (&i, h))| (e.path.clone(), (i, h.clone())))
         .collect();
+    let checked_encrypted = checked.encrypted.clone();
     let mut pass = policy_pass(checked.entries, dir, policy, select)?;
     let mkdirs = pass.mkdirs(dir);
     for e in &pass.entries {
@@ -1429,6 +1428,20 @@ fn run_extract<P: Peer>(
         }
     }
     targets.sort_by_key(|t| t.index);
+    // An encrypted member to receive and no password given: asked for before anything is
+    // written, so the retry with a password (`with_credentials`) starts from a clean slate.
+    if !conv.has_password {
+        let encrypted: std::collections::HashSet<u64> = checked_encrypted
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e)
+            .map(|(i, _)| i as u64)
+            .collect();
+        if targets.iter().any(|t| encrypted.contains(&t.index)) {
+            conv.kill();
+            return Err(FormatError::PasswordRequired.into());
+        }
+    }
     // Hard links resolve by name to a file this run receives (one map lookup each, the
     // cancel token polled as they go).
     let by_target: std::collections::HashMap<&str, (&Path, u64)> = targets
@@ -1625,13 +1638,30 @@ fn start<'m>(
     let format = detect_file(archive)
         .map_err(|e| CoreError::io(archive, e))?
         .ok_or(ForeignError::UnknownFormat)?;
+    if !format.read_by_worker() {
+        return Err(ForeignError::Unsupported {
+            message: format!(
+                "{} archives are read by the libarchive worker (E4-4), which this build does not have",
+                format.name()
+            ),
+        }
+        .into());
+    }
+    // The worker gets the file name only (single streams name their member from it), never
+    // the directory.
+    let name = archive
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned().into_bytes())
+        .unwrap_or_default();
     let exe = opts.worker_exe()?;
     let memory = opts.limits.budget();
     let (peer, warnings) = process::spawn(&exe, &file, opts, memory)?;
     drop(file);
     let mut conv = Conv::new(peer, opts.limits.clone(), len, monitor);
     conv.warnings = warnings;
-    let r = conv.handshake().and_then(|()| conv.open(credentials));
+    let r = conv
+        .handshake()
+        .and_then(|()| conv.open(format, &name, credentials));
     match r {
         Ok(name) => Ok((conv, format, name)),
         Err(e) => {
@@ -1654,7 +1684,7 @@ pub fn extract_file(
     opts: &Options,
     monitor: &Monitor,
 ) -> Result<ForeignSummary, CoreError> {
-    let (mut conv, format, name) = start(archive, opts, credentials, monitor)?;
+    let (mut conv, _format, name) = start(archive, opts, credentials, monitor)?;
     let mut summary = ForeignSummary {
         format: name,
         warnings: conv.warnings.clone(),
@@ -1664,7 +1694,7 @@ pub fn extract_file(
         dir: dir.to_path_buf(),
         cur: None,
     };
-    let r = conv.list(format).and_then(|records| {
+    let r = conv.list().and_then(|records| {
         run_extract(
             &mut conv,
             records,
@@ -1715,8 +1745,8 @@ pub fn list_file(
     let (mut conv, format, name) = start(archive, opts, credentials, monitor)?;
     let len = conv.archive_len;
     let checked = conv
-        .list(format)
-        .and_then(|records| check_records(records, len));
+        .list()
+        .and_then(|records| check_records(records, len, format));
     let mut out = NullOut::default();
     match checked {
         Ok(c) => {
@@ -1758,8 +1788,8 @@ pub fn replay(
     let nowhere = PathBuf::from("lpk-replay\0nowhere");
     let run = |out: &mut dyn Out, conv: &mut Conv<'_, ScriptPeer<'_>>, s: &mut ForeignSummary| {
         conv.handshake()?;
-        s.format = conv.open(None)?;
-        let records = conv.list(Format::TestFixture)?;
+        s.format = conv.open(Format::TestFixture, b"", None)?;
+        let records = conv.list()?;
         let d = dir.unwrap_or(&nowhere);
         run_extract(
             conv,

@@ -80,7 +80,14 @@ jobs:
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --features faults -- -D warnings
+      # E4-3: the end-to-end tests drive the main workspace's debug `lpk` against this workspace's
+      # worker; built first, and required (a missing `lpk` fails them instead of skipping).
+      - name: Build lpk for the end-to-end tests
+        working-directory: .
+        run: cargo build --locked -p lpk-cli
       - name: Test (default and faults)
+        env:
+          LPK_REQUIRE_E2E: "1"
         run: |
           cargo nextest run --locked --no-tests=pass
           cargo nextest run --locked --no-tests=pass --features faults

@@ -20,6 +20,11 @@ lpk-codecs-bwt = { version = "0.0.1", path = "../crates/lpk-codecs-bwt", feature
 # Its counting allocator: `bwt_decode` asserts nothing is allocated past the bound and the term.
 lpk-procstat-sys = { version = "0.0.1", path = "../crates/lpk-procstat-sys" }
 preflate-rs = "=0.7.6"
+# The pure-Rust foreign readers of the sandboxed worker (E4-3), for the foreign_* targets; they read
+# a file handle, so each input goes through a temporary file.
+lpk-foreign = { version = "0.0.1", path = "../workers/lpk-foreign" }
+lpk-proto = { version = "0.0.1", path = "../crates/lpk-proto" }
+tempfile = "3.27.0"
 
 # An empty table detaches this crate from the root workspace.
 [workspace]
@@ -181,6 +186,27 @@ bench = false
 [[bin]]
 name = "worker_proto"
 path = "fuzz_targets/worker_proto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_zip"
+path = "fuzz_targets/foreign_zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_7z"
+path = "fuzz_targets/foreign_7z.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_tar"
+path = "fuzz_targets/foreign_tar.rs"
 test = false
 doc = false
 bench = false

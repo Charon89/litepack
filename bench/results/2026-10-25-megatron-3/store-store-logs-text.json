@@ -1,0 +1,150 @@
+{
+  "class": "logs-text",
+  "corpus": {
+    "class_bytes": 2686418017,
+    "class_files": 11,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 2686431232,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.890625,
+      "peak_job_memory_bytes": 1609728,
+      "peak_memory_bytes": 6787072,
+      "peak_process_commit_bytes": 1609728,
+      "timed_out": false,
+      "user_cpu_seconds": 0.0625,
+      "wall_seconds": 1.9883867
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.25,
+      "peak_job_memory_bytes": 1253376,
+      "peak_memory_bytes": 6893568,
+      "peak_process_commit_bytes": 1253376,
+      "timed_out": false,
+      "user_cpu_seconds": 0.0,
+      "wall_seconds": 1.3038701
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 2686431232,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.921875,
+        "peak_job_memory_bytes": 1609728,
+        "peak_memory_bytes": 6787072,
+        "peak_process_commit_bytes": 1609728,
+        "timed_out": false,
+        "user_cpu_seconds": 0.015625,
+        "wall_seconds": 1.9883867
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.25,
+        "peak_job_memory_bytes": 1228800,
+        "peak_memory_bytes": 6889472,
+        "peak_process_commit_bytes": 1228800,
+        "timed_out": false,
+        "user_cpu_seconds": 0.0,
+        "wall_seconds": 1.2687508
+      }
+    },
+    {
+      "archive_bytes": 2686431232,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.75,
+        "peak_job_memory_bytes": 1613824,
+        "peak_memory_bytes": 6799360,
+        "peak_process_commit_bytes": 1613824,
+        "timed_out": false,
+        "user_cpu_seconds": 0.0625,
+        "wall_seconds": 1.8193067
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.234375,
+        "peak_job_memory_bytes": 1298432,
+        "peak_memory_bytes": 6918144,
+        "peak_process_commit_bytes": 1298432,
+        "timed_out": false,
+        "user_cpu_seconds": 0.03125,
+        "wall_seconds": 1.3326421
+      }
+    },
+    {
+      "archive_bytes": 2686431232,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.890625,
+        "peak_job_memory_bytes": 1601536,
+        "peak_memory_bytes": 6787072,
+        "peak_process_commit_bytes": 1601536,
+        "timed_out": false,
+        "user_cpu_seconds": 0.0625,
+        "wall_seconds": 1.9929208
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.265625,
+        "peak_job_memory_bytes": 1253376,
+        "peak_memory_bytes": 6893568,
+        "peak_process_commit_bytes": 1253376,
+        "timed_out": false,
+        "user_cpu_seconds": 0.0,
+        "wall_seconds": 1.3038701
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "-cf",
+      "../../tmp/run22948/c28/a.tar",
+      "-C",
+      "logs-text",
+      "."
+    ],
+    "extract_args": [
+      "-xf",
+      "a.tar",
+      "-C",
+      "x"
+    ],
+    "id": "store"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "store",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "bsdtar 3.8.9"
+  },
+  "verification": {
+    "files_checked": 11,
+    "files_ok": 11,
+    "verified": true
+  }
+}

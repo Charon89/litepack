@@ -21,5 +21,11 @@ lpk-proto = { path = "../lpk-proto", version = "0.0.1", features = ["faults"] }
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
 
+# E4-5's crash-containment tests (tests/containment.rs): the broker drives this worker and
+# lpk-sandbox-sys's test worker through each case in both sandbox modes.
+[dev-dependencies]
+lpk-core = { path = "../lpk-core", version = "0.0.1" }
+tempfile = "3.27.0"
+
 [lints]
 workspace = true
