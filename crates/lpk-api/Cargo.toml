@@ -23,6 +23,8 @@ zip = { version = "9.0.4", default-features = false, features = ["deflate", "zst
 # The listing model's memory bound (E5-1): a counting global allocator.
 lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
 tempfile = "3.27.0"
+# The GUI seam test parses lpk-gui's manifest.
+toml = "1.1.6"
 
 [lints]
 workspace = true

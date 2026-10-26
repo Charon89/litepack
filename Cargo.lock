@@ -1467,6 +1467,7 @@ dependencies = [
  "lpk-procstat-sys",
  "sevenz-rust2",
  "tempfile",
+ "toml",
  "zip",
 ]
 
