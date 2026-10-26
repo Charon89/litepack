@@ -24,6 +24,10 @@ preflate-rs = "=0.7.6"
 # An empty table detaches this crate from the root workspace.
 [workspace]
 
+# Not a workspace member, so the root's lint table does not reach it (E8-7, docs/UNSAFE.md).
+[lints.rust]
+unsafe_code = "forbid"
+
 # The root workspace's patch does not reach a detached crate: the same patched copy (D-66).
 [patch.crates-io]
 preflate-rs = { path = "../vendor/preflate-rs-0.7.6" }

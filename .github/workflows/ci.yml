@@ -26,9 +26,13 @@ jobs:
       - name: Linux build prerequisites (OpenSSL for native-tls)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # E8-5: the toolchain pinned in rust-toolchain.toml (version, components, targets), so the
+      # cache key (rust-cache reads `rustc -vV`) follows the pin.
+      - name: Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -48,6 +52,12 @@ jobs:
       - name: Third-party notices
         shell: bash
         run: scripts/third-party-notices.sh --check
+      # E8-7: `unsafe` only in the crates and modules docs/UNSAFE.md lists (both workspaces and fuzz/).
+      - name: Unsafe confined to the inventory
+        shell: bash
+        run: |
+          bash scripts/check-unsafe.sh --self-test
+          bash scripts/check-unsafe.sh
 
   # E4-2: the sandboxed workers live in their own workspace (workers/: own lockfile and deny.toml)
   # so the main workspace's feature unification cannot pull a C codec into them.
@@ -65,9 +75,13 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # E8-5: the toolchain pinned in rust-toolchain.toml (version, components, targets), so the
+      # cache key (rust-cache reads `rustc -vV`) follows the pin.
+      - name: Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: workers -> ../target
