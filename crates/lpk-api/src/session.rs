@@ -177,6 +177,9 @@ pub struct ExtractReport {
     pub skipped_symlinks: Vec<String>,
     /// The symlink entries not created because of their target (E6-0), with the reason.
     pub refused_symlink_targets: Vec<(String, lpk_core::policy::TargetRefusal)>,
+    /// The symlink entries not created because this process cannot create links (E6-6: on
+    /// Windows a token without `SeCreateSymbolicLinkPrivilege`), in entry order.
+    pub unprivileged_symlinks: Vec<String>,
 }
 
 /// The engine's counts of an extraction.
@@ -1234,6 +1237,7 @@ impl Session {
             outcome,
             skipped_symlinks: policy.skipped_symlinks(),
             refused_symlink_targets: policy.refused_symlink_targets(),
+            unprivileged_symlinks: policy.unprivileged_symlinks(),
         })
     }
 
@@ -1613,18 +1617,12 @@ mod tests {
         let read = s.read_guard(&CancelToken::new()).unwrap();
         let h = {
             let s = Arc::clone(&s);
-            std::thread::spawn(move || {
-                let r = s.history(&CancelToken::new());
-                (r.is_ok(), Instant::now())
-            })
+            std::thread::spawn(move || s.history(&CancelToken::new()).is_ok())
         };
         until_pending(&s, 1);
         let late = {
             let s = Arc::clone(&s);
-            std::thread::spawn(move || {
-                let r = s.model(&CancelToken::new());
-                (r.is_ok(), Instant::now())
-            })
+            std::thread::spawn(move || s.model(&CancelToken::new()).is_ok())
         };
         std::thread::sleep(Duration::from_millis(100));
         assert!(
@@ -1632,10 +1630,10 @@ mod tests {
             "the read started behind the pending history"
         );
         drop(read);
-        let (history_ok, history_done) = h.join().unwrap();
-        let (read_ok, read_done) = late.join().unwrap();
-        assert!(history_ok && read_ok);
-        assert!(read_done >= history_done, "the read ran after the history");
+        // Both finish once the held read is gone. Their order is not compared by clock: each
+        // timestamp would be taken after its call returned, and the history's thread can be
+        // descheduled between releasing the gate and reading the clock (a flaky assertion).
+        assert!(h.join().unwrap() && late.join().unwrap());
     }
 
     #[test]

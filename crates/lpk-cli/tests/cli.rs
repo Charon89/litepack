@@ -1911,6 +1911,25 @@ fn symlink_entries_are_skipped_with_a_warning_unless_symlinks_is_given() {
     let with = work.path().join("with");
     let r = run(&["x", "--symlinks", arch_s, with.to_str().unwrap()]);
     match r.status.code() {
+        // E6-6: Windows without SeCreateSymbolicLinkPrivilege skips the link with a warning
+        // naming the reason, and the extraction goes on.
+        Some(0) if !lpk_core::outtree::can_create_symlinks() => {
+            assert!(std::env::consts::OS == "windows");
+            let e = text(&r.stderr);
+            assert!(
+                e.contains("warning: link: symlink entry skipped: this process lacks SeCreateSymbolicLinkPrivilege"),
+                "{e}"
+            );
+            assert!(fs::symlink_metadata(with.join("link")).is_err());
+            assert_eq!(fs::read(with.join("a.txt")).unwrap(), b"target");
+            let jwith = work.path().join("jwith");
+            let r = run(&["--json", "x", "--symlinks", arch_s, jwith.to_str().unwrap()]);
+            assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+            let first: serde_json::Value =
+                serde_json::from_str(text(&r.stderr).lines().next().unwrap()).unwrap();
+            assert_eq!(first["warning"]["kind"], "SymlinkNoPrivilege");
+            assert_eq!(first["warning"]["path"], "link");
+        }
         Some(0) => {
             assert!(r.stderr.is_empty(), "{}", text(&r.stderr));
             let l = with.join("link");
