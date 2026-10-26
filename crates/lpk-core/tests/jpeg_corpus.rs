@@ -137,3 +137,64 @@ fn lepton_streams_are_identical_at_one_and_eight_processor_threads() {
     println!("photo-jpeg: {files} files, {peeled} peeled, every stream identical");
     assert!(peeled > 0);
 }
+
+/// A census of the photo classes for the decode-memory term (a report only): the files whose
+/// declared term exceeds revision 1.1's, the largest term, and those the peel stores as they
+/// are because the term plus the block exceeds the default memory (`decoder memory allowance
+/// exceeded`). Only progressive files of 8 megapixels or more are peeled (a baseline file or a
+/// smaller one cannot come near the default memory); no archive is written.
+#[test]
+#[ignore = "needs LPK_CORPUS; run in release by hand"]
+fn decode_memory_census() {
+    use lpk_core::peel::jpeg::{marker_scan, memory_bound, read_stream_header};
+    let root = PathBuf::from(std::env::var("LPK_CORPUS").expect("set LPK_CORPUS"));
+    for class in ["photo-jpeg", "photo-jpeg-edited"] {
+        let mut stack = vec![root.join(class)];
+        let (mut files, mut progressive, mut checked, mut more, mut capped) = (0, 0, 0, 0, 0);
+        let mut largest = (0u64, String::new());
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                files += 1;
+                let data = std::fs::read(&p).unwrap();
+                let Some(f) = marker_scan(&data).frame else {
+                    continue;
+                };
+                if f.marker != 0xC2 {
+                    continue;
+                }
+                progressive += 1;
+                if u64::from(f.width) * u64::from(f.height) < 8_000_000 {
+                    continue;
+                }
+                checked += 1;
+                match lpk_core::JpegPeel::default().peel(&data, 1 << 26) {
+                    Ok(plan) => {
+                        let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+                        if plan.memory > memory_bound(&h.frame) {
+                            more += 1;
+                        }
+                        if plan.memory > largest.0 {
+                            largest = (plan.memory, p.display().to_string());
+                        }
+                    }
+                    Err(lpk_core::Fallback::Jpeg(Cause::MemoryCap)) => {
+                        capped += 1;
+                        println!("  memory cap: {} ({}x{})", p.display(), f.width, f.height);
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        println!(
+            "{class}: {files} files, {progressive} progressive, {checked} of 8 MP or more peeled: \
+             {more} declare more than revision 1.1's term, {capped} hit the memory cap; largest \
+             term {} ({})",
+            largest.0, largest.1
+        );
+    }
+}
