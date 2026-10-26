@@ -23,7 +23,10 @@
 //! term is computed from the image's frame header over the library's data layout (every
 //! component's 8x8 blocks padded to whole MCUs, 64 coefficients of 2 bytes each); its fixed term,
 //! [`MODEL_ALLOWANCE`], stands for the library's probability models and thread buffers, which
-//! revision 1.1 does not bound (E2-5b measures them).
+//! revision 1.1 does not bound (E2-5b measures them). Before the library decodes a stream,
+//! [`read_stream_header`] checks every length in the stream's header against the primary image
+//! (the library allocates each at once), and the term a record declares and a reader checks is
+//! [`image_term`]: the larger of that allowance and a stated bound on the library's allocations.
 
 use std::io::{Cursor, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1063,7 +1066,7 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
                     Some(&mut h),
                 )?;
                 let (mut last_row, mut segments) = (0u16, 0u64);
-                for p in h.chunks_exact(16) {
+                for p in h.as_chunks::<16>().0 {
                     let row = u16::from_le_bytes([p[0], p[1]]);
                     if row < last_row {
                         return None;

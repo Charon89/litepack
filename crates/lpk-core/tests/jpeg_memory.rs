@@ -91,7 +91,7 @@ fn segment(out: &mut Vec<u8>, marker: u8, body: &[u8]) {
 /// interleaved scan) or progressive (SOF2, an interleaved DC scan and one AC scan per
 /// component, end-of-block runs as libjpeg writes them).
 fn grey_jpeg(w: u16, h: u16, progressive: bool) -> Vec<u8> {
-    assert!(w % 16 == 0 && h % 16 == 0);
+    assert!(w.is_multiple_of(16) && h.is_multiple_of(16));
     let mut out = vec![0xFF, 0xD8];
     let mut dqt = vec![0u8];
     dqt.extend_from_slice(&[1; 64]);
@@ -202,6 +202,7 @@ fn the_fuzz_input_is_refused_before_the_library_with_a_small_peak() {
     assert_eq!(data[4], 0, "flags of the finding");
     let stream = &data[5..];
     assert!(read_stream_header(stream, primary_len).is_none());
+    assert!(lpk_check::jpeg::stream_header(0, stream, primary_len).is_err());
     let record = Record::new(lpk_format::RecordBody::Jpeg(lpk_format::JpegRecord {
         original_len: primary_len,
         primary_len,
@@ -356,6 +357,13 @@ fn hostile_header_lengths_are_lepton_stream_before_the_library() {
             read_stream_header(&stream, primary_len).is_none(),
             "{name} passed the check"
         );
+        assert_eq!(
+            lpk_check::jpeg::stream_header(0, &stream, primary_len)
+                .unwrap_err()
+                .detail,
+            "bad record 0: lepton stream",
+            "{name} passed lpk-check"
+        );
         let (r, peak, _) = measured(&stream, record_for(&jpeg), primary_len, &l, Some(1));
         assert!(
             matches!(
@@ -404,6 +412,12 @@ fn round_trip_within_the_term(w: u16, h: u16, progressive: bool) -> (u64, u64) {
     assert_eq!(
         plan.memory,
         image_term(&header, plan.primary_len, plan.stream.len() as u64)
+    );
+    // The independent decoder computes the same term.
+    let checked = lpk_check::jpeg::stream_header(0, &plan.stream, plan.primary_len).unwrap();
+    assert_eq!(
+        checked.term(plan.primary_len, plan.stream.len() as u64),
+        plan.memory
     );
     let l = limits(block, block + plan.memory);
     for threads in [Some(1), None] {

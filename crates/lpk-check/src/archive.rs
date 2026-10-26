@@ -530,11 +530,11 @@ impl Archive {
             return Err(block::too_large(last, j.primary_len, bound));
         }
         // (5): the image's term, its coefficient term plus the fixed term.
-        let frame = crate::jpeg::stream_frame(id, stream, j.primary_len)?;
+        let header = crate::jpeg::stream_header(id, stream, j.primary_len)?;
         self.memory()
-            .check(frame.memory_term().saturating_add(crate::jpeg::FIXED_TERM))?;
+            .check(header.term(j.primary_len, stream.len() as u64))?;
         // (6).
-        let primary = crate::jpeg::decode(id, stream, j.primary_len)?;
+        let primary = crate::jpeg::decode(id, stream, j.primary_len, &header.frame)?;
         // (7) and (8).
         self.assemble_check(b, id, &j, &primary)?;
         Ok(primary)
