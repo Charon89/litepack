@@ -38,7 +38,11 @@ jobs:
       - uses: actions/checkout@v7
       - name: Linux build prerequisites (OpenSSL for native-tls)
         run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      # E8-5: the toolchain pinned in rust-toolchain.toml.
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
       - uses: Swatinem/rust-cache@v2
       # ffmpeg is deliberately not installed by this workflow. Whether the image already has it
       # is recorded below; the video encodes are skipped with a reason when it is absent.

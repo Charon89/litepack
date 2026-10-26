@@ -51,14 +51,28 @@ cargo_home="$(cygpath -w "${CARGO_HOME:-$HOME/.cargo}")"
 # applies the last matching prefix), so a target directory inside the checkout maps to /lpk.
 remap="target.$target.rustflags=['--remap-path-prefix=$cargo_home=/cargo', '--remap-path-prefix=$ws=/lpk']"
 
+# The worker is built from a fixed drive letter mapped onto the checkout (`subst`). Its workspace
+# (workers/) reaches lpk-proto and lpk-sandbox-sys through `../crates`, outside its own root, and
+# cargo hashes such a path dependency's absolute path into its `-C metadata` (symbol names, and so
+# the binary): measured, two checkouts gave two different lpk-worker.exe with every flag above,
+# while lpk.exe and lpk-check.exe (all their path dependencies inside the root workspace, hashed
+# by relative path) were equal. From the fixed drive the absolute paths are the same everywhere.
+drive="${LPK_REPRO_DRIVE:-W:}"
+remap_w="target.$target.rustflags=['--remap-path-prefix=$cargo_home=/cargo', '--remap-path-prefix=$drive=/lpk']"
+
 log="$out/cargo-build.log"
 rustc --version | tee "$out/rustc-version.txt"
-echo "building lpk, lpk-check and lpk-worker for $target in $ws"
+echo "building lpk and lpk-check in $ws, lpk-worker in $drive\\workers ($drive mapped onto the checkout), for $target"
 status=0
-{
-  (cd "$root" && cargo build --locked --release -v --target "$target" --config "$remap" -p lpk-cli -p lpk-check) &&
-    (cd "$root/workers" && cargo build --locked --release -v --target "$target" --config "$remap" -p lpk-worker)
-} > "$log" 2>&1 || status=$?
+(cd "$root" && cargo build --locked --release -v --target "$target" --config "$remap" -p lpk-cli -p lpk-check) > "$log" 2>&1 || status=$?
+if [ "$status" = 0 ]; then
+  if ! MSYS_NO_PATHCONV=1 subst "$drive" "$ws" >> "$log" 2>&1; then
+    echo "error: cannot map $drive onto the checkout (in use? \`subst\` lists the mappings; LPK_REPRO_DRIVE picks another letter, which changes lpk-worker.exe)" >&2
+    exit 1
+  fi
+  trap 'MSYS_NO_PATHCONV=1 subst "$drive" /D > /dev/null 2>&1 || true' EXIT
+  (cd "$drive/workers" && cargo build --locked --release -v --target "$target" --config "$remap_w" -p lpk-worker) >> "$log" 2>&1 || status=$?
+fi
 if [ "$status" != 0 ]; then
   echo "error: the build failed (exit $status); the end of $log:" >&2
   tail -n 60 "$log" >&2
@@ -72,13 +86,16 @@ n="$(wc -l < "$out/rustc-shipped.txt")"
 bad=0
 while IFS= read -r line; do
   name="$(echo "$line" | grep -oE -- "--crate-name [a-z_]+" | head -n 1)"
-  for flag in "link-arg=/Brepro" "link-arg=/PDBALTPATH:%_PDB%" "--remap-path-prefix=$cargo_home=/cargo" "--remap-path-prefix=$ws=/lpk"; do
-    if ! grep -qF -- "$flag" <<< "$line"; then
+  from="$ws"
+  [ "$name" = "--crate-name lpk_worker" ] && from="$drive"
+  for flag in "link-arg=/Brepro" "link-arg=/PDBALTPATH:%_PDB%" "--remap-path-prefix=$cargo_home=/cargo" "--remap-path-prefix=$from=/lpk"; do
+    if grep -qF -- "$flag" <<< "$line"; then
+      echo "flags reached rustc ($name): $flag"
+    else
       echo "error: $name: rustc ran without $flag" >&2
       bad=1
     fi
   done
-  echo "flags reached rustc ($name): $(grep -oE -- "-C ?link-arg=/(Brepro|PDBALTPATH:%_PDB%)|--remap-path-prefix=[^ ]*" <<< "$line" | tr '\n' ' ')"
 done < "$out/rustc-shipped.txt"
 [ "$bad" = 0 ] || exit 1
 

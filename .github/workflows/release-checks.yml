@@ -1,0 +1,68 @@
+name: Release checks
+
+# The checks on what ships, kept out of ci.yml: release builds (thin LTO, one codegen unit) of the
+# shipped binaries take far longer than the lint and test jobs, they need no RUSTFLAGS (ci.yml sets
+# `-D warnings` for every job, which would replace the flags of .cargo/config.toml), and E7-2's
+# release workflow can be rehearsed by dispatching this one on a branch.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # E8-5: the shipped binaries built twice from clean, in two directories with two cargo homes,
+  # through scripts/repro-build.sh (the flags of .cargo/config.toml plus path remapping); the
+  # SHA-256 of every binary must be equal. No cache: both builds start from nothing.
+  reproducible:
+    name: reproducible build (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: first
+      - uses: actions/checkout@v7
+        with:
+          path: second-build-directory
+      - name: Rust toolchain from rust-toolchain.toml
+        working-directory: first
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - name: First build
+        working-directory: first
+        run: bash scripts/repro-build.sh --out "$(cygpath -u "$RUNNER_TEMP")/first"
+      - name: Second build (another directory, another cargo home)
+        working-directory: second-build-directory
+        run: |
+          export CARGO_HOME="$(cygpath -u "$RUNNER_TEMP")/cargo-home-2"
+          bash scripts/repro-build.sh --out "$(cygpath -u "$RUNNER_TEMP")/second"
+      - name: Compare the SHA-256 of the shipped binaries
+        run: |
+          t="$(cygpath -u "$RUNNER_TEMP")"
+          cat "$t/first/SHA256SUMS"
+          if diff "$t/first/SHA256SUMS" "$t/second/SHA256SUMS"; then
+            echo "reproducible: every shipped binary is identical across the two builds"
+          else
+            echo "error: the two builds differ" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: reproducible-build
+          path: |
+            ${{ runner.temp }}/first
+            ${{ runner.temp }}/second
+          retention-days: 14
+          if-no-files-found: warn
