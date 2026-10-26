@@ -63,7 +63,7 @@ E4-6's runs were overflow panics), as the workspace's debug tests do; a shipped 
 instead.
 
 A crash is saved under `fuzz/artifacts/<target>/`. Minimise it with
-`cargo +nightly fuzz tmin <target> <file>`, add the bytes as a regression test in `lpk-format`, fix the
+`cargo +nightly fuzz tmin --no-cfg-fuzzing <target> <file>`, add the bytes as a regression test in `lpk-format`, fix the
 bug in its own commit.
 
 ## CI
