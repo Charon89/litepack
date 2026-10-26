@@ -142,6 +142,16 @@ jobs:
           echo "corpus before: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
           bash fuzz/run.sh -t "$FUZZ_SECONDS" "${m[@]}" "$TARGET"
           echo "corpus after: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
+      - name: Known open finding?
+        if: failure()
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if grep -q "^| \`$TARGET\` |" fuzz/KNOWN.md; then
+            echo "::error::$TARGET fails with a known open finding (fuzz/KNOWN.md); its fix is a separate task"
+          else
+            echo "::error::$TARGET: a new finding; file it and add it to fuzz/KNOWN.md until fixed"
+          fi
       - name: Save the corpus
         if: always()
         uses: actions/cache/save@v6

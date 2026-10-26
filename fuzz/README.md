@@ -68,3 +68,5 @@ passes the binaries on; one `fuzz` job per target runs `run.sh` on them (`LPK_FU
 Actions cache (`fuzz-corpus-<target>-<run>`, restored by prefix; unused entries expire after 7 days) and is
 minimised (`run.sh -m`, libFuzzer's `-merge=1`) by the scheduled Monday run. A crash fails the job and
 uploads `fuzz/artifacts` (the input and the log) as `fuzz-artifacts-<target>`.
+
+Open findings that fail a target until their fix lands are listed in `KNOWN.md`; the workflow names them in a failing job.
