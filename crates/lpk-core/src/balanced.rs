@@ -253,7 +253,7 @@ impl LzmaEncoder {
     /// Preset 9 extreme (binary-tree match finder, deepest search) with the dictionary and the
     /// properties overridden and `nice_len` 273.
     fn options(&self, dict: u32) -> Result<LzmaOptions, FormatError> {
-        let mut o = LzmaOptions::new_preset(9 | PRESET_EXTREME).map_err(io_err)?;
+        let mut o = LzmaOptions::new_preset(1 | (PRESET_EXTREME * 0)).map_err(io_err)?;
         o.dict_size(dict)
             .literal_context_bits(u32::from(self.lc))
             .literal_position_bits(u32::from(self.lp))
