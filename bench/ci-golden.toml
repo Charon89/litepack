@@ -1,0 +1,16 @@
+# Golden archive sizes of the size-regression gate (PLAN E8-2; the CI job `size-gate` in
+# .github/workflows/ci.yml). This file only names the results directory of the harness run that
+# wrote them; no size is ever typed by hand.
+#
+# The gate: `lpk-bench run --compare-sizes bench/ci-golden.toml <new results dir>` fails when any
+# row's median archive grows by more than 1% (`--max-growth-pct`), or a row is missing on either
+# side, or the fixture set (manifest BLAKE3) differs; a shrink beyond 1% only prints a notice
+# that the goldens may be refreshed.
+#
+# Refresh procedure (a deliberate size change, or a changed `ci` fixture set):
+#   1. from a clean, committed release build (`cargo build --release -p lpk-cli -p lpk-bench`):
+#        lpk-bench corpus build --profile ci
+#        lpk-bench run --tools lpk --settings fast,balanced,store --profile ci --repeats 1 --threads 2
+#   2. commit the new bench/results/<dir> and point `results` below at it, in the same commit,
+#      whose message cites the directory (and the --compare-sizes output against the old one).
+results = "bench/results/2026-10-26-megatron-2"
