@@ -464,8 +464,6 @@ impl Dir {
     }
 }
 
-/// A symlink reparse buffer (`REPARSE_DATA_BUFFER`, `SymbolicLinkReparseBuffer`) for a
-/// relative `target`: the substitute name and the print name are both the target.
 /// Whether the volume `h` is on holds named streams (`FILE_NAMED_STREAMS` among the volume's
 /// flags, from `GetVolumeInformationByHandleW`): the probe Mark of the Web makes before it
 /// writes a `Zone.Identifier` stream (E6-5). No file system is named: a volume either has the
@@ -509,6 +507,34 @@ pub fn write_stream(file: &File, stream: &str, data: &[u8]) -> Result<(), FsErro
     Ok(())
 }
 
+/// Read at most `max` bytes of the named stream `stream` of the open file `file`, opened
+/// relative to the file's own handle (as [`write_stream`]), never by path: the stream of the
+/// file this handle is open on, whatever its name now is. `Ok(None)` when the file has no such
+/// stream (`STATUS_OBJECT_NAME_NOT_FOUND`); every other failure is an error.
+pub fn read_stream(file: &File, stream: &str, max: u64) -> Result<Option<Vec<u8>>, FsError> {
+    let w = component(OsStr::new(stream))?;
+    let mut name = Vec::with_capacity(w.len() + 1);
+    name.push(u16::from(b':'));
+    name.extend_from_slice(&w);
+    let h = match nt_create(
+        file,
+        &name,
+        FILE_GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE,
+    ) {
+        Ok(h) => h,
+        Err(FsError::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut buf = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(File::from(h), max), &mut buf)?;
+    Ok(Some(buf))
+}
+
+/// A symlink reparse buffer (`REPARSE_DATA_BUFFER`, `SymbolicLinkReparseBuffer`) for a
+/// relative `target`: the substitute name and the print name are both the target.
 fn symlink_buffer(target: &str) -> Result<Vec<u8>, FsError> {
     let t: Vec<u16> = target.encode_utf16().collect();
     let too_long = || {
@@ -683,6 +709,23 @@ mod tests {
         let got = std::fs::read(d.path().join("b.bin:Zone.Identifier")).unwrap();
         assert_eq!(got, b"[ZoneTransfer]\r\nZoneId=3\r\n");
         assert_eq!(std::fs::read(d.path().join("b.bin")).unwrap(), b"data");
+        // Read back through a handle opened before the name changes again: the stream of the
+        // file the handle is on, not of whatever now has the name.
+        let h = File::open(d.path().join("b.bin")).unwrap();
+        std::fs::rename(d.path().join("b.bin"), d.path().join("moved.bin")).unwrap();
+        std::fs::write(d.path().join("b.bin"), b"impostor").unwrap();
+        assert_eq!(
+            read_stream(&h, "Zone.Identifier", 1024).unwrap().unwrap(),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n"
+        );
+        assert_eq!(
+            read_stream(&h, "Zone.Identifier", 4).unwrap().unwrap(),
+            b"[Zon"
+        );
+        let plain = File::open(d.path().join("b.bin")).unwrap();
+        assert!(read_stream(&plain, "Zone.Identifier", 1024)
+            .unwrap()
+            .is_none());
         // A stream name with a separator is refused before any call.
         let (f2, _) = root.create_file(OsStr::new("c.bin")).unwrap();
         assert!(write_stream(&f2, "x:$DATA", b"").is_err());

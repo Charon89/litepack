@@ -30,7 +30,9 @@
 mod windows_impl;
 
 #[cfg(windows)]
-pub use windows_impl::{named_streams, symlink_privilege_held, write_stream, Dir, FileId, FsError};
+pub use windows_impl::{
+    named_streams, read_stream, symlink_privilege_held, write_stream, Dir, FileId, FsError,
+};
 
 #[cfg(all(windows, feature = "test-hooks"))]
 pub use windows_impl::set_share_delete_for_tests;
