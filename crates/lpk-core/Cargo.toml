@@ -45,6 +45,15 @@ lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 
+# E6-6: the output tree's opens relative to verified directory handles (the -sys crate;
+# lpk-core keeps forbid(unsafe_code)). Linux keeps the path code.
+[target.'cfg(windows)'.dependencies]
+lpk-fs-sys = { path = "../lpk-fs-sys", version = "0.0.1" }
+
+# The TOCTOU test's share-mode switch: test builds only, never a release build (D-99 (8)).
+[target.'cfg(windows)'.dev-dependencies]
+lpk-fs-sys = { path = "../lpk-fs-sys", version = "0.0.1", features = ["test-hooks"] }
+
 [dev-dependencies]
 blake3 = "1.8.7"
 # Crafted correction streams for the refusals of LITEPACK-CHANGES change 8 (LIC-2).

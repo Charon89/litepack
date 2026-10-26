@@ -738,9 +738,12 @@ struct ExtractArgs {
     /// in symlinks_skipped; such a target is never read or opened. On Windows a link is a
     /// directory link when its target names a directory of the archive, else a file link; so a
     /// link whose target goes through another link (`l -> s/sub`, `s` a link) is a file link
-    /// unless the archive itself names that target as a directory. A
-    /// link that cannot be created (for example without the privilege on Windows) fails the
-    /// extraction.
+    /// unless the archive itself names that target as a directory. On Windows links are
+    /// created only when the process token holds SeCreateSymbolicLinkPrivilege (an elevated
+    /// administrator; Developer Mode alone does not count); without it every link is skipped
+    /// with a warning (with --json one `{"warning":{"kind":"SymlinkNoPrivilege","path":...}}`
+    /// line) and counted in symlinks_skipped, and the extraction goes on. A link that cannot be
+    /// created for any other reason fails the extraction.
     #[arg(long)]
     symlinks: bool,
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
@@ -978,6 +981,23 @@ fn foreign_extract(
 /// each: `warning: PATH: symlink entry skipped: REASON`, or with --json
 /// `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}`.
 fn refused_target_warnings(policy: &lpk_core::Policy, json: bool, err: &mut dyn Write) {
+    // E6-6: links skipped because the process cannot create them (Windows, no
+    // SeCreateSymbolicLinkPrivilege): `warning: PATH: symlink entry skipped: REASON`, or with
+    // --json `{"warning":{"kind":"SymlinkNoPrivilege","path":...}}`.
+    for p in policy.unprivileged_symlinks() {
+        if json {
+            let line = serde_json::json!({
+                "warning": { "kind": "SymlinkNoPrivilege", "path": p }
+            });
+            let _ = writeln!(err, "{line}");
+        } else {
+            let _ = writeln!(
+                err,
+                "warning: {}: symlink entry skipped: this process lacks SeCreateSymbolicLinkPrivilege",
+                lpk_format::cli::escape_path(&p)
+            );
+        }
+    }
     for (p, why) in policy.refused_symlink_targets() {
         if json {
             let line = serde_json::json!({

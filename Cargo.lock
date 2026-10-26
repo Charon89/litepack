@@ -1578,6 +1578,7 @@ dependencies = [
  "lpk-codecs-bwt",
  "lpk-codecs-vp8",
  "lpk-format",
+ "lpk-fs-sys",
  "lpk-procstat-sys",
  "lpk-proto",
  "lpk-sandbox-sys",
@@ -1612,6 +1613,14 @@ dependencies = [
  "thiserror",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "lpk-fs-sys"
+version = "0.0.1"
+dependencies = [
+ "tempfile",
+ "windows",
 ]
 
 [[package]]
