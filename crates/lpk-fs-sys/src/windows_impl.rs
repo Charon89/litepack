@@ -16,8 +16,8 @@ use windows::Wdk::Storage::FileSystem::{
     NTCREATEFILE_CREATE_DISPOSITION, NTCREATEFILE_CREATE_OPTIONS,
 };
 use windows::Win32::Foundation::{
-    GetLastError, RtlNtStatusToDosError, ERROR_NOT_ALL_ASSIGNED, HANDLE, LUID, NTSTATUS,
-    OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, STATUS_REPARSE_POINT_ENCOUNTERED,
+    GetLastError, RtlNtStatusToDosError, ERROR_NOT_ALL_ASSIGNED, ERROR_NO_TOKEN, HANDLE, LUID,
+    NTSTATUS, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, STATUS_REPARSE_POINT_ENCOUNTERED,
     STATUS_STOPPED_ON_SYMLINK, UNICODE_STRING,
 };
 use windows::Win32::Security::{
@@ -549,6 +549,11 @@ pub fn symlink_privilege_held() -> bool {
     matches!(privileged_token(), Ok(Some(_)))
 }
 
+/// Whether `OpenThreadToken` failed because the thread has no impersonation token.
+fn is_no_token(e: &windows::core::Error) -> bool {
+    e.code() == ERROR_NO_TOKEN.to_hresult()
+}
+
 /// Run `f` on this thread under an impersonation copy of the process token with
 /// `SeCreateSymbolicLinkPrivilege` enabled (when the token holds it; otherwise `f` runs as
 /// is and its own call reports the missing privilege). The thread's token is restored after.
@@ -561,17 +566,23 @@ fn with_symlink_privilege<T>(f: impl FnOnce() -> Result<T, FsError>) -> Result<T
     let mut before = HANDLE::default();
     // SAFETY: the pseudo-handle of this thread; `before` is a live output; the access check
     // is made against the process (open_as_self), so it works whatever the thread holds.
-    let previous = unsafe {
+    let opened = unsafe {
         OpenThreadToken(
             GetCurrentThread(),
             TOKEN_IMPERSONATE | TOKEN_QUERY,
             true,
             &mut before,
         )
-    }
-    .ok()
-    // SAFETY: the call succeeded, so `before` is a new handle that nothing else owns.
-    .map(|()| unsafe { OwnedHandle::from_raw_handle(before.0) });
+    };
+    // Only "no token" means the thread runs as the process; any other failure (an anonymous
+    // or identification-level token that cannot be reopened) is returned before the thread's
+    // token is touched, so its identity is never lost.
+    let previous = match opened {
+        // SAFETY: the call succeeded, so `before` is a new handle that nothing else owns.
+        Ok(()) => Some(unsafe { OwnedHandle::from_raw_handle(before.0) }),
+        Err(e) if is_no_token(&e) => None,
+        Err(e) => return Err(e.into()),
+    };
     // SAFETY: `token` is an open impersonation token with TOKEN_IMPERSONATE; `None` is the
     // calling thread.
     unsafe { SetThreadToken(None, Some(HANDLE(token.as_raw_handle()))) }?;
@@ -753,6 +764,31 @@ mod tests {
             assert!(std::fs::symlink_metadata(d.path().join("l")).is_err());
             println!("SKIPPED: no SeCreateSymbolicLinkPrivilege; the failure path was checked");
         }
+    }
+
+    /// Only ERROR_NO_TOKEN means "not impersonating"; the errors of a token that cannot be
+    /// reopened are failures (so the thread's identity is never dropped).
+    #[test]
+    fn only_no_token_means_no_previous_identity() {
+        use windows::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_BAD_IMPERSONATION_LEVEL, ERROR_CANT_OPEN_ANONYMOUS,
+        };
+        let err = |c: windows::Win32::Foundation::WIN32_ERROR| {
+            windows::core::Error::from_hresult(c.to_hresult())
+        };
+        assert!(is_no_token(&err(ERROR_NO_TOKEN)));
+        for c in [
+            ERROR_CANT_OPEN_ANONYMOUS,
+            ERROR_BAD_IMPERSONATION_LEVEL,
+            ERROR_ACCESS_DENIED,
+        ] {
+            assert!(!is_no_token(&err(c)), "{c:?}");
+        }
+        // This test thread does not impersonate: the real call reports exactly that.
+        let mut h = HANDLE::default();
+        // SAFETY: the pseudo-handle of this thread; `h` is a live output.
+        let r = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut h) };
+        assert!(matches!(&r, Err(e) if is_no_token(e)), "{r:?}");
     }
 
     #[test]

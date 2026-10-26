@@ -13,12 +13,16 @@ use crate::{extract_archive, CoreError, ExtractOptions, ExtractSummary, Overwrit
 use crate::{ExtractPolicy, Symlinks};
 
 fn pack(f: impl FnOnce(&mut Writer<&mut Vec<u8>>)) -> Vec<u8> {
+    pack_with(false, f)
+}
+
+fn pack_with(dedup: bool, f: impl FnOnce(&mut Writer<&mut Vec<u8>>)) -> Vec<u8> {
     let mut out = Vec::new();
     let opts = WriterOptions {
         chunk_size: 4096,
         block_size: 16384,
         archive_id: [9; 16],
-        dedup: true,
+        dedup,
         ..WriterOptions::default()
     };
     let mut w = Writer::new(&mut out, opts).unwrap();
@@ -28,7 +32,11 @@ fn pack(f: impl FnOnce(&mut Writer<&mut Vec<u8>>)) -> Vec<u8> {
 }
 
 fn files(list: &[(&str, &[u8])]) -> Vec<u8> {
-    pack(|w| {
+    files_with(false, list)
+}
+
+fn files_with(dedup: bool, list: &[(&str, &[u8])]) -> Vec<u8> {
+    pack_with(dedup, |w| {
         for (p, d) in list {
             w.add_file(p, EntryFlags::EMPTY, 0, &mut &d[..]).unwrap();
         }
@@ -468,8 +476,8 @@ fn a_failed_extraction_removes_its_unfinished_files() {
 #[test]
 fn cleanup_removes_only_the_file_it_created() {
     let _reset = Reset;
-    let noise: Vec<u8> = {
-        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let noise = |seed: u64| -> Vec<u8> {
+        let mut x = seed | 1;
         (0..30_000)
             .map(|_| {
                 x ^= x << 13;
@@ -479,17 +487,33 @@ fn cleanup_removes_only_the_file_it_created() {
             })
             .collect()
     };
-    // `b.bin` is `a.bin`'s first chunk: deduplicated into block 0, so it is created while
-    // `a.bin` still waits for its chunks in the next block.
-    let bytes = files(&[("a.bin", &noise[..]), ("b.bin", &noise[..4096])]);
+    let noise_c = noise(0x5151_7C15);
+    let noise = noise(0x9E37_79B9_7F4A_7C15);
+    // `c.bin` and `b.bin` start with `a.bin`'s first chunk: deduplicated into block 0, so
+    // both are created while `a.bin` (and then `c.bin`) still wait for later chunks.
+    let c: Vec<u8> = noise[..4096]
+        .iter()
+        .chain(&noise_c[..20_000])
+        .copied()
+        .collect();
+    let bytes = files_with(
+        true,
+        &[
+            ("a.bin", &noise[..]),
+            ("c.bin", &c[..]),
+            ("b.bin", &noise[..4096]),
+        ],
+    );
     let d = tempfile::tempdir().unwrap();
     let out = d.path().join("out");
     let o = out.clone();
     let mut first: Option<PathBuf> = None;
     seam::on_before_create(Some(Box::new(move |p: &Path| match &first {
         None => first = Some(p.to_path_buf()),
+        Some(_) if p.ends_with("c.bin") => {}
         Some(f) => {
             assert!(f.ends_with("a.bin"), "{f:?} first");
+            assert!(p.ends_with("b.bin"), "{p:?} third");
             // `a.bin` (open, partial) moved away and replaced; `b.bin` blocked.
             std::fs::rename(f, o.join("a.orig")).unwrap();
             std::fs::write(f, b"swapped in").unwrap();
@@ -505,6 +529,8 @@ fn cleanup_removes_only_the_file_it_created() {
     // The moved original was partial when the failure came (its tail never written).
     let orig = std::fs::read(out.join("a.orig")).unwrap();
     assert_ne!(orig, noise);
+    // The other unfinished file, left in place, was removed: the cleanup ran.
+    assert!(std::fs::symlink_metadata(out.join("c.bin")).is_err());
 }
 
 /// `--overwrite rename` re-checks the name it picked: a 255-unit name taken on disk would

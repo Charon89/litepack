@@ -1027,7 +1027,9 @@ pub(crate) fn policy_pass(
                         if cfg!(windows) {
                             let rel = p
                                 .strip_prefix(dir)
-                                .unwrap_or(&p)
+                                .map_err(|_| {
+                                    CoreError::Extract("a renamed target outside the destination")
+                                })?
                                 .components()
                                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
                                 .collect::<Vec<_>>()
