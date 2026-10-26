@@ -9167,6 +9167,7 @@ Copyright (C) Microsoft Corporation. All rights reserved.
 
 The licence of the Microsoft.Web.WebView2 SDK applies to the loader:
 https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.4314.35/License
+Before any GUI binary is distributed (E7), this section reproduces verbatim the LICENSE.txt of the Microsoft.Web.WebView2 package the loader came from (docs/LICENSING.md).
 
 ================================================================================
 Licences of the crates in lpk-gui (Windows)
