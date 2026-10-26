@@ -45,11 +45,33 @@ fn sz_error(e: sevenz_rust2::Error, encrypted: bool) -> ReaderError {
         E::ExternalUnsupported => {
             ReaderError::new(ErrorCode::Unsupported, "7z: external streams are not read")
         }
-        other if encrypted => ReaderError::new(
+        other if encrypted && is_decode_error(&other) => ReaderError::new(
             ErrorCode::WrongPassword,
             format!("7z: {other} (a wrong password, or damaged data)"),
         ),
         other => ReaderError::corrupt(format!("7z: {other}")),
+    }
+}
+
+/// What decoding with a wrong key produces: the crate's bad-password report, a CRC mismatch,
+/// a malformed (decrypted) header, or a decoder's invalid-data error.
+fn is_decode_error(e: &sevenz_rust2::Error) -> bool {
+    use sevenz_rust2::Error as E;
+    match e {
+        E::MaybeBadPassword(_)
+        | E::ChecksumVerificationFailed
+        | E::NextHeaderCrcMismatch
+        | E::Other(_)
+        | E::BadTerminatedStreamsInfo(_)
+        | E::BadTerminatedUnpackInfo
+        | E::BadTerminatedPackInfo(_)
+        | E::BadTerminatedSubStreamsInfo
+        | E::BadTerminatedHeader(_) => true,
+        E::Io(io, _) => matches!(
+            io.kind(),
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
     }
 }
 
@@ -135,11 +157,17 @@ impl SevenZReader {
                     ));
                 };
                 view.seek(SeekFrom::Start(0))?;
-                Archive::read(&mut view, &password_of(pw)).map_err(|e| match e {
-                    sevenz_rust2::Error::Io(..) | sevenz_rust2::Error::FileOpen(..) => {
+                // Only what a wrong key produces is a wrong password; an unsupported coder
+                // stays unsupported, a read failure an I/O error.
+                Archive::read(&mut view, &password_of(pw)).map_err(|e| {
+                    if is_decode_error(&e) {
+                        ReaderError::new(
+                            ErrorCode::WrongPassword,
+                            format!("wrong password (7z: {e})"),
+                        )
+                    } else {
                         sz_error(e, false)
                     }
-                    _ => ReaderError::new(ErrorCode::WrongPassword, "wrong password"),
                 })?
             }
             Err(e) => return Err(sz_error(e, false)),
@@ -154,7 +182,36 @@ impl SevenZReader {
             running: None,
         };
         r.records = r.build_records()?;
+        r.check_password()?;
         Ok(r)
+    }
+
+    /// With a password and data-only encryption: decode the first piece of the first
+    /// encrypted block now, so a wrong password is refused at `Open` (a decoder error on the
+    /// garbage a wrong key yields) rather than mid-stream; the piece is kept for streaming.
+    /// A wrong key whose garbage decodes without error is caught by the member's CRC later.
+    fn check_password(&mut self) -> Result<(), ReaderError> {
+        if !self.has_password {
+            return Ok(());
+        }
+        let first = self
+            .records
+            .iter()
+            .find(|r| r.flags & FLAG_ENCRYPTED != 0 && r.block != NO_BLOCK)
+            .and_then(|r| usize::try_from(r.block).ok());
+        let Some(b) = first else {
+            return Ok(());
+        };
+        let mut run = self.start(b)?;
+        match run.rx.recv() {
+            Ok(Msg::Failed(e)) => Err(e),
+            Ok(m) => {
+                run.held = Some(m);
+                self.running = Some(run);
+                Ok(())
+            }
+            Err(_) => Err(ReaderError::corrupt("7z: the block ended at once")),
+        }
     }
 
     fn block_encrypted(&self, b: usize) -> bool {

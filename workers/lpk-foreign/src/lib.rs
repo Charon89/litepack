@@ -70,7 +70,7 @@ pub(crate) fn copy_to_sink(
             Ok(0) => return Ok(total),
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(CopyError::Read(e)),
+            Err(e) => return Err(CopyError::Read(e, total)),
         };
         sink(&buf[..n]).map_err(|_| CopyError::Stopped)?;
         total += n as u64;
@@ -80,22 +80,29 @@ pub(crate) fn copy_to_sink(
 /// Why [`copy_to_sink`] stopped early.
 #[derive(Debug)]
 pub(crate) enum CopyError {
-    /// The source failed (damaged data, a checksum, a wrong password).
-    Read(std::io::Error),
+    /// The source failed (damaged data, a checksum, a wrong password) after this many bytes
+    /// were handed to the sink.
+    Read(std::io::Error, u64),
     /// The sink refused more.
     Stopped,
 }
 
 impl CopyError {
-    /// As a reader error: a read failure is `Corrupt` (or `WrongPassword` when `encrypted`).
+    /// As a reader error. A read failure of an encrypted member before its first byte is
+    /// `WrongPassword` (a wrong key fails the first decoded bytes); after output began it is
+    /// `Corrupt`, worded as possibly either (an authentication code or CRC checked at the end
+    /// cannot tell a wrong key from damage). Unencrypted: `Corrupt`.
     pub(crate) fn into_reader(self, what: &str, encrypted: bool) -> ReaderError {
         match self {
             CopyError::Stopped => ReaderError::from(lpk_proto::Stopped),
-            CopyError::Read(e) if encrypted => ReaderError::new(
+            CopyError::Read(e, 0) if encrypted => ReaderError::new(
                 ErrorCode::WrongPassword,
                 format!("{what}: {e} (a wrong password, or damaged data)"),
             ),
-            CopyError::Read(e) => ReaderError::corrupt(format!("{what}: {e}")),
+            CopyError::Read(e, _) if encrypted => {
+                ReaderError::corrupt(format!("{what}: {e} (damaged data, or a wrong password)"))
+            }
+            CopyError::Read(e, _) => ReaderError::corrupt(format!("{what}: {e}")),
         }
     }
 }

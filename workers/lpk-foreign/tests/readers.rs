@@ -163,7 +163,7 @@ fn the_fixtures_are_the_committed_ones() {
         assert_eq!(blake3::hash(&bytes).to_hex().as_str(), hash, "{name}");
         n += 1;
     }
-    assert_eq!(n, 16);
+    assert_eq!(n, 17);
 }
 
 #[test]
@@ -282,6 +282,13 @@ fn named_gaps_are_unsupported() {
         .err()
         .unwrap();
     assert_eq!(e.code, ErrorCode::Unsupported, "{e:?}");
+    // Behind an encrypted header, an unsupported coder is still unsupported with the right
+    // password, and a wrong password is still a wrong password.
+    let p = fixtures().join("7zip-bzip2-gap-aes-header.7z");
+    let e = read_all(&p, "7z", Some(PW)).err().unwrap();
+    assert_eq!(e.code, ErrorCode::Unsupported, "{e:?}");
+    let e = read_all(&p, "7z", Some(b"bad")).err().unwrap();
+    assert_eq!(e.code, ErrorCode::WrongPassword, "{e:?}");
 }
 
 fn write_zip(dir: &Path) -> PathBuf {

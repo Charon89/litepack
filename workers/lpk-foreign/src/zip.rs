@@ -175,12 +175,28 @@ impl ZipReader {
         let Some(pw) = self.password.clone() else {
             return Ok(());
         };
-        let first = self
+        // The smallest encrypted member the crate decrypts: its check byte or verifier first,
+        // then its data decoded (whole when at most 1 MiB, so its CRC-32 or authentication
+        // code is checked too; else its first 64 KiB), since ZipCrypto's check byte lets one
+        // wrong password in 256 through.
+        let smallest = self
             .members
             .iter()
-            .position(|m| m.encrypted && m.method != METHOD_BZIP2 && m.method != METHOD_ZSTD);
-        if let Some(i) = first {
-            self.zip.by_index_decrypt(i, &pw).map_err(zip_error)?;
+            .enumerate()
+            .filter(|(_, m)| m.encrypted && m.method != METHOD_BZIP2 && m.method != METHOD_ZSTD)
+            // An empty member proves nothing under ZipCrypto (no data, CRC 0): last choice.
+            .min_by_key(|(_, m)| (m.size == 0, m.size))
+            .map(|(i, m)| (i, m.size));
+        if let Some((i, size)) = smallest {
+            let mut f = self.zip.by_index_decrypt(i, &pw).map_err(zip_error)?;
+            let limit = if size <= 1 << 20 { u64::MAX } else { 64 << 10 };
+            let mut probe = (&mut f).take(limit);
+            std::io::copy(&mut probe, &mut std::io::sink()).map_err(|e| {
+                ReaderError::new(
+                    ErrorCode::WrongPassword,
+                    format!("wrong password (ZIP: {e})"),
+                )
+            })?;
         }
         Ok(())
     }
