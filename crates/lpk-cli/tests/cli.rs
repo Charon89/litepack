@@ -723,6 +723,166 @@ fn ordering_values_are_checked_and_verbose_reports_the_pass() {
     }
 }
 
+/// The first chunk index of each file in the archive at `path` (the order the fold wrote the
+/// files in), each file checked against `src`.
+fn first_chunks(path: &Path, src: &Path) -> std::collections::BTreeMap<String, u64> {
+    let mut a = Archive::open(fs::File::open(path).unwrap(), &Resources::default()).unwrap();
+    lpk_core::register_full_reader(&mut a);
+    let t = a.entry_table().unwrap();
+    let entries: Vec<_> = t.table().unwrap().iter().map(|e| e.unwrap()).collect();
+    let mut out = std::collections::BTreeMap::new();
+    for e in entries
+        .iter()
+        .filter(|e| e.kind == lpk_format::EntryKind::File)
+    {
+        let mut got = Vec::new();
+        a.extract(e, &mut got).unwrap();
+        assert!(got == fs::read(src.join(&e.path)).unwrap(), "{}", e.path);
+        out.insert(e.path.clone(), e.chunks[0]);
+    }
+    out
+}
+
+/// Two versions of a two-file tree as sibling folders `r1`, `r2`, beside an unrelated folder
+/// whose path sorts between the versions' files (`m/notes.txt`).
+fn make_sibling_roots(root: &Path) {
+    for (v, seed) in [("r1", 10), ("r2", 20)] {
+        fs::create_dir_all(root.join(v).join("sub")).unwrap();
+        fs::write(root.join(v).join("a.txt"), prose(seed, 80_000)).unwrap();
+        fs::write(root.join(v).join("sub/z.txt"), prose(seed + 1, 80_000)).unwrap();
+    }
+    fs::create_dir_all(root.join("m")).unwrap();
+    fs::write(root.join("m/notes.txt"), prose(99, 80_000)).unwrap();
+}
+
+#[test]
+fn the_balanced_tier_orders_versions_by_default_and_ordering_none_restores_path_order() {
+    let src = tempfile::tempdir().unwrap();
+    make_sibling_roots(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let s = src.path().to_str().unwrap();
+    let make = |name: &str, extra: &[&str]| {
+        let arch = work.path().join(name);
+        let mut args = vec!["a", arch.to_str().unwrap(), s, "--balanced", "-v"];
+        args.extend_from_slice(extra);
+        let r = run(&args);
+        assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+        (arch, text(&r.stderr))
+    };
+    // A first walk can see other directory times than the next: settle before comparing.
+    let _settle = make("settle.lpk", &[]);
+    let (default, e) = make("default.lpk", &[]);
+    assert!(e.contains("ordering: versions\n"), "{e}");
+    let (versions, _) = make("versions.lpk", &["--ordering", "versions"]);
+    let (none, e) = make("none.lpk", &["--ordering", "none"]);
+    assert!(e.contains("ordering: none\n"), "{e}");
+    // The default is the versions order, byte for byte.
+    assert!(fs::read(&default).unwrap() == fs::read(&versions).unwrap());
+    // Default: a file's versions next to each other.
+    let d = first_chunks(&default, src.path());
+    let order = [
+        "r1/a.txt",
+        "r2/a.txt",
+        "m/notes.txt",
+        "r1/sub/z.txt",
+        "r2/sub/z.txt",
+    ];
+    for w in order.windows(2) {
+        assert!(
+            d[w[0]] < d[w[1]],
+            "default: {} before {}: {d:?}",
+            w[0],
+            w[1]
+        );
+    }
+    // --ordering none: path order, as before E2-26.
+    let n = first_chunks(&none, src.path());
+    let order = [
+        "m/notes.txt",
+        "r1/a.txt",
+        "r1/sub/z.txt",
+        "r2/a.txt",
+        "r2/sub/z.txt",
+    ];
+    for w in order.windows(2) {
+        assert!(n[w[0]] < n[w[1]], "none: {} before {}: {n:?}", w[0], w[1]);
+    }
+    // The Fast tier keeps path order by default.
+    let arch = work.path().join("fast.lpk");
+    let r = run(&["a", arch.to_str().unwrap(), s, "--fast", "-v"]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert!(
+        text(&r.stderr).contains("ordering: none\n"),
+        "{}",
+        text(&r.stderr)
+    );
+    let f = first_chunks(&arch, src.path());
+    assert!(f["m/notes.txt"] < f["r1/a.txt"] && f["r1/sub/z.txt"] < f["r2/a.txt"]);
+}
+
+#[test]
+fn the_balanced_default_without_sibling_roots_is_byte_identical_to_ordering_none() {
+    let src = tempfile::tempdir().unwrap();
+    fs::create_dir_all(src.path().join("docs/deep")).unwrap();
+    fs::write(src.path().join("a.txt"), prose(1, 200_000)).unwrap();
+    fs::write(src.path().join("docs/b.md"), prose(2, 70_000)).unwrap();
+    fs::write(src.path().join("docs/deep/r.bin"), random(150_000)).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let s = src.path().to_str().unwrap();
+    let make = |name: &str, extra: &[&str]| {
+        let arch = work.path().join(name);
+        let mut args = vec!["a", arch.to_str().unwrap(), s, "--balanced"];
+        args.extend_from_slice(extra);
+        let r = run(&args);
+        assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+        fs::read(&arch).unwrap()
+    };
+    let _settle = make("settle.lpk", &[]);
+    let (default, none) = (make("d.lpk", &[]), make("n.lpk", &["--ordering", "none"]));
+    assert!(default == none, "the archives differ");
+}
+
+#[test]
+fn append_in_the_balanced_tier_orders_the_new_generations_versions_by_default() {
+    let base = tempfile::tempdir().unwrap();
+    fs::write(base.path().join("start.txt"), prose(7, 50_000)).unwrap();
+    let src = tempfile::tempdir().unwrap();
+    make_sibling_roots(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let first = work.path().join("first.lpk");
+    let a = run(&[
+        "a",
+        first.to_str().unwrap(),
+        base.path().to_str().unwrap(),
+        "--balanced",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let s = src.path().to_str().unwrap();
+    let append = |name: &str, extra: &[&str]| {
+        let arch = work.path().join(name);
+        fs::copy(&first, &arch).unwrap();
+        let mut args = vec!["append", arch.to_str().unwrap(), s, "--balanced", "-v"];
+        args.extend_from_slice(extra);
+        let r = run(&args);
+        assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+        (fs::read(&arch).unwrap(), text(&r.stderr))
+    };
+    // A first walk can see other directory times than the next: settle before comparing.
+    let _settle = append("settle.lpk", &[]);
+    let (default, e) = append("default.lpk", &[]);
+    assert!(e.contains("ordering: versions\n"), "{e}");
+    let (versions, _) = append("versions.lpk", &["--ordering", "versions"]);
+    let (none, e) = append("none.lpk", &["--ordering", "none"]);
+    assert!(e.contains("ordering: none\n"), "{e}");
+    // The generation the default writes is the versions order's, byte for byte, and not the
+    // path order's.
+    assert!(
+        default == versions,
+        "default and --ordering versions differ"
+    );
+    assert!(default != none, "default and --ordering none are the same");
+}
+
 #[test]
 fn dedup_is_on_by_default_and_no_dedup_turns_it_off() {
     let src = tempfile::tempdir().unwrap();

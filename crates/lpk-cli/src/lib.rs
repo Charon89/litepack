@@ -515,14 +515,16 @@ struct TierArgs {
     /// This also returns to the fixed 1 MiB cut.
     #[arg(long)]
     no_dedup: bool,
-    /// How files are ordered inside a cluster before they are written: `none` (the default:
-    /// path order, which keeps directory locality), `extension` (by extension, then name, the
-    /// order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least
-    /// half of the smaller one's files are versions: a file's versions are written next to each
-    /// other, in the natural order of the folder names; without such folders, path order).
-    /// Ignored with --no-dedup and --store.
-    #[arg(long, value_enum, value_name = "ORDER", default_value = "none")]
-    ordering: OrderingArg,
+    /// How files are ordered inside a cluster before they are written: `none` (path order,
+    /// which keeps directory locality), `extension` (by extension, then name, the order 7-Zip
+    /// uses for solid archives) or `versions` (sibling folders that share at least half of the
+    /// smaller one's files are versions: a file's versions are written next to each other, in
+    /// the natural order of the folder names; without such folders, path order). Default:
+    /// `versions` with --balanced, `none` with --fast; `--ordering none` restores path order.
+    /// With `append`, the order applies within the new generation only. Ignored with
+    /// --no-dedup and --store.
+    #[arg(long, value_enum, value_name = "ORDER")]
+    ordering: Option<OrderingArg>,
     /// The Deflate peel: Deflate streams inside ZIP, Office, JAR, PNG, gzip and PDF files (and
     /// zlib streams found in other binary files) stored as their plain text plus a
     /// reconstruction record that restores them bit for bit (revision 1.2). Default: on with
@@ -1231,7 +1233,7 @@ fn build_settings(a: &TierArgs, tier: Tier) -> lpk_api::CreateSettings {
         dict_size: a.dict_size,
         no_dictionaries: a.no_dictionaries,
         no_dedup: a.no_dedup,
-        ordering: a.ordering.into(),
+        ordering: a.ordering.map(Into::into),
         deflate_peel: on(a.deflate_peel),
         jpeg_peel: on(a.jpeg_peel),
         bwt: on(a.bwt),
@@ -1437,7 +1439,9 @@ fn report(
         let _ = writeln!(
             err,
             "ordering: {}",
-            lpk_core::FileOrder::from(a.ordering).name()
+            a.ordering
+                .map_or_else(|| tier.default_ordering(), Into::into)
+                .name()
         );
     }
     let p = &s.peel;
