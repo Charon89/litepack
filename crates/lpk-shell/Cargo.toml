@@ -1,0 +1,48 @@
+[package]
+name = "lpk-shell"
+description = "The Explorer context-menu handler (E6-1): an in-process IExplorerCommand that only launches lpk-gui.exe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about (about.toml `private.ignore`) leaves our own crates out of THIRD-PARTY-NOTICES.
+publish = false
+
+[lib]
+# `lpk_shell.dll` on Windows, loaded in process by Explorer (docs/notes/e6-design.md section 1).
+# On other targets the crate is empty and still builds.
+crate-type = ["cdylib"]
+
+# The handler never loads the engine or the webview: no `lpk-*` crate, no Tauri, no WebView2
+# (a unit test in src/lib.rs walks the workspace Cargo.lock from this crate and fails on any of them).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", default-features = false, features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+] }
+windows-core = "=0.62.2"
+
+[dev-dependencies]
+# Reads the workspace Cargo.lock in the no-engine test (src/lib.rs).
+toml = "1.1.6"
+
+# D-120 (E6-1): this crate is the one exception to the workspace's `forbid(unsafe_code)` that is
+# not a `*-sys` or `*-simd` crate. It cannot inherit the workspace table, because no `allow` can
+# relax `forbid`; it denies `unsafe_code` instead, and only the COM boundary module, src/com.rs,
+# carries `#![allow(unsafe_code)]` (docs/UNSAFE.md; scripts/check-unsafe.sh enforces it). Every
+# `unsafe` block carries a `// SAFETY:` comment (denied otherwise). The rest copies the workspace
+# lints, plus the panic lints of the design note: a panic inside Explorer must never unwind out.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
