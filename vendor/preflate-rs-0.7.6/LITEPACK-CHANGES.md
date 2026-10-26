@@ -94,6 +94,63 @@ lists) far beyond what the archive declares.
    below 2^32 - 1: no valid record is affected. For tests, `src/stream_processor.rs` gains the
    hidden function `litepack_record_with_coded_corrections(record, coded)`, exported from
    `src/lib.rs`: the record with its coded correction stream replaced.
+9. **Prediction differences decoded with wrapping arithmetic** (LitePack E4-6, 2026-10-26). In
+   `src/cabac_codec.rs` (this crate's own file; the coder it drives is unchanged),
+   `decode_difference` subtracts and adds with `wrapping_sub`/`wrapping_add`: upstream's `-`
+   and `+` overflow on a crafted correction, which panics in a build with overflow checks (the
+   fuzz build) and wraps in a release build. The release result is unchanged, so no outcome
+   differs from before in a release build and no valid record is affected (a valid record never
+   overflows: the encoder computed the difference from two `u32` values). Found by LitePack's
+   `deflate_recreate` fuzz target; the test `test_encode_decode_difference` checks the wrap.
+10. **A decoded code length above 15 refused** (LitePack E4-6, 2026-10-26). In
+   `src/tree_predictor.rs` (this crate's own file; the coder it drives is unchanged),
+   `reconstruct_ld_trees` returns `ExitCode::RecompressFailed` when a decoded code-length code
+   (`TreeCodeType::Code`) is above 15: upstream kept it, and `calc_codetree_freq` then indexed
+   past its 19 frequencies (a panic). Deflate's code lengths are 0 to 15, so no valid record is
+   affected. Found by LitePack's `deflate_recreate` fuzz target; its input is in
+   `fuzz/seeds/deflate_recreate/`.
+11. **A decoded repeat count past the remaining symbols refused** (LitePack E4-6, 2026-10-26). In
+   `src/tree_predictor.rs` (this crate's own file; the coder it drives is unchanged),
+   `reconstruct_ld_trees` takes the rest of the symbols with `get(n..)` and returns
+   `ExitCode::RecompressFailed` when a decoded repeat count runs past them: upstream sliced
+   `&symbols[n..]`, which panics out of range. A valid record's repeat counts stay within the
+   symbols (the encoder derived them from them), so no valid record is affected. Found by the
+   review of LitePack's E4-6.
+12. **Tree counts bounded before they size a vector** (LitePack, 2026-10-26; found by the fuzz
+   target `deflate_recreate`, run 40270390275). In `recreate_tree_for_block`
+   (`src/tree_predictor.rs`) the decoded literal count, distance count and code-length count are
+   checked against the ranges a Deflate header can carry (257 to 288, 1 to 32, 4 to 19, as the
+   reader in `src/deflate/huffman_encoding.rs` reads HLIT, HDIST and HCLEN) and refused
+   (`ExitCode::InvalidPredictionData`) otherwise, before the code-length vectors are resized.
+   Upstream resized them to the decoded value: a crafted correction (one that wraps below zero,
+   change 9, or simply adds 2^26) made a single `resize` allocate up to 4 GiB, past the limited
+   recreation's `limit + 8` writer. Every count the analysis records comes from a header the
+   reader accepted, so no valid record is affected. It applies to both recreation functions.
+   `src/stream_processor.rs`'s `litepack_crafted` module gains the ignored test
+   `write_crafted_counts_record`, which writes the crafted record of `lpk-core`'s test
+   `tests/deflate_recreate_fuzz.rs` (with a counting allocator).
+13. **Decoded table counts kept to what a Deflate header holds** (LitePack E4-6, 2026-10-26). Its
+   `src/tree_predictor.rs` part (the code-length count outside 4 to 19 in
+   `recreate_tree_for_block`) is covered by change 12, which checks before the resize; what
+   remains of change 13 is in `src/deflate/huffman_encoding.rs`: `HuffmanOriginalEncoding::write` refuses a literal
+   count outside 257 to 288, a distance count outside 1 to 32 or a code-length count outside 4
+   to 19 (the subtractions that write HLIT, HDIST and HCLEN overflowed). These are the ranges
+   the header's fields can hold, so no valid record is affected. Both files are this crate's
+   own; the coder is unchanged. Found by the regression test below.
+14. **Values kept to their fields' widths** (LitePack E4-6, 2026-10-26). In
+   `src/deflate/huffman_encoding.rs`, `HuffmanOriginalEncoding::write` also refuses
+   (`ExitCode::RecompressFailed`) a code-length code above 7 (written in 3 bits), a code length
+   above 15, and a repeat count outside its code's range (3 to 6, 3 to 10, 11 to 138): a wider
+   value spilled into the next field (`BitWriter::write`'s debug assertion; in a release build,
+   other bytes). A valid header holds only such values, so no valid record is affected. Found
+   by LitePack's `deflate_recreate` fuzz target (fuzz run 40272877553); its input is in
+   `fuzz/seeds/deflate_recreate/`.
+
+The workspace runs the regression test of changes 9 to 11, 13 and 14 (the vendored crate's own tests are not
+run): `lpk-core`'s `crafted_corrections_do_not_panic` (`src/peel/deflate/decode.rs`) feeds the
+`deflate_recreate` seed and a deterministic sweep of crafted correction streams to
+`recreate_whole_deflate_stream_limited_report` and fails on any overflow or out-of-range panic.
+Change 12's test is `lpk-core`'s `tests/deflate_recreate_fuzz.rs`.
 
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.
