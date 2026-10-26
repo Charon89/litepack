@@ -101,6 +101,15 @@ jobs:
           exe="$(ls -t target/$t/release/deps/foreign_worker-*.exe | head -n 1)"
           cp "$exe" arm64/broker/deps/foreign_worker.exe
           cp "target/$t/release/lpk-test-worker.exe" arm64/broker/
+      # E6-1: the Explorer handler for ARM64 Explorer (the DLL must match Explorer's architecture,
+      # docs/notes/e6-design.md section 1), linted with -D warnings for this target too
+      # (`unsafe_code` denied crate-wide, `undocumented_unsafe_blocks` denied).
+      - name: Explorer handler (lpk_shell.dll) for aarch64-pc-windows-msvc
+        run: |
+          t=aarch64-pc-windows-msvc
+          cargo clippy --locked --release --target "$t" -p lpk-shell --all-targets -- -D warnings
+          cargo build --locked --release --target "$t" -p lpk-shell
+          cp "target/$t/release/lpk_shell.dll" arm64/
       # BLAKE3 on the ARM64 runner, independent of lpk: b3sum, cross-built (a CI tool, not shipped).
       - name: b3sum for aarch64-pc-windows-msvc
         run: |
@@ -130,7 +139,7 @@ jobs:
       - name: The binaries are ARM64 (PE machine 0xAA64)
         working-directory: arm64
         run: |
-          for b in lpk.exe lpk-check.exe lpk-worker.exe broker/lpk-test-worker.exe b3sum.exe; do
+          for b in lpk.exe lpk-check.exe lpk-worker.exe broker/lpk-test-worker.exe b3sum.exe lpk_shell.dll; do
             pe=$(od -An -tu4 -j60 -N4 "$b" | tr -d ' ')
             m=$(od -An -tx2 -j$((pe + 4)) -N2 "$b" | tr -d ' ')
             echo "$b: machine 0x$m"

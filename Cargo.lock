@@ -2758,6 +2758,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpk-shell"
+version = "0.0.1"
+dependencies = [
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "lpk-test-worker"
 version = "0.0.1"
 dependencies = [

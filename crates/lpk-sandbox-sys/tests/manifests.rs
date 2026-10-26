@@ -1,15 +1,24 @@
-//! E4-1's manifest check: `unsafe` is allowed only in the `-sys` crates CLAUDE.md names; every
-//! other workspace crate inherits the workspace lints (`unsafe_code = "forbid"`).
+//! E4-1's manifest check: `unsafe` is allowed only in the `-sys` crates CLAUDE.md names and in
+//! `lpk-shell`'s COM boundary module (E6-1); every other workspace crate inherits the workspace
+//! lints (`unsafe_code = "forbid"`).
 
 use std::path::Path;
 
-/// Crates allowed `unsafe` (CLAUDE.md: `*-sys` and `*-simd`); a new one is a reviewed change here.
+/// Crates allowed `unsafe` (CLAUDE.md: `*-sys` and `*-simd`, plus [`BOUNDARY_ONLY`]); a new one
+/// is a reviewed change here.
 const ALLOWED: &[&str] = &[
     "lpk-fs-sys",
     "lpk-gui-sys",
     "lpk-procstat-sys",
     "lpk-sandbox-sys",
+    // E6-1's exception (docs/UNSAFE.md): the Explorer handler's COM boundary module,
+    // `crates/lpk-shell/src/com.rs`, is the only place of the crate allowed `unsafe`.
+    "lpk-shell",
 ];
+
+/// Allowed crates that are not `-sys` crates: their manifest denies `unsafe_code` crate-wide
+/// (it cannot inherit the workspace's `forbid`, which no `allow` relaxes), and one module opts in.
+const BOUNDARY_ONLY: &[&str] = &["lpk-shell"];
 
 #[test]
 fn only_the_sys_crates_allow_unsafe() {
@@ -34,7 +43,14 @@ fn only_the_sys_crates_allow_unsafe() {
         let inherits = manifest.contains("[lints]\nworkspace = true")
             || manifest.contains("[lints]\r\nworkspace = true");
         if ALLOWED.contains(&name.as_str()) {
-            assert!(name.ends_with("-sys") || name.ends_with("-simd"), "{name}");
+            if BOUNDARY_ONLY.contains(&name.as_str()) {
+                assert!(
+                    manifest.contains("unsafe_code = \"deny\""),
+                    "{name} must deny unsafe_code crate-wide"
+                );
+            } else {
+                assert!(name.ends_with("-sys") || name.ends_with("-simd"), "{name}");
+            }
             assert!(
                 manifest.contains("undocumented_unsafe_blocks"),
                 "{name} must lint undocumented unsafe blocks"
