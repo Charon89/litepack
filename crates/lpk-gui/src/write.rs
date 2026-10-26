@@ -557,6 +557,104 @@ mod tests {
         assert_eq!(s.info().latest_generation, 2);
     }
 
+    fn records(j: &Journal) -> usize {
+        std::fs::read_dir(j.dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .count()
+    }
+
+    /// An archive of two generations with a stale record naming generation 0.
+    fn two_generations(d: &Path, j: &Journal) -> (PathBuf, u64) {
+        let src = tree(d, 2);
+        let more = d.join("more");
+        std::fs::create_dir_all(&more).unwrap();
+        std::fs::write(more.join("one.bin"), vec![1u8; 3000]).unwrap();
+        let a = d.join("a.lpk");
+        create_archive(&sources(&src), &a, &store(), &Monitor::default(), None).unwrap();
+        let gen0_len = std::fs::metadata(&a).unwrap().len();
+        append_archive(&a, &more, &store(), None, &Monitor::default(), None).unwrap();
+        j.add(&Record::Append {
+            path: a.clone(),
+            identity: Identity(path_identity(&a).unwrap()),
+            generation: 0,
+        })
+        .unwrap()
+        .keep();
+        (a, gen0_len)
+    }
+
+    #[test]
+    fn a_damaged_chain_is_left_untouched_with_its_record() {
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, gen0_len) = two_generations(d.path(), &j);
+        // Damage generation 0's trailer: the tail (generation 1) still reads, the chain does not.
+        let mut bytes = std::fs::read(&a).unwrap();
+        bytes[gen0_len as usize - 40] ^= 0xFF;
+        std::fs::write(&a, &bytes).unwrap();
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert!(
+            matches!(&got[..], [Recovered::Left { reason, .. }] if *reason == crate::journal::CHAIN_UNREADABLE),
+            "{got:?}"
+        );
+        assert_eq!(std::fs::read(&a).unwrap(), bytes, "byte for byte");
+        assert_eq!(records(&j), 1, "the record stays for a later start");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_held_archive_is_left_untouched_with_its_record() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, _) = two_generations(d.path(), &j);
+        let before = std::fs::read(&a).unwrap();
+        // Another process holds it open with no sharing: it cannot even be opened.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&a)
+            .unwrap();
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert!(
+            matches!(&got[..], [Recovered::Left { reason, .. }] if *reason == crate::journal::UNREADABLE),
+            "{got:?}"
+        );
+        assert_eq!(records(&j), 1, "the record stays for a later start");
+        drop(held);
+        assert_eq!(std::fs::read(&a).unwrap(), before, "byte for byte");
+        // Once released, a later start decides: the append had committed.
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert_eq!(got, [Recovered::Committed(a.clone())]);
+        assert_eq!(records(&j), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unopenable_archive_is_left_untouched_with_its_record() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, _) = two_generations(d.path(), &j);
+        let before = std::fs::read(&a).unwrap();
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&a).is_ok() {
+            // Running as root: permissions do not stop it; nothing to show here.
+            std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert!(
+            matches!(&got[..], [Recovered::Left { reason, .. }] if *reason == crate::journal::UNREADABLE),
+            "{got:?}"
+        );
+        assert_eq!(records(&j), 1, "the record stays for a later start");
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), before, "byte for byte");
+    }
+
     #[test]
     fn archive_names_are_plain_file_names() {
         assert_eq!(archive_name("photos").unwrap(), "photos.lpk");

@@ -217,10 +217,15 @@ impl Journal {
             let record = std::fs::read(&p)
                 .ok()
                 .and_then(|text| serde_json::from_slice::<Record>(&text).ok());
+            let mut keep = false;
             if let Some(r) = record {
-                out.push(recover_one(&r));
+                let done = recover_one(&r);
+                keep = keeps_record(&done);
+                out.push(done);
             }
-            let _ = std::fs::remove_file(&p);
+            if !keep {
+                let _ = std::fs::remove_file(&p);
+            }
             if let Some(f) = lock {
                 let _ = f.unlock();
                 drop(f);
@@ -231,11 +236,22 @@ impl Journal {
     }
 }
 
+/// Why a record is left on disk for a later start: the file could not be read (held by another
+/// process), its trailer chain could not be read, or it has fewer generations than recorded.
+pub(crate) const UNREADABLE: &str = "unreadable";
+pub(crate) const CHAIN_UNREADABLE: &str = "trailer chain unreadable";
+pub(crate) const BEHIND: &str = "fewer generations than recorded";
+
+/// Whether the record of `r` stays on disk (nothing was decided about its file).
+fn keeps_record(r: &Recovered) -> bool {
+    matches!(r, Recovered::Left { reason, .. } if [UNREADABLE, CHAIN_UNREADABLE, BEHIND].contains(reason))
+}
+
 fn same_file(path: &Path, id: &Identity) -> Result<bool, &'static str> {
     match path_identity(path) {
         Ok(now) => Ok(now == id.0),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("gone"),
-        Err(_) => Err("unreadable"),
+        Err(_) => Err(UNREADABLE),
     }
 }
 
@@ -272,28 +288,31 @@ fn recover_one(r: &Record) -> Recovered {
             generation,
         } => match same_file(path, identity) {
             Ok(true) => {
-                // An archive that opens past the recorded generation has the append committed
-                // (and maybe later generations, appended after this process died): nothing is
-                // written. Still at the recorded generation, or not opening at all (the append
-                // was cut short), it is cut back to the recorded generation.
-                let latest = lpk_api::Session::open(path, &lpk_api::OpenOptions::default())
-                    .map(|s| {
-                        let g = s.info().latest_generation;
-                        let _ = s.close();
-                        g
-                    })
-                    .ok();
-                if latest.is_some_and(|g| g > *generation) {
-                    return Recovered::Committed(path.clone());
-                }
-                match lpk_api::rollback(path, *generation) {
-                    Ok(g) => Recovered::RolledBack {
-                        path: path.clone(),
-                        generation: g.generation,
+                // The latest committed generation, from the trailer chain `rollback` reads.
+                // Past the recorded one: the append committed (and maybe later generations,
+                // appended after this process died): nothing is written. Equal: the append
+                // never committed and at most a torn tail follows: cut back to it. Anything
+                // else (the chain unreadable, an unsupported version, fewer generations than
+                // recorded): nothing is touched and the record stays for a later start.
+                match lpk_api::committed_generation(path) {
+                    Ok(g) if g > *generation => Recovered::Committed(path.clone()),
+                    Ok(g) if g == *generation => match lpk_api::rollback(path, *generation) {
+                        Ok(g) => Recovered::RolledBack {
+                            path: path.clone(),
+                            generation: g.generation,
+                        },
+                        Err(e) => Recovered::Failed {
+                            path: path.clone(),
+                            error: e.to_string(),
+                        },
                     },
-                    Err(e) => Recovered::Failed {
+                    Ok(_) => Recovered::Left {
                         path: path.clone(),
-                        error: e.to_string(),
+                        reason: BEHIND,
+                    },
+                    Err(_) => Recovered::Left {
+                        path: path.clone(),
+                        reason: CHAIN_UNREADABLE,
                     },
                 }
             }
