@@ -6,8 +6,11 @@
 //! lpk-bench run --tools <list|all> --profile <small|full> [--corpus DIR] [--classes a,b]
 //!               [--repeats N] [--threads N] [--timeout-s N] [--results DIR] [--tmp DIR]
 //!               [--allow-dirty-build] [--keep-failed on|off] [--tar auto|system|lpk-bench]
+//!               [--settings a,b]
 //!               (the measuring loop, [`exec`])
 //! lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]   ([`compare`])
+//! lpk-bench run --compare-sizes <golden-dir|bench/ci-golden.toml> <dir> [--max-growth-pct 1]
+//!               (the size-regression gate of E8-2, [`size`])
 //! lpk-bench tar -cf A -C DIR . | -cf A -T LIST | -xf A -C DIR   (hidden; [`harness_tar`])
 //! ```
 //!
@@ -31,6 +34,7 @@ pub mod exec;
 pub mod harness_tar;
 pub mod host;
 pub mod result;
+pub mod size;
 pub mod validate;
 
 use catalogue::{Catalogue, Local};
@@ -49,7 +53,11 @@ pub struct RunArgs {
     /// Validate a results directory against bench/results/schema.json and exit
     #[arg(long, value_name = "DIR")]
     pub validate: Option<PathBuf>,
-    /// Corpus profile, `small` or `full`: selects bench/corpus/<profile> (default: small)
+    /// Only these setting ids of the selected tools, comma-separated (default: every setting);
+    /// an id no selected tool has is an error
+    #[arg(long, value_delimiter = ',')]
+    pub settings: Vec<String>,
+    /// Corpus profile, `small`, `full` or `ci`: selects bench/corpus/<profile> (default: small)
     #[arg(long)]
     pub profile: Option<String>,
     /// Corpus directory holding manifest.json (default: bench/corpus/<profile>)
@@ -119,6 +127,15 @@ pub struct RunArgs {
     /// Largest accepted time difference for --compare, in percent
     #[arg(long, value_name = "PERCENT", default_value_t = compare::DEFAULT_MAX_DIFF_PCT)]
     pub max_diff_pct: f64,
+    /// Size-regression gate (E8-2): compare the median archive bytes of every row of a golden
+    /// results directory (or of the directory a pointer file such as bench/ci-golden.toml names)
+    /// with a new results directory; fails when an archive grew by more than --max-growth-pct or
+    /// a row is missing on either side, and exits
+    #[arg(long, num_args = 2, value_names = ["GOLDEN", "NEW_DIR"])]
+    pub compare_sizes: Vec<PathBuf>,
+    /// Largest accepted archive growth for --compare-sizes, in percent
+    #[arg(long, value_name = "PERCENT", default_value_t = size::DEFAULT_MAX_GROWTH_PCT)]
+    pub max_growth_pct: f64,
     /// Tool catalogue
     #[arg(long, value_name = "FILE", default_value = DEFAULT_CATALOGUE)]
     pub catalogue: PathBuf,
@@ -158,6 +175,35 @@ pub fn select(cat: &Catalogue, wanted: &[String]) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Keep only the `wanted` settings of the tools in `ids` (every setting when `wanted` is empty);
+/// an id that none of those tools has is an error.
+pub fn filter_settings(
+    discovered: &mut [discover::Discovered],
+    ids: &[String],
+    wanted: &[String],
+) -> Result<()> {
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let mut found = std::collections::BTreeSet::new();
+    for d in discovered.iter_mut().filter(|d| ids.contains(&d.tool.id)) {
+        d.tool.settings.retain(|s| wanted.contains(&s.id));
+        found.extend(d.tool.settings.iter().map(|s| s.id.clone()));
+    }
+    let missing: Vec<&str> = wanted
+        .iter()
+        .filter(|w| !found.contains(*w))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "--settings: no selected tool has setting(s) {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn list_tools(args: &RunArgs) -> Result<()> {
     let (cat, local) = load_catalogue(&args.catalogue, &args.local)?;
     let ids = select(&cat, &args.tools)?;
@@ -176,8 +222,18 @@ fn list_tools(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
-fn validate_cmd(dir: &Path) -> Result<ExitCode> {
-    let report = validate::validate_dir(dir)?;
+fn validate_cmd(dir: &Path, corpus: Option<&Path>) -> Result<ExitCode> {
+    let mut report = validate::validate_dir(dir)?;
+    // E8-10: each row's class digest against the corpus manifest, when that corpus is present.
+    let digests = validate::check_class_digests(dir, corpus)?;
+    report.notes.extend(digests.notes);
+    report.problems.extend(digests.problems);
+    if digests.results > 0 {
+        report.notes.push(format!(
+            "{} row(s)' class digests match their corpus manifest",
+            digests.results
+        ));
+    }
     for n in &report.notes {
         println!("note: {n}");
     }
@@ -219,7 +275,7 @@ pub fn tar(args: TarArgs) -> ExitCode {
 
 pub fn run(args: RunArgs) -> ExitCode {
     if let Some(dir) = &args.validate {
-        return match validate_cmd(dir) {
+        return match validate_cmd(dir, args.corpus.as_deref()) {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -231,6 +287,8 @@ pub fn run(args: RunArgs) -> ExitCode {
         list_tools(&args).map(|()| ExitCode::SUCCESS)
     } else if let [a, b] = args.compare.as_slice() {
         compare::compare_command(a, b, args.max_diff_pct)
+    } else if let [golden, new] = args.compare_sizes.as_slice() {
+        size::compare_sizes_command(golden, new, args.max_growth_pct)
     } else {
         exec::measure_command(&args)
     };
@@ -240,5 +298,57 @@ pub fn run(args: RunArgs) -> ExitCode {
             eprintln!("error: {e:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn discovered() -> Vec<discover::Discovered> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/tools.toml");
+        let cat = Catalogue::load(&path).expect("catalogue");
+        cat.tools
+            .iter()
+            .map(|t| discover::Discovered {
+                tool: t.clone(),
+                status: discover::Status::Skipped {
+                    reason: "test".into(),
+                },
+                local_override: false,
+            })
+            .collect()
+    }
+
+    fn lpk_settings(d: &[discover::Discovered]) -> Vec<String> {
+        d.iter()
+            .find(|x| x.tool.id == "lpk")
+            .expect("lpk")
+            .tool
+            .settings
+            .iter()
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn settings_filter_keeps_the_named_settings_of_the_selected_tools() {
+        let ids = vec!["lpk".to_string()];
+        let mut d = discovered();
+        let wanted: Vec<String> = ["store", "fast", "balanced"].map(String::from).to_vec();
+        filter_settings(&mut d, &ids, &wanted).expect("filter");
+        // Catalogue order is kept.
+        assert_eq!(lpk_settings(&d), ["fast", "balanced", "store"]);
+        // Tools that are not selected are untouched.
+        let zstd = d.iter().find(|x| x.tool.id == "zstd").expect("zstd");
+        assert_eq!(zstd.tool.settings.len(), 3);
+        // An id no selected tool has is an error.
+        let mut d = discovered();
+        assert!(filter_settings(&mut d, &ids, &["mx5".to_string()]).is_err());
+        // No filter keeps every setting.
+        let mut d = discovered();
+        let before = lpk_settings(&d);
+        filter_settings(&mut d, &ids, &[]).expect("none");
+        assert_eq!(lpk_settings(&d), before);
     }
 }

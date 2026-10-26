@@ -214,6 +214,67 @@ pub fn list_entries(
     Ok(())
 }
 
+/// `lpk l` over the engine API (E5-1): the session's [`lpk_api::Session::for_each`] streams
+/// the entries (none collected: the reader's open plus a write buffer, E3-1's bound) and each
+/// is written as it comes, in the shapes above (an `.lpk` with `--long` starts with its
+/// generation line; a foreign archive has none). A pattern matching nothing is refused before
+/// any line; an API error becomes a failure through `fail`, a write error is `Io`.
+pub fn list_session<F>(
+    session: &lpk_api::Session,
+    options: ListOptions,
+    select: Selection,
+    out: &mut dyn Write,
+    fail: F,
+) -> Result<(), crate::Failure>
+where
+    F: Fn(lpk_api::Error) -> crate::Failure,
+{
+    let header = options.long && !options.json && !session.info().foreign;
+    let generation = session.info().generation;
+    let mut w = BufWriter::new(out);
+    let mut started = false;
+    let mut io: Option<std::io::Error> = None;
+    let selection = if select.is_all() {
+        lpk_api::Selection::All
+    } else {
+        lpk_api::Selection::Globs(select)
+    };
+    let r = session.for_each(&selection, &mut |e| {
+        let line = (|| {
+            if !started {
+                started = true;
+                if header {
+                    writeln!(w, "generation\t{generation}")?;
+                }
+            }
+            if options.json {
+                json_line(&mut w, e.entry(), e.generation)
+            } else {
+                text_line(&mut w, e.entry(), options.long)
+            }
+        })();
+        match line {
+            Ok(()) => std::ops::ControlFlow::Continue(()),
+            Err(x) => {
+                io = Some(x);
+                std::ops::ControlFlow::Break(())
+            }
+        }
+    });
+    let path = session.path().to_path_buf();
+    let io_failure =
+        |e: std::io::Error| fail(lpk_api::Error::format(FormatError::Io(e), Some(&path)));
+    r.map_err(&fail)?;
+    if let Some(e) = io {
+        return Err(io_failure(e));
+    }
+    if !started && header {
+        writeln!(w, "generation\t{generation}").map_err(io_failure)?;
+    }
+    w.flush().map_err(io_failure)?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

@@ -13,12 +13,13 @@
 //! present only when there are some.
 //!
 //! The classification is an exhaustive match over every variant of [`CoreError`] and
-//! [`FormatError`], so a variant added to either enum does not compile until it is placed.
+//! [`FormatError`] (in `lpk_api::error` since E5-1, re-exported here), so a variant added to
+//! either enum does not compile until it is placed.
 
 use std::io::Write;
 use std::path::Path;
 
-use lpk_core::{CoreError, ForeignError, WorkerError};
+use lpk_core::CoreError;
 use lpk_format::FormatError;
 
 use crate::{EXIT_FAILED, EXIT_USAGE};
@@ -139,279 +140,32 @@ impl Failure {
     }
 }
 
-/// The exit code of a pipeline error: 1 for an option the engine refused (a usage error
-/// found after parsing), 2 for everything else (D-48). Every variant placed by name.
-pub fn core_exit(e: &CoreError) -> i32 {
-    match e {
-        CoreError::InvalidOption(_) => EXIT_USAGE,
-        CoreError::Format(inner) => format_exit(inner),
-        CoreError::Io { .. }
-        | CoreError::UnportableName { .. }
-        | CoreError::SpecialFile { .. }
-        | CoreError::DuplicatePath { .. }
-        | CoreError::ChangedWhileReading { .. }
-        | CoreError::Decode { .. }
-        | CoreError::Extract(_)
-        | CoreError::Export { .. }
-        | CoreError::InTheWay { .. }
-        | CoreError::CaseCollision { .. }
-        | CoreError::NoMatch { .. }
-        | CoreError::NotADirectory { .. }
-        | CoreError::Cancelled
-        | CoreError::AppendLeftCut { .. }
-        | CoreError::Foreign(_)
-        | CoreError::Worker(_) => EXIT_FAILED,
-    }
-}
+// The classification lives in `lpk-api` (E5-1: the GUI and the command line report the same
+// kinds and codes); these names stay so the CLI's callers and tests are unchanged.
+pub use lpk_api::error::{
+    core_class, core_exit, core_kind, core_path, foreign_kind, format_class, format_exit,
+    format_kind, format_path, worker_kind,
+};
 
-/// The exit code of a format error: always 2 (an archive, a key or an I/O failure, never
-/// the command line). Every variant placed by name.
-pub fn format_exit(e: &FormatError) -> i32 {
-    match e {
-        FormatError::BadMagic
-        | FormatError::UnsupportedMajor { .. }
-        | FormatError::ReservedHeaderBits { .. }
-        | FormatError::BadHeaderFlags { .. }
-        | FormatError::ReservedFrameBits { .. }
-        | FormatError::InvalidKind
-        | FormatError::NonCanonicalVarint
-        | FormatError::VarintTooLong
-        | FormatError::Truncated { .. }
-        | FormatError::HashMismatch { .. }
-        | FormatError::UnknownMustUnderstand { .. }
-        | FormatError::PayloadTooLarge { .. }
-        | FormatError::UnsortedEntries { .. }
-        | FormatError::DuplicateEntry { .. }
-        | FormatError::UnsupportedEntryKind { .. }
-        | FormatError::ReservedEntryBits { .. }
-        | FormatError::InvalidPath { .. }
-        | FormatError::InconsistentEntry { .. }
-        | FormatError::TrailingBytes { .. }
-        | FormatError::ChunkMismatch { .. }
-        | FormatError::ChunkIndexOutOfRange { .. }
-        | FormatError::FileSizeMismatch { .. }
-        | FormatError::RangeOutOfFile { .. }
-        | FormatError::MerkleRootMismatch
-        | FormatError::IndexHashMismatch
-        | FormatError::ArchiveIdMismatch
-        | FormatError::BlockLengthMismatch { .. }
-        | FormatError::BlockCoverage { .. }
-        | FormatError::BlockOutOfRange { .. }
-        | FormatError::WrongFrameKind { .. }
-        | FormatError::NoTrailer
-        | FormatError::BadGenerationTable { .. }
-        | FormatError::BadTrailer { .. }
-        | FormatError::NoSuchGeneration { .. }
-        | FormatError::AppendNeedsCredentials
-        | FormatError::GenerationMismatch { .. }
-        | FormatError::BadFrameLocation { .. }
-        | FormatError::Refused(_)
-        | FormatError::EnvelopeMismatch { .. }
-        | FormatError::UnknownPrimitive { .. }
-        | FormatError::UnimplementedPrimitive { .. }
-        | FormatError::BadGraph { .. }
-        | FormatError::BadParams { .. }
-        | FormatError::UnknownRecordKind { .. }
-        | FormatError::ReservedRecordBits { .. }
-        | FormatError::RecordHashMismatch { .. }
-        | FormatError::RecordOutOfRange { .. }
-        | FormatError::BadRecord { .. }
-        | FormatError::MissingPrior { .. }
-        | FormatError::UnlistedPrior { .. }
-        | FormatError::BadPriorList { .. }
-        | FormatError::WindowTooLarge { .. }
-        | FormatError::ZstdError { .. }
-        | FormatError::LzmaError { .. }
-        | FormatError::BwtError { .. }
-        | FormatError::BadOptions { .. }
-        | FormatError::BadChunk { .. }
-        | FormatError::BadRecovery { .. }
-        | FormatError::Unrepairable { .. }
-        | FormatError::DamageFound { .. }
-        | FormatError::RecoveryError { .. }
-        | FormatError::UnsafePath { .. }
-        | FormatError::SymlinkRefused { .. }
-        | FormatError::PasswordRequired
-        | FormatError::WrongKey
-        | FormatError::AuthenticationFailed { .. }
-        | FormatError::UnexpectedSealedFrame { .. }
-        | FormatError::UnsealedFrame { .. }
-        | FormatError::UnexpectedKeySlot
-        | FormatError::MissingKeySlot
-        | FormatError::BadKeySlot { .. }
-        | FormatError::BadArgon2 { .. }
-        | FormatError::EntryTableMismatch
-        | FormatError::SealFailed { .. }
-        | FormatError::Io(_) => EXIT_FAILED,
-    }
-}
-
-/// The variant name of a pipeline error (the inner name for the transparent `Format`).
-pub fn core_kind(e: &CoreError) -> &'static str {
-    match e {
-        CoreError::Format(inner) => format_kind(inner),
-        CoreError::Io { .. } => "Io",
-        CoreError::UnportableName { .. } => "UnportableName",
-        CoreError::SpecialFile { .. } => "SpecialFile",
-        CoreError::DuplicatePath { .. } => "DuplicatePath",
-        CoreError::ChangedWhileReading { .. } => "ChangedWhileReading",
-        CoreError::InvalidOption(_) => "InvalidOption",
-        CoreError::Decode { .. } => "Decode",
-        CoreError::Extract(_) => "Extract",
-        CoreError::Export { .. } => "Export",
-        CoreError::InTheWay { .. } => "InTheWay",
-        CoreError::CaseCollision { .. } => "CaseCollision",
-        CoreError::NoMatch { .. } => "NoMatch",
-        CoreError::NotADirectory { .. } => "NotADirectory",
-        CoreError::Cancelled => "Cancelled",
-        CoreError::AppendLeftCut { .. } => "AppendLeftCut",
-        CoreError::Foreign(inner) => foreign_kind(inner),
-        CoreError::Worker(inner) => worker_kind(inner),
-    }
-}
-
-/// The variant name of a foreign-archive error (the inner name, as for `Format`).
-pub fn foreign_kind(e: &ForeignError) -> &'static str {
-    match e {
-        ForeignError::UnknownFormat => "UnknownFormat",
-        ForeignError::Unsupported { .. } => "Unsupported",
-        ForeignError::Corrupt { .. } => "Corrupt",
-        ForeignError::SizeMismatch { .. } => "SizeMismatch",
-        ForeignError::OverlappingEntries { .. } => "OverlappingEntries",
-        ForeignError::LimitExceeded { .. } => "LimitExceeded",
-        ForeignError::NoSpace { .. } => "NoSpace",
-    }
-}
-
-/// The variant name of a worker error (the inner name, as for `Format`).
-pub fn worker_kind(e: &WorkerError) -> &'static str {
-    match e {
-        WorkerError::Spawn { .. } => "Spawn",
-        WorkerError::Sandbox { .. } => "Sandbox",
-        WorkerError::Denied { .. } => "Denied",
-        WorkerError::Crashed { .. } => "Crashed",
-        WorkerError::Panicked { .. } => "Panicked",
-        WorkerError::MemoryLimit { .. } => "MemoryLimit",
-        WorkerError::CpuLimit { .. } => "CpuLimit",
-        WorkerError::Timeout { .. } => "Timeout",
-        WorkerError::Protocol { .. } => "Protocol",
-        WorkerError::Pipe { .. } => "Pipe",
-        WorkerError::BuildMismatch { .. } => "BuildMismatch",
-    }
-}
-
-/// The path a pipeline error names, when it names one.
-pub fn core_path(e: &CoreError) -> Option<String> {
-    match e {
-        CoreError::Format(inner) => format_path(inner),
-        CoreError::Io { path, .. }
-        | CoreError::SpecialFile { path }
-        | CoreError::ChangedWhileReading { path }
-        | CoreError::NotADirectory { path }
-        | CoreError::InTheWay { path, .. }
-        | CoreError::Export { path, .. }
-        | CoreError::AppendLeftCut { path, .. } => Some(path.display().to_string()),
-        CoreError::UnportableName { path, .. }
-        | CoreError::DuplicatePath { path }
-        | CoreError::CaseCollision { first: path, .. }
-        | CoreError::Decode { path, .. } => Some(path.clone()),
-        CoreError::InvalidOption(_)
-        | CoreError::Extract(_)
-        | CoreError::NoMatch { .. }
-        | CoreError::Cancelled
-        | CoreError::Foreign(_)
-        | CoreError::Worker(_) => None,
-    }
-}
-
-/// The variant name of a format error.
-pub fn format_kind(e: &FormatError) -> &'static str {
-    match e {
-        FormatError::BadMagic => "BadMagic",
-        FormatError::UnsupportedMajor { .. } => "UnsupportedMajor",
-        FormatError::ReservedHeaderBits { .. } => "ReservedHeaderBits",
-        FormatError::BadHeaderFlags { .. } => "BadHeaderFlags",
-        FormatError::ReservedFrameBits { .. } => "ReservedFrameBits",
-        FormatError::InvalidKind => "InvalidKind",
-        FormatError::NonCanonicalVarint => "NonCanonicalVarint",
-        FormatError::VarintTooLong => "VarintTooLong",
-        FormatError::Truncated { .. } => "Truncated",
-        FormatError::HashMismatch { .. } => "HashMismatch",
-        FormatError::UnknownMustUnderstand { .. } => "UnknownMustUnderstand",
-        FormatError::PayloadTooLarge { .. } => "PayloadTooLarge",
-        FormatError::UnsortedEntries { .. } => "UnsortedEntries",
-        FormatError::DuplicateEntry { .. } => "DuplicateEntry",
-        FormatError::UnsupportedEntryKind { .. } => "UnsupportedEntryKind",
-        FormatError::ReservedEntryBits { .. } => "ReservedEntryBits",
-        FormatError::InvalidPath { .. } => "InvalidPath",
-        FormatError::InconsistentEntry { .. } => "InconsistentEntry",
-        FormatError::TrailingBytes { .. } => "TrailingBytes",
-        FormatError::ChunkMismatch { .. } => "ChunkMismatch",
-        FormatError::ChunkIndexOutOfRange { .. } => "ChunkIndexOutOfRange",
-        FormatError::FileSizeMismatch { .. } => "FileSizeMismatch",
-        FormatError::RangeOutOfFile { .. } => "RangeOutOfFile",
-        FormatError::MerkleRootMismatch => "MerkleRootMismatch",
-        FormatError::IndexHashMismatch => "IndexHashMismatch",
-        FormatError::ArchiveIdMismatch => "ArchiveIdMismatch",
-        FormatError::BlockLengthMismatch { .. } => "BlockLengthMismatch",
-        FormatError::BlockCoverage { .. } => "BlockCoverage",
-        FormatError::BlockOutOfRange { .. } => "BlockOutOfRange",
-        FormatError::WrongFrameKind { .. } => "WrongFrameKind",
-        FormatError::NoTrailer => "NoTrailer",
-        FormatError::BadGenerationTable { .. } => "BadGenerationTable",
-        FormatError::BadTrailer { .. } => "BadTrailer",
-        FormatError::NoSuchGeneration { .. } => "NoSuchGeneration",
-        FormatError::AppendNeedsCredentials => "AppendNeedsCredentials",
-        FormatError::GenerationMismatch { .. } => "GenerationMismatch",
-        FormatError::BadFrameLocation { .. } => "BadFrameLocation",
-        FormatError::Refused(_) => "Refused",
-        FormatError::EnvelopeMismatch { .. } => "EnvelopeMismatch",
-        FormatError::UnknownPrimitive { .. } => "UnknownPrimitive",
-        FormatError::UnimplementedPrimitive { .. } => "UnimplementedPrimitive",
-        FormatError::BadGraph { .. } => "BadGraph",
-        FormatError::BadParams { .. } => "BadParams",
-        FormatError::UnknownRecordKind { .. } => "UnknownRecordKind",
-        FormatError::ReservedRecordBits { .. } => "ReservedRecordBits",
-        FormatError::RecordHashMismatch { .. } => "RecordHashMismatch",
-        FormatError::RecordOutOfRange { .. } => "RecordOutOfRange",
-        FormatError::BadRecord { .. } => "BadRecord",
-        FormatError::MissingPrior { .. } => "MissingPrior",
-        FormatError::UnlistedPrior { .. } => "UnlistedPrior",
-        FormatError::BadPriorList { .. } => "BadPriorList",
-        FormatError::WindowTooLarge { .. } => "WindowTooLarge",
-        FormatError::ZstdError { .. } => "ZstdError",
-        FormatError::LzmaError { .. } => "LzmaError",
-        FormatError::BwtError { .. } => "BwtError",
-        FormatError::BadOptions { .. } => "BadOptions",
-        FormatError::BadChunk { .. } => "BadChunk",
-        FormatError::BadRecovery { .. } => "BadRecovery",
-        FormatError::Unrepairable { .. } => "Unrepairable",
-        FormatError::DamageFound { .. } => "DamageFound",
-        FormatError::RecoveryError { .. } => "RecoveryError",
-        FormatError::UnsafePath { .. } => "UnsafePath",
-        FormatError::SymlinkRefused { .. } => "SymlinkRefused",
-        FormatError::PasswordRequired => "PasswordRequired",
-        FormatError::WrongKey => "WrongKey",
-        FormatError::AuthenticationFailed { .. } => "AuthenticationFailed",
-        FormatError::UnexpectedSealedFrame { .. } => "UnexpectedSealedFrame",
-        FormatError::UnsealedFrame { .. } => "UnsealedFrame",
-        FormatError::UnexpectedKeySlot => "UnexpectedKeySlot",
-        FormatError::MissingKeySlot => "MissingKeySlot",
-        FormatError::BadKeySlot { .. } => "BadKeySlot",
-        FormatError::BadArgon2 { .. } => "BadArgon2",
-        FormatError::EntryTableMismatch => "EntryTableMismatch",
-        FormatError::SealFailed { .. } => "SealFailed",
-        FormatError::Io(_) => "Io",
-    }
-}
-
-/// The archive path a format error names, when it names one.
-pub fn format_path(e: &FormatError) -> Option<String> {
-    match e {
-        FormatError::DuplicateEntry { path }
-        | FormatError::UnsafePath { path, .. }
-        | FormatError::SymlinkRefused { path } => Some(path.clone()),
-        _ => None,
+impl From<lpk_api::Error> for Failure {
+    /// An API error as the command line prints it: its exit code by its class, D-77's kind,
+    /// its message and path (the API already names the archive when the error names no path).
+    fn from(e: lpk_api::Error) -> Self {
+        Failure {
+            code: e.exit_code(),
+            kind: e.kind,
+            message: e.message,
+            path: e.path,
+            entries: e
+                .entries
+                .into_iter()
+                .map(|x| EntryFailure {
+                    path: x.path,
+                    kind: x.kind,
+                    message: x.message,
+                })
+                .collect(),
+        }
     }
 }
 

@@ -227,6 +227,9 @@ pub struct ForeignSummary {
     pub renamed: u64,
     /// Symlink entries let pass and not created.
     pub symlinks_skipped: u64,
+    /// Bytes the listing held by the host was charged against the memory budget
+    /// ([`entry_charge`] per entry; E4-7 checks the host's peak against it).
+    pub listing_charge: u64,
     /// Warnings of the launch (an AppContainer temporary folder that could not be emptied).
     pub warnings: Vec<String>,
 }
@@ -739,6 +742,8 @@ struct Conv<'m, P: Peer> {
     format: Format,
     /// A password was sent in `Open`.
     has_password: bool,
+    /// What the listing was charged against the memory budget ([`entry_charge`] summed).
+    charged: u64,
 }
 
 impl<'m, P: Peer> Conv<'m, P> {
@@ -762,6 +767,7 @@ impl<'m, P: Peer> Conv<'m, P> {
             warnings: Vec::new(),
             format: Format::TestFixture,
             has_password: false,
+            charged: 0,
         }
     }
 
@@ -1007,6 +1013,7 @@ impl<'m, P: Peer> Conv<'m, P> {
                         .into());
                     }
                     records.extend(page);
+                    self.charged = charged;
                     if !more {
                         return Ok(records);
                     }
@@ -1369,6 +1376,7 @@ fn run_extract<P: Peer>(
     summary: &mut ForeignSummary,
 ) -> Result<(), CoreError> {
     summary.entries = records.len() as u64;
+    summary.listing_charge = conv.charged;
     let declared: std::collections::HashMap<u64, u64> = records
         .iter()
         .enumerate()

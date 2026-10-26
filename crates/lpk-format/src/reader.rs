@@ -539,20 +539,43 @@ impl<R: Read + Seek> Archive<R> {
     /// recovery frames and reports `chunks_checked: false`. In neither mode
     /// does `verify` read a recovery payload; `check` and `repair` do.
     pub fn verify(&mut self) -> Result<VerifySummary, FormatError> {
+        self.verify_with(&mut crate::hook::no_hook)
+            .map(|s| s.expect("no_hook never stops the walk"))
+    }
+
+    /// [`Archive::verify`] with a per-block hook ([`crate::hook`]): called with 0 of the
+    /// block count before the first block and after each block's chunks are checked; a
+    /// `Break` stops the walk and returns `Ok(None)`. A keyless walk (frame hashes only) calls
+    /// it before and after.
+    pub fn verify_with(
+        &mut self,
+        hook: &mut crate::hook::BlockHook<'_>,
+    ) -> Result<Option<VerifySummary>, FormatError> {
         if self.is_keyless() {
-            return self.verify_frames_only();
+            if crate::hook::stop(hook, 0, 1) {
+                return Ok(None);
+            }
+            let s = self.verify_frames_only()?;
+            return Ok((!crate::hook::stop(hook, 1, 1)).then_some(s));
         }
         self.verify_records()?;
         let table = self.chunks_arc();
         let blocks = self.index().blocks.clone();
+        let total = blocks.len() as u64;
+        if crate::hook::stop(hook, 0, total) {
+            return Ok(None);
+        }
         let mut source = ArchiveChunks::new(self);
-        for b in &blocks {
+        for (done, b) in blocks.iter().enumerate() {
             for c in b.first_chunk..b.first_chunk + b.chunk_count {
                 let rec = table.record(c).ok_or(FormatError::ChunkIndexOutOfRange {
                     chunk: c,
                     len: table.len(),
                 })?;
                 fetch_and_check(&mut source, c, &rec)?;
+            }
+            if crate::hook::stop(hook, done as u64 + 1, total) {
+                return Ok(None);
             }
         }
         let entries = self.entry_table()?;
@@ -562,12 +585,12 @@ impl<R: Read + Seek> Archive<R> {
                 resolve(&e.chunks, e.size, &*table)?;
             }
         }
-        Ok(VerifySummary {
+        Ok(Some(VerifySummary {
             entries: entries.len(),
             chunks: table.len(),
             blocks: blocks.len() as u64,
             chunks_checked: true,
-        })
+        }))
     }
 
     /// `verify` without a key: the hash of every frame except the recovery
