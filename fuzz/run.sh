@@ -34,7 +34,10 @@ for t in $targets; do
   if [ "$t" != "archive_mutate" ]; then extra="$extra $vectors"; fi
   echo "== $t (${secs}s)"
   # shellcheck disable=SC2086
-  if cargo "+$toolchain" fuzz run "$t" "corpus/$t" $extra -- \
+  # --no-cfg-fuzzing: the targets run the code we ship. With `cfg(fuzzing)`, bitcode skips its
+  # trailing-bytes check and miniz_oxide its Adler-32 check, so a record the shipped decoder
+  # refuses reached code the fuzzer then reported on (fuzz run 40270390275, deflate_recreate).
+  if cargo "+$toolchain" fuzz run --no-cfg-fuzzing "$t" "corpus/$t" $extra -- \
     -max_total_time="$secs" -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 \
     >"artifacts/logs/$t.log" 2>&1; then
     grep -E "stat::number_of_executed_units|Done [0-9]+ runs" "artifacts/logs/$t.log" | tail -n 2

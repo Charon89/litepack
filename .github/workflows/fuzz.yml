@@ -45,7 +45,8 @@ jobs:
         run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Build every target
         working-directory: fuzz
-        run: cargo "+$LPK_FUZZ_TOOLCHAIN" fuzz build
+        # The same flags as fuzz/run.sh's `fuzz run`, so it reuses this build (see run.sh).
+        run: cargo "+$LPK_FUZZ_TOOLCHAIN" fuzz build --no-cfg-fuzzing
       - name: Run every target
         run: bash fuzz/run.sh -t "$FUZZ_SECONDS"
       - name: Failing targets
