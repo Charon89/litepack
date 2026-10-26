@@ -27,7 +27,10 @@ fuzz_target!(|data: &[u8]| {
         recreate_whole_deflate_stream_limited_report(plain, corrections, limit)
     });
     if let Ok((result, capacity)) = r {
-        assert!(capacity <= limit + 8, "capacity {capacity} over limit {limit} + 8");
+        assert!(
+            capacity <= limit + 8,
+            "capacity {capacity} over limit {limit} + 8"
+        );
         if let Ok(out) = result {
             assert!(out.len() <= limit);
         }
