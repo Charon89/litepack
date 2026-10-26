@@ -1158,11 +1158,22 @@ fn make_link(path: &Path, target: &[u8], dir: bool) -> std::io::Result<()> {
             "symlink target is not UTF-8",
         )
     })?;
+    let target = windows_link_target(target);
     if dir {
-        std::os::windows::fs::symlink_dir(target, path)
+        std::os::windows::fs::symlink_dir(&target, path)
     } else {
-        std::os::windows::fs::symlink_file(target, path)
+        std::os::windows::fs::symlink_file(&target, path)
     }
+}
+
+/// The target a Windows link is created with: the archive's, every `/` made `\`. Windows does
+/// not traverse a link whose target uses `/` (`ERROR_INVALID_NAME`), and the resolver
+/// ([`policy::resolve_symlink_target`]) already read both as separators on Windows, so the
+/// link names what was judged. The archive's own form is kept everywhere else (listing,
+/// export, Unix).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_link_target(target: &str) -> String {
+    target.replace('/', "\\")
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2027,6 +2038,27 @@ mod tests {
             size: target.map_or(0, |t| t.len() as u64),
             symlink_target: target.map(<[u8]>::to_vec),
             chunks: Vec::new(),
+        }
+    }
+
+    /// E6-0: a Windows link is created with `\` for every `/` of the archive's target (Windows
+    /// does not traverse `/` in a link target); `\` and everything else are kept. The plan's
+    /// `Link` keeps the archive's bytes, so nothing else (listing, export, Unix) changes.
+    #[test]
+    fn windows_link_targets_use_backslashes() {
+        assert_eq!(windows_link_target("../d/in.txt"), "..\\d\\in.txt");
+        assert_eq!(windows_link_target("a.txt"), "a.txt");
+        assert_eq!(windows_link_target("..\\x/y"), "..\\x\\y");
+        assert_eq!(windows_link_target("d/"), "d\\");
+        assert_eq!(windows_link_target("ünï/cødé"), "ünï\\cødé");
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("out");
+        let entries = vec![entry(EntryKind::Symlink, "sub/l", Some(b"../a/b"))];
+        let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
+        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        match &pass.placed[0] {
+            Placed::Link(l) => assert_eq!(l.target, b"../a/b"),
+            p => panic!("{p:?}"),
         }
     }
 
