@@ -79,8 +79,9 @@ jobs:
           mkdir -p bench/corpus/.cache
           (cd bench/corpus/.cache && find . -type f ! -name '*.part' -printf '%P %s\n' | LC_ALL=C sort) > "$RUNNER_TEMP/cache-before.txt"
           echo "files before: $(wc -l < "$RUNNER_TEMP/cache-before.txt")"
-      - name: Build lpk-bench
-        run: cargo build --release --locked -p lpk-bench
+      # E8-9: `lpk` too (the catalogue finds it at target/release/lpk), for the runner smoke below.
+      - name: Build lpk-bench and lpk
+        run: cargo build --release --locked -p lpk-bench -p lpk-cli
       # Step timeouts sit below the job timeout: a timed-out step fails (the save step below
       # still runs), whereas a timed-out job is cancelled and nothing after it runs.
       - name: Build the small corpus
@@ -126,14 +127,49 @@ jobs:
       - name: Install the free baseline tools
         if: ${{ inputs.run_smoke }}
         run: sudo apt-get install -y --no-install-recommends zstd xz-utils 7zip
+      # E8-9: the catalogue with `lpk`'s settings trimmed to `fast` and `balanced` (the runner has
+      # no setting selector; every other tool and setting is kept as it is).
+      - name: Catalogue with lpk's fast and balanced settings only
+        if: ${{ inputs.run_smoke }}
+        run: |
+          python3 - bench/tools.toml "$RUNNER_TEMP/tools-smoke.toml" <<'PY'
+          import re
+          import sys
+
+          src, dst = sys.argv[1], sys.argv[2]
+          keep = {"fast", "balanced"}
+          chunks, cur = [], []
+          for line in open(src, encoding="utf-8"):
+              if re.match(r"\s*\[", line) and cur:
+                  chunks.append(cur)
+                  cur = []
+              cur.append(line)
+          chunks.append(cur)
+          out, tool, kept = [], None, []
+          for c in chunks:
+              head = c[0].strip()
+              ids = [m.group(1) for l in c if (m := re.match(r'\s*id\s*=\s*"([^"]+)"', l))]
+              if head == "[[tool]]":
+                  tool = ids[0] if ids else None
+              elif head == "[[tool.setting]]" and tool == "lpk":
+                  if not ids or ids[0] not in keep:
+                      continue
+                  kept.append(ids[0])
+              out.extend(c)
+          if sorted(kept) != sorted(keep):
+              sys.exit(f"lpk settings kept: {kept}, expected {sorted(keep)}")
+          open(dst, "w", encoding="utf-8").write("".join(out))
+          print(f"lpk settings kept: {kept}")
+          PY
       - name: List the tools the catalogue finds
         if: ${{ inputs.run_smoke }}
-        run: ./target/release/lpk-bench run --list-tools
+        run: ./target/release/lpk-bench run --list-tools --catalogue "$RUNNER_TEMP/tools-smoke.toml"
       - name: Smoke-run the baseline runner on the small corpus
         if: ${{ inputs.run_smoke }}
         timeout-minutes: 40
         run: |
           ./target/release/lpk-bench run --tools all --profile small --repeats 1 \
+            --catalogue "$RUNNER_TEMP/tools-smoke.toml" \
             --classes archives-nested,source-git,small-files,photo-jpeg-edited \
             --results "$RUNNER_TEMP/results" --tmp "$RUNNER_TEMP/tmp"
       - name: Validate the smoke results against the schema
@@ -145,6 +181,17 @@ jobs:
             exit 1
           fi
           ./target/release/lpk-bench run --validate "${dirs[0]%/}"
+          # E8-9: the eight lpk rows (fast and balanced on the four classes), each verified.
+          fail=0
+          for s in fast balanced; do
+            for c in archives-nested source-git small-files photo-jpeg-edited; do
+              f="${dirs[0]}lpk-$s-$c.json"
+              if [ ! -f "$f" ]; then echo "missing lpk row: $f"; fail=1
+              elif ! grep -qE '"verified":[[:space:]]*true' "$f"; then echo "lpk row not verified: $f"; fail=1
+              else echo "lpk row verified: lpk-$s-$c"; fi
+            done
+          done
+          exit "$fail"
       - uses: actions/upload-artifact@v7
         if: ${{ always() && inputs.run_smoke }}
         with:

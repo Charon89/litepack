@@ -66,3 +66,105 @@ jobs:
             ${{ runner.temp }}/second
           retention-days: 14
           if-no-files-found: warn
+
+  # E8-9 (decision E7 (g)): the ARM64 binaries are cross-built on x64 and smoke-tested on an ARM64
+  # runner. Here rather than in ci.yml for the reasons in the header (release builds, no
+  # RUSTFLAGS) and because the same pair of jobs is what E7-2's release workflow repeats.
+  arm64-build:
+    name: ARM64 cross-build (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+          rustup target list --installed
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: arm64
+      - name: Shipped binaries (lpk, lpk-check, lpk-worker) for aarch64-pc-windows-msvc
+        run: bash scripts/repro-build.sh --target aarch64-pc-windows-msvc --out arm64
+      # The broker smoke: lpk-core's foreign_worker test (the broker starting a worker through
+      # lpk-sandbox-sys under LPAC) and the test worker it starts, laid out as the test expects
+      # (the worker one directory above the test executable).
+      - name: Broker smoke test and test worker for aarch64-pc-windows-msvc
+        run: |
+          t=aarch64-pc-windows-msvc
+          cargo build --locked --release --target "$t" -p lpk-test-worker
+          cargo test --locked --release --target "$t" -p lpk-core --test foreign_worker --no-run
+          mkdir -p arm64/broker/deps
+          exe="$(ls -t target/$t/release/deps/foreign_worker-*.exe | head -n 1)"
+          cp "$exe" arm64/broker/deps/foreign_worker.exe
+          cp "target/$t/release/lpk-test-worker.exe" arm64/broker/
+      # BLAKE3 on the ARM64 runner, independent of lpk: b3sum, cross-built (a CI tool, not shipped).
+      - name: b3sum for aarch64-pc-windows-msvc
+        run: |
+          root="$(cygpath -u "$RUNNER_TEMP")/b3"
+          cargo install --locked b3sum --version "~1.8" --target aarch64-pc-windows-msvc --root "$root"
+          cp "$root/bin/b3sum.exe" arm64/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: arm64-binaries
+          path: arm64
+          retention-days: 7
+          if-no-files-found: error
+
+  arm64-smoke:
+    name: ARM64 smoke test (windows-11-arm)
+    needs: arm64-build
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: arm64-binaries
+          path: arm64
+      - name: The binaries are ARM64 (PE machine 0xAA64)
+        working-directory: arm64
+        run: |
+          for b in lpk.exe lpk-check.exe lpk-worker.exe broker/lpk-test-worker.exe b3sum.exe; do
+            pe=$(od -An -tu4 -j60 -N4 "$b" | tr -d ' ')
+            m=$(od -An -tx2 -j$((pe + 4)) -N2 "$b" | tr -d ' ')
+            echo "$b: machine 0x$m"
+            [ "$m" = "aa64" ] || { echo "error: $b is not ARM64" >&2; exit 1; }
+          done
+          ./lpk.exe --version
+      - name: lpk a, t and x round trip with BLAKE3 equality
+        working-directory: arm64
+        run: |
+          set -euo pipefail
+          tmp="$(cygpath -u "$RUNNER_TEMP")"
+          src="$tmp/tree"
+          out="$tmp/out"
+          mkdir -p "$src/text/deep/er" "$src/bin" "$src/empty-dir"
+          for i in $(seq 1 200); do
+            for j in $(seq 1 "$i"); do echo "line $j of file $i, a compressible text, LitePack ARM64 smoke"; done > "$src/text/f$i.txt"
+          done
+          cp "$src/text/f7.txt" "$src/text/deep/er/duplicate of f7.txt"
+          head -c 3000000 /dev/urandom > "$src/bin/random.bin"
+          : > "$src/bin/empty"
+          ./lpk.exe a "$tmp/tree.lpk" "$src"
+          ./lpk.exe t "$tmp/tree.lpk"
+          ./lpk.exe x "$tmp/tree.lpk" "$out"
+          b3="$PWD/b3sum.exe"
+          (cd "$src" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 "$b3") > "$tmp/src.b3"
+          (cd "$out" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 "$b3") > "$tmp/out.b3"
+          [ -d "$out/empty-dir" ] || { echo "error: the empty directory was not extracted" >&2; exit 1; }
+          diff "$tmp/src.b3" "$tmp/out.b3"
+          echo "round trip: $(wc -l < "$tmp/src.b3") files, BLAKE3 equal"
+      - name: Broker smoke (the sandboxed worker under LPAC; test worker, then shipped lpk-worker)
+        working-directory: arm64/broker
+        run: |
+          tests=(a_foreign_archive_lists_and_extracts_through_the_sandboxed_worker passwords_go_through_open_only)
+          ./deps/foreign_worker.exe --exact "${tests[@]}" --test-threads 1
+          # The shipped worker serves the same test fixture (E4-2), staged under the test's name.
+          cp ../lpk-worker.exe lpk-test-worker.exe
+          ./deps/foreign_worker.exe --exact "${tests[@]}" --test-threads 1
