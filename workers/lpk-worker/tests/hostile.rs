@@ -356,11 +356,12 @@ impl<'a> ZipMember<'a> {
 }
 
 /// The end of a ZIP: a ZIP64 end record and locator when the entries do not fit 16 bits, then
-/// the end of central directory record (APPNOTE 4.3.14–4.3.16).
-fn zip_end(out: &mut Vec<u8>, entries: u64, cd_offset: u64, cd_len: u64) {
+/// the end of central directory record (APPNOTE 4.3.14–4.3.16); `out` starts at `base` in
+/// the archive.
+fn zip_end(out: &mut Vec<u8>, base: u64, entries: u64, cd_offset: u64, cd_len: u64) {
     let zip64 = entries >= 0xFFFF;
     if zip64 {
-        let at = out.len() as u64;
+        let at = base + out.len() as u64;
         out.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
         out.extend_from_slice(&44u64.to_le_bytes());
         out.extend_from_slice(&45u16.to_le_bytes());
@@ -382,8 +383,16 @@ fn zip_end(out: &mut Vec<u8>, entries: u64, cd_offset: u64, cd_len: u64) {
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&n16.to_le_bytes());
     out.extend_from_slice(&n16.to_le_bytes());
-    out.extend_from_slice(&u32::try_from(cd_len).unwrap().to_le_bytes());
-    out.extend_from_slice(&u32::try_from(cd_offset).unwrap().to_le_bytes());
+    let (len32, off32) = if zip64 {
+        (0xFFFF_FFFF, 0xFFFF_FFFF)
+    } else {
+        (
+            u32::try_from(cd_len).unwrap(),
+            u32::try_from(cd_offset).unwrap(),
+        )
+    };
+    out.extend_from_slice(&len32.to_le_bytes());
+    out.extend_from_slice(&off32.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
 }
 
@@ -400,7 +409,7 @@ fn zip(members: &[ZipMember<'_>]) -> Vec<u8> {
         out.extend_from_slice(&m.central(o));
     }
     let cd_len = out.len() as u64 - cd;
-    zip_end(&mut out, members.len() as u64, cd, cd_len);
+    zip_end(&mut out, 0, members.len() as u64, cd, cd_len);
     out
 }
 
@@ -463,7 +472,7 @@ fn overlapping_entries_are_refused() {
     bytes.extend_from_slice(&outer.central(0));
     bytes.extend_from_slice(&inner.central(30 + 5));
     let cd_len = bytes.len() as u64 - cd;
-    zip_end(&mut bytes, 2, cd, cd_len);
+    zip_end(&mut bytes, 0, 2, cd, cd_len);
     let a = s.write("overlap.zip", &bytes);
     let r = s.x(&a, &[], &[], SMALL);
     assert_refused(&r, "OverlappingEntries");
@@ -545,7 +554,11 @@ fn a_4_gib_declaration_over_a_1_kib_body_is_refused() {
             r.message()
         );
     }
-    assert!(s.written().is_empty(), "partial file left: {:?}", s.written());
+    assert!(
+        s.written().is_empty(),
+        "partial file left: {:?}",
+        s.written()
+    );
     s.assert_nothing_outside();
 }
 
@@ -591,7 +604,11 @@ fn a_high_ratio_bomb_meets_the_expansion_limit() {
         "{}",
         r.message()
     );
-    assert!(s.written().is_empty(), "partial file left: {:?}", s.written());
+    assert!(
+        s.written().is_empty(),
+        "partial file left: {:?}",
+        s.written()
+    );
     s.assert_nothing_outside();
 }
 
@@ -679,7 +696,12 @@ fn tar_symlinks_out_are_skipped_and_an_entry_below_one_is_refused() {
     let a = s.write("symlinks.tar", &tar_end(t));
     let r = s.x(&a, &[], &[], SMALL);
     assert_eq!(r.code, Some(0), "{}", r.message());
-    assert_eq!(r.stderr.matches("SymlinkSkipped").count(), 2, "{}", r.stderr);
+    assert_eq!(
+        r.stderr.matches("SymlinkSkipped").count(),
+        2,
+        "{}",
+        r.stderr
+    );
     let want: BTreeSet<PathBuf> = [PathBuf::from("ok.txt")].into();
     assert_eq!(s.written(), want);
     s.assert_nothing_outside();
@@ -704,7 +726,10 @@ fn tar_symlinks_out_are_skipped_and_an_entry_below_one_is_refused() {
 #[test]
 fn tar_hard_links_out_are_refused() {
     let Some(s) = stage() else { return };
-    for (i, target) in [&b"../../../etc/passwd"[..], b"/etc/passwd"].iter().enumerate() {
+    for (i, target) in [&b"../../../etc/passwd"[..], b"/etc/passwd"]
+        .iter()
+        .enumerate()
+    {
         let mut t = Vec::new();
         tar_member(&mut t, b"ok.txt", b'0', b"", b"fine");
         tar_member(&mut t, b"passwd", b'1', target, b"");
@@ -737,7 +762,10 @@ fn names_differing_only_by_case_are_a_case_collision() {
     } else {
         assert_eq!(r.code, Some(0), "{}", r.message());
         assert_eq!(std::fs::read(s.out().join("Readme.txt")).unwrap(), b"first");
-        assert_eq!(std::fs::read(s.out().join("README.TXT")).unwrap(), b"second");
+        assert_eq!(
+            std::fs::read(s.out().join("README.TXT")).unwrap(),
+            b"second"
+        );
     }
     s.assert_nothing_outside();
 }
@@ -746,7 +774,7 @@ fn names_differing_only_by_case_are_a_case_collision() {
 /// is headers only, about 92 MB): `lpk x` with one member selected lists all 1,000,000
 /// through the broker in pages of 4,096 (`PAGE`), writes the one file, and the host's peak
 /// working set stays under the listing charge it reports (`-v`: "listing charge N bytes",
-/// `entry_charge` summed). Bounds: 600 s (debug builds of both processes), and the charge.
+/// `entry_charge` summed). Bounds: 300 s (debug builds of both processes), and the charge.
 #[test]
 fn a_million_member_central_directory_is_paged_under_the_listing_charge() {
     let Some(s) = stage() else { return };
@@ -765,12 +793,12 @@ fn a_million_member_central_directory_is_paged_under_the_listing_charge() {
             at += local.len() as u64;
         }
         let cd_len = cd.len() as u64;
-        zip_end(&mut cd, N, at, cd_len);
+        zip_end(&mut cd, at, N, at, cd_len);
         f.write_all(&cd).unwrap();
         f.flush().unwrap();
     }
     let bounds = Bounds {
-        wall: Duration::from_secs(600),
+        wall: Duration::from_secs(300),
         memory: u64::MAX,
     };
     let r = s.x(&a, &["-v", "--memory", "4G"], &["f0999999"], bounds);
