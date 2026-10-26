@@ -1,0 +1,14 @@
+# E8-5 reproducible builds: the static half of the flags, for the Windows targets only (Linux builds
+# are unaffected). Also read by cargo inside workers/ and fuzz/ (cargo merges the configs of the
+# parent directories).
+#   /Brepro              the MSVC linker writes a content hash where it would write a time stamp
+#   /PDBALTPATH:%_PDB%   the binary names its PDB by file name only, not by the absolute build path
+# The other half, `--remap-path-prefix` for the workspace and the cargo home, depends on where the
+# checkout is, so `scripts/repro-build.sh` passes it with `--config` (cargo concatenates the two
+# lists). A `RUSTFLAGS` environment variable replaces every list here (CI's lint jobs set
+# `RUSTFLAGS=-D warnings`, which is fine for them); the script refuses to build with it set.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Clink-arg=/Brepro", "-Clink-arg=/PDBALTPATH:%_PDB%"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-Clink-arg=/Brepro", "-Clink-arg=/PDBALTPATH:%_PDB%"]
