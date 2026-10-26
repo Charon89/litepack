@@ -1,0 +1,107 @@
+{
+  "class": "office-pdf",
+  "corpus": {
+    "class_bytes": 2114690575,
+    "class_files": 2334,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 1333747117,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 75.578125,
+      "peak_job_memory_bytes": 3403083776,
+      "peak_memory_bytes": 2155839488,
+      "peak_process_commit_bytes": 3403083776,
+      "timed_out": false,
+      "user_cpu_seconds": 4290.65625,
+      "wall_seconds": 1237.6865132
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 8.0,
+      "peak_job_memory_bytes": 497082368,
+      "peak_memory_bytes": 429060096,
+      "peak_process_commit_bytes": 497082368,
+      "timed_out": false,
+      "user_cpu_seconds": 154.84375,
+      "wall_seconds": 92.9288573
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 1333747117,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 75.578125,
+        "peak_job_memory_bytes": 3403083776,
+        "peak_memory_bytes": 2155839488,
+        "peak_process_commit_bytes": 3403083776,
+        "timed_out": false,
+        "user_cpu_seconds": 4290.65625,
+        "wall_seconds": 1237.6865132
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 8.0,
+        "peak_job_memory_bytes": 497082368,
+        "peak_memory_bytes": 429060096,
+        "peak_process_commit_bytes": 497082368,
+        "timed_out": false,
+        "user_cpu_seconds": 154.84375,
+        "wall_seconds": 92.9288573
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "repeats_short": "the first repeat's compress plus extract wall time reached --long-run-s (120 s): not repeated",
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../tmp/run22948/c35/a.lpk",
+      "office-pdf",
+      "--balanced",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "balanced"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+e9790b809a73"
+  },
+  "verification": {
+    "files_checked": 2334,
+    "files_ok": 2334,
+    "verified": true
+  }
+}
