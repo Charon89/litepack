@@ -11,7 +11,12 @@ use serde::{Deserialize, Serialize};
 use super::catalogue::Mode;
 use super::discover::{Discovered, Status};
 
+/// Version of `host.json`, `tools.json` and `run.json`.
 pub const SCHEMA_VERSION: u32 = 1;
+/// Version of a result row (`<tool>-<setting>-<class>.json`). 2 (E8-10) adds
+/// `corpus.class_blake3`, required from this version on; rows of version 1 have none and stay
+/// valid.
+pub const RESULT_SCHEMA_VERSION: u32 = 2;
 
 /// Pretty JSON with a trailing newline (object keys come out sorted).
 pub fn render<T: Serialize>(value: &T) -> String {
@@ -53,6 +58,10 @@ pub struct CorpusRef {
     pub class_files: u64,
     /// Bytes in this class.
     pub class_bytes: u64,
+    /// The class digest (`ClassEntry::digest`, E8-10): equal digests mean the class held the same
+    /// files, whatever the rest of the manifest held. Absent in rows of schema version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_blake3: Option<String>,
 }
 
 /// Time of one step of a tar-stream pipeline.
@@ -554,7 +563,7 @@ pub mod samples {
     pub fn measured() -> ToolResult {
         let repeats = vec![sample(1.0), sample(1.5), sample(2.0)];
         ToolResult {
-            schema_version: SCHEMA_VERSION,
+            schema_version: RESULT_SCHEMA_VERSION,
             tool: ToolRef {
                 id: "7z".into(),
                 version: Some("26.03".into()),
@@ -578,6 +587,7 @@ pub mod samples {
                 manifest_blake3: "ab".repeat(32),
                 class_files: 10,
                 class_bytes: 5000,
+                class_blake3: Some("cd".repeat(32)),
             },
             threads: 4,
             private: true,

@@ -48,7 +48,7 @@ use super::host;
 use super::result::{
     render, CorpusRef, Difference, DifferenceKind, Failure, Measure, Measurement, PeakMemoryKind,
     RunCombination, RunFile, Sample, SettingRef, StepTimes, TarInfo, ToolRef, ToolResult,
-    ToolsFile, Verification, MAX_DIFFERENCES, SCHEMA_VERSION,
+    ToolsFile, Verification, MAX_DIFFERENCES, RESULT_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 use super::validate;
 use super::{load_catalogue, select, RunArgs};
@@ -1136,6 +1136,7 @@ fn corpus_ref(corpus: &Corpus, entry: &ClassEntry) -> CorpusRef {
         manifest_blake3: corpus.manifest_blake3.clone(),
         class_files: entry.files.len() as u64,
         class_bytes: entry.files.iter().map(|f| f.bytes).sum(),
+        class_blake3: Some(entry.digest()),
     }
 }
 
@@ -1152,7 +1153,7 @@ fn base_result(
         Status::Skipped { .. } => None,
     };
     ToolResult {
-        schema_version: SCHEMA_VERSION,
+        schema_version: RESULT_SCHEMA_VERSION,
         tool: ToolRef {
             id: d.tool.id.clone(),
             version,
