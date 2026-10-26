@@ -488,8 +488,7 @@ fn every_core_error_variant_has_its_class() {
     }
 }
 
-#[test]
-fn every_foreign_and_worker_variant_has_its_class() {
+fn foreign_and_worker() -> Vec<(CoreError, Class, &'static str)> {
     let s = || String::from("x");
     let foreign = [
         (
@@ -601,7 +600,7 @@ fn every_foreign_and_worker_variant_has_its_class() {
             "BuildMismatch",
         ),
     ];
-    let all: Vec<(CoreError, Class, &str)> = foreign
+    foreign
         .into_iter()
         .map(|(e, c, k)| (CoreError::Foreign(e), c, k))
         .chain(
@@ -609,7 +608,12 @@ fn every_foreign_and_worker_variant_has_its_class() {
                 .into_iter()
                 .map(|(e, c, k)| (CoreError::Worker(e), c, k)),
         )
-        .collect();
+        .collect()
+}
+
+#[test]
+fn every_foreign_and_worker_variant_has_its_class() {
+    let all = foreign_and_worker();
     assert_eq!(all.len(), 18);
     for (e, class, kind) in all {
         assert_eq!(core_class(&e), class, "{e}");
@@ -635,4 +639,169 @@ fn io_errors_follow_their_kind() {
             "{k:?}"
         );
     }
+}
+
+// One arm per variant and no wildcard: a variant added to any of the four enums breaks this
+// test's build until it is named here, and the tests below then need its row.
+
+fn format_variant(e: &FormatError) -> &'static str {
+    match e {
+        FormatError::BadMagic => "BadMagic",
+        FormatError::UnsupportedMajor { .. } => "UnsupportedMajor",
+        FormatError::ReservedHeaderBits { .. } => "ReservedHeaderBits",
+        FormatError::BadHeaderFlags { .. } => "BadHeaderFlags",
+        FormatError::ReservedFrameBits { .. } => "ReservedFrameBits",
+        FormatError::InvalidKind => "InvalidKind",
+        FormatError::NonCanonicalVarint => "NonCanonicalVarint",
+        FormatError::VarintTooLong => "VarintTooLong",
+        FormatError::Truncated { .. } => "Truncated",
+        FormatError::HashMismatch { .. } => "HashMismatch",
+        FormatError::UnknownMustUnderstand { .. } => "UnknownMustUnderstand",
+        FormatError::PayloadTooLarge { .. } => "PayloadTooLarge",
+        FormatError::UnsortedEntries { .. } => "UnsortedEntries",
+        FormatError::DuplicateEntry { .. } => "DuplicateEntry",
+        FormatError::UnsupportedEntryKind { .. } => "UnsupportedEntryKind",
+        FormatError::ReservedEntryBits { .. } => "ReservedEntryBits",
+        FormatError::InvalidPath { .. } => "InvalidPath",
+        FormatError::InconsistentEntry { .. } => "InconsistentEntry",
+        FormatError::TrailingBytes { .. } => "TrailingBytes",
+        FormatError::ChunkMismatch { .. } => "ChunkMismatch",
+        FormatError::ChunkIndexOutOfRange { .. } => "ChunkIndexOutOfRange",
+        FormatError::FileSizeMismatch { .. } => "FileSizeMismatch",
+        FormatError::RangeOutOfFile { .. } => "RangeOutOfFile",
+        FormatError::MerkleRootMismatch => "MerkleRootMismatch",
+        FormatError::IndexHashMismatch => "IndexHashMismatch",
+        FormatError::ArchiveIdMismatch => "ArchiveIdMismatch",
+        FormatError::BlockLengthMismatch { .. } => "BlockLengthMismatch",
+        FormatError::BlockCoverage { .. } => "BlockCoverage",
+        FormatError::BlockOutOfRange { .. } => "BlockOutOfRange",
+        FormatError::WrongFrameKind { .. } => "WrongFrameKind",
+        FormatError::NoTrailer => "NoTrailer",
+        FormatError::BadGenerationTable { .. } => "BadGenerationTable",
+        FormatError::BadTrailer { .. } => "BadTrailer",
+        FormatError::NoSuchGeneration { .. } => "NoSuchGeneration",
+        FormatError::AppendNeedsCredentials => "AppendNeedsCredentials",
+        FormatError::GenerationMismatch { .. } => "GenerationMismatch",
+        FormatError::BadFrameLocation { .. } => "BadFrameLocation",
+        FormatError::Refused(_) => "Refused",
+        FormatError::EnvelopeMismatch { .. } => "EnvelopeMismatch",
+        FormatError::UnknownPrimitive { .. } => "UnknownPrimitive",
+        FormatError::UnimplementedPrimitive { .. } => "UnimplementedPrimitive",
+        FormatError::BadGraph { .. } => "BadGraph",
+        FormatError::BadParams { .. } => "BadParams",
+        FormatError::UnknownRecordKind { .. } => "UnknownRecordKind",
+        FormatError::ReservedRecordBits { .. } => "ReservedRecordBits",
+        FormatError::RecordHashMismatch { .. } => "RecordHashMismatch",
+        FormatError::RecordOutOfRange { .. } => "RecordOutOfRange",
+        FormatError::BadRecord { .. } => "BadRecord",
+        FormatError::MissingPrior { .. } => "MissingPrior",
+        FormatError::UnlistedPrior { .. } => "UnlistedPrior",
+        FormatError::BadPriorList { .. } => "BadPriorList",
+        FormatError::WindowTooLarge { .. } => "WindowTooLarge",
+        FormatError::ZstdError { .. } => "ZstdError",
+        FormatError::LzmaError { .. } => "LzmaError",
+        FormatError::BwtError { .. } => "BwtError",
+        FormatError::BadOptions { .. } => "BadOptions",
+        FormatError::BadChunk { .. } => "BadChunk",
+        FormatError::BadRecovery { .. } => "BadRecovery",
+        FormatError::Unrepairable { .. } => "Unrepairable",
+        FormatError::DamageFound { .. } => "DamageFound",
+        FormatError::RecoveryError { .. } => "RecoveryError",
+        FormatError::UnsafePath { .. } => "UnsafePath",
+        FormatError::SymlinkRefused { .. } => "SymlinkRefused",
+        FormatError::PasswordRequired => "PasswordRequired",
+        FormatError::WrongKey => "WrongKey",
+        FormatError::AuthenticationFailed { .. } => "AuthenticationFailed",
+        FormatError::UnexpectedSealedFrame { .. } => "UnexpectedSealedFrame",
+        FormatError::UnsealedFrame { .. } => "UnsealedFrame",
+        FormatError::UnexpectedKeySlot => "UnexpectedKeySlot",
+        FormatError::MissingKeySlot => "MissingKeySlot",
+        FormatError::BadKeySlot { .. } => "BadKeySlot",
+        FormatError::BadArgon2 { .. } => "BadArgon2",
+        FormatError::EntryTableMismatch => "EntryTableMismatch",
+        FormatError::SealFailed { .. } => "SealFailed",
+        FormatError::Io(_) => "Io",
+    }
+}
+
+fn core_variant(e: &CoreError) -> &'static str {
+    match e {
+        CoreError::Format(_) => "Format",
+        CoreError::Io { .. } => "Io",
+        CoreError::UnportableName { .. } => "UnportableName",
+        CoreError::SpecialFile { .. } => "SpecialFile",
+        CoreError::DuplicatePath { .. } => "DuplicatePath",
+        CoreError::ChangedWhileReading { .. } => "ChangedWhileReading",
+        CoreError::InvalidOption(_) => "InvalidOption",
+        CoreError::Decode { .. } => "Decode",
+        CoreError::Extract(_) => "Extract",
+        CoreError::Export { .. } => "Export",
+        CoreError::InTheWay { .. } => "InTheWay",
+        CoreError::CaseCollision { .. } => "CaseCollision",
+        CoreError::NoMatch { .. } => "NoMatch",
+        CoreError::NotADirectory { .. } => "NotADirectory",
+        CoreError::Cancelled => "Cancelled",
+        CoreError::AppendLeftCut { .. } => "AppendLeftCut",
+        CoreError::Foreign(_) => "Foreign",
+        CoreError::Worker(_) => "Worker",
+    }
+}
+
+fn foreign_variant(e: &ForeignError) -> &'static str {
+    match e {
+        ForeignError::UnknownFormat => "UnknownFormat",
+        ForeignError::Unsupported { .. } => "Unsupported",
+        ForeignError::Corrupt { .. } => "Corrupt",
+        ForeignError::SizeMismatch { .. } => "SizeMismatch",
+        ForeignError::OverlappingEntries { .. } => "OverlappingEntries",
+        ForeignError::LimitExceeded { .. } => "LimitExceeded",
+        ForeignError::NoSpace { .. } => "NoSpace",
+    }
+}
+
+fn worker_variant(e: &WorkerError) -> &'static str {
+    match e {
+        WorkerError::Spawn { .. } => "Spawn",
+        WorkerError::Sandbox { .. } => "Sandbox",
+        WorkerError::Denied { .. } => "Denied",
+        WorkerError::Crashed { .. } => "Crashed",
+        WorkerError::Panicked { .. } => "Panicked",
+        WorkerError::MemoryLimit { .. } => "MemoryLimit",
+        WorkerError::CpuLimit { .. } => "CpuLimit",
+        WorkerError::Timeout { .. } => "Timeout",
+        WorkerError::Protocol { .. } => "Protocol",
+        WorkerError::Pipe { .. } => "Pipe",
+        WorkerError::BuildMismatch { .. } => "BuildMismatch",
+    }
+}
+
+/// Every variant has a row: the rows name as many distinct variants as the matches have arms.
+#[test]
+fn every_variant_has_a_row() {
+    use std::collections::HashSet;
+    let f: HashSet<&str> = format_table()
+        .iter()
+        .map(|(e, _, _)| format_variant(e))
+        .collect();
+    assert_eq!(f.len(), 75, "FormatError rows");
+    let c: HashSet<&str> = core_table()
+        .iter()
+        .map(|(e, _, _)| core_variant(e))
+        .collect();
+    assert_eq!(c.len(), 18, "CoreError rows");
+    let mut fo = HashSet::new();
+    let mut wo = HashSet::new();
+    for (e, _, _) in foreign_and_worker() {
+        match e {
+            CoreError::Foreign(x) => {
+                fo.insert(foreign_variant(&x));
+            }
+            CoreError::Worker(x) => {
+                wo.insert(worker_variant(&x));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(fo.len(), 7, "ForeignError rows");
+    assert_eq!(wo.len(), 11, "WorkerError rows");
 }

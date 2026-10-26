@@ -39,9 +39,11 @@ everything) until the engine takes an id set. `Destination` is `Dir`, `Smart { b
 `NewFolder { beside }`.
 
 **Sharing.** A `Session` is `Send + Sync` (a compile-time test asserts it). Each read is
-registered before it starts, with its own cancel token: the caller's token cancels it (a linker
-thread passes the cancel on within `LINK_POLL`, 10 ms), and an exclusive operation (`history`,
-`close`, `rollback`, `append`) cancels it without cancelling the caller's token. Once an
+registered before it starts, with its own cancel token, a child of the caller's
+(`CancelToken::child`): the caller's token cancels it, and an exclusive operation (`history`,
+`close`, `rollback`, `append`) cancels it without cancelling the caller's token. An exclusive
+operation still waiting when `close` takes the session fails with `SessionClosed`; every call
+after `close` (a cached model included) is refused. Once an
 exclusive operation is pending no new read starts; it waits for the reads in flight to end.
 Callbacks (`for_each`'s `f`) must not call back into the `Session`: a nested read would wait
 behind a pending exclusive operation that waits for the outer read.

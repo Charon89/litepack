@@ -4,10 +4,9 @@
 //! **Sharing.** A `Session` is `Send + Sync`. Every read (`for_each`, `model`, `read_entry`,
 //! `preflight`, `extract`, `export`, `test`, `check`, `repair`) forks the opened reader
 //! (`Archive::fork`: nothing is read or checked again) onto a fresh file handle under a shared
-//! gate: each read is registered before it starts, with a token of its own that the
-//! caller's token cancels (a linker thread polls the callers' tokens every
-//! [`LINK_POLL`] while reads run) and that an exclusive operation cancels without touching the
-//! caller's. The exclusive operations (`history`, `close`, `rollback(self)`, `append(self)`)
+//! gate: each read is registered before it starts, with a token of its own, a child of the
+//! caller's (`CancelToken::child`): the caller's token cancels it, and an exclusive operation
+//! cancels it without touching the caller's. The exclusive operations (`history`, `close`, `rollback(self)`, `append(self)`)
 //! mark themselves pending, so no read starts after them, cancel the registered reads and wait
 //! for them to end. A closed session refuses every later call (`Usage`, kind `SessionClosed`).
 //!
@@ -314,21 +313,16 @@ impl std::fmt::Debug for Session {
     }
 }
 
-/// How often the linker thread passes a caller's cancel on to its read's own token.
-pub const LINK_POLL: Duration = Duration::from_millis(10);
-
 /// The reads in flight and the exclusive operations' state.
 #[derive(Debug, Default)]
 struct GateState {
-    /// Each read: its id, the caller's token, its own token.
-    reads: Vec<(u64, CancelToken, CancelToken)>,
+    /// Each read: its id and its own token (a child of the caller's).
+    reads: Vec<(u64, CancelToken)>,
     next: u64,
     /// Exclusive operations waiting: no read starts meanwhile.
     pending: usize,
     exclusive: bool,
     closed: bool,
-    /// The linker thread runs.
-    linker: bool,
 }
 
 #[derive(Debug, Default)]
@@ -344,25 +338,6 @@ impl Gate {
 
     fn wait<'a>(&self, g: MutexGuard<'a, GateState>) -> MutexGuard<'a, GateState> {
         self.cv.wait(g).unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// The linker: while reads run, cancel each read whose caller cancelled.
-    fn link(gate: Arc<Gate>) {
-        loop {
-            {
-                let mut s = gate.lock();
-                if s.reads.is_empty() {
-                    s.linker = false;
-                    return;
-                }
-                for (_, caller, own) in &s.reads {
-                    if caller.is_cancelled() {
-                        own.cancel();
-                    }
-                }
-            }
-            std::thread::sleep(LINK_POLL);
-        }
     }
 }
 
@@ -395,7 +370,7 @@ impl ReadGuard<'_> {
 impl Drop for ReadGuard<'_> {
     fn drop(&mut self) {
         let mut s = self.gate.lock();
-        s.reads.retain(|(id, _, _)| *id != self.id);
+        s.reads.retain(|(id, _)| *id != self.id);
         self.gate.cv.notify_all();
     }
 }
@@ -695,18 +670,8 @@ impl Session {
         }
         let id = s.next;
         s.next += 1;
-        let own = CancelToken::new();
-        if caller.is_cancelled() {
-            own.cancel();
-        }
-        s.reads.push((id, caller.clone(), own.clone()));
-        if !s.linker {
-            let gate = Arc::clone(&self.gate);
-            s.linker = std::thread::Builder::new()
-                .name("lpk-api-linker".into())
-                .spawn(move || Gate::link(gate))
-                .is_ok();
-        }
+        let own = caller.child();
+        s.reads.push((id, own.clone()));
         Ok(ReadGuard {
             gate: &self.gate,
             id,
@@ -724,7 +689,14 @@ impl Session {
         }
         s.pending += 1;
         loop {
-            for (_, _, own) in &s.reads {
+            // A `close` that took the gate first ends this operation: it must not run on
+            // the closed session (the free `rollback` may be truncating the file).
+            if s.closed {
+                s.pending -= 1;
+                self.gate.cv.notify_all();
+                return Err(self.closed());
+            }
+            for (_, own) in &s.reads {
                 own.cancel();
             }
             if s.reads.is_empty() && !s.exclusive {
@@ -799,6 +771,7 @@ impl Session {
     /// The broker's launch warnings of a foreign archive (it is listed now if it was not);
     /// none for an `.lpk`.
     pub fn warnings(&self) -> Result<Vec<String>, Error> {
+        let _g = self.read_guard(&CancelToken::new())?;
         match &self.kind {
             Kind::Lpk(_) => Ok(Vec::new()),
             Kind::Foreign(_) => Ok(self.listing()?.warnings.clone()),
@@ -809,6 +782,9 @@ impl Session {
     /// the reader's open plus the entry table (E3-1's bound; `lpk l` runs through this). A
     /// glob matching no entry is `NoMatch`, refused before `f` is called; `f` returning
     /// `Break` stops the walk.
+    ///
+    /// `f` must not call back into this `Session`: a read started inside the walk waits behind
+    /// a pending exclusive operation, which waits for the walk, and neither ends.
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -916,11 +892,12 @@ impl Session {
     /// call and shared after; its memory bound is [`ListModel::bound`]. Cancellable while it
     /// is built.
     pub fn model(&self, c: &CancelToken) -> Result<Arc<ListModel>, Error> {
+        // The gate first: a closed session refuses even a cached model.
+        let g = self.read_guard(c)?;
         let mut slot = self.model.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(m) = slot.as_ref() {
             return Ok(Arc::clone(m));
         }
-        let g = self.read_guard(c)?;
         let c = &g.cancel;
         let m = match &self.kind {
             Kind::Lpk(_) => {
@@ -1142,6 +1119,7 @@ impl Session {
             Selection::Globs(x) => Ok(x.clone()),
             Selection::Ids(ids) => {
                 let mut globs = Vec::new();
+                let mut over = 0usize;
                 let mut dirs = std::collections::HashSet::new();
                 let mut bad = None;
                 let (mut total, mut picked) = (0u64, 0u64);
@@ -1167,7 +1145,7 @@ impl Session {
                             None => bad = Some(path.to_string()),
                         }
                     } else {
-                        globs.push(String::new());
+                        over += 1;
                     }
                     ControlFlow::Continue(())
                 })?;
@@ -1177,7 +1155,7 @@ impl Session {
                 if picked == total {
                     return Ok(lpk_core::Selection::all());
                 }
-                if globs.len() > MAX_PICKED_GLOBS {
+                if over > 0 {
                     return Err(Error::new(
                         Class::TooLarge,
                         "TooLarge",
@@ -1448,7 +1426,8 @@ impl Session {
         s: &crate::CreateSettings,
         m: &Monitor,
     ) -> Result<lpk_core::RunSummary, Error> {
-        let _ = (out, s, m);
+        let _ = (out, s);
+        let _g = self.read_guard(&m.cancel)?;
         Err(unsupported_foreign("convert", &self.path))
     }
 }
@@ -1535,6 +1514,126 @@ impl lpk_core::Sink for CappedSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn session(dir: &Path) -> Arc<Session> {
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"a").unwrap();
+        let out = dir.join("a.lpk");
+        crate::create(
+            &lpk_core::Sources::contents_of(&src),
+            &out,
+            &crate::CreateSettings::default(),
+            &Monitor::default(),
+        )
+        .unwrap();
+        Arc::new(Session::open(&out, &OpenOptions::default()).unwrap())
+    }
+
+    /// Wait until `pending` exclusive operations wait at the gate.
+    fn until_pending(s: &Session, pending: usize) {
+        let t = Instant::now();
+        while s.gate.lock().pending != pending {
+            assert!(t.elapsed() < Duration::from_secs(10), "never pending");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A `history` waiting behind a read when `close` takes the session fails with
+    /// `SessionClosed` instead of running on the closed session.
+    #[test]
+    fn an_exclusive_operation_pending_when_close_wins_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = session(dir.path());
+        let caller = CancelToken::new();
+        let read = s.read_guard(&caller).unwrap();
+        let h = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || s.history(&CancelToken::new()).map_err(|e| e.kind))
+        };
+        until_pending(&s, 1);
+        assert!(read.cancel.is_cancelled() && !caller.is_cancelled());
+        // `close` wins the gate (what it does once the reads ended): the session is closed
+        // and exclusive while `history` still waits.
+        {
+            let mut g = s.gate.lock();
+            g.closed = true;
+            g.exclusive = true;
+        }
+        drop(read);
+        assert_eq!(h.join().unwrap().unwrap_err(), "SessionClosed");
+        assert_eq!(s.gate.lock().pending, 0);
+    }
+
+    /// The same through `close()` itself: whichever of the two wins, `history` never runs
+    /// after the session is closed, and every later call is refused.
+    #[test]
+    fn close_and_a_pending_history_never_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = session(dir.path());
+        let read = s.read_guard(&CancelToken::new()).unwrap();
+        let h = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || s.history(&CancelToken::new()).map_err(|e| e.kind))
+        };
+        until_pending(&s, 1);
+        let c = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || s.close())
+        };
+        until_pending(&s, 2);
+        drop(read);
+        c.join().unwrap().unwrap();
+        match h.join().unwrap() {
+            Ok(chain) => assert_eq!(chain.len(), 1),
+            Err(kind) => assert_eq!(kind, "SessionClosed"),
+        }
+        assert_eq!(
+            s.history(&CancelToken::new()).unwrap_err().kind,
+            "SessionClosed"
+        );
+        assert_eq!(
+            s.model(&CancelToken::new()).unwrap_err().kind,
+            "SessionClosed"
+        );
+        assert_eq!(s.warnings().unwrap_err().kind, "SessionClosed");
+    }
+
+    /// A read that starts while an exclusive operation is pending waits until it is done.
+    #[test]
+    fn a_read_waits_for_a_pending_exclusive_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = session(dir.path());
+        // The model is cached first, so the later read is cheap.
+        s.model(&CancelToken::new()).unwrap();
+        let read = s.read_guard(&CancelToken::new()).unwrap();
+        let h = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || {
+                let r = s.history(&CancelToken::new());
+                (r.is_ok(), Instant::now())
+            })
+        };
+        until_pending(&s, 1);
+        let late = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || {
+                let r = s.model(&CancelToken::new());
+                (r.is_ok(), Instant::now())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !late.is_finished(),
+            "the read started behind the pending history"
+        );
+        drop(read);
+        let (history_ok, history_done) = h.join().unwrap();
+        let (read_ok, read_done) = late.join().unwrap();
+        assert!(history_ok && read_ok);
+        assert!(read_done >= history_done, "the read ran after the history");
+    }
 
     #[test]
     fn exact_globs_match_only_their_path() {
