@@ -1666,12 +1666,14 @@ fn start<'m>(
     }
     let paths = match volume_set(archive, format).map_err(|e| CoreError::io(archive, e))? {
         Ok(p) => p,
-        Err(n) => return Err(ForeignError::Unsupported {
-            message: format!(
+        Err(n) => {
+            return Err(ForeignError::Unsupported {
+                message: format!(
                 "a volume set of {n} or more volumes; at most {MAX_VOLUMES} are read (named limit)"
             ),
+            }
+            .into())
         }
-        .into()),
     };
     let mut files = Vec::with_capacity(paths.len());
     let mut len = 0u64;
