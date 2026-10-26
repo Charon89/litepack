@@ -1,0 +1,29 @@
+
+================================================================================
+The GUI (lpk-gui.exe, Windows)
+================================================================================
+
+lpk-gui.exe links Microsoft's WebView2 loader (WebView2LoaderStatic.lib, from the
+Microsoft.Web.WebView2 SDK, through the crate webview2-com-sys 0.39.1). Its licence requires
+this notice:
+
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+The licence of the Microsoft.Web.WebView2 SDK applies to the loader:
+https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.4314.35/License
+
+================================================================================
+Licences of the crates in lpk-gui (Windows)
+================================================================================
+{{#each licenses}}
+================================================================================
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} <{{crate.repository}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

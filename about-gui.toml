@@ -1,0 +1,87 @@
+# cargo-about configuration for the GUI's part of THIRD-PARTY-NOTICES (E5-2): about.toml's policy over
+# lpk-gui for the Windows triples it ships on (scripts/third-party-notices.sh renders about-gui.hbs with it).
+# Keep everything but `targets` identical to about.toml.
+# deny.toml's allow-list, in the order a choice is made for an `OR` expression.
+accepted = [
+  "Apache-2.0",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Zlib",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "MPL-2.0",
+]
+# The GUI ships for Windows alone (Tauri is a cfg(windows) dependency of lpk-gui).
+targets = [
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# Our own unpublished crates are not third-party; the third-party code inside them is in about.hbs's static
+# section.
+private = { ignore = true }
+
+# lepton_jpeg ships no licence file: its Apache-2.0 header with Microsoft's copyright line.
+[lepton_jpeg.clarify]
+license = "Apache-2.0"
+[[lepton_jpeg.clarify.files]]
+path = "src/lib.rs"
+start = "/*---"
+end = "*/"
+checksum = "a3eec853c4df9269b68e0a2dbf3543c75a33444d3705d2af10f2eac8b35f1955"
+
+# liblzma-sys bundles liblzma (xz), 0BSD; only liblzma is built (the GPL files of xz's tree are not).
+[liblzma-sys.clarify]
+license = "(MIT OR Apache-2.0) AND 0BSD"
+[[liblzma-sys.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "a90e2da47bdc152cfb89e1fb09972143056c417ddbf86122babc83d0a8ad81d1"
+[[liblzma-sys.clarify.files]]
+path = "LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+[[liblzma-sys.clarify.files]]
+path = "xz/COPYING.0BSD"
+license = "0BSD"
+checksum = "0b01625d853911cd0e2e088dcfb743261034a091bb379246cb25a14cc4c74bf1"
+
+# libz-sys bundles zlib (Zlib licence).
+[libz-sys.clarify]
+license = "(MIT OR Apache-2.0) AND Zlib"
+[[libz-sys.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "34c467b6945a22696d060b8fdd2379d464acb3408d4c599d3dc5fe4fa1b4c84f"
+[[libz-sys.clarify.files]]
+path = "LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+[[libz-sys.clarify.files]]
+path = "src/zlib/LICENSE"
+license = "Zlib"
+checksum = "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+
+# libsais-sys bundles libsais's C sources (Apache-2.0, Copyright (c) 2021-2025 Ilya Grebnov; the 0.2.0 package's
+# libsais/LICENSE is the plain Apache-2.0 text, no LLVM exception).
+[libsais-sys.clarify]
+license = "(MIT OR Apache-2.0) AND Apache-2.0"
+[[libsais-sys.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "f51845d267c67d81df39cd221e6f8a1d95f69d967e49020321954318d2ef1edb"
+[[libsais-sys.clarify.files]]
+path = "LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "7cfd738c53d61c79f07e348f622bf7707c9084237054d37fbe07788a75f5881c"
+[[libsais-sys.clarify.files]]
+path = "libsais/src/libsais.c"
+license = "Apache-2.0"
+start = "/*--"
+end = "--*/"
+checksum = "960b9d28d9a724c44bad518a27cfe2b6e9d3cfbc9621c30a31cc848160e37263"

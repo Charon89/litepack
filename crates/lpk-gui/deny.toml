@@ -1,0 +1,43 @@
+# cargo-deny policy for the GUI's tree (E5-2), the same policy as deny.toml for the triples the GUI
+# ships on. Run: cargo deny --manifest-path crates/lpk-gui/Cargo.toml check --config deny-gui.toml
+# Keep the [advisories], [licenses], [bans] and [sources] tables identical to deny.toml's.
+[graph]
+all-features = true
+# The GUI ships for Windows alone (Tauri is a cfg(windows) dependency of lpk-gui).
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+
+[advisories]
+yanked = "deny"
+unmaintained = "workspace"
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "MIT-0",            # MIT without the attribution clause: borrow-or-share (via jsonschema), D-25
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Zlib",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "MPL-2.0",
+]
+confidence-threshold = 0.9
+# No exceptions: no copyleft crate is in the tree. The one LGPL-3.0 crate the engine had (`cabac`, behind the
+# vendored preflate-rs) was replaced by `lpk-codecs-vp8` (LIC-2, docs/LICENSING.md), so a closed build carries no
+# relinking duty. A future exception is allowed only by crate name, with its own recorded decision (D-25, D-26),
+# and must state what a closed build would then have to keep open.
+exceptions = []
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
