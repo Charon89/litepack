@@ -1,0 +1,477 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "c8c510de49236fc1706427575e768beb2d5ddb3b51dd4185d76ce64e83f16912",
+  "classes": [
+    "archives-nested",
+    "audio",
+    "backup-versions",
+    "backup-versions-large",
+    "encrypted-random",
+    "game-assets",
+    "logs-text",
+    "model-weights",
+    "office-pdf",
+    "photo-jpeg",
+    "photo-jpeg-edited",
+    "photo-raw-png",
+    "small-files",
+    "software-installed",
+    "source-git",
+    "text-prose",
+    "video",
+    "vm-image"
+  ],
+  "combinations": [
+    {
+      "class": "archives-nested",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "archives-nested",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "archives-nested",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "archives-nested",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "audio",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "audio",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "audio",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "audio",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "backup-versions",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "encrypted-random",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "encrypted-random",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "encrypted-random",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "encrypted-random",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "game-assets",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "logs-text",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "logs-text",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "logs-text",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "logs-text",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "model-weights",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "model-weights",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "model-weights",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "model-weights",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "fast-no-jpeg",
+      "tool": "lpk"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "store"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}

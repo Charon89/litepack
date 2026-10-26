@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "lpk",
+      "local_override": false,
+      "manual": false,
+      "name": "LitePack",
+      "status": "found",
+      "version": "0.0.1+e9790b809a73"
+    }
+  ]
+}
