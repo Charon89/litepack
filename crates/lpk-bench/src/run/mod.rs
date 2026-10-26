@@ -222,8 +222,18 @@ fn list_tools(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
-fn validate_cmd(dir: &Path) -> Result<ExitCode> {
-    let report = validate::validate_dir(dir)?;
+fn validate_cmd(dir: &Path, corpus: Option<&Path>) -> Result<ExitCode> {
+    let mut report = validate::validate_dir(dir)?;
+    // E8-10: each row's class digest against the corpus manifest, when that corpus is present.
+    let digests = validate::check_class_digests(dir, corpus)?;
+    report.notes.extend(digests.notes);
+    report.problems.extend(digests.problems);
+    if digests.results > 0 {
+        report.notes.push(format!(
+            "{} row(s)' class digests match their corpus manifest",
+            digests.results
+        ));
+    }
     for n in &report.notes {
         println!("note: {n}");
     }
@@ -265,7 +275,7 @@ pub fn tar(args: TarArgs) -> ExitCode {
 
 pub fn run(args: RunArgs) -> ExitCode {
     if let Some(dir) = &args.validate {
-        return match validate_cmd(dir) {
+        return match validate_cmd(dir, args.corpus.as_deref()) {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("error: {e:#}");

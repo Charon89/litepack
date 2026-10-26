@@ -947,14 +947,15 @@ fn foreign_extract(
     if x.verbose {
         let _ = writeln!(
             err,
-            "{}: {} archive through the sandboxed worker: {} entries, {} files, {} directories, {} symlinks, {} bytes",
+            "{}: {} archive through the sandboxed worker: {} entries, {} files, {} directories, {} symlinks, {} bytes; listing charge {} bytes",
             x.archive.display(),
             s.format,
             s.entries,
             s.files,
             s.directories,
             s.symlinks,
-            s.bytes
+            s.bytes,
+            s.listing_charge
         );
     }
     let _ = writeln!(
