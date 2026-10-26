@@ -386,7 +386,7 @@ mod tests {
         let b = d.path().join("b.lpk");
         create_archive(&sources(&src), &b, &store(), &Monitor::default(), None).unwrap();
         append_archive(&b, &more, &store(), None, &Monitor::default(), None).unwrap();
-        let b_len = std::fs::metadata(&b).unwrap().len();
+        let b_bytes = std::fs::read(&b).unwrap();
         j.add(&Record::Append {
             path: b.clone(),
             identity: Identity(path_identity(&b).unwrap()),
@@ -426,11 +426,47 @@ mod tests {
         want.sort_by_key(|r| format!("{r:?}"));
         assert_eq!(got, want);
         assert_eq!(std::fs::metadata(&a).unwrap().len(), gen0_len);
-        assert_eq!(std::fs::metadata(&b).unwrap().len(), b_len);
+        assert_eq!(
+            std::fs::read(&b).unwrap(),
+            b_bytes,
+            "a committed append is untouched"
+        );
         assert_eq!(std::fs::metadata(&c).unwrap().len(), c_len);
         // The rolled-back archive opens at generation 0.
         let s = Session::open(&a, &OpenOptions::default()).unwrap();
         assert_eq!(s.info().latest_generation, 0);
+    }
+
+    #[test]
+    fn a_later_generation_survives_the_recovery_of_a_stale_append_record() {
+        // The GUI died after its append (generation 1) committed but before it removed the
+        // record; the user then appended generation 2 with `lpk`. The next start must keep both.
+        let d = tempfile::tempdir().unwrap();
+        let src = tree(d.path(), 2);
+        let more = d.path().join("more");
+        std::fs::create_dir_all(&more).unwrap();
+        std::fs::write(more.join("one.bin"), vec![1u8; 3000]).unwrap();
+        let more2 = d.path().join("more2");
+        std::fs::create_dir_all(&more2).unwrap();
+        std::fs::write(more2.join("two.bin"), vec![2u8; 3000]).unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let a = d.path().join("a.lpk");
+        create_archive(&sources(&src), &a, &store(), &Monitor::default(), None).unwrap();
+        append_archive(&a, &more, &store(), None, &Monitor::default(), None).unwrap();
+        append_archive(&a, &more2, &store(), None, &Monitor::default(), None).unwrap();
+        let before = std::fs::read(&a).unwrap();
+        j.add(&Record::Append {
+            path: a.clone(),
+            identity: Identity(path_identity(&a).unwrap()),
+            generation: 0,
+        })
+        .unwrap()
+        .abandon();
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert_eq!(got, [Recovered::Committed(a.clone())]);
+        assert_eq!(std::fs::read(&a).unwrap(), before, "byte for byte");
+        let s = Session::open(&a, &OpenOptions::default()).unwrap();
+        assert_eq!(s.info().latest_generation, 2);
     }
 
     #[test]

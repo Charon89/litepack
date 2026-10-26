@@ -272,22 +272,25 @@ fn recover_one(r: &Record) -> Recovered {
             generation,
         } => match same_file(path, identity) {
             Ok(true) => {
-                // The append committed if its generation exists: rolling back to it is a
-                // no-op. Otherwise cut back to the generation before it.
-                match lpk_api::rollback(path, generation + 1) {
-                    Ok(_) => Recovered::Committed(path.clone()),
-                    Err(e) if e.kind == "NoSuchGeneration" => {
-                        match lpk_api::rollback(path, *generation) {
-                            Ok(g) => Recovered::RolledBack {
-                                path: path.clone(),
-                                generation: g.generation,
-                            },
-                            Err(e) => Recovered::Failed {
-                                path: path.clone(),
-                                error: e.to_string(),
-                            },
-                        }
-                    }
+                // An archive that opens past the recorded generation has the append committed
+                // (and maybe later generations, appended after this process died): nothing is
+                // written. Still at the recorded generation, or not opening at all (the append
+                // was cut short), it is cut back to the recorded generation.
+                let latest = lpk_api::Session::open(path, &lpk_api::OpenOptions::default())
+                    .map(|s| {
+                        let g = s.info().latest_generation;
+                        let _ = s.close();
+                        g
+                    })
+                    .ok();
+                if latest.is_some_and(|g| g > *generation) {
+                    return Recovered::Committed(path.clone());
+                }
+                match lpk_api::rollback(path, *generation) {
+                    Ok(g) => Recovered::RolledBack {
+                        path: path.clone(),
+                        generation: g.generation,
+                    },
                     Err(e) => Recovered::Failed {
                         path: path.clone(),
                         error: e.to_string(),
