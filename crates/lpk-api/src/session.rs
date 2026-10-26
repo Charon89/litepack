@@ -1613,16 +1613,12 @@ mod tests {
         let read = s.read_guard(&CancelToken::new()).unwrap();
         let h = {
             let s = Arc::clone(&s);
-            std::thread::spawn(move || {
-                s.history(&CancelToken::new()).is_ok()
-            })
+            std::thread::spawn(move || s.history(&CancelToken::new()).is_ok())
         };
         until_pending(&s, 1);
         let late = {
             let s = Arc::clone(&s);
-            std::thread::spawn(move || {
-                s.model(&CancelToken::new()).is_ok()
-            })
+            std::thread::spawn(move || s.model(&CancelToken::new()).is_ok())
         };
         std::thread::sleep(Duration::from_millis(100));
         assert!(
