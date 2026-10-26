@@ -926,8 +926,11 @@ pub(crate) fn policy_pass(
     // before output (E6-6); elsewhere the system's own limits answer at the create.
     let dir_units = if cfg!(windows) {
         std::path::absolute(dir)
-            .map(|p| p.as_os_str().to_string_lossy().encode_utf16().count())
-            .map_err(|e| io(dir, e))?
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .count()
     } else {
         0
     };
@@ -2063,7 +2066,10 @@ mod tests {
         let out = tmp.path().join("out");
         let entries = vec![entry(EntryKind::Symlink, "sub/l", Some(b"../a/b"))];
         let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
-        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        crate::outtree::seam::force_symlink_privilege(Some(true));
+        let pass = policy_pass(entries, &out, &policy, &Selection::all());
+        crate::outtree::seam::force_symlink_privilege(None);
+        let pass = pass.unwrap();
         match &pass.placed[0] {
             Placed::Link(l) => assert_eq!(l.target, b"../a/b"),
             p => panic!("{p:?}"),
@@ -2113,7 +2119,11 @@ mod tests {
         // Something on disk named like a file entry's target: ignored for the kind.
         std::fs::create_dir_all(out.join("nothing")).unwrap();
         let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
-        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        // The links reach the link phase (the privilege is the system's answer there, E6-6).
+        crate::outtree::seam::force_symlink_privilege(Some(true));
+        let pass = policy_pass(entries, &out, &policy, &Selection::all());
+        crate::outtree::seam::force_symlink_privilege(None);
+        let pass = pass.unwrap();
         assert_eq!(pass.symlinks_skipped, refused.len() as u64);
         let want: Vec<(String, R)> = refused
             .iter()

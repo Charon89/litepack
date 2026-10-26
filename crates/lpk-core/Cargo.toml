@@ -46,7 +46,7 @@ lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
 libc = "0.2.189"
 
 # E6-6: the output tree's opens relative to verified directory handles (the -sys crate;
-# lpk-core keeps forbid(unsafe_code)). Linux keeps the path code.
+# lpk-core itself stays free of unsafe). Linux keeps the path code.
 [target.'cfg(windows)'.dependencies]
 lpk-fs-sys = { path = "../lpk-fs-sys", version = "0.0.1" }
 

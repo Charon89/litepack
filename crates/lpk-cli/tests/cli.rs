@@ -1914,7 +1914,7 @@ fn symlink_entries_are_skipped_with_a_warning_unless_symlinks_is_given() {
         // E6-6: Windows without SeCreateSymbolicLinkPrivilege skips the link with a warning
         // naming the reason, and the extraction goes on.
         Some(0) if !lpk_core::outtree::can_create_symlinks() => {
-            assert!(cfg!(windows));
+            assert!(std::env::consts::OS == "windows");
             let e = text(&r.stderr);
             assert!(
                 e.contains("warning: link: symlink entry skipped: this process lacks SeCreateSymbolicLinkPrivilege"),
