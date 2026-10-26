@@ -94,6 +94,14 @@ lists) far beyond what the archive declares.
    below 2^32 - 1: no valid record is affected. For tests, `src/stream_processor.rs` gains the
    hidden function `litepack_record_with_coded_corrections(record, coded)`, exported from
    `src/lib.rs`: the record with its coded correction stream replaced.
+9. **Prediction differences decoded with wrapping arithmetic** (LitePack E4-6, 2026-10-26). In
+   `src/cabac_codec.rs` (this crate's own file; the coder it drives is unchanged),
+   `decode_difference` subtracts and adds with `wrapping_sub`/`wrapping_add`: upstream's `-`
+   and `+` overflow on a crafted correction, which panics in a build with overflow checks (the
+   fuzz build) and wraps in a release build. The release result is unchanged, so no outcome
+   differs from before in a release build and no valid record is affected (a valid record never
+   overflows: the encoder computed the difference from two `u32` values). Found by LitePack's
+   `deflate_recreate` fuzz target; the test `test_encode_decode_difference` checks the wrap.
 
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.
