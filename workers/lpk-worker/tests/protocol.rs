@@ -78,8 +78,15 @@ fn session(s: &Staged, fx: &[u8], args: &[&str], reqs: &[Request]) -> (u32, Vec<
         .spawn()
         .unwrap();
     drop((req_r, resp_w, err_w, file));
+    // A worker that refuses its arguments exits before reading its requests; the write then
+    // meets a closed pipe (BrokenPipe), which is that refusal path, not a failure: the callers
+    // assert on what the worker said and on its exit status.
     for r in reqs {
-        r.write_to(&mut req_w).unwrap();
+        match r.write_to(&mut req_w) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
+            Err(e) => panic!("writing a request: {e}"),
+        }
     }
     drop(req_w);
     let mut out = Vec::new();
