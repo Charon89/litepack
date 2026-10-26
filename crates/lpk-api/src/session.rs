@@ -175,6 +175,8 @@ pub struct ExtractReport {
     pub outcome: Extracted,
     /// The symlink entries skipped (without `Symlinks::Create`), in entry order.
     pub skipped_symlinks: Vec<String>,
+    /// The symlink entries not created because of their target (E6-0), with the reason.
+    pub refused_symlink_targets: Vec<(String, lpk_core::policy::TargetRefusal)>,
 }
 
 /// The engine's counts of an extraction.
@@ -1231,6 +1233,7 @@ impl Session {
             dir,
             outcome,
             skipped_symlinks: policy.skipped_symlinks(),
+            refused_symlink_targets: policy.refused_symlink_targets(),
         })
     }
 

@@ -33,6 +33,7 @@ pub use session::{
 /// Engine types a front end names through this crate (re-exported so that it needs no other
 /// engine crate).
 pub use lpk_core::foreign::{ForeignSummary, Format as ForeignFormat, Limits as ForeignLimits};
+pub use lpk_core::policy::TargetRefusal;
 pub use lpk_core::{
     CancelToken, Event, ExportSummary, ExtractSummary, FileOrder, Monitor, Overwrite, Progress,
     Root, RunSummary, Selection as Globs, Sources, Stage, Symlinks,

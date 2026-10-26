@@ -933,7 +933,7 @@ fn foreign_extract(
             );
         }
     }
-    refused_target_warnings(&policy, json, err);
+    refused_target_warnings(&report.refused_symlink_targets, json, err);
     if s.skipped > 0 {
         let _ = writeln!(err, "skipped {} existing entries", s.skipped);
     }
@@ -964,8 +964,12 @@ fn foreign_extract(
 /// The symlink entries `--symlinks` did not create because of their target (E6-0), one line
 /// each: `warning: PATH: symlink entry skipped: REASON`, or with --json
 /// `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}`.
-fn refused_target_warnings(policy: &lpk_core::Policy, json: bool, err: &mut dyn Write) {
-    for (p, why) in policy.refused_symlink_targets() {
+fn refused_target_warnings(
+    refused: &[(String, lpk_api::TargetRefusal)],
+    json: bool,
+    err: &mut dyn Write,
+) {
+    for (p, why) in refused {
         if json {
             let line = serde_json::json!({
                 "warning": { "kind": "SymlinkTargetRefused", "path": p, "reason": why.reason() }
@@ -975,7 +979,7 @@ fn refused_target_warnings(policy: &lpk_core::Policy, json: bool, err: &mut dyn 
             let _ = writeln!(
                 err,
                 "warning: {}: symlink entry skipped: {why}",
-                lpk_format::cli::escape_path(&p)
+                lpk_format::cli::escape_path(p)
             );
         }
     }
@@ -1635,7 +1639,7 @@ fn extract(
             );
         }
     }
-    refused_target_warnings(&policy, json, err);
+    refused_target_warnings(&report.refused_symlink_targets, json, err);
     if json {
         if s.skipped > 0 || s.renamed > 0 || s.symlinks_skipped > 0 {
             let line = serde_json::json!({
