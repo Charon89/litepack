@@ -487,7 +487,8 @@ type Visit<'a, R> =
 fn scan<R: Read + Seek>(
     a: &mut Archive<R>,
     visit: &mut Visit<'_, R>,
-) -> Result<RepairReport, FormatError> {
+    hook: &mut crate::hook::BlockHook<'_>,
+) -> Result<Option<RepairReport>, FormatError> {
     let locations = a.recovery_frames().to_vec();
     let index_at = a.trailer().index_offset;
     let starts: Vec<u64> = a
@@ -501,7 +502,14 @@ fn scan<R: Read + Seek>(
         ..RepairReport::default()
     };
     let mut buf = Vec::new();
+    let total = locations.len() as u64;
+    if crate::hook::stop(hook, 0, total) {
+        return Ok(None);
+    }
     for (i, loc) in locations.iter().enumerate() {
+        if i > 0 && crate::hook::stop(hook, i as u64, total) {
+            return Ok(None);
+        }
         let payload = match a.read_frame_at(*loc, FrameKind::Recovery) {
             Ok(f) => f.payload,
             Err(FormatError::Io(e)) => return Err(FormatError::Io(e)),
@@ -531,7 +539,10 @@ fn scan<R: Read + Seek>(
         report.shards_damaged += damaged.len() as u64;
         report.shards_repaired += visit(a, i, &frame, &damaged)?;
     }
-    Ok(report)
+    if total > 0 && crate::hook::stop(hook, total, total) {
+        return Ok(None);
+    }
+    Ok(Some(report))
 }
 
 /// Rebuild the damaged shards of `frame`: the shard number and its bytes
@@ -604,7 +615,76 @@ impl<R: Read + Seek> Archive<R> {
     /// [`Archive::check_recovery`] without the key check, over whatever
     /// recovery frame list the archive holds.
     pub(crate) fn scan_recovery_frames(&mut self) -> Result<RepairReport, FormatError> {
-        scan(self, &mut |_, _, _, _| Ok(0))
+        self.check_recovery_with(&mut crate::hook::no_hook)
+            .map(|r| r.expect("no_hook never stops the walk"))
+    }
+
+    /// [`Archive::check_recovery`] with a per-frame hook ([`crate::hook`]): called with 0 of
+    /// the recovery frame count first, then as each later frame starts and once all are
+    /// scanned; a `Break` stops the scan and returns `Ok(None)`.
+    pub fn check_recovery_with(
+        &mut self,
+        hook: &mut crate::hook::BlockHook<'_>,
+    ) -> Result<Option<RepairReport>, FormatError> {
+        scan(self, &mut |_, _, _, _| Ok(0), hook)
+    }
+
+    /// Copy this archive's bytes to `out` and repair what the recovery frames can rebuild,
+    /// as [`repair_with_credentials`] does after opening (its memory rule uses this archive's
+    /// `Resources::memory`), with a per-frame hook ([`crate::hook`]); a `Break` stops the
+    /// repair and returns `Ok(None)` (the copy is then incomplete: the caller removes it).
+    pub fn repair_into<W: Write + Seek>(
+        &mut self,
+        mut out: W,
+        hook: &mut crate::hook::BlockHook<'_>,
+    ) -> Result<Option<(RepairReport, Option<FormatError>)>, FormatError> {
+        let memory = self.resources().memory;
+        {
+            let r = self.raw_reader();
+            r.seek(SeekFrom::Start(0))?;
+            out.seek(SeekFrom::Start(0))?;
+            std::io::copy(r, &mut out)?;
+        }
+        let mut unrepairable = None;
+        let report = scan(
+            self,
+            &mut |a, i, frame, damaged| {
+                if damaged.is_empty() {
+                    return Ok(0);
+                }
+                let capacity = u64::from(frame.recovery_shards);
+                if damaged.len() as u64 > capacity {
+                    unrepairable.get_or_insert(FormatError::Unrepairable {
+                        frame: i,
+                        damaged: damaged.len() as u64,
+                        capacity,
+                    });
+                    return Ok(0);
+                }
+                let needed =
+                    decoder_work_bytes(frame.group_shards, frame.recovery_shards, frame.shard_len);
+                if needed > memory {
+                    return Err(FormatError::Refused(Refusal {
+                        field: "recovery group",
+                        needed,
+                        allowed: memory,
+                    }));
+                }
+                let fixed = rebuild(a.raw_reader(), frame, damaged)?;
+                for (s, bytes) in &fixed {
+                    let (offset, len) = frame.shard_range(*s);
+                    out.seek(SeekFrom::Start(offset))?;
+                    out.write_all(&bytes[..len])?;
+                }
+                Ok(fixed.len() as u64)
+            },
+            hook,
+        )?;
+        let Some(report) = report else {
+            return Ok(None);
+        };
+        out.flush()?;
+        Ok(Some((report, unrepairable)))
     }
 }
 
@@ -644,49 +724,13 @@ pub fn repair_with_report<R: Read + Seek, W: Write + Seek>(
 /// frame). An encrypted archive given no credentials is repaired on its sealed bytes.
 pub fn repair_with_credentials<R: Read + Seek, W: Write + Seek>(
     archive: R,
-    mut out: W,
+    out: W,
     resources: &Resources,
     credentials: Option<&crate::crypto::Credentials>,
 ) -> Result<(RepairReport, Option<FormatError>), FormatError> {
     let mut a = Archive::open_with(archive, resources, credentials)?;
-    {
-        let r = a.raw_reader();
-        r.seek(SeekFrom::Start(0))?;
-        out.seek(SeekFrom::Start(0))?;
-        std::io::copy(r, &mut out)?;
-    }
-    let mut unrepairable = None;
-    let report = scan(&mut a, &mut |a, i, frame, damaged| {
-        if damaged.is_empty() {
-            return Ok(0);
-        }
-        let capacity = u64::from(frame.recovery_shards);
-        if damaged.len() as u64 > capacity {
-            unrepairable.get_or_insert(FormatError::Unrepairable {
-                frame: i,
-                damaged: damaged.len() as u64,
-                capacity,
-            });
-            return Ok(0);
-        }
-        let needed = decoder_work_bytes(frame.group_shards, frame.recovery_shards, frame.shard_len);
-        if needed > resources.memory {
-            return Err(FormatError::Refused(Refusal {
-                field: "recovery group",
-                needed,
-                allowed: resources.memory,
-            }));
-        }
-        let fixed = rebuild(a.raw_reader(), frame, damaged)?;
-        for (s, bytes) in &fixed {
-            let (offset, len) = frame.shard_range(*s);
-            out.seek(SeekFrom::Start(offset))?;
-            out.write_all(&bytes[..len])?;
-        }
-        Ok(fixed.len() as u64)
-    })?;
-    out.flush()?;
-    Ok((report, unrepairable))
+    a.repair_into(out, &mut crate::hook::no_hook)
+        .map(|r| r.expect("no_hook never stops the walk"))
 }
 
 /// The Markdown table of the recovery payload, pasted verbatim into the spec.
