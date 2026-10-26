@@ -17,6 +17,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Mutex, PoisonError};
 
 use lpk_procstat_sys::alloc::CountingAlloc;
 use preflate_rs::{recreate_whole_deflate_stream_limited_report, ExitCode};
@@ -38,7 +39,12 @@ struct Outcome {
     result: Option<(Result<Vec<u8>, ExitCode>, usize)>,
 }
 
+/// The peak counter is process-wide: one measurement at a time, so one test's `reset_peak`
+/// cannot erase another's peak.
+static MEASURE: Mutex<()> = Mutex::new(());
+
 fn recreate(plain: &[u8], corrections: &[u8], limit: usize) -> Outcome {
+    let _guard = MEASURE.lock().unwrap_or_else(PoisonError::into_inner);
     let base = ALLOC.current();
     ALLOC.reset_peak();
     let r = catch_unwind(AssertUnwindSafe(|| {
@@ -79,18 +85,21 @@ fn check_fuzz_input(name: &str, data: &[u8]) {
     check_bounded(name, &o, limit);
 }
 
-/// Fuzz run 40270390275's out-of-memory input (libFuzzer: `malloc(4294967295)`).
+/// Fuzz run 40270390275's out-of-memory input (libFuzzer: `malloc(4294967295)`). An
+/// early-refusal regression: in a normal build bitcode refuses it (trailing bytes) before the
+/// resize, so it does not guard change 12 (the crafted-record test below does).
 #[test]
-fn fuzz_oom_input_stays_within_the_limit() {
+fn fuzz_oom_input_is_refused_early() {
     check_fuzz_input(
         "oom-e80ee409",
         include_bytes!("fixtures/fuzz/deflate_recreate-oom-e80ee409"),
     );
 }
 
-/// The base unit libFuzzer mutated into it (an earlier crash input of the target).
+/// The base unit libFuzzer mutated into it (an earlier crash input of the target). An
+/// early-refusal regression too: refused before the resize in a normal build.
 #[test]
-fn fuzz_crash_input_stays_within_the_limit() {
+fn fuzz_crash_input_is_refused_early() {
     check_fuzz_input(
         "crash-35aa2eee",
         include_bytes!("fixtures/fuzz/deflate_recreate-crash-35aa2eee"),

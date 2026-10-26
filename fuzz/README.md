@@ -50,8 +50,15 @@ it wraps in the fuzz and shipped builds: reproduce a fuzz finding with
 `RUSTFLAGS="--cfg fuzzing" cargo test --release` only to match the old builds; with this flag, a
 plain `cargo test --release` matches.
 
+What the fuzzer gives up for this: code after a successful zlib decode is reached only by inputs
+with a valid Adler-32 checksum (and bitcode records only without trailing bytes), so seeds should
+carry valid checksums for mutations to get past them. And as the fuzz builds have no overflow
+checks, a wrap is found only through what it causes later; an occasional separate run built with
+`-a` (`cargo fuzz build -a --no-cfg-fuzzing`, debug assertions and overflow checks) would catch
+wraps directly (a suggestion; no CI job runs it).
+
 A crash is saved under `fuzz/artifacts/<target>/`. Minimise it with
-`cargo +nightly fuzz tmin <target> <file>`, add the bytes as a regression test in `lpk-format`, fix the
+`cargo +nightly fuzz tmin --no-cfg-fuzzing <target> <file>`, add the bytes as a regression test in `lpk-format`, fix the
 bug in its own commit.
 
 ## CI
