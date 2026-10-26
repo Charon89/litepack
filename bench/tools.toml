@@ -263,7 +263,11 @@ extract = []
 # Mark of the Web's cost (E6-5, docs/notes/e6-design.md section 4): the runner writes a
 # Zone.Identifier stream with ZoneId=3 onto the archive before extraction (Windows only), so
 # `fast-zoned` extracts with propagation (every file gets the stream) and `fast-zoned-no-motw`
-# the same zoned archive with the opt-out; both against `fast` on `small-files`.
+# the same zoned archive with the opt-out; both against `fast` on `small-files`. Outside
+# Windows both rows are recorded as skipped ("zone streams need Windows"). They exist for that
+# one comparison: a full run that should leave them out names its settings with `--settings`
+# (for example `--settings fast,balanced,...`), and E6-5's row picks them the same way:
+# `--tools lpk --settings fast,fast-zoned,fast-zoned-no-motw --classes small-files`.
 [[tool.setting]]
 id = "fast-zoned"
 compress = ["--fast"]
