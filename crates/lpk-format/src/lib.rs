@@ -18,6 +18,7 @@ pub mod error;
 pub mod frame;
 pub mod graph;
 pub mod header;
+pub mod hook;
 pub mod index;
 pub mod lzma;
 pub mod magic;
@@ -75,6 +76,7 @@ pub use graph::{
     block_header_table, graph_layout_table, BlockHeader, Graph, Step, MAX_PARAMS, MAX_STEPS,
 };
 pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, HeaderFlags};
+pub use hook::{no_hook, BlockHook, BlockStep};
 pub use lzma::LzmaDecoder;
 pub use magic::MAGIC;
 pub use primitive::{primitive_table, GraphResources, PrimitiveId};

@@ -1,4 +1,4 @@
-//! `lpk export`: the ZIP and 7z sinks (E3-6) the engine's entry-ordered export
+//! `Session::export` (`lpk export`): the ZIP and 7z sinks (E3-6) the engine's entry-ordered export
 //! ([`lpk_core::export_file`]) writes into, in process (they parse nothing untrusted: the
 //! entries come from the archive the reader already validated).
 //!
@@ -79,7 +79,7 @@ impl Container {
 }
 
 /// The compression method of the entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Deflate,
     Zstd,
@@ -115,6 +115,23 @@ pub struct Settings<'k> {
     pub method: Method,
     /// The password every entry is encrypted with (`--encrypt`).
     pub password: Option<&'k [u8]>,
+}
+
+/// How [`crate::Session::export`] writes.
+#[derive(Debug, Clone, Copy)]
+pub struct ExportOptions<'k> {
+    /// ZIP or 7z.
+    pub container: Container,
+    /// The entries' compression method.
+    pub method: Method,
+    /// Encrypt every entry with this password (AES-256).
+    pub password: Option<&'k [u8]>,
+    /// Replace an existing output.
+    pub force: bool,
+    /// The thread budget.
+    pub threads: Option<usize>,
+    /// The memory budget.
+    pub memory: Option<u64>,
 }
 
 /// What creates the output file, called at the first entry.

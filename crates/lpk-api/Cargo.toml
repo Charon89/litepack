@@ -1,0 +1,28 @@
+[package]
+name = "lpk-api"
+description = "The LitePack engine API for front ends: Session, create, calibrate, typed errors (E5-1, docs/API.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about (about.toml `private.ignore`) leaves our own crates out of THIRD-PARTY-NOTICES.
+publish = false
+
+[dependencies]
+lpk-core = { path = "../lpk-core", version = "0.0.1" }
+lpk-format = { path = "../lpk-format", version = "0.0.1" }
+# `Session::export` (moved from lpk-cli with E5-1): 7z through sevenz-rust2 (Apache-2.0):
+# LZMA2, Deflate and store, AES-256 with the archive's password.
+sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["compress", "deflate", "aes256"] }
+# `Session::export`: ZIP through the zip crate (MIT): Deflate (flate2 with the zlib-rs
+# backend), zstd (method 93), store; AES-256 (AE-2).
+zip = { version = "9.0.4", default-features = false, features = ["deflate", "zstd", "aes-crypto"] }
+
+[dev-dependencies]
+# The listing model's memory bound (E5-1): a counting global allocator.
+lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
