@@ -178,8 +178,8 @@ fn main() {
         Ok(v) => v,
         Err(_) => std::process::exit(EXIT_BAD_CRASH),
     };
-    let opener = move |file: std::fs::File, pw: Option<&[u8]>| {
-        let reader = lpk_proto::fixture::open(file, pw)?;
+    let opener = move |file: std::fs::File, args: &lpk_proto::reader::OpenArgs<'_>| {
+        let reader = lpk_proto::fixture::open(file, args)?;
         if let Some(c) = &crash {
             c.run()?;
         }
