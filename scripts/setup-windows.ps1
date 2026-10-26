@@ -7,7 +7,7 @@
     Installs, via winget and rustup:
       - Git for Windows and GitHub CLI
       - Visual Studio 2022 Build Tools with the C++ workload (MSVC linker + Windows SDK; one UAC prompt)
-      - rustup and the toolchain named in rust-toolchain.toml, moved to the current stable release
+      - rustup and the toolchain pinned in rust-toolchain.toml (E8-5), and the current stable release
       - cargo-nextest and cargo-deny
     then prints what it found. Exit code 0 means every command in CLAUDE.md can run on this machine.
 
@@ -83,7 +83,7 @@ if (Test-Command 'rustup') {
         rustup self update
         if ($LASTEXITCODE -ne 0) { $rustUpdateFailed = $true }
         rustup toolchain install
-        # CI always builds with the newest stable; an install from months ago would lint differently.
+        # The pinned toolchain builds the repository; stable is kept current for `cargo +stable install`.
         rustup update stable
         if ($LASTEXITCODE -ne 0) { $rustUpdateFailed = $true }
     }
