@@ -414,8 +414,9 @@ pub fn refuse_symlink(entry: &Entry) -> Result<(), FormatError> {
 }
 
 /// Why a symlink entry's target is not created (E6-0; `docs/notes/e6-design.md` section 5).
-/// The same targets are refused on every operating system: an archive made on one is
-/// extracted on another, and `\` is a separator for Windows.
+/// The same forms are refused on every operating system (an archive made on one is extracted
+/// on another): the absolute ones whether written with `/` or `\`. Past those, `\` is a
+/// separator on Windows and refused elsewhere ([`TargetRefusal::Backslash`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetRefusal {
     /// No target at all.
@@ -446,6 +447,9 @@ pub enum TargetRefusal {
     /// (a link renamed by `--overwrite rename`, one left by an earlier extraction, a case fold
     /// the disk does not share), which the archive cannot tell, so it is never followed.
     DotDotAfterName,
+    /// A backslash past the forms above, on a system where it is a name character, not a
+    /// separator (every one but Windows).
+    Backslash,
 }
 
 impl TargetRefusal {
@@ -466,6 +470,7 @@ impl TargetRefusal {
             TargetRefusal::DeviceName => "the target names a Windows device",
             TargetRefusal::Escapes => "the target escapes the destination",
             TargetRefusal::DotDotAfterName => "the target has `..` after a name",
+            TargetRefusal::Backslash => "the target contains a backslash",
         }
     }
 }
@@ -516,6 +521,12 @@ pub fn resolve_symlink_target(link: &str, target: &[u8]) -> Result<String, Targe
         } else {
             TargetRefusal::DriveRelative
         });
+    }
+    // Off Windows `\` is a name character, not a separator: a target holding one would walk
+    // into a directory named `\` (or `a\b`) the lexical rule cannot see. Entry paths never
+    // contain one, so no link lpk creates is lost.
+    if cfg!(not(windows)) && target.contains(&b'\\') {
+        return Err(TargetRefusal::Backslash);
     }
     // One pass: count the leading `..`, check each name's form, refuse a `..` after a name.
     let mut ups = 0usize;
@@ -754,7 +765,6 @@ mod tests {
             ("l", b"\\??\\C:\\x", R::DevicePath),
             ("a/l", b"../../x", R::Escapes),
             ("l", b"..", R::Escapes),
-            ("a/b/l", b"..\\..\\..\\x", R::Escapes),
             ("a/b/c/l", b"../../../../x", R::Escapes),
             ("l", b"a/../../x", R::DotDotAfterName),
             ("l", b"a/..", R::DotDotAfterName),
@@ -782,7 +792,6 @@ mod tests {
             ("l", b"a.txt", "a.txt"),
             ("l", b"./d/x", "d/x"),
             ("d/l", b"../a.txt", "a.txt"),
-            ("d/e/l", b"..\\..\\x", "x"),
             ("d/l", b"..", ""),
             ("l", b".", ""),
             ("l", b"d/", "d"),
@@ -797,6 +806,29 @@ mod tests {
             assert_eq!(
                 resolve_symlink_target(link, target).as_deref(),
                 Ok(*want),
+                "{link} -> {}",
+                String::from_utf8_lossy(target)
+            );
+        }
+        // A backslash past the absolute forms: a separator on Windows, a name character (and
+        // refused) elsewhere.
+        let backslashed: &[(&str, &[u8], Result<&str, R>)] = &[
+            ("a/b/l", b"./\\/../..", Ok("")),
+            ("d/e/l", b"..\\..\\x", Ok("x")),
+            ("a/b/l", b"..\\..\\..\\x", Err(R::Escapes)),
+            ("l", b"a\\..\\..\\x", Err(R::DotDotAfterName)),
+        ];
+        for (link, target, on_windows) in backslashed {
+            let want = if cfg!(windows) {
+                *on_windows
+            } else {
+                Err(R::Backslash)
+            };
+            assert_eq!(
+                resolve_symlink_target(link, target)
+                    .as_deref()
+                    .map_err(|e| *e),
+                want,
                 "{link} -> {}",
                 String::from_utf8_lossy(target)
             );

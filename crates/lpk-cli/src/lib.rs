@@ -730,12 +730,15 @@ struct ExtractArgs {
     /// `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). Even with it, a link whose
     /// target is absolute, a UNC path, a device path (`\\?\`, `\\.\`), drive-relative (`C:x`),
     /// rooted (`\x` or `/x`), names a Windows device, has a colon or a component ending in a dot or
-    /// a space, has `..` after a name (`a/../x`), or has more leading `..` than the link is
-    /// deep below the output directory is not created: it is skipped with a warning
-    /// naming the entry and the reason (with --json one
+    /// a space, has `..` after a name (`a/../x`), has more leading `..` than the link is deep
+    /// below the output directory, or (outside Windows, where `\` is not a separator) contains
+    /// a backslash is not created: it is skipped with a warning naming the entry and the
+    /// reason (with --json one
     /// `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}` line) and counted
     /// in symlinks_skipped; such a target is never read or opened. On Windows a link is a
-    /// directory link when its target names a directory of the archive, else a file link. A
+    /// directory link when its target names a directory of the archive, else a file link; so a
+    /// link whose target goes through another link (`l -> s/sub`, `s` a link) is a file link
+    /// unless the archive itself names that target as a directory. A
     /// link that cannot be created (for example without the privilege on Windows) fails the
     /// extraction.
     #[arg(long)]
