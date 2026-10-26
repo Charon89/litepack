@@ -120,19 +120,22 @@ jobs:
         run: cargo build --locked --release -p lpk-cli -p lpk-bench
       - name: Build the ci fixture set (generated, no network)
         run: target/release/lpk-bench corpus build --profile ci
+      # The results go to the runner's temporary directory, not target/: rust-cache restores
+      # target/, and a results directory of an earlier run there would be compared instead.
       - name: Measure lpk's fast, balanced and store settings on it
+        shell: bash
         run: >-
           target/release/lpk-bench run --tools lpk --settings fast,balanced,store --profile ci
-          --repeats 1 --threads 2 --results target/size-gate
+          --repeats 1 --threads 2 --results "$RUNNER_TEMP/size-gate"
       - name: Compare with the goldens
         shell: bash
         run: |
-          dirs=(target/size-gate/*/)
+          dirs=("$RUNNER_TEMP"/size-gate/*/)
           test "${#dirs[@]}" -eq 1 || { echo "expected one results directory: ${dirs[*]}"; exit 1; }
           target/release/lpk-bench run --compare-sizes bench/ci-golden.toml "${dirs[0]}"
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
           name: size-gate-results
-          path: target/size-gate
+          path: ${{ runner.temp }}/size-gate
           if-no-files-found: ignore
