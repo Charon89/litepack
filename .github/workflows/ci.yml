@@ -46,6 +46,12 @@ jobs:
         run: |
           bash scripts/check-unsafe.sh --self-test
           bash scripts/check-unsafe.sh
+      # E6-6: the extraction test hooks stay out of the release lpk (D-99 (8)).
+      - name: No test hooks in the release build
+        shell: bash
+        run: |
+          bash scripts/check-release-hooks.sh --self-test
+          bash scripts/check-release-hooks.sh
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build
