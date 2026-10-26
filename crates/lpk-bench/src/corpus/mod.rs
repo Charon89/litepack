@@ -442,7 +442,8 @@ pub fn run(args: CorpusArgs) -> ExitCode {
 fn build_ci(b: &BuildArgs) -> ExitCode {
     if !b.only.is_empty() || b.update_lock || b.list_only || b.allow_unavailable {
         eprintln!(
-            "error: the ci profile is generated: --only, --update-lock, --list-only and              --allow-unavailable do not apply"
+            "error: the ci profile is generated: --only, --update-lock, --list-only and \
+             --allow-unavailable do not apply"
         );
         return ExitCode::FAILURE;
     }

@@ -224,10 +224,39 @@ pub fn table(rep: &SizeReport, max_growth_pct: f64) -> String {
     s
 }
 
+/// Refuse a growth limit that is not a finite number of at least 0 (NaN would pass every row, a
+/// negative limit fail every row).
+pub fn check_limit(max_growth_pct: f64) -> Result<()> {
+    if !max_growth_pct.is_finite() || max_growth_pct < 0.0 {
+        bail!("--max-growth-pct must be a finite number of at least 0, not {max_growth_pct}");
+    }
+    Ok(())
+}
+
+/// The gate: both directories validated (`run --validate`'s checks; any problem fails the gate,
+/// so a hand-edited golden cannot pass), then [`compare_sizes`].
+pub fn gate(golden: &Path, new: &Path, max_growth_pct: f64) -> Result<SizeReport> {
+    check_limit(max_growth_pct)?;
+    let mut problems = Vec::new();
+    for (label, dir) in [("golden", golden), ("new", new)] {
+        let v = super::validate::validate_dir(dir)?;
+        problems.extend(
+            v.problems
+                .into_iter()
+                .map(|p| format!("{label} directory does not validate: {p}")),
+        );
+    }
+    let mut rep = compare_sizes(golden, new, max_growth_pct)?;
+    problems.append(&mut rep.problems);
+    rep.problems = problems;
+    Ok(rep)
+}
+
 pub fn compare_sizes_command(golden: &Path, new: &Path, max_growth_pct: f64) -> Result<ExitCode> {
+    check_limit(max_growth_pct)?;
     let dir = resolve_golden(golden)?;
     println!("golden: {}; new: {}", dir.display(), new.display());
-    let rep = compare_sizes(&dir, new, max_growth_pct)?;
+    let rep = gate(&dir, new, max_growth_pct)?;
     print!("{}", table(&rep, max_growth_pct));
     for n in &rep.notes {
         println!("notice: {n}");
@@ -403,7 +432,75 @@ mod tests {
         let settings: BTreeSet<&str> = rows.cells.keys().map(|k| k.1.as_str()).collect();
         assert_eq!(settings, BTreeSet::from(["balanced", "fast", "store"]));
         assert!(rows.cells.values().all(|c| matches!(c, Cell::Bytes(_))));
-        let rep = compare_sizes(&dir, &dir, DEFAULT_MAX_GROWTH_PCT).expect("self");
+        let rep = gate(&dir, &dir, DEFAULT_MAX_GROWTH_PCT).expect("self");
         assert!(rep.problems.is_empty(), "{:?}", rep.problems);
+        // The goldens belong to the fixture set the generator writes today: a generator change
+        // without refreshed goldens fails here, not only on CI.
+        let blake3: BTreeSet<&str> = rows.manifests.iter().map(String::as_str).collect();
+        assert_eq!(
+            blake3,
+            BTreeSet::from([crate::corpus::fixtures::tests::MANIFEST_BLAKE3]),
+            "the goldens were measured on another ci fixture set: refresh them"
+        );
+        for name in std::fs::read_dir(&dir).expect("dir").filter_map(|e| e.ok()) {
+            let n = name.file_name().to_string_lossy().into_owned();
+            if n.starts_with("lpk-") {
+                let r: ToolResult =
+                    serde_json::from_str(&std::fs::read_to_string(name.path()).expect("read"))
+                        .expect("parse");
+                assert_eq!(r.corpus.profile, "ci", "{n}");
+            }
+        }
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("mk");
+        for e in std::fs::read_dir(from)
+            .expect("read")
+            .filter_map(|e| e.ok())
+        {
+            std::fs::copy(e.path(), to.join(e.file_name())).expect("copy");
+        }
+    }
+
+    #[test]
+    fn a_hand_edited_golden_fails_the_gate() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let golden = root.join(resolve_golden(&root.join("bench/ci-golden.toml")).expect("ptr"));
+        let t = tempfile::tempdir().expect("tmp");
+        let name = golden.file_name().expect("name");
+        let tampered = t.path().join("a").join(name);
+        copy_dir(&golden, &tampered);
+        let file = tampered.join("lpk-balanced-text-prose.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).expect("read")).expect("json");
+        v["median"]["archive_bytes"] = serde_json::json!(1_000_000_000u64);
+        std::fs::write(&file, serde_json::to_string_pretty(&v).expect("ser")).expect("write");
+        // Compared alone, the raised golden is only a "smaller" notice...
+        let plain = compare_sizes(&tampered, &golden, 1.0).expect("compare");
+        assert!(plain.problems.is_empty(), "{:?}", plain.problems);
+        // ...the gate validates both directories first and fails.
+        let rep = gate(&tampered, &golden, 1.0).expect("gate");
+        assert!(
+            rep.problems
+                .iter()
+                .any(|p| p.starts_with("golden directory does not validate")
+                    && p.contains("archive_bytes")),
+            "{:?}",
+            rep.problems
+        );
+    }
+
+    #[test]
+    fn the_growth_limit_must_be_finite_and_not_negative() {
+        for bad in [f64::NAN, f64::INFINITY, -0.5] {
+            assert!(check_limit(bad).is_err(), "{bad}");
+        }
+        for ok in [0.0, 1.0, 12.5] {
+            check_limit(ok).expect("ok");
+        }
+        let t = tempfile::tempdir().expect("tmp");
+        let a = write(t.path(), "a", &golden());
+        assert!(gate(&a, &a, f64::NAN).is_err());
     }
 }
