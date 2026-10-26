@@ -181,6 +181,12 @@ Extract an archive into a directory, created if missing. Without a pattern every
   Possible values: `refuse`, `skip`, `rename`, `replace`
 
 * `--symlinks` — Create symlink entries with the target the archive holds. Without this flag every symlink entry is skipped with a warning on stderr (with --json one `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). Even with it, a link whose target is absolute, a UNC path, a device path (`\\?\`, `\\.\`), drive-relative (`C:x`), rooted (`\x` or `/x`), names a Windows device, has a colon or a component ending in a dot or a space, has `..` after a name (`a/../x`), has more leading `..` than the link is deep below the output directory, or (outside Windows, where `\` is not a separator) contains a backslash is not created: it is skipped with a warning naming the entry and the reason (with --json one `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}` line) and counted in symlinks_skipped; such a target is never read or opened. On Windows a link is a directory link when its target names a directory of the archive, else a file link; so a link whose target goes through another link (`l -> s/sub`, `s` a link) is a file link unless the archive itself names that target as a directory. On Windows links are created only when the process token holds SeCreateSymbolicLinkPrivilege (an elevated administrator; Developer Mode alone does not count); without it every link is skipped with a warning (with --json one `{"warning":{"kind":"SymlinkNoPrivilege","path":...}}` line) and counted in symlinks_skipped, and the extraction goes on. A link that cannot be created for any other reason fails the extraction
+* `--motw <on|off>` — Mark of the Web (Windows): with `on` (the default), when the archive's `Zone.Identifier` stream gives zone 3 (Internet) or 4 (Restricted), or cannot be parsed (read as 3), every extracted file gets a `Zone.Identifier` stream with that `ZoneId` only (no `HostUrl` or `ReferrerUrl`), written before its first byte; zones 0-2 and archives without the stream: nothing. A destination whose volume has no named streams cannot hold the mark: the extraction goes on and prints one warning (with --json one `{"warning":{"kind":"MotwUnmarked","zone":N}}` line). `off` writes no stream
+
+  Default value: `on`
+
+  Possible values: `on`, `off`
+
 * `-v`, `--verbose` — Print the plan's counts, the memory budget and its terms, and the pool size to stderr
 * `--max-entries <N|off>` — Foreign archives: the most entries a listing may have (default 10000000; the archive's length over the format's smallest header always caps it)
 * `--max-expansion <FACTOR|off>` — Foreign archives: the most bytes an extraction writes, as a multiple of the archive's length (default 10000); refused from the declared sizes before anything is written
@@ -245,6 +251,12 @@ Write a copy of an archive with its damaged shards rebuilt from the recovery fra
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
+* `--motw <on|off>` — Mark of the Web (Windows), as for `x`: with `on` (the default) the repaired copy gets the zone of an archive zoned 3 or 4 before its first byte; `off` writes no stream
+
+  Default value: `on`
+
+  Possible values: `on`, `off`
+
 
 
 
@@ -385,6 +397,12 @@ Names are written as the archive stores them: the format's reader already refuse
 
 * `--encrypt` — Encrypt every entry with the archive's password (AES-256: ZIP's AE-2, 7z's with the header encrypted). Needs a credential with a password; a keyfile alone is refused
 * `--force` — Replace an existing output file
+* `--motw <on|off>` — Mark of the Web (Windows), as for `x`: with `on` (the default) the output file gets the zone of an archive zoned 3 or 4 before its first byte; `off` writes no stream
+
+  Default value: `on`
+
+  Possible values: `on`, `off`
+
 * `--threads <N>` — The thread budget: 1 decodes on the calling thread; from 2 on, N - 1 threads decode blocks ahead of the writer (capped by the memory budget), as for `x`
 * `--prior <FILE>` — A prior file (for example a zstd dictionary) the archive needs; may be repeated
 * `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
