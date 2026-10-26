@@ -229,7 +229,11 @@ where
         let reply = match req {
             Request::Close => return EXIT_OK,
             Request::Cancel => Response::Cancelled,
-            Request::Open { password } => {
+            Request::Open {
+                format,
+                name,
+                password,
+            } => {
                 if cfg.is(F::Hang) {
                     sleep_forever();
                 }
@@ -244,12 +248,16 @@ where
                         Ok(f) => f,
                         Err(e) => return finish(&mut out, error(ErrorCode::Io, e.to_string())),
                     };
-                    let pw = password.as_ref().map(|p| p.as_slice());
+                    let args = crate::reader::OpenArgs {
+                        format: &format,
+                        name: &name,
+                        password: password.as_ref().map(|p| p.as_slice()),
+                    };
                     let opened = catch_unwind(AssertUnwindSafe(|| {
                         if cfg.is(F::Panic) {
                             panic!("fault: panic at open");
                         }
-                        opener(file, pw)
+                        opener(file, &args)
                     }));
                     match opened {
                         Ok(Ok(r)) => {
@@ -554,7 +562,11 @@ mod tests {
         let (code, rs) = exchange(
             &fx,
             &[
-                Request::Open { password: None },
+                Request::Open {
+                    format: fixture::FORMAT.into(),
+                    name: Vec::new(),
+                    password: None,
+                },
                 Request::List { from: 0, max: 2 },
                 Request::List { from: 2, max: 2 },
                 Request::ReadMember {
@@ -567,7 +579,9 @@ mod tests {
             ],
         );
         assert_eq!(code, EXIT_OK);
-        assert!(matches!(&rs[0], Response::Hello { proto: 1, build } if build == crate::BUILD));
+        assert!(
+            matches!(&rs[0], Response::Hello { proto: crate::PROTO, build } if build == crate::BUILD)
+        );
         assert!(matches!(&rs[1], Response::Opened { format } if format == fixture::FORMAT));
         assert!(matches!(&rs[2], Response::Entries { records, more: true } if records.len() == 2));
         assert!(matches!(&rs[3], Response::Entries { records, more: false } if records.len() == 1));
@@ -603,11 +617,19 @@ mod tests {
             &fx,
             &[
                 Request::List { from: 0, max: 1 },
-                Request::Open { password: None },
                 Request::Open {
+                    format: fixture::FORMAT.into(),
+                    name: Vec::new(),
+                    password: None,
+                },
+                Request::Open {
+                    format: fixture::FORMAT.into(),
+                    name: Vec::new(),
                     password: Some(zeroize::Zeroizing::new(b"bad".to_vec())),
                 },
                 Request::Open {
+                    format: fixture::FORMAT.into(),
+                    name: Vec::new(),
                     password: Some(zeroize::Zeroizing::new(b"pw".to_vec())),
                 },
                 Request::Cancel,

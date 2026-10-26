@@ -240,14 +240,15 @@ impl<R: Read + Seek> ForeignReader for FixtureReader<R> {
     }
 }
 
-/// The worker's opener for fixtures.
+/// The worker's opener for fixtures (whatever format the host named: the test worker serves
+/// fixtures only).
 pub fn open(
     archive: std::fs::File,
-    password: Option<&[u8]>,
+    args: &crate::reader::OpenArgs<'_>,
 ) -> Result<Box<dyn ForeignReader>, ReaderError> {
     Ok(Box::new(FixtureReader::open(
         std::io::BufReader::new(archive),
-        password,
+        args.password,
     )?))
 }
 

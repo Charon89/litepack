@@ -507,13 +507,70 @@ fn duplicates_are_refused() {
 }
 
 #[test]
-fn detection_recognises_the_fixture_only() {
+fn detection_recognises_the_fixture_and_the_foreign_formats() {
     assert_eq!(
         detect(&fixture::write(&[Member::file("a", b"x")], None)),
         Some(Format::TestFixture)
     );
-    assert_eq!(detect(b"PK\x03\x04"), None);
+    assert_eq!(detect(b"PK\x03\x04"), Some(Format::Zip));
+    assert_eq!(detect(&lpk_format::MAGIC), None);
     assert_eq!(detect(b""), None);
+}
+
+/// D-99 (4): where a format has packed ranges they are required, so a lying worker cannot
+/// slip past the overlap check with `packed_len = 0`.
+#[test]
+fn packed_ranges_are_required_where_the_format_has_them() {
+    let mut no_range = rec("a", 5, 0);
+    no_range.packed_len = 0;
+    let mut empty = rec("e", 0, 0);
+    empty.packed_len = 0;
+    for f in [Format::Zip, Format::Tar] {
+        let e = check_records(vec![empty.clone()], 100, f).err().unwrap();
+        assert!(
+            matches!(e, CoreError::Foreign(ForeignError::Corrupt { .. })),
+            "{f:?}"
+        );
+    }
+    for f in [Format::Zip, Format::Tar, Format::SevenZ, Format::Gzip] {
+        let e = check_records(vec![no_range.clone()], 100, f).err().unwrap();
+        assert!(
+            matches!(e, CoreError::Foreign(ForeignError::Corrupt { .. })),
+            "{f:?}"
+        );
+    }
+    // An empty 7z member has no pack stream; the fixture's ranges stay advisory.
+    assert!(check_records(vec![empty], 100, Format::SevenZ).is_ok());
+    assert!(check_records(vec![no_range], 100, Format::TestFixture).is_ok());
+    // Two 7z members sharing one block are no overlap; two blocks over the same bytes are.
+    let mut a = rec("a", 5, 10);
+    a.block = 0;
+    let mut b = rec("b", 5, 10);
+    b.block = 0;
+    assert!(check_records(vec![a.clone(), b.clone()], 100, Format::SevenZ).is_ok());
+    b.block = 1;
+    let e = check_records(vec![a, b], 100, Format::SevenZ)
+        .err()
+        .unwrap();
+    assert!(matches!(
+        e,
+        CoreError::Foreign(ForeignError::OverlappingEntries { .. })
+    ));
+}
+
+/// An encrypted member and no password: `PasswordRequired` before anything is written.
+#[test]
+fn an_encrypted_member_without_a_password_is_asked_for_before_any_write() {
+    let mut r = rec("a", 5, 0);
+    r.flags = FLAG_ENCRYPTED;
+    let mut frames = one_member(b"hello");
+    frames[2] = entries(vec![rec("plain", 0, 50), r]);
+    let (r, written) = run(&frames, 100);
+    assert!(matches!(
+        r,
+        Err(CoreError::Format(FormatError::PasswordRequired))
+    ));
+    assert_eq!(written, 0);
 }
 
 /// What the `worker_proto` fuzz target does, over every truncation and single-byte change of
@@ -673,8 +730,8 @@ fn many_empty_members_are_progress() {
     let mut conv = Conv::new(peer, limits, 10_000, &monitor);
     let t = Instant::now();
     conv.handshake().unwrap();
-    conv.open(None).unwrap();
-    let records = conv.list(Format::TestFixture).unwrap();
+    conv.open(Format::TestFixture, b"", None).unwrap();
+    let records = conv.list().unwrap();
     let mut out = NullOut::default();
     let mut summary = ForeignSummary::default();
     run_extract(

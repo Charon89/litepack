@@ -101,7 +101,20 @@ pub trait ForeignReader {
     fn read_member(&mut self, index: u64, sink: &mut Sink<'_>) -> Result<bool, ReaderError>;
 }
 
-/// Opens a reader over the archive with an optional password; `Err` with
-/// [`ErrorCode::NeedPassword`] or [`ErrorCode::WrongPassword`] for the credential cases.
+/// What `Open` asked for: the format the host detected, the archive's file name (no
+/// directory) and the password.
+#[derive(Debug, Clone, Copy)]
+pub struct OpenArgs<'a> {
+    /// The host's detected format (wire name).
+    pub format: &'a str,
+    /// The archive's file name, possibly empty.
+    pub name: &'a [u8],
+    /// The password, when one was given.
+    pub password: Option<&'a [u8]>,
+}
+
+/// Opens a reader over the archive as `args.format` with an optional password; `Err` with
+/// [`ErrorCode::NeedPassword`] or [`ErrorCode::WrongPassword`] for the credential cases and
+/// [`ErrorCode::Unsupported`] for a format the worker has no reader for.
 pub type Opener =
-    dyn Fn(std::fs::File, Option<&[u8]>) -> Result<Box<dyn ForeignReader>, ReaderError>;
+    dyn Fn(std::fs::File, &OpenArgs<'_>) -> Result<Box<dyn ForeignReader>, ReaderError>;
