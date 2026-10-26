@@ -94,6 +94,19 @@ lists) far beyond what the archive declares.
    below 2^32 - 1: no valid record is affected. For tests, `src/stream_processor.rs` gains the
    hidden function `litepack_record_with_coded_corrections(record, coded)`, exported from
    `src/lib.rs`: the record with its coded correction stream replaced.
+12. **Tree counts bounded before they size a vector** (LitePack, 2026-10-26; found by the fuzz
+   target `deflate_recreate`, run 40270390275). In `recreate_tree_for_block`
+   (`src/tree_predictor.rs`) the decoded literal count, distance count and code-length count are
+   checked against the ranges a Deflate header can carry (257 to 288, 1 to 32, 4 to 19, as the
+   reader in `src/deflate/huffman_encoding.rs` reads HLIT, HDIST and HCLEN) and refused
+   (`ExitCode::InvalidPredictionData`) otherwise, before the code-length vectors are resized.
+   Upstream resized them to the decoded value: a crafted correction (one that wraps below zero
+   in a build without overflow checks, or simply adds 2^26) made a single `resize` allocate up
+   to 4 GiB, past the limited recreation's `limit + 8` writer. Every count the analysis records
+   comes from a header the reader accepted, so no valid record is affected. It applies to both
+   recreation functions. `src/stream_processor.rs`'s `litepack_crafted` module gains the ignored
+   test `write_crafted_counts_record`, which writes the crafted record LitePack's tests use for
+   this change. (Changes 9 to 11 are E4-6's, on its own branch.)
 
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.
