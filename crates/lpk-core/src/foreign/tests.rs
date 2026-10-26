@@ -698,7 +698,12 @@ impl Peer for SlowPeer<'_> {
 /// member is progress, so a stream longer than the watchdog's limit finishes.
 #[test]
 fn many_empty_members_are_progress() {
-    let n = 40u64;
+    // Paced at 20 ms a frame against a 1 s watchdog: five frames (Hello, Opened, Entries, the
+    // first MemberStart and MemberEnd) and the policy pass come before the first progress, two
+    // frames between later ones, all far inside the limit even on a loaded machine (at 40 ms
+    // against 250 ms the first stretch alone neared the limit and the test failed under load);
+    // 140 frames, at least 2.8 s, still run past twice the limit.
+    let n = 70u64;
     let mut f = vec![
         hello(),
         opened(),
@@ -713,7 +718,7 @@ fn many_empty_members_are_progress() {
     }
     let bytes = script(&f);
     let limits = Limits {
-        no_progress: Duration::from_millis(250),
+        no_progress: Duration::from_millis(1000),
         ..Limits::default()
     };
     let monitor = Monitor::default();
@@ -722,7 +727,7 @@ fn many_empty_members_are_progress() {
             input: &bytes,
             buf: Vec::new(),
         },
-        delay: Duration::from_millis(40),
+        delay: Duration::from_millis(20),
     };
     let mut conv = Conv::new(peer, limits, 10_000, &monitor);
     let t = Instant::now();
