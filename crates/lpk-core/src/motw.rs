@@ -102,6 +102,7 @@ fn decode(bytes: &[u8]) -> Option<String> {
 
 /// The largest stream read: a stream larger than this is not a zone file Windows wrote; what
 /// was read is parsed.
+#[cfg(windows)]
 const MAX_STREAM: u64 = 64 * 1024;
 
 /// What reading an archive's zone found.
@@ -119,6 +120,7 @@ impl ZoneRead {
         zone: None,
         unreadable: false,
     };
+    #[cfg(windows)]
     const UNREADABLE: ZoneRead = ZoneRead {
         zone: Some(Zone::INTERNET),
         unreadable: true,
@@ -232,7 +234,9 @@ pub(crate) mod seam {
         static STREAMS: Cell<Option<bool>> = const { Cell::new(None) };
     }
 
-    /// Force [`super::holds_streams`] on this thread (`None`: the real probe).
+    /// Force [`super::holds_streams`] on this thread (`None`: the real probe). Its tests are
+    /// Windows-only.
+    #[cfg(windows)]
     pub(crate) fn force_streams(v: Option<bool>) {
         STREAMS.with(|c| c.set(v));
     }
