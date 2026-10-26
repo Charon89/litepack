@@ -873,8 +873,12 @@ impl<'m, P: Peer> Conv<'m, P> {
             return WorkerError::Pipe { stderr }.into();
         };
         let margin = (self.memory / 16).max(1 << 20);
+        // The job's user-time kill ends the process with STATUS_QUOTA_EXCEEDED (E4-1, E4-5):
+        // named by the status too, in case the job's accounting could not be read.
+        const STATUS_QUOTA_EXCEEDED: u32 = 0xC000_0044;
         if self.usage.user_time + Duration::from_secs(1) >= self.cpu_limit
             || (cfg!(unix) && (code == 128 + 24 || code == 128 + 9))
+            || (cfg!(windows) && code == STATUS_QUOTA_EXCEEDED)
         {
             WorkerError::CpuLimit {
                 seconds: self.cpu_limit.as_secs(),
