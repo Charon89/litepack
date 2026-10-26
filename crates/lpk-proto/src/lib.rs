@@ -33,3 +33,8 @@ pub const PROTO: u16 = 1;
 /// The build identity the worker announces in `Hello` and the host requires to be its own:
 /// both sides are built from the same `lpk-proto`.
 pub const BUILD: &str = concat!("lpk-proto/", env!("CARGO_PKG_VERSION"), "/1");
+
+/// E8-7 red-run evidence (throwaway PR, never merged).
+pub fn e8_7_planted(x: &u8) -> u8 {
+    unsafe { *(x as *const u8) }
+}
