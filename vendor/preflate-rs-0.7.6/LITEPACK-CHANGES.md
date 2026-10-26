@@ -102,6 +102,13 @@ lists) far beyond what the archive declares.
    differs from before in a release build and no valid record is affected (a valid record never
    overflows: the encoder computed the difference from two `u32` values). Found by LitePack's
    `deflate_recreate` fuzz target; the test `test_encode_decode_difference` checks the wrap.
+10. **A decoded code length above 15 refused** (LitePack E4-6, 2026-10-26). In
+   `src/tree_predictor.rs` (this crate's own file; the coder it drives is unchanged),
+   `predict_ld_trees` returns `ExitCode::RecompressFailed` when a decoded code-length code
+   (`TreeCodeType::Code`) is above 15: upstream kept it, and `calc_codetree_freq` then indexed
+   past its 19 frequencies (a panic). Deflate's code lengths are 0 to 15, so no valid record is
+   affected. Found by LitePack's `deflate_recreate` fuzz target; its input is in
+   `fuzz/seeds/deflate_recreate/`.
 
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.

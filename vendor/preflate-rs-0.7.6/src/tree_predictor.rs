@@ -287,6 +287,11 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
                 predicted_tree_code_data.into(),
                 decoder.decode_correction(CodecCorrection::LDBitLengthCorrection),
             ) as u8;
+            // LitePack change 10: a code length above 15 is refused here; it indexed past the
+            // 19 code-tree frequencies in `calc_codetree_freq` (found by `deflate_recreate`).
+            if predicted_tree_code_data > 15 {
+                return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed");
+            }
         }
 
         result.push((predicted_tree_code_type, predicted_tree_code_data));
