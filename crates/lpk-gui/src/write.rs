@@ -59,9 +59,9 @@ pub fn archive_name(name: &str) -> Result<String, GuiError> {
 }
 
 /// Create the archive `out` from `inputs` through `<out>.partial`: published when complete
-/// (if that fails, for example because `out` appeared meanwhile, the finished partial and its
-/// journal record are kept and the error names the partial), removed by the engine on failure
-/// or cancel. `Exists` up front when `out` or its partial exists.
+/// (if that fails, for example because `out` appeared meanwhile, the finished partial is kept,
+/// the error names it, and its journal record is removed so that no later start touches it),
+/// removed by the engine on failure or cancel. `Exists` up front when `out` or its partial exists.
 pub fn create_archive(
     inputs: &Sources,
     out: &Path,
@@ -123,22 +123,12 @@ pub fn create_archive(
         Ok(summary) => match publish(&partial, out) {
             Ok(()) => Ok(summary),
             Err(e) => {
-                // The finished archive is never deleted: it stays as the partial, with its
-                // record, and the error names it.
-                drop(m);
-                if let Some(entry) = entry {
-                    if let Ok(entry) = Arc::try_unwrap(entry) {
-                        if let Ok((entry, _)) = entry.into_inner() {
-                            entry.keep();
-                        }
-                    }
-                }
                 let class = match e.kind() {
                     std::io::ErrorKind::AlreadyExists => lpk_api::Class::Exists,
                     std::io::ErrorKind::PermissionDenied => lpk_api::Class::AccessDenied,
                     _ => lpk_api::Class::Io,
                 };
-                return Err(lpk_api::Error::new(
+                let error: GuiError = lpk_api::Error::new(
                     class,
                     "PublishFailed",
                     format!(
@@ -148,7 +138,12 @@ pub fn create_archive(
                     ),
                     Some(&partial),
                 )
-                .into());
+                .into();
+                // The finished archive is never deleted: the error names the partial, which is
+                // now the user's file, so its record goes and no later start touches it (R97).
+                drop(m);
+                drop(entry);
+                return Err(error);
             }
         },
         Err(e) => Err(e.into()),
@@ -300,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_publish_keeps_the_finished_partial_and_its_record() {
+    fn a_failed_publish_keeps_the_finished_partial_across_restarts() {
         // The final name appears while the archive is being written: the publish refuses to
         // replace it, and the finished archive stays as the partial.
         let d = tempfile::tempdir().unwrap();
@@ -329,7 +324,14 @@ mod tests {
             .flatten()
             .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
             .count();
-        assert_eq!(records, 1, "the partial's record is kept");
+        assert_eq!(
+            records, 0,
+            "the record goes once the error names the partial"
+        );
+        // A new start's recovery leaves the partial alone, byte for byte.
+        let bytes = std::fs::read(&partial).unwrap();
+        assert!(Journal::open(j.dir()).unwrap().recover().is_empty());
+        assert_eq!(std::fs::read(&partial).unwrap(), bytes);
     }
 
     #[test]
