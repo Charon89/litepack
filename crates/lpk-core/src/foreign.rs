@@ -279,11 +279,13 @@ pub(crate) enum RecvError {
 /// An encoded request frame (it may hold a password: wiped on drop).
 pub(crate) type Frame = lpk_proto::Zeroizing<Vec<u8>>;
 
-fn encode(r: &Request) -> Frame {
+/// A request as one frame; a request the protocol refuses (an over-long format name) is a
+/// protocol error, never an empty or truncated frame.
+fn encode(r: &Request) -> Result<Frame, CoreError> {
     let mut f = lpk_proto::Zeroizing::new(Vec::new());
-    // Writing to a vector cannot fail.
-    let _ = r.write_to(&mut *f);
-    f
+    r.write_to(&mut *f)
+        .map_err(|e| protocol(format!("a request cannot be encoded: {e}")))?;
+    Ok(f)
 }
 
 pub(crate) trait Peer {
@@ -771,7 +773,7 @@ impl<'m, P: Peer> Conv<'m, P> {
     /// Queue a request; while the writer is busy (the worker is not reading), keep polling
     /// the cancel token and the watchdog.
     fn send(&mut self, r: &Request) -> Result<(), CoreError> {
-        let mut frame = encode(r);
+        let mut frame = encode(r)?;
         loop {
             match self.peer.try_send(frame) {
                 Ok(None) => return Ok(()),
@@ -793,7 +795,7 @@ impl<'m, P: Peer> Conv<'m, P> {
         let progress = self
             .usage
             .read_bytes
-            .min(self.archive_len)
+            .min(self.archive_len.saturating_mul(self.format.read_passes()))
             .saturating_add(self.data)
             .saturating_add(self.ends);
         if progress > self.seen {
@@ -1013,7 +1015,8 @@ impl<'m, P: Peer> Conv<'m, P> {
 
     /// `Cancel`, a grace period for `Cancelled`, then the kill.
     fn cancel(&mut self) {
-        if self.killed || !matches!(self.peer.try_send(encode(&Request::Cancel)), Ok(None)) {
+        let sent = encode(&Request::Cancel).map(|f| self.peer.try_send(f));
+        if self.killed || !matches!(sent, Ok(Ok(None))) {
             self.kill();
             return;
         }
@@ -1030,7 +1033,9 @@ impl<'m, P: Peer> Conv<'m, P> {
 
     fn close(&mut self) {
         if !self.killed {
-            let _ = self.peer.try_send(encode(&Request::Close));
+            if let Ok(f) = encode(&Request::Close) {
+                let _ = self.peer.try_send(f);
+            }
             let _ = self.peer.exit_code(Duration::from_millis(500));
         }
         self.kill();

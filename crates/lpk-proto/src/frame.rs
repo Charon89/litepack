@@ -377,8 +377,9 @@ pub enum Request {
 }
 
 impl Request {
-    /// The kind and payload.
-    pub fn encode(&self) -> (u16, Vec<u8>) {
+    /// The kind and payload; an `Open` whose format name is longer than [`MAX_FORMAT`] is
+    /// refused (never truncated, which could split a UTF-8 character).
+    pub fn encode(&self) -> Result<(u16, Vec<u8>), ProtoError> {
         let mut p = Vec::new();
         let k = match self {
             Request::Open {
@@ -386,6 +387,9 @@ impl Request {
                 name,
                 password,
             } => {
+                if format.len() > MAX_FORMAT {
+                    return Err(ProtoError::Malformed("format name longer than 64 bytes"));
+                }
                 match password {
                     Some(pw) => {
                         p.push(1);
@@ -393,7 +397,7 @@ impl Request {
                     }
                     None => p.push(0),
                 }
-                put16(&mut p, &format.as_bytes()[..format.len().min(MAX_FORMAT)]);
+                put16(&mut p, format.as_bytes());
                 put16(&mut p, &name[..name.len().min(MAX_NAME)]);
                 kind::OPEN
             }
@@ -413,7 +417,7 @@ impl Request {
             Request::Cancel => kind::CANCEL,
             Request::Close => kind::CLOSE,
         };
-        (k, p)
+        Ok((k, p))
     }
 
     /// Decode a request frame.
@@ -458,7 +462,9 @@ impl Request {
 
     /// Write as one frame.
     pub fn write_to(&self, w: &mut dyn Write) -> io::Result<()> {
-        let (k, p) = self.encode();
+        let (k, p) = self
+            .encode()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         let p = Zeroizing::new(p);
         write_frame(w, k, &p)
     }
@@ -693,6 +699,23 @@ mod tests {
             .unwrap();
         assert_eq!(back, r);
         assert!(scratch.iter().all(|&b| b == 0), "payload not wiped");
+    }
+
+    #[test]
+    fn an_over_long_format_name_is_refused_not_truncated() {
+        let r = Request::Open {
+            format: "\u{e9}".repeat(40), // 80 bytes of two-byte characters
+            name: Vec::new(),
+            password: None,
+        };
+        assert!(r.encode().is_err());
+        assert!(r.write_to(&mut Vec::new()).is_err());
+        let ok = Request::Open {
+            format: "x".repeat(MAX_FORMAT),
+            name: Vec::new(),
+            password: None,
+        };
+        assert!(ok.encode().is_ok());
     }
 
     #[test]

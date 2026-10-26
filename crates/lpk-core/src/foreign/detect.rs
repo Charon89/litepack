@@ -101,6 +101,20 @@ impl Format {
         }
     }
 
+    /// How many times the archive's length the job's read bytes are credited as progress. A
+    /// compressed stream or 7z is read more than once by the worker (the listing decompresses
+    /// it, streaming decompresses it again and skips to each member, a solid block read out of
+    /// order restarts), and the reads of a later pass are the only progress the host can see
+    /// while the worker skips decompressed bytes it does not send; capped, so a worker reading
+    /// in a loop cannot stay alive forever.
+    pub fn read_passes(self) -> u64 {
+        if self.compressed_headers() {
+            3
+        } else {
+            1
+        }
+    }
+
     /// Whether this build's worker reads the format (RAR waits for E4-4's worker).
     pub fn read_by_worker(self) -> bool {
         !matches!(self, Format::Rar)
@@ -153,6 +167,60 @@ fn rar_at(buf: &[u8], at: usize) -> bool {
     match buf.get(at..at.saturating_add(8)) {
         Some(h) => h[..6] == RAR_MAGIC && (h[6] == 0 || (h[6] == 1 && h[7] == 0)),
         None => false,
+    }
+}
+
+/// A RAR signature at `at` in `buf` followed by a main archive header whose CRC holds (so the
+/// bare signature bytes inside a PE file do not match): RAR 5's header CRC-32 over the header
+/// size and the header; RAR 4's MAIN_HEAD (type 0x73) whose 16-bit CRC is the low half of the
+/// CRC-32 from its type byte to its end.
+pub fn rar_valid_at(buf: &[u8], at: usize) -> bool {
+    if !rar_at(buf, at) {
+        return false;
+    }
+    let Some(rest) = buf.get(at..) else {
+        return false;
+    };
+    if rest[6] == 1 {
+        // RAR 5: CRC32 (4), then the header size as a vint (at most 3 bytes here), then that
+        // many header bytes.
+        let Some(h) = rest.get(8..) else {
+            return false;
+        };
+        let Some(crc) = h.get(..4) else {
+            return false;
+        };
+        let (mut size, mut n) = (0usize, 0usize);
+        loop {
+            let Some(&b) = h.get(4 + n) else {
+                return false;
+            };
+            size |= usize::from(b & 0x7F) << (7 * n);
+            n += 1;
+            if b & 0x80 == 0 {
+                break;
+            }
+            if n == 3 {
+                return false;
+            }
+        }
+        let Some(body) = h.get(4..4 + n + size) else {
+            return false;
+        };
+        size > 0 && u32::from_le_bytes([crc[0], crc[1], crc[2], crc[3]]) == crc32(body)
+    } else {
+        // RAR 4: HEAD_CRC (2), HEAD_TYPE (1), HEAD_FLAGS (2), HEAD_SIZE (2), ...
+        let Some(h) = rest.get(7..14) else {
+            return false;
+        };
+        let size = usize::from(u16::from_le_bytes([h[5], h[6]]));
+        if h[2] != 0x73 || size < 7 {
+            return false;
+        }
+        let Some(body) = rest.get(9..7 + size) else {
+            return false;
+        };
+        u16::from_le_bytes([h[0], h[1]]) == (crc32(body) & 0xFFFF) as u16
     }
 }
 
@@ -314,21 +382,25 @@ fn pe_embedded(f: &mut File, head: &[u8]) -> std::io::Result<Option<Format>> {
     {
         return Ok(None);
     }
-    // Windows overlapping by a start header's length, so a signature across a boundary is seen.
+    // Windows overlapping by 512 bytes (more than a 7z start header or a RAR main header's
+    // first part), so an archive starting near a boundary is seen whole.
     const WINDOW: usize = 1 << 20;
-    let mut buf = vec![0u8; WINDOW + 32];
+    let mut buf = vec![0u8; WINDOW + 512];
     let mut at = 0u64;
     while at < PE_SCAN {
         let n = read_at(f, at, &mut buf)?;
         let window = &buf[..n];
-        for i in 0..n.min(WINDOW) {
+        // The last window (short read) is scanned to its end; others leave their overlap to
+        // the next window.
+        let limit = if n < buf.len() { n } else { WINDOW };
+        for i in 0..limit {
             if at == 0 && i == 0 {
                 continue;
             }
             if window[i] == SEVENZ_MAGIC[0] && sevenz_at(window, i) {
                 return Ok(Some(Format::SevenZ));
             }
-            if window[i] == RAR_MAGIC[0] && rar_at(window, i) {
+            if window[i] == RAR_MAGIC[0] && rar_valid_at(window, i) {
                 return Ok(Some(Format::Rar));
             }
         }
@@ -431,6 +503,54 @@ mod tests {
         h[20] ^= 1;
         assert!(!sevenz_at(&h, 0));
         assert!(!sevenz_at(&h[..20], 0));
+    }
+
+    /// A RAR 5 signature and a minimal main header (type 1, no flags) with its CRC.
+    fn rar5() -> Vec<u8> {
+        let mut v = b"Rar!\x1a\x07\x01\x00".to_vec();
+        let body = [3u8, 1, 0, 0];
+        v.extend_from_slice(&crc32(&body).to_le_bytes());
+        v.extend_from_slice(&body);
+        v
+    }
+
+    /// A RAR 4 signature and MAIN_HEAD (type 0x73, size 13) with its CRC.
+    fn rar4() -> Vec<u8> {
+        let mut v = b"Rar!\x1a\x07\x00".to_vec();
+        let mut head = vec![0x73u8, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0];
+        let crc = (crc32(&head) & 0xFFFF) as u16;
+        v.extend_from_slice(&crc.to_le_bytes());
+        v.append(&mut head);
+        v
+    }
+
+    #[test]
+    fn a_rar_signature_needs_its_main_header_crc() {
+        assert!(rar_valid_at(&rar5(), 0));
+        assert!(rar_valid_at(&rar4(), 0));
+        for mut v in [rar5(), rar4()] {
+            let last = v.len() - 1;
+            v[last] ^= 1;
+            assert!(!rar_valid_at(&v, 0));
+        }
+        assert!(!rar_valid_at(b"Rar!\x1a\x07\x01\x00", 0));
+    }
+
+    #[test]
+    fn a_pe_with_bare_rar_bytes_is_not_foreign() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pe = vec![0u8; 4096];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        pe[0x300..0x308].copy_from_slice(b"Rar!\x1a\x07\x01\x00");
+        let p = dir.path().join("tool.exe");
+        std::fs::write(&p, &pe).unwrap();
+        assert_eq!(detect_file(&p).unwrap(), None);
+        let r = rar5();
+        pe[0x600..0x600 + r.len()].copy_from_slice(&r);
+        std::fs::write(&p, &pe).unwrap();
+        assert_eq!(detect_file(&p).unwrap(), Some(Format::Rar));
     }
 
     #[test]
