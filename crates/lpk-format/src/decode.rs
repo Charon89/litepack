@@ -25,6 +25,35 @@ pub trait DecodeContext {
     /// the block being decoded (`BadRecord`, `chunk order`), so a record never
     /// needs the block rebuilt from it.
     fn chunk(&mut self, record: u64, index: u64) -> Result<Vec<u8>, FormatError>;
+    /// The reader's own memory resource (the extraction's budget), which a
+    /// decoder whose library may need more than the archive declares checks
+    /// that need against; `None` when there is no archive behind the decode,
+    /// and the decoder then uses the limits it was given.
+    fn memory_budget(&self) -> Option<u64> {
+        None
+    }
+    /// The extraction's gate for a decode that needs more than the archive
+    /// declares ([`DecodeGate`]); `None` outside a pooled extraction.
+    fn gate(&self) -> Option<Arc<dyn DecodeGate>> {
+        None
+    }
+}
+
+/// A pooled extraction's gate for decodes whose working memory exceeds what
+/// the archive's `decode_memory` declares: such a decode runs alone (no other
+/// block decodes meanwhile), within the memory the pool leaves a lone decode.
+pub trait DecodeGate: Send + Sync + std::fmt::Debug {
+    /// Bytes a decode running alone may use beyond its block's plain bytes.
+    fn alone_memory(&self) -> u64;
+    /// The memory resource (`--memory`, whole MiB) under which a decode running
+    /// alone may use `need` bytes beyond its block's plain bytes: what a
+    /// refusal tells the user to pass.
+    fn budget_for(&self, need: u64) -> u64;
+    /// Waits until no other block decodes and keeps others from starting;
+    /// `false` when the extraction is cancelled meanwhile.
+    fn enter_alone(&self) -> bool;
+    /// Ends [`DecodeGate::enter_alone`]'s exclusivity.
+    fn leave_alone(&self);
 }
 
 /// The context of a decode that has no archive behind it: every request fails.

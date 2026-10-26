@@ -4,7 +4,12 @@
 use std::path::Path;
 
 /// Crates allowed `unsafe` (CLAUDE.md: `*-sys` and `*-simd`); a new one is a reviewed change here.
-const ALLOWED: &[&str] = &["lpk-procstat-sys", "lpk-sandbox-sys"];
+const ALLOWED: &[&str] = &[
+    "lpk-fs-sys",
+    "lpk-gui-sys",
+    "lpk-procstat-sys",
+    "lpk-sandbox-sys",
+];
 
 #[test]
 fn only_the_sys_crates_allow_unsafe() {

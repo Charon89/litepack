@@ -294,6 +294,14 @@ fn symlink_entries_are_skipped_with_a_record_or_created() {
     let out = d.path().join("out");
     let p = Policy::new(Overwrite::Refuse, Symlinks::Create);
     match extract(&bytes, &out, &p) {
+        // E6-6 (D-79 (3) amended): Windows without SeCreateSymbolicLinkPrivilege skips every
+        // link to create with a record, and the extraction goes on.
+        Ok(s) if !lpk_core::outtree::can_create_symlinks() => {
+            assert!(std::env::consts::OS == "windows");
+            assert_eq!(s.symlinks, 0);
+            assert!(!p.unprivileged_symlinks().is_empty());
+            println!("SKIPPED: links skipped, no symlink privilege on this machine");
+        }
         Ok(s) => {
             assert_eq!((s.files, s.symlinks, s.symlinks_skipped), (1, 2, 0));
             assert!(p.skipped_symlinks().is_empty());
@@ -483,6 +491,14 @@ fn symlink_targets_leaving_the_destination_are_skipped() {
         assert!(std::fs::symlink_metadata(out.join(path)).is_err(), "{path}");
     }
     match r {
+        // E6-6 (D-79 (3) amended): Windows without SeCreateSymbolicLinkPrivilege skips every
+        // link to create with a record, and the extraction goes on.
+        Ok(s) if !lpk_core::outtree::can_create_symlinks() => {
+            assert!(std::env::consts::OS == "windows");
+            assert_eq!(s.symlinks, 0);
+            assert!(!p.unprivileged_symlinks().is_empty());
+            println!("SKIPPED: links skipped, no symlink privilege on this machine");
+        }
         Ok(s) => {
             assert_eq!((s.files, s.symlinks, s.symlinks_skipped), (3, 4, 9));
             assert!(p.skipped_symlinks().is_empty());
@@ -550,6 +566,14 @@ fn a_dot_dot_after_a_name_is_refused_even_through_a_renamed_link() {
         assert!(std::fs::symlink_metadata(out.join("l")).is_err());
         assert!(std::fs::symlink_metadata(out.join("m")).is_err());
         match r {
+            // E6-6 (D-79 (3) amended): no symlink privilege, the link is skipped with a record.
+            Ok(s) if !lpk_core::outtree::can_create_symlinks() => {
+                assert!(std::env::consts::OS == "windows");
+                assert_eq!((s.symlinks, s.symlinks_skipped), (0, 3), "round {round}");
+                assert_eq!(p.unprivileged_symlinks(), ["a/b/s"]);
+                println!("SKIPPED: links skipped, no symlink privilege on this machine");
+                break;
+            }
             Ok(s) => {
                 assert_eq!((s.symlinks, s.symlinks_skipped), (1, 2), "round {round}");
                 // The second round writes `f (1)` and `a/b/s (1)` beside the first.

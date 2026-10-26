@@ -1,0 +1,22 @@
+{
+  "app.title": "LitePack",
+  "drop.hint": "Drop an archive here, or open one with LitePack.",
+  "list.label": "Archive contents",
+  "list.name": "Name",
+  "list.size": "Size",
+  "list.modified": "Modified",
+  "status.entries": "{count} entries",
+  "status.loading": "Opening…",
+  "status.recovered": "Cleaned up {count} interrupted writes from the last run.",
+  "error.title": "Error",
+  "exit.busy.title": "LitePack is working",
+  "exit.busy.text": "An operation is still running. Stop it and close LitePack?",
+  "password.title": "Password",
+  "password.prompt": "Enter the archive's password:",
+  "password.confirm": "Enter it again:",
+  "password.ok": "OK",
+  "password.cancel": "Cancel",
+  "password.mismatch": "The two entries differ. Type the password again.",
+  "rollback.title": "Roll back the archive",
+  "rollback.text": "Remove every generation after the one you chose? This cannot be undone."
+}

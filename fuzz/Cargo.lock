@@ -945,6 +945,7 @@ dependencies = [
  "liblzma",
  "lpk-codecs-bwt",
  "lpk-format",
+ "lpk-fs-sys",
  "lpk-procstat-sys",
  "lpk-proto",
  "lpk-sandbox-sys",
@@ -1003,6 +1004,13 @@ dependencies = [
  "lpk-proto",
  "preflate-rs",
  "tempfile",
+]
+
+[[package]]
+name = "lpk-fs-sys"
+version = "0.0.1"
+dependencies = [
+ "windows",
 ]
 
 [[package]]

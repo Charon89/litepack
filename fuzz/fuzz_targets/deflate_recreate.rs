@@ -8,9 +8,10 @@ const MAX_PLAIN: usize = 1 << 16;
 // Layout: bytes 0..2 = the output limit (u16 LE), bytes 2..6 = the plain text's length (u32 LE,
 // cut to MAX_PLAIN and to what is there), then the plain text, then the corrections. The patched
 // limited recreation (D-66) must never return more than the limit and its writer's buffer must
-// never exceed `limit + 8` bytes; errors are fine. Panics are caught here as the decoder catches
-// them (they are `BadRecord`, `corrections`); what this target also looks for is hangs
-// (libFuzzer's -timeout) and memory growth (-rss_limit_mb).
+// never exceed `limit + 8` bytes; errors are fine. A panic is a crash here (libfuzzer-sys's
+// panic hook aborts, see below), although the decoder would catch it as `BadRecord`,
+// `corrections`; this target also looks for hangs (libFuzzer's -timeout) and memory growth
+// (-rss_limit_mb).
 fuzz_target!(|data: &[u8]| {
     if data.len() < 6 {
         return;
@@ -23,11 +24,16 @@ fuzz_target!(|data: &[u8]| {
         .min(MAX_PLAIN)
         .min(rest.len());
     let (plain, corrections) = rest.split_at(plain_len);
+    // libFuzzer's hook aborts on any panic, even one caught here: a library panic is a finding
+    // (the decoder would catch it, but it is a defect in the recreation all the same).
     let r = std::panic::catch_unwind(|| {
         recreate_whole_deflate_stream_limited_report(plain, corrections, limit)
     });
     if let Ok((result, capacity)) = r {
-        assert!(capacity <= limit + 8, "capacity {capacity} over limit {limit} + 8");
+        assert!(
+            capacity <= limit + 8,
+            "capacity {capacity} over limit {limit} + 8"
+        );
         if let Ok(out) = result {
             assert!(out.len() <= limit);
         }

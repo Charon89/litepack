@@ -106,25 +106,31 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     let mut bit_lengths = calc_bit_lengths(huffcalc, &freq.literal_codes, 15);
 
-    bit_lengths.resize(
-        codec.decode_correction_diff(
-            CodecCorrection::LiteralCountCorrection,
-            bit_lengths.len() as u32,
-        ) as usize,
-        0,
+    // LitePack change 12: each decoded count is checked against the range a Deflate header can
+    // carry (HLIT 257 to 288, HDIST 1 to 32, HCLEN 4 to 19, as the reader in
+    // `huffman_encoding.rs` reads them) before it sizes a vector; a crafted correction made
+    // these `resize` calls allocate up to 4 GiB each (found by `deflate_recreate`).
+    let num_literals = codec.decode_correction_diff(
+        CodecCorrection::LiteralCountCorrection,
+        bit_lengths.len() as u32,
     );
+    if !(257..=288).contains(&num_literals) {
+        return err_exit_code(ExitCode::InvalidPredictionData, "literal count out of range");
+    }
+    bit_lengths.resize(num_literals as usize, 0);
 
     result.num_literals = bit_lengths.len();
 
     let mut distance_code_lengths = calc_bit_lengths(huffcalc, &freq.distance_codes, 15);
 
-    distance_code_lengths.resize(
-        codec.decode_correction_diff(
-            CodecCorrection::DistanceCountCorrection,
-            distance_code_lengths.len() as u32,
-        ) as usize,
-        0,
+    let num_dist = codec.decode_correction_diff(
+        CodecCorrection::DistanceCountCorrection,
+        distance_code_lengths.len() as u32,
     );
+    if !(1..=32).contains(&num_dist) {
+        return err_exit_code(ExitCode::InvalidPredictionData, "distance count out of range");
+    }
+    distance_code_lengths.resize(num_dist as usize, 0);
 
     result.num_dist = distance_code_lengths.len();
 
@@ -139,10 +145,18 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     let mut tc_code_tree_len = calc_tc_lengths_without_trailing_zeros(&tc_code_tree);
 
-    tc_code_tree_len = codec.decode_correction_diff(
+    let decoded_tc_len = codec.decode_correction_diff(
         CodecCorrection::TreeCodeBitLengthCorrection,
         tc_code_tree_len as u32,
-    ) as usize;
+    );
+    if !(4..=CODETREE_CODE_COUNT as u32).contains(&decoded_tc_len) {
+        return err_exit_code(
+            ExitCode::InvalidPredictionData,
+            "code length count out of range",
+        );
+    }
+    // (change 13's check of this count is covered by change 12's above.)
+    tc_code_tree_len = decoded_tc_len as usize;
 
     result.num_code_lengths = tc_code_tree_len;
 
@@ -287,6 +301,11 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
                 predicted_tree_code_data.into(),
                 decoder.decode_correction(CodecCorrection::LDBitLengthCorrection),
             ) as u8;
+            // LitePack change 10: a code length above 15 is refused here; it indexed past the
+            // 19 code-tree frequencies in `calc_codetree_freq` (found by `deflate_recreate`).
+            if predicted_tree_code_data > 15 {
+                return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed");
+            }
         }
 
         result.push((predicted_tree_code_type, predicted_tree_code_data));
@@ -294,7 +313,12 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
         if predicted_tree_code_type == TreeCodeType::Code {
             symbols = &symbols[1..];
         } else {
-            symbols = &symbols[predicted_tree_code_data as usize..];
+            // LitePack change 11: a crafted repeat count past the remaining symbols is refused
+            // instead of slicing out of range.
+            symbols = match symbols.get(predicted_tree_code_data as usize..) {
+                Some(rest) => rest,
+                None => return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed"),
+            };
         }
     }
 

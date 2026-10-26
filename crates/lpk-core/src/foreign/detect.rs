@@ -273,7 +273,8 @@ fn lzma_alone(head: &[u8]) -> bool {
         return false;
     }
     let dict = u32::from_le_bytes([h[1], h[2], h[3], h[4]]);
-    let shape = dict.is_power_of_two() || (dict >> dict.trailing_zeros()) == 3;
+    // `checked_shr`: a dictionary size of 0 has 32 trailing zeros (found by `worker_proto`, E4-6).
+    let shape = dict.is_power_of_two() || dict.checked_shr(dict.trailing_zeros()) == Some(3);
     let size = u64::from_le_bytes([h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12]]);
     dict >= 4096 && shape && (size == u64::MAX || size < 1 << 48)
 }
@@ -466,6 +467,10 @@ mod tests {
         assert_eq!(detect(&lzma), Some(Format::Lzma));
         lzma[1] = 1; // a dictionary size no encoder writes
         assert_eq!(detect(&lzma), None);
+        // A dictionary size of 0 (32 trailing zeros) is no `.lzma` header and no panic (the
+        // `worker_proto` crash of E4-6).
+        let zero = [0x5D, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(detect(&zero), None);
         assert_eq!(detect(b"plain text"), None);
         assert_eq!(detect(b""), None);
     }

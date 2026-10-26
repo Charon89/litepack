@@ -120,17 +120,18 @@
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lpk_format::{Archive, Credentials, Entry, EntryKind, FormatError, MemoryPriors};
 
 use crate::memory::{Budget, BudgetSource, EnvelopeTier};
+use crate::outtree::{can_create_symlinks, Created, Tree};
 use crate::policy::{self, Existing, Found, SymlinkAction, Wanted};
 pub use crate::policy::{DefaultPolicy, ExtractPolicy};
 use crate::progress::{Monitor, Reporter, Stage};
@@ -221,6 +222,12 @@ pub struct ExtractSummary {
     /// Most decoded blocks held at once, measured (permits taken and not yet returned): never
     /// above `in_flight`. 1 on the sequential path when a block was decoded, else 0.
     pub peak_in_flight: usize,
+    /// Decodes that ran alone because they need more memory than the archive declares (a
+    /// `jpeg-reconstruct` record an earlier writer declared under revision 1.1).
+    pub alone_decodes: u64,
+    /// The most blocks decoding at once while a decode ran alone (itself included; 1 when the
+    /// gate held, 0 when no decode ran alone).
+    pub concurrent_while_alone: usize,
     /// The memory budget and what the engine counts against it.
     pub memory: ExtractMemory,
 }
@@ -379,9 +386,26 @@ struct Shared {
     files: AtomicU64,
     bytes: AtomicU64,
     reopened: AtomicU64,
+    /// The output tree, made after the plan and the memory check ([`Shared::open_tree`]).
+    tree: OnceLock<Tree>,
+    /// Per target, the file the tree created (for reopens and cleanup).
+    created: Vec<OnceLock<Created>>,
 }
 
 impl Shared {
+    fn tree(&self) -> Result<&Tree, CoreError> {
+        self.tree
+            .get()
+            .ok_or(CoreError::Extract("the output tree is not open"))
+    }
+
+    /// Create the destination and the plan's directories: the output tree every file and
+    /// link of this extraction is created through.
+    fn open_tree(&self, dir: &Path, mkdirs: &[PathBuf]) -> Result<&Tree, CoreError> {
+        let tree = Tree::create(dir, mkdirs)?;
+        Ok(self.tree.get_or_init(|| tree))
+    }
+
     fn state(&self, file: usize) -> u8 {
         self.states[file].load(Ordering::SeqCst)
     }
@@ -390,11 +414,15 @@ impl Shared {
         self.states[file].store(s, Ordering::SeqCst);
     }
 
-    /// Remove every file created and not finished.
+    /// Remove every file created and not finished (through the tree: on Windows only the
+    /// file with the ID recorded at its creation).
     fn clean_up(&self) {
-        for (i, t) in self.targets.iter().enumerate() {
+        let Some(tree) = self.tree.get() else { return };
+        for i in 0..self.targets.len() {
             if self.state(i) == PARTIAL {
-                let _ = std::fs::remove_file(&t.path);
+                if let Some(c) = self.created[i].get() {
+                    tree.remove(c);
+                }
             }
         }
     }
@@ -402,16 +430,18 @@ impl Shared {
     /// Create a target's file (create-new; what a replaced target held is removed first).
     fn create(&self, file: usize) -> Result<File, CoreError> {
         let t = &self.targets[file];
-        if t.replace {
-            policy::remove_existing(&t.path).map_err(|e| io(&t.path, e))?;
-        }
-        let f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&t.path)
-            .map_err(|e| io(&t.path, e))?;
+        let (f, c) = self.tree()?.create_file(&t.path, t.replace)?;
+        let _ = self.created[file].set(c);
         self.set(file, PARTIAL);
         Ok(f)
+    }
+
+    /// Reopen a target's file created earlier (without create, without truncation).
+    fn reopen(&self, file: usize) -> Result<File, CoreError> {
+        let c = self.created[file]
+            .get()
+            .ok_or(CoreError::Extract("a file to reopen was not created"))?;
+        self.tree()?.reopen(c)
     }
 
     /// Create and finish a file with no chunk.
@@ -510,10 +540,7 @@ impl<'s> Out<'s> {
                 f
             } else {
                 s.reopened.fetch_add(1, Ordering::Relaxed);
-                OpenOptions::new()
-                    .write(true)
-                    .open(&t.path)
-                    .map_err(|e| io(&t.path, e))?
+                s.reopen(file)?
             };
             self.open.insert(file, (f, 0));
             self.order.push_back(file);
@@ -559,6 +586,189 @@ impl<'s> Out<'s> {
     }
 }
 
+/// The pool's gate for decodes whose working memory exceeds what the archive declares
+/// ([`lpk_format::DecodeGate`]; a `jpeg-reconstruct` record an earlier writer declared under
+/// revision 1.1): such a decode waits until no other block decodes, keeps others from starting
+/// and runs alone, within [`AloneGate::alone_memory`]. Every other decode keeps the pool's
+/// concurrency. Decoded blocks waiting for the writers are not waited for (the writers may be
+/// waiting for the lone block); the lone decode's memory leaves room for all of them.
+#[derive(Debug)]
+pub(crate) struct AloneGate {
+    state: Mutex<GateState>,
+    cv: Condvar,
+    cancelled: AtomicBool,
+    alone_memory: u64,
+    budget: u64,
+    sizing: Sizing,
+    /// Decodes that ran alone.
+    alone_runs: AtomicU64,
+    /// The most blocks decoding at once while a decode ran alone (itself included).
+    concurrent_while_alone: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    /// Blocks decoding now (a decode waiting to run alone is not counted).
+    decoding: usize,
+    /// Decodes waiting to run alone: no decode starts meanwhile.
+    waiting: usize,
+    /// A decode runs alone.
+    alone: bool,
+}
+
+impl AloneGate {
+    /// The gate of a pool of `pool`'s size.
+    pub(crate) fn new(pool: &Pool) -> Arc<Self> {
+        Self::with_memory(pool, pool.sizing.alone_memory(pool.memory.budget.bytes))
+    }
+
+    /// The gate of a pool of `pool`'s budget whose lone decode may use `alone_memory` bytes
+    /// beyond its plain bytes (an export, which holds its own count of blocks).
+    pub(crate) fn with_memory(pool: &Pool, alone_memory: u64) -> Arc<Self> {
+        let budget = pool.memory.budget.bytes;
+        Arc::new(AloneGate {
+            state: Mutex::new(GateState::default()),
+            cv: Condvar::new(),
+            cancelled: AtomicBool::new(false),
+            alone_memory,
+            budget,
+            sizing: pool.sizing,
+            alone_runs: AtomicU64::new(0),
+            concurrent_while_alone: AtomicUsize::new(0),
+        })
+    }
+
+    /// Decodes that ran alone so far.
+    pub(crate) fn alone_runs(&self) -> u64 {
+        self.alone_runs.load(Ordering::SeqCst)
+    }
+
+    /// The most blocks decoding at once while a decode ran alone (0 when none did).
+    pub(crate) fn concurrent_while_alone(&self) -> usize {
+        self.concurrent_while_alone.load(Ordering::SeqCst)
+    }
+
+    /// Before a block decodes: waits while a decode runs alone or waits to.
+    pub(crate) fn begin(&self) -> bool {
+        let Ok(mut s) = self.state.lock() else {
+            return false;
+        };
+        while s.alone || s.waiting > 0 {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return false;
+            }
+            s = match self.cv.wait(s) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+        }
+        s.decoding += 1;
+        if s.alone {
+            self.concurrent_while_alone
+                .fetch_max(s.decoding, Ordering::SeqCst);
+        }
+        true
+    }
+
+    /// After a block decoded (whatever the outcome).
+    pub(crate) fn end(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.decoding = s.decoding.saturating_sub(1);
+        }
+        self.cv.notify_all();
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        drop(self.state.lock());
+        self.cv.notify_all();
+    }
+}
+
+impl lpk_format::DecodeGate for AloneGate {
+    fn alone_memory(&self) -> u64 {
+        self.alone_memory
+    }
+
+    fn budget_for(&self, need: u64) -> u64 {
+        self.sizing.budget_for(
+            need,
+            self.budget
+                .saturating_add(need.saturating_sub(self.alone_memory)),
+        )
+    }
+
+    fn enter_alone(&self) -> bool {
+        let Ok(mut s) = self.state.lock() else {
+            return false;
+        };
+        // This decode stops counting while it waits, so two decodes waiting to run alone do
+        // not wait for each other.
+        s.decoding = s.decoding.saturating_sub(1);
+        s.waiting += 1;
+        self.cv.notify_all();
+        while s.alone || s.decoding > 0 {
+            if self.cancelled.load(Ordering::SeqCst) {
+                s.waiting -= 1;
+                s.decoding += 1;
+                return false;
+            }
+            s = match self.cv.wait(s) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+        }
+        s.waiting -= 1;
+        s.decoding += 1;
+        s.alone = true;
+        self.alone_runs.fetch_add(1, Ordering::SeqCst);
+        self.concurrent_while_alone
+            .fetch_max(s.decoding, Ordering::SeqCst);
+        true
+    }
+
+    fn leave_alone(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.alone = false;
+        }
+        self.cv.notify_all();
+    }
+}
+
+/// The memory a lone decode may use beyond its plain bytes with `m`'s terms and `permits`
+/// permits: the budget less the fixed terms, one block's terms other than its decoder, and every
+/// other permit held as a decoded block (an export, [`crate::export`]).
+pub(crate) fn alone_memory_for(m: &ExtractMemory, permits: usize) -> u64 {
+    let others = u64::try_from(permits.saturating_sub(1)).unwrap_or(u64::MAX);
+    m.budget
+        .bytes
+        .saturating_sub(m.fixed)
+        .saturating_sub(m.per_block.saturating_sub(m.decoder))
+        .saturating_sub(others.saturating_mul(m.held))
+}
+
+/// True for the error of a decode that stopped waiting at the gate because the run was
+/// cancelled ([`lpk_format::DecodeGate::enter_alone`] returned `false`).
+pub(crate) fn is_cancelled_decode(e: &FormatError) -> bool {
+    matches!(e, FormatError::Io(io) if io.kind() == std::io::ErrorKind::Interrupted)
+}
+
+/// Runs `f` as one block's decode through `gate` ([`AloneGate::begin`] and
+/// [`AloneGate::end`]); `None` when the extraction was cancelled before it started.
+pub(crate) fn gated<T>(gate: &AloneGate, f: impl FnOnce() -> T) -> Option<T> {
+    struct End<'a>(&'a AloneGate);
+    impl Drop for End<'_> {
+        fn drop(&mut self) {
+            self.0.end();
+        }
+    }
+    if !gate.begin() {
+        return None;
+    }
+    let _end = End(gate);
+    Some(f())
+}
+
 /// A counting semaphore that can be cancelled (shared with [`crate::export`]).
 pub(crate) struct Permits {
     free: Mutex<usize>,
@@ -568,6 +778,8 @@ pub(crate) struct Permits {
     cap: usize,
     /// Most permits out at once.
     pub(crate) peak: AtomicUsize,
+    /// The pool's gate for decodes that run alone ([`AloneGate`]), cancelled with the permits.
+    gate: std::sync::OnceLock<Arc<AloneGate>>,
 }
 
 impl Permits {
@@ -578,6 +790,22 @@ impl Permits {
             cancelled: AtomicBool::new(false),
             cap: n,
             peak: AtomicUsize::new(0),
+            gate: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Attach the pool's gate: the workers' decodes go through it and [`Permits::cancel`]
+    /// cancels it.
+    pub(crate) fn attach_gate(&self, gate: Arc<AloneGate>) {
+        let _ = self.gate.set(gate);
+    }
+
+    /// Runs one block's decode through the attached gate (directly without one); `None` when
+    /// the extraction was cancelled before it started.
+    pub(crate) fn decode<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        match self.gate.get() {
+            Some(g) => gated(g, f),
+            None => Some(f()),
         }
     }
 
@@ -618,6 +846,9 @@ impl Permits {
         // Take the lock so a worker between its check and its wait sees the flag.
         drop(self.free.lock());
         self.cv.notify_all();
+        if let Some(g) = self.gate.get() {
+            g.cancel();
+        }
     }
 }
 
@@ -901,12 +1132,27 @@ pub(crate) fn policy_pass(
     // The selection first: the policy's rules and the placements concern only what is
     // extracted, and a pattern without a match is refused here, before any output.
     let entries = select.filter(entries, |e| e.path.as_str())?;
+    // On Windows a name over 255 UTF-16 units or a total path over 32,767 is refused by name
+    // before output (E6-6); elsewhere the system's own limits answer at the create.
+    let dir_units = if cfg!(windows) {
+        std::path::absolute(dir)
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .count()
+    } else {
+        0
+    };
     for e in &entries {
         if e.kind == EntryKind::Symlink {
             policy.symlink(e)?;
         }
         policy.check_path(&e.path)?;
         policy.device(&e.path)?;
+        if cfg!(windows) {
+            policy::check_path_length(dir_units, &e.path)?;
+        }
     }
     policy::check_conflicting_names(&entries)?;
     if policy::case_insensitive_target(dir) {
@@ -923,6 +1169,8 @@ pub(crate) fn policy_pass(
         fold: policy::case_insensitive_target(dir),
     };
     let mut placed = Vec::with_capacity(entries.len());
+    // The symlink privilege, probed once, at the first link to create.
+    let mut privileged: Option<bool> = None;
     let (mut directories, mut skipped, mut renamed, mut symlinks_skipped) = (0u64, 0, 0, 0);
     for e in &entries {
         let path = join_components(dir, &e.path);
@@ -951,10 +1199,19 @@ pub(crate) fn policy_pass(
             }
             EntryKind::Symlink | EntryKind::File => {
                 // A link to create: its target is judged from the archive alone, before
-                // anything at the link's path is looked at; a refused one is skipped.
+                // anything at the link's path is looked at; a refused one is skipped. Then a
+                // process that cannot create links (on Windows a token without
+                // SeCreateSymbolicLinkPrivilege) skips it, recorded for a warning (D-79 (3)
+                // as amended by E6-6).
                 let link_dir = if e.kind == EntryKind::Symlink {
                     let target = e.symlink_target.as_deref().unwrap_or_default();
                     match namespace.resolve(&e.path, target) {
+                        Ok(_) if !*privileged.get_or_insert_with(can_create_symlinks) => {
+                            policy.symlink_unprivileged(e);
+                            symlinks_skipped += 1;
+                            placed.push(Placed::Skipped);
+                            continue;
+                        }
                         Ok(dir) => dir,
                         Err(refusal) => {
                             policy.symlink_target_refused(e, refusal);
@@ -975,6 +1232,20 @@ pub(crate) fn policy_pass(
                     Decision::Write => Some((path, false)),
                     Decision::Replace => Some((path, true)),
                     Decision::Rename(p) => {
+                        // The suffix may push the name or the path past the Windows limits:
+                        // checked again on the name the rename picked (E6-6).
+                        if cfg!(windows) {
+                            let rel = p
+                                .strip_prefix(dir)
+                                .map_err(|_| {
+                                    CoreError::Extract("a renamed target outside the destination")
+                                })?
+                                .components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/");
+                            policy::check_path_length(dir_units, &rel)?;
+                        }
                         renamed += 1;
                         Some((p, false))
                     }
@@ -1077,12 +1348,15 @@ fn plan<R: Read + Seek>(
         .map(|t| (t.name.len() + t.path.as_os_str().len()) as u64)
         .sum();
     let states = targets.iter().map(|_| AtomicU8::new(NOT_CREATED)).collect();
+    let created = targets.iter().map(|_| OnceLock::new()).collect();
     let shared = Shared {
         targets,
         states,
         files: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
         reopened: AtomicU64::new(0),
+        tree: OnceLock::new(),
+        created,
     };
     Ok(Plan {
         shared,
@@ -1099,28 +1373,19 @@ fn plan<R: Read + Seek>(
     })
 }
 
-/// Create the plan's directories, the output directory first.
-pub(crate) fn make_dirs(mkdirs: &[PathBuf]) -> Result<(), CoreError> {
-    for d in mkdirs {
-        std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
-    }
-    Ok(())
+/// Create the plan's directories, the output directory first, and return the output tree
+/// (shared with [`crate::foreign`]).
+pub(crate) fn make_dirs(dir: &Path, mkdirs: &[PathBuf]) -> Result<Tree, CoreError> {
+    Tree::create(dir, mkdirs)
 }
 
-/// Create the plan's symlinks, in entry order (after the directories, before the files). Every
-/// target here passed [`policy::resolve_symlink_target`] in the policy pass; a refused one
-/// never reaches this phase. On Windows the target is read as UTF-8 and the link kind is the
-/// plan's ([`Link::dir`], from the archive); nothing reads the target on any system.
-pub(crate) fn make_links(links: &[Link]) -> Result<(), CoreError> {
-    for l in links {
-        if l.replace {
-            policy::remove_existing(&l.path).map_err(|e| io(&l.path, e))?;
-        }
-        #[cfg(test)]
-        seam::record(&l.target);
-        make_link(&l.path, &l.target, l.dir).map_err(|e| io(&l.path, e))?;
-    }
-    Ok(())
+/// Create the plan's symlinks through `tree`, in entry order (after the directories, before
+/// the files). Every target here passed [`policy::resolve_symlink_target`] and the privilege
+/// check in the policy pass; a refused one never reaches this phase. On Windows the target is
+/// read as UTF-8 and the link kind is the plan's ([`Link::dir`], from the archive); nothing
+/// reads the target on any system.
+pub(crate) fn make_links(tree: &Tree, links: &[Link]) -> Result<(), CoreError> {
+    tree.make_links(links)
 }
 
 /// The test seam of the link phase: every target handed to the operating system by
@@ -1144,28 +1409,6 @@ pub(crate) mod seam {
     }
 }
 
-#[cfg(unix)]
-fn make_link(path: &Path, target: &[u8], _dir: bool) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), path)
-}
-
-#[cfg(windows)]
-fn make_link(path: &Path, target: &[u8], dir: bool) -> std::io::Result<()> {
-    let target = std::str::from_utf8(target).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "symlink target is not UTF-8",
-        )
-    })?;
-    let target = windows_link_target(target);
-    if dir {
-        std::os::windows::fs::symlink_dir(&target, path)
-    } else {
-        std::os::windows::fs::symlink_file(&target, path)
-    }
-}
-
 /// The target a Windows link is created with: the archive's, every `/` made `\`. Windows does
 /// not traverse a link whose target uses `/` (`ERROR_INVALID_NAME`), and the resolver
 /// ([`policy::resolve_symlink_target`]) already read both as separators on Windows, so the
@@ -1174,14 +1417,6 @@ fn make_link(path: &Path, target: &[u8], dir: bool) -> std::io::Result<()> {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn windows_link_target(target: &str) -> String {
     target.replace('/', "\\")
-}
-
-#[cfg(not(any(unix, windows)))]
-fn make_link(_path: &Path, _target: &[u8], _dir: bool) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "symlinks are not supported on this platform",
-    ))
 }
 
 /// The pool for `archive` under `opts`: decode workers, decoded blocks in flight, file writers.
@@ -1199,6 +1434,8 @@ pub struct Pool {
     pub writers: usize,
     /// The budget and the terms counted against it.
     pub memory: ExtractMemory,
+    /// What the size depends on besides the budget.
+    pub(crate) sizing: Sizing,
 }
 
 /// What the plan gives the pool's sizing.
@@ -1311,31 +1548,17 @@ pub(crate) fn pool_size<R: Read + Seek>(
         .saturating_add(DISPATCH_ALLOWANCE)
         .saturating_add(records);
     let held = plain.saturating_add(BLOCK_ALLOWANCE);
-    let workers = if threads == 1 {
-        1
-    } else {
-        let by_memory =
-            budget.bytes.saturating_sub(fixed_shared) / per_block.saturating_add(per_worker).max(1);
-        let by_memory = usize::try_from(by_memory).unwrap_or(usize::MAX).max(1);
-        (threads - writers)
-            .min(by_memory)
-            .min(shape.needed.len().max(1))
-            .max(1)
+    let sizing = Sizing {
+        threads,
+        writers,
+        needed: shape.needed.len(),
+        fixed_shared,
+        per_block,
+        per_worker,
+        held,
+        decoder,
     };
-    let in_flight = if threads == 1 {
-        1
-    } else {
-        let w = u64::try_from(workers).unwrap_or(u64::MAX);
-        let paid =
-            fixed_shared.saturating_add(w.saturating_mul(per_block.saturating_add(per_worker)));
-        let extra = budget.bytes.saturating_sub(paid) / held.max(1);
-        let extra = usize::try_from(extra).unwrap_or(usize::MAX);
-        let cap = workers
-            .saturating_mul(HELD_PER_WORKER)
-            .min(shape.needed.len())
-            .max(workers);
-        workers.saturating_add(extra).min(cap)
-    };
+    let (workers, in_flight) = sizing.size(budget.bytes);
     let memory = ExtractMemory {
         budget,
         tier,
@@ -1359,6 +1582,79 @@ pub(crate) fn pool_size<R: Read + Seek>(
         in_flight,
         writers,
         memory,
+        sizing,
+    }
+}
+
+/// What the pool's size depends on besides the budget ([`pool_size`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Sizing {
+    threads: usize,
+    writers: usize,
+    needed: usize,
+    fixed_shared: u64,
+    per_block: u64,
+    per_worker: u64,
+    held: u64,
+    decoder: u64,
+}
+
+impl Sizing {
+    /// The decode workers and the permits a budget of `budget` bytes pays for (module
+    /// documentation, "The memory bound").
+    fn size(&self, budget: u64) -> (usize, usize) {
+        if self.threads == 1 {
+            return (1, 1);
+        }
+        let by_memory = budget.saturating_sub(self.fixed_shared)
+            / self.per_block.saturating_add(self.per_worker).max(1);
+        let by_memory = usize::try_from(by_memory).unwrap_or(usize::MAX).max(1);
+        let workers = (self.threads - self.writers)
+            .min(by_memory)
+            .min(self.needed.max(1))
+            .max(1);
+        let w = u64::try_from(workers).unwrap_or(u64::MAX);
+        let paid = self
+            .fixed_shared
+            .saturating_add(w.saturating_mul(self.per_block.saturating_add(self.per_worker)));
+        let extra = budget.saturating_sub(paid) / self.held.max(1);
+        let extra = usize::try_from(extra).unwrap_or(usize::MAX);
+        let cap = workers
+            .saturating_mul(HELD_PER_WORKER)
+            .min(self.needed)
+            .max(workers);
+        (workers, workers.saturating_add(extra).min(cap))
+    }
+
+    /// The memory a lone decode may use beyond its plain bytes under a budget of `budget`:
+    /// the budget less the shared and per-worker terms, one block's terms other than its
+    /// decoder, and every other permit held as a decoded block.
+    pub(crate) fn alone_memory(&self, budget: u64) -> u64 {
+        let (workers, in_flight) = self.size(budget);
+        let w = u64::try_from(workers).unwrap_or(u64::MAX);
+        let others = u64::try_from(in_flight.saturating_sub(1)).unwrap_or(u64::MAX);
+        budget
+            .saturating_sub(self.fixed_shared)
+            .saturating_sub(w.saturating_mul(self.per_worker))
+            .saturating_sub(self.per_block.saturating_sub(self.decoder))
+            .saturating_sub(others.saturating_mul(self.held))
+    }
+
+    /// The smallest budget, in whole MiB, under which a lone decode may use `need` bytes beyond
+    /// its plain bytes (more budget may pay for more held blocks first, so the step repeats
+    /// until the lone decode's share covers `need`).
+    pub(crate) fn budget_for(&self, need: u64, from: u64) -> u64 {
+        const MIB: u64 = 1 << 20;
+        let mut b = from;
+        for _ in 0..4096 {
+            b = b.div_ceil(MIB).saturating_mul(MIB);
+            let have = self.alone_memory(b);
+            if have >= need || b == u64::MAX {
+                return b;
+            }
+            b = b.saturating_add((need - have).max(MIB));
+        }
+        b
     }
 }
 
@@ -1428,6 +1724,10 @@ where
         max_writers: usize::MAX,
     };
     let pool = pool_size(archive, opts, &shape);
+    // Decodes that need more than the archive declares run alone ([`AloneGate`]); the forks
+    // share the gate.
+    let gate = AloneGate::new(&pool);
+    archive.set_decode_gate(Some(gate.clone()));
     // A given budget below one block in flight is refused with the figure, before anything is
     // written, as the compress side refuses (D-67 (1)); a default budget that small runs one.
     let m = pool.memory;
@@ -1444,13 +1744,13 @@ where
     rep.check()?;
     rep.totals(Some(shared.targets.len() as u64), Some(needed.len() as u64));
     let frame_len: Vec<u64> = archive.index().blocks.iter().map(|b| b.frame_len).collect();
-    make_dirs(&mkdirs)?;
-    // Links are created after every directory and before any file: a failure here (no
-    // privilege on Windows, a target that is not UTF-8) fails the extraction with nothing to
+    let tree = shared.open_tree(dir, &mkdirs)?;
+    // Links are created after every directory and before any file: a failure here (a target
+    // that is not UTF-8, a link in the way) fails the extraction with nothing to
     // clean up, and the order is load-bearing: a directory that exists before any link is
     // made can never be a link this extraction created, so no file is written through one
     // (the plan's checks hold whatever the entry order or the target's case rules).
-    make_links(&links)?;
+    tree.make_links(&links)?;
     let first_file: Vec<usize> = per_block
         .iter()
         .map(|p| p.first().map_or(usize::MAX, |p| p.file))
@@ -1458,14 +1758,19 @@ where
     let decoded = AtomicU64::new(0);
     let reads = AtomicU64::new(0);
     let peak = AtomicUsize::new(0);
-    let decode_error = |block: usize, source: FormatError| CoreError::Decode {
-        block,
-        path: shared
-            .targets
-            .get(first_file[block])
-            .map(|t| t.name.clone())
-            .unwrap_or_default(),
-        source,
+    let decode_error = |block: usize, source: FormatError| -> CoreError {
+        if is_cancelled_decode(&source) {
+            return CoreError::Cancelled;
+        }
+        CoreError::Decode {
+            block,
+            path: shared
+                .targets
+                .get(first_file[block])
+                .map(|t| t.name.clone())
+                .unwrap_or_default(),
+            source,
+        }
     };
     let outcome = {
         let shared = &shared;
@@ -1535,6 +1840,7 @@ where
                         decode_error: &decode_error,
                         rep: &rep,
                         frame_len: &frame_len,
+                        gate: gate.clone(),
                     }),
                     Err(e) => Outcome::Failed(FormatError::from(e).into()),
                 }
@@ -1591,6 +1897,8 @@ where
         symlinks: links.len() as u64,
         symlinks_skipped,
         peak_in_flight: peak.load(Ordering::Relaxed),
+        alone_decodes: gate.alone_runs(),
+        concurrent_while_alone: gate.concurrent_while_alone(),
         memory: pool.memory,
     })
 }
@@ -1639,6 +1947,8 @@ struct Run<'a, R: Read + Seek> {
     rep: &'a Reporter,
     /// Every block's frame length, for the bytes-in figure.
     frame_len: &'a [u64],
+    /// The pool's gate, already set on the forks.
+    gate: Arc<AloneGate>,
 }
 
 /// Keep the first panic payload.
@@ -1665,6 +1975,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         decode_error,
         rep,
         frame_len,
+        gate,
     } = run;
     let n = pool.writers.max(1);
     // The placements of writer w in block b.
@@ -1675,6 +1986,7 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
         }
     }
     let permits = Permits::new(pool.in_flight);
+    permits.attach_gate(gate);
     let outcome = parallel_with(
         shared,
         forks,
@@ -1788,11 +2100,15 @@ fn parallel_with<R: Read + Seek + Send>(
                         };
                         let r = catch_unwind(AssertUnwindSafe(|| {
                             let _token = budget.hold();
-                            fork.decode_block_checked(b)
+                            permits.decode(|| fork.decode_block_checked(b))
                         }));
                         decoded.fetch_add(1, Ordering::Relaxed);
                         match r {
-                            Ok(r) => {
+                            Ok(None) => {
+                                permits.release();
+                                break;
+                            }
+                            Ok(Some(r)) => {
                                 if tx.send((k, r)).is_err() {
                                     break;
                                 }
@@ -2055,7 +2371,10 @@ mod tests {
         let out = tmp.path().join("out");
         let entries = vec![entry(EntryKind::Symlink, "sub/l", Some(b"../a/b"))];
         let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
-        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        crate::outtree::seam::force_symlink_privilege(Some(true));
+        let pass = policy_pass(entries, &out, &policy, &Selection::all());
+        crate::outtree::seam::force_symlink_privilege(None);
+        let pass = pass.unwrap();
         match &pass.placed[0] {
             Placed::Link(l) => assert_eq!(l.target, b"../a/b"),
             p => panic!("{p:?}"),
@@ -2105,7 +2424,11 @@ mod tests {
         // Something on disk named like a file entry's target: ignored for the kind.
         std::fs::create_dir_all(out.join("nothing")).unwrap();
         let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
-        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        // The links reach the link phase (the privilege is the system's answer there, E6-6).
+        crate::outtree::seam::force_symlink_privilege(Some(true));
+        let pass = policy_pass(entries, &out, &policy, &Selection::all());
+        crate::outtree::seam::force_symlink_privilege(None);
+        let pass = pass.unwrap();
         assert_eq!(pass.symlinks_skipped, refused.len() as u64);
         let want: Vec<(String, R)> = refused
             .iter()
@@ -2124,7 +2447,7 @@ mod tests {
         let want: Vec<(&[u8], bool)> = fine.iter().map(|(_, t, d)| (*t, *d)).collect();
         assert_eq!(kinds, want);
         // The link phase over the plan: only in-tree targets reach the operating system.
-        make_dirs(&pass.mkdirs(&out)).unwrap();
+        let tree = make_dirs(&out, &pass.mkdirs(&out)).unwrap();
         let owned: Vec<Link> = pass
             .placed
             .into_iter()
@@ -2134,7 +2457,7 @@ mod tests {
             })
             .collect();
         let _ = seam::take();
-        let made = make_links(&owned);
+        let made = make_links(&tree, &owned);
         let seen = seam::take();
         for (_, t, _) in &refused {
             assert!(!seen.iter().any(|s| s == t), "{seen:?}");

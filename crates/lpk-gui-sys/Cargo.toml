@@ -1,0 +1,43 @@
+[package]
+name = "lpk-gui-sys"
+description = "The GUI's native pieces (E5-2): the password prompt and the rollback confirm, the no-replace publish, file identities"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about (about.toml `private.ignore`) leaves our own crates out of THIRD-PARTY-NOTICES.
+publish = false
+
+[dependencies]
+# The password goes straight into memory that is wiped when dropped (docs/notes/e5-design.md section 4).
+zeroize = "1.9.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", default-features = false, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_FileSystem",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_Controls",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+# This crate is allowed `unsafe` (CLAUDE.md: `*-sys` crates; docs/UNSAFE.md lists the module), so it
+# cannot inherit the workspace table (which forbids it): lpk-sandbox-sys's table (D-97). Every
+# `unsafe` block carries a `// SAFETY:` comment (denied otherwise).
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+undocumented_unsafe_blocks = "deny"

@@ -38,7 +38,8 @@ pub mod writer;
 pub mod zstd;
 
 pub use archive::{
-    generation_rules_table, read_key_slot, rollback, Archive, Diagnosis, Generation,
+    committed_chain, generation_rules_table, read_key_slot, rollback, Archive, Diagnosis,
+    Generation,
 };
 pub use chunk::{
     chunk_record_table, verify_file, verify_range, ChunkIndex, ChunkIter, ChunkLookup, ChunkPlace,
@@ -57,7 +58,7 @@ pub use crypto::{
     Argon2Params, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE, KEY_SLOT_LEN,
 };
 pub use decode::{
-    decode_block, decode_block_in, DecodeContext, NoContext, PrimitiveDecoder, Registry,
+    decode_block, decode_block_in, DecodeContext, DecodeGate, NoContext, PrimitiveDecoder, Registry,
 };
 pub use entry::{
     entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,

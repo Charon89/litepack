@@ -721,9 +721,12 @@ struct ExtractArgs {
     /// in symlinks_skipped; such a target is never read or opened. On Windows a link is a
     /// directory link when its target names a directory of the archive, else a file link; so a
     /// link whose target goes through another link (`l -> s/sub`, `s` a link) is a file link
-    /// unless the archive itself names that target as a directory. A
-    /// link that cannot be created (for example without the privilege on Windows) fails the
-    /// extraction.
+    /// unless the archive itself names that target as a directory. On Windows links are
+    /// created only when the process token holds SeCreateSymbolicLinkPrivilege (an elevated
+    /// administrator; Developer Mode alone does not count); without it every link is skipped
+    /// with a warning (with --json one `{"warning":{"kind":"SymlinkNoPrivilege","path":...}}`
+    /// line) and counted in symlinks_skipped, and the extraction goes on. A link that cannot be
+    /// created for any other reason fails the extraction.
     #[arg(long)]
     symlinks: bool,
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
@@ -935,6 +938,7 @@ fn foreign_extract(
             );
         }
     }
+    unprivileged_warnings(&report.unprivileged_symlinks, json, err);
     refused_target_warnings(&report.refused_symlink_targets, json, err);
     if s.skipped > 0 {
         let _ = writeln!(err, "skipped {} existing entries", s.skipped);
@@ -962,6 +966,27 @@ fn foreign_extract(
         s.files, s.directories
     );
     Ok(())
+}
+
+/// The symlink entries `--symlinks` did not create because this process cannot create links
+/// (E6-6: Windows, no SeCreateSymbolicLinkPrivilege), one line each: `warning: PATH: symlink
+/// entry skipped: this process lacks SeCreateSymbolicLinkPrivilege`, or with --json
+/// `{"warning":{"kind":"SymlinkNoPrivilege","path":...}}`.
+fn unprivileged_warnings(paths: &[String], json: bool, err: &mut dyn Write) {
+    for p in paths {
+        if json {
+            let line = serde_json::json!({
+                "warning": { "kind": "SymlinkNoPrivilege", "path": p }
+            });
+            let _ = writeln!(err, "{line}");
+        } else {
+            let _ = writeln!(
+                err,
+                "warning: {}: symlink entry skipped: this process lacks SeCreateSymbolicLinkPrivilege",
+                lpk_format::cli::escape_path(p)
+            );
+        }
+    }
 }
 
 /// The symlink entries `--symlinks` did not create because of their target (E6-0), one line
@@ -1644,6 +1669,7 @@ fn extract(
             );
         }
     }
+    unprivileged_warnings(&report.unprivileged_symlinks, json, err);
     refused_target_warnings(&report.refused_symlink_targets, json, err);
     if json {
         if s.skipped > 0 || s.renamed > 0 || s.symlinks_skipped > 0 {
