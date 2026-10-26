@@ -870,6 +870,7 @@ impl PrimitiveDecoder for JpegDecoder {
                             allowed: 0,
                         }));
                     }
+                    ALONE_DECODES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Some(Alone(gate))
                 }
                 None => {
@@ -936,6 +937,14 @@ impl PrimitiveDecoder for JpegDecoder {
         }
         Ok(primary)
     }
+}
+
+static ALONE_DECODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test hook: the JPEG decodes that have run alone through a pool's gate in this process.
+#[doc(hidden)]
+pub fn alone_decodes() -> u64 {
+    ALONE_DECODES.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// A decode running alone ([`lpk_format::DecodeGate::enter_alone`]); leaves on drop.

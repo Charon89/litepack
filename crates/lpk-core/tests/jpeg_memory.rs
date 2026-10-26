@@ -573,3 +573,138 @@ fn an_archive_declaring_revision_1_1s_term_extracts_within_a_budget_covering_the
     let new = archive_declaring(&jpeg, &|plan| plan.memory);
     assert_eq!(extract_with(&new, enough).unwrap(), jpeg);
 }
+
+/// An archive of `jpegs` (entries `p0.jpg`, `p1.jpg`, ..), each peeled into a block of its own
+/// declaring `declare(plan)`.
+fn archive_of(jpegs: &[Vec<u8>], declare: &dyn Fn(&lpk_core::peel::PeelPlan) -> u64) -> Vec<u8> {
+    use lpk_format::{Encoded, EntryFlags, Graph, GraphResources, Step, Writer, WriterOptions};
+    let peel = JpegPeel::default();
+    let mut out = Vec::new();
+    let mut w = Writer::new_revision(&mut out, WriterOptions::default(), 1).unwrap();
+    for (i, jpeg) in jpegs.iter().enumerate() {
+        let plan = peel.peel(jpeg, 1 << 24).unwrap();
+        w.begin_entry(&format!("p{i}.jpg"), EntryFlags::EMPTY, 0)
+            .unwrap();
+        let id = w.add_record(peel.record(&plan, &[])).unwrap();
+        let mut params = Vec::new();
+        lpk_format::varint::write(&mut params, id).unwrap();
+        let encoded = Encoded {
+            graph: Graph {
+                steps: vec![Step {
+                    primitive: plan.primitive,
+                    params,
+                }],
+            },
+            bytes: plan.stream.clone(),
+            resources: GraphResources::default(),
+            memory: 0,
+        };
+        w.add_part_encoded(0, jpeg, encoded, declare(&plan))
+            .unwrap();
+        w.end_entry().unwrap();
+    }
+    w.finish().unwrap();
+    out
+}
+
+/// `--memory` holds across workers: an archive of several large progressive JPEGs, each
+/// declaring only revision 1.1's term, extracted by the pooled engine at eight threads. Each
+/// decode needs more than the archive declares, so each runs alone through the pool's gate; the
+/// process peak stays within the budget and every file is byte-exact.
+#[test]
+fn over_declared_decodes_run_alone_and_the_peak_stays_within_the_budget() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpegs: Vec<Vec<u8>> = [2048u16, 2032, 2016, 2000]
+        .iter()
+        .map(|&w| grey_jpeg(w, 2048, true))
+        .collect();
+    let old = archive_of(&jpegs, &|plan| {
+        let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+        memory_bound(&h.frame)
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let arch = dir.path().join("old.lpk");
+    std::fs::write(&arch, &old).unwrap();
+    let budget = 640u64 << 20;
+    let opts = lpk_core::ExtractOptions {
+        threads: Some(8),
+        memory: Some(budget),
+        ..lpk_core::ExtractOptions::default()
+    };
+    let out = dir.path().join("out");
+    let alone_before = lpk_core::peel::jpeg::alone_decodes();
+    let before = ALLOC.current();
+    ALLOC.reset_peak();
+    let s =
+        lpk_core::extract_file(&arch, &out, &[], None, &lpk_core::DefaultPolicy, &opts).unwrap();
+    let peak = (ALLOC.peak() - before) as u64;
+    let alone = lpk_core::peel::jpeg::alone_decodes() - alone_before;
+    eprintln!(
+        "workers {}, in flight {}, decoder {}, alone {alone}, peak {peak}, budget {budget}",
+        s.workers, s.in_flight, s.memory.decoder
+    );
+    assert!(s.workers > 1, "the pool runs several workers");
+    assert_eq!(alone, jpegs.len() as u64);
+    assert!(peak <= budget, "peak {peak} > budget {budget}");
+    for (i, j) in jpegs.iter().enumerate() {
+        assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
+    }
+}
+
+/// D-100: a header ending in a marker cut short (two bytes) counts those bytes in both decoders,
+/// which compute the same term.
+#[test]
+fn a_header_ending_in_two_stray_bytes_gives_both_decoders_the_same_term() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpeg = grey_jpeg(256, 256, false);
+    let plan = JpegPeel::default().peel(&jpeg, 1 << 24).unwrap();
+    let stream = rewrite_header(&plan.stream, |r| r.extend_from_slice(b"P0"));
+    let mine = read_stream_header(&stream, plan.primary_len).unwrap();
+    let theirs = lpk_check::jpeg::stream_header(0, &stream, plan.primary_len).unwrap();
+    let plain = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+    assert_eq!(mine.header_len, plain.header_len + 2);
+    assert_eq!(theirs.header_len, mine.header_len);
+    let len = stream.len() as u64;
+    assert_eq!(
+        theirs.term(plan.primary_len, len),
+        image_term(&mine, plan.primary_len, len)
+    );
+}
+
+/// A truncated JPEG (no EOI: the library's early-EOF path, an `EEE` section, whose last segment
+/// the library cuts) encoded by the library as another writer could, decoded through both
+/// decoders' checks: it passes them and round-trips. (The peel itself never writes one: it peels
+/// a primary only up to its EOI.)
+#[test]
+fn an_early_eof_jpeg_round_trips() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let full = grey_jpeg(512, 512, false);
+    let sos = full.windows(2).rposition(|w| w == [0xFF, 0xDA]).unwrap();
+    let data = sos + 2 + 12;
+    let jpeg = full[..data + (full.len() - 2 - data) / 3].to_vec();
+    let f = lpk_core::peel::jpeg::features(1 << 24);
+    let mut w = std::io::Cursor::new(Vec::new());
+    lepton_jpeg::encode_lepton(
+        &mut std::io::Cursor::new(&jpeg[..]),
+        &mut w,
+        &f,
+        &lepton_jpeg::DEFAULT_THREAD_POOL,
+    )
+    .unwrap();
+    let stream = w.into_inner();
+    let clen = u32::from_le_bytes(stream[24..28].try_into().unwrap()) as usize;
+    let mut raw = Vec::new();
+    flate2::read::ZlibDecoder::new(&stream[28..28 + clen])
+        .read_to_end(&mut raw)
+        .unwrap();
+    assert!(raw.windows(3).any(|w| w == b"EEE"), "an early-EOF stream");
+    let primary_len = jpeg.len() as u64;
+    let h = read_stream_header(&stream, primary_len).unwrap();
+    let theirs = lpk_check::jpeg::stream_header(0, &stream, primary_len).unwrap();
+    let term = image_term(&h, primary_len, stream.len() as u64);
+    assert_eq!(theirs.term(primary_len, stream.len() as u64), term);
+    let block = 1u64 << 24;
+    let l = limits(block, block + term);
+    let (r, _, _) = measured(&stream, record_for(&jpeg), primary_len, &l, Some(1));
+    assert!(r.unwrap() == jpeg);
+}
