@@ -852,11 +852,34 @@ impl PrimitiveDecoder for JpegDecoder {
             Ok(())
         };
         refuse(memory_bound(&header.frame), limits.memory)?;
-        let budget = ctx.memory_budget().unwrap_or(limits.memory);
-        refuse(
-            image_term(&header, j.primary_len, input.len() as u64),
-            budget,
-        )?;
+        let need = image_term(&header, j.primary_len, input.len() as u64);
+        // A need the declaration covers is counted by the extraction's pool like any block's.
+        // One it does not cover runs alone when a pooled extraction gives a gate, within the
+        // memory the pool leaves a lone decode; otherwise within the reader's own resource.
+        let _alone = if need > limits.memory.saturating_sub(limits.max_block_plain) {
+            match ctx.gate() {
+                Some(gate) => {
+                    refuse(
+                        need,
+                        gate.alone_memory().saturating_add(limits.max_block_plain),
+                    )?;
+                    if !gate.enter_alone() {
+                        return Err(FormatError::Refused(Refusal {
+                            field: "decode_memory",
+                            needed: limits.max_block_plain.saturating_add(need),
+                            allowed: 0,
+                        }));
+                    }
+                    Some(Alone(gate))
+                }
+                None => {
+                    refuse(need, ctx.memory_budget().unwrap_or(limits.memory))?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let frame = header.frame;
         let mut f = features(u32::try_from(j.primary_len).unwrap_or(u32::MAX));
         f.max_jpeg_width = frame.width;
@@ -912,6 +935,15 @@ impl PrimitiveDecoder for JpegDecoder {
             return Err(bad(id, "original_hash"));
         }
         Ok(primary)
+    }
+}
+
+/// A decode running alone ([`lpk_format::DecodeGate::enter_alone`]); leaves on drop.
+struct Alone(std::sync::Arc<dyn lpk_format::DecodeGate>);
+
+impl Drop for Alone {
+    fn drop(&mut self) {
+        self.0.leave_alone();
     }
 }
 
@@ -1012,9 +1044,15 @@ fn take_u32(z: &mut impl std::io::Read, total: &mut u64, cap: u64) -> Option<u32
 /// it could make the library allocate past what the primary image explains: the JPEG length,
 /// the compressed header, the raw header, the garbage, the restart errors (summed) or four bytes
 /// per restart count (summed) above `primary_len`; the inflated header above
-/// [`header_cap`]; not exactly one `HH` section, or one with no partition, partitions whose
-/// first rows go down, or segment sizes that sum past `primary_len`; an unknown section; data
-/// ending inside a section; or no frame header in the raw header. Each of these is a stream the
+/// [`header_cap`] (a marker cut short at its end counts its bytes); not exactly one `HH`
+/// section, or one with no partition or partitions whose first rows go down; segment sizes
+/// past what the library bounds them by (below); an unknown section; data ending inside a
+/// section; or no frame header in the raw header. Segment sizes, as the library treats them
+/// (`lepton_header.rs`, the early-EOF adjustment): without an `EEE` section all of them sum to
+/// at most `primary_len`; with one, the library cuts the last segment to the JPEG length less
+/// the garbage (2 bytes, the EOI it assumes, when there is no `GRB`), the raw header, SOI and
+/// the other segments, so those must fit in the JPEG length (a raw header longer than the
+/// library's parse of it only makes this stricter). Each of these is a stream the
 /// library refuses too, or one it does not write: the library allocates each length it reads
 /// at once (a `GRB` length of 4 GB was a fuzzing finding), and partitions whose rows overlap
 /// each hold a coefficient buffer for their rows.
@@ -1041,7 +1079,8 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
     let mut raw = vec![0xFF, 0xD8];
     take_exact(&mut z, n, &mut total, cap, Some(&mut raw))?;
     let (mut restarts, mut errors) = (0u64, 0u64);
-    let mut partitions = None;
+    let mut segments: Option<Vec<u64>> = None;
+    let (mut garbage, mut early_eof) = (2u64, false);
     loop {
         // The library ends the header at the first marker it cannot read whole.
         let mut m = [0u8; 3];
@@ -1055,6 +1094,7 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
             }
         }
         if got < 3 {
+            total = total.checked_add(got as u64).filter(|&t| t <= cap)?;
             break;
         }
         total = total.checked_add(3).filter(|&t| t <= cap)?;
@@ -1069,7 +1109,7 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
                 take_exact(&mut z, count * 4, &mut total, cap, None)?;
             }
             [b'H', b'H', count] => {
-                if partitions.is_some() || *count == 0 {
+                if segments.is_some() || *count == 0 {
                     return None;
                 }
                 let mut h = Vec::with_capacity(16 * usize::from(*count));
@@ -1080,19 +1120,17 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
                     cap,
                     Some(&mut h),
                 )?;
-                let (mut last_row, mut segments) = (0u16, 0u64);
+                let mut last_row = 0u16;
+                let mut sizes = Vec::with_capacity(usize::from(*count));
                 for p in h.as_chunks::<16>().0 {
                     let row = u16::from_le_bytes([p[0], p[1]]);
                     if row < last_row {
                         return None;
                     }
                     last_row = row;
-                    segments += u64::from(u32::from_le_bytes(p[2..6].try_into().ok()?));
+                    sizes.push(u64::from(u32::from_le_bytes(p[2..6].try_into().ok()?)));
                 }
-                if segments > primary_len {
-                    return None;
-                }
-                partitions = Some(u32::from(*count));
+                segments = Some(sizes);
             }
             b"FRS" | b"GRB" => {
                 let len = u64::from(take_u32(&mut z, &mut total, cap)?);
@@ -1102,16 +1140,33 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
                 if len > primary_len || errors > primary_len {
                     return None;
                 }
+                if &m == b"GRB" {
+                    garbage = len;
+                }
                 take_exact(&mut z, len, &mut total, cap, None)?;
             }
-            b"EEE" => take_exact(&mut z, 28, &mut total, cap, None)?,
+            b"EEE" => {
+                take_exact(&mut z, 28, &mut total, cap, None)?;
+                early_eof = true;
+            }
             _ => return None,
         }
+    }
+    let segments = segments?;
+    let (_last, others) = segments.split_last()?;
+    let others: u64 = others.iter().sum();
+    let fits = if early_eof {
+        others + garbage + n + 2 <= jpeg_len
+    } else {
+        segments.iter().sum::<u64>() <= primary_len
+    };
+    if !fits {
+        return None;
     }
     Some(StreamHeader {
         frame: marker_scan(&raw).frame?,
         header_len: total,
-        partitions: partitions?,
+        partitions: u32::try_from(segments.len()).ok()?,
     })
 }
 
@@ -1132,15 +1187,18 @@ pub const THREAD_ALLOWANCE: u64 = 4 << 20;
 ///
 /// - `128·B` for the coefficients (64 of 2 bytes per block), twice for a progressive frame
 ///   (SOF2), whose partitions' buffers stay alive while the library merges them into one;
-/// - for a progressive frame, `512·B` for one scan's output, which the library builds whole
-///   (at most 64 coefficients of a 16-bit Huffman code and 16 bits each per block, doubled for
-///   the zero byte stuffed after each `FF`);
+/// - for a progressive frame, `1536·B` for one scan's output, which the library builds whole:
+///   the content is at most 512 bytes per block (64 coefficients of a 16-bit Huffman code and
+///   16 bits each, doubled for the zero byte stuffed after each `FF`), and the buffer grows from
+///   128 KiB by `reserve` (doubling), so its capacity is under twice the content and, while it
+///   moves, the old buffer is live too: three times the content;
 /// - per decode thread, `P · (THREAD_ALLOWANCE + 128 KiB + 512·R)`: its model, its output
 ///   buffer, which the library hands on once it holds 128 KiB, and one MCU row's output;
 /// - `4·H` for the inflated header, which the library holds, grows by doubling and copies for
 ///   its threads;
 /// - `primary_len` for the output a baseline decode queues (each partition's output is cut at
-///   its segment size, whose sum [`read_stream_header`] bounds by `primary_len`);
+///   its segment size, whose sum [`read_stream_header`] bounds by `primary_len`, or by the JPEG
+///   length after the library's early-EOF cut);
 /// - the stream's length, for the copy of the partitions' bytes the library queues per thread;
 /// - 1 MiB for the rest (Huffman and quantisation tables, the inflater's window, channels).
 pub fn image_term(h: &StreamHeader, primary_len: u64, stream_len: u64) -> u64 {
@@ -1158,7 +1216,7 @@ pub fn image_term(h: &StreamHeader, primary_len: u64, stream_len: u64) -> u64 {
     let progressive = f.marker == 0xC2;
     let coefficients = blocks.saturating_mul(if progressive { 256 } else { 128 });
     let scan = if progressive {
-        blocks.saturating_mul(512)
+        blocks.saturating_mul(1536)
     } else {
         0
     };

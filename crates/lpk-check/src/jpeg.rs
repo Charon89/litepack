@@ -139,10 +139,14 @@ pub const THREADS: u64 = 8;
 pub const THREAD_TERM: u64 = 4_194_304;
 
 /// Check 5's stream-header read: the whole compressed header is inflated (at most two primaries
-/// and 64 KiB) and walked; any length in it that the primary image does not explain, an `HH`
-/// section missing, repeated, empty, with rows going down or segment sizes past `primary_len`,
-/// an unknown section, data ending inside a section, damage, or no frame header is `BadRecord`
-/// `lepton stream`, before the library allocates anything.
+/// and 64 KiB; its length counts every inflated byte, a marker cut short at the end included)
+/// and walked; any length in it that the primary image does not explain, an `HH` section
+/// missing, repeated, empty or with rows going down, segment sizes past their bound, an unknown
+/// section, data ending inside a section, damage, or no frame header is `BadRecord` `lepton
+/// stream`, before the library allocates anything. The segment sizes: without an `EEE` section
+/// they sum to at most `primary_len`; with one, the library cuts the last to the JPEG length
+/// less the garbage (2 bytes without `GRB`), the raw header, SOI and the other segments, which
+/// must therefore fit in the JPEG length.
 pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamHeader> {
     let bad = || bad_record(id, "lepton stream");
     let le = |b: &[u8]| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
@@ -172,7 +176,9 @@ pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamH
     }
     let mut jpeg = vec![0xFF, 0xD8];
     jpeg.extend_from_slice(take(raw_len).ok_or_else(bad)?);
-    let (mut restarts, mut errors, mut partitions) = (0u64, 0u64, None);
+    let (mut restarts, mut errors) = (0u64, 0u64);
+    let mut segments: Option<Vec<u64>> = None;
+    let (mut garbage, mut early_eof) = (2u64, false);
     // The library ends the header at the first section marker it cannot read whole.
     while let Some(m) = take(3) {
         let m = [m[0], m[1], m[2]];
@@ -189,7 +195,7 @@ pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamH
                 take(n * 4).ok_or_else(bad)?;
             }
             [b'H', b'H', n] => {
-                if partitions.is_some() || *n == 0 {
+                if segments.is_some() || *n == 0 {
                     return Err(bad());
                 }
                 let (h, _) = take(16 * u64::from(*n)).ok_or_else(bad)?.as_chunks::<16>();
@@ -197,11 +203,7 @@ pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamH
                 if rows.windows(2).any(|w| w[1] < w[0]) {
                     return Err(bad());
                 }
-                let segments: u64 = h.iter().map(|c| le(&c[2..6])).sum();
-                if segments > primary_len {
-                    return Err(bad());
-                }
-                partitions = Some(u64::from(*n));
+                segments = Some(h.iter().map(|c| le(&c[2..6])).collect());
             }
             b"FRS" | b"GRB" => {
                 let n = le(take(4).ok_or_else(bad)?);
@@ -211,25 +213,42 @@ pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamH
                 if n > primary_len || errors > primary_len {
                     return Err(bad());
                 }
+                if &m == b"GRB" {
+                    garbage = n;
+                }
                 take(n).ok_or_else(bad)?;
             }
             b"EEE" => {
                 take(28).ok_or_else(bad)?;
+                early_eof = true;
             }
             _ => return Err(bad()),
         }
     }
+    let segments = segments.ok_or_else(bad)?;
+    let all: u64 = segments.iter().sum();
+    let last = segments.last().copied().unwrap_or(0);
+    let jpeg_len = le(&hdr[20..24]);
+    let fits = if early_eof {
+        all - last + garbage + raw_len + 2 <= jpeg_len
+    } else {
+        all <= primary_len
+    };
+    if !fits {
+        return Err(bad());
+    }
     Ok(StreamHeader {
         frame: find_frame(&jpeg).ok_or_else(bad)?,
         header_len: d.len() as u64,
-        partitions: partitions.ok_or_else(bad)?,
+        partitions: segments.len() as u64,
     })
 }
 
 impl StreamHeader {
     /// The image's term (section 8, "Resources"): the larger of the coefficient term plus the
     /// fixed term, and the bound on the library's allocations: the coefficients (twice for a
-    /// progressive frame), a progressive scan's output (512 bytes per block), per thread (at most
+    /// progressive frame), a progressive scan's output (1536 bytes per block: 512 of content, a
+    /// buffer grown by doubling and its old copy while it moves), per thread (at most
     /// [`THREADS`], at most the partitions) [`THREAD_TERM`], 128 KiB and 512 bytes per block of an
     /// MCU row; four times the inflated header; `primary_len`; the stream's length; 1 MiB.
     pub fn term(&self, primary_len: u64, stream_len: u64) -> u64 {
@@ -256,7 +275,7 @@ impl StreamHeader {
             .map(|&(h, v)| mcux * u64::from(h) * u64::from(v))
             .sum();
         let blocks = row * mcuy;
-        let per_block = if f.marker == 0xC2 { 256 + 512 } else { 128 };
+        let per_block = if f.marker == 0xC2 { 256 + 1536 } else { 128 };
         let library = blocks * per_block
             + self.partitions.min(THREADS) * (THREAD_TERM + 131_072 + 512 * row)
             + 4 * self.header_len

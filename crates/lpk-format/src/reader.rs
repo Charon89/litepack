@@ -257,6 +257,10 @@ impl<R: Read + Seek> DecodeContext for ArchiveContext<'_, R> {
         Some(self.archive.resources().memory)
     }
 
+    fn gate(&self) -> Option<std::sync::Arc<dyn crate::decode::DecodeGate>> {
+        self.archive.gate.clone()
+    }
+
     fn chunk(&mut self, record: u64, index: u64) -> Result<Vec<u8>, FormatError> {
         let table = self.archive.chunks_arc();
         let place = table

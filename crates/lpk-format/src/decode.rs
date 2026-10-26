@@ -32,6 +32,24 @@ pub trait DecodeContext {
     fn memory_budget(&self) -> Option<u64> {
         None
     }
+    /// The extraction's gate for a decode that needs more than the archive
+    /// declares ([`DecodeGate`]); `None` outside a pooled extraction.
+    fn gate(&self) -> Option<Arc<dyn DecodeGate>> {
+        None
+    }
+}
+
+/// A pooled extraction's gate for decodes whose working memory exceeds what
+/// the archive's `decode_memory` declares: such a decode runs alone (no other
+/// block decodes meanwhile), within the memory the pool leaves a lone decode.
+pub trait DecodeGate: Send + Sync + std::fmt::Debug {
+    /// Bytes a decode running alone may use beyond its block's plain bytes.
+    fn alone_memory(&self) -> u64;
+    /// Waits until no other block decodes and keeps others from starting;
+    /// `false` when the extraction is cancelled meanwhile.
+    fn enter_alone(&self) -> bool;
+    /// Ends [`DecodeGate::enter_alone`]'s exclusivity.
+    fn leave_alone(&self);
 }
 
 /// The context of a decode that has no archive behind it: every request fails.

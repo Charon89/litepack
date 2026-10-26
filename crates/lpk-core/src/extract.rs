@@ -559,6 +559,141 @@ impl<'s> Out<'s> {
     }
 }
 
+/// The pool's gate for decodes whose working memory exceeds what the archive declares
+/// ([`lpk_format::DecodeGate`]; a `jpeg-reconstruct` record an earlier writer declared under
+/// revision 1.1): such a decode waits until no other block decodes, keeps others from starting
+/// and runs alone, within [`AloneGate::alone_memory`]. Every other decode keeps the pool's
+/// concurrency. Decoded blocks waiting for the writers are not waited for (the writers may be
+/// waiting for the lone block); the lone decode's memory leaves room for all of them.
+#[derive(Debug)]
+pub(crate) struct AloneGate {
+    state: Mutex<GateState>,
+    cv: Condvar,
+    cancelled: AtomicBool,
+    alone_memory: u64,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    /// Blocks decoding now (a decode waiting to run alone is not counted).
+    decoding: usize,
+    /// Decodes waiting to run alone: no decode starts meanwhile.
+    waiting: usize,
+    /// A decode runs alone.
+    alone: bool,
+}
+
+impl AloneGate {
+    /// A gate whose lone decode may use `alone_memory` bytes beyond its plain bytes.
+    pub(crate) fn new(alone_memory: u64) -> Arc<Self> {
+        Arc::new(AloneGate {
+            state: Mutex::new(GateState::default()),
+            cv: Condvar::new(),
+            cancelled: AtomicBool::new(false),
+            alone_memory,
+        })
+    }
+
+    /// The memory a lone decode may use beyond its block's plain bytes, with `m`'s terms: the
+    /// budget less the shared and per-worker terms, one block's terms other than its decoder,
+    /// and every other permit held as a decoded block.
+    pub(crate) fn memory_for(m: &ExtractMemory, in_flight: usize) -> u64 {
+        let others = u64::try_from(in_flight.saturating_sub(1)).unwrap_or(u64::MAX);
+        m.budget
+            .bytes
+            .saturating_sub(m.fixed)
+            .saturating_sub(m.per_block.saturating_sub(m.decoder))
+            .saturating_sub(others.saturating_mul(m.held))
+    }
+
+    /// Before a block decodes: waits while a decode runs alone or waits to.
+    pub(crate) fn begin(&self) -> bool {
+        let Ok(mut s) = self.state.lock() else {
+            return false;
+        };
+        while s.alone || s.waiting > 0 {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return false;
+            }
+            s = match self.cv.wait(s) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+        }
+        s.decoding += 1;
+        true
+    }
+
+    /// After a block decoded (whatever the outcome).
+    pub(crate) fn end(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.decoding = s.decoding.saturating_sub(1);
+        }
+        self.cv.notify_all();
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        drop(self.state.lock());
+        self.cv.notify_all();
+    }
+}
+
+impl lpk_format::DecodeGate for AloneGate {
+    fn alone_memory(&self) -> u64 {
+        self.alone_memory
+    }
+
+    fn enter_alone(&self) -> bool {
+        let Ok(mut s) = self.state.lock() else {
+            return false;
+        };
+        // This decode stops counting while it waits, so two decodes waiting to run alone do
+        // not wait for each other.
+        s.decoding = s.decoding.saturating_sub(1);
+        s.waiting += 1;
+        self.cv.notify_all();
+        while s.alone || s.decoding > 0 {
+            if self.cancelled.load(Ordering::SeqCst) {
+                s.waiting -= 1;
+                s.decoding += 1;
+                return false;
+            }
+            s = match self.cv.wait(s) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+        }
+        s.waiting -= 1;
+        s.decoding += 1;
+        s.alone = true;
+        true
+    }
+
+    fn leave_alone(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.alone = false;
+        }
+        self.cv.notify_all();
+    }
+}
+
+/// Runs `f` as one block's decode through `gate` ([`AloneGate::begin`] and
+/// [`AloneGate::end`]); `None` when the extraction was cancelled before it started.
+pub(crate) fn gated<T>(gate: &AloneGate, f: impl FnOnce() -> T) -> Option<T> {
+    struct End<'a>(&'a AloneGate);
+    impl Drop for End<'_> {
+        fn drop(&mut self) {
+            self.0.end();
+        }
+    }
+    if !gate.begin() {
+        return None;
+    }
+    let _end = End(gate);
+    Some(f())
+}
+
 /// A counting semaphore that can be cancelled (shared with [`crate::export`]).
 pub(crate) struct Permits {
     free: Mutex<usize>,
@@ -568,6 +703,8 @@ pub(crate) struct Permits {
     cap: usize,
     /// Most permits out at once.
     pub(crate) peak: AtomicUsize,
+    /// The pool's gate for decodes that run alone ([`AloneGate`]), cancelled with the permits.
+    gate: std::sync::OnceLock<Arc<AloneGate>>,
 }
 
 impl Permits {
@@ -578,6 +715,22 @@ impl Permits {
             cancelled: AtomicBool::new(false),
             cap: n,
             peak: AtomicUsize::new(0),
+            gate: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Attach the pool's gate: the workers' decodes go through it and [`Permits::cancel`]
+    /// cancels it.
+    pub(crate) fn attach_gate(&self, gate: Arc<AloneGate>) {
+        let _ = self.gate.set(gate);
+    }
+
+    /// Runs one block's decode through the attached gate (directly without one); `None` when
+    /// the extraction was cancelled before it started.
+    pub(crate) fn decode<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        match self.gate.get() {
+            Some(g) => gated(g, f),
+            None => Some(f()),
         }
     }
 
@@ -618,6 +771,9 @@ impl Permits {
         // Take the lock so a worker between its check and its wait sees the flag.
         drop(self.free.lock());
         self.cv.notify_all();
+        if let Some(g) = self.gate.get() {
+            g.cancel();
+        }
     }
 }
 
@@ -1481,6 +1637,8 @@ where
             Err(e) => Outcome::Failed(e),
             Ok(()) if pool.threads == 1 => {
                 let before = archive.decode_count();
+                archive
+                    .set_decode_gate(Some(AloneGate::new(AloneGate::memory_for(&pool.memory, 1))));
                 // One thread in all: a JPEG stream decodes on this thread alone (E2-25).
                 let one = Some(crate::peel::jpeg::DecodeThreads::new(1));
                 let r = catch_unwind(AssertUnwindSafe(|| {
@@ -1674,7 +1832,13 @@ fn parallel<R: Read + Seek + Send>(run: Run<'_, R>) -> Outcome {
             split[p.file % n][b].push(p);
         }
     }
+    let gate = AloneGate::new(AloneGate::memory_for(&pool.memory, pool.in_flight));
+    let mut forks = forks;
+    for f in &mut forks {
+        f.set_decode_gate(Some(gate.clone()));
+    }
     let permits = Permits::new(pool.in_flight);
+    permits.attach_gate(gate);
     let outcome = parallel_with(
         shared,
         forks,
@@ -1788,11 +1952,15 @@ fn parallel_with<R: Read + Seek + Send>(
                         };
                         let r = catch_unwind(AssertUnwindSafe(|| {
                             let _token = budget.hold();
-                            fork.decode_block_checked(b)
+                            permits.decode(|| fork.decode_block_checked(b))
                         }));
                         decoded.fetch_add(1, Ordering::Relaxed);
                         match r {
-                            Ok(r) => {
+                            Ok(None) => {
+                                permits.release();
+                                break;
+                            }
+                            Ok(Some(r)) => {
                                 if tx.send((k, r)).is_err() {
                                     break;
                                 }
