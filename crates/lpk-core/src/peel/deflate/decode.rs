@@ -491,4 +491,85 @@ mod tests {
             "a correction value above 2^32 - 1",
         );
     }
+
+    /// preflate-rs's vendor changes 9 to 11, 13 and 14 (E4-6's fuzzing): crafted correction streams
+    /// (the `deflate_recreate` seeds, then a deterministic sweep of pseudo-random coded streams
+    /// under the parameters of [`stream`]) make no arithmetic overflow, no out-of-range index or
+    /// slice and no failed (debug) assertion in the recreation. Change 8's deliberate refusals are panics and are allowed; a
+    /// panic hook records the others, on this thread only (as libFuzzer's hook would see them).
+    #[test]
+    fn crafted_corrections_do_not_panic() {
+        use std::sync::{Arc, Mutex};
+        let bad: Arc<Mutex<Vec<String>>> = Arc::default();
+        let me = std::thread::current().id();
+        let old = std::panic::take_hook();
+        {
+            let bad = Arc::clone(&bad);
+            std::panic::set_hook(Box::new(move |info| {
+                let text = info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| info.payload().downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                let defect = [
+                    "overflow",
+                    "out of range",
+                    "out of bounds",
+                    "assertion failed",
+                ]
+                .iter()
+                .any(|w| text.contains(w));
+                if std::thread::current().id() == me && defect {
+                    let at = info.location().map(|l| l.to_string()).unwrap_or_default();
+                    bad.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(format!("{at}: {text}"));
+                }
+            }));
+        }
+        let try_one = |plain: &[u8], corrections: &[u8], limit: usize| {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                preflate_rs::recreate_whole_deflate_stream_limited_report(plain, corrections, limit)
+            }));
+        };
+        // The fuzz target's layout: limit (u16 LE), plain length (u32 LE), plain, corrections.
+        let seeds: [&[u8]; 2] = [
+            include_bytes!(
+                "../../../../../fuzz/seeds/deflate_recreate/crash-35aa2eee820b0f5b132908c7cf85ff9d46e5562f"
+            ),
+            include_bytes!(
+                "../../../../../fuzz/seeds/deflate_recreate/crash-bbd6b7bcd56627214532a1afa95004c8fa242826"
+            ),
+        ];
+        for data in seeds {
+            let limit = usize::from(u16::from_le_bytes([data[0], data[1]]));
+            let rest = &data[6..];
+            let n =
+                (u32::from_le_bytes([data[2], data[3], data[4], data[5]]) as usize).min(rest.len());
+            let (plain, corrections) = rest.split_at(n);
+            try_one(plain, corrections, limit);
+        }
+        let (plain, d) = stream();
+        let limit = d.original_len as usize;
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for i in 0..400usize {
+            let len = 8 + i % 120;
+            let coded: Vec<u8> = (0..len)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x as u8
+                })
+                .collect();
+            let rec = preflate_rs::litepack_record_with_coded_corrections(&d.corrections, coded)
+                .expect("the record re-encodes");
+            try_one(&plain, &rec, limit);
+        }
+        std::panic::set_hook(old);
+        let bad = bad.lock().unwrap_or_else(|e| e.into_inner());
+        let sites: std::collections::BTreeSet<&String> = bad.iter().collect();
+        assert!(bad.is_empty(), "{} defects at {:?}", bad.len(), sites);
+    }
 }

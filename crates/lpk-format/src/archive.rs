@@ -44,6 +44,8 @@ pub struct Archive<R: Read + Seek> {
     /// sealed, so only the frame envelopes, the recovery frames and (when
     /// listable) the entry table are available.
     keyless: bool,
+    /// The pooled extraction's gate ([`crate::DecodeGate`]), shared by forks.
+    pub(crate) gate: Option<Arc<dyn crate::decode::DecodeGate>>,
 }
 
 /// What a forward walk over the frames found.
@@ -548,6 +550,7 @@ impl<R: Read + Seek> Archive<R> {
                 sealer: None,
                 key_slot,
                 keyless: true,
+                gate: None,
             });
         }
         let at = FrameLocation {
@@ -604,6 +607,7 @@ impl<R: Read + Seek> Archive<R> {
             sealer,
             key_slot,
             keyless: false,
+            gate: None,
         })
     }
 
@@ -743,7 +747,15 @@ impl<R: Read + Seek> Archive<R> {
             sealer: self.sealer.clone(),
             key_slot: self.key_slot.clone(),
             keyless: self.keyless,
+            gate: self.gate.clone(),
         }
+    }
+
+    /// Sets the gate a decode that needs more memory than the archive
+    /// declares goes through ([`crate::DecodeGate`]); forks made after this
+    /// share it.
+    pub fn set_decode_gate(&mut self, gate: Option<Arc<dyn crate::decode::DecodeGate>>) {
+        self.gate = gate;
     }
 
     /// How many blocks this reader has decoded so far: every miss of the

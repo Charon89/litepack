@@ -26,10 +26,12 @@ pub fn encode_difference(pred_val: u32, act_val: u32) -> u32 {
 
 /// decodes the result of the previous calculation
 pub fn decode_difference(pred_val: u32, encoded_val: u32) -> u32 {
+    // LitePack change 9: wrapping, as a release build computes it, so that a crafted
+    // correction does not panic in a build with overflow checks (found by `deflate_recreate`).
     if encoded_val & 1 == 0 {
-        pred_val - (encoded_val >> 1)
+        pred_val.wrapping_sub(encoded_val >> 1)
     } else {
-        pred_val + (encoded_val >> 1)
+        pred_val.wrapping_add(encoded_val >> 1)
     }
 }
 
@@ -40,6 +42,9 @@ fn test_encode_decode_difference() {
         assert_eq!(i, decode_difference(10, encode_difference(10, i)));
         assert_eq!(i, decode_difference(100, encode_difference(100, i)));
     }
+    // LitePack change 9: a crafted difference wraps instead of overflowing.
+    assert_eq!(decode_difference(0, 2), u32::MAX);
+    assert_eq!(decode_difference(u32::MAX, 3), 0);
 }
 
 #[derive(Default)]
