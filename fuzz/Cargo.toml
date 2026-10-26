@@ -214,3 +214,31 @@ path = "fuzz_targets/foreign_tar.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "jpeg_reconstruct"
+path = "fuzz_targets/jpeg_reconstruct.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jpeg_peel"
+path = "fuzz_targets/jpeg_peel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deflate_analyse"
+path = "fuzz_targets/deflate_analyse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png_filter_undo"
+path = "fuzz_targets/png_filter_undo.rs"
+test = false
+doc = false
+bench = false

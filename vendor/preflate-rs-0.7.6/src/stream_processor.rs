@@ -1225,4 +1225,81 @@ mod litepack_crafted {
             params.max_chain
         );
     }
+
+    /// Replaces the value of one correction kind.
+    struct TamperOne<E> {
+        inner: E,
+        action: CodecCorrection,
+        value: u32,
+    }
+
+    impl<E: PredictionEncoder> PredictionEncoder for TamperOne<E> {
+        fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
+            if action == self.action {
+                self.inner.encode_correction(action, self.value);
+            } else {
+                self.inner.encode_correction(action, value);
+            }
+        }
+        fn encode_verify_state(&mut self, message: &'static str, checksum: u64) {
+            self.inner.encode_verify_state(message, checksum);
+        }
+        fn finish(&mut self) {
+            self.inner.finish();
+        }
+    }
+
+    /// LitePack (LITEPACK-CHANGES.md, change 12): writes the crafted record LitePack's tests use
+    /// for the bounded tree counts. Run once, by hand, from this directory:
+    /// `LPK_CRAFTED_OUT=<dir> cargo test --lib write_crafted_counts_record -- --ignored`
+    /// A raw Deflate stream of one dynamic-Huffman block (zlib level 9 of the plain text below) is
+    /// analysed, then its corrections are encoded with the `LiteralCountCorrection` asking for
+    /// the predicted literal count plus 2^26 (an addition, so it does not overflow in a build
+    /// with overflow checks); written as `counts-plain.bin` and `counts-corrections.bin`.
+    #[test]
+    #[ignore = "writes the crafted record (LPK_CRAFTED_OUT)"]
+    fn write_crafted_counts_record() {
+        let out_dir = std::path::PathBuf::from(std::env::var("LPK_CRAFTED_OUT").unwrap());
+        let plain = b"the quick brown fox jumps over the lazy dog; pack my box with five dozen liquor jugs. "
+            .repeat(3);
+        let deflate: [u8; 79] = [
+            0xd5, 0x8c, 0x57, 0x15, 0x80, 0x30, 0x0c, 0x45, 0xad, 0x3c, 0x05, 0x18, 0x40, 0x4d,
+            0x0b, 0xe9, 0x60, 0x34, 0xdd, 0x05, 0xd4, 0x93, 0x83, 0x0b, 0xbe, 0xef, 0xa8, 0x8e,
+            0x90, 0x9a, 0x5f, 0x76, 0xe8, 0xcc, 0x23, 0xc0, 0xf0, 0x85, 0xad, 0x9d, 0xb1, 0x80,
+            0x3b, 0x65, 0x54, 0xc1, 0x87, 0x7a, 0x6e, 0xac, 0x6c, 0x67, 0x44, 0x25, 0xde, 0x79,
+            0x43, 0x8b, 0x34, 0x7c, 0x75, 0x30, 0xbe, 0x93, 0xa0, 0x87, 0x02, 0x0e, 0x9f, 0x1a,
+            0x67, 0x69, 0x6d, 0x99, 0xbe, 0xec, 0x2f, 0xd7, 0x17,
+        ];
+        let (contents, plain_text) = parse_deflate_whole(&deflate).unwrap();
+        assert_eq!(plain_text.text(), plain.as_slice());
+        assert!(matches!(
+            contents.blocks[0].block_type,
+            DeflateTokenBlockType::Huffman {
+                huffman_type: DeflateHuffmanType::Dynamic { .. },
+                ..
+            }
+        ));
+        let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+
+        let mut cabac = Vec::new();
+        {
+            let mut enc = TamperOne {
+                inner: PredictionEncoderCabac::new(VPXBoolWriter::new(&mut cabac).unwrap()),
+                action: CodecCorrection::LiteralCountCorrection,
+                // encode_difference's layout: (difference << 1) | 1 is "predicted + difference".
+                value: (1 << 27) | 1,
+            };
+            let mut input = PreflateInput::new(&plain_text);
+            let mut tp = TokenPredictor::new(&params);
+            predict_blocks(&contents.blocks, &mut tp, &mut enc, &mut input).unwrap();
+            enc.finish();
+        }
+        let record = bitcode::encode(&ReconstructionData {
+            parameters: params,
+            corrections: cabac,
+        });
+        std::fs::write(out_dir.join("counts-plain.bin"), &plain).unwrap();
+        std::fs::write(out_dir.join("counts-corrections.bin"), &record).unwrap();
+        println!("plain {} bytes, record {} bytes", plain.len(), record.len());
+    }
 }

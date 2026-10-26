@@ -57,7 +57,7 @@ pub use crypto::{
     Argon2Params, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE, KEY_SLOT_LEN,
 };
 pub use decode::{
-    decode_block, decode_block_in, DecodeContext, NoContext, PrimitiveDecoder, Registry,
+    decode_block, decode_block_in, DecodeContext, DecodeGate, NoContext, PrimitiveDecoder, Registry,
 };
 pub use entry::{
     entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,

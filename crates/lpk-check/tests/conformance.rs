@@ -655,7 +655,13 @@ fn jpeg_peel_memory_term() {
     let h = lpk_check::block::parse_block(f.payload, &mut || Ok(1)).unwrap();
     assert_eq!(h.steps, vec![lpk_check::block::Prim::Jpeg { record_id: 0 }]);
     assert_eq!(h.plain_len, j.primary_len);
-    let frame = lpk_check::jpeg::stream_frame(0, h.encoded, j.primary_len).unwrap();
+    let header = lpk_check::jpeg::stream_header(0, h.encoded, j.primary_len).unwrap();
+    let frame = &header.frame;
+    // A small image: the library bound is below revision 1.1's term, so the declaration is that term.
+    assert_eq!(
+        header.term(j.primary_len, h.encoded.len() as u64),
+        frame.memory_term() + lpk_check::jpeg::FIXED_TERM
+    );
     let env = a.index.envelope;
     assert_eq!(
         env.max_block_plain + frame.memory_term() + lpk_check::jpeg::FIXED_TERM,
