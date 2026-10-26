@@ -12,7 +12,9 @@
 //! paths differ only by case are refused before any output when the target is
 //! case-insensitive ([`check_case_collisions`]; [`case_insensitive_target`] is Windows and
 //! macOS). Symlink entries are refused ([`refuse_symlink`], the reference tool's rule), skipped
-//! or created ([`Symlinks`]). An existing target is refused, skipped, written beside under a
+//! or created ([`Symlinks`]); one to create whose target is absolute, UNC, a device path,
+//! drive-relative, rooted or escaping is skipped and recorded, its kind on Windows read from
+//! the archive, never the file system ([`resolve_symlink_target`], E6-0). An existing target is refused, skipped, written beside under a
 //! new name or replaced ([`Overwrite`]); the modes apply to files (and symlink entries); a
 //! directory where a file goes, or a file where a directory goes, is in the way
 //! ([`CoreError::InTheWay`]) in every mode but `skip`.
@@ -54,6 +56,11 @@ pub trait ExtractPolicy: Sync {
     fn symlink_action(&self, entry: &Entry) -> SymlinkAction {
         let _ = entry;
         SymlinkAction::Skip
+    }
+    /// A symlink entry to create whose target [`resolve_symlink_target`] refuses: it is skipped
+    /// and counted, never created; the policy may record it for a warning. Default: nothing.
+    fn symlink_target_refused(&self, entry: &Entry, refusal: TargetRefusal) {
+        let _ = (entry, refusal);
     }
     /// Something exists where an entry goes: what to do. Default: [`ExtractPolicy::overwrite`]
     /// decides, and an accepted target is written as before (create-new, so the open fails).
@@ -173,7 +180,9 @@ pub enum Symlinks {
     /// Skipped, each one recorded for a warning (the command line's default).
     #[default]
     Skip,
-    /// Created (`lpk x --symlinks`); a creation that fails fails the extraction.
+    /// Created (`lpk x --symlinks`) when the target stays inside the destination
+    /// ([`resolve_symlink_target`]; a refused target is skipped with a record); a creation
+    /// that fails fails the extraction.
     Create,
 }
 
@@ -215,6 +224,7 @@ pub struct Policy {
     /// What symlink entries get.
     pub symlinks: Symlinks,
     skipped_symlinks: Mutex<Vec<String>>,
+    refused_targets: Mutex<Vec<(String, TargetRefusal)>>,
 }
 
 impl Policy {
@@ -224,6 +234,7 @@ impl Policy {
             overwrite,
             symlinks,
             skipped_symlinks: Mutex::new(Vec::new()),
+            refused_targets: Mutex::new(Vec::new()),
         }
     }
 
@@ -231,6 +242,15 @@ impl Policy {
     /// order.
     pub fn skipped_symlinks(&self) -> Vec<String> {
         self.skipped_symlinks
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// The archive paths of the symlink entries skipped because of their target, with the
+    /// reason, in entry order (for the warnings).
+    pub fn refused_symlink_targets(&self) -> Vec<(String, TargetRefusal)> {
+        self.refused_targets
             .lock()
             .map(|v| v.clone())
             .unwrap_or_default()
@@ -271,6 +291,12 @@ impl ExtractPolicy for Policy {
         match self.symlinks {
             Symlinks::Create => SymlinkAction::Create,
             Symlinks::Refuse | Symlinks::Skip => SymlinkAction::Skip,
+        }
+    }
+
+    fn symlink_target_refused(&self, entry: &Entry, refusal: TargetRefusal) {
+        if let Ok(mut v) = self.refused_targets.lock() {
+            v.push((entry.path.clone(), refusal));
         }
     }
 
@@ -384,6 +410,149 @@ pub fn refuse_symlink(entry: &Entry) -> Result<(), FormatError> {
         });
     }
     Ok(())
+}
+
+/// Why a symlink entry's target is not created (E6-0; `docs/notes/e6-design.md` section 5).
+/// The same targets are refused on every operating system: an archive made on one is
+/// extracted on another, and `\` is a separator for Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetRefusal {
+    /// No target at all.
+    Empty,
+    /// A NUL byte, which no file system accepts in a path.
+    Nul,
+    /// A device path (`\\?\`, `\\.\`, `\??\`, or the same with `/`).
+    DevicePath,
+    /// A UNC path (`\\server\share`, `//server/share`): following it contacts a server.
+    Unc,
+    /// A drive-absolute path (`C:\x`).
+    Absolute,
+    /// A drive-relative path (`C:x`).
+    DriveRelative,
+    /// Rooted: starts with one `/` or `\` (an absolute path on Unix).
+    Rooted,
+    /// A component with a colon (an alternate data stream on Windows).
+    Colon,
+    /// A component ending in a dot or a space (Windows strips them, so the name the archive
+    /// shows is not the name followed).
+    TrailingDotOrSpace,
+    /// A component that is a Windows device name (`CON`, `NUL`, `COM1`, ...).
+    DeviceName,
+    /// It climbs above the destination after lexical normalisation from the link's directory.
+    Escapes,
+    /// It goes through another symlink entry of the archive (the operating system would
+    /// resolve what follows from that link's target, which lexical normalisation cannot see).
+    ThroughLink,
+}
+
+impl TargetRefusal {
+    /// The reason, as the warnings print it.
+    pub fn reason(self) -> &'static str {
+        match self {
+            TargetRefusal::Empty => "the target is empty",
+            TargetRefusal::Nul => "the target contains a NUL byte",
+            TargetRefusal::DevicePath => "the target is a device path",
+            TargetRefusal::Unc => "the target is a UNC path",
+            TargetRefusal::Absolute => "the target is an absolute path",
+            TargetRefusal::DriveRelative => "the target is drive-relative",
+            TargetRefusal::Rooted => "the target is rooted",
+            TargetRefusal::Colon => "the target contains a colon",
+            TargetRefusal::TrailingDotOrSpace => {
+                "a component of the target ends in a dot or a space"
+            }
+            TargetRefusal::DeviceName => "the target names a Windows device",
+            TargetRefusal::Escapes => "the target escapes the destination",
+            TargetRefusal::ThroughLink => "the target goes through another symlink entry",
+        }
+    }
+}
+
+impl std::fmt::Display for TargetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+fn is_sep(b: u8) -> bool {
+    b == b'/' || b == b'\\'
+}
+
+/// Resolve the target of the symlink entry at archive path `link` (`/`-separated) lexically,
+/// from the link's own directory, within the archive's namespace: the path it names relative
+/// to the destination (`""` for the destination itself), or why it is refused
+/// ([`TargetRefusal`]). `is_link` says whether an archive path (resolved so far) is a symlink
+/// entry; a target that goes on below one is refused. Pure: no file-system call, so a refused
+/// target is never touched.
+pub fn resolve_symlink_target(
+    link: &str,
+    target: &[u8],
+    is_link: impl Fn(&str) -> bool,
+) -> Result<String, TargetRefusal> {
+    if target.is_empty() {
+        return Err(TargetRefusal::Empty);
+    }
+    if target.contains(&0) {
+        return Err(TargetRefusal::Nul);
+    }
+    if target.len() >= 4
+        && is_sep(target[0])
+        && is_sep(target[3])
+        && ((is_sep(target[1]) && matches!(target[2], b'?' | b'.'))
+            || (target[1] == b'?' && target[2] == b'?'))
+    {
+        return Err(TargetRefusal::DevicePath);
+    }
+    if target.len() >= 2 && is_sep(target[0]) && is_sep(target[1]) {
+        return Err(TargetRefusal::Unc);
+    }
+    if is_sep(target[0]) {
+        return Err(TargetRefusal::Rooted);
+    }
+    if target.len() >= 2 && target[0].is_ascii_alphabetic() && target[1] == b':' {
+        return Err(if target.get(2).copied().is_some_and(is_sep) {
+            TargetRefusal::Absolute
+        } else {
+            TargetRefusal::DriveRelative
+        });
+    }
+    let components: Vec<String> = target
+        .split(|&b| is_sep(b))
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect();
+    for c in &components {
+        if c.is_empty() || c == "." || c == ".." {
+            continue;
+        }
+        if c.contains(':') {
+            return Err(TargetRefusal::Colon);
+        }
+        if c.ends_with('.') || c.ends_with(' ') {
+            return Err(TargetRefusal::TrailingDotOrSpace);
+        }
+        if is_reserved_device(c) {
+            return Err(TargetRefusal::DeviceName);
+        }
+    }
+    // The link's directory, then each component; a parent of the link is a directory entry
+    // or implied (the conflicting-name rule refuses a link below a non-directory).
+    let mut stack: Vec<&str> = link.split('/').collect();
+    stack.pop();
+    for c in &components {
+        if c.is_empty() || c == "." {
+            continue;
+        }
+        if !stack.is_empty() && is_link(&stack.join("/")) {
+            return Err(TargetRefusal::ThroughLink);
+        }
+        if c == ".." {
+            if stack.pop().is_none() {
+                return Err(TargetRefusal::Escapes);
+            }
+        } else {
+            stack.push(c);
+        }
+    }
+    Ok(stack.join("/"))
 }
 
 /// Nothing is replaced: a file target that already exists (a file, a directory, a symlink,
@@ -563,6 +732,83 @@ mod tests {
             size: 1,
             ..file(path)
         }
+    }
+
+    /// E6-0: every refused target form, with its reason, and the in-tree resolutions.
+    #[test]
+    fn symlink_target_table() {
+        use TargetRefusal as R;
+        let links = ["s", "d/s2"];
+        let is_link = |p: &str| links.contains(&p);
+        let refused: &[(&str, &[u8], R)] = &[
+            ("l", b"\\\\server\\share\\x", R::Unc),
+            ("l", b"//server/share", R::Unc),
+            ("l", b"\\/server/share", R::Unc),
+            ("l", b"C:\\Windows\\x", R::Absolute),
+            ("l", b"c:/x", R::Absolute),
+            ("l", b"C:x", R::DriveRelative),
+            ("l", b"C:", R::DriveRelative),
+            ("l", b"\\x", R::Rooted),
+            ("l", b"/etc/passwd", R::Rooted),
+            ("l", b"\\\\?\\C:\\x", R::DevicePath),
+            ("l", b"\\\\.\\pipe\\x", R::DevicePath),
+            ("l", b"//?/C:/x", R::DevicePath),
+            ("l", b"\\??\\C:\\x", R::DevicePath),
+            ("a/l", b"../../x", R::Escapes),
+            ("l", b"..", R::Escapes),
+            ("a/b/l", b"..\\..\\..\\x", R::Escapes),
+            ("l", b"a/../../x", R::Escapes),
+            ("l", b"x/file:stream", R::Colon),
+            ("l", b"x./y", R::TrailingDotOrSpace),
+            ("l", b"x ", R::TrailingDotOrSpace),
+            ("l", b"...", R::TrailingDotOrSpace),
+            ("l", b"sub/CON", R::DeviceName),
+            ("l", b"nul.txt", R::DeviceName),
+            ("l", b"s/../x", R::ThroughLink),
+            ("l", b"s/x", R::ThroughLink),
+            ("l", b"d/s2/..", R::ThroughLink),
+            ("l", b"", R::Empty),
+            ("l", b"a\0b", R::Nul),
+        ];
+        for (link, target, want) in refused {
+            assert_eq!(
+                resolve_symlink_target(link, target, is_link),
+                Err(*want),
+                "{link} -> {}",
+                String::from_utf8_lossy(target)
+            );
+        }
+        let fine: &[(&str, &[u8], &str)] = &[
+            ("l", b"a.txt", "a.txt"),
+            ("l", b"./d/x", "d/x"),
+            ("d/l", b"../a.txt", "a.txt"),
+            ("d/e/l", b"..\\..\\x", "x"),
+            ("d/l", b"..", ""),
+            ("l", b".", ""),
+            ("l", b"d/", "d"),
+            ("l", b"s", "s"),
+            ("a/b/l", b"../../d/x/../y", "d/y"),
+        ];
+        for (link, target, want) in fine {
+            assert_eq!(
+                resolve_symlink_target(link, target, is_link).as_deref(),
+                Ok(*want),
+                "{link} -> {}",
+                String::from_utf8_lossy(target)
+            );
+        }
+        assert_eq!(R::Unc.to_string(), "the target is a UNC path");
+        // The policy records each refusal for the warnings, in order.
+        let p = Policy::new(Overwrite::Refuse, Symlinks::Create);
+        p.symlink_target_refused(&link("a"), R::Unc);
+        p.symlink_target_refused(&link("b"), R::Escapes);
+        assert_eq!(
+            p.refused_symlink_targets(),
+            vec![("a".to_string(), R::Unc), ("b".to_string(), R::Escapes)]
+        );
+        assert!(p.skipped_symlinks().is_empty());
+        // The default hook records nothing and does not panic.
+        DefaultPolicy.symlink_target_refused(&link("a"), R::Unc);
     }
 
     fn reason(r: Result<(), FormatError>) -> Option<&'static str> {

@@ -1929,3 +1929,53 @@ fn symlink_entries_are_skipped_with_a_warning_unless_symlinks_is_given() {
         }
     }
 }
+
+/// E6-0: with `--symlinks` a link whose target leaves the output directory (here a UNC path
+/// and an escaping one) is skipped with a warning naming the entry and the reason, counted in
+/// symlinks_skipped, and the extraction goes on.
+#[test]
+fn symlinks_with_targets_leaving_the_output_are_skipped_with_a_reason() {
+    use lpk_format::{EntryFlags, Writer, WriterOptions};
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("hostile.lpk");
+    {
+        let mut out = std::fs::File::create(&arch).unwrap();
+        let mut w = Writer::new(&mut out, WriterOptions::default()).unwrap();
+        w.add_file("a.txt", EntryFlags::EMPTY, 0, &mut &b"target"[..])
+            .unwrap();
+        w.add_symlink("sub/up", EntryFlags::EMPTY, 0, b"../../outside")
+            .unwrap();
+        w.add_symlink("unc", EntryFlags::EMPTY, 0, b"\\\\192.0.2.1\\share\\x")
+            .unwrap();
+        w.finish().unwrap();
+    }
+    let arch_s = arch.to_str().unwrap();
+    let out = work.path().join("out");
+    let r = run(&["x", "--symlinks", arch_s, out.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    assert_eq!(
+        text(&r.stderr),
+        "warning: sub/up: symlink entry skipped: the target escapes the destination\n\
+         warning: unc: symlink entry skipped: the target is a UNC path\n"
+    );
+    assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"target");
+    assert!(fs::symlink_metadata(out.join("unc")).is_err());
+    assert!(fs::symlink_metadata(out.join("sub/up")).is_err());
+    let jout = work.path().join("jout");
+    let r = run(&["--json", "x", "--symlinks", arch_s, jout.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+    let lines: Vec<serde_json::Value> = text(&r.stderr)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3, "{}", text(&r.stderr));
+    assert_eq!(lines[0]["warning"]["kind"], "SymlinkTargetRefused");
+    assert_eq!(lines[0]["warning"]["path"], "sub/up");
+    assert_eq!(
+        lines[0]["warning"]["reason"],
+        "the target escapes the destination"
+    );
+    assert_eq!(lines[1]["warning"]["path"], "unc");
+    assert_eq!(lines[1]["warning"]["reason"], "the target is a UNC path");
+    assert_eq!(lines[2]["summary"]["symlinks_skipped"], 2);
+}

@@ -727,8 +727,17 @@ struct ExtractArgs {
     overwrite: OverwriteArg,
     /// Create symlink entries with the target the archive holds. Without this flag every
     /// symlink entry is skipped with a warning on stderr (with --json one
-    /// `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). A link that cannot be created (for
-    /// example without the privilege on Windows) fails the extraction.
+    /// `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). Even with it, a link whose
+    /// target is absolute, a UNC path, a device path (`\\?\`, `\\.\`), drive-relative (`C:x`),
+    /// rooted (`\x` or `/x`), names a Windows device, has a colon or a component ending in a dot or
+    /// a space, goes through another symlink entry, or escapes the output directory once `..`
+    /// is resolved from the link's directory is not created: it is skipped with a warning
+    /// naming the entry and the reason (with --json one
+    /// `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}` line) and counted
+    /// in symlinks_skipped; such a target is never read or opened. On Windows a link is a
+    /// directory link when its target names a directory of the archive, else a file link. A
+    /// link that cannot be created (for example without the privilege on Windows) fails the
+    /// extraction.
     #[arg(long)]
     symlinks: bool,
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
@@ -934,6 +943,7 @@ fn foreign_extract(
             );
         }
     }
+    refused_target_warnings(&policy, json, err);
     if s.skipped > 0 {
         let _ = writeln!(err, "skipped {} existing entries", s.skipped);
     }
@@ -959,6 +969,26 @@ fn foreign_extract(
         s.files, s.directories
     );
     Ok(())
+}
+
+/// The symlink entries `--symlinks` did not create because of their target (E6-0), one line
+/// each: `warning: PATH: symlink entry skipped: REASON`, or with --json
+/// `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}`.
+fn refused_target_warnings(policy: &lpk_core::Policy, json: bool, err: &mut dyn Write) {
+    for (p, why) in policy.refused_symlink_targets() {
+        if json {
+            let line = serde_json::json!({
+                "warning": { "kind": "SymlinkTargetRefused", "path": p, "reason": why.reason() }
+            });
+            let _ = writeln!(err, "{line}");
+        } else {
+            let _ = writeln!(
+                err,
+                "warning: {}: symlink entry skipped: {why}",
+                lpk_format::cli::escape_path(&p)
+            );
+        }
+    }
 }
 
 /// The broker's launch warnings (an AppContainer temporary folder it could not empty), one
@@ -1618,6 +1648,7 @@ fn extract(
             );
         }
     }
+    refused_target_warnings(&policy, json, err);
     if json {
         if s.skipped > 0 || s.renamed > 0 || s.symlinks_skipped > 0 {
             let line = serde_json::json!({
