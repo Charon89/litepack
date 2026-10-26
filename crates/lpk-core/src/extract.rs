@@ -167,6 +167,10 @@ pub struct ExtractOptions {
     /// the workers whatever the timing. Always `false` outside tests.
     #[doc(hidden)]
     pub fill_permits_before_dispatch: bool,
+    /// Mark of the Web (E6-5, [`crate::motw`]): the zone every extracted file gets, as a
+    /// `Zone.Identifier` stream written before its first byte; `None` (the default) writes
+    /// none. The caller passes the archive's [`crate::motw::read_zone`] unless the user opted out.
+    pub zone: Option<crate::motw::Zone>,
 }
 
 impl Default for ExtractOptions {
@@ -178,6 +182,7 @@ impl Default for ExtractOptions {
             max_open_files: 128,
             panic_in_dispatch_at: None,
             fill_permits_before_dispatch: false,
+            zone: None,
         }
     }
 }
@@ -219,6 +224,9 @@ pub struct ExtractSummary {
     pub symlinks: u64,
     /// Symlink entries the policy let pass and did not create ([`SymlinkAction::Skip`]).
     pub symlinks_skipped: u64,
+    /// Mark of the Web: a file could not carry [`ExtractOptions::zone`] (the destination's
+    /// volume has no named streams, or the write failed); the caller prints one warning.
+    pub motw_unmarked: bool,
     /// Most decoded blocks held at once, measured (permits taken and not yet returned): never
     /// above `in_flight`. 1 on the sequential path when a block was decoded, else 0.
     pub peak_in_flight: usize,
@@ -395,8 +403,14 @@ impl Shared {
 
     /// Create the destination and the plan's directories: the output tree every file and
     /// link of this extraction is created through.
-    fn open_tree(&self, dir: &Path, mkdirs: &[PathBuf]) -> Result<&Tree, CoreError> {
-        let tree = Tree::create(dir, mkdirs)?;
+    fn open_tree(
+        &self,
+        dir: &Path,
+        mkdirs: &[PathBuf],
+        zone: Option<crate::motw::Zone>,
+    ) -> Result<&Tree, CoreError> {
+        let mut tree = Tree::create(dir, mkdirs)?;
+        tree.set_zone(zone);
         Ok(self.tree.get_or_init(|| tree))
     }
 
@@ -1469,7 +1483,7 @@ where
     rep.check()?;
     rep.totals(Some(shared.targets.len() as u64), Some(needed.len() as u64));
     let frame_len: Vec<u64> = archive.index().blocks.iter().map(|b| b.frame_len).collect();
-    let tree = shared.open_tree(dir, &mkdirs)?;
+    let tree = shared.open_tree(dir, &mkdirs, opts.zone)?;
     // Links are created after every directory and before any file: a failure here (a target
     // that is not UTF-8, a link in the way) fails the extraction with nothing to
     // clean up, and the order is load-bearing: a directory that exists before any link is
@@ -1615,6 +1629,7 @@ where
         renamed,
         symlinks: links.len() as u64,
         symlinks_skipped,
+        motw_unmarked: tree.unmarked(),
         peak_in_flight: peak.load(Ordering::Relaxed),
         memory: pool.memory,
     })

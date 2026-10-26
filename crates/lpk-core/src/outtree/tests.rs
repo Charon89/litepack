@@ -562,3 +562,95 @@ fn a_renamed_name_over_the_limit_is_refused() {
     );
     assert_eq!(listing(&out), [name]);
 }
+
+/// E6-5 (Mark of the Web): one thread, `zone` on every created file, `max_open` files open.
+#[cfg(windows)]
+fn extract_zoned(
+    bytes: &[u8],
+    dir: &Path,
+    zone: Option<crate::motw::Zone>,
+    max_open: usize,
+) -> ExtractSummary {
+    let mut a = Archive::open(Cursor::new(bytes.to_vec()), &Resources::default()).unwrap();
+    let opts = ExtractOptions {
+        threads: Some(1),
+        max_open_files: max_open,
+        zone,
+        ..ExtractOptions::default()
+    };
+    let b = bytes.to_vec();
+    extract_archive(
+        &mut a,
+        move || Ok(Cursor::new(b.clone())),
+        dir,
+        &Policy::new(Overwrite::Refuse, Symlinks::Skip),
+        &opts,
+    )
+    .unwrap()
+}
+
+#[cfg(windows)]
+fn zoned_tree() -> Vec<u8> {
+    let big: Vec<u8> = (0..40_000u32).map(|i| (i * 31 % 251) as u8).collect();
+    files(&[
+        ("a.txt", b"alpha"),
+        ("d/b.bin", &big),
+        ("d/e/c.txt", b""),
+        ("z.txt", b"zeta"),
+    ])
+}
+
+/// Every extracted file carries the zone, written through the file's handle: also the files
+/// closed by the open-file bound and reopened, and an empty file.
+#[cfg(windows)]
+#[test]
+fn every_extracted_file_carries_the_zone() {
+    use crate::motw::{read_zone, Zone};
+    for (zone, max_open) in [(Zone::INTERNET, 128), (Zone::RESTRICTED, 1)] {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out");
+        let s = extract_zoned(&zoned_tree(), &out, Some(zone), max_open);
+        assert_eq!(s.files, 4);
+        assert!(!s.motw_unmarked);
+        for f in ["a.txt", "d/b.bin", "d/e/c.txt", "z.txt"] {
+            assert_eq!(read_zone(&out.join(f)), Some(zone), "{f}");
+        }
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"alpha");
+        // The stream holds the zone only.
+        let raw = std::fs::read(out.join("z.txt:Zone.Identifier")).unwrap();
+        assert_eq!(raw, zone.stream_bytes());
+    }
+}
+
+/// No zone: no stream on any file.
+#[cfg(windows)]
+#[test]
+fn no_zone_writes_no_stream() {
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    let s = extract_zoned(&zoned_tree(), &out, None, 128);
+    assert!(!s.motw_unmarked);
+    for f in ["a.txt", "d/b.bin", "d/e/c.txt", "z.txt"] {
+        assert_eq!(crate::motw::read_zone(&out.join(f)), None, "{f}");
+        assert!(std::fs::metadata(out.join(format!("{f}:Zone.Identifier"))).is_err());
+    }
+}
+
+/// A volume without named streams (the probe's branch, forced: no such volume can be made in
+/// a test without elevation): the extraction goes on, every file is written unmarked, and
+/// the summary asks for the one warning.
+#[cfg(windows)]
+#[test]
+fn a_volume_without_named_streams_extracts_unmarked_with_one_flag() {
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    crate::motw::seam::force_streams(Some(false));
+    let s = extract_zoned(&zoned_tree(), &out, Some(crate::motw::Zone::INTERNET), 128);
+    crate::motw::seam::force_streams(None);
+    assert_eq!(s.files, 4);
+    assert!(s.motw_unmarked);
+    assert_eq!(std::fs::read(out.join("z.txt")).unwrap(), b"zeta");
+    for f in ["a.txt", "d/b.bin", "d/e/c.txt", "z.txt"] {
+        assert_eq!(crate::motw::read_zone(&out.join(f)), None, "{f}");
+    }
+}

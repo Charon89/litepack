@@ -119,6 +119,7 @@ impl Staged {
             appcontainer: Some(self.profile.clone()),
             limits,
             worker_args: args,
+            zone: None,
         }
     }
 }

@@ -15,6 +15,10 @@
 //!   impersonation copy of the process token, for the call only; the process token is not
 //!   changed). [`symlink_privilege_held`] says whether the token holds it.
 //!
+//! * [`write_stream`]: a named stream of an open file (Mark of the Web's `Zone.Identifier`,
+//!   E6-5), opened relative to the file's own handle; [`named_streams`] probes the volume's
+//!   `FILE_NAMED_STREAMS` flag first.
+//!
 //! Every name is one component: empty, `.`, `..`, or a name with `\`, `/`, `:` or NUL is
 //! refused before any call. Nothing here assumes `MAX_PATH`.
 //!
@@ -26,7 +30,7 @@
 mod windows_impl;
 
 #[cfg(windows)]
-pub use windows_impl::{symlink_privilege_held, Dir, FileId, FsError};
+pub use windows_impl::{named_streams, symlink_privilege_held, write_stream, Dir, FileId, FsError};
 
 #[cfg(all(windows, feature = "test-hooks"))]
 pub use windows_impl::set_share_delete_for_tests;

@@ -727,6 +727,15 @@ struct ExtractArgs {
     /// created for any other reason fails the extraction.
     #[arg(long)]
     symlinks: bool,
+    /// Mark of the Web (Windows): with `on` (the default), when the archive's
+    /// `Zone.Identifier` stream gives zone 3 (Internet) or 4 (Restricted), or cannot be parsed
+    /// (read as 3), every extracted file gets a `Zone.Identifier` stream with that `ZoneId`
+    /// only (no `HostUrl` or `ReferrerUrl`), written before its first byte; zones 0-2 and
+    /// archives without the stream: nothing. A destination whose volume has no named streams
+    /// cannot hold the mark: the extraction goes on and prints one warning (with --json one
+    /// `{"warning":{"kind":"MotwUnmarked","zone":N}}` line). `off` writes no stream.
+    #[arg(long, value_enum, value_name = "on|off", default_value_t = OnOff::On)]
+    motw: OnOff,
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
     #[arg(short, long)]
     verbose: bool,
@@ -903,6 +912,7 @@ fn foreign_extract(
         &lpk_api::OpenOptions {
             credentials,
             foreign: x.foreign.options(x.memory),
+            motw_off: x.motw == OnOff::Off,
             ..lpk_api::OpenOptions::default()
         },
     )?;
@@ -922,6 +932,9 @@ fn foreign_extract(
         ));
     };
     sandbox_warnings(&s.warnings, json, err);
+    if report.motw_unmarked {
+        motw_warning(report.zone, json, err);
+    }
     for p in report.skipped_symlinks {
         if json {
             let line = serde_json::json!({
@@ -964,6 +977,30 @@ fn foreign_extract(
         s.files, s.directories
     );
     Ok(())
+}
+
+/// Mark of the Web's one warning (E6-5): files derived from an archive zoned `zone` could not
+/// carry the zone (the destination's volume has no named streams, or the write failed):
+/// `warning: Mark of the Web: ...`, or with --json
+/// `{"warning":{"kind":"MotwUnmarked","zone":N}}`.
+fn motw_warning(zone: Option<lpk_core::motw::Zone>, json: bool, err: &mut dyn Write) {
+    let Some(z) = zone else { return };
+    if json {
+        let line = serde_json::json!({
+            "warning": { "kind": "MotwUnmarked", "zone": z.id() }
+        });
+        let _ = writeln!(err, "{line}");
+    } else {
+        let _ = writeln!(err, "warning: {}", lpk_core::motw::unmarked_warning(z));
+    }
+}
+
+/// After an export or a repair (one output file): the warning of [`motw_warning`] when the
+/// archive is zoned and the output does not carry the zone.
+fn motw_check(zone: Option<lpk_core::motw::Zone>, output: &Path, json: bool, err: &mut dyn Write) {
+    if zone.is_some() && lpk_core::motw::read_zone(output) != zone {
+        motw_warning(zone, json, err);
+    }
 }
 
 /// The symlink entries `--symlinks` did not create because this process cannot create links
@@ -1166,6 +1203,10 @@ struct ExportArgs {
     /// Replace an existing output file.
     #[arg(long)]
     force: bool,
+    /// Mark of the Web (Windows), as for `x`: with `on` (the default) the output file gets the
+    /// zone of an archive zoned 3 or 4 before its first byte; `off` writes no stream.
+    #[arg(long, value_enum, value_name = "on|off", default_value_t = OnOff::On)]
+    motw: OnOff,
     /// The thread budget: 1 decodes on the calling thread; from 2 on, N - 1 threads decode
     /// blocks ahead of the writer (capped by the memory budget), as for `x`.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
@@ -1216,6 +1257,10 @@ struct RepairArgs {
     /// The key material of an encrypted archive (not needed: the shards are rebuilt sealed).
     #[command(flatten)]
     credentials: CredentialArgs,
+    /// Mark of the Web (Windows), as for `x`: with `on` (the default) the repaired copy gets
+    /// the zone of an archive zoned 3 or 4 before its first byte; `off` writes no stream.
+    #[arg(long, value_enum, value_name = "on|off", default_value_t = OnOff::On)]
+    motw: OnOff,
 }
 
 /// The API's settings of a tier and its flags (E5-1: what `build_pipeline` built is now
@@ -1629,6 +1674,7 @@ fn extract(
             credentials,
             memory: x.memory,
             priors,
+            motw_off: x.motw == OnOff::Off,
             ..lpk_api::OpenOptions::default()
         },
     )
@@ -1651,6 +1697,9 @@ fn extract(
             Some(&x.archive),
         ));
     };
+    if report.motw_unmarked {
+        motw_warning(report.zone, json, err);
+    }
     for p in report.skipped_symlinks {
         if json {
             let line = serde_json::json!({
@@ -1769,6 +1818,7 @@ fn extract(
 fn export(
     x: &ExportArgs,
     credentials: Option<&Credentials>,
+    json: bool,
     console: &Console,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -1831,9 +1881,15 @@ fn export(
             credentials,
             memory: x.memory,
             priors,
+            motw_off: x.motw == OnOff::Off,
             ..lpk_api::OpenOptions::default()
         },
     )?;
+    let zone = if x.motw == OnOff::On {
+        session.zone()
+    } else {
+        None
+    };
     let options = lpk_api::ExportOptions {
         container,
         method,
@@ -1898,6 +1954,7 @@ fn export(
             export::compressor_memory(container, method)
         );
     }
+    motw_check(zone, &x.out, json, err);
     let _ = writeln!(
         out,
         "exported {} files, {} directories, {} symlinks to {}",
@@ -1936,12 +1993,14 @@ fn reference(
 fn maintenance_session(
     archive: &Path,
     credentials: Option<&Credentials>,
+    motw_off: bool,
 ) -> Result<Session, Failure> {
     let file = std::fs::File::open(archive)
         .map_err(|e| Failure::format(&FormatError::Io(e), Some(archive)))?;
     let open = lpk_api::OpenOptions {
         credentials,
         memory: Some(lpk_format::Resources::default().memory),
+        motw_off,
         ..lpk_api::OpenOptions::default()
     };
     Ok(Session::open_file(file, archive, &open)?)
@@ -1968,7 +2027,7 @@ fn check(
     credentials: Option<&Credentials>,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let session = maintenance_session(archive, credentials)?;
+    let session = maintenance_session(archive, credentials, false)?;
     let r = session.check(&lpk_core::Monitor::default())?;
     recovery_line(out, archive, &r)?;
     if r.shards_damaged > 0 || r.frames_unusable > 0 {
@@ -1986,13 +2045,22 @@ fn check(
 /// `lpk repair`: `Session::repair` into `target` (which must not exist); the copy is kept
 /// with every possible repair when a frame cannot be rebuilt (exit 2, `Unrepairable`).
 fn repair(
-    archive: &Path,
-    target: &Path,
+    r: &RepairArgs,
     credentials: Option<&Credentials>,
+    json: bool,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let session = maintenance_session(archive, credentials)?;
+    let (archive, target) = (r.archive.as_path(), r.out.as_path());
+    let motw_off = r.motw == OnOff::Off;
+    let session = maintenance_session(archive, credentials, motw_off)?;
     let (report, unrepairable) = session.repair(target, &lpk_core::Monitor::default())?;
+    motw_check(
+        if motw_off { None } else { session.zone() },
+        target,
+        json,
+        err,
+    );
     recovery_line(out, archive, &report)?;
     match unrepairable {
         Some(e) => Err(e.into()),
@@ -2171,7 +2239,7 @@ fn dispatch(
         Command::Repair(mut r) => {
             let given = r.credentials.resolve(terminal, &r.archive, Use::Open)?;
             with_credentials(given, &r.credentials, &r.archive, terminal, |c| {
-                repair(&r.archive, &r.out, c, out)
+                repair(&r, c, json, out, err)
             })
         }
         Command::Append(mut a) => {
@@ -2203,7 +2271,7 @@ fn dispatch(
         Command::Export(mut x) => {
             let given = x.credentials.resolve(terminal, &x.archive, Use::Open)?;
             with_credentials(given, &x.credentials, &x.archive, terminal, |c| {
-                export(&x, c, console, out, err)
+                export(&x, c, json, console, out, err)
             })
         }
     }
