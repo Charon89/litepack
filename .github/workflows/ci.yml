@@ -59,6 +59,18 @@ jobs:
           bash scripts/check-unsafe.sh --self-test
           bash scripts/check-unsafe.sh
 
+  # E8's honesty rule: every bench/results directory the documents cite is in the tree.
+  cited-results:
+    name: cited results exist (ubuntu-24.04)
+    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cited results directories
+        run: |
+          bash scripts/check-cited-results.sh --self-test
+          bash scripts/check-cited-results.sh
+
   # E4-2: the sandboxed workers live in their own workspace (workers/: own lockfile and deny.toml)
   # so the main workspace's feature unification cannot pull a C codec into them.
   workers:
