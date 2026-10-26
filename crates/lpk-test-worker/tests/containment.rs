@@ -9,7 +9,10 @@
 //! dereference, which needs `unsafe` and is `lpk-sandbox-sys`'s test worker's
 //! `crash-at-request` (found beside this test's executable, built by the workspace build): it
 //! sends the broker's own `Hello` (encoded here and passed on its command line), waits for the
-//! first request and faults.
+//! first request and faults. **The null-dereference tests need `lpk-sandbox-testworker.exe`
+//! beside this test's executable, so build the workspace first** (`cargo build --workspace`,
+//! or run `cargo nextest run --workspace`); `cargo test -p lpk-test-worker` alone does not build
+//! it, and those two tests then fail naming the missing file.
 //!
 //! The network case connects to a loopback listener of this test and to TEST-NET-1
 //! (192.0.2.1, never routed). Under LPAC both are refused and the listener sees nothing; under
@@ -83,8 +86,10 @@ fn stage() -> Staged {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     );
-    lpk_sandbox_sys::create_appcontainer_profile(&profile).unwrap();
+    // The temp dir first: once the profile exists, `Staged` owns it at once, so no panic can
+    // leak it.
     let dir = tempfile::tempdir().unwrap();
+    lpk_sandbox_sys::create_appcontainer_profile(&profile).unwrap();
     // From here the profile is deleted by `Staged`'s drop, also if a step below panics.
     let s = Staged {
         proto_worker: dir.path().join("lpk-test-worker.exe"),
