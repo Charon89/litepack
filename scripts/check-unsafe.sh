@@ -45,7 +45,8 @@ for my $f (@ARGV) {
     (my $show = $line) =~ s/^\s+|\s+$//g;
     if ($line =~ /\bunsafe\b/) {
       print "$f:$n: unsafe keyword: $show\n";
-    } elsif ($line =~ /#\s*\[\s*(?:no_mangle|export_name|link_section)\b/) {
+    } elsif ($line =~ /#\s*\[\s*(?:no_mangle|export_name|link_section)\b/
+          || $line =~ /\bcfg_attr\s*\(.*\b(?:no_mangle|export_name|link_section)\b/) {
       print "$f:$n: unsafe attribute: $show\n";
     } elsif ($line =~ /\b(?:allow|warn|expect)\s*\([^)]*\bunsafe_code\b/) {
       print "$f:$n: unsafe_code allowed: $show\n";
@@ -135,8 +136,11 @@ check_tree() {
 
   # Every Cargo.toml of the tree (paths may hold spaces: one per line, never word-split).
   local all_manifests
-  all_manifests="$(cd "$top" && find . \( -name target -o -name vendor -o -name .git -o -name .claude \
-    -o -name node_modules -o -path ./bench/corpus -o -path ./bench/tmp \) -prune -o \
+  # Pruned by exact path only: the build output (cargo's and cargo-fuzz's), vendor/ (patched
+  # third-party crates, D-66), git and harness state, the corpus. A package elsewhere whose
+  # directory happens to be named `target` or `vendor` is still checked.
+  all_manifests="$(cd "$top" && find . \( -path ./target -o -path ./fuzz/target -o -path ./vendor \
+    -o -path ./.git -o -path ./.claude -o -name node_modules -o -path ./bench/corpus -o -path ./bench/tmp \) -prune -o \
     -name Cargo.toml -print | sed 's#^\./##' | LC_ALL=C sort)"
 
   # The packages, as cargo itself sees them: `cargo metadata` of every workspace manifest (the
@@ -147,7 +151,8 @@ check_tree() {
     [ -n "$m" ] || continue
     [ "$m" = "Cargo.toml" ] || has_table "$top/$m" workspace || continue
     if ! meta="$(cargo metadata --no-deps --format-version 1 --offline --manifest-path "$top/$m" 2>&1)"; then
-      echo "error: cargo metadata failed for $m: $(printf '%s' "$meta" | tail -n 1)"
+      echo "error: cargo metadata failed for $m:"
+      printf '%s\n' "$meta"
       return 1
     fi
     packages="$packages$(printf '%s' "$meta" | perl -MJSON::PP -e '
@@ -163,7 +168,6 @@ check_tree() {
     local lt="${top_m,,}" la="${abs,,}"
     [ "${la:0:$((${#lt} + 1))}" = "$lt/" ] || continue
     rel="${abs:$((${#lt} + 1))}"
-    case "$rel" in vendor/*|*/vendor/*) continue ;; esac
     pkg_list="$pkg_list$name"$'\t'"$rel"$'\n'
   done <<< "$(printf '%s' "$packages" | LC_ALL=C sort -u)"
 
@@ -183,7 +187,7 @@ check_tree() {
     pkg_dir="$(dirname "$m")"
     row="$(printf '%s\n' "$rows" | awk -F'\t' -v n="$name" '$1 == n' | head -n 1)"
     local files=()
-    mapfile -t files < <(cd "$top" && find "$pkg_dir" -name target -prune -o -name '*.rs' -print | LC_ALL=C sort)
+    mapfile -t files < <(cd "$top" && find "$pkg_dir" -path "$pkg_dir/target" -prune -o -name '*.rs' -print | LC_ALL=C sort)
     if [ -n "$row" ]; then
       state="$(printf '%s' "$row" | cut -f3)"
       mods="$(printf '%s' "$row" | cut -f4)"
@@ -351,6 +355,10 @@ EOF
     "root-without-forbid|printf 'fn main() {}\n' > other/src/main.rs"
     "sys-outside-its-modules|printf 'pub fn h() { unsafe {} }\n' >> crates/x-sys/src/lib.rs"
     "sys-unsafe-attribute|printf '#[no_mangle]\npub extern \"C\" fn z() {}\n' >> crates/x-sys/src/lib.rs"
+    "sys-cfg-attr-attribute|printf '#[cfg_attr(all(), no_mangle)]\npub extern \"C\" fn z() {}\n' >> crates/x-sys/src/lib.rs"
+    "sys-module-in-dir-named-target|mkdir -p crates/x-sys/src/target && printf 'pub fn t() { unsafe {} }\n' > crates/x-sys/src/target/mod.rs"
+    "member-named-vendor|mkdir -p crates/vendor/src && sed -e 's/\"good\"/\"vend\"/' -e '/^\[lints\]/,\$d' crates/good/Cargo.toml > crates/vendor/Cargo.toml && printf '[lints.rust]\nunsafe_code = \"allow\"\n' >> crates/vendor/Cargo.toml && printf 'pub fn e() { unsafe {} }\n' > crates/vendor/src/lib.rs"
+    "member-named-target|mkdir -p crates/target/src && sed 's/\"good\"/\"tgt\"/' crates/good/Cargo.toml > crates/target/Cargo.toml && printf '#![allow(unsafe_code)]\npub fn e() { unsafe {} }\n' > crates/target/src/lib.rs"
     "reserved-crate-built|mkdir -p crates/y-shell/src && sed 's/\"good\"/\"y-shell\"/' crates/good/Cargo.toml > crates/y-shell/Cargo.toml && : > crates/y-shell/src/lib.rs"
     "stale-inventory|rm -rf crates/x-sys"
     "path-with-space|mkdir -p 'crates/evil crate/src' && sed 's/\"good\"/\"evil\"/' crates/good/Cargo.toml > 'crates/evil crate/Cargo.toml' && printf 'pub fn e() { unsafe {} }\n' > 'crates/evil crate/src/lib.rs'"
