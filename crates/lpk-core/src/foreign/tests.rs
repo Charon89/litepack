@@ -655,8 +655,11 @@ fn many_empty_members_are_progress() {
         });
     }
     let bytes = script(&f);
+    // The five frames before the first `MemberEnd` carry no progress: 5 x 40 ms, which a
+    // coarse Windows timer under load stretched past a 250 ms limit (a flake seen while E4-5's
+    // tests ran beside other builds); 500 ms keeps the stream (83 frames) far longer.
     let limits = Limits {
-        no_progress: Duration::from_millis(250),
+        no_progress: Duration::from_millis(500),
         ..Limits::default()
     };
     let monitor = Monitor::default();
@@ -688,4 +691,78 @@ fn many_empty_members_are_progress() {
     assert_eq!(summary.files, n);
     // Far longer than the watchdog's limit: the finished members kept it fed.
     assert!(t.elapsed() > Duration::from_secs(2), "{:?}", t.elapsed());
+}
+
+/// A worker that died with `.0` before its first frame, its job accounting unreadable.
+struct DeadPeer(u32);
+
+impl Peer for DeadPeer {
+    fn try_send(&mut self, _frame: Frame) -> Result<Option<Frame>, RecvError> {
+        Err(RecvError::Closed)
+    }
+    fn recv(&mut self, _tick: Duration) -> Result<Option<Response>, RecvError> {
+        Err(RecvError::Closed)
+    }
+    fn usage(&self) -> Option<Usage> {
+        None
+    }
+    fn set_cpu_limit(&self, _d: Duration) {}
+    fn exit_code(&self, _wait: Duration) -> Option<u32> {
+        Some(self.0)
+    }
+    fn kill(&self) {}
+    fn stderr(&self) -> String {
+        String::new()
+    }
+}
+
+/// E4-5: the job's user-time kill (exit status STATUS_QUOTA_EXCEEDED) names `CpuLimit` on
+/// Windows by the status alone, when no usage can be read; elsewhere that status means nothing
+/// and the death is `Crashed`. Any other status without usage stays `Crashed`.
+#[test]
+fn quota_exceeded_status_names_the_cpu_limit_without_usage() {
+    const STATUS_QUOTA_EXCEEDED: u32 = 0xC000_0044;
+    const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
+    let monitor = Monitor::default();
+    let mut conv = Conv::new(
+        DeadPeer(STATUS_QUOTA_EXCEEDED),
+        Limits::default(),
+        100,
+        &monitor,
+    );
+    let e = conv.handshake().unwrap_err();
+    if cfg!(windows) {
+        assert!(
+            matches!(e, CoreError::Worker(WorkerError::CpuLimit { .. })),
+            "{e:?}"
+        );
+    } else {
+        assert!(
+            matches!(
+                e,
+                CoreError::Worker(WorkerError::Crashed {
+                    code: STATUS_QUOTA_EXCEEDED,
+                    ..
+                })
+            ),
+            "{e:?}"
+        );
+    }
+    let mut conv = Conv::new(
+        DeadPeer(STATUS_ACCESS_VIOLATION),
+        Limits::default(),
+        100,
+        &monitor,
+    );
+    let e = conv.handshake().unwrap_err();
+    assert!(
+        matches!(
+            e,
+            CoreError::Worker(WorkerError::Crashed {
+                code: STATUS_ACCESS_VIOLATION,
+                ..
+            })
+        ),
+        "{e:?}"
+    );
 }
