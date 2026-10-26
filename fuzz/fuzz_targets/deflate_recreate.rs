@@ -23,11 +23,16 @@ fuzz_target!(|data: &[u8]| {
         .min(MAX_PLAIN)
         .min(rest.len());
     let (plain, corrections) = rest.split_at(plain_len);
+    // libFuzzer's hook aborts on any panic, even one caught here: a library panic is a finding
+    // (the decoder would catch it, but it is a defect in the recreation all the same).
     let r = std::panic::catch_unwind(|| {
         recreate_whole_deflate_stream_limited_report(plain, corrections, limit)
     });
     if let Ok((result, capacity)) = r {
-        assert!(capacity <= limit + 8, "capacity {capacity} over limit {limit} + 8");
+        assert!(
+            capacity <= limit + 8,
+            "capacity {capacity} over limit {limit} + 8"
+        );
         if let Ok(out) = result {
             assert!(out.len() <= limit);
         }

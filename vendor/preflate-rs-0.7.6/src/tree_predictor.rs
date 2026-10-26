@@ -144,6 +144,12 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
         tc_code_tree_len as u32,
     ) as usize;
 
+    // LitePack change 13: a decoded code-length count outside Deflate's 4 to 19 is refused; above
+    // 19 it indexed past the order table below.
+    if !(4..=CODETREE_CODE_COUNT).contains(&tc_code_tree_len) {
+        return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed");
+    }
+
     result.num_code_lengths = tc_code_tree_len;
 
     // resize so that when we walk through in TREE_CODE_ORDER_TABLE order, we
@@ -287,6 +293,11 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
                 predicted_tree_code_data.into(),
                 decoder.decode_correction(CodecCorrection::LDBitLengthCorrection),
             ) as u8;
+            // LitePack change 10: a code length above 15 is refused here; it indexed past the
+            // 19 code-tree frequencies in `calc_codetree_freq` (found by `deflate_recreate`).
+            if predicted_tree_code_data > 15 {
+                return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed");
+            }
         }
 
         result.push((predicted_tree_code_type, predicted_tree_code_data));
@@ -294,7 +305,12 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
         if predicted_tree_code_type == TreeCodeType::Code {
             symbols = &symbols[1..];
         } else {
-            symbols = &symbols[predicted_tree_code_data as usize..];
+            // LitePack change 11: a crafted repeat count past the remaining symbols is refused
+            // instead of slicing out of range.
+            symbols = match symbols.get(predicted_tree_code_data as usize..) {
+                Some(rest) => rest,
+                None => return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed"),
+            };
         }
     }
 
