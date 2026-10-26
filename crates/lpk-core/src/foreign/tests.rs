@@ -732,6 +732,11 @@ fn many_empty_members_are_progress() {
     conv.handshake().unwrap();
     conv.open(Format::TestFixture, b"", None).unwrap();
     let records = conv.list().unwrap();
+    // The summary reports the listing charge (E4-7 checks the host's peak against it).
+    let charge: u64 = records
+        .iter()
+        .map(|r| entry_charge(r.name.len(), r.target.len()))
+        .sum();
     let mut out = NullOut::default();
     let mut summary = ForeignSummary::default();
     run_extract(
@@ -746,6 +751,7 @@ fn many_empty_members_are_progress() {
     )
     .unwrap();
     assert_eq!(summary.files, n);
+    assert_eq!(summary.listing_charge, charge);
     // Far longer than the watchdog's limit: the finished members kept it fed.
     assert!(t.elapsed() > Duration::from_secs(2), "{:?}", t.elapsed());
 }
