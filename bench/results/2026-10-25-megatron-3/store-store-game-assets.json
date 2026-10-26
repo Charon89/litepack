@@ -1,0 +1,150 @@
+{
+  "class": "game-assets",
+  "corpus": {
+    "class_bytes": 52470892,
+    "class_files": 4660,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 56135168,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.1875,
+      "peak_job_memory_bytes": 1662976,
+      "peak_memory_bytes": 6864896,
+      "peak_process_commit_bytes": 1662976,
+      "timed_out": false,
+      "user_cpu_seconds": 0.015625,
+      "wall_seconds": 0.19896
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.375,
+      "peak_job_memory_bytes": 1347584,
+      "peak_memory_bytes": 6975488,
+      "peak_process_commit_bytes": 1347584,
+      "timed_out": false,
+      "user_cpu_seconds": 0.15625,
+      "wall_seconds": 0.541209
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 56135168,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.171875,
+        "peak_job_memory_bytes": 1662976,
+        "peak_memory_bytes": 6873088,
+        "peak_process_commit_bytes": 1662976,
+        "timed_out": false,
+        "user_cpu_seconds": 0.015625,
+        "wall_seconds": 0.1796584
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.390625,
+        "peak_job_memory_bytes": 1347584,
+        "peak_memory_bytes": 6975488,
+        "peak_process_commit_bytes": 1347584,
+        "timed_out": false,
+        "user_cpu_seconds": 0.09375,
+        "wall_seconds": 0.5103164
+      }
+    },
+    {
+      "archive_bytes": 56135168,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.1875,
+        "peak_job_memory_bytes": 1654784,
+        "peak_memory_bytes": 6864896,
+        "peak_process_commit_bytes": 1654784,
+        "timed_out": false,
+        "user_cpu_seconds": 0.03125,
+        "wall_seconds": 0.211736
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.375,
+        "peak_job_memory_bytes": 1347584,
+        "peak_memory_bytes": 6987776,
+        "peak_process_commit_bytes": 1347584,
+        "timed_out": false,
+        "user_cpu_seconds": 0.15625,
+        "wall_seconds": 0.5888443
+      }
+    },
+    {
+      "archive_bytes": 56135168,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.1875,
+        "peak_job_memory_bytes": 1667072,
+        "peak_memory_bytes": 6852608,
+        "peak_process_commit_bytes": 1667072,
+        "timed_out": false,
+        "user_cpu_seconds": 0.015625,
+        "wall_seconds": 0.19896
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.375,
+        "peak_job_memory_bytes": 1302528,
+        "peak_memory_bytes": 6946816,
+        "peak_process_commit_bytes": 1302528,
+        "timed_out": false,
+        "user_cpu_seconds": 0.171875,
+        "wall_seconds": 0.541209
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "-cf",
+      "../../tmp/run22948/c24/a.tar",
+      "-C",
+      "game-assets",
+      "."
+    ],
+    "extract_args": [
+      "-xf",
+      "a.tar",
+      "-C",
+      "x"
+    ],
+    "id": "store"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "store",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "bsdtar 3.8.9"
+  },
+  "verification": {
+    "files_checked": 4660,
+    "files_ok": 4660,
+    "verified": true
+  }
+}
