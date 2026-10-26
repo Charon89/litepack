@@ -730,8 +730,8 @@ struct ExtractArgs {
     /// `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). Even with it, a link whose
     /// target is absolute, a UNC path, a device path (`\\?\`, `\\.\`), drive-relative (`C:x`),
     /// rooted (`\x` or `/x`), names a Windows device, has a colon or a component ending in a dot or
-    /// a space, goes through another symlink entry, or escapes the output directory once `..`
-    /// is resolved from the link's directory is not created: it is skipped with a warning
+    /// a space, has `..` after a name (`a/../x`), or has more leading `..` than the link is
+    /// deep below the output directory is not created: it is skipped with a warning
     /// naming the entry and the reason (with --json one
     /// `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}` line) and counted
     /// in symlinks_skipped; such a target is never read or opened. On Windows a link is a

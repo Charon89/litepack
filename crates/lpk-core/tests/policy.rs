@@ -519,3 +519,56 @@ fn symlink_targets_leaving_the_destination_are_skipped() {
         }
     }
 }
+
+/// E6-0, the rename bypass: `--overwrite rename` gives a link a name the archive does not
+/// know (`a/b/s` becomes `a/b/s (1)`), so a target that walks through that name and back up
+/// would resolve lexically inside the destination and physically outside it. A `..` after a
+/// name is refused whatever the name is, on the first extraction and the second; a plain one
+/// (`a/../f`) too.
+#[test]
+fn a_dot_dot_after_a_name_is_refused_even_through_a_renamed_link() {
+    use lpk_core::policy::TargetRefusal as R;
+    let bytes = packed_with(|w| {
+        w.add_symlink("a/b/s", EntryFlags::EMPTY, 0, b"../..")
+            .unwrap();
+        w.add_file("f", EntryFlags::EMPTY, 0, &mut &b"file"[..])
+            .unwrap();
+        w.add_symlink("l", EntryFlags::EMPTY, 0, b"a/b/s (1)/../..")
+            .unwrap();
+        w.add_symlink("m", EntryFlags::EMPTY, 0, b"a/../f").unwrap();
+    });
+    let want = vec![
+        ("l".to_string(), R::DotDotAfterName),
+        ("m".to_string(), R::DotDotAfterName),
+    ];
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    for round in 0..2 {
+        let p = Policy::new(Overwrite::Rename, Symlinks::Create);
+        let r = extract(&bytes, &out, &p);
+        assert_eq!(p.refused_symlink_targets(), want, "round {round}");
+        assert!(std::fs::symlink_metadata(out.join("l")).is_err());
+        assert!(std::fs::symlink_metadata(out.join("m")).is_err());
+        match r {
+            Ok(s) => {
+                assert_eq!((s.symlinks, s.symlinks_skipped), (1, 2), "round {round}");
+                // The second round writes `f (1)` and `a/b/s (1)` beside the first.
+                assert_eq!(s.renamed, round * 2, "round {round}");
+                if round == 1 {
+                    assert!(std::fs::symlink_metadata(out.join("a/b/s (1)"))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink());
+                }
+            }
+            Err(e) => {
+                if !cfg!(windows) {
+                    panic!("{e:?}");
+                }
+                assert!(matches!(&e, CoreError::Io { .. }), "{e:?}");
+                println!("SKIPPED: second round, symlink creation refused on this machine ({e})");
+                break;
+            }
+        }
+    }
+}

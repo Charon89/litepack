@@ -13,10 +13,11 @@
 //! case-insensitive ([`check_case_collisions`]; [`case_insensitive_target`] is Windows and
 //! macOS). Symlink entries are refused ([`refuse_symlink`], the reference tool's rule), skipped
 //! or created ([`Symlinks`]); one to create whose target is absolute, UNC, a device path,
-//! drive-relative, rooted or escaping is skipped and recorded, its kind on Windows read from
-//! the archive, never the file system ([`resolve_symlink_target`], E6-0). An existing target is refused, skipped, written beside under a
-//! new name or replaced ([`Overwrite`]); the modes apply to files (and symlink entries); a
-//! directory where a file goes, or a file where a directory goes, is in the way
+//! drive-relative, rooted, with a `..` after a name or escaping is skipped and recorded, its
+//! kind on Windows read from the archive, never the file system ([`resolve_symlink_target`],
+//! E6-0). An existing target is refused, skipped, written beside under a new name or replaced
+//! ([`Overwrite`]); the modes apply to files (and symlink entries); a directory where a file
+//! goes, or a file where a directory goes, is in the way
 //! ([`CoreError::InTheWay`]) in every mode but `skip`.
 //!
 //! **The hook.** [`ExtractPolicy`] is what the engine asks; [`DefaultPolicy`] answers with the
@@ -438,11 +439,13 @@ pub enum TargetRefusal {
     TrailingDotOrSpace,
     /// A component that is a Windows device name (`CON`, `NUL`, `COM1`, ...).
     DeviceName,
-    /// It climbs above the destination after lexical normalisation from the link's directory.
+    /// Its leading `..` climb above the destination: more of them than the link's own depth
+    /// below it.
     Escapes,
-    /// It goes through another symlink entry of the archive (the operating system would
-    /// resolve what follows from that link's target, which lexical normalisation cannot see).
-    ThroughLink,
+    /// A `..` after a name (`a/../x`): where it lands depends on what the name is on disk
+    /// (a link renamed by `--overwrite rename`, one left by an earlier extraction, a case fold
+    /// the disk does not share), which the archive cannot tell, so it is never followed.
+    DotDotAfterName,
 }
 
 impl TargetRefusal {
@@ -462,7 +465,7 @@ impl TargetRefusal {
             }
             TargetRefusal::DeviceName => "the target names a Windows device",
             TargetRefusal::Escapes => "the target escapes the destination",
-            TargetRefusal::ThroughLink => "the target goes through another symlink entry",
+            TargetRefusal::DotDotAfterName => "the target has `..` after a name",
         }
     }
 }
@@ -477,17 +480,16 @@ fn is_sep(b: u8) -> bool {
     b == b'/' || b == b'\\'
 }
 
-/// Resolve the target of the symlink entry at archive path `link` (`/`-separated) lexically,
-/// from the link's own directory, within the archive's namespace: the path it names relative
-/// to the destination (`""` for the destination itself), or why it is refused
-/// ([`TargetRefusal`]). `is_link` says whether an archive path (resolved so far) is a symlink
-/// entry; a target that goes on below one is refused. Pure: no file-system call, so a refused
-/// target is never touched.
-pub fn resolve_symlink_target(
-    link: &str,
-    target: &[u8],
-    is_link: impl Fn(&str) -> bool,
-) -> Result<String, TargetRefusal> {
+/// Judge the target of the symlink entry at archive path `link` (`/`-separated) and resolve it
+/// lexically from the link's own directory: the path it names relative to the destination
+/// (`""` for the destination itself), or why it is refused ([`TargetRefusal`]). The rule needs
+/// nothing but the two strings: every `..` comes before any name, and there are no more of
+/// them than the link's depth below the destination (the link's own parents are directories
+/// this extraction checked: a linked parent is refused), so the target can only name
+/// something at or below a directory of the link's own path, whatever the names after the
+/// `..` turn out to be on disk. Linear in the target's length; pure: no file-system call, so a
+/// refused target is never touched.
+pub fn resolve_symlink_target(link: &str, target: &[u8]) -> Result<String, TargetRefusal> {
     if target.is_empty() {
         return Err(TargetRefusal::Empty);
     }
@@ -515,44 +517,42 @@ pub fn resolve_symlink_target(
             TargetRefusal::DriveRelative
         });
     }
-    let components: Vec<String> = target
-        .split(|&b| is_sep(b))
-        .map(|c| String::from_utf8_lossy(c).into_owned())
-        .collect();
-    for c in &components {
-        if c.is_empty() || c == "." || c == ".." {
-            continue;
-        }
-        if c.contains(':') {
-            return Err(TargetRefusal::Colon);
-        }
-        if c.ends_with('.') || c.ends_with(' ') {
-            return Err(TargetRefusal::TrailingDotOrSpace);
-        }
-        if is_reserved_device(c) {
-            return Err(TargetRefusal::DeviceName);
-        }
-    }
-    // The link's directory, then each component; a parent of the link is a directory entry
-    // or implied (the conflicting-name rule refuses a link below a non-directory).
-    let mut stack: Vec<&str> = link.split('/').collect();
-    stack.pop();
-    for c in &components {
-        if c.is_empty() || c == "." {
-            continue;
-        }
-        if !stack.is_empty() && is_link(&stack.join("/")) {
-            return Err(TargetRefusal::ThroughLink);
-        }
-        if c == ".." {
-            if stack.pop().is_none() {
-                return Err(TargetRefusal::Escapes);
+    // One pass: count the leading `..`, check each name's form, refuse a `..` after a name.
+    let mut ups = 0usize;
+    let mut names: Vec<&[u8]> = Vec::new();
+    for c in target.split(|&b| is_sep(b)) {
+        match c {
+            b"" | b"." => {}
+            b".." if names.is_empty() => ups += 1,
+            b".." => return Err(TargetRefusal::DotDotAfterName),
+            _ => {
+                if c.contains(&b':') {
+                    return Err(TargetRefusal::Colon);
+                }
+                if matches!(c.last(), Some(b'.' | b' ')) {
+                    return Err(TargetRefusal::TrailingDotOrSpace);
+                }
+                if is_reserved_device(&String::from_utf8_lossy(c)) {
+                    return Err(TargetRefusal::DeviceName);
+                }
+                names.push(c);
             }
-        } else {
-            stack.push(c);
         }
     }
-    Ok(stack.join("/"))
+    let mut parents: Vec<&str> = link.split('/').collect();
+    parents.pop();
+    if ups > parents.len() {
+        return Err(TargetRefusal::Escapes);
+    }
+    parents.truncate(parents.len() - ups);
+    let mut out = parents.join("/");
+    for n in names {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(&String::from_utf8_lossy(n));
+    }
+    Ok(out)
 }
 
 /// Nothing is replaced: a file target that already exists (a file, a directory, a symlink,
@@ -738,8 +738,6 @@ mod tests {
     #[test]
     fn symlink_target_table() {
         use TargetRefusal as R;
-        let links = ["s", "d/s2"];
-        let is_link = |p: &str| links.contains(&p);
         let refused: &[(&str, &[u8], R)] = &[
             ("l", b"\\\\server\\share\\x", R::Unc),
             ("l", b"//server/share", R::Unc),
@@ -757,22 +755,24 @@ mod tests {
             ("a/l", b"../../x", R::Escapes),
             ("l", b"..", R::Escapes),
             ("a/b/l", b"..\\..\\..\\x", R::Escapes),
-            ("l", b"a/../../x", R::Escapes),
+            ("a/b/c/l", b"../../../../x", R::Escapes),
+            ("l", b"a/../../x", R::DotDotAfterName),
+            ("l", b"a/..", R::DotDotAfterName),
+            ("a/b/l", b"../x/../..", R::DotDotAfterName),
+            ("l", b"a/b/s (1)/../..", R::DotDotAfterName),
+            ("a/b/l", b"../../d/x/../y", R::DotDotAfterName),
             ("l", b"x/file:stream", R::Colon),
             ("l", b"x./y", R::TrailingDotOrSpace),
             ("l", b"x ", R::TrailingDotOrSpace),
             ("l", b"...", R::TrailingDotOrSpace),
             ("l", b"sub/CON", R::DeviceName),
             ("l", b"nul.txt", R::DeviceName),
-            ("l", b"s/../x", R::ThroughLink),
-            ("l", b"s/x", R::ThroughLink),
-            ("l", b"d/s2/..", R::ThroughLink),
             ("l", b"", R::Empty),
             ("l", b"a\0b", R::Nul),
         ];
         for (link, target, want) in refused {
             assert_eq!(
-                resolve_symlink_target(link, target, is_link),
+                resolve_symlink_target(link, target),
                 Err(*want),
                 "{link} -> {}",
                 String::from_utf8_lossy(target)
@@ -787,11 +787,15 @@ mod tests {
             ("l", b".", ""),
             ("l", b"d/", "d"),
             ("l", b"s", "s"),
-            ("a/b/l", b"../../d/x/../y", "d/y"),
+            ("a/b/l", b"../../d/./x/", "d/x"),
+            ("a/b/l", b"../..", ""),
+            ("a/b/l", b"./../s/x", "a/s/x"),
+            // Descending through a name that is a link on disk is safe without `..` after it.
+            ("l", b"s/x", "s/x"),
         ];
         for (link, target, want) in fine {
             assert_eq!(
-                resolve_symlink_target(link, target, is_link).as_deref(),
+                resolve_symlink_target(link, target).as_deref(),
                 Ok(*want),
                 "{link} -> {}",
                 String::from_utf8_lossy(target)
@@ -809,6 +813,35 @@ mod tests {
         assert!(p.skipped_symlinks().is_empty());
         // The default hook records nothing and does not panic.
         DefaultPolicy.symlink_target_refused(&link("a"), R::Unc);
+    }
+
+    /// E6-0: the resolver is linear: a 65,535-byte target (the format's longest) of 32,768
+    /// names, one of 21,845 leading `..` below a link as deep, and one with a `..` at the end
+    /// of 32,767 names each resolve well under a second in a debug build.
+    #[test]
+    fn symlink_target_resolution_is_linear() {
+        let mut names = "a/".repeat(32_767);
+        names.push('a');
+        assert_eq!(names.len(), 65_535);
+        let t = std::time::Instant::now();
+        let to = resolve_symlink_target("l", names.as_bytes()).unwrap();
+        assert_eq!(to.len(), 65_535);
+        let mut ups = "../".repeat(21_844);
+        ups.push_str("..");
+        assert_eq!(ups.len(), 65_534);
+        let link = format!("{}l", "d/".repeat(21_845));
+        assert_eq!(
+            resolve_symlink_target(&link, ups.as_bytes()).as_deref(),
+            Ok("")
+        );
+        let mut bad = "a/".repeat(32_766);
+        bad.push_str("..");
+        assert_eq!(
+            resolve_symlink_target("l", bad.as_bytes()),
+            Err(TargetRefusal::DotDotAfterName)
+        );
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
     }
 
     fn reason(r: Result<(), FormatError>) -> Option<&'static str> {

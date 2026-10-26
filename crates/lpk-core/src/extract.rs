@@ -821,43 +821,36 @@ impl PolicyPass {
     }
 }
 
-/// The archive's own namespace, for symlink targets (E6-0): its directories (directory
-/// entries and the parents other entries imply) and its symlink entries, folded on a
-/// case-insensitive target as the disk compares.
+/// The archive's own namespace, for the kind of a symlink to create (E6-0; never for its
+/// safety, which [`policy::resolve_symlink_target`] judges from the target alone): its
+/// directory entries and every entry path, sorted, so a path some entry lies below is a
+/// directory too. Folded on a case-insensitive target as the disk compares. Memory and time
+/// are linear in the entries' path bytes (plus the sort); empty when no entry is a symlink.
 struct Namespace {
     dirs: HashSet<String>,
-    links: HashSet<String>,
+    paths: Vec<String>,
     fold: bool,
 }
 
 impl Namespace {
     fn new(entries: &[Entry], fold: bool) -> Self {
-        let key = |p: &str| {
-            if fold {
-                p.to_lowercase()
-            } else {
-                p.to_string()
-            }
+        let mut ns = Namespace {
+            dirs: HashSet::new(),
+            paths: Vec::new(),
+            fold,
         };
-        let mut dirs = HashSet::new();
-        let mut links = HashSet::new();
-        for e in entries {
-            match e.kind {
-                EntryKind::Directory => {
-                    dirs.insert(key(&e.path));
-                }
-                EntryKind::Symlink => {
-                    links.insert(key(&e.path));
-                }
-                EntryKind::File => {}
-            }
-            let mut at = 0;
-            while let Some(i) = e.path[at..].find('/') {
-                dirs.insert(key(&e.path[..at + i]));
-                at += i + 1;
-            }
+        if !entries.iter().any(|e| e.kind == EntryKind::Symlink) {
+            return ns;
         }
-        Namespace { dirs, links, fold }
+        for e in entries {
+            let k = ns.key(&e.path);
+            if e.kind == EntryKind::Directory {
+                ns.dirs.insert(k.clone());
+            }
+            ns.paths.push(k);
+        }
+        ns.paths.sort_unstable();
+        ns
     }
 
     fn key(&self, p: &str) -> String {
@@ -868,12 +861,26 @@ impl Namespace {
         }
     }
 
+    /// Whether `to` (an archive path, `""` for the destination) is a directory of the archive:
+    /// a directory entry, or a parent some entry lies below.
+    fn is_dir(&self, to: &str) -> bool {
+        if to.is_empty() {
+            return true;
+        }
+        let k = self.key(to);
+        if self.dirs.contains(&k) {
+            return true;
+        }
+        let below = format!("{k}/");
+        let i = self.paths.partition_point(|p| p.as_str() < below.as_str());
+        self.paths.get(i).is_some_and(|p| p.starts_with(&below))
+    }
+
     /// Whether the link at archive path `link` with `target` is a directory link, or why the
     /// target is refused ([`policy::resolve_symlink_target`]). No file-system call.
     fn resolve(&self, link: &str, target: &[u8]) -> Result<bool, policy::TargetRefusal> {
-        let to =
-            policy::resolve_symlink_target(link, target, |p| self.links.contains(&self.key(p)))?;
-        Ok(to.is_empty() || self.dirs.contains(&self.key(&to)))
+        let to = policy::resolve_symlink_target(link, target)?;
+        Ok(self.is_dir(&to))
     }
 }
 
