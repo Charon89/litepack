@@ -186,8 +186,15 @@ to extract.
 `balanced-extension` (`--balanced --ordering extension`) is the A/B row of the file-ordering task
 (E2-8): the same as `balanced` except that the files of a cluster are written sorted by extension
 (then name), the order 7-Zip uses for solid archives, not in path order (`lpk a --ordering none`,
-the default, which keeps directory locality). The two rows are measured in one run on the same
-classes; the difference is what the extension order buys.
+which keeps directory locality). The two rows are measured in one run on the same classes; the
+difference is what the extension order buys.
+
+Since E2-26 (D-104) `balanced` orders versions by default (`--ordering versions`: the same
+relative path under sibling version roots written next to each other; an input without such
+roots is in path order, byte for byte as before). `balanced-versions` (`--balanced --ordering
+versions`) stays as the comparison row and `balanced-no-versions` (`--balanced --ordering none`)
+measures the old path order. Rows of `balanced` before E2-26 were taken in path order (the build
+hash in the version separates the eras).
 
 `balanced-no-deflate` (`--balanced --deflate-peel off`) is the A/B row of the Deflate peel
 (E2-10): the same as `balanced` with the Deflate peel turned off, which is what `balanced` was
