@@ -39,6 +39,13 @@ jobs:
           tool: cargo-nextest,cargo-deny,cargo-about@0.9.2
       - name: Format
         run: cargo fmt --all -- --check
+      # E8-7: `unsafe` only in the crates and modules docs/UNSAFE.md lists (both workspaces and
+      # fuzz/); before Clippy, so that its finding, not a compile error, is what turns the job red.
+      - name: Unsafe confined to the inventory
+        shell: bash
+        run: |
+          bash scripts/check-unsafe.sh --self-test
+          bash scripts/check-unsafe.sh
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build
@@ -52,12 +59,6 @@ jobs:
       - name: Third-party notices
         shell: bash
         run: scripts/third-party-notices.sh --check
-      # E8-7: `unsafe` only in the crates and modules docs/UNSAFE.md lists (both workspaces and fuzz/).
-      - name: Unsafe confined to the inventory
-        shell: bash
-        run: |
-          bash scripts/check-unsafe.sh --self-test
-          bash scripts/check-unsafe.sh
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:
