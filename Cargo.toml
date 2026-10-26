@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/lpk-api",
   "crates/lpk-bench",
   "crates/lpk-check",
   "crates/lpk-codecs-bwt",

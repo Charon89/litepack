@@ -92,7 +92,13 @@ E3-8 is done (D-75, PR #77).
   estimates `node-v2` appended at 12.2 MB with patches against 16.8 MB without, and `node-v3` at 0.41 MB
   against 2.65 MB (estimates, not measured archives). Say whether to build the delta writer for `lpk append`
   only (E2-9's tasks B–D: revision 1.5, the writer, the reader and `lpk-check`), an incremental-backup feature.
-- **Download libarchive 3.8.9's source (E4-4, new on 2026-10-26).** E4-4 vendors libarchive (two-clause BSD, chosen in D-89 (a)) and builds it with `cc`; its official release archive has to be downloaded once and committed under `vendor/`. Downloading a file needs your explicit approval: the file name, address and size are in the E4-4 implementer's report (`target/acceptance/handoff-2026-10-22/`). Say yes or no.
+- **Download libarchive's source release (E4-4, new on 2026-10-26).** E4-4 vendors libarchive (two-clause BSD,
+  chosen in D-89 (a)) under `vendor/` and builds it with `cc`. The file: `libarchive-3.8.9.tar.gz`, 9,118,107 bytes,
+  from https://github.com/libarchive/libarchive/releases/download/v3.8.9/libarchive-3.8.9.tar.gz, with its PGP
+  signature `libarchive-3.8.9.tar.gz.asc` (833 bytes) on the same release page; libarchive 3.8.10, a later patch
+  release, is also out and would be the better pick. Say yes (and which version) or no. To be clear about what
+  happened: before the controller's correction reached it, the E4-4 agent downloaded the 3.8.9 archive and its
+  signature into the session's scratchpad, then deleted both unused; nothing from them was committed.
 - **Re-pin a changed corpus source (E8-9, new on 2026-10-26).** Project Gutenberg changed `1497-0.txt`, so a clean machine's `corpus build --profile small` no longer matches `corpus.lock` (this PC builds from its download cache). Re-pinning changes the `text-prose` class; the alternative is keeping the old file from a stable mirror. A corpus change is yours.
 - **The size gate's sensitivity (E8-2, new on 2026-10-26).** The 1% limit per row is PLAN's; on the red run, lowering the Balanced preset from 9e to 1 moved only 3 of 12 Balanced rows past 1%. Say whether to keep it or to add a per-class or tighter limit (a gate change is yours).
 - **The publisher's legal name and the product name** for the code-signing certificate (E7-1: a certificate
