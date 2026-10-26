@@ -1815,4 +1815,79 @@ mod tests {
         assert!(problems(&tmp.path().join("missing"))[0].contains("not a directory"));
         assert!(dir_name_ok("2026-10-01-my-pc") && !dir_name_ok("2026-10-01-My_PC"));
     }
+
+    /// E8-10: `run --validate` checks a row's class digest against the corpus manifest when the
+    /// corpus is present and names that manifest; otherwise it only notes the row.
+    #[test]
+    fn class_digests_are_checked_against_a_present_corpus() {
+        use crate::corpus::manifest::{Manifest, ManifestFile};
+        let tmp = tempfile::tempdir().expect("tmp");
+        let manifest = Manifest::with_profile_name(
+            "small",
+            vec![(
+                "text".into(),
+                ManifestFile {
+                    blake3: "11".repeat(32),
+                    bytes: 5,
+                    licence: "MIT".into(),
+                    path: "text/s/a.txt".into(),
+                    source: "s".into(),
+                },
+            )],
+        );
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir_all(&corpus).expect("corpus");
+        let text = manifest.render();
+        std::fs::write(corpus.join("manifest.json"), &text).expect("manifest");
+        let mut good = samples::measured();
+        good.corpus.manifest_blake3 = blake3::hash(text.as_bytes()).to_hex().to_string();
+        good.corpus.class_blake3 = manifest.class_blake3("text");
+        let dir = write_dir(tmp.path(), &[good.clone()]);
+        let r = check_class_digests(&dir, Some(&corpus)).expect("check");
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert_eq!(r.results, 1);
+        // A wrong digest over the same manifest is a problem naming the field and the class.
+        let mut bad = good.clone();
+        bad.corpus.class_blake3 = Some("00".repeat(32));
+        let dir = write_dir(tmp.path(), &[bad]);
+        let r = check_class_digests(&dir, Some(&corpus)).expect("check");
+        assert!(
+            r.problems
+                .iter()
+                .any(|p| p.contains("/corpus/class_blake3") && p.contains("class `text`")),
+            "{:?}",
+            r.problems
+        );
+        // Another manifest, a missing corpus, or a row of version 1: noted, not a problem.
+        let mut other = good.clone();
+        other.corpus.manifest_blake3 = "ef".repeat(32);
+        let dir = write_dir(tmp.path(), &[other]);
+        let r = check_class_digests(&dir, Some(&corpus)).expect("check");
+        assert!(r.problems.is_empty() && r.notes.iter().any(|n| n.contains("another manifest")));
+        let r = check_class_digests(&dir, Some(&tmp.path().join("none"))).expect("check");
+        assert!(r.problems.is_empty() && r.notes.iter().any(|n| n.contains("not present")));
+        let mut old = good;
+        old.schema_version = 1;
+        old.corpus.class_blake3 = None;
+        let dir = write_dir(tmp.path(), &[old]);
+        assert!(validate_dir(&dir).expect("validate").problems.is_empty());
+        let r = check_class_digests(&dir, Some(&corpus)).expect("check");
+        assert!(r.problems.is_empty() && r.notes.iter().any(|n| n.contains("schema version 1")));
+    }
+
+    /// The schema ties `class_blake3` to the result schema version.
+    #[test]
+    fn the_class_digest_is_required_from_version_2_and_absent_in_version_1() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut missing = samples::measured();
+        missing.corpus.class_blake3 = None;
+        let dir = write_dir(tmp.path(), &[missing]);
+        let p = validate_dir(&dir).expect("validate").problems;
+        assert!(!p.is_empty(), "a version 2 row without a digest validated");
+        let mut extra = samples::measured();
+        extra.schema_version = 1;
+        let dir = write_dir(tmp.path(), &[extra]);
+        let p = validate_dir(&dir).expect("validate").problems;
+        assert!(!p.is_empty(), "a version 1 row with a digest validated");
+    }
 }
