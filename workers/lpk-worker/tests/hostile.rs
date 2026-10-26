@@ -12,7 +12,37 @@
 //! short with `--max-cpu 1`) and the memory, as the **host's peak working set** measured by
 //! `lpk-procstat-sys` (Windows: `PeakWorkingSetSize` of `lpk` alone, the worker being a
 //! separate process in its own job; Linux: `ru_maxrss`, the largest resident set of any process
-//! of the tree, so an upper bound of the host's).
+//! of the tree, so an upper bound of the host's). Outside the jail, the roots an escaped name
+//! would reach (the temporary root, the current directory, the C: drive's current directory
+//! and root on Windows, `/` on Linux) are listed before and after each run and must gain no
+//! entry named like a fixture's member.
+//!
+//! **Time bounds.** The design's bounds are the broker's timeouts set short; of those only the
+//! CPU ceiling has a flag (`--max-cpu`, in minutes). The 60 s no-progress timeout
+//! (`lpk_core::foreign::NO_PROGRESS`) has no CLI flag, so the tests bound the wall time
+//! instead (10 s for the small fixtures); a flag for it is a follow-up.
+//!
+//! **Formats.** ZIP and tar fixtures for every case. 7z: the unsafe names. A 7z whose
+//! members' pack streams overlap cannot be written: 7z has no per-stream offsets, a pack
+//! stream starts where the previous one ends (`PackInfo` gives sizes only, from one
+//! `PackPos`), so the reader's ranges (`sevenz.rs`, from `pack_stream_offsets`) are disjoint
+//! by construction; members of one solid block share that block's range by design, and the
+//! host's overlap check is per block. No 7z overlap fixture therefore exists, and none is
+//! owed.
+//!
+//! **`.lpk`.** An `.lpk` is decoded in process, not by the worker (D-66, D-67, D-68), and its
+//! parsers are fuzzed (`fuzz/fuzz_targets/{archive_open,archive_mutate,entry_table,...}.rs`).
+//! Its hostile cases are covered elsewhere: unsafe names cannot be written and are refused at
+//! parse (`lpk-format/src/entry.rs`, `validate_path`'s unit test; `lpk-format/tests/cli.rs`
+//! `extraction_path_rules`), device and `:` names and symlinks by the default policy before
+//! any write (`lpk-core/tests/extract.rs` `the_default_policy_refuses_before_writing_anything`),
+//! sizes by the chunk hashes and the entry table's checks (`lpk-format` conformance and
+//! mutation tests), a linked parent by `a_linked_parent_is_refused`. The two cases without an
+//! `lpk x` test of their own, a case-only pair and an entry below a symlink entry, are in
+//! `crates/lpk-cli/tests/hostile_lpk.rs` (the main workspace, which has the format's writer).
+//!
+//! The million-member test reads the charge from `lpk x -v`'s text ("listing charge N
+//! bytes"): a change of that line's wording breaks the test, deliberately.
 #![cfg(any(windows, target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
 
@@ -104,9 +134,9 @@ struct Bounds {
 }
 
 /// A small fixture's bounds: a debug `lpk` and worker start, refuse or extract a few KiB to a
-/// few MiB within a minute, the host within 256 MiB.
+/// few MiB within 10 s (they take well under 1 s), the host within 256 MiB.
 const SMALL: Bounds = Bounds {
-    wall: Duration::from_secs(60),
+    wall: Duration::from_secs(10),
     memory: 256 << 20,
 };
 
@@ -157,6 +187,7 @@ impl Staged {
             self.path(&format!("stdout-{n}.txt")),
             self.path(&format!("stderr-{n}.txt")),
         );
+        let before = roots();
         let mut spec = Spec::new(&self.lpk)
             .args(["--json", "x", "--max-cpu", "1"])
             .args(extra.iter().copied())
@@ -188,6 +219,7 @@ impl Staged {
             bounds.memory,
             run.stderr
         );
+        assert_no_new_member_names(&before, &roots());
         eprintln!(
             "{}: exit {:?} ({}), {:?} wall, host peak {} bytes",
             archive.file_name().unwrap().to_string_lossy(),
@@ -246,6 +278,90 @@ impl Staged {
     fn clear_out(&self) {
         if self.out().exists() {
             std::fs::remove_dir_all(self.out()).unwrap();
+        }
+    }
+}
+
+/// The places an escaped name would land outside the jail: the temporary root, the current
+/// directory, and on Windows the C: drive's current directory (where `C:name` goes) and its
+/// root (where `C:\name` and `\\?\C:\name` go); on Linux `/`. Each with its entries' names.
+fn roots() -> Vec<(PathBuf, BTreeSet<String>)> {
+    let mut dirs = vec![std::env::temp_dir()];
+    if let Ok(d) = std::env::current_dir() {
+        dirs.push(d);
+    }
+    if cfg!(windows) {
+        if let Some(d) = std::path::absolute("C:x")
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+        {
+            dirs.push(d);
+        }
+        dirs.push(PathBuf::from("C:\\"));
+    } else {
+        dirs.push(PathBuf::from("/"));
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs.into_iter()
+        .map(|d| {
+            let names = std::fs::read_dir(&d)
+                .map(|r| {
+                    r.filter_map(Result::ok)
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (d, names)
+        })
+        .collect()
+}
+
+/// A name as Windows stores it, for comparison: lower case, trailing dots and spaces gone.
+fn normal(name: &str) -> String {
+    name.trim_end_matches(['.', ' ']).to_lowercase()
+}
+
+/// Every name a fixture's member could land under: the components of the unsafe names and the
+/// other fixtures' member names.
+fn member_names() -> BTreeSet<String> {
+    let mut set: BTreeSet<String> = UNSAFE_NAMES
+        .iter()
+        .flat_map(|n| n.split(['/', '\\', ':']))
+        .filter(|c| !matches!(*c, "" | "." | ".." | "?" | "a" | "C" | "server" | "share"))
+        .map(normal)
+        .collect();
+    for n in [
+        "ok.txt",
+        "a.bin",
+        "b.bin",
+        "big.bin",
+        "zeros.bin",
+        "passwd",
+        "up",
+        "abs",
+        "readme.txt",
+        "e4-7-through-link.txt",
+        "f0999999",
+    ] {
+        set.insert(normal(n));
+    }
+    set
+}
+
+/// No root gained an entry named like a fixture's member during the run.
+fn assert_no_new_member_names(
+    before: &[(PathBuf, BTreeSet<String>)],
+    after: &[(PathBuf, BTreeSet<String>)],
+) {
+    let watched = member_names();
+    for ((dir, b), (_, a)) in before.iter().zip(after) {
+        for n in a.difference(b) {
+            assert!(
+                !watched.contains(&normal(n)),
+                "{} gained {n:?} during the run",
+                dir.display()
+            );
         }
     }
 }
@@ -448,6 +564,74 @@ fn tar_member(out: &mut Vec<u8>, name: &[u8], kind: u8, link: &[u8], data: &[u8]
     out.resize(out.len().div_ceil(512) * 512, 0);
 }
 
+/// A 7z NUMBER (7zFormat.txt): one byte below 0x80, two below 0x4000, else 0xFF and 8 bytes.
+fn sz_number(out: &mut Vec<u8>, v: u64) {
+    if v < 0x80 {
+        out.push(v as u8);
+    } else if v < 0x4000 {
+        out.push(0x80 | (v >> 8) as u8);
+        out.push(v as u8);
+    } else {
+        out.push(0xFF);
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// A 7z (7zFormat.txt) of `members`, names written raw as UTF-16 (so `..` and drive names
+/// survive), each member its own block of one Copy coder (id 0x00) over its bytes: the pack
+/// streams in order after the signature header, then a plain (uncompressed) header with
+/// `PackInfo`, `UnpackInfo`, `SubStreamsInfo` (each member's CRC-32) and the names.
+fn sevenz(members: &[(&str, &[u8])]) -> Vec<u8> {
+    let n = members.len() as u64;
+    let mut h = vec![0x01, 0x04, 0x06]; // Header, MainStreamsInfo, PackInfo
+    sz_number(&mut h, 0); // PackPos
+    sz_number(&mut h, n);
+    h.push(0x09); // Size
+    for (_, d) in members {
+        sz_number(&mut h, d.len() as u64);
+    }
+    h.extend_from_slice(&[0x00, 0x07, 0x0B]); // End, UnpackInfo, Folder
+    sz_number(&mut h, n);
+    h.push(0x00); // not external
+    for _ in members {
+        h.extend_from_slice(&[0x01, 0x01, 0x00]); // one coder, a 1-byte id, Copy
+    }
+    h.push(0x0C); // CodersUnpackSize
+    for (_, d) in members {
+        sz_number(&mut h, d.len() as u64);
+    }
+    h.extend_from_slice(&[0x00, 0x08, 0x0A, 0x01]); // End, SubStreamsInfo, CRC, all defined
+    for (_, d) in members {
+        h.extend_from_slice(&crc32(d).to_le_bytes());
+    }
+    h.extend_from_slice(&[0x00, 0x00, 0x05]); // End, End, FilesInfo
+    sz_number(&mut h, n);
+    let mut names = vec![0x00]; // not external
+    for (name, _) in members {
+        for u in name.encode_utf16().chain([0]) {
+            names.extend_from_slice(&u.to_le_bytes());
+        }
+    }
+    h.push(0x11); // Name
+    sz_number(&mut h, names.len() as u64);
+    h.extend_from_slice(&names);
+    h.extend_from_slice(&[0x00, 0x00]); // End of FilesInfo, End of Header
+    let packed: Vec<u8> = members
+        .iter()
+        .flat_map(|(_, d)| d.iter().copied())
+        .collect();
+    let mut tail = Vec::with_capacity(20);
+    tail.extend_from_slice(&(packed.len() as u64).to_le_bytes());
+    tail.extend_from_slice(&(h.len() as u64).to_le_bytes());
+    tail.extend_from_slice(&crc32(&h).to_le_bytes());
+    let mut out = vec![0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04];
+    out.extend_from_slice(&crc32(&tail).to_le_bytes());
+    out.extend_from_slice(&tail);
+    out.extend_from_slice(&packed);
+    out.extend_from_slice(&h);
+    out
+}
+
 /// The two zero blocks that end a tar.
 fn tar_end(mut out: Vec<u8>) -> Vec<u8> {
     out.resize(out.len() + 1024, 0);
@@ -596,11 +780,14 @@ fn a_high_ratio_bomb_meets_the_expansion_limit() {
     };
     let a = s.write("bomb-lying.zip", &zip(&[lying]));
     let r = s.x(&a, &["--max-expansion", "100"], &[], SMALL);
-    assert_eq!(r.code, Some(2), "{}", r.message());
-    // The host cuts at the declaration (`SizeMismatch`) unless the reader stops first at the
-    // declared size and reports the damage (`Corrupt`): both before a byte past 1 KiB.
+    // Deterministic, no race: the `zip` crate's reader fails a member whose decoder yields more
+    // than its declared size ("File is larger than its declared uncompressed size") before
+    // handing the excess on, so the worker reports the damage itself (`Corrupt`) after at most
+    // 1 KiB of Data. (Were a reader to send more, the host would cut it at the declaration
+    // with `SizeMismatch`, its own check, which the 4 GiB test exercises.)
+    assert_refused(&r, "Corrupt");
     assert!(
-        matches!(r.kind(), Some("SizeMismatch" | "Corrupt")),
+        r.message().contains("larger than its declared"),
         "{}",
         r.message()
     );
@@ -640,6 +827,9 @@ fn assert_no_escape_at_roots() {
         "/e4-7-absolute.txt",
         "C:\\e4-7-drive.txt",
         "C:/e4-7-drive.txt",
+        "C:\\e4-7-device-path.txt",
+        // The C: drive's current directory (the test's cwd when on C:).
+        "C:e4-7-drive-relative.txt",
     ] {
         assert!(!Path::new(n).exists(), "{n} was written");
     }
@@ -655,6 +845,33 @@ fn unsafe_names_in_a_zip_are_refused() {
                 ZipMember::stored(b"ok.txt", b"fine"),
                 ZipMember::stored(name.as_bytes(), b"escaped"),
             ]),
+        );
+        let r = s.x(&a, &[], &[], SMALL);
+        assert_refused(&r, "UnsafePath");
+        assert!(s.written().is_empty(), "{name:?}: {:?}", s.written());
+        s.assert_nothing_outside();
+    }
+    assert_no_escape_at_roots();
+}
+
+/// The same names in a 7z (names are UTF-16; the reader reads backslashes as separators, as
+/// for ZIP), each refused with `UnsafePath`. A well-formed 7z of the same shape extracts, so
+/// the refusals are the names', not the builder's.
+#[test]
+fn unsafe_names_in_a_7z_are_refused() {
+    let Some(s) = stage() else { return };
+    let a = s.write(
+        "control.7z",
+        &sevenz(&[("ok.txt", b"fine"), ("dir/b.bin", b"second")]),
+    );
+    let r = s.x(&a, &[], &[], SMALL);
+    assert_eq!(r.code, Some(0), "{}", r.message());
+    assert_eq!(std::fs::read(s.out().join("dir/b.bin")).unwrap(), b"second");
+    s.clear_out();
+    for (i, name) in UNSAFE_NAMES.iter().enumerate() {
+        let a = s.write(
+            &format!("name-{i}.7z"),
+            &sevenz(&[("ok.txt", b"fine"), (name, b"escaped")]),
         );
         let r = s.x(&a, &[], &[], SMALL);
         assert_refused(&r, "UnsafePath");
@@ -775,6 +992,9 @@ fn names_differing_only_by_case_are_a_case_collision() {
 /// through the broker in pages of 4,096 (`PAGE`), writes the one file, and the host's peak
 /// working set stays under the listing charge it reports (`-v`: "listing charge N bytes",
 /// `entry_charge` summed). Bounds: 300 s (debug builds of both processes), and the charge.
+const PEAK_PER_MEMBER: u64 = 1024;
+const CHARGE_PER_MEMBER_MAX: u64 = 2048;
+
 #[test]
 fn a_million_member_central_directory_is_paged_under_the_listing_charge() {
     let Some(s) = stage() else { return };
@@ -797,10 +1017,17 @@ fn a_million_member_central_directory_is_paged_under_the_listing_charge() {
         f.write_all(&cd).unwrap();
         f.flush().unwrap();
     }
+    // Stated bounds, independent of what `lpk` reports: the host's peak at most 1,024 bytes per
+    // member (1 GiB for the million; 367 bytes per member measured on Windows), and 300 s.
     let bounds = Bounds {
         wall: Duration::from_secs(300),
-        memory: u64::MAX,
+        memory: N * PEAK_PER_MEMBER,
     };
+    // `--memory 4G`: the budget is both the listing's ceiling and the worker's commit limit
+    // (D-67). The default (half the physical memory, at most the tier's ceiling) varies with
+    // the machine and could refuse the listing (about 1 GB of charge) on a small CI runner, or
+    // starve the worker, which holds its own copy of the million ZIP headers; 4 GiB is the
+    // extraction ceiling and leaves room for both, so the run measures paging, not the budget.
     let r = s.x(&a, &["-v", "--memory", "4G"], &["f0999999"], bounds);
     assert_eq!(r.code, Some(0), "{}", r.message());
     assert!(r.stdout.contains("extracted 1 files"), "{}", r.stdout);
@@ -813,6 +1040,15 @@ fn a_million_member_central_directory_is_paged_under_the_listing_charge() {
         .and_then(|t| t.parse().ok())
         .unwrap_or_else(|| panic!("no listing charge in: {}", r.stderr));
     eprintln!("listing charge {charge} bytes, host peak {} bytes", r.peak);
+    // The reported charge against what the test computes: at least the record and the name's
+    // eight copies (`NAME_COPIES`) per member, at most the stated `CHARGE_PER_MEMBER_MAX`
+    // (1,009 bytes per member today: `ENTRY_CHARGE` 945 plus 8 x 8).
+    let floor = N * (std::mem::size_of::<lpk_proto::Record>() as u64 + 8 * 8);
+    assert!(
+        (floor..=N * CHARGE_PER_MEMBER_MAX).contains(&charge),
+        "listing charge {charge} outside {floor}..={}",
+        N * CHARGE_PER_MEMBER_MAX
+    );
     assert!(
         r.peak <= charge,
         "the host's peak {} exceeds the listing charge {charge}",
