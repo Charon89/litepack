@@ -365,6 +365,10 @@ pub(crate) struct Link {
     pub(crate) path: PathBuf,
     pub(crate) target: Vec<u8>,
     pub(crate) replace: bool,
+    /// The target names a directory of the archive (a directory entry, a parent implied by
+    /// another entry, or the destination itself): a directory link on Windows. Decided from
+    /// the archive alone, never from the file system.
+    pub(crate) dir: bool,
 }
 
 /// What every thread sees: the targets, their states and the counters. Cleanup reads the
@@ -817,6 +821,69 @@ impl PolicyPass {
     }
 }
 
+/// The archive's own namespace, for the kind of a symlink to create (E6-0; never for its
+/// safety, which [`policy::resolve_symlink_target`] judges from the target alone): its
+/// directory entries and every entry path, sorted, so a path some entry lies below is a
+/// directory too. Folded on a case-insensitive target as the disk compares. Memory and time
+/// are linear in the entries' path bytes (plus the sort); empty when no entry is a symlink.
+struct Namespace {
+    dirs: HashSet<String>,
+    paths: Vec<String>,
+    fold: bool,
+}
+
+impl Namespace {
+    fn new(entries: &[Entry], fold: bool) -> Self {
+        let mut ns = Namespace {
+            dirs: HashSet::new(),
+            paths: Vec::new(),
+            fold,
+        };
+        if !entries.iter().any(|e| e.kind == EntryKind::Symlink) {
+            return ns;
+        }
+        for e in entries {
+            let k = ns.key(&e.path);
+            if e.kind == EntryKind::Directory {
+                ns.dirs.insert(k.clone());
+            }
+            ns.paths.push(k);
+        }
+        ns.paths.sort_unstable();
+        ns
+    }
+
+    fn key(&self, p: &str) -> String {
+        if self.fold {
+            p.to_lowercase()
+        } else {
+            p.to_string()
+        }
+    }
+
+    /// Whether `to` (an archive path, `""` for the destination) is a directory of the archive:
+    /// a directory entry, or a parent some entry lies below.
+    fn is_dir(&self, to: &str) -> bool {
+        if to.is_empty() {
+            return true;
+        }
+        let k = self.key(to);
+        if self.dirs.contains(&k) {
+            return true;
+        }
+        let below = format!("{k}/");
+        let i = self.paths.partition_point(|p| p.as_str() < below.as_str());
+        self.paths.get(i).is_some_and(|p| p.starts_with(&below))
+    }
+
+    /// Whether the link at archive path `link` with `target` is a directory link, or why the
+    /// target is refused ([`policy::resolve_symlink_target`]). No file-system call.
+    fn resolve(&self, link: &str, target: &[u8]) -> Result<bool, policy::TargetRefusal> {
+        let to = policy::resolve_symlink_target(link, target)?;
+        Ok(self.is_dir(&to))
+    }
+}
+
 /// E3-2's pass over `entries` before anything is written, shared by `.lpk` extraction and the
 /// foreign-archive broker (`crate::foreign`): the selection, then per entry the symlink rule,
 /// the path and device rules, then the conflicting-name rule and (on a case-insensitive
@@ -828,6 +895,9 @@ pub(crate) fn policy_pass(
     policy: &dyn ExtractPolicy,
     select: &Selection,
 ) -> Result<PolicyPass, CoreError> {
+    // The archive's namespace for link targets, from every entry (a link may name an entry
+    // the selection leaves out).
+    let namespace = Namespace::new(&entries, policy::case_insensitive_target(dir));
     // The selection first: the policy's rules and the placements concern only what is
     // extracted, and a pattern without a match is refused here, before any output.
     let entries = select.filter(entries, |e| e.path.as_str())?;
@@ -880,6 +950,22 @@ pub(crate) fn policy_pass(
                 Placed::Skipped
             }
             EntryKind::Symlink | EntryKind::File => {
+                // A link to create: its target is judged from the archive alone, before
+                // anything at the link's path is looked at; a refused one is skipped.
+                let link_dir = if e.kind == EntryKind::Symlink {
+                    let target = e.symlink_target.as_deref().unwrap_or_default();
+                    match namespace.resolve(&e.path, target) {
+                        Ok(dir) => dir,
+                        Err(refusal) => {
+                            policy.symlink_target_refused(e, refusal);
+                            symlinks_skipped += 1;
+                            placed.push(Placed::Skipped);
+                            continue;
+                        }
+                    }
+                } else {
+                    false
+                };
                 let wanted = if e.kind == EntryKind::Symlink {
                     Wanted::Symlink
                 } else {
@@ -903,6 +989,7 @@ pub(crate) fn policy_pass(
                         path,
                         target: e.symlink_target.clone().unwrap_or_default(),
                         replace,
+                        dir: link_dir,
                     }),
                     Some((path, replace)) => Placed::File { path, replace },
                 }
@@ -1020,46 +1107,77 @@ pub(crate) fn make_dirs(mkdirs: &[PathBuf]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Create the plan's symlinks, in entry order (after the directories, before the files). On
-/// Windows the target is read as UTF-8 and the link is a directory link when the target,
-/// resolved against the link's directory, is a directory now, else a file link.
+/// Create the plan's symlinks, in entry order (after the directories, before the files). Every
+/// target here passed [`policy::resolve_symlink_target`] in the policy pass; a refused one
+/// never reaches this phase. On Windows the target is read as UTF-8 and the link kind is the
+/// plan's ([`Link::dir`], from the archive); nothing reads the target on any system.
 pub(crate) fn make_links(links: &[Link]) -> Result<(), CoreError> {
     for l in links {
         if l.replace {
             policy::remove_existing(&l.path).map_err(|e| io(&l.path, e))?;
         }
-        make_link(&l.path, &l.target).map_err(|e| io(&l.path, e))?;
+        #[cfg(test)]
+        seam::record(&l.target);
+        make_link(&l.path, &l.target, l.dir).map_err(|e| io(&l.path, e))?;
     }
     Ok(())
 }
 
+/// The test seam of the link phase: every target handed to the operating system by
+/// [`make_links`] (the only code of the extraction that passes a target to a system call) is
+/// recorded per thread, so a test can prove a refused target was never touched.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SEEN: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record(target: &[u8]) {
+        SEEN.with(|s| s.borrow_mut().push(target.to_vec()));
+    }
+
+    /// The targets recorded on this thread since the last call.
+    pub(crate) fn take() -> Vec<Vec<u8>> {
+        SEEN.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+}
+
 #[cfg(unix)]
-fn make_link(path: &Path, target: &[u8]) -> std::io::Result<()> {
+fn make_link(path: &Path, target: &[u8], _dir: bool) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), path)
 }
 
 #[cfg(windows)]
-fn make_link(path: &Path, target: &[u8]) -> std::io::Result<()> {
+fn make_link(path: &Path, target: &[u8], dir: bool) -> std::io::Result<()> {
     let target = std::str::from_utf8(target).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "symlink target is not UTF-8",
         )
     })?;
-    let resolved = path
-        .parent()
-        .map(|p| p.join(target))
-        .unwrap_or_else(|| PathBuf::from(target));
-    if std::fs::metadata(&resolved).is_ok_and(|m| m.is_dir()) {
-        std::os::windows::fs::symlink_dir(target, path)
+    let target = windows_link_target(target);
+    if dir {
+        std::os::windows::fs::symlink_dir(&target, path)
     } else {
-        std::os::windows::fs::symlink_file(target, path)
+        std::os::windows::fs::symlink_file(&target, path)
     }
 }
 
+/// The target a Windows link is created with: the archive's, every `/` made `\`. Windows does
+/// not traverse a link whose target uses `/` (`ERROR_INVALID_NAME`), and the resolver
+/// ([`policy::resolve_symlink_target`]) already read both as separators on Windows, so the
+/// link names what was judged. The archive's own form is kept everywhere else (listing,
+/// export, Unix).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_link_target(target: &str) -> String {
+    target.replace('/', "\\")
+}
+
 #[cfg(not(any(unix, windows)))]
-fn make_link(_path: &Path, _target: &[u8]) -> std::io::Result<()> {
+fn make_link(_path: &Path, _target: &[u8], _dir: bool) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "symlinks are not supported on this platform",
@@ -1902,4 +2020,138 @@ pub fn extract_file_with(
     }
     crate::register_full_reader(&mut a);
     extract_archive_with(&mut a, || File::open(path), dir, policy, opts, monitor)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::policy::{Overwrite, Policy, Symlinks, TargetRefusal as R};
+    use lpk_format::EntryFlags;
+
+    fn entry(kind: EntryKind, path: &str, target: Option<&[u8]>) -> Entry {
+        Entry {
+            kind,
+            flags: EntryFlags::EMPTY,
+            path: path.to_string(),
+            mtime_ns: 0,
+            size: target.map_or(0, |t| t.len() as u64),
+            symlink_target: target.map(<[u8]>::to_vec),
+            chunks: Vec::new(),
+        }
+    }
+
+    /// E6-0: a Windows link is created with `\` for every `/` of the archive's target (Windows
+    /// does not traverse `/` in a link target); `\` and everything else are kept. The plan's
+    /// `Link` keeps the archive's bytes, so nothing else (listing, export, Unix) changes.
+    #[test]
+    fn windows_link_targets_use_backslashes() {
+        assert_eq!(windows_link_target("../d/in.txt"), "..\\d\\in.txt");
+        assert_eq!(windows_link_target("a.txt"), "a.txt");
+        assert_eq!(windows_link_target("..\\x/y"), "..\\x\\y");
+        assert_eq!(windows_link_target("d/"), "d\\");
+        assert_eq!(windows_link_target("ünï/cødé"), "ünï\\cødé");
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("out");
+        let entries = vec![entry(EntryKind::Symlink, "sub/l", Some(b"../a/b"))];
+        let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
+        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        match &pass.placed[0] {
+            Placed::Link(l) => assert_eq!(l.target, b"../a/b"),
+            p => panic!("{p:?}"),
+        }
+    }
+
+    /// E6-0, through the policy pass and the link phase (the path `.lpk` extraction and the
+    /// foreign-archive broker share): every refused target is skipped, counted and recorded,
+    /// never placed as a link, and never handed to the operating system — the link phase's
+    /// seam ([`seam`]) records every target `make_links` passes on, and none of the refused
+    /// ones is among them. The pass itself judges targets with a pure function (no path, no
+    /// file-system call). In-tree links get their kind from the archive: a directory entry, an
+    /// implied parent or the destination gives a directory link, anything else a file link,
+    /// whatever exists on disk (here a directory named like the file entry's target exists
+    /// before the extraction and is still not a directory link's reason).
+    #[test]
+    fn refused_targets_never_reach_the_link_phase_and_kinds_come_from_the_archive() {
+        let refused: [(&str, &[u8], R); 7] = [
+            ("unc", b"\\\\192.0.2.1\\share\\x", R::Unc),
+            ("abs", b"C:\\x", R::Absolute),
+            ("drive", b"C:x", R::DriveRelative),
+            ("rooted", b"\\x", R::Rooted),
+            ("slash", b"/x", R::Rooted),
+            ("sub/esc", b"../../x", R::Escapes),
+            ("dev", b"\\\\?\\UNC\\192.0.2.1\\share", R::DevicePath),
+        ];
+        let mut entries = vec![
+            entry(EntryKind::File, "a.txt", None),
+            entry(EntryKind::Directory, "d", None),
+            entry(EntryKind::File, "e/f", None),
+        ];
+        for (p, t, _) in &refused {
+            entries.push(entry(EntryKind::Symlink, p, Some(t)));
+        }
+        let fine: [(&str, &[u8], bool); 5] = [
+            ("to_file", b"a.txt", false),
+            ("to_dir", b"d", true),
+            ("to_implied", b"e", true),
+            ("sub/to_root", b"..", true),
+            ("sub/missing", b"../nothing", false),
+        ];
+        for (p, t, _) in &fine {
+            entries.push(entry(EntryKind::Symlink, p, Some(t)));
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("out");
+        // Something on disk named like a file entry's target: ignored for the kind.
+        std::fs::create_dir_all(out.join("nothing")).unwrap();
+        let policy = Policy::new(Overwrite::Refuse, Symlinks::Create);
+        let pass = policy_pass(entries, &out, &policy, &Selection::all()).unwrap();
+        assert_eq!(pass.symlinks_skipped, refused.len() as u64);
+        let want: Vec<(String, R)> = refused
+            .iter()
+            .map(|(p, _, r)| (p.to_string(), *r))
+            .collect();
+        assert_eq!(policy.refused_symlink_targets(), want);
+        let links: Vec<&Link> = pass
+            .placed
+            .iter()
+            .filter_map(|p| match p {
+                Placed::Link(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        let kinds: Vec<(&[u8], bool)> = links.iter().map(|l| (&l.target[..], l.dir)).collect();
+        let want: Vec<(&[u8], bool)> = fine.iter().map(|(_, t, d)| (*t, *d)).collect();
+        assert_eq!(kinds, want);
+        // The link phase over the plan: only in-tree targets reach the operating system.
+        make_dirs(&pass.mkdirs(&out)).unwrap();
+        let owned: Vec<Link> = pass
+            .placed
+            .into_iter()
+            .filter_map(|p| match p {
+                Placed::Link(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        let _ = seam::take();
+        let made = make_links(&owned);
+        let seen = seam::take();
+        for (_, t, _) in &refused {
+            assert!(!seen.iter().any(|s| s == t), "{seen:?}");
+        }
+        for (p, _, _) in &refused {
+            assert!(std::fs::symlink_metadata(out.join(p)).is_err(), "{p}");
+        }
+        match made {
+            Ok(()) => assert_eq!(seen.len(), fine.len()),
+            // Windows without the privilege: the first creation fails; it was in-tree.
+            Err(e) => {
+                if !cfg!(windows) {
+                    panic!("{e:?}");
+                }
+                assert_eq!(seen, vec![fine[0].1.to_vec()]);
+                println!("SKIPPED: link creation refused on this machine ({e})");
+            }
+        }
+    }
 }
