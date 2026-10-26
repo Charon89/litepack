@@ -174,6 +174,33 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
                 brackets(&BTreeSet::from([d.run_src]))
             ));
         }
+        if b.pooled.iter().any(|d| d.manifest != b.pooled[0].manifest) {
+            // E8-10: the directories measured different manifests; rows pooled class by class.
+            s.push_str(
+                "- corpus manifests differ between the directories (rows pool class by class: \
+                 same manifest, or equal class digests, E8-10):\n",
+            );
+            for d in &b.pooled {
+                s.push_str(&format!(
+                    "  - `{}`: manifest BLAKE3 `{}`\n",
+                    d.label, d.manifest
+                ));
+            }
+            let classes = super::classes_pooled_by_digest(b);
+            s.push_str(&format!(
+                "  - classes whose rows come from more than one manifest, pooled by equal class \
+                 digest: {}\n",
+                if classes.is_empty() {
+                    "none".to_string()
+                } else {
+                    classes
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ));
+        }
         if !b.superseded.is_empty() {
             s.push_str(
                 "- Superseded rows (a later directory's re-measurement replaces an earlier \

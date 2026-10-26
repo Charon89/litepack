@@ -2097,9 +2097,12 @@ fn a_manifest_mismatch_is_refused() {
     let a = dir_under(tmp.path(), "a", &real_class_results());
     let mut r = second_results();
     r[0].corpus.manifest_blake3 = "0".repeat(64);
+    // Another manifest and another class digest of `audio` (E8-10: equal digests would pool).
+    r[0].corpus.class_blake3 = Some("0".repeat(64));
     let c = dir_under(tmp.path(), "c", &r);
     let err = load(&pooled_args(tmp.path(), vec![a, c])).expect_err("mismatch");
     assert!(format!("{err:#}").contains("manifest"), "{err:#}");
+    assert!(format!("{err:#}").contains("class `audio`"), "{err:#}");
 }
 
 #[test]
@@ -2432,7 +2435,7 @@ fn b_with_file(tmp: &Path) -> std::path::PathBuf {
 }
 
 #[test]
-fn a_superseding_row_from_another_tool_version_is_refused() {
+fn a_superseding_row_from_another_tool_version_pools_once_the_old_rows_leave() {
     let tmp = tempfile::tempdir().expect("tmp");
     let a = dir_under(tmp.path(), "a", &real_class_results());
     // The result file and tools.json both say 27.00, so only the pool's version rule refuses.
@@ -2441,11 +2444,11 @@ fn a_superseding_row_from_another_tool_version_is_refused() {
     let b = dir_under(tmp.path(), "b", &r);
     set_tool_version(&b, "7z", "27.00");
     write_supersedes(&b, &[("7z", "mx5", "audio", "2026-10-01-testbox")]);
-    let err = load(&pooled_args(tmp.path(), vec![a, b])).expect_err("versions");
-    assert!(
-        format!("{err:#}").contains("has rows at version"),
-        "{err:#}"
-    );
+    // D-103 (b): the superseded row leaves before the version rule runs, and `a` has no other
+    // 7z row, so the newer build's row pools (it used to be refused here).
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("versions");
+    let seven = inputs.baseline.tools.tools.iter().find(|t| t.id == "7z");
+    assert_eq!(seven.and_then(|t| t.version.as_deref()), Some("27.00"));
 }
 
 #[test]
@@ -2493,6 +2496,7 @@ fn pool_reasons_name_the_threads_and_the_lpk_build_and_the_loader_uses_them() {
         threads,
         settle_ms: 1,
         antivirus_changed: false,
+        manifest: String::new(),
         rows: vec![],
     };
     let (d1, d2) = (d(4), d(8));
@@ -3080,4 +3084,229 @@ fn g3_measured_says_one_run_when_both_rows_come_from_the_same_directory() {
         "{:?}",
         g.notes
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// E8-10: per-class corpus digests, the store control in gates, supersedes before version checks
+
+/// Two manifests of one profile: `video` changes between them (a re-pin), `audio` does not.
+fn two_manifests() -> (
+    crate::corpus::manifest::Manifest,
+    crate::corpus::manifest::Manifest,
+) {
+    use crate::corpus::manifest::{Manifest, ManifestFile};
+    let f = |path: &str, bytes: u64, hash: &str| ManifestFile {
+        blake3: hash.repeat(32),
+        bytes,
+        licence: "MIT".into(),
+        path: path.into(),
+        source: "s".into(),
+    };
+    let audio = || ("audio".to_string(), f("audio/s/a.flac", 5, "11"));
+    let first = Manifest::with_profile_name(
+        "small",
+        vec![audio(), ("video".into(), f("video/s/v1.mp4", 7, "22"))],
+    );
+    let second = Manifest::with_profile_name(
+        "small",
+        vec![audio(), ("video".into(), f("video/s/v2.mp4", 8, "33"))],
+    );
+    (first, second)
+}
+
+fn manifest_hash(m: &crate::corpus::manifest::Manifest) -> String {
+    blake3::hash(m.render().as_bytes()).to_hex().to_string()
+}
+
+/// The sample row `7z/<setting>` on `class`, measured over manifest `m`.
+fn row_on(m: &crate::corpus::manifest::Manifest, setting: &str, class: &str) -> ToolResult {
+    let mut r = samples::measured();
+    r.setting.id = setting.into();
+    r.class = class.into();
+    r.corpus.manifest_blake3 = manifest_hash(m);
+    r.corpus.class_blake3 = m.class_blake3(class);
+    r
+}
+
+#[test]
+fn rows_of_unchanged_classes_pool_across_a_re_pin_and_a_changed_class_is_refused() {
+    let (m1, m2) = two_manifests();
+    let (h1, h2) = (manifest_hash(&m1), manifest_hash(&m2));
+    assert_ne!(h1, h2);
+    assert_eq!(m1.class_blake3("audio"), m2.class_blake3("audio"));
+    assert_ne!(m1.class_blake3("video"), m2.class_blake3("video"));
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(
+        tmp.path(),
+        "a",
+        &[row_on(&m1, "mx5", "audio"), row_on(&m1, "mx5", "video")],
+    );
+    // The unchanged class measured again over the second manifest: pools by digest.
+    let b = dir_under(tmp.path(), "b", &[row_on(&m2, "ultra", "audio")]);
+    let inputs = load(&pooled_args(tmp.path(), vec![a.clone(), b])).expect("pooled by digest");
+    assert_eq!(inputs.baseline.results.len(), 3);
+    assert_eq!(classes_pooled_by_digest(&inputs.baseline), vec!["audio"]);
+    let text = report_text(&inputs);
+    assert!(
+        text.contains("- corpus manifests differ between the directories"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "  - `a/2026-10-01-testbox`: manifest BLAKE3 `{h1}`\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "  - `b/2026-10-01-testbox`: manifest BLAKE3 `{h2}`\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("pooled by equal class digest: `audio`\n"),
+        "{text}"
+    );
+    // The changed class: refused, naming it.
+    let c = dir_under(tmp.path(), "c", &[row_on(&m2, "ultra", "video")]);
+    let err = format!(
+        "{:#}",
+        load(&pooled_args(tmp.path(), vec![a.clone(), c])).expect_err("changed class")
+    );
+    assert!(
+        err.contains("class `video`") && err.contains("files differ"),
+        "{err}"
+    );
+    // A row of schema version 1 (no digest) pools only over the same manifest.
+    let mut old = row_on(&m2, "ultra", "audio");
+    old.schema_version = 1;
+    old.corpus.class_blake3 = None;
+    let d = dir_under(tmp.path(), "d", &[old]);
+    let err = format!(
+        "{:#}",
+        load(&pooled_args(tmp.path(), vec![a.clone(), d])).expect_err("no digest")
+    );
+    assert!(
+        err.contains("class `audio`") && err.contains("no class digest"),
+        "{err}"
+    );
+    // ... and still pools under the equal-manifest rule, as before E8-10.
+    let mut same = row_on(&m1, "ultra", "video");
+    same.schema_version = 1;
+    same.corpus.class_blake3 = None;
+    let e = dir_under(tmp.path(), "e", &[same]);
+    let inputs = load(&pooled_args(tmp.path(), vec![a, e])).expect("same manifest");
+    assert!(!report_text(&inputs).contains("corpus manifests differ"));
+}
+
+#[test]
+fn a_re_pinned_class_pools_when_the_later_directory_supersedes_its_rows() {
+    let (m1, m2) = two_manifests();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(
+        tmp.path(),
+        "a",
+        &[row_on(&m1, "mx5", "audio"), row_on(&m1, "mx5", "video")],
+    );
+    let b = dir_under(tmp.path(), "b", &[row_on(&m2, "mx5", "video")]);
+    write_supersedes(&b, &[("7z", "mx5", "video", "a/2026-10-01-testbox")]);
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("re-pin superseded");
+    assert_eq!(inputs.baseline.results.len(), 2);
+    assert!(classes_pooled_by_digest(&inputs.baseline).is_empty());
+    assert!(report_text(&inputs).contains("pooled by equal class digest: none\n"));
+}
+
+#[test]
+fn a_newer_build_supersedes_an_older_builds_rows_without_a_version_conflict() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &remeasured_mx5());
+    let newer = |name: &str| {
+        let mut r = remeasured_mx5();
+        r[0].tool.version = Some("26.04".into());
+        let dir = dir_under(tmp.path(), name, &r);
+        let mut tools = samples::tools();
+        for t in &mut tools.tools {
+            if t.id == "7z" {
+                t.version = Some("26.04".into());
+            }
+        }
+        std::fs::write(dir.join("tools.json"), render_json(&tools)).expect("tools");
+        dir
+    };
+    // Without a supersedes.toml the two versions of one tool are refused, as before.
+    let b = newer("b");
+    let err = format!(
+        "{:#}",
+        load(&pooled_args(tmp.path(), vec![a.clone(), b])).expect_err("two versions")
+    );
+    assert!(err.contains("has rows at version"), "{err}");
+    // With it, the replaced rows leave first: the newer build's rows pool.
+    let c = newer("c");
+    write_supersedes(&c, &[("7z", "mx5", "audio", "a/2026-10-01-testbox")]);
+    let inputs = load(&pooled_args(tmp.path(), vec![a, c])).expect("superseded build");
+    let seven = inputs
+        .baseline
+        .tools
+        .tools
+        .iter()
+        .find(|t| t.id == "7z")
+        .expect("7z");
+    assert_eq!(seven.version.as_deref(), Some("26.04"));
+    assert_eq!(inputs.baseline.results.len(), 1);
+}
+
+/// D-103 (a): with only the subject and the store control measured, no gate takes the control as
+/// its best incumbent: G1 and G2 are `not evaluable`, never a pass.
+#[test]
+fn the_store_control_is_never_a_gates_best_incumbent() {
+    let mut i = inputs(&Knobs::default(), true);
+    i.baseline.results.retain(|(r, _)| r.tool.id == STORE.0);
+    i.baseline.run.combinations.retain(|c| c.tool == STORE.0);
+    let all = rows(&i.baseline);
+    assert!(gate_best(&all, G2_CLASS).is_none());
+    assert!(best_single(&all, &G1_CLASSES).is_none());
+    // The per-class table still shows the control when it is all there is.
+    assert!(best_incumbent(&all, G2_CLASS).is_some());
+    for g in ["G1", "G2"] {
+        assert!(
+            matches!(verdict_of(&i, g), Verdict::NotEvaluable(_)),
+            "{g}: {:?}",
+            verdict_of(&i, g)
+        );
+    }
+    // Phase 1 form: an lpk/balanced row far below the store row still finds no incumbent.
+    i.baseline.tools.tools.push(crate::run::result::ToolEntry {
+        id: SUBJECT_TOOL.into(),
+        name: "LitePack".into(),
+        status: "found".into(),
+        reason: None,
+        version: Some("0.0.1+abcdefabcdef".into()),
+        catalogue_verified: true,
+        manual: false,
+        local_override: false,
+        dedup: Some(false),
+    });
+    for c in G1_CLASSES.iter().copied().chain([G2_CLASS]) {
+        i.baseline.results.push((
+            result(SUBJECT_TOOL, "balanced", c, 9_100_000, 1_000, 50.0, 100.0),
+            1,
+        ));
+        i.baseline
+            .run
+            .combinations
+            .push(crate::run::result::RunCombination {
+                tool: SUBJECT_TOOL.into(),
+                setting: "balanced".into(),
+                class: c.into(),
+                outcome: "measured".into(),
+            });
+    }
+    match verdict_of(&i, "G2") {
+        Verdict::NotEvaluable(why) => assert!(why.contains("no measured incumbent"), "{why}"),
+        v => panic!("G2: {v:?}"),
+    }
+    match verdict_of(&i, "G1") {
+        Verdict::NotEvaluable(why) => assert!(why.contains("no measured incumbent"), "{why}"),
+        v => panic!("G1: {v:?}"),
+    }
 }

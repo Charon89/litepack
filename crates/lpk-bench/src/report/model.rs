@@ -94,6 +94,9 @@ pub struct PoolDir {
     pub threads: u32,
     pub settle_ms: u64,
     pub antivirus_changed: bool,
+    /// The corpus manifest BLAKE3 its rows name (one per results directory, checked by the
+    /// validator).
+    pub manifest: String,
     /// The source ids of the result rows this directory supplies to the pool (a superseded row
     /// is taken out of its directory's list).
     pub rows: Vec<SourceId>,
@@ -448,6 +451,19 @@ fn star(m: &Measured) -> &'static str {
 /// [`SUBJECT_TOOL`]); the value carries the sources of every row compared.
 pub fn best_incumbent(rows: &[Row], class: &str) -> Option<Incumbent> {
     best_incumbent_where(rows, class, |t| t != SUBJECT_TOOL)
+}
+
+/// A tool a gate may take as "the best incumbent": neither the subject ([`SUBJECT_TOOL`]) nor
+/// the store control ([`STORE`]), which compresses nothing (D-103, E8-10). With no other tool
+/// measured, a gate is `not evaluable`, never a pass against the control.
+pub fn is_gate_incumbent(tool: &str) -> bool {
+    tool != SUBJECT_TOOL && tool != STORE.0
+}
+
+/// The best incumbent of `class` as a gate takes it ([`is_gate_incumbent`]). The per-class
+/// tables keep [`best_incumbent`], which still lists the store control when it is smallest.
+pub fn gate_best(rows: &[Row], class: &str) -> Option<Incumbent> {
+    best_incumbent_where(rows, class, is_gate_incumbent)
 }
 
 /// [`best_incumbent`] over the rows whose tool id `keep` accepts.
@@ -821,8 +837,9 @@ pub fn best_single(rows: &[Row], classes: &[&str]) -> Option<Incumbent> {
     let mut best: Option<(String, Traced, bool)> = None;
     let mut seen = std::collections::BTreeSet::new();
     for (t, s) in settings(rows) {
-        if t == SUBJECT_TOOL {
-            // The subject's rows are compared with the incumbents, never counted as one.
+        if !is_gate_incumbent(&t) {
+            // The subject's rows are compared with the incumbents, never counted as one; nor is
+            // the store control (D-103).
             continue;
         }
         let mut parts = Vec::new();
@@ -1153,7 +1170,7 @@ fn gate1(m: &Model) -> GateRow {
             why.get_or_insert(format!("class {c} is not in the corpus"));
             continue;
         };
-        match (&v.est, &v.best, &v.ultra) {
+        match (&v.est, &gate_best(&m.rows, c), &v.ultra) {
             (Ok(e), Some(b), Some(u)) => {
                 parts.push((c, e.bytes.clone(), b.bytes.clone(), u.clone()))
             }
@@ -1265,7 +1282,7 @@ fn gate2(m: &Model, probes: &Probes) -> GateRow {
             refs.sort_unstable();
             refs.dedup();
             let compared =
-                best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t) && t != SUBJECT_TOOL);
+                best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t) && is_gate_incumbent(t));
             if m.dedup_known {
                 numbers.push(format!(
                     "tools treated as deduplicating: {}",
@@ -1599,7 +1616,11 @@ fn gate1_measured(m: &Model) -> GateRow {
             why.get_or_insert(format!("class {c} is not in the corpus"));
             continue;
         };
-        match (subject_row(&m.rows, SUBJECT_BALANCED, c), &v.best, &v.ultra) {
+        match (
+            subject_row(&m.rows, SUBJECT_BALANCED, c),
+            &gate_best(&m.rows, c),
+            &v.ultra,
+        ) {
             (Ok((_, s)), Some(b), Some(u)) => {
                 single |= s.single.is_some();
                 parts.push((c, s.size_bytes.clone(), b.bytes.clone(), u.clone()));
@@ -1710,7 +1731,7 @@ fn gate2_measured(m: &Model, probes: &Probes) -> GateRow {
             refs.sort_unstable();
             refs.dedup();
             let compared =
-                best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t) && t != SUBJECT_TOOL);
+                best_incumbent_where(&m.rows, G2_CLASS, |t| !is_dedup(t) && is_gate_incumbent(t));
             if m.dedup_known {
                 numbers.push(format!(
                     "tools treated as deduplicating: {}",

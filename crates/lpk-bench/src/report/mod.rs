@@ -360,6 +360,11 @@ fn pool_dir(label: String, b: &Baseline) -> model::PoolDir {
         threads: b.run.threads,
         settle_ms: b.run.settle_ms_per_1000_files,
         antivirus_changed: b.run.antivirus_changed,
+        manifest: b
+            .results
+            .first()
+            .map(|(r, _)| r.corpus.manifest_blake3.clone())
+            .unwrap_or_default(),
         rows: b.results.iter().map(|(_, s)| *s).collect(),
     }
 }
@@ -442,7 +447,93 @@ fn has_rows(b: &[(ToolResult, SourceId)], id: &str) -> bool {
     b.iter().any(|(r, _)| r.tool.id == id)
 }
 
-/// Pool `next` into `base`: same corpus manifest and host required; rows keep their own source
+/// The label of the pooled directory that supplied row source `src`.
+fn label_of(base: &Baseline, src: SourceId) -> &str {
+    base.pooled
+        .iter()
+        .find(|d| d.rows.contains(&src))
+        .map_or("?", |d| d.label.as_str())
+}
+
+/// The corpus rule of pooling (D-48, E8-10), row by row: a row of `next` pools with an earlier
+/// row of its class when both name the same manifest, or else when both carry a class digest
+/// and the digests are equal. A row of a class no earlier row has pools when its manifest is one
+/// an earlier row names, or else when it carries a class digest. A row without a digest
+/// (schema version 1) therefore pools only under the equal-manifest rule. A refusal names the
+/// class.
+fn check_same_corpus(base: &Baseline, next: &Baseline, name: &str) -> Result<()> {
+    let manifests: BTreeSet<&str> = base
+        .results
+        .iter()
+        .map(|(r, _)| r.corpus.manifest_blake3.as_str())
+        .collect();
+    for (r, _) in &next.results {
+        let here = &r.corpus;
+        let mut earlier = base.results.iter().filter(|(b, _)| b.class == r.class);
+        let mut any = false;
+        for (b, src) in earlier.by_ref() {
+            any = true;
+            let there = &b.corpus;
+            if there.manifest_blake3 == here.manifest_blake3 {
+                continue;
+            }
+            match (&here.class_blake3, &there.class_blake3) {
+                (Some(x), Some(y)) if x == y => {}
+                (Some(x), Some(y)) => bail!(
+                    "{name}: class `{}`: its files differ from those `{}` measured (class digest \
+                     {x} here, {y} there; manifests {} and {}); rows of a class pool only over \
+                     the same files: re-measure the class, or list the earlier rows in this \
+                     directory's {}",
+                    r.class,
+                    label_of(base, *src),
+                    here.manifest_blake3,
+                    there.manifest_blake3,
+                    supersede::FILE_NAME
+                ),
+                _ => bail!(
+                    "{name}: class `{}`: corpus manifest {} differs from {} of `{}` and a row \
+                     carries no class digest (rows of result schema version 1 pool only over \
+                     the same manifest)",
+                    r.class,
+                    here.manifest_blake3,
+                    there.manifest_blake3,
+                    label_of(base, *src)
+                ),
+            }
+        }
+        if !any && !manifests.contains(here.manifest_blake3.as_str()) && here.class_blake3.is_none()
+        {
+            bail!(
+                "{name}: class `{}`: corpus manifest {} is not one an earlier directory measured \
+                 and the row carries no class digest (rows of result schema version 1 pool only \
+                 over the same manifest)",
+                r.class,
+                here.manifest_blake3
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The classes whose pooled rows name more than one corpus manifest: pooled by class digest
+/// (E8-10). Empty when every row names one manifest.
+pub fn classes_pooled_by_digest(b: &Baseline) -> Vec<String> {
+    let mut by_class: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (r, _) in &b.results {
+        by_class
+            .entry(r.class.as_str())
+            .or_default()
+            .insert(r.corpus.manifest_blake3.as_str());
+    }
+    by_class
+        .into_iter()
+        .filter(|(_, m)| m.len() > 1)
+        .map(|(c, _)| c.to_string())
+        .collect()
+}
+
+/// Pool `next` into `base`: the same corpus profile and host, and the corpus rule of
+/// [`check_same_corpus`]; rows keep their own source
 /// ids. `tools.json` entries are merged: a tool's entry (and version) comes from the directory
 /// that holds its rows, two directories with rows of one tool must agree on the version, a
 /// `dedup` of `None` is unknown and takes the other side's flag, and `Some(a)` against
@@ -452,12 +543,12 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path, allow_unclean: bool) ->
     let (Some((first, _)), Some((other, _))) = (base.results.first(), next.results.first()) else {
         bail!("{name}: no results to pool");
     };
-    if other.corpus.manifest_blake3 != first.corpus.manifest_blake3 {
+    if other.corpus.profile != first.corpus.profile {
         bail!(
-            "{name}: corpus manifest BLAKE3 {} differs from the first directory's {}; pooled \
+            "{name}: corpus profile `{}` differs from the first directory's `{}`; pooled \
              directories must measure the same corpus",
-            other.corpus.manifest_blake3,
-            first.corpus.manifest_blake3
+            other.corpus.profile,
+            first.corpus.profile
         );
     }
     if next.host.host != base.host.host {
@@ -477,6 +568,35 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path, allow_unclean: bool) ->
     }
     let pd = pool_dir(dir_label(dir).0, &next);
     let supersedes = read_supersedes(base, &next, dir)?;
+    // The superseded rows leave the earlier directory's contribution (never the disk) first, so
+    // the corpus and tool-version checks below see only the rows that stay (E8-10, D-103): a
+    // newer build's rows may replace an older build's, and a re-pinned class's new rows may
+    // replace its old ones.
+    for (e, from) in supersedes {
+        let (Some(pos), Some((_, by_src))) = (
+            row_of(base, &e, from),
+            next.results.iter().find(|(r, _)| is_row(r, &e)),
+        ) else {
+            bail!("{name}: {} vanished while pooling", e.combination());
+        };
+        let (_, from_src) = base.results.remove(pos);
+        base.pooled[from].rows.retain(|s| *s != from_src);
+        let key = (&e.tool, &e.setting, &e.class);
+        base.run
+            .combinations
+            .retain(|c| (&c.tool, &c.setting, &c.class) != key);
+        base.superseded.push(model::Superseded {
+            tool: e.tool,
+            setting: e.setting,
+            class: e.class,
+            from: base.pooled[from].label.clone(),
+            from_src,
+            by: pd.label.clone(),
+            by_src: *by_src,
+            reason: e.reason,
+        });
+    }
+    check_same_corpus(base, &next, &name.to_string())?;
     let (base_rows, next_rows): (Vec<String>, Vec<String>) = (
         base.tools
             .tools
@@ -542,32 +662,6 @@ fn pool(base: &mut Baseline, next: Baseline, dir: &Path, allow_unclean: bool) ->
             }
         }
         base.tools.tools[slot] = merged;
-    }
-    // The superseded rows leave the earlier directory's contribution (never the disk): the
-    // later directory's rows then pool like any other.
-    for (e, from) in supersedes {
-        let (Some(pos), Some((_, by_src))) = (
-            row_of(base, &e, from),
-            next.results.iter().find(|(r, _)| is_row(r, &e)),
-        ) else {
-            bail!("{name}: {} vanished while pooling", e.combination());
-        };
-        let (_, from_src) = base.results.remove(pos);
-        base.pooled[from].rows.retain(|s| *s != from_src);
-        let key = (&e.tool, &e.setting, &e.class);
-        base.run
-            .combinations
-            .retain(|c| (&c.tool, &c.setting, &c.class) != key);
-        base.superseded.push(model::Superseded {
-            tool: e.tool,
-            setting: e.setting,
-            class: e.class,
-            from: base.pooled[from].label.clone(),
-            from_src,
-            by: pd.label.clone(),
-            by_src: *by_src,
-            reason: e.reason,
-        });
     }
     for c in next.run.combinations {
         if base
