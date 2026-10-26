@@ -1614,16 +1614,14 @@ mod tests {
         let h = {
             let s = Arc::clone(&s);
             std::thread::spawn(move || {
-                let r = s.history(&CancelToken::new());
-                (r.is_ok(), Instant::now())
+                s.history(&CancelToken::new()).is_ok()
             })
         };
         until_pending(&s, 1);
         let late = {
             let s = Arc::clone(&s);
             std::thread::spawn(move || {
-                let r = s.model(&CancelToken::new());
-                (r.is_ok(), Instant::now())
+                s.model(&CancelToken::new()).is_ok()
             })
         };
         std::thread::sleep(Duration::from_millis(100));
@@ -1632,10 +1630,10 @@ mod tests {
             "the read started behind the pending history"
         );
         drop(read);
-        let (history_ok, history_done) = h.join().unwrap();
-        let (read_ok, read_done) = late.join().unwrap();
-        assert!(history_ok && read_ok);
-        assert!(read_done >= history_done, "the read ran after the history");
+        // Both finish once the held read is gone. Their order is not compared by clock: each
+        // timestamp would be taken after its call returned, and the history's thread can be
+        // descheduled between releasing the gate and reading the clock (a flaky assertion).
+        assert!(h.join().unwrap() && late.join().unwrap());
     }
 
     #[test]
