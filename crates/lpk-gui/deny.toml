@@ -1,5 +1,5 @@
 # cargo-deny policy for the GUI's tree (E5-2), the same policy as deny.toml for the triples the GUI
-# ships on. Run: cargo deny --manifest-path crates/lpk-gui/Cargo.toml check --config deny-gui.toml
+# ships on (cargo-deny finds this file beside the manifest). Run: cargo deny --manifest-path crates/lpk-gui/Cargo.toml check
 # Keep the [advisories], [licenses], [bans] and [sources] tables identical to deny.toml's.
 [graph]
 all-features = true

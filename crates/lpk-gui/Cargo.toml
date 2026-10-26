@@ -24,7 +24,8 @@ serde_json = "1.0.151"
 
 # Tauri is a Windows-only dependency (docs/notes/e5-design.md section 1): on Linux the crate
 # builds the command layer and a stub `main`. Its tree is checked by `cargo deny` for the shipped
-# Windows triples only (deny-gui.toml); the main check excludes this crate (deny.toml).
+# Windows triples only (crates/lpk-gui/deny.toml: `cargo deny --manifest-path crates/lpk-gui/Cargo.toml check`);
+# the main check excludes this crate (deny.toml).
 [target.'cfg(windows)'.dependencies]
 tauri = { version = "=2.12.5", default-features = false, features = ["wry", "compression", "common-controls-v6"] }
 
@@ -33,6 +34,8 @@ tauri-build = { version = "=2.7.4", default-features = false , features = [] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# tests/deny_configs.rs compares crates/lpk-gui/deny.toml with deny.toml.
+toml = "1.1.6"
 
 [lints]
 workspace = true

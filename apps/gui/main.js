@@ -15,6 +15,8 @@ const core = window.__TAURI__.core;
 const FIRST_PAGE_ROWS = 200;
 let strings = {};
 let nextOp = 1;
+// The open archive's session, closed before another is opened (a drop).
+let currentSession = null;
 
 function t(key, vars = {}) {
   const text = strings[key] ?? key;
@@ -78,7 +80,13 @@ async function report(session, total, first) {
 
 async function openArchive(granted) {
   setStatus(t("status.loading"));
+  if (currentSession !== null) {
+    const previous = currentSession;
+    currentSession = null;
+    await core.invoke("close_archive", { session: previous });
+  }
   const opened = await core.invoke("open_archive", { grant: granted.grant, op: nextOp++ });
+  currentSession = opened.session;
   const buffer = await core.invoke("rows", { session: opened.session, first: 0, count: FIRST_PAGE_ROWS });
   const batch = decodeBatch(buffer);
   render(batch);
