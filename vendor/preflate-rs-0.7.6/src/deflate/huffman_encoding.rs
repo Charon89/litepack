@@ -414,6 +414,14 @@ impl HuffmanOriginalEncoding {
 
     /// writes dynamic huffman table to the output buffer using the bitwriter
     pub fn write(&self, bitwriter: &mut BitWriter, output_buffer: &mut Vec<u8>) -> Result<()> {
+        // LitePack change 12: counts outside what the header's fields can hold (HLIT, HDIST,
+        // HCLEN) are refused instead of overflowing the subtractions below.
+        if !(257..=288).contains(&self.num_literals)
+            || !(1..=32).contains(&self.num_dist)
+            || !(4..=19).contains(&self.num_code_lengths)
+        {
+            return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed");
+        }
         bitwriter.write(self.num_literals as u32 - 257, 5, output_buffer);
         bitwriter.write(self.num_dist as u32 - 1, 5, output_buffer);
         bitwriter.write(self.num_code_lengths as u32 - 4, 4, output_buffer);
