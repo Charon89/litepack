@@ -91,3 +91,48 @@ jobs:
         run: |
           bash scripts/check-worker-symbols.sh --self-test
           bash scripts/check-worker-symbols.sh
+
+  # E8-2: the size-regression gate. Archive bytes are deterministic (D-60), so archive size is
+  # gated here on every pull request; time never is (E8 decision (b)). The generated `ci` profile
+  # is built from a fixed seed without network, lpk's shipped settings are measured on it, and
+  # every row is compared with the golden results directory that bench/ci-golden.toml names: an
+  # archive more than 1% larger, or a row missing on either side, fails the job. Refreshing the
+  # goldens is described in bench/ci-golden.toml.
+  size-gate:
+    name: size regression (ubuntu-24.04)
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    env:
+      # A quicker release build for this job only; archive bytes do not depend on it (the goldens
+      # come from the workspace's full release profile on Windows, and this job must match them).
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux build prerequisites (OpenSSL for native-tls)
+        run: sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: size-gate
+      - name: Build the release lpk and lpk-bench
+        run: cargo build --locked --release -p lpk-cli -p lpk-bench
+      - name: Build the ci fixture set (generated, no network)
+        run: target/release/lpk-bench corpus build --profile ci
+      - name: Measure lpk's fast, balanced and store settings on it
+        run: >-
+          target/release/lpk-bench run --tools lpk --settings fast,balanced,store --profile ci
+          --repeats 1 --threads 2 --results target/size-gate
+      - name: Compare with the goldens
+        shell: bash
+        run: |
+          dirs=(target/size-gate/*/)
+          test "${#dirs[@]}" -eq 1 || { echo "expected one results directory: ${dirs[*]}"; exit 1; }
+          target/release/lpk-bench run --compare-sizes bench/ci-golden.toml "${dirs[0]}"
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: size-gate-results
+          path: target/size-gate
+          if-no-files-found: ignore
