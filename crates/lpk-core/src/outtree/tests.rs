@@ -18,6 +18,7 @@ fn pack(f: impl FnOnce(&mut Writer<&mut Vec<u8>>)) -> Vec<u8> {
         chunk_size: 4096,
         block_size: 16384,
         archive_id: [9; 16],
+        dedup: true,
         ..WriterOptions::default()
     };
     let mut w = Writer::new(&mut out, opts).unwrap();
@@ -458,4 +459,80 @@ fn a_failed_extraction_removes_its_unfinished_files() {
         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
     }
     assert!(out.join("big.bin").is_dir());
+}
+
+/// Cleanup goes by the file ID recorded at creation: `a.bin` is half-written (its chunks span
+/// two blocks) when the next create fails; before the cleanup runs, `a.bin` was swapped for
+/// another file, which survives (the extraction removes only the file it created).
+#[cfg(windows)]
+#[test]
+fn cleanup_removes_only_the_file_it_created() {
+    let _reset = Reset;
+    let noise: Vec<u8> = {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        (0..30_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    };
+    // `b.bin` is `a.bin`'s first chunk: deduplicated into block 0, so it is created while
+    // `a.bin` still waits for its chunks in the next block.
+    let bytes = files(&[("a.bin", &noise[..]), ("b.bin", &noise[..4096])]);
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    let o = out.clone();
+    let mut first: Option<PathBuf> = None;
+    seam::on_before_create(Some(Box::new(move |p: &Path| match &first {
+        None => first = Some(p.to_path_buf()),
+        Some(f) => {
+            assert!(f.ends_with("a.bin"), "{f:?} first");
+            // `a.bin` (open, partial) moved away and replaced; `b.bin` blocked.
+            std::fs::rename(f, o.join("a.orig")).unwrap();
+            std::fs::write(f, b"swapped in").unwrap();
+            std::fs::create_dir(o.join("b.bin")).unwrap();
+        }
+    })));
+    let e = extract(&bytes, &out, &Policy::default()).unwrap_err();
+    assert!(
+        matches!(&e, CoreError::Io { path, .. } if path.ends_with("b.bin")),
+        "{e:?}"
+    );
+    assert_eq!(std::fs::read(out.join("a.bin")).unwrap(), b"swapped in");
+    // The moved original was partial when the failure came (its tail never written).
+    let orig = std::fs::read(out.join("a.orig")).unwrap();
+    assert_ne!(orig, noise);
+}
+
+/// `--overwrite rename` re-checks the name it picked: a 255-unit name taken on disk would
+/// become `name (1).ext`, over the limit, and is refused by name before output.
+#[cfg(windows)]
+#[test]
+fn a_renamed_name_over_the_limit_is_refused() {
+    let name = format!("{}.txt", "n".repeat(251));
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join(&name), b"old").unwrap();
+    let bytes = files(&[(name.as_str(), b"new")]);
+    let e = extract(
+        &bytes,
+        &out,
+        &Policy::new(Overwrite::Rename, Symlinks::Skip),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &e,
+            CoreError::Format(FormatError::UnsafePath {
+                reason: "name too long",
+                ..
+            })
+        ),
+        "{e:?}"
+    );
+    assert_eq!(listing(&out), [name]);
 }

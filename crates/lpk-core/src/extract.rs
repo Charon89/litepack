@@ -1022,6 +1022,18 @@ pub(crate) fn policy_pass(
                     Decision::Write => Some((path, false)),
                     Decision::Replace => Some((path, true)),
                     Decision::Rename(p) => {
+                        // The suffix may push the name or the path past the Windows limits:
+                        // checked again on the name the rename picked (E6-6).
+                        if cfg!(windows) {
+                            let rel = p
+                                .strip_prefix(dir)
+                                .unwrap_or(&p)
+                                .components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/");
+                            policy::check_path_length(dir_units, &rel)?;
+                        }
                         renamed += 1;
                         Some((p, false))
                     }

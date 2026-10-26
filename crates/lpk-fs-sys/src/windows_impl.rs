@@ -27,19 +27,21 @@ use windows::Win32::Security::{
     TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::{
-    FileAttributeTagInfo, FileDispositionInfo, FileDispositionInfoEx, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
-    FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
-    FILE_DISPOSITION_INFO_EX_FLAGS, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES,
-    FILE_WRITE_DATA, SYNCHRONIZE,
+    FileAttributeTagInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO,
+    FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, SYNCHRONIZE,
 };
 use windows::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
 use windows::Win32::System::SystemServices::IO_REPARSE_TAG_SYMLINK;
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken, SetThreadToken,
+};
 use windows::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 
 /// Why an operation was refused or failed.
@@ -84,12 +86,13 @@ impl From<windows::core::Error> for FsError {
     }
 }
 
-/// A file's identity on its volume: the volume serial number and the 64-bit file index
-/// (`BY_HANDLE_FILE_INFORMATION`).
+/// A file's identity on its volume: the volume serial number and the 128-bit file ID
+/// (`FILE_ID_INFO`, unique on NTFS and ReFS), or, where that query fails (FAT, exFAT), the
+/// 64-bit file index of `BY_HANDLE_FILE_INFORMATION` widened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileId {
-    volume: u32,
-    index: u64,
+    volume: u64,
+    id: [u8; 16],
 }
 
 /// A name-surrogate reparse tag (`IsReparseTagNameSurrogate`): symlinks, junctions, mount
@@ -225,12 +228,31 @@ fn is_name_surrogate(attrs: u32, tag: u32) -> bool {
 }
 
 fn file_id(h: &OwnedHandle) -> Result<FileId, FsError> {
+    let mut wide = FILE_ID_INFO::default();
+    // SAFETY: `wide` is a live, correctly sized output buffer for this class; `h` is open.
+    let r = unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(h.as_raw_handle()),
+            FileIdInfo,
+            (&raw mut wide).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if r.is_ok() {
+        return Ok(FileId {
+            volume: wide.VolumeSerialNumber,
+            id: wide.FileId.Identifier,
+        });
+    }
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: `info` is a live output structure; `h` is open.
     unsafe { GetFileInformationByHandle(HANDLE(h.as_raw_handle()), &mut info) }?;
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(&index.to_le_bytes());
     Ok(FileId {
-        volume: info.dwVolumeSerialNumber,
-        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        volume: u64::from(info.dwVolumeSerialNumber),
+        id,
     })
 }
 
@@ -378,14 +400,14 @@ impl Dir {
             FILE_OPEN,
             NTCREATEFILE_CREATE_OPTIONS(0),
         )?;
-        let (attrs, _) = tag_info(&h)?;
+        let (attrs, tag) = tag_info(&h)?;
         match id {
             Some(id) if file_id(&h)? != id => return Err(FsError::Changed),
             Some(_) => {}
             None => {
-                if attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0
-                    && attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0
-                {
+                // Only a name surrogate (symlink, junction, mount point) is a link; any other
+                // directory, a cloud placeholder or a dedup one included, is in the way.
+                if attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0 && !is_name_surrogate(attrs, tag) {
                     return Err(FsError::Io(io::Error::new(
                         io::ErrorKind::AlreadyExists,
                         "a directory is in the way",
@@ -534,17 +556,42 @@ fn with_symlink_privilege<T>(f: impl FnOnce() -> Result<T, FsError>) -> Result<T
     let Some(token) = privileged_token()? else {
         return f();
     };
+    // The thread's own token, if it impersonates already: restored afterwards, so an earlier
+    // identity always comes back (none: the thread reverts to the process token).
+    let mut before = HANDLE::default();
+    // SAFETY: the pseudo-handle of this thread; `before` is a live output; the access check
+    // is made against the process (open_as_self), so it works whatever the thread holds.
+    let previous = unsafe {
+        OpenThreadToken(
+            GetCurrentThread(),
+            TOKEN_IMPERSONATE | TOKEN_QUERY,
+            true,
+            &mut before,
+        )
+    }
+    .ok()
+    // SAFETY: the call succeeded, so `before` is a new handle that nothing else owns.
+    .map(|()| unsafe { OwnedHandle::from_raw_handle(before.0) });
     // SAFETY: `token` is an open impersonation token with TOKEN_IMPERSONATE; `None` is the
     // calling thread.
     unsafe { SetThreadToken(None, Some(HANDLE(token.as_raw_handle()))) }?;
-    struct Revert;
-    impl Drop for Revert {
+    struct Restore(Option<OwnedHandle>);
+    impl Drop for Restore {
         fn drop(&mut self) {
-            // SAFETY: ends this thread's impersonation; no pointer is involved.
-            let _ = unsafe { RevertToSelf() };
+            match &self.0 {
+                Some(t) => {
+                    // SAFETY: `t` is the thread's earlier impersonation token, open with
+                    // TOKEN_IMPERSONATE; `None` is the calling thread.
+                    let _ = unsafe { SetThreadToken(None, Some(HANDLE(t.as_raw_handle()))) };
+                }
+                None => {
+                    // SAFETY: ends this thread's impersonation; no pointer is involved.
+                    let _ = unsafe { RevertToSelf() };
+                }
+            }
         }
     }
-    let _revert = Revert;
+    let _restore = Restore(previous);
     f()
 }
 

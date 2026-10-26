@@ -161,6 +161,8 @@ impl Tree {
     #[cfg(unix)]
     fn make_link(&self, l: &Link) -> Result<(), CoreError> {
         use std::os::unix::ffi::OsStrExt;
+        // A Unix link has no kind: the plan's `dir` (from the archive) matters on Windows only.
+        let _ = l.dir;
         if l.replace {
             crate::policy::remove_existing(&l.path).map_err(|e| io(&l.path, e))?;
         }
@@ -170,6 +172,7 @@ impl Tree {
 
     #[cfg(not(any(unix, windows)))]
     fn make_link(&self, l: &Link) -> Result<(), CoreError> {
+        let _ = l.dir;
         Err(io(
             &l.path,
             std::io::Error::new(
