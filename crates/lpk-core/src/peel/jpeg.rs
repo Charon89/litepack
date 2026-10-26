@@ -659,6 +659,12 @@ impl JpegPeel {
         if stream.len() >= primary_len {
             return Err(Cause::NoGain);
         }
+        // The term the record declares is the one its reader computes from the stream itself.
+        let header = read_stream_header(&stream, primary_len as u64).ok_or(Cause::Other)?;
+        let memory = image_term(&header, primary_len as u64, stream.len() as u64);
+        if memory.saturating_add(max_part) > self.memory_limit {
+            return Err(Cause::MemoryCap);
+        }
         // Verify by re-encode: the stream must give back the primary bytes exactly.
         let mut decoded = lepton_decode(&stream, primary_len, &f, pool).map_err(fail)?;
         after_decode(&mut decoded);
@@ -822,8 +828,10 @@ impl PrimitiveDecoder for JpegDecoder {
         // Resources: the image's coefficient term, from the stream's own JPEG header, plus the
         // fixed allowance must fit in the decode memory left after the block buffer; the
         // library's caps are then the checked dimensions and the primary's length.
-        let frame = stream_frame(input, j.primary_len).ok_or_else(|| bad(id, "lepton stream"))?;
-        let need = memory_bound(&frame);
+        let header =
+            read_stream_header(input, j.primary_len).ok_or_else(|| bad(id, "lepton stream"))?;
+        let need = image_term(&header, j.primary_len, input.len() as u64);
+        let frame = header.frame;
         let allowance = limits.memory.saturating_sub(limits.max_block_plain);
         if need > allowance {
             return Err(FormatError::Refused(Refusal {
@@ -926,33 +934,228 @@ impl Trailing<'_> {
     }
 }
 
-/// The first frame header of the JPEG a Lepton stream holds, read from the stream's own header
-/// (the layout lepton_jpeg 0.5.8 writes, spec section 8: a 28-byte fixed header whose bytes 24..28 are the length of the
-/// zlib-compressed header that follows; that header starts with `HDR` and a u32 LE length of
-/// the raw JPEG header, which follows SOI). `None` when the stream does not have that shape or
-/// the raw header is longer than the primary image.
-fn stream_frame(stream: &[u8], primary_len: u64) -> Option<Frame> {
-    use std::io::Read;
+/// What [`read_stream_header`] reads from a Lepton stream's header before the library sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamHeader {
+    /// The first frame header of the raw JPEG header.
+    pub frame: Frame,
+    /// The inflated length of the zlib-compressed header (every byte the library reads from it).
+    pub header_len: u64,
+    /// The number of partitions (thread handoffs) the header declares.
+    pub partitions: u32,
+}
+
+/// The largest inflated header [`read_stream_header`] accepts for a primary of `primary_len`
+/// bytes: two primaries and 64 KiB. Everything the header holds describes bytes of the primary
+/// image (its raw header, its trailing garbage, its restart counts and errors) or is a few bytes
+/// per partition, so a header lepton_jpeg writes stays far below this.
+pub fn header_cap(primary_len: u64) -> u64 {
+    primary_len.saturating_mul(2).saturating_add(64 << 10)
+}
+
+/// Reads exactly `n` bytes of `z` into `out` (or skips them when `out` is `None`), counting them
+/// in `total` against `cap`. `None` when the data ends first, is damaged, or passes `cap`.
+fn take_exact(
+    z: &mut impl std::io::Read,
+    n: u64,
+    total: &mut u64,
+    cap: u64,
+    mut out: Option<&mut Vec<u8>>,
+) -> Option<()> {
+    *total = total.checked_add(n).filter(|&t| t <= cap)?;
+    let mut left = n;
+    let mut buf = [0u8; 4096];
+    while left > 0 {
+        let want = usize::try_from(left).map_or(buf.len(), |l| l.min(buf.len()));
+        z.read_exact(&mut buf[..want]).ok()?;
+        if let Some(o) = out.as_deref_mut() {
+            o.extend_from_slice(&buf[..want]);
+        }
+        left -= want as u64;
+    }
+    Some(())
+}
+
+fn take_u32(z: &mut impl std::io::Read, total: &mut u64, cap: u64) -> Option<u32> {
+    let mut v = Vec::with_capacity(4);
+    take_exact(z, 4, total, cap, Some(&mut v))?;
+    Some(u32::from_le_bytes(v.try_into().ok()?))
+}
+
+/// The header of a Lepton stream, read and checked before the library decodes it (the layout
+/// lepton_jpeg 0.5.8 writes and reads, `src/structs/lepton_header.rs`): a 28-byte fixed header
+/// whose bytes 20..24 are the JPEG's length and 24..28 the length of the zlib-compressed header
+/// that follows. Inflated, that header is `HDR`, a u32 LE length and the raw JPEG header (which
+/// follows SOI), then recovery sections until its end, each a 3-byte marker: `P0D` and one byte;
+/// `CRS`, a u32 count and that many u32s; `HH` with a count byte and 16 bytes per partition;
+/// `FRS` or `GRB`, a u32 length and that many bytes; `EEE` and 28 bytes.
+///
+/// `None` (the step's `lepton stream`) when the stream does not have that shape or a length in
+/// it could make the library allocate past what the primary image explains: the JPEG length,
+/// the compressed header, the raw header, the garbage, the restart errors (summed) or four bytes
+/// per restart count (summed) above `primary_len`; the inflated header above
+/// [`header_cap`]; not exactly one `HH` section, or one with no partition, partitions whose
+/// first rows go down, or segment sizes that sum past `primary_len`; an unknown section; data
+/// ending inside a section; or no frame header in the raw header. Each of these is a stream the
+/// library refuses too, or one it does not write: the library allocates each length it reads
+/// at once (a `GRB` length of 4 GB was a fuzzing finding), and partitions whose rows overlap
+/// each hold a coefficient buffer for their rows.
+pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeader> {
     let fixed = stream.get(..28)?;
-    let compressed_len =
-        usize::try_from(u32::from_le_bytes(fixed[24..28].try_into().ok()?)).ok()?;
-    let compressed = stream.get(28..28usize.checked_add(compressed_len)?)?;
-    let mut z = flate2::read::ZlibDecoder::new(compressed);
-    let mut head = [0u8; 7];
-    z.read_exact(&mut head).ok()?;
-    if &head[..3] != b"HDR" {
+    let jpeg_len = u64::from(u32::from_le_bytes(fixed[20..24].try_into().ok()?));
+    let compressed_len = u32::from_le_bytes(fixed[24..28].try_into().ok()?);
+    if jpeg_len > primary_len || u64::from(compressed_len) > primary_len {
         return None;
     }
-    let n = u64::from(u32::from_le_bytes(head[3..7].try_into().ok()?));
+    let compressed = stream.get(28..28usize.checked_add(usize::try_from(compressed_len).ok()?)?)?;
+    let mut z = flate2::read::ZlibDecoder::new(compressed);
+    let cap = header_cap(primary_len);
+    let mut total = 0u64;
+    let mut marker = Vec::with_capacity(3);
+    take_exact(&mut z, 3, &mut total, cap, Some(&mut marker))?;
+    if marker != b"HDR" {
+        return None;
+    }
+    let n = u64::from(take_u32(&mut z, &mut total, cap)?);
     if n > primary_len {
         return None;
     }
     let mut raw = vec![0xFF, 0xD8];
-    z.take(n).read_to_end(&mut raw).ok()?;
-    if raw.len() as u64 != n + 2 {
-        return None;
+    take_exact(&mut z, n, &mut total, cap, Some(&mut raw))?;
+    let (mut restarts, mut errors) = (0u64, 0u64);
+    let mut partitions = None;
+    loop {
+        // The library ends the header at the first marker it cannot read whole.
+        let mut m = [0u8; 3];
+        let mut got = 0;
+        while got < 3 {
+            match std::io::Read::read(&mut z, &mut m[got..]) {
+                Ok(0) => break,
+                Ok(k) => got += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
+            }
+        }
+        if got < 3 {
+            break;
+        }
+        total = total.checked_add(3).filter(|&t| t <= cap)?;
+        match &m {
+            b"P0D" => take_exact(&mut z, 1, &mut total, cap, None)?,
+            b"CRS" => {
+                let count = u64::from(take_u32(&mut z, &mut total, cap)?);
+                restarts = restarts.checked_add(count)?;
+                if restarts.saturating_mul(4) > primary_len {
+                    return None;
+                }
+                take_exact(&mut z, count * 4, &mut total, cap, None)?;
+            }
+            [b'H', b'H', count] => {
+                if partitions.is_some() || *count == 0 {
+                    return None;
+                }
+                let mut h = Vec::with_capacity(16 * usize::from(*count));
+                take_exact(
+                    &mut z,
+                    16 * u64::from(*count),
+                    &mut total,
+                    cap,
+                    Some(&mut h),
+                )?;
+                let (mut last_row, mut segments) = (0u16, 0u64);
+                for p in h.chunks_exact(16) {
+                    let row = u16::from_le_bytes([p[0], p[1]]);
+                    if row < last_row {
+                        return None;
+                    }
+                    last_row = row;
+                    segments += u64::from(u32::from_le_bytes(p[2..6].try_into().ok()?));
+                }
+                if segments > primary_len {
+                    return None;
+                }
+                partitions = Some(u32::from(*count));
+            }
+            b"FRS" | b"GRB" => {
+                let len = u64::from(take_u32(&mut z, &mut total, cap)?);
+                if &m == b"FRS" {
+                    errors = errors.checked_add(len)?;
+                }
+                if len > primary_len || errors > primary_len {
+                    return None;
+                }
+                take_exact(&mut z, len, &mut total, cap, None)?;
+            }
+            b"EEE" => take_exact(&mut z, 28, &mut total, cap, None)?,
+            _ => return None,
+        }
     }
-    marker_scan(&raw).frame
+    Some(StreamHeader {
+        frame: marker_scan(&raw).frame?,
+        header_len: total,
+        partitions: partitions?,
+    })
+}
+
+/// The decode threads lepton_jpeg runs at most: the `max_processor_threads` of the preset, which
+/// no reader of this crate raises.
+pub const LEPTON_THREADS: u64 = 8;
+
+/// Per decode thread, lepton_jpeg's probability model and per-row state, an over-approximation
+/// of `Box<Model>` (`src/structs/model.rs`) and the neighbour caches.
+pub const THREAD_ALLOWANCE: u64 = 4 << 20;
+
+/// An image's decode memory, the term its record declares and its reader checks: the larger of
+/// [`memory_bound`] (revision 1.1's term: coefficients plus [`MODEL_ALLOWANCE`]) and this bound
+/// on what lepton_jpeg 0.5.8 allocates for a stream whose header passed
+/// [`read_stream_header`], with `B` the frame's blocks (each component's 8x8 blocks padded to
+/// whole MCUs), `R` the blocks of one MCU row, `P` = min(partitions, [`LEPTON_THREADS`]) and
+/// `H` the inflated header length:
+///
+/// - `128·B` for the coefficients (64 of 2 bytes per block), twice for a progressive frame
+///   (SOF2), whose partitions' buffers stay alive while the library merges them into one;
+/// - for a progressive frame, `512·B` for one scan's output, which the library builds whole
+///   (at most 64 coefficients of a 16-bit Huffman code and 16 bits each per block, doubled for
+///   the zero byte stuffed after each `FF`);
+/// - per decode thread, `P · (THREAD_ALLOWANCE + 128 KiB + 512·R)`: its model, its output
+///   buffer, which the library hands on once it holds 128 KiB, and one MCU row's output;
+/// - `4·H` for the inflated header, which the library holds, grows by doubling and copies for
+///   its threads;
+/// - `primary_len` for the output a baseline decode queues (each partition's output is cut at
+///   its segment size, whose sum [`read_stream_header`] bounds by `primary_len`);
+/// - the stream's length, for the copy of the partitions' bytes the library queues per thread;
+/// - 1 MiB for the rest (Huffman and quantisation tables, the inflater's window, channels).
+pub fn image_term(h: &StreamHeader, primary_len: u64, stream_len: u64) -> u64 {
+    let f = &h.frame;
+    let hmax = f.sampling.iter().map(|s| s.0).max().unwrap_or(1).max(1);
+    let vmax = f.sampling.iter().map(|s| s.1).max().unwrap_or(1).max(1);
+    let mcus_x = u64::from(f.width).div_ceil(u64::from(8 * hmax));
+    let mcus_y = u64::from(f.height).div_ceil(u64::from(8 * vmax));
+    let row: u64 = f
+        .sampling
+        .iter()
+        .map(|&(sh, sv)| mcus_x * u64::from(sh) * u64::from(sv))
+        .sum();
+    let blocks = row.saturating_mul(mcus_y);
+    let progressive = f.marker == 0xC2;
+    let coefficients = blocks.saturating_mul(if progressive { 256 } else { 128 });
+    let scan = if progressive {
+        blocks.saturating_mul(512)
+    } else {
+        0
+    };
+    let threads = u64::from(h.partitions).min(LEPTON_THREADS);
+    let per_thread = THREAD_ALLOWANCE
+        .saturating_add(128 << 10)
+        .saturating_add(row.saturating_mul(512));
+    let honest = coefficients
+        .saturating_add(scan)
+        .saturating_add(threads.saturating_mul(per_thread))
+        .saturating_add(h.header_len.saturating_mul(4))
+        .saturating_add(primary_len)
+        .saturating_add(stream_len)
+        .saturating_add(1 << 20);
+    memory_bound(f).max(honest)
 }
 
 /// Register the full reader's decoders (revision 1.1's `jpeg-reconstruct`, revision 1.2's

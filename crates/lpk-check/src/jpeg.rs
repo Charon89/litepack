@@ -14,6 +14,8 @@ pub const FIXED_TERM: u64 = 67_108_864;
 /// What the frame header of the JPEG gives the memory term.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameInfo {
+    /// The SOF marker's second byte (`C2` is a progressive frame).
+    pub marker: u8,
     /// Image height.
     pub height: u16,
     /// Image width.
@@ -96,6 +98,7 @@ pub fn find_frame(jpeg: &[u8]) -> Option<FrameInfo> {
                 sampling.push((hv >> 4, hv & 0x0F));
             }
             return Some(FrameInfo {
+                marker: m,
                 height,
                 width,
                 sampling,
@@ -222,6 +225,7 @@ mod tests {
         assert_eq!(
             f,
             FrameInfo {
+                marker: 0xC2,
                 height: 17,
                 width: 33,
                 sampling: vec![(2, 2), (1, 1)]
