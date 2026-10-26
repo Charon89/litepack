@@ -92,6 +92,19 @@ bundled C libraries are clarified there: liblzma (0BSD) in `liblzma-sys`, zlib (
 (`lpk-codecs-vp8`'s Microsoft header, the WebM banner and lepton_jpeg's `NOTICE.txt`). The E7 packaging task ships
 the file in every artefact.
 
+**libarchive 3.8.9 (E4-4).** Linked statically into `lpk-worker-libarchive` only (never into `lpk`, `lpk-worker`
+or `workers/`), through `crates/lpk-libarchive-sys`, from sources vendored unmodified in `vendor/libarchive-3.8.9/`
+with the release's `COPYING`. Its terms as `COPYING` states them: every C source under the two-clause BSD licence
+(copyright notices kept in each file), except the files taken from the University of California Regents (BSD
+licence), `archive_parse_date.c` (public domain; not compiled here) and the BLAKE2 reference sources
+(`archive_blake2*`, used by the RAR5 reader, under CC0-1.0). The RAR readers carry two-clause BSD headers (Tim
+Kientzle and Andres Mejia for RAR 4, Grzegorz Antoniak for RAR 5); `archive_ppmd7.c` is Igor Pavlov's public-domain
+PPMd. No unRAR code and no 7-Zip handler code is used anywhere. The worker links zlib (`libz-sys`, Zlib), liblzma
+(`liblzma-sys`, 0BSD) and libzstd (`zstd-sys`, BSD-3-Clause), all already in the notices. Owed when the sources
+land (they wait for the owner's approval to fetch the release tarball): `COPYING` reproduced in the static section of
+`THIRD-PARTY-NOTICES`, `lpk-worker-libarchive` added to the shipped packages `scripts/third-party-notices.sh`
+walks, and CI's GPL-family scan over `vendor/libarchive-3.8.9/`.
+
 ## Patents to review (counsel, not engineers, decide)
 This is a watch-list, not a legal opinion: engineers record what each patent is about and when counsel
 must look at it. Titles, holders and dates are from Google Patents; the expiry dates are that site's

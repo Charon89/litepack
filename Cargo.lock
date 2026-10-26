@@ -1665,6 +1665,7 @@ name = "lpk-worker-libarchive"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "lpk-core",
  "lpk-libarchive-sys",
  "lpk-proto",
  "lpk-sandbox-sys",

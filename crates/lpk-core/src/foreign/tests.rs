@@ -823,3 +823,88 @@ fn quota_exceeded_status_names_the_cpu_limit_without_usage() {
         "{e:?}"
     );
 }
+
+// --- E4-4: the libarchive formats ----------------------------------------------------------
+
+fn la_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lpk-worker-libarchive/tests/fixtures")
+        .join(name)
+}
+
+#[test]
+fn libarchive_formats_are_detected_by_magic_and_routed_to_their_worker() {
+    for (name, format) in [
+        ("rar5.rar", Format::Rar),
+        ("rar4.rar", Format::Rar),
+        ("rar5-sfx.sfx", Format::Rar),
+        ("cab-lzx.cab", Format::Cab),
+        ("iso-rockridge.iso", Format::Iso),
+        ("iso-joliet.iso", Format::Iso),
+        ("fixture.a", Format::Ar),
+        ("fixture.cpio", Format::Cpio),
+        ("hello.txt.uue", Format::Uue),
+        ("hello.txt.Z", Format::Compress),
+        ("small.tar.Z", Format::Compress),
+    ] {
+        assert_eq!(
+            detect_file(&la_fixture(name)).unwrap(),
+            Some(format),
+            "{name}"
+        );
+        assert_eq!(format.worker(), WorkerKind::Libarchive, "{name}");
+    }
+    assert_eq!(detect(&[0xED, 0xAB, 0xEE, 0xDB, 3, 0]), Some(Format::Rpm));
+    let mut lha = vec![0u8; 32];
+    lha[2..7].copy_from_slice(b"-lh5-");
+    assert_eq!(detect(&lha), Some(Format::Lha));
+    lha[20] = 9;
+    assert_eq!(detect(&lha), None);
+    assert_eq!(detect(b"begin 644 x.bin\nM..."), Some(Format::Uue));
+    assert_eq!(detect(b"notes\nbegin-base64 600 y\n"), Some(Format::Uue));
+    assert_eq!(detect(b"begin here, then"), None);
+    assert_eq!(detect(b"MSCF\0\0\0\0"), None, "a CAB needs its version");
+    for f in [Format::Zip, Format::SevenZ, Format::Tar, Format::Gzip] {
+        assert_eq!(f.worker(), WorkerKind::Rust);
+    }
+}
+
+#[test]
+fn rar_volume_sets_are_found_from_the_first_volume() {
+    let new = volume_set(&la_fixture("rar5-vol.part1.rar"), Format::Rar)
+        .unwrap()
+        .unwrap();
+    let names: Vec<_> = new
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "rar5-vol.part1.rar",
+            "rar5-vol.part2.rar",
+            "rar5-vol.part3.rar"
+        ]
+    );
+    let old = volume_set(&la_fixture("rar4-vol.rar"), Format::Rar)
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.len(), 3);
+    assert!(old[2].ends_with("rar4-vol.r01"));
+    // Not a volume: alone, whatever lies beside it.
+    let one = volume_set(&la_fixture("rar5.rar"), Format::Rar)
+        .unwrap()
+        .unwrap();
+    assert_eq!(one.len(), 1);
+}
+
+#[test]
+fn a_volume_set_past_the_handle_limit_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let first = std::fs::read(la_fixture("rar5-vol.part1.rar")).unwrap();
+    for k in 1..=(MAX_VOLUMES + 1) {
+        std::fs::write(d.path().join(format!("big.part{k:02}.rar")), &first).unwrap();
+    }
+    let r = volume_set(&d.path().join("big.part01.rar"), Format::Rar).unwrap();
+    assert!(r.is_err(), "{r:?}");
+}

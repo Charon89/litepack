@@ -1,0 +1,5 @@
+# BLAKE3 (hex), size, path of the files the fixtures hold (tests/fixtures/make_fixtures.py's tree)
+3bdca0be975a64b78f5a4bf070bc8f85d7b59e824e71b3eca53da2a77f7ce7e1  43  hello.txt
+6971d971ac7364a535d476ef5cb8fc11fedecbe15b28caacda446d6b1e5eb0d4  111  Mixed Case Name.txt
+b7c1458cc8024b8c884d72085f1d55a51efc96308dbc3bc519c8f7b51f1b094f  480  sub/nested.txt
+6f323afea0ee923bf076726817d9c2ec4e5823f4392bce11897f8e3895e0f0fa  48000  data.bin

@@ -211,7 +211,7 @@ fn rar5(f: &mut File, mut at: u64, len: u64) -> std::io::Result<Option<String>> 
         match ty {
             4 => return Ok(gap("encrypted RAR 5 headers")),
             2 => {
-                if let Some(g) = rar5_file(&h, q, extra) {
+                if let Some(g) = named_gap_of_file_header(&h, q, extra) {
                     return Ok(Some(g));
                 }
             }
@@ -226,9 +226,10 @@ fn rar5(f: &mut File, mut at: u64, len: u64) -> std::io::Result<Option<String>> 
     Ok(None)
 }
 
-/// A RAR5 file header's gap: an encryption record in its extra area, or a dictionary above
+/// A RAR5 file header's gap (`h` from its type field, `q` at its file fields, `extra` the
+/// extra area's size): an encryption record in its extra area, or a dictionary above
 /// [`RAR5_MAX_DICT`] for a compressed member.
-fn rar5_file(h: &[u8], mut q: usize, extra: u64) -> Option<String> {
+pub fn named_gap_of_file_header(h: &[u8], mut q: usize, extra: u64) -> Option<String> {
     let file_flags = vint(h, &mut q)?;
     let _unpacked = vint(h, &mut q)?;
     let _attributes = vint(h, &mut q)?;
@@ -243,7 +244,7 @@ fn rar5_file(h: &[u8], mut q: usize, extra: u64) -> Option<String> {
     let dict_log = (comp >> 10) & 0x1F;
     let directory = file_flags & 0x1 != 0;
     if !directory && method != 0 {
-        let dict = 128u64 << dict_log.min(40);
+        let dict = (128u64 << 10) << dict_log.min(40);
         if dict > RAR5_MAX_DICT {
             return gap(&format!(
                 "a RAR 5 dictionary of {} MiB (above 64 MiB)",
