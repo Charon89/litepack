@@ -139,7 +139,8 @@
         "profile": { "$ref": "#/$defs/id", "description": "Corpus profile (small, full or private)." },
         "manifest_blake3": { "$ref": "#/$defs/blake3", "description": "BLAKE3 hash of manifest.json (64 lowercase hex digits)." },
         "class_files": { "$ref": "#/$defs/count", "description": "Number of files in this class, a count." },
-        "class_bytes": { "$ref": "#/$defs/count", "description": "Total size of this class's files in bytes." }
+        "class_bytes": { "$ref": "#/$defs/count", "description": "Total size of this class's files in bytes." },
+        "class_blake3": { "$ref": "#/$defs/blake3", "description": "Class digest (E8-10): BLAKE3 over the class's manifest entries in the manifest's order, each serialised as path NUL size-in-decimal NUL content-BLAKE3-hex NUL (64 lowercase hex digits). Required from result schema version 2; absent in version 1." }
       }
     },
     "tar_info": {
@@ -173,7 +174,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "tool", "setting", "class", "corpus", "threads"],
       "properties": {
-        "schema_version": { "const": 1, "description": "Result format version." },
+        "schema_version": { "enum": [1, 2], "description": "Result format version: 2 since E8-10 (corpus.class_blake3 required), 1 before (no class_blake3)." },
         "tool": { "$ref": "#/$defs/tool_ref", "description": "The tool." },
         "setting": { "$ref": "#/$defs/setting_ref", "description": "The setting." },
         "class": { "$ref": "#/$defs/id", "description": "Corpus class name." },
@@ -211,6 +212,11 @@
         {
           "if": { "not": { "anyOf": [{ "required": ["skipped"] }, { "required": ["failed"] }] } },
           "then": { "required": ["repeats", "median", "verification", "measurement"] }
+        },
+        {
+          "if": { "properties": { "schema_version": { "const": 1 } } },
+          "then": { "properties": { "corpus": { "not": { "required": ["class_blake3"] } } } },
+          "else": { "properties": { "corpus": { "required": ["class_blake3"] } } }
         }
       ]
     },

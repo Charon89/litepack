@@ -46,7 +46,8 @@
 //! **Formats.** E4-2 has no real reader: detection recognises only the test fixture of
 //! `lpk_proto::fixture` ([`Format::TestFixture`]); E4-3 adds ZIP, 7z and tar.
 
-use std::fs::{File, OpenOptions};
+use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -56,8 +57,9 @@ use lpk_proto::frame::{FLAG_ENCRYPTED, NO_BLOCK};
 use lpk_proto::{ErrorCode, ProtoError, Record, RecordKind, Request, Response};
 
 use crate::error::{ForeignError, WorkerError};
-use crate::extract::{make_dirs, make_links, mtime, policy_pass, Placed};
-use crate::policy::{self, ExtractPolicy};
+use crate::extract::{make_dirs, make_links, mtime, policy_pass, Link, Placed};
+use crate::outtree::{Created, Tree};
+use crate::policy::ExtractPolicy;
 use crate::progress::{Monitor, Reporter, Stage};
 use crate::select::Selection;
 use crate::CoreError;
@@ -227,6 +229,9 @@ pub struct ForeignSummary {
     pub renamed: u64,
     /// Symlink entries let pass and not created.
     pub symlinks_skipped: u64,
+    /// Bytes the listing held by the host was charged against the memory budget
+    /// ([`entry_charge`] per entry; E4-7 checks the host's peak against it).
+    pub listing_charge: u64,
     /// Warnings of the launch (an AppContainer temporary folder that could not be emptied).
     pub warnings: Vec<String>,
 }
@@ -739,6 +744,8 @@ struct Conv<'m, P: Peer> {
     format: Format,
     /// A password was sent in `Open`.
     has_password: bool,
+    /// What the listing was charged against the memory budget ([`entry_charge`] summed).
+    charged: u64,
 }
 
 impl<'m, P: Peer> Conv<'m, P> {
@@ -762,6 +769,7 @@ impl<'m, P: Peer> Conv<'m, P> {
             warnings: Vec::new(),
             format: Format::TestFixture,
             has_password: false,
+            charged: 0,
         }
     }
 
@@ -1007,6 +1015,7 @@ impl<'m, P: Peer> Conv<'m, P> {
                         .into());
                     }
                     records.extend(page);
+                    self.charged = charged;
                     if !more {
                         return Ok(records);
                     }
@@ -1218,6 +1227,8 @@ fn check_records(
 
 /// Where member bytes go: files under the destination, or (fuzzing, tests) nowhere.
 trait Out {
+    /// Create the destination, the plan's directories and its links (before any file).
+    fn prepare(&mut self, mkdirs: &[PathBuf], links: &[Link]) -> Result<(), CoreError>;
     fn create(&mut self, path: &Path, replace: bool) -> Result<(), CoreError>;
     fn write(&mut self, data: &[u8]) -> Result<(), CoreError>;
     fn finish(&mut self, mtime_ns: i64) -> Result<(), CoreError>;
@@ -1234,44 +1245,70 @@ trait Out {
     fn free_space(&self) -> Option<u64>;
 }
 
+/// Files under the destination, every one created, reopened and removed through the output
+/// tree ([`crate::outtree`]: on Windows relative to verified directory handles).
 struct FsOut {
     dir: PathBuf,
-    cur: Option<(File, PathBuf)>,
+    tree: Option<Tree>,
+    /// The file being written and what the tree recorded at its creation.
+    cur: Option<(File, Created)>,
+    /// The files finished so far, by path: a hard link's source is opened through its entry
+    /// here, never by path.
+    done: HashMap<PathBuf, Created>,
+}
+
+impl FsOut {
+    fn new(dir: &Path) -> Self {
+        FsOut {
+            dir: dir.to_path_buf(),
+            tree: None,
+            cur: None,
+            done: HashMap::new(),
+        }
+    }
+
+    fn tree(&self) -> Result<&Tree, CoreError> {
+        self.tree
+            .as_ref()
+            .ok_or(CoreError::Extract("the output tree is not open"))
+    }
 }
 
 impl Out for FsOut {
+    fn prepare(&mut self, mkdirs: &[PathBuf], links: &[Link]) -> Result<(), CoreError> {
+        let tree = make_dirs(&self.dir, mkdirs)?;
+        make_links(&tree, links)?;
+        self.tree = Some(tree);
+        Ok(())
+    }
     fn create(&mut self, path: &Path, replace: bool) -> Result<(), CoreError> {
-        if replace {
-            policy::remove_existing(path).map_err(|e| CoreError::io(path, e))?;
-        }
-        let f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|e| CoreError::io(path, e))?;
-        self.cur = Some((f, path.to_path_buf()));
+        let (f, c) = self.tree()?.create_file(path, replace)?;
+        self.cur = Some((f, c));
         Ok(())
     }
     fn write(&mut self, data: &[u8]) -> Result<(), CoreError> {
         match self.cur.as_mut() {
-            Some((f, p)) => f.write_all(data).map_err(|e| CoreError::io(p.as_path(), e)),
+            Some((f, c)) => f.write_all(data).map_err(|e| CoreError::io(&c.path, e)),
             None => Err(CoreError::Extract("data with no file open")),
         }
     }
     fn finish(&mut self, mtime_ns: i64) -> Result<(), CoreError> {
-        if let Some((f, p)) = self.cur.as_ref() {
+        if let Some((f, c)) = self.cur.as_ref() {
             if let Some(m) = mtime(mtime_ns) {
-                f.set_modified(m)
-                    .map_err(|e| CoreError::io(p.as_path(), e))?;
+                f.set_modified(m).map_err(|e| CoreError::io(&c.path, e))?;
             }
         }
-        self.cur = None;
+        if let Some((_, c)) = self.cur.take() {
+            self.done.insert(c.path.clone(), c);
+        }
         Ok(())
     }
     fn abort(&mut self) {
-        if let Some((f, p)) = self.cur.take() {
+        if let Some((f, c)) = self.cur.take() {
             drop(f);
-            let _ = std::fs::remove_file(p);
+            if let Some(tree) = self.tree.as_ref() {
+                tree.remove(&c);
+            }
         }
     }
     fn copy(
@@ -1281,7 +1318,17 @@ impl Out for FsOut {
         replace: bool,
         mtime_ns: i64,
     ) -> Result<u64, CoreError> {
-        let mut src = File::open(from).map_err(|e| CoreError::io(from, e))?;
+        let source = self
+            .done
+            .get(from)
+            .ok_or_else(|| {
+                CoreError::io(
+                    from,
+                    std::io::Error::other("a hard link's source was not extracted"),
+                )
+            })?
+            .clone();
+        let mut src = self.tree()?.open_read(&source)?;
         self.create(to, replace)?;
         let n = match self.cur.as_mut() {
             Some((f, _)) => std::io::copy(&mut src, f).map_err(|e| CoreError::io(to, e))?,
@@ -1318,6 +1365,9 @@ struct NullOut {
 }
 
 impl Out for NullOut {
+    fn prepare(&mut self, _mkdirs: &[PathBuf], _links: &[Link]) -> Result<(), CoreError> {
+        Ok(())
+    }
     fn create(&mut self, _path: &Path, _replace: bool) -> Result<(), CoreError> {
         Ok(())
     }
@@ -1369,6 +1419,7 @@ fn run_extract<P: Peer>(
     summary: &mut ForeignSummary,
 ) -> Result<(), CoreError> {
     summary.entries = records.len() as u64;
+    summary.listing_charge = conv.charged;
     let declared: std::collections::HashMap<u64, u64> = records
         .iter()
         .enumerate()
@@ -1505,8 +1556,7 @@ fn run_extract<P: Peer>(
     summary.renamed = pass.renamed;
     summary.symlinks_skipped = pass.symlinks_skipped;
     if write_fs {
-        make_dirs(&mkdirs)?;
-        make_links(&links)?;
+        out.prepare(&mkdirs, &links)?;
     }
     summary.symlinks = links.len() as u64;
     let rep = conv.monitor.reporter();
@@ -1690,10 +1740,7 @@ pub fn extract_file(
         warnings: conv.warnings.clone(),
         ..ForeignSummary::default()
     };
-    let mut out = FsOut {
-        dir: dir.to_path_buf(),
-        cur: None,
-    };
+    let mut out = FsOut::new(dir);
     let r = conv.list().and_then(|records| {
         run_extract(
             &mut conv,
@@ -1804,10 +1851,7 @@ pub fn replay(
     };
     match dir {
         Some(d) => {
-            let mut out = FsOut {
-                dir: d.to_path_buf(),
-                cur: None,
-            };
+            let mut out = FsOut::new(d);
             let r = run(&mut out, &mut conv, &mut summary);
             let r = finish_run(&mut conv, &mut out, r);
             let bytes = summary.bytes;

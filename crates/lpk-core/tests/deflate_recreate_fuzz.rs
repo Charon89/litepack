@@ -107,6 +107,16 @@ fn fuzz_crash_input_is_refused_early() {
     );
 }
 
+/// Fuzz run 40274460627's out-of-memory input (`malloc(4294967290)`, built with
+/// `--no-cfg-fuzzing`): it reaches the resize in a normal build, so it guards change 12 too.
+#[test]
+fn fuzz_oom_input_without_cfg_fuzzing_stays_within_the_limit() {
+    check_fuzz_input(
+        "oom-a1f85f32",
+        include_bytes!("fixtures/fuzz/deflate_recreate-oom-a1f85f32"),
+    );
+}
+
 /// The crafted record (written by the vendored crate's ignored test
 /// `litepack_crafted::write_crafted_counts_record`): a valid dynamic-block record whose literal
 /// count correction asks for the predicted count plus 2^26. Refused as `InvalidPredictionData`

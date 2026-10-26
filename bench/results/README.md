@@ -43,6 +43,28 @@ environment dumps.
   the repeats requested, `--long-run-s` and the catalogue's BLAKE3; `--validate` checks each listed
   combination against its file. A combination whose first repeat reached `--long-run-s` is measured
   once and says so in `repeats_short`. `host.json` records the antivirus products Windows Security Center lists (name, raw `productState` as hex, decoded scanner state, and `antivirus_source`: `queried`, `query-failed` or `not-applicable`) and, independently, `defender_realtime` from the registry.
+- Result schema version 2 (E8-10) adds `corpus.class_blake3`, the class digest: BLAKE3 over the
+  class's manifest entries in the manifest's order (bytewise by path), each written as
+  `path NUL size NUL blake3 NUL` (the `/`-separated relative path, the size in decimal, the content
+  hash in lower-case hex; licence and source id are not part of it). `corpus build` and
+  `corpus scan` record it per class in `build-info.json`'s `summary`. Rows of version 1 have no
+  digest and stay valid. `run --validate DIR [--corpus C]` checks each digest against the corpus
+  manifest (`--corpus`, else `bench/corpus/<profile>` of the repository holding the results directory) when that corpus is present with the
+  manifest the row names; otherwise it notes the row.
+- Pooling in `lpk-bench report` (D-48, E8-10): directories of one host and profile pool when their
+  manifests are equal; when they differ, row by row: a row pools with the earlier rows of its class
+  when each names the same manifest or both carry equal `class_blake3`; a row of a class no earlier
+  row has pools when its manifest is one already pooled or it carries a digest. A row without a
+  digest pools only under the equal-manifest rule; a class whose digests differ is refused, naming
+  the class. A later directory's `supersedes.toml` is applied first, so a re-pinned class's new rows
+  (and a newer build's rows, before the tool-version check) can replace the old ones. The header
+  then lists each directory's manifest, the manifest(s) each class was measured on, and the
+  classes whose rows come from more than one. A probe counts for a class only when some pooled row
+  of that class names the probe's manifest (a probe no pooled row names is refused); otherwise
+  the header says so and any estimate or gate that needs it for that class is `not evaluable`,
+  naming the class.
+- A gate's best incumbent never includes the subject (`lpk`) or the store control (`store`); with
+  no other measured tool the gate is `not evaluable` (D-103).
 - Make a run with `lpk-bench run --tools all --profile small`; compare two runs of the same corpus
   with `lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]`.
 ## Probe files

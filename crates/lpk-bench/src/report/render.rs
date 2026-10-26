@@ -1,7 +1,7 @@
 //! The Markdown of the report. Every number in sections 2 to 6 is printed through
 //! [`Traced::show`], so it carries its source bracket.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::model::{
     blend, class_bytes, est_kind, gates, marked_verdict, settings, unclean_reasons, Baseline,
@@ -172,6 +172,56 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
                 d.settle_ms,
                 d.antivirus_changed,
                 brackets(&BTreeSet::from([d.run_src]))
+            ));
+        }
+        if b.pooled.iter().any(|d| d.manifest != b.pooled[0].manifest) {
+            // E8-10: the directories measured different manifests; rows pooled class by class.
+            s.push_str(
+                "- corpus manifests differ between the directories (rows pool class by class: \
+                 same manifest, or equal class digests, E8-10):\n",
+            );
+            for d in &b.pooled {
+                s.push_str(&format!(
+                    "  - `{}`: manifest BLAKE3 `{}`\n",
+                    d.label, d.manifest
+                ));
+            }
+            // Which files each class was measured on: the manifest(s) its pooled rows name.
+            let mut by_class: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for (r, _) in &b.results {
+                by_class
+                    .entry(r.class.as_str())
+                    .or_default()
+                    .insert(r.corpus.manifest_blake3.as_str());
+            }
+            for (class, manifests) in &by_class {
+                let list: Vec<String> = manifests.iter().map(|m| format!("`{m}`")).collect();
+                s.push_str(&format!(
+                    "  - class `{class}` measured on manifest {}\n",
+                    list.join(" and ")
+                ));
+            }
+            let classes = super::classes_pooled_by_digest(b);
+            s.push_str(&format!(
+                "  - classes whose rows come from more than one manifest, pooled by equal class \
+                 digest: {}\n",
+                if classes.is_empty() {
+                    "none".to_string()
+                } else {
+                    classes
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ));
+        }
+        for (probe, (manifest, classes)) in &inputs.probes.refused {
+            let list: Vec<String> = classes.iter().map(|c| format!("`{c}`")).collect();
+            s.push_str(&format!(
+                "- probe {probe} was taken on manifest `{manifest}`, which no pooled row of these \
+                 classes names, so it does not count for them (E8-10): {}\n",
+                list.join(", ")
             ));
         }
         if !b.superseded.is_empty() {
