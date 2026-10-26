@@ -843,6 +843,47 @@ fn the_balanced_default_without_sibling_roots_is_byte_identical_to_ordering_none
 }
 
 #[test]
+fn append_in_the_balanced_tier_orders_the_new_generations_versions_by_default() {
+    let base = tempfile::tempdir().unwrap();
+    fs::write(base.path().join("start.txt"), prose(7, 50_000)).unwrap();
+    let src = tempfile::tempdir().unwrap();
+    make_sibling_roots(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let first = work.path().join("first.lpk");
+    let a = run(&[
+        "a",
+        first.to_str().unwrap(),
+        base.path().to_str().unwrap(),
+        "--balanced",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let s = src.path().to_str().unwrap();
+    let append = |name: &str, extra: &[&str]| {
+        let arch = work.path().join(name);
+        fs::copy(&first, &arch).unwrap();
+        let mut args = vec!["append", arch.to_str().unwrap(), s, "--balanced", "-v"];
+        args.extend_from_slice(extra);
+        let r = run(&args);
+        assert_eq!(r.status.code(), Some(0), "{}", text(&r.stderr));
+        (fs::read(&arch).unwrap(), text(&r.stderr))
+    };
+    // A first walk can see other directory times than the next: settle before comparing.
+    let _settle = append("settle.lpk", &[]);
+    let (default, e) = append("default.lpk", &[]);
+    assert!(e.contains("ordering: versions\n"), "{e}");
+    let (versions, _) = append("versions.lpk", &["--ordering", "versions"]);
+    let (none, e) = append("none.lpk", &["--ordering", "none"]);
+    assert!(e.contains("ordering: none\n"), "{e}");
+    // The generation the default writes is the versions order's, byte for byte, and not the
+    // path order's.
+    assert!(
+        default == versions,
+        "default and --ordering versions differ"
+    );
+    assert!(default != none, "default and --ordering none are the same");
+}
+
+#[test]
 fn dedup_is_on_by_default_and_no_dedup_turns_it_off() {
     let src = tempfile::tempdir().unwrap();
     let big = random(300_000);

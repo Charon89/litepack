@@ -26,7 +26,7 @@ this page is the overview. v0 is unstable: it changes with the GUI tasks.
 | `Session::close(&self)` | Exclusive: cancels the reads in flight (their callers' tokens untouched), waits for them, and closes the session; every later call is `Usage`, kind `SessionClosed`. |
 | `Session::rollback(self, g)` / `append(self, dir, &CreateSettings, &Monitor)` | Exclusive: close, then run the free `rollback` / `append` (append returns the re-opened session). Taking `self`, they suit a sole owner. |
 | `Session::convert` | E5-7's `--convert`: `Unsupported` in v0 (needs E4-3's readers). |
-| `create(&Sources, out, &CreateSettings, &Monitor)` | A new archive; `CreateSettings` holds the tier flags (`Tier` cannot name Strong), `seal`, `recovery`. |
+| `create(&Sources, out, &CreateSettings, &Monitor)` | A new archive; `CreateSettings` holds the tier flags (`Tier` cannot name Strong), `seal`, `recovery`. Since E2-26 (v0 change) `ordering` is an `Option<FileOrder>`: `ordering: None` means the tier's default (`Tier::default_ordering`: Balanced `versions`, Fast and Store `none`); read the resolved value with `CreateSettings::ordering()`. |
 | `append(archive, dir, …)`, `rollback(path, g)` | The same without a session (an archive whose last append was cut short does not open). |
 | `calibrate(&Sources, &CreateSettings, sample, &Monitor)` | Runs the pipeline in memory on the first `sample` bytes of files: a `Rate`, E5-5's only source of estimates. |
 

@@ -521,7 +521,8 @@ struct TierArgs {
     /// smaller one's files are versions: a file's versions are written next to each other, in
     /// the natural order of the folder names; without such folders, path order). Default:
     /// `versions` with --balanced, `none` with --fast; `--ordering none` restores path order.
-    /// Ignored with --no-dedup and --store.
+    /// With `append`, the order applies within the new generation only. Ignored with
+    /// --no-dedup and --store.
     #[arg(long, value_enum, value_name = "ORDER")]
     ordering: Option<OrderingArg>,
     /// The Deflate peel: Deflate streams inside ZIP, Office, JAR, PNG, gzip and PDF files (and
