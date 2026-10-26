@@ -51,8 +51,16 @@ cargo install cargo-fuzz --locked --version 0.13.2
 export CARGO_TARGET_DIR=~/lpk-fuzz-target # under WSL: keep the build off /mnt (slow)
 bash fuzz/run.sh -t 60                    # every target for 60 s
 bash fuzz/run.sh -t 600 archive_mutate    # one target for 10 min
-cargo +nightly fuzz run archive_mutate    # by hand, from fuzz/
+cargo +nightly fuzz run --no-cfg-fuzzing archive_mutate    # by hand, from fuzz/
 ```
+
+Every build passes `--no-cfg-fuzzing` (`run.sh`, the workflow's `cargo fuzz build`), so the targets run
+the code we ship. With `cfg(fuzzing)` set (cargo-fuzz's default), dependencies relax checks: bitcode
+accepts trailing bytes after a record (`expect_eof`) and miniz_oxide skips the zlib Adler-32 check, so
+a record the shipped decoder refuses reached code no shipped build reaches (fuzz run 40270390275,
+`deflate_recreate`). cargo-fuzz's build keeps debug assertions and overflow checks on (the crashes of
+E4-6's runs were overflow panics), as the workspace's debug tests do; a shipped release build wraps
+instead.
 
 A crash is saved under `fuzz/artifacts/<target>/`. Minimise it with
 `cargo +nightly fuzz tmin <target> <file>`, add the bytes as a regression test in `lpk-format`, fix the

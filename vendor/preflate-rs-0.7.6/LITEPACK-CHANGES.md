@@ -116,7 +116,8 @@ lists) far beyond what the archive declares.
    `&symbols[n..]`, which panics out of range. A valid record's repeat counts stay within the
    symbols (the encoder derived them from them), so no valid record is affected. Found by the
    review of LitePack's E4-6.
-12. **Decoded table counts kept to what a Deflate header holds** (LitePack E4-6, 2026-10-26). In
+(Change 12 is the Deflate decode-memory fix, on the branch `fix/deflate-decode-memory`.)
+13. **Decoded table counts kept to what a Deflate header holds** (LitePack E4-6, 2026-10-26). In
    `src/tree_predictor.rs`, `recreate_tree_for_block` returns `ExitCode::RecompressFailed` when
    the decoded code-length count is outside 4 to 19 (above 19 it indexed past the order table);
    in `src/deflate/huffman_encoding.rs`, `HuffmanOriginalEncoding::write` refuses a literal
@@ -124,8 +125,16 @@ lists) far beyond what the archive declares.
    to 19 (the subtractions that write HLIT, HDIST and HCLEN overflowed). These are the ranges
    the header's fields can hold, so no valid record is affected. Both files are this crate's
    own; the coder is unchanged. Found by the regression test below.
+14. **Values kept to their fields' widths** (LitePack E4-6, 2026-10-26). In
+   `src/deflate/huffman_encoding.rs`, `HuffmanOriginalEncoding::write` also refuses
+   (`ExitCode::RecompressFailed`) a code-length code above 7 (written in 3 bits), a code length
+   above 15, and a repeat count outside its code's range (3 to 6, 3 to 10, 11 to 138): a wider
+   value spilled into the next field (`BitWriter::write`'s debug assertion; in a release build,
+   other bytes). A valid header holds only such values, so no valid record is affected. Found
+   by LitePack's `deflate_recreate` fuzz target (fuzz run 40272877553); its input is in
+   `fuzz/seeds/deflate_recreate/`.
 
-The workspace runs the regression test of changes 9 to 12 (the vendored crate's own tests are not
+The workspace runs the regression test of changes 9 to 11, 13 and 14 (the vendored crate's own tests are not
 run): `lpk-core`'s `crafted_corrections_do_not_panic` (`src/peel/deflate/decode.rs`) feeds the
 `deflate_recreate` seed and a deterministic sweep of crafted correction streams to
 `recreate_whole_deflate_stream_limited_report` and fails on any overflow or out-of-range panic.

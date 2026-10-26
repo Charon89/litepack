@@ -492,10 +492,10 @@ mod tests {
         );
     }
 
-    /// preflate-rs's vendor changes 9 to 12 (E4-6's fuzzing): crafted correction streams
+    /// preflate-rs's vendor changes 9 to 11, 13 and 14 (E4-6's fuzzing): crafted correction streams
     /// (the `deflate_recreate` seeds, then a deterministic sweep of pseudo-random coded streams
-    /// under the parameters of [`stream`]) make no arithmetic overflow and no out-of-range index
-    /// or slice in the recreation. Change 8's deliberate refusals are panics and are allowed; a
+    /// under the parameters of [`stream`]) make no arithmetic overflow, no out-of-range index or
+    /// slice and no failed (debug) assertion in the recreation. Change 8's deliberate refusals are panics and are allowed; a
     /// panic hook records the others, on this thread only (as libFuzzer's hook would see them).
     #[test]
     fn crafted_corrections_do_not_panic() {
@@ -512,9 +512,14 @@ mod tests {
                     .cloned()
                     .or_else(|| info.payload().downcast_ref::<&str>().map(|s| s.to_string()))
                     .unwrap_or_default();
-                let defect = ["overflow", "out of range", "out of bounds"]
-                    .iter()
-                    .any(|w| text.contains(w));
+                let defect = [
+                    "overflow",
+                    "out of range",
+                    "out of bounds",
+                    "assertion failed",
+                ]
+                .iter()
+                .any(|w| text.contains(w));
                 if std::thread::current().id() == me && defect {
                     let at = info.location().map(|l| l.to_string()).unwrap_or_default();
                     bad.lock()
@@ -529,9 +534,14 @@ mod tests {
             }));
         };
         // The fuzz target's layout: limit (u16 LE), plain length (u32 LE), plain, corrections.
-        let seeds: [&[u8]; 1] = [include_bytes!(
-            "../../../../../fuzz/seeds/deflate_recreate/crash-35aa2eee820b0f5b132908c7cf85ff9d46e5562f"
-        )];
+        let seeds: [&[u8]; 2] = [
+            include_bytes!(
+                "../../../../../fuzz/seeds/deflate_recreate/crash-35aa2eee820b0f5b132908c7cf85ff9d46e5562f"
+            ),
+            include_bytes!(
+                "../../../../../fuzz/seeds/deflate_recreate/crash-bbd6b7bcd56627214532a1afa95004c8fa242826"
+            ),
+        ];
         for data in seeds {
             let limit = usize::from(u16::from_le_bytes([data[0], data[1]]));
             let rest = &data[6..];

@@ -89,7 +89,8 @@ jobs:
         run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Build every target
         working-directory: fuzz
-        run: cargo "+$LPK_FUZZ_TOOLCHAIN" fuzz build
+        # --no-cfg-fuzzing: the targets run the code we ship (fuzz/run.sh, fuzz/README.md).
+        run: cargo "+$LPK_FUZZ_TOOLCHAIN" fuzz build --no-cfg-fuzzing
       - name: Collect the binaries
         run: |
           set -euo pipefail

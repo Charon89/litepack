@@ -144,7 +144,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
         tc_code_tree_len as u32,
     ) as usize;
 
-    // LitePack change 12: a decoded code-length count outside Deflate's 4 to 19 is refused; above
+    // LitePack change 13: a decoded code-length count outside Deflate's 4 to 19 is refused; above
     // 19 it indexed past the order table below.
     if !(4..=CODETREE_CODE_COUNT).contains(&tc_code_tree_len) {
         return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed");

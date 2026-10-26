@@ -53,7 +53,10 @@ run() {
     for a in "$@"; do
       case "$a" in -*) opts+=("$a") ;; *) dirs+=("$a") ;; esac
     done
-    cargo "+$toolchain" fuzz run "$t" "${dirs[@]}" -- "${opts[@]}"
+    # --no-cfg-fuzzing: the targets run the code we ship. With `cfg(fuzzing)`, bitcode skips its
+    # trailing-bytes check and miniz_oxide its Adler-32 check, so a record the shipped decoder
+    # refuses reached code the fuzzer then reported on (fuzz run 40270390275, deflate_recreate).
+    cargo "+$toolchain" fuzz run --no-cfg-fuzzing "$t" "${dirs[@]}" -- "${opts[@]}"
   fi
 }
 
