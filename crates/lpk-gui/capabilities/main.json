@@ -1,0 +1,15 @@
+{
+  "identifier": "main",
+  "description": "The main window: the archive browser's commands, nothing else (no plugin and no core permission; dialogs and the update check run in Rust).",
+  "windows": ["main"],
+  "permissions": [
+    "allow-startup",
+    "allow-open-archive",
+    "allow-rows",
+    "allow-close-archive",
+    "allow-create-archive",
+    "allow-cancel",
+    "allow-subscribe",
+    "allow-listing-shown"
+  ]
+}

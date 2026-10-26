@@ -60,11 +60,75 @@ jobs:
         run: cargo nextest run --locked --workspace --no-tests=pass
       - name: Licence and advisory policy
         run: cargo deny check
+      # E5-2: the GUI's tree (excluded above) for the Windows triples it ships on (crates/lpk-gui/deny.toml).
+      - name: Licence and advisory policy (GUI, Windows triples)
+        run: cargo deny --manifest-path crates/lpk-gui/Cargo.toml check
+      # E5-2: no Node toolchain: no package manifest or lockfile in the tree, no Node set up by any workflow.
+      - name: No Node
+        shell: bash
+        run: |
+          if git ls-files | grep -E '(^|/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|\.npmrc|node_modules/)'; then
+            echo "the repository holds a Node manifest, lockfile or node_modules" >&2
+            exit 1
+          fi
+          if grep -nE 'setup-node|\bnpm |\bnpx |\byarn |\bpnpm ' .github/workflows/*.yml | grep -v "grep -nE"; then
+            echo "a workflow installs or runs Node" >&2
+            exit 1
+          fi
       # LIC-2: THIRD-PARTY-NOTICES regenerated from Cargo.lock over the shipped packages; red when a dependency
       # changed without regenerating it, or when a GPL-family licence text reaches the notices, crates/ or vendor/.
       - name: Third-party notices
         shell: bash
         run: scripts/third-party-notices.sh --check
+
+  # E5-2: the Tauri GUI built with `cargo tauri build` (tauri-cli through cargo, no Node) and run against a
+  # generated archive given on its command line: the page reports the rows it put in the window's DOM through
+  # the `listing_shown` command and the host writes that report (LPK_GUI_SMOKE_REPORT), which
+  # crates/lpk-gui/smoke.sh checks. The minimum Windows version is part of the matrix (docs/RELEASING.md).
+  gui:
+    name: gui (${{ matrix.os }}, minimum Windows ${{ matrix.windows-minimum }})
+    timeout-minutes: 45
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            windows-minimum: "10.0.19045"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui
+      - name: The minimum Windows build matches docs/RELEASING.md
+        shell: bash
+        run: grep -qF '| ${{ matrix.windows-minimum }} |' docs/RELEASING.md
+      - name: tauri-cli through cargo (pinned)
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: Build lpk (makes the smoke archive)
+        run: cargo build --locked -p lpk-cli
+      - name: cargo tauri build
+        working-directory: crates/lpk-gui
+        run: cargo tauri build --ci -- --locked
+      - name: The exe opens an archive from the command line
+        shell: bash
+        run: bash crates/lpk-gui/smoke.sh target/debug/lpk.exe target/release/lpk-gui.exe "$RUNNER_TEMP/gui-smoke"
+      # Risk 2 of the E5 design: the MPL-2.0 crate option-ext is used only by dirs-sys on Unix; no symbol of it
+      # may reach the Windows exe (webview2_com is the control: present).
+      - name: No option-ext symbol in the PDB
+        shell: bash
+        run: |
+          pdb=target/release/lpk_gui.pdb
+          test "$(grep -a -c 'webview2_com::' "$pdb")" -gt 0
+          if grep -a -qE 'option_ext::|10option_ext' "$pdb"; then
+            echo "option-ext code reached lpk-gui.exe" >&2
+            exit 1
+          fi
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:

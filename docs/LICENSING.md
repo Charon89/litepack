@@ -92,6 +92,15 @@ bundled C libraries are clarified there: liblzma (0BSD) in `liblzma-sys`, zlib (
 (`lpk-codecs-vp8`'s Microsoft header, the WebM banner and lepton_jpeg's `NOTICE.txt`). The E7 packaging task ships
 the file in every artefact.
 
+**Open item (E5-2, due before any GUI binary is distributed, E7): the WebView2 loader's licence text.**
+`lpk-gui.exe` links Microsoft's `WebView2LoaderStatic.lib`, vendored by `webview2-com-sys` 0.39.1 (which declares
+itself MIT), whose licence requires its notice. `THIRD-PARTY-NOTICES` (`about-gui.hbs`) carries the copyright line
+and the licence URL only; before E7 distributes a GUI binary it must reproduce verbatim the `LICENSE.txt` of the
+Microsoft.Web.WebView2 NuGet package the vendored loader came from. The crate does not state that package's
+version: 0.39.0's changelog says only "update windows and WebView2 SDK versions" (0.38.2 named 1.0.3650.58), and
+the E5 design's reference, 1.0.4314.35, is unverified against the vendored files. The text is copied from the
+package, never written from memory.
+
 ## Patents to review (counsel, not engineers, decide)
 This is a watch-list, not a legal opinion: engineers record what each patent is about and when counsel
 must look at it. Titles, holders and dates are from Google Patents; the expiry dates are that site's

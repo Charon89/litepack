@@ -38,7 +38,8 @@ pub mod writer;
 pub mod zstd;
 
 pub use archive::{
-    generation_rules_table, read_key_slot, rollback, Archive, Diagnosis, Generation,
+    committed_chain, generation_rules_table, read_key_slot, rollback, Archive, Diagnosis,
+    Generation,
 };
 pub use chunk::{
     chunk_record_table, verify_file, verify_range, ChunkIndex, ChunkIter, ChunkLookup, ChunkPlace,

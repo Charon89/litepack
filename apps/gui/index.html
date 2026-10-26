@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title></title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="main.js"></script>
+</head>
+<body>
+  <main>
+    <p id="hint" class="hint" data-string="drop.hint"></p>
+    <div id="list" class="list" role="grid" aria-rowcount="0" data-label="list.label" hidden>
+      <div class="row head" role="row">
+        <span role="columnheader" data-string="list.name"></span>
+        <span role="columnheader" class="num" data-string="list.size"></span>
+        <span role="columnheader" data-string="list.modified"></span>
+      </div>
+      <div id="rows" role="rowgroup"></div>
+    </div>
+  </main>
+  <footer id="status" class="status" role="status" aria-live="polite"></footer>
+</body>
+</html>

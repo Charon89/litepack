@@ -237,6 +237,18 @@ pub fn rollback(path: &Path, generation: u64) -> Result<GenerationInfo, Error> {
         .map_err(fail)
 }
 
+/// The latest committed generation of the archive at `path`, from its trailer chain (the
+/// chain [`rollback`] reads; a torn append's tail is skipped), opened read-only and without
+/// credentials; nothing is written. Any error (the file held or unreadable, a damaged chain,
+/// an unsupported version) is returned as it is.
+pub fn committed_generation(path: &Path) -> Result<u64, Error> {
+    let fail = |e: FormatError| Error::format(e, Some(path));
+    let mut file = std::fs::File::open(path).map_err(|e| fail(FormatError::Io(e)))?;
+    lpk_format::committed_chain(&mut file)
+        .map(|(_, latest)| latest)
+        .map_err(fail)
+}
+
 /// A measured compression rate on this machine (E5-5's only source of estimates).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rate {

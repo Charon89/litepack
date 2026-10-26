@@ -997,16 +997,11 @@ pub fn generation_rules_table() -> String {
     )
 }
 
-/// Roll the archive in `file` back to `generation`: truncate the file to the
-/// end of that generation's trailer (spec section 15). No credentials are
-/// needed, nothing is decrypted. The file's last complete trailer is found
-/// from the tail, or by walking the frames when the tail is not a trailer (an
-/// append that was cut short), so rolling back to the latest generation
-/// repairs a half-appended file. The chain is checked on the way: every
-/// trailer on it must verify, name this archive and number the generations
-/// down by one. Asking for a generation above the latest is
-/// `NoSuchGeneration`. Returns the generation the file now ends with.
-pub fn rollback(file: &mut std::fs::File, generation: u64) -> Result<Generation, FormatError> {
+/// The committed generations of the archive in `file` and the latest of them, read as
+/// [`rollback`] reads them (the last complete trailer from the tail, or by walking the frames
+/// when the tail is not a trailer, then the checked chain), without writing anything. What a
+/// recovery uses to tell a committed append from a torn one.
+pub fn committed_chain(file: &mut std::fs::File) -> Result<(Vec<Generation>, u64), FormatError> {
     let len = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(0))?;
     let header = Header::read(&mut *file)?;
@@ -1033,13 +1028,27 @@ pub fn rollback(file: &mut std::fs::File, generation: u64) -> Result<Generation,
         return Err(FormatError::ArchiveIdMismatch);
     }
     let chain = walk_chain(&mut *file, header.archive_id, latest, at)?;
+    Ok((chain, latest.generation))
+}
+
+/// Roll the archive in `file` back to `generation`: truncate the file to the
+/// end of that generation's trailer (spec section 15). No credentials are
+/// needed, nothing is decrypted. The file's last complete trailer is found
+/// from the tail, or by walking the frames when the tail is not a trailer (an
+/// append that was cut short), so rolling back to the latest generation
+/// repairs a half-appended file. The chain is checked on the way: every
+/// trailer on it must verify, name this archive and number the generations
+/// down by one. Asking for a generation above the latest is
+/// `NoSuchGeneration`. Returns the generation the file now ends with.
+pub fn rollback(file: &mut std::fs::File, generation: u64) -> Result<Generation, FormatError> {
+    let (chain, latest) = committed_chain(file)?;
     let target = chain
         .iter()
         .find(|g| g.generation == generation)
         .copied()
         .ok_or(FormatError::NoSuchGeneration {
             requested: generation,
-            latest: latest.generation,
+            latest,
         })?;
     file.set_len(target.end())?;
     file.sync_all()?;

@@ -28,6 +28,7 @@ this page is the overview. v0 is unstable: it changes with the GUI tasks.
 | `Session::convert` | E5-7's `--convert`: `Unsupported` in v0 (needs E4-3's readers). |
 | `create(&Sources, out, &CreateSettings, &Monitor)` | A new archive; `CreateSettings` holds the tier flags (`Tier` cannot name Strong), `seal`, `recovery`. |
 | `append(archive, dir, …)`, `rollback(path, g)` | The same without a session (an archive whose last append was cut short does not open). |
+| `committed_generation(path)` | The latest committed generation from the trailer chain, read-only (a torn append's tail skipped): how the GUI's recovery tells a committed append from a torn one (E5-2). |
 | `calibrate(&Sources, &CreateSettings, sample, &Monitor)` | Runs the pipeline in memory on the first `sample` bytes of files: a `Rate`, E5-5's only source of estimates. |
 
 `Selection` is `All`, `Globs` (D-90) or `Ids(Arc<IdSet>)` (picks as a bit set). For an
