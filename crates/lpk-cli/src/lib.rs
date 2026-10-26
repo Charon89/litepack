@@ -731,9 +731,11 @@ struct ExtractArgs {
     /// `Zone.Identifier` stream gives zone 3 (Internet) or 4 (Restricted), or cannot be parsed
     /// (read as 3), every extracted file gets a `Zone.Identifier` stream with that `ZoneId`
     /// only (no `HostUrl` or `ReferrerUrl`), written before its first byte; zones 0-2 and
-    /// archives without the stream: nothing. A destination whose volume has no named streams
-    /// cannot hold the mark: the extraction goes on and prints one warning (with --json one
-    /// `{"warning":{"kind":"MotwUnmarked","zone":N}}` line). `off` writes no stream.
+    /// archives without the stream: nothing. A stream that exists and cannot be read (access
+    /// denied, a sharing violation) is read as 3 with one warning (with --json one
+    /// `{"warning":{"kind":"MotwZoneUnreadable"}}` line). A destination whose volume has no
+    /// named streams cannot hold the mark: the extraction goes on and prints one warning (with
+    /// --json one `{"warning":{"kind":"MotwUnmarked","zone":N}}` line). `off` writes no stream.
     #[arg(long, value_enum, value_name = "on|off", default_value_t = OnOff::On)]
     motw: OnOff,
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
@@ -916,6 +918,7 @@ fn foreign_extract(
             ..lpk_api::OpenOptions::default()
         },
     )?;
+    let zone_warning = session.zone_warning();
     let r = session.extract(
         &lpk_api::Selection::Globs(select),
         &lpk_api::Destination::Dir(x.outdir.clone()),
@@ -932,6 +935,7 @@ fn foreign_extract(
         ));
     };
     sandbox_warnings(&s.warnings, json, err);
+    zone_warning_line(zone_warning.as_deref(), json, err);
     if report.motw_unmarked {
         motw_warning(report.zone, json, err);
     }
@@ -992,6 +996,19 @@ fn motw_warning(zone: Option<lpk_core::motw::Zone>, json: bool, err: &mut dyn Wr
         let _ = writeln!(err, "{line}");
     } else {
         let _ = writeln!(err, "warning: {}", lpk_core::motw::unmarked_warning(z));
+    }
+}
+
+/// The archive's zone could not be read and was taken as the Internet zone (fail safe): one
+/// line, `warning: Mark of the Web: ...`, or with --json
+/// `{"warning":{"kind":"MotwZoneUnreadable"}}`.
+fn zone_warning_line(warning: Option<&str>, json: bool, err: &mut dyn Write) {
+    let Some(w) = warning else { return };
+    if json {
+        let line = serde_json::json!({ "warning": { "kind": "MotwZoneUnreadable" } });
+        let _ = writeln!(err, "{line}");
+    } else {
+        let _ = writeln!(err, "warning: {w}");
     }
 }
 
@@ -1666,6 +1683,7 @@ fn extract(
     }
     let select =
         lpk_core::Selection::new(&x.patterns).map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    let mut zone_warning = None;
     // E5-1: open (the key slot, the envelope against `--memory`, the priors), then extract;
     // every refusal of the open comes before any output exists, as before.
     let r = Session::open(
@@ -1679,6 +1697,7 @@ fn extract(
         },
     )
     .and_then(|session| {
+        zone_warning = session.zone_warning();
         session.extract(
             &lpk_api::Selection::Globs(select),
             &lpk_api::Destination::Dir(x.outdir.clone()),
@@ -1697,6 +1716,7 @@ fn extract(
             Some(&x.archive),
         ));
     };
+    zone_warning_line(zone_warning.as_deref(), json, err);
     if report.motw_unmarked {
         motw_warning(report.zone, json, err);
     }
@@ -1954,6 +1974,7 @@ fn export(
             export::compressor_memory(container, method)
         );
     }
+    zone_warning_line(session.zone_warning().as_deref(), json, err);
     motw_check(zone, &x.out, json, err);
     let _ = writeln!(
         out,
@@ -2055,6 +2076,7 @@ fn repair(
     let motw_off = r.motw == OnOff::Off;
     let session = maintenance_session(archive, credentials, motw_off)?;
     let (report, unrepairable) = session.repair(target, &lpk_core::Monitor::default())?;
+    zone_warning_line(session.zone_warning().as_deref(), json, err);
     motw_check(
         if motw_off { None } else { session.zone() },
         target,

@@ -93,6 +93,31 @@ fn a_zoned_archive_gives_every_extracted_file_its_zone_id_only() {
     expect(&out, Some(Z3));
 }
 
+/// Fail safe: a stream that cannot be read (held without sharing by another handle) is the
+/// Internet zone, with one warning, even though it says zone 1.
+#[test]
+fn an_unreadable_zone_is_the_internet_zone_with_one_warning() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let a = archive(d.path());
+    set_zone(&a, "[ZoneTransfer]\r\nZoneId=1\r\n");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(stream(&a))
+        .unwrap();
+    let out = d.path().join("out");
+    let (code, _, err) = lpk(&["x", s(&a), s(&out)]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(err.matches("could not be read").count(), 1, "{err}");
+    expect(&out, Some(Z3));
+    let out = d.path().join("json");
+    let (code, _, err) = lpk(&["--json", "x", s(&a), s(&out)]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("MotwZoneUnreadable"), "{err}");
+    drop(lock);
+}
+
 #[test]
 fn an_unzoned_archive_and_zones_zero_to_two_give_none() {
     let d = tempfile::tempdir().unwrap();
@@ -174,10 +199,26 @@ fn export_and_repair_copies_carry_the_zone_and_the_opt_out_none() {
     let (code, _, err) = lpk(&["repair", s(&a), s(&r), "--motw", "off"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(zone_of(&r), None);
+    // `--force` replaces the output as a new file: an old stream (zone 4) is not inherited,
+    // with the opt-out here and from an unzoned archive below.
+    let o = d.path().join("forced.zip");
+    std::fs::write(&o, b"old").unwrap();
+    set_zone(&o, Z4);
+    let (code, _, err) = lpk(&["export", s(&a), s(&o), "--force", "--motw", "off"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(zone_of(&o), None);
+    set_zone(&o, Z4);
+    let (code, _, err) = lpk(&["export", s(&a), s(&o), "--force"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(zone_of(&o).as_deref(), Some(Z3));
     // An unzoned archive's copies: none.
     std::fs::remove_file(stream(&a)).unwrap();
     let o = d.path().join("plain.zip");
     let (code, _, err) = lpk(&["export", s(&a), s(&o)]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(zone_of(&o), None);
+    set_zone(&o, Z4);
+    let (code, _, err) = lpk(&["export", s(&a), s(&o), "--force"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(zone_of(&o), None);
 }

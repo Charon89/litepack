@@ -323,6 +323,11 @@ impl Dir {
         self.id
     }
 
+    /// Whether this directory's volume holds named streams ([`named_streams`]).
+    pub fn named_streams(&self) -> Result<bool, FsError> {
+        named_streams(&self.h)
+    }
+
     /// Open the child directory `name` (with `create`, create it when absent), relative to
     /// this one; a name-surrogate reparse point there is [`FsError::Linked`].
     pub fn open_dir(&self, name: &OsStr, create: bool) -> Result<Dir, FsError> {

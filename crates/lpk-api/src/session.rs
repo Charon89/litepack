@@ -308,8 +308,10 @@ pub struct Session {
     options: SessionOptions,
     gate: Arc<Gate>,
     model: Mutex<Option<Arc<ListModel>>>,
-    /// The archive's propagating zone, read once at open ([`lpk_core::motw::read_zone`]).
-    zone: Option<lpk_core::motw::Zone>,
+    /// The archive's propagating zone, read once at open through the archive's handle
+    /// ([`lpk_core::motw::read_zone_of`]); `unreadable` when it was taken as the Internet zone
+    /// because the stream could not be read.
+    zone: lpk_core::motw::ZoneRead,
 }
 
 /// What a re-open (`unlock`, after `append`) needs again.
@@ -540,6 +542,8 @@ impl Session {
             motw_off: o.motw_off,
         };
         let fail = |e: FormatError| Error::format(e, Some(path));
+        // Mark of the Web: the zone is read through this handle, before the reader takes it.
+        let zone = lpk_core::motw::read_zone_of(&file);
         let window = Window::new(file, None).map_err(|e| fail(FormatError::Io(e)))?;
         let mut archive = Self::open_archive(window, path, &options, o.credentials)?;
         let mut fork_window = None;
@@ -585,7 +589,7 @@ impl Session {
             options,
             gate: Arc::new(Gate::default()),
             model: Mutex::new(None),
-            zone: lpk_core::motw::read_zone(path),
+            zone,
         })
     }
 
@@ -636,7 +640,17 @@ impl Session {
             },
             gate: Arc::new(Gate::default()),
             model: Mutex::new(None),
-            zone: lpk_core::motw::read_zone(path),
+            // A foreign archive is opened by path here (the broker opens it by path again
+            // for the worker): the zone is read through this handle, so a file swapped in
+            // between the two opens could differ from the one extracted (a window E4's broker
+            // shares; it does not open the archive through one handle either).
+            zone: File::open(path).map_or(
+                lpk_core::motw::ZoneRead {
+                    zone: None,
+                    unreadable: false,
+                },
+                |f| lpk_core::motw::read_zone_of(&f),
+            ),
         }
     }
 
@@ -644,7 +658,13 @@ impl Session {
     /// `Zone.Identifier` gives zone 3 or 4 (or cannot be parsed), read once at open; reported
     /// whatever [`OpenOptions::motw_off`] says.
     pub fn zone(&self) -> Option<lpk_core::motw::Zone> {
-        self.zone
+        self.zone.zone
+    }
+
+    /// The one warning when the archive's zone could not be read and was taken as the
+    /// Internet zone (fail safe), unless Mark of the Web is opted out.
+    pub fn zone_warning(&self) -> Option<String> {
+        (self.zone.unreadable && !self.options.motw_off).then(lpk_core::motw::unreadable_warning)
     }
 
     /// The zone the files this session writes get: [`Session::zone`] unless opted out.
@@ -652,7 +672,7 @@ impl Session {
         if self.options.motw_off {
             None
         } else {
-            self.zone
+            self.zone.zone
         }
     }
 
@@ -1315,13 +1335,22 @@ impl Session {
         };
         let out_path = out.to_path_buf();
         let zone = self.out_zone();
+        // The output is always a new file: an existing one (`force`) is removed first, so the
+        // replacement inherits none of its streams (an unrelated `Zone.Identifier`, E6-5).
         // Mark of the Web: the zone goes onto the output before its first byte, relative to
         // the file's handle (a volume that cannot hold it leaves the output unmarked).
+        let force = o.force;
         let opener = move || {
+            if force {
+                match std::fs::remove_file(&out_path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
             let f = std::fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .open(&out_path)?;
             if let Some(z) = zone {
                 lpk_core::motw::mark(&f, z);

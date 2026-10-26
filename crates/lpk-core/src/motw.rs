@@ -100,30 +100,68 @@ fn decode(bytes: &[u8]) -> Option<String> {
     std::str::from_utf8(bytes).ok().map(str::to_owned)
 }
 
-/// The propagating zone of the archive at `path`, read once when it is opened: `None` when it
-/// has no `Zone.Identifier` stream (or the stream cannot be opened: no streams on its volume),
-/// else [`parse`] of the stream (a stream that opens and cannot be read is the Internet zone).
-/// Always `None` outside Windows.
-pub fn read_zone(path: &Path) -> Option<Zone> {
+/// The largest stream read: a stream larger than this is not a zone file Windows wrote; what
+/// was read is parsed.
+const MAX_STREAM: u64 = 64 * 1024;
+
+/// What reading an archive's zone found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoneRead {
+    /// The propagating zone, if any.
+    pub zone: Option<Zone>,
+    /// The stream (or the volume probe) could not be read: the zone is the Internet zone, fail
+    /// safe, and the caller warns once ([`unreadable_warning`]).
+    pub unreadable: bool,
+}
+
+impl ZoneRead {
+    const NONE: ZoneRead = ZoneRead {
+        zone: None,
+        unreadable: false,
+    };
+    const UNREADABLE: ZoneRead = ZoneRead {
+        zone: Some(Zone::INTERNET),
+        unreadable: true,
+    };
+}
+
+/// The propagating zone of the open archive `file`, read once when it is opened, through the
+/// archive's own handle (the `:Zone.Identifier` stream opened relative to it,
+/// [`lpk_fs_sys::read_stream`]), never by path: no other file swapped in at the archive's
+/// path after the open can lend or withhold a zone. Unzoned only when the file's volume has no
+/// named streams or the file has no such stream; else [`parse`] of the stream; and every other
+/// failure (the probe, access denied, a sharing violation, a read error) is the Internet zone
+/// with [`ZoneRead::unreadable`] set (fail safe). Always unzoned outside Windows.
+pub fn read_zone_of(file: &File) -> ZoneRead {
     #[cfg(windows)]
     {
-        use std::io::Read;
-        let mut name = path.as_os_str().to_owned();
-        name.push(":");
-        name.push(STREAM);
-        let mut f = File::open(name).ok()?;
-        let mut buf = Vec::new();
-        // A stream larger than this is not a zone file Windows wrote; what was read is parsed.
-        match f.by_ref().take(64 * 1024).read_to_end(&mut buf) {
-            Ok(_) => parse(&buf),
-            Err(_) => Some(Zone::INTERNET),
+        match lpk_fs_sys::named_streams(file) {
+            Ok(true) => {}
+            Ok(false) => return ZoneRead::NONE,
+            Err(_) => return ZoneRead::UNREADABLE,
+        }
+        match lpk_fs_sys::read_stream(file, STREAM, MAX_STREAM) {
+            Ok(None) => ZoneRead::NONE,
+            Ok(Some(bytes)) => ZoneRead {
+                zone: parse(&bytes),
+                unreadable: false,
+            },
+            Err(_) => ZoneRead::UNREADABLE,
         }
     }
     #[cfg(not(windows))]
     {
-        let _ = path;
-        None
+        let _ = file;
+        ZoneRead::NONE
     }
+}
+
+/// [`read_zone_of`] of the file at `path` (opened for the read; a file that cannot be opened
+/// is unzoned: there is nothing to derive from it). For a file this process wrote (the CLI's
+/// check of an export or repair output) and for tests; an archive is read through its open
+/// handle.
+pub fn read_zone(path: &Path) -> Option<Zone> {
+    File::open(path).map_or(None, |f| read_zone_of(&f).zone)
 }
 
 /// Whether the volume `file` is on holds named streams (`FILE_NAMED_STREAMS`); a failed probe
@@ -145,21 +183,33 @@ pub fn holds_streams(file: &File) -> bool {
 }
 
 /// Write `zone`'s `Zone.Identifier` stream onto the open, still empty `file`, relative to its
-/// handle. `false` when the volume cannot hold it (no named streams, or the write failed):
-/// the caller warns once and goes on. Outside Windows nothing is written (`false`).
+/// handle, after probing its volume ([`holds_streams`]; one output file: export, repair).
+/// `false` when the volume cannot hold it (no named streams, or the write failed): the caller
+/// warns once and goes on. Outside Windows nothing is written (`false`).
 pub fn mark(file: &File, zone: Zone) -> bool {
-    if !holds_streams(file) {
-        return false;
-    }
+    holds_streams(file) && write(file, zone)
+}
+
+/// Write `zone`'s stream onto `file` without a probe: for a caller that probed the volume once
+/// for all its outputs (the output tree).
+pub(crate) fn write(file: &File, zone: Zone) -> bool {
     #[cfg(windows)]
     {
         lpk_fs_sys::write_stream(file, STREAM, &zone.stream_bytes()).is_ok()
     }
     #[cfg(not(windows))]
     {
-        let _ = zone;
+        let _ = (file, zone);
         false
     }
+}
+
+/// The one warning printed when the archive's own zone could not be read (it is then taken
+/// as the Internet zone).
+pub fn unreadable_warning() -> String {
+    "Mark of the Web: the archive's Zone.Identifier stream could not be read; its outputs are \
+     marked with the Internet zone (ZoneId=3)"
+        .to_string()
 }
 
 /// The one warning printed when files derived from a zoned archive could not carry the mark.
@@ -187,7 +237,7 @@ pub(crate) mod seam {
         STREAMS.with(|c| c.set(v));
     }
 
-    pub(super) fn forced_streams() -> Option<bool> {
+    pub(crate) fn forced_streams() -> Option<bool> {
         STREAMS.with(Cell::get)
     }
 }
@@ -271,6 +321,50 @@ mod tests {
         assert_eq!(read_zone(&a), None);
         std::fs::write(&s, b"[ZoneTransfer]\r\nZoneId=3\r\n").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(read_zone(&a), Some(Zone::INTERNET));
+    }
+
+    /// Fail safe: a stream that exists and cannot be opened (here a sharing violation: another
+    /// handle holds it without sharing) is the Internet zone, flagged unreadable, even when the
+    /// stream says zone 1.
+    #[cfg(windows)]
+    #[test]
+    fn an_unreadable_stream_is_the_internet_zone_flagged() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let a = d.path().join("a.lpk");
+        std::fs::write(&a, b"x").unwrap_or_else(|e| panic!("{e}"));
+        let s = d.path().join("a.lpk:Zone.Identifier");
+        std::fs::write(&s, b"[ZoneTransfer]\r\nZoneId=1\r\n").unwrap_or_else(|e| panic!("{e}"));
+        let f = File::open(&a).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(read_zone_of(&f), ZoneRead::NONE);
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&s)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(read_zone_of(&f), ZoneRead::UNREADABLE);
+        drop(lock);
+        assert_eq!(read_zone_of(&f), ZoneRead::NONE);
+    }
+
+    /// The zone is read through the archive's handle: a file swapped in at its path after the
+    /// open lends it nothing.
+    #[cfg(windows)]
+    #[test]
+    fn the_zone_is_read_through_the_open_handle() {
+        let d = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let a = d.path().join("a.lpk");
+        std::fs::write(&a, b"x").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            d.path().join("a.lpk:Zone.Identifier"),
+            Zone::RESTRICTED.stream_bytes(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let f = File::open(&a).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::rename(&a, d.path().join("moved")).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(&a, b"unzoned impostor").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(read_zone_of(&f).zone, Some(Zone::RESTRICTED));
+        assert_eq!(read_zone(&a), None);
     }
 
     #[cfg(windows)]
