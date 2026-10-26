@@ -4,8 +4,9 @@
 //! the bootstrap page, answers the broker with `lpk-proto`'s worker loop and exits. It writes no
 //! file and never uses `TEMP`.
 //!
-//! E4-2 ships no real reader: the loop serves the test fixture of `lpk_proto::fixture`; E4-3
-//! plugs the pure-Rust readers in. Built without the `faults` feature for release; a
+//! The readers are `lpk-foreign`'s (E4-3): ZIP, 7z, tar and the single compressed streams,
+//! selected by the format the host detected (`Open { format }`); the test fixture of
+//! `lpk_proto::fixture` is served too (the protocol tests use it). Built without the `faults` feature for release; a
 //! `--fault=` argument is then refused.
 //!
 //! `lpk-worker --remove-profile` (unsandboxed, by the uninstaller) deletes the AppContainer
@@ -29,11 +30,7 @@ fn main() {
         .into_iter()
         .map(|(role, h)| (role, std::fs::File::from(h)))
         .collect();
-    std::process::exit(lpk_proto::worker::run(
-        files,
-        &args,
-        &lpk_proto::fixture::open,
-    ));
+    std::process::exit(lpk_proto::worker::run(files, &args, &lpk_foreign::open));
 }
 
 #[cfg(windows)]

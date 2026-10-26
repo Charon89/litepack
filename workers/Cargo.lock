@@ -448,6 +448,7 @@ dependencies = [
 name = "lpk-worker"
 version = "0.0.1"
 dependencies = [
+ "lpk-foreign",
  "lpk-proto",
  "lpk-sandbox-sys",
  "tempfile",

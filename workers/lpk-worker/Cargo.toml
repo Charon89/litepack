@@ -16,6 +16,8 @@ faults = ["lpk-proto/faults"]
 
 [dependencies]
 lpk-proto = { path = "../../crates/lpk-proto", version = "0.0.1" }
+# The pure-Rust foreign readers (E4-3); this binary is the only crate that links them.
+lpk-foreign = { path = "../lpk-foreign", version = "0.0.1" }
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 lpk-sandbox-sys = { path = "../../crates/lpk-sandbox-sys", version = "0.0.1" }
