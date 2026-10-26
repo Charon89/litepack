@@ -7,9 +7,10 @@
 //! A counting global allocator measures the peak heap of each recreation. Its own test binary,
 //! so no other test allocates meanwhile.
 //!
-//! The fuzz inputs reach the resize only in a build like the fuzz build: `--cfg fuzzing` turns
-//! off bitcode's trailing-bytes check (`bitcode::consume::expect_eof`), and no overflow checks
-//! let the decoded count wrap below zero to about 2^32. Without the fix,
+//! The fuzz inputs reach the resize only with `--cfg fuzzing` (which turns off bitcode's
+//! trailing-bytes check, `bitcode::consume::expect_eof`) and a wrapping `decode_difference` (E4-6's
+//! vendor change 9 on the fuzzed branch, or a build without overflow checks), which lets the
+//! decoded count wrap below zero to about 2^32. Without the fix,
 //! `RUSTFLAGS="--cfg fuzzing" cargo test --release -p lpk-core --test deflate_recreate_fuzz`
 //! measured a peak of 12,985,859,157 bytes on the out-of-memory input. In a normal build they are
 //! refused earlier, so the crafted record `counts-*.bin` (an addition, no wrap, no trailing bytes)

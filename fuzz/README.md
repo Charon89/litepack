@@ -43,19 +43,20 @@ cargo +nightly fuzz run --no-cfg-fuzzing archive_mutate    # by hand, from fuzz/
 Every build passes `--no-cfg-fuzzing`, so the targets run the code we ship. With `cfg(fuzzing)` set
 (cargo-fuzz's default), dependencies relax checks: bitcode accepts trailing bytes after a record
 (`expect_eof`) and miniz_oxide skips the zlib Adler-32 check. A record the shipped decoder refuses
-then reached code no shipped build reaches (fuzz run 40270390275, `deflate_recreate`). The fuzz
-build is a release build without overflow checks, as the shipped binaries are; the workspace's
-debug tests have overflow checks, so a crafted value can panic there (caught, `corrections`) where
-it wraps in the fuzz and shipped builds: reproduce a fuzz finding with
-`RUSTFLAGS="--cfg fuzzing" cargo test --release` only to match the old builds; with this flag, a
-plain `cargo test --release` matches.
+then reached code no shipped build reaches (fuzz run 40270390275, `deflate_recreate`).
 
-What the fuzzer gives up for this: code after a successful zlib decode is reached only by inputs
-with a valid Adler-32 checksum (and bitcode records only without trailing bytes), so seeds should
-carry valid checksums for mutations to get past them. And as the fuzz builds have no overflow
-checks, a wrap is found only through what it causes later; an occasional separate run built with
-`-a` (`cargo fuzz build -a --no-cfg-fuzzing`, debug assertions and overflow checks) would catch
-wraps directly (a suggestion; no CI job runs it).
+The other difference stays: cargo-fuzz builds release code with debug assertions and overflow
+checks (its default; fuzz run 40273076668 panicked on a `u32` subtraction overflow in preflate's
+`decode_difference`), while the shipped release binaries wrap. So an arithmetic overflow is a crash
+in the fuzzer even where the shipped decoder would go on with a wrapped value; the vendored fixes
+make such places wrap or refuse explicitly, so both builds then agree. libfuzzer-sys's panic hook
+aborts the process, so a panic is a crash in a fuzz build even inside the targets' `catch_unwind`.
+To reproduce a finding in the workspace, `cargo test` (debug, overflow checks) matches the fuzz
+build's arithmetic; `cargo test --release` matches the shipped one.
+
+What the fuzzer gives up with `--no-cfg-fuzzing`: code after a successful zlib decode is reached
+only by inputs with a valid Adler-32 checksum (and bitcode records only without trailing bytes),
+so seeds should carry valid checksums for mutations to get past them.
 
 A crash is saved under `fuzz/artifacts/<target>/`. Minimise it with
 `cargo +nightly fuzz tmin --no-cfg-fuzzing <target> <file>`, add the bytes as a regression test in `lpk-format`, fix the
