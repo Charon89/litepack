@@ -45,6 +45,8 @@ for my $f (@ARGV) {
     (my $show = $line) =~ s/^\s+|\s+$//g;
     if ($line =~ /\bunsafe\b/) {
       print "$f:$n: unsafe keyword: $show\n";
+    } elsif ($line =~ /#\s*\[\s*(?:no_mangle|export_name|link_section)\b/) {
+      print "$f:$n: unsafe attribute: $show\n";
     } elsif ($line =~ /\b(?:allow|warn|expect)\s*\([^)]*\bunsafe_code\b/) {
       print "$f:$n: unsafe_code allowed: $show\n";
     }
@@ -75,6 +77,17 @@ toml_table() {
   ' "$1"
 }
 
+# True when file $1 has the TOML table header [$2] (comments and spaces ignored, so
+# `[package] # note` counts); false, with an error, when the file cannot be read.
+has_table() {
+  [ -r "$1" ] || { echo "error: cannot read $1" >&2; return 1; }
+  awk -v want="[$2]" '
+    { sub(/[[:space:]]*#.*$/, ""); h = $0; gsub(/[[:space:]]/, "", h) }
+    h == want { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
 # True when TOML table $2 of file $1 sets unsafe_code to forbid (plain or `{ level = "forbid" }`).
 table_forbids() {
   toml_table "$1" "$2" | grep -qE '^[[:space:]]*unsafe_code[[:space:]]*=[[:space:]]*("forbid"|\{[^}]*level[[:space:]]*=[[:space:]]*"forbid")'
@@ -85,7 +98,7 @@ table_forbids() {
 workspace_of() {
   local d="$1" top="$2"
   while :; do
-    if [ -f "$d/Cargo.toml" ] && grep -qE '^[[:space:]]*\[workspace\][[:space:]]*$' "$d/Cargo.toml"; then
+    if [ -f "$d/Cargo.toml" ] && has_table "$d/Cargo.toml" workspace; then
       echo "$d/Cargo.toml"
       return 0
     fi
@@ -120,20 +133,57 @@ check_tree() {
   rows="$(inventory_rows "$inv")" || return 1
   [ -n "$rows" ] || { echo "error: $inv lists no crate" >&2; return 1; }
 
-  local manifests
-  manifests="$(cd "$top" && find . \( -name target -o -name vendor -o -name .git -o -name .claude \
+  # Every Cargo.toml of the tree (paths may hold spaces: one per line, never word-split).
+  local all_manifests
+  all_manifests="$(cd "$top" && find . \( -name target -o -name vendor -o -name .git -o -name .claude \
     -o -name node_modules -o -path ./bench/corpus -o -path ./bench/tmp \) -prune -o \
-    -name Cargo.toml -print | LC_ALL=C sort)"
+    -name Cargo.toml -print | sed 's#^\./##' | LC_ALL=C sort)"
 
-  local seen_inv="" m pkg_dir name row state mods ws hits roots r
-  for m in $manifests; do
-    m="${m#./}"
-    grep -qE '^[[:space:]]*\[package\][[:space:]]*$' "$top/$m" || continue
+  # The packages, as cargo itself sees them: `cargo metadata` of every workspace manifest (the
+  # root's, and each manifest with a [workspace] table: workers/, fuzz/), name<TAB>relative path.
+  local top_m="$top" m packages="" meta
+  if command -v cygpath > /dev/null 2>&1; then top_m="$(cygpath -m "$top")"; fi
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    [ "$m" = "Cargo.toml" ] || has_table "$top/$m" workspace || continue
+    if ! meta="$(cargo metadata --no-deps --format-version 1 --offline --manifest-path "$top/$m" 2>&1)"; then
+      echo "error: cargo metadata failed for $m: $(printf '%s' "$meta" | tail -n 1)"
+      return 1
+    fi
+    packages="$packages$(printf '%s' "$meta" | perl -MJSON::PP -e '
+      local $/; my $j = decode_json(<STDIN>);
+      for my $p (@{$j->{packages}}) { (my $mp = $p->{manifest_path}) =~ s{\\}{/}g; print "$p->{name}\t$mp\n" }
+    ')"$'\n'
+  done <<< "$all_manifests"
+
+  local pkg_list="" name abs rel
+  while IFS=$'\t' read -r name abs; do
+    [ -n "$name" ] || continue
+    # Case-insensitive prefix (Windows drive letters); a package outside the tree is not ours.
+    local lt="${top_m,,}" la="${abs,,}"
+    [ "${la:0:$((${#lt} + 1))}" = "$lt/" ] || continue
+    rel="${abs:$((${#lt} + 1))}"
+    case "$rel" in vendor/*|*/vendor/*) continue ;; esac
+    pkg_list="$pkg_list$name"$'\t'"$rel"$'\n'
+  done <<< "$(printf '%s' "$packages" | LC_ALL=C sort -u)"
+
+  # A manifest that is neither a package cargo reports nor a workspace-only manifest is a
+  # package hidden from cargo metadata (or unreadable): refused, never skipped.
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    if printf '%s' "$pkg_list" | cut -f2 | grep -qxF -- "$m"; then continue; fi
+    if [ -r "$top/$m" ] && has_table "$top/$m" workspace && ! has_table "$top/$m" package; then continue; fi
+    echo "error: $m is not a package of any workspace cargo metadata reports, nor a workspace-only manifest: cannot classify it"
+    fail=1
+  done <<< "$all_manifests"
+
+  local seen_inv="" pkg_dir row state mods ws hits roots r
+  while IFS=$'\t' read -r name m; do
+    [ -n "$name" ] || continue
     pkg_dir="$(dirname "$m")"
-    name="$(toml_table "$top/$m" package | sed -nE 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' | head -n 1)"
     row="$(printf '%s\n' "$rows" | awk -F'\t' -v n="$name" '$1 == n' | head -n 1)"
-    local files
-    files="$(cd "$top" && find "$pkg_dir" -name target -prune -o -name '*.rs' -print | LC_ALL=C sort)"
+    local files=()
+    mapfile -t files < <(cd "$top" && find "$pkg_dir" -name target -prune -o -name '*.rs' -print | LC_ALL=C sort)
     if [ -n "$row" ]; then
       state="$(printf '%s' "$row" | cut -f3)"
       mods="$(printf '%s' "$row" | cut -f4)"
@@ -148,7 +198,7 @@ check_tree() {
         continue
       fi
       # Confinement: findings only in the listed modules.
-      hits="$(cd "$top" && scan_rs $files)" || return 1
+      hits="$(cd "$top" && scan_rs "${files[@]}")" || return 1
       while IFS= read -r h; do
         [ -n "$h" ] || continue
         local f="${h%%:*}" allowed=0 mod
@@ -182,9 +232,9 @@ check_tree() {
       } 2>/dev/null || true)"
       if [ -n "$roots" ]; then
         lint_ok=1
-        for r in $roots; do
-          root_forbids "$top/$r" || lint_ok=0
-        done
+        while IFS= read -r r; do
+          [ -n "$r" ] && { root_forbids "$top/$r" || lint_ok=0; }
+        done <<< "$roots"
       fi
     fi
     if [ "$lint_ok" = 0 ]; then
@@ -196,12 +246,12 @@ check_tree() {
       fail=1
     fi
     # ... and no source may hold the keyword or relax the lint.
-    hits="$(cd "$top" && scan_rs $files)" || return 1
+    hits="$(cd "$top" && scan_rs "${files[@]}")" || return 1
     if [ -n "$hits" ]; then
       while IFS= read -r h; do echo "error: $h ($name is not in docs/UNSAFE.md)"; done <<< "$hits"
       fail=1
     fi
-  done
+  done <<< "$pkg_list"
 
   # Every built row names a crate that exists.
   while IFS=$'\t' read -r name _ state _; do
@@ -231,7 +281,8 @@ self_test() {
 EOF
   cat > "$base/Cargo.toml" <<'EOF'
 [workspace]
-members = ["crates/good", "crates/x-sys"]
+members = ["crates/*"]
+resolver = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"   # a comment
@@ -239,6 +290,8 @@ EOF
   cat > "$base/crates/good/Cargo.toml" <<'EOF'
 [package]
 name = "good"
+version = "0.0.0"
+edition = "2021"
 
 [lints]
 workspace = true
@@ -260,6 +313,8 @@ EOF
   cat > "$base/crates/x-sys/Cargo.toml" <<'EOF'
 [package]
 name = "x-sys"
+version = "0.0.0"
+edition = "2021"
 
 [lints.rust]
 unsafe_code = "allow"
@@ -267,8 +322,10 @@ EOF
   printf 'mod ffi;\n' > "$base/crates/x-sys/src/lib.rs"
   printf 'pub fn f() { unsafe { core::hint::unreachable_unchecked() } }\n' > "$base/crates/x-sys/src/ffi.rs"
   cat > "$base/other/Cargo.toml" <<'EOF'
-[package]
+[package]  # a comment after the header
 name = "other"
+version = "0.0.0"
+edition = "2021"
 
 [workspace]
 EOF
@@ -288,13 +345,16 @@ EOF
     "unsafe-impl|printf 'struct S; unsafe impl Send for S {}\n' >> crates/good/src/lib.rs"
     "unsafe-in-test|mkdir -p crates/good/tests && printf 'fn t() { unsafe {} }\n' > crates/good/tests/t.rs"
     "allow-attribute|printf '#[allow(unsafe_code)]\nfn g() {}\n' >> crates/good/src/lib.rs"
-    "no-lint-inheritance|printf '[package]\nname = \"good\"\n' > crates/good/Cargo.toml"
-    "lint-relaxed|printf '[package]\nname = \"good\"\n[lints.rust]\nunsafe_code = \"allow\"\n' > crates/good/Cargo.toml"
-    "workspace-not-forbidding|printf '[workspace]\n[workspace.lints.rust]\nunsafe_code = \"warn\"\n' > Cargo.toml"
+    "no-lint-inheritance|sed -i '/^\[lints\]/,\$d' crates/good/Cargo.toml"
+    "lint-relaxed|sed -i '/^\[lints\]/,\$d' crates/good/Cargo.toml && printf '[lints.rust]\nunsafe_code = \"allow\"\n' >> crates/good/Cargo.toml"
+    "workspace-not-forbidding|sed -i 's/\"forbid\"/\"warn\"/' Cargo.toml"
     "root-without-forbid|printf 'fn main() {}\n' > other/src/main.rs"
     "sys-outside-its-modules|printf 'pub fn h() { unsafe {} }\n' >> crates/x-sys/src/lib.rs"
-    "reserved-crate-built|mkdir -p crates/y-shell/src && printf '[package]\nname = \"y-shell\"\n[lints]\nworkspace = true\n' > crates/y-shell/Cargo.toml && : > crates/y-shell/src/lib.rs"
+    "sys-unsafe-attribute|printf '#[no_mangle]\npub extern \"C\" fn z() {}\n' >> crates/x-sys/src/lib.rs"
+    "reserved-crate-built|mkdir -p crates/y-shell/src && sed 's/\"good\"/\"y-shell\"/' crates/good/Cargo.toml > crates/y-shell/Cargo.toml && : > crates/y-shell/src/lib.rs"
     "stale-inventory|rm -rf crates/x-sys"
+    "path-with-space|mkdir -p 'crates/evil crate/src' && sed 's/\"good\"/\"evil\"/' crates/good/Cargo.toml > 'crates/evil crate/Cargo.toml' && printf 'pub fn e() { unsafe {} }\n' > 'crates/evil crate/src/lib.rs'"
+    "package-header-comment|mkdir -p tools/hidden/src && printf '[package] # hidden from the workspace\nname = \"hidden\"\nversion = \"0.0.0\"\nedition = \"2021\"\n' > tools/hidden/Cargo.toml && printf 'pub fn h() { unsafe {} }\n' > tools/hidden/src/lib.rs"
   )
   local c name cmd d
   for c in "${cases[@]}"; do

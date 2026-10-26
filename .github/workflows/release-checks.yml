@@ -164,7 +164,13 @@ jobs:
         working-directory: arm64/broker
         run: |
           tests=(a_foreign_archive_lists_and_extracts_through_the_sandboxed_worker passwords_go_through_open_only)
-          ./deps/foreign_worker.exe --exact "${tests[@]}" --test-threads 1
+          # --exact names: a renamed test would match nothing and pass, so both must have run.
+          run() {
+            ./deps/foreign_worker.exe --exact "${tests[@]}" --test-threads 1 | tee "$RUNNER_TEMP/broker.log"
+            grep -q "test result: ok. ${#tests[@]} passed" "$RUNNER_TEMP/broker.log" ||
+              { echo "error: expected ${#tests[@]} broker tests to pass" >&2; exit 1; }
+          }
+          run
           # The shipped worker serves the same test fixture (E4-2), staged under the test's name.
           cp ../lpk-worker.exe lpk-test-worker.exe
-          ./deps/foreign_worker.exe --exact "${tests[@]}" --test-threads 1
+          run

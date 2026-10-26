@@ -31,6 +31,7 @@ open="$(gh issue list --label memory-safety --state open --limit 1000 --json num
 
 total=0
 failed=0
+succeeded=0
 echo "## Memory safety"
 echo
 echo "Phase 1 criterion: zero memory-safety findings. Evidence:"
@@ -49,16 +50,26 @@ while IFS=$'\t' read -r id at ev st co; do
   [ -n "$id" ] || continue
   total=$((total + 1))
   [ "$st" = "completed" ] || co="$st"
-  case "$co" in success|in_progress|queued|cancelled|skipped) ;; *) failed=$((failed + 1)) ;; esac
+  # Only a completed, successful run counts as evidence; cancelled, skipped and unfinished runs
+  # are neither evidence nor findings.
+  case "$co" in
+    success) succeeded=$((succeeded + 1)) ;;
+    in_progress|queued|waiting|pending|requested|cancelled|skipped) ;;
+    *) failed=$((failed + 1)) ;;
+  esac
   echo "| $id | $at | $ev | $co |"
 done <<< "$runs"
 echo
-echo "$total runs, $failed failed."
+echo "$total runs: $succeeded completed successfully, $failed failed."
+if [ "$succeeded" = 0 ]; then
+  echo
+  echo "No fuzz run completed successfully in this window: there is no fuzzing evidence."
+fi
 echo
 echo "### Open findings"
 echo
 echo "Open issues labelled \`memory-safety\`: $open."
-if [ "$failed" != 0 ] || [ "$open" != 0 ]; then
-  echo "error: $failed failed fuzz runs and $open open findings: the criterion is not met" >&2
+if [ "$failed" != 0 ] || [ "$open" != 0 ] || [ "$succeeded" = 0 ]; then
+  echo "error: $succeeded successful and $failed failed fuzz runs, $open open findings: the criterion is not met" >&2
   exit 1
 fi

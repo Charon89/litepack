@@ -17,16 +17,21 @@ check_tree() {
   done
   [ "${#srcs[@]}" -gt 0 ] || { echo "error: nothing to check under $top" >&2; return 1; }
   local hits
+  # Host names may hold `_` and `.`; the path may use backslashes; a bare name in backticks may
+  # be followed by `/` and a file.
+  local host='[A-Za-z][A-Za-z0-9_.]*(-[A-Za-z0-9_.]+)*'
   hits="$(cd "$top" && grep -rIoE \
-    'bench/results/[0-9]{4}-[0-9]{2}-[0-9]{2}-[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)*|`[0-9]{4}-[0-9]{2}-[0-9]{2}-[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)*`' \
+    "bench[/\\\\]results[/\\\\][0-9]{4}-[0-9]{2}-[0-9]{2}-$host|\`[0-9]{4}-[0-9]{2}-[0-9]{2}-$host(/[^\`]*)?\`" \
     "${srcs[@]}" || true)"
   local line file name
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     file="${line%%:*}"
     name="${line#*:}"
-    name="${name#bench/results/}"
     name="${name//\`/}"
+    name="${name#bench[/\\]results[/\\]}"
+    name="${name%%/*}"
+    while [ "${name%.}" != "$name" ]; do name="${name%.}"; done # a sentence's full stop
     n=$((n + 1))
     if [ ! -d "$top/bench/results/$name" ]; then
       echo "error: $file cites bench/results/$name, which is not in the tree"
@@ -45,8 +50,12 @@ self_test() {
   cat > "$base/docs/a.md" <<'EOF'
 Measured in `bench/results/2026-10-22-megatron-4` (see bench/results/2026-10-03-megatron/probe.json).
 Placeholders are not names: `bench/results/<date>-<host>/`, `<date>-<host>[-n]`.
+Also `2026-10-03-megatron/probe.json`, bench\results\2026-10-22-megatron-4\x.json and `2026-10-22-megatron-4`.
 EOF
   printf 'The run `2026-10-03-megatron` again.\n' > "$base/bench/reports/r.md"
+  cat > "$st_tmp/backslash.txt" <<'EOF'
+On Windows: bench\results\2026-10-24-megatron\x.json
+EOF
   printf '# readme\n' > "$base/README.md"
   if ! check_tree "$base" > "$st_tmp/clean.out" 2>&1; then
     echo "self-test: the clean fixture was refused:" >&2
@@ -57,6 +66,10 @@ EOF
     "missing-path|printf 'See bench/results/2026-10-25-megatron-2/x.json.\n' >> docs/a.md"
     "missing-bare-name|printf 'Run \`2026-10-24-otherhost\`.\n' >> bench/reports/r.md"
     "missing-in-readme|printf 'bench/results/2026-01-01-ci\n' >> README.md"
+    "missing-bare-name-with-file|printf 'See \`2026-10-24-megatron-9/run.json\`.\n' >> docs/a.md"
+    "missing-host-with-underscore|printf 'In bench/results/2026-10-24-build_host.\n' >> docs/a.md"
+    "missing-host-with-dot|printf 'In \`2026-10-24-ci.example-2\`.\n' >> docs/a.md"
+    "missing-backslash-path|cat \"\$st_tmp/backslash.txt\" >> docs/a.md"
   )
   local c name cmd d
   for c in "${cases[@]}"; do
