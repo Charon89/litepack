@@ -1,19 +1,25 @@
 name: Fuzz
 
-# Bounded libFuzzer runs of every lpk-format reader target (fuzz/README.md). Manual, plus a
-# weekly run. A crash fails the job and uploads the artifacts.
+# Bounded libFuzzer runs of every fuzz target (fuzz/README.md), one job per target (E4-6, E8-1):
+# 600 s per target nightly, 3,600 s on Mondays (PLAN E4 decision (e), a budget the owner may
+# change), with a persistent corpus per target in the Actions cache, minimised on Mondays. A
+# crash fails the run and uploads its input. scripts/memory-safety-statement.sh reads these runs.
 on:
   workflow_dispatch:
     inputs:
       seconds:
-        description: "Seconds per target"
+        description: "Seconds per target (1..3600; empty: 600, or 3600 on a Monday)"
         type: string
-        default: "120"
+        default: ""
   schedule:
-    - cron: "17 3 * * 1"
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,41 +27,131 @@ env:
   LPK_FUZZ_TOOLCHAIN: nightly-2026-09-28
 
 jobs:
-  fuzz:
-    name: fuzz all targets (ubuntu-24.04)
+  targets:
+    name: target matrix
     runs-on: ubuntu-24.04
-    # 22 targets x at most 1200 s, plus the builds.
-    timeout-minutes: 360
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      seconds: ${{ steps.budget.outputs.seconds }}
+      minimise: ${{ steps.budget.outputs.minimise }}
     steps:
       - uses: actions/checkout@v7
-      - name: Validate the time per target
-        env:
-          SECONDS_INPUT: ${{ inputs.seconds || '120' }}
+      - name: The targets of fuzz/fuzz_targets, fuzz/Cargo.toml and fuzz/run.sh agree
+        id: list
         run: |
-          case "$SECONDS_INPUT" in
-            ''|*[!0-9]*) echo "seconds must be digits" >&2; exit 1 ;;
-          esac
-          if [ "$SECONDS_INPUT" -lt 1 ] || [ "$SECONDS_INPUT" -gt 1200 ]; then
-            echo "seconds must be 1..1200" >&2; exit 1
+          set -euo pipefail
+          # Fails (with a diff) when a target is missing from Cargo.toml's [[bin]] set or run.sh.
+          files="$(bash fuzz/check-targets.sh)"
+          echo "$(echo "$files" | wc -l) targets:" $files
+          echo "matrix=$(echo "$files" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+      - name: Time per target
+        id: budget
+        env:
+          SECONDS_INPUT: ${{ inputs.seconds }}
+        run: |
+          set -euo pipefail
+          monday=0
+          [ "$(date -u +%u)" = 1 ] && monday=1
+          if [ -n "$SECONDS_INPUT" ]; then
+            case "$SECONDS_INPUT" in
+              *[!0-9]*) echo "::error::seconds must be digits"; exit 1 ;;
+            esac
+            if [ "$SECONDS_INPUT" -lt 1 ] || [ "$SECONDS_INPUT" -gt 3600 ]; then
+              echo "::error::seconds must be 1..3600"; exit 1
+            fi
+            secs="$SECONDS_INPUT"
+          elif [ "$monday" = 1 ]; then
+            secs=3600
+          else
+            secs=600
           fi
-          echo "FUZZ_SECONDS=$SECONDS_INPUT" >> "$GITHUB_ENV"
+          # The weekly run (the scheduled one on a Monday) minimises each corpus after fuzzing.
+          minimise=0
+          if [ "$monday" = 1 ] && [ "$GITHUB_EVENT_NAME" = schedule ]; then minimise=1; fi
+          echo "seconds=$secs minimise=$minimise"
+          echo "seconds=$secs" >> "$GITHUB_OUTPUT"
+          echo "minimise=$minimise" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build every target
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
       - name: Nightly toolchain
         run: rustup toolchain install "$LPK_FUZZ_TOOLCHAIN" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: ${{ env.LPK_FUZZ_TOOLCHAIN }}
       - name: cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Build every target
         working-directory: fuzz
         run: cargo "+$LPK_FUZZ_TOOLCHAIN" fuzz build
-      - name: Run every target
-        run: bash fuzz/run.sh -t "$FUZZ_SECONDS"
-      - name: Failing targets
-        if: failure()
+      - name: Collect the binaries
         run: |
-          grep -l -E "ERROR: libFuzzer|panicked|SUMMARY" fuzz/artifacts/logs/*.log 2>/dev/null || true
-      - name: Upload artifacts and logs
+          set -euo pipefail
+          mkdir -p fuzz-bin
+          for t in $(bash fuzz/run.sh --list); do
+            cp "fuzz/target/x86_64-unknown-linux-gnu/release/$t" fuzz-bin/
+          done
+          du -sh fuzz-bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-bin
+          path: fuzz-bin
+          retention-days: 3
+          if-no-files-found: error
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    needs: [targets, build]
+    runs-on: ubuntu-24.04
+    # 3,600 s of fuzzing, the minimise pass and the cache.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: fuzz-bin
+          path: fuzz-bin
+      - name: Restore the corpus
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+          FUZZ_SECONDS: ${{ needs.targets.outputs.seconds }}
+          MINIMISE: ${{ needs.targets.outputs.minimise }}
+        run: |
+          set -euo pipefail
+          chmod +x fuzz-bin/*
+          export LPK_FUZZ_BIN_DIR="$PWD/fuzz-bin"
+          m=()
+          [ "$MINIMISE" = 1 ] && m=(-m)
+          mkdir -p "fuzz/corpus/$TARGET"
+          echo "corpus before: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
+          bash fuzz/run.sh -t "$FUZZ_SECONDS" "${m[@]}" "$TARGET"
+          echo "corpus after: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
+      - name: Save the corpus
         if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - name: Upload the crash input and the log
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts
           if-no-files-found: ignore
