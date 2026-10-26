@@ -292,10 +292,17 @@ extract = []
 id = "balanced-extension"
 compress = ["--balanced", "--ordering", "extension"]
 extract = []
-# The version ordering's A/B (E2-9 task E): a file's versions adjacent inside the window.
+# The version ordering's A/B (E2-9 task E): a file's versions adjacent inside the window. Since
+# E2-26 the `balanced` default orders so too; this row stays for the comparison.
 [[tool.setting]]
 id = "balanced-versions"
 compress = ["--balanced", "--ordering", "versions"]
+extract = []
+# The old order (E2-26, D-104): `balanced` carries the version ordering by default since E2-26;
+# this row restores path order so the ordering stays measurable.
+[[tool.setting]]
+id = "balanced-no-versions"
+compress = ["--balanced", "--ordering", "none"]
 extract = []
 # The Deflate peel's A/B (E2-10): `balanced` carries the peel by default; this row turns it off.
 [[tool.setting]]

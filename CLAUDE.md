@@ -28,7 +28,10 @@ No neural tier in the product (research track only). Full rationale: `docs/LiteP
 ## Commands
 - Build/test: `cargo build --workspace` · `cargo nextest run --workspace` (fallback `cargo test`)
 - Lint: `cargo fmt --all` · `cargo clippy --workspace --all-targets -- -D warnings`
-- Licences: `cargo deny check`
+- Licences: `cargo deny check` · `cargo deny --manifest-path crates/lpk-gui/Cargo.toml check` (the GUI's graph for
+  its Windows targets; `deny.toml` leaves `lpk-gui` out, E5-2)
+- GUI (E5-2, Windows; `cargo install tauri-cli --version 2.12.4 --locked`): in `crates/lpk-gui`, `cargo tauri build
+  --ci -- --locked`; then `bash crates/lpk-gui/smoke.sh target/debug/lpk.exe target/release/lpk-gui.exe <scratch dir>`
 - Bench (Phase 0): `cargo run -p lpk-bench -- corpus build --profile small` · `cargo run --release -p lpk-bench -- run --tools all` · `cargo run --release -p lpk-bench -- probe all --profile small` · `cargo run --release -p lpk-bench -- report --results bench/results/<dir> --probes bench/results/<dir>`
   (measured runs come from release builds; the runner and the probes refuse debug or dirty builds unless told otherwise)
 - All four of build, test, clippy and deny must pass before a task is marked done.

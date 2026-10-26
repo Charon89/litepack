@@ -33,6 +33,18 @@ impl Tier {
             Tier::Store => "store",
         }
     }
+
+    /// The file order this tier uses when none is given (E2-26, D-104): the Balanced tier puts
+    /// a file's versions next to each other ([`lpk_core::FileOrder::Versions`]; an input
+    /// without sibling version roots is in path order, as with `None`), the Fast tier keeps
+    /// path order, and the Store tier has no fold stage to order by. `lpk-core`'s own default
+    /// stays [`lpk_core::FileOrder::None`].
+    pub fn default_ordering(self) -> lpk_core::FileOrder {
+        match self {
+            Tier::Balanced => lpk_core::FileOrder::Versions,
+            Tier::Fast | Tier::Store => lpk_core::FileOrder::None,
+        }
+    }
 }
 
 /// How a new archive is sealed.
@@ -76,8 +88,8 @@ pub struct CreateSettings {
     pub no_dictionaries: bool,
     /// No deduplication (also the fixed 1 MiB cut).
     pub no_dedup: bool,
-    /// How files are ordered inside a cluster.
-    pub ordering: lpk_core::FileOrder,
+    /// How files are ordered inside a cluster (`None`: [`Tier::default_ordering`]).
+    pub ordering: Option<lpk_core::FileOrder>,
     /// The Deflate peel on or off.
     pub deflate_peel: Option<bool>,
     /// The JPEG peel on or off.
@@ -93,6 +105,12 @@ pub struct CreateSettings {
 }
 
 impl CreateSettings {
+    /// The file order these settings use: the one given, else the tier's default.
+    pub fn ordering(&self) -> lpk_core::FileOrder {
+        self.ordering
+            .unwrap_or_else(|| self.tier.default_ordering())
+    }
+
     /// The pipeline of these settings (what `lpk a`'s `build_pipeline` built), with the seal,
     /// the recovery percent and `monitor`.
     pub fn pipeline(&self, monitor: &Monitor) -> Pipeline {
@@ -157,7 +175,7 @@ impl CreateSettings {
             pipeline.fold = None;
         } else if pipeline.fold.is_some() {
             pipeline.fold = Some(Box::new(lpk_core::Dedup::new(lpk_core::FoldOptions {
-                ordering: self.ordering,
+                ordering: self.ordering(),
                 ..lpk_core::FoldOptions::default()
             })));
         }
@@ -237,6 +255,18 @@ pub fn rollback(path: &Path, generation: u64) -> Result<GenerationInfo, Error> {
         .map_err(fail)
 }
 
+/// The latest committed generation of the archive at `path`, from its trailer chain (the
+/// chain [`rollback`] reads; a torn append's tail is skipped), opened read-only and without
+/// credentials; nothing is written. Any error (the file held or unreadable, a damaged chain,
+/// an unsupported version) is returned as it is.
+pub fn committed_generation(path: &Path) -> Result<u64, Error> {
+    let fail = |e: FormatError| Error::format(e, Some(path));
+    let mut file = std::fs::File::open(path).map_err(|e| fail(FormatError::Io(e)))?;
+    lpk_format::committed_chain(&mut file)
+        .map(|(_, latest)| latest)
+        .map_err(fail)
+}
+
 /// A measured compression rate on this machine (E5-5's only source of estimates).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rate {
@@ -306,4 +336,36 @@ pub fn calibrate(
         bytes_out: out.len() as u64,
         seconds: t.elapsed().as_secs_f64(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateSettings, Tier};
+    use lpk_core::FileOrder;
+
+    /// E2-26 (D-104): the Balanced tier orders versions unless told otherwise; the other tiers
+    /// and `lpk-core`'s own default keep path order.
+    #[test]
+    fn the_balanced_tier_defaults_to_the_versions_order() {
+        assert_eq!(Tier::Balanced.default_ordering(), FileOrder::Versions);
+        assert_eq!(Tier::Fast.default_ordering(), FileOrder::None);
+        assert_eq!(Tier::Store.default_ordering(), FileOrder::None);
+        assert_eq!(lpk_core::FoldOptions::default().ordering, FileOrder::None);
+        let s = |tier, ordering| CreateSettings {
+            tier,
+            ordering,
+            ..CreateSettings::default()
+        };
+        assert_eq!(s(Tier::Balanced, None).ordering(), FileOrder::Versions);
+        assert_eq!(
+            s(Tier::Balanced, Some(FileOrder::None)).ordering(),
+            FileOrder::None
+        );
+        assert_eq!(s(Tier::Fast, None).ordering(), FileOrder::None);
+        assert_eq!(
+            s(Tier::Fast, Some(FileOrder::Versions)).ordering(),
+            FileOrder::Versions
+        );
+        assert_eq!(CreateSettings::default().ordering(), FileOrder::None);
+    }
 }

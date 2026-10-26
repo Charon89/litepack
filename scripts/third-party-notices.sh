@@ -11,6 +11,8 @@ render() {
   # tr: LF only, whatever line ends a licence file has (the file is committed with LF on every machine).
   cargo about generate --locked --fail --config about.toml -m crates/lpk-cli/Cargo.toml about.hbs | tr -d '\r'
   cargo about generate --locked --fail --config about.toml -m crates/lpk-check/Cargo.toml about-check.hbs | tr -d '\r'
+  # E5-2: the GUI, for the Windows triples it ships on (about-gui.toml), with the WebView2 loader's notice.
+  cargo about generate --locked --fail --config about-gui.toml -m crates/lpk-gui/Cargo.toml about-gui.hbs | tr -d '\r'
 }
 
 if [[ "${1:-}" == "--check" ]]; then

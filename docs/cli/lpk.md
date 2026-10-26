@@ -85,9 +85,7 @@ Create an archive. With one directory as the input, its contents are archived (n
 * `--dict-size <BYTES>` — The Balanced tier's LZMA dictionary in bytes (default 64 MiB)
 * `--no-dictionaries` — Use no dictionaries (what the Fast tier does today: none is bundled)
 * `--no-dedup` — Do not deduplicate chunks (the Fast and Balanced tiers cut files with content-defined chunking and store each distinct chunk once by default, across files and within a file). This also returns to the fixed 1 MiB cut
-* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (the default: path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Ignored with --no-dedup and --store
-
-  Default value: `none`
+* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Default: `versions` with --balanced, `none` with --fast; `--ordering none` restores path order. With `append`, the order applies within the new generation only. Ignored with --no-dedup and --store
 
   Possible values: `none`, `extension`, `versions`
 
@@ -293,9 +291,7 @@ Append the contents of a directory to an archive as its next generation: a snaps
 * `--dict-size <BYTES>` — The Balanced tier's LZMA dictionary in bytes (default 64 MiB)
 * `--no-dictionaries` — Use no dictionaries (what the Fast tier does today: none is bundled)
 * `--no-dedup` — Do not deduplicate chunks (the Fast and Balanced tiers cut files with content-defined chunking and store each distinct chunk once by default, across files and within a file). This also returns to the fixed 1 MiB cut
-* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (the default: path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Ignored with --no-dedup and --store
-
-  Default value: `none`
+* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Default: `versions` with --balanced, `none` with --fast; `--ordering none` restores path order. With `append`, the order applies within the new generation only. Ignored with --no-dedup and --store
 
   Possible values: `none`, `extension`, `versions`
 

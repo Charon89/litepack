@@ -21,7 +21,9 @@ pub mod export;
 pub mod model;
 mod session;
 
-pub use create::{append, calibrate, create, rollback, CreateSettings, Rate, Seal, Tier};
+pub use create::{
+    append, calibrate, committed_generation, create, rollback, CreateSettings, Rate, Seal, Tier,
+};
 pub use error::{Class, EntryError, Error};
 pub use export::{Container, ExportOptions, Method};
 pub use model::{Filter, IdSet, Key, ListModel, Order, Row, RowRef, Scope, Totals, View, ROOT};

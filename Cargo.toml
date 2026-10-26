@@ -10,6 +10,8 @@ members = [
   "crates/lpk-core",
   "crates/lpk-format",
   "crates/lpk-fs-sys",
+  "crates/lpk-gui",
+  "crates/lpk-gui-sys",
   "crates/lpk-procstat-sys",
   "crates/lpk-proto",
   "crates/lpk-test-worker",

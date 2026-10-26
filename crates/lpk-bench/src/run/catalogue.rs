@@ -425,6 +425,7 @@ mod tests {
                 "balanced",
                 "balanced-extension",
                 "balanced-versions",
+                "balanced-no-versions",
                 "balanced-no-deflate",
                 "balanced-no-bwt",
                 "balanced-no-png-filter",

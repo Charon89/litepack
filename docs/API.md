@@ -13,6 +13,8 @@ this page is the overview. v0 is unstable: it changes with the GUI tasks.
 |---|---|
 | `Session::open(path, &OpenOptions)` | Opens an `.lpk` in process (credentials, decode-memory limit, priors, an earlier `generation` read-only) or a foreign archive through E4's sandboxed broker (by magic; listed only when first asked). |
 | `Session::open_file(File, path, &OpenOptions)` | The same for an `.lpk` the caller opened (its open error stays the caller's). |
+| `OpenOptions::motw_off` | Mark of the Web opted out (E6-5, `--motw off`): files the session derives from the archive (extraction, export, repair) do not get its zone. Default `false`: an archive whose `Zone.Identifier` gives zone 3 or 4 (or cannot be parsed or read: 3) passes `ZoneId` only to each output, written before its first byte; `ExtractReport::zone` and `motw_unmarked` report it. |
+| `Session::zone(&self)` / `zone_warning(&self)` | The archive's propagating zone, read once at open through the archive's handle (reported whatever `motw_off` says: an opened entry is zoned regardless), and the one warning when the stream could not be read and was taken as zone 3. |
 | `Session::unlock(&mut self, Credentials)` | Re-opens with credentials. |
 | `Session::info(&self)` | Format, generation (open and latest), encrypted, listable, keyless, length. |
 | `Session::for_each(&self, &Selection, f)` | Streams the entries, none collected (E3-1's bound); a glob matching nothing is `NoMatch` before `f` runs. |
@@ -26,8 +28,9 @@ this page is the overview. v0 is unstable: it changes with the GUI tasks.
 | `Session::close(&self)` | Exclusive: cancels the reads in flight (their callers' tokens untouched), waits for them, and closes the session; every later call is `Usage`, kind `SessionClosed`. |
 | `Session::rollback(self, g)` / `append(self, dir, &CreateSettings, &Monitor)` | Exclusive: close, then run the free `rollback` / `append` (append returns the re-opened session). Taking `self`, they suit a sole owner. |
 | `Session::convert` | E5-7's `--convert`: `Unsupported` in v0 (needs E4-3's readers). |
-| `create(&Sources, out, &CreateSettings, &Monitor)` | A new archive; `CreateSettings` holds the tier flags (`Tier` cannot name Strong), `seal`, `recovery`. |
+| `create(&Sources, out, &CreateSettings, &Monitor)` | A new archive; `CreateSettings` holds the tier flags (`Tier` cannot name Strong), `seal`, `recovery`. Since E2-26 (v0 change) `ordering` is an `Option<FileOrder>`: `ordering: None` means the tier's default (`Tier::default_ordering`: Balanced `versions`, Fast and Store `none`); read the resolved value with `CreateSettings::ordering()`. |
 | `append(archive, dir, …)`, `rollback(path, g)` | The same without a session (an archive whose last append was cut short does not open). |
+| `committed_generation(path)` | The latest committed generation from the trailer chain, read-only (a torn append's tail skipped): how the GUI's recovery tells a committed append from a torn one (E5-2). |
 | `calibrate(&Sources, &CreateSettings, sample, &Monitor)` | Runs the pipeline in memory on the first `sample` bytes of files: a `Rate`, E5-5's only source of estimates. |
 
 `Selection` is `All`, `Globs` (D-90) or `Ids(Arc<IdSet>)` (picks as a bit set). For an
