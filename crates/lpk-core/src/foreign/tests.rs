@@ -670,8 +670,8 @@ fn many_empty_members_are_progress() {
     let mut conv = Conv::new(peer, limits, 10_000, &monitor);
     let t = Instant::now();
     conv.handshake().unwrap();
-    conv.open(None).unwrap();
-    let records = conv.list(Format::TestFixture).unwrap();
+    conv.open(Format::TestFixture, b"", None).unwrap();
+    let records = conv.list().unwrap();
     let mut out = NullOut::default();
     let mut summary = ForeignSummary::default();
     run_extract(

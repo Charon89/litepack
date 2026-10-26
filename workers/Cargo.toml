@@ -4,7 +4,7 @@
 # and lpk-sandbox-sys are shared by path. Run cargo inside this directory (see .cargo/config.toml).
 [workspace]
 resolver = "2"
-members = ["lpk-worker"]
+members = ["lpk-worker", "lpk-foreign"]
 
 [workspace.package]
 version = "0.0.1"

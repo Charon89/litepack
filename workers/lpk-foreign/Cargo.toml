@@ -1,0 +1,41 @@
+[package]
+name = "lpk-foreign"
+description = "LitePack's pure-Rust foreign-format readers (ZIP, 7z, tar and the single compressed streams) behind lpk-proto's ForeignReader; linked by the sandboxed worker only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about and cargo-deny's private rule leave our own crates out.
+publish = false
+
+[dependencies]
+lpk-proto = { path = "../../crates/lpk-proto", version = "0.0.1" }
+# ZIP (design §3): Deflate through flate2's zlib-rs backend (the reading half of `zip`'s `deflate`
+# feature; `deflate-zopfli`, a compressor, is left out), Deflate64, LZMA, XZ, PPMd, AES and
+# ZipCrypto, and the legacy methods (Shrink, Reduce, Implode). bzip2 and zstd members are read raw
+# and decoded below: `zip`'s own `bzip2-rs` feature pulls the C `bzip2-sys`, its `zstd` the C
+# `zstd-sys`.
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2-zlib-rs", "deflate64", "lzma", "xz", "ppmd", "aes-crypto", "legacy-zip"] }
+# 7z: AES-256, PPMd, Deflate, Brotli, LZ4 (LZMA, LZMA2, the BCJ filters and Delta are built in).
+# Its `bzip2` and `zstd` features pull C codecs and stay off (named gaps).
+sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["aes256", "ppmd", "deflate", "brotli", "lz4"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+bzip2-rs = "0.1.2"
+lzma-rust2 = { version = "0.22.0", default-features = false, features = ["std", "xz", "lzip"] }
+ruzstd = "0.9.1"
+crc32fast = "1.5.2"
+
+[dev-dependencies]
+blake3 = "1.8.7"
+tempfile = "3.27.0"
+# The fixtures the tests write: `zip` with its Deflate and AES writers, `sevenz-rust2` with its
+# compressor, and the encoders of the compressed tar streams.
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2-zlib-rs", "aes-crypto", "time"] }
+sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["aes256", "compress"] }
+lzma-rust2 = { version = "0.22.0", default-features = false, features = ["std", "encoder"] }
+ruzstd = "0.9.1"
+
+[lints]
+workspace = true
