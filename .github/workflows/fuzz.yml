@@ -127,7 +127,13 @@ jobs:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: llvm-symbolizer (symbolised stacks)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq llvm
+          echo "ASAN_SYMBOLIZER_PATH=$(command -v llvm-symbolizer)" >> "$GITHUB_ENV"
       - name: Fuzz
+        id: fuzz
         env:
           TARGET: ${{ matrix.target }}
           FUZZ_SECONDS: ${{ needs.targets.outputs.seconds }}
@@ -143,14 +149,15 @@ jobs:
           bash fuzz/run.sh -t "$FUZZ_SECONDS" "${m[@]}" "$TARGET"
           echo "corpus after: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
       - name: Known open finding?
-        if: failure()
+        if: always() && steps.fuzz.outcome == 'failure'
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          if grep -q "^| \`$TARGET\` |" fuzz/KNOWN.md; then
-            echo "::error::$TARGET fails with a known open finding (fuzz/KNOWN.md); its fix is a separate task"
+          # Known only when the SUMMARY kind and the signature of a fuzz/KNOWN.md row match the log.
+          if label="$(bash fuzz/classify-failure.sh "$TARGET" "fuzz/artifacts/logs/$TARGET.log")"; then
+            echo "::error::$TARGET fails with a known open finding (fuzz/KNOWN.md): $label"
           else
-            echo "::error::$TARGET: a new finding; file it and add it to fuzz/KNOWN.md until fixed"
+            echo "::error::$TARGET: $label; file it, and list it in fuzz/KNOWN.md until fixed"
           fi
       - name: Save the corpus
         if: always()

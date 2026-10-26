@@ -71,6 +71,9 @@ for t in $targets; do
     grep -E "stat::number_of_executed_units|Done [0-9]+ runs" "artifacts/logs/$t.log" | tail -n 2
   else
     echo "FAILED: $t (log: fuzz/artifacts/logs/$t.log)" >&2
+    # The lines that name the failure, wherever they are in the log, then its tail.
+    grep -E "panicked at|SUMMARY|malloc\(" -A1 "artifacts/logs/$t.log" | head -n 20 >&2
+    echo "-- last lines:" >&2
     tail -n 30 "artifacts/logs/$t.log" >&2
     failed="$failed $t"
     continue

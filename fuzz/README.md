@@ -69,4 +69,4 @@ Actions cache (`fuzz-corpus-<target>-<run>`, restored by prefix; unused entries 
 minimised (`run.sh -m`, libFuzzer's `-merge=1`) by the scheduled Monday run. A crash fails the job and
 uploads `fuzz/artifacts` (the input and the log) as `fuzz-artifacts-<target>`.
 
-Open findings that fail a target until their fix lands are listed in `KNOWN.md`; the workflow names them in a failing job.
+Open findings that fail a target until their fix lands are listed in `KNOWN.md` with their SUMMARY kind and signature; the workflow labels a failing job known only when `classify-failure.sh` matches both, else new.

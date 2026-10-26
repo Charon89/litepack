@@ -23,19 +23,11 @@ fuzz_target!(|data: &[u8]| {
         .min(MAX_PLAIN)
         .min(rest.len());
     let (plain, corrections) = rest.split_at(plain_len);
-    // libFuzzer's hook aborts on any panic, even a caught one; the product catches the library's
-    // panics around the recreation (D-66), so this target does too: the hook is taken off for
-    // the call and put back after, and a caught panic is noted in the log without failing the
-    // run. A panic outside the catch, an OOM or a timeout still fails it.
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    // libFuzzer's hook aborts on any panic, even one caught here: a library panic is a finding
+    // (the decoder would catch it, but it is a defect in the recreation all the same).
     let r = std::panic::catch_unwind(|| {
         recreate_whole_deflate_stream_limited_report(plain, corrections, limit)
     });
-    std::panic::set_hook(hook);
-    if r.is_err() {
-        eprintln!("note: a library panic was caught (as the decoder catches it)");
-    }
     if let Ok((result, capacity)) = r {
         assert!(
             capacity <= limit + 8,
