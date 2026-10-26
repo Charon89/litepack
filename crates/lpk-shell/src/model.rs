@@ -78,6 +78,12 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/API.md"),
         )
         .expect("docs/API.md");
+        let rows = api.lines().filter(|l| l.starts_with("| `--")).count();
+        assert_eq!(
+            rows,
+            Verb::ALL.len(),
+            "docs/API.md's verb table and Verb::ALL differ in length"
+        );
         for verb in Verb::ALL {
             let text = verb.text().replace('<', "&lt;").replace('>', "&gt;");
             let row = api

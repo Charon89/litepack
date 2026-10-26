@@ -15,7 +15,7 @@ publish = false
 crate-type = ["cdylib"]
 
 # The handler never loads the engine or the webview: no `lpk-*` crate, no Tauri, no WebView2
-# (a unit test in src/lib.rs reads this manifest and fails on any of them).
+# (a unit test in src/lib.rs walks the workspace Cargo.lock from this crate and fails on any of them).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", default-features = false, features = [
   "Win32_Foundation",
@@ -24,7 +24,11 @@ windows = { version = "=0.62.2", default-features = false, features = [
 ] }
 windows-core = "=0.62.2"
 
-# D-NN (E6-1): this crate is the one exception to the workspace's `forbid(unsafe_code)` that is
+[dev-dependencies]
+# Reads the workspace Cargo.lock in the no-engine test (src/lib.rs).
+toml = "1.1.6"
+
+# D-120 (E6-1): this crate is the one exception to the workspace's `forbid(unsafe_code)` that is
 # not a `*-sys` or `*-simd` crate. It cannot inherit the workspace table, because no `allow` can
 # relax `forbid`; it denies `unsafe_code` instead, and only the COM boundary module, src/com.rs,
 # carries `#![allow(unsafe_code)]` (docs/UNSAFE.md; scripts/check-unsafe.sh enforces it). Every

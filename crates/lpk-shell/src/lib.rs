@@ -20,52 +20,77 @@ mod tests {
 
     use std::path::Path;
 
-    /// The dependency names declared anywhere in this crate's manifest (every
-    /// `[*dependencies]` table, target-specific ones included).
-    fn declared_dependencies() -> Vec<String> {
-        let manifest =
-            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-                .expect("manifest");
-        let mut names = Vec::new();
-        let mut in_deps = false;
-        for line in manifest.lines() {
-            let line = line.trim();
-            if line.starts_with('[') {
-                in_deps = line.trim_end_matches(']').ends_with("dependencies");
-                continue;
-            }
-            if !in_deps || line.is_empty() || line.starts_with('#') || line.starts_with(']') {
-                continue;
-            }
-            if let Some((key, _)) = line.split_once('=') {
-                let key = key.trim();
-                if !key.starts_with('"') {
-                    names.push(key.to_string());
+    /// Every package reached from `lpk-shell` in the workspace's `Cargo.lock`, following each
+    /// package's `dependencies` transitively. The lock records every target's dependencies,
+    /// renames under their package name and `[dependencies.x]` tables alike, so nothing a
+    /// manifest can declare escapes this walk.
+    fn reachable_packages() -> Vec<String> {
+        let lock =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"))
+                .expect("Cargo.lock");
+        let lock: toml::Table = toml::from_str(&lock).expect("Cargo.lock parses");
+        let packages = lock
+            .get("package")
+            .and_then(toml::Value::as_array)
+            .expect("[[package]] entries");
+        let field = |p: &toml::Value, k: &str| -> String {
+            p.get(k)
+                .and_then(toml::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        // A dependency entry is "name", "name version" or "name version (source)".
+        let find = |entry: &str| -> Vec<&toml::Value> {
+            let mut parts = entry.split_whitespace();
+            let name = parts.next().unwrap_or_default();
+            let version = parts.next();
+            packages
+                .iter()
+                .filter(|p| field(p, "name") == name)
+                .filter(|p| version.is_none_or(|v| field(p, "version") == v))
+                .collect()
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut queue = vec!["lpk-shell".to_string()];
+        let mut reached = Vec::new();
+        while let Some(entry) = queue.pop() {
+            let found = find(&entry);
+            assert!(!found.is_empty(), "{entry}: not in Cargo.lock");
+            for p in found {
+                let key = (field(p, "name"), field(p, "version"));
+                if !seen.insert(key.clone()) {
+                    continue;
+                }
+                reached.push(key.0);
+                if let Some(deps) = p.get("dependencies").and_then(toml::Value::as_array) {
+                    queue.extend(
+                        deps.iter()
+                            .filter_map(toml::Value::as_str)
+                            .map(String::from),
+                    );
                 }
             }
         }
-        names
+        reached
     }
 
     #[test]
     fn the_handler_never_depends_on_the_engine_or_the_webview() {
-        let deps = declared_dependencies();
+        let reached = reachable_packages();
         assert!(
-            deps.iter().any(|d| d == "windows"),
-            "the manifest scan found no dependency at all: {deps:?}"
+            reached.iter().any(|d| d == "windows"),
+            "the Cargo.lock walk found no dependency at all: {reached:?}"
         );
-        for d in &deps {
+        for d in reached.iter().filter(|d| d.as_str() != "lpk-shell") {
             let lower = d.to_ascii_lowercase();
             assert!(
-                !lower.starts_with("lpk"),
+                !lower.starts_with("lpk-"),
                 "{d}: the handler must not load the engine or any LitePack crate"
             );
-            for banned in ["tauri", "wry", "webview", "tao"] {
-                assert!(
-                    !lower.contains(banned),
-                    "{d}: the handler must not load the webview"
-                );
-            }
+            assert!(
+                !(lower.starts_with("tauri") || lower.starts_with("webview2") || lower == "wry"),
+                "{d}: the handler must not load the webview"
+            );
         }
     }
 

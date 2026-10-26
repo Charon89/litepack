@@ -1,5 +1,5 @@
 //! The COM boundary of `lpk_shell.dll` (`docs/notes/e6-design.md` section 1), the only module of
-//! the crate allowed `unsafe` (docs/UNSAFE.md; D-NN of E6-1).
+//! the crate allowed `unsafe` (docs/UNSAFE.md; D-120 of E6-1).
 //!
 //! It exports `DllGetClassObject` and `DllCanUnloadNow`, and holds the class factory and the
 //! `IExplorerCommand` object. In E6-1 the command gives the fixed title [`ROOT_TITLE`] and
@@ -143,12 +143,16 @@ impl IClassFactory_Impl for ClassFactory_Impl {
         object: *mut *mut c_void,
     ) -> Result<()> {
         guard(|| {
-            if object.is_null() || riid.is_null() {
+            if object.is_null() {
                 return Err(E_POINTER.into());
             }
             // SAFETY: `object` is non-null and, by IClassFactory's contract, points to a
-            // writable interface pointer; it is cleared first so that every failure leaves null.
+            // writable interface pointer; it is cleared before any other check so that every
+            // failure, a null `riid` included, leaves null.
             unsafe { *object = std::ptr::null_mut() };
+            if riid.is_null() {
+                return Err(E_POINTER.into());
+            }
             if !outer.is_null() {
                 return Err(CLASS_E_NOAGGREGATION.into());
             }

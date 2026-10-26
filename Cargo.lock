@@ -2761,6 +2761,7 @@ dependencies = [
 name = "lpk-shell"
 version = "0.0.1"
 dependencies = [
+ "toml 1.1.6+spec-1.1.0",
  "windows",
  "windows-core",
 ]
