@@ -1,0 +1,38 @@
+[package]
+name = "lpk-libarchive-sys"
+description = "libarchive 3.8.9's read side (vendored, built with cc against a committed config.h) behind hand-written bindings and a small safe wrapper, for the sandboxed lpk-worker-libarchive only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about (about.toml `private.ignore`) leaves our own crates out of THIRD-PARTY-NOTICES.
+publish = false
+build = "build.rs"
+links = "archive"
+
+# The C codecs libarchive's filters call (design §3): zlib for gzip and RAR/CAB's Deflate paths,
+# liblzma for xz and RPM payloads, libzstd for zstd. All static; none is built into `workers/`.
+[dependencies]
+libz-sys = { version = "1.1.29", features = ["static"] }
+liblzma-sys = { version = "0.4.9", features = ["static"] }
+zstd-sys = "2.1.0"
+
+[build-dependencies]
+cc = "1.5.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+# This crate is allowed `unsafe` (CLAUDE.md: `*-sys` crates), so it cannot inherit the workspace
+# table (which forbids it). Every `unsafe` block carries a `// SAFETY:` comment (denied otherwise).
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(lpk_libarchive)"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+undocumented_unsafe_blocks = "deny"

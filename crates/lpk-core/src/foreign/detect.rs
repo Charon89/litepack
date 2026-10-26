@@ -4,7 +4,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A foreign format the broker recognises (by magic, [`detect_file`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,9 +30,34 @@ pub enum Format {
     Lzip,
     /// The legacy `.lzma` (LZMA-alone) stream (a single file or a `.tar.lzma`).
     Lzma,
-    /// RAR 4 or 5 (also inside a PE file): recognised, read by E4-4's libarchive worker and
-    /// not by this build's worker (refused as unsupported before any worker starts).
+    /// RAR 4 or 5 (also inside a PE file, and as a volume set): read by the libarchive worker
+    /// (E4-4).
     Rar,
+    /// ISO 9660 (Rock Ridge, Joliet): `CD001` at 0x8001; the libarchive worker.
+    Iso,
+    /// Microsoft Cabinet (`MSCF`, version 1.3); the libarchive worker.
+    Cab,
+    /// LHA/LZH (`-lh?-`/`-lz?-` at 2); the libarchive worker.
+    Lha,
+    /// Unix `ar` (`!<arch>\n`, also `.deb`); the libarchive worker.
+    Ar,
+    /// cpio (odc, newc, crc, binary); the libarchive worker.
+    Cpio,
+    /// RPM (its lead's magic); the libarchive worker.
+    Rpm,
+    /// Unix `compress` (`.Z`, a single file or a `.tar.Z`); the libarchive worker.
+    Compress,
+    /// uuencode or base64 (`begin ` / `begin-base64 ` at a line start); the libarchive worker.
+    Uue,
+}
+
+/// Which worker binary reads a format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerKind {
+    /// `lpk-worker`: the pure-Rust readers (E4-3), either sandbox mode.
+    Rust,
+    /// `lpk-worker-libarchive` (E4-4): LPAC only.
+    Libarchive,
 }
 
 /// How the host requires a format's packed ranges (D-99 (4): without them a lying worker could
@@ -64,6 +89,30 @@ impl Format {
             Format::Lzip => "lz",
             Format::Lzma => "lzma",
             Format::Rar => "rar",
+            Format::Iso => "iso",
+            Format::Cab => "cab",
+            Format::Lha => "lzh",
+            Format::Ar => "ar",
+            Format::Cpio => "cpio",
+            Format::Rpm => "rpm",
+            Format::Compress => "z",
+            Format::Uue => "uue",
+        }
+    }
+
+    /// The worker binary that reads the format.
+    pub fn worker(self) -> WorkerKind {
+        match self {
+            Format::Rar
+            | Format::Iso
+            | Format::Cab
+            | Format::Lha
+            | Format::Ar
+            | Format::Cpio
+            | Format::Rpm
+            | Format::Compress
+            | Format::Uue => WorkerKind::Libarchive,
+            _ => WorkerKind::Rust,
         }
     }
 
@@ -76,6 +125,14 @@ impl Format {
             Format::Zip => 46,
             Format::SevenZ => 4,
             Format::Rar => 7,
+            // A directory record; a CFFILE with a one-byte name; an LHA level-0 header; an ar
+            // header; a binary cpio header (an RPM's payload too).
+            Format::Iso => 34,
+            Format::Cab => 17,
+            Format::Lha => 22,
+            Format::Ar => 60,
+            Format::Cpio | Format::Rpm => 26,
+            Format::Compress | Format::Uue => 512,
             Format::Tar
             | Format::Gzip
             | Format::Bzip2
@@ -89,7 +146,17 @@ impl Format {
     /// Whether member headers are compressed (the entries cap is then multiplied by the
     /// expansion limit).
     pub fn compressed_headers(self) -> bool {
-        !matches!(self, Format::TestFixture | Format::Zip | Format::Tar)
+        !matches!(
+            self,
+            Format::TestFixture
+                | Format::Zip
+                | Format::Tar
+                | Format::Iso
+                | Format::Cab
+                | Format::Lha
+                | Format::Ar
+                | Format::Cpio
+        )
     }
 
     /// How the host requires the format's packed ranges.
@@ -107,17 +174,19 @@ impl Format {
     /// order restarts), and the reads of a later pass are the only progress the host can see
     /// while the worker skips decompressed bytes it does not send; capped, so a worker reading
     /// in a loop cannot stay alive forever.
+    /// libarchive's formats read twice too (the listing pass, then the streaming pass, which
+    /// restarts for a member before its position).
     pub fn read_passes(self) -> u64 {
-        if self.compressed_headers() {
+        if self.compressed_headers() || self.worker() == WorkerKind::Libarchive {
             3
         } else {
             1
         }
     }
 
-    /// Whether this build's worker reads the format (RAR waits for E4-4's worker).
+    /// Whether a worker of this build reads the format (every recognised format since E4-4).
     pub fn read_by_worker(self) -> bool {
-        !matches!(self, Format::Rar)
+        true
     }
 }
 
@@ -321,13 +390,193 @@ pub fn detect(head: &[u8]) -> Option<Format> {
     if head.starts_with(b"LZIP") {
         return Some(Format::Lzip);
     }
+    if head.starts_with(b"MSCF\0\0\0\0") && head.get(24..26) == Some(&[3, 1][..]) {
+        return Some(Format::Cab);
+    }
+    if head.starts_with(b"!<arch>\n") {
+        return Some(Format::Ar);
+    }
+    if head.starts_with(&[0xED, 0xAB, 0xEE, 0xDB]) {
+        return Some(Format::Rpm);
+    }
+    if head.starts_with(b"070707")
+        || head.starts_with(b"070701")
+        || head.starts_with(b"070702")
+        || (head.len() >= 26
+            && (head.starts_with(&[0xC7, 0x71]) || head.starts_with(&[0x71, 0xC7])))
+    {
+        return Some(Format::Cpio);
+    }
+    if head.starts_with(&[0x1F, 0x9D]) {
+        return Some(Format::Compress);
+    }
+    if lha_header(head) {
+        return Some(Format::Lha);
+    }
     if tar_header(head) {
         return Some(Format::Tar);
     }
     if lzma_alone(head) {
         return Some(Format::Lzma);
     }
+    if uu_begin(head) {
+        return Some(Format::Uue);
+    }
     None
+}
+
+/// An LHA header at the start: `-lh?-` or `-lz?-` at 2 with a method libarchive knows, and a
+/// header level of 0 to 3 at 20.
+fn lha_header(head: &[u8]) -> bool {
+    let Some(h) = head.get(..22) else {
+        return false;
+    };
+    let method_ok = match &h[2..5] {
+        b"-lh" => matches!(h[5], b'0'..=b'7' | b'd'),
+        b"-lz" => matches!(h[5], b's' | b'4' | b'5'),
+        _ => false,
+    };
+    method_ok && h[6] == b'-' && h[20] <= 3
+}
+
+/// A uuencode (`begin` and an octal mode) or base64 (`begin-base64`) start line at the head's
+/// start or at a line start within it.
+fn uu_begin(head: &[u8]) -> bool {
+    let line_at = |i: usize| -> bool {
+        let rest = &head[i..];
+        let after = if let Some(r) = rest.strip_prefix(b"begin-base64 ") {
+            r
+        } else if let Some(r) = rest.strip_prefix(b"begin ") {
+            r
+        } else {
+            return false;
+        };
+        let digits = after
+            .iter()
+            .take_while(|b| (b'0'..=b'7').contains(b))
+            .count();
+        (3..=4).contains(&digits) && after.get(digits) == Some(&b' ')
+    };
+    line_at(0)
+        || head
+            .iter()
+            .enumerate()
+            .any(|(i, &b)| b == b'\n' && i + 1 < head.len() && line_at(i + 1))
+}
+
+/// Where an ISO 9660 primary (or any) volume descriptor's `CD001` is (sector 16).
+const ISO_MAGIC_AT: u64 = 0x8001;
+
+/// The most volumes of a set a worker takes: the bootstrap page holds 16 handles, three of them
+/// pipes (a named limit until the page grows).
+pub const MAX_VOLUMES: usize = 13;
+
+/// A RAR main header's volume flag at the start of `head` (RAR 4: `MHD_VOLUME`; RAR 5: the
+/// main archive header's volume flag).
+fn rar_volume_flag(head: &[u8]) -> bool {
+    if !rar_valid_at(head, 0) {
+        return false;
+    }
+    if head[6] == 0 {
+        // RAR 4: HEAD_FLAGS of the main header at 7 + 3.
+        return head.get(10).is_some_and(|f| f & 0x01 != 0);
+    }
+    // RAR 5: CRC32, size vint, type vint (1), flags vint, [extra vint], [data vint], archive
+    // flags vint.
+    let mut p = 12usize;
+    let vint = |p: &mut usize| -> Option<u64> {
+        let mut v = 0u64;
+        for s in 0..10 {
+            let b = *head.get(*p)?;
+            *p += 1;
+            v |= u64::from(b & 0x7F) << (7 * s);
+            if b & 0x80 == 0 {
+                return Some(v);
+            }
+        }
+        None
+    };
+    let Some(_size) = vint(&mut p) else {
+        return false;
+    };
+    let (Some(ty), Some(flags)) = (vint(&mut p), vint(&mut p)) else {
+        return false;
+    };
+    if ty != 1 {
+        return false;
+    }
+    if flags & 1 != 0 && vint(&mut p).is_none() {
+        return false;
+    }
+    if flags & 2 != 0 && vint(&mut p).is_none() {
+        return false;
+    }
+    vint(&mut p).is_some_and(|a| a & 1 != 0)
+}
+
+/// The volumes of the archive at `path`, first to last: itself alone unless it is the first
+/// volume of a RAR set (its main header's volume flag) named `<stem>.partN.rar` (N of any
+/// width, all zeros but the last digit `1`) or `<stem>.rar` with `<stem>.r00` beside it; then
+/// the following names while they exist. `Err(n)` when the set has more than [`MAX_VOLUMES`].
+pub fn volume_set(path: &Path, format: Format) -> std::io::Result<Result<Vec<PathBuf>, usize>> {
+    let single = Ok(Ok(vec![path.to_path_buf()]));
+    if format != Format::Rar {
+        return single;
+    }
+    let mut head = vec![0u8; 64];
+    let mut f = File::open(path)?;
+    let n = read_at(&mut f, 0, &mut head)?;
+    head.truncate(n);
+    if !rar_volume_flag(&head) {
+        return single;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return single;
+    };
+    let lower = name.to_ascii_lowercase();
+    let mut names: Vec<String> = Vec::new();
+    if let Some(stem) = lower.strip_suffix(".rar") {
+        if let Some(i) = stem.rfind(".part") {
+            let digits = &stem[i + 5..];
+            let w = digits.len();
+            if w > 0
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && digits.trim_start_matches('0') == "1"
+            {
+                let prefix = &name[..i + 5];
+                let suffix = &name[name.len() - 4..];
+                for k in 2..=usize::MAX {
+                    let candidate = format!("{prefix}{k:0w$}{suffix}");
+                    if !path.with_file_name(&candidate).is_file() {
+                        break;
+                    }
+                    names.push(candidate);
+                    if names.len() >= MAX_VOLUMES {
+                        break;
+                    }
+                }
+            }
+        } else {
+            let base = &name[..name.len() - 4];
+            let r = if name.ends_with(".RAR") { "R" } else { "r" };
+            for k in 0..100 {
+                let candidate = format!("{base}.{r}{k:02}");
+                if !path.with_file_name(&candidate).is_file() {
+                    break;
+                }
+                names.push(candidate);
+                if names.len() >= MAX_VOLUMES {
+                    break;
+                }
+            }
+        }
+    }
+    let mut out = vec![path.to_path_buf()];
+    out.extend(names.iter().map(|n| path.with_file_name(n)));
+    if out.len() > MAX_VOLUMES {
+        return Ok(Err(out.len()));
+    }
+    Ok(Ok(out))
 }
 
 /// Read up to `buf.len()` bytes at `at`; the count read.
@@ -426,6 +675,10 @@ pub fn detect_file(path: &Path) -> std::io::Result<Option<Format>> {
     }
     if let Some(found) = detect(&head) {
         return Ok(Some(found));
+    }
+    let mut cd = [0u8; 5];
+    if len >= ISO_MAGIC_AT + 5 && read_at(&mut f, ISO_MAGIC_AT, &mut cd)? == 5 && &cd == b"CD001" {
+        return Ok(Some(Format::Iso));
     }
     if zip_end_record(&mut f, len)? {
         return Ok(Some(Format::Zip));

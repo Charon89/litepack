@@ -118,7 +118,9 @@ pub const MEMBER_BATCH: usize = 1024;
 const TICK: Duration = Duration::from_millis(50);
 
 mod detect;
-pub use detect::{detect, detect_file, Format, Ranges, HEAD, PE_SCAN};
+pub use detect::{
+    detect, detect_file, volume_set, Format, Ranges, WorkerKind, HEAD, MAX_VOLUMES, PE_SCAN,
+};
 
 /// How the worker is sandboxed (Windows; Linux runs it unsandboxed, decision (d)).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -175,6 +177,9 @@ impl Limits {
 pub struct Options {
     /// The worker executable; `None` is `lpk-worker` beside the running executable.
     pub worker: Option<PathBuf>,
+    /// The libarchive worker executable (E4-4); `None` is `lpk-worker-libarchive` beside the
+    /// running executable.
+    pub worker_libarchive: Option<PathBuf>,
     /// The sandbox mode.
     pub sandbox: Sandbox,
     /// The AppContainer name; `None` is `lpk_sandbox_sys::APPCONTAINER_NAME`.
@@ -194,15 +199,31 @@ pub const WORKER_NAME: &str = if cfg!(windows) {
     "lpk-worker"
 };
 
+/// The libarchive worker's file name (E4-4).
+pub const WORKER_LIBARCHIVE_NAME: &str = if cfg!(windows) {
+    "lpk-worker-libarchive.exe"
+} else {
+    "lpk-worker-libarchive"
+};
+
+/// The message of the [`WorkerError::Sandbox`] refusing the restricted token for a format the
+/// libarchive worker reads (design section 1: LPAC only, never the restricted token for
+/// libarchive).
+pub const RESTRICTED_REFUSED: &str = "the restricted-token sandbox is never used for the libarchive worker (C code); this format needs the default LPAC sandbox";
+
 impl Options {
-    fn worker_exe(&self) -> Result<PathBuf, CoreError> {
-        if let Some(w) = &self.worker {
+    fn worker_exe(&self, kind: WorkerKind) -> Result<PathBuf, CoreError> {
+        let (given, name) = match kind {
+            WorkerKind::Rust => (&self.worker, WORKER_NAME),
+            WorkerKind::Libarchive => (&self.worker_libarchive, WORKER_LIBARCHIVE_NAME),
+        };
+        if let Some(w) = given {
             return Ok(w.clone());
         }
         let exe = std::env::current_exe().map_err(|e| WorkerError::Spawn {
             message: format!("cannot locate the host executable: {e}"),
         })?;
-        Ok(exe.with_file_name(WORKER_NAME))
+        Ok(exe.with_file_name(name))
     }
 }
 
@@ -505,7 +526,7 @@ mod process {
 
     pub(super) fn spawn(
         exe: &Path,
-        archive: &File,
+        archives: &[File],
         opts: &Options,
         memory: u64,
     ) -> Result<(ProcessPeer, Vec<String>), CoreError> {
@@ -540,17 +561,19 @@ mod process {
             cpu_time: CPU_STEP.min(cpu_ceiling),
             cpu_ceiling,
         };
-        let worker = Launch::new(exe)
+        let mut launch = Launch::new(exe)
             .mode(mode)
             .appcontainer_name(&name)
             .limits(limits)
             .args(&opts.worker_args)
             .handle(roles::REQUESTS, borrow(&req_r), Access::Read)
             .handle(roles::RESPONSES, borrow(&resp_w), Access::Write)
-            .handle(roles::STDERR, borrow(&err_w), Access::Write)
-            .handle(roles::ARCHIVE, borrow(archive), Access::Read)
-            .spawn()
-            .map_err(spawn_err)?;
+            .handle(roles::STDERR, borrow(&err_w), Access::Write);
+        // The volumes of a set take the roles after the first archive handle, in order.
+        for (i, a) in (0u32..).zip(archives) {
+            launch = launch.handle(roles::ARCHIVE + i, borrow(a), Access::Read);
+        }
+        let worker = launch.spawn().map_err(spawn_err)?;
         drop((req_r, resp_w, err_w));
         // Responses: decoded by a thread into a small channel, so the broker can wait with a
         // timeout; at most a few frames (each at most 1 MiB) are held, and a full channel
@@ -1630,22 +1653,32 @@ fn start<'m>(
         }
         .into());
     }
-    let file = File::open(archive).map_err(|e| CoreError::io(archive, e))?;
-    let len = file
-        .metadata()
-        .map_err(|e| CoreError::io(archive, e))?
-        .len();
     let format = detect_file(archive)
         .map_err(|e| CoreError::io(archive, e))?
         .ok_or(ForeignError::UnknownFormat)?;
-    if !format.read_by_worker() {
-        return Err(ForeignError::Unsupported {
-            message: format!(
-                "{} archives are read by the libarchive worker (E4-4), which this build does not have",
-                format.name()
-            ),
+    let kind = format.worker();
+    // Design section 1: the libarchive worker (C code) runs under LPAC only.
+    if kind == WorkerKind::Libarchive && opts.sandbox == Sandbox::Restricted {
+        return Err(WorkerError::Sandbox {
+            message: RESTRICTED_REFUSED.to_string(),
         }
         .into());
+    }
+    let paths = match volume_set(archive, format).map_err(|e| CoreError::io(archive, e))? {
+        Ok(p) => p,
+        Err(n) => return Err(ForeignError::Unsupported {
+            message: format!(
+                "a volume set of {n} or more volumes; at most {MAX_VOLUMES} are read (named limit)"
+            ),
+        }
+        .into()),
+    };
+    let mut files = Vec::with_capacity(paths.len());
+    let mut len = 0u64;
+    for p in &paths {
+        let f = File::open(p).map_err(|e| CoreError::io(p, e))?;
+        len = len.saturating_add(f.metadata().map_err(|e| CoreError::io(p, e))?.len());
+        files.push(f);
     }
     // The worker gets the file name only (single streams name their member from it), never
     // the directory.
@@ -1653,10 +1686,10 @@ fn start<'m>(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned().into_bytes())
         .unwrap_or_default();
-    let exe = opts.worker_exe()?;
+    let exe = opts.worker_exe(kind)?;
     let memory = opts.limits.budget();
-    let (peer, warnings) = process::spawn(&exe, &file, opts, memory)?;
-    drop(file);
+    let (peer, warnings) = process::spawn(&exe, &files, opts, memory)?;
+    drop(files);
     let mut conv = Conv::new(peer, opts.limits.clone(), len, monitor);
     conv.warnings = warnings;
     let r = conv

@@ -1,0 +1,33 @@
+[package]
+name = "lpk-worker-libarchive"
+description = "LitePack's sandboxed libarchive worker (LPAC only): reads RAR, ISO 9660, CAB, LZH, AR, CPIO, RPM, .Z and UUE through its handles and answers the broker over pipes; never writes a file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about and cargo-deny's private rule leave our own crates out.
+publish = false
+
+[lib]
+# The `ForeignReader` over libarchive, shared by the binary, its tests and the fuzz target.
+name = "lpk_worker_libarchive"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lpk-worker-libarchive"
+path = "src/main.rs"
+
+[dependencies]
+lpk-proto = { path = "../lpk-proto", version = "0.0.1" }
+lpk-libarchive-sys = { path = "../lpk-libarchive-sys", version = "0.0.1" }
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+blake3 = "1.8.7"
+
+[lints]
+workspace = true
