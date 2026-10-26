@@ -24,6 +24,8 @@ lpk-sandbox-sys = { path = "../../crates/lpk-sandbox-sys", version = "0.0.1" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# BLAKE3 equality of what `lpk x` extracts through the worker (tests/cli.rs).
+blake3 = "1.8.7"
 
 [lints]
 workspace = true
