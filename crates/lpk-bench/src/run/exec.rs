@@ -1023,6 +1023,22 @@ struct ArgRecord {
 }
 
 /// One repeat: clean up, compress, extract, verify.
+/// E6-5's catalogue key `zone`: write the `Zone.Identifier` stream onto the archive (outside
+/// the timed steps, between compression and extraction). Windows only: elsewhere the
+/// combination fails with the reason.
+fn write_zone(archive: &Path, zone: u8) -> Result<(), Fail> {
+    if !cfg!(windows) {
+        return Err(Fail::new(
+            "extract",
+            "the setting's zone needs Windows (a Zone.Identifier stream)",
+        ));
+    }
+    let mut name = archive.as_os_str().to_owned();
+    name.push(":Zone.Identifier");
+    std::fs::write(&name, crate::run::catalogue::zone_stream(zone))
+        .map_err(|e| Fail::new("extract", format!("zone stream: {:?}", e.kind())))
+}
+
 fn one_repeat(
     ctx: &Ctx<'_>,
     tool: &Tool,
@@ -1083,6 +1099,9 @@ fn one_repeat(
     }
 
     let (compress_m, archive_bytes) = compress(ctx, tool, exe, setting, &archive, &archive_rel)?;
+    if let Some(z) = setting.zone {
+        write_zone(&archive, z)?;
+    }
     let extract_m = extract(
         &ctx.in_scratch(),
         tool,
@@ -1164,6 +1183,7 @@ fn base_result(
             id: setting.id.clone(),
             compress_args: setting.compress.clone(),
             extract_args: setting.extract.clone(),
+            zone: setting.zone,
         },
         class: class.to_string(),
         corpus: corpus_ref(corpus, entry),

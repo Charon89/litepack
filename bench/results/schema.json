@@ -127,7 +127,8 @@
       "properties": {
         "id": { "$ref": "#/$defs/id", "description": "Setting id within the tool." },
         "compress_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the compress command as executed, thread argument filled in, paths shown relative to the working directory (the parent of the class directory)." },
-        "extract_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the extract command as executed, same conventions." }
+        "extract_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the extract command as executed, same conventions." },
+        "zone": { "type": "integer", "minimum": 0, "maximum": 4, "description": "E6-5: the ZoneId the runner wrote as the archive's Zone.Identifier stream between compression and extraction (untimed; Windows only); absent when none was written." }
       }
     },
     "corpus_ref": {
