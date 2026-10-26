@@ -1,0 +1,34 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "b483edc3b8bb1c1fd645452eb659bd859f39457bde358459e671d1c76ac0d66c",
+  "classes": [
+    "backup-versions-large"
+  ],
+  "combinations": [
+    {
+      "class": "backup-versions-large",
+      "outcome": "measured",
+      "setting": "balanced-versions",
+      "tool": "lpk"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}
