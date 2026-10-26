@@ -108,7 +108,7 @@ impl Class {
             Class::PasswordRequired => "This archive needs a password.",
             Class::WrongPassword => "The password is wrong.",
             Class::Damaged => "The archive is damaged.",
-            Class::Unsupported => "This archive needs a feature this version does not have.",
+            Class::Unsupported => "This is not supported (see the detail): an archive feature this version does not have, or an operation this archive does not allow.",
             Class::TooLarge => "This exceeds a limit.",
             Class::Unsafe => "A path was refused as unsafe.",
             Class::Exists => "Something is in the way.",
@@ -273,7 +273,6 @@ fn io_class(e: &std::io::Error) -> Class {
         std::io::ErrorKind::PermissionDenied => Class::AccessDenied,
         std::io::ErrorKind::AlreadyExists => Class::Exists,
         std::io::ErrorKind::StorageFull => Class::DiskFull,
-        std::io::ErrorKind::Interrupted => Class::Cancelled,
         _ => Class::Io,
     }
 }
@@ -290,8 +289,13 @@ pub fn core_class(e: &CoreError) -> Class {
         CoreError::DuplicatePath { .. }
         | CoreError::InTheWay { .. }
         | CoreError::NotADirectory { .. } => Class::Exists,
-        CoreError::ChangedWhileReading { .. } | CoreError::AppendLeftCut { .. } => Class::Io,
-        CoreError::Decode { .. } | CoreError::Extract(_) => Class::Damaged,
+        CoreError::ChangedWhileReading { .. } => Class::Io,
+        // An append cut back after a failure: the archive is left at its previous generation
+        // only if the cut held, so the outcome is reported as damage to look at.
+        CoreError::AppendLeftCut { .. } | CoreError::Decode { .. } => Class::Damaged,
+        // `Extract` carries no inner cause (a decode worker stopped without a result: its
+        // own error, disk full or damage, is reported instead when there is one).
+        CoreError::Extract(_) => Class::Internal,
         CoreError::Export { .. } => Class::Io,
         CoreError::NoMatch { .. } => Class::NotFound,
         CoreError::Cancelled => Class::Cancelled,

@@ -155,3 +155,115 @@ fn every_class_has_a_message_and_only_usage_exits_1() {
     let e = missing.unwrap_err();
     assert_eq!((e.class, e.kind.as_str()), (Class::NotFound, "Io"));
 }
+
+/// A monitor whose first event signals `started` and then holds the walk for `hold`, so
+/// another thread acts while the read is in flight.
+fn holding_monitor(
+    token: CancelToken,
+    started: std::sync::mpsc::Sender<()>,
+    hold: std::time::Duration,
+) -> Monitor {
+    let started = std::sync::Mutex::new(Some(started));
+    Monitor::new(
+        Arc::new(move |_: &lpk_api::Event| {
+            if let Some(tx) = started.lock().unwrap().take() {
+                let _ = tx.send(());
+                std::thread::sleep(hold);
+            }
+        }),
+        token,
+    )
+}
+
+#[test]
+fn history_cancels_a_read_in_flight_and_leaves_the_callers_token_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = archive(dir.path(), 0);
+    let s = Arc::new(Session::open(&a, &Default::default()).unwrap());
+    let caller = CancelToken::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let m = holding_monitor(caller.clone(), tx, std::time::Duration::from_millis(300));
+    let reader = {
+        let s = Arc::clone(&s);
+        std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            (s.test(&m).map(|_| ()).map_err(|e| e.class), t)
+        })
+    };
+    rx.recv().unwrap();
+    let h = s.history(&CancelToken::new()).unwrap();
+    assert_eq!(h.len(), 1, "history completes once the read ended");
+    let (r, started) = reader.join().unwrap();
+    assert_eq!(r, Err(Class::Cancelled));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the read stopped promptly"
+    );
+    assert!(
+        !caller.is_cancelled(),
+        "only the read's own token was cancelled"
+    );
+    // The caller's token is reused: the next read runs to the end.
+    assert!(s.test(&Monitor::with_cancel(caller)).is_ok());
+}
+
+#[test]
+fn the_callers_token_cancels_its_read_and_close_refuses_later_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = archive(dir.path(), 0);
+    let s = Arc::new(Session::open(&a, &Default::default()).unwrap());
+    let caller = CancelToken::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let m = holding_monitor(caller.clone(), tx, std::time::Duration::from_millis(300));
+    let reader = {
+        let s = Arc::clone(&s);
+        std::thread::spawn(move || s.test(&m).map(|_| ()).map_err(|e| e.class))
+    };
+    rx.recv().unwrap();
+    caller.cancel();
+    assert_eq!(reader.join().unwrap(), Err(Class::Cancelled));
+    s.close().unwrap();
+    let e = s.test(&Monitor::default()).unwrap_err();
+    assert_eq!((e.class, e.kind.as_str()), (Class::Usage, "SessionClosed"));
+    assert_eq!(s.close().unwrap_err().kind, "SessionClosed");
+    // Closed, the free rollback runs on the file.
+    assert_eq!(lpk_api::rollback(&a, 0).unwrap().generation, 0);
+}
+
+#[test]
+fn picking_a_directory_picks_its_subtree_and_all_picks_are_the_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = archive(dir.path(), 0);
+    let s = Session::open(&a, &Default::default()).unwrap();
+    let m = s.model(&CancelToken::new()).unwrap();
+    let sub = (0..m.len() as u32).find(|&i| m.path(i) == "sub").unwrap();
+    let mut picks = m.new_selection();
+    picks.insert(sub);
+    let out = dir.path().join("x1");
+    let r = s
+        .extract(
+            &Selection::Ids(Arc::new(picks)),
+            &Destination::Dir(out.clone()),
+            &ExtractOptions::default(),
+            &Monitor::default(),
+        )
+        .unwrap();
+    let lpk_api::Extracted::Lpk(sum) = r.outcome else {
+        panic!("an .lpk")
+    };
+    assert_eq!(sum.files, 20);
+    assert!(!out.join("top.txt").exists());
+    let mut all = m.new_selection();
+    for i in 0..m.len() as u32 {
+        all.insert(i);
+    }
+    let out2 = dir.path().join("x2");
+    s.extract(
+        &Selection::Ids(Arc::new(all)),
+        &Destination::Dir(out2.clone()),
+        &ExtractOptions::default(),
+        &Monitor::default(),
+    )
+    .unwrap();
+    assert!(out2.join("top.txt").exists());
+}

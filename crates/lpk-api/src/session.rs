@@ -4,16 +4,22 @@
 //! **Sharing.** A `Session` is `Send + Sync`. Every read (`for_each`, `model`, `read_entry`,
 //! `preflight`, `extract`, `export`, `test`, `check`, `repair`) forks the opened reader
 //! (`Archive::fork`: nothing is read or checked again) onto a fresh file handle under a shared
-//! guard and registers its cancel token for the duration. The exclusive operations
-//! (`history`, `rollback(self)`, `append(self)`) cancel the registered tokens and wait for the
-//! shared guards to drop before they run.
+//! gate: each read is registered before it starts, with a token of its own that the
+//! caller's token cancels (a linker thread polls the callers' tokens every
+//! [`LINK_POLL`] while reads run) and that an exclusive operation cancels without touching the
+//! caller's. The exclusive operations (`history`, `close`, `rollback(self)`, `append(self)`)
+//! mark themselves pending, so no read starts after them, cancel the registered reads and wait
+//! for them to end. A closed session refuses every later call (`Usage`, kind `SessionClosed`).
+//!
+//! **Callbacks must not call back into the `Session`** (`for_each`'s `f`): a read started
+//! inside another read waits behind a pending exclusive operation, which waits for the outer
+//! read, and neither ends.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lpk_core::foreign::{ForeignSummary, Listing};
@@ -264,8 +270,9 @@ impl Seek for Window {
 
 struct LpkState {
     archive: Mutex<Archive<Window>>,
-    /// The bytes of the open generation.
-    len: u64,
+    /// The bytes a fork reads: the first `end` bytes for an earlier generation, `None` (the
+    /// whole file, as the reference tool reads it) for the latest.
+    window: Option<u64>,
 }
 
 struct ForeignState {
@@ -285,9 +292,7 @@ pub struct Session {
     kind: Kind,
     credentials: Option<Credentials>,
     options: SessionOptions,
-    gate: RwLock<()>,
-    readers: Mutex<Vec<(u64, CancelToken)>>,
-    next_reader: AtomicU64,
+    gate: Arc<Gate>,
     model: Mutex<Option<Arc<ListModel>>>,
 }
 
@@ -309,20 +314,107 @@ impl std::fmt::Debug for Session {
     }
 }
 
-/// A read in progress: the shared guard and the registered token.
+/// How often the linker thread passes a caller's cancel on to its read's own token.
+pub const LINK_POLL: Duration = Duration::from_millis(10);
+
+/// The reads in flight and the exclusive operations' state.
+#[derive(Debug, Default)]
+struct GateState {
+    /// Each read: its id, the caller's token, its own token.
+    reads: Vec<(u64, CancelToken, CancelToken)>,
+    next: u64,
+    /// Exclusive operations waiting: no read starts meanwhile.
+    pending: usize,
+    exclusive: bool,
+    closed: bool,
+    /// The linker thread runs.
+    linker: bool,
+}
+
+#[derive(Debug, Default)]
+struct Gate {
+    state: Mutex<GateState>,
+    cv: Condvar,
+}
+
+impl Gate {
+    fn lock(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn wait<'a>(&self, g: MutexGuard<'a, GateState>) -> MutexGuard<'a, GateState> {
+        self.cv.wait(g).unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The linker: while reads run, cancel each read whose caller cancelled.
+    fn link(gate: Arc<Gate>) {
+        loop {
+            {
+                let mut s = gate.lock();
+                if s.reads.is_empty() {
+                    s.linker = false;
+                    return;
+                }
+                for (_, caller, own) in &s.reads {
+                    if caller.is_cancelled() {
+                        own.cancel();
+                    }
+                }
+            }
+            std::thread::sleep(LINK_POLL);
+        }
+    }
+}
+
+/// A read in progress: registered in the gate with its own token.
 struct ReadGuard<'s> {
-    session: &'s Session,
+    gate: &'s Gate,
     id: u64,
-    _guard: RwLockReadGuard<'s, ()>,
+    path: &'s Path,
+    /// The read's own token: cancelled by the caller's token or by an exclusive operation.
+    cancel: CancelToken,
+}
+
+impl ReadGuard<'_> {
+    /// `m` with the read's own token.
+    fn monitor(&self, m: &Monitor) -> Monitor {
+        Monitor {
+            progress: m.progress.clone(),
+            cancel: self.cancel.clone(),
+        }
+    }
+
+    /// `Cancelled` once the read's token is cancelled.
+    fn check(&self) -> Result<(), Error> {
+        self.cancel
+            .check()
+            .map_err(|e| Error::core(e, Some(self.path)))
+    }
 }
 
 impl Drop for ReadGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut r) = self.session.readers.lock() {
-            r.retain(|(id, _)| *id != self.id);
-        }
+        let mut s = self.gate.lock();
+        s.reads.retain(|(id, _, _)| *id != self.id);
+        self.gate.cv.notify_all();
     }
 }
+
+/// An exclusive operation in progress.
+struct ExclusiveGuard<'s> {
+    gate: &'s Gate,
+}
+
+impl Drop for ExclusiveGuard<'_> {
+    fn drop(&mut self) {
+        let mut s = self.gate.lock();
+        s.exclusive = false;
+        self.gate.cv.notify_all();
+    }
+}
+
+/// The most exact globs an id selection spells before it is refused (`TooLarge`).
+pub const MAX_PICKED_GLOBS: usize = 10_000;
 
 /// The exclusive operations' refusal on a foreign archive.
 fn unsupported_foreign(what: &str, path: &Path) -> Error {
@@ -456,6 +548,7 @@ impl Session {
         let fail = |e: FormatError| Error::format(e, Some(path));
         let window = Window::new(file, None).map_err(|e| fail(FormatError::Io(e)))?;
         let mut archive = Self::open_archive(window, path, &options, o.credentials)?;
+        let mut fork_window = None;
         let latest = archive.generation();
         if let Some(g) = o.generation.filter(|g| *g != latest) {
             let chain = archive.history().map_err(fail)?;
@@ -470,6 +563,7 @@ impl Session {
             let file = File::open(path).map_err(|e| fail(FormatError::Io(e)))?;
             let window = Window::new(file, Some(at.end())).map_err(|e| fail(FormatError::Io(e)))?;
             archive = Self::open_archive(window, path, &options, o.credentials)?;
+            fork_window = Some(at.end());
         }
         let len = {
             let t = archive.trailer();
@@ -491,13 +585,11 @@ impl Session {
             info,
             kind: Kind::Lpk(Box::new(LpkState {
                 archive: Mutex::new(archive),
-                len,
+                window: fork_window,
             })),
             credentials: o.credentials.cloned(),
             options,
-            gate: RwLock::new(()),
-            readers: Mutex::new(Vec::new()),
-            next_reader: AtomicU64::new(0),
+            gate: Arc::new(Gate::default()),
             model: Mutex::new(None),
         })
     }
@@ -546,9 +638,7 @@ impl Session {
                 generation: o.generation,
                 foreign: o.foreign.clone(),
             },
-            gate: RwLock::new(()),
-            readers: Mutex::new(Vec::new()),
-            next_reader: AtomicU64::new(0),
+            gate: Arc::new(Gate::default()),
             model: Mutex::new(None),
         }
     }
@@ -584,32 +674,85 @@ impl Session {
         }
     }
 
-    fn read_guard(&self, cancel: &CancelToken) -> ReadGuard<'_> {
-        let guard = self.gate.read().unwrap_or_else(|p| p.into_inner());
-        let id = self.next_reader.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut r) = self.readers.lock() {
-            r.push((id, cancel.clone()));
-        }
-        ReadGuard {
-            session: self,
-            id,
-            _guard: guard,
-        }
+    fn closed(&self) -> Error {
+        Error::new(
+            Class::Usage,
+            "SessionClosed",
+            format!("{}: the session is closed", self.path.display()),
+            Some(&self.path),
+        )
     }
 
-    /// Cancel every registered read and wait for the shared guards to drop.
-    fn exclusive(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
-        if let Ok(r) = self.readers.lock() {
-            for (_, t) in r.iter() {
-                t.cancel();
-            }
+    /// Register a read (after any pending exclusive operation) with its own token linked to
+    /// `caller`.
+    fn read_guard(&self, caller: &CancelToken) -> Result<ReadGuard<'_>, Error> {
+        let mut s = self.gate.lock();
+        while !s.closed && (s.exclusive || s.pending > 0) {
+            s = self.gate.wait(s);
         }
-        self.gate.write().unwrap_or_else(|p| p.into_inner())
+        if s.closed {
+            return Err(self.closed());
+        }
+        let id = s.next;
+        s.next += 1;
+        let own = CancelToken::new();
+        if caller.is_cancelled() {
+            own.cancel();
+        }
+        s.reads.push((id, caller.clone(), own.clone()));
+        if !s.linker {
+            let gate = Arc::clone(&self.gate);
+            s.linker = std::thread::Builder::new()
+                .name("lpk-api-linker".into())
+                .spawn(move || Gate::link(gate))
+                .is_ok();
+        }
+        Ok(ReadGuard {
+            gate: &self.gate,
+            id,
+            path: &self.path,
+            cancel: own,
+        })
+    }
+
+    /// Become exclusive: pending first (no read starts), then cancel every registered read's
+    /// own token and wait for the reads to end; `close` marks the session closed.
+    fn exclusive(&self, close: bool) -> Result<ExclusiveGuard<'_>, Error> {
+        let mut s = self.gate.lock();
+        if s.closed {
+            return Err(self.closed());
+        }
+        s.pending += 1;
+        loop {
+            for (_, _, own) in &s.reads {
+                own.cancel();
+            }
+            if s.reads.is_empty() && !s.exclusive {
+                break;
+            }
+            s = self.gate.wait(s);
+        }
+        s.pending -= 1;
+        s.exclusive = true;
+        if close {
+            s.closed = true;
+        }
+        Ok(ExclusiveGuard { gate: &self.gate })
+    }
+
+    /// Cancel the reads in flight (their callers' tokens untouched), wait for them, and close
+    /// the session: every later call is refused (`Usage`, kind `SessionClosed`). What a GUI
+    /// holding the session in an `Arc` calls before `rollback` or `append` on the archive
+    /// (it then runs the free [`crate::rollback`] or [`crate::append`] and opens a new
+    /// session).
+    pub fn close(&self) -> Result<(), Error> {
+        drop(self.exclusive(true)?);
+        Ok(())
     }
 
     fn reopen(&self) -> std::io::Result<Window> {
         let len = match &self.kind {
-            Kind::Lpk(l) => Some(l.len),
+            Kind::Lpk(l) => l.window,
             Kind::Foreign(_) => None,
         };
         Window::new(File::open(&self.path)?, len)
@@ -688,8 +831,17 @@ impl Session {
         s: &Selection,
         f: &mut dyn FnMut(&EntryRef<'_>) -> ControlFlow<()>,
     ) -> Result<(), Error> {
-        let never = CancelToken::new();
-        let _g = self.read_guard(&never);
+        let g = self.read_guard(&CancelToken::new())?;
+        self.walk(&g, s, f)
+    }
+
+    /// [`Session::for_each`] under a read's guard, polling its token every 4,096 entries.
+    fn walk(
+        &self,
+        g: &ReadGuard<'_>,
+        s: &Selection,
+        f: &mut dyn FnMut(&EntryRef<'_>) -> ControlFlow<()>,
+    ) -> Result<(), Error> {
         match &self.kind {
             Kind::Lpk(_) => {
                 let fail = |e: FormatError| Error::format(e, Some(&self.path));
@@ -706,6 +858,9 @@ impl Session {
                     }
                 }
                 for (i, entry) in table.table().map_err(fail)?.iter().enumerate() {
+                    if i % 4096 == 0 {
+                        g.check()?;
+                    }
                     let e = entry.map_err(fail)?;
                     let id = u32::try_from(i).unwrap_or(u32::MAX);
                     if !selected(s, id, &e.path) {
@@ -735,6 +890,9 @@ impl Session {
                     }
                 }
                 for (i, e) in listing.entries.iter().enumerate() {
+                    if i % 4096 == 0 {
+                        g.check()?;
+                    }
                     let id = u32::try_from(i).unwrap_or(u32::MAX);
                     if !selected(s, id, &e.path) {
                         continue;
@@ -762,7 +920,8 @@ impl Session {
         if let Some(m) = slot.as_ref() {
             return Ok(Arc::clone(m));
         }
-        let _g = self.read_guard(c);
+        let g = self.read_guard(c)?;
+        let c = &g.cancel;
         let m = match &self.kind {
             Kind::Lpk(_) => {
                 let fail = |e: FormatError| Error::format(e, Some(&self.path));
@@ -819,7 +978,7 @@ impl Session {
         if let Kind::Foreign(_) = &self.kind {
             return Err(unsupported_foreign("reading one entry", &self.path));
         }
-        let _g = self.read_guard(c);
+        let g = self.read_guard(c)?;
         let fail = |e: FormatError| Error::format(e, Some(&self.path));
         let mut a = self.fork()?;
         let table = a.entry_table().map_err(fail)?;
@@ -873,13 +1032,13 @@ impl Session {
                     || self.reopen(),
                     &mut sink,
                     &opts,
-                    &Monitor::with_cancel(c.clone()),
+                    &Monitor::with_cancel(g.cancel.clone()),
                 )
                 .map_err(|e| Error::core(e, Some(&self.path)))?;
             }
             // A name a glob cannot spell: the format's reader (not cancellable mid-entry).
             None => {
-                c.check().map_err(|e| Error::core(e, Some(&self.path)))?;
+                g.check()?;
                 a.extract(&entry, &mut sink.out).map_err(fail)?;
             }
         }
@@ -888,12 +1047,22 @@ impl Session {
 
     /// The destination directory `to` resolves to (the smart rule needs the top level).
     pub fn destination(&self, s: &Selection, to: &Destination) -> Result<PathBuf, Error> {
+        let g = self.read_guard(&CancelToken::new())?;
+        self.destination_in(&g, s, to)
+    }
+
+    fn destination_in(
+        &self,
+        g: &ReadGuard<'_>,
+        s: &Selection,
+        to: &Destination,
+    ) -> Result<PathBuf, Error> {
         match to {
             Destination::Dir(d) => Ok(d.clone()),
             Destination::NewFolder { beside } => Ok(self.fresh_folder(beside)),
             Destination::Smart { beside } => {
                 let mut tops: Vec<String> = Vec::new();
-                self.for_each(s, &mut |e| {
+                self.walk(g, s, &mut |e| {
                     let top = e.path().split('/').next().unwrap_or_default();
                     if !tops.iter().any(|t| t == top) {
                         tops.push(top.to_string());
@@ -938,17 +1107,13 @@ impl Session {
         to: &Destination,
         c: &CancelToken,
     ) -> Result<Preflight, Error> {
-        let dir = self.destination(s, to)?;
+        let g = self.read_guard(c)?;
+        let dir = self.destination_in(&g, s, to)?;
         let mut p = Preflight {
             dir: dir.clone(),
             ..Preflight::default()
         };
-        let mut n = 0u64;
-        self.for_each(s, &mut |e| {
-            n += 1;
-            if n.is_multiple_of(4096) && c.is_cancelled() {
-                return ControlFlow::Break(());
-            }
+        self.walk(&g, s, &mut |e| {
             p.entries += 1;
             if e.kind() == EntryKind::File {
                 p.files += 1;
@@ -959,25 +1124,70 @@ impl Session {
             }
             ControlFlow::Continue(())
         })?;
-        c.check().map_err(|e| Error::core(e, Some(&self.path)))?;
         Ok(p)
     }
 
-    /// The engine's selection of `s` (ids spelled as exact globs, see [`exact_glob`]).
-    fn core_selection(&self, s: &Selection) -> Result<lpk_core::Selection, Error> {
+    /// The engine's selection of `s`. Ids: every entry picked is the whole archive; a picked
+    /// directory is its subtree (D-90's globs select a directory's subtree), so the entries
+    /// under it spell no glob of their own; every other pick is one exact glob
+    /// ([`exact_glob`]), at most [`MAX_PICKED_GLOBS`] (`TooLarge` beyond: pick folders, or
+    /// all).
+    fn core_selection(
+        &self,
+        g: &ReadGuard<'_>,
+        s: &Selection,
+    ) -> Result<lpk_core::Selection, Error> {
         match s {
             Selection::All => Ok(lpk_core::Selection::all()),
-            Selection::Globs(g) => Ok(g.clone()),
+            Selection::Globs(x) => Ok(x.clone()),
             Selection::Ids(ids) => {
                 let mut globs = Vec::new();
+                let mut dirs = std::collections::HashSet::new();
                 let mut bad = None;
-                self.for_each(&Selection::Ids(Arc::clone(ids)), &mut |e| {
-                    match exact_glob(e.path()) {
-                        Some(g) => globs.push(g),
-                        None => bad = Some(e.path().to_string()),
+                let (mut total, mut picked) = (0u64, 0u64);
+                self.walk(g, &Selection::All, &mut |e| {
+                    total += 1;
+                    if !ids.contains(e.id) {
+                        return ControlFlow::Continue(());
+                    }
+                    picked += 1;
+                    let path = e.path();
+                    let covered = path
+                        .match_indices('/')
+                        .any(|(i, _)| dirs.contains(&path[..i]));
+                    if covered {
+                        return ControlFlow::Continue(());
+                    }
+                    if e.kind() == EntryKind::Directory {
+                        dirs.insert(path.to_string());
+                    }
+                    if globs.len() < MAX_PICKED_GLOBS {
+                        match exact_glob(path) {
+                            Some(x) => globs.push(x),
+                            None => bad = Some(path.to_string()),
+                        }
+                    } else {
+                        globs.push(String::new());
                     }
                     ControlFlow::Continue(())
                 })?;
+                if picked == 0 {
+                    return Err(Error::usage("no entry picked"));
+                }
+                if picked == total {
+                    return Ok(lpk_core::Selection::all());
+                }
+                if globs.len() > MAX_PICKED_GLOBS {
+                    return Err(Error::new(
+                        Class::TooLarge,
+                        "TooLarge",
+                        format!(
+                            "{}: more than {MAX_PICKED_GLOBS} separate picks; pick their folders, or everything",
+                            self.path.display()
+                        ),
+                        Some(&self.path),
+                    ));
+                }
                 if let Some(p) = bad {
                     return Err(Error::new(
                         Class::Unsupported,
@@ -985,9 +1195,6 @@ impl Session {
                         format!("{p}: a picked name with a backslash cannot be selected yet"),
                         Some(&self.path),
                     ));
-                }
-                if globs.is_empty() {
-                    return Err(Error::usage("no entry picked"));
                 }
                 lpk_core::Selection::new(&globs).map_err(|e| Error::core(e, Some(&self.path)))
             }
@@ -1004,9 +1211,10 @@ impl Session {
         o: &ExtractOptions,
         m: &Monitor,
     ) -> Result<ExtractReport, Error> {
-        let select = self.core_selection(s)?;
-        let dir = self.destination(s, to)?;
-        let _g = self.read_guard(&m.cancel);
+        let g = self.read_guard(&m.cancel)?;
+        let select = self.core_selection(&g, s)?;
+        let dir = self.destination_in(&g, s, to)?;
+        let m = &g.monitor(m);
         let policy = lpk_core::Policy::new(o.overwrite, o.symlinks);
         let outcome = match &self.kind {
             Kind::Lpk(_) => {
@@ -1062,8 +1270,9 @@ impl Session {
             return Err(unsupported_foreign("export", &self.path));
         }
         check_export_target(&self.path, out, o.force)?;
-        let select = self.core_selection(s)?;
-        let _g = self.read_guard(&m.cancel);
+        let g = self.read_guard(&m.cancel)?;
+        let select = self.core_selection(&g, s)?;
+        let m = &g.monitor(m);
         let mut a = self.fork()?;
         let opts = lpk_core::ExtractOptions {
             select,
@@ -1105,7 +1314,8 @@ impl Session {
 
     /// Verify every chunk against its hash (keyless: every frame hash), polling `m` per block.
     pub fn test(&self, m: &Monitor) -> Result<TestReport, Error> {
-        let _g = self.read_guard(&m.cancel);
+        let g = self.read_guard(&m.cancel)?;
+        let m = &g.monitor(m);
         let mut a = self.fork()?;
         let mut pace = Pace::new(m);
         a.verify_with(&mut |s| pace.step(s))
@@ -1119,7 +1329,8 @@ impl Session {
         if let Kind::Foreign(_) = &self.kind {
             return Err(unsupported_foreign("check", &self.path));
         }
-        let _g = self.read_guard(&m.cancel);
+        let g = self.read_guard(&m.cancel)?;
+        let m = &g.monitor(m);
         let mut a = self.fork()?;
         let mut pace = Pace::new(m);
         a.check_recovery_with(&mut |s| pace.step(s))
@@ -1146,7 +1357,14 @@ impl Session {
             .create_new(true)
             .open(out)
             .map_err(|e| fail(FormatError::Io(e)))?;
-        let _g = self.read_guard(&m.cancel);
+        let g = match self.read_guard(&m.cancel) {
+            Ok(g) => g,
+            Err(e) => {
+                let _ = std::fs::remove_file(out);
+                return Err(e);
+            }
+        };
+        let m = &g.monitor(m);
         let r = self.fork().and_then(|mut a| {
             let mut pace = Pace::new(m);
             a.repair_into(file, &mut |s| pace.step(s))
@@ -1168,7 +1386,7 @@ impl Session {
         let Kind::Lpk(l) = &self.kind else {
             return Err(unsupported_foreign("history", &self.path));
         };
-        let _x = self.exclusive();
+        let _x = self.exclusive(false)?;
         c.check().map_err(|e| Error::core(e, Some(&self.path)))?;
         let mut a = l.archive.lock().unwrap_or_else(|p| p.into_inner());
         Ok(a.history()
@@ -1180,17 +1398,20 @@ impl Session {
 
     /// Truncate the archive to `generation` (`.lpk` only; D-59). Exclusive: cancels the reads
     /// in flight, waits for them, closes the session, then rolls back ([`crate::rollback`]).
+    /// Taking `self`, it suits a sole owner: with the session shared (an `Arc`), call
+    /// [`Session::close`] and then the free [`crate::rollback`].
     pub fn rollback(self, generation: u64) -> Result<GenerationInfo, Error> {
         if let Kind::Foreign(_) = &self.kind {
             return Err(unsupported_foreign("rollback", &self.path));
         }
-        drop(self.exclusive());
+        drop(self.exclusive(true)?);
         let path = self.path.clone();
         drop(self);
         crate::rollback(&path, generation)
     }
 
     /// Append `dir` as a new generation (`.lpk` only; the archive's own key seals it).
+    /// Shared (an `Arc`): [`Session::close`], then the free [`crate::append`].
     /// Exclusive: cancels the reads in flight, waits, closes, appends
     /// ([`crate::append`]), and returns the session re-opened on the new generation.
     pub fn append(
@@ -1202,7 +1423,7 @@ impl Session {
         if let Kind::Foreign(_) = &self.kind {
             return Err(unsupported_foreign("append", &self.path));
         }
-        drop(self.exclusive());
+        drop(self.exclusive(true)?);
         let path = self.path.clone();
         let credentials = self.credentials.clone();
         let options = self.options.clone();
