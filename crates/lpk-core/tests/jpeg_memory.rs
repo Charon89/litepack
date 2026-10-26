@@ -572,6 +572,22 @@ fn an_archive_declaring_revision_1_1s_term_extracts_within_a_budget_covering_the
     assert_eq!(plan.memory, library);
     let new = archive_declaring(&jpeg, &|plan| plan.memory);
     assert_eq!(extract_with(&new, enough).unwrap(), jpeg);
+    // Through the pooled engine: a declaration that covers the need keeps the concurrency (no
+    // decode runs alone).
+    let dir = tempfile::tempdir().unwrap();
+    let arch = dir.path().join("new.lpk");
+    std::fs::write(&arch, &new).unwrap();
+    let opts = lpk_core::ExtractOptions {
+        threads: Some(8),
+        memory: Some(enough + (64 << 20)),
+        ..lpk_core::ExtractOptions::default()
+    };
+    let out = dir.path().join("out");
+    let s =
+        lpk_core::extract_file(&arch, &out, &[], None, &lpk_core::DefaultPolicy, &opts).unwrap();
+    assert_eq!(s.alone_decodes, 0);
+    assert_eq!(s.concurrent_while_alone, 0);
+    assert!(std::fs::read(out.join("p.jpg")).unwrap() == jpeg);
 }
 
 /// An archive of `jpegs` (entries `p0.jpg`, `p1.jpg`, ..), each peeled into a block of its own
@@ -632,19 +648,19 @@ fn over_declared_decodes_run_alone_and_the_peak_stays_within_the_budget() {
         ..lpk_core::ExtractOptions::default()
     };
     let out = dir.path().join("out");
-    let alone_before = lpk_core::peel::jpeg::alone_decodes();
     let before = ALLOC.current();
     ALLOC.reset_peak();
     let s =
         lpk_core::extract_file(&arch, &out, &[], None, &lpk_core::DefaultPolicy, &opts).unwrap();
     let peak = (ALLOC.peak() - before) as u64;
-    let alone = lpk_core::peel::jpeg::alone_decodes() - alone_before;
     eprintln!(
-        "workers {}, in flight {}, decoder {}, alone {alone}, peak {peak}, budget {budget}",
-        s.workers, s.in_flight, s.memory.decoder
+        "workers {}, in flight {}, decoder {}, alone {}, concurrent while alone {}, peak {peak}, budget {budget}",
+        s.workers, s.in_flight, s.memory.decoder, s.alone_decodes, s.concurrent_while_alone
     );
     assert!(s.workers > 1, "the pool runs several workers");
-    assert_eq!(alone, jpegs.len() as u64);
+    assert_eq!(s.alone_decodes, jpegs.len() as u64);
+    // While a decode ran alone, no other block decoded.
+    assert_eq!(s.concurrent_while_alone, 1);
     assert!(peak <= budget, "peak {peak} > budget {budget}");
     for (i, j) in jpegs.iter().enumerate() {
         assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
@@ -707,4 +723,128 @@ fn an_early_eof_jpeg_round_trips() {
     let l = limits(block, block + term);
     let (r, _, _) = measured(&stream, record_for(&jpeg), primary_len, &l, Some(1));
     assert!(r.unwrap() == jpeg);
+}
+
+/// A decode the extraction's budget cannot run alone is refused with the `--memory` that would
+/// let it run, in the message the CLI and the API show; extracting with exactly that `--memory`
+/// succeeds.
+#[test]
+fn the_refusal_names_a_sufficient_memory_option() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpegs: Vec<Vec<u8>> = [2048u16, 2032, 2016]
+        .iter()
+        .map(|&w| grey_jpeg(w, 2048, true))
+        .collect();
+    let old = archive_of(&jpegs, &|plan| {
+        let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+        memory_bound(&h.frame)
+    });
+    let env = lpk_format::Archive::open(std::io::Cursor::new(old.clone()), &Resources::default())
+        .unwrap()
+        .index()
+        .envelope;
+    let dir = tempfile::tempdir().unwrap();
+    let arch = dir.path().join("old.lpk");
+    std::fs::write(&arch, &old).unwrap();
+    for threads in [1usize, 8] {
+        let run = |memory: u64, out: &str| {
+            let opts = lpk_core::ExtractOptions {
+                threads: Some(threads),
+                memory: Some(memory),
+                ..lpk_core::ExtractOptions::default()
+            };
+            lpk_core::extract_file(
+                &arch,
+                &dir.path().join(out),
+                &[],
+                None,
+                &lpk_core::DefaultPolicy,
+                &opts,
+            )
+        };
+        let small = env.decode_memory + (16 << 20);
+        let e = run(small, &format!("refused-{threads}")).unwrap_err();
+        let message = e.to_string();
+        let lpk_core::CoreError::Decode {
+            source: FormatError::Refused(r),
+            ..
+        } = e
+        else {
+            panic!("{message}")
+        };
+        assert_eq!(r.field, "--memory");
+        assert_eq!(r.allowed, small);
+        assert_eq!(r.needed % (1 << 20), 0, "whole MiB");
+        assert!(r.needed > small);
+        let mib = r.needed >> 20;
+        assert!(
+            message.contains(&format!("needs --memory {mib} MiB or more")),
+            "{message}"
+        );
+        eprintln!("threads {threads}: {message}");
+        let s = run(r.needed, &format!("ok-{threads}")).unwrap();
+        assert_eq!(s.alone_decodes, jpegs.len() as u64);
+        for (i, j) in jpegs.iter().enumerate() {
+            let got = std::fs::read(dir.path().join(format!("ok-{threads}/p{i}.jpg"))).unwrap();
+            assert!(got == *j);
+        }
+    }
+}
+
+/// The open compatibility question of review round 3 (segment sizes): could the writer have
+/// produced an early-EOF stream from a file that still ends in EOI? A progressive JPEG whose
+/// last scan is cut short but ends in EOI, through the writer's own path (the peel): the peel
+/// refuses it and stores the file as it is (`Cause::Other`), because lepton_jpeg 0.5.8 refuses
+/// to encode it ("invalid reset ff d9 code found in stream": the EOI arrives inside the scan).
+/// The library's early-EOF path is reached only by a file without EOI, which the peel never
+/// hands it (`Cause::NoEoi`), so no archive the reference writer wrote holds such a stream and
+/// the segment rule cannot refuse one.
+#[test]
+fn a_progressive_jpeg_with_its_last_scan_cut_short_is_refused_by_the_peel() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let full = grey_jpeg(512, 512, true);
+    let sos = full.windows(2).rposition(|w| w == [0xFF, 0xDA]).unwrap();
+    let data = sos + 2 + 8;
+    let end = full.len() - 2;
+    let mut jpeg = full[..data + (end - data) / 2].to_vec();
+    jpeg.extend_from_slice(&[0xFF, 0xD9]);
+    let r = JpegPeel::default().peel(&jpeg, 1 << 24);
+    assert!(
+        matches!(r, Err(lpk_core::Fallback::Jpeg(lpk_core::Cause::Other))),
+        "{:?}",
+        r.map(|p| p.primary_len)
+    );
+    let f = lpk_core::peel::jpeg::features(1 << 24);
+    let e = lepton_jpeg::encode_lepton(
+        &mut std::io::Cursor::new(&jpeg[..]),
+        &mut std::io::Cursor::new(Vec::new()),
+        &f,
+        &lepton_jpeg::DEFAULT_THREAD_POOL,
+    )
+    .unwrap_err();
+    assert!(
+        e.message().starts_with("invalid reset ff d9"),
+        "{}",
+        e.message()
+    );
+    // The whole file still round-trips through the Fast pipeline, stored as it is.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("in")).unwrap();
+    std::fs::write(dir.path().join("in").join("cut.jpg"), &jpeg).unwrap();
+    let mut bytes = Vec::new();
+    lpk_core::archive_fast(
+        &dir.path().join("in"),
+        &mut bytes,
+        lpk_core::FastOptions::default(),
+    )
+    .unwrap();
+    let mut a =
+        lpk_format::Archive::open(std::io::Cursor::new(bytes), &Resources::default()).unwrap();
+    lpk_core::register_full_reader(&mut a);
+    let t = a.entry_table().unwrap();
+    let entries: Vec<_> = t.table().unwrap().iter().map(|e| e.unwrap()).collect();
+    let e = entries.iter().find(|e| e.path == "cut.jpg").unwrap();
+    let mut got = Vec::new();
+    a.extract(e, &mut got).unwrap();
+    assert!(got == jpeg);
 }

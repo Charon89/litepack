@@ -68,8 +68,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use lpk_format::{Archive, Credentials, Entry, EntryKind, FormatError, MemoryPriors};
 
 use crate::extract::{
-    keep, pool_size, AloneGate, ExtractMemory, ExtractOptions, Held, Outcome, Permits, Shape,
-    DECODER_STOPPED,
+    alone_memory_for, keep, pool_size, AloneGate, ExtractMemory, ExtractOptions, Held, Outcome,
+    Permits, Shape, DECODER_STOPPED,
 };
 use crate::memory::{Budget, BudgetSource};
 use crate::progress::{Monitor, Reporter, Stage};
@@ -396,6 +396,9 @@ fn decode_error(
     block: usize,
     source: FormatError,
 ) -> CoreError {
+    if crate::extract::is_cancelled_decode(&source) {
+        return CoreError::Cancelled;
+    }
     CoreError::Decode {
         block,
         path: first_entry
@@ -736,7 +739,7 @@ where
     let token = rep.token();
     let permits = Permits::new(held);
     // Decodes that need more than the archive declares run alone (extract.rs, `AloneGate`).
-    let gate = AloneGate::new(AloneGate::memory_for(&memory, held));
+    let gate = AloneGate::with_memory(&pool, alone_memory_for(&memory, held));
     archive.set_decode_gate(Some(gate.clone()));
     permits.attach_gate(gate);
     let decoded = AtomicU64::new(0);

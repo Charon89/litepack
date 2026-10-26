@@ -859,18 +859,22 @@ impl PrimitiveDecoder for JpegDecoder {
         let _alone = if need > limits.memory.saturating_sub(limits.max_block_plain) {
             match ctx.gate() {
                 Some(gate) => {
-                    refuse(
-                        need,
-                        gate.alone_memory().saturating_add(limits.max_block_plain),
-                    )?;
-                    if !gate.enter_alone() {
+                    // Refused with the `--memory` that would let it run (field `--memory`:
+                    // `needed` is that figure, `allowed` this extraction's budget).
+                    if need > gate.alone_memory() {
+                        let budget = ctx.memory_budget().unwrap_or(limits.memory);
                         return Err(FormatError::Refused(Refusal {
-                            field: "decode_memory",
-                            needed: limits.max_block_plain.saturating_add(need),
-                            allowed: 0,
+                            field: lpk_format::envelope::MEMORY_OPTION,
+                            needed: gate.budget_for(need),
+                            allowed: budget,
                         }));
                     }
-                    ALONE_DECODES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if !gate.enter_alone() {
+                        return Err(FormatError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "the extraction was cancelled",
+                        )));
+                    }
                     Some(Alone(gate))
                 }
                 None => {
@@ -937,14 +941,6 @@ impl PrimitiveDecoder for JpegDecoder {
         }
         Ok(primary)
     }
-}
-
-static ALONE_DECODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Test hook: the JPEG decodes that have run alone through a pool's gate in this process.
-#[doc(hidden)]
-pub fn alone_decodes() -> u64 {
-    ALONE_DECODES.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// A decode running alone ([`lpk_format::DecodeGate::enter_alone`]); leaves on drop.

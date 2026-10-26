@@ -94,8 +94,21 @@ pub struct Refusal {
     pub allowed: u64,
 }
 
+/// The [`Refusal::field`] of a decode that needs more memory than the
+/// extraction may use: `needed` is the `--memory` (in bytes, whole MiB) that
+/// would let it run, `allowed` the extraction's budget.
+pub const MEMORY_OPTION: &str = "--memory";
+
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.field == MEMORY_OPTION {
+            return write!(
+                f,
+                "the archive needs --memory {} MiB or more; this extraction allows {} bytes",
+                self.needed.div_ceil(1 << 20),
+                self.allowed
+            );
+        }
         write!(
             f,
             "the archive needs {} of {} bytes; this reader allows {}",
