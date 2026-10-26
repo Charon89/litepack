@@ -116,7 +116,11 @@ fn the_worker_round_trips_a_session() {
         &fx,
         &[],
         &[
-            Request::Open { password: None },
+            Request::Open {
+                format: fixture::FORMAT.into(),
+                name: Vec::new(),
+                password: None,
+            },
             Request::List { from: 0, max: 10 },
             Request::ReadMember {
                 indices: vec![1, 2],
@@ -168,7 +172,14 @@ fn a_test_build_takes_faults() {
         &s,
         &fx,
         &["--fault=garbage"],
-        &[Request::Open { password: None }, Request::Close],
+        &[
+            Request::Open {
+                format: fixture::FORMAT.into(),
+                name: Vec::new(),
+                password: None,
+            },
+            Request::Close,
+        ],
     );
     assert_eq!(code, 0);
     assert!(rs.len() <= 1, "garbage should not decode past Hello");

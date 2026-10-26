@@ -3,7 +3,9 @@
 //!
 //! Commands (after the bootstrap argument): `report`, `read <path>`, `spawn`, `alloc <MiB>`,
 //! `spin <cpu-ms>`, `sleep <ms>`, `env`, `open <pid> <tid>` (Windows), `reg <hkcu|hklm> <path>`
-//! (Windows). Unsandboxed helper mode: `host <lpac|restricted> <out-file> [appcontainer-name]`
+//! (Windows), `crash-at-request <hex>` (E4-5: writes the hex-decoded bytes to the response pipe,
+//! the broker's `Hello`, waits for the first request frame's header on the request pipe, then
+//! dereferences null). Unsandboxed helper mode: `host <lpac|restricted> <out-file> [appcontainer-name]`
 //! launches a sandboxed copy of itself the way a console-less host would and writes the number of
 //! processes in its job to `out-file` (Windows only).
 
@@ -35,10 +37,13 @@ fn main() {
     };
     let passed: Vec<(u32, u64)> = handles.iter().map(|(r, h)| (*r, raw_value(h))).collect();
     let mut resp: Option<File> = None;
+    let mut req: Option<File> = None;
     let mut keep = Vec::new();
     for (role, h) in handles {
         if role == roles::RESPONSES {
             resp = Some(File::from(h));
+        } else if role == roles::REQUESTS {
+            req = Some(File::from(h));
         } else {
             keep.push(h);
         }
@@ -203,11 +208,51 @@ fn main() {
             std::thread::sleep(Duration::from_millis(ms));
             let _ = writeln!(out, "woke");
         }
+        Some("crash-at-request") => {
+            let hello = cmd.get(1).and_then(|h| unhex(h)).unwrap_or_default();
+            if out.write_all(&hello).and_then(|_| out.flush()).is_err() {
+                std::process::exit(EXIT_NO_RESPONSES);
+            }
+            // The header of the first request frame (length and kind: 6 bytes), then crash.
+            let mut header = [0u8; 6];
+            let got = req
+                .as_mut()
+                .map(|r| std::io::Read::read_exact(r, &mut header).is_ok())
+                .unwrap_or(false);
+            if got {
+                null_dereference();
+            }
+        }
         other => {
             let _ = writeln!(out, "unknown command {other:?}");
         }
     }
     drop(keep);
+}
+
+/// Bytes from hex digits; `None` when malformed.
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// A read through a null pointer to a structure, at its field 16 bytes in: the classic null
+/// dereference of a parser. (Address 16 rather than 0 keeps Rust's debug precondition check of
+/// `read_volatile`, which aborts on a null pointer, out of the way; the first 64 KiB of the
+/// address space are never mapped on Windows, nor the first page on Linux.)
+fn null_dereference() -> ! {
+    let field = std::ptr::without_provenance::<u64>(16);
+    // SAFETY: deliberately unsound, in this test-only binary: the address lies in the null
+    // page, which is never mapped, so the read faults (an access violation on Windows, ended by
+    // the job's die-on-unhandled-exception; SIGSEGV on Linux) and never returns a value.
+    let v = unsafe { std::ptr::read_volatile(field) };
+    std::hint::black_box(v);
+    std::process::abort()
 }
 
 #[cfg(windows)]

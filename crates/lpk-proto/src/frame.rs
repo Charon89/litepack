@@ -21,6 +21,8 @@ pub const DATA_CHUNK: usize = 256 << 10;
 pub const MAX_NAME: usize = 65535;
 /// The longest password `Open` may carry.
 pub const MAX_PASSWORD: usize = 4096;
+/// The longest format name `Open` may carry.
+pub const MAX_FORMAT: usize = 64;
 /// The most member indices one `ReadMember` may carry.
 pub const MAX_INDICES: usize = (MAX_CONTROL - 4) / 8;
 /// The smallest encoded record: kind, flags, mtime, size, packed offset, packed length, block,
@@ -343,9 +345,15 @@ impl Record {
 /// Host to worker.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Request {
-    /// Open the archive (with a password when one was given). Answered `Opened`,
-    /// `NeedPassword` or `Error`.
+    /// Open the archive as `format` (the host's detection, by magic) with a password when one
+    /// was given. Answered `Opened`, `NeedPassword` or `Error`.
     Open {
+        /// The format the host detected (its wire name, e.g. `zip`, `7z`, `tar`, `gz`); the
+        /// worker selects its reader by it and refuses a name it does not know.
+        format: String,
+        /// The archive's file name without its directory (single-stream formats such as `.gz`
+        /// name their one member from it when the stream stores no name); may be empty.
+        name: Vec<u8>,
         /// The password, wiped on drop.
         password: Option<Zeroizing<Vec<u8>>>,
     },
@@ -369,11 +377,19 @@ pub enum Request {
 }
 
 impl Request {
-    /// The kind and payload.
-    pub fn encode(&self) -> (u16, Vec<u8>) {
+    /// The kind and payload; an `Open` whose format name is longer than [`MAX_FORMAT`] is
+    /// refused (never truncated, which could split a UTF-8 character).
+    pub fn encode(&self) -> Result<(u16, Vec<u8>), ProtoError> {
         let mut p = Vec::new();
         let k = match self {
-            Request::Open { password } => {
+            Request::Open {
+                format,
+                name,
+                password,
+            } => {
+                if format.len() > MAX_FORMAT {
+                    return Err(ProtoError::Malformed("format name longer than 64 bytes"));
+                }
                 match password {
                     Some(pw) => {
                         p.push(1);
@@ -381,6 +397,8 @@ impl Request {
                     }
                     None => p.push(0),
                 }
+                put16(&mut p, format.as_bytes());
+                put16(&mut p, &name[..name.len().min(MAX_NAME)]);
                 kind::OPEN
             }
             Request::List { from, max } => {
@@ -399,7 +417,7 @@ impl Request {
             Request::Cancel => kind::CANCEL,
             Request::Close => kind::CLOSE,
         };
-        (k, p)
+        Ok((k, p))
     }
 
     /// Decode a request frame.
@@ -412,7 +430,15 @@ impl Request {
                 } else {
                     None
                 };
-                Request::Open { password }
+                let format = std::str::from_utf8(c.bytes16(MAX_FORMAT)?)
+                    .map_err(|_| ProtoError::Malformed("format name is not UTF-8"))?
+                    .to_string();
+                let name = c.bytes16(MAX_NAME)?.to_vec();
+                Request::Open {
+                    format,
+                    name,
+                    password,
+                }
             }
             kind::LIST => Request::List {
                 from: c.u64()?,
@@ -436,7 +462,9 @@ impl Request {
 
     /// Write as one frame.
     pub fn write_to(&self, w: &mut dyn Write) -> io::Result<()> {
-        let (k, p) = self.encode();
+        let (k, p) = self
+            .encode()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         let p = Zeroizing::new(p);
         write_frame(w, k, &p)
     }
@@ -674,9 +702,32 @@ mod tests {
     }
 
     #[test]
+    fn an_over_long_format_name_is_refused_not_truncated() {
+        let r = Request::Open {
+            format: "\u{e9}".repeat(40), // 80 bytes of two-byte characters
+            name: Vec::new(),
+            password: None,
+        };
+        assert!(r.encode().is_err());
+        assert!(r.write_to(&mut Vec::new()).is_err());
+        let ok = Request::Open {
+            format: "x".repeat(MAX_FORMAT),
+            name: Vec::new(),
+            password: None,
+        };
+        assert!(ok.encode().is_ok());
+    }
+
+    #[test]
     fn every_frame_round_trips() {
-        round_trip_request(Request::Open { password: None });
         round_trip_request(Request::Open {
+            format: "zip".into(),
+            name: b"a.zip".to_vec(),
+            password: None,
+        });
+        round_trip_request(Request::Open {
+            format: "7z".into(),
+            name: Vec::new(),
             password: Some(Zeroizing::new(b"secret".to_vec())),
         });
         round_trip_request(Request::List { from: 7, max: 100 });
