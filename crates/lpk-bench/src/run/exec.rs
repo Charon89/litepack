@@ -1715,7 +1715,8 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
 pub fn measure_command(args: &RunArgs) -> Result<ExitCode> {
     let (cat, local) = load_catalogue(&args.catalogue, &args.local)?;
     let ids = select(&cat, &args.tools)?;
-    let discovered = discover::discover_all(&cat, &local, &discover::Env::current());
+    let mut discovered = discover::discover_all(&cat, &local, &discover::Env::current());
+    super::filter_settings(&mut discovered, &ids, &args.settings)?;
     let profile = args.profile.clone().unwrap_or_else(|| "small".to_string());
     let corpus = args
         .corpus

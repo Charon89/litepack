@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! lpk-bench corpus build --profile <small|full> [--out DIR] [--cache DIR] [--only a,b] [--update-lock [--repin a,b|all]] [--allow-unavailable]
+//! lpk-bench corpus build --profile ci [--out DIR]   (generated, no network; see [`fixtures`])
 //! lpk-bench corpus scan  --private DIR --out DIR      (see [`scan`] and [`classify`])
 //! ```
 //!
@@ -241,6 +242,7 @@ pub mod commons;
 pub mod derive;
 pub mod extract;
 pub mod fetch;
+pub mod fixtures;
 pub mod gitsrc;
 pub mod lock;
 pub mod manifest;
@@ -377,6 +379,7 @@ pub fn run(args: CorpusArgs) -> ExitCode {
                 }
             }
         }
+        CorpusCommand::Build(b) if b.profile == Profile::Ci => build_ci(&b),
         CorpusCommand::Build(b) => {
             let result = HttpFetcher::new().and_then(|f| build::build(&b.options(), &f));
             match result {
@@ -431,6 +434,41 @@ pub fn run(args: CorpusArgs) -> ExitCode {
             }
         }
         CorpusCommand::Scan(s) => scan::run(&s),
+    }
+}
+
+/// `corpus build --profile ci`: the generated fixture set ([`fixtures`]); no registry, no lock,
+/// no network.
+fn build_ci(b: &BuildArgs) -> ExitCode {
+    if !b.only.is_empty() || b.update_lock || b.list_only || b.allow_unavailable {
+        eprintln!(
+            "error: the ci profile is generated: --only, --update-lock, --list-only and              --allow-unavailable do not apply"
+        );
+        return ExitCode::FAILURE;
+    }
+    let out = b.options().out;
+    match fixtures::build(&out) {
+        Ok(r) => {
+            println!(
+                "{} files, {} bytes; manifest {} (blake3 {})",
+                r.summary.total_files,
+                r.summary.total_bytes,
+                out.join("manifest.json").display(),
+                r.manifest_blake3
+            );
+            for (class, t) in &r.summary.classes {
+                println!("  {class}: {} files, {} bytes", t.files, t.bytes);
+            }
+            println!(
+                "  total: {} files, {} bytes",
+                r.summary.total_files, r.summary.total_bytes
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
     }
 }
 
