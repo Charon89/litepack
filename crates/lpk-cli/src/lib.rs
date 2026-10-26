@@ -45,7 +45,8 @@
 #![forbid(unsafe_code)]
 
 pub mod console;
-pub mod export;
+/// The ZIP and 7z writers of `lpk export` (in `lpk-api` since E5-1).
+pub use lpk_api::export;
 pub mod failure;
 pub mod list;
 pub mod prompt;
@@ -55,10 +56,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use lpk_core::{
-    BalancedOptions, CancelToken, DictionaryPolicy, FastOptions, Pipeline, RunSummary, StoreOptions,
-};
-use lpk_format::{Argon2Params, Credentials, FormatError, Resources, Suite};
+use lpk_api::{Session, Tier};
+use lpk_core::{CancelToken, RunSummary};
+use lpk_format::{Credentials, FormatError, Suite};
 use zeroize::Zeroizing;
 
 pub use console::Console;
@@ -465,25 +465,6 @@ enum TierArg {
     Strong,
 }
 
-/// A tier the tool can run today.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tier {
-    Fast,
-    Balanced,
-    Store,
-}
-
-impl Tier {
-    /// The value `--tier` takes for this tier.
-    fn name(self) -> &'static str {
-        match self {
-            Tier::Fast => "fast",
-            Tier::Balanced => "balanced",
-            Tier::Store => "store",
-        }
-    }
-}
-
 /// The tier and its settings; `a` and `append` take the same ones.
 #[derive(Debug, Args)]
 struct TierArgs {
@@ -727,8 +708,20 @@ struct ExtractArgs {
     overwrite: OverwriteArg,
     /// Create symlink entries with the target the archive holds. Without this flag every
     /// symlink entry is skipped with a warning on stderr (with --json one
-    /// `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). A link that cannot be created (for
-    /// example without the privilege on Windows) fails the extraction.
+    /// `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). Even with it, a link whose
+    /// target is absolute, a UNC path, a device path (`\\?\`, `\\.\`), drive-relative (`C:x`),
+    /// rooted (`\x` or `/x`), names a Windows device, has a colon or a component ending in a dot or
+    /// a space, has `..` after a name (`a/../x`), has more leading `..` than the link is deep
+    /// below the output directory, or (outside Windows, where `\` is not a separator) contains
+    /// a backslash is not created: it is skipped with a warning naming the entry and the
+    /// reason (with --json one
+    /// `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}` line) and counted
+    /// in symlinks_skipped; such a target is never read or opened. On Windows a link is a
+    /// directory link when its target names a directory of the archive, else a file link; so a
+    /// link whose target goes through another link (`l -> s/sub`, `s` a link) is a file link
+    /// unless the archive itself names that target as a directory. A
+    /// link that cannot be created (for example without the privilege on Windows) fails the
+    /// extraction.
     #[arg(long)]
     symlinks: bool,
     /// Print the plan's counts, the memory budget and its terms, and the pool size to stderr.
@@ -902,25 +895,31 @@ fn foreign_extract(
     refuse_foreign_keyfile(&x.archive, credentials)?;
     let select =
         lpk_core::Selection::new(&x.patterns).map_err(|e| Failure::core(&e, Some(&x.archive)))?;
-    let symlinks = if x.symlinks {
-        lpk_core::Symlinks::Create
-    } else {
-        lpk_core::Symlinks::Skip
-    };
-    let policy = lpk_core::Policy::new(x.overwrite.into(), symlinks);
-    let r = lpk_core::foreign::extract_file(
+    let session = Session::open(
         &x.archive,
-        &x.outdir,
-        credentials,
-        &policy,
-        &select,
-        &x.foreign.options(x.memory),
+        &lpk_api::OpenOptions {
+            credentials,
+            foreign: x.foreign.options(x.memory),
+            ..lpk_api::OpenOptions::default()
+        },
+    )?;
+    let r = session.extract(
+        &lpk_api::Selection::Globs(select),
+        &lpk_api::Destination::Dir(x.outdir.clone()),
+        &extract_options(x),
         &console.monitor(),
     );
     console.clear();
-    let s = r.map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    let report = r?;
+    let lpk_api::Extracted::Foreign(s) = report.outcome else {
+        return Err(Failure::failed(
+            "Internal",
+            "a foreign archive extracted as an .lpk",
+            Some(&x.archive),
+        ));
+    };
     sandbox_warnings(&s.warnings, json, err);
-    for p in policy.skipped_symlinks() {
+    for p in report.skipped_symlinks {
         if json {
             let line = serde_json::json!({
                 "warning": { "kind": "SymlinkSkipped", "path": p }
@@ -934,6 +933,7 @@ fn foreign_extract(
             );
         }
     }
+    refused_target_warnings(&report.refused_symlink_targets, json, err);
     if s.skipped > 0 {
         let _ = writeln!(err, "skipped {} existing entries", s.skipped);
     }
@@ -962,6 +962,30 @@ fn foreign_extract(
     Ok(())
 }
 
+/// The symlink entries `--symlinks` did not create because of their target (E6-0), one line
+/// each: `warning: PATH: symlink entry skipped: REASON`, or with --json
+/// `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}`.
+fn refused_target_warnings(
+    refused: &[(String, lpk_api::TargetRefusal)],
+    json: bool,
+    err: &mut dyn Write,
+) {
+    for (p, why) in refused {
+        if json {
+            let line = serde_json::json!({
+                "warning": { "kind": "SymlinkTargetRefused", "path": p, "reason": why.reason() }
+            });
+            let _ = writeln!(err, "{line}");
+        } else {
+            let _ = writeln!(
+                err,
+                "warning: {}: symlink entry skipped: {why}",
+                lpk_format::cli::escape_path(p)
+            );
+        }
+    }
+}
+
 /// The broker's launch warnings (an AppContainer temporary folder it could not empty), one
 /// line each: `warning: ...`, or with --json `{"warning":{"kind":"SandboxCleanup",...}}`.
 fn sandbox_warnings(warnings: &[String], json: bool, err: &mut dyn Write) {
@@ -988,19 +1012,31 @@ fn foreign_list(
     refuse_foreign_keyfile(&l.archive, credentials)?;
     let select =
         lpk_core::Selection::new(&l.patterns).map_err(|e| Failure::core(&e, Some(&l.archive)))?;
-    let listing = lpk_core::foreign::list_file(
+    let session = Session::open(
         &l.archive,
-        credentials,
-        &l.foreign.options(None),
-        &lpk_core::Monitor::default(),
-    )
-    .map_err(|e| Failure::core(&e, Some(&l.archive)))?;
-    sandbox_warnings(&listing.warnings, json, err);
+        &lpk_api::OpenOptions {
+            credentials,
+            foreign: l.foreign.options(None),
+            ..lpk_api::OpenOptions::default()
+        },
+    )?;
+    sandbox_warnings(&session.warnings()?, json, err);
     let options = ListOptions { long: l.long, json };
-    list::list_entries(&listing.entries, options, &select, out).map_err(|e| match e {
-        list::ListError::Format(e) => Failure::format(&e, Some(&l.archive)),
-        list::ListError::Core(e) => Failure::core(&e, Some(&l.archive)),
-    })
+    list::list_session(&session, options, select, out, Failure::from)
+}
+
+/// The API's extraction options of `lpk x`.
+fn extract_options(x: &ExtractArgs) -> lpk_api::ExtractOptions {
+    lpk_api::ExtractOptions {
+        overwrite: x.overwrite.into(),
+        symlinks: if x.symlinks {
+            lpk_core::Symlinks::Create
+        } else {
+            lpk_core::Symlinks::Skip
+        },
+        threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+        memory: x.memory,
+    }
 }
 
 #[derive(Debug, Args)]
@@ -1097,7 +1133,7 @@ struct ExportArgs {
     /// The compression method of the entries: deflate (ZIP's default), zstd (ZIP only),
     /// store, or lzma2 (7z's default; 7z only).
     #[arg(long, value_enum, value_name = "METHOD")]
-    method: Option<Method>,
+    method: Option<MethodArg>,
     /// Encrypt every entry with the archive's password (AES-256: ZIP's AE-2, 7z's with the
     /// header encrypted). Needs a credential with a password; a keyfile alone is refused.
     #[arg(long, requires = "credential")]
@@ -1124,6 +1160,27 @@ struct ExportArgs {
     verbose: bool,
 }
 
+/// `lpk export --method`: the methods of [`Method`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum MethodArg {
+    Deflate,
+    Zstd,
+    Store,
+    /// 7z only.
+    Lzma2,
+}
+
+impl From<MethodArg> for Method {
+    fn from(m: MethodArg) -> Self {
+        match m {
+            MethodArg::Deflate => Method::Deflate,
+            MethodArg::Zstd => Method::Zstd,
+            MethodArg::Store => Method::Store,
+            MethodArg::Lzma2 => Method::Lzma2,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 struct RepairArgs {
     /// The archive.
@@ -1136,73 +1193,27 @@ struct RepairArgs {
     credentials: CredentialArgs,
 }
 
-/// The pipeline of a tier and its settings (the seal stage untouched).
-fn build_pipeline(a: &TierArgs, tier: Tier) -> Pipeline {
-    let mut pipeline = if tier == Tier::Store {
-        Pipeline::store(StoreOptions {
-            threads: a.threads,
-            ..StoreOptions::default()
-        })
-    } else if tier == Tier::Balanced {
-        let mut o = BalancedOptions {
-            threads: a.threads,
-            ..BalancedOptions::default()
-        };
-        if let Some(l) = a.level {
-            o.zstd_level = l;
-        }
-        if let Some(w) = a.window_log {
-            o.zstd_window_log = Some(w);
-        }
-        if let Some(d) = a.dict_size {
-            o.dict_size = d;
-        }
-        if let Some(b) = a.bwt {
-            o.bwt = b == OnOff::On;
-        }
-        Pipeline::balanced(o)
-    } else {
-        let mut o = FastOptions {
-            threads: a.threads,
-            ..FastOptions::default()
-        };
-        if let Some(l) = a.level {
-            o.level = l;
-        }
-        if a.no_dictionaries {
-            o.dictionaries = DictionaryPolicy::None;
-        }
-        if let Some(w) = a.window_log {
-            o.window_log = w;
-        }
-        Pipeline::fast(o)
-    };
-    pipeline.seal.memory = a.memory;
-    match a.deflate_peel {
-        Some(OnOff::On) => pipeline.deflate = Some(lpk_core::peel::deflate::DeflatePeel::default()),
-        Some(OnOff::Off) => pipeline.deflate = None,
-        None => {}
+/// The API's settings of a tier and its flags (E5-1: what `build_pipeline` built is now
+/// [`lpk_api::CreateSettings::pipeline`]); no seal, recovery 0.
+fn build_settings(a: &TierArgs, tier: Tier) -> lpk_api::CreateSettings {
+    let on = |o: Option<OnOff>| o.map(|v| v == OnOff::On);
+    lpk_api::CreateSettings {
+        tier,
+        threads: a.threads,
+        memory: a.memory,
+        level: a.level,
+        window_log: a.window_log,
+        dict_size: a.dict_size,
+        no_dictionaries: a.no_dictionaries,
+        no_dedup: a.no_dedup,
+        ordering: a.ordering.into(),
+        deflate_peel: on(a.deflate_peel),
+        jpeg_peel: on(a.jpeg_peel),
+        bwt: on(a.bwt),
+        png_filter: on(a.png_filter),
+        seal: None,
+        recovery: 0,
     }
-    // The PNG row-filter re-encoding: on by default with the Balanced tier's Deflate peel.
-    if let Some(d) = pipeline.deflate.as_mut() {
-        d.png_filter = tier == Tier::Balanced && a.png_filter != Some(OnOff::Off);
-    }
-    // The pipelines of both tiers carry the JPEG peel; off removes every stage that peels the
-    // JPEG class (a typed check, so a renamed stage cannot make it a no-op); on keeps it.
-    if a.jpeg_peel == Some(OnOff::Off) {
-        pipeline
-            .peel
-            .retain(|p| !p.applies_to(lpk_core::Class::Jpeg));
-    }
-    if a.no_dedup {
-        pipeline.fold = None;
-    } else if pipeline.fold.is_some() {
-        pipeline.fold = Some(Box::new(lpk_core::Dedup::new(lpk_core::FoldOptions {
-            ordering: a.ordering.into(),
-            ..lpk_core::FoldOptions::default()
-        })));
-    }
-    pipeline
 }
 
 fn add(
@@ -1220,21 +1231,17 @@ fn add(
             if a.listable { ", listable" } else { "" }
         )
     });
-    let mut pipeline = build_pipeline(&a.tier, tier);
-    if let Some(credentials) = credentials {
-        pipeline.seal.writer.seal = Some(lpk_format::SealOptions {
-            suite: a.suite.map_or(DEFAULT_SUITE, Suite::from),
-            argon2: Argon2Params::default(),
-            listable: a.listable,
-            credentials,
-        });
-    }
-    pipeline.seal.writer.recovery.percent = a.recovery;
-    pipeline.monitor = console.monitor();
+    let mut settings = build_settings(&a.tier, tier);
+    settings.seal = credentials.map(|credentials| lpk_api::Seal {
+        suite: a.suite.map_or(DEFAULT_SUITE, Suite::from),
+        listable: a.listable,
+        credentials,
+    });
+    settings.recovery = a.recovery;
     let sources = sources(a)?;
-    let r = pipeline.run_file_sources(&sources, &a.archive);
+    let r = lpk_api::create(&sources, &a.archive, &settings, &console.monitor());
     console.clear();
-    let s = r.map_err(|e| Failure::core(&e, Some(&a.archive)))?;
+    let s = r?;
     records_cap_note(err, &s.peel.deflate);
     if a.verbose {
         report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
@@ -1298,12 +1305,20 @@ fn append(
     let sealing = credentials
         .is_some()
         .then(|| "the archive's key".to_string());
-    let mut pipeline = build_pipeline(&a.tier, tier);
-    pipeline.seal.writer.recovery.percent = a.recovery;
-    pipeline.monitor = console.monitor();
-    let r = pipeline.append_file(&a.input, &a.archive, credentials);
+    let mut settings = build_settings(&a.tier, tier);
+    settings.recovery = a.recovery;
+    // Through the API's free `append` (what `Session::append` runs once its session is
+    // closed): an archive whose last append was cut short must still reach the engine's own
+    // refusal, which a session's open would replace.
+    let r = lpk_api::append(
+        &a.archive,
+        &a.input,
+        &settings,
+        credentials,
+        &console.monitor(),
+    );
     console.clear();
-    let s = r.map_err(|e| Failure::core(&e, Some(&a.archive)))?;
+    let s = r?;
     records_cap_note(err, &s.peel.deflate);
     if a.verbose {
         report(err, &a.archive, &a.tier, tier, sealing, a.recovery, &s);
@@ -1579,33 +1594,39 @@ fn extract(
             "--threads: at most {max} (four times the logical cores) on this machine"
         )));
     }
-    let opts = lpk_core::ExtractOptions {
-        select: lpk_core::Selection::new(&x.patterns)
-            .map_err(|e| Failure::core(&e, Some(&x.archive)))?,
-        threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
-        memory: x.memory,
-        ..lpk_core::ExtractOptions::default()
-    };
-    let symlinks = if x.symlinks {
-        lpk_core::Symlinks::Create
-    } else {
-        lpk_core::Symlinks::Skip
-    };
-    let policy = lpk_core::Policy::new(x.overwrite.into(), symlinks);
-    let r = lpk_core::extract_file_with(
+    let select =
+        lpk_core::Selection::new(&x.patterns).map_err(|e| Failure::core(&e, Some(&x.archive)))?;
+    // E5-1: open (the key slot, the envelope against `--memory`, the priors), then extract;
+    // every refusal of the open comes before any output exists, as before.
+    let r = Session::open(
         &x.archive,
-        &x.outdir,
-        &priors,
-        credentials,
-        &policy,
-        &opts,
-        &console.monitor(),
-    );
+        &lpk_api::OpenOptions {
+            credentials,
+            memory: x.memory,
+            priors,
+            ..lpk_api::OpenOptions::default()
+        },
+    )
+    .and_then(|session| {
+        session.extract(
+            &lpk_api::Selection::Globs(select),
+            &lpk_api::Destination::Dir(x.outdir.clone()),
+            &extract_options(x),
+            &console.monitor(),
+        )
+    });
     console.clear();
     // On failure the error line is the only stderr output (D-77 (3)): the warnings are
     // printed only after success, one line per skipped symlink entry, then the counts.
-    let s = r.map_err(|e| Failure::core(&e, Some(&x.archive)))?;
-    for p in policy.skipped_symlinks() {
+    let report = r?;
+    let lpk_api::Extracted::Lpk(s) = report.outcome else {
+        return Err(Failure::failed(
+            "Internal",
+            "an .lpk extracted as a foreign archive",
+            Some(&x.archive),
+        ));
+    };
+    for p in report.skipped_symlinks {
         if json {
             let line = serde_json::json!({
                 "warning": { "kind": "SymlinkSkipped", "path": p }
@@ -1619,6 +1640,7 @@ fn extract(
             );
         }
     }
+    refused_target_warnings(&report.refused_symlink_targets, json, err);
     if json {
         if s.skipped > 0 || s.renamed > 0 || s.symlinks_skipped > 0 {
             let line = serde_json::json!({
@@ -1731,7 +1753,10 @@ fn export(
             x.out.display()
         ))
     })?;
-    let method = x.method.unwrap_or_else(|| container.default_method());
+    let method = x
+        .method
+        .map(Method::from)
+        .unwrap_or_else(|| container.default_method());
     if container == Container::Zip && method == Method::Lzma2 {
         return Err(Failure::usage(
             "--method lzma2 is a 7z method; ZIP takes deflate, zstd or store",
@@ -1767,77 +1792,38 @@ fn export(
             .map_err(|e| Failure::failed("Io", format!("{}: {e}", p.display()), Some(p)))?;
         priors.push(b);
     }
-    let opts = lpk_core::ExtractOptions {
-        select: lpk_core::Selection::new(&x.patterns)
-            .map_err(|e| Failure::core(&e, Some(&x.archive)))?,
-        threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
-        memory: x.memory,
-        ..lpk_core::ExtractOptions::default()
-    };
+    let select =
+        lpk_core::Selection::new(&x.patterns).map_err(|e| Failure::core(&e, Some(&x.archive)))?;
     // The output must not be the archive (whatever the spelling of either path), and an
     // existing one is refused unless --force; both before the archive is opened.
-    let existing = std::fs::metadata(&x.out).is_ok();
-    if existing {
-        let same = match (
-            std::fs::canonicalize(&x.archive),
-            std::fs::canonicalize(&x.out),
-        ) {
-            (Ok(a), Ok(o)) => a == o,
-            _ => false,
-        };
-        if same {
-            return Err(Failure::failed(
-                "Io",
-                format!("{}: the output is the archive itself", x.out.display()),
-                Some(&x.out),
-            ));
-        }
-        if !x.force {
-            return Err(Failure::failed(
-                "Io",
-                format!("{}: exists (--force replaces it)", x.out.display()),
-                Some(&x.out),
-            ));
-        }
-    }
+    lpk_api::check_export_target(&x.archive, &x.out, x.force)?;
     // The archive, its key slot and its priors: a wrong or missing password, an unreadable
     // archive or an envelope over the budget are refused here, before any output exists.
-    let mut archive = lpk_core::export::open_file(&x.archive, &priors, credentials, &opts)
-        .map_err(|e| Failure::core(&e, Some(&x.archive)))?;
-    let settings = export::Settings { method, password };
-    let out_path = x.out.clone();
-    let opener = move || {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&out_path)
+    let session = Session::open(
+        &x.archive,
+        &lpk_api::OpenOptions {
+            credentials,
+            memory: x.memory,
+            priors,
+            ..lpk_api::OpenOptions::default()
+        },
+    )?;
+    let options = lpk_api::ExportOptions {
+        container,
+        method,
+        password,
+        force: x.force,
+        threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+        memory: x.memory,
     };
-    let mut writer = export::open(container, Box::new(opener), &x.out, settings);
-    let r = lpk_core::export_archive_with(
-        &mut archive,
-        || std::fs::File::open(&x.archive),
-        writer.as_mut(),
-        &opts,
+    let r = session.export(
+        &lpk_api::Selection::Globs(select),
+        &x.out,
+        &options,
         &console.monitor(),
     );
     console.clear();
-    // Only an output this export created (or truncated under --force) is removed on
-    // failure; an existing one a refusal left untouched stays as it was.
-    let created = writer.created();
-    // (The trailer opens the output when no entry did, so its failure always removes.)
-    let r = r
-        .map_err(|e| (e, created))
-        .and_then(|s| writer.finish().map(|()| s).map_err(|e| (e, true)));
-    let s = match r {
-        Ok(s) => s,
-        Err((e, created)) => {
-            if created {
-                let _ = std::fs::remove_file(&x.out);
-            }
-            return Err(Failure::core(&e, Some(&x.archive)));
-        }
-    };
+    let s = r?;
     if x.verbose {
         let _ = writeln!(
             err,
@@ -1919,6 +1905,75 @@ fn reference(
         .map_err(|e| Failure::format(&e, Some(command.archive())))
 }
 
+/// The session of `check` and `repair`: the archive opened as the reference tool opened it
+/// (the reader's default limit, no priors), its open failure a `FormatError` naming it.
+fn maintenance_session(
+    archive: &Path,
+    credentials: Option<&Credentials>,
+) -> Result<Session, Failure> {
+    let file = std::fs::File::open(archive)
+        .map_err(|e| Failure::format(&FormatError::Io(e), Some(archive)))?;
+    let open = lpk_api::OpenOptions {
+        credentials,
+        memory: Some(lpk_format::Resources::default().memory),
+        ..lpk_api::OpenOptions::default()
+    };
+    Ok(Session::open_file(file, archive, &open)?)
+}
+
+/// The recovery report line of `check` and `repair` (the reference tool's).
+fn recovery_line(
+    out: &mut dyn Write,
+    archive: &Path,
+    r: &lpk_api::RecoveryReport,
+) -> Result<(), Failure> {
+    writeln!(
+        out,
+        "recovery frames: {}, unusable: {}, damaged shards: {}, repaired shards: {}",
+        r.frames, r.frames_unusable, r.shards_damaged, r.shards_repaired
+    )
+    .map_err(|e| Failure::format(&FormatError::Io(e), Some(archive)))
+}
+
+/// `lpk check`: `Session::check`, the report line, `DamageFound` when a shard is damaged or a
+/// frame unusable.
+fn check(
+    archive: &Path,
+    credentials: Option<&Credentials>,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let session = maintenance_session(archive, credentials)?;
+    let r = session.check(&lpk_core::Monitor::default())?;
+    recovery_line(out, archive, &r)?;
+    if r.shards_damaged > 0 || r.frames_unusable > 0 {
+        return Err(Failure::format(
+            &FormatError::DamageFound {
+                damaged: r.shards_damaged,
+                unusable: r.frames_unusable,
+            },
+            Some(archive),
+        ));
+    }
+    Ok(())
+}
+
+/// `lpk repair`: `Session::repair` into `target` (which must not exist); the copy is kept
+/// with every possible repair when a frame cannot be rebuilt (exit 2, `Unrepairable`).
+fn repair(
+    archive: &Path,
+    target: &Path,
+    credentials: Option<&Credentials>,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let session = maintenance_session(archive, credentials)?;
+    let (report, unrepairable) = session.repair(target, &lpk_core::Monitor::default())?;
+    recovery_line(out, archive, &report)?;
+    match unrepairable {
+        Some(e) => Err(e.into()),
+        None => Ok(()),
+    }
+}
+
 /// `lpk l`: open with the credentials (a sealed archive without them opens keyless, which
 /// lists only when it is listable) and stream the entry table.
 fn list(
@@ -1939,13 +1994,23 @@ fn list(
     let select =
         lpk_core::Selection::new(&l.patterns).map_err(|e| Failure::core(&e, Some(&l.archive)))?;
     let file = std::fs::File::open(&l.archive).map_err(|e| failed(FormatError::Io(e)))?;
-    let mut archive =
-        lpk_format::Archive::open_with(file, &Resources::default(), credentials).map_err(failed)?;
+    // The reader's default limit (a listing decodes no block).
+    let open = lpk_api::OpenOptions {
+        credentials,
+        memory: Some(lpk_format::Resources::default().memory),
+        ..lpk_api::OpenOptions::default()
+    };
+    let api_failed = |e: lpk_api::Error| {
+        let format = e.is_format();
+        let mut f = Failure::from(e);
+        if format {
+            f.message = format!("{}: {} ({})", l.archive.display(), f.message, f.kind);
+        }
+        f
+    };
+    let session = Session::open_file(file, &l.archive, &open).map_err(api_failed)?;
     let options = ListOptions { long: l.long, json };
-    list_archive(&mut archive, options, &select, out).map_err(|e| match e {
-        list::ListError::Format(e) => failed(e),
-        list::ListError::Core(e) => Failure::core(&e, Some(&l.archive)),
-    })
+    list::list_session(&session, options, select, out, api_failed)
 }
 
 /// True when the raw command line carries `--json` (before any `--`), so a usage error clap
@@ -2073,21 +2138,14 @@ fn dispatch(
         }
         Command::Check(mut c) => {
             let given = c.credentials.resolve(terminal, &c.archive, Use::Open)?;
-            let tool = Tool::Check {
-                archive: c.archive.clone(),
-            };
             with_credentials(given, &c.credentials, &c.archive, terminal, |k| {
-                reference(&tool, &[], None, k, out)
+                check(&c.archive, k, out)
             })
         }
         Command::Repair(mut r) => {
             let given = r.credentials.resolve(terminal, &r.archive, Use::Open)?;
-            let tool = Tool::Repair {
-                archive: r.archive.clone(),
-                out: r.out.clone(),
-            };
             with_credentials(given, &r.credentials, &r.archive, terminal, |c| {
-                reference(&tool, &[], None, c, out)
+                repair(&r.archive, &r.out, c, out)
             })
         }
         Command::Append(mut a) => {
@@ -2099,11 +2157,13 @@ fn dispatch(
         Command::Rollback(r) => {
             // No key is needed: the credential flags are accepted and ignored, nothing is
             // read or asked for (`--password-prompt` does not prompt here).
-            let tool = Tool::Rollback {
-                archive: r.archive.clone(),
-                generation: r.generation,
-            };
-            reference(&tool, &[], None, None, out)
+            let g = lpk_api::rollback(&r.archive, r.generation)?;
+            writeln!(
+                out,
+                "rolled back to generation {}: {} bytes",
+                g.generation, g.end
+            )
+            .map_err(|e| Failure::format(&FormatError::Io(e), Some(&r.archive)))
         }
         Command::Info(mut i) => {
             let given = i.credentials.resolve(terminal, &i.archive, Use::Open)?;
@@ -2156,7 +2216,8 @@ mod jpeg_peel_tests {
             panic!("not an add");
         };
         let tier = a.tier.tier().unwrap();
-        super::build_pipeline(&a.tier, tier)
+        super::build_settings(&a.tier, tier)
+            .pipeline(&lpk_core::Monitor::default())
             .peel
             .iter()
             .filter(|p| p.applies_to(lpk_core::Class::Jpeg))

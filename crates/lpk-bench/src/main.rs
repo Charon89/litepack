@@ -30,7 +30,7 @@ enum Command {
     /// Build the public corpus or scan a private folder (PLAN P0-2)
     Corpus(corpus::CorpusArgs),
     /// Run baseline tools over the corpus with round-trip verification (PLAN P0-3)
-    Run(run::RunArgs),
+    Run(Box<run::RunArgs>),
     /// Run a component probe: jpeg, deflate, dedup, text, weights, entropy-gate, bwt, png-filter, text-encodings, delta (PLAN P0-4, E2-15 to E2-17, E2-9)
     Probe(probe::ProbeArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
@@ -42,7 +42,7 @@ enum Command {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Run(args) => run::run(args),
+        Command::Run(args) => run::run(*args),
         Command::Tar(args) => run::tar(args),
         Command::Probe(args) => probe::command(&args),
         Command::Corpus(args) => corpus::run(args),
