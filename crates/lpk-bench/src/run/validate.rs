@@ -311,6 +311,141 @@ pub fn validate_dir(dir: &Path) -> Result<Report> {
     Ok(total)
 }
 
+/// Where `run --validate` looks for a row's corpus when no `--corpus` is given.
+pub const DEFAULT_CORPUS_ROOT: &str = "bench/corpus";
+
+/// Check every result row's `corpus.class_blake3` against the corpus manifest when that corpus is
+/// present (E8-10): `corpus` when given, else `bench/corpus/<profile>` (never for a private scan,
+/// whose folder is only known through `--corpus`). A row is checked only when the corpus's
+/// manifest hashes to the row's `manifest_blake3`: then the digest must equal the class digest of
+/// that manifest. A row without a digest (schema version 1), a corpus that is not there, or one
+/// with another manifest is noted, not a problem. `dir` may be one results directory or a parent
+/// of several, as for [`validate_dir`].
+pub fn check_class_digests(dir: &Path, corpus: Option<&Path>) -> Result<Report> {
+    let dirs: Vec<std::path::PathBuf> = if dir.join("host.json").is_file() {
+        vec![dir.to_path_buf()]
+    } else {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.join("host.json").is_file())
+            .collect();
+        v.sort();
+        v
+    };
+    let single = dirs.len() == 1 && dirs[0] == dir;
+    // Corpus directory -> its manifest and the manifest's BLAKE3, or why it could not be read.
+    let mut manifests: std::collections::BTreeMap<
+        std::path::PathBuf,
+        Option<(crate::corpus::manifest::Manifest, String)>,
+    > = Default::default();
+    let mut out = Report::default();
+    let mut unchecked: std::collections::BTreeMap<String, usize> = Default::default();
+    for d in dirs {
+        let prefix = if single {
+            String::new()
+        } else {
+            format!(
+                "{}/",
+                d.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            )
+        };
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&d)
+            .with_context(|| format!("reading {}", d.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                n.ends_with(".json")
+                    && !matches!(n, "host.json" | "tools.json" | "run.json")
+                    && !n.starts_with("probe-")
+            })
+            .collect();
+        files.sort();
+        for f in files {
+            let name = format!(
+                "{prefix}{}",
+                f.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            );
+            let Ok(text) = std::fs::read_to_string(&f) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                continue; // the schema check reports it
+            };
+            let s = |p: &str| v.pointer(p).and_then(Value::as_str).map(str::to_string);
+            let (Some(class), Some(profile), Some(hash)) = (
+                s("/class"),
+                s("/corpus/profile"),
+                s("/corpus/manifest_blake3"),
+            ) else {
+                continue;
+            };
+            let Some(digest) = s("/corpus/class_blake3") else {
+                *unchecked
+                    .entry("rows without a class digest (schema version 1)".into())
+                    .or_default() += 1;
+                continue;
+            };
+            let root = match (corpus, profile.as_str()) {
+                (Some(c), _) => c.to_path_buf(),
+                (None, crate::corpus::scan::PRIVATE) => {
+                    *unchecked
+                        .entry("rows of a private scan (give --corpus)".into())
+                        .or_default() += 1;
+                    continue;
+                }
+                (None, p) => Path::new(DEFAULT_CORPUS_ROOT).join(p),
+            };
+            let entry = manifests.entry(root.clone()).or_insert_with(|| {
+                let bytes = std::fs::read(root.join("manifest.json")).ok()?;
+                let m = serde_json::from_slice(&bytes).ok()?;
+                Some((m, blake3::hash(&bytes).to_hex().to_string()))
+            });
+            let Some((manifest, manifest_hash)) = entry.as_ref() else {
+                *unchecked
+                    .entry(format!(
+                        "rows whose corpus {} is not present",
+                        root.display()
+                    ))
+                    .or_default() += 1;
+                continue;
+            };
+            if *manifest_hash != hash {
+                *unchecked
+                    .entry(format!(
+                        "rows of another manifest than {}'s",
+                        root.display()
+                    ))
+                    .or_default() += 1;
+                continue;
+            }
+            match manifest.class_blake3(&class) {
+                Some(want) if want == digest => out.results += 1,
+                Some(want) => out.problems.push(format!(
+                    "{name}: /corpus/class_blake3: {digest} but class `{class}` of {} has {want}",
+                    root.display()
+                )),
+                None => out.problems.push(format!(
+                    "{name}: /class: `{class}` is not a class of {}, whose manifest the row \
+                     names",
+                    root.display()
+                )),
+            }
+        }
+    }
+    for (what, n) in unchecked {
+        out.notes
+            .push(format!("class digests not checked for {n} {what}"));
+    }
+    Ok(out)
+}
+
 /// What `tools.json` says about one tool.
 struct ToolState {
     found: bool,
