@@ -54,13 +54,21 @@ bash fuzz/run.sh -t 600 archive_mutate    # one target for 10 min
 cargo +nightly fuzz run --no-cfg-fuzzing archive_mutate    # by hand, from fuzz/
 ```
 
-Every build passes `--no-cfg-fuzzing` (`run.sh`, the workflow's `cargo fuzz build`), so the targets run
-the code we ship. With `cfg(fuzzing)` set (cargo-fuzz's default), dependencies relax checks: bitcode
-accepts trailing bytes after a record (`expect_eof`) and miniz_oxide skips the zlib Adler-32 check, so
-a record the shipped decoder refuses reached code no shipped build reaches (fuzz run 40270390275,
-`deflate_recreate`). cargo-fuzz's build keeps debug assertions and overflow checks on (the crashes of
-E4-6's runs were overflow panics), as the workspace's debug tests do; a shipped release build wraps
-instead.
+Every build passes `--no-cfg-fuzzing` (`run.sh`, the workflow's `cargo fuzz build`, `tmin` below), so
+the targets run the code we ship. With `cfg(fuzzing)` set (cargo-fuzz's default), dependencies relax
+checks: bitcode accepts trailing bytes after a record (`expect_eof`) and miniz_oxide skips the zlib
+Adler-32 check, so a record the shipped decoder refuses reached code no shipped build reaches (fuzz run
+40270390275, `deflate_recreate`). What this gives up: code after a successful zlib decode is reached
+only by inputs with a valid Adler-32 checksum (and bitcode records only without trailing bytes), so
+seeds should carry valid checksums for mutations to get past them.
+
+One difference stays: cargo-fuzz's build keeps debug assertions and overflow checks on (the crashes of
+E4-6's runs and fuzz run 40273076668 were overflow panics), as the workspace's debug tests do, while a
+shipped release build wraps. So an overflow is a crash in the fuzzer even where the shipped decoder
+would go on with a wrapped value; the vendored fixes make such places wrap or refuse explicitly, so
+both builds agree. libfuzzer-sys's panic hook aborts the process, so any panic is a crash in a fuzz
+build, even inside a target's `catch_unwind`. To reproduce a finding in the workspace, `cargo test`
+matches the fuzz build's arithmetic and `cargo test --release` the shipped one.
 
 A crash is saved under `fuzz/artifacts/<target>/`. Minimise it with
 `cargo +nightly fuzz tmin --no-cfg-fuzzing <target> <file>`, add the bytes as a regression test in `lpk-format`, fix the
