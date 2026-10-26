@@ -21,24 +21,13 @@ fuzz_target!(|data: &[u8]| {
         input_len(text.len() as u64, u64::from(block_size))
     );
     let mut out = vec![0u8; text.len()];
-    decode_blocks(
-        &enc[8..],
-        text.len() as u64,
-        u64::from(block_size),
-        &mut out,
-    )
-    .unwrap();
+    decode_blocks(&enc[8..], text.len() as u64, u64::from(block_size), &mut out).unwrap();
     assert_eq!(out, text);
     if enc.len() > 8 {
         let mut bad = enc.clone();
         let i = 8 + at % (enc.len() - 8);
         bad[i] ^= 1 | (at as u8 & 0xFE);
-        match decode_blocks(
-            &bad[8..],
-            text.len() as u64,
-            u64::from(block_size),
-            &mut out,
-        ) {
+        match decode_blocks(&bad[8..], text.len() as u64, u64::from(block_size), &mut out) {
             Ok(()) => {
                 // A damaged index is never accepted; a damaged byte may still give another text.
                 let _ = out;
@@ -48,23 +37,13 @@ fuzz_target!(|data: &[u8]| {
         }
         // Shorter and longer by one: `length`.
         assert_eq!(
-            decode_blocks(
-                &enc[8..enc.len() - 1],
-                text.len() as u64,
-                u64::from(block_size),
-                &mut out
-            ),
+            decode_blocks(&enc[8..enc.len() - 1], text.len() as u64, u64::from(block_size), &mut out),
             Err(Reason::Length)
         );
         let mut longer = enc.clone();
         longer.push(0);
         assert_eq!(
-            decode_blocks(
-                &longer[8..],
-                text.len() as u64,
-                u64::from(block_size),
-                &mut out
-            ),
+            decode_blocks(&longer[8..], text.len() as u64, u64::from(block_size), &mut out),
             Err(Reason::Length)
         );
     }
