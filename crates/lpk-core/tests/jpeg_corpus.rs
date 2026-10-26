@@ -9,7 +9,7 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use lpk_core::{archive_fast, register_full_reader, Cause, FastOptions};
+use lpk_core::{archive_fast, register_full_reader, Cause, FastOptions, PeelStage};
 use lpk_format::{Archive, EntryKind, Resources};
 
 fn join(root: &Path, rel: &str) -> PathBuf {
@@ -72,6 +72,31 @@ fn photo_classes_round_trip_with_the_jpeg_peel() {
                     n.bytes
                 );
             }
+        }
+        // Which peeled files declare more than revision 1.1's term (the library's need is
+        // larger); a report only.
+        let mut more = Vec::new();
+        for e in entries.iter().filter(|e| e.kind == EntryKind::File) {
+            let data = std::fs::read(join(&dir, &e.path)).unwrap();
+            let Ok(plan) = lpk_core::JpegPeel::default().peel(&data, 1 << 26) else {
+                continue;
+            };
+            let h =
+                lpk_core::peel::jpeg::read_stream_header(&plan.stream, plan.primary_len).unwrap();
+            let old = lpk_core::peel::jpeg::memory_bound(&h.frame);
+            if plan.memory > old {
+                more.push(format!(
+                    "{} ({}x{}, SOF {:02X}: {} > {old})",
+                    e.path, h.frame.width, h.frame.height, h.frame.marker, plan.memory
+                ));
+            }
+        }
+        println!(
+            "  declaring more than revision 1.1's term: {} files",
+            more.len()
+        );
+        for m in &more {
+            println!("    {m}");
         }
     }
 }

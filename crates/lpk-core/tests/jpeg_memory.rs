@@ -473,3 +473,103 @@ fn a_large_progressive_jpeg_round_trips_within_its_term() {
         "a large progressive image declares more: {term} vs {old}"
     );
 }
+
+/// An archive with `jpeg` peeled as one entry whose block declares `declare(plan)` (the term an
+/// earlier writer declared under revision 1.1, or the plan's).
+fn archive_declaring(jpeg: &[u8], declare: &dyn Fn(&lpk_core::peel::PeelPlan) -> u64) -> Vec<u8> {
+    use lpk_format::{Encoded, EntryFlags, Graph, GraphResources, Step, Writer, WriterOptions};
+    let peel = JpegPeel::default();
+    let plan = peel.peel(jpeg, 1 << 24).unwrap();
+    assert!(plan.nested.is_empty());
+    let mut out = Vec::new();
+    let mut w = Writer::new_revision(&mut out, WriterOptions::default(), 1).unwrap();
+    w.begin_entry("p.jpg", EntryFlags::EMPTY, 0).unwrap();
+    let id = w.add_record(peel.record(&plan, &[])).unwrap();
+    let mut params = Vec::new();
+    lpk_format::varint::write(&mut params, id).unwrap();
+    let encoded = Encoded {
+        graph: Graph {
+            steps: vec![Step {
+                primitive: plan.primitive,
+                params,
+            }],
+        },
+        bytes: plan.stream.clone(),
+        resources: GraphResources::default(),
+        memory: 0,
+    };
+    w.add_part_encoded(0, jpeg, encoded, declare(&plan))
+        .unwrap();
+    w.end_entry().unwrap();
+    w.finish().unwrap();
+    out
+}
+
+/// Extracts every file of `bytes` with the full reader under a memory resource of `budget`.
+fn extract_with(bytes: &[u8], budget: u64) -> Result<Vec<u8>, FormatError> {
+    let r = Resources {
+        memory: budget,
+        ..Resources::default()
+    };
+    let mut a = lpk_format::Archive::open(std::io::Cursor::new(bytes.to_vec()), &r)?;
+    lpk_core::register_full_reader(&mut a);
+    let t = a.entry_table()?;
+    let entries: Vec<_> = t.table()?.iter().collect::<Result<_, _>>()?;
+    let mut v = Vec::new();
+    for e in &entries {
+        a.extract(e, &mut v)?;
+    }
+    Ok(v)
+}
+
+/// Revision 1.1 is final: an archive whose large progressive JPEG declares exactly revision
+/// 1.1's term (as an earlier writer did) still extracts, byte-exact, when the reader's own memory
+/// covers the library's need; under less it is refused (`decode_memory`) before decoding. Both
+/// decoders agree.
+#[test]
+fn an_archive_declaring_revision_1_1s_term_extracts_within_a_budget_covering_the_library() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpeg = grey_jpeg(2048, 2048, true);
+    let old = archive_declaring(&jpeg, &|plan| {
+        let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+        memory_bound(&h.frame)
+    });
+    let a = lpk_format::Archive::open(std::io::Cursor::new(old.clone()), &Resources::default())
+        .unwrap();
+    let env = a.index().envelope;
+    let plan = JpegPeel::default().peel(&jpeg, 1 << 24).unwrap();
+    let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+    let library = image_term(&h, plan.primary_len, plan.stream.len() as u64);
+    assert_eq!(
+        env.decode_memory,
+        env.max_block_plain + memory_bound(&h.frame)
+    );
+    assert!(library > memory_bound(&h.frame));
+    let enough = env.max_block_plain + library;
+    assert_eq!(extract_with(&old, enough).unwrap(), jpeg);
+    match extract_with(&old, enough - 1) {
+        Err(FormatError::Refused(Refusal {
+            field: "decode_memory",
+            needed,
+            allowed,
+        })) => assert_eq!((needed, allowed), (enough, enough - 1)),
+        r => panic!("{:?}", r.map(|v| v.len())),
+    }
+    // lpk-check: the same outcomes.
+    let check = |memory: u64| {
+        let mut o = lpk_check::archive::Options::default();
+        o.resources.memory = memory;
+        let mut a = lpk_check::archive::Archive::open(old.clone(), o)?;
+        let e = a.entries()?;
+        let file = e.iter().find(|e| e.path == "p.jpg").unwrap().clone();
+        a.read_file(&file)
+    };
+    assert_eq!(check(enough).unwrap(), jpeg);
+    let e = check(enough - 1).unwrap_err();
+    assert_eq!(e.class, "Refused");
+    assert!(e.detail.contains("decode_memory"), "{}", e.detail);
+    // A new archive declares the library's need, and extracts within that.
+    assert_eq!(plan.memory, library);
+    let new = archive_declaring(&jpeg, &|plan| plan.memory);
+    assert_eq!(extract_with(&new, enough).unwrap(), jpeg);
+}

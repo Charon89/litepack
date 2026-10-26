@@ -253,6 +253,10 @@ impl<R: Read + Seek> DecodeContext for ArchiveContext<'_, R> {
         self.archive.record(id)
     }
 
+    fn memory_budget(&self) -> Option<u64> {
+        Some(self.archive.resources().memory)
+    }
+
     fn chunk(&mut self, record: u64, index: u64) -> Result<Vec<u8>, FormatError> {
         let table = self.archive.chunks_arc();
         let place = table

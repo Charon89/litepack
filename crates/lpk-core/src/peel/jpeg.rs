@@ -25,8 +25,11 @@
 //! [`MODEL_ALLOWANCE`], stands for the library's probability models and thread buffers, which
 //! revision 1.1 does not bound (E2-5b measures them). Before the library decodes a stream,
 //! [`read_stream_header`] checks every length in the stream's header against the primary image
-//! (the library allocates each at once), and the term a record declares and a reader checks is
-//! [`image_term`]: the larger of that allowance and a stated bound on the library's allocations.
+//! (the library allocates each at once). The writer declares [`image_term`], the larger of
+//! revision 1.1's term and a stated bound on the library's allocations; the reader checks
+//! revision 1.1's term against the archive's `decode_memory` (so an archive an earlier writer
+//! declared honestly is never refused for it) and [`image_term`] against its own memory
+//! resource, the extraction's budget.
 
 use std::io::{Cursor, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -828,21 +831,33 @@ impl PrimitiveDecoder for JpegDecoder {
             });
         }
         let max = usize::try_from(j.primary_len).map_err(|_| bad(id, "primary_len"))?;
-        // Resources: the image's coefficient term, from the stream's own JPEG header, plus the
-        // fixed allowance must fit in the decode memory left after the block buffer; the
-        // library's caps are then the checked dimensions and the primary's length.
+        // Resources. The header is checked first (no length in it past what the primary
+        // explains). Then revision 1.1's rule: the image's coefficient term plus the fixed
+        // allowance must fit in the decode memory left after the block buffer (the archive's
+        // `decode_memory`, never above the reader's resource). Then the library's own need
+        // ([`image_term`], which may exceed what an archive written under revision 1.1
+        // declares) must fit in the reader's own memory resource, the extraction's budget, left
+        // after the block buffer. The library's caps are then the checked dimensions and the
+        // primary's length.
         let header =
             read_stream_header(input, j.primary_len).ok_or_else(|| bad(id, "lepton stream"))?;
-        let need = image_term(&header, j.primary_len, input.len() as u64);
+        let refuse = |need: u64, allowed: u64| {
+            if need > allowed.saturating_sub(limits.max_block_plain) {
+                return Err(FormatError::Refused(Refusal {
+                    field: "decode_memory",
+                    needed: limits.max_block_plain.saturating_add(need),
+                    allowed,
+                }));
+            }
+            Ok(())
+        };
+        refuse(memory_bound(&header.frame), limits.memory)?;
+        let budget = ctx.memory_budget().unwrap_or(limits.memory);
+        refuse(
+            image_term(&header, j.primary_len, input.len() as u64),
+            budget,
+        )?;
         let frame = header.frame;
-        let allowance = limits.memory.saturating_sub(limits.max_block_plain);
-        if need > allowance {
-            return Err(FormatError::Refused(Refusal {
-                field: "decode_memory",
-                needed: limits.max_block_plain.saturating_add(need),
-                allowed: limits.memory,
-            }));
-        }
         let mut f = features(u32::try_from(j.primary_len).unwrap_or(u32::MAX));
         f.max_jpeg_width = frame.width;
         f.max_jpeg_height = frame.height;

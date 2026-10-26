@@ -25,6 +25,13 @@ pub trait DecodeContext {
     /// the block being decoded (`BadRecord`, `chunk order`), so a record never
     /// needs the block rebuilt from it.
     fn chunk(&mut self, record: u64, index: u64) -> Result<Vec<u8>, FormatError>;
+    /// The reader's own memory resource (the extraction's budget), which a
+    /// decoder whose library may need more than the archive declares checks
+    /// that need against; `None` when there is no archive behind the decode,
+    /// and the decoder then uses the limits it was given.
+    fn memory_budget(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The context of a decode that has no archive behind it: every request fails.

@@ -530,9 +530,21 @@ impl Archive {
             return Err(block::too_large(last, j.primary_len, bound));
         }
         // (5): the image's term, its coefficient term plus the fixed term.
+        // The header's structural checks; revision 1.1's term against the archive's
+        // `decode_memory` (never above this reader's memory); the library's own need against this
+        // reader's memory alone.
         let header = crate::jpeg::stream_header(id, stream, j.primary_len)?;
-        self.memory()
-            .check(header.term(j.primary_len, stream.len() as u64))?;
+        self.memory().check(
+            header
+                .frame
+                .memory_term()
+                .saturating_add(crate::jpeg::FIXED_TERM),
+        )?;
+        crate::deflate::Memory {
+            decode_memory: u64::MAX,
+            ..self.memory()
+        }
+        .check(header.term(j.primary_len, stream.len() as u64))?;
         // (6).
         let primary = crate::jpeg::decode(id, stream, j.primary_len, &header.frame)?;
         // (7) and (8).
