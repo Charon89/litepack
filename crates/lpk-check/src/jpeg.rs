@@ -146,7 +146,10 @@ pub const THREAD_TERM: u64 = 4_194_304;
 /// stream`, before the library allocates anything. The segment sizes: without an `EEE` section
 /// they sum to at most `primary_len`; with one, the library cuts the last to the JPEG length
 /// less the garbage (2 bytes without `GRB`), the raw header, SOI and the other segments, which
-/// must therefore fit in the JPEG length.
+/// must therefore fit in the JPEG length. Also `lepton stream`: the garbage longer than the
+/// JPEG length; a partition with more than 7 overhang bits; an `EEE` `max_dpos` of `u32::MAX`;
+/// a first restart error of 2 or more; restart counts given but fewer than the raw header's
+/// `FF DA` pairs (at least one).
 pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamHeader> {
     let bad = || bad_record(id, "lepton stream");
     let le = |b: &[u8]| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
@@ -179,6 +182,7 @@ pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamH
     let (mut restarts, mut errors) = (0u64, 0u64);
     let mut segments: Option<Vec<u64>> = None;
     let (mut garbage, mut early_eof) = (2u64, false);
+    let mut rst_err0: Option<u8> = None;
     // The library ends the header at the first section marker it cannot read whole.
     while let Some(m) = take(3) {
         let m = [m[0], m[1], m[2]];
@@ -200,7 +204,8 @@ pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamH
                 }
                 let (h, _) = take(16 * u64::from(*n)).ok_or_else(bad)?.as_chunks::<16>();
                 let rows: Vec<u16> = h.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-                if rows.windows(2).any(|w| w[1] < w[0]) {
+                // Rows going down, or overhang bits past a byte's seven.
+                if rows.windows(2).any(|w| w[1] < w[0]) || h.iter().any(|c| c[7] > 7) {
                     return Err(bad());
                 }
                 segments = Some(h.iter().map(|c| le(&c[2..6])).collect());
@@ -216,10 +221,20 @@ pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamH
                 if &m == b"GRB" {
                     garbage = n;
                 }
-                take(n).ok_or_else(bad)?;
+                let body = take(n).ok_or_else(bad)?;
+                if &m == b"FRS" && rst_err0.is_none() {
+                    rst_err0 = body.first().copied();
+                }
             }
             b"EEE" => {
-                take(28).ok_or_else(bad)?;
+                let e = take(28).ok_or_else(bad)?;
+                // Four `max_dpos` values after three other u32s; the library adds one to each.
+                if (12..28)
+                    .step_by(4)
+                    .any(|i| le(&e[i..i + 4]) == u64::from(u32::MAX))
+                {
+                    return Err(bad());
+                }
                 early_eof = true;
             }
             _ => return Err(bad()),
@@ -235,6 +250,18 @@ pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamH
         all <= primary_len
     };
     if !fits {
+        return Err(bad());
+    }
+    // The library takes the garbage (2 bytes without `GRB`) off the JPEG length, adds the first
+    // restart error to an 8-bit marker count, and looks the restart counts up by scan.
+    if garbage > jpeg_len || rst_err0.is_some_and(|e| e >= 2) {
+        return Err(bad());
+    }
+    let sos = jpeg
+        .windows(2)
+        .filter(|w| w[0] == 0xFF && w[1] == 0xDA)
+        .count() as u64;
+    if restarts != 0 && restarts < sos.max(1) {
         return Err(bad());
     }
     Ok(StreamHeader {
