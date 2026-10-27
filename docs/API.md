@@ -92,7 +92,7 @@ the binary's parser with this table.
 
 | Verb | Arguments | Menu entry | Action |
 |---|---|---|---|
-| `--open` (or a bare path) | `<archive>` | Open | Opens the archive in the browser. |
+| `--open` (or a bare path) | `<archive>` | Open | Opens the archive in the browser. `--open=<archive>` is the same (the form the Edge WebDriver can pass, E5-11). |
 | `--extract-here` | `<archive>...` | Extract here | Smart destination beside each archive. |
 | `--extract-to` | `<archive>...` | Extract to "&lt;name&gt;\" | Into `<name>\` beside each, `<name> (k)` if taken. |
 | `--create` | `<path>...` | Add to archive… | Opens the create wizard with these inputs. |

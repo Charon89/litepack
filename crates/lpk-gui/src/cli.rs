@@ -35,7 +35,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Startup, String
     };
     while let Some(a) = it.next() {
         let text = a.to_string_lossy();
-        if text == "--open" {
+        // `--open=<archive>`: the form the Edge WebDriver can pass (it turns each argument into a
+        // Chromium switch, lower-casing a bare path; E5-11's driver harness).
+        if let Some(p) = a.to_str().and_then(|t| t.strip_prefix("--open=")) {
+            if p.is_empty() {
+                return Err("--open needs an archive".into());
+            }
+            set(OsString::from(p), &mut s)?;
+        } else if text == "--open" {
             let p = it.next().ok_or("--open needs an archive")?;
             set(p, &mut s)?;
         } else if text == "--" {
@@ -70,6 +77,10 @@ mod tests {
             Some(PathBuf::from("C:\\x y\\a.lpk"))
         );
         assert_eq!(
+            p(&["--open=C:\\x y\\A.lpk"]).unwrap().open,
+            Some(PathBuf::from("C:\\x y\\A.lpk"))
+        );
+        assert_eq!(
             p(&["--", "--odd.lpk"]).unwrap().open,
             Some(PathBuf::from("--odd.lpk"))
         );
@@ -78,6 +89,8 @@ mod tests {
     #[test]
     fn refusals() {
         assert!(p(&["--open"]).is_err());
+        assert!(p(&["--open="]).is_err());
+        assert!(p(&["--open=a.lpk", "b.lpk"]).is_err());
         assert!(p(&["a.lpk", "b.lpk"]).is_err());
         assert!(p(&["--bogus"]).is_err());
         assert!(p(&["--extract-here", "a.lpk"])

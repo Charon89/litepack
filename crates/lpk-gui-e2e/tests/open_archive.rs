@@ -105,6 +105,9 @@ fn start_driver(work: &Path) -> Driver {
         // The GUI's state (journal, WebView2's data folder) goes to the scratch dir; the GUI
         // inherits this environment through tauri-driver and the native driver.
         .env("LOCALAPPDATA", &local)
+        // The host passes the driver's browser arguments to its webview (WebView2 does not apply
+        // them itself when the app sets its own; `lpk_gui::security::WEBDRIVER_ENV`).
+        .env("LPK_GUI_WEBDRIVER", "1")
         .env_remove("LPK_GUI_SMOKE_REPORT")
         .stdin(Stdio::null())
         .spawn()
@@ -120,7 +123,9 @@ async fn connect(archive: &Path) -> Client {
         "tauri:options".into(),
         serde_json::json!({
             "application": gui,
-            "args": [archive],
+            // The Edge WebDriver turns each argument into a Chromium switch (a bare path becomes
+            // `--d:\...`, lower-cased), so the archive goes as `--open=<path>`, whose value it keeps.
+            "args": [format!("--open={}", archive.display())],
         }),
     );
     let url = format!("http://127.0.0.1:{DRIVER_PORT}");
