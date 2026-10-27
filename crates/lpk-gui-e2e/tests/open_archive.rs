@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use fantoccini::error::NewSessionError;
 use fantoccini::{Client, ClientBuilder, Locator};
 use hyper_util::client::legacy::connect::HttpConnector;
 
@@ -131,7 +132,12 @@ async fn connect(archive: &Path) -> Client {
             .await
         {
             Ok(c) => return c,
-            Err(e) if Instant::now() < deadline => {
+            // Only an unreachable driver is waited for; a refused session fails at once.
+            Err(
+                e @ (NewSessionError::Failed(_)
+                | NewSessionError::FailedC(_)
+                | NewSessionError::Lost(_)),
+            ) if Instant::now() < deadline => {
                 eprintln!("waiting for tauri-driver: {e}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -183,9 +189,12 @@ async fn row_names(c: &Client) -> Vec<String> {
     ignore = "needs tauri-driver and the Edge WebDriver; build with LPK_GUI_E2E=1 (CI's gui-e2e job)"
 )]
 fn an_archive_given_on_the_command_line_opens_with_no_page_error() {
-    let work = tempfile::tempdir().expect("scratch dir");
-    let archive = make_archive(work.path());
-    let _driver = start_driver(work.path());
+    // `LPK_E2E_WORK` keeps the scratch folder (CI reads it after a failure); else a temporary one.
+    let temp = tempfile::tempdir().expect("scratch dir");
+    let work =
+        std::env::var_os("LPK_E2E_WORK").map_or_else(|| temp.path().to_path_buf(), PathBuf::from);
+    let archive = make_archive(&work);
+    let _driver = start_driver(&work);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

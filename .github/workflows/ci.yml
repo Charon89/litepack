@@ -191,7 +191,20 @@ jobs:
       - name: The driver harness
         env:
           LPK_GUI_E2E: "1"
+          LPK_E2E_WORK: ${{ runner.temp }}/gui-e2e
         run: cargo test --locked -p lpk-gui-e2e -- --nocapture
+      - name: After a failure, the processes and DevToolsActivePort files
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -match '^(lpk-gui|msedgewebview2|msedgedriver|tauri-driver)\.exe$' } |
+            ForEach-Object { "$($_.ProcessId) $($_.Name): $($_.CommandLine)" }
+          foreach ($root in @("$env:RUNNER_TEMP\gui-e2e", $env:TEMP, $env:LOCALAPPDATA)) {
+            Get-ChildItem -Path $root -Recurse -Force -Filter DevToolsActivePort -ErrorAction SilentlyContinue |
+              ForEach-Object { "$($_.FullName): $(Get-Content $_.FullName -Raw)" }
+          }
+          Get-ChildItem -Path "$env:RUNNER_TEMP\gui-e2e" -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 60 FullName
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:
