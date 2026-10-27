@@ -7,8 +7,12 @@ E9-7's task.
 
 ## 1. What runs where
 
-- **The host** (`lpk`, the GUI through `lpk-api`) opens `.lpk` archives in process: their decoders are LitePack's
-  own, bounded by the format's memory rules (D-66, D-67, D-68) and fuzzed (section 6). The host also detects the
+- **The host** (`lpk`, the GUI through `lpk-api`) opens `.lpk` archives in process. Their decoding runs
+  LitePack's own code (the container, the BWT codec, the PNG filter undo) and third-party decoders: `ruzstd` and
+  `lzma-rs` for the block codecs (`lpk-format`), `lepton_jpeg` for the JPEG peel, the vendored `preflate-rs` for
+  the Deflate peel, and `flate2` over C zlib (its `zlib` feature) to inflate a Lepton stream's compressed header
+  before `lepton_jpeg` sees it (`lpk-core/src/peel/jpeg.rs`, `read_stream_header`, D-116 (2)). All of it is
+  bounded by the format's memory rules (D-66, D-67, D-68, D-116) and fuzzed (section 6). The host also detects the
   format of every other archive by magic bytes only (`lpk_core::foreign::detect`, D-106) and owns every file
   write (D-99 (4)).
 - **The worker** (`lpk-worker`, built in the separate `workers/` cargo workspace) runs every foreign-format
@@ -28,8 +32,9 @@ E9-7's task.
 `lpk-sandbox-sys` launches the worker (D-97); it is one of the crates allowed `unsafe` (`docs/UNSAFE.md`).
 
 - **Default: an LPAC AppContainer** (`LitePack.Worker`, no capability, `ALL_APPLICATION_PACKAGES` opt-out). It
-  reaches only objects granted to the package SID or to ALL RESTRICTED APPLICATION PACKAGES; no network; no HKCU
-  (pinned by tests, D-97 (4)).
+  reaches only objects granted to the package SID or to ALL RESTRICTED APPLICATION PACKAGES (D-97); no HKCU
+  (pinned by tests, D-97 (4)); no network, as far as D-105's test shows: loopback is blocked and Winsock cannot
+  start (residual 4).
 - **Job object, both modes**: one process, a commit limit per process and job, a per-process user-time limit
   raised only on host-observed progress, all eight UI restrictions, kill-on-close, die-on-unhandled-exception
   (D-97 (1)).
@@ -39,8 +44,10 @@ E9-7's task.
 - **Isolation between workers**: the process and thread carry a broker-only security descriptor and the child's
   default DACL is replaced; a test has one worker try sixteen `OpenProcess`/`OpenThread` rights on another and get
   access denied in both modes (D-97 (2)).
-- **The worker writes nothing**: it never uses `TEMP` or writes a file, and the broker empties the AppContainer's
-  `AC\Temp` before each launch without following reparse points (D-99 (6)).
+- **The worker writes no file by design**: `lpk-worker` never uses `TEMP` or writes a file, and the broker empties
+  the AppContainer's `AC\Temp` before each launch without following reparse points (D-99 (6)). This is a rule of
+  the worker's code, not a sandbox boundary: a compromised LPAC worker can still write to the shared `AC` folder
+  (residual 2).
 - **Limits come from what the host observes, never from worker reports**: progress is the job's read bytes plus
   `Data` bytes; 60 s without progress ends the worker; entries are capped by the archive length over the format's
   smallest header and by `--max-entries` (default 10 million); output by `--max-expansion` (default 10,000) times
@@ -52,18 +59,21 @@ E9-7's task.
 - **The restricted-token mode** (Low integrity, restricting SIDs Everyone, Users and a per-launch unique SID) is an
   opt-in of the engine (`lpk_core::foreign::Sandbox::Restricted`) for machines where the AppContainer launch fails;
   the CLI does not expose it today (D-97 (1)).
-- **Linux** runs the worker as a plain child under `setrlimit`, unsandboxed by decision (d); it is used by CI only
-  (D-97).
+- **Linux** runs the worker as a plain child under `setrlimit`, unsandboxed by decision (d) (D-97). Decision (d)
+  meant it for CI, but nothing enforces that: a Linux `lpk` extracts foreign archives through an unsandboxed worker,
+  where only the host's limits and policy pass (above) apply.
 
 ## 3. Residual risks
 
 Stated by the decisions that built the sandbox; none is closed by this note.
 
 1. Under the restricted-token opt-in the worker can read whatever Everyone or Users may read (a BUILTIN\Users
-   readable file and HKLM\SOFTWARE are read, both pinned by tests) and can reach the network (D-97 (4), D-105 (1)).
-2. Every LPAC worker shares the persistent `Packages\LitePack.Worker\AC` folder. The broker empties `AC\Temp`
-   before each launch, but one host's cleanup can run while another host's worker is alive and can race a
-   junction swap: narrowed, not closed (D-99 (6)).
+   readable file and HKLM\SOFTWARE are read, both pinned by tests), open the session's named objects where those
+   SIDs are granted (`docs/notes/e4-design.md` section 1), and reach the network (D-97 (4), D-105 (1)).
+2. Every LPAC worker shares the persistent, writable `Packages\LitePack.Worker\AC` folder, so a compromised worker
+   could leave files there for later workers or fill the disk (D-97 (4)). The broker empties `AC\Temp` before each
+   launch, but one host's cleanup can run while another host's worker is alive and can race a junction swap:
+   narrowed, not closed (D-99 (6)).
 3. The job's CPU limit counts user time only and is enforced with a lag of a few seconds, so the no-progress
    watchdog stays required (D-97 (4), D-105 (3)).
 4. The `Denied` causes of crash containment are reported by the worker itself: the tests prove the refusals, but a
@@ -83,9 +93,13 @@ Stated by the decisions that built the sandbox; none is closed by this note.
 
 A test-only crash parser runs under LPAC and under the restricted token: abort and null dereference end as
 `Crashed`, allocation past the commit limit as `MemoryLimit`, spinning past the CPU limit as `CpuLimit`, and
-spawning a process, opening the network or opening a file outside the allowance as `Denied` with the resource
-named. Each of the 14 tests asserts the named cause, the host alive and the next extraction in the same session
-succeeding (D-105). A panic in the worker is reported as `Panicked`; no worker output can panic the host (D-99 (5)).
+spawning a process or opening a file outside the allowance as `Denied` with the resource named in both modes.
+Opening the network ends as `Denied` under LPAC only; under the restricted token the network is reachable, the
+opt-in's residual (D-105 (1), residual 1). Each of the 14 tests asserts its expected outcome, the host alive and the
+next extraction in the same session succeeding (D-105). A panic in the worker is reported as `Panicked`
+(D-99 (5)). That hostile worker output does not panic the host rests on the frame limits (every length and count
+checked before allocating, D-99 (2)) and on the `worker_proto` fuzz target, which feeds arbitrary worker output
+through the decoder, the limits, the policy pass and the writer (D-99 (10)); it is not proven beyond that.
 
 ## 5. The hostile-archive set (E4-7)
 
@@ -103,8 +117,12 @@ the destination and that no partial file remains.
 29 targets cover every parser: the `.lpk` decoders and peels, the foreign readers (`foreign_zip`, `foreign_7z`,
 `foreign_tar`) and the worker protocol (`worker_proto`). `fuzz.yml` runs one job per target, 600 s nightly and
 3,600 s on Mondays, with a persistent corpus; a check fails the workflow when the matrix and `fuzz/fuzz_targets/`
-differ; every build uses `--no-cfg-fuzzing` so the fuzzer sees the shipped checks (D-114). Findings so far were
-fixed with their inputs kept as seeds (D-115, D-116). `foreign_libarchive` waits for E4-4.
+differ; every build uses `--no-cfg-fuzzing` so the fuzzer sees the shipped checks (D-114). The findings of E4-6's
+own runs were fixed with their inputs kept as seeds (D-115, D-116). The first nightly run on `main` (run
+40444702572) found two more, not fixed at the time of writing: `deflate_recreate`, a panic in the vendored
+`preflate-rs` (fix on branch `fix/deflate-decode-panics`), and `jpeg_reconstruct`, an underflow in `lepton_jpeg`
+(fix on branch `fix/jpeg-garbage-bound`). The nightly stays red until both land. `foreign_libarchive` waits for
+E4-4.
 
 ## 7. Extraction policy on Windows (E6-6, E6-0)
 
