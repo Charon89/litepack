@@ -114,6 +114,8 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
         CodecCorrection::LiteralCountCorrection,
         bit_lengths.len() as u32,
     );
+    // LitePack change 15: a failed read of the corrections is refused before the value is used.
+    codec.litepack_check()?;
     if !(257..=288).contains(&num_literals) {
         return err_exit_code(ExitCode::InvalidPredictionData, "literal count out of range");
     }
@@ -127,6 +129,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
         CodecCorrection::DistanceCountCorrection,
         distance_code_lengths.len() as u32,
     );
+    codec.litepack_check()?; // LitePack change 15
     if !(1..=32).contains(&num_dist) {
         return err_exit_code(ExitCode::InvalidPredictionData, "distance count out of range");
     }
@@ -149,6 +152,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
         CodecCorrection::TreeCodeBitLengthCorrection,
         tc_code_tree_len as u32,
     );
+    codec.litepack_check()?; // LitePack change 15
     if !(4..=CODETREE_CODE_COUNT as u32).contains(&decoded_tc_len) {
         return err_exit_code(
             ExitCode::InvalidPredictionData,
@@ -170,6 +174,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
             tc_code_tree[TREE_CODE_ORDER_TABLE[i]].into(),
         ) as u8;
     }
+    codec.litepack_check()?; // LitePack change 15
 
     Ok(result)
 }
@@ -281,6 +286,7 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
         const TC_ZERO_SHORT: u32 = TreeCodeType::ZeroShort as u32;
         const TC_ZERO_LONG: u32 = TreeCodeType::ZeroLong as u32;
 
+        decoder.litepack_check()?; // LitePack change 15
         let predicted_tree_code_type = match predicted_tree_code_type_u32 {
             TC_CODE => TreeCodeType::Code,
             TC_REPEAT => TreeCodeType::Repeat,
@@ -308,6 +314,7 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
             }
         }
 
+        decoder.litepack_check()?; // LitePack change 15
         result.push((predicted_tree_code_type, predicted_tree_code_data));
 
         if predicted_tree_code_type == TreeCodeType::Code {

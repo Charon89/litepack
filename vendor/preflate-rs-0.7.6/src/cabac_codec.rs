@@ -81,21 +81,18 @@ impl<CTX> PredictionCabacContext<CTX> {
         context: &mut [CTX; N],
         context_bits: &mut [CTX; N],
         reader: &mut R,
-    ) -> u32 {
+    ) -> std::io::Result<u32> {
         // LitePack change 8 (LITEPACK-CHANGES.md): corrections are u32 values, so a valid exponent
-        // is at most 32; a larger one is refused at its 33rd one (a panic, which LitePack's callers
-        // report as refused corrections) instead of overflowing `1 << (bits_found - 1)` below,
-        // which panics in a debug build and wraps in a release build.
-        let bits_found = reader.get_unary_encoded_max(context, 32).unwrap();
+        // is at most 32; a larger one is refused at its 33rd one instead of overflowing
+        // `1 << (bits_found - 1)` below, which panics in a debug build and wraps in a release
+        // build. LitePack change 15: the refusal (and any read failure) is returned, not a panic.
+        let bits_found = reader.get_unary_encoded_max(context, 32)?;
 
-        match bits_found {
+        Ok(match bits_found {
             0 => 0,
             1 => 1,
-            _ => {
-                reader.get_n_bits(bits_found - 1, context_bits).unwrap() as u32
-                    | (1 << (bits_found - 1))
-            }
-        }
+            _ => reader.get_n_bits(bits_found - 1, context_bits)? as u32 | (1 << (bits_found - 1)),
+        })
     }
 }
 
@@ -225,14 +222,31 @@ pub struct PredictionDecoderCabac<R, CTX> {
 
     actions_seen: [bool; CodecCorrection::MAX as usize],
     default_actions: [u32; CodecCorrection::MAX as usize],
+
+    /// LitePack change 15 (LITEPACK-CHANGES.md): the first failure to read the correction stream
+    /// (a refused value or a read error). Once set, every correction decodes as 0 without reading
+    /// and `litepack_check` returns it as `InvalidPredictionData`.
+    failure: Option<String>,
 }
+
+/// LitePack change 8: the refusal of a decoded 2^32 - 1, whose `+ 1` does not fit in a `u32`.
+const LITEPACK_VALUE_TOO_LARGE: &str = "a correction value above 2^32 - 1";
 
 impl<R: Vp8Decode<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
     pub fn new(mut reader: R) -> Self {
         let mut actions_seen = [false; CodecCorrection::MAX as usize];
         let mut actions_seen_ctx = CTX::default();
+        // LitePack change 15: a read failure is recorded (nothing is marked seen after it)
+        // instead of a panic.
+        let mut failure = None;
         for i in 0..actions_seen.len() {
-            actions_seen[i] = reader.get(&mut actions_seen_ctx).unwrap();
+            match reader.get(&mut actions_seen_ctx) {
+                Ok(b) => actions_seen[i] = b,
+                Err(e) => {
+                    failure = Some(e.to_string());
+                    break;
+                }
+            }
         }
 
         Self {
@@ -240,38 +254,40 @@ impl<R: Vp8Decode<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
             default_actions: Default::default(),
             actions_seen,
             reader,
+            failure,
         }
     }
 
+    /// LitePack change 15: the decoded value, or the failure as a message (the caller records it).
     #[cold]
-    fn decode_correction_slow(&mut self, c: usize) -> Result<u32, u32> {
-        if self
+    fn decode_correction_slow(&mut self, c: usize) -> std::result::Result<u32, String> {
+        let default = self
             .reader
             .get(&mut self.context.default_signal_ctx[c])
-            .unwrap()
-        {
+            .map_err(|e| e.to_string())?;
+        if default {
             // LitePack change 8: checked, so a decoded 2^32 - 1 is refused in every build profile.
             let value = PredictionCabacContext::read_exp_value(
                 &mut self.context.default_ctx[c],
                 &mut self.context.default_ctx_bits[c],
                 &mut self.reader,
             )
+            .map_err(|e| e.to_string())?
             .checked_add(1)
-            .expect("LitePack change 8: a correction value above 2^32 - 1");
+            .ok_or_else(|| LITEPACK_VALUE_TOO_LARGE.to_string())?;
 
             self.default_actions[c] = value - 1;
-            return Err(0);
+            Ok(0)
         } else {
             // LitePack change 8: checked, so a decoded 2^32 - 1 is refused in every build profile.
-            let value = PredictionCabacContext::read_exp_value(
+            PredictionCabacContext::read_exp_value(
                 &mut self.context.correction_ctx[c],
                 &mut self.context.correction_ctx_bits[c],
                 &mut self.reader,
             )
+            .map_err(|e| e.to_string())?
             .checked_add(1)
-            .expect("LitePack change 8: a correction value above 2^32 - 1");
-
-            return Err(value);
+            .ok_or_else(|| LITEPACK_VALUE_TOO_LARGE.to_string())
         }
     }
 }
@@ -279,10 +295,26 @@ impl<R: Vp8Decode<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
 impl<R: Vp8Decode<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderCabac<R, CTX> {
     fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
+    // LitePack change 15
+    fn litepack_check(&self) -> crate::preflate_error::Result<()> {
+        match &self.failure {
+            None => Ok(()),
+            Some(m) => Err(crate::preflate_error::PreflateError::new(
+                crate::preflate_error::ExitCode::InvalidPredictionData,
+                format!("corrections refused: {m}"),
+            )),
+        }
+    }
+
     #[inline]
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
         // if the action hasn't been seen at all, then always return 0
         if !self.actions_seen[correction as usize] {
+            return 0;
+        }
+
+        // LitePack change 15: after a failure, no more reads; every correction is 0.
+        if self.failure.is_some() {
             return 0;
         }
 
@@ -293,9 +325,13 @@ impl<R: Vp8Decode<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderCab
             return 0;
         }
 
+        // LitePack change 15: a failure is recorded and decodes as 0 (no correction).
         match self.decode_correction_slow(c) {
             Ok(value) => value,
-            Err(value) => return value,
+            Err(m) => {
+                self.failure = Some(m);
+                0
+            }
         }
     }
 }
@@ -442,6 +478,7 @@ fn roundtrip_cabac_write_value() {
         assert_eq!(
             i * 13,
             PredictionCabacContext::read_exp_value(&mut context, &mut context_bits, &mut reader)
+                .unwrap()
         );
     }
 }
