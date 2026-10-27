@@ -463,7 +463,9 @@ mod tests {
                 "lpk",
                 "tsaur",
                 "wzzip",
-                "pacl"
+                "pacl",
+                "lpk-foreign",
+                "7z-foreign"
             ]
         );
         let settings = |id: &str| -> Vec<String> {
@@ -625,6 +627,55 @@ mod tests {
         assert_eq!(get("fast-zoned-no-motw").zone, Some(3));
         assert_eq!(get("fast-zoned-no-motw").extract, ["--motw", "off"]);
         assert_eq!(zone_stream(3), "[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+
+    /// E4-8: the two foreign-extraction tools share their maker's settings, so `lpk x` and
+    /// `7z x` extract the same made archive; `all` leaves them out.
+    #[test]
+    fn the_foreign_tools_share_the_maker_settings_and_stay_out_of_all() {
+        let cat = Catalogue::parse(REAL).expect("catalogue");
+        let (l, s) = (
+            cat.get("lpk-foreign").expect("present"),
+            cat.get("7z-foreign").expect("present"),
+        );
+        assert_eq!(l.foreign.as_deref(), Some("7z"));
+        assert_eq!(l.settings, s.settings);
+        assert_eq!(l.foreign, s.foreign);
+        let ext: Vec<&str> = l.settings.iter().map(|x| x.extension(l)).collect();
+        assert_eq!(ext, [".zip", ".7z"]);
+        assert_eq!(
+            cat.get("7z").expect("present").settings[0].extension(cat.get("7z").expect("present")),
+            ".7z"
+        );
+        let all = super::super::select(&cat, &["all".to_string()]).expect("present");
+        assert!(!all.iter().any(|t| t.ends_with("-foreign")) && all.contains(&"7z".into()));
+        let named = super::super::select(&cat, &["lpk-foreign".to_string()]).expect("present");
+        assert_eq!(named, ["lpk-foreign"]);
+    }
+
+    #[test]
+    fn foreign_tools_are_checked() {
+        let tool = |extra: &str, setting: &str| {
+            format!(
+                "{REAL}\n[[tool]]\nid = \"t\"\nname = \"t\"\nversion = {{ args = [], pattern = '(x)' }}\n\
+                 extension = \".zip\"\nmode = \"directory\"\nlicence = \"x\"\n{extra}\n\
+                 [[tool.setting]]\nid = \"s\"\n{setting}\n"
+            )
+        };
+        let ok = "foreign = \"7z\"\nextract = [\"x\", \"{archive}\"]";
+        assert!(Catalogue::parse(&tool(ok, "extension = \".7z\"")).is_ok());
+        // An unknown maker, a maker that is itself foreign, a create template, a bad extension.
+        let bad_maker = "foreign = \"nope\"\nextract = [\"x\"]";
+        assert!(Catalogue::parse(&tool(bad_maker, "")).is_err());
+        let foreign_maker = "foreign = \"lpk-foreign\"\nextract = [\"x\"]";
+        assert!(Catalogue::parse(&tool(foreign_maker, "")).is_err());
+        let with_create = format!("{ok}\ncreate = [\"a\", \"{{archive}}\"]");
+        assert!(Catalogue::parse(&tool(&with_create, "")).is_err());
+        assert!(Catalogue::parse(&tool(ok, "extension = \"7z\"")).is_err());
+        // `extension` on a setting of an ordinary tool.
+        let plain = "create = [\"a\", \"{archive}\"]\nextract = [\"x\", \"{archive}\"]";
+        assert!(Catalogue::parse(&tool(plain, "extension = \".7z\"")).is_err());
+        assert!(Catalogue::parse(&tool(plain, "")).is_ok());
     }
 
     #[test]

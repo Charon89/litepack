@@ -55,6 +55,12 @@
 #                   Zone.Identifier stream between compression and extraction (untimed), so the
 #                   extraction runs from a zoned archive. Windows only (elsewhere the row fails
 #                   with the reason); recorded in the row's `setting.zone`.
+#   foreign         optional (E4-8): a foreign-extraction tool. The id of the tool (the maker)
+#                   whose `create` template writes the archive once per class and setting,
+#                   untimed, with the setting's `compress` as the maker's `{settings}`; this tool
+#                   has no create template and only extracts it. Its rows carry `information`
+#                   (never in a gate) and it is left out of `--tools all`. Per setting,
+#                   `extension` names that archive's extension.
 #
 # Working-directory rules. CREATE (every directory-mode tool and the tar step of tar-stream
 # tools): the runner executes the tool with its working directory set to the parent of the class
@@ -387,3 +393,55 @@ install = { url = "https://www.powerarchiver.com/" }
 manual = true
 verified = false
 note = "Strongest-setting flags and archive format not verified. The owner supplies command lines (and the extension) in bench/tools.local.toml (docs/BASELINES.md)."
+
+# Foreign-format extraction, information rows only (E4-8; never in a gate, no claim). `7z` makes
+# each setting's archive once per class (ZIP Deflate, 7z LZMA2; the setting's `compress` are 7z's
+# arguments), outside every timed step; `lpk x` and `7z x` then extract that same file, each
+# verified against the manifest. Left out of `--tools all`; asked for by name:
+# `lpk-bench run --tools lpk-foreign,7z-foreign --classes office-pdf,source-git,small-files`.
+[[tool]]
+id = "lpk-foreign"
+name = "LitePack, extracting foreign archives"
+exe = { windows = ["lpk"], linux = ["lpk"], macos = ["lpk"] }
+hints_first = true
+hints = { windows = ["target/release/lpk.exe"], linux = ["target/release/lpk"], macos = ["target/release/lpk"] }
+version = { args = ["--version"], pattern = 'lpk (\S+)' }
+extension = ".zip"
+mode = "directory"
+layout = "nested"
+foreign = "7z"
+extract = ["x", "{archive}", "{outdir}", "{settings}"]
+licence = "Apache-2.0 OR MIT (this repository)"
+install = { url = "built from this repository: cargo build --release -p lpk-cli, and lpk-worker in workers/" }
+note = "Extracts through the sandboxed lpk-worker, which must sit beside lpk."
+[[tool.setting]]
+id = "zip-deflate"
+compress = ["-tzip", "-mm=Deflate", "-mx5"]
+extension = ".zip"
+[[tool.setting]]
+id = "7z-lzma2"
+compress = ["-t7z", "-m0=LZMA2", "-mx5"]
+extension = ".7z"
+
+[[tool]]
+id = "7z-foreign"
+name = "7-Zip, extracting the same foreign archives"
+exe = { windows = ["7z"], linux = ["7zz", "7z"], macos = ["7zz"] }
+hints = { windows = ["%ProgramFiles%/7-Zip/7z.exe", "%ProgramFiles(x86)%/7-Zip/7z.exe", "%LOCALAPPDATA%/Programs/7-Zip/7z.exe"] }
+version = { args = [], pattern = '7-Zip[^\d\r\n]*(\d+(?:\.\d+)+)' }
+extension = ".zip"
+mode = "directory"
+layout = "nested"
+foreign = "7z"
+extract = ["x", "-bd", "-y", "{threads}", "-o{outdir}", "{archive}"]
+threads = ["-mmt={n}"]
+licence = "LGPL-2.1-or-later with unRAR restriction; used as an external program only"
+install = { winget = "7zip.7zip", apt = "7zip", url = "https://www.7-zip.org/" }
+[[tool.setting]]
+id = "zip-deflate"
+compress = ["-tzip", "-mm=Deflate", "-mx5"]
+extension = ".zip"
+[[tool.setting]]
+id = "7z-lzma2"
+compress = ["-t7z", "-m0=LZMA2", "-mx5"]
+extension = ".7z"
