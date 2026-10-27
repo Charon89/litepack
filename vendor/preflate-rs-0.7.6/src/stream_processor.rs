@@ -433,6 +433,8 @@ fn recreate_limited_into(
         // end of stream normally is the last block (as in recreate_blocks)
         let last = cabac_decoder
             .decode_correction_bool(CodecCorrection::EndOfChunk, input.remaining() == 0);
+        // LitePack change 15: a failed read of the corrections is refused, never a success.
+        cabac_decoder.litepack_check()?;
 
         if last {
             break;
@@ -521,6 +523,7 @@ fn recreate_blocks<D: PredictionDecoder>(
         // end of stream normally is the last block
         let last =
             decoder.decode_correction_bool(CodecCorrection::EndOfChunk, input.remaining() == 0);
+        decoder.litepack_check()?; // LitePack change 15
 
         if last {
             break;

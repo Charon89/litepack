@@ -430,6 +430,15 @@ mod tests {
     /// context it touches is fresh whichever kind the recreation reads first, so the bytes do
     /// not depend on it.
     fn crafted(tail: impl FnOnce(&mut lpk_codecs_vp8::VPXBoolWriter<&mut Vec<u8>>)) -> Vec<u8> {
+        crafted_branch(false, tail)
+    }
+
+    /// [`crafted`], taking the default branch (`true`: a run of default actions) or the
+    /// correction branch (`false`) at the first read.
+    fn crafted_branch(
+        default: bool,
+        tail: impl FnOnce(&mut lpk_codecs_vp8::VPXBoolWriter<&mut Vec<u8>>),
+    ) -> Vec<u8> {
         use lpk_codecs_vp8::{Branch, VPXBoolWriter, Vp8Encode};
         let mut out = Vec::new();
         {
@@ -438,7 +447,7 @@ mod tests {
             for _ in 0..preflate_rs::CodecCorrection::MAX as usize {
                 w.put(true, &mut seen).unwrap();
             }
-            w.put(false, &mut Branch::new()).unwrap();
+            w.put(default, &mut Branch::new()).unwrap();
             tail(&mut w);
             // room for whatever is read after the refusal point
             w.put_n_bits(0, 64, &mut [Branch::new(); 32]).unwrap();
@@ -447,42 +456,82 @@ mod tests {
         out
     }
 
+    /// Runs `f` with a panic hook that records every panic on this thread (as libFuzzer's hook
+    /// would abort on it, R92), and returns `f`'s result and the panics seen.
+    fn without_panics<T>(f: impl FnOnce() -> T) -> (Option<T>, Vec<String>) {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let me = std::thread::current().id();
+        let old = std::panic::take_hook();
+        {
+            let seen = Arc::clone(&seen);
+            std::panic::set_hook(Box::new(move |info| {
+                if std::thread::current().id() == me {
+                    let at = info.location().map(|l| l.to_string()).unwrap_or_default();
+                    seen.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(format!("{at}: {info}"));
+                }
+            }));
+        }
+        let r = catch_unwind(AssertUnwindSafe(f)).ok();
+        std::panic::set_hook(old);
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        (r, seen)
+    }
+
     /// The record of [`stream`] with `coded` as its correction stream: refused as `corrections`
-    /// through the decoder, and the library's panic is LitePack change 8's (the same in a debug
-    /// and a release build; run with `--release` too).
-    fn refused_by_change_8(coded: Vec<u8>, message: &str) {
+    /// through the decoder, and the library returns LitePack change 15's error
+    /// (`InvalidPredictionData`, naming `message`) without a panic (the same in a debug and a
+    /// release build; run with `--release` too).
+    fn refused_by_change_15(coded: Vec<u8>, message: &str) {
         let (plain, d) = stream();
         let mut crafted = d.clone();
         crafted.corrections =
             preflate_rs::litepack_record_with_coded_corrections(&d.corrections, coded).unwrap();
-        assert_eq!(reason(run(&crafted, &plain)), "corrections");
         let limit = d.original_len as usize;
-        let payload = catch_unwind(AssertUnwindSafe(|| {
-            recreate_whole_deflate_stream_limited(&plain, &crafted.corrections, limit)
-        }))
-        .expect_err("the library refuses with a panic");
-        let text = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        assert!(text.contains(message), "{text}");
+        let (r, panics) = without_panics(|| {
+            (
+                reason(run(&crafted, &plain)),
+                recreate_whole_deflate_stream_limited(&plain, &crafted.corrections, limit),
+            )
+        });
+        assert!(panics.is_empty(), "panicked: {panics:?}");
+        let (why, r) = r.expect("no panic");
+        assert_eq!(why, "corrections");
+        let e = r.expect_err("the library refuses");
+        assert_eq!(e.exit_code(), ExitCode::InvalidPredictionData);
+        assert!(e.to_string().contains(message), "{e}");
     }
 
+    /// Change 15, `read_exp_value`'s bounded unary read (formerly change 8's first panic).
     #[test]
     fn a_correction_exponent_above_32_is_refused() {
         use lpk_codecs_vp8::Branch;
-        refused_by_change_8(
+        refused_by_change_15(
             crafted(|w| w.put_unary_encoded(33, &mut [Branch::new(); 32]).unwrap()),
             "value above the caller's maximum",
         );
     }
 
+    /// The same on the default branch (a run of default actions).
+    #[test]
+    fn a_default_run_exponent_above_32_is_refused() {
+        use lpk_codecs_vp8::Branch;
+        refused_by_change_15(
+            crafted_branch(true, |w| {
+                w.put_unary_encoded(33, &mut [Branch::new(); 32]).unwrap()
+            }),
+            "value above the caller's maximum",
+        );
+    }
+
+    /// Change 15, `decode_correction_slow`'s correction branch: a decoded 2^32 - 1.
     #[test]
     fn a_decoded_correction_value_of_u32_max_is_refused() {
         use lpk_codecs_vp8::Branch;
         // exponent 32 and the 31 bits below the leading one all set: 2^32 - 1
-        refused_by_change_8(
+        refused_by_change_15(
             crafted(|w| {
                 w.put_unary_encoded(32, &mut [Branch::new(); 32]).unwrap();
                 w.put_n_bits(u64::MAX, 31, &mut [Branch::new(); 32])
@@ -492,11 +541,52 @@ mod tests {
         );
     }
 
+    /// Change 15, `decode_correction_slow`'s default branch: a run of 2^32 - 1 default actions
+    /// plus one.
+    #[test]
+    fn a_decoded_default_run_of_u32_max_is_refused() {
+        use lpk_codecs_vp8::Branch;
+        refused_by_change_15(
+            crafted_branch(true, |w| {
+                w.put_unary_encoded(32, &mut [Branch::new(); 32]).unwrap();
+                w.put_n_bits(u64::MAX, 31, &mut [Branch::new(); 32])
+                    .unwrap();
+            }),
+            "a correction value above 2^32 - 1",
+        );
+    }
+
+    /// The nightly fuzz run's input (run 40444702572, `deflate_recreate`): the panic at
+    /// `cabac_codec.rs:89` is now LitePack change 15's error, with no panic.
+    #[test]
+    fn the_nightly_fuzz_input_is_refused_without_a_panic() {
+        let data: &[u8] = include_bytes!(
+            "../../../../../fuzz/seeds/deflate_recreate/crash-a2c5003203eb879630e41e00ea7e24e0044b025a"
+        );
+        let limit = usize::from(u16::from_le_bytes([data[0], data[1]]));
+        let rest = &data[6..];
+        let n = (u32::from_le_bytes([data[2], data[3], data[4], data[5]]) as usize).min(rest.len());
+        let (plain, corrections) = rest.split_at(n);
+        let (r, panics) = without_panics(|| {
+            preflate_rs::recreate_whole_deflate_stream_limited_report(plain, corrections, limit)
+        });
+        assert!(panics.is_empty(), "panicked: {panics:?}");
+        let (r, capacity) = r.expect("no panic");
+        assert!(capacity <= limit + 8);
+        let e = r.expect_err("refused");
+        assert_eq!(e.exit_code(), ExitCode::InvalidPredictionData);
+        assert!(
+            e.to_string().contains("value above the caller's maximum"),
+            "{e}"
+        );
+    }
+
     /// preflate-rs's vendor changes 9 to 11, 13 and 14 (E4-6's fuzzing): crafted correction streams
     /// (the `deflate_recreate` seeds, then a deterministic sweep of pseudo-random coded streams
     /// under the parameters of [`stream`]) make no arithmetic overflow, no out-of-range index or
-    /// slice and no failed (debug) assertion in the recreation. Change 8's deliberate refusals are panics and are allowed; a
-    /// panic hook records the others, on this thread only (as libFuzzer's hook would see them).
+    /// slice and no failed (debug) assertion in the recreation. Since change 15 no panic at all is
+    /// allowed (R92): a panic hook records every one, on this thread only (as libFuzzer's hook
+    /// would see them).
     #[test]
     fn crafted_corrections_do_not_panic() {
         use std::sync::{Arc, Mutex};
@@ -512,15 +602,7 @@ mod tests {
                     .cloned()
                     .or_else(|| info.payload().downcast_ref::<&str>().map(|s| s.to_string()))
                     .unwrap_or_default();
-                let defect = [
-                    "overflow",
-                    "out of range",
-                    "out of bounds",
-                    "assertion failed",
-                ]
-                .iter()
-                .any(|w| text.contains(w));
-                if std::thread::current().id() == me && defect {
+                if std::thread::current().id() == me {
                     let at = info.location().map(|l| l.to_string()).unwrap_or_default();
                     bad.lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -534,12 +616,15 @@ mod tests {
             }));
         };
         // The fuzz target's layout: limit (u16 LE), plain length (u32 LE), plain, corrections.
-        let seeds: [&[u8]; 2] = [
+        let seeds: [&[u8]; 3] = [
             include_bytes!(
                 "../../../../../fuzz/seeds/deflate_recreate/crash-35aa2eee820b0f5b132908c7cf85ff9d46e5562f"
             ),
             include_bytes!(
                 "../../../../../fuzz/seeds/deflate_recreate/crash-bbd6b7bcd56627214532a1afa95004c8fa242826"
+            ),
+            include_bytes!(
+                "../../../../../fuzz/seeds/deflate_recreate/crash-a2c5003203eb879630e41e00ea7e24e0044b025a"
             ),
         ];
         for data in seeds {
