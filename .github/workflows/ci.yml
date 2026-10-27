@@ -205,6 +205,26 @@ jobs:
               ForEach-Object { "$($_.FullName): $(Get-Content $_.FullName -Raw)" }
           }
           Get-ChildItem -Path "$env:RUNNER_TEMP\gui-e2e" -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 60 FullName
+          # The native driver alone, verbose: (a) the test's environment, (b) without LOCALAPPDATA (no data folder set by the app).
+          $gui = (Resolve-Path target\release\lpk-gui.exe).Path
+          $archive = "$env:RUNNER_TEMP\gui-e2e\smoke.lpk"
+          foreach ($variant in @('a', 'b')) {
+            $log = "$env:RUNNER_TEMP\msedgedriver-$variant.log"
+            $saved = $env:LOCALAPPDATA
+            if ($variant -eq 'a') { $env:LOCALAPPDATA = "$env:RUNNER_TEMP\gui-e2e\local" } else { Remove-Item Env:LOCALAPPDATA }
+            $p = Start-Process -FilePath $env:LPK_E2E_NATIVE_DRIVER -ArgumentList '--port=9515', '--verbose', "--log-path=$log" -PassThru
+            $env:LOCALAPPDATA = $saved
+            Start-Sleep -Seconds 3
+            $body = @{ capabilities = @{ alwaysMatch = @{ browserName = 'webview2'; 'ms:edgeChromium' = $true; 'ms:edgeOptions' = @{ binary = $gui; args = @($archive) } } } } | ConvertTo-Json -Depth 8
+            try {
+              $r = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:9515/session -Body $body -ContentType 'application/json' -TimeoutSec 120
+              "variant ${variant}: session $($r.value.sessionId)"
+              Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:9515/session/$($r.value.sessionId)" | Out-Null
+            } catch { "variant ${variant}: $_" }
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            "---- $log"
+            Get-Content $log | Select-String -Pattern 'DevTools|Launch|command|WEBVIEW2|user-data|binary|exit|rror|crash|args' | Select-Object -First 60
+          }
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:
