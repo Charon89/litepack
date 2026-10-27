@@ -119,10 +119,10 @@ the destination and that no partial file remains.
 3,600 s on Mondays, with a persistent corpus; a check fails the workflow when the matrix and `fuzz/fuzz_targets/`
 differ; every build uses `--no-cfg-fuzzing` so the fuzzer sees the shipped checks (D-114). The findings of E4-6's
 own runs were fixed with their inputs kept as seeds (D-115, D-116). The first nightly run on `main` (run
-40444702572) found two more, not fixed at the time of writing: `deflate_recreate`, a panic in the vendored
-`preflate-rs` (fix on branch `fix/deflate-decode-panics`), and `jpeg_reconstruct`, an underflow in `lepton_jpeg`
-(fix on branch `fix/jpeg-garbage-bound`). The nightly stays red until both land. `foreign_libarchive` waits for
-E4-4.
+40444702572) found two more, both fixed with their inputs kept as seeds: `deflate_recreate`, a panic in the
+vendored `preflate-rs`, now an error instead (vendor changes 15 and 16, D-122), and `jpeg_reconstruct`, an
+underflow in `lepton_jpeg`, now refused by five more structural checks before the library reads the stream
+(D-121). `foreign_libarchive` waits for E4-4.
 
 ## 7. Extraction policy on Windows (E6-6, E6-0)
 
