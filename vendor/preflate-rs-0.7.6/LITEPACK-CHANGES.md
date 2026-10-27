@@ -170,7 +170,8 @@ lists) far beyond what the archive declares.
    `src/hash_chain_holder.rs`, `hop_match` returns `ExitCode::RecompressFailed` for a length
    below 3: a crafted length correction reached `prefix_cmp_odd_size`'s `assert!` (a panic in
    every build). A Deflate match is 3 to 258 bytes, so no valid record is affected. Found by
-   change 15's regression test, which counts every panic.
+   change 15's regression test, which counts every panic; `lpk-core`'s
+   `a_decoded_match_length_of_2_is_refused` checks it (a crafted length correction giving 2).
 
 The workspace runs the regression test of changes 9 to 11, 13 and 14 (the vendored crate's own tests are not
 run): `lpk-core`'s `crafted_corrections_do_not_panic` (`src/peel/deflate/decode.rs`) feeds the
