@@ -382,6 +382,224 @@ fn hostile_header_lengths_are_lepton_stream_before_the_library() {
     assert_eq!(r.unwrap(), jpeg);
 }
 
+/// The nightly fuzz finding (scheduled run 40444702572, `crash-b6df…`): a `GRB` section longer
+/// than the JPEG length the fixed header declares made lepton_jpeg 0.5.8 subtract with overflow
+/// (`lepton_file_reader.rs:299`). Both decoders refuse it before the library, with a small peak.
+#[test]
+fn garbage_past_the_jpeg_length_is_refused_before_the_library() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let data = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fuzz-jpeg-reconstruct-crash-b6df.bin"),
+    )
+    .unwrap();
+    let primary_len = u64::from(u32::from_le_bytes(data[..4].try_into().unwrap()));
+    assert_eq!(data[4], 0, "flags of the finding");
+    let stream = &data[5..];
+    assert!(read_stream_header(stream, primary_len).is_none());
+    assert_eq!(
+        lpk_check::jpeg::stream_header(0, stream, primary_len)
+            .unwrap_err()
+            .detail,
+        "bad record 0: lepton stream"
+    );
+    let record = Record::new(lpk_format::RecordBody::Jpeg(lpk_format::JpegRecord {
+        original_len: primary_len,
+        primary_len,
+        trailing: Vec::new(),
+        nested_trailing_chunks: Vec::new(),
+        gainmaps: Vec::new(),
+        lepton_version: LEPTON_VERSION,
+        original_hash: [0; 32],
+    }));
+    let block = 1u64 << 24;
+    let l = limits(block, block + MODEL_ALLOWANCE + (32 << 20));
+    let (r, peak, took) = measured(stream, record, primary_len, &l, Some(1));
+    assert!(
+        matches!(
+            r,
+            Err(FormatError::BadRecord {
+                reason: "lepton stream",
+                ..
+            })
+        ),
+        "{r:?}"
+    );
+    assert!(peak < 1 << 20, "peak {peak}");
+    assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
+/// `stream` with the fixed header's JPEG length set to `len`.
+fn with_jpeg_len(stream: &[u8], len: u32) -> Vec<u8> {
+    let mut s = stream.to_vec();
+    s[20..24].copy_from_slice(&len.to_le_bytes());
+    s
+}
+
+/// The inflated header's `HH` section with byte `at` of every partition set to `v`.
+fn set_partition_byte(stream: &[u8], at: usize, v: u8) -> Vec<u8> {
+    rewrite_header(stream, |r| {
+        let hh = hh_at(r);
+        for p in 0..usize::from(r[hh + 2]) {
+            r[hh + 3 + 16 * p + at] = v;
+        }
+    })
+}
+
+/// An appended section `m`, a u32 LE `len` and `body`.
+fn appended(stream: &[u8], m: &[u8], len: u32, body: &[u8]) -> Vec<u8> {
+    rewrite_header(stream, |r| {
+        r.extend_from_slice(m);
+        r.extend_from_slice(&len.to_le_bytes());
+        r.extend_from_slice(body);
+    })
+}
+
+/// `stream` with every `GRB` section taken out of its inflated header (the library then
+/// assumes 2 bytes of garbage, the EOI).
+fn without_grb(stream: &[u8]) -> Vec<u8> {
+    let le = |b: &[u8]| u32::from_le_bytes(b[..4].try_into().unwrap()) as usize;
+    let mut removed = false;
+    let out = rewrite_header(stream, |r| {
+        let mut p = 7 + le(&r[3..]);
+        while p < r.len() {
+            let len = match &r[p..p + 3] {
+                b"P0D" => 4,
+                [b'H', b'H', n] => 3 + 16 * usize::from(*n),
+                b"CRS" => 7 + 4 * le(&r[p + 3..]),
+                b"FRS" | b"GRB" => 7 + le(&r[p + 3..]),
+                b"EEE" => 31,
+                m => panic!("unexpected section {m:?}"),
+            };
+            if &r[p..p + 3] == b"GRB" {
+                r.drain(p..p + len);
+                removed = true;
+            } else {
+                p += len;
+            }
+        }
+    });
+    assert!(removed, "the peeled stream carries a GRB section");
+    out
+}
+
+/// An `EEE` section whose `max_dpos` are all `dpos`.
+fn early_eof(stream: &[u8], dpos: u32) -> Vec<u8> {
+    rewrite_header(stream, |r| {
+        r.extend_from_slice(b"EEE");
+        r.extend_from_slice(&[0; 12]);
+        for _ in 0..4 {
+            r.extend_from_slice(&dpos.to_le_bytes());
+        }
+    })
+}
+
+/// Each header field lepton_jpeg 0.5.8 does unchecked arithmetic or indexing with, on both
+/// sides of the bound both decoders give it: past it, `lepton stream` before the library with a
+/// small peak; at it, the header walk passes.
+#[test]
+fn header_fields_the_library_trusts_are_bounded_by_both_decoders() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpeg = grey_jpeg(256, 256, false);
+    let plan = JpegPeel::default().peel(&jpeg, 1 << 24).unwrap();
+    let s = &plan.stream;
+    let pjpeg = grey_jpeg(256, 256, true);
+    let pplan = JpegPeel::default().peel(&pjpeg, 1 << 24).unwrap();
+    let ps = &pplan.stream;
+    let scans = pjpeg.windows(2).filter(|w| *w == [0xFF, 0xDA]).count() as u32;
+    assert_eq!(scans, 4);
+    let counts = |n: u32| -> Vec<u8> { (0..n).flat_map(|_| 1u32.to_le_bytes()).collect() };
+    let garbage = vec![0u8; 100];
+    // (name, refused, passing, the primary both belong to)
+    type Case<'a> = (&'a str, Vec<u8>, Vec<u8>, &'a [u8]);
+    let cases: Vec<Case> = vec![
+        (
+            "garbage past the JPEG length (lepton_file_reader.rs:299)",
+            with_jpeg_len(&appended(s, b"GRB", 100, &garbage), 99),
+            with_jpeg_len(&appended(s, b"GRB", 100, &garbage), 100),
+            &jpeg,
+        ),
+        (
+            "the assumed EOI (no GRB) past the JPEG length (lepton_file_reader.rs:299)",
+            with_jpeg_len(&without_grb(s), 1),
+            with_jpeg_len(&without_grb(s), 2),
+            &jpeg,
+        ),
+        (
+            "overhang bits past 7 (bit_writer.rs:143)",
+            set_partition_byte(s, 7, 8),
+            set_partition_byte(s, 7, 7),
+            &jpeg,
+        ),
+        (
+            "max_dpos of u32::MAX (truncate_components.rs:69)",
+            early_eof(s, u32::MAX),
+            early_eof(s, u32::MAX - 1),
+            &jpeg,
+        ),
+        (
+            "first restart error above 1 (lepton_file_reader.rs:393)",
+            appended(s, b"FRS", 1, &[2]),
+            appended(s, b"FRS", 2, &[1, 255]),
+            &jpeg,
+        ),
+        (
+            "restart counts fewer than the scans (jpeg_write.rs:323)",
+            appended(ps, b"CRS", scans - 1, &counts(scans - 1)),
+            appended(ps, b"CRS", scans, &counts(scans)),
+            &pjpeg,
+        ),
+        (
+            "an empty FRS, then a first restart error above 1 (lepton_file_reader.rs:393)",
+            appended(&appended(s, b"FRS", 0, &[]), b"FRS", 1, &[2]),
+            appended(&appended(s, b"FRS", 0, &[]), b"FRS", 1, &[1]),
+            &jpeg,
+        ),
+        (
+            "restart counts split across two CRS sections (jpeg_write.rs:323)",
+            appended(&appended(ps, b"CRS", 2, &counts(2)), b"CRS", 1, &counts(1)),
+            appended(&appended(ps, b"CRS", 2, &counts(2)), b"CRS", 2, &counts(2)),
+            &pjpeg,
+        ),
+    ];
+    let block = 1u64 << 24;
+    let l = limits(block, block + (512 << 20));
+    for (name, refused, passing, primary) in cases {
+        let primary_len = primary.len() as u64;
+        assert!(
+            read_stream_header(&refused, primary_len).is_none(),
+            "{name} passed the check"
+        );
+        assert_eq!(
+            lpk_check::jpeg::stream_header(0, &refused, primary_len)
+                .unwrap_err()
+                .detail,
+            "bad record 0: lepton stream",
+            "{name} passed lpk-check"
+        );
+        let (r, peak, _) = measured(&refused, record_for(primary), primary_len, &l, Some(1));
+        assert!(
+            matches!(
+                r,
+                Err(FormatError::BadRecord {
+                    reason: "lepton stream",
+                    ..
+                })
+            ),
+            "{name}: {r:?}"
+        );
+        assert!(peak < 1 << 20, "{name}: peak {peak}");
+        assert!(
+            read_stream_header(&passing, primary_len).is_some(),
+            "{name}: the bound itself was refused"
+        );
+        assert!(
+            lpk_check::jpeg::stream_header(0, &passing, primary_len).is_ok(),
+            "{name}: the bound itself was refused by lpk-check"
+        );
+    }
+}
+
 #[test]
 fn small_images_declare_revision_1_1s_term() {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
