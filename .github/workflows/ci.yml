@@ -223,8 +223,20 @@ jobs:
             } catch { "variant ${variant}: $_" }
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             "---- $log"
-            Get-Content $log | Select-String -Pattern 'DevTools|Launch|command|WEBVIEW2|user-data|binary|exit|rror|crash|args' | Select-Object -First 60
+            "lines: $((Get-Content $log).Count)"
+            Get-Content $log | Where-Object { $_ -match 'DevTools|Launch|command|WEBVIEW2|user-data|binary|exit|rror|crash|args' } |
+              Select-Object -First 60 | ForEach-Object { $_.Substring(0, [Math]::Min(600, $_.Length)) }
           }
+          # (c) The app alone with a remote-debugging port in WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: does its webview listen?
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9333'
+          $app = Start-Process -FilePath $gui -ArgumentList "`"$archive`"" -PassThru
+          Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+          Start-Sleep -Seconds 15
+          "variant c: app running: $(-not $app.HasExited) exit: $(if ($app.HasExited) { $app.ExitCode })"
+          Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(lpk-gui|msedgewebview2)\.exe$' } |
+            Select-Object -First 3 | ForEach-Object { "$($_.Name): $($_.CommandLine.Substring(0, [Math]::Min(700, $_.CommandLine.Length)))" }
+          try { Invoke-RestMethod -Uri http://127.0.0.1:9333/json/version -TimeoutSec 10 | ConvertTo-Json } catch { "variant c: no DevTools endpoint: $_" }
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:
