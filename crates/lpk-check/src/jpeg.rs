@@ -149,7 +149,7 @@ pub const THREAD_TERM: u64 = 4_194_304;
 /// must therefore fit in the JPEG length. Also `lepton stream`: the garbage longer than the
 /// JPEG length; a partition with more than 7 overhang bits; an `EEE` `max_dpos` of `u32::MAX`;
 /// a first restart error of 2 or more; restart counts given but fewer than the raw header's
-/// `FF DA` pairs (at least one).
+/// `FF DA` pairs, and fewer than one when the raw header has no `FF DA`.
 pub fn stream_header(id: u64, stream: &[u8], primary_len: u64) -> Result<StreamHeader> {
     let bad = || bad_record(id, "lepton stream");
     let le = |b: &[u8]| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));

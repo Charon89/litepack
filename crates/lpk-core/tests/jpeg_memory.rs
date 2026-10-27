@@ -455,6 +455,34 @@ fn appended(stream: &[u8], m: &[u8], len: u32, body: &[u8]) -> Vec<u8> {
     })
 }
 
+/// `stream` with every `GRB` section taken out of its inflated header (the library then
+/// assumes 2 bytes of garbage, the EOI).
+fn without_grb(stream: &[u8]) -> Vec<u8> {
+    let le = |b: &[u8]| u32::from_le_bytes(b[..4].try_into().unwrap()) as usize;
+    let mut removed = false;
+    let out = rewrite_header(stream, |r| {
+        let mut p = 7 + le(&r[3..]);
+        while p < r.len() {
+            let len = match &r[p..p + 3] {
+                b"P0D" => 4,
+                [b'H', b'H', n] => 3 + 16 * usize::from(*n),
+                b"CRS" => 7 + 4 * le(&r[p + 3..]),
+                b"FRS" | b"GRB" => 7 + le(&r[p + 3..]),
+                b"EEE" => 31,
+                m => panic!("unexpected section {m:?}"),
+            };
+            if &r[p..p + 3] == b"GRB" {
+                r.drain(p..p + len);
+                removed = true;
+            } else {
+                p += len;
+            }
+        }
+    });
+    assert!(removed, "the peeled stream carries a GRB section");
+    out
+}
+
 /// An `EEE` section whose `max_dpos` are all `dpos`.
 fn early_eof(stream: &[u8], dpos: u32) -> Vec<u8> {
     rewrite_header(stream, |r| {
@@ -492,14 +520,14 @@ fn header_fields_the_library_trusts_are_bounded_by_both_decoders() {
             &jpeg,
         ),
         (
-            "the assumed EOI past the JPEG length (lepton_file_reader.rs:299)",
-            with_jpeg_len(&appended(s, b"GRB", 2, &[0xFF, 0xD9]), 1),
-            with_jpeg_len(&appended(s, b"GRB", 1, &[0xD9]), 1),
+            "the assumed EOI (no GRB) past the JPEG length (lepton_file_reader.rs:299)",
+            with_jpeg_len(&without_grb(s), 1),
+            with_jpeg_len(&without_grb(s), 2),
             &jpeg,
         ),
         (
             "overhang bits past 7 (bit_writer.rs:143)",
-            set_partition_byte(s, 7, 65),
+            set_partition_byte(s, 7, 8),
             set_partition_byte(s, 7, 7),
             &jpeg,
         ),
@@ -519,6 +547,18 @@ fn header_fields_the_library_trusts_are_bounded_by_both_decoders() {
             "restart counts fewer than the scans (jpeg_write.rs:323)",
             appended(ps, b"CRS", scans - 1, &counts(scans - 1)),
             appended(ps, b"CRS", scans, &counts(scans)),
+            &pjpeg,
+        ),
+        (
+            "an empty FRS, then a first restart error above 1 (lepton_file_reader.rs:393)",
+            appended(&appended(s, b"FRS", 0, &[]), b"FRS", 1, &[2]),
+            appended(&appended(s, b"FRS", 0, &[]), b"FRS", 1, &[1]),
+            &jpeg,
+        ),
+        (
+            "restart counts split across two CRS sections (jpeg_write.rs:323)",
+            appended(&appended(ps, b"CRS", 2, &counts(2)), b"CRS", 1, &counts(1)),
+            appended(&appended(ps, b"CRS", 2, &counts(2)), b"CRS", 2, &counts(2)),
             &pjpeg,
         ),
     ];

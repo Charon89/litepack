@@ -1063,8 +1063,8 @@ fn take_u32(z: &mut impl std::io::Read, total: &mut u64, cap: u64) -> Option<u32
 /// overhang bits exceed 7 (`bit_writer.rs:143`); an `EEE` section with a `max_dpos` of
 /// `u32::MAX` (`truncate_components.rs:69` adds one); a first restart error above 1
 /// (`lepton_file_reader.rs:393` adds it to an 8-bit count); restart counts, when any are given,
-/// fewer than the `FF DA` pairs of the raw header, or none (`jpeg_write.rs:323` indexes them by
-/// scan). Each of these is a stream the
+/// fewer than the `FF DA` pairs of the raw header, and fewer than one when the raw header has
+/// no `FF DA` (`jpeg_write.rs:323` indexes them by scan). Each of these is a stream the
 /// library refuses too, or one it does not write: the library allocates each length it reads
 /// at once (a `GRB` length of 4 GB was a fuzzing finding), and partitions whose rows overlap
 /// each hold a coefficient buffer for their rows.
