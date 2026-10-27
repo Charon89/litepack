@@ -7,9 +7,22 @@ import { decodeBatch } from "./batch.js";
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
 const problems = [];
-window.addEventListener("error", (e) => problems.push(`error: ${e.message}`));
-window.addEventListener("unhandledrejection", (e) => problems.push(`rejection: ${describe(e.reason)}`));
-document.addEventListener("securitypolicyviolation", (e) => problems.push(`csp: ${e.violatedDirective}`));
+// The same events as flags on <html> for E5-11's WebDriver harness: a count per kind
+// (data-lpk-error, data-lpk-rejection, data-lpk-csp, data-lpk-failure), "0" once the listeners
+// are in, and the last message (data-lpk-last). The driver reads them as attributes, so no
+// script is injected and the CSP stays as it is.
+const flags = document.documentElement.dataset;
+for (const kind of ["lpkError", "lpkRejection", "lpkCsp", "lpkFailure"]) {
+  flags[kind] = "0";
+}
+function problem(kind, text) {
+  problems.push(text);
+  flags[kind] = String(Number(flags[kind]) + 1);
+  flags.lpkLast = text;
+}
+window.addEventListener("error", (e) => problem("lpkError", `error: ${e.message}`));
+window.addEventListener("unhandledrejection", (e) => problem("lpkRejection", `rejection: ${describe(e.reason)}`));
+document.addEventListener("securitypolicyviolation", (e) => problem("lpkCsp", `csp: ${e.violatedDirective}`));
 
 const core = window.__TAURI__.core;
 const FIRST_PAGE_ROWS = 200;
@@ -95,7 +108,7 @@ async function openArchive(granted) {
 }
 
 function showError(e) {
-  problems.push(`failure: ${describe(e)}`);
+  problem("lpkFailure", `failure: ${describe(e)}`);
   setStatus(`${t("error.title")}: ${describe(e)}`);
   report(null, 0, "").catch(() => {});
 }

@@ -130,6 +130,69 @@ jobs:
             exit 1
           fi
 
+  # E5-11's driver harness (crates/lpk-gui-e2e): lpk-gui.exe under tauri-driver and the Edge WebDriver of the
+  # WebView2 runtime's version opens an archive made by lpk; its rows reach the DOM and the page raised no
+  # error, unhandled rejection, CSP violation or failure flag.
+  gui-e2e:
+    name: gui-e2e (windows-2025)
+    timeout-minutes: 45
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui-e2e
+      - name: tauri-cli and tauri-driver through cargo (pinned)
+        env:
+          # Third-party sources: their warnings are not ours to deny.
+          RUSTFLAGS: ""
+        run: |
+          cargo install tauri-cli --version 2.12.4 --locked
+          cargo install tauri-driver --version 2.0.4 --locked
+      - name: Build lpk (makes the test archive)
+        run: cargo build --locked --release -p lpk-cli
+      - name: cargo tauri build
+        working-directory: crates/lpk-gui
+        run: cargo tauri build --ci -- --locked
+      - name: An Edge WebDriver of the WebView2 runtime's version
+        shell: pwsh
+        run: |
+          # The WebView2 runtime's version (the Evergreen runtime's client key, machine-wide, then per-user).
+          $key = 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $runtime = (Get-ItemProperty "HKLM:\$key" -ErrorAction SilentlyContinue).pv
+          if (-not $runtime) {
+            $runtime = (Get-ItemProperty 'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv
+          }
+          if (-not $runtime) { throw "no WebView2 runtime version in the registry" }
+          $preinstalled = Join-Path $env:EdgeWebDriver 'msedgedriver.exe'
+          $line = & $preinstalled --version
+          $driver = [regex]::Match("$line", '\d+\.\d+\.\d+\.\d+').Value
+          Write-Output "WebView2 runtime $runtime; preinstalled Edge WebDriver $driver ($line)"
+          if ($driver -eq $runtime) {
+            $native = $preinstalled
+          } else {
+            # Microsoft's official Edge WebDriver download location, the version pinned to the runtime's:
+            # https://msedgedriver.microsoft.com/<version>/edgedriver_win64.zip
+            $zip = Join-Path $env:RUNNER_TEMP 'edgedriver_win64.zip'
+            $dir = Join-Path $env:RUNNER_TEMP 'edgedriver'
+            Invoke-WebRequest -Uri "https://msedgedriver.microsoft.com/$runtime/edgedriver_win64.zip" -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $dir -Force
+            $native = Join-Path $dir 'msedgedriver.exe'
+            $line = & $native --version
+            Write-Output "fetched: $line"
+            if ([regex]::Match("$line", '\d+\.\d+\.\d+\.\d+').Value -ne $runtime) { throw "the fetched driver is not $runtime" }
+          }
+          "LPK_E2E_NATIVE_DRIVER=$native" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: The driver harness
+        env:
+          LPK_GUI_E2E: "1"
+        run: cargo test --locked -p lpk-gui-e2e -- --nocapture
+
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:
     name: cited results exist (ubuntu-24.04)
