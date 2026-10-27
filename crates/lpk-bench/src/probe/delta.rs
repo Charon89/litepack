@@ -458,6 +458,11 @@ pub fn read_rows(dirs: &[PathBuf], class: &str, manifest: &str) -> Result<GateRo
                     r.corpus.manifest_blake3
                 );
             }
+            // An information row (E4-8) is neither the subject nor an incumbent: its archive was
+            // made by another tool and it is never in a gate.
+            if r.information.is_some() {
+                continue;
+            }
             let Some(m) = r.median else { continue };
             let bytes = m.archive_bytes;
             if r.tool.id == "lpk" {
@@ -1341,6 +1346,28 @@ pub fn check(e: &Envelope<Data>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E4-8: an information row, however small its archive, is never the pre-gate's incumbent.
+    #[test]
+    fn information_rows_are_not_incumbents() {
+        use crate::run::result::samples;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let incumbent = samples::measured();
+        let mut info = samples::foreign();
+        if let Some(m) = info.median.as_mut() {
+            m.archive_bytes = 1;
+        }
+        for r in [&incumbent, &info] {
+            std::fs::write(
+                tmp.path().join(r.file_name()),
+                crate::run::result::render(r),
+            )
+            .expect("row");
+        }
+        let rows = read_rows(&[tmp.path().to_path_buf()], "text", &"ab".repeat(32)).expect("rows");
+        assert_eq!(rows.b_row.as_deref(), Some("7z/mx5"));
+        assert_eq!(rows.b, incumbent.median.map(|m| m.archive_bytes));
+    }
 
     #[test]
     fn ruzstd_raw_prefix_fact() {

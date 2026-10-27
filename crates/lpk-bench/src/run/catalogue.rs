@@ -417,6 +417,14 @@ impl Tool {
                      create templates (its maker writes the archive)"
                 );
             }
+            // A zone would be written onto the made archive, which the tools of a class share
+            // (hard-linked) and whose cache key does not carry a zone.
+            if let Some(s) = self.settings.iter().find(|s| s.zone.is_some()) {
+                bail!(
+                    "tool `{id}`: setting `{}`: zone is not allowed on a foreign-extraction tool",
+                    s.id
+                );
+            }
             if self.extract.is_empty() || self.settings.is_empty() {
                 bail!("tool `{id}`: an extract template and at least one setting are required");
             }
@@ -672,6 +680,8 @@ mod tests {
         let with_create = format!("{ok}\ncreate = [\"a\", \"{{archive}}\"]");
         assert!(Catalogue::parse(&tool(&with_create, "")).is_err());
         assert!(Catalogue::parse(&tool(ok, "extension = \"7z\"")).is_err());
+        // A zone would land on the shared made archive.
+        assert!(Catalogue::parse(&tool(ok, "zone = 3")).is_err());
         // `extension` on a setting of an ordinary tool.
         let plain = "create = [\"a\", \"{archive}\"]\nextract = [\"x\", \"{archive}\"]";
         assert!(Catalogue::parse(&tool(plain, "extension = \".7z\"")).is_err());
