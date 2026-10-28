@@ -326,7 +326,10 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
 ## 2026-10-28 — Text revision: the decoder checks of revisions 1.1 and 1.2 stated (D-116, D-121, D-115, D-122; no byte changes)
 
 The reference decoders (`lpk-core` and `lpk-check`) already enforce everything below; no vector byte, pinned hash
-or `version_minor` changes. A reader outcome changes only for records no conforming writer produces.
+or `version_minor` changes. A reader outcome changes only for records no conforming writer produces; that rests on
+the writer rule this revision adds (a writer MUST NOT write a Lepton stream that fails the requirements), and some
+of the stricter requirements also refuse streams the library would decode (D-121 (2)). No stream `lpk` has written
+fails them: the `jpeg_corpus` test asserts that `lpk-check` accepts every stream the JPEG peel writes.
 
 1. Section 8, `jpeg-reconstruct`, check (5): the decoder inflates the whole compressed header instead of exactly
    7 + `raw_len` bytes, so damage anywhere in the zlib stream, a wrong Adler-32 included, is `lepton stream` at
@@ -349,7 +352,7 @@ or `version_minor` changes. A reader outcome changes only for records no conform
    reference writer does. The `deflate-reconstruct` "Resources" sentence on what the writer declares says so for a
    JPEG image.
 3. Section 8, `deflate-reconstruct` "Limits of a recreation": two more permitted refusals, the ones the reference's
-   copy of preflate-rs makes since changes 12 to 14 of its `LITEPACK-CHANGES.md` (E4-6, D-115): a dynamic block header's
+   copy of preflate-rs makes since changes 10 and 12 to 14 of its `LITEPACK-CHANGES.md` (E4-6, D-115): a dynamic block header's
    decoded counts outside the ranges HLIT, HDIST and HCLEN can give (257 to 288, 1 to 32, 4 to 19), and a header
    value wider than its field. They are permitted refusals (MAY), as the limits before them, because a reader that
    calls the cited library cannot inspect decoded values and the library's result for them depends on the build.

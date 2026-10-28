@@ -127,7 +127,11 @@ recovery frames (section 13, "The code"), which version 1 had defined by referen
 of minor 0 or 1 is read as before. Nor does a revision of the text that states checks the reference decoders of a
 revision already enforce, which changes an outcome only for records no conforming writer produces: the text
 revision of 2026-10-28 states the structural requirements and memory rules of revision 1.1 (D-116, D-121) and
-further permitted refusals of revision 1.2 (D-115, D-122) in section 8.
+further permitted refusals of revision 1.2 (D-115, D-122) in section 8. That a conforming writer produces no such
+record rests on the writer rule the same revision adds (section 8: a writer MUST NOT write a Lepton stream that
+fails the requirements); some of the stricter requirements also refuse streams the library would decode (D-121
+(2)). No stream `lpk` has written fails them: the reference's `jpeg_corpus` test asserts that `lpk-check` accepts
+every stream the JPEG peel writes.
 
 Header flags:
 
@@ -864,7 +868,7 @@ The step's input is one Lepton stream and its output is the primary image of the
   below) is compared with the decode memory left after `max_block_plain` (`Refused`, field `decode_memory`;
   informative: the reference reports `needed` = `max_block_plain` + the image's term, saturating at 2^64 - 1, and
   `allowed` = the decode memory it compared against, the archive's `decode_memory` or its own memory resource if
-  smaller); then a decoder whose own need for the stream exceeds the memory it can give the decode may refuse the
+  smaller); then a decoder whose own need for the stream exceeds the memory it can give the decode MAY refuse the
   image (`Refused`, "Resources" below); (6) the stream is decoded (`BadRecord`, `lepton stream` when the
   library refuses it or its output would exceed `primary_len`; `primary_len` when the output is shorter);
   (7) assembly, in file order. When `trailing` is not empty it follows the primary image. Otherwise the nested
@@ -968,10 +972,10 @@ The step's input is one Lepton stream and its output is the primary image of the
   writer produces: the writer rule above excludes such streams, and the encoder of `lepton_jpeg` 0.5.8, which the
   reference pins, writes one `HH` section, at most 7 overhang bits per partition, no `CRS` or `FRS` section, block
   positions as `max_dpos` and only garbage the JPEG holds. The stricter cases are: a second `HH` section, whose
-  partitions the library would append; more than 7 overhang bits, though the library's subtraction from 64 fails
-  only above 64; a first restart error of 2 or more, and restart counts below the `FF DA` pairs, a pair inside a
-  segment's content counting too (the library decodes some such streams); a `max_dpos` of 2^32 - 1 for a component
-  the frame does not have; G above `jpeg_len` whatever encoder version the fixed header names (the library skips
+  partitions the library would append; more than 7 overhang bits, though the library's subtraction from 64
+  (`bit_writer.rs:143` of `lepton_jpeg` 0.5.8, D-121) fails only above 64; a first restart error of 2 or more, and
+  restart counts below the `FF DA` pairs, a pair inside a segment's content counting too (the library decodes some
+  such streams); a `max_dpos` of 2^32 - 1 for a component the frame does not have; G above `jpeg_len` whatever encoder version the fixed header names (the library skips
   the subtraction for one); and, with `EEE`, `raw_len` in the sum where the library subtracts only the part of the
   raw header it has parsed when it cuts the last segment.
 - Resources: memory per image, declared by the envelope's `decode_memory` (section 7). An image's term is its
@@ -1119,7 +1123,7 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   lazy-matching rows, dictionary add policies and hash algorithms analysis constructs (the full list is change 3
   of `vendor/preflate-rs-0.7.6/LITEPACK-CHANGES.md`); it refuses a hop count above `max_chain` before it walks
   the chain; it refuses a header count outside its range before the count sizes a vector, and a value wider than
-  its field before it is written (changes 12 to 14 of the same file); and it refuses a correction exponent above
+  its field before it is written (changes 10 and 12 to 14 of the same file); and it refuses a correction exponent above
   32 at the 33rd one of its run and a decoded correction value of 2^32 - 1 (change 8 of the same file).
   Informative (D-122): a decoded match length below 3 needs no permission, because the cited library fails
   on it (its match search ends on an assertion, which panics in every build, or finds no match), so check (7) makes
@@ -1143,7 +1147,7 @@ output, or the block's encoded bytes when it is the first step. Its output is th
   above its own memory resource, minus `max_block_plain`, and refuses a stream whose term exceeds it with `Refused`
   (field `decode_memory`, the class `Archive::open` uses for an envelope the reader cannot meet, section 7), without
   decoding it, exactly as for `jpeg-reconstruct`. The figure is lasting: a revision 1.2 reader refuses the stream
-  of any archive that declares less, whatever revision wrote it. The writer declares `max_block_plain`
+  of any archive that declares less, whatever revision wrote it. The reference writer declares `max_block_plain`
   plus the largest term of any block of the archive, JPEG images included (for an image, the larger of its term and
   the reference decoder's need, as "Decoding `jpeg-reconstruct`" says). Informative, the derivation from the
   layout of 0.7.6's recreation: per plain byte, 1 byte for the step's input, 1 for the library's own copy of it, and
