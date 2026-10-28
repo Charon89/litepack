@@ -908,6 +908,51 @@ fn the_subject_tool_is_never_the_best_incumbent() {
     );
 }
 
+/// E4-8: an information row with a tiny archive on every class changes no table, estimate or
+/// gate; it is printed only in its own table.
+#[test]
+fn information_rows_stay_out_of_every_table_estimate_and_gate() {
+    let plain = inputs(&Knobs::default(), true);
+    let before = render::render(&plain);
+    let mut i = inputs(&Knobs::default(), true);
+    let classes = i.baseline.run.classes.clone();
+    for class in &classes {
+        let mut r = result("7z-foreign", "zip-deflate", class, 1_000, 1, 50.0, 100.0);
+        r.information = Some(crate::run::result::Information {
+            kind: crate::run::result::FOREIGN_EXTRACT.into(),
+            maker: "7z".into(),
+            maker_version: Some("26.03".into()),
+        });
+        i.baseline.results.push((r, 1));
+        i.baseline
+            .run
+            .combinations
+            .push(crate::run::result::RunCombination {
+                tool: "7z-foreign".into(),
+                setting: "zip-deflate".into(),
+                class: class.clone(),
+                outcome: "measured".into(),
+            });
+    }
+    assert_eq!(rows(&i.baseline).len(), rows(&plain.baseline).len());
+    assert!(!rows(&i.baseline).iter().any(|r| r.tool == "7z-foreign"));
+    assert_eq!(information_rows(&i.baseline).len(), classes.len());
+    for g in ["G1", "G2", "G3"] {
+        assert_eq!(verdict_of(&i, g), verdict_of(&plain, g), "{g}");
+    }
+    let after = render::render(&i);
+    let marker = "### Information rows (no claim; never in a gate)";
+    assert!(!before.contains(marker));
+    let at = after.find(marker).expect("the information table");
+    // Outside the information table the report is unchanged.
+    let end = after[at..]
+        .find("\n## ")
+        .map_or(after.len(), |e| at + e + 1);
+    let stripped = format!("{}{}", &after[..at], &after[end..]);
+    assert_eq!(stripped, before);
+    assert!(after[at..end].contains("7z-foreign/zip-deflate"));
+}
+
 #[test]
 fn g2_passes_and_fails_around_half_of_the_best_incumbent() {
     // Best incumbent 8.0 MB; the estimate (a) is 3.0 + 0.5 + last.

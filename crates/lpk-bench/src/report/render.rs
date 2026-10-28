@@ -436,6 +436,61 @@ fn baseline_per_class(s: &mut String, m: &Model, inputs: &Inputs) {
         ));
         s.push('\n');
     }
+    information_table(s, inputs);
+}
+
+/// E4-8's information rows: a foreign archive made once by its maker, extracted by each tool.
+/// Printed only when present; no claim, never in an estimate or a gate.
+fn information_table(s: &mut String, inputs: &Inputs) {
+    let rows = super::model::information_rows(&inputs.baseline);
+    if rows.is_empty() {
+        return;
+    }
+    s.push_str(
+        "### Information rows (no claim; never in a gate)\n\nEach archive was made once per \
+         class and setting by its maker, outside the timing; the tools extract that same file, \
+         each extraction verified against the manifest. Archive size is the made archive's.\n\n",
+    );
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| match &r.state {
+            RowState::Measured(x) => vec![
+                r.label(),
+                r.class.clone(),
+                x.size_pct.show(pct1),
+                x.extract_mbps.show(mbps_s),
+                x.repeats.show(count_s),
+            ],
+            RowState::Failed { step, reason, src } => vec![
+                r.label(),
+                r.class.clone(),
+                format!(
+                    "FAILED ({step}): {reason} {}",
+                    brackets(&BTreeSet::from([*src]))
+                ),
+                "-".into(),
+                "-".into(),
+            ],
+            RowState::Skipped { reason, src } => vec![
+                r.label(),
+                r.class.clone(),
+                format!("skipped: {reason} {}", brackets(&BTreeSet::from([*src]))),
+                "-".into(),
+                "-".into(),
+            ],
+        })
+        .collect();
+    s.push_str(&md_table(
+        &[
+            "tool/setting",
+            "class",
+            "archive size (% of class bytes)",
+            "extract MB/s",
+            "repeats used",
+        ],
+        &table,
+    ));
+    s.push('\n');
 }
 
 fn baseline_blended(s: &mut String, m: &Model, inputs: &Inputs) {

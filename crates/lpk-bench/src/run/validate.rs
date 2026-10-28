@@ -1176,7 +1176,9 @@ mod tests {
             to_value(&short),
             to_value(&samples::unverified()),
         );
-        assert_agree(&schema, "result", &[&m, &s, &z, &f, &sh, &u]);
+        let info = to_value(&samples::foreign());
+        assert_agree(&schema, "result", &[&m, &s, &z, &f, &sh, &u, &info]);
+        assert_agree(&schema, "information", &[&info["information"]]);
         let run = to_value(&samples::run_file(&[samples::measured()]));
         assert_agree(&schema, "run", &[&run]);
         assert_agree(&schema, "run_combination", &[&run["combinations"][0]]);
@@ -1248,6 +1250,7 @@ mod tests {
             "verification",
             "difference",
             "failure",
+            "information",
             "av_product",
             "run",
             "run_combination",
@@ -1909,6 +1912,39 @@ mod tests {
         std::fs::create_dir_all(repo.join(".git")).expect("git");
         let root = std::fs::canonicalize(&repo).expect("canon");
         assert_eq!(corpus_root_for(&results), root.join("bench").join("corpus"));
+    }
+
+    /// E4-8: an information row validates beside older rows without the field, and its kind
+    /// and maker are checked.
+    #[test]
+    fn information_rows_validate_beside_older_rows() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut old = samples::measured();
+        old.schema_version = 1;
+        old.corpus.class_blake3 = None;
+        let write = |rows: &[ToolResult]| {
+            let dir = write_dir(tmp.path(), rows);
+            let mut tools = samples::tools();
+            let mut e = tools.tools[0].clone();
+            e.id = "lpk-foreign".into();
+            e.name = "LitePack, extracting foreign archives".into();
+            tools.tools.push(e);
+            std::fs::write(dir.join("tools.json"), render(&tools)).expect("tools");
+            dir
+        };
+        let dir = write(&[old.clone(), samples::foreign()]);
+        let p = problems(&dir);
+        assert!(p.is_empty(), "{p:?}");
+        let mut bad = samples::foreign();
+        if let Some(i) = bad.information.as_mut() {
+            i.kind = "something-else".into();
+        }
+        assert!(!problems(&write(&[old.clone(), bad])).is_empty());
+        let mut bad = samples::foreign();
+        if let Some(i) = bad.information.as_mut() {
+            i.maker = "7-Zip".into();
+        }
+        assert!(!problems(&write(&[old, bad])).is_empty());
     }
 
     /// The schema ties `class_blake3` to the result schema version.

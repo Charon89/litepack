@@ -80,6 +80,17 @@ pub struct Setting {
     /// extraction is measured from a zoned archive. Windows only; recorded in the row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<u8>,
+    /// Foreign-extraction tools only (E4-8): the extension of the archive the maker writes for
+    /// this setting (`.zip`, `.7z`), in place of the tool's `extension`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+}
+
+impl Setting {
+    /// The extension of this setting's archive: its own (foreign tools), else the tool's.
+    pub fn extension<'a>(&'a self, tool: &'a Tool) -> &'a str {
+        self.extension.as_deref().unwrap_or(&tool.extension)
+    }
 }
 
 /// The bytes of the `Zone.Identifier` stream of `zone` (what Windows writes, `ZoneId` only).
@@ -131,6 +142,13 @@ pub struct Tool {
     pub note: Option<String>,
     #[serde(default, rename = "setting")]
     pub settings: Vec<Setting>,
+    /// A foreign-extraction tool (E4-8): the id of the catalogued tool (the maker, `7z`) whose
+    /// `create` template writes the archive once per class and setting, outside every timed step,
+    /// with this tool's setting's `compress` arguments; this tool then only extracts it. Its rows
+    /// are information rows (`information` in the row), never in a gate. Such a tool has no
+    /// `create` template of its own and is left out of `--tools all` (it is named explicitly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreign: Option<String>,
 }
 
 fn yes() -> bool {
@@ -209,6 +227,21 @@ impl Catalogue {
                 bail!("duplicate tool id `{}`", tool.id);
             }
             tool.validate()?;
+        }
+        for tool in &self.tools {
+            if let Some(maker) = &tool.foreign {
+                match self.get(maker) {
+                    None => bail!(
+                        "tool `{}`: foreign maker `{maker}` is not catalogued",
+                        tool.id
+                    ),
+                    Some(m) if m.foreign.is_some() || m.manual || m.create.is_empty() => bail!(
+                        "tool `{}`: foreign maker `{maker}` must be a tool with its own create template",
+                        tool.id
+                    ),
+                    Some(_) => {}
+                }
+            }
         }
         Ok(())
     }
@@ -358,8 +391,44 @@ impl Tool {
             if s.zone.is_some_and(|z| z > 4) {
                 bail!("tool `{id}`: setting `{}`: zone must be 0 to 4", s.id);
             }
+            if let Some(ext) = &s.extension {
+                if self.foreign.is_none() {
+                    bail!(
+                        "tool `{id}`: setting `{}`: extension is for foreign-extraction tools only",
+                        s.id
+                    );
+                }
+                if !ext.starts_with('.') {
+                    bail!(
+                        "tool `{id}`: setting `{}`: extension `{ext}` must start with `.`",
+                        s.id
+                    );
+                }
+            }
         }
-        if !self.manual {
+        if self.foreign.is_some() {
+            if self.manual
+                || self.mode != Mode::Directory
+                || !self.create.is_empty()
+                || self.create_list.is_some()
+            {
+                bail!(
+                    "tool `{id}`: a foreign-extraction tool is a directory-mode tool without \
+                     create templates (its maker writes the archive)"
+                );
+            }
+            // A zone would be written onto the made archive, which the tools of a class share
+            // (hard-linked) and whose cache key does not carry a zone.
+            if let Some(s) = self.settings.iter().find(|s| s.zone.is_some()) {
+                bail!(
+                    "tool `{id}`: setting `{}`: zone is not allowed on a foreign-extraction tool",
+                    s.id
+                );
+            }
+            if self.extract.is_empty() || self.settings.is_empty() {
+                bail!("tool `{id}`: an extract template and at least one setting are required");
+            }
+        } else if !self.manual {
             if self.create.is_empty() || self.extract.is_empty() {
                 bail!("tool `{id}`: create and extract templates are required");
             }
@@ -402,7 +471,9 @@ mod tests {
                 "lpk",
                 "tsaur",
                 "wzzip",
-                "pacl"
+                "pacl",
+                "lpk-foreign",
+                "7z-foreign"
             ]
         );
         let settings = |id: &str| -> Vec<String> {
@@ -564,6 +635,57 @@ mod tests {
         assert_eq!(get("fast-zoned-no-motw").zone, Some(3));
         assert_eq!(get("fast-zoned-no-motw").extract, ["--motw", "off"]);
         assert_eq!(zone_stream(3), "[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+
+    /// E4-8: the two foreign-extraction tools share their maker's settings, so `lpk x` and
+    /// `7z x` extract the same made archive; `all` leaves them out.
+    #[test]
+    fn the_foreign_tools_share_the_maker_settings_and_stay_out_of_all() {
+        let cat = Catalogue::parse(REAL).expect("catalogue");
+        let (l, s) = (
+            cat.get("lpk-foreign").expect("present"),
+            cat.get("7z-foreign").expect("present"),
+        );
+        assert_eq!(l.foreign.as_deref(), Some("7z"));
+        assert_eq!(l.settings, s.settings);
+        assert_eq!(l.foreign, s.foreign);
+        let ext: Vec<&str> = l.settings.iter().map(|x| x.extension(l)).collect();
+        assert_eq!(ext, [".zip", ".7z"]);
+        assert_eq!(
+            cat.get("7z").expect("present").settings[0].extension(cat.get("7z").expect("present")),
+            ".7z"
+        );
+        let all = super::super::select(&cat, &["all".to_string()]).expect("present");
+        assert!(!all.iter().any(|t| t.ends_with("-foreign")) && all.contains(&"7z".into()));
+        let named = super::super::select(&cat, &["lpk-foreign".to_string()]).expect("present");
+        assert_eq!(named, ["lpk-foreign"]);
+    }
+
+    #[test]
+    fn foreign_tools_are_checked() {
+        let tool = |extra: &str, setting: &str| {
+            format!(
+                "{REAL}\n[[tool]]\nid = \"t\"\nname = \"t\"\nversion = {{ args = [], pattern = '(x)' }}\n\
+                 extension = \".zip\"\nmode = \"directory\"\nlicence = \"x\"\n{extra}\n\
+                 [[tool.setting]]\nid = \"s\"\n{setting}\n"
+            )
+        };
+        let ok = "foreign = \"7z\"\nextract = [\"x\", \"{archive}\"]";
+        assert!(Catalogue::parse(&tool(ok, "extension = \".7z\"")).is_ok());
+        // An unknown maker, a maker that is itself foreign, a create template, a bad extension.
+        let bad_maker = "foreign = \"nope\"\nextract = [\"x\"]";
+        assert!(Catalogue::parse(&tool(bad_maker, "")).is_err());
+        let foreign_maker = "foreign = \"lpk-foreign\"\nextract = [\"x\"]";
+        assert!(Catalogue::parse(&tool(foreign_maker, "")).is_err());
+        let with_create = format!("{ok}\ncreate = [\"a\", \"{{archive}}\"]");
+        assert!(Catalogue::parse(&tool(&with_create, "")).is_err());
+        assert!(Catalogue::parse(&tool(ok, "extension = \"7z\"")).is_err());
+        // A zone would land on the shared made archive.
+        assert!(Catalogue::parse(&tool(ok, "zone = 3")).is_err());
+        // `extension` on a setting of an ordinary tool.
+        let plain = "create = [\"a\", \"{archive}\"]\nextract = [\"x\", \"{archive}\"]";
+        assert!(Catalogue::parse(&tool(plain, "extension = \".7z\"")).is_err());
+        assert!(Catalogue::parse(&tool(plain, "")).is_ok());
     }
 
     #[test]
