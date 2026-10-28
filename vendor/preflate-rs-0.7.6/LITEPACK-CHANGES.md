@@ -89,7 +89,8 @@ lists) far beyond what the archive declares.
    refused at its 33rd one (upstream overflows `1 << (bits_found - 1)` on `u32`, which panics in a
    debug build and wraps in a release build); and `decode_correction_slow` adds the `+ 1` to a
    decoded value with `checked_add`, refusing a decoded 2^32 - 1 (upstream overflows there too).
-   Both refusals are panics, which LitePack's callers catch and report as refused corrections.
+   Both refusals were panics, which LitePack's callers caught and reported as refused corrections;
+   since change 15 they are errors (`ExitCode::InvalidPredictionData`) and nothing panics.
    Corrections are `u32` values, so a valid record has exponents of at most 32 and decoded values
    below 2^32 - 1: no valid record is affected. For tests, `src/stream_processor.rs` gains the
    hidden function `litepack_record_with_coded_corrections(record, coded)`, exported from
@@ -145,12 +146,41 @@ lists) far beyond what the archive declares.
    other bytes). A valid header holds only such values, so no valid record is affected. Found
    by LitePack's `deflate_recreate` fuzz target (fuzz run 40272877553); its input is in
    `fuzz/seeds/deflate_recreate/`.
+15. **Decode-side failures of the correction stream returned, not panics** (LitePack, 2026-10-27;
+   found by the nightly `deflate_recreate` fuzz run 40444702572, whose input is in
+   `fuzz/seeds/deflate_recreate/`). Since LitePack's ruling R92 (D-114) every panic is a defect,
+   caught or not. In `src/cabac_codec.rs`, `PredictionDecoderCabac` no longer unwraps a read:
+   `read_exp_value` returns change 8's bounded-unary refusal and any read error; `new` (the
+   seen-set reads) and `decode_correction_slow` (the default-signal read, both `read_exp_value`
+   calls, and change 8's two `checked_add(1)`) record the first failure in a new field instead of
+   panicking. After a failure the decoder reads nothing more and every correction decodes as 0
+   (no correction: the predicted value). `src/statistical_codec.rs`'s `PredictionDecoder` trait
+   gains `litepack_check(&self) -> Result<()>` (default `Ok`; the pair decoder checks both),
+   which `PredictionDecoderCabac` answers with the failure as `ExitCode::InvalidPredictionData`.
+   The recreation calls it right after every decoded value that sizes a buffer, indexes or
+   selects a branch, before using it: in `src/token_predictor.rs`'s `recreate_block` (block type,
+   stored length, token count, before each token, both hop counts, the last-block flags), in
+   `src/tree_predictor.rs` (the three counts before their range checks and resizes, each
+   code-type and code-data read in `reconstruct_ld_trees`, the code-length codes) and in
+   `src/stream_processor.rs` after each end-of-chunk flag (both recreation loops), so no
+   recreation returns success after a failure. A valid record never fails a read (the encoder
+   wrote every value it reads), so its reads, values and output are unchanged. The encode-side
+   unwraps (on LitePack's own analysis) are upstream's.
+16. **A decoded match length below 3 refused** (LitePack, 2026-10-27). In
+   `src/hash_chain_holder.rs`, `hop_match` returns `ExitCode::RecompressFailed` for a length
+   below 3: a crafted length correction reached `prefix_cmp_odd_size`'s `assert!` (a panic in
+   every build). A Deflate match is 3 to 258 bytes, so no valid record is affected. Found by
+   change 15's regression test, which counts every panic; `lpk-core`'s
+   `a_decoded_match_length_of_2_is_refused` checks it (a crafted length correction giving 2).
 
 The workspace runs the regression test of changes 9 to 11, 13 and 14 (the vendored crate's own tests are not
 run): `lpk-core`'s `crafted_corrections_do_not_panic` (`src/peel/deflate/decode.rs`) feeds the
 `deflate_recreate` seed and a deterministic sweep of crafted correction streams to
-`recreate_whole_deflate_stream_limited_report` and fails on any overflow or out-of-range panic.
-Change 12's test is `lpk-core`'s `tests/deflate_recreate_fuzz.rs`.
+`recreate_whole_deflate_stream_limited_report` and, since changes 15 and 16, fails on any panic.
+Change 12's test is `lpk-core`'s `tests/deflate_recreate_fuzz.rs`. Change 15's tests are in
+`lpk-core`'s `src/peel/deflate/decode.rs` (the nightly fuzz input, and a crafted stream per
+refusal: an exponent above 32 and a decoded 2^32 - 1 on each of the two branches), each run under
+a panic hook that fails on any panic.
 
 Nothing else in the code changed: `recreate_whole_deflate_stream`, the analysis, the correction
 format and every output for a valid record are upstream's.

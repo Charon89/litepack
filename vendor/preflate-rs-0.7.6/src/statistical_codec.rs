@@ -66,6 +66,15 @@ pub trait PredictionDecoder {
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32;
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64);
 
+    /// LitePack change 15 (LITEPACK-CHANGES.md): the decoder's first failure to read the
+    /// correction stream, as `InvalidPredictionData`. A decoder that fails records the failure
+    /// and returns 0 (no correction) from then on; the recreation calls this wherever a decoded
+    /// value sizes a buffer or indexes, and before it returns success.
+    #[inline]
+    fn litepack_check(&self) -> crate::preflate_error::Result<()> {
+        Ok(())
+    }
+
     #[inline]
     fn decode_correction_diff(&mut self, correction: CodecCorrection, predicted_value: u32) -> u32 {
         let actual_value = self.decode_correction(correction);
@@ -333,5 +342,11 @@ where
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64) {
         self.0.decode_verify_state(message, checksum);
         self.1.decode_verify_state(message, checksum);
+    }
+
+    // LitePack change 15
+    fn litepack_check(&self) -> crate::preflate_error::Result<()> {
+        self.0.litepack_check()?;
+        self.1.litepack_check()
     }
 }

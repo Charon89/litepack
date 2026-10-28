@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels that pull request's older runs (the shared runner queue was the
+# bottleneck on 2026-10-26); runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -15,7 +21,8 @@ env:
 jobs:
   check:
     name: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The Windows job took 30 minutes on 2026-10-26 (build, tests, notices, then the cache save).
+    timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

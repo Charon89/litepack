@@ -83,6 +83,12 @@ fn photo_classes_round_trip_with_the_jpeg_peel() {
             };
             let h =
                 lpk_core::peel::jpeg::read_stream_header(&plan.stream, plan.primary_len).unwrap();
+            // The independent decoder's walk accepts every stream the peel writes too.
+            assert!(
+                lpk_check::jpeg::stream_header(0, &plan.stream, plan.primary_len).is_ok(),
+                "{}: lpk-check refused the stream",
+                e.path
+            );
             let old = lpk_core::peel::jpeg::memory_bound(&h.frame);
             if plan.memory > old {
                 more.push(format!(

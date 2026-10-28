@@ -1057,7 +1057,14 @@ fn take_u32(z: &mut impl std::io::Read, total: &mut u64, cap: u64) -> Option<u32
 /// at most `primary_len`; with one, the library cuts the last segment to the JPEG length less
 /// the garbage (2 bytes, the EOI it assumes, when there is no `GRB`), the raw header, SOI and
 /// the other segments, so those must fit in the JPEG length (a raw header longer than the
-/// library's parse of it only makes this stricter). Each of these is a stream the
+/// library's parse of it only makes this stricter). Also refused, for the library's unchecked
+/// arithmetic and indexing on them: the garbage (2 bytes without `GRB`) above the JPEG length
+/// (`lepton_file_reader.rs:299` subtracts it, whatever the encoder version); a partition whose
+/// overhang bits exceed 7 (`bit_writer.rs:143`); an `EEE` section with a `max_dpos` of
+/// `u32::MAX` (`truncate_components.rs:69` adds one); a first restart error above 1
+/// (`lepton_file_reader.rs:393` adds it to an 8-bit count); restart counts, when any are given,
+/// fewer than the `FF DA` pairs of the raw header, and fewer than one when the raw header has
+/// no `FF DA` (`jpeg_write.rs:323` indexes them by scan). Each of these is a stream the
 /// library refuses too, or one it does not write: the library allocates each length it reads
 /// at once (a `GRB` length of 4 GB was a fuzzing finding), and partitions whose rows overlap
 /// each hold a coefficient buffer for their rows.
@@ -1086,6 +1093,7 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
     let (mut restarts, mut errors) = (0u64, 0u64);
     let mut segments: Option<Vec<u64>> = None;
     let (mut garbage, mut early_eof) = (2u64, false);
+    let mut first_error: Option<u8> = None;
     loop {
         // The library ends the header at the first marker it cannot read whole.
         let mut m = [0u8; 3];
@@ -1133,6 +1141,10 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
                         return None;
                     }
                     last_row = row;
+                    // The bits of its first byte the partition's writer starts from (0..=7).
+                    if p[7] > 7 {
+                        return None;
+                    }
                     sizes.push(u64::from(u32::from_le_bytes(p[2..6].try_into().ok()?)));
                 }
                 segments = Some(sizes);
@@ -1148,10 +1160,23 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
                 if &m == b"GRB" {
                     garbage = len;
                 }
-                take_exact(&mut z, len, &mut total, cap, None)?;
+                if &m == b"FRS" && first_error.is_none() && len > 0 {
+                    let mut b = Vec::with_capacity(1);
+                    take_exact(&mut z, 1, &mut total, cap, Some(&mut b))?;
+                    first_error = b.first().copied();
+                    take_exact(&mut z, len - 1, &mut total, cap, None)?;
+                } else {
+                    take_exact(&mut z, len, &mut total, cap, None)?;
+                }
             }
             b"EEE" => {
-                take_exact(&mut z, 28, &mut total, cap, None)?;
+                let mut e = Vec::with_capacity(28);
+                take_exact(&mut z, 28, &mut total, cap, Some(&mut e))?;
+                // `max_dpos[0..4]` (bytes 12..28), each of which the library adds one to.
+                let (dpos, _) = e.get(12..)?.as_chunks::<4>();
+                if dpos.iter().any(|d| u32::from_le_bytes(*d) == u32::MAX) {
+                    return None;
+                }
                 early_eof = true;
             }
             _ => return None,
@@ -1167,6 +1192,19 @@ pub fn read_stream_header(stream: &[u8], primary_len: u64) -> Option<StreamHeade
     };
     if !fits {
         return None;
+    }
+    // The garbage (the EOI the library assumes without `GRB`) within the JPEG length, which the
+    // library lowers by it; the first restart error at most 1, which the library adds to an 8-bit
+    // count; restart counts, when given, one for every scan the raw header can hold (each
+    // `FF DA` in it), which the library indexes by scan.
+    if garbage > jpeg_len || first_error.is_some_and(|e| e > 1) {
+        return None;
+    }
+    if restarts > 0 {
+        let scans = raw.windows(2).filter(|w| *w == [0xFF, 0xDA]).count() as u64;
+        if restarts < scans.max(1) {
+            return None;
+        }
     }
     Some(StreamHeader {
         frame: marker_scan(&raw).frame?,
