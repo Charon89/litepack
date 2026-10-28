@@ -322,3 +322,43 @@ without the key; the index-sequence and section 11 sentences; CONFORMANCE items 
 
 1. `lpk-check` decoded `png-filter` from this text alone (D-49): every outcome of `expected-1.4.toml` at revision 4 and the `_1_0` outcomes at revisions 0-3, and 79 crafted records agreeing with the reference on class and normative reason. Revision 1.4 is final.
 2. Its three points are clarified in section 8 and section 12: the bound a `png-filter` step gives to a `png-filter` before it ("Bounds"); that check (3)'s filter count is reached only by an interlaced record, since for a non-interlaced one the count is a section 12 rule raised at the lookup; and the order of the rules within a record body (each applied as its field is read; a non-interlaced `png-filter` record's `filters` length before `original_hash`). The reference already behaves so.
+
+## 2026-10-28 — Text revision: the decoder checks of revisions 1.1 and 1.2 stated (D-116, D-121, D-115, D-122; no byte changes)
+
+The reference decoders (`lpk-core` and `lpk-check`) already enforce everything below; no vector byte, pinned hash
+or `version_minor` changes. A reader outcome changes only for records no conforming writer produces; that rests on
+the writer rule this revision adds (a writer MUST NOT write a Lepton stream that fails the requirements), and some
+of the stricter requirements also refuse streams the library would decode (D-121 (2)). No stream `lpk` has written
+fails them: the `jpeg_corpus` test asserts that `lpk-check` accepts every stream the JPEG peel writes.
+
+1. Section 8, `jpeg-reconstruct`, check (5): the decoder inflates the whole compressed header instead of exactly
+   7 + `raw_len` bytes, so damage anywhere in the zlib stream, a wrong Adler-32 included, is `lepton stream` at
+   check (5) (before, the library refused it at check (6)). The header's sections are laid out (`P0D`, `HH`, `CRS`,
+   `FRS`, `GRB`, `EEE`, and the fixed header's `jpeg_len`), and the structural requirements are decoder MUSTs, each
+   `BadRecord` `lepton stream` before decoding and before the term is compared: D-116's (`jpeg_len`,
+   `compressed_len`, each `GRB` length, the `FRS` sum and four times the `CRS` sum at most `primary_len`; the inflated
+   header at most 2·`primary_len` + 65536; exactly one `HH` section, not empty, with first luma rows that do not go
+   down; segment sizes that fit as the library cuts them, without `EEE` summing to at most `primary_len` and with
+   `EEE` the last one cut; no unknown section; no data ending inside a section) and D-121's five (the garbage length,
+   2 without `GRB`, at most `jpeg_len`; at most 7 overhang bits; no `max_dpos` of 2^32 - 1; a first restart error of
+   at most 1; restart counts, when given, at least the raw header's `FF DA` pairs). An informative note names the
+   requirements stricter than the Lepton format needs and why they refuse no stream a conforming writer produces;
+   a writer MUST NOT write a stream that fails them.
+2. Section 8, `jpeg-reconstruct` "Resources": the comparison of revision 1.1's term (128·B + 64 MiB) with
+   `decode_memory` is unchanged. A decoder's own need may exceed what an archive declares, which alone is no reason
+   to refuse; a decoder MAY refuse an image whose need exceeds the memory it can give the decode (`Refused`) and
+   SHOULD name the memory it would need. The reference decoder's need (D-116 (3)) is given as informative, with how
+   the reference and the `lpk` tool refuse; a writer SHOULD declare the larger of the term and that need, as the
+   reference writer does. The `deflate-reconstruct` "Resources" sentence on what the writer declares says so for a
+   JPEG image.
+3. Section 8, `deflate-reconstruct` "Limits of a recreation": two more permitted refusals, the ones the reference's
+   copy of preflate-rs makes since changes 10 and 12 to 14 of its `LITEPACK-CHANGES.md` (E4-6, D-115): a dynamic block header's
+   decoded counts outside the ranges HLIT, HDIST and HCLEN can give (257 to 288, 1 to 32, 4 to 19), and a header
+   value wider than its field. They are permitted refusals (MAY), as the limits before them, because a reader that
+   calls the cited library cannot inspect decoded values and the library's result for them depends on the build.
+   Informative notes: a decoded match length below 3 and a repeat count past the remaining code lengths are already
+   `BadRecord` `corrections` under check (7), since the cited library fails on them (the reference refuses them
+   first, changes 16 and 11); and the reference's copy panics on no correction stream (change 15, D-122).
+4. Section 1 lists SHOULD among the normative terms (the text already used it once). Section 2 and the status line
+   name this revision; section 9's JPEG layout lists two more reasons a peel falls back (the header checks, the
+   memory cap); section 16's `Refused` row names the new permitted refusal.
