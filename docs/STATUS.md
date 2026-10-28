@@ -101,6 +101,12 @@ E3-8 is done (D-75, PR #77).
   signature into the session's scratchpad, then deleted both unused; nothing from them was committed.
 - **Re-pin a changed corpus source (E8-9, new on 2026-10-26).** Project Gutenberg changed `1497-0.txt`, so a clean machine's `corpus build --profile small` no longer matches `corpus.lock` (this PC builds from its download cache). Re-pinning changes the `text-prose` class; the alternative is keeping the old file from a stable mirror. A corpus change is yours.
 - **The size gate's sensitivity (E8-2, new on 2026-10-26).** The 1% limit per row is PLAN's; on the red run, lowering the Balanced preset from 9e to 1 moved only 3 of 12 Balanced rows past 1%. Say whether to keep it or to add a per-class or tighter limit (a gate change is yours).
+- **E7's questions (new on 2026-10-28; `docs/notes/e7-design.md` §10, each with sources, costs and a
+  recommendation):** the publisher's legal name and product name (a company first if the Pro edition is to be
+  sold, Store policy 10.14), the certificate route (Artifact Signing, available to individuals in the US or Canada,
+  or OV), the update default, paid accounts, CPL-1.0 for the NSIS stub (proposed: no), where the updater key
+  signs (proposed: offline on removable media), the GitHub and Entra settings to apply, and optionally the
+  settings folder. Starting the identity validation early shortens E7-1.
 - **The publisher's legal name and the product name** for the code-signing certificate (E7-1: a certificate
   in the publisher's name, Azure Artifact Signing or an OV certificate, since a later version may be closed,
   D-89 (6)). Identity validation takes weeks; the earlier the better.
