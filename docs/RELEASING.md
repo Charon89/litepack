@@ -16,8 +16,11 @@ build), and enforced by E7-4's MSIX (`MinVersion`) and E7-5's installer (which s
 it). There is no Windows 10 runner on GitHub: CI builds and runs the GUI on `windows-2025`; Windows 10 22H2 is
 checked by hand in E5-10.
 
-The GUI needs the WebView2 runtime: Windows 11 ships it; Windows 10 22H2 usually has it through Edge, and the
-NSIS installer downloads the bootstrapper when it is missing (`tauri.conf.json`, `downloadBootstrapper`).
+The GUI needs the WebView2 runtime: Windows 11 ships it; most Windows 10 devices have it already, though Edge itself
+does not count as the runtime (Microsoft's distribution guide,
+https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution); the NSIS installer checks for the
+runtime and runs Microsoft's bootstrapper when it is missing (`tauri.conf.json`, `downloadBootstrapper`;
+`docs/notes/e7-design.md` §3).
 
 ## Building the GUI
 
