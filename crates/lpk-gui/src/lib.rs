@@ -11,16 +11,20 @@
 //!   exit's cancel-and-join.
 //! - [`journal`] and [`write`]: `create` through `<name>.lpk.partial` published without
 //!   replacing anything, appends recorded, and the next start's recovery.
-//! - [`app`]: sessions, listing pages ([`batch`] v1) and the shutdown.
+//! - [`app`]: sessions, the browser ([`browse`]: views, selection, pages as [`batch`] v1) and
+//!   the shutdown.
+//! - [`open`]: opening an entry with the shell (the allow-list, fresh zoned folders).
 //! - [`cli`], [`paths`], [`strings`], [`security`].
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod app;
 pub mod batch;
+pub mod browse;
 pub mod cli;
 pub mod grants;
 pub mod journal;
+pub mod open;
 pub mod ops;
 pub mod paths;
 pub mod security;

@@ -20,6 +20,8 @@ pub mod error;
 pub mod export;
 pub mod model;
 mod session;
+#[cfg(feature = "test-support")]
+pub mod testing;
 
 pub use create::{
     append, calibrate, committed_generation, create, rollback, CreateSettings, Rate, Seal, Tier,

@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use lpk_api::{Class, CreateSettings, Event, Monitor, Tier};
 use lpk_gui::app::{App, Opened};
+use lpk_gui::browse::{SelectAction, Status, ViewInfo, ViewRequest};
 use lpk_gui::grants::{Grant, GrantKind, Granted};
+use lpk_gui::open::Opening;
 use lpk_gui::security::{MAIN_WINDOW, SMOKE_REPORT_ENV};
 use lpk_gui::{cli, paths, strings, GuiError};
 use serde::Serialize;
@@ -106,6 +108,59 @@ async fn rows(
     let app = host.app.clone();
     let bytes = blocking(move || app.rows(session, first, count)).await?;
     Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+async fn view(
+    host: State<'_, Host>,
+    session: u64,
+    request: ViewRequest,
+    op: u64,
+) -> Result<ViewInfo, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, false)?;
+        app.view(session, &request, &g.token)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn select(
+    host: State<'_, Host>,
+    session: u64,
+    action: SelectAction,
+    row: Option<u32>,
+) -> Result<Status, GuiError> {
+    let app = host.app.clone();
+    blocking(move || app.select(session, action, row)).await
+}
+
+/// Open a file entry: extracted alone into a fresh zoned folder and handed to the shell when
+/// its type is allow-listed; otherwise refused before anything is written (the page says the
+/// preview shows it, E5-6).
+#[tauri::command]
+async fn open_entry(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    session: u64,
+    row: u32,
+    op: u64,
+) -> Result<Opening, GuiError> {
+    let app = host.app.clone();
+    let opening = blocking(move || {
+        let g = app.ops.begin(op, false)?;
+        app.open_entry(
+            session,
+            row,
+            &Monitor::new(Arc::new(|_: &Event| {}), g.token.clone()),
+        )
+    })
+    .await?;
+    if let Opening::Shell { file, .. } = &opening {
+        lpk_gui_sys::shell_open(owner(&handle), file).map_err(internal)?;
+    }
+    Ok(opening)
 }
 
 #[tauri::command]
@@ -234,7 +289,7 @@ pub fn run() -> i32 {
             (None, Some(e))
         }
     };
-    let app = Arc::new(App::new(paths::journal_dir().as_deref()));
+    let app = Arc::new(App::new(paths::journal_dir().as_deref()).with_open_dir(paths::open_dir()));
     // The previous run's interrupted writes, before anything new starts.
     let recovered = app.recover().len();
     let opened_at_start = startup_path.map(|p| app.grants.mint(GrantKind::Archive, &p));
@@ -254,6 +309,9 @@ pub fn run() -> i32 {
             startup,
             open_archive,
             rows,
+            view,
+            select,
+            open_entry,
             close_archive,
             create_archive,
             cancel,

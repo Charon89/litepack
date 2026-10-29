@@ -9,17 +9,32 @@
   <script type="module" src="main.js"></script>
 </head>
 <body>
+  <header class="bar" role="toolbar" data-label="bar.label" hidden id="bar">
+    <div class="modes" role="radiogroup" data-label="mode.label">
+      <button type="button" id="mode-tree" role="radio" aria-checked="false" data-string="mode.tree"></button>
+      <button type="button" id="mode-flat" role="radio" aria-checked="true" data-string="mode.flat"></button>
+    </div>
+    <nav id="crumbs" class="crumbs" data-label="crumbs.label"></nav>
+    <input id="filter" class="filter" type="search" autocomplete="off" spellcheck="false" data-label="filter.label">
+    <label class="glob"><input id="glob" type="checkbox"><span data-string="filter.glob"></span></label>
+  </header>
   <main>
     <p id="hint" class="hint" data-string="drop.hint"></p>
-    <div id="list" class="list" role="grid" aria-rowcount="0" data-label="list.label" hidden>
-      <div class="row head" role="row">
-        <span role="columnheader" data-string="list.name"></span>
-        <span role="columnheader" class="num" data-string="list.size"></span>
-        <span role="columnheader" data-string="list.modified"></span>
+    <div id="list" class="list" role="treegrid" aria-rowcount="0" aria-multiselectable="true" tabindex="0" data-label="list.label" hidden>
+      <div class="row head" role="row" aria-rowindex="1">
+        <span role="columnheader" aria-sort="none" data-key="name"><button type="button" tabindex="-1" id="col-name" data-string="list.name"></button></span>
+        <span role="columnheader" aria-sort="none" data-key="size" class="num"><button type="button" tabindex="-1" data-string="list.size"></button></span>
+        <span role="columnheader" aria-sort="none" data-key="modified"><button type="button" tabindex="-1" data-string="list.modified"></button></span>
       </div>
-      <div id="rows" role="rowgroup"></div>
+      <div id="viewport" class="viewport">
+        <div id="spacer" class="spacer"></div>
+        <div id="rows" class="layer" role="rowgroup"></div>
+      </div>
     </div>
   </main>
-  <footer id="status" class="status" role="status" aria-live="polite"></footer>
+  <footer class="status">
+    <span id="status" role="status" aria-live="polite"></span>
+    <span id="selection" class="selection"></span>
+  </footer>
 </body>
 </html>

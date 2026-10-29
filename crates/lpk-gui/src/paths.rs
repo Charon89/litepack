@@ -26,3 +26,9 @@ pub fn journal_dir() -> Option<PathBuf> {
 pub fn webview_dir() -> Option<PathBuf> {
     state_dir().map(|d| d.join("WebView2"))
 }
+
+/// The folder opened entries are extracted into, each into a fresh folder of its own
+/// (`docs/notes/e5-design.md` section 4), removed at exit.
+pub fn open_dir() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("Open"))
+}

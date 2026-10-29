@@ -38,6 +38,8 @@ tauri = { version = "=2.12.5", default-features = false, features = ["wry", "com
 tauri-build = { version = "=2.7.4", default-features = false , features = [] }
 
 [dev-dependencies]
+# E5-3's backend bound (tests/browse_memory.rs): E3-1's archive and the counting allocator.
+lpk-api = { path = "../lpk-api", version = "0.0.1", features = ["test-support"] }
 tempfile = "3.27.0"
 # tests/deny_configs.rs compares crates/lpk-gui/deny.toml with deny.toml.
 toml = "1.1.6"

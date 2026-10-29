@@ -1,5 +1,5 @@
 // Listing batches, v1 (crates/lpk-gui/src/batch.rs): a 28-byte header, 32 bytes per row,
-// then the UTF-8 names. Little-endian.
+// then the UTF-8 names. Little-endian. Marks bit 0: selected.
 
 const MAGIC = 0x424b504c; // "LPKB" read as a little-endian u32
 export const HEADER_LEN = 28;
@@ -29,6 +29,7 @@ export function decodeBatch(buffer) {
     rows.push({
       id: view.getUint32(o, true),
       kind: view.getUint8(o + 4),
+      marks: view.getUint8(o + 5),
       size: view.getBigUint64(o + 8, true),
       mtimeNs: view.getBigInt64(o + 16, true),
       name: utf8.decode(names.subarray(off, off + len)),

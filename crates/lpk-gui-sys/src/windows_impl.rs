@@ -1,5 +1,5 @@
-//! The Win32 side of `lpk-gui-sys`: file IDs, the no-replace move, the password dialog and the
-//! confirmation box. The only module of the crate allowed `unsafe` (docs/UNSAFE.md); every
+//! The Win32 side of `lpk-gui-sys`: file IDs, the no-replace move, the password dialog, the
+//! confirmation box and the shell's open verb. The only module of the crate allowed `unsafe` (docs/UNSAFE.md); every
 //! block carries a `// SAFETY:` comment.
 
 use std::cell::RefCell;
@@ -108,6 +108,36 @@ pub(crate) fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 
 fn hwnd(raw: isize) -> HWND {
     HWND(raw as *mut c_void)
+}
+
+pub(crate) fn shell_open(owner: Option<isize>, path: &Path) -> io::Result<()> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    // Not `\\?\`-prefixed: handlers receive the path as it is, and many cannot read that form.
+    let file = wide(std::path::absolute(path)?.as_os_str());
+    let verb = wide(OsStr::new("open"));
+    // SAFETY: the strings are NUL-terminated and alive for the call; no parameters and no
+    // directory (null); the owner, if any, is a window handle the caller passed.
+    let r = unsafe {
+        ShellExecuteW(
+            owner.map(hwnd),
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Values above 32 mean success (the documented contract of the return value).
+    if r.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "the shell could not open {} (code {})",
+            path.display(),
+            r.0 as isize
+        )))
+    }
 }
 
 pub(crate) fn confirm(owner: Option<isize>, title: &str, text: &str) -> bool {

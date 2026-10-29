@@ -1117,6 +1117,7 @@ fn extract_options(x: &ExtractArgs) -> lpk_api::ExtractOptions {
         },
         threads: x.threads.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
         memory: x.memory,
+        opening: false,
     }
 }
 

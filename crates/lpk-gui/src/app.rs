@@ -9,15 +9,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lpk_api::{
-    CancelToken, CreateSettings, Filter, Globs, ListModel, Monitor, OpenOptions, Order, Root,
-    RunSummary, Scope, Session, Sources, View,
+    CancelToken, CreateSettings, Destination, ExtractOptions, Globs, Monitor, OpenOptions, Root,
+    RunSummary, Selection, Session, Sources,
 };
 use serde::Serialize;
 
+use crate::browse::{Browser, SelectAction, Status, ViewInfo, ViewRequest};
 use crate::grants::{Grant, GrantKind, Grants};
 use crate::journal::{Journal, Recovered};
+use crate::open::{OpenFolders, Opening};
 use crate::ops::Ops;
-use crate::{batch, write, GuiError};
+use crate::{write, GuiError};
 
 /// What `open_archive` returns to the page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -36,13 +38,15 @@ pub struct Opened {
     pub keyless: bool,
     /// The rows of the flat view.
     pub total: u64,
+    /// The first view (flat, in the archive's order).
+    pub view: ViewInfo,
 }
 
 #[derive(Debug)]
 struct Slot {
     session: Arc<Session>,
     name: String,
-    view: Mutex<Option<(Arc<ListModel>, Arc<View>)>>,
+    browser: Mutex<Browser>,
 }
 
 /// The process's state.
@@ -56,6 +60,7 @@ pub struct App {
     pub journal: Option<Journal>,
     sessions: Mutex<HashMap<u64, Arc<Slot>>>,
     next: AtomicU64,
+    opened: OpenFolders,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -71,7 +76,15 @@ impl App {
             journal: journal_dir.and_then(|d| Journal::open(d).ok()),
             sessions: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
+            opened: OpenFolders::new(None),
         }
+    }
+
+    /// The folder opened entries go into (each into a fresh folder of its own; none: opening
+    /// an entry is refused).
+    pub fn with_open_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.opened = OpenFolders::new(dir);
+        self
     }
 
     /// The start-up recovery of interrupted writes (before any operation starts).
@@ -90,17 +103,17 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let model = session.model(cancel)?;
-        let view = Arc::new(model.view(Scope::All, Order::default(), &Filter::None, cancel)?);
+        let browser = Browser::new(session.model(cancel)?, cancel)?;
+        let view = browser.info();
         let info = session.info().clone();
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let total = view.len() as u64;
+        let total = view.total;
         lock(&self.sessions).insert(
             id,
             Arc::new(Slot {
                 session,
                 name: name.clone(),
-                view: Mutex::new(Some((model, view))),
+                browser: Mutex::new(browser),
             }),
         );
         Ok(Opened {
@@ -111,6 +124,7 @@ impl App {
             encrypted: info.encrypted,
             keyless: info.keyless,
             total,
+            view,
         })
     }
 
@@ -126,22 +140,93 @@ impl App {
         Ok(self.slot(id)?.name.clone())
     }
 
-    /// A batch (v1) of `count` rows of session `id`'s view from row `first`.
+    /// A batch (v1) of at most `count` rows of session `id`'s view from row `first`.
     pub fn rows(&self, id: u64, first: u32, count: u32) -> Result<Vec<u8>, GuiError> {
         let slot = self.slot(id)?;
-        let g = lock(&slot.view);
-        let (model, view) = g
-            .as_ref()
-            .ok_or_else(|| GuiError::usage("the session has no view"))?;
-        let n = (count as usize).min(batch::MAX_ROWS);
-        let rows = model.rows(view, first as usize, n);
-        Ok(batch::encode(
-            view.generation,
-            view.len(),
-            first as usize,
-            &rows,
-            true,
-        ))
+        let b = lock(&slot.browser);
+        Ok(b.rows(first, count))
+    }
+
+    /// Session `id`'s listing model: its entries and their path bytes (`N` and `P` of E5-1's
+    /// bound, [`lpk_api::ListModel::bound`]).
+    pub fn model_size(&self, id: u64) -> Result<(usize, usize), GuiError> {
+        let slot = self.slot(id)?;
+        let b = lock(&slot.browser);
+        Ok((b.model().len(), b.model().name_bytes()))
+    }
+
+    /// Build session `id`'s view as `r` asks (sort, filter, folder, mode).
+    pub fn view(
+        &self,
+        id: u64,
+        r: &ViewRequest,
+        cancel: &CancelToken,
+    ) -> Result<ViewInfo, GuiError> {
+        let slot = self.slot(id)?;
+        let mut b = lock(&slot.browser);
+        b.set_view(r, cancel)
+    }
+
+    /// Change session `id`'s selection.
+    pub fn select(
+        &self,
+        id: u64,
+        action: SelectAction,
+        row: Option<u32>,
+    ) -> Result<Status, GuiError> {
+        let slot = self.slot(id)?;
+        let mut b = lock(&slot.browser);
+        b.select(action, row)
+    }
+
+    /// Open view row `row` of session `id` (`docs/notes/e5-design.md` section 4): a type off
+    /// [`crate::open::ALLOWED`] is refused before anything is written ([`Opening::Preview`]);
+    /// otherwise the entry alone is extracted under E3-2's policy into a fresh folder, zoned as
+    /// an opened entry ([`ExtractOptions::opening`]), for the host to hand to the shell.
+    pub fn open_entry(&self, id: u64, row: u32, monitor: &Monitor) -> Result<Opening, GuiError> {
+        let slot = self.slot(id)?;
+        let (name, path, ids) = {
+            let b = lock(&slot.browser);
+            let entry = b.id_at(row)?;
+            let m = b.model();
+            if m.row(entry).map(|r| r.kind) != Some(0) {
+                return Err(GuiError::usage(format!("{} is not a file", m.path(entry))));
+            }
+            let mut ids = m.new_selection();
+            ids.insert(entry);
+            (m.name(entry).to_string(), m.path(entry).to_string(), ids)
+        };
+        if !crate::open::allowed(&name) {
+            return Ok(Opening::Preview {
+                extension: crate::open::last_extension(&name).unwrap_or_default(),
+                name,
+            });
+        }
+        let dir = self
+            .opened
+            .fresh()
+            .map_err(|e| crate::io_error(e, Path::new("Open")))?;
+        let options = ExtractOptions {
+            opening: true,
+            ..ExtractOptions::default()
+        };
+        slot.session.extract(
+            &Selection::Ids(Arc::new(ids)),
+            &Destination::Dir(dir.clone()),
+            &options,
+            monitor,
+        )?;
+        let file = crate::open::file_in(&dir, &path);
+        if !file.is_file() {
+            return Err(lpk_api::Error::new(
+                lpk_api::Class::Internal,
+                "OpenEntry",
+                format!("{path} was not extracted"),
+                None,
+            )
+            .into());
+        }
+        Ok(Opening::Shell { name, file })
     }
 
     /// Close session `id` (its reads in flight end `Cancelled`).
@@ -199,7 +284,9 @@ impl App {
         for s in slots {
             let _ = s.session.close();
         }
-        self.ops.join(timeout)
+        let joined = self.ops.join(timeout);
+        self.opened.clean();
+        joined
     }
 }
 
@@ -232,7 +319,8 @@ mod tests {
         let o = app.open(&g.grant, &CancelToken::new()).unwrap();
         assert_eq!(o.name, "a.lpk");
         assert_eq!(o.total, 10);
-        let (total, first, rows) = batch::decode(&app.rows(o.session, 2, 5).unwrap()).unwrap();
+        let (total, first, rows) =
+            crate::batch::decode(&app.rows(o.session, 2, 5).unwrap()).unwrap();
         assert_eq!((total, first, rows.len()), (10, 2, 5));
         assert_eq!(rows[0].name, "file-002.txt");
         app.close(o.session).unwrap();

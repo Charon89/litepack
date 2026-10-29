@@ -115,6 +115,21 @@ pub fn password_prompt(
     }
 }
 
+/// Open the file at `path` with the program the shell associates with its type
+/// (`ShellExecuteW`'s `open` verb), owned by `owner`. The GUI calls it only for an entry it
+/// extracted and whose type is on its allow-list (`docs/notes/e5-design.md` section 4).
+pub fn shell_open(owner: Option<isize>, path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows_impl::shell_open(owner, path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, path);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
 /// A native Yes/No warning box owned by `owner`; `true` on Yes. The rollback confirmation
 /// (`docs/notes/e5-design.md` section 4): the page cannot answer it for the user.
 pub fn confirm(owner: Option<isize>, title: &str, text: &str) -> io::Result<bool> {

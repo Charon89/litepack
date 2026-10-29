@@ -158,6 +158,10 @@ pub struct ExtractOptions {
     pub threads: Option<usize>,
     /// The memory budget; `None` is the default of the archive's envelope tier.
     pub memory: Option<u64>,
+    /// An entry the GUI opens with the shell (E5-3, `docs/notes/e5-design.md` section 4):
+    /// zoned like the archive whatever [`OpenOptions::motw_off`] says, and a foreign archive
+    /// without a zone counts as the Internet zone.
+    pub opening: bool,
 }
 
 impl Default for ExtractOptions {
@@ -167,6 +171,7 @@ impl Default for ExtractOptions {
             symlinks: lpk_core::Symlinks::Skip,
             threads: None,
             memory: None,
+            opening: false,
         }
     }
 }
@@ -665,6 +670,20 @@ impl Session {
     /// Internet zone (fail safe), unless Mark of the Web is opted out.
     pub fn zone_warning(&self) -> Option<String> {
         (self.zone.unreadable && !self.options.motw_off).then(lpk_core::motw::unreadable_warning)
+    }
+
+    /// The zone the files an extraction writes get: [`Session::out_zone`], or for an entry
+    /// opened with the shell ([`ExtractOptions::opening`]) the archive's zone whatever the
+    /// opt-out says, the Internet zone for a foreign archive without one.
+    fn extract_zone(&self, o: &ExtractOptions) -> Option<lpk_core::motw::Zone> {
+        if !o.opening {
+            return self.out_zone();
+        }
+        match (&self.kind, self.zone.zone) {
+            (_, Some(z)) => Some(z),
+            (Kind::Foreign(_), None) => Some(lpk_core::motw::Zone::INTERNET),
+            (Kind::Lpk(_), None) => None,
+        }
     }
 
     /// The zone the files this session writes get: [`Session::zone`] unless opted out.
@@ -1253,6 +1272,7 @@ impl Session {
         let dir = self.destination_in(&g, s, to)?;
         let m = &g.monitor(m);
         let policy = lpk_core::Policy::new(o.overwrite, o.symlinks);
+        let zone = self.extract_zone(o);
         let outcome = match &self.kind {
             Kind::Lpk(_) => {
                 let mut a = self.fork()?;
@@ -1260,7 +1280,7 @@ impl Session {
                     select,
                     threads: o.threads,
                     memory: o.memory,
-                    zone: self.out_zone(),
+                    zone,
                     ..lpk_core::ExtractOptions::default()
                 };
                 let s = lpk_core::extract_archive_with(
@@ -1282,7 +1302,7 @@ impl Session {
                     &policy,
                     &select,
                     &lpk_core::foreign::Options {
-                        zone: self.out_zone(),
+                        zone,
                         ..self.options.foreign.clone()
                     },
                     m,
@@ -1300,7 +1320,7 @@ impl Session {
             skipped_symlinks: policy.skipped_symlinks(),
             refused_symlink_targets: policy.refused_symlink_targets(),
             unprivileged_symlinks: policy.unprivileged_symlinks(),
-            zone: self.out_zone(),
+            zone,
             motw_unmarked,
         })
     }
