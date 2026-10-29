@@ -1,0 +1,24 @@
+{
+  "class": "software-installed",
+  "corpus": {
+    "class_bytes": 437043701,
+    "class_files": 9671,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [
+      "-m1"
+    ],
+    "extract_args": [],
+    "id": "m1"
+  },
+  "skipped": "not installed (path in bench/tools.local.toml not found)",
+  "threads": 24,
+  "tool": {
+    "id": "zpaqfranz",
+    "mode": "directory",
+    "ratio_depends_on_threads": false
+  }
+}

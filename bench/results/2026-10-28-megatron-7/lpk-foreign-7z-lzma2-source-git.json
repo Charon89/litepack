@@ -1,0 +1,159 @@
+{
+  "class": "source-git",
+  "corpus": {
+    "class_blake3": "3f6f5f50b63b9e9a95548e84d4b01f56c7f984287fb35616d5e4f52f91a73c9e",
+    "class_bytes": 35365500,
+    "class_files": 663,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "information": {
+    "kind": "foreign-extract",
+    "maker": "7z",
+    "maker_version": "26.03"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 27007213,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.3125,
+      "peak_job_memory_bytes": 396746752,
+      "peak_memory_bytes": 386293760,
+      "peak_process_commit_bytes": 396746752,
+      "timed_out": false,
+      "user_cpu_seconds": 2.46875,
+      "wall_seconds": 1.6950318
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.15625,
+      "peak_job_memory_bytes": 43147264,
+      "peak_memory_bytes": 10588160,
+      "peak_process_commit_bytes": 39997440,
+      "timed_out": false,
+      "user_cpu_seconds": 0.46875,
+      "wall_seconds": 0.5552023
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 27007213,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.3125,
+        "peak_job_memory_bytes": 396746752,
+        "peak_memory_bytes": 386293760,
+        "peak_process_commit_bytes": 396746752,
+        "timed_out": false,
+        "user_cpu_seconds": 2.46875,
+        "wall_seconds": 1.6950318
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.15625,
+        "peak_job_memory_bytes": 43147264,
+        "peak_memory_bytes": 10579968,
+        "peak_process_commit_bytes": 40099840,
+        "timed_out": false,
+        "user_cpu_seconds": 0.484375,
+        "wall_seconds": 0.5552023
+      }
+    },
+    {
+      "archive_bytes": 27007213,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.3125,
+        "peak_job_memory_bytes": 396746752,
+        "peak_memory_bytes": 386293760,
+        "peak_process_commit_bytes": 396746752,
+        "timed_out": false,
+        "user_cpu_seconds": 2.46875,
+        "wall_seconds": 1.6950318
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.109375,
+        "peak_job_memory_bytes": 42569728,
+        "peak_memory_bytes": 10588160,
+        "peak_process_commit_bytes": 39608320,
+        "timed_out": false,
+        "user_cpu_seconds": 0.46875,
+        "wall_seconds": 0.655174
+      }
+    },
+    {
+      "archive_bytes": 27007213,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.3125,
+        "peak_job_memory_bytes": 396746752,
+        "peak_memory_bytes": 386293760,
+        "peak_process_commit_bytes": 396746752,
+        "timed_out": false,
+        "user_cpu_seconds": 2.46875,
+        "wall_seconds": 1.6950318
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.15625,
+        "peak_job_memory_bytes": 43184128,
+        "peak_memory_bytes": 10657792,
+        "peak_process_commit_bytes": 39997440,
+        "timed_out": false,
+        "user_cpu_seconds": 0.453125,
+        "wall_seconds": 0.5504546
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 2,
+  "setting": {
+    "compress_args": [
+      "a",
+      "-bd",
+      "-y",
+      "-t7z",
+      "-m0=LZMA2",
+      "-mx5",
+      "-mmt=24",
+      "../../tmp/run10284/made-source-git/m1/a.7z",
+      "source-git"
+    ],
+    "extract_args": [
+      "x",
+      "a.7z",
+      "x"
+    ],
+    "id": "7z-lzma2"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk-foreign",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+52f6220d11cc"
+  },
+  "verification": {
+    "files_checked": 663,
+    "files_ok": 663,
+    "verified": true
+  }
+}

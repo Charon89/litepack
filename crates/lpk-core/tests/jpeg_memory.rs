@@ -1066,3 +1066,100 @@ fn a_progressive_jpeg_with_its_last_scan_cut_short_is_refused_by_the_peel() {
     a.extract(e, &mut got).unwrap();
     assert!(got == jpeg);
 }
+
+/// The raw JPEG header of `stream`'s `HDR` section (after the SOI the decoders prefix), changed
+/// by `f`, its length updated.
+fn rewrite_raw_jpeg(stream: &[u8], f: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    rewrite_header(stream, |r| {
+        let n = u32::from_le_bytes(r[3..7].try_into().unwrap()) as usize;
+        let mut jpeg = r[7..7 + n].to_vec();
+        f(&mut jpeg);
+        r.splice(7..7 + n, jpeg.iter().copied());
+        r[3..7].copy_from_slice(&(jpeg.len() as u32).to_le_bytes());
+    })
+}
+
+/// Both decoders' check 5 on `stream`: the same refusal (`None` from lpk-core, `lepton stream`
+/// from lpk-check) or the same accepted header and term. Returns the accepted sampling factors.
+fn assert_decoders_agree(stream: &[u8], primary_len: u64) -> Option<Vec<(u32, u32)>> {
+    let mine = read_stream_header(stream, primary_len);
+    let theirs = lpk_check::jpeg::stream_header(0, stream, primary_len);
+    match (mine, theirs) {
+        (None, Err(e)) => {
+            assert_eq!(e.detail, "bad record 0: lepton stream");
+            None
+        }
+        (Some(m), Ok(t)) => {
+            assert_eq!(t.frame.marker, m.frame.marker);
+            assert_eq!(u32::from(t.frame.width), m.frame.width);
+            assert_eq!(u32::from(t.frame.height), m.frame.height);
+            let sampling: Vec<(u32, u32)> = t
+                .frame
+                .sampling
+                .iter()
+                .map(|&(h, v)| (u32::from(h), u32::from(v)))
+                .collect();
+            assert_eq!(sampling, m.frame.sampling);
+            assert_eq!(t.header_len, m.header_len);
+            assert_eq!(t.partitions, u64::from(m.partitions));
+            let len = stream.len() as u64;
+            assert_eq!(t.term(primary_len, len), image_term(&m, primary_len, len));
+            Some(m.frame.sampling)
+        }
+        (m, t) => panic!("the decoders disagree: lpk-core {m:?}, lpk-check {t:?}"),
+    }
+}
+
+/// Section 8's walk ends at `FF 00` where a marker is expected: both decoders find no frame
+/// header and refuse the stream with `lepton stream` (lpk-check once read `00` as a marker with a
+/// length and went on to the frame).
+#[test]
+fn ff00_before_the_frame_header_is_refused_by_both_decoders() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpeg = grey_jpeg(256, 256, false);
+    let plan = JpegPeel::default().peel(&jpeg, 1 << 24).unwrap();
+    assert!(assert_decoders_agree(&plan.stream, plan.primary_len).is_some());
+    // `FF 00 00 02` first: an empty segment if `00` were a marker with a length.
+    let stream = rewrite_raw_jpeg(&plan.stream, |j| {
+        j.splice(0..0, [0xFF, 0x00, 0x00, 0x02]);
+    });
+    assert_eq!(assert_decoders_agree(&stream, plan.primary_len), None);
+}
+
+/// A component whose sampling byte lies past the frame header's content is not counted: both
+/// decoders keep the frame with the components before it and compute the same term.
+#[test]
+fn a_component_past_the_frame_header_is_skipped_by_both_decoders() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpeg = grey_jpeg(256, 256, false);
+    let plan = JpegPeel::default().peel(&jpeg, 1 << 24).unwrap();
+    // The SOF0 declares `Nf` 4 for its 3 components.
+    let stream = rewrite_raw_jpeg(&plan.stream, |j| {
+        let sof = j.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        assert_eq!(j[sof + 9], 3);
+        j[sof + 9] = 4;
+    });
+    assert_eq!(
+        assert_decoders_agree(&stream, plan.primary_len),
+        Some(vec![(2, 2), (1, 1), (1, 1)])
+    );
+}
+
+/// After an SOS, a run `FF FF 00` in entropy-coded data is stuffing (the last `FF` of the run is
+/// examined): both decoders walk on to the frame header and accept the same header.
+#[test]
+fn ff_ff_00_in_entropy_data_is_stuffing_for_both_decoders() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpeg = grey_jpeg(256, 256, false);
+    let plan = JpegPeel::default().peel(&jpeg, 1 << 24).unwrap();
+    let stream = rewrite_raw_jpeg(&plan.stream, |j| {
+        j.splice(
+            0..0,
+            [0xFF, 0xDA, 0x00, 0x03, 0, 0x12, 0xFF, 0xFF, 0x00, 0x34],
+        );
+    });
+    assert_eq!(
+        assert_decoders_agree(&stream, plan.primary_len),
+        Some(vec![(2, 2), (1, 1), (1, 1)])
+    );
+}

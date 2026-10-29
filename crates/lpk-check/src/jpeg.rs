@@ -75,7 +75,8 @@ pub fn find_frame(jpeg: &[u8]) -> Option<FrameInfo> {
                 pos += 2;
                 continue;
             }
-            0xD9 => return None,
+            // EOI, or `FF 00` (byte stuffing, not a marker), ends the walk.
+            0x00 | 0xD9 => return None,
             _ => {}
         }
         let len = usize::from(u16::from_be_bytes([
@@ -92,11 +93,12 @@ pub fn find_frame(jpeg: &[u8]) -> Option<FrameInfo> {
             let height = u16::from_be_bytes([*seg.get(1)?, *seg.get(2)?]);
             let width = u16::from_be_bytes([*seg.get(3)?, *seg.get(4)?]);
             let nf = usize::from(*seg.get(5)?);
-            let mut sampling = Vec::with_capacity(nf);
-            for i in 0..nf {
-                let hv = *seg.get(6 + 3 * i + 1)?;
-                sampling.push((hv >> 4, hv & 0x0F));
-            }
+            // A component whose sampling byte lies past the content is not counted (nor is any
+            // after it, whose bytes lie further on).
+            let sampling = (0..nf)
+                .map_while(|i| seg.get(6 + 3 * i + 1))
+                .map(|&hv| (hv >> 4, hv & 0x0F))
+                .collect();
             return Some(FrameInfo {
                 marker: m,
                 height,
@@ -106,10 +108,15 @@ pub fn find_frame(jpeg: &[u8]) -> Option<FrameInfo> {
         }
         pos += 2 + len;
         if m == 0xDA {
-            // Entropy-coded data up to the next marker other than FF 00 and RST0-RST7.
+            // Entropy-coded data up to the next FF not followed by 00, RST0-RST7 or FF (in a run
+            // FF FF the last FF is the one examined).
             loop {
                 if *jpeg.get(pos)? == 0xFF {
                     let n = *jpeg.get(pos + 1)?;
+                    if n == 0xFF {
+                        pos += 1;
+                        continue;
+                    }
                     if n != 0x00 && !(0xD0..=0xD7).contains(&n) {
                         break;
                     }
@@ -399,6 +406,51 @@ mod tests {
         assert_eq!(f.memory_term(), 30 * 128);
         assert!(find_frame(&j[..20]).is_none());
         assert!(find_frame(&[0xFF, 0xD8, 0xFF, 0xD9]).is_none());
+    }
+
+    /// Section 8's walk: `FF 00` where a marker is expected ends it without a frame header (it is
+    /// not read as a segment with a length).
+    #[test]
+    fn ff00_where_a_marker_is_expected_ends_the_walk() {
+        let sof = [0xFF, 0xC0, 0, 11, 8, 0, 8, 0, 8, 1, 1, 0x11, 0];
+        let mut j = vec![0xFF, 0xD8];
+        j.extend_from_slice(&sof);
+        assert!(find_frame(&j).is_some());
+        // `FF 00 00 02` would be an empty segment if `00` were read as a marker with a length.
+        let mut j = vec![0xFF, 0xD8, 0xFF, 0x00, 0x00, 0x02];
+        j.extend_from_slice(&sof);
+        assert!(find_frame(&j).is_none());
+        // After fill bytes too.
+        let mut j = vec![0xFF, 0xD8, 0xFF, 0xFF, 0x00, 0x00, 0x02];
+        j.extend_from_slice(&sof);
+        assert!(find_frame(&j).is_none());
+    }
+
+    /// A component whose sampling byte lies past the frame header's content is not counted; the
+    /// frame is kept with the components before it.
+    #[test]
+    fn a_component_past_the_content_is_not_counted() {
+        // Nf 3, but the content holds one whole component and the first byte of a second.
+        let j = [
+            0xFF, 0xD8, 0xFF, 0xC0, 0, 12, 8, 0, 16, 0, 16, 3, 1, 0x22, 0, 2,
+        ];
+        let f = find_frame(&j).unwrap();
+        assert_eq!(f.sampling, vec![(2, 2)]);
+        assert_eq!((f.width, f.height), (16, 16));
+        // Nf 2 with no component bytes at all: a frame with no components.
+        let j = [0xFF, 0xD8, 0xFF, 0xC0, 0, 8, 8, 0, 16, 0, 16, 2];
+        assert_eq!(find_frame(&j).unwrap().sampling, vec![]);
+    }
+
+    /// In entropy-coded data, a run `FF FF` is not a marker: its last `FF` is the one examined, so
+    /// `FF FF 00` is stuffing and the walk goes on to the frame header.
+    #[test]
+    fn ff_ff_00_in_entropy_data_is_stuffing() {
+        let j = [
+            0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x03, 0, 0x12, 0xFF, 0xFF, 0x00, 0x34, 0xFF, 0xC0, 0, 11,
+            8, 0, 8, 0, 8, 1, 1, 0x11, 0,
+        ];
+        assert_eq!(find_frame(&j).unwrap().sampling, vec![(1, 1)]);
     }
 
     #[test]
