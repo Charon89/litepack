@@ -173,20 +173,30 @@ impl App {
         id: u64,
         action: SelectAction,
         row: Option<u32>,
+        generation: u32,
     ) -> Result<Status, GuiError> {
         let slot = self.slot(id)?;
         let mut b = lock(&slot.browser);
-        b.select(action, row)
+        b.select(action, row, generation)
     }
 
-    /// Open view row `row` of session `id` (`docs/notes/e5-design.md` section 4): a type off
-    /// [`crate::open::ALLOWED`] is refused before anything is written ([`Opening::Preview`]);
-    /// otherwise the entry alone is extracted under E3-2's policy into a fresh folder, zoned as
-    /// an opened entry ([`ExtractOptions::opening`]), for the host to hand to the shell.
-    pub fn open_entry(&self, id: u64, row: u32, monitor: &Monitor) -> Result<Opening, GuiError> {
+    /// Open row `row` of view `generation` of session `id` (`docs/notes/e5-design.md` section
+    /// 4). Refused before anything is written: another view than the one served, an entry
+    /// that is not a file, a path E3-2's rules refuse, or a type off [`crate::open::ALLOWED`]
+    /// ([`Opening::Preview`]). Otherwise the entry alone is extracted into a fresh folder, zoned
+    /// as an opened entry ([`ExtractOptions::opening`]), for the host to hand to the shell; a
+    /// copy whose due zone could not be written is removed and refused.
+    pub fn open_entry(
+        &self,
+        id: u64,
+        row: u32,
+        generation: u32,
+        monitor: &Monitor,
+    ) -> Result<Opening, GuiError> {
         let slot = self.slot(id)?;
         let (name, path, ids) = {
             let b = lock(&slot.browser);
+            b.check_generation(generation)?;
             let entry = b.id_at(row)?;
             let m = b.model();
             if m.row(entry).map(|r| r.kind) != Some(0) {
@@ -196,11 +206,8 @@ impl App {
             ids.insert(entry);
             (m.name(entry).to_string(), m.path(entry).to_string(), ids)
         };
-        if !crate::open::allowed(&name) {
-            return Ok(Opening::Preview {
-                extension: crate::open::last_extension(&name).unwrap_or_default(),
-                name,
-            });
+        if let Some(preview) = crate::open::refuse_first(&path)? {
+            return Ok(preview);
         }
         let dir = self
             .opened
@@ -210,12 +217,29 @@ impl App {
             opening: true,
             ..ExtractOptions::default()
         };
-        slot.session.extract(
+        let report = slot.session.extract(
             &Selection::Ids(Arc::new(ids)),
             &Destination::Dir(dir.clone()),
             &options,
             monitor,
-        )?;
+        );
+        let report = match report {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e.into());
+            }
+        };
+        if crate::open::refuse_unmarked(report.zone.is_some(), report.motw_unmarked) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(lpk_api::Error::new(
+                lpk_api::Class::Unsafe,
+                "MotwUnmarked",
+                format!("{path}: the Mark of the Web could not be written; not opened"),
+                None,
+            )
+            .into());
+        }
         let file = crate::open::file_in(&dir, &path);
         if !file.is_file() {
             return Err(lpk_api::Error::new(

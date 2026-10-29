@@ -75,7 +75,9 @@ fn scrolling_a_million_entries_stays_within_the_model_bound_plus_one_batch() {
         };
         let v = app.view(opened.session, &by_name, &c).unwrap();
         assert_eq!(v.total, ENTRIES as u64);
-        let s = app.select(opened.session, SelectAction::All, None).unwrap();
+        let s = app
+            .select(opened.session, SelectAction::All, None, v.generation)
+            .unwrap();
         assert_eq!(s.picked, ENTRIES as u64);
         assert_eq!(scroll(&app, opened.session, total), total - 1);
         let filtered = ViewRequest {

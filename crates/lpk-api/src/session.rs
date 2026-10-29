@@ -676,14 +676,12 @@ impl Session {
     /// opened with the shell ([`ExtractOptions::opening`]) the archive's zone whatever the
     /// opt-out says, the Internet zone for a foreign archive without one.
     fn extract_zone(&self, o: &ExtractOptions) -> Option<lpk_core::motw::Zone> {
-        if !o.opening {
-            return self.out_zone();
-        }
-        match (&self.kind, self.zone.zone) {
-            (_, Some(z)) => Some(z),
-            (Kind::Foreign(_), None) => Some(lpk_core::motw::Zone::INTERNET),
-            (Kind::Lpk(_), None) => None,
-        }
+        extraction_zone(
+            o.opening,
+            matches!(self.kind, Kind::Foreign(_)),
+            self.zone.zone,
+            self.options.motw_off,
+        )
     }
 
     /// The zone the files this session writes get: [`Session::zone`] unless opted out.
@@ -1623,10 +1621,49 @@ impl lpk_core::Sink for CappedSink {
     }
 }
 
+/// The zone an extraction writes: for an entry opened with the shell (`opening`), the archive's
+/// zone whatever the opt-out says, and the Internet zone for a foreign archive without one;
+/// otherwise the archive's zone unless opted out.
+fn extraction_zone(
+    opening: bool,
+    foreign: bool,
+    archive: Option<lpk_core::motw::Zone>,
+    motw_off: bool,
+) -> Option<lpk_core::motw::Zone> {
+    match (opening, archive) {
+        (true, Some(z)) => Some(z),
+        (true, None) if foreign => Some(lpk_core::motw::Zone::INTERNET),
+        (true, None) => None,
+        (false, z) => z.filter(|_| !motw_off),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn an_opened_entry_is_zoned_whatever_the_opt_out_and_a_zoneless_foreign_one_is_internet() {
+        use lpk_core::motw::Zone;
+        let restricted = Zone::from_id(4);
+        // Opening: the archive's zone even with the opt-out; Internet for a zoneless foreign
+        // archive; nothing for a zoneless .lpk.
+        assert_eq!(extraction_zone(true, false, restricted, true), restricted);
+        assert_eq!(
+            extraction_zone(true, true, None, true),
+            Some(Zone::INTERNET)
+        );
+        assert_eq!(
+            extraction_zone(true, true, None, false),
+            Some(Zone::INTERNET)
+        );
+        assert_eq!(extraction_zone(true, false, None, false), None);
+        // A plain extraction: the opt-out applies, and a zoneless foreign archive gives none.
+        assert_eq!(extraction_zone(false, false, restricted, true), None);
+        assert_eq!(extraction_zone(false, false, restricted, false), restricted);
+        assert_eq!(extraction_zone(false, true, None, false), None);
+    }
 
     fn session(dir: &Path) -> Arc<Session> {
         let src = dir.join("src");

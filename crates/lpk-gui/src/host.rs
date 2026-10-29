@@ -131,9 +131,10 @@ async fn select(
     session: u64,
     action: SelectAction,
     row: Option<u32>,
+    generation: u32,
 ) -> Result<Status, GuiError> {
     let app = host.app.clone();
-    blocking(move || app.select(session, action, row)).await
+    blocking(move || app.select(session, action, row, generation)).await
 }
 
 /// Open a file entry: extracted alone into a fresh zoned folder and handed to the shell when
@@ -145,6 +146,7 @@ async fn open_entry(
     host: State<'_, Host>,
     session: u64,
     row: u32,
+    generation: u32,
     op: u64,
 ) -> Result<Opening, GuiError> {
     let app = host.app.clone();
@@ -153,6 +155,7 @@ async fn open_entry(
         app.open_entry(
             session,
             row,
+            generation,
             &Monitor::new(Arc::new(|_: &Event| {}), g.token.clone()),
         )
     })

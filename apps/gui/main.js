@@ -87,8 +87,9 @@ const list = new VirtualList({
   cells,
   fetch: (first, count) => core.invoke("rows", { session, first, count }),
   activate: (index, row, folderOnly = false) => activate(index, row, folderOnly).catch(showError),
+  // The generation of the view the row index came from: Rust refuses another.
   select: async (action, row) => {
-    const s = await core.invoke("select", { session, action, row });
+    const s = await core.invoke("select", { session, action, row, generation: list.generation });
     showSelection(s);
     await list.refresh();
   },
@@ -157,7 +158,7 @@ async function activate(index, row, folderOnly) {
   if (folderOnly) {
     return;
   }
-  const r = await core.invoke("open_entry", { session, row: index, op: nextOp++ });
+  const r = await core.invoke("open_entry", { session, row: index, generation: list.generation, op: nextOp++ });
   if (r.outcome === "shell") {
     setStatus(t("open.done", { name: r.name }));
   } else {
@@ -197,7 +198,16 @@ async function openArchive(granted) {
   await report(opened.total, list.rowAt(0)?.name ?? "");
 }
 
+// A row request made against a view Rust has already replaced is refused ("stale view",
+// crates/lpk-gui/src/browse.rs STALE_VIEW); the next view re-syncs the page, so it is ignored.
+function stale(e) {
+  return Boolean(e && typeof e === "object" && e.class === "Usage" && String(e.detail).startsWith("stale view"));
+}
+
 function showError(e) {
+  if (stale(e)) {
+    return;
+  }
   problem("lpkFailure", `failure: ${describe(e)}`);
   setStatus(`${t("error.title")}: ${describe(e)}`);
   if (!reported) {

@@ -18,9 +18,8 @@ use serde::Serialize;
 /// those itself).
 pub const ALLOWED: &[&str] = &[
     // Documents.
-    "pdf", "docx", "xlsx", "pptx", "odt", "ods", "odp", "rtf", "epub", // Text.
-    "txt", "md", "csv", "tsv", "log", "json", "xml", "yaml", "yml", "toml", "ini",
-    // Images.
+    "pdf", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", // Text.
+    "txt", "md", "log", "json", "xml", "yaml", "yml", "toml", "ini", // Images.
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "heic", "avif", // Audio.
     "mp3", "wav", "flac", "ogg", "opus", "m4a", "aac", "wma", // Video.
     "mp4", "m4v", "mkv", "webm", "avi", "mov", "wmv",
@@ -38,6 +37,29 @@ pub fn last_extension(name: &str) -> Option<String> {
 /// Whether the shell may open an entry named `name`.
 pub fn allowed(name: &str) -> bool {
     last_extension(name).is_some_and(|e| ALLOWED.contains(&e.as_str()))
+}
+
+/// What is decided before anything is written for entry `path` (`/`-separated): an error when
+/// E3-2's path rules refuse it (a colon, as in `a.exe:x.pdf` or `a.pdf::$DATA`; a device name
+/// with any extension, as `CON.pdf`; a trailing dot or space), [`Opening::Preview`] when its
+/// type is off [`ALLOWED`], `None` to go on and extract it.
+pub fn refuse_first(path: &str) -> Result<Option<Opening>, crate::GuiError> {
+    lpk_api::check_extraction_path(path)?;
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if allowed(name) {
+        Ok(None)
+    } else {
+        Ok(Some(Opening::Preview {
+            name: name.to_string(),
+            extension: last_extension(name).unwrap_or_default(),
+        }))
+    }
+}
+
+/// Whether an extracted copy must not reach the shell: a zone was due and the mark could not
+/// be written (fail safe: the copy is removed and the open refused).
+pub fn refuse_unmarked(zone_due: bool, unmarked: bool) -> bool {
+    zone_due && unmarked
 }
 
 /// What opening an entry did.
@@ -142,11 +164,44 @@ mod tests {
             "setup.msi",
             "script.ps1",
             "inner.zip",
+            "letter.rtf",
+            "table.csv",
+            "table.tsv",
             "README",
             "doc.pdf.",
         ] {
             assert!(!allowed(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_path_rules_refuse_before_the_allow_list() {
+        for bad in [
+            "a.exe:x.pdf",
+            "a.pdf::$DATA",
+            "a.exe::$DATA.pdf",
+            "CON.pdf",
+            "nul.txt",
+            "dir/com1.png",
+            "doc.pdf ",
+            "doc.pdf.",
+        ] {
+            let e = refuse_first(bad).unwrap_err();
+            assert!(e.is(lpk_api::Class::Unsafe), "{bad}: {e}");
+        }
+        assert!(matches!(
+            refuse_first("x/run.cmd").unwrap(),
+            Some(Opening::Preview { .. })
+        ));
+        assert_eq!(refuse_first("x/report.pdf").unwrap(), None);
+    }
+
+    #[test]
+    fn an_unmarked_copy_of_a_zoned_source_is_refused() {
+        assert!(refuse_unmarked(true, true));
+        assert!(!refuse_unmarked(true, false));
+        assert!(!refuse_unmarked(false, true));
+        assert!(!refuse_unmarked(false, false));
     }
 
     #[test]

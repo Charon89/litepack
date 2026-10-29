@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{batch, GuiError};
 
+/// How a refusal of a stale request begins (the page ignores those: the next view re-syncs it).
+pub const STALE_VIEW: &str = "stale view";
+
 /// The rows the page keeps above and below the visible ones (its DOM holds at most
 /// `visible + 2·MARGIN_ROWS` rows; E5-11's harness counts them).
 pub const MARGIN_ROWS: usize = 64;
@@ -302,8 +305,28 @@ impl Browser {
         self.view.ids().iter().position(|&x| x == id)
     }
 
-    /// Change the selection; the status bar's figures after it.
-    pub fn select(&mut self, action: SelectAction, row: Option<u32>) -> Result<Status, GuiError> {
+    /// Refuse a request made against another view than the one served: a row index means
+    /// nothing in a view built since (a sort or filter the page has not seen yet).
+    pub fn check_generation(&self, generation: u32) -> Result<(), GuiError> {
+        let current = self.view.generation as u32;
+        if generation == current {
+            Ok(())
+        } else {
+            Err(GuiError::usage(format!(
+                "{STALE_VIEW}: generation {generation}, the view is {current}"
+            )))
+        }
+    }
+
+    /// Change the selection of view `generation` (refused when it is not the view served,
+    /// before anything changes); the status bar's figures after it.
+    pub fn select(
+        &mut self,
+        action: SelectAction,
+        row: Option<u32>,
+        generation: u32,
+    ) -> Result<Status, GuiError> {
+        self.check_generation(generation)?;
         let need = |row: Option<u32>| row.ok_or_else(|| GuiError::usage("no row given"));
         match action {
             SelectAction::Only => {
@@ -452,11 +475,17 @@ mod tests {
     fn selection_ranges_toggles_and_marks_travel_in_the_batch() {
         let d = tempfile::tempdir().unwrap();
         let mut b = browser(d.path());
-        let s = b.select(SelectAction::Only, Some(1)).unwrap();
+        let s = b
+            .select(SelectAction::Only, Some(1), b.info().generation)
+            .unwrap();
         assert_eq!(s.picked, 1);
-        let s = b.select(SelectAction::Range, Some(3)).unwrap();
+        let s = b
+            .select(SelectAction::Range, Some(3), b.info().generation)
+            .unwrap();
         assert_eq!(s.picked, 3);
-        let s = b.select(SelectAction::Toggle, Some(2)).unwrap();
+        let s = b
+            .select(SelectAction::Toggle, Some(2), b.info().generation)
+            .unwrap();
         assert_eq!(s.picked, 2);
         let (_, _, rows) = batch::decode(&b.rows(0, 10)).unwrap();
         let marked: Vec<bool> = rows
@@ -465,22 +494,69 @@ mod tests {
             .collect();
         assert_eq!(marked, [false, true, false, true, false, false]);
         // The anchor moved to row 2: a range from it.
-        let s = b.select(SelectAction::Extend, Some(5)).unwrap();
+        let s = b
+            .select(SelectAction::Extend, Some(5), b.info().generation)
+            .unwrap();
         assert_eq!(s.picked, 5);
-        assert_eq!(b.select(SelectAction::All, None).unwrap().picked, 6);
-        let s = b.select(SelectAction::None, None).unwrap();
+        assert_eq!(
+            b.select(SelectAction::All, None, b.info().generation)
+                .unwrap()
+                .picked,
+            6
+        );
+        let s = b
+            .select(SelectAction::None, None, b.info().generation)
+            .unwrap();
         assert_eq!((s.picked, s.entries), (0, 6));
-        assert!(b.select(SelectAction::Only, Some(6)).is_err());
-        assert!(b.select(SelectAction::Only, None).is_err());
+        assert!(b
+            .select(SelectAction::Only, Some(6), b.info().generation)
+            .is_err());
+        assert!(b
+            .select(SelectAction::Only, None, b.info().generation)
+            .is_err());
         // A sort keeps the selection; another scope clears it.
         let c = CancelToken::new();
-        b.select(SelectAction::All, None).unwrap();
+        b.select(SelectAction::All, None, b.info().generation)
+            .unwrap();
         let v = b
             .set_view(&req("flat", None, "size", false, ""), &c)
             .unwrap();
         assert_eq!(v.status.picked, 6);
         let v = b.set_view(&req("tree", None, "", false, ""), &c).unwrap();
         assert_eq!(v.status.picked, 0);
+    }
+
+    #[test]
+    fn a_request_against_an_older_view_is_refused_and_changes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut b = browser(d.path());
+        let c = CancelToken::new();
+        let old = b.info().generation;
+        b.select(SelectAction::Only, Some(0), old).unwrap();
+        let new = b
+            .set_view(&req("flat", None, "size", true, ""), &c)
+            .unwrap();
+        assert_ne!(old, new.generation);
+        for action in [
+            SelectAction::Only,
+            SelectAction::Range,
+            SelectAction::Extend,
+            SelectAction::Toggle,
+        ] {
+            let e = b.select(action, Some(3), old).unwrap_err();
+            assert!(
+                e.is(lpk_api::Class::Usage) && e.detail.starts_with(STALE_VIEW),
+                "{e}"
+            );
+        }
+        assert!(b.select(SelectAction::All, None, old).is_err());
+        assert_eq!(b.status().picked, 1, "the selection is untouched");
+        assert_eq!(
+            b.select(SelectAction::Only, Some(3), new.generation)
+                .unwrap()
+                .picked,
+            1
+        );
     }
 
     #[test]
