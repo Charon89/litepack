@@ -136,6 +136,106 @@ jobs:
             echo "option-ext code reached lpk-gui.exe" >&2
             exit 1
           fi
+      # R111: the WebDriver switch (lpk-gui's cargo feature `webdriver`, gui-e2e only) is not in the shipped exe
+      # (the smoke report's variable is the control: present).
+      - name: No WebDriver switch in the exe
+        shell: bash
+        run: |
+          exe=target/release/lpk-gui.exe
+          test "$(grep -a -c 'LPK_GUI_SMOKE_REPORT' "$exe")" -gt 0
+          if grep -a -qF 'LPK_GUI_WEBDRIVER' "$exe"; then
+            echo "the WebDriver switch reached the shipped lpk-gui.exe" >&2
+            exit 1
+          fi
+
+  # E5-11's driver harness (crates/lpk-gui-e2e): lpk-gui.exe (its `webdriver` build) under the Edge WebDriver of the
+  # WebView2 runtime's version opens an archive made by lpk; its rows reach the DOM and the page raised no
+  # error, unhandled rejection, CSP violation or failure flag.
+  gui-e2e:
+    name: gui-e2e (windows-2025)
+    timeout-minutes: 45
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui-e2e
+      - name: tauri-cli through cargo (pinned)
+        env:
+          # Third-party sources: their warnings are not ours to deny.
+          RUSTFLAGS: ""
+        run: |
+          cargo install tauri-cli --version 2.12.4 --locked
+      - name: Build lpk (makes the test archive)
+        run: cargo build --locked --release -p lpk-cli
+      - name: cargo tauri build (with the WebDriver switch)
+        working-directory: crates/lpk-gui
+        run: cargo tauri build --ci --features webdriver -- --locked
+      - name: An Edge WebDriver of the WebView2 runtime's version
+        shell: pwsh
+        run: |
+          # The WebView2 runtime's version (the Evergreen runtime's client key, machine-wide, then per-user).
+          $key = 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $runtime = (Get-ItemProperty "HKLM:\$key" -ErrorAction SilentlyContinue).pv
+          if (-not $runtime) {
+            $runtime = (Get-ItemProperty 'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv
+          }
+          if (-not $runtime) { throw "no WebView2 runtime version in the registry" }
+          # The image's preinstalled driver when it matches; otherwise (no EdgeWebDriver, no file, another version)
+          # the download.
+          $driver = $null
+          if ($env:EdgeWebDriver) {
+            $preinstalled = Join-Path $env:EdgeWebDriver 'msedgedriver.exe'
+            if (Test-Path -LiteralPath $preinstalled -PathType Leaf) {
+              $line = & $preinstalled --version
+              $driver = [regex]::Match("$line", '\d+\.\d+\.\d+\.\d+').Value
+            }
+          }
+          Write-Output "WebView2 runtime $runtime; preinstalled Edge WebDriver: $(if ($driver) { $driver } else { 'none' })"
+          if ($driver -and $driver -eq $runtime) {
+            $native = $preinstalled
+          } else {
+            # Microsoft's official Edge WebDriver download location, the version pinned to the runtime's:
+            # https://msedgedriver.microsoft.com/<version>/edgedriver_win64.zip
+            $zip = Join-Path $env:RUNNER_TEMP 'edgedriver_win64.zip'
+            $dir = Join-Path $env:RUNNER_TEMP 'edgedriver'
+            Invoke-WebRequest -Uri "https://msedgedriver.microsoft.com/$runtime/edgedriver_win64.zip" -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $dir -Force
+            $native = Join-Path $dir 'msedgedriver.exe'
+            # The fetched exe runs only with a valid Authenticode signature by Microsoft.
+            $sig = Get-AuthenticodeSignature -LiteralPath $native
+            Write-Output "signature: $($sig.Status); $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "the fetched driver's signature is $($sig.Status)" }
+            if ($sig.SignerCertificate.Subject -notmatch '(^|, )O=Microsoft Corporation(,|$)') {
+              throw "the fetched driver is not signed by Microsoft: $($sig.SignerCertificate.Subject)"
+            }
+            $line = & $native --version
+            Write-Output "fetched: $line"
+            if ([regex]::Match("$line", '\d+\.\d+\.\d+\.\d+').Value -ne $runtime) { throw "the fetched driver is not $runtime" }
+          }
+          "LPK_E2E_NATIVE_DRIVER=$native" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: The driver harness
+        env:
+          LPK_GUI_E2E: "1"
+          LPK_E2E_WORK: ${{ runner.temp }}/gui-e2e
+        run: cargo test --locked -p lpk-gui-e2e -- --nocapture
+      - name: After a failure, the processes and DevToolsActivePort files
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -match '^(lpk-gui|msedgewebview2|msedgedriver|tauri-driver)\.exe$' } |
+            ForEach-Object { "$($_.ProcessId) $($_.Name): $($_.CommandLine)" }
+          foreach ($root in @("$env:RUNNER_TEMP\gui-e2e", $env:TEMP, $env:LOCALAPPDATA)) {
+            Get-ChildItem -Path $root -Recurse -Force -Filter DevToolsActivePort -ErrorAction SilentlyContinue |
+              ForEach-Object { "$($_.FullName): $(Get-Content $_.FullName -Raw)" }
+          }
+          Get-ChildItem -Path "$env:RUNNER_TEMP\gui-e2e" -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 60 FullName
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:

@@ -272,6 +272,30 @@ pub fn run() -> i32 {
             if let Some(d) = paths::webview_dir() {
                 b = b.data_directory(d);
             }
+            // E5-11: the Edge WebDriver's arguments, only in a `webdriver` build (CI's driver
+            // harness; never shipped) and only when the harness asks for them.
+            #[cfg(feature = "webdriver")]
+            {
+                use lpk_gui::security::webdriver;
+                let outcome = webdriver::browser_args(
+                    std::env::var_os(webdriver::WEBDRIVER_ENV).as_deref(),
+                    std::env::var_os(webdriver::WEBVIEW2_ARGS_ENV).as_deref(),
+                );
+                // The harness cannot read a windowed exe's stderr: the outcome goes to its file.
+                if let Some(log) = std::env::var_os(webdriver::WEBDRIVER_LOG_ENV) {
+                    let line = match &outcome {
+                        Ok(Some(args)) => format!("accepted: {args}\n"),
+                        Ok(None) => "not asked\n".to_owned(),
+                        Err(e) => format!("refused: {e}\n"),
+                    };
+                    let _ = std::fs::write(log, line);
+                }
+                match outcome {
+                    Ok(Some(args)) => b = b.additional_browser_args(&args),
+                    Ok(None) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
             b.build()?;
             Ok(())
         })
