@@ -64,8 +64,8 @@ pub mod webdriver {
     /// repeated switch). `Ok(None)` otherwise, and the window keeps wry's defaults.
     ///
     /// # Errors
-    /// The first driver argument that is not one the driver needs ([`ALLOWED_ARGS`] and a
-    /// `--disable-features=` list), named in the message; also a value that is not Unicode.
+    /// Every driver argument that is not one the driver needs ([`ALLOWED_ARGS`] and a
+    /// `--disable-features=` list), each named in the message; also a value that is not Unicode.
     pub fn browser_args(
         gate: Option<&OsStr>,
         driver_args: Option<&OsStr>,
@@ -79,9 +79,15 @@ pub mod webdriver {
         let driver_args = driver_args
             .to_str()
             .ok_or_else(|| format!("{WEBVIEW2_ARGS_ENV} is not Unicode; refused"))?;
-        if let Some(bad) = driver_args.split_whitespace().find(|a| !allowed(a)) {
+        let refused: Vec<String> = driver_args
+            .split_whitespace()
+            .filter(|a| !allowed(a))
+            .map(|a| format!("`{a}`"))
+            .collect();
+        if !refused.is_empty() {
             return Err(format!(
-                "{WEBVIEW2_ARGS_ENV}: the argument `{bad}` is not one the WebDriver needs; refused"
+                "{WEBVIEW2_ARGS_ENV}: not arguments the WebDriver needs, refused: {}",
+                refused.join(" ")
             ));
         }
         let mut features: Vec<&str> = Vec::new();
