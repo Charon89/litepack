@@ -368,19 +368,31 @@ fn cancellation_wakes_the_waiting_decodes() {
     let g = gate();
     assert!(g.begin());
     let held = g.acquire(100 * MIB).unwrap();
-    let waiters: Vec<_> = [50 * MIB, 250 * MIB]
-        .into_iter()
-        .map(|need| {
-            let g = g.clone();
-            std::thread::spawn(move || {
-                assert!(g.begin());
-                let r = g.acquire(need);
-                g.end();
-                r
-            })
+    let spawn = |need: u64| {
+        let g = g.clone();
+        std::thread::spawn(move || {
+            assert!(g.begin());
+            let r = g.acquire(need);
+            g.end();
+            r
         })
-        .collect();
-    std::thread::sleep(Duration::from_millis(100));
+    };
+    let wait_for = |what: &str, done: &dyn Fn(&GateState) -> bool| {
+        for _ in 0..10_000 {
+            if done(&g.lock()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("{what} never happened");
+    };
+    // The shared waiter queues first: a decode waiting to run alone holds new decodes back at
+    // `begin`, so the other order would leave the shared waiter outside the gate.
+    let shared = spawn(50 * MIB);
+    wait_for("the shared waiter queues", &|s| s.queue.len() == 1);
+    let lone = spawn(250 * MIB);
+    wait_for("the lone waiter waits", &|s| s.alone_waiting == 1);
+    let waiters = [shared, lone];
     g.cancel();
     for w in waiters {
         assert_eq!(w.join().unwrap(), Err(Denied::Cancelled));
