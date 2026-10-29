@@ -2873,6 +2873,7 @@ version = "0.0.1"
 dependencies = [
  "fantoccini",
  "hyper-util",
+ "lpk-api",
  "serde_json",
  "tempfile",
  "tokio",
