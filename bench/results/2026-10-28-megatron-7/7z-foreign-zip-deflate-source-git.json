@@ -1,0 +1,162 @@
+{
+  "class": "source-git",
+  "corpus": {
+    "class_blake3": "3f6f5f50b63b9e9a95548e84d4b01f56c7f984287fb35616d5e4f52f91a73c9e",
+    "class_bytes": 35365500,
+    "class_files": 663,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "information": {
+    "kind": "foreign-extract",
+    "maker": "7z",
+    "maker_version": "26.03"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 28921046,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.234375,
+      "peak_job_memory_bytes": 1681362944,
+      "peak_memory_bytes": 141729792,
+      "peak_process_commit_bytes": 1681362944,
+      "timed_out": false,
+      "user_cpu_seconds": 0.71875,
+      "wall_seconds": 0.4390097
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.09375,
+      "peak_job_memory_bytes": 3055616,
+      "peak_memory_bytes": 9363456,
+      "peak_process_commit_bytes": 3055616,
+      "timed_out": false,
+      "user_cpu_seconds": 0.078125,
+      "wall_seconds": 0.2212145
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 28921046,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.234375,
+        "peak_job_memory_bytes": 1681362944,
+        "peak_memory_bytes": 141729792,
+        "peak_process_commit_bytes": 1681362944,
+        "timed_out": false,
+        "user_cpu_seconds": 0.71875,
+        "wall_seconds": 0.4390097
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.0625,
+        "peak_job_memory_bytes": 3067904,
+        "peak_memory_bytes": 9375744,
+        "peak_process_commit_bytes": 3067904,
+        "timed_out": false,
+        "user_cpu_seconds": 0.125,
+        "wall_seconds": 0.2229478
+      }
+    },
+    {
+      "archive_bytes": 28921046,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.234375,
+        "peak_job_memory_bytes": 1681362944,
+        "peak_memory_bytes": 141729792,
+        "peak_process_commit_bytes": 1681362944,
+        "timed_out": false,
+        "user_cpu_seconds": 0.71875,
+        "wall_seconds": 0.4390097
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.09375,
+        "peak_job_memory_bytes": 3055616,
+        "peak_memory_bytes": 9363456,
+        "peak_process_commit_bytes": 3055616,
+        "timed_out": false,
+        "user_cpu_seconds": 0.078125,
+        "wall_seconds": 0.2212145
+      }
+    },
+    {
+      "archive_bytes": 28921046,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.234375,
+        "peak_job_memory_bytes": 1681362944,
+        "peak_memory_bytes": 141729792,
+        "peak_process_commit_bytes": 1681362944,
+        "timed_out": false,
+        "user_cpu_seconds": 0.71875,
+        "wall_seconds": 0.4390097
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.125,
+        "peak_job_memory_bytes": 3047424,
+        "peak_memory_bytes": 9363456,
+        "peak_process_commit_bytes": 3047424,
+        "timed_out": false,
+        "user_cpu_seconds": 0.078125,
+        "wall_seconds": 0.2173755
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 2,
+  "setting": {
+    "compress_args": [
+      "a",
+      "-bd",
+      "-y",
+      "-tzip",
+      "-mm=Deflate",
+      "-mx5",
+      "-mmt=24",
+      "../../tmp/run10284/made-source-git/m0/a.zip",
+      "source-git"
+    ],
+    "extract_args": [
+      "x",
+      "-bd",
+      "-y",
+      "-mmt=24",
+      "-ox",
+      "a.zip"
+    ],
+    "id": "zip-deflate"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "7z-foreign",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "26.03"
+  },
+  "verification": {
+    "files_checked": 663,
+    "files_ok": 663,
+    "verified": true
+  }
+}
