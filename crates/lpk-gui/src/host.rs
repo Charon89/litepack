@@ -277,10 +277,20 @@ pub fn run() -> i32 {
             #[cfg(feature = "webdriver")]
             {
                 use lpk_gui::security::webdriver;
-                match webdriver::browser_args(
+                let outcome = webdriver::browser_args(
                     std::env::var_os(webdriver::WEBDRIVER_ENV).as_deref(),
                     std::env::var_os(webdriver::WEBVIEW2_ARGS_ENV).as_deref(),
-                ) {
+                );
+                // The harness cannot read a windowed exe's stderr: the outcome goes to its file.
+                if let Some(log) = std::env::var_os(webdriver::WEBDRIVER_LOG_ENV) {
+                    let line = match &outcome {
+                        Ok(Some(args)) => format!("accepted: {args}\n"),
+                        Ok(None) => "not asked\n".to_owned(),
+                        Err(e) => format!("refused: {e}\n"),
+                    };
+                    let _ = std::fs::write(log, line);
+                }
+                match outcome {
                     Ok(Some(args)) => b = b.additional_browser_args(&args),
                     Ok(None) => {}
                     Err(e) => return Err(e.into()),

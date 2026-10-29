@@ -29,6 +29,10 @@ pub mod webdriver {
     /// passes the driver's arguments itself, the allow-listed ones only ([`browser_args`]).
     pub const WEBDRIVER_ENV: &str = "LPK_GUI_WEBDRIVER";
 
+    /// A file the host writes the outcome of [`browser_args`] to (the arguments it passed, or the
+    /// refusal), for the harness, which cannot read a windowed exe's stderr.
+    pub const WEBDRIVER_LOG_ENV: &str = "LPK_GUI_WEBDRIVER_LOG";
+
     /// The WebView2 runtime's variable of additional browser arguments, which the Edge WebDriver
     /// sets for the app it launches.
     pub const WEBVIEW2_ARGS_ENV: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";

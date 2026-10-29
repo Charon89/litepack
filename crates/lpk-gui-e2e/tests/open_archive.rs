@@ -116,7 +116,23 @@ fn make_archive(work: &Path) -> PathBuf {
     archive
 }
 
+/// The file where the GUI says which of the driver's browser arguments it passed or refused
+/// (`lpk_gui::security::webdriver::WEBDRIVER_LOG_ENV`).
+fn webdriver_log(work: &Path) -> PathBuf {
+    work.join("webdriver.log")
+}
+
+/// The GUI's word on the driver's arguments, for messages.
+fn gui_says(work: &Path) -> String {
+    std::fs::read_to_string(webdriver_log(work)).map_or_else(
+        |e| format!("no {}: {e}", webdriver_log(work).display()),
+        |s| s.trim().to_owned(),
+    )
+}
+
 fn start_driver(work: &Path) -> Driver {
+    // A kept scratch folder holds the previous run's word.
+    let _ = std::fs::remove_file(webdriver_log(work));
     let local = work.join("local");
     std::fs::create_dir_all(&local).expect("create the local data folder");
     let native = native_driver();
@@ -135,6 +151,7 @@ fn start_driver(work: &Path) -> Driver {
         // them itself when the app sets its own; `lpk_gui::security::webdriver::WEBDRIVER_ENV`,
         // in a GUI built with the feature `webdriver`).
         .env("LPK_GUI_WEBDRIVER", "1")
+        .env("LPK_GUI_WEBDRIVER_LOG", webdriver_log(work))
         .env_remove("LPK_GUI_SMOKE_REPORT")
         .stdin(Stdio::null())
         .spawn()
@@ -142,7 +159,7 @@ fn start_driver(work: &Path) -> Driver {
     Driver(child)
 }
 
-async fn connect(driver: &mut Driver, archive: &Path) -> Client {
+async fn connect(driver: &mut Driver, work: &Path, archive: &Path) -> Client {
     let gui = gui_exe();
     assert!(gui.is_file(), "no GUI at {}", gui.display());
     let mut caps = serde_json::Map::new();
@@ -160,7 +177,7 @@ async fn connect(driver: &mut Driver, archive: &Path) -> Client {
     loop {
         // A dead tauri-driver fails the test at once, not after the whole wait.
         if let Some(e) = driver.exited() {
-            panic!("no WebDriver session: {e}");
+            panic!("no WebDriver session: {e}; the GUI: {}", gui_says(work));
         }
         match ClientBuilder::new(HttpConnector::new())
             .capabilities(caps.clone())
@@ -177,7 +194,10 @@ async fn connect(driver: &mut Driver, archive: &Path) -> Client {
                 eprintln!("waiting for tauri-driver: {e}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            Err(e) => panic!("no WebDriver session within {CONNECT_WITHIN:?}: {e}"),
+            Err(e) => panic!(
+                "no WebDriver session within {CONNECT_WITHIN:?}: {e}; the GUI: {}",
+                gui_says(work)
+            ),
         }
     }
 }
@@ -236,7 +256,8 @@ fn an_archive_given_on_the_command_line_opens_with_no_page_error() {
         .build()
         .expect("tokio runtime");
     rt.block_on(async {
-        let c = connect(&mut driver, &archive).await;
+        let c = connect(&mut driver, &work, &archive).await;
+        eprintln!("the GUI: {}", gui_says(&work));
         let outcome = check(&c).await;
         let _ = c.close().await;
         if let Err(e) = outcome {
