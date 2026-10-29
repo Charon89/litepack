@@ -39,21 +39,99 @@ pub trait DecodeContext {
     }
 }
 
-/// A pooled extraction's gate for decodes whose working memory exceeds what
-/// the archive's `decode_memory` declares: such a decode runs alone (no other
-/// block decodes meanwhile), within the memory the pool leaves a lone decode.
+/// A pooled extraction's gate for the working memory of record decoders
+/// (`jpeg-reconstruct`, `deflate-reconstruct`, `bwt`): each decode reserves
+/// its computed need from the bytes the pool keeps for them, and waits when it
+/// does not fit. A need larger than the pool waits for the pool to empty and
+/// runs alone, within the memory the pool leaves a lone decode; a need beyond
+/// that is refused. The reader stays within its memory resource either way.
 pub trait DecodeGate: Send + Sync + std::fmt::Debug {
     /// Bytes a decode running alone may use beyond its block's plain bytes.
     fn alone_memory(&self) -> u64;
+    /// The extraction's memory budget (`--memory`), in bytes: what a refusal
+    /// reports as allowed.
+    fn budget(&self) -> u64;
     /// The memory resource (`--memory`, whole MiB) under which a decode running
     /// alone may use `need` bytes beyond its block's plain bytes: what a
     /// refusal tells the user to pass.
     fn budget_for(&self, need: u64) -> u64;
-    /// Waits until no other block decodes and keeps others from starting;
-    /// `false` when the extraction is cancelled meanwhile.
-    fn enter_alone(&self) -> bool;
-    /// Ends [`DecodeGate::enter_alone`]'s exclusivity.
-    fn leave_alone(&self);
+    /// Waits until `need` bytes of working memory are reserved for this decode
+    /// (alone when the pool cannot hold them beside others).
+    fn acquire(&self, need: u64) -> Result<Grant, Denied>;
+    /// Returns what [`DecodeGate::acquire`] granted.
+    fn release(&self, grant: Grant);
+}
+
+/// What a [`DecodeGate`] reserved for one decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grant {
+    /// Bytes taken from the pool.
+    pub bytes: u64,
+    /// The decode runs alone (no other reservation meanwhile).
+    pub alone: bool,
+}
+
+/// Why a [`DecodeGate`] reserved nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denied {
+    /// The extraction was cancelled while the decode waited.
+    Cancelled,
+    /// The need exceeds what this extraction's budget lets a decode use.
+    TooLarge {
+        /// The `--memory` figure (bytes) under which the decode would run.
+        needed: u64,
+    },
+}
+
+/// A reservation of a [`DecodeGate`]: returned on drop, so on every path out
+/// of the decode (success, error, panic).
+#[derive(Debug)]
+pub struct Reservation {
+    gate: Arc<dyn DecodeGate>,
+    grant: Grant,
+}
+
+impl Reservation {
+    /// What the gate granted.
+    pub fn grant(&self) -> Grant {
+        self.grant
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.gate.release(self.grant);
+    }
+}
+
+/// Reserves `need` bytes of working memory for a record decode through the
+/// context's gate: `Ok(None)` without a gate (the decoder then checks the need
+/// against the limits it was given); a `Refused` error (field `--memory`,
+/// `allowed` the extraction's budget) when the need is beyond what a lone
+/// decode may use; an `Interrupted` I/O error ([`cancelled`]) when the
+/// extraction is cancelled while the decode waits.
+pub fn reserve(ctx: &dyn DecodeContext, need: u64) -> Result<Option<Reservation>, FormatError> {
+    let Some(gate) = ctx.gate() else {
+        return Ok(None);
+    };
+    match gate.acquire(need) {
+        Ok(grant) => Ok(Some(Reservation { gate, grant })),
+        Err(Denied::Cancelled) => Err(cancelled()),
+        Err(Denied::TooLarge { needed }) => Err(FormatError::Refused(crate::envelope::Refusal {
+            field: crate::envelope::MEMORY_OPTION,
+            needed,
+            allowed: gate.budget(),
+        })),
+    }
+}
+
+/// The error of a decode that stopped waiting at the gate because the
+/// extraction was cancelled.
+pub fn cancelled() -> FormatError {
+    FormatError::Io(std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "the extraction was cancelled",
+    ))
 }
 
 /// The context of a decode that has no archive behind it: every request fails.

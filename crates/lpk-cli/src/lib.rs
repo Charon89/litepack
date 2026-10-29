@@ -1763,7 +1763,7 @@ fn extract(
     if x.verbose {
         let _ = writeln!(
             err,
-            "{}: {} files, {} directories, {} symlinks, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} nested decodes, {} files reopened",
+            "{}: {} files, {} directories, {} symlinks, {} bytes; plan: {} chunk placements over {} of {} blocks; pool: {} workers, {} blocks in flight, {} writers; {} blocks decoded, {} nested decodes, {} files reopened; alone_decodes {}, concurrent_while_alone {}",
             x.archive.display(),
             s.files,
             s.directories,
@@ -1777,7 +1777,9 @@ fn extract(
             s.writers,
             s.blocks_decoded,
             s.nested_decodes,
-            s.reopened
+            s.reopened,
+            s.alone_decodes,
+            s.concurrent_while_alone
         );
         let m = &s.memory;
         let source = match m.budget.source {
@@ -1810,13 +1812,14 @@ fn extract(
         };
         let _ = writeln!(
             err,
-            "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {}, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}; held block {} bytes, blocks in flight {}{key}",
+            "memory: budget {} bytes ({source}); envelope tier {}; per block {} bytes (encoded {}, plain {}, decoder {} of {} declared, step input {}, nested {}); fixed {} bytes (shared {}, per worker {}); workers {}; held block {} bytes, blocks in flight {}{key}",
             m.budget.bytes,
             m.tier.name(),
             m.per_block,
             m.encoded,
             m.plain,
             m.decoder,
+            m.declared,
             m.step_input,
             m.nested,
             m.fixed,

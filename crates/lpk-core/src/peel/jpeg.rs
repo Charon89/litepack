@@ -853,43 +853,25 @@ impl PrimitiveDecoder for JpegDecoder {
         };
         refuse(memory_bound(&header.frame), limits.memory)?;
         let need = image_term(&header, j.primary_len, input.len() as u64);
-        // A need the declaration covers is counted by the extraction's pool like any block's.
-        // One it does not cover runs alone when a pooled extraction gives a gate, within the
-        // memory the pool leaves a lone decode; otherwise within the reader's own resource.
-        let _alone = if need > limits.memory.saturating_sub(limits.max_block_plain) {
-            match ctx.gate() {
-                Some(gate) => {
-                    // Refused with the `--memory` that would let it run (field `--memory`:
-                    // `needed` is that figure, `allowed` this extraction's budget).
-                    if need > gate.alone_memory() {
-                        let budget = ctx.memory_budget().unwrap_or(limits.memory);
-                        return Err(FormatError::Refused(Refusal {
-                            field: lpk_format::envelope::MEMORY_OPTION,
-                            needed: gate.budget_for(need),
-                            allowed: budget,
-                        }));
-                    }
-                    if !gate.enter_alone() {
-                        return Err(FormatError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "the extraction was cancelled",
-                        )));
-                    }
-                    Some(Alone(gate))
-                }
-                None => {
-                    refuse(need, ctx.memory_budget().unwrap_or(limits.memory))?;
-                    None
-                }
+        // The need is reserved from the extraction's gate (R115): it waits for room beside the
+        // other decodes, waits for the pool to empty and runs alone, or is refused with the
+        // `--memory` that would let it run. Without a gate it must fit the reader's own
+        // resource.
+        let reserved = match lpk_format::reserve(&*ctx, need)? {
+            Some(r) => Some(r),
+            None => {
+                refuse(need, ctx.memory_budget().unwrap_or(limits.memory))?;
+                None
             }
-        } else {
-            None
         };
         let frame = header.frame;
         let mut f = features(u32::try_from(j.primary_len).unwrap_or(u32::MAX));
         f.max_jpeg_width = frame.width;
         f.max_jpeg_height = frame.height;
         let primary = budgeted_decode(input, max, &mut f).map_err(|_| bad(id, "lepton stream"))?;
+        // The library's working memory is freed: the reservation goes back before the trailing
+        // chunks are read (which may decode a lower block).
+        drop(reserved);
         if primary.len() as u64 != j.primary_len {
             return Err(bad(id, "primary_len"));
         }
@@ -940,15 +922,6 @@ impl PrimitiveDecoder for JpegDecoder {
             return Err(bad(id, "original_hash"));
         }
         Ok(primary)
-    }
-}
-
-/// A decode running alone ([`lpk_format::DecodeGate::enter_alone`]); leaves on drop.
-struct Alone(std::sync::Arc<dyn lpk_format::DecodeGate>);
-
-impl Drop for Alone {
-    fn drop(&mut self) {
-        self.0.leave_alone();
     }
 }
 
