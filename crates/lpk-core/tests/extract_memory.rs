@@ -487,10 +487,17 @@ fn a_small_budget_binds_for_a_peeled_archive() {
     let want = hashes(src.path());
     let (wide, _) = measure(&arch, &work.path().join("o0"), THREADS, Some(u64::MAX / 2));
     assert!(wide.memory.nested > 0, "{:?}", wide.memory);
-    let budget = wide.memory.total(3);
+    // Three blocks at the declared decoder term: the floor (R115) lets at least as many decode.
+    let budget = wide.memory.with_declared().total(3);
     let (s, peak) = measure(&arch, &work.path().join("o1"), THREADS, Some(budget));
-    assert_eq!(s.workers, 3);
-    check_bound("peeled", &s, peak);
+    assert!(s.workers >= 3, "{}", s.workers);
+    // The record decoders' needs are reserved from the pool beyond the counted blocks (R115):
+    // the bound is the budget.
+    assert!(
+        peak <= s.memory.budget.bytes,
+        "peeled: measured {peak} above the budget {}",
+        s.memory.budget.bytes
+    );
     let (one, peak) = measure(&arch, &work.path().join("o2"), 1, Some(budget));
     check_one("peeled", &one, peak);
     for o in ["o0", "o1", "o2"] {

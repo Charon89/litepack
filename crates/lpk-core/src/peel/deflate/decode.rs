@@ -159,6 +159,10 @@ impl PrimitiveDecoder for DeflateDecoder {
         ctx: &mut dyn DecodeContext,
     ) -> Result<Vec<u8>, FormatError> {
         let (id, d) = Self::checked_record(params, expected_len, last, limits, ctx)?;
+        // The need of check 5 is reserved from the extraction's gate (R115): it waits for room,
+        // runs alone or is refused there; returned on every path out, a panic included.
+        let _reserved =
+            lpk_format::reserve(&*ctx, memory_term(d.plain_len, d.corrections.len() as u64))?;
         // 6
         if input.len() as u64 != d.plain_len {
             return Err(bad(id, "plain_len"));
