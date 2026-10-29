@@ -1,6 +1,6 @@
 //! `LPK_GUI_E2E=1` turns the WebDriver tests on (`cfg(lpk_gui_e2e)`); without it they are
-//! `#[ignore]`d, so a local `cargo nextest run --workspace` skips them (they need tauri-driver
-//! and the Edge WebDriver that matches the WebView2 runtime).
+//! `#[ignore]`d, so a local `cargo nextest run --workspace` skips them (they need
+//! the Edge WebDriver that matches the WebView2 runtime).
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(lpk_gui_e2e)");
     println!("cargo::rerun-if-env-changed=LPK_GUI_E2E");

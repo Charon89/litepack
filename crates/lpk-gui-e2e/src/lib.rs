@@ -2,7 +2,6 @@
 //!
 //! Run on Windows with `LPK_GUI_E2E=1 cargo test -p lpk-gui-e2e` after building `lpk` and
 //! `lpk-gui` in release (CI's `gui-e2e` job). The environment the tests read:
-//! - `LPK_E2E_TAURI_DRIVER`: the `tauri-driver` executable (default: `tauri-driver` on `PATH`);
 //! - `LPK_E2E_NATIVE_DRIVER`: `msedgedriver.exe` (default: `%EdgeWebDriver%\msedgedriver.exe`,
 //!   the runner's preinstalled Edge WebDriver);
 //! - `LPK_E2E_LPK`, `LPK_E2E_GUI`: the executables (default: `target/release/lpk.exe` and

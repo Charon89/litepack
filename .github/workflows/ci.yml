@@ -148,7 +148,7 @@ jobs:
             exit 1
           fi
 
-  # E5-11's driver harness (crates/lpk-gui-e2e): lpk-gui.exe under tauri-driver and the Edge WebDriver of the
+  # E5-11's driver harness (crates/lpk-gui-e2e): lpk-gui.exe (its `webdriver` build) under the Edge WebDriver of the
   # WebView2 runtime's version opens an archive made by lpk; its rows reach the DOM and the page raised no
   # error, unhandled rejection, CSP violation or failure flag.
   gui-e2e:
@@ -165,13 +165,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gui-e2e
-      - name: tauri-cli and tauri-driver through cargo (pinned)
+      - name: tauri-cli through cargo (pinned)
         env:
           # Third-party sources: their warnings are not ours to deny.
           RUSTFLAGS: ""
         run: |
           cargo install tauri-cli --version 2.12.4 --locked
-          cargo install tauri-driver --version 2.0.4 --locked
       - name: Build lpk (makes the test archive)
         run: cargo build --locked --release -p lpk-cli
       - name: cargo tauri build (with the WebDriver switch)

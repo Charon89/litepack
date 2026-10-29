@@ -1,6 +1,6 @@
 [package]
 name = "lpk-gui-e2e"
-description = "E5-11's WebDriver harness for lpk-gui.exe: tauri-driver and Edge WebDriver, driven by fantoccini (tests only)"
+description = "E5-11's WebDriver harness for lpk-gui.exe: the Edge WebDriver, driven by fantoccini (tests only)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,5 +1,11 @@
-//! E5-11's driver harness: `lpk-gui.exe` under tauri-driver and the Edge WebDriver opens an
-//! archive made by `lpk`, its rows reach the DOM, and the page raised no error flag.
+//! E5-11's driver harness: `lpk-gui.exe` under the Edge WebDriver opens an archive made by
+//! `lpk`, its rows reach the DOM, and the page raised no error flag.
+//!
+//! The test talks to the Edge WebDriver itself, with the capabilities tauri-driver would make
+//! (`browserName` `webview2`, the exe as `ms:edgeOptions.binary`) plus `excludeSwitches`:
+//! tauri-driver 2.0.4 rebuilds `ms:edgeOptions` from `tauri:options` and drops that key, and
+//! without it the driver's default Chrome switches reach the GUI, whose `webdriver` build
+//! refuses every argument but the three the session needs (R111).
 //!
 //! Ignored unless the crate was built with `LPK_GUI_E2E=1` (build.rs); CI's `gui-e2e` job sets
 //! it. E5-3's DOM-count check and E5-9's accessibility pass are added to this harness.
@@ -14,9 +20,31 @@ use fantoccini::error::NewSessionError;
 use fantoccini::{Client, ClientBuilder, Locator};
 use hyper_util::client::legacy::connect::HttpConnector;
 
-/// tauri-driver's port and the native driver's (tauri-driver's defaults).
+/// The Edge WebDriver's port.
 const DRIVER_PORT: u16 = 4444;
-const NATIVE_PORT: u16 = 4445;
+/// The Edge WebDriver's default Chrome switches the session does not need: excluded, so that the
+/// GUI is handed only `--remote-debugging-port=0`, `--enable-automation` and a
+/// `--disable-features=` list (`lpk_gui::security::webdriver::ALLOWED_ARGS`). The list is what
+/// msedgedriver 155 put in `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (CI's gui-e2e log on 6627ae5).
+const EXCLUDED_SWITCHES: &[&str] = &[
+    "allow-pre-commit-input",
+    "disable-background-networking",
+    "disable-background-timer-throttling",
+    "disable-backgrounding-occluded-windows",
+    "disable-client-side-phishing-detection",
+    "disable-default-apps",
+    "disable-hang-monitor",
+    "disable-popup-blocking",
+    "disable-prompt-on-repost",
+    "disable-sync",
+    "enable-logging",
+    "log-level",
+    "no-first-run",
+    "no-service-autorun",
+    "password-store",
+    "test-type",
+    "use-mock-keychain",
+];
 /// How long the driver may take to accept a session, and the page to show its rows.
 const CONNECT_WITHIN: Duration = Duration::from_secs(90);
 const ROWS_WITHIN: Duration = Duration::from_secs(90);
@@ -50,10 +78,6 @@ fn gui_exe() -> PathBuf {
     })
 }
 
-fn tauri_driver() -> PathBuf {
-    exe_from_env("LPK_E2E_TAURI_DRIVER", || PathBuf::from("tauri-driver"))
-}
-
 fn native_driver() -> PathBuf {
     exe_from_env("LPK_E2E_NATIVE_DRIVER", || {
         let dir = std::env::var_os("EdgeWebDriver")
@@ -62,17 +86,17 @@ fn native_driver() -> PathBuf {
     })
 }
 
-/// The tauri-driver process, killed with its whole tree (the Edge WebDriver, the GUI and its
-/// webview) when the test ends however it ends, a panic included.
+/// The Edge WebDriver's process, killed with its whole tree (the GUI and its webview) when the
+/// test ends however it ends, a panic included.
 struct Driver(Child);
 
 impl Driver {
-    /// A failure message if tauri-driver has already exited.
+    /// A failure message if the driver has already exited.
     fn exited(&mut self) -> Option<String> {
         match self.0.try_wait() {
-            Ok(Some(status)) => Some(format!("tauri-driver exited: {status}")),
+            Ok(Some(status)) => Some(format!("the Edge WebDriver exited: {status}")),
             Ok(None) => None,
-            Err(e) => Some(format!("tauri-driver's state is unknown: {e}")),
+            Err(e) => Some(format!("the Edge WebDriver's state is unknown: {e}")),
         }
     }
 }
@@ -137,15 +161,10 @@ fn start_driver(work: &Path) -> Driver {
     std::fs::create_dir_all(&local).expect("create the local data folder");
     let native = native_driver();
     assert!(native.is_file(), "no native driver at {}", native.display());
-    let child = Command::new(tauri_driver())
-        .arg("--port")
-        .arg(DRIVER_PORT.to_string())
-        .arg("--native-port")
-        .arg(NATIVE_PORT.to_string())
-        .arg("--native-driver")
-        .arg(&native)
+    let child = Command::new(&native)
+        .arg(format!("--port={DRIVER_PORT}"))
         // The GUI's state (journal, WebView2's data folder) goes to the scratch dir; the GUI
-        // inherits this environment through tauri-driver and the native driver.
+        // inherits this environment through the driver.
         .env("LOCALAPPDATA", &local)
         // The host passes the driver's browser arguments to its webview (WebView2 does not apply
         // them itself when the app sets its own; `lpk_gui::security::webdriver::WEBDRIVER_ENV`,
@@ -155,7 +174,7 @@ fn start_driver(work: &Path) -> Driver {
         .env_remove("LPK_GUI_SMOKE_REPORT")
         .stdin(Stdio::null())
         .spawn()
-        .expect("start tauri-driver");
+        .expect("start the Edge WebDriver");
     Driver(child)
 }
 
@@ -163,19 +182,22 @@ async fn connect(driver: &mut Driver, work: &Path, archive: &Path) -> Client {
     let gui = gui_exe();
     assert!(gui.is_file(), "no GUI at {}", gui.display());
     let mut caps = serde_json::Map::new();
+    caps.insert("browserName".into(), "webview2".into());
+    caps.insert("ms:edgeChromium".into(), true.into());
     caps.insert(
-        "tauri:options".into(),
+        "ms:edgeOptions".into(),
         serde_json::json!({
-            "application": gui,
+            "binary": gui,
             // The Edge WebDriver turns each argument into a Chromium switch (a bare path becomes
             // `--d:\...`, lower-cased), so the archive goes as `--open=<path>`, whose value it keeps.
             "args": [format!("--open={}", archive.display())],
+            "excludeSwitches": EXCLUDED_SWITCHES,
         }),
     );
     let url = format!("http://127.0.0.1:{DRIVER_PORT}");
     let deadline = Instant::now() + CONNECT_WITHIN;
     loop {
-        // A dead tauri-driver fails the test at once, not after the whole wait.
+        // A dead driver fails the test at once, not after the whole wait.
         if let Some(e) = driver.exited() {
             panic!("no WebDriver session: {e}; the GUI: {}", gui_says(work));
         }
@@ -191,7 +213,7 @@ async fn connect(driver: &mut Driver, work: &Path, archive: &Path) -> Client {
                 | NewSessionError::FailedC(_)
                 | NewSessionError::Lost(_)),
             ) if Instant::now() < deadline => {
-                eprintln!("waiting for tauri-driver: {e}");
+                eprintln!("waiting for the Edge WebDriver: {e}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(e) => panic!(
@@ -242,7 +264,7 @@ async fn row_names(c: &Client) -> Vec<String> {
 #[test]
 #[cfg_attr(
     not(lpk_gui_e2e),
-    ignore = "needs tauri-driver and the Edge WebDriver; build with LPK_GUI_E2E=1 (CI's gui-e2e job)"
+    ignore = "needs the Edge WebDriver; build with LPK_GUI_E2E=1 (CI's gui-e2e job)"
 )]
 fn an_archive_given_on_the_command_line_opens_with_no_page_error() {
     // `LPK_E2E_WORK` keeps the scratch folder (CI reads it after a failure); else a temporary one.
