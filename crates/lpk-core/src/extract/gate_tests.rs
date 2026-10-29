@@ -58,31 +58,98 @@ fn gate() -> Arc<AloneGate> {
     )
 }
 
-/// The envelope of `full/photo-jpeg` at 853acea declares 2,005,814,109 bytes: under the default
-/// 2 GiB budget the pool sized from the floor keeps at least e9790b8's 4 workers (it chose 1 when
-/// every block was counted with the declaration), and a lone decode still has the declared term.
+/// The envelope of `full/photo-jpeg` at 853acea declares 2,005,814,109 bytes: under a 2 GiB
+/// budget the pool sized from the floor keeps at least e9790b8's 4 workers (it chose 1 when every
+/// block was counted with the declaration), and a lone decode still has the declared term. The
+/// terms follow `pool_size` for an archive with records: `encoded + plain + floor + step_input +
+/// nested + BLOCK_ALLOWANCE`, the nested term a lower block's plain bytes and largest frame.
 #[test]
 fn the_floor_keeps_the_workers_under_a_large_declaration() {
-    let plain = 4 * MIB;
-    let decode_memory = 2_005_814_109u64;
-    let floor = crate::memory::zstd_decode_memory(22, plain);
-    let s = sizing(24, decode_memory - plain, floor, plain);
-    let budget = 2u64 << 30;
-    let (workers, in_flight) = s.size(budget);
-    assert!(workers >= 4, "workers {workers}");
-    assert!(in_flight >= workers);
-    let terms = s.gate_terms(Budget {
-        bytes: budget,
-        source: BudgetSource::Given,
+    // Blocks of 1 and 4 MiB (a 16 MiB block leaves room for one worker beside the declared
+    // term once every waiting decode keeps its frame and step input, R117).
+    for plain in [MIB, 4 * MIB] {
+        let env = lpk_format::Envelope {
+            max_window: plain,
+            max_block_plain: plain,
+            decode_memory: 2_005_814_109,
+            ..envelope()
+        };
+        let floor = decoder_floor(&env);
+        let declared = env.decode_memory - plain;
+        let frame = plain + plain / 64;
+        let nested = plain + frame;
+        let per_block = frame + plain + floor + plain + nested + BLOCK_ALLOWANCE;
+        let s = Sizing {
+            threads: 24,
+            writers: 4,
+            needed: 3054,
+            fixed_shared: 2 * MIB,
+            per_block,
+            per_worker: 256 << 10,
+            held: plain + BLOCK_ALLOWANCE,
+            decoder: floor,
+            declared,
+            budget_given: true,
+        };
+        let budget = Budget {
+            bytes: 2 << 30,
+            source: BudgetSource::Given,
+        };
+        let (workers, in_flight) = s.size(budget.bytes);
+        assert!(workers >= 4, "plain {plain}: workers {workers}");
+        assert!(in_flight >= workers);
+        let terms = s.gate_terms(budget);
+        assert!(terms.lone >= declared, "plain {plain}: {terms:?}");
+        let w = workers as u64;
+        let counted = s.fixed_shared
+            + w * (s.per_block + s.per_worker)
+            + (in_flight - workers) as u64 * s.held
+            + terms.shared;
+        assert!(counted <= budget.bytes, "{counted} > {}", budget.bytes);
+    }
+}
+
+fn envelope() -> lpk_format::Envelope {
+    lpk_format::Envelope {
+        max_window: 0,
+        max_bwt_block: 0,
+        max_block_plain: 0,
+        max_frame_payload: 0,
+        decode_memory: 0,
+        threads_hint: 0,
+    }
+}
+
+/// The floor at the edges of `max_window`: 0 and 1 (the smallest window), a window that is not a
+/// power of two (rounded up), and windows above 2^62 (zstd's log is capped); never above the
+/// declared term, never below the window within the block.
+#[test]
+fn the_floor_at_the_edges_of_max_window() {
+    let plain = 8 * MIB;
+    let big = |max_window: u64| {
+        decoder_floor(&lpk_format::Envelope {
+            max_window,
+            max_block_plain: plain,
+            decode_memory: u64::MAX,
+            ..envelope()
+        })
+    };
+    let zstd = crate::memory::zstd_decode_memory;
+    assert_eq!(big(0), zstd(0, plain));
+    assert_eq!(big(1), zstd(0, plain));
+    assert_eq!(big(3 * MIB), zstd(22, plain));
+    assert!(big(3 * MIB) >= 3 * MIB);
+    assert_eq!(big((1 << 62) + 1), zstd(62, plain));
+    assert_eq!(big(u64::MAX), zstd(62, plain));
+    assert!(big(u64::MAX) >= plain);
+    // Capped by the declared term.
+    let small = decoder_floor(&lpk_format::Envelope {
+        max_window: 1 << 30,
+        max_block_plain: plain,
+        decode_memory: plain + 1000,
+        ..envelope()
     });
-    assert!(terms.lone >= s.declared, "{terms:?}");
-    // The counted terms and the pool stay within the budget.
-    let w = workers as u64;
-    let counted = s.fixed_shared
-        + w * (s.per_block + s.per_worker)
-        + (in_flight - workers) as u64 * s.held
-        + terms.shared;
-    assert!(counted <= budget, "{counted} > {budget}");
+    assert_eq!(small, 1000);
 }
 
 /// Many small needs share the pool and never hold more than it at once; one outlier larger than

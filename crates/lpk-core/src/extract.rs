@@ -261,6 +261,9 @@ pub struct ExtractMemory {
     pub decoder: u64,
     /// The archive's declared decoder term: `decode_memory - max_block_plain`.
     pub declared: u64,
+    /// The gate's reservation pool for record decoders' needs beyond the floor (R115): the
+    /// budget less the fixed terms, every worker at `per_block` and every other permit held.
+    pub pool: u64,
     /// A step's input while the next step decodes: `max_block_plain`, for every archive.
     pub step_input: u64,
     /// With records: the nested lower block (its plain bytes and frame); else 0.
@@ -293,6 +296,7 @@ impl Default for ExtractMemory {
             plain: 0,
             decoder: 0,
             declared: 0,
+            pool: 0,
             step_input: 0,
             nested: 0,
             held: 0,
@@ -822,15 +826,19 @@ impl AloneGate {
                 return Err(lpk_format::Denied::Cancelled);
             }
             if !s.alone && s.reserved == 0 && s.queue.is_empty() {
-                // The other decodes waiting to run alone have not started their decoder: each
-                // is counted as the held block its permit pays for, as D-116 (4) counts them,
-                // so two of them never wait for each other.
+                // The other decodes waiting to run alone have not started their decoder; each
+                // still holds its block's other terms, which the lone room counts for every
+                // other worker ([`Sizing::alone_memory`]), so two of them never wait for each
+                // other.
                 let d = s.decoding.saturating_sub(s.alone_waiting - 1).max(1);
                 if d == 1 {
                     leave(&mut s);
                     s.alone = true;
                     self.alone_runs.fetch_add(1, Ordering::SeqCst);
-                    self.concurrent_while_alone.fetch_max(d, Ordering::SeqCst);
+                    // Blocks between `begin` and `end` at the grant: itself and the decodes
+                    // waiting to run alone.
+                    self.concurrent_while_alone
+                        .fetch_max(s.decoding.max(1), Ordering::SeqCst);
                     return Ok(lpk_format::Grant {
                         bytes: 0,
                         alone: true,
@@ -1728,6 +1736,7 @@ pub(crate) fn pool_size<R: Read + Seek>(
         plain,
         decoder,
         declared,
+        pool: sizing.gate_terms(budget).shared,
         step_input,
         nested,
         held,
@@ -1787,17 +1796,13 @@ impl Sizing {
         let by_memory = budget.saturating_sub(self.fixed_shared)
             / self.per_block.saturating_add(self.per_worker).max(1);
         let by_memory = usize::try_from(by_memory).unwrap_or(usize::MAX).max(1);
-        // A lone decode keeps room for the declared term beside every worker's reader and every
-        // other permit held (R115): `workers * per_worker + (workers - 1) * held` within the
-        // budget less the fixed terms, one block's other terms and the declared term.
-        let lone = self
-            .fixed_shared
-            .saturating_add(self.per_block.saturating_sub(self.decoder))
-            .saturating_add(self.declared);
-        let by_lone = match budget.checked_sub(lone) {
-            Some(room) => {
-                room.saturating_add(self.held) / self.per_worker.saturating_add(self.held).max(1)
-            }
+        // A lone decode keeps room for the declared term beside every worker's reader and
+        // every worker's block terms other than its decoder (a decode waiting to run alone
+        // holds its frame and step input, R117): `workers * (per_worker + per_block -
+        // decoder)` within the budget less the fixed terms and the declared term.
+        let other = self.per_block.saturating_sub(self.decoder);
+        let by_lone = match budget.checked_sub(self.fixed_shared.saturating_add(self.declared)) {
+            Some(room) => room / self.per_worker.saturating_add(other).max(1),
             None => 1,
         };
         let by_lone = usize::try_from(by_lone).unwrap_or(usize::MAX).max(1);
@@ -1826,16 +1831,17 @@ impl Sizing {
     }
 
     /// The memory a lone decode may use beyond its plain bytes under a budget of `budget`:
-    /// the budget less the shared and per-worker terms, one block's terms other than its
-    /// decoder, and every other permit held as a decoded block.
+    /// the budget less the shared and per-worker terms, every worker's block terms other than
+    /// its decoder (its own, and each other worker's, which may wait to run alone holding its
+    /// frame and step input, R117), and every permit beyond the workers held as a decoded block.
     pub(crate) fn alone_memory(&self, budget: u64) -> u64 {
         let (workers, in_flight) = self.size(budget);
         let w = u64::try_from(workers).unwrap_or(u64::MAX);
-        let others = u64::try_from(in_flight.saturating_sub(1)).unwrap_or(u64::MAX);
+        let others = u64::try_from(in_flight.saturating_sub(workers)).unwrap_or(u64::MAX);
         budget
             .saturating_sub(self.fixed_shared)
             .saturating_sub(w.saturating_mul(self.per_worker))
-            .saturating_sub(self.per_block.saturating_sub(self.decoder))
+            .saturating_sub(w.saturating_mul(self.per_block.saturating_sub(self.decoder)))
             .saturating_sub(others.saturating_mul(self.held))
     }
 

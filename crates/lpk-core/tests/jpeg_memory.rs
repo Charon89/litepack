@@ -877,8 +877,9 @@ fn over_declared_decodes_run_alone_and_the_peak_stays_within_the_budget() {
     );
     assert!(s.workers > 1, "the pool runs several workers");
     assert_eq!(s.alone_decodes, jpegs.len() as u64);
-    // While a decode ran alone, no other block decoded.
-    assert_eq!(s.concurrent_while_alone, 1);
+    // While a decode ran alone, no other block decoded: the blocks between `begin` and `end` at
+    // the grant are itself and the decodes waiting to run alone (R117).
+    assert!((1..=s.workers).contains(&s.concurrent_while_alone));
     assert!(peak <= budget, "peak {peak} > budget {budget}");
     for (i, j) in jpegs.iter().enumerate() {
         assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
@@ -1162,4 +1163,136 @@ fn ff_ff_00_in_entropy_data_is_stuffing_for_both_decoders() {
         assert_decoders_agree(&stream, plan.primary_len),
         Some(vec![(2, 2), (1, 1), (1, 1)])
     );
+}
+
+/// Extracts `arch` at `threads` and `memory`, measuring the process peak with the counting
+/// allocator.
+fn extract_measured(
+    arch: &std::path::Path,
+    out: &std::path::Path,
+    threads: usize,
+    memory: u64,
+) -> Result<(lpk_core::ExtractSummary, u64), lpk_core::CoreError> {
+    let opts = lpk_core::ExtractOptions {
+        threads: Some(threads),
+        memory: Some(memory),
+        ..lpk_core::ExtractOptions::default()
+    };
+    let before = ALLOC.current();
+    ALLOC.reset_peak();
+    let s = lpk_core::extract_file(arch, out, &[], None, &lpk_core::DefaultPolicy, &opts)?;
+    Ok((s, (ALLOC.peak() - before) as u64))
+}
+
+/// Admission by need (R115): an archive of many small JPEG records and one large progressive
+/// outlier, each declaring what the current writer declares (the larger of revision 1.1's term
+/// and the library's need). Under a budget only a little above the outlier's declaration the pool
+/// still runs several workers; the small needs share the gate's pool, the outlier waits for it to
+/// empty and runs alone; the process peak stays within the budget and every file is byte-exact.
+#[test]
+fn small_records_share_the_pool_and_the_outlier_waits() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut jpegs: Vec<Vec<u8>> = (0..24u16)
+        .map(|i| grey_jpeg(192 + 16 * (i % 8), 256, i % 3 == 0))
+        .collect();
+    jpegs.push(grey_jpeg(2048, 2048, true));
+    let arch_bytes = archive_of(&jpegs, &|plan| {
+        let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+        memory_bound(&h.frame).max(image_term(&h, plan.primary_len, plan.stream.len() as u64))
+    });
+    let env = lpk_format::Archive::open(
+        std::io::Cursor::new(arch_bytes.clone()),
+        &Resources::default(),
+    )
+    .unwrap()
+    .index()
+    .envelope;
+    let dir = tempfile::tempdir().unwrap();
+    let arch = dir.path().join("mixed.lpk");
+    std::fs::write(&arch, &arch_bytes).unwrap();
+    let budget = env.decode_memory + (16 << 20);
+    let out = dir.path().join("out");
+    let (s, peak) = extract_measured(&arch, &out, 8, budget).unwrap();
+    eprintln!(
+        "workers {}, in flight {}, floor {}, declared {}, pool {}, alone {}, peak {peak}, budget {budget}",
+        s.workers, s.in_flight, s.memory.decoder, s.memory.declared, s.memory.pool, s.alone_decodes
+    );
+    assert!(s.workers > 1, "the pool keeps several workers");
+    // The outlier's need beyond the floor and the smallest small record's do not fit the pool
+    // together: the outlier waits while any small record holds a reservation.
+    let need = |j: &[u8]| {
+        let plan = JpegPeel::default().peel(j, 1 << 24).unwrap();
+        let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+        image_term(&h, plan.primary_len, plan.stream.len() as u64).saturating_sub(s.memory.decoder)
+    };
+    let outlier = need(&jpegs[jpegs.len() - 1]);
+    let smallest = jpegs[..jpegs.len() - 1]
+        .iter()
+        .map(|j| need(j))
+        .min()
+        .unwrap();
+    assert!(
+        s.memory.pool < outlier + smallest,
+        "pool {} holds the outlier {outlier} beside {smallest}",
+        s.memory.pool
+    );
+    assert!(peak <= budget, "peak {peak} > budget {budget}");
+    for (i, j) in jpegs.iter().enumerate() {
+        assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
+    }
+}
+
+/// R117: decodes waiting to run alone still hold their frames and step inputs. An archive of
+/// eight over-declared progressive JPEGs (each runs alone) extracted at eight threads under the
+/// smallest budget the refusal names: the other workers wait to run alone while one runs, and the
+/// process peak stays within the budget.
+#[test]
+fn waiting_alone_decodes_and_one_lone_decode_stay_within_the_budget() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let jpegs: Vec<Vec<u8>> = (0..8u16)
+        .map(|i| grey_jpeg(1536 - 16 * i, 1536, true))
+        .collect();
+    let old = archive_of(&jpegs, &|plan| {
+        let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+        memory_bound(&h.frame)
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let arch = dir.path().join("old.lpk");
+    std::fs::write(&arch, &old).unwrap();
+    let env = lpk_format::Archive::open(std::io::Cursor::new(old.clone()), &Resources::default())
+        .unwrap()
+        .index()
+        .envelope;
+    let small = env.decode_memory + (1 << 20);
+    // The first refusal names the figure for whichever block failed first: retry with each
+    // figure until every block runs.
+    let mut budget = small;
+    let mut tries = 0;
+    let out = dir.path().join("out");
+    let (s, peak) = loop {
+        let _ = std::fs::remove_dir_all(&out);
+        match extract_measured(&arch, &out, 8, budget) {
+            Ok(r) => break r,
+            Err(lpk_core::CoreError::Decode {
+                source: FormatError::Refused(r),
+                ..
+            }) if tries < 8 => {
+                assert!(r.needed > budget);
+                budget = r.needed;
+                tries += 1;
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert!(tries >= 1, "the budget binds");
+    eprintln!(
+        "workers {}, in flight {}, alone {}, at the grant {}, peak {peak}, budget {budget}",
+        s.workers, s.in_flight, s.alone_decodes, s.concurrent_while_alone
+    );
+    assert!(s.workers > 1, "several workers wait to run alone");
+    assert_eq!(s.alone_decodes, jpegs.len() as u64);
+    assert!(peak <= budget, "peak {peak} > budget {budget}");
+    for (i, j) in jpegs.iter().enumerate() {
+        assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
+    }
 }
