@@ -158,6 +158,10 @@ pub struct ExtractOptions {
     pub threads: Option<usize>,
     /// The memory budget; `None` is the default of the archive's envelope tier.
     pub memory: Option<u64>,
+    /// An entry the GUI opens with the shell (E5-3, `docs/notes/e5-design.md` section 4):
+    /// zoned like the archive whatever [`OpenOptions::motw_off`] says, and a foreign archive
+    /// without a zone counts as the Internet zone.
+    pub opening: bool,
 }
 
 impl Default for ExtractOptions {
@@ -167,6 +171,7 @@ impl Default for ExtractOptions {
             symlinks: lpk_core::Symlinks::Skip,
             threads: None,
             memory: None,
+            opening: false,
         }
     }
 }
@@ -665,6 +670,18 @@ impl Session {
     /// Internet zone (fail safe), unless Mark of the Web is opted out.
     pub fn zone_warning(&self) -> Option<String> {
         (self.zone.unreadable && !self.options.motw_off).then(lpk_core::motw::unreadable_warning)
+    }
+
+    /// The zone the files an extraction writes get: [`Session::out_zone`], or for an entry
+    /// opened with the shell ([`ExtractOptions::opening`]) the archive's zone whatever the
+    /// opt-out says, the Internet zone for a foreign archive without one.
+    fn extract_zone(&self, o: &ExtractOptions) -> Option<lpk_core::motw::Zone> {
+        extraction_zone(
+            o.opening,
+            matches!(self.kind, Kind::Foreign(_)),
+            self.zone.zone,
+            self.options.motw_off,
+        )
     }
 
     /// The zone the files this session writes get: [`Session::zone`] unless opted out.
@@ -1253,6 +1270,7 @@ impl Session {
         let dir = self.destination_in(&g, s, to)?;
         let m = &g.monitor(m);
         let policy = lpk_core::Policy::new(o.overwrite, o.symlinks);
+        let zone = self.extract_zone(o);
         let outcome = match &self.kind {
             Kind::Lpk(_) => {
                 let mut a = self.fork()?;
@@ -1260,7 +1278,7 @@ impl Session {
                     select,
                     threads: o.threads,
                     memory: o.memory,
-                    zone: self.out_zone(),
+                    zone,
                     ..lpk_core::ExtractOptions::default()
                 };
                 let s = lpk_core::extract_archive_with(
@@ -1282,7 +1300,7 @@ impl Session {
                     &policy,
                     &select,
                     &lpk_core::foreign::Options {
-                        zone: self.out_zone(),
+                        zone,
                         ..self.options.foreign.clone()
                     },
                     m,
@@ -1300,7 +1318,7 @@ impl Session {
             skipped_symlinks: policy.skipped_symlinks(),
             refused_symlink_targets: policy.refused_symlink_targets(),
             unprivileged_symlinks: policy.unprivileged_symlinks(),
-            zone: self.out_zone(),
+            zone,
             motw_unmarked,
         })
     }
@@ -1603,10 +1621,49 @@ impl lpk_core::Sink for CappedSink {
     }
 }
 
+/// The zone an extraction writes: for an entry opened with the shell (`opening`), the archive's
+/// zone whatever the opt-out says, and the Internet zone for a foreign archive without one;
+/// otherwise the archive's zone unless opted out.
+fn extraction_zone(
+    opening: bool,
+    foreign: bool,
+    archive: Option<lpk_core::motw::Zone>,
+    motw_off: bool,
+) -> Option<lpk_core::motw::Zone> {
+    match (opening, archive) {
+        (true, Some(z)) => Some(z),
+        (true, None) if foreign => Some(lpk_core::motw::Zone::INTERNET),
+        (true, None) => None,
+        (false, z) => z.filter(|_| !motw_off),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn an_opened_entry_is_zoned_whatever_the_opt_out_and_a_zoneless_foreign_one_is_internet() {
+        use lpk_core::motw::Zone;
+        let restricted = Zone::from_id(4);
+        // Opening: the archive's zone even with the opt-out; Internet for a zoneless foreign
+        // archive; nothing for a zoneless .lpk.
+        assert_eq!(extraction_zone(true, false, restricted, true), restricted);
+        assert_eq!(
+            extraction_zone(true, true, None, true),
+            Some(Zone::INTERNET)
+        );
+        assert_eq!(
+            extraction_zone(true, true, None, false),
+            Some(Zone::INTERNET)
+        );
+        assert_eq!(extraction_zone(true, false, None, false), None);
+        // A plain extraction: the opt-out applies, and a zoneless foreign archive gives none.
+        assert_eq!(extraction_zone(false, false, restricted, true), None);
+        assert_eq!(extraction_zone(false, false, restricted, false), restricted);
+        assert_eq!(extraction_zone(false, true, None, false), None);
+    }
 
     fn session(dir: &Path) -> Arc<Session> {
         let src = dir.join("src");

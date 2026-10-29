@@ -1,0 +1,26 @@
+[package]
+name = "lpk-gui-e2e"
+description = "E5-11's WebDriver harness for lpk-gui.exe: the Edge WebDriver, driven by fantoccini (tests only)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about (about.toml `private.ignore`) leaves our own crates out of THIRD-PARTY-NOTICES.
+publish = false
+# The tests drive the built `lpk.exe` and `lpk-gui.exe` as a user would; lpk-api only writes a fixture.
+
+# The tests compile on Windows only (the GUI is Windows-only); elsewhere the crate is empty.
+# fantoccini without its TLS features: the driver is on localhost, reached over plain HTTP.
+[target.'cfg(windows)'.dev-dependencies]
+fantoccini = { version = "=0.22.1", default-features = false }
+# E5-3's DOM bound: E3-1's million-entry archive, written through lpk-api's test helpers (a
+# million files through `lpk a` would take far longer).
+lpk-api = { path = "../lpk-api", version = "0.0.1", features = ["test-support"] }
+hyper-util ={ version = "0.1.19", features = ["client-legacy", "http1", "tokio"] }
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+tokio = { version = "1.45.1", features = ["macros", "rt", "time"] }
+
+[lints]
+workspace = true

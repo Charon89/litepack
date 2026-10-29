@@ -1,6 +1,6 @@
-/* LitePack GUI (E5-2 skeleton). The theme follows the system (prefers-color-scheme), high
-   contrast uses the system colours (forced-colors); sizes are in rem so that the page scales
-   with the display's DPI. */
+/* LitePack GUI (E5-3, the archive browser). The theme follows the system (prefers-color-scheme),
+   high contrast uses the system colours (forced-colors). Rows have a fixed height in CSS pixels
+   (list.js ROW_PX), which the webview scales with the display's DPI. */
 :root {
   color-scheme: light dark;
   --bg: #ffffff;
@@ -9,6 +9,7 @@
   --line: #e1e1e1;
   --head: #f3f3f3;
   --focus: #005fb8;
+  --pick: #cce4f7;
   font: 0.875rem/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
 
@@ -20,6 +21,7 @@
     --line: #3a3a3a;
     --head: #2b2b2b;
     --focus: #60cdff;
+    --pick: #1f3d57;
   }
 }
 
@@ -35,9 +37,70 @@ body {
   flex-direction: column;
 }
 
+button, input {
+  font: inherit;
+  color: inherit;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.bar[hidden] {
+  display: none;
+}
+
+.modes button, .crumbs button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0.125rem 0.5rem;
+  cursor: pointer;
+}
+
+.modes button[aria-checked="true"] {
+  border-color: var(--line);
+  background: var(--head);
+}
+
+.crumbs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.crumbs button + button::before {
+  content: "\203A\00a0";
+  color: var(--muted);
+}
+
+.crumbs button[aria-current] {
+  font-weight: 600;
+}
+
+.filter {
+  width: 14rem;
+  padding: 0.125rem 0.375rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.glob {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 main {
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .hint {
@@ -47,22 +110,86 @@ main {
   color: var(--muted);
 }
 
+.list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+
+.list[hidden] {
+  display: none;
+}
+
+.viewport {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  contain: strict;
+}
+
+.spacer {
+  width: 1px;
+}
+
+.layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  will-change: transform;
+}
+
 .row {
   display: grid;
   grid-template-columns: minmax(10rem, 1fr) 8rem 12rem;
   gap: 0.75rem;
-  padding: 0.25rem 0.75rem;
+  box-sizing: border-box;
+  height: 24px;
+  align-items: center;
+  padding: 0 0.75rem;
   border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row[data-kind="1"] > span:first-child {
+  font-weight: 600;
 }
 
 .row.head {
-  position: sticky;
-  top: 0;
   background: var(--head);
   font-weight: 600;
 }
 
-.row:focus-visible {
+.row.head button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+[aria-sort="ascending"] button::after {
+  content: " \25B4";
+}
+
+[aria-sort="descending"] button::after {
+  content: " \25BE";
+}
+
+.row[aria-selected="true"] {
+  background: var(--pick);
+}
+
+.list:focus-visible .row.focused {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
@@ -73,6 +200,9 @@ main {
 }
 
 .status {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
   padding: 0.25rem 0.75rem;
   border-top: 1px solid var(--line);
   color: var(--muted);
@@ -80,10 +210,14 @@ main {
 }
 
 @media (forced-colors: active) {
-  .row:focus-visible {
+  .list:focus-visible .row.focused {
     outline-color: Highlight;
   }
-  .row, .status {
+  .row[aria-selected="true"] {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .row, .status, .bar {
     border-color: CanvasText;
   }
 }

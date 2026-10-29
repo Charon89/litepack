@@ -20,6 +20,8 @@ pub mod error;
 pub mod export;
 pub mod model;
 mod session;
+#[cfg(feature = "test-support")]
+pub mod testing;
 
 pub use create::{
     append, calibrate, committed_generation, create, rollback, CreateSettings, Rate, Seal, Tier,
@@ -41,6 +43,16 @@ pub use lpk_core::{
     Root, RunSummary, Selection as Globs, Sources, Stage, Symlinks,
 };
 pub use lpk_format::{Credentials, Entry, EntryFlags, EntryKind, Refusal, Suite};
+
+/// E3-2's extraction-path rules on top of the format's (`/`-separated `path`): no Windows device
+/// name (with any extension), no `:`, no trailing dot or space, no absolute path, backslash or
+/// dot component. The GUI runs it before it writes anything for an opened entry (E5-3).
+///
+/// # Errors
+/// [`Class::Unsafe`]'s error naming the rule.
+pub fn check_extraction_path(path: &str) -> Result<(), Error> {
+    lpk_core::policy::check_extraction_path(path).map_err(|e| Error::format(e, None))
+}
 
 /// The broker's options for a foreign archive (E4's limits and the worker).
 pub type ForeignOptions = lpk_core::foreign::Options;
