@@ -60,10 +60,37 @@ async fn settle(c: &Client) -> Result<(), String> {
 
 /// The rows in the DOM against the bound; the largest `aria-rowindex` among them.
 async fn check_rows(c: &Client, at: &str) -> Result<u64, String> {
-    let visible: usize = list_attr(c, "data-visible-rows")
+    // "Visible" from the viewport itself, not the page's word: ceil(clientHeight / ROW_PX) + 1
+    // (a partly shown row at each edge), ROW_PX the rendered row's height.
+    let geometry = c
+        .execute(
+            "const v = document.getElementById('viewport'); \
+             const r = document.querySelector('#rows [role=row]'); \
+             return [v.clientHeight, r ? r.getBoundingClientRect().height : 0];",
+            vec![],
+        )
+        .await
+        .map_err(|e| format!("{at}: reading the viewport: {e}"))?;
+    let (client, row_px) = match geometry.as_array().map(Vec::as_slice) {
+        Some([a, b]) => (a.as_f64().unwrap_or(0.0), b.as_f64().unwrap_or(0.0)),
+        _ => (0.0, 0.0),
+    };
+    if client <= 0.0 || row_px <= 0.0 {
+        return Err(format!(
+            "{at}: viewport {client} px, row {row_px} px; page: {}",
+            page_state(c).await
+        ));
+    }
+    let visible = (client / row_px).ceil() as usize + 1;
+    let page_visible: usize = list_attr(c, "data-visible-rows")
         .await?
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| format!("{at}: no data-visible-rows"))?;
+    if page_visible > visible {
+        return Err(format!(
+            "{at}: the page counts {page_visible} visible rows, the viewport shows at most {visible}"
+        ));
+    }
     let rows = c
         .find_all(Locator::Css("#rows [role=row]"))
         .await
@@ -71,7 +98,8 @@ async fn check_rows(c: &Client, at: &str) -> Result<u64, String> {
     let bound = visible + 2 * MARGIN_ROWS;
     if rows.is_empty() || rows.len() > bound {
         return Err(format!(
-            "{at}: {} rows in the DOM, the bound is {visible} visible + 2·{MARGIN_ROWS} = {bound}",
+            "{at}: {} rows in the DOM, the bound is {visible} visible + 2·{MARGIN_ROWS} = {bound} \
+             (viewport {client} px, row {row_px} px)",
             rows.len()
         ));
     }

@@ -197,7 +197,8 @@ export class VirtualList {
       el.setAttribute("aria-rowindex", String(index + 2));
       el.setAttribute("aria-level", String(this.level));
       el.setAttribute("aria-selected", (r.marks & MARK_PICKED) !== 0 ? "true" : "false");
-      if (this.level > 1 || r.kind === KIND_FOLDER) {
+      // Folders only: a file never expands, whatever its level.
+      if (r.kind === KIND_FOLDER) {
         el.setAttribute("aria-expanded", "false");
       } else {
         el.removeAttribute("aria-expanded");
@@ -211,7 +212,8 @@ export class VirtualList {
     // The layer sits where its first row belongs on screen.
     const y = this.viewport.scrollTop - (topFloat - from) * ROW_PX;
     this.layer.style.transform = `translateY(${Math.max(0, y)}px)`;
-    if (this.total > 0) {
+    // Only a rendered row may be named; a focus row scrolled out of the window names none.
+    if (this.total > 0 && this.focus >= from && this.focus < to) {
       this.grid.setAttribute("aria-activedescendant", `lpk-row-${this.focus}`);
     } else {
       this.grid.removeAttribute("aria-activedescendant");
@@ -265,6 +267,10 @@ export class VirtualList {
   }
 
   onKey(e) {
+    // Keys on a header's sort button are the button's (Enter and Space sort).
+    if (e.target !== this.grid) {
+      return;
+    }
     const page = Math.max(1, this.visible() - 1);
     const go = (i) => {
       e.preventDefault();

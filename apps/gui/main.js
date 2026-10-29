@@ -225,6 +225,7 @@ function wireControls() {
     Object.assign(state, { mode: "tree", dir: null, key: state.key === "path" ? "kind" : state.key });
     applyView().catch(showError);
   });
+  // Each header holds a button: focusable, and Enter or Space click it (the click bubbles here).
   for (const h of document.querySelectorAll("[role=columnheader]")) {
     h.addEventListener("click", () => {
       const key = h.dataset.key === "name" && state.mode === "flat" ? "path" : h.dataset.key;
