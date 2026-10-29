@@ -62,11 +62,30 @@ fn native_driver() -> PathBuf {
     })
 }
 
-/// The tauri-driver process, killed when the test ends however it ends.
+/// The tauri-driver process, killed with its whole tree (the Edge WebDriver, the GUI and its
+/// webview) when the test ends however it ends, a panic included.
 struct Driver(Child);
+
+impl Driver {
+    /// A failure message if tauri-driver has already exited.
+    fn exited(&mut self) -> Option<String> {
+        match self.0.try_wait() {
+            Ok(Some(status)) => Some(format!("tauri-driver exited: {status}")),
+            Ok(None) => None,
+            Err(e) => Some(format!("tauri-driver's state is unknown: {e}")),
+        }
+    }
+}
 
 impl Drop for Driver {
     fn drop(&mut self) {
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID"])
+            .arg(self.0.id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -80,6 +99,13 @@ fn make_archive(work: &Path) -> PathBuf {
         std::fs::write(sub.join(format!("f{i}.txt")), format!("file {i}\n")).expect("write input");
     }
     let archive = work.join("smoke.lpk");
+    // A kept scratch folder (`LPK_E2E_WORK`) holds the previous run's archive: `lpk a` would add
+    // to it.
+    match std::fs::remove_file(&archive) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("remove the previous {}: {e}", archive.display()),
+    }
     let status = Command::new(lpk_exe())
         .arg("a")
         .arg(&archive)
@@ -106,7 +132,8 @@ fn start_driver(work: &Path) -> Driver {
         // inherits this environment through tauri-driver and the native driver.
         .env("LOCALAPPDATA", &local)
         // The host passes the driver's browser arguments to its webview (WebView2 does not apply
-        // them itself when the app sets its own; `lpk_gui::security::WEBDRIVER_ENV`).
+        // them itself when the app sets its own; `lpk_gui::security::webdriver::WEBDRIVER_ENV`,
+        // in a GUI built with the feature `webdriver`).
         .env("LPK_GUI_WEBDRIVER", "1")
         .env_remove("LPK_GUI_SMOKE_REPORT")
         .stdin(Stdio::null())
@@ -115,7 +142,7 @@ fn start_driver(work: &Path) -> Driver {
     Driver(child)
 }
 
-async fn connect(archive: &Path) -> Client {
+async fn connect(driver: &mut Driver, archive: &Path) -> Client {
     let gui = gui_exe();
     assert!(gui.is_file(), "no GUI at {}", gui.display());
     let mut caps = serde_json::Map::new();
@@ -131,6 +158,10 @@ async fn connect(archive: &Path) -> Client {
     let url = format!("http://127.0.0.1:{DRIVER_PORT}");
     let deadline = Instant::now() + CONNECT_WITHIN;
     loop {
+        // A dead tauri-driver fails the test at once, not after the whole wait.
+        if let Some(e) = driver.exited() {
+            panic!("no WebDriver session: {e}");
+        }
         match ClientBuilder::new(HttpConnector::new())
             .capabilities(caps.clone())
             .connect(&url)
@@ -199,13 +230,13 @@ fn an_archive_given_on_the_command_line_opens_with_no_page_error() {
     let work =
         std::env::var_os("LPK_E2E_WORK").map_or_else(|| temp.path().to_path_buf(), PathBuf::from);
     let archive = make_archive(&work);
-    let _driver = start_driver(&work);
+    let mut driver = start_driver(&work);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
     rt.block_on(async {
-        let c = connect(&archive).await;
+        let c = connect(&mut driver, &archive).await;
         let outcome = check(&c).await;
         let _ = c.close().await;
         if let Err(e) = outcome {

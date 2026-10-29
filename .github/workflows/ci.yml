@@ -136,6 +136,17 @@ jobs:
             echo "option-ext code reached lpk-gui.exe" >&2
             exit 1
           fi
+      # R111: the WebDriver switch (lpk-gui's cargo feature `webdriver`, gui-e2e only) is not in the shipped exe
+      # (the smoke report's variable is the control: present).
+      - name: No WebDriver switch in the exe
+        shell: bash
+        run: |
+          exe=target/release/lpk-gui.exe
+          test "$(grep -a -c 'LPK_GUI_SMOKE_REPORT' "$exe")" -gt 0
+          if grep -a -qF 'LPK_GUI_WEBDRIVER' "$exe"; then
+            echo "the WebDriver switch reached the shipped lpk-gui.exe" >&2
+            exit 1
+          fi
 
   # E5-11's driver harness (crates/lpk-gui-e2e): lpk-gui.exe under tauri-driver and the Edge WebDriver of the
   # WebView2 runtime's version opens an archive made by lpk; its rows reach the DOM and the page raised no
@@ -163,9 +174,9 @@ jobs:
           cargo install tauri-driver --version 2.0.4 --locked
       - name: Build lpk (makes the test archive)
         run: cargo build --locked --release -p lpk-cli
-      - name: cargo tauri build
+      - name: cargo tauri build (with the WebDriver switch)
         working-directory: crates/lpk-gui
-        run: cargo tauri build --ci -- --locked
+        run: cargo tauri build --ci --features webdriver -- --locked
       - name: An Edge WebDriver of the WebView2 runtime's version
         shell: pwsh
         run: |
@@ -176,11 +187,18 @@ jobs:
             $runtime = (Get-ItemProperty 'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv
           }
           if (-not $runtime) { throw "no WebView2 runtime version in the registry" }
-          $preinstalled = Join-Path $env:EdgeWebDriver 'msedgedriver.exe'
-          $line = & $preinstalled --version
-          $driver = [regex]::Match("$line", '\d+\.\d+\.\d+\.\d+').Value
-          Write-Output "WebView2 runtime $runtime; preinstalled Edge WebDriver $driver ($line)"
-          if ($driver -eq $runtime) {
+          # The image's preinstalled driver when it matches; otherwise (no EdgeWebDriver, no file, another version)
+          # the download.
+          $driver = $null
+          if ($env:EdgeWebDriver) {
+            $preinstalled = Join-Path $env:EdgeWebDriver 'msedgedriver.exe'
+            if (Test-Path -LiteralPath $preinstalled -PathType Leaf) {
+              $line = & $preinstalled --version
+              $driver = [regex]::Match("$line", '\d+\.\d+\.\d+\.\d+').Value
+            }
+          }
+          Write-Output "WebView2 runtime $runtime; preinstalled Edge WebDriver: $(if ($driver) { $driver } else { 'none' })"
+          if ($driver -and $driver -eq $runtime) {
             $native = $preinstalled
           } else {
             # Microsoft's official Edge WebDriver download location, the version pinned to the runtime's:
@@ -190,6 +208,13 @@ jobs:
             Invoke-WebRequest -Uri "https://msedgedriver.microsoft.com/$runtime/edgedriver_win64.zip" -OutFile $zip
             Expand-Archive -Path $zip -DestinationPath $dir -Force
             $native = Join-Path $dir 'msedgedriver.exe'
+            # The fetched exe runs only with a valid Authenticode signature by Microsoft.
+            $sig = Get-AuthenticodeSignature -LiteralPath $native
+            Write-Output "signature: $($sig.Status); $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "the fetched driver's signature is $($sig.Status)" }
+            if ($sig.SignerCertificate.Subject -notmatch '(^|, )O=Microsoft Corporation(,|$)') {
+              throw "the fetched driver is not signed by Microsoft: $($sig.SignerCertificate.Subject)"
+            }
             $line = & $native --version
             Write-Output "fetched: $line"
             if ([regex]::Match("$line", '\d+\.\d+\.\d+\.\d+').Value -ne $runtime) { throw "the fetched driver is not $runtime" }

@@ -14,6 +14,11 @@ publish = false
 name = "lpk-gui"
 path = "src/main.rs"
 
+[features]
+# E5-11's WebDriver switch (`LPK_GUI_WEBDRIVER`, src/security.rs): CI's `gui-e2e` job only, never a
+# shipped build (the `gui` job checks that the release exe does not hold the string).
+webdriver = []
+
 [dependencies]
 lpk-api = { path = "../lpk-api", version = "0.0.1" }
 lpk-gui-sys = { path = "../lpk-gui-sys", version = "0.0.1" }

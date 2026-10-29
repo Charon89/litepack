@@ -16,9 +16,7 @@ use std::time::Duration;
 use lpk_api::{Class, CreateSettings, Event, Monitor, Tier};
 use lpk_gui::app::{App, Opened};
 use lpk_gui::grants::{Grant, GrantKind, Granted};
-use lpk_gui::security::{
-    webdriver_browser_args, MAIN_WINDOW, SMOKE_REPORT_ENV, WEBDRIVER_ENV, WEBVIEW2_ARGS_ENV,
-};
+use lpk_gui::security::{MAIN_WINDOW, SMOKE_REPORT_ENV};
 use lpk_gui::{cli, paths, strings, GuiError};
 use serde::Serialize;
 use tauri::ipc::{Channel, Response};
@@ -274,12 +272,19 @@ pub fn run() -> i32 {
             if let Some(d) = paths::webview_dir() {
                 b = b.data_directory(d);
             }
-            // E5-11: the Edge WebDriver's arguments, only when the driver harness asks for them.
-            if let Some(args) = webdriver_browser_args(
-                std::env::var_os(WEBDRIVER_ENV).as_deref(),
-                std::env::var_os(WEBVIEW2_ARGS_ENV).as_deref(),
-            ) {
-                b = b.additional_browser_args(&args);
+            // E5-11: the Edge WebDriver's arguments, only in a `webdriver` build (CI's driver
+            // harness; never shipped) and only when the harness asks for them.
+            #[cfg(feature = "webdriver")]
+            {
+                use lpk_gui::security::webdriver;
+                match webdriver::browser_args(
+                    std::env::var_os(webdriver::WEBDRIVER_ENV).as_deref(),
+                    std::env::var_os(webdriver::WEBVIEW2_ARGS_ENV).as_deref(),
+                ) {
+                    Ok(Some(args)) => b = b.additional_browser_args(&args),
+                    Ok(None) => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
             b.build()?;
             Ok(())
