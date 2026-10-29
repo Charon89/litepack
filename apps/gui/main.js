@@ -1,8 +1,9 @@
-// LitePack GUI page (E5-2 skeleton): asks Rust for the strings and the archive given on the
-// command line, opens it through its grant, and shows the first rows of its listing. No HTML
-// sink anywhere (Trusted Types would refuse it): text goes in through textContent. E5-3
-// replaces the first-page list with the virtual list.
-import { decodeBatch } from "./batch.js";
+// LitePack GUI page (E5-3, the archive browser): asks Rust for the strings and the archive given
+// on the command line (or dropped on the window), opens it through its grant and shows it in the
+// virtual list (list.js): flat or tree, sorted and filtered in Rust, with keyboard navigation,
+// multi-selection and a status bar. No HTML sink anywhere (Trusted Types would refuse it): text
+// goes in through textContent.
+import { VirtualList } from "./list.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
@@ -25,11 +26,15 @@ window.addEventListener("unhandledrejection", (e) => problem("lpkRejection", `re
 document.addEventListener("securitypolicyviolation", (e) => problem("lpkCsp", `csp: ${e.violatedDirective}`));
 
 const core = window.__TAURI__.core;
-const FIRST_PAGE_ROWS = 200;
+const $ = (id) => document.getElementById(id);
 let strings = {};
 let nextOp = 1;
 // The open archive's session, closed before another is opened (a drop).
-let currentSession = null;
+let session = null;
+let reported = false;
+// What the view shows; Rust builds it (`view`).
+const state = { mode: "flat", dir: null, key: "path", descending: false, filter: "", glob: false };
+let info = null;
 
 function t(key, vars = {}) {
   const text = strings[key] ?? key;
@@ -51,77 +56,209 @@ function applyStrings() {
   for (const el of document.querySelectorAll("[data-label]")) {
     el.setAttribute("aria-label", t(el.dataset.label));
   }
+  $("filter").placeholder = t("filter.placeholder");
 }
 
 function setStatus(text) {
-  document.getElementById("status").textContent = text;
+  $("status").textContent = text;
 }
 
-function cell(text, cls) {
-  const span = document.createElement("span");
-  span.setAttribute("role", "gridcell");
-  if (cls) {
-    span.className = cls;
+const bytes = (n) => Number(n).toLocaleString();
+
+function showSelection(s) {
+  const parts = [t("status.view", { entries: bytes(s.entries), files: bytes(s.files), folders: bytes(s.folders), bytes: bytes(s.bytes) })];
+  if (s.picked > 0) {
+    parts.push(t("status.picked", { count: bytes(s.picked), bytes: bytes(s.pickedBytes) }));
   }
-  span.textContent = text;
-  return span;
+  $("selection").textContent = parts.join(" · ");
 }
 
-function render(batch) {
-  const list = document.getElementById("list");
-  const rows = document.getElementById("rows");
-  rows.replaceChildren();
-  list.setAttribute("aria-rowcount", String(batch.total + 1));
-  batch.rows.forEach((r, i) => {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.setAttribute("role", "row");
-    row.setAttribute("aria-rowindex", String(batch.first + i + 2));
-    row.tabIndex = i === 0 ? 0 : -1;
-    const when = new Date(Number(r.mtimeNs / 1000000n));
-    row.append(cell(r.name), cell(r.size.toLocaleString(), "num"), cell(when.toLocaleString()));
-    rows.append(row);
+function cells(r) {
+  const when = r.mtimeNs === -(2n ** 63n) ? "" : new Date(Number(r.mtimeNs / 1000000n)).toLocaleString();
+  const size = r.kind === 1 ? "" : r.size.toLocaleString();
+  return [r.name, size, when];
+}
+
+const list = new VirtualList({
+  grid: $("list"),
+  viewport: $("viewport"),
+  spacer: $("spacer"),
+  layer: $("rows"),
+  cells,
+  fetch: (first, count) => core.invoke("rows", { session, first, count }),
+  activate: (index, row, folderOnly = false) => activate(index, row, folderOnly).catch(showError),
+  // The generation of the view the row index came from: Rust refuses another.
+  select: async (action, row) => {
+    const s = await core.invoke("select", { session, action, row, generation: list.generation });
+    showSelection(s);
+    await list.refresh();
+  },
+  onError: (e) => showError(e),
+});
+list.parent = (e) => {
+  if (state.mode === "tree" && info && info.crumbs.length > 1) {
+    e.preventDefault();
+    const up = info.crumbs[info.crumbs.length - 2];
+    navigate(up.id).catch(showError);
+  }
+};
+
+function renderCrumbs() {
+  const nav = $("crumbs");
+  nav.replaceChildren();
+  if (!info || state.mode !== "tree") {
+    return;
+  }
+  info.crumbs.forEach((c, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = c.id === null ? t("crumbs.root") : c.name;
+    if (i === info.crumbs.length - 1) {
+      b.setAttribute("aria-current", "location");
+    }
+    b.addEventListener("click", () => navigate(c.id).catch(showError));
+    nav.append(b);
   });
-  document.getElementById("hint").hidden = true;
-  list.hidden = false;
 }
 
-async function report(session, total, first) {
+function renderHeader() {
+  for (const h of document.querySelectorAll("[role=columnheader]")) {
+    const key = h.dataset.key;
+    const active = key === state.key;
+    h.setAttribute("aria-sort", active ? (state.descending ? "descending" : "ascending") : "none");
+  }
+  $("col-name").textContent = state.mode === "flat" ? t("list.path") : t("list.name");
+  for (const m of ["flat", "tree"]) {
+    $(`mode-${m}`).setAttribute("aria-checked", String(state.mode === m));
+  }
+}
+
+async function applyView(keep = false) {
+  const request = { ...state };
+  info = await core.invoke("view", { session, request, op: nextOp++ });
+  renderCrumbs();
+  renderHeader();
+  showSelection(info.status);
+  await list.reset(info, keep);
+}
+
+async function navigate(dir) {
+  state.mode = "tree";
+  state.dir = dir;
+  await applyView();
+}
+
+async function activate(index, row, folderOnly) {
+  if (row.kind === 1) {
+    if (state.mode === "tree") {
+      await navigate(row.id);
+    }
+    return;
+  }
+  if (folderOnly) {
+    return;
+  }
+  const r = await core.invoke("open_entry", { session, row: index, generation: list.generation, op: nextOp++ });
+  if (r.outcome === "shell") {
+    setStatus(t("open.done", { name: r.name }));
+  } else {
+    setStatus(t("open.refused", { name: r.name, extension: r.extension }));
+  }
+}
+
+async function report(total, first) {
+  if (reported) {
+    return;
+  }
+  reported = true;
   const rendered = document.querySelectorAll("#rows [role=row]").length;
   await core.invoke("listing_shown", { session, rendered, total, first, problems });
 }
 
 async function openArchive(granted) {
   setStatus(t("status.loading"));
-  if (currentSession !== null) {
-    const previous = currentSession;
-    currentSession = null;
+  if (session !== null) {
+    const previous = session;
+    session = null;
     await core.invoke("close_archive", { session: previous });
   }
   const opened = await core.invoke("open_archive", { grant: granted.grant, op: nextOp++ });
-  currentSession = opened.session;
-  const buffer = await core.invoke("rows", { session: opened.session, first: 0, count: FIRST_PAGE_ROWS });
-  const batch = decodeBatch(buffer);
-  render(batch);
-  setStatus(t("status.entries", { count: opened.total.toLocaleString() }));
-  await report(opened.session, opened.total, batch.rows[0]?.name ?? "");
+  session = opened.session;
+  Object.assign(state, { mode: "flat", dir: null, key: "path", descending: false });
+  info = opened.view;
+  $("hint").hidden = true;
+  $("bar").hidden = false;
+  $("list").hidden = false;
+  renderCrumbs();
+  renderHeader();
+  showSelection(info.status);
+  await list.reset(info);
+  setStatus(t("status.entries", { name: opened.name, count: bytes(opened.total) }));
+  $("list").focus();
+  await report(opened.total, list.rowAt(0)?.name ?? "");
+}
+
+// A row request made against a view Rust has already replaced is refused ("stale view",
+// crates/lpk-gui/src/browse.rs STALE_VIEW); the next view re-syncs the page, so it is ignored.
+function stale(e) {
+  return Boolean(e && typeof e === "object" && e.class === "Usage" && String(e.detail).startsWith("stale view"));
 }
 
 function showError(e) {
+  if (stale(e)) {
+    return;
+  }
   problem("lpkFailure", `failure: ${describe(e)}`);
   setStatus(`${t("error.title")}: ${describe(e)}`);
-  report(null, 0, "").catch(() => {});
+  if (!reported) {
+    reported = true;
+    core.invoke("listing_shown", { session: null, rendered: 0, total: 0, first: "", problems }).catch(() => {});
+  }
+}
+
+function wireControls() {
+  $("mode-flat").addEventListener("click", () => {
+    Object.assign(state, { mode: "flat", dir: null });
+    applyView().catch(showError);
+  });
+  $("mode-tree").addEventListener("click", () => {
+    Object.assign(state, { mode: "tree", dir: null, key: state.key === "path" ? "kind" : state.key });
+    applyView().catch(showError);
+  });
+  // Each header holds a button: focusable, and Enter or Space click it (the click bubbles here).
+  for (const h of document.querySelectorAll("[role=columnheader]")) {
+    h.addEventListener("click", () => {
+      const key = h.dataset.key === "name" && state.mode === "flat" ? "path" : h.dataset.key;
+      state.descending = state.key === key ? !state.descending : false;
+      state.key = key;
+      applyView(true).catch(showError);
+    });
+  }
+  let timer = null;
+  const refilter = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      state.filter = $("filter").value;
+      state.glob = $("glob").checked;
+      if (session !== null) {
+        applyView().catch(showError);
+      }
+    }, 200);
+  };
+  $("filter").addEventListener("input", refilter);
+  $("glob").addEventListener("change", refilter);
 }
 
 async function main() {
-  const info = await core.invoke("startup");
-  strings = info.strings;
+  const startup = await core.invoke("startup");
+  strings = startup.strings;
   applyStrings();
-  if (info.recovered > 0) {
-    setStatus(t("status.recovered", { count: info.recovered }));
+  wireControls();
+  if (startup.recovered > 0) {
+    setStatus(t("status.recovered", { count: startup.recovered }));
   }
-  if (info.error) {
-    showError({ message: info.error });
+  if (startup.error) {
+    showError({ message: startup.error });
     return;
   }
   const channel = new core.Channel();
@@ -134,8 +271,8 @@ async function main() {
     }
   };
   await core.invoke("subscribe", { channel });
-  if (info.archive) {
-    await openArchive(info.archive);
+  if (startup.archive) {
+    await openArchive(startup.archive);
   }
 }
 

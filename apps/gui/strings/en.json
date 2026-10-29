@@ -1,11 +1,21 @@
 {
   "app.title": "LitePack",
   "drop.hint": "Drop an archive here, or open one with LitePack.",
+  "bar.label": "Archive view",
+  "mode.label": "View",
+  "mode.tree": "Folders",
+  "mode.flat": "All files",
+  "crumbs.label": "Location",
+  "crumbs.root": "Archive",
+  "filter.label": "Filter",
+  "filter.placeholder": "Filter by name or path",
+  "filter.glob": "Patterns",
   "list.label": "Archive contents",
   "list.name": "Name",
+  "list.path": "Path",
   "list.size": "Size",
   "list.modified": "Modified",
-  "status.entries": "{count} entries",
+  "status.entries": "{name}: {count} entries",
   "status.loading": "Opening…",
   "status.recovered": "Cleaned up {count} interrupted writes from the last run.",
   "error.title": "Error",
@@ -18,5 +28,9 @@
   "password.cancel": "Cancel",
   "password.mismatch": "The two entries differ. Type the password again.",
   "rollback.title": "Roll back the archive",
-  "rollback.text": "Remove every generation after the one you chose? This cannot be undone."
+  "rollback.text": "Remove every generation after the one you chose? This cannot be undone.",
+  "status.view": "{entries} items ({files} files, {folders} folders, {bytes} bytes)",
+  "status.picked": "{count} selected ({bytes} bytes)",
+  "open.done": "Opened {name}.",
+  "open.refused": "{name} is not opened directly (type .{extension}); its preview will show it."
 }

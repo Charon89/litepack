@@ -19,6 +19,14 @@ sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["comp
 # backend), zstd (method 93), store; AES-256 (AE-2).
 zip = { version = "9.0.4", default-features = false, features = ["deflate", "zstd", "aes-crypto"] }
 
+# `testing` (feature `test-support`): the counting allocator for a front end's memory tests (E5-3).
+lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1", optional = true }
+
+[features]
+# Test helpers for front ends (`lpk_api::testing`): E3-1's generated million-entry archive and a
+# counting global allocator. Dev-dependencies only; never a shipped build.
+test-support = ["dep:lpk-procstat-sys"]
+
 [dev-dependencies]
 # The listing model's memory bound (E5-1): a counting global allocator.
 lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
