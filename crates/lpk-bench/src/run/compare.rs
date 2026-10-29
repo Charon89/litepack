@@ -8,6 +8,10 @@
 //! when the directories do not measure the same thing: a different corpus, different tool
 //! versions, a different thread count, different classes for a combination, or a combination
 //! measured in only one of them.
+//!
+//! An information row (E4-8, `information` in the row) is compared like any other, but its
+//! `compress` is the maker's one make step (the same in every repeat), not a compression by the
+//! row's tool: its compress column compares the maker's runs, only its extract column the tool's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

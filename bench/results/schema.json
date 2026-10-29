@@ -189,7 +189,8 @@
         "median": { "$ref": "#/$defs/sample", "description": "Median of every field over the repeats (the validator recomputes it)." },
         "verification": { "$ref": "#/$defs/verification", "description": "Round-trip verification." },
         "skipped": { "$ref": "#/$defs/text", "description": "Why the combination was skipped; then there are no measurements." },
-        "failed": { "$ref": "#/$defs/failure", "description": "Present when the combination ran and failed (non-zero exit, missing or empty archive, timeout, killed descendants, or a verification finding). The repeats completed before the failure may be recorded; there is no median and verification.verified is false." }
+        "failed": { "$ref": "#/$defs/failure", "description": "Present when the combination ran and failed (non-zero exit, missing or empty archive, timeout, killed descendants, or a verification finding). The repeats completed before the failure may be recorded; there is no median and verification.verified is false." },
+        "information": { "$ref": "#/$defs/information", "description": "E4-8: present on an information row, which the report shows apart and never puts in a gate; absent on every other row (optional in version 2, so rows written before it still validate)." }
       },
       "allOf": [
         {
@@ -220,6 +221,17 @@
           "else": { "properties": { "corpus": { "required": ["class_blake3"] } } }
         }
       ]
+    },
+    "information": {
+      "type": "object",
+      "description": "What kind of information row this is (E4-8).",
+      "additionalProperties": false,
+      "required": ["kind", "maker"],
+      "properties": {
+        "kind": { "enum": ["foreign-extract"], "description": "foreign-extract: the row's tool extracts a foreign archive (ZIP, 7z) that its maker wrote once per class and setting, outside every timed step, and that every tool of the class with the same maker, maker arguments and extension extracts; setting.compress_args are the maker's arguments as executed, and each repeat's compress is that one make step's measurement (the same in every repeat), never a compression by the row's tool." },
+        "maker": { "$ref": "#/$defs/id", "description": "The maker's tool id in the catalogue (7z)." },
+        "maker_version": { "$ref": "#/$defs/text", "description": "The maker's version as discovered; absent when the row was skipped before the make step." }
+      }
     },
     "failure": {
       "type": "object",

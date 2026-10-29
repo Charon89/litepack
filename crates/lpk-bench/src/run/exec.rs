@@ -46,9 +46,10 @@ use super::discover::{self, Discovered, Status};
 use super::harness_tar::{self, TarChoice, TarPolicy, HARNESS_FORMAT, HARNESS_TAR};
 use super::host;
 use super::result::{
-    render, CorpusRef, Difference, DifferenceKind, Failure, Measure, Measurement, PeakMemoryKind,
-    RunCombination, RunFile, Sample, SettingRef, StepTimes, TarInfo, ToolRef, ToolResult,
-    ToolsFile, Verification, MAX_DIFFERENCES, RESULT_SCHEMA_VERSION, SCHEMA_VERSION,
+    render, CorpusRef, Difference, DifferenceKind, Failure, Information, Measure, Measurement,
+    PeakMemoryKind, RunCombination, RunFile, Sample, SettingRef, StepTimes, TarInfo, ToolRef,
+    ToolResult, ToolsFile, Verification, FOREIGN_EXTRACT, MAX_DIFFERENCES, RESULT_SCHEMA_VERSION,
+    SCHEMA_VERSION,
 };
 use super::validate;
 use super::{load_catalogue, select, RunArgs};
@@ -592,7 +593,7 @@ fn thread_args(tool: &Tool, threads: u32) -> Vec<String> {
 // Steps
 
 /// A step or verification that failed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Fail {
     step: &'static str,
     reason: String,
@@ -1022,6 +1023,87 @@ struct ArgRecord {
     extract: Vec<String>,
 }
 
+/// The archive a foreign-extraction tool extracts (E4-8): written once per class and setting by
+/// the tool's maker (`foreign` in the catalogue), outside every timed step, and shared by every
+/// tool of the class that names the same maker, maker arguments and extension, so `lpk x` and
+/// `7z x` extract the same file.
+#[derive(Debug, Clone)]
+struct Made {
+    /// The archive (absolute), under the run's temporary directory.
+    path: PathBuf,
+    /// The make step's measurement, recorded as each repeat's `compress` (never timed against
+    /// anything; the row is an information row).
+    measure: Measure,
+    bytes: u64,
+    /// The maker's arguments as executed (the row's `setting.compress_args`).
+    args: Vec<String>,
+    maker: String,
+    maker_version: Option<String>,
+}
+
+/// The made archives of one class: (maker, maker arguments, extension) → the archive or the
+/// failure of the make step.
+type MadeCache = BTreeMap<(String, Vec<String>, String), Result<Made, Fail>>;
+
+/// Write a foreign archive with the maker's `create` template (E4-8). `ctx.work` is the make
+/// step's own directory; the archive is `a<ext>` in it.
+fn make_foreign(
+    ctx: &Ctx<'_>,
+    maker: &Discovered,
+    exe: &Path,
+    setting: &Setting,
+    ext: &str,
+) -> Result<Made, Fail> {
+    let io = |e: std::io::Error| Fail::new("compress", format!("make directory: {:?}", e.kind()));
+    std::fs::create_dir_all(&ctx.work).map_err(io)?;
+    let name = format!("a{ext}");
+    let archive = ctx.work.join(&name);
+    let threads = thread_args(&maker.tool, ctx.cfg.threads);
+    let v = Vars {
+        archive: &ctx.rel(&name),
+        input: ctx.class,
+        outdir: "",
+        list: "",
+        settings: &setting.compress,
+        threads: &threads,
+    };
+    let args = expand(&maker.tool.create, &v);
+    let what = format!("make ({})", maker.tool.id);
+    let m = run_step(
+        ctx,
+        "compress",
+        &what,
+        exe,
+        &args,
+        ps::Input::Null,
+        ps::Output::Discard,
+    )?;
+    let bytes = archive_size("compress", &archive)?;
+    flush(&archive);
+    Ok(Made {
+        path: archive,
+        measure: single_measure(&m),
+        bytes,
+        args,
+        maker: maker.tool.id.clone(),
+        maker_version: match &maker.status {
+            Status::Found { version, .. } => Some(version.clone()),
+            Status::Skipped { .. } => None,
+        },
+    })
+}
+
+/// Put the made archive into the scratch directory as `archive` (outside every timed step): a
+/// hard link where the volume allows it, else a copy.
+fn place_made(made: &Made, archive: &Path) -> Result<(), Fail> {
+    if std::fs::hard_link(&made.path, archive).is_err() {
+        std::fs::copy(&made.path, archive)
+            .map_err(|e| Fail::new("extract", format!("placing the archive: {:?}", e.kind())))?;
+        flush(archive);
+    }
+    Ok(())
+}
+
 /// One repeat: clean up, compress, extract, verify.
 /// E6-5's catalogue key `zone`: write the `Zone.Identifier` stream onto the archive (outside
 /// the timed steps, between compression and extraction). Windows only: elsewhere the
@@ -1046,6 +1128,7 @@ fn one_repeat(
     setting: &Setting,
     expected: &ExpectedTree,
     record: &mut ArgRecord,
+    made: Option<&Made>,
 ) -> Result<Sample, Fail> {
     remove_and_settle(&ctx.work, ctx.cfg);
     if ctx.work.exists() {
@@ -1067,11 +1150,23 @@ fn one_repeat(
         }
         std::fs::write(ctx.work.join("list.txt"), list).map_err(io)?;
     }
-    let archive_name = format!("a{}", tool.extension);
+    let archive_name = format!("a{}", setting.extension(tool));
     let archive = ctx.work.join(&archive_name);
     let archive_rel = ctx.rel(&archive_name);
 
-    if record.compress.is_empty() {
+    if let (true, Some(m)) = (record.compress.is_empty(), made) {
+        let threads = thread_args(tool, ctx.cfg.threads);
+        let v = Vars {
+            archive: &archive_name,
+            input: ctx.class,
+            outdir: OUTDIR,
+            list: "",
+            settings: &setting.extract,
+            threads: &threads,
+        };
+        record.compress = m.args.clone();
+        record.extract = expand(&tool.extract, &v);
+    } else if record.compress.is_empty() {
         let threads = thread_args(tool, ctx.cfg.threads);
         let list_rel = ctx.rel("list.txt");
         let v = Vars {
@@ -1098,7 +1193,13 @@ fn one_repeat(
         record.extract = expand(&tool.extract, &v);
     }
 
-    let (compress_m, archive_bytes) = compress(ctx, tool, exe, setting, &archive, &archive_rel)?;
+    let (compress_m, archive_bytes) = match made {
+        Some(m) => {
+            place_made(m, &archive)?;
+            (m.measure, m.bytes)
+        }
+        None => compress(ctx, tool, exe, setting, &archive, &archive_rel)?,
+    };
     if let Some(z) = setting.zone {
         write_zone(&archive, z)?;
     }
@@ -1197,6 +1298,11 @@ fn base_result(
         verification: None,
         skipped: None,
         failed: None,
+        information: d.tool.foreign.as_ref().map(|maker| Information {
+            kind: FOREIGN_EXTRACT.to_string(),
+            maker: maker.clone(),
+            maker_version: None,
+        }),
     }
 }
 
@@ -1300,6 +1406,7 @@ fn run_combination(
     exe: &Path,
     setting: &Setting,
     expected: &ExpectedTree,
+    made: Option<&Made>,
 ) -> ToolResult {
     let mut result = base_result(ctx.cfg, ctx.corpus, ctx.entry, ctx.class, d, setting);
     result.measurement = Some(measurement_info(ctx.tar, d));
@@ -1309,13 +1416,22 @@ fn run_combination(
     let mut failure: Option<(u32, Fail)> = None;
     let mut short: Option<String> = None;
     for n in 1..=ctx.cfg.repeats {
-        match one_repeat(ctx, &d.tool, exe, setting, expected, &mut record) {
+        match one_repeat(ctx, &d.tool, exe, setting, expected, &mut record, made) {
             Ok(s) => {
-                let first_wall = s.compress.wall_seconds + s.extract.wall_seconds;
+                // A foreign row's compress is the one make step, not part of the repeat.
+                let first_wall = match made {
+                    Some(_) => s.extract.wall_seconds,
+                    None => s.compress.wall_seconds + s.extract.wall_seconds,
+                };
                 samples.push(s);
                 if n == 1 && n < ctx.cfg.repeats && first_wall >= ctx.cfg.long_run.as_secs_f64() {
                     short = Some(format!(
-                        "the first repeat's compress plus extract wall time reached --long-run-s ({} s): not repeated",
+                        "the first repeat's {} wall time reached --long-run-s ({} s): not repeated",
+                        if made.is_some() {
+                            "extract"
+                        } else {
+                            "compress plus extract"
+                        },
                         ctx.cfg.long_run.as_secs()
                     ));
                     break;
@@ -1326,6 +1442,13 @@ fn run_combination(
                 break;
             }
         }
+    }
+    if let Some(m) = made {
+        result.information = Some(Information {
+            kind: FOREIGN_EXTRACT.to_string(),
+            maker: m.maker.clone(),
+            maker_version: m.maker_version.clone(),
+        });
     }
     if !record.compress.is_empty() {
         result.setting.compress_args = record.compress;
@@ -1362,6 +1485,23 @@ fn run_combination(
             });
         }
     }
+    result
+}
+
+/// The row of a foreign-extraction combination whose make step failed (E4-8): failed at the
+/// first repeat, nothing extracted.
+fn failed_result(ctx: &Ctx<'_>, d: &Discovered, setting: &Setting, f: Fail) -> ToolResult {
+    let mut result = base_result(ctx.cfg, ctx.corpus, ctx.entry, ctx.class, d, setting);
+    result.measurement = Some(measurement_info(ctx.tar, d));
+    result.repeats_requested = Some(ctx.cfg.repeats);
+    result.failed = Some(Failure {
+        reason: f.reason,
+        step: f.step.to_string(),
+        repeat: 1,
+        timed_out: f.timed_out,
+        descendants_killed: f.descendants_killed,
+        evidence_dir: None,
+    });
     result
 }
 
@@ -1585,6 +1725,9 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
             None => system_tar.as_ref(),
         };
         let harness = tar.is_some_and(|t| t.harness);
+        // E4-8: the foreign archives of this class, made on first use and removed with the class.
+        let mut made_cache: MadeCache = BTreeMap::new();
+        let made_root = tmp_run.join(format!("made-{class}"));
         for id in selected {
             let Some(d) = discovered.iter().find(|d| &d.tool.id == id) else {
                 continue;
@@ -1618,9 +1761,25 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                         r
                     }
                     Status::Found { path, .. } => {
+                        let maker = d.tool.foreign.as_ref().map(|m| {
+                            discovered
+                                .iter()
+                                .find(|x| &x.tool.id == m)
+                                .ok_or_else(|| format!("its maker `{m}` is not catalogued"))
+                                .and_then(|x| match &x.status {
+                                    Status::Found { path, .. } => Ok((x, path)),
+                                    Status::Skipped { reason } => {
+                                        Err(format!("its maker `{m}` was not found: {reason}"))
+                                    }
+                                })
+                        });
                         if setting.zone.is_some() && !cfg!(windows) {
                             let mut r = base_result(cfg, &corpus, entry, class, d, setting);
                             r.skipped = Some(SKIP_ZONE.to_string());
+                            r
+                        } else if let Some(Err(why)) = &maker {
+                            let mut r = base_result(cfg, &corpus, entry, class, d, setting);
+                            r.skipped = Some(why.clone());
                             r
                         } else if corpus.is_private()
                             && cfg!(windows)
@@ -1663,7 +1822,41 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                                 tar,
                                 failed_dir: failed_dir.clone(),
                             };
-                            let r = run_combination(&ctx, d, path, setting, &expected);
+                            let made = match &maker {
+                                Some(Ok((m, mexe))) => {
+                                    let ext = setting.extension(&d.tool).to_string();
+                                    let key = (m.tool.id.clone(), setting.compress.clone(), ext);
+                                    if !made_cache.contains_key(&key) {
+                                        let work = made_root.join(format!("m{}", made_cache.len()));
+                                        let mctx = Ctx {
+                                            cfg,
+                                            corpus: &corpus,
+                                            class,
+                                            entry,
+                                            cwd: cwd_base.clone(),
+                                            work_rel: relative(&cwd_base, &work)?,
+                                            work,
+                                            tar,
+                                            failed_dir: None,
+                                        };
+                                        println!(
+                                            "{class}: making the {} archive of setting `{}` with `{}` (untimed)",
+                                            key.2, setting.id, m.tool.id
+                                        );
+                                        let r = make_foreign(&mctx, m, mexe, setting, &key.2);
+                                        made_cache.insert(key.clone(), r);
+                                    }
+                                    Some(made_cache[&key].clone())
+                                }
+                                _ => None,
+                            };
+                            let r = match made {
+                                Some(Err(f)) => failed_result(&ctx, d, setting, f),
+                                Some(Ok(m)) => {
+                                    run_combination(&ctx, d, path, setting, &expected, Some(&m))
+                                }
+                                None => run_combination(&ctx, d, path, setting, &expected, None),
+                            };
                             remove_and_settle(&ctx.work, cfg);
                             r
                         }
@@ -1688,6 +1881,9 @@ pub fn execute(cfg: &Config, discovered: &[Discovered], selected: &[String]) -> 
                 });
                 write_result(&results_dir, &result)?;
             }
+        }
+        if !made_cache.is_empty() {
+            remove_and_settle(&made_root, cfg);
         }
     }
 

@@ -311,8 +311,19 @@ fn row_of(r: &ToolResult, src: SourceId) -> Row {
     }
 }
 
-/// One row per planned combination, in the order of `run.json`.
+/// One row per planned combination, in the order of `run.json`; information rows (E4-8) are
+/// left out, so no table, estimate or gate sees them ([`information_rows`] has them).
 pub fn rows(b: &Baseline) -> Vec<Row> {
+    rows_where(b, false)
+}
+
+/// The information rows (E4-8: `information` in the row), in the order of `run.json`; the
+/// report shows them in their own table, never in a gate.
+pub fn information_rows(b: &Baseline) -> Vec<Row> {
+    rows_where(b, true)
+}
+
+fn rows_where(b: &Baseline, information: bool) -> Vec<Row> {
     b.run
         .combinations
         .iter()
@@ -322,6 +333,7 @@ pub fn rows(b: &Baseline) -> Vec<Row> {
                 .find(|(r, _)| {
                     r.tool.id == c.tool && r.setting.id == c.setting && r.class == c.class
                 })
+                .filter(|(r, _)| r.information.is_some() == information)
                 .map(|(r, src)| row_of(r, *src))
         })
         .collect()

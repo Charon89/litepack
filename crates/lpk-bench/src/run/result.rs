@@ -261,7 +261,31 @@ pub struct ToolResult {
     /// The combination ran and failed; then there is no median.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed: Option<Failure>,
+    /// Present on an information row (E4-8), which the report shows apart and never puts in a
+    /// gate; absent on every other row (optional in result schema version 2, so older rows
+    /// still validate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub information: Option<Information>,
 }
+
+/// What kind of information row a row is, and where its archive came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Information {
+    /// [`FOREIGN_EXTRACT`]: the tool extracts a foreign archive its maker wrote once per class
+    /// and setting, outside every timed step; `setting.compress_args` are the maker's
+    /// arguments, and each repeat's `compress` is that one make step's measurement (the same in
+    /// every repeat), never a compression by the row's tool.
+    pub kind: String,
+    /// The maker's tool id (`7z`).
+    pub maker: String,
+    /// The maker's version as discovered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker_version: Option<String>,
+}
+
+/// [`Information::kind`] of a foreign-extraction row.
+pub const FOREIGN_EXTRACT: &str = "foreign-extract";
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -609,7 +633,23 @@ pub mod samples {
             }),
             skipped: None,
             failed: None,
+            information: None,
         }
+    }
+
+    /// An information row (E4-8): `lpk` extracting a ZIP that 7-Zip made once.
+    pub fn foreign() -> ToolResult {
+        let mut r = measured();
+        r.private = false;
+        r.tool.id = "lpk-foreign".into();
+        r.tool.ratio_depends_on_threads = false;
+        r.setting.id = "zip-deflate".into();
+        r.information = Some(Information {
+            kind: FOREIGN_EXTRACT.into(),
+            maker: "7z".into(),
+            maker_version: Some("26.03".into()),
+        });
+        r
     }
 
     /// A combination that failed in the second repeat's extract step: one completed repeat, no

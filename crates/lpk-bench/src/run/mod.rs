@@ -158,8 +158,16 @@ pub fn load_catalogue(catalogue: &Path, local: &Path) -> Result<(Catalogue, Loca
 
 /// Keep the requested tools, in catalogue order; unknown ids are errors.
 pub fn select(cat: &Catalogue, wanted: &[String]) -> Result<Vec<String>> {
+    // `all` is every tool but the foreign-extraction ones (E4-8): their information rows are
+    // asked for by name, so a baseline run of `all` stays what it was.
+    let named = |t: &&catalogue::Tool| t.foreign.is_none() || wanted.contains(&t.id);
     if wanted.is_empty() || wanted.iter().any(|w| w == "all") {
-        return Ok(cat.tools.iter().map(|t| t.id.clone()).collect());
+        return Ok(cat
+            .tools
+            .iter()
+            .filter(named)
+            .map(|t| t.id.clone())
+            .collect());
     }
     for w in wanted {
         if cat.get(w).is_none() {
