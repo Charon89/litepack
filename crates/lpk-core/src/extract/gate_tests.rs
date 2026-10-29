@@ -58,55 +58,124 @@ fn gate() -> Arc<AloneGate> {
     )
 }
 
+/// A one-entry archive whose single block of `plain` bytes is stored and declares `declared`
+/// bytes of decoder memory.
+fn archive_declaring(plain: usize, declared: u64) -> lpk_format::Archive<std::io::Cursor<Vec<u8>>> {
+    use lpk_format::{Encoded, EntryFlags, Graph, GraphResources, Writer, WriterOptions};
+    let data: Vec<u8> = (0..plain).map(|i| (i * 31 % 251) as u8).collect();
+    let mut out = Vec::new();
+    let mut w = Writer::new_revision(&mut out, WriterOptions::default(), 1).unwrap();
+    w.begin_entry("p.bin", EntryFlags::EMPTY, 0).unwrap();
+    let encoded = Encoded {
+        graph: Graph {
+            steps: vec![lpk_format::Step {
+                primitive: lpk_format::PrimitiveId::Store,
+                params: Vec::new(),
+            }],
+        },
+        bytes: data.clone(),
+        resources: GraphResources::default(),
+        memory: 0,
+    };
+    w.add_part_encoded(0, &data, encoded, declared).unwrap();
+    w.end_entry().unwrap();
+    w.finish().unwrap();
+    lpk_format::Archive::open(
+        std::io::Cursor::new(out),
+        &lpk_format::Resources {
+            memory: u64::MAX / 4,
+            ..lpk_format::Resources::default()
+        },
+    )
+    .unwrap()
+}
+
+/// `pool_size` on an archive declaring `decode_memory` with blocks of `plain` bytes, at 24
+/// threads, 3054 needed blocks and `budget`.
+fn pool_for(plain: usize, decode_memory: u64, budget: u64) -> Pool {
+    let a = archive_declaring(plain, decode_memory - plain as u64);
+    let needed = vec![0usize; 3054];
+    let shape = Shape {
+        needed: &needed,
+        targets: 3054,
+        with_content: 3054,
+        placements: 3054,
+        name_bytes: 3054 * 16,
+        max_writers: usize::MAX,
+    };
+    let opts = ExtractOptions {
+        threads: Some(24),
+        memory: Some(budget),
+        ..ExtractOptions::default()
+    };
+    pool_size(&a, &opts, &shape)
+}
+
 /// The envelope of `full/photo-jpeg` at 853acea declares 2,005,814,109 bytes: under a 2 GiB
-/// budget the pool sized from the floor keeps at least e9790b8's 4 workers (it chose 1 when every
-/// block was counted with the declaration), and a lone decode still has the declared term. The
-/// terms follow `pool_size` for an archive with records: `encoded + plain + floor + step_input +
-/// nested + BLOCK_ALLOWANCE`, the nested term a lower block's plain bytes and largest frame.
+/// budget `pool_size`, sized from the floor, keeps at least e9790b8's 4 workers (it chose 1 when
+/// every block was counted with the declaration), a lone decode still has the declared term, and
+/// the counted terms and the gate's pool stay within the budget.
 #[test]
 fn the_floor_keeps_the_workers_under_a_large_declaration() {
-    // Blocks of 1 and 4 MiB (a 16 MiB block leaves room for one worker beside the declared
-    // term once every waiting decode keeps its frame and step input, R117).
-    for plain in [MIB, 4 * MIB] {
-        let env = lpk_format::Envelope {
-            max_window: plain,
-            max_block_plain: plain,
-            decode_memory: 2_005_814_109,
-            ..envelope()
-        };
-        let floor = decoder_floor(&env);
-        let declared = env.decode_memory - plain;
-        let frame = plain + plain / 64;
-        let nested = plain + frame;
-        let per_block = frame + plain + floor + plain + nested + BLOCK_ALLOWANCE;
-        let s = Sizing {
-            threads: 24,
-            writers: 4,
-            needed: 3054,
-            fixed_shared: 2 * MIB,
-            per_block,
-            per_worker: 256 << 10,
-            held: plain + BLOCK_ALLOWANCE,
-            decoder: floor,
-            declared,
-            budget_given: true,
-        };
-        let budget = Budget {
-            bytes: 2 << 30,
-            source: BudgetSource::Given,
-        };
-        let (workers, in_flight) = s.size(budget.bytes);
-        assert!(workers >= 4, "plain {plain}: workers {workers}");
-        assert!(in_flight >= workers);
-        let terms = s.gate_terms(budget);
-        assert!(terms.lone >= declared, "plain {plain}: {terms:?}");
-        let w = workers as u64;
-        let counted = s.fixed_shared
-            + w * (s.per_block + s.per_worker)
-            + (in_flight - workers) as u64 * s.held
-            + terms.shared;
-        assert!(counted <= budget.bytes, "{counted} > {}", budget.bytes);
+    let budget = 2u64 << 30;
+    for plain in [1usize << 20, 4 << 20] {
+        let pool = pool_for(plain, 2_005_814_109, budget);
+        let m = pool.memory;
+        assert!(m.declared >= 2_005_814_109 - plain as u64, "{m:?}");
+        assert!(m.decoder < m.declared);
+        assert!(pool.workers >= 4, "plain {plain}: workers {}", pool.workers);
+        let terms = pool.sizing.gate_terms(m.budget);
+        assert!(terms.lone >= m.declared, "plain {plain}: {terms:?}");
+        let counted = m.total_in_flight(pool.workers, pool.in_flight) + m.pool;
+        assert!(counted <= budget, "{counted} > {budget}");
     }
+}
+
+/// R117: the counted terms at a lone grant stay within the budget. Every worker holds its
+/// block's terms other than its decoder (the others wait to run alone with their frames and step
+/// inputs), the lone decode uses its whole room, and the permits beyond the workers are held
+/// blocks. R115's formula, which counted the waiting decodes as held blocks, exceeds the budget;
+/// the shared [`lone_room`] meets it exactly, for extraction's `Sizing` and the export's
+/// `alone_memory_for` alike.
+#[test]
+fn the_counted_terms_at_a_lone_grant_stay_within_the_budget() {
+    let budget = 2u64 << 30;
+    let pool = pool_for(4 << 20, 1 << 30, budget);
+    let s = pool.sizing;
+    let (w, p) = s.size(budget);
+    assert!(w > 1, "several workers");
+    let (wu, pu) = (w as u64, p as u64);
+    let other = s.per_block - s.decoder;
+    assert!(other > s.held);
+    let at_grant = |fixed: u64, lone: u64| fixed + wu * other + lone + (pu - wu) * s.held;
+    // Extraction.
+    let fixed = s.fixed_shared + wu * s.per_worker;
+    let r115 = budget - fixed - other - (pu - 1) * s.held;
+    let now = s.alone_memory(budget);
+    eprintln!(
+        "extraction: workers {w}, permits {p}; at the grant R115 {} and now {} against {budget}",
+        at_grant(fixed, r115),
+        at_grant(fixed, now)
+    );
+    assert!(at_grant(fixed, r115) > budget);
+    assert!(at_grant(fixed, now) <= budget);
+    // The export, with the same terms counted at the declared decoder term and more permits.
+    let m = ExtractMemory {
+        fixed,
+        ..pool.memory.with_declared()
+    };
+    let permits = p + 4;
+    let other = m.per_block - m.decoder;
+    let at_grant = |lone: u64| m.fixed + wu * other + lone + (permits - w) as u64 * m.held;
+    let r115 = budget - m.fixed - other - (permits as u64 - 1) * m.held;
+    let now = alone_memory_for(&m, w, permits);
+    eprintln!(
+        "export: workers {w}, permits {permits}; at the grant R115 {} and now {} against {budget}",
+        at_grant(r115),
+        at_grant(now)
+    );
+    assert!(at_grant(r115) > budget);
+    assert!(at_grant(now) <= budget);
 }
 
 fn envelope() -> lpk_format::Envelope {

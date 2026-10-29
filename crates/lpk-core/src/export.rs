@@ -743,7 +743,7 @@ where
     let permits = Permits::new(held);
     // Decodes that need more than the archive declares run alone (extract.rs, `AloneGate`).
     let permits_n = u64::try_from(held).unwrap_or(u64::MAX);
-    let lone = alone_memory_for(&memory, held);
+    let lone = alone_memory_for(&memory, workers, held);
     let gate =
         AloneGate::with_terms(
             &pool,

@@ -641,10 +641,12 @@ impl<'s> Out<'s> {
 ///
 /// - A need that fits the free bytes is granted at once; one that does not waits, first come
 ///   first served.
-/// - A need larger than the whole pool, or above the archive's declared decoder term, waits for the pool to empty and runs alone: no other
-///   reservation meanwhile, and no block starts decoding while it waits or runs, so it cannot be
-///   starved. It is admitted once it is the only block decoding (the others waiting to run alone
-///   counted as held blocks, as D-116 (4) counts them).
+/// - A need larger than the whole pool, or above the archive's declared decoder term, waits for
+///   the pool to empty and runs alone: no other reservation meanwhile, and no block starts
+///   decoding while it waits or runs, so it cannot be starved. It is admitted once it is the only
+///   block decoding; the others waiting to run alone still hold their frames and step inputs, so
+///   the lone room counts every worker at its block's terms other than its decoder (R117,
+///   [`lone_room`]).
 /// - A need above [`GateTerms::lone`] is refused with the `--memory` figure that would let it
 ///   run.
 ///
@@ -901,16 +903,40 @@ impl lpk_format::DecodeGate for AloneGate {
     }
 }
 
-/// The memory a lone decode may use beyond its plain bytes with `m`'s terms and `permits`
-/// permits: the budget less the fixed terms, one block's terms other than its decoder, and every
-/// other permit held as a decoded block (an export, [`crate::export`]).
-pub(crate) fn alone_memory_for(m: &ExtractMemory, permits: usize) -> u64 {
-    let others = u64::try_from(permits.saturating_sub(1)).unwrap_or(u64::MAX);
-    m.budget
-        .bytes
-        .saturating_sub(m.fixed)
-        .saturating_sub(m.per_block.saturating_sub(m.decoder))
-        .saturating_sub(others.saturating_mul(m.held))
+/// The memory a lone decode may use beyond its plain bytes (R117), for extraction and export
+/// alike: `budget` less `fixed` (the shared terms and every worker's reader), every worker's
+/// block terms other than its decoder (its own, and each other worker's, which may wait to run
+/// alone holding its frame, step input and nested block), and every permit beyond the workers
+/// held as a decoded block.
+pub(crate) fn lone_room(
+    budget: u64,
+    fixed: u64,
+    workers: usize,
+    permits: usize,
+    per_block: u64,
+    decoder: u64,
+    held: u64,
+) -> u64 {
+    let w = u64::try_from(workers).unwrap_or(u64::MAX);
+    let others = u64::try_from(permits.saturating_sub(workers)).unwrap_or(u64::MAX);
+    budget
+        .saturating_sub(fixed)
+        .saturating_sub(w.saturating_mul(per_block.saturating_sub(decoder)))
+        .saturating_sub(others.saturating_mul(held))
+}
+
+/// [`lone_room`] with `m`'s terms, `workers` workers and `permits` permits (an export,
+/// [`crate::export`], whose `m.fixed` holds every worker's reader).
+pub(crate) fn alone_memory_for(m: &ExtractMemory, workers: usize, permits: usize) -> u64 {
+    lone_room(
+        m.budget.bytes,
+        m.fixed,
+        workers,
+        permits,
+        m.per_block,
+        m.decoder,
+        m.held,
+    )
 }
 
 /// True for the error of a decode that stopped waiting at the gate because the run was
@@ -1837,12 +1863,16 @@ impl Sizing {
     pub(crate) fn alone_memory(&self, budget: u64) -> u64 {
         let (workers, in_flight) = self.size(budget);
         let w = u64::try_from(workers).unwrap_or(u64::MAX);
-        let others = u64::try_from(in_flight.saturating_sub(workers)).unwrap_or(u64::MAX);
-        budget
-            .saturating_sub(self.fixed_shared)
-            .saturating_sub(w.saturating_mul(self.per_worker))
-            .saturating_sub(w.saturating_mul(self.per_block.saturating_sub(self.decoder)))
-            .saturating_sub(others.saturating_mul(self.held))
+        lone_room(
+            budget,
+            self.fixed_shared
+                .saturating_add(w.saturating_mul(self.per_worker)),
+            workers,
+            in_flight,
+            self.per_block,
+            self.decoder,
+            self.held,
+        )
     }
 
     /// The gate's terms under a budget of `budget` ([`AloneGate`]): the pool is the budget less

@@ -877,9 +877,6 @@ fn over_declared_decodes_run_alone_and_the_peak_stays_within_the_budget() {
     );
     assert!(s.workers > 1, "the pool runs several workers");
     assert_eq!(s.alone_decodes, jpegs.len() as u64);
-    // While a decode ran alone, no other block decoded: the blocks between `begin` and `end` at
-    // the grant are itself and the decodes waiting to run alone (R117).
-    assert!((1..=s.workers).contains(&s.concurrent_while_alone));
     assert!(peak <= budget, "peak {peak} > budget {budget}");
     for (i, j) in jpegs.iter().enumerate() {
         assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
@@ -1290,6 +1287,12 @@ fn waiting_alone_decodes_and_one_lone_decode_stay_within_the_budget() {
         s.workers, s.in_flight, s.alone_decodes, s.concurrent_while_alone
     );
     assert!(s.workers > 1, "several workers wait to run alone");
+    // At a lone grant other workers wait to run alone, holding their blocks (threads pinned to 8).
+    assert!(
+        s.concurrent_while_alone >= 2,
+        "{} at the grant",
+        s.concurrent_while_alone
+    );
     assert_eq!(s.alone_decodes, jpegs.len() as u64);
     assert!(peak <= budget, "peak {peak} > budget {budget}");
     for (i, j) in jpegs.iter().enumerate() {
