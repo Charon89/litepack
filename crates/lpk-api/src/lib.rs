@@ -24,7 +24,8 @@ mod session;
 pub mod testing;
 
 pub use create::{
-    append, calibrate, committed_generation, create, rollback, CreateSettings, Rate, Seal, Tier,
+    append, calibrate, committed_generation, committed_generation_of, create, rollback,
+    rollback_file, CreateSettings, Rate, Seal, Tier,
 };
 pub use error::{Class, EntryError, Error};
 pub use export::{Container, ExportOptions, Method};

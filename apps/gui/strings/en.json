@@ -32,5 +32,15 @@
   "status.view": "{entries} items ({files} files, {folders} folders, {bytes} bytes)",
   "status.picked": "{count} selected ({bytes} bytes)",
   "open.done": "Opened {name}.",
-  "open.refused": "{name} is not opened directly (type .{extension}); its preview will show it."
+  "open.refused": "{name} is not opened directly (type .{extension}); its preview will show it.",
+  "pick.archive": "Open an archive",
+  "pick.files": "Choose files to put into the archive",
+  "pick.folder": "Choose a folder to put into the archive",
+  "pick.destination": "Choose where the new archive goes",
+  "actions.label": "Actions",
+  "action.open": "Open…",
+  "action.create": "New archive…",
+  "create.running": "Creating {name}…",
+  "create.done": "Created {name}.",
+  "notice.gaveup": "{name} was left as it is: an interrupted write could not be finished after {tries} tries. Check it with lpk test."
 }

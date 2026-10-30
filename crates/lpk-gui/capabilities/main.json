@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "The main window: the archive browser's commands, nothing else (no plugin and no core permission; dialogs and the update check run in Rust).",
+  "description": "The main window: the archive browser's commands, nothing else (no plugin and no core permission; dialogs, the pickers included, and the update check run in Rust).",
   "windows": ["main"],
   "permissions": [
     "allow-startup",
@@ -9,6 +9,7 @@
     "allow-view",
     "allow-select",
     "allow-open-entry",
+    "allow-pick",
     "allow-close-archive",
     "allow-create-archive",
     "allow-cancel",

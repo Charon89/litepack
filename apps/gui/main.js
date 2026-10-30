@@ -86,10 +86,10 @@ const list = new VirtualList({
   layer: $("rows"),
   cells,
   fetch: (first, count) => core.invoke("rows", { session, first, count }),
-  activate: (index, row, folderOnly = false) => activate(index, row, folderOnly).catch(showError),
-  // The generation of the view the row index came from: Rust refuses another.
-  select: async (action, row) => {
-    const s = await core.invoke("select", { session, action, row, generation: list.generation });
+  activate: (index, row, generation, folderOnly = false) => activate(index, row, generation, folderOnly).catch(showError),
+  // The generation of the batch the row index came from: Rust refuses another.
+  select: async (action, row, generation) => {
+    const s = await core.invoke("select", { session, action, row, generation });
     showSelection(s);
     await list.refresh();
   },
@@ -148,7 +148,7 @@ async function navigate(dir) {
   await applyView();
 }
 
-async function activate(index, row, folderOnly) {
+async function activate(index, row, generation, folderOnly) {
   if (row.kind === 1) {
     if (state.mode === "tree") {
       await navigate(row.id);
@@ -158,12 +158,53 @@ async function activate(index, row, folderOnly) {
   if (folderOnly) {
     return;
   }
-  const r = await core.invoke("open_entry", { session, row: index, generation: list.generation, op: nextOp++ });
+  const r = await core.invoke("open_entry", { session, row: index, generation, op: nextOp++ });
   if (r.outcome === "shell") {
     setStatus(t("open.done", { name: r.name }));
   } else {
     setStatus(t("open.refused", { name: r.name, extension: r.extension }));
   }
+}
+
+// A native picker in Rust: the page names what to pick and receives grants (never a path).
+function pick(purpose) {
+  return core.invoke("pick", { purpose });
+}
+
+async function openPicked() {
+  const [archive] = await pick("archive");
+  if (archive) {
+    await openArchive(archive);
+  }
+}
+
+// A new archive: what goes in (files, or a folder when no file is chosen), then where it goes;
+// named after the first input, written by Rust through a `.partial` that never replaces a file.
+async function createPicked() {
+  let inputs = await pick("files");
+  if (inputs.length === 0) {
+    inputs = await pick("folder");
+  }
+  if (inputs.length === 0) {
+    return;
+  }
+  const [folder] = await pick("destination");
+  if (!folder) {
+    return;
+  }
+  const name = inputs[0].name.replace(/\.[^.]*$/, "") || "archive";
+  setStatus(t("create.running", { name: `${name}.lpk` }));
+  const progress = new core.Channel();
+  progress.onmessage = () => {};
+  await core.invoke("create_archive", {
+    inputs: inputs.map((i) => i.grant),
+    folder: folder.grant,
+    name,
+    tier: "balanced",
+    op: nextOp++,
+    progress,
+  });
+  setStatus(t("create.done", { name: `${name}.lpk` }));
 }
 
 async function report(total, first) {
@@ -217,6 +258,8 @@ function showError(e) {
 }
 
 function wireControls() {
+  $("action-open").addEventListener("click", () => openPicked().catch(showError));
+  $("action-create").addEventListener("click", () => createPicked().catch(showError));
   $("mode-flat").addEventListener("click", () => {
     Object.assign(state, { mode: "flat", dir: null });
     applyView().catch(showError);
@@ -256,6 +299,10 @@ async function main() {
   wireControls();
   if (startup.recovered > 0) {
     setStatus(t("status.recovered", { count: startup.recovered }));
+  }
+  // Interrupted writes the recovery gave up on after its tries: said once, not retried.
+  for (const g of startup.gave_up) {
+    setStatus(t("notice.gaveup", { name: g.name, tries: g.tries }));
   }
   if (startup.error) {
     showError({ message: startup.error });

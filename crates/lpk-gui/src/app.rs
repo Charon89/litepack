@@ -61,6 +61,7 @@ pub struct App {
     sessions: Mutex<HashMap<u64, Arc<Slot>>>,
     next: AtomicU64,
     opened: OpenFolders,
+    motw_off: bool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -77,7 +78,30 @@ impl App {
             sessions: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             opened: OpenFolders::new(None),
+            motw_off: false,
         }
+    }
+
+    /// Mark of the Web opted out for the archives this state opens (E6-5's setting,
+    /// [`OpenOptions::motw_off`]); an opened entry is zoned all the same.
+    pub fn with_motw_off(mut self, off: bool) -> Self {
+        self.motw_off = off;
+        self
+    }
+
+    /// The start-up sweep of the `Open` folders an earlier run left behind (its process has
+    /// ended), leaving a running instance's alone; the count removed.
+    pub fn sweep_open(&self) -> usize {
+        self.opened.sweep(lpk_gui_sys::process_alive)
+    }
+
+    /// The native picker for `purpose` (through `picker`): a grant per path chosen.
+    pub fn pick(
+        &self,
+        picker: &dyn crate::pick::Picker,
+        purpose: crate::pick::Purpose,
+    ) -> Result<Vec<crate::grants::Granted>, GuiError> {
+        crate::pick::pick(&self.grants, picker, purpose)
     }
 
     /// The folder opened entries go into (each into a fresh folder of its own; none: opening
@@ -98,7 +122,11 @@ impl App {
     /// Open the archive of `grant`.
     pub fn open(&self, grant: &Grant, cancel: &CancelToken) -> Result<Opened, GuiError> {
         let path = self.grants.resolve(grant, GrantKind::Archive)?;
-        let session = Arc::new(Session::open(&path, &OpenOptions::default())?);
+        let options = OpenOptions {
+            motw_off: self.motw_off,
+            ..OpenOptions::default()
+        };
+        let session = Arc::new(Session::open(&path, &options)?);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -240,16 +268,7 @@ impl App {
             )
             .into());
         }
-        let file = crate::open::file_in(&dir, &path);
-        if !file.is_file() {
-            return Err(lpk_api::Error::new(
-                lpk_api::Class::Internal,
-                "OpenEntry",
-                format!("{path} was not extracted"),
-                None,
-            )
-            .into());
-        }
+        let file = crate::open::extracted_file(&dir, &path)?;
         Ok(Opening::Shell { name, file })
     }
 

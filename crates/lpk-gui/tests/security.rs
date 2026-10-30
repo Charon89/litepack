@@ -306,3 +306,29 @@ fn every_string_is_in_the_table_and_every_key_is_used() {
         "literal text in index.html: {outside:?}"
     );
 }
+
+#[test]
+fn the_page_passes_each_rows_batch_generation() {
+    // E5-3 (D-130 (7)): a row index goes to Rust with the generation of the batch it came
+    // from, not whatever view the list holds when the call is made.
+    let read = |f: &str| std::fs::read_to_string(repo_root().join("apps/gui").join(f)).unwrap();
+    let main = read("main.js");
+    let list = read("list.js");
+    assert!(
+        !main.contains("list.generation"),
+        "main.js reads the list's current generation"
+    );
+    assert!(main.contains(r#"core.invoke("select", { session, action, row, generation })"#));
+    assert!(main.contains(r#"core.invoke("open_entry", { session, row: index, generation,"#));
+    assert!(list.contains("el.dataset.generation = String(b.generation)"));
+    for call in ["this.select(", "this.activate("] {
+        let lines: Vec<&str> = list.lines().filter(|l| l.contains(call)).collect();
+        assert!(!lines.is_empty(), "{call}");
+        for l in lines {
+            assert!(
+                l.contains("this.generationOf(e)") || l.contains("this.heldGeneration()"),
+                "{call} without a batch generation: {l}"
+            );
+        }
+    }
+}

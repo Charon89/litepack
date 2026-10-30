@@ -8,6 +8,7 @@ pub const COMMANDS: &[&str] = &[
     "view",
     "select",
     "open_entry",
+    "pick",
     "close_archive",
     "create_archive",
     "cancel",

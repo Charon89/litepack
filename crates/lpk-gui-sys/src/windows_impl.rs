@@ -110,7 +110,7 @@ fn hwnd(raw: isize) -> HWND {
     HWND(raw as *mut c_void)
 }
 
-/// `ShellExecuteW` on its own short-lived thread with COM initialised as an apartment (what the
+/// `ShellExecuteExW` on its own short-lived thread with COM initialised as an apartment (what the
 /// shell's handlers expect; a tokio worker's COM state is unknown), joined before returning.
 pub(crate) fn shell_open(owner: Option<isize>, path: &Path) -> io::Result<()> {
     // Not `\\?\`-prefixed: handlers receive the path as it is, and many cannot read that form.
@@ -127,37 +127,153 @@ fn shell_open_on_this_thread(owner: Option<isize>, file: &[u16], shown: &str) ->
     use windows::Win32::System::Com::{
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
     };
-    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     let verb = wide(OsStr::new("open"));
     // SAFETY: this thread is new and owns its COM state; no reserved pointer is passed; a
     // success is balanced by the `CoUninitialize` below on the same thread.
     let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
-    // SAFETY: the strings are NUL-terminated and alive for the call; no parameters and no
-    // directory (null); the owner, if any, is a window handle the caller passed.
-    let r = unsafe {
-        ShellExecuteW(
-            owner.map(hwnd),
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        // The call returns only once the shell has finished with the request: COM can then be
+        // uninitialised straight after it.
+        fMask: SEE_MASK_NOASYNC,
+        hwnd: owner.map(hwnd).unwrap_or_default(),
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
     };
+    // SAFETY: `info` is a correctly sized `SHELLEXECUTEINFOW` alive for the call; its strings
+    // are NUL-terminated and outlive it; no parameters and no directory (null); no mask asks
+    // for a process handle, so nothing is returned to close; the owner, if any, is a window
+    // handle the caller passed.
+    let r = unsafe { ShellExecuteExW(&mut info) };
     if init.is_ok() {
         // SAFETY: balances the successful `CoInitializeEx` above, on the same thread.
         unsafe { CoUninitialize() };
     }
-    // Values above 32 mean success (the documented contract of the return value).
-    if r.0 as isize > 32 {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "the shell could not open {shown} (code {})",
-            r.0 as isize
-        )))
+    r.map_err(|e| io::Error::other(format!("the shell could not open {shown}: {}", e.message())))
+}
+
+/// The common item dialog on a thread of its own (COM initialised as an apartment there, as
+/// the dialog requires), joined before returning: files (`folders` false) or one folder.
+pub(crate) fn pick(
+    owner: Option<isize>,
+    title: &str,
+    folders: bool,
+    multi: bool,
+) -> io::Result<Vec<std::path::PathBuf>> {
+    let title = wide(OsStr::new(title));
+    std::thread::Builder::new()
+        .name("lpk-pick".into())
+        .spawn(move || pick_on_this_thread(owner, &title, folders, multi))?
+        .join()
+        .map_err(|_| io::Error::other("the picker thread panicked"))?
+}
+
+fn pick_on_this_thread(
+    owner: Option<isize>,
+    title: &[u16],
+    folders: bool,
+    multi: bool,
+) -> io::Result<Vec<std::path::PathBuf>> {
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    };
+    // SAFETY: this thread is new and owns its COM state; no reserved pointer is passed; a
+    // success is balanced by the `CoUninitialize` below, after every COM object is dropped.
+    let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    let r = run_dialog(owner, title, folders, multi);
+    if init.is_ok() {
+        // SAFETY: balances the successful `CoInitializeEx` above, on the same thread; the
+        // dialog's objects were all released inside `run_dialog`.
+        unsafe { CoUninitialize() };
     }
+    r
+}
+
+fn run_dialog(
+    owner: Option<isize>,
+    title: &[u16],
+    folders: bool,
+    multi: bool,
+) -> io::Result<Vec<std::path::PathBuf>> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::ERROR_CANCELLED;
+    use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, IShellItem, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST,
+        FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
+        SIGDN_FILESYSPATH,
+    };
+    // SAFETY: COM is initialised on this thread (or the call fails cleanly); the class ID is
+    // the shell's Open dialog, created in process with no aggregate.
+    let dialog: IFileOpenDialog =
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }.map_err(io_err)?;
+    let mut options = FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR;
+    if folders {
+        options |= FOS_PICKFOLDERS;
+    } else {
+        options |= FOS_FILEMUSTEXIST;
+        if multi {
+            options |= FOS_ALLOWMULTISELECT;
+        }
+    }
+    // SAFETY: the dialog is a live object of this apartment; `title` is NUL-terminated and
+    // alive for the call; the owner, if any, is a window handle the caller passed (the dialog
+    // is modal to it).
+    let shown = unsafe {
+        dialog
+            .GetOptions()
+            .and_then(|o| dialog.SetOptions(o | options))
+            .and_then(|()| dialog.SetTitle(PCWSTR(title.as_ptr())))
+            .and_then(|()| dialog.Show(owner.map(hwnd)))
+    };
+    match shown {
+        Ok(()) => {}
+        Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => return Ok(Vec::new()),
+        Err(e) => return Err(io_err(e)),
+    }
+    let path_of = |item: &IShellItem| -> io::Result<std::path::PathBuf> {
+        // SAFETY: the item is a live result of the dialog; on success the returned string is
+        // NUL-terminated and allocated with the COM allocator, read once and freed here.
+        unsafe {
+            let p = item.GetDisplayName(SIGDN_FILESYSPATH).map_err(io_err)?;
+            let s = std::ffi::OsString::from_wide(p.as_wide());
+            CoTaskMemFree(Some(p.0 as *const c_void));
+            Ok(std::path::PathBuf::from(s))
+        }
+    };
+    // SAFETY: the dialog was shown and returned OK, so its results exist; every index is
+    // below the count the array reports.
+    unsafe {
+        let items = dialog.GetResults().map_err(io_err)?;
+        let n = items.GetCount().map_err(io_err)?;
+        (0..n)
+            .map(|i| path_of(&items.GetItemAt(i).map_err(io_err)?))
+            .collect()
+    }
+}
+
+/// `OpenProcess` and `GetExitCodeProcess`: false only when the process does not exist or has
+/// exited; any other failure (access denied: another user's process) reads as running.
+pub(crate) fn process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: plain call; a returned handle is closed below.
+    let h = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(h) => h,
+        Err(e) => return e.code() != ERROR_INVALID_PARAMETER.to_hresult(),
+    };
+    let mut code = 0u32;
+    // SAFETY: `h` is the process handle just opened; `code` outlives the call.
+    let ok = unsafe { GetExitCodeProcess(h, &mut code) }.is_ok();
+    // SAFETY: `h` was opened above and is closed once.
+    let _ = unsafe { CloseHandle(h) };
+    !ok || code == STILL_ACTIVE.0 as u32
 }
 
 pub(crate) fn confirm(owner: Option<isize>, title: &str, text: &str) -> bool {

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use lpk_api::testing::archive_with;
 use lpk_api::{CancelToken, Monitor};
 use lpk_gui::app::App;
-use lpk_gui::browse::{SelectAction, ViewRequest};
+use lpk_gui::browse::{SelectAction, ViewRequest, STALE_VIEW};
 use lpk_gui::grants::GrantKind;
 use lpk_gui::open::Opening;
 
@@ -161,6 +161,12 @@ fn the_entry_goes_alone_into_a_fresh_folder_and_the_exit_removes_it() {
     assert!(files_under(&o.folder).is_empty(), "cleaned at exit");
 }
 
+/// The stale-view refusal itself (the page ignores exactly this one, `apps/gui/main.js`), not
+/// another `Usage` error.
+fn stale(e: &lpk_gui::GuiError) -> bool {
+    e.is(lpk_api::Class::Usage) && e.detail.starts_with(STALE_VIEW)
+}
+
 #[test]
 fn row_requests_against_an_older_view_are_refused_and_write_nothing() {
     let d = tempfile::tempdir().unwrap();
@@ -180,18 +186,18 @@ fn row_requests_against_an_older_view_are_refused_and_write_nothing() {
         .app
         .open_entry(o.session, row, o.generation, &Monitor::default())
         .unwrap_err();
-    assert!(e.is(lpk_api::Class::Usage), "{e}");
+    assert!(stale(&e), "{e}");
     assert!(nothing_written(&o.folder));
     let e = o
         .app
         .select(o.session, SelectAction::Only, Some(row), o.generation)
         .unwrap_err();
-    assert!(e.is(lpk_api::Class::Usage), "{e}");
+    assert!(stale(&e), "{e}");
     let e = o
         .app
         .select(o.session, SelectAction::Range, Some(row), o.generation)
         .unwrap_err();
-    assert!(e.is(lpk_api::Class::Usage), "{e}");
+    assert!(stale(&e), "{e}");
     // The current generation still works.
     let s = o
         .app
@@ -218,6 +224,37 @@ fn a_zoned_archive_zones_the_opened_entry() {
     stream.push(":Zone.Identifier");
     std::fs::write(&stream, "[ZoneTransfer]\r\nZoneId=3\r\n").unwrap();
     let app = App::new(None).with_open_dir(Some(d.path().join("Open")));
+    let g = app.grants.mint(GrantKind::Archive, &archive).grant;
+    let opened = app.open(&g, &CancelToken::new()).unwrap();
+    let o = Open {
+        app,
+        session: opened.session,
+        generation: opened.view.generation,
+        folder: d.path().join("Open"),
+    };
+    let Opening::Shell { file, .. } = o.open("other.txt").unwrap() else {
+        panic!()
+    };
+    let mut zone = file.as_os_str().to_owned();
+    zone.push(":Zone.Identifier");
+    let text = std::fs::read_to_string(&zone).unwrap();
+    assert!(text.contains("ZoneId=3"), "{text}");
+}
+
+#[cfg(windows)]
+#[test]
+fn an_opened_entry_is_zoned_with_the_opt_out_on() {
+    // `ExtractOptions::opening`: Mark of the Web opted out for the session, and the opened
+    // entry carries the archive's zone all the same.
+    let d = tempfile::tempdir().unwrap();
+    let archive = d.path().join("a.lpk");
+    archive_with(&archive, ENTRIES).unwrap();
+    let mut stream = archive.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    std::fs::write(&stream, "[ZoneTransfer]\r\nZoneId=3\r\n").unwrap();
+    let app = App::new(None)
+        .with_open_dir(Some(d.path().join("Open")))
+        .with_motw_off(true);
     let g = app.grants.mint(GrantKind::Archive, &archive).grant;
     let opened = app.open(&g, &CancelToken::new()).unwrap();
     let o = Open {

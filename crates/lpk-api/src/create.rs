@@ -250,9 +250,28 @@ pub fn rollback(path: &Path, generation: u64) -> Result<GenerationInfo, Error> {
         .write(true)
         .open(path)
         .map_err(|e| fail(FormatError::Io(e)))?;
-    lpk_format::rollback(&mut file, generation)
+    rollback_file(&mut file, path, generation)
+}
+
+/// [`rollback`] through a handle the caller holds (opened for reading and writing), so that a
+/// check made through the same handle ([`committed_generation_of`], the file's identity) is
+/// about the file this truncates (the GUI's recovery, D-117). `path` names it in errors.
+pub fn rollback_file(
+    file: &mut std::fs::File,
+    path: &Path,
+    generation: u64,
+) -> Result<GenerationInfo, Error> {
+    lpk_format::rollback(file, generation)
         .map(GenerationInfo::from)
-        .map_err(fail)
+        .map_err(|e| Error::format(e, Some(path)))
+}
+
+/// [`committed_generation`] through a handle the caller holds; nothing is written. `path`
+/// names it in errors.
+pub fn committed_generation_of(file: &mut std::fs::File, path: &Path) -> Result<u64, Error> {
+    lpk_format::committed_chain(file)
+        .map(|(_, latest)| latest)
+        .map_err(|e| Error::format(e, Some(path)))
 }
 
 /// The latest committed generation of the archive at `path`, from its trailer chain (the
