@@ -223,7 +223,7 @@ async function createNamed(a) {
     showNotices([{ kind: "text", text: t("verb.create") }]);
     return;
   }
-  const name = `${a.name}.lpk`;
+  const name = a.name;
   setStatus(t("create.running", { name }));
   const progress = new core.Channel();
   progress.onmessage = () => {};
@@ -438,9 +438,14 @@ async function main() {
     showNotices([{ kind: "settings", error: startup.settings_warning }]);
   }
   await wireSettings();
+  // A command line that did not parse is shown, and the window still takes later verbs.
   if (startup.error) {
     showError({ message: startup.error });
-    return;
+  }
+  // This instance's own verb first; a second instance's verbs, held by Rust until the page
+  // subscribes, run after it.
+  if (startup.activation) {
+    await runActivation(startup.activation).catch(showError);
   }
   const channel = new core.Channel();
   channel.onmessage = (notice) => {
@@ -458,9 +463,6 @@ async function main() {
     }
   };
   await core.invoke("subscribe", { channel });
-  if (startup.activation) {
-    await runActivation(startup.activation);
-  }
 }
 
 main().catch(showError);

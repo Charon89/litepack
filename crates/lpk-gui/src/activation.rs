@@ -52,7 +52,8 @@ pub struct Activation {
     pub handler: Handler,
     /// A grant per path, in the command line's order.
     pub items: Vec<Granted>,
-    /// `--name`'s file name, without its `.lpk` (the name `create_archive` takes).
+    /// `--name`'s file name, whole: it ends in `.lpk` (the parser's rule), and `create_archive`
+    /// keeps such a name as it is.
     pub name: Option<String>,
     /// For [`Handler::CreateNamed`]: the first input's folder, the destination (derived in Rust
     /// from a path the user chose, as "extract here" derives from the archive's).
@@ -74,8 +75,7 @@ pub fn activate(verb: &Verb, grants: &Grants) -> Activation {
                         .and_then(|p| p.parent())
                         .filter(|p| !p.as_os_str().is_empty())
                         .map(|p| grants.mint(GrantKind::Folder, p));
-                    let stem = n[..n.len() - ".lpk".len()].to_owned();
-                    (Handler::CreateNamed, folder, Some(stem))
+                    (Handler::CreateNamed, folder, Some(n.clone()))
                 }
                 None => (Handler::CreateWizard, None, None),
             };
@@ -149,7 +149,12 @@ mod tests {
         let cwd = std::env::temp_dir();
         let a = act(&["--create", "sub/x.txt", "y", "--name", "x.lpk"], &cwd, &g);
         assert_eq!(a.handler, Handler::CreateNamed);
-        assert_eq!(a.name.as_deref(), Some("x"));
+        assert_eq!(a.name.as_deref(), Some("x.lpk"));
+        // The name goes whole: `x.lpk.lpk` stays `x.lpk.lpk` (not `x.lpk`), as create keeps it.
+        let twice = act(&["--create", "x", "--name", "x.lpk.lpk"], &cwd, &g);
+        let twice = twice.name.unwrap();
+        assert_eq!(twice, "x.lpk.lpk");
+        assert_eq!(crate::write::archive_name(&twice).unwrap(), "x.lpk.lpk");
         let folder = a.folder.unwrap();
         assert_eq!(
             g.resolve(&folder.grant, GrantKind::Folder).unwrap(),

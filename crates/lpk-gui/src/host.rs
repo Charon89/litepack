@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use lpk_api::{Class, CreateSettings, Event, Monitor, Tier};
@@ -25,6 +25,7 @@ use lpk_gui::browse::{SelectAction, Status, ViewInfo, ViewRequest};
 use lpk_gui::grants::{Grant, GrantKind, Granted};
 use lpk_gui::journal::{startup_report, Notice as StartupNotice};
 use lpk_gui::open::Opening;
+use lpk_gui::outbox::Outbox;
 use lpk_gui::pick::{NativePicker, Purpose};
 use lpk_gui::security::{MAIN_WINDOW, SMOKE_REPORT_ENV};
 use lpk_gui::settings::{Settings, Store};
@@ -47,9 +48,9 @@ struct Host {
     settings: Store,
     settings_warning: Option<String>,
     smoke: Option<PathBuf>,
-    subscribers: Mutex<Vec<Channel<Notice>>>,
-    /// Notices pushed before the page subscribed (a second instance's verbs at start-up).
-    pending: Mutex<Vec<Notice>>,
+    /// The page's channels, and the notices pushed before it subscribed (a second instance's
+    /// verbs at start-up).
+    outbox: Outbox<Channel<Notice>, Notice>,
     exit_confirmed: AtomicBool,
 }
 
@@ -283,47 +284,44 @@ async fn cancel(host: State<'_, Host>, op: u64) -> Result<bool, GuiError> {
 
 #[tauri::command]
 async fn subscribe(host: State<'_, Host>, channel: Channel<Notice>) -> Result<(), GuiError> {
-    let pending = std::mem::take(&mut *host.pending.lock().map_err(internal)?);
-    for n in pending {
-        let _ = channel.send(n);
-    }
-    host.subscribers.lock().map_err(internal)?.push(channel);
+    host.outbox.subscribe(channel, send);
     Ok(())
 }
 
-/// Send `notice` to the page's channels, or keep it until the page subscribes.
+fn send(c: &Channel<Notice>, n: Notice) {
+    let _ = c.send(n);
+}
+
+/// Send `notice` to the page's channels, or hold it until the page subscribes
+/// (`lpk_gui::outbox`: one lock, at most 64 held, then one notice that the rest were dropped).
 fn push(host: &Host, notice: Notice) {
-    let subs: Vec<Channel<Notice>> = match host.subscribers.lock() {
-        Ok(s) => s.clone(),
-        Err(_) => Vec::new(),
+    let overflow = || Notice::Refused {
+        error: "too many requests arrived before the window was ready; the later ones were dropped"
+            .into(),
     };
-    if subs.is_empty() {
-        if let Ok(mut p) = host.pending.lock() {
-            p.push(notice);
-        }
-        return;
-    }
-    for s in subs {
-        let _ = s.send(notice.clone());
-    }
+    host.outbox.push(notice, overflow, send);
 }
 
 /// A second instance's arguments (the program name first) and folder: its verb reaches the
-/// page as grants, and the window comes to the front.
+/// page as grants, and the window comes to the front. The parse (which reads `@file`s, perhaps
+/// on a slow share) and the minting run on a blocking thread, never on the event loop's.
 fn second_instance(handle: &AppHandle, argv: Vec<String>, cwd: String) {
-    let Some(host) = handle.try_state::<Host>() else {
-        return;
-    };
-    let args = argv.into_iter().skip(1).map(std::ffi::OsString::from);
-    match cli::parse(args, Some(std::path::Path::new(&cwd))) {
-        Ok(s) => {
-            if let Some(verb) = s.verb {
-                let activation = activate(&verb, &host.app.grants);
-                push(&host, Notice::Activated { activation });
+    let h = handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(host) = h.try_state::<Host>() else {
+            return;
+        };
+        let args = argv.into_iter().skip(1).map(std::ffi::OsString::from);
+        match cli::parse(args, Some(std::path::Path::new(&cwd))) {
+            Ok(s) => {
+                if let Some(verb) = s.verb {
+                    let activation = activate(&verb, &host.app.grants);
+                    push(&host, Notice::Activated { activation });
+                }
             }
+            Err(error) => push(&host, Notice::Refused { error }),
         }
-        Err(error) => push(&host, Notice::Refused { error }),
-    }
+    });
     if let Some(w) = handle.get_webview_window(MAIN_WINDOW) {
         let _ = w.unminimize();
         let _ = w.show();
@@ -445,8 +443,7 @@ pub fn run() -> i32 {
                 settings,
                 settings_warning,
                 smoke: std::env::var_os(SMOKE_REPORT_ENV).map(PathBuf::from),
-                subscribers: Mutex::new(Vec::new()),
-                pending: Mutex::new(Vec::new()),
+                outbox: Outbox::new(),
                 exit_confirmed: AtomicBool::new(false),
             });
             // The update check, once the window is up; off in the settings, or without the

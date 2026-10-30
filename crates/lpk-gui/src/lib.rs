@@ -31,6 +31,7 @@ pub mod grants;
 pub mod journal;
 pub mod open;
 pub mod ops;
+pub mod outbox;
 pub mod paths;
 pub mod pick;
 pub mod security;

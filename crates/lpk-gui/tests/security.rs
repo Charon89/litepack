@@ -365,6 +365,23 @@ fn the_page_passes_each_rows_batch_generation() {
     }
 }
 
+/// E5-7 (review M1, L6): the page subscribes whatever its own command line held, and only after
+/// its own start-up verb ran, so a second instance's verbs (held by Rust until then) follow it.
+#[test]
+fn the_page_always_subscribes_after_its_own_activation() {
+    let main = std::fs::read_to_string(repo_root().join("apps/gui/main.js")).unwrap();
+    let body = &main[main.find("async function main(").unwrap()..];
+    let body = &body[..body.find("\n}").unwrap()];
+    let own = body.find("runActivation(startup.activation)").unwrap();
+    let error = body.find("if (startup.error)").unwrap();
+    let subscribe = body.find("core.invoke(\"subscribe\"").unwrap();
+    assert!(own < subscribe && error < subscribe, "{body}");
+    assert!(
+        !body[..subscribe].contains("return"),
+        "a return before subscribe leaves forwarded verbs held: {body}"
+    );
+}
+
 fn strings_in(v: &serde_json::Value, out: &mut Vec<String>) {
     match v {
         serde_json::Value::String(s) => out.push(s.clone()),

@@ -22,9 +22,12 @@ pub const VERBS: &[&str] = &[
 /// `--create`'s modifier: the archive's file name, for `Add to "<name>.lpk"`.
 pub const NAME: &str = "--name";
 
-/// The largest response file read (a command line holds at most 32,767 characters; a response
-/// file carries more, but not without bound).
+/// The most bytes read across all the response files of one command line (a command line holds
+/// at most 32,767 characters; response files carry more, but not without bound).
 pub const MAX_RESPONSE_FILE: u64 = 16 << 20;
+
+/// The most arguments a command line may hold once its response files are expanded.
+pub const MAX_ARGS: usize = 1 << 20;
 
 /// One activation: what the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,8 +209,20 @@ fn expand(
     args: impl IntoIterator<Item = OsString>,
     cwd: Option<&Path>,
 ) -> Result<Vec<OsString>, String> {
+    expand_within(args, cwd, MAX_RESPONSE_FILE, MAX_ARGS)
+}
+
+/// [`expand`] with its bounds: `max_bytes` read across every response file, `max_args`
+/// arguments after the expansion.
+fn expand_within(
+    args: impl IntoIterator<Item = OsString>,
+    cwd: Option<&Path>,
+    max_bytes: u64,
+    max_args: usize,
+) -> Result<Vec<OsString>, String> {
     let mut out = Vec::new();
     let mut literal = false;
+    let mut budget = max_bytes;
     for a in args {
         let at = a.to_str().and_then(|t| t.strip_prefix('@'));
         match at {
@@ -219,24 +234,44 @@ fn expand(
                 if let (Some(c), true) = (cwd, path.is_relative()) {
                     path = c.join(path);
                 }
-                out.extend(read_response_file(&path)?);
+                out.extend(read_response_file(&path, &mut budget, max_bytes)?);
             }
             _ => {
                 literal |= a == "--";
                 out.push(a);
             }
         }
+        if out.len() > max_args {
+            return Err(format!("more than {max_args} arguments"));
+        }
     }
     Ok(out)
 }
 
-fn read_response_file(path: &Path) -> Result<Vec<OsString>, String> {
+/// Read one response file through a single handle: a regular file only (by the opened handle's
+/// metadata, so nothing changes between the check and the read), at most `budget` bytes, which
+/// the read uses up.
+fn read_response_file(
+    path: &Path,
+    budget: &mut u64,
+    max_bytes: u64,
+) -> Result<Vec<OsString>, String> {
+    use std::io::Read;
     let err = |e: &dyn std::fmt::Display| format!("@{}: {e}", path.display());
-    let len = std::fs::metadata(path).map_err(|e| err(&e))?.len();
-    if len > MAX_RESPONSE_FILE {
-        return Err(err(&format!("larger than {MAX_RESPONSE_FILE} bytes")));
+    let file = std::fs::File::open(path).map_err(|e| err(&e))?;
+    if !file.metadata().map_err(|e| err(&e))?.is_file() {
+        return Err(err(&"not a regular file"));
     }
-    let bytes = std::fs::read(path).map_err(|e| err(&e))?;
+    let mut bytes = Vec::new();
+    file.take(*budget + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| err(&e))?;
+    if bytes.len() as u64 > *budget {
+        return Err(err(&format!(
+            "the response files hold more than {max_bytes} bytes"
+        )));
+    }
+    *budget -= bytes.len() as u64;
     let text = String::from_utf8(bytes).map_err(|_| err(&"not UTF-8"))?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     Ok(text
@@ -424,5 +459,32 @@ mod tests {
         assert!(parse(["@bad.txt"].map(OsString::from), Some(dir.path()))
             .unwrap_err()
             .contains("UTF-8"));
+    }
+
+    #[test]
+    fn a_folder_is_not_a_response_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        assert!(parse(["@sub"].map(OsString::from), Some(dir.path())).is_err());
+    }
+
+    #[test]
+    fn the_whole_expansion_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two files of 6 bytes each: 12 bytes in all.
+        std::fs::write(dir.path().join("one.txt"), "a1\nb1\n").unwrap();
+        std::fs::write(dir.path().join("two.txt"), "a2\nb2\n").unwrap();
+        let args = || ["--test", "@one.txt", "@two.txt"].map(OsString::from);
+        let ok = expand_within(args(), Some(dir.path()), 12, 5).unwrap();
+        assert_eq!(ok.len(), 5);
+        // The bytes across both files, not per file: 11 refuses the second.
+        let e = expand_within(args(), Some(dir.path()), 11, 5).unwrap_err();
+        assert!(e.contains("more than 11 bytes"), "{e}");
+        // The arguments after the expansion: 4 refuses the fifth.
+        let e = expand_within(args(), Some(dir.path()), 12, 4).unwrap_err();
+        assert!(e.contains("more than 4 arguments"), "{e}");
+        // Without response files too.
+        let many = (0..6).map(|i| OsString::from(format!("p{i}")));
+        assert!(expand_within(many, None, 12, 5).is_err());
     }
 }
