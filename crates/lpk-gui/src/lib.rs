@@ -27,6 +27,7 @@ pub mod app;
 pub mod batch;
 pub mod browse;
 pub mod cli;
+pub mod forward;
 pub mod grants;
 pub mod journal;
 pub mod open;

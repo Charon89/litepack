@@ -22,6 +22,7 @@ use lpk_api::{Class, CreateSettings, Event, Monitor, Tier};
 use lpk_gui::activation::{activate, Activation};
 use lpk_gui::app::{App, Opened};
 use lpk_gui::browse::{SelectAction, Status, ViewInfo, ViewRequest};
+use lpk_gui::forward::Forwarder;
 use lpk_gui::grants::{Grant, GrantKind, Granted};
 use lpk_gui::journal::{startup_report, Notice as StartupNotice};
 use lpk_gui::open::Opening;
@@ -51,6 +52,8 @@ struct Host {
     /// The page's channels, and the notices pushed before it subscribed (a second instance's
     /// verbs at start-up).
     outbox: Outbox<Channel<Notice>, Notice>,
+    /// Second instances' command lines, handled one at a time in arrival order.
+    forwarder: Forwarder<(Vec<String>, String)>,
     exit_confirmed: AtomicBool,
 }
 
@@ -302,26 +305,32 @@ fn push(host: &Host, notice: Notice) {
     host.outbox.push(notice, overflow, send);
 }
 
-/// A second instance's arguments (the program name first) and folder: its verb reaches the
-/// page as grants, and the window comes to the front. The parse (which reads `@file`s, perhaps
-/// on a slow share) and the minting run on a blocking thread, never on the event loop's.
-fn second_instance(handle: &AppHandle, argv: Vec<String>, cwd: String) {
-    let h = handle.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let Some(host) = h.try_state::<Host>() else {
-            return;
-        };
-        let args = argv.into_iter().skip(1).map(std::ffi::OsString::from);
-        match cli::parse(args, Some(std::path::Path::new(&cwd))) {
-            Ok(s) => {
-                if let Some(verb) = s.verb {
-                    let activation = activate(&verb, &host.app.grants);
-                    push(&host, Notice::Activated { activation });
-                }
+/// The forwarding worker's step: parse a second instance's command line (`argv` with the
+/// program name first, relative to `cwd`), mint its grants and push it to the page.
+fn forwarded(handle: &AppHandle, argv: Vec<String>, cwd: String) {
+    let Some(host) = handle.try_state::<Host>() else {
+        return;
+    };
+    let args = argv.into_iter().skip(1).map(std::ffi::OsString::from);
+    match cli::parse(args, Some(std::path::Path::new(&cwd))) {
+        Ok(s) => {
+            if let Some(verb) = s.verb {
+                let activation = activate(&verb, &host.app.grants);
+                push(&host, Notice::Activated { activation });
             }
-            Err(error) => push(&host, Notice::Refused { error }),
         }
-    });
+        Err(error) => push(&host, Notice::Refused { error }),
+    }
+}
+
+/// A second instance's arguments (the program name first) and folder: its verb reaches the
+/// page as grants, and the window comes to the front at once. The parse (which reads `@file`s,
+/// perhaps on a slow share) and the minting run on the forwarding worker
+/// (`lpk_gui::forward`), one thread in arrival order, never on the event loop's.
+fn second_instance(handle: &AppHandle, argv: Vec<String>, cwd: String) {
+    if let Some(host) = handle.try_state::<Host>() {
+        host.forwarder.send((argv, cwd));
+    }
     if let Some(w) = handle.get_webview_window(MAIN_WINDOW) {
         let _ = w.unminimize();
         let _ = w.show();
@@ -434,6 +443,10 @@ pub fn run() -> i32 {
             }
             let check = settings.get().update_check;
             let activation = startup_verb.as_ref().map(|v| activate(v, &app.grants));
+            let worker_handle = a.handle().clone();
+            let forwarder = Forwarder::start(move |(argv, cwd): (Vec<String>, String)| {
+                forwarded(&worker_handle, argv, cwd)
+            })?;
             a.manage(Host {
                 app: app.clone(),
                 startup: activation,
@@ -444,6 +457,7 @@ pub fn run() -> i32 {
                 settings_warning,
                 smoke: std::env::var_os(SMOKE_REPORT_ENV).map(PathBuf::from),
                 outbox: Outbox::new(),
+                forwarder,
                 exit_confirmed: AtomicBool::new(false),
             });
             // The update check, once the window is up; off in the settings, or without the

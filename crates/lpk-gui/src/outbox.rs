@@ -51,9 +51,9 @@ impl<C, N: Clone> Outbox<C, N> {
     /// Send `notice` to every subscriber with `send`, or hold it (past [`MAX_HELD`], hold
     /// `overflow()` once instead).
     pub fn push(&self, notice: N, overflow: impl FnOnce() -> N, send: impl Fn(&C, N)) {
-        let Ok(mut s) = self.state.lock() else {
-            return;
-        };
+        // A send that panicked under the lock leaves the lists whole (nothing is half-updated
+        // around a send): carry on with them, as the crate does elsewhere.
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if s.subscribers.is_empty() {
             if s.held.len() < MAX_HELD {
                 s.held.push(notice);
@@ -70,9 +70,8 @@ impl<C, N: Clone> Outbox<C, N> {
 
     /// Add `channel`: the held notices go to it first, in order, with `send`.
     pub fn subscribe(&self, channel: C, send: impl Fn(&C, N)) {
-        let Ok(mut s) = self.state.lock() else {
-            return;
-        };
+        // Poisoned: the lists are still whole (see `push`), so the channel is still subscribed.
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         for n in std::mem::take(&mut s.held) {
             send(&channel, n);
         }

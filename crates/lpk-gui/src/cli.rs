@@ -234,7 +234,7 @@ fn expand_within(
                 if let (Some(c), true) = (cwd, path.is_relative()) {
                     path = c.join(path);
                 }
-                out.extend(read_response_file(&path, &mut budget, max_bytes)?);
+                read_response_file(&path, &mut budget, max_bytes, &mut out, max_args)?;
             }
             _ => {
                 literal |= a == "--";
@@ -250,12 +250,14 @@ fn expand_within(
 
 /// Read one response file through a single handle: a regular file only (by the opened handle's
 /// metadata, so nothing changes between the check and the read), at most `budget` bytes, which
-/// the read uses up.
+/// the read uses up; its arguments go onto `out`, which may hold at most `max_args`.
 fn read_response_file(
     path: &Path,
     budget: &mut u64,
     max_bytes: u64,
-) -> Result<Vec<OsString>, String> {
+    out: &mut Vec<OsString>,
+    max_args: usize,
+) -> Result<(), String> {
     use std::io::Read;
     let err = |e: &dyn std::fmt::Display| format!("@{}: {e}", path.display());
     let file = std::fs::File::open(path).map_err(|e| err(&e))?;
@@ -274,12 +276,18 @@ fn read_response_file(
     *budget -= bytes.len() as u64;
     let text = String::from_utf8(bytes).map_err(|_| err(&"not UTF-8"))?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    Ok(text
+    // Counted while collected: a file of short lines never holds more than `max_args` strings.
+    for line in text
         .lines()
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .filter(|l| !l.is_empty())
-        .map(OsString::from)
-        .collect())
+    {
+        if out.len() >= max_args {
+            return Err(format!("more than {max_args} arguments"));
+        }
+        out.push(OsString::from(line));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -483,6 +491,11 @@ mod tests {
         // The arguments after the expansion: 4 refuses the fifth.
         let e = expand_within(args(), Some(dir.path()), 12, 4).unwrap_err();
         assert!(e.contains("more than 4 arguments"), "{e}");
+        // One file with more lines than the allowance is refused while it is collected.
+        std::fs::write(dir.path().join("many.txt"), "a\nb\nc\nd\ne\nf\n").unwrap();
+        let e = expand_within(["@many.txt"].map(OsString::from), Some(dir.path()), 1000, 5)
+            .unwrap_err();
+        assert!(e.contains("more than 5 arguments"), "{e}");
         // Without response files too.
         let many = (0..6).map(|i| OsString::from(format!("p{i}")));
         assert!(expand_within(many, None, 12, 5).is_err());
