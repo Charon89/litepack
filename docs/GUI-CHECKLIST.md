@@ -63,7 +63,7 @@ Open an archive; the pane is on the right of the list, shown at every start. Foc
 | 6.6 | An entry of exactly 16 MiB | It is previewed (text or hex) | |
 | 6.7 | A folder row | Its name and how many items it holds | |
 | 6.8 | A file with bidirectional or hidden characters in its text (U+202E, U+200B, a BOM inside) and one in its name | In the text and in the pane's title they show as visible escapes (U+202E as `\u{202E}`), not as reordered or invisible characters | |
-| 6.9 | An encrypted entry (archive made with `--password`, listable names) | Resting on it shows "Encrypted" and an Unlock button, with no prompt; Unlock asks once; a wrong password asks again; Cancel leaves the pane saying it could not preview; after the right one, other entries preview with no question | |
+| 6.9 | An encrypted entry (archive made with `--password`, listable names) | Resting on it shows "Encrypted" and an Unlock button, with no prompt; Unlock asks once; a wrong password asks again; Cancel at the prompt returns the pane to "Encrypted" with its Unlock button (never "Reading..."); a double-click with the pane hidden shows the pane and asks; after the right one, other entries preview with no question | |
 | 6.10 | Moving focus quickly down a long list | The pane follows the last row only; no flicker of the ones passed | |
 | 6.11 | Alt+P and the Preview button in the bar | Each hides and shows the pane; hidden, nothing is read; shown again it previews the focused row; on again after a restart | |
 | 6.12 | Double-click a file whose type is not opened directly (a `.cmd`, `.html`) | Nothing is extracted or launched; the status line says it is shown in the preview pane, and the pane shows it | |

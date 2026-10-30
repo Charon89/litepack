@@ -24,7 +24,7 @@ export const REST_MS = 150;
 const CHUNK = 64 * 1024;
 
 // The characters Rust escapes in text, escaped here too where the page shows an entry's name.
-const HIDDEN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f­؜​-‏‪-‮⁠-⁤⁦-⁩﻿]/g;
+const HIDDEN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 
 /** A name with hidden and bidirectional characters written out. */
 export function visibleName(name) {
@@ -116,12 +116,22 @@ export function createPreview({ core, t, nextOp, session, showError }) {
     pre.tabIndex = 0;
     pre.setAttribute("aria-label", t("preview.text.label"));
     body.append(pre);
-    for (let at = 0; at < text.length; at += CHUNK) {
+    let at = 0;
+    while (at < text.length) {
       if (mine !== seq) {
         return;
       }
-      pre.append(document.createTextNode(text.slice(at, at + CHUNK)));
-      if (at + CHUNK < text.length) {
+      let end = Math.min(text.length, at + CHUNK);
+      // Never split a surrogate pair: a boundary after a high surrogate moves on by one.
+      if (end < text.length) {
+        const unit = text.charCodeAt(end - 1);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          end++;
+        }
+      }
+      pre.append(document.createTextNode(text.slice(at, end)));
+      at = end;
+      if (at < text.length) {
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     }
@@ -251,6 +261,12 @@ export function createPreview({ core, t, nextOp, session, showError }) {
       }
       await render(row.name, decodePreview(buffer), mine, index, row, generation);
     } catch (e) {
+      // The password prompt's Cancel (an Unlock the user started, still the newest read) returns
+      // the pane to the encrypted state; a superseded read also ends Cancelled and is dropped.
+      if (mine === seq && unlock && e && e.class === "Cancelled") {
+        showLocked(row.name, index, row, generation);
+        return;
+      }
       // A superseded read ends Cancelled, a view replaced meanwhile is stale: neither is shown.
       if (mine !== seq || (e && e.class === "Cancelled") || (e && e.class === "Usage" && String(e.detail).startsWith("stale view"))) {
         return;
@@ -329,6 +345,9 @@ export function createPreview({ core, t, nextOp, session, showError }) {
       current = { index, row, generation };
       if (!shown) {
         setShown(true);
+        // The user's own act (a double-click): an encrypted entry asks for its password.
+        clearTimeout(timer);
+        read(index, row, generation, true).catch(showError);
         return;
       }
       clearTimeout(timer);

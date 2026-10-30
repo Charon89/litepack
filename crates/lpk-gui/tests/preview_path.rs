@@ -26,6 +26,34 @@ fn the_pages_magic_is_the_messages() {
     assert_eq!(u32::from_str_radix(hex, 16).unwrap(), want);
 }
 
+/// No invisible or bidirectional character sits raw in the page's sources (they are written as
+/// escapes, so that a reader sees them).
+#[test]
+fn no_hidden_character_is_raw_in_the_page_sources() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/gui");
+    let mut files = vec![dir.clone(), dir.join("strings")];
+    let mut checked = 0;
+    while let Some(d) = files.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap();
+            for c in text.chars() {
+                assert!(
+                    !lpk_gui::preview::is_hidden(c) || matches!(c, '\t' | '\n' | '\r'),
+                    "{}: raw U+{:04X}",
+                    p.display(),
+                    c as u32
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 8, "{checked} files");
+}
+
 #[test]
 fn a_click_then_the_preview_of_that_row_gives_its_text() {
     let d = tempfile::tempdir().unwrap();
