@@ -26,11 +26,14 @@
 //! the physical memory is unknown), never below the tier's default. That is what every decoder
 //! counts at its block terms, one decoded block held, the largest need in the decode pool, and
 //! as much again so that the need shares the pool with the decodes beside it instead of
-//! waiting for it to empty (D-131 (2)). Within the caps the pool's cut applies as before; an
+//! waiting for it to empty (D-131 (2)). Only a cut the declared need causes raises (R122): when
+//! the same sizing with the declared term at the decoder floor would still cut the workers (the
+//! block terms or the threads do), the tier's default stays. Within the caps the pool's cut applies as before; an
 //! archive whose workers are not cut keeps the tier's default; a given `--memory` is never
 //! changed. The terms come from the envelope, the index and the plan's needed blocks (no block
 //! is read): [`crate::extract`]'s `Sizing::default_budget`, the one function behind
-//! extraction, export, `lpk-api` and the GUI.
+//! extraction, `lpk-api` and the GUI. An export keeps the tier's default (R123): it counts
+//! every block it holds at the declared term, so the raise would mostly pay for held blocks.
 //!
 //! **The model.** Compressing holds:
 //!

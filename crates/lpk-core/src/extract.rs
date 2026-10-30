@@ -154,7 +154,9 @@ pub struct ExtractOptions {
     /// 1 is the sequential path.
     pub threads: Option<usize>,
     /// The extraction's memory budget in bytes; `None` is the ceiling of the tier the
-    /// archive's envelope shows, resolved on this machine (see the module documentation).
+    /// archive's envelope shows, resolved on this machine, raised for a large declared record
+    /// need that would cut the decoders (an extraction only, not an export; see the module
+    /// documentation and [`crate::memory`]'s "The raised extraction default").
     /// [`extract_file`] also opens the archive with it as the reader's `Resources::memory` (with
     /// `None`, [`crate::memory::EXTRACT_CEILING`] resolved likewise), so an archive whose
     /// envelope needs more is refused before any output exists.
@@ -1654,6 +1656,10 @@ pub(crate) struct Shape<'a> {
     /// A cap on the writers: `usize::MAX` for an extraction (the module's rule applies), 1 for
     /// an export, whose one consumer is the calling thread ([`crate::export`]).
     pub(crate) max_writers: usize,
+    /// The default budget may be raised for a large declared need ([`Sizing::default_budget`]):
+    /// `true` for an extraction; `false` for an export (R123), which counts every block it holds
+    /// at the declared term, so a raise sized from the floor would mostly pay for held blocks.
+    pub(crate) raise_default: bool,
 }
 
 /// The bytes of `index` outside the shared chunk table: what each fork copies.
@@ -1767,7 +1773,11 @@ pub(crate) fn pool_size<R: Read + Seek>(
             bytes,
             source: BudgetSource::Given,
         },
-        None => sizing.default_budget(
+        None if shape.raise_default => sizing.default_budget(
+            tier.ceiling(),
+            opts.physical_memory.or_else(crate::memory::physical_memory),
+        ),
+        None => Budget::default_for(
             tier.ceiling(),
             opts.physical_memory.or_else(crate::memory::physical_memory),
         ),
@@ -1854,7 +1864,14 @@ impl Sizing {
             return base;
         };
         let decoders = self.decoders();
-        if self.size(base.bytes).0 >= decoders {
+        // Only a cut the declared need causes raises (R122): when the same sizing with the
+        // declared term at the floor would cut too, the cut is the block terms' or the
+        // threads', which a raise for the need would misname.
+        let at_floor = Sizing {
+            declared: self.decoder,
+            ..*self
+        };
+        if self.size(base.bytes).0 >= decoders || at_floor.size(base.bytes).0 < decoders {
             return base;
         }
         let d = u64::try_from(decoders).unwrap_or(u64::MAX);
@@ -2049,6 +2066,7 @@ where
         placements,
         name_bytes,
         max_writers: usize::MAX,
+        raise_default: true,
     };
     let pool = pool_size(archive, opts, &shape);
     // Decodes that need more than the archive declares run alone ([`AloneGate`]); the forks

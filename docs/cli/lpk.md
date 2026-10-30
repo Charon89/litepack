@@ -405,7 +405,7 @@ Names are written as the archive stores them: the format's reader already refuse
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
-* `--memory <SIZE>` — The memory budget, as for `x` (default: the ceiling of the tier the archive's envelope shows, at most half of the physical memory, raised up to 4 GiB and that half for a large declared record need): the decoded blocks held at once (cached or in flight) are derived from it; the writer's own memory (its compressor) is outside the count
+* `--memory <SIZE>` — The memory budget, as for `x`, but the default is never raised for a large declared record need: the ceiling of the tier the archive's envelope shows, at most half of the physical memory. The decoded blocks held at once (cached or in flight) are derived from it; the writer's own memory (its compressor) is outside the count
 * `-v`, `--verbose` — Print the plan's counts, the cache schedule's outcome and the memory terms to stderr
 
 

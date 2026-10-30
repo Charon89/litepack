@@ -1243,10 +1243,10 @@ struct ExportArgs {
     /// The key material of an encrypted archive; checked before anything is written.
     #[command(flatten)]
     credentials: CredentialArgs,
-    /// The memory budget, as for `x` (default: the ceiling of the tier the archive's envelope
-    /// shows, at most half of the physical memory, raised up to 4 GiB and that half for a large
-    /// declared record need): the decoded blocks held at once (cached or in flight) are derived
-    /// from it; the writer's own memory (its compressor) is outside the count.
+    /// The memory budget, as for `x`, but the default is never raised for a large declared
+    /// record need: the ceiling of the tier the archive's envelope shows, at most half of the
+    /// physical memory. The decoded blocks held at once (cached or in flight) are derived from
+    /// it; the writer's own memory (its compressor) is outside the count.
     #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
     memory: Option<u64>,
     /// Print the plan's counts, the cache schedule's outcome and the memory terms to stderr.

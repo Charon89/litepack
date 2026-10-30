@@ -61,6 +61,23 @@ fn gate() -> Arc<AloneGate> {
 /// A one-entry archive whose single block of `plain` bytes is stored and declares `declared`
 /// bytes of decoder memory.
 fn archive_declaring(plain: usize, declared: u64) -> lpk_format::Archive<std::io::Cursor<Vec<u8>>> {
+    open_unlimited(bytes_declaring(plain, declared))
+}
+
+/// Opens `bytes` with no practical reader limit.
+fn open_unlimited(bytes: Vec<u8>) -> lpk_format::Archive<std::io::Cursor<Vec<u8>>> {
+    lpk_format::Archive::open(
+        std::io::Cursor::new(bytes),
+        &lpk_format::Resources {
+            memory: u64::MAX / 4,
+            ..lpk_format::Resources::default()
+        },
+    )
+    .unwrap()
+}
+
+/// The bytes of [`archive_declaring`]'s archive.
+fn bytes_declaring(plain: usize, declared: u64) -> Vec<u8> {
     use lpk_format::{Encoded, EntryFlags, Graph, GraphResources, Writer, WriterOptions};
     let data: Vec<u8> = (0..plain).map(|i| (i * 31 % 251) as u8).collect();
     let mut out = Vec::new();
@@ -80,14 +97,7 @@ fn archive_declaring(plain: usize, declared: u64) -> lpk_format::Archive<std::io
     w.add_part_encoded(0, &data, encoded, declared).unwrap();
     w.end_entry().unwrap();
     w.finish().unwrap();
-    lpk_format::Archive::open(
-        std::io::Cursor::new(out),
-        &lpk_format::Resources {
-            memory: u64::MAX / 4,
-            ..lpk_format::Resources::default()
-        },
-    )
-    .unwrap()
+    out
 }
 
 /// `pool_size` on an archive declaring `decode_memory` with blocks of `plain` bytes, at 24
@@ -102,6 +112,7 @@ fn pool_for(plain: usize, decode_memory: u64, budget: u64) -> Pool {
         placements: 3054,
         name_bytes: 3054 * 16,
         max_writers: usize::MAX,
+        raise_default: true,
     };
     let opts = ExtractOptions {
         threads: Some(24),
@@ -577,6 +588,7 @@ fn pool_size_takes_the_raised_default_and_keeps_a_given_budget() {
         placements: 3054,
         name_bytes: 3054 * 16,
         max_writers: usize::MAX,
+        raise_default: true,
     };
     let opts = ExtractOptions {
         threads: Some(24),
@@ -598,4 +610,80 @@ fn pool_size_takes_the_raised_default_and_keeps_a_given_budget() {
     assert_eq!(p.memory.budget.bytes, 2 * GIB);
     assert_eq!(p.memory.budget.source, BudgetSource::Given);
     assert!(p.workers < 20);
+}
+
+/// R122: a cut the declared need does not cause is not raised. At 400 threads with a small
+/// declared term the block terms cut the workers at the Fast ceiling; the default stays the
+/// tier's and the cut applies as before.
+#[test]
+fn a_cut_by_the_block_terms_keeps_the_tiers_default() {
+    let s = Sizing {
+        threads: 400,
+        ..photo_sizing(1_572_865)
+    };
+    let base = Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    let w = s.size(base.bytes).0;
+    assert!(w < s.decoders(), "{w} workers of {}", s.decoders());
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(b, base);
+    assert!(matches!(b.source, BudgetSource::Default { .. }));
+    assert_eq!(s.size(b.bytes).0, w);
+}
+
+/// R123: an export keeps the tier's default for a photo-shaped envelope (no raise), while an
+/// extraction of the same archive is raised.
+#[test]
+fn an_export_keeps_the_tiers_default_for_a_photo_shaped_envelope() {
+    struct Drain;
+    impl crate::export::Sink for Drain {
+        fn directory(&mut self, _: &lpk_format::Entry) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn symlink(&mut self, _: &lpk_format::Entry) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn file(
+            &mut self,
+            _: &lpk_format::Entry,
+            content: &mut dyn std::io::Read,
+        ) -> Result<(), CoreError> {
+            std::io::copy(content, &mut std::io::sink()).unwrap();
+            Ok(())
+        }
+    }
+    let bytes = bytes_declaring(4_499_797, PHOTO_DECLARED);
+    let opts = ExtractOptions {
+        threads: Some(24),
+        physical_memory: Some(PHYSICAL),
+        ..ExtractOptions::default()
+    };
+    let mut a = open_unlimited(bytes.clone());
+    let s = crate::export::export_archive(
+        &mut a,
+        || Ok(std::io::Cursor::new(bytes.clone())),
+        &mut Drain,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(
+        s.memory.budget,
+        Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL))
+    );
+    // The same archive's extraction pool is raised.
+    let a = open_unlimited(bytes);
+    let needed = vec![0usize; 24];
+    let shape = Shape {
+        needed: &needed,
+        targets: 24,
+        with_content: 24,
+        placements: 24,
+        name_bytes: 24 * 16,
+        max_writers: usize::MAX,
+        raise_default: true,
+    };
+    let p = pool_size(&a, &opts, &shape);
+    assert!(matches!(
+        p.memory.budget.source,
+        BudgetSource::Raised { .. }
+    ));
 }
