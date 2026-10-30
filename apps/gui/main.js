@@ -5,6 +5,7 @@
 // goes in through textContent.
 import { VirtualList } from "./list.js";
 import { createExtractor } from "./extract.js";
+import { createPreview } from "./preview.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
@@ -84,6 +85,14 @@ function cells(r) {
   return [r.name, size, when];
 }
 
+const preview = createPreview({
+  core,
+  t,
+  nextOp: () => nextOp++,
+  session: () => session,
+  showError: (e) => showError(e),
+});
+
 const list = new VirtualList({
   grid: $("list"),
   viewport: $("viewport"),
@@ -99,6 +108,8 @@ const list = new VirtualList({
     await list.refresh();
   },
   onError: (e) => showError(e),
+  // The focused row rests for a moment, then the pane reads it (preview.js).
+  onFocus: (index, row, generation) => preview.focused(index, row, generation),
 });
 list.parent = (e) => {
   if (state.mode === "tree" && info && info.crumbs.length > 1) {
@@ -168,6 +179,8 @@ async function activate(index, row, generation, folderOnly) {
     setStatus(t("open.done", { name: r.name }));
   } else {
     setStatus(t("open.refused", { name: r.name, extension: r.extension }));
+    // Not opened directly: the pane shows that entry now.
+    preview.show(index, row, generation);
   }
 }
 
@@ -382,6 +395,8 @@ async function openArchive(granted) {
   $("recents").hidden = true;
   $("bar").hidden = false;
   $("list").hidden = false;
+  $("split").hidden = false;
+  preview.clear();
   renderCrumbs();
   renderHeader();
   showSelection(info.status);

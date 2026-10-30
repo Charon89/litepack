@@ -25,6 +25,7 @@
     <nav id="crumbs" class="crumbs" data-label="crumbs.label"></nav>
     <input id="filter" class="filter" type="search" autocomplete="off" spellcheck="false" data-label="filter.label">
     <label class="glob"><input id="glob" type="checkbox"><span data-string="filter.glob"></span></label>
+    <button type="button" id="preview-toggle" aria-pressed="true" aria-keyshortcuts="Alt+P" data-string="preview.toggle"></button>
   </header>
   <main>
     <p id="hint" class="hint" data-string="drop.hint"></p>
@@ -33,16 +34,25 @@
       <ul id="recent-list"></ul>
       <button type="button" id="recents-clear" data-string="recents.clear"></button>
     </section>
-    <div id="list" class="list" role="treegrid" aria-rowcount="0" aria-multiselectable="true" tabindex="0" data-label="list.label" hidden>
-      <div class="row head" role="row" aria-rowindex="1">
-        <span role="columnheader" aria-sort="none" data-key="name"><button type="button" id="col-name" data-string="list.name"></button></span>
-        <span role="columnheader" aria-sort="none" data-key="size" class="num"><button type="button" data-string="list.size"></button></span>
-        <span role="columnheader" aria-sort="none" data-key="modified"><button type="button" data-string="list.modified"></button></span>
+    <div id="split" class="split" hidden>
+      <div id="list" class="list" role="treegrid" aria-rowcount="0" aria-multiselectable="true" tabindex="0" data-label="list.label" hidden>
+        <div class="row head" role="row" aria-rowindex="1">
+          <span role="columnheader" aria-sort="none" data-key="name"><button type="button" id="col-name" data-string="list.name"></button></span>
+          <span role="columnheader" aria-sort="none" data-key="size" class="num"><button type="button" data-string="list.size"></button></span>
+          <span role="columnheader" aria-sort="none" data-key="modified"><button type="button" data-string="list.modified"></button></span>
+        </div>
+        <div id="viewport" class="viewport">
+          <div id="spacer" class="spacer"></div>
+          <div id="rows" class="layer" role="rowgroup"></div>
+        </div>
       </div>
-      <div id="viewport" class="viewport">
-        <div id="spacer" class="spacer"></div>
-        <div id="rows" class="layer" role="rowgroup"></div>
-      </div>
+      <aside id="preview" class="preview" data-label="preview.label">
+        <header class="preview-head">
+          <h2 id="preview-title" class="preview-title"></h2>
+          <p id="preview-meta" class="preview-meta"></p>
+        </header>
+        <div id="preview-body" class="preview-body"></div>
+      </aside>
     </div>
   </main>
   <footer class="status">

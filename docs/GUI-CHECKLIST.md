@@ -49,9 +49,30 @@ returns to where it was when the dialog closes.
 | 7.2 | The "Check for updates" switch | Off stays off after a restart; on stays on | |
 | 7.3 | A portable copy (an empty `portable` file beside the executable) | Settings, recent lists and WebView data are kept in `data` beside the executable, nothing under the user profile | |
 
-## E5-5, E5-6 and E5-8
+## E5-6 Preview pane
 
-Append the create wizard (E5-5), the preview (E5-6), the verbs and shell integration (E5-7) and
+Open an archive; the pane is on the right of the list, shown at every start. Focus a file row (arrow keys or a click) and wait a moment: the pane previews it.
+
+| # | Item | Expected result | Result |
+|---|---|---|---|
+| 6.1 | A text entry (`.txt`, `.json`, and an `.html` or `.svg` file) | Its text in a monospace block; an `.html` or `.svg` file shows its source, never a page or a picture; nothing runs | |
+| 6.2 | An image entry (PNG, JPEG, GIF, WebP, BMP, ICO) | The picture, scaled to fit the pane; the same file renamed `.txt` still shows as an image (the content decides, not the name) | |
+| 6.3 | An image in both themes (Windows light and dark) | A picture with transparency shows on a neutral checkered background in both, and the pane's text stays legible | |
+| 6.4 | A binary entry (an `.exe`, a `.zip`, a file with NUL bytes) | A hex view: offset, 16 bytes in hex and their ASCII on each line; scrolling a 16 MiB file stays smooth | |
+| 6.5 | An entry over 16 MiB | The pane says it cannot preview and names the 16 MiB cap; nothing else changes | |
+| 6.6 | An entry of exactly 16 MiB | It is previewed (text or hex) | |
+| 6.7 | A folder row | Its name and how many items it holds | |
+| 6.8 | A file with bidirectional or hidden characters in its text (U+202E, U+200B, a BOM inside) and one in its name | In the text and in the pane's title they show as visible escapes (U+202E as `\u{202E}`), not as reordered or invisible characters | |
+| 6.9 | An encrypted entry (archive made with `--password`, listable names) | The password prompt appears once; a wrong password asks again; Cancel leaves the pane saying it could not preview; after the right one, other entries preview with no question | |
+| 6.10 | Moving focus quickly down a long list | The pane follows the last row only; no flicker of the ones passed | |
+| 6.11 | Alt+P and the Preview button in the bar | Each hides and shows the pane; hidden, nothing is read; shown again it previews the focused row; on again after a restart | |
+| 6.12 | Double-click a file whose type is not opened directly (a `.cmd`, `.html`) | Nothing is extracted or launched; the status line says it is shown in the preview pane, and the pane shows it | |
+| 6.13 | Tab through the window | Focus reaches the text or hex block and leaves it again with Tab; no keyboard trap | |
+| 6.14 | A ZIP or 7z archive | Its entries preview like any other (or the pane gives the engine's message where reading them is not supported yet) | |
+
+## E5-5 and E5-8
+
+Append the create wizard (E5-5), the verbs and shell integration (E5-7) and
 the maintenance dialogs (E5-8) here.
 
 ## Notes
