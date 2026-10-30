@@ -2,6 +2,7 @@
 //! All and with picked ids, each conflict answer, the password (right, wrong then right,
 //! cancelled), the envelope refusal and "Allow", cancel, entry errors, the verbs queueing
 //! several archives, the free-space refusal (injected) and the recents.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
