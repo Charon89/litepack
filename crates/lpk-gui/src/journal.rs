@@ -255,9 +255,10 @@ impl Journal {
                     let counted = std::fs::write(&tries_path, tries.to_string()).is_ok();
                     done = match done {
                         // A held file, which a later start can still fix: kept and retried at
-                        // every start, with a notice from the last try on.
+                        // every start, with a notice from the last try on (at once when the
+                        // count cannot be kept, which would otherwise never reach it).
                         Recovered::Left { path, reason } if reason == UNREADABLE => {
-                            if tries >= MAX_TRIES {
+                            if tries >= MAX_TRIES || !counted {
                                 Recovered::Held { path, tries }
                             } else {
                                 Recovered::Left { path, reason }
@@ -279,8 +280,10 @@ impl Journal {
                 out.push(done);
             }
             if !keep {
-                let _ = std::fs::remove_file(&p);
+                // The count first: a crash between the two then leaves the record, which the
+                // next start lists, rather than a count no start would ever list.
                 let _ = std::fs::remove_file(&tries_path);
+                let _ = std::fs::remove_file(&p);
             }
             if let Some(f) = lock {
                 let _ = f.unlock();

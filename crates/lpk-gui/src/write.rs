@@ -690,6 +690,42 @@ mod tests {
         assert_eq!(std::fs::read_dir(j.dir()).unwrap().count(), 0);
     }
 
+    /// A held file whose count cannot be written (here a directory stands where the count goes)
+    /// would never reach the last try, so its notice comes at the first start.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_file_whose_count_cannot_be_kept_is_noticed_at_once() {
+        use crate::journal::{startup_report, Notice};
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, _) = torn_append(d.path(), &j);
+        let record = std::fs::read_dir(j.dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "json"))
+            .unwrap();
+        std::fs::create_dir(record.with_extension("tries")).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&a).unwrap();
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert_eq!(
+            got,
+            [Recovered::Held {
+                path: a.clone(),
+                tries: 1
+            }]
+        );
+        assert_eq!(
+            startup_report(&got).notices,
+            [Notice::Held {
+                name: "torn.lpk".into(),
+                tries: 1
+            }]
+        );
+        assert_eq!(records(&j), 1, "kept");
+        drop(writer);
+    }
+
     #[test]
     fn a_failed_recovery_keeps_its_record_and_only_settled_ones_count() {
         use crate::journal::{startup_report, Notice};
