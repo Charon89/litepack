@@ -5,7 +5,7 @@
 // an image through a Blob of Rust's MIME type, and everything else as a virtualized hex view.
 // Archive content is never rendered as markup: there is no HTML sink on this page.
 
-const MAGIC = 0x5650504c; // "LPKV" read as a little-endian u32
+const MAGIC = 0x564b504c; // "LPKV" read as a little-endian u32
 const TEXT = 0;
 const IMAGE = 1;
 const HEX = 2;

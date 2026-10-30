@@ -61,6 +61,20 @@ fn make_archive(work: &Path) -> PathBuf {
     archive
 }
 
+/// The page's flags and the pane's state (title, meta and body text), for a failure message.
+async fn pane_state(c: &Client) -> String {
+    let pane = c
+        .execute(
+            "const g = (id) => { const e = document.getElementById(id); return e ? e.textContent.slice(0, 300) : null; }; \
+             return JSON.stringify({ title: g('preview-title'), meta: g('preview-meta'), body: g('preview-body'), \
+             hidden: document.getElementById('preview').hidden });",
+            vec![],
+        )
+        .await
+        .map_or_else(|e| format!("pane unreadable: {e}"), |v| v.to_string());
+    format!("{}; pane: {pane}", page_state(c).await)
+}
+
 /// Click the row named `name`.
 async fn click_row(c: &Client, name: &str) -> Result<(), String> {
     let deadline = Instant::now() + ROWS_WITHIN;
@@ -103,7 +117,7 @@ async fn wait_for(c: &Client, what: &str, script: &str) -> Result<serde_json::Va
         if Instant::now() >= deadline {
             return Err(format!(
                 "{what}: not shown within {SHOWN_WITHIN:?}; page: {}",
-                page_state(c).await
+                pane_state(c).await
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -133,7 +147,7 @@ async fn assert_inert(c: &Client, at: &str) -> Result<(), String> {
         if v.as_deref() != Some("0") {
             return Err(format!(
                 "{at}: page flag {name} is {v:?}; page: {}",
-                page_state(c).await
+                pane_state(c).await
             ));
         }
     }
