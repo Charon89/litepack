@@ -110,7 +110,7 @@ export function createExtractor(env) {
     const nodes = [];
     let allow = null;
     if (e && e.class === "Cancelled") {
-      nodes.push(el("p", { text: t("extract.cancelled", { name }) }));
+      nodes.push(el("p", { text: t("extract.cancelled.none", { name }) }));
     } else if (e && e.refusal && e.refusal.field === "--memory") {
       allow = e.refusal.needed;
       nodes.push(el("p", { text: t("extract.refusal", { name, needed: size(e.refusal.needed), allowed: size(e.refusal.allowed) }) }));
