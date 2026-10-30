@@ -167,8 +167,19 @@ async function activate(index, row, generation, folderOnly) {
 }
 
 // A native picker in Rust: the page names what to pick and receives grants (never a path).
-function pick(purpose) {
-  return core.invoke("pick", { purpose });
+// One picker at a time (Rust refuses a second one too): the buttons are disabled meanwhile.
+async function pick(purpose) {
+  const buttons = document.querySelectorAll(".actions button");
+  for (const b of buttons) {
+    b.disabled = true;
+  }
+  try {
+    return await core.invoke("pick", { purpose });
+  } finally {
+    for (const b of buttons) {
+      b.disabled = false;
+    }
+  }
 }
 
 async function openPicked() {
@@ -178,13 +189,10 @@ async function openPicked() {
   }
 }
 
-// A new archive: what goes in (files, or a folder when no file is chosen), then where it goes;
-// named after the first input, written by Rust through a `.partial` that never replaces a file.
-async function createPicked() {
-  let inputs = await pick("files");
-  if (inputs.length === 0) {
-    inputs = await pick("folder");
-  }
+// A new archive from files or from a folder (`what`), then where it goes; one cancel ends it.
+// Named after the first input, written by Rust through a `.partial` that never replaces a file.
+async function createPicked(what) {
+  const inputs = await pick(what);
   if (inputs.length === 0) {
     return;
   }
@@ -192,7 +200,8 @@ async function createPicked() {
   if (!folder) {
     return;
   }
-  const name = inputs[0].name.replace(/\.[^.]*$/, "") || "archive";
+  const first = inputs[0].name;
+  const name = (what === "files" ? first.replace(/\.[^.]*$/, "") : first) || "archive";
   setStatus(t("create.running", { name: `${name}.lpk` }));
   const progress = new core.Channel();
   progress.onmessage = () => {};
@@ -205,6 +214,39 @@ async function createPicked() {
     progress,
   });
   setStatus(t("create.done", { name: `${name}.lpk` }));
+}
+
+// The recovery's notices (D-117): each stays in its own list item, which the status line never
+// replaces, until the user dismisses it.
+function noticeText(n) {
+  switch (n.kind) {
+    case "gaveup":
+      return t("notice.gaveup", { name: n.name, tries: n.tries });
+    case "held":
+      return t("notice.held", { name: n.name, tries: n.tries });
+    default:
+      return t("notice.failed", { name: n.name, error: n.error });
+  }
+}
+
+function showNotices(notices) {
+  const list = $("notices");
+  for (const n of notices) {
+    const item = document.createElement("li");
+    item.className = "notice";
+    const text = document.createElement("span");
+    text.textContent = noticeText(n);
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.textContent = t("notice.dismiss");
+    dismiss.addEventListener("click", () => {
+      item.remove();
+      list.hidden = list.children.length === 0;
+    });
+    item.append(text, dismiss);
+    list.append(item);
+  }
+  list.hidden = list.children.length === 0;
 }
 
 async function report(total, first) {
@@ -259,7 +301,8 @@ function showError(e) {
 
 function wireControls() {
   $("action-open").addEventListener("click", () => openPicked().catch(showError));
-  $("action-create").addEventListener("click", () => createPicked().catch(showError));
+  $("action-files").addEventListener("click", () => createPicked("files").catch(showError));
+  $("action-folder").addEventListener("click", () => createPicked("folder").catch(showError));
   $("mode-flat").addEventListener("click", () => {
     Object.assign(state, { mode: "flat", dir: null });
     applyView().catch(showError);
@@ -300,10 +343,7 @@ async function main() {
   if (startup.recovered > 0) {
     setStatus(t("status.recovered", { count: startup.recovered }));
   }
-  // Interrupted writes the recovery gave up on after its tries: said once, not retried.
-  for (const g of startup.gave_up) {
-    setStatus(t("notice.gaveup", { name: g.name, tries: g.tries }));
-  }
+  showNotices(startup.notices);
   if (startup.error) {
     showError({ message: startup.error });
     return;

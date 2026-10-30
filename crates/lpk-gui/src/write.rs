@@ -645,6 +645,104 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn a_held_file_is_never_given_up_and_is_noticed_from_the_last_try() {
+        use crate::journal::{startup_report, Notice};
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, gen0_len) = torn_append(d.path(), &j);
+        let writer = std::fs::OpenOptions::new().write(true).open(&a).unwrap();
+        for start in 1..=crate::journal::MAX_TRIES + 2 {
+            let got = Journal::open(j.dir()).unwrap().recover();
+            if start < crate::journal::MAX_TRIES {
+                assert!(
+                    matches!(&got[..], [Recovered::Left { reason, .. }] if *reason == crate::journal::UNREADABLE),
+                    "start {start}: {got:?}"
+                );
+                assert_eq!(startup_report(&got).notices, [], "start {start}");
+            } else {
+                assert_eq!(
+                    got,
+                    [Recovered::Held {
+                        path: a.clone(),
+                        tries: start
+                    }],
+                    "start {start}"
+                );
+                assert_eq!(
+                    startup_report(&got).notices,
+                    [Notice::Held {
+                        name: "torn.lpk".into(),
+                        tries: start
+                    }]
+                );
+            }
+            assert_eq!(records(&j), 1, "start {start}: kept");
+            assert_eq!(startup_report(&got).recovered, 0);
+        }
+        drop(writer);
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert!(
+            matches!(&got[..], [Recovered::RolledBack { .. }]),
+            "{got:?}"
+        );
+        assert_eq!(startup_report(&got).recovered, 1);
+        assert_eq!(std::fs::metadata(&a).unwrap().len(), gen0_len);
+        assert_eq!(std::fs::read_dir(j.dir()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_failed_recovery_keeps_its_record_and_only_settled_ones_count() {
+        use crate::journal::{startup_report, Notice};
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        // A partial that cannot be deleted. Windows: another handle holds it without sharing
+        // delete. Unix: a folder at the recorded path (remove_file fails on a folder).
+        let p = d.path().join("x.lpk.partial");
+        #[cfg(windows)]
+        let _holder = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::write(&p, b"partial").unwrap();
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1 | 2) // read and write, not delete
+                .open(&p)
+                .unwrap()
+        };
+        #[cfg(not(windows))]
+        std::fs::create_dir_all(p.join("inner")).unwrap();
+        let id = Identity(path_identity(&p).unwrap());
+        j.add(&Record::Partial {
+            path: p.clone(),
+            identity: Some(id),
+        })
+        .unwrap()
+        .keep();
+        // Gone, and another file: decided, but not recovered.
+        j.add(&Record::Partial {
+            path: d.path().join("gone.lpk.partial"),
+            identity: Some(id),
+        })
+        .unwrap()
+        .keep();
+        for start in 1..=2 {
+            let got = Journal::open(j.dir()).unwrap().recover();
+            assert!(
+                got.iter()
+                    .any(|r| matches!(r, Recovered::Failed { path, .. } if *path == p)),
+                "start {start}: {got:?}"
+            );
+            let report = startup_report(&got);
+            assert_eq!(report.recovered, 0, "start {start}: {got:?}");
+            assert!(
+                matches!(&report.notices[..], [Notice::Failed { name, .. }] if name == "x.lpk.partial"),
+                "start {start}: {report:?}"
+            );
+            assert_eq!(records(&j), 1, "start {start}: the failed record stays");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn a_torn_append_another_writer_holds_is_not_cut() {
         // The check and the cut go through one handle that admits no other writer: a writer
         // holding the file (sharing read and write, std's default) makes the recovery leave it.

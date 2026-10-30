@@ -154,7 +154,15 @@ pub enum Recovered {
         /// The starts that tried.
         tries: u32,
     },
-    /// The recovery failed (the record is dropped; the file is left as it is).
+    /// Held by another process at [`MAX_TRIES`] starts or more: the record stays and is retried
+    /// at every start, and the start shows a notice.
+    Held {
+        /// The path recorded.
+        path: PathBuf,
+        /// The starts that tried.
+        tries: u32,
+    },
+    /// The recovery failed: the record stays for the next start, and the start shows a notice.
     Failed {
         /// The path recorded.
         path: PathBuf,
@@ -244,18 +252,29 @@ impl Journal {
                 keep = keeps_record(&done);
                 if keep {
                     let tries = read_tries(&tries_path).saturating_add(1);
-                    // A count that cannot be kept would retry for ever: give up then too.
-                    if tries >= MAX_TRIES || std::fs::write(&tries_path, tries.to_string()).is_err()
-                    {
-                        keep = false;
-                        if let Recovered::Left { path, reason } = done {
-                            done = Recovered::GaveUp {
+                    let counted = std::fs::write(&tries_path, tries.to_string()).is_ok();
+                    done = match done {
+                        // A held file, which a later start can still fix: kept and retried at
+                        // every start, with a notice from the last try on.
+                        Recovered::Left { path, reason } if reason == UNREADABLE => {
+                            if tries >= MAX_TRIES {
+                                Recovered::Held { path, tries }
+                            } else {
+                                Recovered::Left { path, reason }
+                            }
+                        }
+                        // A permanent outcome: dropped after its tries (or at once when the
+                        // count cannot be kept, which would retry for ever), with a notice.
+                        Recovered::Left { path, reason } if tries >= MAX_TRIES || !counted => {
+                            keep = false;
+                            Recovered::GaveUp {
                                 path,
                                 reason,
                                 tries,
-                            };
+                            }
                         }
-                    }
+                        other => other,
+                    };
                 }
                 out.push(done);
             }
@@ -306,7 +325,76 @@ pub(crate) const BEHIND: &str = "fewer generations than recorded";
 
 /// Whether the record of `r` stays on disk (nothing was decided about its file).
 fn keeps_record(r: &Recovered) -> bool {
-    matches!(r, Recovered::Left { reason, .. } if [UNREADABLE, CHAIN_UNREADABLE, BEHIND].contains(reason))
+    matches!(r, Recovered::Failed { .. })
+        || matches!(r, Recovered::Left { reason, .. } if [UNREADABLE, CHAIN_UNREADABLE, BEHIND].contains(reason))
+}
+
+/// What the start tells the page about one record: never its folder, only the file's name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Notice {
+    /// Given up after its tries (the record dropped; the file left as it is).
+    GaveUp {
+        /// The file's name.
+        name: String,
+        /// The starts that tried.
+        tries: u32,
+    },
+    /// Held by another process at every try so far (the record kept, retried at every start).
+    Held {
+        /// The file's name.
+        name: String,
+        /// The starts that tried.
+        tries: u32,
+    },
+    /// The recovery failed (the record kept, retried at the next start).
+    Failed {
+        /// The file's name.
+        name: String,
+        /// The error.
+        error: String,
+    },
+}
+
+/// The start's account of its recovery: how many interrupted writes it settled, and a notice
+/// for each record the user must hear about.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StartupReport {
+    /// The records settled: a partial deleted, an append rolled back or found committed.
+    pub recovered: usize,
+    /// The notices, in the recovery's order.
+    pub notices: Vec<Notice>,
+}
+
+/// The account of `done` (what [`Journal::recover`] returned).
+pub fn startup_report(done: &[Recovered]) -> StartupReport {
+    let name = |p: &Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let mut r = StartupReport::default();
+    for d in done {
+        match d {
+            Recovered::DeletedPartial(_)
+            | Recovered::RolledBack { .. }
+            | Recovered::Committed(_) => r.recovered += 1,
+            Recovered::GaveUp { path, tries, .. } => r.notices.push(Notice::GaveUp {
+                name: name(path),
+                tries: *tries,
+            }),
+            Recovered::Held { path, tries } => r.notices.push(Notice::Held {
+                name: name(path),
+                tries: *tries,
+            }),
+            Recovered::Failed { path, error } => r.notices.push(Notice::Failed {
+                name: name(path),
+                error: error.clone(),
+            }),
+            Recovered::Left { .. } => {}
+        }
+    }
+    r
 }
 
 fn same_file(path: &Path, id: &Identity) -> Result<bool, &'static str> {

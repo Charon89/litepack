@@ -166,11 +166,10 @@ impl OpenFolders {
 /// The process ID of a folder named `<pid>-<n>` (both decimal), else `None`.
 fn folder_pid(name: &str) -> Option<u32> {
     let (pid, n) = name.split_once('-')?;
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    if !digits(pid) || !digits(n) {
-        return None;
-    }
-    pid.parse().ok()
+    // Exactly the form `fresh` writes: `007-1` or `7-01` is not one of ours.
+    let pid_n: u32 = pid.parse().ok()?;
+    let n_n: u64 = n.parse().ok()?;
+    (pid_n.to_string() == pid && n_n.to_string() == n).then_some(pid_n)
 }
 
 /// The extracted file of entry `path` (`/`-separated) under `dir`.
@@ -302,6 +301,32 @@ mod tests {
         assert!(!running.exists());
         assert!(mine.join("x.txt").exists());
         assert_eq!(OpenFolders::new(None).sweep(|_| false), 0);
+    }
+
+    #[test]
+    fn only_the_exact_folder_form_names_a_process() {
+        assert_eq!(folder_pid("7-1"), Some(7));
+        assert_eq!(folder_pid("4000000001-12"), Some(4_000_000_001));
+        for bad in [
+            "007-1",
+            "7-01",
+            "+7-1",
+            "7-+1",
+            "7-",
+            "-1",
+            "7",
+            "7-1-2",
+            "a-1",
+            "99999999999-1",
+        ] {
+            assert_eq!(folder_pid(bad), None, "{bad}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("Open");
+        let padded = root.join("004000000001-1");
+        std::fs::create_dir_all(&padded).unwrap();
+        assert_eq!(OpenFolders::new(Some(root)).sweep(|_| false), 0);
+        assert!(padded.exists());
     }
 
     #[test]

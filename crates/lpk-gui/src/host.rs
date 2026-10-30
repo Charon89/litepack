@@ -17,7 +17,7 @@ use lpk_api::{Class, CreateSettings, Event, Monitor, Tier};
 use lpk_gui::app::{App, Opened};
 use lpk_gui::browse::{SelectAction, Status, ViewInfo, ViewRequest};
 use lpk_gui::grants::{Grant, GrantKind, Granted};
-use lpk_gui::journal::Recovered;
+use lpk_gui::journal::{startup_report, Notice as StartupNotice};
 use lpk_gui::open::Opening;
 use lpk_gui::pick::{NativePicker, Purpose};
 use lpk_gui::security::{MAIN_WINDOW, SMOKE_REPORT_ENV};
@@ -34,7 +34,7 @@ struct Host {
     startup: Option<Granted>,
     startup_error: Option<String>,
     recovered: usize,
-    gave_up: Vec<GaveUp>,
+    notices: Vec<StartupNotice>,
     smoke: Option<PathBuf>,
     subscribers: Mutex<Vec<Channel<Notice>>>,
     exit_confirmed: AtomicBool,
@@ -47,15 +47,8 @@ struct StartupInfo {
     archive: Option<Granted>,
     error: Option<String>,
     recovered: usize,
-    /// Interrupted writes whose recovery gave up after its tries (D-117): a notice each.
-    gave_up: Vec<GaveUp>,
-}
-
-/// A record the recovery gave up on: the file's name (never its folder) and the tries.
-#[derive(Clone, Serialize)]
-struct GaveUp {
-    name: String,
-    tries: u32,
+    /// What the recovery must tell the user (D-117): a notice each, shown until dismissed.
+    notices: Vec<StartupNotice>,
 }
 
 /// Pushed to the page's `subscribe` channel.
@@ -97,7 +90,7 @@ async fn startup(host: State<'_, Host>) -> Result<StartupInfo, GuiError> {
         archive: host.startup.clone(),
         error: host.startup_error.clone(),
         recovered: host.recovered,
-        gave_up: host.gave_up.clone(),
+        notices: host.notices.clone(),
     })
 }
 
@@ -328,28 +321,15 @@ pub fn run() -> i32 {
     let app = Arc::new(App::new(paths::journal_dir().as_deref()).with_open_dir(paths::open_dir()));
     // The previous run's interrupted writes, before anything new starts; and the folders of
     // entries an earlier run opened, if its process has ended.
-    let mut recovered = 0;
-    let mut gave_up = Vec::new();
-    for r in app.recover() {
-        match r {
-            Recovered::GaveUp { path, tries, .. } => gave_up.push(GaveUp {
-                name: path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                tries,
-            }),
-            _ => recovered += 1,
-        }
-    }
+    let report = startup_report(&app.recover());
     app.sweep_open();
     let opened_at_start = startup_path.map(|p| app.grants.mint(GrantKind::Archive, &p));
     let host = Host {
         app: app.clone(),
         startup: opened_at_start,
         startup_error,
-        recovered,
-        gave_up,
+        recovered: report.recovered,
+        notices: report.notices,
         smoke: std::env::var_os(SMOKE_REPORT_ENV).map(PathBuf::from),
         subscribers: Mutex::new(Vec::new()),
         exit_confirmed: AtomicBool::new(false),

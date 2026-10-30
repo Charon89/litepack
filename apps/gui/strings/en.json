@@ -39,7 +39,12 @@
   "pick.destination": "Choose where the new archive goes",
   "actions.label": "Actions",
   "action.open": "Open…",
-  "action.create": "New archive…",
+  "action.files": "New archive from files…",
+  "action.folder": "New archive from a folder…",
+  "notices.label": "Notices",
+  "notice.dismiss": "Dismiss",
+  "notice.held": "{name} is held by another program, so an interrupted write could not be finished ({tries} tries). LitePack will try again at the next start.",
+  "notice.failed": "{name}: an interrupted write could not be cleaned up ({error}). LitePack will try again at the next start.",
   "create.running": "Creating {name}…",
   "create.done": "Created {name}.",
   "notice.gaveup": "{name} was left as it is: an interrupted write could not be finished after {tries} tries. Check it with lpk test."

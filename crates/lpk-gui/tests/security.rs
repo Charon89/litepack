@@ -307,6 +307,38 @@ fn every_string_is_in_the_table_and_every_key_is_used() {
     );
 }
 
+/// The recovery's notices stay on the page until dismissed (R125). A text search: the
+/// WebDriver harness (`crates/lpk-gui-e2e`) starts the exe with the runner's own state folder,
+/// and a seeded journal record there would need the harness to redirect `%LOCALAPPDATA%` for
+/// the exe and WebView2 alike; `journal::startup_report`'s tests cover the notices returned.
+#[test]
+fn startup_notices_have_their_own_area_the_status_line_never_replaces() {
+    let read = |f: &str| std::fs::read_to_string(repo_root().join("apps/gui").join(f)).unwrap();
+    let main = read("main.js");
+    let html = read("index.html");
+    assert!(main.contains("showNotices(startup.notices)"));
+    assert!(
+        !main.contains("setStatus(t(\"notice."),
+        "a notice in the status line is overwritten by the next status"
+    );
+    let set_status = &main[main.find("function setStatus(").unwrap()..];
+    let set_status = &set_status[..set_status.find("\n}").unwrap()];
+    assert!(!set_status.contains("notices"), "{set_status}");
+    let show = &main[main.find("function showNotices(").unwrap()..];
+    let show = &show[..show.find("\n}").unwrap()];
+    assert!(show.contains("$(\"notices\")") && show.contains("list.append(item)"));
+    assert!(show.contains("notice.dismiss") && show.contains("item.remove()"));
+    let notices = html.find("id=\"notices\"").unwrap();
+    let footer = html.find("<footer").unwrap();
+    assert!(notices < footer, "the notices are not in the status footer");
+    for kind in ["\"gaveup\"", "\"held\""] {
+        assert!(main.contains(&format!("case {kind}:")), "{kind}");
+    }
+    assert!(main.contains("t(\"notice.failed\""));
+    let host = host_source();
+    assert!(host.contains("notices: Vec<StartupNotice>"));
+}
+
 #[test]
 fn the_page_passes_each_rows_batch_generation() {
     // E5-3 (D-130 (7)): a row index goes to Rust with the generation of the batch it came
