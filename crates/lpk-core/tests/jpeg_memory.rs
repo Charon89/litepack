@@ -1256,7 +1256,11 @@ fn small_records_share_the_pool_and_the_outlier_waits() {
 /// R117: decodes waiting to run alone still hold their frames and step inputs. An archive of
 /// eight over-declared progressive JPEGs (each runs alone) extracted at eight threads under the
 /// smallest budget the refusal names: the other workers wait to run alone while one runs, and the
-/// process peak stays within the budget.
+/// process peak stays within the budget. Whether others wait at a lone grant is the scheduler's
+/// call: `begin` holds new blocks back while a decode waits to run alone, so a woken worker that
+/// reaches the gate before the others pass `begin` runs with none waiting (now and then on a
+/// loaded four-core runner). The extraction is repeated until a grant finds others waiting, and
+/// every run keeps the budget and writes every file.
 #[test]
 fn waiting_alone_decodes_and_one_lone_decode_stay_within_the_budget() {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -1275,14 +1279,17 @@ fn waiting_alone_decodes_and_one_lone_decode_stay_within_the_budget() {
         .index()
         .envelope;
     let small = env.decode_memory + (1 << 20);
+    let out = dir.path().join("out");
+    let run = |budget: u64| {
+        let _ = std::fs::remove_dir_all(&out);
+        extract_measured(&arch, &out, 8, budget)
+    };
     // The first refusal names the figure for whichever block failed first: retry with each
     // figure until every block runs.
     let mut budget = small;
     let mut tries = 0;
-    let out = dir.path().join("out");
-    let (s, peak) = loop {
-        let _ = std::fs::remove_dir_all(&out);
-        match extract_measured(&arch, &out, 8, budget) {
+    let (mut s, mut peak) = loop {
+        match run(budget) {
             Ok(r) => break r,
             Err(lpk_core::CoreError::Decode {
                 source: FormatError::Refused(r),
@@ -1296,22 +1303,30 @@ fn waiting_alone_decodes_and_one_lone_decode_stay_within_the_budget() {
         }
     };
     assert!(tries >= 1, "the budget binds");
-    eprintln!(
-        "workers {}, in flight {}, alone {}, at the grant {}, peak {peak}, budget {budget}",
-        s.workers, s.in_flight, s.alone_decodes, s.concurrent_while_alone
-    );
-    assert!(s.workers > 1, "several workers wait to run alone");
+    let mut runs = 1;
+    loop {
+        eprintln!(
+            "run {runs}: workers {}, in flight {}, alone {}, at the grant {}, peak {peak}, budget {budget}",
+            s.workers, s.in_flight, s.alone_decodes, s.concurrent_while_alone
+        );
+        assert!(s.workers > 1, "several workers wait to run alone");
+        assert_eq!(s.alone_decodes, jpegs.len() as u64);
+        assert!(peak <= budget, "peak {peak} > budget {budget}");
+        for (i, j) in jpegs.iter().enumerate() {
+            assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
+        }
+        if s.concurrent_while_alone >= 2 || runs == 8 {
+            break;
+        }
+        (s, peak) = run(budget).unwrap();
+        runs += 1;
+    }
     // At a lone grant other workers wait to run alone, holding their blocks (threads pinned to 8).
     assert!(
         s.concurrent_while_alone >= 2,
-        "{} at the grant",
+        "fewer than 2 at the grant in each of {runs} runs (the last: {})",
         s.concurrent_while_alone
     );
-    assert_eq!(s.alone_decodes, jpegs.len() as u64);
-    assert!(peak <= budget, "peak {peak} > budget {budget}");
-    for (i, j) in jpegs.iter().enumerate() {
-        assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
-    }
 }
 
 /// E2-25: the default budget is raised for a large declared record need. An archive of many
