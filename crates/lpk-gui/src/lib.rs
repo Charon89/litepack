@@ -36,6 +36,7 @@ pub mod ops;
 pub mod outbox;
 pub mod paths;
 pub mod pick;
+pub mod preview;
 pub mod recents;
 pub mod security;
 pub mod settings;
