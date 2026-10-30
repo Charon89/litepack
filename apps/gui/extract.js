@@ -137,11 +137,11 @@ export function createExtractor(env) {
 
   // A finished extraction: counts, what was skipped, the links, the Mark of the Web, the check.
   function summary(r) {
-    if (r.outcome === "cancelled-before-writing") {
+    if (r.outcome === "cancelled-before-start") {
       return [el("p", { text: t("extract.cancelled.none", { name: r.archive }) })];
     }
     const nodes = [];
-    if (r.outcome === "cancelled-after-writing") {
+    if (r.outcome === "cancelled-after-start") {
       // D-87 (2): the finished files stay, the unfinished one is removed.
       nodes.push(el("p", { text: t("extract.cancelled.kept", { name: r.archive, folder: r.folder }) }));
     } else {

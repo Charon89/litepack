@@ -152,11 +152,12 @@ pub enum Check {
 pub enum Outcome {
     /// The extraction finished.
     Done,
-    /// Cancelled after files were written: the finished ones are kept, the unfinished one was
-    /// removed (D-87 (2)).
-    CancelledAfterWriting,
-    /// Cancelled before anything was written (a password prompt, the preflight, Cancel at once).
-    CancelledBeforeWriting,
+    /// Cancelled once the engine's run had started: any files already extracted were kept, the
+    /// unfinished one was removed (D-87 (2)).
+    CancelledAfterStart,
+    /// Cancelled before the engine's run started (a password prompt, the preflight, Cancel at
+    /// once): nothing was written.
+    CancelledBeforeStart,
 }
 
 /// A symlink not created because of its target.
@@ -354,13 +355,7 @@ impl lpk_api::Progress for Seen {
     }
 }
 
-fn cancelled_result(
-    job: &Job<'_>,
-    folder: String,
-    files: u64,
-    bytes: u64,
-    wrote: bool,
-) -> ExtractResult {
+fn cancelled_result(job: &Job<'_>, folder: String, files: u64, bytes: u64) -> ExtractResult {
     ExtractResult {
         archive: job.archive.to_string(),
         folder,
@@ -374,11 +369,7 @@ fn cancelled_result(
         unprivileged_symlinks: Vec::new(),
         motw_unmarked: false,
         check: None,
-        outcome: if wrote {
-            Outcome::CancelledAfterWriting
-        } else {
-            Outcome::CancelledBeforeWriting
-        },
+        outcome: Outcome::CancelledAfterStart,
         left_out: job.left_out,
     }
 }
@@ -398,7 +389,7 @@ pub(crate) fn cancelled_before(archive: &str) -> ExtractResult {
         unprivileged_symlinks: Vec::new(),
         motw_unmarked: false,
         check: None,
-        outcome: Outcome::CancelledBeforeWriting,
+        outcome: Outcome::CancelledBeforeStart,
         left_out: 0,
     }
 }
@@ -443,7 +434,6 @@ fn attempt(s: &Session, job: &Job<'_>, monitor: &Monitor) -> Result<ExtractResul
         ..ExtractOptions::default()
     };
     // The folder the preflight chose, so that both steps agree.
-    let existed = pf.dir.exists();
     let seen = Arc::new(Seen {
         files: std::sync::atomic::AtomicU64::new(0),
         bytes: std::sync::atomic::AtomicU64::new(0),
@@ -454,21 +444,19 @@ fn attempt(s: &Session, job: &Job<'_>, monitor: &Monitor) -> Result<ExtractResul
         cancel: monitor.cancel.clone(),
     };
     let dir = pf.dir.clone();
+    // Control flow decides the outcome: a cancel up to here is "before the run" (an `Err` the
+    // caller turns into `CancelledBeforeStart`); one from the engine's run is "after start",
+    // true also after zero-byte files or before the first progress event (D-87 (2): finished
+    // files are kept).
+    if monitor.cancel.is_cancelled() {
+        return Err(Error::cancelled().into());
+    }
     let report = match s.extract(job.selection, &Destination::Dir(pf.dir), &options, &watched) {
         Ok(r) => r,
         Err(e) if e.class == Class::Cancelled => {
             use std::sync::atomic::Ordering::Relaxed;
             let (files, bytes) = (seen.files.load(Relaxed), seen.bytes.load(Relaxed));
-            // Files were written when the engine said so, or when it made the folder and it
-            // still holds something (a finished file is kept, D-87 (2)).
-            let made = !existed && std::fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_some());
-            return Ok(cancelled_result(
-                job,
-                last_name(&dir),
-                files,
-                bytes,
-                bytes > 0 || made,
-            ));
+            return Ok(cancelled_result(job, last_name(&dir), files, bytes));
         }
         Err(e) => return Err(e.into()),
     };

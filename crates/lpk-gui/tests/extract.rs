@@ -349,7 +349,7 @@ fn encrypted_content_asks_at_extraction_and_cancel_writes_nothing() {
             &Monitor::default(),
         )
         .unwrap();
-    assert_eq!(e.outcome, Outcome::CancelledBeforeWriting);
+    assert_eq!(e.outcome, Outcome::CancelledBeforeStart);
     assert!(!d.path().join("sealed").exists(), "nothing written");
     // Wrong then right.
     let p = Answers::new(&[Some("bad"), Some("hunter2")]);
@@ -433,7 +433,7 @@ fn cancel_before_the_run_ends_cancelled_and_leaves_nothing() {
             &monitor,
         )
         .unwrap();
-    assert_eq!(e.outcome, Outcome::CancelledBeforeWriting);
+    assert_eq!(e.outcome, Outcome::CancelledBeforeStart);
     assert!(!d.path().join("a").exists());
 }
 
@@ -758,7 +758,7 @@ fn a_cancel_mid_run_keeps_the_finished_files_and_removes_the_unfinished_one() {
             &monitor,
         )
         .unwrap();
-    assert_eq!(r.outcome, Outcome::CancelledAfterWriting, "{r:?}");
+    assert_eq!(r.outcome, Outcome::CancelledAfterStart, "{r:?}");
     assert_eq!(r.check, None, "a cancelled run claims no check");
     let written: Vec<_> = std::fs::read_dir(d.path().join("big"))
         .unwrap()
@@ -886,7 +886,7 @@ fn the_exit_cancels_and_joins_a_run_in_progress() {
     );
     assert!(t.elapsed() < std::time::Duration::from_secs(30));
     let r = worker.join().unwrap().unwrap();
-    assert_eq!(r.outcome, Outcome::CancelledAfterWriting);
+    assert_eq!(r.outcome, Outcome::CancelledAfterStart);
 }
 
 /// A prompter whose user never answers, as the host's waits.
@@ -927,7 +927,7 @@ fn a_prompt_nobody_answers_ends_with_the_cancel_promptly() {
         "{:?}",
         t.elapsed()
     );
-    assert_eq!(r.outcome, Outcome::CancelledBeforeWriting);
+    assert_eq!(r.outcome, Outcome::CancelledBeforeStart);
     assert!(!d.path().join("sealed").exists());
 }
 

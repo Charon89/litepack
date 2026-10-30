@@ -38,8 +38,9 @@ pub enum Selection {
     /// The entries D-90's globs select (a directory's match selects its subtree).
     Globs(lpk_core::Selection),
     /// The entries picked by id (an index into the entry table, for a foreign archive the
-    /// position in its listing; [`IdSet`]): picks are not rewritten as globs: they reach the engine as an id set, so any number of picks and any
-    /// name. A picked directory is its subtree.
+    /// position in its listing; [`IdSet`]): picks are not rewritten as globs: they reach the
+    /// engine as an id set, so any number of picks and any name. A picked directory is its
+    /// subtree.
     Ids(Arc<IdSet>),
 }
 

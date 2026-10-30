@@ -29,7 +29,7 @@ returns to where it was when the dialog closes.
 | 4.12 | Password dialog cancelled | The operation ends as cancelled; nothing is written | |
 | 4.13 | Envelope refusal (an archive whose memory need exceeds this PC's allowance) | Reads "needs X; this PC allows Y" with `Allow X`; Allow re-runs that one extraction; the next extraction refuses again (nothing persisted) | |
 | 4.14 | Not enough free space (a destination volume too small) | Refused before anything is written, naming both figures | |
-| 4.15 | Progress and Cancel on a large archive | Files, bytes, MB/s and an ETA update; Cancel (and Esc) stops it; the result says the files already extracted were kept in the folder and the unfinished one was removed (D-87 (2)); cancelling a password prompt or the conflict question says it was cancelled before anything was written | |
+| 4.15 | Progress and Cancel on a large archive | Files, bytes, MB/s and an ETA update; Cancel (and Esc) stops it; the result says any files already extracted were kept in the folder (the unfinished one is removed, D-87 (2)), also when none had finished yet; cancelling a password prompt, the conflict question or the run before it started says it was cancelled before anything was written | |
 | 4.16 | Result with entry errors (a damaged archive) | Each failed entry is listed with its reason | |
 | 4.17 | Result with symlinks (an archive with links, run without the symlink privilege) | Skipped and unprivileged links are listed | |
 | 4.18 | Result check line | `.lpk`: "every file matched its BLAKE3 hash" (only when a file was written); ZIP and 7z: "each member matched its stored checksum", or "N members matched their stored checksum; K had none to check" when some member stored none; tar: "not verifiable"; no check line after a cancel; the Mark of the Web warning appears only when a file could not be marked | |
@@ -56,4 +56,4 @@ the maintenance dialogs (E5-8) here.
 
 ## Notes
 
-- Envelope refusal of a foreign archive (E4 follow-up): its listing refusal (`LimitExceeded` with `--memory`) now offers "Allow X", but X is what the listing needed so far, a lower bound; Allow may refuse again with a larger figure until the worker reports the total.
+- Envelope refusal of a foreign archive (E4 follow-up): the GUI offers no "Allow X" for a ZIP or 7z memory limit yet, because that limit comes from the session's open options, not from the extraction's; such an error shows its message only.

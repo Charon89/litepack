@@ -82,7 +82,7 @@
   "extract.progress": "{done} of {total} files, {bytes} bytes, {rate} MB/s, {eta}",
   "extract.progress.unknown": "{done} files, {bytes} bytes, {rate} MB/s",
   "extract.eta": "about {seconds} s left",
-  "extract.cancelled.kept": "{name}: cancelled. The files already extracted were kept in {folder}; the unfinished one was removed.",
+  "extract.cancelled.kept": "{name}: cancelled. Any files already extracted were kept in {folder}.",
   "extract.cancelled.none": "{name}: cancelled before anything was written.",
   "extract.dialog": "Extract",
   "extract.done": "{name}: extracted {files} files ({bytes} bytes) into {folder}.",

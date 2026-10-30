@@ -245,19 +245,8 @@ impl Error {
         match &*self.source {
             Source::Format(FormatError::Refused(r))
             | Source::Core(CoreError::Format(FormatError::Refused(r))) => Some(r.clone()),
-            // A foreign archive whose listing outgrew the memory budget carries both figures
-            // (`value` is what the listing needed so far, a lower bound: "Allow" may refuse
-            // again with a larger figure).
-            Source::Core(CoreError::Foreign(ForeignError::LimitExceeded {
-                flag: "--memory",
-                value,
-                max,
-                ..
-            })) => Some(Refusal {
-                field: "--memory",
-                needed: *value,
-                allowed: *max,
-            }),
+            // Not a foreign archive's `LimitExceeded { flag: "--memory" }`: its limit is the
+            // session's open option, not the extraction's, so an "Allow" could never lift it.
             _ => None,
         }
     }
@@ -618,5 +607,25 @@ pub fn format_path(e: &FormatError) -> Option<String> {
         | FormatError::UnsafePath { path, .. }
         | FormatError::SymlinkRefused { path } => Some(path.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_foreign_memory_limit_carries_no_refusal_figures() {
+        let e = Error::core(
+            CoreError::Foreign(ForeignError::LimitExceeded {
+                limit: "listing memory",
+                value: 9,
+                max: 5,
+                flag: "--memory",
+            }),
+            None,
+        );
+        assert!(e.refusal().is_none());
+        assert_eq!(e.class, Class::TooLarge);
     }
 }
