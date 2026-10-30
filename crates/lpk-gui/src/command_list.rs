@@ -3,6 +3,8 @@
 /// it against `generate_handler!` in `src/host.rs` and the capability files.
 pub const COMMANDS: &[&str] = &[
     "startup",
+    "settings",
+    "set_settings",
     "open_archive",
     "rows",
     "view",

@@ -7,6 +7,11 @@
 //! then every token is cancelled, and `RunEvent::Exit` closes the sessions and joins the runs
 //! before the process ends, so the engine's cleanup (D-87 (2)) completes, also when Windows
 //! ends the session (tao ends its loop on `WM_ENDSESSION`).
+//!
+//! Activation (E5-7): `tauri-plugin-single-instance` is registered first, so a second
+//! `lpk-gui.exe` hands its verbs and folder to this one and exits before it touches anything;
+//! the recovery of interrupted writes therefore runs in `setup`, in the one instance alone. Each
+//! verb's paths are minted as grants (`lpk_gui::activation`) and pushed to the page.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lpk_api::{Class, CreateSettings, Event, Monitor, Tier};
+use lpk_gui::activation::{activate, Activation};
 use lpk_gui::app::{App, Opened};
 use lpk_gui::browse::{SelectAction, Status, ViewInfo, ViewRequest};
 use lpk_gui::grants::{Grant, GrantKind, Granted};
@@ -21,22 +27,29 @@ use lpk_gui::journal::{startup_report, Notice as StartupNotice};
 use lpk_gui::open::Opening;
 use lpk_gui::pick::{NativePicker, Purpose};
 use lpk_gui::security::{MAIN_WINDOW, SMOKE_REPORT_ENV};
+use lpk_gui::settings::{Settings, Store};
 use lpk_gui::{cli, paths, strings, GuiError};
 use serde::Serialize;
 use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, DragDropEvent, Manager, RunEvent, State, WebviewUrl, WindowEvent};
+
+use crate::updates;
 
 /// How long the exit waits for the runs it cancelled.
 const EXIT_JOIN: Duration = Duration::from_secs(30);
 
 struct Host {
     app: Arc<App>,
-    startup: Option<Granted>,
+    startup: Option<Activation>,
     startup_error: Option<String>,
     recovered: usize,
     notices: Vec<StartupNotice>,
+    settings: Store,
+    settings_warning: Option<String>,
     smoke: Option<PathBuf>,
     subscribers: Mutex<Vec<Channel<Notice>>>,
+    /// Notices pushed before the page subscribed (a second instance's verbs at start-up).
+    pending: Mutex<Vec<Notice>>,
     exit_confirmed: AtomicBool,
 }
 
@@ -44,11 +57,14 @@ struct Host {
 #[derive(Serialize)]
 struct StartupInfo {
     strings: &'static std::collections::BTreeMap<String, String>,
-    archive: Option<Granted>,
+    /// The command line's verb, its paths as grants.
+    activation: Option<Activation>,
     error: Option<String>,
     recovered: usize,
     /// What the recovery must tell the user (D-117): a notice each, shown until dismissed.
     notices: Vec<StartupNotice>,
+    /// Why the settings file was not used, if it was not (shown once, as a notice).
+    settings_warning: Option<String>,
 }
 
 /// Pushed to the page's `subscribe` channel.
@@ -57,6 +73,12 @@ struct StartupInfo {
 enum Notice {
     /// Files dropped on the window, as grants.
     Dropped { items: Vec<Granted> },
+    /// A second instance's verb, its paths as grants.
+    Activated { activation: Activation },
+    /// A second instance's command line that does not parse.
+    Refused { error: String },
+    /// The update check found a newer version (E7-7 adds the install).
+    Update { version: String },
 }
 
 /// A progress event as the page sees it.
@@ -87,11 +109,24 @@ async fn blocking<T: Send + 'static>(
 async fn startup(host: State<'_, Host>) -> Result<StartupInfo, GuiError> {
     Ok(StartupInfo {
         strings: strings::table(),
-        archive: host.startup.clone(),
+        activation: host.startup.clone(),
         error: host.startup_error.clone(),
         recovered: host.recovered,
         notices: host.notices.clone(),
+        settings_warning: host.settings_warning.clone(),
     })
+}
+
+/// The settings the page shows (no path among them, `lpk_gui::settings`).
+#[tauri::command]
+async fn settings(host: State<'_, Host>) -> Result<Settings, GuiError> {
+    Ok(host.settings.get())
+}
+
+/// Change the settings; a field the page may not write (a path) fails to deserialize.
+#[tauri::command]
+async fn set_settings(host: State<'_, Host>, settings: Settings) -> Result<(), GuiError> {
+    host.settings.set(settings)
 }
 
 #[tauri::command]
@@ -248,8 +283,52 @@ async fn cancel(host: State<'_, Host>, op: u64) -> Result<bool, GuiError> {
 
 #[tauri::command]
 async fn subscribe(host: State<'_, Host>, channel: Channel<Notice>) -> Result<(), GuiError> {
+    let pending = std::mem::take(&mut *host.pending.lock().map_err(internal)?);
+    for n in pending {
+        let _ = channel.send(n);
+    }
     host.subscribers.lock().map_err(internal)?.push(channel);
     Ok(())
+}
+
+/// Send `notice` to the page's channels, or keep it until the page subscribes.
+fn push(host: &Host, notice: Notice) {
+    let subs: Vec<Channel<Notice>> = match host.subscribers.lock() {
+        Ok(s) => s.clone(),
+        Err(_) => Vec::new(),
+    };
+    if subs.is_empty() {
+        if let Ok(mut p) = host.pending.lock() {
+            p.push(notice);
+        }
+        return;
+    }
+    for s in subs {
+        let _ = s.send(notice.clone());
+    }
+}
+
+/// A second instance's arguments (the program name first) and folder: its verb reaches the
+/// page as grants, and the window comes to the front.
+fn second_instance(handle: &AppHandle, argv: Vec<String>, cwd: String) {
+    let Some(host) = handle.try_state::<Host>() else {
+        return;
+    };
+    let args = argv.into_iter().skip(1).map(std::ffi::OsString::from);
+    match cli::parse(args, Some(std::path::Path::new(&cwd))) {
+        Ok(s) => {
+            if let Some(verb) = s.verb {
+                let activation = activate(&verb, &host.app.grants);
+                push(&host, Notice::Activated { activation });
+            }
+        }
+        Err(error) => push(&host, Notice::Refused { error }),
+    }
+    if let Some(w) = handle.get_webview_window(MAIN_WINDOW) {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
 }
 
 /// The page reports that a listing reached the window. With [`SMOKE_REPORT_ENV`] set (CI's
@@ -311,34 +390,28 @@ fn may_exit(handle: &AppHandle, host: &Host) -> bool {
 
 /// Run the GUI; the process's exit code.
 pub fn run() -> i32 {
-    let (startup_path, startup_error) = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(s) => (s.open, None),
-        Err(e) => {
-            eprintln!("lpk-gui: {e}");
-            (None, Some(e))
-        }
-    };
+    let cwd = std::env::current_dir().ok();
+    let (startup_verb, startup_error) =
+        match cli::parse(std::env::args_os().skip(1), cwd.as_deref()) {
+            Ok(s) => (s.verb, None),
+            Err(e) => {
+                eprintln!("lpk-gui: {e}");
+                (None, Some(e))
+            }
+        };
     let app = Arc::new(App::new(paths::journal_dir().as_deref()).with_open_dir(paths::open_dir()));
-    // The previous run's interrupted writes, before anything new starts; and the folders of
-    // entries an earlier run opened, if its process has ended.
-    let report = startup_report(&app.recover());
-    app.sweep_open();
-    let opened_at_start = startup_path.map(|p| app.grants.mint(GrantKind::Archive, &p));
-    let host = Host {
-        app: app.clone(),
-        startup: opened_at_start,
-        startup_error,
-        recovered: report.recovered,
-        notices: report.notices,
-        smoke: std::env::var_os(SMOKE_REPORT_ENV).map(PathBuf::from),
-        subscribers: Mutex::new(Vec::new()),
-        exit_confirmed: AtomicBool::new(false),
-    };
+    let setup_app = app.clone();
 
     let built = tauri::Builder::default()
-        .manage(host)
+        // First: a second instance forwards its verbs here and exits before anything else runs.
+        .plugin(tauri_plugin_single_instance::init(|handle, argv, cwd| {
+            second_instance(handle, argv, cwd)
+        }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             startup,
+            settings,
+            set_settings,
             open_archive,
             rows,
             view,
@@ -351,7 +424,45 @@ pub fn run() -> i32 {
             subscribe,
             listing_shown,
         ])
-        .setup(|a| {
+        .setup(move |a| {
+            let app = setup_app;
+            // The previous run's interrupted writes, before anything new starts (this is the one
+            // instance); and the folders of entries an earlier run opened, if its process ended.
+            let report = startup_report(&app.recover());
+            app.sweep_open();
+            let (settings, settings_warning) = Store::open(paths::settings_file());
+            if let Some(w) = &settings_warning {
+                eprintln!("lpk-gui: {w}");
+            }
+            let check = settings.get().update_check;
+            let activation = startup_verb.as_ref().map(|v| activate(v, &app.grants));
+            a.manage(Host {
+                app: app.clone(),
+                startup: activation,
+                startup_error,
+                recovered: report.recovered,
+                notices: report.notices,
+                settings,
+                settings_warning,
+                smoke: std::env::var_os(SMOKE_REPORT_ENV).map(PathBuf::from),
+                subscribers: Mutex::new(Vec::new()),
+                pending: Mutex::new(Vec::new()),
+                exit_confirmed: AtomicBool::new(false),
+            });
+            // The update check, once the window is up; off in the settings, or without the
+            // release key (E7-7), it requests nothing.
+            let handle = a.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match updates::check(&handle, check).await {
+                    updates::Outcome::Available(version) => {
+                        if let Some(host) = handle.try_state::<Host>() {
+                            push(&host, Notice::Update { version });
+                        }
+                    }
+                    updates::Outcome::Failed(e) => eprintln!("lpk-gui: the update check: {e}"),
+                    _ => {}
+                }
+            });
             let mut b = tauri::WebviewWindowBuilder::new(
                 a,
                 MAIN_WINDOW,
@@ -424,15 +535,7 @@ pub fn run() -> i32 {
                     host.app.grants.mint(kind, p)
                 })
                 .collect();
-            let subs: Vec<Channel<Notice>> = match host.subscribers.lock() {
-                Ok(s) => s.clone(),
-                Err(_) => Vec::new(),
-            };
-            for s in subs {
-                let _ = s.send(Notice::Dropped {
-                    items: items.clone(),
-                });
-            }
+            push(&host, Notice::Dropped { items });
         }
         RunEvent::ExitRequested { code, api, .. } => {
             let host = handle.state::<Host>();

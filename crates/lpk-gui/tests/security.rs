@@ -364,3 +364,77 @@ fn the_page_passes_each_rows_batch_generation() {
         }
     }
 }
+
+fn strings_in(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) => out.push(s.clone()),
+        serde_json::Value::Array(a) => a.iter().for_each(|x| strings_in(x, out)),
+        serde_json::Value::Object(o) => o.values().for_each(|x| strings_in(x, out)),
+        _ => {}
+    }
+}
+
+/// E5-7's acceptance: the capability files, the CSP and the updater's endpoint list leave the
+/// update check (made from Rust, `src/updates.rs`) as the GUI's one network permission. Its
+/// silence when off and the request's lack of any user or host identifier are proven against a
+/// local server by `src/updates.rs`'s tests.
+#[test]
+fn the_update_check_is_the_only_network_permission() {
+    // The page: no plugin or core permission in any capability (so no `updater:`, `http:` or
+    // `shell:` permission), and the CSP connects to Tauri's IPC alone.
+    let mut caps = Vec::new();
+    files(&crate_dir().join("capabilities"), &mut caps, &[]);
+    for c in &caps {
+        let v = json(c);
+        for p in v["permissions"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(!p.contains(':'), "{}: {p}", c.display());
+        }
+    }
+    let connect: Vec<&str> = CSP
+        .split("; ")
+        .find(|d| d.starts_with("connect-src "))
+        .unwrap()
+        .split(' ')
+        .skip(1)
+        .collect();
+    assert_eq!(connect, ["ipc:", "http://ipc.localhost"]);
+    // The configuration: one plugin configured, the updater, with one HTTPS endpoint on the
+    // project's release page, no URL variable (no version, target or architecture sent) and no
+    // `dangerous*` option.
+    let conf = json(&crate_dir().join("tauri.conf.json"));
+    let plugins = conf["plugins"].as_object().unwrap();
+    assert_eq!(plugins.keys().collect::<Vec<_>>(), ["updater"]);
+    let updater = plugins["updater"].as_object().unwrap();
+    for k in updater.keys() {
+        assert!(!k.to_lowercase().contains("dangerous"), "{k}");
+    }
+    assert_eq!(updater["requireSignedVersion"], true);
+    let (endpoints, _) = lpk_gui::update::config(&conf);
+    assert_eq!(endpoints.len(), 1, "{endpoints:?}");
+    let endpoint = &endpoints[0];
+    assert!(
+        endpoint.starts_with("https://github.com/") && endpoint.ends_with("/latest.json"),
+        "{endpoint}"
+    );
+    assert!(!endpoint.contains("{{"), "{endpoint}: a URL variable");
+    // Every URL in the configuration is the CSP's IPC endpoint or that one.
+    let mut all = Vec::new();
+    strings_in(&conf, &mut all);
+    for s in all {
+        for w in s.split([' ', ';']).filter(|w| w.contains("://")) {
+            assert!(
+                w == "http://ipc.localhost" || w == endpoint,
+                "a network URL besides the update check: {w}"
+            );
+        }
+    }
+    // The manifest: the updater is the only network plugin.
+    let manifest = std::fs::read_to_string(crate_dir().join("Cargo.toml")).unwrap();
+    let plugins: Vec<&str> = manifest
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("tauri-plugin-"))
+        .map(|l| l.split([' ', '=']).next().unwrap())
+        .collect();
+    assert_eq!(plugins, ["single-instance", "updater"]);
+}

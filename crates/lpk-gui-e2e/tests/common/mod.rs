@@ -130,6 +130,8 @@ pub(crate) fn start_driver(work: &Path, port: u16) -> Driver {
         // The GUI's state (journal, WebView2's data folder) goes to the scratch dir; the GUI
         // inherits this environment through the driver.
         .env("LOCALAPPDATA", &local)
+        // And its settings (E5-7).
+        .env("APPDATA", work.join("roaming"))
         // The host passes the driver's browser arguments to its webview (WebView2 does not apply
         // them itself when the app sets its own; `lpk_gui::security::webdriver::WEBDRIVER_ENV`,
         // in a GUI built with the feature `webdriver`).

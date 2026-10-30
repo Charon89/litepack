@@ -33,6 +33,13 @@
   background: var(--head);
 }
 
+.setting {
+  margin-left: auto;
+  align-self: center;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .notices {
   margin: 0;
   padding: 0;

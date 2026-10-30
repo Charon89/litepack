@@ -4,6 +4,8 @@
   "windows": ["main"],
   "permissions": [
     "allow-startup",
+    "allow-settings",
+    "allow-set-settings",
     "allow-open-archive",
     "allow-rows",
     "allow-view",

@@ -15,6 +15,16 @@
       "capabilities": ["main"]
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "E7-7 replaces this with the release signing public key",
+      "endpoints": ["https://github.com/Charon89/litepack/releases/latest/download/latest.json"],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": false,
     "icon": [
