@@ -694,8 +694,9 @@ struct ExtractArgs {
     /// anything is written). Default: half of the physical memory, at most the ceiling of the
     /// tier the archive's envelope shows: 1 GiB (stored blocks only), 2 GiB (Fast-sized blocks
     /// and windows) or 4 GiB (larger); raised, up to 4 GiB and half of the physical memory, for
-    /// an archive whose largest declared record need would otherwise cut the decoders below the
-    /// thread budget's (to every decoder's block terms plus twice that need; -v says which);
+    /// an archive whose largest declared record need cuts the decoders below the thread budget's
+    /// and below what the block terms alone allow (to every decoder's block terms plus twice
+    /// that need; -v says which);
     /// the reader is then limited to half of the physical memory, at most 4 GiB. The decoders
     /// in flight are derived from the budget (shown with -v); a budget below what one block in
     /// flight needs is refused with that figure.

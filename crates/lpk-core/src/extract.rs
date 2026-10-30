@@ -1852,8 +1852,9 @@ impl Sizing {
     }
 
     /// The extraction's default budget (E2-25; [`crate::memory`]'s "The raised extraction
-    /// default"), for every caller: the tier's default `min(ceiling, physical / 2)`, unless the
-    /// workers are cut below [`Sizing::decoders`] there; then `fixed_shared + decoders *
+    /// default"), for an extraction: the tier's default `min(ceiling, physical / 2)`, unless the
+    /// declared term cuts the workers there below both [`Sizing::decoders`] and the workers of
+    /// the same sizing with the declared term at the floor (R124); then `fixed_shared + decoders *
     /// (per_block + per_worker) + held + 2 * declared` (every decoder at its block terms, one
     /// held block, and the largest declared need twice in the decode pool: itself and as much
     /// again for the decodes beside it), at most [`crate::memory::EXTRACT_CEILING`] and
@@ -1864,14 +1865,16 @@ impl Sizing {
             return base;
         };
         let decoders = self.decoders();
-        // Only a cut the declared need causes raises (R122): when the same sizing with the
-        // declared term at the floor would cut too, the cut is the block terms' or the
-        // threads', which a raise for the need would misname.
+        // Only a cut the declared need deepens raises (R122, R124): the workers with the
+        // declared term are compared with those of the same sizing with the declared term at
+        // the floor, both at the tier's default; a cut by the block terms or the threads alone
+        // keeps the default, which a raise for the need would misname.
         let at_floor = Sizing {
             declared: self.decoder,
             ..*self
         };
-        if self.size(base.bytes).0 >= decoders || at_floor.size(base.bytes).0 < decoders {
+        let workers = self.size(base.bytes).0;
+        if workers >= decoders || workers >= at_floor.size(base.bytes).0 {
             return base;
         }
         let d = u64::try_from(decoders).unwrap_or(u64::MAX);

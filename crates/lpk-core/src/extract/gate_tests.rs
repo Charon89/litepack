@@ -687,3 +687,47 @@ fn an_export_keeps_the_tiers_default_for_a_photo_shaped_envelope() {
         BudgetSource::Raised { .. }
     ));
 }
+
+/// R124: at 400 threads the block terms alone cut the workers at the Fast ceiling, and the
+/// photo-shaped declared need cuts them deeper; the default is raised (capped at 4 GiB) and
+/// the workers at the raised budget are more than at the tier's default, within the counted
+/// terms.
+#[test]
+fn a_need_deepening_a_block_terms_cut_is_raised() {
+    let s = Sizing {
+        threads: 400,
+        ..photo_sizing(PHOTO_DECLARED)
+    };
+    let base = Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    let at_floor = Sizing {
+        declared: s.decoder,
+        ..s
+    };
+    assert!(
+        at_floor.size(base.bytes).0 < s.decoders(),
+        "the block terms cut"
+    );
+    let old = s.size(base.bytes).0;
+    assert!(
+        old < at_floor.size(base.bytes).0,
+        "the need deepens the cut"
+    );
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(b.bytes, crate::memory::EXTRACT_CEILING);
+    assert_eq!(
+        b.source,
+        BudgetSource::Raised {
+            ceiling: crate::memory::FAST_CEILING,
+            physical: PHYSICAL,
+            need: PHOTO_DECLARED,
+        }
+    );
+    let (w, permits) = s.size(b.bytes);
+    assert!(w > old, "{w} workers at the raise, {old} before");
+    let terms = s.gate_terms(b);
+    let counted = s.fixed_shared
+        + w as u64 * (s.per_block + s.per_worker)
+        + (permits - w) as u64 * s.held
+        + terms.shared;
+    assert!(counted <= b.bytes);
+}
