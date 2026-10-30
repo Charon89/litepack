@@ -387,6 +387,37 @@ async fn open_entry(
     Ok(opening)
 }
 
+/// Preview a row (E5-6): one capped read, classified in Rust, returned as one binary message
+/// (`lpk_gui::preview::Preview::encode`). A newer preview, `cancel` of `op` or the exit
+/// cancels it; it never queues behind a heavy operation.
+#[tauri::command]
+async fn preview(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    session: u64,
+    row: u32,
+    generation: u32,
+    op: u64,
+) -> Result<Response, GuiError> {
+    let app = host.app.clone();
+    let bytes = blocking(move || {
+        let g = app.ops.begin(op, false)?;
+        let p = app.preview(
+            session,
+            row,
+            generation,
+            &g.token,
+            &NativePrompter {
+                handle,
+                token: g.token.clone(),
+            },
+        )?;
+        Ok(p.encode())
+    })
+    .await?;
+    Ok(Response::new(bytes))
+}
+
 /// A native picker (`docs/notes/e5-design.md` section 3): the page names what to pick, the
 /// dialog (in Rust) gives the paths, and the page receives a grant per path (none when the
 /// user cancels).
@@ -589,6 +620,7 @@ pub fn run() -> i32 {
             view,
             select,
             open_entry,
+            preview,
             pick,
             extract_plan,
             extract_run,
