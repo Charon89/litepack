@@ -301,7 +301,9 @@ fn more_than_ten_thousand_separate_picks_extract_exactly_the_picked_files() {
     let s = Session::open(&a, &Default::default()).unwrap();
     let m = s.model(&CancelToken::new()).unwrap();
     let mut picks = m.new_selection();
-    for i in (0..12_000u32).step_by(2) {
+    // Every file but the multiples of 7: 10,285 separate picks, over the old cap of 10,000
+    // (`MAX_PICKED_GLOBS`, which refused the call `TooLarge`).
+    for i in (0..12_000u32).filter(|i| i % 7 != 0) {
         picks.insert(id_of(&m, &format!("many/f{i:05}.txt")));
     }
     let sel = Selection::Ids(Arc::new(picks));
@@ -309,8 +311,8 @@ fn more_than_ten_thousand_separate_picks_extract_exactly_the_picked_files() {
     let p = s
         .preflight(&sel, &Destination::Dir(out.clone()), &CancelToken::new())
         .unwrap();
-    assert_eq!((p.entries, p.files), (6_000, 6_000));
-    assert_eq!(count(&s, &sel), 6_000);
+    assert_eq!((p.entries, p.files), (10_285, 10_285));
+    assert_eq!(count(&s, &sel), 10_285);
     s.extract(
         &sel,
         &Destination::Dir(out.clone()),
@@ -324,11 +326,11 @@ fn more_than_ten_thousand_separate_picks_extract_exactly_the_picked_files() {
         .collect();
     got.sort();
     let want: Vec<String> = (0..12_000u32)
-        .step_by(2)
+        .filter(|i| i % 7 != 0)
         .map(|i| format!("f{i:05}.txt"))
         .collect();
     assert_eq!(got, want);
-    for i in [0u32, 5_998, 11_998] {
+    for i in [1u32, 5_998, 11_999] {
         let b = std::fs::read(out.join(format!("many/f{i:05}.txt"))).unwrap();
         assert_eq!(b, i.to_string().as_bytes());
     }

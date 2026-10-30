@@ -37,7 +37,7 @@ pub enum Selection {
     All,
     /// The entries D-90's globs select (a directory's match selects its subtree).
     Globs(lpk_core::Selection),
-    /// The entries picked by id (an index into the entry table; [`IdSet`]): picks are not
+    /// The entries picked by id (an index into the entry table, for a foreign archive the position in its listing; [`IdSet`]): picks are not
     /// rewritten as globs: they reach the engine as an id set, so any number of picks and any
     /// name. A picked directory is its subtree.
     Ids(Arc<IdSet>),
@@ -113,7 +113,8 @@ pub struct Info {
 /// One entry as [`Session::for_each`] hands it out.
 #[derive(Debug, Clone, Copy)]
 pub struct EntryRef<'a> {
-    /// The entry's id: its index in the entry table (what [`Selection::Ids`] and
+    /// The entry's id: its index in the entry table (for a foreign archive, its position in
+    /// the listing; what [`Selection::Ids`] and
     /// [`Session::read_entry`] take).
     pub id: u32,
     /// The generation the entry belongs to (0 for a foreign archive).
@@ -894,15 +895,20 @@ impl Session {
         s: &Selection,
         f: &mut dyn FnMut(&EntryRef<'_>) -> ControlFlow<()>,
     ) -> Result<(), Error> {
-        // Picked ids are closed over directories first, so every consumer sees one set.
-        if let Selection::Ids(ids) = s {
-            let closed = Selection::Ids(Arc::new(self.close_ids(g, ids)?));
-            return self.walk_raw(g, &closed, f);
-        }
-        self.walk_raw(g, s, f)
+        self.walk_raw(g, &self.resolved(g, s)?, f)
     }
 
-    /// `ids` closed over directories: an entry is in when its id is picked or the entry of
+    /// `s` with picked ids closed over directories (one walk or two; a foreign archive's ids
+    /// also carry the listing's fingerprint): the form every consumer of one call shares, so
+    /// `for_each`, `preflight`, `extract` and `export` agree. Globs and All are cloned.
+    fn resolved(&self, g: &ReadGuard<'_>, s: &Selection) -> Result<Selection, Error> {
+        match s {
+            Selection::Ids(ids) => Ok(Selection::Ids(Arc::new(self.close_ids(g, ids)?))),
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// `ids` closed over directories, over a set whose capacity is the table's length: an entry is in when its id is picked or the entry of
     /// one of its ancestor directories is, whatever the table order (a directory listed
     /// after its children still selects them; D-90's rule that a directory is its subtree).
     fn close_ids(&self, g: &ReadGuard<'_>, ids: &IdSet) -> Result<IdSet, Error> {
@@ -916,6 +922,13 @@ impl Session {
             ControlFlow::Continue(())
         })?;
         let mut closed = IdSet::new(total);
+        if dirs.is_empty() {
+            // No directory picked: nothing to close over.
+            for id in ids.iter().filter(|&id| id < total) {
+                closed.insert(id);
+            }
+            return Ok(closed);
+        }
         self.walk_raw(g, &Selection::All, &mut |e| {
             let path = e.path();
             if ids.contains(e.id)
@@ -1143,9 +1156,11 @@ impl Session {
     /// The destination directory `to` resolves to (the smart rule needs the top level).
     pub fn destination(&self, s: &Selection, to: &Destination) -> Result<PathBuf, Error> {
         let g = self.read_guard(&CancelToken::new())?;
-        self.destination_in(&g, s, to)
+        let s = self.resolved(&g, s)?;
+        self.destination_in(&g, &s, to)
     }
 
+    /// `s` must be [`resolved`](Self::resolved).
     fn destination_in(
         &self,
         g: &ReadGuard<'_>,
@@ -1157,7 +1172,7 @@ impl Session {
             Destination::NewFolder { beside } => Ok(self.fresh_folder(beside)),
             Destination::Smart { beside } => {
                 let mut tops: Vec<String> = Vec::new();
-                self.walk(g, s, &mut |e| {
+                self.walk_raw(g, s, &mut |e| {
                     let top = e.path().split('/').next().unwrap_or_default();
                     if !tops.iter().any(|t| t == top) {
                         tops.push(top.to_string());
@@ -1203,12 +1218,13 @@ impl Session {
         c: &CancelToken,
     ) -> Result<Preflight, Error> {
         let g = self.read_guard(c)?;
+        let s = &self.resolved(&g, s)?;
         let dir = self.destination_in(&g, s, to)?;
         let mut p = Preflight {
             dir: dir.clone(),
             ..Preflight::default()
         };
-        self.walk(&g, s, &mut |e| {
+        self.walk_raw(&g, s, &mut |e| {
             p.entries += 1;
             if e.kind() == EntryKind::File {
                 p.files += 1;
@@ -1222,32 +1238,27 @@ impl Session {
         Ok(p)
     }
 
-    /// The engine's selection of `s`. Ids: the picks closed over directories
-    /// ([`close_ids`](Self::close_ids)) as the engine's id set (no cap, any name); every entry
+    /// The engine's selection of a [`resolved`](Self::resolved) `s`. Ids: the closed picks as
+    /// the engine's id set (no cap, any name; a foreign archive's with the listing's
+    /// fingerprint, which the extraction checks against its own fresh listing); every entry
     /// picked is the whole archive, none picked is a usage error.
-    fn core_selection(
-        &self,
-        g: &ReadGuard<'_>,
-        s: &Selection,
-    ) -> Result<lpk_core::Selection, Error> {
+    fn core_selection(&self, s: &Selection) -> Result<lpk_core::Selection, Error> {
         match s {
             Selection::All => Ok(lpk_core::Selection::all()),
             Selection::Globs(x) => Ok(x.clone()),
-            Selection::Ids(ids) => {
-                let mut total = 0u64;
-                self.walk_raw(g, &Selection::All, &mut |_| {
-                    total += 1;
-                    ControlFlow::Continue(())
-                })?;
-                let closed = self.close_ids(g, ids)?;
+            Selection::Ids(closed) => {
                 let picked = closed.count();
                 if picked == 0 {
                     return Err(Error::usage("no entry picked"));
                 }
-                if picked == total {
+                if picked == u64::from(closed.capacity()) {
                     return Ok(lpk_core::Selection::all());
                 }
-                Ok(lpk_core::Selection::from_ids(closed.iter()))
+                let mut sel = lpk_core::Selection::from_ids(closed.iter(), closed.capacity());
+                if let Kind::Foreign(_) = &self.kind {
+                    sel = sel.with_fingerprint(self.listing()?.fingerprint());
+                }
+                Ok(sel)
             }
         }
     }
@@ -1263,7 +1274,8 @@ impl Session {
         m: &Monitor,
     ) -> Result<ExtractReport, Error> {
         let g = self.read_guard(&m.cancel)?;
-        let select = self.core_selection(&g, s)?;
+        let s = &self.resolved(&g, s)?;
+        let select = self.core_selection(s)?;
         let dir = self.destination_in(&g, s, to)?;
         let m = &g.monitor(m);
         let policy = lpk_core::Policy::new(o.overwrite, o.symlinks);
@@ -1335,7 +1347,7 @@ impl Session {
         }
         check_export_target(&self.path, out, o.force)?;
         let g = self.read_guard(&m.cancel)?;
-        let select = self.core_selection(&g, s)?;
+        let select = self.core_selection(&self.resolved(&g, s)?)?;
         let m = &g.monitor(m);
         let mut a = self.fork()?;
         let opts = lpk_core::ExtractOptions {

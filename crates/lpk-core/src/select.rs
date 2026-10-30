@@ -27,7 +27,41 @@ pub struct Selection {
     patterns: Vec<String>,
     set: Option<GlobSet>,
     /// The id-set form: bit `i` is entry `i`.
-    ids: Option<std::sync::Arc<Vec<u64>>>,
+    ids: Option<std::sync::Arc<IdPicks>>,
+}
+
+/// An id set and, for a foreign archive, the fingerprint of the listing it was numbered
+/// against.
+#[derive(Debug, Default)]
+struct IdPicks {
+    bits: Vec<u64>,
+    fingerprint: Option<Fingerprint>,
+}
+
+/// What identifies a listing (E5-4): the member count and a digest of every member's path and
+/// size in listing order. An id set built against one listing is refused against another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprint {
+    count: u64,
+    digest: [u8; 32],
+}
+
+impl Fingerprint {
+    /// The fingerprint of members given as `(path, size)` in listing order.
+    pub fn of<'a>(members: impl IntoIterator<Item = (&'a str, u64)>) -> Self {
+        let mut h = blake3::Hasher::new();
+        let mut count = 0u64;
+        for (path, size) in members {
+            h.update(&(path.len() as u64).to_le_bytes());
+            h.update(path.as_bytes());
+            h.update(&size.to_le_bytes());
+            count += 1;
+        }
+        Fingerprint {
+            count,
+            digest: *h.finalize().as_bytes(),
+        }
+    }
 }
 
 fn id_picked(bits: &[u64], i: usize) -> bool {
@@ -81,22 +115,42 @@ impl Selection {
         })
     }
 
-    /// The entries with these indices (the position in the entry table); an index past the
-    /// end of the archive selects nothing. No directory closure: the caller adds a picked
+    /// The entries with these indices (the position in the entry table, for a foreign
+    /// archive in its listing) of a table of `len` entries; an index at or past `len`
+    /// selects nothing and costs nothing. No directory closure: the caller adds a picked
     /// directory's subtree.
-    pub fn from_ids(ids: impl IntoIterator<Item = u32>) -> Self {
-        let mut bits: Vec<u64> = Vec::new();
-        for id in ids {
-            let w = id as usize / 64;
-            if w >= bits.len() {
-                bits.resize(w + 1, 0);
-            }
-            bits[w] |= 1 << (id % 64);
+    pub fn from_ids(ids: impl IntoIterator<Item = u32>, len: u32) -> Self {
+        let mut bits = vec![0u64; (len as usize).div_ceil(64)];
+        for id in ids.into_iter().filter(|&id| id < len) {
+            bits[id as usize / 64] |= 1 << (id % 64);
         }
         Selection {
-            ids: Some(std::sync::Arc::new(bits)),
+            ids: Some(std::sync::Arc::new(IdPicks {
+                bits,
+                fingerprint: None,
+            })),
             ..Selection::default()
         }
+    }
+
+    /// An id set tied to the listing it was numbered against ([`Fingerprint::of`]); foreign
+    /// extraction refuses it, before writing, against a listing that differs
+    /// ([`ForeignError::ArchiveChanged`](crate::ForeignError::ArchiveChanged)). A selection
+    /// that is not an id set is returned unchanged.
+    #[must_use]
+    pub fn with_fingerprint(mut self, fingerprint: Fingerprint) -> Self {
+        if let Some(picks) = &self.ids {
+            self.ids = Some(std::sync::Arc::new(IdPicks {
+                bits: picks.bits.clone(),
+                fingerprint: Some(fingerprint),
+            }));
+        }
+        self
+    }
+
+    /// The fingerprint an id set is tied to, if any.
+    pub fn fingerprint(&self) -> Option<&Fingerprint> {
+        self.ids.as_ref().and_then(|p| p.fingerprint.as_ref())
     }
 
     /// True when no pattern and no id set was given.
@@ -150,7 +204,7 @@ impl Selection {
     /// [`matches`](Self::matches).
     pub fn selects(&self, index: usize, path: &str) -> bool {
         match &self.ids {
-            Some(bits) => id_picked(bits, index),
+            Some(p) => id_picked(&p.bits, index),
             None => self.matches(path),
         }
     }
@@ -162,11 +216,11 @@ impl Selection {
         if self.is_all() {
             return Ok(items);
         }
-        if let Some(bits) = &self.ids {
+        if let Some(p) = &self.ids {
             return Ok(items
                 .into_iter()
                 .enumerate()
-                .filter(|(i, _)| id_picked(bits, *i))
+                .filter(|(i, _)| id_picked(&p.bits, *i))
                 .map(|(_, t)| t)
                 .collect());
         }
@@ -226,8 +280,8 @@ impl Hits<'_> {
     pub fn record(&mut self, path: &str) -> bool {
         let index = self.next;
         self.next += 1;
-        if let Some(bits) = &self.selection.ids {
-            return id_picked(bits, index);
+        if let Some(p) = &self.selection.ids {
+            return id_picked(&p.bits, index);
         }
         if self.selection.is_all() {
             return true;
@@ -258,7 +312,7 @@ mod tests {
 
     #[test]
     fn an_id_set_selects_by_position_whatever_the_names() {
-        let s = Selection::from_ids([0, 2, 70, 200_000]);
+        let s = Selection::from_ids([0, 2, 70, 200_000, u32::MAX], 200_001);
         assert!(!s.is_all());
         let names = vec!["a", r"b\c", "a", "d"];
         let kept = s.filter(names.clone(), |p| p).unwrap();
@@ -274,7 +328,7 @@ mod tests {
         let got: Vec<bool> = names.iter().map(|p| h.record(p)).collect();
         assert_eq!(got, [true, false, true, false]);
         h.check().unwrap();
-        let none = Selection::from_ids([]);
+        let none = Selection::from_ids([], 4);
         assert!(!none.is_all());
         assert!(none.filter(names, |p| p).unwrap().is_empty());
     }
