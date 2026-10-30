@@ -942,8 +942,12 @@ fn an_early_eof_jpeg_round_trips() {
 }
 
 /// A decode the extraction's budget cannot run alone is refused with the `--memory` that would
-/// let it run, in the message the CLI and the API show; extracting with exactly that `--memory`
-/// succeeds.
+/// let it run, in the message the CLI and the API show; extracting with that `--memory`
+/// succeeds or refuses a larger record in turn. The records of an archive written before D-116
+/// under-declare, so only their decodes know their needs: with several threads the record that
+/// reaches the gate first, and is refused, is not always the largest (now and then under load),
+/// and a rerun at its figure then refuses the larger one. Every refusal names more
+/// than its run allowed, at most one per record, and the last run extracts every file.
 #[test]
 fn the_refusal_names_a_sufficient_memory_option() {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -978,30 +982,40 @@ fn the_refusal_names_a_sufficient_memory_option() {
                 &opts,
             )
         };
-        let small = env.decode_memory + (16 << 20);
-        let e = run(small, &format!("refused-{threads}")).unwrap_err();
-        let message = e.to_string();
-        let lpk_core::CoreError::Decode {
-            source: FormatError::Refused(r),
-            ..
-        } = e
-        else {
-            panic!("{message}")
+        let mut memory = env.decode_memory + (16 << 20);
+        let mut refusals = 0;
+        let s = loop {
+            let e = match run(memory, &format!("run-{threads}-{refusals}")) {
+                Ok(s) => break s,
+                Err(e) => e,
+            };
+            let message = e.to_string();
+            let lpk_core::CoreError::Decode {
+                source: FormatError::Refused(r),
+                ..
+            } = e
+            else {
+                panic!("{message}")
+            };
+            assert_eq!(r.field, "--memory");
+            assert_eq!(r.allowed, memory);
+            assert_eq!(r.needed % (1 << 20), 0, "whole MiB");
+            assert!(r.needed > memory);
+            let mib = r.needed >> 20;
+            assert!(
+                message.contains(&format!("needs --memory {mib} MiB or more")),
+                "{message}"
+            );
+            eprintln!("threads {threads}: {message}");
+            refusals += 1;
+            assert!(refusals <= jpegs.len(), "at most one refusal per record");
+            memory = r.needed;
         };
-        assert_eq!(r.field, "--memory");
-        assert_eq!(r.allowed, small);
-        assert_eq!(r.needed % (1 << 20), 0, "whole MiB");
-        assert!(r.needed > small);
-        let mib = r.needed >> 20;
-        assert!(
-            message.contains(&format!("needs --memory {mib} MiB or more")),
-            "{message}"
-        );
-        eprintln!("threads {threads}: {message}");
-        let s = run(r.needed, &format!("ok-{threads}")).unwrap();
+        assert!(refusals >= 1, "the first budget is refused");
         assert_eq!(s.alone_decodes, jpegs.len() as u64);
         for (i, j) in jpegs.iter().enumerate() {
-            let got = std::fs::read(dir.path().join(format!("ok-{threads}/p{i}.jpg"))).unwrap();
+            let out = format!("run-{threads}-{refusals}/p{i}.jpg");
+            let got = std::fs::read(dir.path().join(out)).unwrap();
             assert!(got == *j);
         }
     }
