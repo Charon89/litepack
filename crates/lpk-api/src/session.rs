@@ -37,9 +37,10 @@ pub enum Selection {
     All,
     /// The entries D-90's globs select (a directory's match selects its subtree).
     Globs(lpk_core::Selection),
-    /// The entries picked by id (an index into the entry table, for a foreign archive the position in its listing; [`IdSet`]): picks are not
-    /// rewritten as globs: they reach the engine as an id set, so any number of picks and any
-    /// name. A picked directory is its subtree.
+    /// The entries picked by id (an index into the entry table, for a foreign archive the
+    /// position in its listing; [`IdSet`]): picks are not rewritten as globs: they reach the
+    /// engine as an id set, so any number of picks and any name. A picked directory is its
+    /// subtree.
     Ids(Arc<IdSet>),
 }
 
@@ -223,6 +224,17 @@ pub struct Preflight {
     pub bytes: u64,
     /// Selected entries whose target already exists.
     pub existing: u64,
+    /// Bytes free on the destination's volume (the nearest existing ancestor of
+    /// [`Preflight::dir`]); `None` when the system cannot say.
+    pub free: Option<u64>,
+}
+
+/// Free bytes on the volume that holds `dir`: asked of its nearest existing ancestor (the
+/// folder may not exist yet), `None` when the system cannot say.
+fn free_beside(dir: &Path) -> Option<u64> {
+    dir.ancestors()
+        .find(|a| !a.as_os_str().is_empty() && a.exists())
+        .and_then(lpk_procstat_sys::free_space)
 }
 
 /// What `test` checked.
@@ -908,9 +920,10 @@ impl Session {
         }
     }
 
-    /// `ids` closed over directories, over a set whose capacity is the table's length: an entry is in when its id is picked or the entry of
-    /// one of its ancestor directories is, whatever the table order (a directory listed
-    /// after its children still selects them; D-90's rule that a directory is its subtree).
+    /// `ids` closed over directories, over a set whose capacity is the table's length: an entry
+    /// is in when its id is picked or the entry of one of its ancestor directories is, whatever
+    /// the table order (a directory listed after its children still selects them; D-90's rule
+    /// that a directory is its subtree).
     fn close_ids(&self, g: &ReadGuard<'_>, ids: &IdSet) -> Result<IdSet, Error> {
         let mut dirs = std::collections::HashSet::new();
         let mut total = 0u32;
@@ -1221,6 +1234,7 @@ impl Session {
         let s = &self.resolved(&g, s)?;
         let dir = self.destination_in(&g, s, to)?;
         let mut p = Preflight {
+            free: free_beside(&dir),
             dir: dir.clone(),
             ..Preflight::default()
         };

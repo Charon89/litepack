@@ -96,6 +96,11 @@ pub fn journal_dir() -> Option<PathBuf> {
     state_dir().map(|d| d.join("journal"))
 }
 
+/// The recent archives and destinations (E5-4), Rust's alone.
+pub fn recents_file() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("recents.json"))
+}
+
 /// WebView2's user data folder.
 pub fn webview_dir() -> Option<PathBuf> {
     state_dir().map(|d| d.join("WebView2"))

@@ -27,6 +27,7 @@ pub mod app;
 pub mod batch;
 pub mod browse;
 pub mod cli;
+pub mod extract;
 pub mod forward;
 pub mod grants;
 pub mod journal;
@@ -35,6 +36,7 @@ pub mod ops;
 pub mod outbox;
 pub mod paths;
 pub mod pick;
+pub mod recents;
 pub mod security;
 pub mod settings;
 pub mod strings;
@@ -57,6 +59,35 @@ pub struct GuiError {
     pub message: String,
     /// The detail.
     pub detail: String,
+    /// The entries of a partial operation that failed, each with its reason.
+    #[serde(skip_serializing_if = "no_entries")]
+    pub entries: Box<[EntryFailure]>,
+    /// An envelope refusal's figures: what the archive needs and what this PC allows (the
+    /// page offers "Allow X" for a memory refusal).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<Box<RefusalFigures>>,
+}
+
+/// One entry of a partial operation that failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EntryFailure {
+    /// The entry's path in the archive.
+    pub path: String,
+    /// The error's variant name.
+    pub kind: String,
+    /// Why it failed.
+    pub reason: String,
+}
+
+/// The figures of an envelope refusal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RefusalFigures {
+    /// The envelope field (`--memory` for a decode that needs more memory).
+    pub field: String,
+    /// What the archive needs.
+    pub needed: u64,
+    /// What this PC allows.
+    pub allowed: u64,
 }
 
 impl GuiError {
@@ -73,13 +104,47 @@ impl GuiError {
 
 impl From<lpk_api::Error> for GuiError {
     fn from(e: lpk_api::Error) -> Self {
+        let refusal = e.refusal().map(|r| {
+            Box::new(RefusalFigures {
+                field: r.field.to_string(),
+                needed: r.needed,
+                allowed: r.allowed,
+            })
+        });
+        // The operation's own entry list (lpk-api fills none today), else the one entry the
+        // failure names, with the engine's reason.
+        let mut entries: Vec<EntryFailure> = e
+            .entries
+            .iter()
+            .map(|x| EntryFailure {
+                path: x.path.clone(),
+                kind: x.kind.clone(),
+                reason: x.message.clone(),
+            })
+            .collect();
+        if entries.is_empty() {
+            if let Some(path) = e.entry_path() {
+                entries.push(EntryFailure {
+                    path: path.to_string(),
+                    kind: e.kind.clone(),
+                    reason: e.message.clone(),
+                });
+            }
+        }
+        let entries = entries.into_boxed_slice();
         GuiError {
             class: e.class.name().to_string(),
             kind: e.kind.clone(),
             message: e.class.message().to_string(),
             detail: e.message,
+            entries,
+            refusal,
         }
     }
+}
+
+fn no_entries(v: &[EntryFailure]) -> bool {
+    v.is_empty()
 }
 
 impl std::fmt::Display for GuiError {

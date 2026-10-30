@@ -20,8 +20,12 @@ use std::time::Duration;
 
 use lpk_api::{Class, CreateSettings, Event, Monitor, Tier};
 use lpk_gui::activation::{activate, Activation};
+use lpk_gui::app::RecentLists;
 use lpk_gui::app::{App, Opened};
 use lpk_gui::browse::{SelectAction, Status, ViewInfo, ViewRequest};
+use lpk_gui::extract::{
+    Dest, ExtractResult, Plan, Prompter, Request as ExtractRequest, Scope, Verb as ExtractVerb,
+};
 use lpk_gui::forward::Forwarder;
 use lpk_gui::grants::{Grant, GrantKind, Granted};
 use lpk_gui::journal::{startup_report, Notice as StartupNotice};
@@ -34,6 +38,7 @@ use lpk_gui::{cli, paths, strings, GuiError};
 use serde::Serialize;
 use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, DragDropEvent, Manager, RunEvent, State, WebviewUrl, WindowEvent};
+use zeroize::Zeroizing;
 
 use crate::updates;
 
@@ -133,12 +138,179 @@ async fn set_settings(host: State<'_, Host>, settings: Settings) -> Result<(), G
     host.settings.set(settings)
 }
 
+/// The native password dialog (E5-4), run on the main thread while the blocking task waits on a
+/// channel (the event loop is never blocked), owned by the main window and in its theme. The
+/// password goes into wiped memory and to the engine; the page learns only the outcome.
+struct NativePrompter {
+    handle: AppHandle,
+    /// The operation's token: a cancel (or the exit, which cancels every token) ends the wait,
+    /// and the main-thread closure shows no box once it is set.
+    token: lpk_api::CancelToken,
+}
+
+impl Prompter for NativePrompter {
+    fn password(&self, archive: &str, wrong: bool) -> Option<Zeroizing<String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let owner = owner(&self.handle);
+        let dark = self
+            .handle
+            .get_webview_window(MAIN_WINDOW)
+            .and_then(|w| w.theme().ok())
+            .is_some_and(|t| t == tauri::Theme::Dark);
+        let mut texts = strings::password_texts(false);
+        texts.title = format!("{} - {archive}", texts.title);
+        if wrong {
+            texts.prompt = format!("{}\n{}", strings::get("password.wrong"), texts.prompt);
+        }
+        let token = self.token.clone();
+        self.handle
+            .run_on_main_thread(move || {
+                if token.is_cancelled() {
+                    let _ = tx.send(Ok(None));
+                    return;
+                }
+                let _ = tx.send(lpk_gui_sys::password_prompt(owner, &texts, dark));
+            })
+            .ok()?;
+        lpk_gui::extract::wait_for_answer(&rx, &self.token)?
+            .ok()
+            .flatten()
+    }
+}
+
 #[tauri::command]
-async fn open_archive(host: State<'_, Host>, grant: Grant, op: u64) -> Result<Opened, GuiError> {
+async fn open_archive(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    grant: Grant,
+    op: u64,
+) -> Result<Opened, GuiError> {
     let app = host.app.clone();
     blocking(move || {
         let g = app.ops.begin(op, false)?;
-        app.open(&grant, &g.token)
+        app.open_with(
+            &grant,
+            &g.token,
+            &NativePrompter {
+                handle,
+                token: g.token.clone(),
+            },
+        )
+    })
+    .await
+}
+
+/// A monitor that sends each progress event down `progress` and watches `token`.
+fn monitor_of(progress: Channel<ProgressDto>, token: lpk_api::CancelToken) -> Monitor {
+    Monitor::new(
+        Arc::new(move |e: &Event| {
+            let _ = progress.send(ProgressDto {
+                stage: e.stage.name(),
+                files_done: e.files_done,
+                files_total: e.files_total,
+                bytes_in: e.bytes_in,
+                bytes_out: e.bytes_out,
+                done: e.done,
+            });
+        }),
+        token,
+    )
+}
+
+/// What the extract dialog shows before anything is written: the counts, what exists, the
+/// free space (a destination that does not fit is refused here, naming both figures).
+#[tauri::command]
+async fn extract_plan(
+    host: State<'_, Host>,
+    session: u64,
+    dest: Dest,
+    scope: Scope,
+    op: u64,
+) -> Result<Plan, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, false)?;
+        app.extract_plan(session, &dest, scope, &g.token)
+    })
+    .await
+}
+
+/// Extract from an open archive (a heavy operation: queued behind any other).
+#[tauri::command]
+async fn extract_run(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    session: u64,
+    request: ExtractRequest,
+    op: u64,
+    progress: Channel<ProgressDto>,
+) -> Result<ExtractResult, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, true)?;
+        let monitor = monitor_of(progress, g.token.clone());
+        app.extract_run(
+            session,
+            &request,
+            &NativePrompter {
+                handle,
+                token: g.token.clone(),
+            },
+            &monitor,
+        )
+    })
+    .await
+}
+
+/// The verbs `--extract-here` (`here`: Smart) and `--extract-to` (`to`: a new folder) for one
+/// archive: open, extract everything beside it, close. `memory` is "Allow X" after a refusal.
+#[tauri::command]
+async fn extract_archive(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    grant: Grant,
+    verb: String,
+    memory: Option<u64>,
+    op: u64,
+    progress: Channel<ProgressDto>,
+) -> Result<ExtractResult, GuiError> {
+    let verb = match verb.as_str() {
+        "here" => ExtractVerb::Here,
+        "to" => ExtractVerb::To,
+        other => return Err(GuiError::usage(format!("verb {other:?}"))),
+    };
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, true)?;
+        let monitor = monitor_of(progress, g.token.clone());
+        app.extract_archive(
+            &grant,
+            verb,
+            memory,
+            &NativePrompter {
+                handle,
+                token: g.token.clone(),
+            },
+            &monitor,
+        )
+    })
+    .await
+}
+
+/// The recent archives and destinations that still exist, as grants minted now.
+#[tauri::command]
+async fn recents(host: State<'_, Host>) -> Result<RecentLists, GuiError> {
+    let app = host.app.clone();
+    blocking(move || Ok(app.recents())).await
+}
+
+/// Forget the recent archives and destinations.
+#[tauri::command]
+async fn clear_recents(host: State<'_, Host>) -> Result<(), GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        app.clear_recents();
+        Ok(())
     })
     .await
 }
@@ -257,19 +429,7 @@ async fn create_archive(
     let app = host.app.clone();
     blocking(move || {
         let g = app.ops.begin(op, true)?;
-        let monitor = Monitor::new(
-            Arc::new(move |e: &Event| {
-                let _ = progress.send(ProgressDto {
-                    stage: e.stage.name(),
-                    files_done: e.files_done,
-                    files_total: e.files_total,
-                    bytes_in: e.bytes_in,
-                    bytes_out: e.bytes_out,
-                    done: e.done,
-                });
-            }),
-            g.token.clone(),
-        );
+        let monitor = monitor_of(progress, g.token.clone());
         let settings = CreateSettings {
             tier,
             ..CreateSettings::default()
@@ -316,6 +476,7 @@ fn forwarded(handle: &AppHandle, argv: Vec<String>, cwd: String) {
         Ok(s) => {
             if let Some(verb) = s.verb {
                 let activation = activate(&verb, &host.app.grants);
+                host.app.note_activation(&activation);
                 push(&host, Notice::Activated { activation });
             }
         }
@@ -406,7 +567,11 @@ pub fn run() -> i32 {
                 (None, Some(e))
             }
         };
-    let app = Arc::new(App::new(paths::journal_dir().as_deref()).with_open_dir(paths::open_dir()));
+    let app = Arc::new(
+        App::new(paths::journal_dir().as_deref())
+            .with_open_dir(paths::open_dir())
+            .with_recents(lpk_gui::recents::Recents::open(paths::recents_file())),
+    );
     let setup_app = app.clone();
 
     let built = tauri::Builder::default()
@@ -425,6 +590,11 @@ pub fn run() -> i32 {
             select,
             open_entry,
             pick,
+            extract_plan,
+            extract_run,
+            extract_archive,
+            recents,
+            clear_recents,
             close_archive,
             create_archive,
             cancel,
@@ -443,6 +613,9 @@ pub fn run() -> i32 {
             }
             let check = settings.get().update_check;
             let activation = startup_verb.as_ref().map(|v| activate(v, &app.grants));
+            if let Some(a) = &activation {
+                app.note_activation(a);
+            }
             let worker_handle = a.handle().clone();
             let forwarder = Forwarder::start(move |(argv, cwd): (Vec<String>, String)| {
                 forwarded(&worker_handle, argv, cwd)
@@ -546,6 +719,7 @@ pub fn run() -> i32 {
                     host.app.grants.mint(kind, p)
                 })
                 .collect();
+            host.app.note_drop(&items);
             push(&host, Notice::Dropped { items });
         }
         RunEvent::ExitRequested { code, api, .. } => {

@@ -182,6 +182,19 @@ impl Browser {
         &self.picks
     }
 
+    /// The picks inside the current view (its scope and filter): what the status bar counts
+    /// and what an extraction takes (E5-4), and how many picks the view hides.
+    pub fn picked_in_view(&self) -> (IdSet, u64) {
+        let mut inside = self.model.new_selection();
+        for &id in self.view.ids() {
+            if self.picks.contains(id) {
+                inside.insert(id);
+            }
+        }
+        let hidden = self.picks.count().saturating_sub(inside.count());
+        (inside, hidden)
+    }
+
     /// Build the view `r` asks for; the selection is kept across a sort or a filter and
     /// cleared when the scope changes (another folder, or the other mode).
     pub fn set_view(&mut self, r: &ViewRequest, c: &CancelToken) -> Result<ViewInfo, GuiError> {
@@ -265,8 +278,35 @@ impl Browser {
             folders: t.directories,
             bytes: t.bytes,
             picked: t.picked,
-            picked_bytes: t.picked_bytes,
+            picked_bytes: self.picked_bytes(),
         }
+    }
+
+    /// The bytes an extraction of the picks inside the view writes: a picked folder counts its
+    /// whole subtree, and each file counts once even when it and its folder are both picked
+    /// (the dialog's figures come from the engine's preflight of the same set and agree).
+    fn picked_bytes(&self) -> u64 {
+        let mut seen = self.model.new_selection();
+        let mut total = 0u64;
+        let mut stack: Vec<u32> = self
+            .view
+            .ids()
+            .iter()
+            .copied()
+            .filter(|&id| self.picks.contains(id))
+            .collect();
+        while let Some(id) = stack.pop() {
+            if seen.contains(id) {
+                continue;
+            }
+            seen.insert(id);
+            match self.model.row(id).map(|r| (r.kind, r.size)) {
+                Some((0, size)) => total += size,
+                Some((1, _)) => stack.extend_from_slice(self.model.children(id)),
+                _ => {}
+            }
+        }
+        total
     }
 
     /// A batch v1 of at most `count` rows (and [`batch::MAX_ROWS`]) from view row `first`.

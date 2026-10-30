@@ -245,6 +245,22 @@ impl Error {
         match &*self.source {
             Source::Format(FormatError::Refused(r))
             | Source::Core(CoreError::Format(FormatError::Refused(r))) => Some(r.clone()),
+            // Not a foreign archive's `LimitExceeded { flag: "--memory" }`: its limit is the
+            // session's open option, not the extraction's, so an "Allow" could never lift it.
+            _ => None,
+        }
+    }
+
+    /// The archive path of the entry a failure names (a block that failed to decode, a name that
+    /// cannot be extracted), not the archive's file: what a front end lists as the failing
+    /// entry when the operation reports no entry list of its own.
+    pub fn entry_path(&self) -> Option<&str> {
+        match &*self.source {
+            Source::Core(
+                CoreError::Decode { path, .. }
+                | CoreError::DuplicatePath { path }
+                | CoreError::UnportableName { path, .. },
+            ) => Some(path),
             _ => None,
         }
     }
@@ -591,5 +607,25 @@ pub fn format_path(e: &FormatError) -> Option<String> {
         | FormatError::UnsafePath { path, .. }
         | FormatError::SymlinkRefused { path } => Some(path.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_foreign_memory_limit_carries_no_refusal_figures() {
+        let e = Error::core(
+            CoreError::Foreign(ForeignError::LimitExceeded {
+                limit: "listing memory",
+                value: 9,
+                max: 5,
+                flag: "--memory",
+            }),
+            None,
+        );
+        assert!(e.refusal().is_none());
+        assert_eq!(e.class, Class::TooLarge);
     }
 }

@@ -9,16 +9,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lpk_api::{
-    CancelToken, CreateSettings, Destination, ExtractOptions, Globs, Monitor, OpenOptions, Root,
-    RunSummary, Selection, Session, Sources,
+    CancelToken, CreateSettings, Destination, ExtractOptions, Globs, Monitor, Root, RunSummary,
+    Selection, Session, Sources,
 };
 use serde::Serialize;
 
 use crate::browse::{Browser, SelectAction, Status, ViewInfo, ViewRequest};
-use crate::grants::{Grant, GrantKind, Grants};
+use crate::extract::{open_unlocked, NoPrompt, Prompter, Scope};
+use crate::grants::{Grant, GrantKind, Granted, Grants};
 use crate::journal::{Journal, Recovered};
 use crate::open::{OpenFolders, Opening};
 use crate::ops::Ops;
+use crate::recents::Recents;
 use crate::{write, GuiError};
 
 /// The refusal of a second `pick` while a picker is open.
@@ -46,10 +48,18 @@ pub struct Opened {
 }
 
 #[derive(Debug)]
-struct Slot {
-    session: Arc<Session>,
-    name: String,
-    browser: Mutex<Browser>,
+pub(crate) struct Slot {
+    /// The session; replaced by a reopened one when a password is given (E5-4).
+    pub(crate) cell: Mutex<Arc<Session>>,
+    pub(crate) name: String,
+    pub(crate) browser: Mutex<Browser>,
+}
+
+impl Slot {
+    /// The session now open.
+    pub(crate) fn session(&self) -> Arc<Session> {
+        lock(&self.cell).clone()
+    }
 }
 
 /// The process's state.
@@ -66,6 +76,20 @@ pub struct App {
     opened: OpenFolders,
     motw_off: bool,
     picking: std::sync::atomic::AtomicBool,
+    recents: Recents,
+    /// A test's injected free space (bytes) in place of the volume's.
+    free: Option<u64>,
+    /// A test seam: the memory budget (bytes) of every extraction that names none.
+    memory: Option<u64>,
+}
+
+/// The recent lists as the page receives them: labels and opaque grants minted when listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecentLists {
+    /// Archives (grants of kind `archive`), newest first.
+    pub archives: Vec<Granted>,
+    /// Destinations (grants of kind `folder`), newest first.
+    pub destinations: Vec<Granted>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -84,11 +108,107 @@ impl App {
             opened: OpenFolders::new(None),
             motw_off: false,
             picking: std::sync::atomic::AtomicBool::new(false),
+            recents: Recents::open(None),
+            free: None,
+            memory: None,
         }
     }
 
+    /// Keep the recent lists in `recents`.
+    pub fn with_recents(mut self, recents: Recents) -> Self {
+        self.recents = recents;
+        self
+    }
+
+    /// A test seam, not a setting: every extraction that names no memory budget uses `bytes`.
+    pub fn with_memory_budget(mut self, bytes: u64) -> Self {
+        self.memory = Some(bytes);
+        self
+    }
+
+    pub(crate) fn memory_default(&self) -> Option<u64> {
+        self.memory
+    }
+
+    /// Treat `bytes` as the free space of every destination (tests: no disk is filled).
+    pub fn with_free_space(mut self, bytes: u64) -> Self {
+        self.free = Some(bytes);
+        self
+    }
+
+    pub(crate) fn free_override(&self) -> Option<u64> {
+        self.free
+    }
+
+    pub(crate) fn motw_off(&self) -> bool {
+        self.motw_off
+    }
+
+    /// The picks of session `slot` inside its current view for `scope`, and how many picks
+    /// the filter hides (left out).
+    pub(crate) fn selection(
+        &self,
+        slot: &Slot,
+        scope: Scope,
+    ) -> Result<(Selection, u64), GuiError> {
+        match scope {
+            Scope::All => Ok((Selection::All, 0)),
+            Scope::Selected => {
+                let b = lock(&slot.browser);
+                let (ids, hidden) = b.picked_in_view();
+                if ids.count() == 0 {
+                    return Err(GuiError::usage("nothing is selected"));
+                }
+                Ok((Selection::Ids(Arc::new(ids)), hidden))
+            }
+        }
+    }
+
+    /// Record the archives of an activation (a verb on the command line or from a second
+    /// instance); the page's own paths are never recorded.
+    pub fn note_activation(&self, a: &crate::activation::Activation) {
+        for item in &a.items {
+            if item.kind == GrantKind::Archive {
+                if let Ok(p) = self.grants.resolve(&item.grant, GrantKind::Archive) {
+                    self.recents.record_archive(&p);
+                }
+            }
+        }
+    }
+
+    /// Record the archives dropped on the window.
+    pub fn note_drop(&self, items: &[Granted]) {
+        for item in items {
+            if item.kind == GrantKind::Archive {
+                if let Ok(p) = self.grants.resolve(&item.grant, GrantKind::Archive) {
+                    self.recents.record_archive(&p);
+                }
+            }
+        }
+    }
+
+    /// The recent archives and destinations that still exist, as grants minted now.
+    pub fn recents(&self) -> RecentLists {
+        let (a, d) = self.recents.list();
+        RecentLists {
+            archives: a
+                .iter()
+                .map(|p| self.grants.mint(GrantKind::Archive, p))
+                .collect(),
+            destinations: d
+                .iter()
+                .map(|p| self.grants.mint(GrantKind::Folder, p))
+                .collect(),
+        }
+    }
+
+    /// Forget the recent archives and destinations.
+    pub fn clear_recents(&self) {
+        self.recents.clear();
+    }
+
     /// Mark of the Web opted out for the archives this state opens (E6-5's setting,
-    /// [`OpenOptions::motw_off`]); an opened entry is zoned all the same.
+    /// [`lpk_api::OpenOptions::motw_off`]); an opened entry is zoned all the same.
     pub fn with_motw_off(mut self, off: bool) -> Self {
         self.motw_off = off;
         self
@@ -122,7 +242,25 @@ impl App {
             }
         }
         let _release = Release(&self.picking);
-        crate::pick::pick(&self.grants, picker, purpose)
+        let granted = crate::pick::pick(&self.grants, picker, purpose)?;
+        // What the user chose in a native dialog is recorded: archives, and folders chosen as
+        // a destination (never an input folder, never one derived from an archive).
+        for g in &granted {
+            match purpose {
+                crate::pick::Purpose::Archive => {
+                    if let Ok(p) = self.grants.resolve(&g.grant, GrantKind::Archive) {
+                        self.recents.record_archive(&p);
+                    }
+                }
+                crate::pick::Purpose::Destination => {
+                    if let Ok(p) = self.grants.resolve(&g.grant, GrantKind::Folder) {
+                        self.recents.record_destination(&p);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(granted)
     }
 
     /// The folder opened entries go into (each into a fresh folder of its own; none: opening
@@ -142,17 +280,45 @@ impl App {
 
     /// Open the archive of `grant`.
     pub fn open(&self, grant: &Grant, cancel: &CancelToken) -> Result<Opened, GuiError> {
+        self.open_with(grant, cancel, &NoPrompt)
+    }
+
+    /// Open the archive of `grant`, asking `prompter` for the password when the archive's
+    /// names are encrypted (E5-4): a wrong one asks again, Cancel ends with `Cancelled`.
+    pub fn open_with(
+        &self,
+        grant: &Grant,
+        cancel: &CancelToken,
+        prompter: &dyn Prompter,
+    ) -> Result<Opened, GuiError> {
         let path = self.grants.resolve(grant, GrantKind::Archive)?;
-        let options = OpenOptions {
-            motw_off: self.motw_off,
-            ..OpenOptions::default()
+        // An archive with encrypted names opens keyless and refuses its listing: ask for the
+        // password (again when wrong) and reopen with it.
+        let mut ask = None;
+        let (session, model) = loop {
+            let s = Arc::new(open_unlocked(&path, self.motw_off, prompter, ask)?);
+            match s.model(cancel) {
+                Ok(m) => break (s, m),
+                Err(e)
+                    if matches!(
+                        e.class,
+                        lpk_api::Class::PasswordRequired | lpk_api::Class::WrongPassword
+                    ) =>
+                {
+                    let _ = s.close();
+                    if !prompter.interactive() {
+                        return Err(e.into());
+                    }
+                    ask = Some(e.class == lpk_api::Class::WrongPassword);
+                }
+                Err(e) => return Err(e.into()),
+            }
         };
-        let session = Arc::new(Session::open(&path, &options)?);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let browser = Browser::new(session.model(cancel)?, cancel)?;
+        let browser = Browser::new(model, cancel)?;
         let view = browser.info();
         let info = session.info().clone();
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -160,7 +326,7 @@ impl App {
         lock(&self.sessions).insert(
             id,
             Arc::new(Slot {
-                session,
+                cell: Mutex::new(session),
                 name: name.clone(),
                 browser: Mutex::new(browser),
             }),
@@ -177,7 +343,7 @@ impl App {
         })
     }
 
-    fn slot(&self, id: u64) -> Result<Arc<Slot>, GuiError> {
+    pub(crate) fn slot(&self, id: u64) -> Result<Arc<Slot>, GuiError> {
         lock(&self.sessions)
             .get(&id)
             .cloned()
@@ -266,7 +432,7 @@ impl App {
             opening: true,
             ..ExtractOptions::default()
         };
-        let report = slot.session.extract(
+        let report = slot.session().extract(
             &Selection::Ids(Arc::new(ids)),
             &Destination::Dir(dir.clone()),
             &options,
@@ -297,7 +463,7 @@ impl App {
     pub fn close(&self, id: u64) -> Result<(), GuiError> {
         let slot = lock(&self.sessions).remove(&id);
         if let Some(s) = slot {
-            s.session.close()?;
+            s.session().close()?;
         }
         Ok(())
     }
@@ -346,7 +512,7 @@ impl App {
         self.ops.cancel_all();
         let slots: Vec<Arc<Slot>> = lock(&self.sessions).drain().map(|(_, s)| s).collect();
         for s in slots {
-            let _ = s.session.close();
+            let _ = s.session().close();
         }
         let joined = self.ops.join(timeout);
         self.opened.clean();
