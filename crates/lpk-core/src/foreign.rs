@@ -1796,6 +1796,150 @@ pub fn extract_file(
     r.map(|()| summary)
 }
 
+/// Read one member of the foreign archive at `archive` into memory through a sandboxed
+/// worker (E5-6): `id` is its listing position and `fingerprint` the listing the id was
+/// numbered against (checked against the worker's fresh listing before any member data is
+/// read, [`ForeignError::ArchiveChanged`]). A member whose declared size exceeds `cap` is
+/// refused before any data is read, and the stream is stopped and refused the same way when
+/// more than `cap` bytes arrive (a declared size can lie); the refusal is
+/// `FormatError::Refused` on the field `preview cap`, as the `.lpk` reader's. Only a regular
+/// file is read. Nothing is written to disk by the host.
+#[cfg(any(windows, target_os = "linux"))]
+pub fn read_member_file(
+    archive: &Path,
+    id: u32,
+    fingerprint: Option<&crate::select::Fingerprint>,
+    cap: u64,
+    credentials: Option<&Credentials>,
+    opts: &Options,
+    monitor: &Monitor,
+) -> Result<Vec<u8>, CoreError> {
+    let (mut conv, _format, _name) = start(archive, opts, credentials, monitor)?;
+    let r = conv
+        .list()
+        .and_then(|records| read_member(&mut conv, records, id, fingerprint, cap));
+    match r {
+        Ok(v) => {
+            conv.close();
+            Ok(v)
+        }
+        Err(e) => {
+            if matches!(e, CoreError::Cancelled) {
+                conv.cancel();
+            } else {
+                conv.kill();
+            }
+            Err(e)
+        }
+    }
+}
+
+fn preview_cap(needed: u64, cap: u64) -> CoreError {
+    FormatError::Refused(lpk_format::Refusal {
+        field: "preview cap",
+        needed,
+        allowed: cap,
+    })
+    .into()
+}
+
+fn read_member<P: Peer>(
+    conv: &mut Conv<'_, P>,
+    records: Vec<Record>,
+    id: u32,
+    fingerprint: Option<&crate::select::Fingerprint>,
+    cap: u64,
+) -> Result<Vec<u8>, CoreError> {
+    let checked = check_records(records, conv.archive_len, conv.format)?;
+    if let Some(want) = fingerprint {
+        let got = crate::select::Fingerprint::of(
+            checked.entries.iter().map(|e| (e.path.as_str(), e.size)),
+        );
+        if &got != want {
+            return Err(ForeignError::ArchiveChanged.into());
+        }
+    }
+    let i = id as usize;
+    let entry = checked.entries.get(i).ok_or(ForeignError::Unsupported {
+        message: format!("no entry {id}"),
+    })?;
+    let hard = checked.hard_target[i].is_some();
+    if entry.kind != EntryKind::File || hard {
+        return Err(CoreError::InvalidOption(format!(
+            "{}: not a regular file ({})",
+            escape(entry.path.as_bytes()),
+            if hard { "hard link" } else { entry.kind.name() }
+        )));
+    }
+    let (name, size, index) = (entry.path.clone(), entry.size, checked.index[i]);
+    // E4's declared-output limit, as extraction applies it before any `ReadMember`.
+    if let Some(f) = conv.limits.max_expansion {
+        let max = f.saturating_mul(conv.archive_len.max(1));
+        if size > max {
+            return Err(ForeignError::LimitExceeded {
+                limit: "declared output",
+                value: size,
+                max,
+                flag: "--max-expansion",
+            }
+            .into());
+        }
+    }
+    if size > cap {
+        return Err(preview_cap(size, cap));
+    }
+    if !conv.has_password && checked.encrypted[i] {
+        return Err(FormatError::PasswordRequired.into());
+    }
+    conv.monitor.cancel.check()?;
+    conv.send(&Request::ReadMember {
+        indices: vec![index],
+    })?;
+    match conv.next("a member's start")? {
+        Response::MemberStart { index: x } if x == index => {}
+        Response::Error { code, message } => return Err(reader_error(code, &message)),
+        other => return Err(unexpected("MemberStart", &other)),
+    }
+    let mut out = Vec::with_capacity(usize::try_from(size.min(1 << 20)).unwrap_or(0));
+    loop {
+        match conv.next("member data")? {
+            Response::Data(d) if d.is_empty() => {
+                return Err(protocol("an empty Data frame".into()));
+            }
+            Response::Data(d) => {
+                let total = (out.len() as u64).saturating_add(d.len() as u64);
+                if total > cap {
+                    return Err(preview_cap(total, cap));
+                }
+                if total > size {
+                    return Err(ForeignError::SizeMismatch {
+                        path: escape(name.as_bytes()),
+                        declared: size,
+                        received: total,
+                    }
+                    .into());
+                }
+                conv.data += d.len() as u64;
+                out.extend_from_slice(&d);
+            }
+            Response::MemberEnd { index: x, .. } if x == index => {
+                if out.len() as u64 != size {
+                    return Err(ForeignError::SizeMismatch {
+                        path: escape(name.as_bytes()),
+                        declared: size,
+                        received: out.len() as u64,
+                    }
+                    .into());
+                }
+                conv.ends += 1;
+                return Ok(out);
+            }
+            Response::Error { code, message } => return Err(reader_error(code, &message)),
+            other => return Err(unexpected("Data or MemberEnd", &other)),
+        }
+    }
+}
+
 /// Cleanup after a run: the partial file removed on failure, the worker told to cancel (on
 /// a cancellation) or closed, then killed.
 fn finish_run<P: Peer>(
