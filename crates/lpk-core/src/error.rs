@@ -192,6 +192,10 @@ pub enum ForeignError {
         /// Bytes free.
         available: u64,
     },
+    /// An extraction by entry ids (E5-4) found a listing that is not the one the ids were
+    /// numbered against: the archive was replaced or rewritten since it was opened.
+    #[error("the archive changed since it was opened; open it again and repeat the selection")]
+    ArchiveChanged,
 }
 
 /// How the sandboxed worker failed (D-77: each a named kind, exit 2).

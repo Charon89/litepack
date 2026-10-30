@@ -541,6 +541,7 @@ fn foreign_and_worker() -> Vec<(CoreError, Class, &'static str)> {
             Class::DiskFull,
             "NoSpace",
         ),
+        (ForeignError::ArchiveChanged, Class::Io, "ArchiveChanged"),
     ];
     let worker = [
         (WorkerError::Spawn { message: s() }, Class::Sandbox, "Spawn"),
@@ -614,7 +615,7 @@ fn foreign_and_worker() -> Vec<(CoreError, Class, &'static str)> {
 #[test]
 fn every_foreign_and_worker_variant_has_its_class() {
     let all = foreign_and_worker();
-    assert_eq!(all.len(), 18);
+    assert_eq!(all.len(), 19);
     for (e, class, kind) in all {
         assert_eq!(core_class(&e), class, "{e}");
         let a = lpk_api::Error::core(e, None);
@@ -756,6 +757,7 @@ fn foreign_variant(e: &ForeignError) -> &'static str {
         ForeignError::OverlappingEntries { .. } => "OverlappingEntries",
         ForeignError::LimitExceeded { .. } => "LimitExceeded",
         ForeignError::NoSpace { .. } => "NoSpace",
+        ForeignError::ArchiveChanged => "ArchiveChanged",
     }
 }
 
@@ -802,6 +804,6 @@ fn every_variant_has_a_row() {
             _ => {}
         }
     }
-    assert_eq!(fo.len(), 7, "ForeignError rows");
+    assert_eq!(fo.len(), 8, "ForeignError rows");
     assert_eq!(wo.len(), 11, "WorkerError rows");
 }

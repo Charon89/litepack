@@ -69,6 +69,6 @@ pub use pipeline::{ClassifyStage, ModelStage, Pipeline, RunSummary, SealOptions,
 pub use policy::{DefaultPolicy, ExtractPolicy, Overwrite, Policy, Symlinks};
 pub use priors::ProvidedDictionaries;
 pub use progress::{CancelToken, Event, Monitor, Progress, Stage};
-pub use select::{Hits, Selection};
+pub use select::{Fingerprint, Hits, Selection};
 pub use source::Source;
 pub use store::{archive_store, archive_store_file, write_inputs, StoreOptions};

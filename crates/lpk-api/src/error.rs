@@ -312,6 +312,7 @@ pub fn foreign_class(e: &ForeignError) -> Class {
         ForeignError::OverlappingEntries { .. } => Class::Unsafe,
         ForeignError::LimitExceeded { .. } => Class::TooLarge,
         ForeignError::NoSpace { .. } => Class::DiskFull,
+        ForeignError::ArchiveChanged => Class::Io,
     }
 }
 
@@ -457,6 +458,7 @@ pub fn foreign_kind(e: &ForeignError) -> &'static str {
         ForeignError::OverlappingEntries { .. } => "OverlappingEntries",
         ForeignError::LimitExceeded { .. } => "LimitExceeded",
         ForeignError::NoSpace { .. } => "NoSpace",
+        ForeignError::ArchiveChanged => "ArchiveChanged",
     }
 }
 
