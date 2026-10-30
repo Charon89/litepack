@@ -221,6 +221,17 @@ pub struct Preflight {
     pub bytes: u64,
     /// Selected entries whose target already exists.
     pub existing: u64,
+    /// Bytes free on the destination's volume (the nearest existing ancestor of
+    /// [`Preflight::dir`]); `None` when the system cannot say.
+    pub free: Option<u64>,
+}
+
+/// Free bytes on the volume that holds `dir`: asked of its nearest existing ancestor (the
+/// folder may not exist yet), `None` when the system cannot say.
+fn free_beside(dir: &Path) -> Option<u64> {
+    dir.ancestors()
+        .find(|a| !a.as_os_str().is_empty() && a.exists())
+        .and_then(lpk_procstat_sys::free_space)
 }
 
 /// What `test` checked.
@@ -1165,6 +1176,7 @@ impl Session {
         let g = self.read_guard(c)?;
         let dir = self.destination_in(&g, s, to)?;
         let mut p = Preflight {
+            free: free_beside(&dir),
             dir: dir.clone(),
             ..Preflight::default()
         };

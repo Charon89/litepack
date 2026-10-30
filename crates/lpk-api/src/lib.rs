@@ -43,7 +43,7 @@ pub use lpk_core::{
     CancelToken, Event, ExportSummary, ExtractSummary, FileOrder, Monitor, Overwrite, Progress,
     Root, RunSummary, Selection as Globs, Sources, Stage, Symlinks,
 };
-pub use lpk_format::{Credentials, Entry, EntryFlags, EntryKind, Refusal, Suite};
+pub use lpk_format::{Credentials, Entry, EntryFlags, EntryKind, FormatError, Refusal, Suite};
 
 /// E3-2's extraction-path rules on top of the format's (`/`-separated `path`): no Windows device
 /// name (with any extension), no `:`, no trailing dot or space, no absolute path, backslash or

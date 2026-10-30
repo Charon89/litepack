@@ -13,6 +13,7 @@
     <button type="button" id="action-open" data-string="action.open"></button>
     <button type="button" id="action-files" data-string="action.files"></button>
     <button type="button" id="action-folder" data-string="action.folder"></button>
+    <button type="button" id="action-extract" data-string="action.extract" aria-keyshortcuts="Control+E"></button>
     <label class="setting"><input id="update-check" type="checkbox"><span data-string="settings.updates"></span></label>
   </div>
   <ul id="notices" class="notices" role="list" data-label="notices.label" hidden></ul>
@@ -27,6 +28,11 @@
   </header>
   <main>
     <p id="hint" class="hint" data-string="drop.hint"></p>
+    <section id="recents" class="recents" hidden>
+      <h2 data-string="recents.label"></h2>
+      <ul id="recent-list"></ul>
+      <button type="button" id="recents-clear" data-string="recents.clear"></button>
+    </section>
     <div id="list" class="list" role="treegrid" aria-rowcount="0" aria-multiselectable="true" tabindex="0" data-label="list.label" hidden>
       <div class="row head" role="row" aria-rowindex="1">
         <span role="columnheader" aria-sort="none" data-key="name"><button type="button" id="col-name" data-string="list.name"></button></span>

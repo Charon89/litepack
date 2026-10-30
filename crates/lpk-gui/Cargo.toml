@@ -26,6 +26,8 @@ lpk-gui-sys = { path = "../lpk-gui-sys", version = "0.0.1" }
 getrandom = "0.3.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# E5-4: a password the native prompt returns lives in wiped memory (the same crate as lpk-gui-sys).
+zeroize = "1.9.0"
 
 # Tauri is a Windows-only dependency (docs/notes/e5-design.md section 1): on Linux the crate
 # builds the command layer and a stub `main`. Its tree is checked by `cargo deny` for the shipped

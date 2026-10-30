@@ -182,6 +182,19 @@ impl Browser {
         &self.picks
     }
 
+    /// The picks inside the current view (its scope and filter): what the status bar counts
+    /// and what an extraction takes (E5-4), and how many picks the view hides.
+    pub fn picked_in_view(&self) -> (IdSet, u64) {
+        let mut inside = self.model.new_selection();
+        for &id in self.view.ids() {
+            if self.picks.contains(id) {
+                inside.insert(id);
+            }
+        }
+        let hidden = self.picks.count().saturating_sub(inside.count());
+        (inside, hidden)
+    }
+
     /// Build the view `r` asks for; the selection is kept across a sort or a filter and
     /// cleared when the scope changes (another folder, or the other mode).
     pub fn set_view(&mut self, r: &ViewRequest, c: &CancelToken) -> Result<ViewInfo, GuiError> {

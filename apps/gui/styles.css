@@ -254,3 +254,65 @@ main {
     border-color: CanvasText;
   }
 }
+
+/* The extract wizard (E5-4) and the recent archives. */
+.recents {
+  margin: 0 auto;
+  max-width: 30rem;
+}
+
+.recents ul {
+  list-style: none;
+  padding: 0;
+}
+
+.wizard {
+  min-width: 24rem;
+  max-width: min(40rem, 92vw);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+}
+
+.wizard::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.wizard fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0 0 0.75rem;
+}
+
+.wizard .choice {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.125rem 0;
+}
+
+.wizard progress {
+  width: 100%;
+}
+
+.wizard .check {
+  color: var(--muted);
+}
+
+.wizard .results,
+.wizard .entries {
+  padding-left: 1.25rem;
+}
+
+.wizard-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.wizard button:focus-visible,
+.wizard input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}

@@ -7,7 +7,8 @@
 //! - [`Handler::Open`]: opens the archive in the browser (done).
 //! - [`Handler::CreateNamed`]: `Add to "<name>.lpk"`, created at once with the defaults through
 //!   `create_archive` into the first input's folder (done; E5-5 adds its progress dialog).
-//! - [`Handler::ExtractHere`], [`Handler::ExtractTo`]: E5-4 (the smart destination rule).
+//! - [`Handler::ExtractHere`], [`Handler::ExtractTo`]: extract each archive beside itself with no
+//!   question, Smart or into `<name>` (done, E5-4: `extract_archive`).
 //! - [`Handler::CreateWizard`]: E5-5 (the create wizard).
 //! - [`Handler::Test`]: E5-8 (the test dialog).
 //! - [`Handler::Convert`]: E4's broker path into E5-1's `create` (re-creating a foreign archive).
@@ -23,9 +24,9 @@ use crate::grants::{GrantKind, Granted, Grants};
 pub enum Handler {
     /// Open the archive (`--open`, a bare path).
     Open,
-    /// Extract each archive beside itself (`--extract-here`); E5-4 completes it.
+    /// Extract each archive beside itself (`--extract-here`, the Smart destination; E5-4).
     ExtractHere,
-    /// Extract each archive into `<name>\` beside it (`--extract-to`); E5-4 completes it.
+    /// Extract each archive into `<name>\` beside it (`--extract-to`; E5-4).
     ExtractTo,
     /// The create wizard with these inputs (`--create`); E5-5 completes it.
     CreateWizard,
@@ -41,7 +42,10 @@ impl Handler {
     /// Whether the handler's action exists in this version (the others show the page's
     /// "not in this version yet" notice).
     pub fn implemented(self) -> bool {
-        matches!(self, Handler::Open | Handler::CreateNamed)
+        matches!(
+            self,
+            Handler::Open | Handler::CreateNamed | Handler::ExtractHere | Handler::ExtractTo
+        )
     }
 }
 

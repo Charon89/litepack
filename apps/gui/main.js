@@ -4,6 +4,7 @@
 // multi-selection and a status bar. No HTML sink anywhere (Trusted Types would refuse it): text
 // goes in through textContent.
 import { VirtualList } from "./list.js";
+import { createExtractor } from "./extract.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
@@ -31,6 +32,9 @@ let strings = {};
 let nextOp = 1;
 // The open archive's session, closed before another is opened (a drop).
 let session = null;
+let sessionName = "";
+// Selected rows of the current view (the status bar's count: what an extraction takes).
+let pickedCount = 0;
 let reported = false;
 // What the view shows; Rust builds it (`view`).
 const state = { mode: "flat", dir: null, key: "path", descending: false, filter: "", glob: false };
@@ -66,6 +70,7 @@ function setStatus(text) {
 const bytes = (n) => Number(n).toLocaleString();
 
 function showSelection(s) {
+  pickedCount = s.picked;
   const parts = [t("status.view", { entries: bytes(s.entries), files: bytes(s.files), folders: bytes(s.folders), bytes: bytes(s.bytes) })];
   if (s.picked > 0) {
     parts.push(t("status.picked", { count: bytes(s.picked), bytes: bytes(s.pickedBytes) }));
@@ -238,15 +243,27 @@ async function createNamed(a) {
   setStatus(t("create.done", { name }));
 }
 
-// The handlers of the verbs whose action a later task brings; each says so in a notice until then.
-// E5-4 completes extractHere and extractTo (its destination rule).
-function extractHere() {
-  showNotices([{ kind: "text", text: t("verb.extract-here") }]);
+// The extract wizard (extract.js) and the verbs' queue.
+const extractor = createExtractor({
+  core,
+  t,
+  nextOp: () => nextOp++,
+  session: () => session,
+  picked: () => pickedCount,
+  archiveName: () => sessionName,
+  showError: (e) => showError(e),
+});
+
+// `--extract-here` (Smart) and `--extract-to` (a new folder) beside each archive, no question.
+function extractHere(a) {
+  return extractor.runVerb("here", a.items);
 }
 
-function extractTo() {
-  showNotices([{ kind: "text", text: t("verb.extract-to") }]);
+function extractTo(a) {
+  return extractor.runVerb("to", a.items);
 }
+
+// The handlers of the verbs whose action a later task brings; each says so in a notice until then.
 
 // E5-5 completes createWizard (the create wizard, with these inputs).
 function createWizard() {
@@ -357,9 +374,12 @@ async function openArchive(granted) {
   }
   const opened = await core.invoke("open_archive", { grant: granted.grant, op: nextOp++ });
   session = opened.session;
+  sessionName = opened.name;
+  $("action-extract").disabled = false;
   Object.assign(state, { mode: "flat", dir: null, key: "path", descending: false });
   info = opened.view;
   $("hint").hidden = true;
+  $("recents").hidden = true;
   $("bar").hidden = false;
   $("list").hidden = false;
   renderCrumbs();
@@ -389,7 +409,44 @@ function showError(e) {
   }
 }
 
+// The recent archives on the empty window (Rust lists the ones that still exist, as fresh
+// grants); one button clears the recent archives and destinations.
+async function renderRecents() {
+  const box = $("recents");
+  if (session !== null) {
+    box.hidden = true;
+    return;
+  }
+  const lists = await core.invoke("recents");
+  const ul = $("recent-list");
+  ul.replaceChildren();
+  for (const g of lists.archives) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = g.name;
+    b.addEventListener("click", () => openArchive(g).catch(showError));
+    li.append(b);
+    ul.append(li);
+  }
+  box.hidden = lists.archives.length === 0;
+}
+
 function wireControls() {
+  $("action-extract").disabled = true;
+  $("action-extract").addEventListener("click", () => extractor.openDialog().catch(showError));
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e" && session !== null && !document.querySelector("dialog[open]")) {
+      e.preventDefault();
+      extractor.openDialog().catch(showError);
+    }
+  });
+  $("recents-clear").addEventListener("click", () => {
+    core
+      .invoke("clear_recents")
+      .then(() => renderRecents())
+      .catch(showError);
+  });
   $("action-open").addEventListener("click", () => openPicked().catch(showError));
   $("action-files").addEventListener("click", () => createPicked("files").catch(showError));
   $("action-folder").addEventListener("click", () => createPicked("folder").catch(showError));
@@ -447,6 +504,7 @@ async function main() {
   if (startup.activation) {
     await runActivation(startup.activation).catch(showError);
   }
+  await renderRecents().catch(showError);
   const channel = new core.Channel();
   channel.onmessage = (notice) => {
     if (notice.type === "dropped") {
