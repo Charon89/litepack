@@ -129,14 +129,34 @@ pub struct Plan {
 
 /// How the extracted data was checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Check {
     /// An `.lpk`: every file matched its BLAKE3 hash (true by construction when no entry failed).
     Blake3,
-    /// ZIP and 7z: each member against its stored checksum.
+    /// ZIP and 7z: each member matched a checksum the archive stores.
     Members,
+    /// ZIP and 7z: `matched` members matched their checksum, `none` had none stored to check.
+    Partial {
+        /// Members checked.
+        matched: u64,
+        /// Members extracted without a stored checksum.
+        none: u64,
+    },
     /// tar and the rest: nothing to verify against.
     Unverifiable,
+}
+
+/// How the run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Outcome {
+    /// The extraction finished.
+    Done,
+    /// Cancelled after files were written: the finished ones are kept, the unfinished one was
+    /// removed (D-87 (2)).
+    CancelledAfterWriting,
+    /// Cancelled before anything was written (a password prompt, the preflight, Cancel at once).
+    CancelledBeforeWriting,
 }
 
 /// A symlink not created because of its target.
@@ -174,8 +194,10 @@ pub struct ExtractResult {
     pub unprivileged_symlinks: Vec<String>,
     /// The Mark of the Web could not be written on some file.
     pub motw_unmarked: bool,
-    /// How the data was checked.
-    pub check: Check,
+    /// How the data was checked; none unless a file was written (a cancelled run claims nothing).
+    pub check: Option<Check>,
+    /// How the run ended.
+    pub outcome: Outcome,
     /// Picks the filter hid, left out.
     pub left_out: u64,
 }
@@ -290,15 +312,111 @@ fn last_name(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-fn check_of(outcome: &Extracted) -> Check {
+/// The check line of a finished extraction: only when a file was written (never "every file
+/// matched" over none); ZIP and 7z by what the members' readers reported (`unchecked`).
+pub fn check_of(outcome: &Extracted) -> Option<Check> {
     match outcome {
-        Extracted::Lpk(_) => Check::Blake3,
+        Extracted::Lpk(s) => (s.files > 0).then_some(Check::Blake3),
+        Extracted::Foreign(s) if s.files == 0 => None,
         Extracted::Foreign(s) => {
             let f = s.format.to_ascii_lowercase();
-            if f.contains("zip") || f.contains("7z") {
+            Some(if !(f.contains("zip") || f.contains("7z")) {
+                Check::Unverifiable
+            } else if s.unchecked == 0 {
                 Check::Members
             } else {
-                Check::Unverifiable
+                Check::Partial {
+                    matched: s.files.saturating_sub(s.unchecked),
+                    none: s.unchecked,
+                }
+            })
+        }
+    }
+}
+
+/// Watches the engine's events for what an extraction wrote, and passes them on.
+struct Seen {
+    files: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+    inner: Option<Arc<dyn lpk_api::Progress>>,
+}
+
+impl lpk_api::Progress for Seen {
+    fn event(&self, e: &lpk_api::Event) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if e.stage == lpk_api::Stage::Extract {
+            self.files.fetch_max(e.files_done, Relaxed);
+            self.bytes.fetch_max(e.bytes_out, Relaxed);
+        }
+        if let Some(i) = &self.inner {
+            i.event(e);
+        }
+    }
+}
+
+fn cancelled_result(
+    job: &Job<'_>,
+    folder: String,
+    files: u64,
+    bytes: u64,
+    wrote: bool,
+) -> ExtractResult {
+    ExtractResult {
+        archive: job.archive.to_string(),
+        folder,
+        files,
+        directories: 0,
+        bytes,
+        skipped: 0,
+        renamed: 0,
+        skipped_symlinks: Vec::new(),
+        refused_symlinks: Vec::new(),
+        unprivileged_symlinks: Vec::new(),
+        motw_unmarked: false,
+        check: None,
+        outcome: if wrote {
+            Outcome::CancelledAfterWriting
+        } else {
+            Outcome::CancelledBeforeWriting
+        },
+        left_out: job.left_out,
+    }
+}
+
+/// A run ended before it began (a cancelled password prompt or preflight): nothing written.
+pub(crate) fn cancelled_before(archive: &str) -> ExtractResult {
+    ExtractResult {
+        archive: archive.to_string(),
+        folder: String::new(),
+        files: 0,
+        directories: 0,
+        bytes: 0,
+        skipped: 0,
+        renamed: 0,
+        skipped_symlinks: Vec::new(),
+        refused_symlinks: Vec::new(),
+        unprivileged_symlinks: Vec::new(),
+        motw_unmarked: false,
+        check: None,
+        outcome: Outcome::CancelledBeforeWriting,
+        left_out: 0,
+    }
+}
+
+/// Wait for a native dialog's answer on `rx` without holding the exit: polls the operation's
+/// token, and gives `None` (cancelled) when it is cancelled or the sender is gone.
+pub fn wait_for_answer<T>(
+    rx: &std::sync::mpsc::Receiver<T>,
+    token: &lpk_api::CancelToken,
+) -> Option<T> {
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(v) => return Some(v),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if token.is_cancelled() {
+                    return None;
+                }
             }
         }
     }
@@ -325,7 +443,35 @@ fn attempt(s: &Session, job: &Job<'_>, monitor: &Monitor) -> Result<ExtractResul
         ..ExtractOptions::default()
     };
     // The folder the preflight chose, so that both steps agree.
-    let report = s.extract(job.selection, &Destination::Dir(pf.dir), &options, monitor)?;
+    let existed = pf.dir.exists();
+    let seen = Arc::new(Seen {
+        files: std::sync::atomic::AtomicU64::new(0),
+        bytes: std::sync::atomic::AtomicU64::new(0),
+        inner: monitor.progress.clone(),
+    });
+    let watched = Monitor {
+        progress: Some(seen.clone()),
+        cancel: monitor.cancel.clone(),
+    };
+    let dir = pf.dir.clone();
+    let report = match s.extract(job.selection, &Destination::Dir(pf.dir), &options, &watched) {
+        Ok(r) => r,
+        Err(e) if e.class == Class::Cancelled => {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (files, bytes) = (seen.files.load(Relaxed), seen.bytes.load(Relaxed));
+            // Files were written when the engine said so, or when it made the folder and it
+            // still holds something (a finished file is kept, D-87 (2)).
+            let made = !existed && std::fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_some());
+            return Ok(cancelled_result(
+                job,
+                last_name(&dir),
+                files,
+                bytes,
+                bytes > 0 || made,
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
     let (files, directories, bytes, skipped, renamed) = match &report.outcome {
         Extracted::Lpk(x) => (x.files, x.directories, x.bytes, x.skipped, x.renamed),
         Extracted::Foreign(x) => (x.files, x.directories, x.bytes, x.skipped, x.renamed),
@@ -350,13 +496,28 @@ fn attempt(s: &Session, job: &Job<'_>, monitor: &Monitor) -> Result<ExtractResul
         unprivileged_symlinks: report.unprivileged_symlinks.clone(),
         motw_unmarked: report.motw_unmarked,
         check: check_of(&report.outcome),
+        outcome: Outcome::Done,
         left_out: job.left_out,
     })
 }
 
 /// Extract with `cell`'s session; a password the content needs is asked for (the session is
-/// reopened with it and stays so), and a wrong one asks again.
+/// reopened with it and stays so), and a wrong one asks again. A cancel before the first write
+/// (the prompt, the preflight) is an `Ok` result that says nothing was written; one during it
+/// says the finished files were kept.
 pub(crate) fn run(
+    cell: &Mutex<Arc<Session>>,
+    job: &Job<'_>,
+    prompter: &dyn Prompter,
+    monitor: &Monitor,
+) -> Result<ExtractResult, GuiError> {
+    match run_inner(cell, job, prompter, monitor) {
+        Err(e) if e.is(Class::Cancelled) => Ok(cancelled_before(job.archive)),
+        other => other,
+    }
+}
+
+fn run_inner(
     cell: &Mutex<Arc<Session>>,
     job: &Job<'_>,
     prompter: &dyn Prompter,
@@ -421,7 +582,7 @@ impl App {
             selection: &selection,
             dest: &to,
             overwrite: req.conflict.overwrite(),
-            memory: req.memory,
+            memory: req.memory.or(self.memory_default()),
             free: self.free_override(),
             motw_off: self.motw_off(),
             left_out,
@@ -442,7 +603,11 @@ impl App {
     ) -> Result<ExtractResult, GuiError> {
         let path = self.grants.resolve(grant, GrantKind::Archive)?;
         let name = last_name(&path);
-        let session = open_unlocked(&path, self.motw_off(), prompter, None)?;
+        let session = match open_unlocked(&path, self.motw_off(), prompter, None) {
+            Ok(s) => s,
+            Err(e) if e.class == Class::Cancelled => return Ok(cancelled_before(&name)),
+            Err(e) => return Err(e.into()),
+        };
         let cell = Mutex::new(Arc::new(session));
         let dest = match verb {
             Verb::Here => Dest::Smart,
@@ -453,7 +618,7 @@ impl App {
             selection: &Selection::All,
             dest: &to,
             overwrite: Overwrite::Refuse,
-            memory,
+            memory: memory.or(self.memory_default()),
             free: self.free_override(),
             motw_off: self.motw_off(),
             left_out: 0,

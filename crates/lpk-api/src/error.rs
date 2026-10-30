@@ -245,6 +245,33 @@ impl Error {
         match &*self.source {
             Source::Format(FormatError::Refused(r))
             | Source::Core(CoreError::Format(FormatError::Refused(r))) => Some(r.clone()),
+            // A foreign archive whose listing outgrew the memory budget carries both figures
+            // (`value` is what the listing needed so far, a lower bound: "Allow" may refuse
+            // again with a larger figure).
+            Source::Core(CoreError::Foreign(ForeignError::LimitExceeded {
+                flag: "--memory",
+                value,
+                max,
+                ..
+            })) => Some(Refusal {
+                field: "--memory",
+                needed: *value,
+                allowed: *max,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The archive path of the entry a failure names (a block that failed to decode, a name that
+    /// cannot be extracted), not the archive's file: what a front end lists as the failing
+    /// entry when the operation reports no entry list of its own.
+    pub fn entry_path(&self) -> Option<&str> {
+        match &*self.source {
+            Source::Core(
+                CoreError::Decode { path, .. }
+                | CoreError::DuplicatePath { path }
+                | CoreError::UnportableName { path, .. },
+            ) => Some(path),
             _ => None,
         }
     }

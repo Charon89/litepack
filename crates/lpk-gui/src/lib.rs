@@ -111,7 +111,9 @@ impl From<lpk_api::Error> for GuiError {
                 allowed: r.allowed,
             })
         });
-        let entries = e
+        // The operation's own entry list (lpk-api fills none today), else the one entry the
+        // failure names, with the engine's reason.
+        let mut entries: Vec<EntryFailure> = e
             .entries
             .iter()
             .map(|x| EntryFailure {
@@ -120,6 +122,16 @@ impl From<lpk_api::Error> for GuiError {
                 reason: x.message.clone(),
             })
             .collect();
+        if entries.is_empty() {
+            if let Some(path) = e.entry_path() {
+                entries.push(EntryFailure {
+                    path: path.to_string(),
+                    kind: e.kind.clone(),
+                    reason: e.message.clone(),
+                });
+            }
+        }
+        let entries = entries.into_boxed_slice();
         GuiError {
             class: e.class.name().to_string(),
             kind: e.kind.clone(),

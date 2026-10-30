@@ -143,6 +143,9 @@ async fn set_settings(host: State<'_, Host>, settings: Settings) -> Result<(), G
 /// password goes into wiped memory and to the engine; the page learns only the outcome.
 struct NativePrompter {
     handle: AppHandle,
+    /// The operation's token: a cancel (or the exit, which cancels every token) ends the wait,
+    /// and the main-thread closure shows no box once it is set.
+    token: lpk_api::CancelToken,
 }
 
 impl Prompter for NativePrompter {
@@ -159,12 +162,19 @@ impl Prompter for NativePrompter {
         if wrong {
             texts.prompt = format!("{}\n{}", strings::get("password.wrong"), texts.prompt);
         }
+        let token = self.token.clone();
         self.handle
             .run_on_main_thread(move || {
+                if token.is_cancelled() {
+                    let _ = tx.send(Ok(None));
+                    return;
+                }
                 let _ = tx.send(lpk_gui_sys::password_prompt(owner, &texts, dark));
             })
             .ok()?;
-        rx.recv().ok()?.ok().flatten()
+        lpk_gui::extract::wait_for_answer(&rx, &self.token)?
+            .ok()
+            .flatten()
     }
 }
 
@@ -178,7 +188,14 @@ async fn open_archive(
     let app = host.app.clone();
     blocking(move || {
         let g = app.ops.begin(op, false)?;
-        app.open_with(&grant, &g.token, &NativePrompter { handle })
+        app.open_with(
+            &grant,
+            &g.token,
+            &NativePrompter {
+                handle,
+                token: g.token.clone(),
+            },
+        )
     })
     .await
 }
@@ -232,7 +249,15 @@ async fn extract_run(
     blocking(move || {
         let g = app.ops.begin(op, true)?;
         let monitor = monitor_of(progress, g.token.clone());
-        app.extract_run(session, &request, &NativePrompter { handle }, &monitor)
+        app.extract_run(
+            session,
+            &request,
+            &NativePrompter {
+                handle,
+                token: g.token.clone(),
+            },
+            &monitor,
+        )
     })
     .await
 }
@@ -258,7 +283,16 @@ async fn extract_archive(
     blocking(move || {
         let g = app.ops.begin(op, true)?;
         let monitor = monitor_of(progress, g.token.clone());
-        app.extract_archive(&grant, verb, memory, &NativePrompter { handle }, &monitor)
+        app.extract_archive(
+            &grant,
+            verb,
+            memory,
+            &NativePrompter {
+                handle,
+                token: g.token.clone(),
+            },
+            &monitor,
+        )
     })
     .await
 }

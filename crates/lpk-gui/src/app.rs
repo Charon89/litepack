@@ -79,6 +79,8 @@ pub struct App {
     recents: Recents,
     /// A test's injected free space (bytes) in place of the volume's.
     free: Option<u64>,
+    /// A test seam: the memory budget (bytes) of every extraction that names none.
+    memory: Option<u64>,
 }
 
 /// The recent lists as the page receives them: labels and opaque grants minted when listed.
@@ -108,6 +110,7 @@ impl App {
             picking: std::sync::atomic::AtomicBool::new(false),
             recents: Recents::open(None),
             free: None,
+            memory: None,
         }
     }
 
@@ -115,6 +118,16 @@ impl App {
     pub fn with_recents(mut self, recents: Recents) -> Self {
         self.recents = recents;
         self
+    }
+
+    /// A test seam, not a setting: every extraction that names no memory budget uses `bytes`.
+    pub fn with_memory_budget(mut self, bytes: u64) -> Self {
+        self.memory = Some(bytes);
+        self
+    }
+
+    pub(crate) fn memory_default(&self) -> Option<u64> {
+        self.memory
     }
 
     /// Treat `bytes` as the free space of every destination (tests: no disk is filled).

@@ -240,6 +240,9 @@ pub struct ForeignSummary {
     /// Mark of the Web: a file could not carry [`Options::zone`] (the destination's volume
     /// has no named streams, or the write failed); the caller prints one warning.
     pub motw_unmarked: bool,
+    /// Files extracted whose member the reader could not check against a stored checksum
+    /// (`MemberEnd { checked: false }`; host side only, the worker protocol is as it was).
+    pub unchecked: u64,
 }
 
 /// A foreign archive's validated listing.
@@ -1667,7 +1670,7 @@ fn stream<P: Peer>(
                             0,
                         );
                     }
-                    Response::MemberEnd { index, .. } if index == t.index => {
+                    Response::MemberEnd { index, checked } if index == t.index => {
                         if received != t.size {
                             conv.kill();
                             return Err(ForeignError::SizeMismatch {
@@ -1680,6 +1683,9 @@ fn stream<P: Peer>(
                         out.finish(t.mtime_ns)?;
                         conv.ends += 1;
                         summary.files += 1;
+                        if !checked {
+                            summary.unchecked += 1;
+                        }
                         break;
                     }
                     Response::Error { code, message } => return Err(reader_error(code, &message)),

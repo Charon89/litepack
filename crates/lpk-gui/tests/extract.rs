@@ -15,7 +15,8 @@ use lpk_api::{
 use lpk_gui::app::App;
 use lpk_gui::browse::SelectAction;
 use lpk_gui::extract::{
-    Check, Conflict, Dest, ExtractResult, NoPrompt, Prompter, Request, Scope, Verb, DISK_FIELD,
+    Check, Conflict, Dest, ExtractResult, NoPrompt, Outcome, Prompter, Request, Scope, Verb,
+    DISK_FIELD,
 };
 use lpk_gui::grants::{GrantKind, Granted};
 use lpk_gui::pick::{Picker, Purpose};
@@ -125,7 +126,7 @@ fn smart_puts_several_items_in_a_new_folder_and_a_lone_item_beside() {
     let r = o.run(Dest::Smart, Scope::All, Conflict::Refuse).unwrap();
     assert_eq!(r.folder, "a");
     assert_eq!(read(&d.path().join("a/docs/deep/c.txt")), "charlie");
-    assert_eq!(r.check, Check::Blake3);
+    assert_eq!(r.check, Some(Check::Blake3));
     // A second Smart finds `a` taken and makes `a (2)`: nothing existing is touched.
     let r = o.run(Dest::Smart, Scope::All, Conflict::Refuse).unwrap();
     assert_eq!(r.folder, "a (2)");
@@ -328,7 +329,7 @@ fn a_password_for_encrypted_names_wrong_then_right_and_cancelled() {
         )
         .unwrap();
     assert_eq!(read(&d.path().join("sealed/secret.txt")), "top secret");
-    assert_eq!(r.check, Check::Blake3);
+    assert_eq!(r.check, Some(Check::Blake3));
 }
 
 #[test]
@@ -347,8 +348,8 @@ fn encrypted_content_asks_at_extraction_and_cancel_writes_nothing() {
             &cancel,
             &Monitor::default(),
         )
-        .unwrap_err();
-    assert!(e.is(Class::Cancelled), "{e}");
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::CancelledBeforeWriting);
     assert!(!d.path().join("sealed").exists(), "nothing written");
     // Wrong then right.
     let p = Answers::new(&[Some("bad"), Some("hunter2")]);
@@ -431,8 +432,8 @@ fn cancel_before_the_run_ends_cancelled_and_leaves_nothing() {
             &NoPrompt,
             &monitor,
         )
-        .unwrap_err();
-    assert!(e.is(Class::Cancelled), "{e}");
+        .unwrap();
+    assert_eq!(e.outcome, Outcome::CancelledBeforeWriting);
     assert!(!d.path().join("a").exists());
 }
 
@@ -629,6 +630,325 @@ fn recents_come_from_dialogs_verbs_and_drops_only() {
     again.clear_recents();
     let lists = again.recents();
     assert!(lists.archives.is_empty() && lists.destinations.is_empty());
+}
+
+#[test]
+fn a_picked_folder_extracts_its_subtree_and_every_figure_agrees() {
+    let d = tempfile::tempdir().unwrap();
+    let a = plain(d.path(), "a.lpk", ENTRIES);
+    let o = open(App::new(None), &a);
+    o.pick("docs");
+    // The file and its folder both picked: its bytes count once.
+    let (_, _, rows) = lpk_gui::batch::decode(&o.app.rows(o.session, 0, 100).unwrap()).unwrap();
+    let row = rows.iter().position(|r| r.name == "docs/b.txt").unwrap() as u32;
+    let status = o
+        .app
+        .select(o.session, SelectAction::Toggle, Some(row), o.generation)
+        .unwrap();
+    assert_eq!(status.picked, 2, "the count stays the picked rows");
+    assert_eq!(status.picked_bytes, 12, "b.txt and deep/c.txt, once each");
+    let plan = o
+        .app
+        .extract_plan(
+            o.session,
+            &Dest::NewFolder,
+            Scope::Selected,
+            &CancelToken::new(),
+        )
+        .unwrap();
+    assert_eq!((plan.files, plan.bytes), (2, status.picked_bytes));
+    let r = o
+        .run(Dest::NewFolder, Scope::Selected, Conflict::Refuse)
+        .unwrap();
+    assert_eq!((r.files, r.bytes), (2, 12));
+    assert_eq!(read(&d.path().join("a/docs/deep/c.txt")), "charlie");
+    assert!(!d.path().join("a/a.txt").exists());
+}
+
+#[test]
+fn the_check_line_follows_what_the_members_reported() {
+    use lpk_api::{Extracted, ForeignSummary};
+    let zip = |files, unchecked| {
+        Extracted::Foreign(ForeignSummary {
+            format: "zip".into(),
+            files,
+            unchecked,
+            ..ForeignSummary::default()
+        })
+    };
+    assert_eq!(lpk_gui::extract::check_of(&zip(4, 0)), Some(Check::Members));
+    assert_eq!(
+        lpk_gui::extract::check_of(&zip(4, 1)),
+        Some(Check::Partial {
+            matched: 3,
+            none: 1
+        })
+    );
+    assert_eq!(
+        lpk_gui::extract::check_of(&zip(0, 0)),
+        None,
+        "no file, no claim"
+    );
+    let tar = Extracted::Foreign(ForeignSummary {
+        format: "tar".into(),
+        files: 2,
+        ..ForeignSummary::default()
+    });
+    assert_eq!(lpk_gui::extract::check_of(&tar), Some(Check::Unverifiable));
+}
+
+/// An archive of `files` incompressible files of `each` bytes, stored.
+fn big(dir: &Path, files: usize, each: usize) -> PathBuf {
+    let src = dir.join("bigsrc");
+    std::fs::create_dir_all(&src).unwrap();
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    for i in 0..files {
+        let body: Vec<u8> = (0..each)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        std::fs::write(src.join(format!("f{i:04}.bin")), body).unwrap();
+    }
+    let out = dir.join("big.lpk");
+    let s = CreateSettings {
+        tier: Tier::Store,
+        ..CreateSettings::default()
+    };
+    lpk_api::create(&Sources::contents_of(&src), &out, &s, &Monitor::default()).unwrap();
+    out
+}
+
+/// Calls `then` once two entries exist in `dir` (polled every millisecond, at most 60 s).
+fn when_files_appear(dir: PathBuf, then: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || {
+        for _ in 0..60_000 {
+            if std::fs::read_dir(&dir).is_ok_and(|d| d.count() >= 2) {
+                then();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    });
+}
+
+fn cancel_when_files_appear(dir: PathBuf, token: CancelToken) -> Monitor {
+    let t = token.clone();
+    when_files_appear(dir, move || t.cancel());
+    Monitor::with_cancel(token)
+}
+
+#[test]
+fn a_cancel_mid_run_keeps_the_finished_files_and_removes_the_unfinished_one() {
+    let d = tempfile::tempdir().unwrap();
+    let a = big(d.path(), 300, 1024 * 1024);
+    let o = open(App::new(None), &a);
+    let monitor = cancel_when_files_appear(d.path().join("big"), CancelToken::new());
+    let r = o
+        .run_with(
+            Dest::NewFolder,
+            Scope::All,
+            Conflict::Refuse,
+            None,
+            &NoPrompt,
+            &monitor,
+        )
+        .unwrap();
+    assert_eq!(r.outcome, Outcome::CancelledAfterWriting, "{r:?}");
+    assert_eq!(r.check, None, "a cancelled run claims no check");
+    let written: Vec<_> = std::fs::read_dir(d.path().join("big"))
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+    assert!(
+        !written.is_empty() && written.len() < 300,
+        "{}",
+        written.len()
+    );
+    for f in &written {
+        assert_eq!(
+            f.metadata().unwrap().len(),
+            1024 * 1024,
+            "{:?}: only finished files remain",
+            f.file_name()
+        );
+    }
+}
+
+#[test]
+fn allow_x_reruns_with_a_larger_budget_for_that_run_alone() {
+    let d = tempfile::tempdir().unwrap();
+    // A `.lpk` holding a ZIP of compressible text: the Deflate record's decode reserves memory.
+    let text = d.path().join("text");
+    std::fs::create_dir_all(&text).unwrap();
+    let line = "the quick brown fox jumps over the lazy dog 0123456789\n";
+    std::fs::write(text.join("t.txt"), line.repeat(40_000)).unwrap();
+    let t = d.path().join("t.lpk");
+    let store = CreateSettings {
+        tier: Tier::Store,
+        ..CreateSettings::default()
+    };
+    lpk_api::create(
+        &Sources::contents_of(&text),
+        &t,
+        &store,
+        &Monitor::default(),
+    )
+    .unwrap();
+    let zip_dir = d.path().join("zipdir");
+    std::fs::create_dir_all(&zip_dir).unwrap();
+    let session = lpk_api::Session::open(&t, &Default::default()).unwrap();
+    session
+        .export(
+            &lpk_api::Selection::All,
+            &zip_dir.join("t.zip"),
+            &lpk_api::ExportOptions {
+                container: lpk_api::Container::Zip,
+                method: lpk_api::Method::Deflate,
+                password: None,
+                force: false,
+                threads: None,
+                memory: None,
+            },
+            &Monitor::default(),
+        )
+        .unwrap();
+    let a = d.path().join("a.lpk");
+    let peel = CreateSettings {
+        tier: Tier::Balanced,
+        deflate_peel: Some(true),
+        ..CreateSettings::default()
+    };
+    lpk_api::create(
+        &Sources::contents_of(&zip_dir),
+        &a,
+        &peel,
+        &Monitor::default(),
+    )
+    .unwrap();
+    // The test seam lowers the default budget to the floor; a real run refuses and names both
+    // figures.
+    //
+    // The engine refuses a budget below what one block needs (an `InvalidOption` naming the
+    // figure); a decode record's `Refused` needs a record larger than its block, which no
+    // fixture here builds (E5-4 review: the figures' path is `an_envelope_refusal_carries...`).
+    let o = open(App::new(None).with_memory_budget(470_000), &a);
+    let e = o
+        .run(Dest::NewFolder, Scope::All, Conflict::Refuse)
+        .unwrap_err();
+    assert!(e.detail.contains("--memory"), "{e}");
+    assert!(!d.path().join("a").exists(), "nothing written");
+    // Allow X: that run alone, with the larger budget, extracts; nothing is kept, so the next
+    // run is refused again.
+    let ok = o
+        .run_with(
+            Dest::NewFolder,
+            Scope::All,
+            Conflict::Refuse,
+            Some(64 << 20),
+            &NoPrompt,
+            &Monitor::default(),
+        )
+        .unwrap();
+    assert_eq!(ok.files, 1);
+    assert!(o
+        .run(Dest::NewFolder, Scope::All, Conflict::Refuse)
+        .is_err());
+}
+
+#[test]
+fn the_exit_cancels_and_joins_a_run_in_progress() {
+    let d = tempfile::tempdir().unwrap();
+    let a = big(d.path(), 300, 1024 * 1024);
+    let app = std::sync::Arc::new(App::new(None));
+    let grant = app.grants.mint(GrantKind::Archive, &a).grant;
+    let (tx, rx) = std::sync::mpsc::channel();
+    when_files_appear(d.path().join("big"), move || {
+        let _ = tx.send(());
+    });
+    let worker = {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let g = app.ops.begin(1, true).unwrap();
+            let monitor = Monitor::with_cancel(g.token.clone());
+            app.extract_archive(&grant, Verb::To, None, &NoPrompt, &monitor)
+        })
+    };
+    rx.recv_timeout(std::time::Duration::from_secs(60)).unwrap();
+    let t = std::time::Instant::now();
+    assert!(
+        app.shutdown(std::time::Duration::from_secs(30)),
+        "the run was joined"
+    );
+    assert!(t.elapsed() < std::time::Duration::from_secs(30));
+    let r = worker.join().unwrap().unwrap();
+    assert_eq!(r.outcome, Outcome::CancelledAfterWriting);
+}
+
+/// A prompter whose user never answers, as the host's waits.
+struct Hang(CancelToken);
+
+impl Prompter for Hang {
+    fn password(&self, _: &str, _: bool) -> Option<Zeroizing<String>> {
+        let (_keep_open, rx) = std::sync::mpsc::channel::<()>();
+        lpk_gui::extract::wait_for_answer(&rx, &self.0).map(|()| Zeroizing::new(String::new()))
+    }
+}
+
+#[test]
+fn a_prompt_nobody_answers_ends_with_the_cancel_promptly() {
+    let d = tempfile::tempdir().unwrap();
+    let a = sealed(d.path(), true);
+    let o = open(App::new(None), &a);
+    let token = CancelToken::new();
+    let t2 = token.clone();
+    let monitor = Monitor::with_cancel(token.clone());
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        t2.cancel();
+    });
+    let t = std::time::Instant::now();
+    let r = o
+        .run_with(
+            Dest::NewFolder,
+            Scope::All,
+            Conflict::Refuse,
+            None,
+            &Hang(token),
+            &monitor,
+        )
+        .unwrap();
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(r.outcome, Outcome::CancelledBeforeWriting);
+    assert!(!d.path().join("sealed").exists());
+}
+
+#[test]
+fn a_really_damaged_archive_names_its_failure() {
+    let d = tempfile::tempdir().unwrap();
+    let a = big(d.path(), 1, 300_000);
+    let mut bytes = std::fs::read(&a).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(&a, bytes).unwrap();
+    let o = open(App::new(None), &a);
+    let e = o
+        .run(Dest::NewFolder, Scope::All, Conflict::Refuse)
+        .unwrap_err();
+    eprintln!(
+        "damaged: class={} kind={} detail={} entries={:?}",
+        e.class, e.kind, e.detail, e.entries
+    );
+    assert!(e.is(Class::Damaged), "{e}");
+    assert_eq!(e.entries.len(), 1, "the failing entry is listed");
+    assert!(!e.entries[0].reason.is_empty());
 }
 
 #[test]
