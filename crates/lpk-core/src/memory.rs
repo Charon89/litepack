@@ -18,6 +18,20 @@
 //! [`EXTRACT_CEILING`] resolved likewise. What extraction counts against the budget is in
 //! [`crate::extract`].
 //!
+//! **The raised extraction default** (E2-25). An archive whose largest declared decoder term
+//! (the envelope's `decode_memory` beyond `max_block_plain`) cuts the decode workers below the
+//! thread budget's decoders (D-95) at the default above gets a larger default instead
+//! ([`BudgetSource::Raised`]): `fixed + decoders * (per_block + per_worker) + held + 2 *
+//! declared`, at most [`EXTRACT_CEILING`] and at most half the physical memory (no raise when
+//! the physical memory is unknown), never below the tier's default. That is what every decoder
+//! counts at its block terms, one decoded block held, the largest need in the decode pool, and
+//! as much again so that the need shares the pool with the decodes beside it instead of
+//! waiting for it to empty (D-131 (2)). Within the caps the pool's cut applies as before; an
+//! archive whose workers are not cut keeps the tier's default; a given `--memory` is never
+//! changed. The terms come from the envelope, the index and the plan's needed blocks (no block
+//! is read): [`crate::extract`]'s `Sizing::default_budget`, the one function behind
+//! extraction, export, `lpk-api` and the GUI.
+//!
 //! **The model.** Compressing holds:
 //!
 //! - per block in flight (`per_block`): the block's plain bytes (`block_size`), its encoding
@@ -76,7 +90,8 @@ pub const FAST_CEILING: u64 = 2 * GIB;
 pub const BALANCED_CEILING: u64 = 4 * GIB;
 /// The ceiling the reader of `lpk x` and `lpk t` is limited by when `--memory` is not given:
 /// it is opened before its envelope is known, so this is the largest tier ceiling. The
-/// extraction's own budget is the envelope's tier's ([`EnvelopeTier::of`]).
+/// extraction's own budget is the envelope's tier's ([`EnvelopeTier::of`]), raised up to this
+/// figure for a large declared record need (module documentation).
 pub const EXTRACT_CEILING: u64 = 4 * GIB;
 /// The largest block the Fast tier writes with its default block size, `FastOptions::block_size`
 /// (the format writer's `DEFAULT_BLOCK_SIZE`), the one the CLI uses: it cannot change it. A
@@ -171,6 +186,16 @@ pub enum BudgetSource {
         /// The machine's physical memory.
         physical: Option<u64>,
     },
+    /// Raised for the largest declared record need (E2-25, module documentation): the tier's
+    /// default cut the decode workers below the thread budget's decoders.
+    Raised {
+        /// The tier's ceiling (the default before the raise).
+        ceiling: u64,
+        /// The machine's physical memory.
+        physical: u64,
+        /// The archive's largest declared decoder term.
+        need: u64,
+    },
     /// Given (`--memory`).
     Given,
 }
@@ -179,7 +204,7 @@ impl BudgetSource {
     /// `default` or `--memory`, for `-v`.
     pub fn name(&self) -> &'static str {
         match self {
-            BudgetSource::Default { .. } => "default",
+            BudgetSource::Default { .. } | BudgetSource::Raised { .. } => "default",
             BudgetSource::Given => "--memory",
         }
     }

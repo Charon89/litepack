@@ -454,3 +454,148 @@ fn no_reservation_leaks_after_an_error_or_a_panic() {
     let r = lpk_format::reserve(&ctx, 250 * MIB).unwrap().unwrap();
     assert!(r.grant().alone);
 }
+
+/// The terms of the controller's diagnostic of one Fast archive of `full/photo-jpeg` at ed573b1
+/// (24 threads, 4 writers): per block 24,146,416 B with a decoder floor of 1,572,865 B, the
+/// declared term `declared`, about 27 MB fixed, a held block of 4,630,869 B.
+fn photo_sizing(declared: u64) -> Sizing {
+    Sizing {
+        threads: 24,
+        writers: 4,
+        needed: 3054,
+        fixed_shared: 27_000_000,
+        per_block: 24_146_416,
+        per_worker: 256 << 10,
+        held: 4_630_869,
+        decoder: 1_572_865,
+        declared,
+        budget_given: false,
+    }
+}
+
+const GIB: u64 = 1 << 30;
+/// The diagnostic machine's memory.
+const PHYSICAL: u64 = 95 * GIB;
+/// The diagnostic archive's declared term: 2,005,814,109 B of `decode_memory` less its
+/// 4,499,797 B `max_block_plain`.
+const PHOTO_DECLARED: u64 = 2_001_314_312;
+
+/// E2-25: an archive whose declared term does not cut the workers keeps the tier's default.
+#[test]
+fn a_small_declaration_keeps_the_fast_ceiling() {
+    let s = photo_sizing(1_572_865);
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(
+        b,
+        Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL))
+    );
+    assert_eq!(s.size(b.bytes).0, 20);
+    // Unknown physical memory: no raise.
+    let s = photo_sizing(PHOTO_DECLARED);
+    assert_eq!(
+        s.default_budget(crate::memory::FAST_CEILING, None),
+        Budget::default_for(crate::memory::FAST_CEILING, None)
+    );
+}
+
+/// E2-25: the diagnostic's archive was cut to 5 workers at the Fast ceiling; its default is
+/// raised (the rule's figure is above 4 GiB, so the raise stops at `EXTRACT_CEILING`) and all
+/// 20 of the thread budget's decoders run.
+#[test]
+fn the_photo_declaration_raises_the_default_to_all_decoders() {
+    let s = photo_sizing(PHOTO_DECLARED);
+    assert_eq!(s.decoders(), 20);
+    let old = Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(s.size(old.bytes).0, 5, "the old default's cut");
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(b.bytes, crate::memory::EXTRACT_CEILING);
+    assert_eq!(
+        b.source,
+        BudgetSource::Raised {
+            ceiling: crate::memory::FAST_CEILING,
+            physical: PHYSICAL,
+            need: PHOTO_DECLARED,
+        }
+    );
+    let (w, permits) = s.size(b.bytes);
+    assert_eq!(w, 20);
+    // The counted terms and the gate's pool stay within the budget, and the need fits the pool.
+    let terms = s.gate_terms(b);
+    let counted = s.fixed_shared
+        + w as u64 * (s.per_block + s.per_worker)
+        + (permits - w) as u64 * s.held
+        + terms.shared;
+    assert!(counted <= b.bytes);
+    assert!(terms.shared >= PHOTO_DECLARED, "the need fits the pool");
+}
+
+/// E2-25: below the caps the raised default is the rule's figure, at which every decoder runs
+/// and the decode pool holds the largest need twice.
+#[test]
+fn the_raised_default_is_the_rule_below_the_caps() {
+    let declared = 1_800_000_000;
+    let s = photo_sizing(declared);
+    assert!(s.size(crate::memory::FAST_CEILING).0 < 20);
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    let rule = s.fixed_shared + 20 * (s.per_block + s.per_worker) + s.held + 2 * declared;
+    assert!(rule < crate::memory::EXTRACT_CEILING);
+    assert_eq!(b.bytes, rule);
+    assert_eq!(s.size(b.bytes).0, 20);
+    assert!(s.gate_terms(b).shared >= 2 * declared);
+}
+
+/// E2-25: on a small machine the raise stops at half the physical memory and the cut applies
+/// there as before; with 4 GiB the default is the old one.
+#[test]
+fn the_raise_stops_at_half_a_small_machines_memory() {
+    let s = photo_sizing(PHOTO_DECLARED);
+    let physical = 2 * (2 * GIB + 128 * MIB);
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(physical));
+    assert_eq!(b.bytes, physical / 2);
+    assert!(matches!(b.source, BudgetSource::Raised { .. }));
+    let w = s.size(b.bytes).0;
+    assert!(5 < w && w < 20, "cut to {w} within the cap");
+    let small = s.default_budget(crate::memory::FAST_CEILING, Some(4 * GIB));
+    assert_eq!(
+        small,
+        Budget::default_for(crate::memory::FAST_CEILING, Some(4 * GIB))
+    );
+    assert_eq!(s.size(small.bytes).0, 5);
+}
+
+/// E2-25: `pool_size` with no budget given takes the raised default (the test hook's physical
+/// memory); a given budget is never changed.
+#[test]
+fn pool_size_takes_the_raised_default_and_keeps_a_given_budget() {
+    let plain = 4_499_797usize;
+    let a = archive_declaring(plain, PHOTO_DECLARED);
+    let needed = vec![0usize; 3054];
+    let shape = Shape {
+        needed: &needed,
+        targets: 3054,
+        with_content: 3054,
+        placements: 3054,
+        name_bytes: 3054 * 16,
+        max_writers: usize::MAX,
+    };
+    let opts = ExtractOptions {
+        threads: Some(24),
+        physical_memory: Some(PHYSICAL),
+        ..ExtractOptions::default()
+    };
+    let p = pool_size(&a, &opts, &shape);
+    assert!(matches!(
+        p.memory.budget.source,
+        BudgetSource::Raised { .. }
+    ));
+    assert!(p.memory.budget.bytes > crate::memory::FAST_CEILING);
+    assert_eq!(p.workers, 20);
+    let given = ExtractOptions {
+        memory: Some(2 * GIB),
+        ..opts
+    };
+    let p = pool_size(&a, &given, &shape);
+    assert_eq!(p.memory.budget.bytes, 2 * GIB);
+    assert_eq!(p.memory.budget.source, BudgetSource::Given);
+    assert!(p.workers < 20);
+}

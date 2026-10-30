@@ -37,7 +37,11 @@
 //! **The memory bound** (E2-20, ruling R19). The budget is [`ExtractOptions::memory`] when given
 //! (`lpk x --memory`), else the ceiling of the tier the archive's envelope shows
 //! ([`crate::memory::EnvelopeTier::of`]) resolved like the compress side's
-//! ([`crate::memory::Budget::resolve`]: the smaller of the ceiling and half the physical memory).
+//! ([`crate::memory::Budget::resolve`]: the smaller of the ceiling and half the physical memory),
+//! raised for an archive whose largest declared decoder term cuts the workers below the thread
+//! budget's decoders there (E2-25, [`crate::memory`]'s "The raised extraction default":
+//! `fixed_shared + decoders * (per_block + per_worker) + held + 2 * declared`, at most
+//! [`crate::memory::EXTRACT_CEILING`] and half the physical memory; [`Sizing::default_budget`]).
 //! The engine counts ([`ExtractMemory`]):
 //!
 //! - per block in flight (`per_block`): the encoded frame its worker reads (`encoded`: the
@@ -171,6 +175,11 @@ pub struct ExtractOptions {
     /// `Zone.Identifier` stream written before its first byte; `None` (the default) writes
     /// none. The caller passes the archive's [`crate::motw::read_zone`] unless the user opted out.
     pub zone: Option<crate::motw::Zone>,
+    /// Test hook: the physical memory the default budget assumes instead of the machine's
+    /// ([`crate::memory::physical_memory`]), so a test sees the default of a machine with that
+    /// memory. Always `None` outside tests.
+    #[doc(hidden)]
+    pub physical_memory: Option<u64>,
 }
 
 impl Default for ExtractOptions {
@@ -183,6 +192,7 @@ impl Default for ExtractOptions {
             panic_in_dispatch_at: None,
             fill_permits_before_dispatch: false,
             zone: None,
+            physical_memory: None,
         }
     }
 }
@@ -1681,7 +1691,6 @@ pub(crate) fn pool_size<R: Read + Seek>(
     let index = archive.index();
     let env = index.envelope;
     let tier = EnvelopeTier::of(&env);
-    let budget = Budget::resolve(opts.memory, tier.ceiling());
     // Per block in flight.
     let copies = if archive.is_encrypted() { 2 } else { 1 };
     let frame = |b: &usize| index.blocks.get(*b).map_or(0, |l| l.frame_len);
@@ -1751,7 +1760,17 @@ pub(crate) fn pool_size<R: Read + Seek>(
         held,
         decoder,
         declared,
-        budget_given: budget.source == BudgetSource::Given,
+        budget_given: opts.memory.is_some(),
+    };
+    let budget = match opts.memory {
+        Some(bytes) => Budget {
+            bytes,
+            source: BudgetSource::Given,
+        },
+        None => sizing.default_budget(
+            tier.ceiling(),
+            opts.physical_memory.or_else(crate::memory::physical_memory),
+        ),
     };
     let (workers, in_flight) = sizing.size(budget.bytes);
     let memory = ExtractMemory {
@@ -1813,6 +1832,52 @@ pub(crate) struct Sizing {
 }
 
 impl Sizing {
+    /// The decoders the thread budget gives (D-95: the threads less the writers), capped by the
+    /// needed blocks; one on the sequential path.
+    pub(crate) fn decoders(&self) -> usize {
+        if self.threads == 1 {
+            return 1;
+        }
+        (self.threads - self.writers).min(self.needed.max(1)).max(1)
+    }
+
+    /// The extraction's default budget (E2-25; [`crate::memory`]'s "The raised extraction
+    /// default"), for every caller: the tier's default `min(ceiling, physical / 2)`, unless the
+    /// workers are cut below [`Sizing::decoders`] there; then `fixed_shared + decoders *
+    /// (per_block + per_worker) + held + 2 * declared` (every decoder at its block terms, one
+    /// held block, and the largest declared need twice in the decode pool: itself and as much
+    /// again for the decodes beside it), at most [`crate::memory::EXTRACT_CEILING`] and
+    /// `physical / 2`, never below the tier's default. No raise when `physical` is unknown.
+    pub(crate) fn default_budget(&self, ceiling: u64, physical: Option<u64>) -> Budget {
+        let base = Budget::default_for(ceiling, physical);
+        let Some(physical) = physical else {
+            return base;
+        };
+        let decoders = self.decoders();
+        if self.size(base.bytes).0 >= decoders {
+            return base;
+        }
+        let d = u64::try_from(decoders).unwrap_or(u64::MAX);
+        let want = self
+            .fixed_shared
+            .saturating_add(d.saturating_mul(self.per_block.saturating_add(self.per_worker)))
+            .saturating_add(self.held)
+            .saturating_add(self.declared.saturating_mul(2))
+            .min(crate::memory::EXTRACT_CEILING)
+            .min(physical / 2);
+        if want <= base.bytes {
+            return base;
+        }
+        Budget {
+            bytes: want,
+            source: BudgetSource::Raised {
+                ceiling,
+                physical,
+                need: self.declared,
+            },
+        }
+    }
+
     /// The decode workers and the permits a budget of `budget` bytes pays for (module
     /// documentation, "The memory bound").
     fn size(&self, budget: u64) -> (usize, usize) {

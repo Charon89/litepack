@@ -693,9 +693,12 @@ struct ExtractArgs {
     /// reader's decode memory limit (an archive whose envelope needs more is refused before
     /// anything is written). Default: half of the physical memory, at most the ceiling of the
     /// tier the archive's envelope shows: 1 GiB (stored blocks only), 2 GiB (Fast-sized blocks
-    /// and windows) or 4 GiB (larger); the reader is then limited to half of the physical
-    /// memory, at most 4 GiB. The decoders in flight are derived from the budget (shown with -v);
-    /// a budget below what one block in flight needs is refused with that figure.
+    /// and windows) or 4 GiB (larger); raised, up to 4 GiB and half of the physical memory, for
+    /// an archive whose largest declared record need would otherwise cut the decoders below the
+    /// thread budget's (to every decoder's block terms plus twice that need; -v says which);
+    /// the reader is then limited to half of the physical memory, at most 4 GiB. The decoders
+    /// in flight are derived from the budget (shown with -v); a budget below what one block in
+    /// flight needs is refused with that figure.
     #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
     memory: Option<u64>,
     /// What an existing file at a target gets. refuse: the extraction is refused before any
@@ -1133,6 +1136,8 @@ struct TestArgs {
     #[command(flatten)]
     credentials: CredentialArgs,
     /// The decode memory limit, as for `x`: an archive whose envelope needs more is refused.
+    /// Default: half of the physical memory, at most 4 GiB (the reader's limit of `x`, which
+    /// also bounds `x`'s default budget when it is raised for a large declared record need).
     #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
     memory: Option<u64>,
 }
@@ -1143,7 +1148,8 @@ fn parse_memory(s: &str) -> Result<u64, String> {
 }
 
 /// The reader's decode memory limit of `t`: `--memory`, else `min(4 GiB, half the physical
-/// memory)` (`x` passes `--memory` on; the engine applies the same default to its reader).
+/// memory)` (`x` passes `--memory` on; the engine applies the same default to its reader, which
+/// bounds the extraction's raised default budget too, `lpk_core::memory`).
 fn decode_memory(given: Option<u64>) -> u64 {
     lpk_core::memory::Budget::resolve(given, lpk_core::memory::EXTRACT_CEILING).bytes
 }
@@ -1237,8 +1243,10 @@ struct ExportArgs {
     /// The key material of an encrypted archive; checked before anything is written.
     #[command(flatten)]
     credentials: CredentialArgs,
-    /// The memory budget, as for `x`: the decoded blocks held at once (cached or in flight)
-    /// are derived from it; the writer's own memory (its compressor) is outside the count.
+    /// The memory budget, as for `x` (default: the ceiling of the tier the archive's envelope
+    /// shows, at most half of the physical memory, raised up to 4 GiB and that half for a large
+    /// declared record need): the decoded blocks held at once (cached or in flight) are derived
+    /// from it; the writer's own memory (its compressor) is outside the count.
     #[arg(long, value_name = "SIZE", value_parser = parse_memory)]
     memory: Option<u64>,
     /// Print the plan's counts, the cache schedule's outcome and the memory terms to stderr.
@@ -1797,6 +1805,15 @@ fn extract(
             } => format!(
                 "default: the {} tier's ceiling of {ceiling} bytes; physical memory unknown",
                 m.tier.name()
+            ),
+            lpk_core::memory::BudgetSource::Raised {
+                ceiling,
+                physical,
+                need,
+            } => format!(
+                "default: raised from the {} tier's ceiling of {ceiling} bytes for the largest declared record need of {need} bytes, at most {} bytes and half the physical memory of {physical} bytes",
+                m.tier.name(),
+                lpk_core::memory::EXTRACT_CEILING
             ),
         };
         // A sealed archive's key is derived at open, before its envelope can be read:
