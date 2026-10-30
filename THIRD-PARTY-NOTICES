@@ -3108,7 +3108,7 @@ Used by:
 - indexmap 2.14.2 <https://github.com/indexmap-rs/indexmap>
 - liblzma-sys 0.4.9 <https://github.com/portable-network-archive/liblzma-rs>
 - liblzma 0.4.8 <https://github.com/portable-network-archive/liblzma-rs>
-- libz-sys 1.1.29 <https://github.com/rust-lang/libz-sys>
+- libz-sys 1.1.31 <https://github.com/rust-lang/libz-sys>
 - log 0.4.34 <https://github.com/rust-lang/log>
 - num-traits 0.2.19 <https://github.com/rust-num/num-traits>
 - num_cpus 1.17.0 <https://github.com/seanmonstar/num_cpus>
@@ -5674,7 +5674,7 @@ freely, subject to the following restrictions:
 zlib License (Zlib)
 
 Used by:
-- libz-sys 1.1.29 <https://github.com/rust-lang/libz-sys>
+- libz-sys 1.1.31 <https://github.com/rust-lang/libz-sys>
 
 Copyright notice:
 
@@ -13443,7 +13443,7 @@ Used by:
 - indexmap 2.14.2 <https://github.com/indexmap-rs/indexmap>
 - liblzma-sys 0.4.9 <https://github.com/portable-network-archive/liblzma-rs>
 - liblzma 0.4.8 <https://github.com/portable-network-archive/liblzma-rs>
-- libz-sys 1.1.29 <https://github.com/rust-lang/libz-sys>
+- libz-sys 1.1.31 <https://github.com/rust-lang/libz-sys>
 - lock_api 0.4.14 <https://github.com/Amanieu/parking_lot>
 - log 0.4.34 <https://github.com/rust-lang/log>
 - markup5ever 0.39.0 <https://github.com/servo/html5ever>
@@ -18789,7 +18789,7 @@ the following restrictions:
 zlib License (Zlib)
 
 Used by:
-- libz-sys 1.1.29 <https://github.com/rust-lang/libz-sys>
+- libz-sys 1.1.31 <https://github.com/rust-lang/libz-sys>
 
 Copyright notice:
 
