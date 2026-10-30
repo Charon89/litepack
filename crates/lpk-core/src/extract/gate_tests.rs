@@ -61,6 +61,23 @@ fn gate() -> Arc<AloneGate> {
 /// A one-entry archive whose single block of `plain` bytes is stored and declares `declared`
 /// bytes of decoder memory.
 fn archive_declaring(plain: usize, declared: u64) -> lpk_format::Archive<std::io::Cursor<Vec<u8>>> {
+    open_unlimited(bytes_declaring(plain, declared))
+}
+
+/// Opens `bytes` with no practical reader limit.
+fn open_unlimited(bytes: Vec<u8>) -> lpk_format::Archive<std::io::Cursor<Vec<u8>>> {
+    lpk_format::Archive::open(
+        std::io::Cursor::new(bytes),
+        &lpk_format::Resources {
+            memory: u64::MAX / 4,
+            ..lpk_format::Resources::default()
+        },
+    )
+    .unwrap()
+}
+
+/// The bytes of [`archive_declaring`]'s archive.
+fn bytes_declaring(plain: usize, declared: u64) -> Vec<u8> {
     use lpk_format::{Encoded, EntryFlags, Graph, GraphResources, Writer, WriterOptions};
     let data: Vec<u8> = (0..plain).map(|i| (i * 31 % 251) as u8).collect();
     let mut out = Vec::new();
@@ -80,14 +97,7 @@ fn archive_declaring(plain: usize, declared: u64) -> lpk_format::Archive<std::io
     w.add_part_encoded(0, &data, encoded, declared).unwrap();
     w.end_entry().unwrap();
     w.finish().unwrap();
-    lpk_format::Archive::open(
-        std::io::Cursor::new(out),
-        &lpk_format::Resources {
-            memory: u64::MAX / 4,
-            ..lpk_format::Resources::default()
-        },
-    )
-    .unwrap()
+    out
 }
 
 /// `pool_size` on an archive declaring `decode_memory` with blocks of `plain` bytes, at 24
@@ -102,6 +112,7 @@ fn pool_for(plain: usize, decode_memory: u64, budget: u64) -> Pool {
         placements: 3054,
         name_bytes: 3054 * 16,
         max_writers: usize::MAX,
+        raise_default: true,
     };
     let opts = ExtractOptions {
         threads: Some(24),
@@ -453,4 +464,270 @@ fn no_reservation_leaks_after_an_error_or_a_panic() {
     // The gate still admits after both.
     let r = lpk_format::reserve(&ctx, 250 * MIB).unwrap().unwrap();
     assert!(r.grant().alone);
+}
+
+/// The terms of the controller's diagnostic of one Fast archive of `full/photo-jpeg` at ed573b1
+/// (24 threads, 4 writers): per block 24,146,416 B with a decoder floor of 1,572,865 B, the
+/// declared term `declared`, about 27 MB fixed, a held block of 4,630,869 B.
+fn photo_sizing(declared: u64) -> Sizing {
+    Sizing {
+        threads: 24,
+        writers: 4,
+        needed: 3054,
+        fixed_shared: 27_000_000,
+        per_block: 24_146_416,
+        per_worker: 256 << 10,
+        held: 4_630_869,
+        decoder: 1_572_865,
+        declared,
+        budget_given: false,
+    }
+}
+
+const GIB: u64 = 1 << 30;
+/// The diagnostic machine's memory.
+const PHYSICAL: u64 = 95 * GIB;
+/// The diagnostic archive's declared term: 2,005,814,109 B of `decode_memory` less its
+/// 4,499,797 B `max_block_plain`.
+const PHOTO_DECLARED: u64 = 2_001_314_312;
+
+/// E2-25: an archive whose declared term does not cut the workers keeps the tier's default.
+#[test]
+fn a_small_declaration_keeps_the_fast_ceiling() {
+    let s = photo_sizing(1_572_865);
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(
+        b,
+        Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL))
+    );
+    assert_eq!(s.size(b.bytes).0, 20);
+    // Unknown physical memory: no raise.
+    let s = photo_sizing(PHOTO_DECLARED);
+    assert_eq!(
+        s.default_budget(crate::memory::FAST_CEILING, None),
+        Budget::default_for(crate::memory::FAST_CEILING, None)
+    );
+}
+
+/// E2-25: the diagnostic's archive was cut to 5 workers at the Fast ceiling; its default is
+/// raised (the rule's figure is above 4 GiB, so the raise stops at `EXTRACT_CEILING`) and all
+/// 20 of the thread budget's decoders run.
+#[test]
+fn the_photo_declaration_raises_the_default_to_all_decoders() {
+    let s = photo_sizing(PHOTO_DECLARED);
+    assert_eq!(s.decoders(), 20);
+    let old = Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(s.size(old.bytes).0, 5, "the old default's cut");
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(b.bytes, crate::memory::EXTRACT_CEILING);
+    assert_eq!(
+        b.source,
+        BudgetSource::Raised {
+            ceiling: crate::memory::FAST_CEILING,
+            physical: PHYSICAL,
+            need: PHOTO_DECLARED,
+        }
+    );
+    let (w, permits) = s.size(b.bytes);
+    assert_eq!(w, 20);
+    // The counted terms and the gate's pool stay within the budget, and the need fits the pool.
+    let terms = s.gate_terms(b);
+    let counted = s.fixed_shared
+        + w as u64 * (s.per_block + s.per_worker)
+        + (permits - w) as u64 * s.held
+        + terms.shared;
+    assert!(counted <= b.bytes);
+    assert!(terms.shared >= PHOTO_DECLARED, "the need fits the pool");
+}
+
+/// E2-25: below the caps the raised default is the rule's figure, at which every decoder runs
+/// and the decode pool holds the largest need twice.
+#[test]
+fn the_raised_default_is_the_rule_below_the_caps() {
+    let declared = 1_800_000_000;
+    let s = photo_sizing(declared);
+    assert!(s.size(crate::memory::FAST_CEILING).0 < 20);
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    let rule = s.fixed_shared + 20 * (s.per_block + s.per_worker) + s.held + 2 * declared;
+    assert!(rule < crate::memory::EXTRACT_CEILING);
+    assert_eq!(b.bytes, rule);
+    assert_eq!(s.size(b.bytes).0, 20);
+    assert!(s.gate_terms(b).shared >= 2 * declared);
+}
+
+/// E2-25: on a small machine the raise stops at half the physical memory and the cut applies
+/// there as before; with 4 GiB the default is the old one.
+#[test]
+fn the_raise_stops_at_half_a_small_machines_memory() {
+    let s = photo_sizing(PHOTO_DECLARED);
+    let physical = 2 * (2 * GIB + 128 * MIB);
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(physical));
+    assert_eq!(b.bytes, physical / 2);
+    assert!(matches!(b.source, BudgetSource::Raised { .. }));
+    let w = s.size(b.bytes).0;
+    assert!(5 < w && w < 20, "cut to {w} within the cap");
+    let small = s.default_budget(crate::memory::FAST_CEILING, Some(4 * GIB));
+    assert_eq!(
+        small,
+        Budget::default_for(crate::memory::FAST_CEILING, Some(4 * GIB))
+    );
+    assert_eq!(s.size(small.bytes).0, 5);
+}
+
+/// E2-25: `pool_size` with no budget given takes the raised default (the test hook's physical
+/// memory); a given budget is never changed.
+#[test]
+fn pool_size_takes_the_raised_default_and_keeps_a_given_budget() {
+    let plain = 4_499_797usize;
+    let a = archive_declaring(plain, PHOTO_DECLARED);
+    let needed = vec![0usize; 3054];
+    let shape = Shape {
+        needed: &needed,
+        targets: 3054,
+        with_content: 3054,
+        placements: 3054,
+        name_bytes: 3054 * 16,
+        max_writers: usize::MAX,
+        raise_default: true,
+    };
+    let opts = ExtractOptions {
+        threads: Some(24),
+        physical_memory: Some(PHYSICAL),
+        ..ExtractOptions::default()
+    };
+    let p = pool_size(&a, &opts, &shape);
+    assert!(matches!(
+        p.memory.budget.source,
+        BudgetSource::Raised { .. }
+    ));
+    assert!(p.memory.budget.bytes > crate::memory::FAST_CEILING);
+    assert_eq!(p.workers, 20);
+    let given = ExtractOptions {
+        memory: Some(2 * GIB),
+        ..opts
+    };
+    let p = pool_size(&a, &given, &shape);
+    assert_eq!(p.memory.budget.bytes, 2 * GIB);
+    assert_eq!(p.memory.budget.source, BudgetSource::Given);
+    assert!(p.workers < 20);
+}
+
+/// R122: a cut the declared need does not cause is not raised. At 400 threads with a small
+/// declared term the block terms cut the workers at the Fast ceiling; the default stays the
+/// tier's and the cut applies as before.
+#[test]
+fn a_cut_by_the_block_terms_keeps_the_tiers_default() {
+    let s = Sizing {
+        threads: 400,
+        ..photo_sizing(1_572_865)
+    };
+    let base = Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    let w = s.size(base.bytes).0;
+    assert!(w < s.decoders(), "{w} workers of {}", s.decoders());
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(b, base);
+    assert!(matches!(b.source, BudgetSource::Default { .. }));
+    assert_eq!(s.size(b.bytes).0, w);
+}
+
+/// R123: an export keeps the tier's default for a photo-shaped envelope (no raise), while an
+/// extraction of the same archive is raised.
+#[test]
+fn an_export_keeps_the_tiers_default_for_a_photo_shaped_envelope() {
+    struct Drain;
+    impl crate::export::Sink for Drain {
+        fn directory(&mut self, _: &lpk_format::Entry) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn symlink(&mut self, _: &lpk_format::Entry) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn file(
+            &mut self,
+            _: &lpk_format::Entry,
+            content: &mut dyn std::io::Read,
+        ) -> Result<(), CoreError> {
+            std::io::copy(content, &mut std::io::sink()).unwrap();
+            Ok(())
+        }
+    }
+    let bytes = bytes_declaring(4_499_797, PHOTO_DECLARED);
+    let opts = ExtractOptions {
+        threads: Some(24),
+        physical_memory: Some(PHYSICAL),
+        ..ExtractOptions::default()
+    };
+    let mut a = open_unlimited(bytes.clone());
+    let s = crate::export::export_archive(
+        &mut a,
+        || Ok(std::io::Cursor::new(bytes.clone())),
+        &mut Drain,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(
+        s.memory.budget,
+        Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL))
+    );
+    // The same archive's extraction pool is raised.
+    let a = open_unlimited(bytes);
+    let needed = vec![0usize; 24];
+    let shape = Shape {
+        needed: &needed,
+        targets: 24,
+        with_content: 24,
+        placements: 24,
+        name_bytes: 24 * 16,
+        max_writers: usize::MAX,
+        raise_default: true,
+    };
+    let p = pool_size(&a, &opts, &shape);
+    assert!(matches!(
+        p.memory.budget.source,
+        BudgetSource::Raised { .. }
+    ));
+}
+
+/// R124: at 400 threads the block terms alone cut the workers at the Fast ceiling, and the
+/// photo-shaped declared need cuts them deeper; the default is raised (capped at 4 GiB) and
+/// the workers at the raised budget are more than at the tier's default, within the counted
+/// terms.
+#[test]
+fn a_need_deepening_a_block_terms_cut_is_raised() {
+    let s = Sizing {
+        threads: 400,
+        ..photo_sizing(PHOTO_DECLARED)
+    };
+    let base = Budget::default_for(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    let at_floor = Sizing {
+        declared: s.decoder,
+        ..s
+    };
+    assert!(
+        at_floor.size(base.bytes).0 < s.decoders(),
+        "the block terms cut"
+    );
+    let old = s.size(base.bytes).0;
+    assert!(
+        old < at_floor.size(base.bytes).0,
+        "the need deepens the cut"
+    );
+    let b = s.default_budget(crate::memory::FAST_CEILING, Some(PHYSICAL));
+    assert_eq!(b.bytes, crate::memory::EXTRACT_CEILING);
+    assert_eq!(
+        b.source,
+        BudgetSource::Raised {
+            ceiling: crate::memory::FAST_CEILING,
+            physical: PHYSICAL,
+            need: PHOTO_DECLARED,
+        }
+    );
+    let (w, permits) = s.size(b.bytes);
+    assert!(w > old, "{w} workers at the raise, {old} before");
+    let terms = s.gate_terms(b);
+    let counted = s.fixed_shared
+        + w as u64 * (s.per_block + s.per_worker)
+        + (permits - w) as u64 * s.held
+        + terms.shared;
+    assert!(counted <= b.bytes);
 }

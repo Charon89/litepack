@@ -699,6 +699,7 @@ where
         placements: places.len() as u64,
         name_bytes,
         max_writers: 1,
+        raise_default: false,
     };
     let pool = pool_size(archive, opts, &shape);
     // The export counts every block it holds at the declared decoder term; its gate reserves
