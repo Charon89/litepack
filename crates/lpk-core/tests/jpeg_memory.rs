@@ -1324,7 +1324,7 @@ fn waiting_alone_decodes_and_one_lone_decode_stay_within_the_budget() {
     // At a lone grant other workers wait to run alone, holding their blocks (threads pinned to 8).
     assert!(
         s.concurrent_while_alone >= 2,
-        "{} at the grant in each of {runs} runs",
+        "fewer than 2 at the grant in each of {runs} runs (the last: {})",
         s.concurrent_while_alone
     );
 }
