@@ -1865,16 +1865,26 @@ fn read_member<P: Peer>(
     })?;
     let hard = checked.hard_target[i].is_some();
     if entry.kind != EntryKind::File || hard {
-        return Err(ForeignError::Unsupported {
-            message: format!(
-                "{}: not a regular file ({})",
-                escape(entry.path.as_bytes()),
-                if hard { "hard link" } else { entry.kind.name() }
-            ),
-        }
-        .into());
+        return Err(CoreError::InvalidOption(format!(
+            "{}: not a regular file ({})",
+            escape(entry.path.as_bytes()),
+            if hard { "hard link" } else { entry.kind.name() }
+        )));
     }
     let (name, size, index) = (entry.path.clone(), entry.size, checked.index[i]);
+    // E4's declared-output limit, as extraction applies it before any `ReadMember`.
+    if let Some(f) = conv.limits.max_expansion {
+        let max = f.saturating_mul(conv.archive_len.max(1));
+        if size > max {
+            return Err(ForeignError::LimitExceeded {
+                limit: "declared output",
+                value: size,
+                max,
+                flag: "--max-expansion",
+            }
+            .into());
+        }
+    }
     if size > cap {
         return Err(preview_cap(size, cap));
     }
@@ -1890,7 +1900,7 @@ fn read_member<P: Peer>(
         Response::Error { code, message } => return Err(reader_error(code, &message)),
         other => return Err(unexpected("MemberStart", &other)),
     }
-    let mut out = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+    let mut out = Vec::with_capacity(usize::try_from(size.min(1 << 20)).unwrap_or(0));
     loop {
         match conv.next("member data")? {
             Response::Data(d) if d.is_empty() => {

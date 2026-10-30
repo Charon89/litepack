@@ -725,13 +725,15 @@ fn one_member_is_read_by_listing_position_with_the_fingerprint_checked() {
     let e = read_one(&archive, 2, Some(&fp), n - 1, &opts, &m).unwrap_err();
     assert!(cap_refused(&e, n - 1), "{e}");
     // A directory, a hard link, and a position past the end are refused.
-    for id in [0, 4, 9] {
+    for id in [0, 4] {
         let e = read_one(&archive, id, Some(&fp), 1 << 20, &opts, &m).unwrap_err();
-        assert!(
-            matches!(e, CoreError::Foreign(ForeignError::Unsupported { .. })),
-            "{id}: {e}"
-        );
+        assert!(matches!(e, CoreError::InvalidOption(_)), "{id}: {e}");
     }
+    let e = read_one(&archive, 9, Some(&fp), 1 << 20, &opts, &m).unwrap_err();
+    assert!(
+        matches!(e, CoreError::Foreign(ForeignError::Unsupported { .. })),
+        "{e}"
+    );
     let names: Vec<_> = std::fs::read_dir(work.path())
         .unwrap()
         .map(|e| e.unwrap().file_name())
@@ -752,6 +754,25 @@ fn a_member_declared_over_the_cap_is_refused_before_any_data_is_read() {
     let e = read_one(&archive, 2, None, 1000, &opts, &Monitor::default()).unwrap_err();
     assert!(cap_refused(&e, 1000), "{e}");
     assert!(t.elapsed() < lim.no_progress + SLACK, "{:?}", t.elapsed());
+}
+
+/// The GUI's password prompt relies on `PasswordRequired`; the right credentials read exactly.
+#[test]
+fn an_encrypted_member_needs_the_password_and_reads_exactly_with_it() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let archive = write_fixture(work.path(), &[Member::file("a", b"secret")], Some(b"pw"));
+    let opts = s.options(None, Limits::default());
+    let m = Monitor::default();
+    // Without credentials the worker asks for the password at open.
+    let e = foreign::read_member_file(&archive, 0, None, 100, None, &opts, &m).unwrap_err();
+    assert!(
+        matches!(e, CoreError::Format(FormatError::PasswordRequired)),
+        "{e}"
+    );
+    let right = Credentials::password(b"pw".to_vec());
+    let got = foreign::read_member_file(&archive, 0, None, 100, Some(&right), &opts, &m).unwrap();
+    assert_eq!(got, b"secret");
 }
 
 #[test]

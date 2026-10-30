@@ -1205,7 +1205,14 @@ impl Session {
             &self.options.foreign,
             &Monitor::with_cancel(g.cancel.clone()),
         )
-        .map_err(|e| Error::core(e, Some(&self.path)))
+        .map_err(|e| match e {
+            // The streamed bytes passed the cap: the same error as the declared size's, with
+            // the member's path.
+            CoreError::Format(FormatError::Refused(r)) if r.field == "preview cap" => {
+                Error::format(FormatError::Refused(r), Some(Path::new(&entry.path)))
+            }
+            e => Error::core(e, Some(&self.path)),
+        })
     }
 
     /// The destination directory `to` resolves to (the smart rule needs the top level).

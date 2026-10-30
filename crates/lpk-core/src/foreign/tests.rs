@@ -892,3 +892,41 @@ fn a_member_is_read_exactly_and_the_cap_refuses_before_and_during_the_stream() {
     let (r, _) = read_scripted(&one_member(b"abc"), 7, 5);
     assert!(matches!(r, Err(CoreError::Foreign(_))), "{r:?}");
 }
+
+#[test]
+fn the_declared_output_limit_applies_before_the_cap_and_any_data() {
+    let mut frames = one_member(b"hello");
+    frames[2] = entries(vec![Record {
+        packed_len: 10,
+        ..rec("a", 500, 0)
+    }]);
+    let out = script(&frames);
+    let monitor = Monitor::default();
+    let peer = ScriptPeer {
+        input: &out,
+        buf: Vec::new(),
+    };
+    let limits = Limits {
+        max_expansion: Some(2),
+        ..Limits::default()
+    };
+    // 500 declared bytes against an archive of 100 bytes and a factor of 2; the cap allows it.
+    let mut conv = Conv::new(peer, limits, 100, &monitor);
+    let r = conv.handshake().and_then(|()| {
+        conv.open(Format::TestFixture, b"", None)?;
+        let records = conv.list()?;
+        read_member(&mut conv, records, 0, None, 1000)
+    });
+    assert!(
+        matches!(
+            r,
+            Err(CoreError::Foreign(ForeignError::LimitExceeded {
+                limit: "declared output",
+                value: 500,
+                max: 200,
+                ..
+            }))
+        ),
+        "{r:?}"
+    );
+}
