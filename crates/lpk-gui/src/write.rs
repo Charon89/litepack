@@ -586,6 +586,250 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_record_is_given_up_with_a_notice_after_its_tries() {
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, gen0_len) = two_generations(d.path(), &j);
+        let mut bytes = std::fs::read(&a).unwrap();
+        bytes[gen0_len as usize - 40] ^= 0xFF;
+        std::fs::write(&a, &bytes).unwrap();
+        for start in 1..crate::journal::MAX_TRIES {
+            let got = Journal::open(j.dir()).unwrap().recover();
+            assert!(
+                matches!(&got[..], [Recovered::Left { reason, .. }] if *reason == crate::journal::CHAIN_UNREADABLE),
+                "start {start}: {got:?}"
+            );
+            assert_eq!(records(&j), 1, "start {start}: kept");
+        }
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert_eq!(
+            got,
+            [Recovered::GaveUp {
+                path: a.clone(),
+                reason: crate::journal::CHAIN_UNREADABLE,
+                tries: crate::journal::MAX_TRIES,
+            }]
+        );
+        assert_eq!(
+            std::fs::read_dir(j.dir()).unwrap().count(),
+            0,
+            "the record, its lock and its count are gone"
+        );
+        assert_eq!(std::fs::read(&a).unwrap(), bytes, "the file is untouched");
+        assert!(Journal::open(j.dir()).unwrap().recover().is_empty());
+    }
+
+    /// A torn append (generation 1 cut in half) recorded at generation 0.
+    fn torn_append(d: &Path, j: &Journal) -> (PathBuf, u64) {
+        let src = tree(d, 2);
+        let more = d.join("more");
+        std::fs::create_dir_all(&more).unwrap();
+        std::fs::write(more.join("new.bin"), vec![7u8; 5000]).unwrap();
+        let a = d.join("torn.lpk");
+        create_archive(&sources(&src), &a, &store(), &Monitor::default(), None).unwrap();
+        let gen0_len = std::fs::metadata(&a).unwrap().len();
+        append_archive(&a, &more, &store(), None, &Monitor::default(), None).unwrap();
+        let gen1_len = std::fs::metadata(&a).unwrap().len();
+        let f = std::fs::OpenOptions::new().write(true).open(&a).unwrap();
+        f.set_len(gen0_len + (gen1_len - gen0_len) / 2).unwrap();
+        drop(f);
+        j.add(&Record::Append {
+            path: a.clone(),
+            identity: Identity(path_identity(&a).unwrap()),
+            generation: 0,
+        })
+        .unwrap()
+        .keep();
+        (a, gen0_len)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_held_file_is_never_given_up_and_is_noticed_from_the_last_try() {
+        use crate::journal::{startup_report, Notice};
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, gen0_len) = torn_append(d.path(), &j);
+        let writer = std::fs::OpenOptions::new().write(true).open(&a).unwrap();
+        for start in 1..=crate::journal::MAX_TRIES + 2 {
+            let got = Journal::open(j.dir()).unwrap().recover();
+            if start < crate::journal::MAX_TRIES {
+                assert!(
+                    matches!(&got[..], [Recovered::Left { reason, .. }] if *reason == crate::journal::UNREADABLE),
+                    "start {start}: {got:?}"
+                );
+                assert_eq!(startup_report(&got).notices, [], "start {start}");
+            } else {
+                assert_eq!(
+                    got,
+                    [Recovered::Held {
+                        path: a.clone(),
+                        tries: start
+                    }],
+                    "start {start}"
+                );
+                assert_eq!(
+                    startup_report(&got).notices,
+                    [Notice::Held {
+                        name: "torn.lpk".into(),
+                        tries: start
+                    }]
+                );
+            }
+            assert_eq!(records(&j), 1, "start {start}: kept");
+            assert_eq!(startup_report(&got).recovered, 0);
+        }
+        drop(writer);
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert!(
+            matches!(&got[..], [Recovered::RolledBack { .. }]),
+            "{got:?}"
+        );
+        assert_eq!(startup_report(&got).recovered, 1);
+        assert_eq!(std::fs::metadata(&a).unwrap().len(), gen0_len);
+        assert_eq!(std::fs::read_dir(j.dir()).unwrap().count(), 0);
+    }
+
+    /// A held file whose count cannot be written (here a directory stands where the count goes)
+    /// would never reach the last try, so its notice comes at the first start.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_file_whose_count_cannot_be_kept_is_noticed_at_once() {
+        use crate::journal::{startup_report, Notice};
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, _) = torn_append(d.path(), &j);
+        let record = std::fs::read_dir(j.dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "json"))
+            .unwrap();
+        std::fs::create_dir(record.with_extension("tries")).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&a).unwrap();
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert_eq!(
+            got,
+            [Recovered::Held {
+                path: a.clone(),
+                tries: 1
+            }]
+        );
+        assert_eq!(
+            startup_report(&got).notices,
+            [Notice::Held {
+                name: "torn.lpk".into(),
+                tries: 1
+            }]
+        );
+        assert_eq!(records(&j), 1, "kept");
+        drop(writer);
+    }
+
+    #[test]
+    fn a_failed_recovery_keeps_its_record_and_only_settled_ones_count() {
+        use crate::journal::{startup_report, Notice};
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        // A partial that cannot be deleted. Windows: another handle holds it without sharing
+        // delete. Unix: a folder at the recorded path (remove_file fails on a folder).
+        let p = d.path().join("x.lpk.partial");
+        #[cfg(windows)]
+        let _holder = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::write(&p, b"partial").unwrap();
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1 | 2) // read and write, not delete
+                .open(&p)
+                .unwrap()
+        };
+        #[cfg(not(windows))]
+        std::fs::create_dir_all(p.join("inner")).unwrap();
+        let id = Identity(path_identity(&p).unwrap());
+        j.add(&Record::Partial {
+            path: p.clone(),
+            identity: Some(id),
+        })
+        .unwrap()
+        .keep();
+        // Gone, and another file: decided, but not recovered.
+        j.add(&Record::Partial {
+            path: d.path().join("gone.lpk.partial"),
+            identity: Some(id),
+        })
+        .unwrap()
+        .keep();
+        for start in 1..=2 {
+            let got = Journal::open(j.dir()).unwrap().recover();
+            assert!(
+                got.iter()
+                    .any(|r| matches!(r, Recovered::Failed { path, .. } if *path == p)),
+                "start {start}: {got:?}"
+            );
+            let report = startup_report(&got);
+            assert_eq!(report.recovered, 0, "start {start}: {got:?}");
+            assert!(
+                matches!(&report.notices[..], [Notice::Failed { name, .. }] if name == "x.lpk.partial"),
+                "start {start}: {report:?}"
+            );
+            assert_eq!(records(&j), 1, "start {start}: the failed record stays");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_torn_append_another_writer_holds_is_not_cut() {
+        // The check and the cut go through one handle that admits no other writer: a writer
+        // holding the file (sharing read and write, std's default) makes the recovery leave it.
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, gen0_len) = torn_append(d.path(), &j);
+        let before = std::fs::read(&a).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&a).unwrap();
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert!(
+            matches!(&got[..], [Recovered::Left { reason, .. }] if *reason == crate::journal::UNREADABLE),
+            "{got:?}"
+        );
+        assert_eq!(std::fs::read(&a).unwrap(), before, "byte for byte");
+        assert_eq!(records(&j), 1);
+        drop(writer);
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert_eq!(
+            got,
+            [Recovered::RolledBack {
+                path: a.clone(),
+                generation: 0
+            }]
+        );
+        assert_eq!(std::fs::metadata(&a).unwrap().len(), gen0_len);
+    }
+
+    #[test]
+    fn a_torn_append_replaced_by_another_file_is_not_cut() {
+        // The identity is read through the handle that cuts: a file moved over the recorded
+        // path is another file, left as it is.
+        let d = tempfile::tempdir().unwrap();
+        let j = Journal::open(&d.path().join("journal")).unwrap();
+        let (a, _) = torn_append(d.path(), &j);
+        let copy = d.path().join("copy.lpk");
+        std::fs::copy(&a, &copy).unwrap();
+        std::fs::rename(&a, d.path().join("moved.lpk")).unwrap();
+        std::fs::rename(&copy, &a).unwrap();
+        let before = std::fs::read(&a).unwrap();
+        let got = Journal::open(j.dir()).unwrap().recover();
+        assert_eq!(
+            got,
+            [Recovered::Left {
+                path: a.clone(),
+                reason: "another file now"
+            }]
+        );
+        assert_eq!(std::fs::read(&a).unwrap(), before);
+    }
+
+    #[test]
     fn a_damaged_chain_is_left_untouched_with_its_record() {
         let d = tempfile::tempdir().unwrap();
         let j = Journal::open(&d.path().join("journal")).unwrap();

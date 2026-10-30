@@ -86,10 +86,10 @@ const list = new VirtualList({
   layer: $("rows"),
   cells,
   fetch: (first, count) => core.invoke("rows", { session, first, count }),
-  activate: (index, row, folderOnly = false) => activate(index, row, folderOnly).catch(showError),
-  // The generation of the view the row index came from: Rust refuses another.
-  select: async (action, row) => {
-    const s = await core.invoke("select", { session, action, row, generation: list.generation });
+  activate: (index, row, generation, folderOnly = false) => activate(index, row, generation, folderOnly).catch(showError),
+  // The generation of the batch the row index came from: Rust refuses another.
+  select: async (action, row, generation) => {
+    const s = await core.invoke("select", { session, action, row, generation });
     showSelection(s);
     await list.refresh();
   },
@@ -148,7 +148,7 @@ async function navigate(dir) {
   await applyView();
 }
 
-async function activate(index, row, folderOnly) {
+async function activate(index, row, generation, folderOnly) {
   if (row.kind === 1) {
     if (state.mode === "tree") {
       await navigate(row.id);
@@ -158,12 +158,95 @@ async function activate(index, row, folderOnly) {
   if (folderOnly) {
     return;
   }
-  const r = await core.invoke("open_entry", { session, row: index, generation: list.generation, op: nextOp++ });
+  const r = await core.invoke("open_entry", { session, row: index, generation, op: nextOp++ });
   if (r.outcome === "shell") {
     setStatus(t("open.done", { name: r.name }));
   } else {
     setStatus(t("open.refused", { name: r.name, extension: r.extension }));
   }
+}
+
+// A native picker in Rust: the page names what to pick and receives grants (never a path).
+// One picker at a time (Rust refuses a second one too): the buttons are disabled meanwhile.
+async function pick(purpose) {
+  const buttons = document.querySelectorAll(".actions button");
+  for (const b of buttons) {
+    b.disabled = true;
+  }
+  try {
+    return await core.invoke("pick", { purpose });
+  } finally {
+    for (const b of buttons) {
+      b.disabled = false;
+    }
+  }
+}
+
+async function openPicked() {
+  const [archive] = await pick("archive");
+  if (archive) {
+    await openArchive(archive);
+  }
+}
+
+// A new archive from files or from a folder (`what`), then where it goes; one cancel ends it.
+// Named after the first input, written by Rust through a `.partial` that never replaces a file.
+async function createPicked(what) {
+  const inputs = await pick(what);
+  if (inputs.length === 0) {
+    return;
+  }
+  const [folder] = await pick("destination");
+  if (!folder) {
+    return;
+  }
+  const first = inputs[0].name;
+  const name = (what === "files" ? first.replace(/\.[^.]*$/, "") : first) || "archive";
+  setStatus(t("create.running", { name: `${name}.lpk` }));
+  const progress = new core.Channel();
+  progress.onmessage = () => {};
+  await core.invoke("create_archive", {
+    inputs: inputs.map((i) => i.grant),
+    folder: folder.grant,
+    name,
+    tier: "balanced",
+    op: nextOp++,
+    progress,
+  });
+  setStatus(t("create.done", { name: `${name}.lpk` }));
+}
+
+// The recovery's notices (D-117): each stays in its own list item, which the status line never
+// replaces, until the user dismisses it.
+function noticeText(n) {
+  switch (n.kind) {
+    case "gaveup":
+      return t("notice.gaveup", { name: n.name, tries: n.tries });
+    case "held":
+      return t("notice.held", { name: n.name, tries: n.tries });
+    default:
+      return t("notice.failed", { name: n.name, error: n.error });
+  }
+}
+
+function showNotices(notices) {
+  const list = $("notices");
+  for (const n of notices) {
+    const item = document.createElement("li");
+    item.className = "notice";
+    const text = document.createElement("span");
+    text.textContent = noticeText(n);
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.textContent = t("notice.dismiss");
+    dismiss.addEventListener("click", () => {
+      item.remove();
+      list.hidden = list.children.length === 0;
+    });
+    item.append(text, dismiss);
+    list.append(item);
+  }
+  list.hidden = list.children.length === 0;
 }
 
 async function report(total, first) {
@@ -217,6 +300,9 @@ function showError(e) {
 }
 
 function wireControls() {
+  $("action-open").addEventListener("click", () => openPicked().catch(showError));
+  $("action-files").addEventListener("click", () => createPicked("files").catch(showError));
+  $("action-folder").addEventListener("click", () => createPicked("folder").catch(showError));
   $("mode-flat").addEventListener("click", () => {
     Object.assign(state, { mode: "flat", dir: null });
     applyView().catch(showError);
@@ -257,6 +343,7 @@ async function main() {
   if (startup.recovered > 0) {
     setStatus(t("status.recovered", { count: startup.recovered }));
   }
+  showNotices(startup.notices);
   if (startup.error) {
     showError({ message: startup.error });
     return;

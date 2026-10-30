@@ -13,7 +13,9 @@
 //!   replacing anything, appends recorded, and the next start's recovery.
 //! - [`app`]: sessions, the browser ([`browse`]: views, selection, pages as [`batch`] v1) and
 //!   the shutdown.
-//! - [`open`]: opening an entry with the shell (the allow-list, fresh zoned folders).
+//! - [`open`]: opening an entry with the shell (the allow-list, fresh zoned folders, the
+//!   start-up sweep).
+//! - [`pick`]: the native pickers, which mint grants.
 //! - [`cli`], [`paths`], [`strings`], [`security`].
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
@@ -27,6 +29,7 @@ pub mod journal;
 pub mod open;
 pub mod ops;
 pub mod paths;
+pub mod pick;
 pub mod security;
 pub mod strings;
 pub mod write;

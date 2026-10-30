@@ -10,6 +10,9 @@
 //!   twice to create) whose text goes straight into [`Zeroizing`] memory and never reaches the
 //!   web process, and the rollback confirmation box. Windows only; elsewhere they return
 //!   [`std::io::ErrorKind::Unsupported`].
+//! - [`pick_files`] and [`pick_folder`]: the shell's common item dialogs (E5-3's `pick`); the
+//!   chosen paths go to Rust only, which mints grants for them. Windows only.
+//! - [`process_alive`]: whether a process still runs (the start-up sweep of opened entries).
 //!
 //! `unsafe` lives in `src/windows_impl.rs` alone (docs/UNSAFE.md).
 #![cfg_attr(not(windows), forbid(unsafe_code))]
@@ -17,7 +20,7 @@
 
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use zeroize::Zeroizing;
 
@@ -116,7 +119,9 @@ pub fn password_prompt(
 }
 
 /// Open the file at `path` with the program the shell associates with its type
-/// (`ShellExecuteW`'s `open` verb), owned by `owner`. The GUI calls it only for an entry it
+/// (`ShellExecuteExW`'s `open` verb with `SEE_MASK_NOASYNC`, on a thread of its own that
+/// initialises COM and uninitialises it straight after the call), owned by `owner`. Blocks
+/// until the shell has handed the file over: call it off the async runtime's workers. The GUI calls it only for an entry it
 /// extracted and whose type is on its allow-list (`docs/notes/e5-design.md` section 4).
 pub fn shell_open(owner: Option<isize>, path: &Path) -> io::Result<()> {
     #[cfg(windows)]
@@ -127,6 +132,54 @@ pub fn shell_open(owner: Option<isize>, path: &Path) -> io::Result<()> {
     {
         let _ = (owner, path);
         Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// The shell's Open dialog (`IFileOpenDialog`) owned by `owner`, titled `title`: the files the
+/// user chose (several when `multi`), empty when cancelled. File-system items only. Runs on a
+/// thread of its own with COM initialised, and blocks until the dialog closes.
+pub fn pick_files(owner: Option<isize>, title: &str, multi: bool) -> io::Result<Vec<PathBuf>> {
+    #[cfg(windows)]
+    {
+        windows_impl::pick(owner, title, false, multi)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, title, multi);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// The shell's folder picker (`IFileOpenDialog` with `FOS_PICKFOLDERS`) owned by `owner`:
+/// the folder the user chose, `None` when cancelled.
+pub fn pick_folder(owner: Option<isize>, title: &str) -> io::Result<Option<PathBuf>> {
+    #[cfg(windows)]
+    {
+        windows_impl::pick(owner, title, true, false).map(|v| v.into_iter().next())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, title);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Whether process `pid` still runs. When it cannot be told (access denied, an unknown
+/// platform), `true`: the caller then leaves that process's files alone. A reused ID also
+/// reads as running, the same safe side.
+pub fn process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        windows_impl::process_alive(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pid;
+        true
     }
 }
 
@@ -172,6 +225,16 @@ mod tests {
         assert!(!from.exists());
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
         assert_eq!(path_identity(&to).unwrap(), before, "a move keeps the file");
+    }
+
+    #[test]
+    fn this_process_is_alive_and_an_unused_id_is_not() {
+        assert!(process_alive(std::process::id()));
+        if cfg!(any(windows, target_os = "linux")) {
+            // Not a valid process ID on either (Windows IDs are multiples of 4; Linux caps them
+            // at 2^22).
+            assert!(!process_alive(u32::MAX - 2));
+        }
     }
 
     #[test]

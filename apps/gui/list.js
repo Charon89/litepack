@@ -24,8 +24,11 @@ export class VirtualList {
    * @param {HTMLElement} o.layer holds the row elements
    * @param {(first: number, count: number) => Promise<ArrayBuffer>} o.fetch a batch
    * @param {(row: object, index: number) => Array<string>} o.cells a row's cell texts
-   * @param {(index: number, row: object) => void} o.activate Enter or a double-click
-   * @param {(action: string, index: number|null) => Promise<void>} o.select a selection change
+   * @param {(index: number, row: object, generation: number, folderOnly?: boolean) => void} o.activate
+   *   Enter or a double-click, with the generation of the batch the row came from
+   * @param {(action: string, index: number|null, generation: number) => Promise<void>} o.select a
+   *   selection change, with the generation of the batch the row index came from (Rust refuses
+   *   another)
    */
   constructor(o) {
     Object.assign(this, o);
@@ -193,6 +196,7 @@ export class VirtualList {
       const el = this.pool[i];
       el.id = `lpk-row-${index}`;
       el.dataset.index = String(index);
+      el.dataset.generation = String(b.generation);
       el.dataset.kind = String(r.kind);
       el.setAttribute("aria-rowindex", String(index + 2));
       el.setAttribute("aria-level", String(this.level));
@@ -220,6 +224,17 @@ export class VirtualList {
     }
   }
 
+  /** The generation of the batch held (the view its row indices belong to), else the view's. */
+  heldGeneration() {
+    return this.batch ? this.batch.generation : this.generation;
+  }
+
+  /** The generation of the rendered row element of event `e`. */
+  generationOf(e) {
+    const el = e.target.closest("[role=row]");
+    return el && el.dataset.generation !== undefined ? Number(el.dataset.generation) : this.heldGeneration();
+  }
+
   /** The row held for view row `index`, if any. */
   rowAt(index) {
     const b = this.batch;
@@ -244,7 +259,7 @@ export class VirtualList {
       this.render();
       return;
     }
-    await this.select(e.shiftKey ? (e.ctrlKey ? "extend" : "range") : "only", this.focus);
+    await this.select(e.shiftKey ? (e.ctrlKey ? "extend" : "range") : "only", this.focus, this.heldGeneration());
   }
 
   onClick(e) {
@@ -255,14 +270,14 @@ export class VirtualList {
     this.focus = index;
     this.grid.focus();
     const action = e.shiftKey ? (e.ctrlKey ? "extend" : "range") : e.ctrlKey ? "toggle" : "only";
-    this.select(action, index).catch((err) => this.onError(err));
+    this.select(action, index, this.generationOf(e)).catch((err) => this.onError(err));
   }
 
   onDoubleClick(e) {
     const index = this.indexOf(e);
     const row = index === null ? null : this.rowAt(index);
     if (row) {
-      this.activate(index, row);
+      this.activate(index, row, this.generationOf(e));
     }
   }
 
@@ -294,14 +309,14 @@ export class VirtualList {
         return go(this.total - 1);
       case " ":
         e.preventDefault();
-        this.select(e.ctrlKey ? "toggle" : "only", this.focus).catch((err) => this.onError(err));
+        this.select(e.ctrlKey ? "toggle" : "only", this.focus, this.heldGeneration()).catch((err) => this.onError(err));
         return;
       case "Enter":
       case "ArrowRight": {
         const row = this.rowAt(this.focus);
         if (row && (e.key === "Enter" || (row.kind === KIND_FOLDER && this.level > 0))) {
           e.preventDefault();
-          this.activate(this.focus, row, e.key === "ArrowRight");
+          this.activate(this.focus, row, this.heldGeneration(), e.key === "ArrowRight");
         }
         return;
       }
@@ -310,12 +325,12 @@ export class VirtualList {
         return this.parent?.(e);
       case "Escape":
         e.preventDefault();
-        this.select("none", null).catch((err) => this.onError(err));
+        this.select("none", null, this.heldGeneration()).catch((err) => this.onError(err));
         return;
       default:
         if ((e.key === "a" || e.key === "A") && e.ctrlKey) {
           e.preventDefault();
-          this.select("all", null).catch((err) => this.onError(err));
+          this.select("all", null, this.heldGeneration()).catch((err) => this.onError(err));
         }
     }
   }

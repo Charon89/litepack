@@ -10,6 +10,16 @@
 //! The process that writes a record holds an exclusive lock on a lock file beside it until it
 //! removes both,
 //! so a second instance's recovery skips the records of a live one.
+//!
+//! A record kept because nothing could be decided (the file held, its chain unreadable) counts
+//! its tries in a `<id>.tries` file beside it; after [`MAX_TRIES`] starts it is dropped and the
+//! start shows a notice naming the file ([`Recovered::GaveUp`]) instead of retrying silently
+//! for ever (D-117).
+//!
+//! An interrupted append is decided through one handle: the archive is opened for reading and
+//! writing with no other writer allowed (on Windows), its identity and its trailer chain are
+//! read through that handle and `rollback` truncates through it, so no other file and no other
+//! writer can come between the check and the cut (D-117).
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -17,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lpk_gui_sys::{path_identity, FileIdentity};
+use lpk_gui_sys::{file_identity, path_identity, FileIdentity};
 use serde::{Deserialize, Serialize};
 
 /// A file's identity as recorded (the file ID in hex: JSON numbers stop at 2^53).
@@ -134,7 +144,25 @@ pub enum Recovered {
         /// Why.
         reason: &'static str,
     },
-    /// The recovery failed (the record is dropped; the file is left as it is).
+    /// Kept [`MAX_TRIES`] times without a decision: the record is dropped and the start shows
+    /// a notice naming the file, which is left as it is.
+    GaveUp {
+        /// The path recorded.
+        path: PathBuf,
+        /// Why the last try decided nothing.
+        reason: &'static str,
+        /// The starts that tried.
+        tries: u32,
+    },
+    /// Held by another process at [`MAX_TRIES`] starts or more: the record stays and is retried
+    /// at every start, and the start shows a notice.
+    Held {
+        /// The path recorded.
+        path: PathBuf,
+        /// The starts that tried.
+        tries: u32,
+    },
+    /// The recovery failed: the record stays for the next start, and the start shows a notice.
     Failed {
         /// The path recorded.
         path: PathBuf,
@@ -217,13 +245,44 @@ impl Journal {
             let record = std::fs::read(&p)
                 .ok()
                 .and_then(|text| serde_json::from_slice::<Record>(&text).ok());
+            let tries_path = p.with_extension("tries");
             let mut keep = false;
             if let Some(r) = record {
-                let done = recover_one(&r);
+                let mut done = recover_one(&r);
                 keep = keeps_record(&done);
+                if keep {
+                    let tries = read_tries(&tries_path).saturating_add(1);
+                    let counted = std::fs::write(&tries_path, tries.to_string()).is_ok();
+                    done = match done {
+                        // A held file, which a later start can still fix: kept and retried at
+                        // every start, with a notice from the last try on (at once when the
+                        // count cannot be kept, which would otherwise never reach it).
+                        Recovered::Left { path, reason } if reason == UNREADABLE => {
+                            if tries >= MAX_TRIES || !counted {
+                                Recovered::Held { path, tries }
+                            } else {
+                                Recovered::Left { path, reason }
+                            }
+                        }
+                        // A permanent outcome: dropped after its tries (or at once when the
+                        // count cannot be kept, which would retry for ever), with a notice.
+                        Recovered::Left { path, reason } if tries >= MAX_TRIES || !counted => {
+                            keep = false;
+                            Recovered::GaveUp {
+                                path,
+                                reason,
+                                tries,
+                            }
+                        }
+                        other => other,
+                    };
+                }
                 out.push(done);
             }
             if !keep {
+                // The count first: a crash between the two then leaves the record, which the
+                // next start lists, rather than a count no start would ever list.
+                let _ = std::fs::remove_file(&tries_path);
                 let _ = std::fs::remove_file(&p);
             }
             if let Some(f) = lock {
@@ -236,6 +295,31 @@ impl Journal {
     }
 }
 
+/// The starts that try a kept record before it is dropped with a notice.
+pub const MAX_TRIES: u32 = 3;
+
+fn read_tries(path: &Path) -> u32 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Opened for reading and writing with no other writer while it is held (Windows: share read
+/// only, so the open fails while another process holds it for writing, and nobody can open it
+/// for writing until it is closed).
+fn open_alone(path: &Path) -> std::io::Result<File> {
+    let mut o = OpenOptions::new();
+    o.read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        o.share_mode(FILE_SHARE_READ);
+    }
+    o.open(path)
+}
+
 /// Why a record is left on disk for a later start: the file could not be read (held by another
 /// process), its trailer chain could not be read, or it has fewer generations than recorded.
 pub(crate) const UNREADABLE: &str = "unreadable";
@@ -244,7 +328,76 @@ pub(crate) const BEHIND: &str = "fewer generations than recorded";
 
 /// Whether the record of `r` stays on disk (nothing was decided about its file).
 fn keeps_record(r: &Recovered) -> bool {
-    matches!(r, Recovered::Left { reason, .. } if [UNREADABLE, CHAIN_UNREADABLE, BEHIND].contains(reason))
+    matches!(r, Recovered::Failed { .. })
+        || matches!(r, Recovered::Left { reason, .. } if [UNREADABLE, CHAIN_UNREADABLE, BEHIND].contains(reason))
+}
+
+/// What the start tells the page about one record: never its folder, only the file's name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Notice {
+    /// Given up after its tries (the record dropped; the file left as it is).
+    GaveUp {
+        /// The file's name.
+        name: String,
+        /// The starts that tried.
+        tries: u32,
+    },
+    /// Held by another process at every try so far (the record kept, retried at every start).
+    Held {
+        /// The file's name.
+        name: String,
+        /// The starts that tried.
+        tries: u32,
+    },
+    /// The recovery failed (the record kept, retried at the next start).
+    Failed {
+        /// The file's name.
+        name: String,
+        /// The error.
+        error: String,
+    },
+}
+
+/// The start's account of its recovery: how many interrupted writes it settled, and a notice
+/// for each record the user must hear about.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StartupReport {
+    /// The records settled: a partial deleted, an append rolled back or found committed.
+    pub recovered: usize,
+    /// The notices, in the recovery's order.
+    pub notices: Vec<Notice>,
+}
+
+/// The account of `done` (what [`Journal::recover`] returned).
+pub fn startup_report(done: &[Recovered]) -> StartupReport {
+    let name = |p: &Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let mut r = StartupReport::default();
+    for d in done {
+        match d {
+            Recovered::DeletedPartial(_)
+            | Recovered::RolledBack { .. }
+            | Recovered::Committed(_) => r.recovered += 1,
+            Recovered::GaveUp { path, tries, .. } => r.notices.push(Notice::GaveUp {
+                name: name(path),
+                tries: *tries,
+            }),
+            Recovered::Held { path, tries } => r.notices.push(Notice::Held {
+                name: name(path),
+                tries: *tries,
+            }),
+            Recovered::Failed { path, error } => r.notices.push(Notice::Failed {
+                name: name(path),
+                error: error.clone(),
+            }),
+            Recovered::Left { .. } => {}
+        }
+    }
+    r
 }
 
 fn same_file(path: &Path, id: &Identity) -> Result<bool, &'static str> {
@@ -286,26 +439,42 @@ fn recover_one(r: &Record) -> Recovered {
             path,
             identity,
             generation,
-        } => match same_file(path, identity) {
-            Ok(true) => {
+        } => {
+            let left = |reason| Recovered::Left {
+                path: path.clone(),
+                reason,
+            };
+            let mut file = match open_alone(path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return left("gone"),
+                Err(_) => return left(UNREADABLE),
+            };
+            match file_identity(&file) {
+                Ok(now) if now == identity.0 => {}
+                Ok(_) => return left("another file now"),
+                Err(_) => return left(UNREADABLE),
+            }
+            {
                 // The latest committed generation, from the trailer chain `rollback` reads.
                 // Past the recorded one: the append committed (and maybe later generations,
                 // appended after this process died): nothing is written. Equal: the append
                 // never committed and at most a torn tail follows: cut back to it. Anything
                 // else (the chain unreadable, an unsupported version, fewer generations than
                 // recorded): nothing is touched and the record stays for a later start.
-                match lpk_api::committed_generation(path) {
+                match lpk_api::committed_generation_of(&mut file, path) {
                     Ok(g) if g > *generation => Recovered::Committed(path.clone()),
-                    Ok(g) if g == *generation => match lpk_api::rollback(path, *generation) {
-                        Ok(g) => Recovered::RolledBack {
-                            path: path.clone(),
-                            generation: g.generation,
-                        },
-                        Err(e) => Recovered::Failed {
-                            path: path.clone(),
-                            error: e.to_string(),
-                        },
-                    },
+                    Ok(g) if g == *generation => {
+                        match lpk_api::rollback_file(&mut file, path, *generation) {
+                            Ok(g) => Recovered::RolledBack {
+                                path: path.clone(),
+                                generation: g.generation,
+                            },
+                            Err(e) => Recovered::Failed {
+                                path: path.clone(),
+                                error: e.to_string(),
+                            },
+                        }
+                    }
                     Ok(_) => Recovered::Left {
                         path: path.clone(),
                         reason: BEHIND,
@@ -316,15 +485,7 @@ fn recover_one(r: &Record) -> Recovered {
                     },
                 }
             }
-            Ok(false) => Recovered::Left {
-                path: path.clone(),
-                reason: "another file now",
-            },
-            Err(reason) => Recovered::Left {
-                path: path.clone(),
-                reason,
-            },
-        },
+        }
     }
 }
 

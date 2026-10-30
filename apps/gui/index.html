@@ -9,6 +9,12 @@
   <script type="module" src="main.js"></script>
 </head>
 <body>
+  <div class="actions" role="toolbar" data-label="actions.label">
+    <button type="button" id="action-open" data-string="action.open"></button>
+    <button type="button" id="action-files" data-string="action.files"></button>
+    <button type="button" id="action-folder" data-string="action.folder"></button>
+  </div>
+  <ul id="notices" class="notices" role="list" data-label="notices.label" hidden></ul>
   <header class="bar" role="toolbar" data-label="bar.label" hidden id="bar">
     <div class="modes" role="radiogroup" data-label="mode.label">
       <button type="button" id="mode-tree" role="radio" aria-checked="false" data-string="mode.tree"></button>

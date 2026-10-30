@@ -21,6 +21,9 @@ use crate::open::{OpenFolders, Opening};
 use crate::ops::Ops;
 use crate::{write, GuiError};
 
+/// The refusal of a second `pick` while a picker is open.
+pub const PICKER_OPEN: &str = "a picker is already open";
+
 /// What `open_archive` returns to the page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Opened {
@@ -61,6 +64,8 @@ pub struct App {
     sessions: Mutex<HashMap<u64, Arc<Slot>>>,
     next: AtomicU64,
     opened: OpenFolders,
+    motw_off: bool,
+    picking: std::sync::atomic::AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -77,7 +82,47 @@ impl App {
             sessions: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             opened: OpenFolders::new(None),
+            motw_off: false,
+            picking: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Mark of the Web opted out for the archives this state opens (E6-5's setting,
+    /// [`OpenOptions::motw_off`]); an opened entry is zoned all the same.
+    pub fn with_motw_off(mut self, off: bool) -> Self {
+        self.motw_off = off;
+        self
+    }
+
+    /// The start-up sweep of the `Open` folders an earlier run left behind (its process has
+    /// ended), leaving a running instance's alone; the count removed.
+    pub fn sweep_open(&self) -> usize {
+        self.opened.sweep(lpk_gui_sys::process_alive)
+    }
+
+    /// The native picker for `purpose` (through `picker`): a grant per path chosen. One picker
+    /// at a time: a second request while one is open is refused (`Usage`), so a double-click
+    /// cannot stack two modal dialogs.
+    pub fn pick(
+        &self,
+        picker: &dyn crate::pick::Picker,
+        purpose: crate::pick::Purpose,
+    ) -> Result<Vec<crate::grants::Granted>, GuiError> {
+        if self
+            .picking
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(GuiError::usage(PICKER_OPEN));
+        }
+        struct Release<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _release = Release(&self.picking);
+        crate::pick::pick(&self.grants, picker, purpose)
     }
 
     /// The folder opened entries go into (each into a fresh folder of its own; none: opening
@@ -98,7 +143,11 @@ impl App {
     /// Open the archive of `grant`.
     pub fn open(&self, grant: &Grant, cancel: &CancelToken) -> Result<Opened, GuiError> {
         let path = self.grants.resolve(grant, GrantKind::Archive)?;
-        let session = Arc::new(Session::open(&path, &OpenOptions::default())?);
+        let options = OpenOptions {
+            motw_off: self.motw_off,
+            ..OpenOptions::default()
+        };
+        let session = Arc::new(Session::open(&path, &options)?);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -240,16 +289,7 @@ impl App {
             )
             .into());
         }
-        let file = crate::open::file_in(&dir, &path);
-        if !file.is_file() {
-            return Err(lpk_api::Error::new(
-                lpk_api::Class::Internal,
-                "OpenEntry",
-                format!("{path} was not extracted"),
-                None,
-            )
-            .into());
-        }
+        let file = crate::open::extracted_file(&dir, &path)?;
         Ok(Opening::Shell { name, file })
     }
 
@@ -349,6 +389,40 @@ mod tests {
         assert_eq!(rows[0].name, "file-002.txt");
         app.close(o.session).unwrap();
         assert!(app.rows(o.session, 0, 1).is_err());
+    }
+
+    #[test]
+    fn one_picker_at_a_time() {
+        use crate::pick::{Picker, Purpose};
+        use std::cell::RefCell;
+        /// A dialog during which the page asks for a second one.
+        struct Reentrant<'a> {
+            app: &'a App,
+            second: RefCell<Option<Result<usize, GuiError>>>,
+        }
+        impl Picker for Reentrant<'_> {
+            fn files(&self, _: &str, _: bool) -> std::io::Result<Vec<PathBuf>> {
+                let r = self.app.pick(self, Purpose::Files).map(|v| v.len());
+                *self.second.borrow_mut() = Some(r);
+                Ok(vec![PathBuf::from("a.lpk")])
+            }
+            fn folder(&self, _: &str) -> std::io::Result<Option<PathBuf>> {
+                Ok(Some(PathBuf::from("out")))
+            }
+        }
+        let app = App::new(None);
+        let p = Reentrant {
+            app: &app,
+            second: RefCell::new(None),
+        };
+        assert_eq!(app.pick(&p, Purpose::Archive).unwrap().len(), 1);
+        let second = p.second.borrow_mut().take().unwrap().unwrap_err();
+        assert!(
+            second.is(lpk_api::Class::Usage) && second.detail == PICKER_OPEN,
+            "{second}"
+        );
+        // Released once the first dialog closed.
+        assert_eq!(app.pick(&p, Purpose::Destination).unwrap().len(), 1);
     }
 
     #[test]

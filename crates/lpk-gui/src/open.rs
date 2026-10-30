@@ -134,9 +134,64 @@ impl OpenFolders {
     }
 }
 
+impl OpenFolders {
+    /// The start-up sweep: remove the folders under the root an earlier run left (`<pid>-<n>`
+    /// whose process `alive` says has ended; never this process's), best effort. Anything
+    /// else under the root, and the folders of a running instance, are left alone. The count
+    /// removed.
+    pub fn sweep(&self, alive: impl Fn(u32) -> bool) -> usize {
+        let Some(root) = &self.root else {
+            return 0;
+        };
+        let Ok(rd) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        let me = std::process::id();
+        let mut removed = 0;
+        for e in rd.flatten() {
+            let Some(pid) = folder_pid(&e.file_name().to_string_lossy()) else {
+                continue;
+            };
+            if pid == me || alive(pid) || !e.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            if std::fs::remove_dir_all(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+}
+
+/// The process ID of a folder named `<pid>-<n>` (both decimal), else `None`.
+fn folder_pid(name: &str) -> Option<u32> {
+    let (pid, n) = name.split_once('-')?;
+    // Exactly the form `fresh` writes: `007-1` or `7-01` is not one of ours.
+    let pid_n: u32 = pid.parse().ok()?;
+    let n_n: u64 = n.parse().ok()?;
+    (pid_n.to_string() == pid && n_n.to_string() == n).then_some(pid_n)
+}
+
 /// The extracted file of entry `path` (`/`-separated) under `dir`.
 pub fn file_in(dir: &Path, path: &str) -> PathBuf {
     path.split('/').fold(dir.to_path_buf(), |p, c| p.join(c))
+}
+
+/// The extracted file of entry `path` in its fresh folder `dir`; when the extraction left no
+/// such file, the folder is removed and the open fails.
+pub fn extracted_file(dir: &Path, path: &str) -> Result<PathBuf, crate::GuiError> {
+    let file = file_in(dir, path);
+    if file.is_file() {
+        return Ok(file);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    Err(lpk_api::Error::new(
+        lpk_api::Class::Internal,
+        "OpenEntry",
+        format!("{path} was not extracted"),
+        None,
+    )
+    .into())
 }
 
 #[cfg(test)]
@@ -215,5 +270,76 @@ mod tests {
         f.clean();
         assert!(!a.exists() && !b.exists());
         assert!(OpenFolders::new(None).fresh().is_err());
+    }
+
+    #[test]
+    fn the_sweep_removes_ended_processes_folders_only() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("Open");
+        let f = OpenFolders::new(Some(root.clone()));
+        let mine = f.fresh().unwrap();
+        std::fs::write(mine.join("x.txt"), b"x").unwrap();
+        let ended = root.join("4000000001-1");
+        let running = root.join("4000000002-7");
+        let other = root.join("notes");
+        let odd = root.join("12-x");
+        for dir in [&ended, &running, &other, &odd] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("f.pdf"), b"f").unwrap();
+        }
+        let file = root.join("13-1");
+        std::fs::write(&file, b"a file, not a folder").unwrap();
+        let removed = f.sweep(|pid| pid == 4_000_000_002);
+        assert_eq!(removed, 1);
+        assert!(!ended.exists(), "an ended process's folder goes");
+        assert!(running.join("f.pdf").exists(), "a running instance's stays");
+        assert!(mine.join("x.txt").exists(), "this process's stays");
+        assert!(other.exists() && odd.exists() && file.exists());
+        // With the real check: no process 4000000002 runs, so its folder goes; this process
+        // runs, so its folder stays.
+        assert_eq!(f.sweep(lpk_gui_sys::process_alive), 1);
+        assert!(!running.exists());
+        assert!(mine.join("x.txt").exists());
+        assert_eq!(OpenFolders::new(None).sweep(|_| false), 0);
+    }
+
+    #[test]
+    fn only_the_exact_folder_form_names_a_process() {
+        assert_eq!(folder_pid("7-1"), Some(7));
+        assert_eq!(folder_pid("4000000001-12"), Some(4_000_000_001));
+        for bad in [
+            "007-1",
+            "7-01",
+            "+7-1",
+            "7-+1",
+            "7-",
+            "-1",
+            "7",
+            "7-1-2",
+            "a-1",
+            "99999999999-1",
+        ] {
+            assert_eq!(folder_pid(bad), None, "{bad}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("Open");
+        let padded = root.join("004000000001-1");
+        std::fs::create_dir_all(&padded).unwrap();
+        assert_eq!(OpenFolders::new(Some(root)).sweep(|_| false), 0);
+        assert!(padded.exists());
+    }
+
+    #[test]
+    fn a_file_not_extracted_removes_its_fresh_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let f = OpenFolders::new(Some(d.path().join("Open")));
+        let dir = f.fresh().unwrap();
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let e = extracted_file(&dir, "a/missing.pdf").unwrap_err();
+        assert!(e.is(lpk_api::Class::Internal), "{e}");
+        assert!(!dir.exists(), "the fresh folder is removed");
+        let dir = f.fresh().unwrap();
+        std::fs::write(dir.join("ok.pdf"), b"ok").unwrap();
+        assert_eq!(extracted_file(&dir, "ok.pdf").unwrap(), dir.join("ok.pdf"));
     }
 }
