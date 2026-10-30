@@ -481,3 +481,95 @@ fn a_cleanup_that_cannot_run_is_a_warning() {
     );
     assert_eq!(std::fs::read(victim.join("keep.txt")).unwrap(), b"precious");
 }
+
+/// E5-4: an id set picks listing positions (`lpk_api::EntryRef::id` is the position in
+/// `list_file`'s entries), not paths.
+#[test]
+fn an_id_set_picks_foreign_members_by_listing_position() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let archive = write_fixture(work.path(), &members(), None);
+    let opts = s.options(None, Limits::default());
+    let monitor = Monitor::default();
+    let listing = foreign::list_file(&archive, None, &opts, &monitor).unwrap();
+    let id_of = |name: &str| listing.entries.iter().position(|e| e.path == name).unwrap() as u32;
+    let out = work.path().join("out");
+    let sum = foreign::extract_file(
+        &archive,
+        &out,
+        None,
+        &lpk_core::DefaultPolicy,
+        &Selection::from_ids([id_of("d/a.txt"), id_of("empty")]),
+        &opts,
+        &monitor,
+    )
+    .unwrap();
+    assert_eq!(sum.files, 2);
+    assert_eq!(std::fs::read(out.join("d/a.txt")).unwrap(), b"hello");
+    assert!(out.join("empty").is_file());
+    assert!(!out.join("d/big.bin").exists() && !out.join("d/copy.txt").exists());
+    // A member named with a backslash (a ZIP may): picking it by id selects it (a glob could
+    // not spell it); the policy then refuses its name on every platform, while picking the
+    // others leaves it alone.
+    let odd = vec![
+        Member::file(r"a\b.txt", b"odd"),
+        Member::file("ok.txt", b"ok"),
+    ];
+    let archive = write_fixture(work.path(), &odd, None);
+    let listing = foreign::list_file(&archive, None, &opts, &monitor).unwrap();
+    let odd_id = listing
+        .entries
+        .iter()
+        .position(|e| e.path == r"a\b.txt")
+        .unwrap() as u32;
+    let sel = Selection::from_ids([odd_id]);
+    assert!(sel.selects(odd_id as usize, r"a\b.txt"));
+    let e = foreign::extract_file(
+        &archive,
+        &work.path().join("out4"),
+        None,
+        &lpk_core::DefaultPolicy,
+        &sel,
+        &opts,
+        &monitor,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e, CoreError::Format(FormatError::UnsafePath { .. })),
+        "{e}"
+    );
+    let ok_id = 1 - odd_id;
+    let out5 = work.path().join("out5");
+    foreign::extract_file(
+        &archive,
+        &out5,
+        None,
+        &lpk_core::DefaultPolicy,
+        &Selection::from_ids([ok_id]),
+        &opts,
+        &monitor,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(out5.join("ok.txt")).unwrap(), b"ok");
+    // Two members with one path: the listing numbers both, but extraction refuses the
+    // archive (a second member would meet the first's file), whatever is picked.
+    let dup = vec![
+        Member::file("x.txt", b"one"),
+        Member::file("y.txt", b"y"),
+        Member::file("x.txt", b"two"),
+    ];
+    let archive = write_fixture(work.path(), &dup, None);
+    let listing = foreign::list_file(&archive, None, &opts, &monitor).unwrap();
+    assert_eq!(listing.entries.len(), 3, "ids 0 and 2 are both x.txt");
+    let e = foreign::extract_file(
+        &archive,
+        &work.path().join("out3"),
+        None,
+        &lpk_core::DefaultPolicy,
+        &Selection::from_ids([2]),
+        &opts,
+        &monitor,
+    )
+    .unwrap_err();
+    assert!(matches!(e, CoreError::DuplicatePath { .. }), "{e}");
+}

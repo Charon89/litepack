@@ -9,16 +9,29 @@
 //! (so a Windows user may type `docs\deep`), never as an escape; `[*]` matches a literal `*`.
 //! Matching is case-sensitive on every platform. No pattern is anchored to a name: `*.log`
 //! matches `a.log` at the top only, `**/*.log` at any depth.
+//!
+//! A selection may instead be an id set ([`Selection::from_ids`], E5-4): the indices of the
+//! entries in the archive's entry table (for a foreign archive, in its listing), one bit each.
+//! It is exact: no path is spelled, so any name (a backslash included) can be picked and a
+//! million picks cost about 125 KB; a directory's subtree is the caller's to include. It
+//! applies where the entries are filtered by position ([`Selection::filter`], [`Hits`] fed
+//! every entry in order); asked about a bare path it selects nothing.
 
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::CoreError;
 
-/// A set of patterns over entry paths; empty selects everything.
+/// A set of patterns over entry paths, or of entry indices; empty selects everything.
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
     patterns: Vec<String>,
     set: Option<GlobSet>,
+    /// The id-set form: bit `i` is entry `i`.
+    ids: Option<std::sync::Arc<Vec<u64>>>,
+}
+
+fn id_picked(bits: &[u64], i: usize) -> bool {
+    bits.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
 }
 
 /// Compile one pattern (the rules of the module documentation).
@@ -64,12 +77,31 @@ impl Selection {
         Ok(Selection {
             patterns: kept,
             set: Some(set),
+            ids: None,
         })
     }
 
-    /// True when no pattern was given.
+    /// The entries with these indices (the position in the entry table); an index past the
+    /// end of the archive selects nothing. No directory closure: the caller adds a picked
+    /// directory's subtree.
+    pub fn from_ids(ids: impl IntoIterator<Item = u32>) -> Self {
+        let mut bits: Vec<u64> = Vec::new();
+        for id in ids {
+            let w = id as usize / 64;
+            if w >= bits.len() {
+                bits.resize(w + 1, 0);
+            }
+            bits[w] |= 1 << (id % 64);
+        }
+        Selection {
+            ids: Some(std::sync::Arc::new(bits)),
+            ..Selection::default()
+        }
+    }
+
+    /// True when no pattern and no id set was given.
     pub fn is_all(&self) -> bool {
-        self.set.is_none()
+        self.set.is_none() && self.ids.is_none()
     }
 
     /// The patterns as given.
@@ -114,12 +146,29 @@ impl Selection {
         self.is_all() || self.is_match(path)
     }
 
+    /// True when entry `index` at `path` is selected: by its position for an id set, else
+    /// [`matches`](Self::matches).
+    pub fn selects(&self, index: usize, path: &str) -> bool {
+        match &self.ids {
+            Some(bits) => id_picked(bits, index),
+            None => self.matches(path),
+        }
+    }
+
     /// Keep the items whose path (given by `path`) matches, in their order; every pattern
     /// must match at least one item, else [`CoreError::NoMatch`] names the first (in the
     /// order given) that matched none. The selection of everything keeps everything.
     pub fn filter<T>(&self, items: Vec<T>, path: impl Fn(&T) -> &str) -> Result<Vec<T>, CoreError> {
         if self.is_all() {
             return Ok(items);
+        }
+        if let Some(bits) = &self.ids {
+            return Ok(items
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| id_picked(bits, *i))
+                .map(|(_, t)| t)
+                .collect());
         }
         let mut hit = vec![false; self.patterns.len()];
         let (mut buf, mut scratch) = (Vec::new(), Vec::new());
@@ -147,6 +196,7 @@ impl Selection {
             hit: vec![false; self.patterns.len()],
             buf: Vec::new(),
             scratch: Vec::new(),
+            next: 0,
         }
     }
 
@@ -167,11 +217,18 @@ pub struct Hits<'a> {
     hit: Vec<bool>,
     buf: Vec<usize>,
     scratch: Vec<usize>,
+    /// The position of the next recorded entry (an id set is read by position).
+    next: usize,
 }
 
 impl Hits<'_> {
     /// Record `path`; true when it is selected.
     pub fn record(&mut self, path: &str) -> bool {
+        let index = self.next;
+        self.next += 1;
+        if let Some(bits) = &self.selection.ids {
+            return id_picked(bits, index);
+        }
         if self.selection.is_all() {
             return true;
         }
@@ -197,6 +254,29 @@ mod tests {
 
     fn sel(p: &[&str]) -> Selection {
         Selection::new(p).unwrap()
+    }
+
+    #[test]
+    fn an_id_set_selects_by_position_whatever_the_names() {
+        let s = Selection::from_ids([0, 2, 70, 200_000]);
+        assert!(!s.is_all());
+        let names = vec!["a", r"b\c", "a", "d"];
+        let kept = s.filter(names.clone(), |p| p).unwrap();
+        assert_eq!(
+            kept,
+            ["a", "a"],
+            "positions 0 and 2, though both are named a"
+        );
+        assert!(s.selects(2, r"b\c") && !s.selects(1, "a"));
+        assert!(s.selects(200_000, "x") && !s.selects(200_001, "x"));
+        assert!(!s.matches("a"), "a bare path selects nothing");
+        let mut h = s.hits();
+        let got: Vec<bool> = names.iter().map(|p| h.record(p)).collect();
+        assert_eq!(got, [true, false, true, false]);
+        h.check().unwrap();
+        let none = Selection::from_ids([]);
+        assert!(!none.is_all());
+        assert!(none.filter(names, |p| p).unwrap().is_empty());
     }
 
     #[test]
