@@ -1,11 +1,14 @@
 //! `lpk-gui.exe`: the Tauri host on Windows; elsewhere a stub (the command layer in the library
 //! builds and is tested on every OS; the GUI ships for Windows alone).
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 // No console window behind the GUI in a release build.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
 mod host;
+#[cfg(windows)]
+mod updates;
 
 #[cfg(windows)]
 fn main() {

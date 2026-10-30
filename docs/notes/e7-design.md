@@ -168,7 +168,7 @@ file publishes anyway. The `git log --all -S` search covers the minisign header 
 `$LOCALAPPDATA\<productName>` [T-NSI][T-CFG]; `both` needs an elevated installer [T-WIN], so per-machine waits for an
 enterprise demand.
 
-**A collision to fix first, in the local state only.** That folder, `%LOCALAPPDATA%\LitePack`, is also where E5-2 keeps
+**A collision to fix first, in the local state only** (fixed by E5-7: the local state is now in `%LOCALAPPDATA%\org.litepack.gui`). That folder, `%LOCALAPPDATA%\LitePack`, is also where E5-2 keeps
 the GUI's journal and WebView2 data (`crates/lpk-gui/src/paths.rs:11`) and where E5-3 and E6-2 put `Open\` and
 `Verbs\`; the settings, `%APPDATA%\LitePack\settings.json` (E5 §5 chose `config_dir` over `app_config_dir`), live
 elsewhere and do not collide. Tauri's uninstaller deletes its own files and then `RMDir "$INSTDIR"` without `/r`; its

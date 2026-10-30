@@ -16,22 +16,29 @@
 //! - [`open`]: opening an entry with the shell (the allow-list, fresh zoned folders, the
 //!   start-up sweep).
 //! - [`pick`]: the native pickers, which mint grants.
-//! - [`cli`], [`paths`], [`strings`], [`security`].
+//! - [`cli`] and [`activation`]: the verbs of `docs/API.md` (E5-7), each path minted as a
+//!   grant; [`settings`]: the versioned settings file; [`update`]: the update check's gate.
+//! - [`paths`], [`strings`], [`security`].
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod activation;
 pub mod app;
 pub mod batch;
 pub mod browse;
 pub mod cli;
+pub mod forward;
 pub mod grants;
 pub mod journal;
 pub mod open;
 pub mod ops;
+pub mod outbox;
 pub mod paths;
 pub mod pick;
 pub mod security;
+pub mod settings;
 pub mod strings;
+pub mod update;
 pub mod write;
 
 include!("command_list.rs");

@@ -17,8 +17,9 @@ for i in 1 2 3; do
   echo "file $i" > "$work/in/sub/f$i.txt"
 done
 "$lpk" a "$work/smoke.lpk" "$work/in"
-# The GUI's state (journal, WebView2's data folder) goes to the scratch dir, not the user's.
+# The GUI's state (journal, WebView2's data folder) and its settings go to the scratch dir, not the user's.
 export LOCALAPPDATA="$work/local"
+export APPDATA="$work/roaming"
 export LPK_GUI_SMOKE_REPORT="$work/report.json"
 timeout 180 "$gui" "$work/smoke.lpk"
 report="$(cat "$work/report.json")"

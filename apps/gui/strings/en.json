@@ -47,5 +47,14 @@
   "notice.failed": "{name}: an interrupted write could not be cleaned up ({error}). LitePack will try again at the next start.",
   "create.running": "Creating {name}…",
   "create.done": "Created {name}.",
-  "notice.gaveup": "{name} was left as it is: an interrupted write could not be finished after {tries} tries. Check it with lpk test."
+  "settings.updates": "Check for updates",
+  "notice.settings": "Your settings could not be read, so the defaults are in use ({error}).",
+  "notice.refused": "LitePack could not follow a request from another window: {error}",
+  "notice.update": "LitePack {version} is available.",
+  "verb.extract-here": "Extract here is not in this version yet.",
+  "verb.extract-to": "Extract to a folder is not in this version yet.",
+  "verb.create": "The create wizard is not in this version yet; use New archive from files or from a folder.",
+  "verb.test": "Testing archives is not in this version yet; lpk test does it from a command prompt.",
+  "verb.convert": "Converting an archive to .lpk is not in this version yet.",
+  "notice.gaveup":"{name} was left as it is: an interrupted write could not be finished after {tries} tries. Check it with lpk test."
 }

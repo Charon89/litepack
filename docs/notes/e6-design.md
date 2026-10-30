@@ -32,7 +32,7 @@ returning `E_UNEXPECTED`, the release profile keeps unwinding (`Cargo.toml:40–
 are denied.
 
 **Invoke: the contract with the GUI.**
-- The paths travel in a binary response file, `%LOCALAPPDATA%\LitePack\Verbs\shell-<32 hex>.verbs`, created
+- The paths travel in a binary response file, `%LOCALAPPDATA%\org.litepack.gui\Verbs\shell-<32 hex>.verbs` (the GUI's local state, E5-7), created
   create-new: a magic, a protocol version and the verb, then per path a `u32` count of UTF-16LE code units and the
   units, unpaired surrogates kept; the GUI rebuilds each path with `OsString::from_wide`, which is lossless [FROMW],
   so D-89 (4)'s names round-trip. The command line is `"<GuiPath>" @<file>`.

@@ -100,4 +100,7 @@ the binary's parser with this table.
 | `--test` | `<archive>...` | Test | Tests each archive. |
 | `--convert` | `<archive>` | Convert to… | Re-creates a foreign archive as `.lpk` (E4 §6). |
 
-`@file` response files carry longer argument lists.
+`@file` response files carry longer argument lists: UTF-8 text (an optional byte-order mark), one argument
+per line, blank lines skipped, not recursive (a line starting with `@` is a path), at most 16 MiB across a
+command line's files. They are for users and scripts; E6's menus pass their paths in the binary `.verbs` files
+of `docs/notes/e6-design.md` ("Invoke: the contract with the GUI"), whose reader E6-2 adds.

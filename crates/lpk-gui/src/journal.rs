@@ -1,6 +1,6 @@
 //! Interrupted writes (`docs/notes/e5-design.md` section 1). Every `<name>.lpk.partial` a
 //! create writes and every running append is recorded in a file under the state folder
-//! (`%LOCALAPPDATA%\LitePack\journal`) with the file's identity (volume serial and file ID).
+//! (`%LOCALAPPDATA%\org.litepack.gui\journal`, `crate::paths`) with the file's identity (volume serial and file ID).
 //! The record is removed when the write ends, published or cleaned up by the engine. A record
 //! left behind means the process died mid-write (a crash, a forced log-off: tao ignores
 //! `WM_QUERYENDSESSION`); the next start then deletes the leftover partial, or rolls the

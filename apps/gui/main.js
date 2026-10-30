@@ -216,10 +216,100 @@ async function createPicked(what) {
   setStatus(t("create.done", { name: `${name}.lpk` }));
 }
 
-// The recovery's notices (D-117): each stays in its own list item, which the status line never
-// replaces, until the user dismisses it.
+// `Add to "<name>.lpk"` (E5-7, `--create … --name`): created at once with the defaults into the
+// first input's folder, a grant Rust derived from the verb's paths. E5-5 adds its progress dialog.
+async function createNamed(a) {
+  if (!a.folder) {
+    showNotices([{ kind: "text", text: t("verb.create") }]);
+    return;
+  }
+  const name = a.name;
+  setStatus(t("create.running", { name }));
+  const progress = new core.Channel();
+  progress.onmessage = () => {};
+  await core.invoke("create_archive", {
+    inputs: a.items.map((i) => i.grant),
+    folder: a.folder.grant,
+    name: a.name,
+    tier: "balanced",
+    op: nextOp++,
+    progress,
+  });
+  setStatus(t("create.done", { name }));
+}
+
+// The handlers of the verbs whose action a later task brings; each says so in a notice until then.
+// E5-4 completes extractHere and extractTo (its destination rule).
+function extractHere() {
+  showNotices([{ kind: "text", text: t("verb.extract-here") }]);
+}
+
+function extractTo() {
+  showNotices([{ kind: "text", text: t("verb.extract-to") }]);
+}
+
+// E5-5 completes createWizard (the create wizard, with these inputs).
+function createWizard() {
+  showNotices([{ kind: "text", text: t("verb.create") }]);
+}
+
+// E5-8 completes testArchives (the test dialog).
+function testArchives() {
+  showNotices([{ kind: "text", text: t("verb.test") }]);
+}
+
+// E4's broker path into create completes convertArchive (a foreign archive re-created as .lpk).
+function convertArchive() {
+  showNotices([{ kind: "text", text: t("verb.convert") }]);
+}
+
+// An activation verb (E5-7), from this instance's command line or forwarded by a second one: its
+// paths arrive as grants (src/activation.rs), the handler is Rust's choice.
+async function runActivation(a) {
+  switch (a.handler) {
+    case "open":
+      return openArchive(a.items[0]);
+    case "create-named":
+      return createNamed(a);
+    case "extract-here":
+      return extractHere(a);
+    case "extract-to":
+      return extractTo(a);
+    case "create-wizard":
+      return createWizard(a);
+    case "test":
+      return testArchives(a);
+    default:
+      return convertArchive(a);
+  }
+}
+
+// The update check's switch (E5-7): Rust saves it; off means no request at all.
+async function wireSettings() {
+  const box = $("update-check");
+  const settings = await core.invoke("settings");
+  box.checked = settings.update_check;
+  box.addEventListener("change", () => {
+    core.invoke("set_settings", { settings: { update_check: box.checked } }).catch((e) => {
+      box.checked = !box.checked;
+      showError(e);
+    });
+  });
+}
+
+// The recovery's notices (D-117) and the others (a second instance's refused command line, the
+// settings file's warning, an update, a verb not in this version): each stays in its own list
+// item, which the status line never replaces, until the user dismisses it.
 function noticeText(n) {
   switch (n.kind) {
+    case "text":
+      return n.text;
+    case "settings":
+      return t("notice.settings", { error: n.error });
+    case "refused":
+      return t("notice.refused", { error: n.error });
+    case "update":
+      return t("notice.update", { version: n.version });
     case "gaveup":
       return t("notice.gaveup", { name: n.name, tries: n.tries });
     case "held":
@@ -344,9 +434,18 @@ async function main() {
     setStatus(t("status.recovered", { count: startup.recovered }));
   }
   showNotices(startup.notices);
+  if (startup.settings_warning) {
+    showNotices([{ kind: "settings", error: startup.settings_warning }]);
+  }
+  await wireSettings();
+  // A command line that did not parse is shown, and the window still takes later verbs.
   if (startup.error) {
     showError({ message: startup.error });
-    return;
+  }
+  // This instance's own verb first; a second instance's verbs, held by Rust until the page
+  // subscribes, run after it.
+  if (startup.activation) {
+    await runActivation(startup.activation).catch(showError);
   }
   const channel = new core.Channel();
   channel.onmessage = (notice) => {
@@ -355,12 +454,15 @@ async function main() {
       if (archive) {
         openArchive(archive).catch(showError);
       }
+    } else if (notice.type === "activated") {
+      runActivation(notice.activation).catch(showError);
+    } else if (notice.type === "refused") {
+      showNotices([{ kind: "refused", error: notice.error }]);
+    } else if (notice.type === "update") {
+      showNotices([{ kind: "update", version: notice.version }]);
     }
   };
   await core.invoke("subscribe", { channel });
-  if (startup.archive) {
-    await openArchive(startup.archive);
-  }
 }
 
 main().catch(showError);
