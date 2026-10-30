@@ -1,0 +1,108 @@
+{
+  "class": "backup-versions-large",
+  "corpus": {
+    "class_blake3": "1f6716878e43c4c7d9575713b26cbe9415b61de6d1378a29d254aaa01b7a6a6b",
+    "class_bytes": 1658978348,
+    "class_files": 130215,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 85906890,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 17.15625,
+      "peak_job_memory_bytes": 1671245824,
+      "peak_memory_bytes": 1168388096,
+      "peak_process_commit_bytes": 1671245824,
+      "timed_out": false,
+      "user_cpu_seconds": 324.359375,
+      "wall_seconds": 235.6742
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 20.859375,
+      "peak_job_memory_bytes": 780763136,
+      "peak_memory_bytes": 529485824,
+      "peak_process_commit_bytes": 780763136,
+      "timed_out": false,
+      "user_cpu_seconds": 5.59375,
+      "wall_seconds": 10.2468364
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 85906890,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 17.15625,
+        "peak_job_memory_bytes": 1671245824,
+        "peak_memory_bytes": 1168388096,
+        "peak_process_commit_bytes": 1671245824,
+        "timed_out": false,
+        "user_cpu_seconds": 324.359375,
+        "wall_seconds": 235.6742
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 20.859375,
+        "peak_job_memory_bytes": 780763136,
+        "peak_memory_bytes": 529485824,
+        "peak_process_commit_bytes": 780763136,
+        "timed_out": false,
+        "user_cpu_seconds": 5.59375,
+        "wall_seconds": 10.2468364
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "repeats_short": "the first repeat's compress plus extract wall time reached --long-run-s (120 s): not repeated",
+  "schema_version": 2,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../tmp/run65016/c8/a.lpk",
+      "backup-versions-large",
+      "--balanced",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "balanced"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+b804e8fa8ebe"
+  },
+  "verification": {
+    "files_checked": 130215,
+    "files_ok": 130215,
+    "verified": true
+  }
+}

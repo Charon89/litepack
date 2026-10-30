@@ -1,0 +1,131 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "69155e679d828a757c7018767979ed6c9822ebf623e3ad22fd631a45cef29454",
+  "classes": [
+    "photo-jpeg-edited",
+    "photo-raw-png",
+    "small-files",
+    "software-installed",
+    "source-git",
+    "text-prose",
+    "video",
+    "vm-image"
+  ],
+  "combinations": [
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}
