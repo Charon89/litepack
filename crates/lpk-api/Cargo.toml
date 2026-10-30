@@ -28,7 +28,12 @@ lpk-procstat-sys = { path = "../lpk-procstat-sys", version = "0.0.1" }
 # counting global allocator. Dev-dependencies only; never a shipped build.
 test-support = []
 
+[target.'cfg(windows)'.dev-dependencies]
+lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
+
 [dev-dependencies]
+# E5-6's foreign `read_entry` test: the fixture format, and the test worker (built beside).
+lpk-proto = { path = "../lpk-proto", version = "0.0.1" }
 tempfile = "3.27.0"
 # The GUI seam test parses lpk-gui's manifest.
 toml = "1.1.6"

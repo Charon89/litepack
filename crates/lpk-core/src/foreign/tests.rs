@@ -829,3 +829,104 @@ fn quota_exceeded_status_names_the_cpu_limit_without_usage() {
         "{e:?}"
     );
 }
+
+/// `read_member` over recorded output (the worker's frames after the listing).
+fn read_scripted(frames: &[Response], id: u32, cap: u64) -> (Result<Vec<u8>, CoreError>, Vec<u8>) {
+    let out = script(frames);
+    let monitor = Monitor::default();
+    let peer = ScriptPeer {
+        input: &out,
+        buf: Vec::new(),
+    };
+    let mut conv = Conv::new(peer, Limits::default(), 100, &monitor);
+    let r = conv.handshake().and_then(|()| {
+        conv.open(Format::TestFixture, b"", None)?;
+        let records = conv.list()?;
+        read_member(&mut conv, records, id, None, cap)
+    });
+    (r, conv.peer.buf.clone())
+}
+
+fn is_cap_refusal(r: &Result<Vec<u8>, CoreError>, needed: u64, cap: u64) -> bool {
+    matches!(
+        r,
+        Err(CoreError::Format(FormatError::Refused(lpk_format::Refusal {
+            field: "preview cap",
+            needed: n,
+            allowed: a,
+        }))) if *n == needed && *a == cap
+    )
+}
+
+#[test]
+fn a_member_is_read_exactly_and_the_cap_refuses_before_and_during_the_stream() {
+    let (r, _) = read_scripted(&one_member(b"hello"), 0, 5);
+    assert_eq!(r.unwrap(), b"hello");
+    // Declared over the cap: refused before any request for data.
+    let (r, _) = read_scripted(&one_member(b"hello"), 0, 4);
+    assert!(is_cap_refusal(&r, 5, 4), "{r:?}");
+    // Declared small, streamed over the cap: stopped at the first frame past it.
+    let mut f = one_member(b"abc");
+    f.truncate(4);
+    for _ in 0..1000 {
+        f.push(Response::Data(vec![0; 1]));
+    }
+    let (r, _) = read_scripted(&f, 0, 3);
+    assert!(is_cap_refusal(&r, 4, 3), "{r:?}");
+    // Over the declared size but under the cap: a size mismatch.
+    let mut f = one_member(b"abc");
+    f[4] = Response::Data(b"abcdef".to_vec());
+    let (r, _) = read_scripted(&f, 0, 100);
+    assert!(
+        matches!(
+            &r,
+            Err(CoreError::Foreign(ForeignError::SizeMismatch { .. }))
+        ),
+        "{r:?}"
+    );
+    let mut f = one_member(b"abc");
+    f[4] = Response::Data(b"abcdefgh".to_vec());
+    let (r, _) = read_scripted(&f, 0, 5);
+    assert!(is_cap_refusal(&r, 8, 5), "{r:?}");
+    // Not a member.
+    let (r, _) = read_scripted(&one_member(b"abc"), 7, 5);
+    assert!(matches!(r, Err(CoreError::Foreign(_))), "{r:?}");
+}
+
+#[test]
+fn the_declared_output_limit_applies_before_the_cap_and_any_data() {
+    let mut frames = one_member(b"hello");
+    frames[2] = entries(vec![Record {
+        packed_len: 10,
+        ..rec("a", 500, 0)
+    }]);
+    let out = script(&frames);
+    let monitor = Monitor::default();
+    let peer = ScriptPeer {
+        input: &out,
+        buf: Vec::new(),
+    };
+    let limits = Limits {
+        max_expansion: Some(2),
+        ..Limits::default()
+    };
+    // 500 declared bytes against an archive of 100 bytes and a factor of 2; the cap allows it.
+    let mut conv = Conv::new(peer, limits, 100, &monitor);
+    let r = conv.handshake().and_then(|()| {
+        conv.open(Format::TestFixture, b"", None)?;
+        let records = conv.list()?;
+        read_member(&mut conv, records, 0, None, 1000)
+    });
+    assert!(
+        matches!(
+            r,
+            Err(CoreError::Foreign(ForeignError::LimitExceeded {
+                limit: "declared output",
+                value: 500,
+                max: 200,
+                ..
+            }))
+        ),
+        "{r:?}"
+    );
+}

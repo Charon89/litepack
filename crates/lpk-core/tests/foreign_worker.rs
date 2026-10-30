@@ -682,3 +682,148 @@ fn an_id_set_with_a_directory_after_its_children_extracts_what_it_names() {
     assert_eq!(std::fs::read(out.join("d/y.txt")).unwrap(), b"y");
     assert!(!out.join("z.txt").exists());
 }
+
+fn read_one(
+    archive: &Path,
+    id: u32,
+    fp: Option<&lpk_core::Fingerprint>,
+    cap: u64,
+    opts: &Options,
+    m: &Monitor,
+) -> Result<Vec<u8>, CoreError> {
+    foreign::read_member_file(archive, id, fp, cap, None, opts, m)
+}
+
+fn cap_refused(e: &CoreError, cap: u64) -> bool {
+    matches!(
+        e,
+        CoreError::Format(FormatError::Refused(r)) if r.field == "preview cap" && r.allowed == cap
+    )
+}
+
+/// E5-6: one member by listing position, read exactly, nothing written beside the archive.
+#[test]
+fn one_member_is_read_by_listing_position_with_the_fingerprint_checked() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let ms = members();
+    let archive = write_fixture(work.path(), &ms, None);
+    let opts = s.options(None, Limits::default());
+    let m = Monitor::default();
+    let listing = foreign::list_file(&archive, None, &opts, &m).unwrap();
+    let fp = listing.fingerprint();
+    assert_eq!(
+        read_one(&archive, 1, Some(&fp), 100, &opts, &m).unwrap(),
+        b"hello"
+    );
+    let big = read_one(&archive, 2, Some(&fp), 1 << 20, &opts, &m).unwrap();
+    assert_eq!(big, ms[2].data);
+    assert_eq!(read_one(&archive, 3, Some(&fp), 0, &opts, &m).unwrap(), b"");
+    // Exactly at the cap is fine; one under is refused naming the cap.
+    let n = ms[2].data.len() as u64;
+    assert!(read_one(&archive, 2, Some(&fp), n, &opts, &m).is_ok());
+    let e = read_one(&archive, 2, Some(&fp), n - 1, &opts, &m).unwrap_err();
+    assert!(cap_refused(&e, n - 1), "{e}");
+    // A directory, a hard link, and a position past the end are refused.
+    for id in [0, 4] {
+        let e = read_one(&archive, id, Some(&fp), 1 << 20, &opts, &m).unwrap_err();
+        assert!(matches!(e, CoreError::InvalidOption(_)), "{id}: {e}");
+    }
+    let e = read_one(&archive, 9, Some(&fp), 1 << 20, &opts, &m).unwrap_err();
+    assert!(
+        matches!(e, CoreError::Foreign(ForeignError::Unsupported { .. })),
+        "{e}"
+    );
+    let names: Vec<_> = std::fs::read_dir(work.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+}
+
+/// A declared size over the cap is refused before a `ReadMember` goes out: a worker that
+/// would hang on one never gets the chance.
+#[test]
+fn a_member_declared_over_the_cap_is_refused_before_any_data_is_read() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let archive = write_fixture(work.path(), &members(), None);
+    let lim = short();
+    let opts = s.options(Some("hang-read-member"), lim.clone());
+    let t = Instant::now();
+    let e = read_one(&archive, 2, None, 1000, &opts, &Monitor::default()).unwrap_err();
+    assert!(cap_refused(&e, 1000), "{e}");
+    assert!(t.elapsed() < lim.no_progress + SLACK, "{:?}", t.elapsed());
+}
+
+/// The GUI's password prompt relies on `PasswordRequired`; the right credentials read exactly.
+#[test]
+fn an_encrypted_member_needs_the_password_and_reads_exactly_with_it() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let archive = write_fixture(work.path(), &[Member::file("a", b"secret")], Some(b"pw"));
+    let opts = s.options(None, Limits::default());
+    let m = Monitor::default();
+    // Without credentials the worker asks for the password at open.
+    let e = foreign::read_member_file(&archive, 0, None, 100, None, &opts, &m).unwrap_err();
+    assert!(
+        matches!(e, CoreError::Format(FormatError::PasswordRequired)),
+        "{e}"
+    );
+    let right = Credentials::password(b"pw".to_vec());
+    let got = foreign::read_member_file(&archive, 0, None, 100, Some(&right), &opts, &m).unwrap();
+    assert_eq!(got, b"secret");
+}
+
+#[test]
+fn a_changed_archive_is_refused_before_any_member_data_is_read() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let archive = write_fixture(work.path(), &members(), None);
+    let opts = s.options(None, Limits::default());
+    let m = Monitor::default();
+    let fp = foreign::list_file(&archive, None, &opts, &m)
+        .unwrap()
+        .fingerprint();
+    write_fixture(
+        work.path(),
+        &[Member::file("other", b"hello"), Member::file("x", b"y")],
+        None,
+    );
+    let hang = s.options(Some("hang-read-member"), short());
+    let t = Instant::now();
+    let e = read_one(&archive, 0, Some(&fp), 100, &hang, &m).unwrap_err();
+    assert!(
+        matches!(e, CoreError::Foreign(ForeignError::ArchiveChanged)),
+        "{e}"
+    );
+    assert!(t.elapsed() < short().no_progress + SLACK);
+}
+
+#[test]
+fn cancelling_a_member_read_ends_the_worker_promptly() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let big = vec![9u8; 4 << 20];
+    let archive = write_fixture(work.path(), &[Member::file("big", &big)], None);
+    let cancel = CancelToken::new();
+    let c = cancel.clone();
+    let h = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        c.cancel();
+    });
+    let lim = short();
+    let t = Instant::now();
+    let e = read_one(
+        &archive,
+        0,
+        None,
+        8 << 20,
+        &s.options(Some("slow-data"), lim.clone()),
+        &Monitor::with_cancel(cancel),
+    )
+    .unwrap_err();
+    h.join().unwrap();
+    assert!(matches!(e, CoreError::Cancelled), "{e}");
+    assert!(t.elapsed() < lim.cancel_grace + SLACK, "{:?}", t.elapsed());
+}

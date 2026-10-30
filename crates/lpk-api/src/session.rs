@@ -1096,10 +1096,10 @@ impl Session {
     /// # Ok(()) }
     /// ```
     pub fn read_entry(&self, id: u32, cap: u64, c: &CancelToken) -> Result<Vec<u8>, Error> {
-        if let Kind::Foreign(_) = &self.kind {
-            return Err(unsupported_foreign("reading one entry", &self.path));
-        }
         let g = self.read_guard(c)?;
+        if let Kind::Foreign(_) = &self.kind {
+            return self.read_foreign_entry(&g, id, cap);
+        }
         let fail = |e: FormatError| Error::format(e, Some(&self.path));
         let mut a = self.fork()?;
         let table = a.entry_table().map_err(fail)?;
@@ -1164,6 +1164,55 @@ impl Session {
             }
         }
         Ok(sink.out)
+    }
+
+    /// [`read_entry`](Self::read_entry) of a foreign archive: one member by listing position,
+    /// decompressed by the sandboxed worker into a buffer capped at `cap`; the session's
+    /// listing fingerprint is checked against the worker's fresh listing.
+    fn read_foreign_entry(&self, g: &ReadGuard<'_>, id: u32, cap: u64) -> Result<Vec<u8>, Error> {
+        let listing = self.listing()?;
+        let entry = listing.entries.get(id as usize).ok_or_else(|| {
+            Error::new(
+                Class::NotFound,
+                "NotFound",
+                format!("{}: no entry {id}", self.path.display()),
+                Some(&self.path),
+            )
+        })?;
+        if entry.kind != EntryKind::File {
+            return Err(Error::usage(format!(
+                "{}: not a file ({})",
+                entry.path,
+                entry.kind.name()
+            )));
+        }
+        if entry.size > cap {
+            return Err(Error::format(
+                FormatError::Refused(lpk_format::Refusal {
+                    field: "preview cap",
+                    needed: entry.size,
+                    allowed: cap,
+                }),
+                Some(Path::new(&entry.path)),
+            ));
+        }
+        lpk_core::foreign::read_member_file(
+            &self.path,
+            id,
+            Some(&listing.fingerprint()),
+            cap,
+            self.credentials.as_ref(),
+            &self.options.foreign,
+            &Monitor::with_cancel(g.cancel.clone()),
+        )
+        .map_err(|e| match e {
+            // The streamed bytes passed the cap: the same error as the declared size's, with
+            // the member's path.
+            CoreError::Format(FormatError::Refused(r)) if r.field == "preview cap" => {
+                Error::format(FormatError::Refused(r), Some(Path::new(&entry.path)))
+            }
+            e => Error::core(e, Some(&self.path)),
+        })
     }
 
     /// The destination directory `to` resolves to (the smart rule needs the top level).
