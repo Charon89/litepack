@@ -156,7 +156,9 @@ pub struct ExtractOptions {
     pub symlinks: lpk_core::Symlinks,
     /// The total thread budget; `None` is the machine's logical cores.
     pub threads: Option<usize>,
-    /// The memory budget; `None` is the default of the archive's envelope tier.
+    /// The memory budget; `None` is the default of the archive's envelope tier, raised for a
+    /// large declared record need that would cut the decoders (`lpk_core::memory`'s module
+    /// documentation, "The raised extraction default").
     pub memory: Option<u64>,
     /// An entry the GUI opens with the shell (E5-3, `docs/notes/e5-design.md` section 4):
     /// zoned like the archive whatever [`OpenOptions::motw_off`] says, and a foreign archive
