@@ -35,10 +35,11 @@ this page is the overview. v0 is unstable: it changes with the GUI tasks.
 
 `Selection` is `All`, `Globs` (D-90) or `Ids(Arc<IdSet>)` (picks as a bit set). For an
 extraction or export, ids follow D-90's directory rule: **a picked directory is its whole
-subtree** (the entries under it need no pick of their own, and unpicked ones under it are
-included); every entry picked is the whole archive; every other pick spells one exact glob, at
-most `MAX_PICKED_GLOBS` (10,000) — beyond that the call is `TooLarge` (pick the folders, or
-everything) until the engine takes an id set. `Destination` is `Dir`, `Smart { beside }` or
+subtree** (the entries under it need no pick of their own, whatever the table order, and
+unpicked ones under it are included); every entry picked is the whole archive; no entry picked is
+a usage error. The picks reach the engine as an id set (`lpk_core::Selection::from_ids`, the index
+in the entry table; for a foreign archive the index in its listing): no cap on the picks and no
+restriction on names. `Destination` is `Dir`, `Smart { beside }` or
 `NewFolder { beside }`.
 
 **Sharing.** A `Session` is `Send + Sync` (a compile-time test asserts it). Each read is

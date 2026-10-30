@@ -255,6 +255,14 @@ pub struct Listing {
     pub warnings: Vec<String>,
 }
 
+impl Listing {
+    /// The fingerprint of this listing (path and size of every member, in order): what an id
+    /// selection is tied to ([`Selection::with_fingerprint`]).
+    pub fn fingerprint(&self) -> crate::select::Fingerprint {
+        crate::select::Fingerprint::of(self.entries.iter().map(|e| (e.path.as_str(), e.size)))
+    }
+}
+
 /// Escape control characters (and lossily decode) bytes from the worker for display.
 pub fn escape(bytes: &[u8]) -> String {
     let mut out = String::new();
@@ -1452,6 +1460,16 @@ fn run_extract<P: Peer>(
         .zip(checked.index.iter().zip(checked.hard_target.iter()))
         .map(|(e, (&i, h))| (e.path.clone(), (i, h.clone())))
         .collect();
+    // An id selection was numbered against a listing: refuse, before anything is written, a
+    // fresh listing that is not that one (the archive was replaced since it was opened).
+    if let Some(want) = select.fingerprint() {
+        let got = crate::select::Fingerprint::of(
+            checked.entries.iter().map(|e| (e.path.as_str(), e.size)),
+        );
+        if &got != want {
+            return Err(ForeignError::ArchiveChanged.into());
+        }
+    }
     let checked_encrypted = checked.encrypted.clone();
     let mut pass = policy_pass(checked.entries, dir, policy, select)?;
     let mkdirs = pass.mkdirs(dir);

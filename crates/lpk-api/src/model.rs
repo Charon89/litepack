@@ -85,6 +85,15 @@ impl IdSet {
         id < self.len && self.bits[id as usize / 64] & (1 << (id % 64)) != 0
     }
 
+    /// The ids in the set, ascending.
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.bits.iter().enumerate().flat_map(|(w, &bits)| {
+            (0..64u32)
+                .filter(move |b| bits & (1 << b) != 0)
+                .map(move |b| (w as u32) * 64 + b)
+        })
+    }
+
     /// How many ids are in the set.
     pub fn count(&self) -> u64 {
         self.bits.iter().map(|w| u64::from(w.count_ones())).sum()

@@ -481,3 +481,201 @@ fn a_cleanup_that_cannot_run_is_a_warning() {
     );
     assert_eq!(std::fs::read(victim.join("keep.txt")).unwrap(), b"precious");
 }
+
+/// An id selection numbered against `listing`, as the session builds it.
+fn ids(listing: &foreign::Listing, picks: impl IntoIterator<Item = u32>) -> Selection {
+    Selection::from_ids(picks, listing.entries.len() as u32).with_fingerprint(listing.fingerprint())
+}
+
+/// E5-4: an id set picks listing positions (`lpk_api::EntryRef::id` is the position in
+/// `list_file`'s entries), not paths.
+#[test]
+fn an_id_set_picks_foreign_members_by_listing_position() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let archive = write_fixture(work.path(), &members(), None);
+    let opts = s.options(None, Limits::default());
+    let monitor = Monitor::default();
+    let listing = foreign::list_file(&archive, None, &opts, &monitor).unwrap();
+    let id_of = |name: &str| listing.entries.iter().position(|e| e.path == name).unwrap() as u32;
+    let out = work.path().join("out");
+    let sum = foreign::extract_file(
+        &archive,
+        &out,
+        None,
+        &lpk_core::DefaultPolicy,
+        &ids(&listing, [id_of("d/a.txt"), id_of("empty")]),
+        &opts,
+        &monitor,
+    )
+    .unwrap();
+    assert_eq!(sum.files, 2);
+    assert_eq!(std::fs::read(out.join("d/a.txt")).unwrap(), b"hello");
+    assert!(out.join("empty").is_file());
+    assert!(!out.join("d/big.bin").exists() && !out.join("d/copy.txt").exists());
+    // A member named with a backslash (a ZIP may): picking it by id selects it (a glob could
+    // not spell it); the policy then refuses its name on every platform, while picking the
+    // others leaves it alone.
+    let odd = vec![
+        Member::file(r"a\b.txt", b"odd"),
+        Member::file("ok.txt", b"ok"),
+    ];
+    let archive = write_fixture(work.path(), &odd, None);
+    let listing = foreign::list_file(&archive, None, &opts, &monitor).unwrap();
+    let odd_id = listing
+        .entries
+        .iter()
+        .position(|e| e.path == r"a\b.txt")
+        .unwrap() as u32;
+    let sel = ids(&listing, [odd_id]);
+    assert!(sel.selects(odd_id as usize, r"a\b.txt"));
+    let e = foreign::extract_file(
+        &archive,
+        &work.path().join("out4"),
+        None,
+        &lpk_core::DefaultPolicy,
+        &sel,
+        &opts,
+        &monitor,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e, CoreError::Format(FormatError::UnsafePath { .. })),
+        "{e}"
+    );
+    let ok_id = 1 - odd_id;
+    let out5 = work.path().join("out5");
+    foreign::extract_file(
+        &archive,
+        &out5,
+        None,
+        &lpk_core::DefaultPolicy,
+        &ids(&listing, [ok_id]),
+        &opts,
+        &monitor,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(out5.join("ok.txt")).unwrap(), b"ok");
+    // Two members with one path: the listing numbers both, but extraction refuses the
+    // archive (a second member would meet the first's file), whatever is picked.
+    let dup = vec![
+        Member::file("x.txt", b"one"),
+        Member::file("y.txt", b"y"),
+        Member::file("x.txt", b"two"),
+    ];
+    let archive = write_fixture(work.path(), &dup, None);
+    let listing = foreign::list_file(&archive, None, &opts, &monitor).unwrap();
+    assert_eq!(listing.entries.len(), 3, "ids 0 and 2 are both x.txt");
+    let e = foreign::extract_file(
+        &archive,
+        &work.path().join("out3"),
+        None,
+        &lpk_core::DefaultPolicy,
+        &ids(&listing, [2]),
+        &opts,
+        &monitor,
+    )
+    .unwrap_err();
+    assert!(matches!(e, CoreError::DuplicatePath { .. }), "{e}");
+}
+
+/// E5-4 review: ids numbered against one archive are refused, before anything is written,
+/// when the archive at the path was replaced by another.
+#[test]
+fn an_id_set_is_refused_when_the_archive_changed_since_the_listing() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let a = vec![Member::file("a.txt", b"A"), Member::file("b.txt", b"B")];
+    let archive = write_fixture(work.path(), &a, None);
+    let opts = s.options(None, Limits::default());
+    let monitor = Monitor::default();
+    let listing = foreign::list_file(&archive, None, &opts, &monitor).unwrap();
+    let sel = ids(&listing, [0]);
+    // Same count and names, one size differs: still another archive.
+    let b = vec![Member::file("a.txt", b"AA"), Member::file("b.txt", b"B")];
+    write_fixture(work.path(), &b, None);
+    let out = work.path().join("out");
+    let e = foreign::extract_file(
+        &archive,
+        &out,
+        None,
+        &lpk_core::DefaultPolicy,
+        &sel,
+        &opts,
+        &monitor,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e, CoreError::Foreign(ForeignError::ArchiveChanged)),
+        "{e}"
+    );
+    assert!(!out.exists(), "nothing written");
+    // A different member order: refused too.
+    let c = vec![Member::file("b.txt", b"B"), Member::file("a.txt", b"A")];
+    write_fixture(work.path(), &c, None);
+    let e = foreign::extract_file(
+        &archive,
+        &out,
+        None,
+        &lpk_core::DefaultPolicy,
+        &sel,
+        &opts,
+        &monitor,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        e,
+        CoreError::Foreign(ForeignError::ArchiveChanged)
+    ));
+    assert!(!out.exists());
+    // The unchanged archive extracts.
+    write_fixture(work.path(), &a, None);
+    foreign::extract_file(
+        &archive,
+        &out,
+        None,
+        &lpk_core::DefaultPolicy,
+        &sel,
+        &opts,
+        &monitor,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"A");
+    assert!(!out.join("b.txt").exists());
+}
+
+/// E5-4 review: a foreign listing may put a directory after its children; the id numbers are
+/// positions, and the api's closure (every entry under a picked directory) is by path. Here the
+/// engine's side: the picked ids select exactly those positions, children included.
+#[test]
+fn an_id_set_with_a_directory_after_its_children_extracts_what_it_names() {
+    let s = stage();
+    let work = tempfile::tempdir().unwrap();
+    let m = vec![
+        Member::file("d/x.txt", b"x"),
+        Member::file("d/y.txt", b"y"),
+        Member::dir("d"),
+        Member::file("z.txt", b"z"),
+    ];
+    let archive = write_fixture(work.path(), &m, None);
+    let opts = s.options(None, Limits::default());
+    let monitor = Monitor::default();
+    let listing = foreign::list_file(&archive, None, &opts, &monitor).unwrap();
+    let names: Vec<&str> = listing.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(names, ["d/x.txt", "d/y.txt", "d", "z.txt"]);
+    // The directory (id 2) and its closure under it (ids 0, 1), as `close_ids` builds it.
+    let out = work.path().join("out");
+    let sum = foreign::extract_file(
+        &archive,
+        &out,
+        None,
+        &lpk_core::DefaultPolicy,
+        &ids(&listing, [0, 1, 2]),
+        &opts,
+        &monitor,
+    )
+    .unwrap();
+    assert_eq!((sum.files, sum.directories), (2, 1));
+    assert_eq!(std::fs::read(out.join("d/y.txt")).unwrap(), b"y");
+    assert!(!out.join("z.txt").exists());
+}
