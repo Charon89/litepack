@@ -1299,3 +1299,85 @@ fn waiting_alone_decodes_and_one_lone_decode_stay_within_the_budget() {
         assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
     }
 }
+
+/// E2-25: the default budget is raised for a large declared record need. An archive of many
+/// small JPEG records and one large progressive one, every record declaring a term that leaves
+/// the Fast ceiling (2 GiB) room for only a few workers beside it, extracted at eight threads
+/// with no budget given on a machine of 64 GiB (the test hook): the default is raised, every
+/// one of the thread budget's decoders runs, the process peak stays within the budget and every
+/// file is byte-exact. With a small budget given the cut applies as before.
+#[test]
+fn a_large_declared_need_raises_the_default_to_every_decoder() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut jpegs: Vec<Vec<u8>> = (0..24u16)
+        .map(|i| grey_jpeg(192 + 16 * (i % 8), 256, i % 3 == 0))
+        .collect();
+    jpegs.push(grey_jpeg(2048, 2048, true));
+    let declared = lpk_core::memory::FAST_CEILING - (1 << 20);
+    let arch_bytes = archive_of(&jpegs, &|plan| {
+        let h = read_stream_header(&plan.stream, plan.primary_len).unwrap();
+        memory_bound(&h.frame)
+            .max(image_term(&h, plan.primary_len, plan.stream.len() as u64))
+            .max(declared)
+    });
+    let env = lpk_format::Archive::open(
+        std::io::Cursor::new(arch_bytes.clone()),
+        &Resources::default(),
+    )
+    .unwrap()
+    .index()
+    .envelope;
+    assert_eq!(
+        lpk_core::memory::EnvelopeTier::of(&env),
+        lpk_core::memory::EnvelopeTier::Fast
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let arch = dir.path().join("mixed.lpk");
+    std::fs::write(&arch, &arch_bytes).unwrap();
+    let threads = 8;
+    let opts = lpk_core::ExtractOptions {
+        threads: Some(threads),
+        physical_memory: Some(64 << 30),
+        ..lpk_core::ExtractOptions::default()
+    };
+    let out = dir.path().join("out");
+    let before = ALLOC.current();
+    ALLOC.reset_peak();
+    let s =
+        lpk_core::extract_file(&arch, &out, &[], None, &lpk_core::DefaultPolicy, &opts).unwrap();
+    let peak = (ALLOC.peak() - before) as u64;
+    let budget = s.memory.budget.bytes;
+    // The thread budget's decoders (D-95): the threads less `clamp(threads / 4, 1, 4)` writers,
+    // capped by the needed blocks.
+    let decoders = (threads - (threads / 4).clamp(1, 4)).min(s.blocks_needed as usize);
+    eprintln!(
+        "default: workers {}, decoders {decoders}, in flight {}, declared {}, pool {}, alone {}, peak {peak}, budget {budget}; per block {}, decoder {}, fixed {}, per worker {}, plain {}",
+        s.workers, s.in_flight, s.memory.declared, s.memory.pool, s.alone_decodes, s.memory.per_block, s.memory.decoder, s.memory.fixed_shared, s.memory.per_worker, s.memory.plain
+    );
+    assert!(decoders > 2, "{} blocks needed", s.blocks_needed);
+    assert!(matches!(
+        s.memory.budget.source,
+        lpk_core::memory::BudgetSource::Raised { need, .. } if need == s.memory.declared
+    ));
+    assert!(budget > lpk_core::memory::FAST_CEILING);
+    assert!(budget <= lpk_core::memory::EXTRACT_CEILING);
+    assert_eq!(s.workers, decoders, "the workers are not cut");
+    assert!(peak <= budget, "peak {peak} > budget {budget}");
+    for (i, j) in jpegs.iter().enumerate() {
+        assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
+    }
+    // A small budget given: the cut applies as before.
+    let small = env.decode_memory + (1 << 20);
+    let out = dir.path().join("out-small");
+    let (s, peak) = extract_measured(&arch, &out, threads, small).unwrap();
+    eprintln!(
+        "given: workers {}, in flight {}, peak {peak}, budget {small}",
+        s.workers, s.in_flight
+    );
+    assert_eq!(s.memory.budget.bytes, small);
+    assert!(s.workers < decoders, "cut to {} workers", s.workers);
+    assert!(peak <= small, "peak {peak} > budget {small}");
+    for (i, j) in jpegs.iter().enumerate() {
+        assert!(std::fs::read(out.join(format!("p{i}.jpg"))).unwrap() == *j);
+    }
+}
