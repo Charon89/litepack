@@ -398,10 +398,12 @@ async fn preview(
     row: u32,
     generation: u32,
     op: u64,
+    unlock: bool,
 ) -> Result<Response, GuiError> {
     let app = host.app.clone();
+    // Registered before the hop to the blocking thread: a `cancel` that arrives early finds it.
+    let g = app.ops.begin(op, false)?;
     let bytes = blocking(move || {
-        let g = app.ops.begin(op, false)?;
         let p = app.preview(
             session,
             row,
@@ -411,6 +413,7 @@ async fn preview(
                 handle,
                 token: g.token.clone(),
             },
+            unlock,
         )?;
         Ok(p.encode())
     })

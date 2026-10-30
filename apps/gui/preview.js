@@ -10,6 +10,7 @@ const TEXT = 0;
 const IMAGE = 1;
 const HEX = 2;
 const FOLDER = 3;
+const LOCKED = 4;
 
 // A hex line: 16 bytes. Its height in CSS pixels (styles.css: .hex-line height).
 const PER_LINE = 16;
@@ -19,6 +20,8 @@ const MAX_SCROLL_PX = 8000000;
 const HEX_MARGIN = 16;
 // How long focus rests on a row before it is read.
 export const REST_MS = 150;
+// Characters per text node.
+const CHUNK = 64 * 1024;
 
 // The characters Rust escapes in text, escaped here too where the page shows an entry's name.
 const HIDDEN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f­؜​-‏‪-‮⁠-⁤⁦-⁩﻿]/g;
@@ -104,14 +107,40 @@ export function createPreview({ core, t, nextOp, session, showError }) {
     note(t("preview.empty"));
   }
 
-  function showText(text) {
+  // The text goes in as text nodes of CHUNK characters, yielding between them, so that 16 MiB
+  // never blocks the main thread in one step; a newer request (`seq` moved on) stops it.
+  async function showText(text, mine) {
     release();
     const pre = document.createElement("pre");
     pre.className = "preview-text";
     pre.tabIndex = 0;
     pre.setAttribute("aria-label", t("preview.text.label"));
-    pre.textContent = text;
     body.append(pre);
+    for (let at = 0; at < text.length; at += CHUNK) {
+      if (mine !== seq) {
+        return;
+      }
+      pre.append(document.createTextNode(text.slice(at, at + CHUNK)));
+      if (at + CHUNK < text.length) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+  }
+
+  // Encrypted content: the pane says so; only the Unlock button (the user's act) asks for the
+  // password, so focus resting on a row never opens a prompt.
+  function showLocked(name, index, row, generation) {
+    head(name, t("preview.locked"));
+    release();
+    const p = document.createElement("p");
+    p.className = "preview-note";
+    p.textContent = t("preview.locked.note");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = "preview-unlock";
+    button.textContent = t("preview.unlock");
+    button.addEventListener("click", () => read(index, row, generation, true).catch(showError));
+    body.append(p, button);
   }
 
   function showImage(bytes, mime, name) {
@@ -187,7 +216,11 @@ export function createPreview({ core, t, nextOp, session, showError }) {
     }
   }
 
-  function render(name, m) {
+  async function render(name, m, mine, index, row, generation) {
+    if (m.kind === LOCKED) {
+      showLocked(name, index, row, generation);
+      return;
+    }
     if (m.kind === FOLDER) {
       head(name, t("preview.folder", { count: count(m.size) }));
       note(t("preview.folder.note"));
@@ -195,7 +228,7 @@ export function createPreview({ core, t, nextOp, session, showError }) {
     }
     head(name, `${kindName(m.kind)} · ${t("preview.size", { bytes: count(m.size) })}`);
     if (m.kind === TEXT) {
-      showText(new TextDecoder().decode(m.body));
+      await showText(new TextDecoder().decode(m.body), mine);
     } else if (m.kind === IMAGE) {
       showImage(m.body, m.mime, name);
     } else {
@@ -203,7 +236,7 @@ export function createPreview({ core, t, nextOp, session, showError }) {
     }
   }
 
-  async function read(index, row, generation) {
+  async function read(index, row, generation, unlock = false) {
     const mine = ++seq;
     if (op !== 0) {
       core.invoke("cancel", { op }).catch(() => {});
@@ -212,11 +245,11 @@ export function createPreview({ core, t, nextOp, session, showError }) {
     op = mineOp;
     head(row.name, t("preview.loading"));
     try {
-      const buffer = await core.invoke("preview", { session: session(), row: index, generation, op: mineOp });
+      const buffer = await core.invoke("preview", { session: session(), row: index, generation, op: mineOp, unlock });
       if (mine !== seq) {
         return;
       }
-      render(row.name, decodePreview(buffer));
+      await render(row.name, decodePreview(buffer), mine, index, row, generation);
     } catch (e) {
       // A superseded read ends Cancelled, a view replaced meanwhile is stale: neither is shown.
       if (mine !== seq || (e && e.class === "Cancelled") || (e && e.class === "Usage" && String(e.detail).startsWith("stale view"))) {
@@ -234,14 +267,23 @@ export function createPreview({ core, t, nextOp, session, showError }) {
     }
   }
 
+  function cancelInFlight() {
+    if (op !== 0) {
+      core.invoke("cancel", { op }).catch(() => {});
+      op = 0;
+    }
+  }
+
   function ask(index, row, generation) {
     clearTimeout(timer);
     current = { index, row, generation };
     if (!shown) {
       return;
     }
+    // A read in flight for another row is cancelled now, not when the next one starts.
+    cancelInFlight();
+    seq++;
     if (row.kind === 2) {
-      seq++;
       head(row.name, "");
       note(t("preview.link"));
       return;
@@ -290,7 +332,7 @@ export function createPreview({ core, t, nextOp, session, showError }) {
         return;
       }
       clearTimeout(timer);
-      read(index, row, generation).catch(showError);
+      read(index, row, generation, true).catch(showError);
     },
     /** No row is focused (a new archive, an empty view). */
     clear() {

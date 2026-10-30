@@ -8,12 +8,12 @@
 //! The wire format (little-endian): magic `LPKV`, kind `u8` ([`Kind`]), MIME length `u8`, the
 //! entry's size `u64` (for a folder: how many entries it holds directly), the MIME, the body.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use lpk_api::{CancelToken, Class};
 
 use crate::app::{lock, App};
-use crate::extract::{open_unlocked, Prompter};
+use crate::extract::{open_unlocked, swap_unlocked, Prompter};
 use crate::GuiError;
 
 /// The most one preview reads: an entry over it is refused naming the cap (16 MiB).
@@ -34,6 +34,8 @@ pub enum Kind {
     Hex = 2,
     /// A folder; no body, the size is its entry count.
     Folder = 3,
+    /// The content is encrypted and nothing asked for the password yet; no body.
+    Locked = 4,
 }
 
 /// One preview.
@@ -125,6 +127,10 @@ pub fn is_hidden(c: char) -> bool {
         || (c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
 }
 
+/// The most hidden characters a text may hold, in percent of its characters, to be shown as
+/// text; a text with more is shown as hex (its escapes would outgrow it).
+pub const MAX_ESCAPED_PERCENT: usize = 1;
+
 /// `text` with each hidden character written out as the visible text `\u{XXXX}`.
 pub fn escape_hidden(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -136,6 +142,16 @@ pub fn escape_hidden(text: &str) -> String {
         }
     }
     out
+}
+
+/// Whether at most [`MAX_ESCAPED_PERCENT`] of the characters of `text` are hidden.
+fn hidden_percent_ok(text: &str) -> bool {
+    let (mut chars, mut hidden) = (0usize, 0usize);
+    for c in text.chars() {
+        chars += 1;
+        hidden += usize::from(is_hidden(c));
+    }
+    hidden * 100 <= chars * MAX_ESCAPED_PERCENT
 }
 
 /// Classify the bytes of a file of the entry and prepare what the page shows.
@@ -150,13 +166,13 @@ pub fn classify(bytes: Vec<u8>) -> Preview {
         };
     }
     match decode_text(&bytes) {
-        Some(t) => Preview {
+        Some(t) if hidden_percent_ok(&t) => Preview {
             kind: Kind::Text,
             mime: "",
             size,
             body: escape_hidden(&t).into_bytes(),
         },
-        None => Preview {
+        _ => Preview {
             kind: Kind::Hex,
             mime: "",
             size,
@@ -177,7 +193,8 @@ impl App {
     /// count; a file is read once, at most [`PREVIEW_CAP`] bytes (a larger one is refused,
     /// naming the cap) and classified. A newer preview cancels this one (`token` is theirs to
     /// cancel too); only one read runs at a time and none queues behind a heavy operation. A
-    /// password the content needs is asked of `prompter` (the session is reopened with it).
+    /// password the content needs is asked of `prompter` only when `unlock` (the user pressed
+    /// Unlock or double-clicked); a read that merely rested on the row answers [`Kind::Locked`].
     pub fn preview(
         &self,
         id: u64,
@@ -185,6 +202,7 @@ impl App {
         generation: u32,
         token: &CancelToken,
         prompter: &dyn Prompter,
+        unlock: bool,
     ) -> Result<Preview, GuiError> {
         let slot = self.slot(id)?;
         let (entry, kind, child_count) = {
@@ -222,15 +240,22 @@ impl App {
             let session = slot.session();
             match session.read_entry(entry, PREVIEW_CAP, token) {
                 Ok(bytes) => return Ok(classify(bytes)),
-                Err(e)
-                    if matches!(e.class, Class::PasswordRequired | Class::WrongPassword)
-                        && prompter.interactive() =>
-                {
+                Err(e) if matches!(e.class, Class::PasswordRequired | Class::WrongPassword) => {
+                    if !unlock {
+                        return Ok(Preview {
+                            kind: Kind::Locked,
+                            mime: "",
+                            size: 0,
+                            body: Vec::new(),
+                        });
+                    }
+                    if !prompter.interactive() {
+                        return Err(e.into());
+                    }
                     let wrong = e.class == Class::WrongPassword;
                     let fresh =
                         open_unlocked(session.path(), self.motw_off(), prompter, Some(wrong))?;
-                    let old = std::mem::replace(&mut *lock(&slot.cell), Arc::new(fresh));
-                    let _ = old.close();
+                    swap_unlocked(&slot.cell, &session, fresh);
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -304,11 +329,11 @@ mod tests {
             "tab\tlf\ncr\r ok ü 漢"
         );
         // A BOM at the start is dropped; one inside is escaped.
-        let p = classify("\u{FEFF}x\u{FEFF}y".as_bytes().to_vec());
-        assert_eq!(p.body, b"x\\u{FEFF}y");
+        let p = classify(format!("\u{FEFF}x\u{FEFF}y{}", "z".repeat(200)).into_bytes());
+        assert!(p.body.starts_with(b"x\\u{FEFF}y"));
         // The text of a right-to-left override file name trick.
-        let p = classify("evil\u{202E}gpj.exe".as_bytes().to_vec());
-        assert_eq!(p.body, b"evil\\u{202E}gpj.exe");
+        let p = classify(format!("evil\u{202E}gpj.exe{}", "z".repeat(200)).into_bytes());
+        assert!(p.body.starts_with(b"evil\\u{202E}gpj.exe"));
     }
 
     #[test]
