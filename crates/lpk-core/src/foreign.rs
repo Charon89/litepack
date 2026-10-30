@@ -243,6 +243,8 @@ pub struct ForeignSummary {
     /// Files extracted whose member the reader could not check against a stored checksum
     /// (`MemberEnd { checked: false }`; host side only, the worker protocol is as it was).
     pub unchecked: u64,
+    /// Files extracted whose member the reader checked against a stored checksum.
+    pub checked: u64,
 }
 
 /// A foreign archive's validated listing.
@@ -1683,7 +1685,9 @@ fn stream<P: Peer>(
                         out.finish(t.mtime_ns)?;
                         conv.ends += 1;
                         summary.files += 1;
-                        if !checked {
+                        if checked {
+                            summary.checked += 1;
+                        } else {
                             summary.unchecked += 1;
                         }
                         break;

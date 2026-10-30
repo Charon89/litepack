@@ -152,7 +152,7 @@ fn a_foreign_archive_lists_and_extracts_through_the_sandboxed_worker() {
     assert_eq!((sum.files, sum.directories), (4, 1));
     // The test worker's reader stores no checksum: every member ended `checked: false`, and
     // the host counts them (the GUI's check line says "K had none to check").
-    assert_eq!(sum.unchecked, 4);
+    assert_eq!((sum.unchecked, sum.checked), (3, 0));
     for m in &members {
         if m.kind == RecordKind::File {
             let p = out.join(std::str::from_utf8(&m.name).unwrap());

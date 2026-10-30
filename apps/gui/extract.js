@@ -47,7 +47,10 @@ export function createExtractor(env) {
       onEscape();
     });
     dialog.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) {
+      // Enter takes the primary action everywhere but on a button (which it presses) and in a
+      // text field; a radio button or checkbox does not keep it.
+      const own = ["BUTTON", "SELECT", "TEXTAREA"].includes(e.target.tagName) || (e.target.tagName === "INPUT" && !["radio", "checkbox"].includes(e.target.type));
+      if (e.key === "Enter" && !own) {
         const primary = dialog.querySelector("button.primary:not([disabled])");
         if (primary) {
           e.preventDefault();
@@ -72,13 +75,14 @@ export function createExtractor(env) {
     onEscape = () => {};
     let first = null;
     for (const [label, handler, role, disabled] of buttons) {
-      const b = el("button", { type: "button", text: label, class: role === "primary" ? "primary" : null, disabled: Boolean(disabled) });
+      const roles = (role ?? "").split(" ");
+      const b = el("button", { type: "button", text: label, class: roles.includes("primary") ? "primary" : null, disabled: Boolean(disabled) });
       b.addEventListener("click", () => Promise.resolve(handler(b)).catch(showError));
       footer.append(b);
-      if (role === "cancel") {
+      if (roles.includes("cancel")) {
         onEscape = () => b.click();
       }
-      if (role === "primary" && !first) {
+      if (roles.includes("primary") && !first) {
         first = b;
       }
     }
@@ -133,7 +137,16 @@ export function createExtractor(env) {
 
   // A finished extraction: counts, what was skipped, the links, the Mark of the Web, the check.
   function summary(r) {
-    const nodes = [el("p", { text: t("extract.done", { name: r.archive, files: count(r.files), bytes: count(r.bytes), folder: r.folder }) })];
+    if (r.outcome === "cancelled-before-writing") {
+      return [el("p", { text: t("extract.cancelled.none", { name: r.archive }) })];
+    }
+    const nodes = [];
+    if (r.outcome === "cancelled-after-writing") {
+      // D-87 (2): the finished files stay, the unfinished one is removed.
+      nodes.push(el("p", { text: t("extract.cancelled.kept", { name: r.archive, folder: r.folder }) }));
+    } else {
+      nodes.push(el("p", { text: t("extract.done", { name: r.archive, files: count(r.files), bytes: count(r.bytes), folder: r.folder }) }));
+    }
     if (r.skipped > 0) {
       nodes.push(el("p", { text: t("extract.skipped", { count: count(r.skipped) }) }));
     }
@@ -155,15 +168,17 @@ export function createExtractor(env) {
     if (r.motwUnmarked) {
       nodes.push(el("p", { text: t("extract.motw") }));
     }
-    let check;
-    if (r.check === "blake3") {
-      check = t("extract.check.blake3");
-    } else if (r.check === "members") {
-      check = t("extract.check.members");
-    } else {
-      check = t("extract.check.unverifiable");
+    // No check line without a written file, and none for a cancelled run.
+    const kind = r.check ? r.check.kind : null;
+    if (kind === "blake3") {
+      nodes.push(el("p", { class: "check", text: t("extract.check.blake3") }));
+    } else if (kind === "members") {
+      nodes.push(el("p", { class: "check", text: t("extract.check.members") }));
+    } else if (kind === "partial") {
+      nodes.push(el("p", { class: "check", text: t("extract.check.partial", { matched: count(r.check.matched), none: count(r.check.none) }) }));
+    } else if (kind === "unverifiable") {
+      nodes.push(el("p", { class: "check", text: t("extract.check.unverifiable") }));
     }
-    nodes.push(el("p", { class: "check", text: check }));
     return nodes;
   }
 
@@ -214,7 +229,14 @@ export function createExtractor(env) {
       ];
       const choose = el("button", { type: "button", text: t("extract.dest.choose") });
       choose.addEventListener("click", async () => {
-        const [g] = await core.invoke("pick", { purpose: "destination" });
+        let g;
+        try {
+          [g] = await core.invoke("pick", { purpose: "destination" });
+        } catch (e) {
+          // A refused or failed picker is shown, not left as an unhandled rejection.
+          showError(e);
+          return;
+        }
         if (g) {
           chosen += 1;
           const item = { id: `chosen-${chosen}`, label: t("extract.dest.chosen", { name: g.name }), dest: { kind: "folder", grant: g.grant } };
@@ -281,7 +303,7 @@ export function createExtractor(env) {
       const request = { dest: state.dest.dest, scope: state.scope, conflict, memory };
       try {
         const r = await core.invoke("extract_run", { session: sid, request, op, progress: channel });
-        phase(t("extract.title", { name: env.archiveName() }), summary(r), [[t("extract.close"), closeDialog, "primary"]]);
+        phase(t("extract.title", { name: env.archiveName() }), summary(r), [[t("extract.close"), closeDialog, "primary cancel"]]);
       } catch (e) {
         const f = failure(env.archiveName(), e);
         const buttons = [[t("extract.close"), closeDialog, "cancel"]];
@@ -302,15 +324,24 @@ export function createExtractor(env) {
     return chain;
   }
 
+  // The queue's states, each with a way out:
+  //   idle     no dialog; a verb arrives and runVerb chains it behind any run (and any Allow).
+  //   running  one archive is extracting (shown with "k of n"); Cancel/Esc cancels it and ends
+  //            the queue; an archive's password question is Rust's native dialog, which
+  //            Cancel ends too.
+  //   refused  an archive's result offers "Allow X"; this is part of `done`, never a state of
+  //            its own: the dialog stays open on `done` and Allow queues a re-run on `chain`.
+  //   done     every archive has its result; Close/Esc/Enter close the dialog. Every path of
+  //            queue() and of an Allow re-run ends in show(..., done = true), also after errors.
   async function queue(kind, items) {
     const results = el("ul", { class: "results" });
     let stopped = false;
     let currentOp = null;
-    const title = t("action.extract");
+    const title = t("extract.dialog");
     const show = (head, area, done) => {
       phase(title, [el("p", { text: head }), ...area, results], [
         done
-          ? [t("extract.close"), closeDialog, "primary"]
+          ? [t("extract.close"), closeDialog, "primary cancel"]
           : [
               t("extract.cancel"),
               () => {
@@ -335,15 +366,25 @@ export function createExtractor(env) {
       try {
         const r = await core.invoke("extract_archive", { grant: item.grant, verb: kind, memory, op, progress: channel });
         li.replaceChildren(...summary(r));
+        if (r.outcome !== "done") {
+          stopped = true;
+        }
       } catch (e) {
         const f = failure(item.name, e);
         li.replaceChildren(...f.nodes);
         if (f.allow !== null) {
           const allow = el("button", { type: "button", text: t("extract.allow", { needed: size(f.allow) }) });
-          allow.addEventListener("click", async () => {
+          allow.addEventListener("click", () => {
             allow.disabled = true;
-            const again = await attempt(item, index, f.allow);
-            li.replaceWith(again);
+            // Inside the chain, so that a later verb queues behind it; ends in `done`.
+            chain = chain
+              .then(async () => {
+                stopped = false;
+                const again = await attempt(item, index, f.allow);
+                li.replaceWith(again);
+              })
+              .catch(showError)
+              .then(finish);
           });
           li.append(allow);
         }
@@ -354,10 +395,14 @@ export function createExtractor(env) {
       currentOp = null;
       return li;
     };
-    for (let i = 0; i < items.length && !stopped; i += 1) {
-      results.append(await attempt(items[i], i, null));
+    const finish = () => show(t("extract.queue", { n: items.length, total: items.length, name: items[items.length - 1].name }), [], true);
+    try {
+      for (let i = 0; i < items.length && !stopped; i += 1) {
+        results.append(await attempt(items[i], i, null));
+      }
+    } finally {
+      finish();
     }
-    show(t("extract.queue", { n: items.length, total: items.length, name: items[items.length - 1].name }), [], true);
   }
 
   return { openDialog, runVerb };

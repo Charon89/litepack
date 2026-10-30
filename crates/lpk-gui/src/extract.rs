@@ -326,7 +326,7 @@ pub fn check_of(outcome: &Extracted) -> Option<Check> {
                 Check::Members
             } else {
                 Check::Partial {
-                    matched: s.files.saturating_sub(s.unchecked),
+                    matched: s.checked,
                     none: s.unchecked,
                 }
             })

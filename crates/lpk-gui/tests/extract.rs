@@ -673,6 +673,7 @@ fn the_check_line_follows_what_the_members_reported() {
             format: "zip".into(),
             files,
             unchecked,
+            checked: files - unchecked,
             ..ForeignSummary::default()
         })
     };
