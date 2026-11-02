@@ -63,6 +63,9 @@ pub enum RunState {
     Cancelled,
     /// The user declined the confirmation: nothing happened.
     Declined,
+    /// The run failed after the session was closed: the archive was reopened if it could be
+    /// (`error` says why).
+    Failed,
 }
 
 /// What a test found.
@@ -224,6 +227,8 @@ pub struct RollbackResult {
     pub opened: Option<Opened>,
     /// Why it could not be reopened (the rollback is done).
     pub reopen_error: Option<GuiError>,
+    /// Why the rollback failed (state `failed`).
+    pub error: Option<GuiError>,
 }
 
 /// What the Update from folder dialog starts with.
@@ -286,6 +291,8 @@ pub struct AppendResult {
     pub opened: Option<Opened>,
     /// Why it could not be reopened.
     pub reopen_error: Option<GuiError>,
+    /// Why the append failed (state `failed`; the archive is as it was).
+    pub error: Option<GuiError>,
 }
 
 /// Hands a password already typed to the first ask, then defers to `then` (an archive reopened
@@ -610,23 +617,29 @@ impl App {
                 lost: 0,
                 opened: None,
                 reopen_error: None,
+                error: None,
             });
         }
         // D-110 (2): the session's reads end before the file shrinks.
         self.close(id)?;
-        let kept = lpk_api::rollback(&path, generation)?;
+        let ran = lpk_api::rollback(&path, generation);
         let (opened, reopen_error) = match self.open_path(&path, None, cancel, prompter) {
             Ok(o) => (Some(o), None),
             Err(e) => (None, Some(e)),
         };
+        let (state, kept_generation, size, error) = match ran {
+            Ok(k) => (RunState::Done, k.generation, k.end, None),
+            Err(e) => (RunState::Failed, latest, 0, Some(GuiError::from(e))),
+        };
         Ok(RollbackResult {
             archive: file_name(&path),
-            state: RunState::Done,
-            generation: kept.generation,
-            size: kept.end,
-            lost,
+            state,
+            generation: kept_generation,
+            size,
+            lost: if state == RunState::Done { lost } else { 0 },
             opened,
             reopen_error,
+            error,
         })
     }
 
@@ -682,6 +695,7 @@ impl App {
             test: None,
             opened: None,
             reopen_error: None,
+            error: None,
         };
         // The password, asked for before anything is written (Cancel: nothing happened).
         let password = if session.info().encrypted {
@@ -725,7 +739,10 @@ impl App {
                 result.generation = s.writer.generation;
             }
             Err(e) if e.is(Class::Cancelled) => result.state = RunState::Cancelled,
-            Err(e) => return Err(e),
+            Err(e) => {
+                result.state = RunState::Failed;
+                result.error = Some(e);
+            }
         }
         if result.state == RunState::Done && req.test {
             let options = OpenOptions {
