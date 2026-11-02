@@ -19,7 +19,12 @@
     "allow-recents",
     "allow-clear-recents",
     "allow-close-archive",
-    "allow-create-archive",
+    "allow-create-plan",
+    "allow-create-name",
+    "allow-create-calibrate",
+    "allow-create-scale",
+    "allow-create-password",
+    "allow-create-run",
     "allow-cancel",
     "allow-subscribe",
     "allow-listing-shown"

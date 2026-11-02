@@ -38,6 +38,10 @@ pub const MIN_CHUNK_SIZE: u64 = 4096;
 pub const DEFAULT_CHUNK_SIZE: u64 = 1 << 20;
 /// Default `block_size`: 64 MiB.
 pub const DEFAULT_BLOCK_SIZE: u64 = 1 << 26;
+/// What a block's frame adds to its bytes when it must fit in one recovery group: a block plus
+/// this allowance may not exceed `group_shards * shard_len` (the writer refuses the options
+/// otherwise).
+pub const GROUP_FRAME_ALLOWANCE: u64 = 4096;
 
 /// Cuts the bytes of one file into chunks, as a stream.
 ///
@@ -809,7 +813,7 @@ fn check_options(options: &WriterOptions) -> Result<Option<GroupEncoder>, Format
     options.recovery.check()?;
     // A block (plus its frame's overhead) must fit in one group.
     if options.recovery.percent > 0
-        && options.block_size.saturating_add(4096)
+        && options.block_size.saturating_add(GROUP_FRAME_ALLOWANCE)
             > u64::from(options.recovery.group_shards) * u64::from(options.recovery.shard_len)
     {
         return Err(bad_options("group smaller than a block"));

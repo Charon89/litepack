@@ -1110,6 +1110,30 @@ fn encryption_flags_are_checked() {
 
 // ---- E2-13: recovery records through the tool ----
 
+/// E5-5: the Balanced tier's 256 MiB block used to be refused with recovery records ("group
+/// smaller than a block"); its recovery group now grows, and `lpk a --balanced --recovery 5`
+/// makes an archive that `t` and `check` pass.
+#[test]
+fn balanced_with_recovery_records_creates_an_archive_t_passes() {
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let work = tempfile::tempdir().unwrap();
+    let arch = work.path().join("b.lpk");
+    let a = run(&[
+        "a",
+        arch.to_str().unwrap(),
+        src.path().to_str().unwrap(),
+        "--balanced",
+        "--recovery",
+        "5",
+    ]);
+    assert_eq!(a.status.code(), Some(0), "{}", text(&a.stderr));
+    let t = run(&["t", arch.to_str().unwrap()]);
+    assert_eq!(t.status.code(), Some(0), "{}", text(&t.stderr));
+    let c = run(&["check", arch.to_str().unwrap()]);
+    assert_eq!(c.status.code(), Some(0), "{}", text(&c.stderr));
+}
+
 /// `a --recovery 10`, a few bytes overwritten inside the covered data: `t` fails, `check`
 /// reports the damaged shards (exit 2), `repair` writes a copy that tests and extracts.
 #[test]

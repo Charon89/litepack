@@ -11,6 +11,7 @@
 
 const GIB = 2 ** 30;
 const MIB = 2 ** 20;
+const MB = 1000 * 1000;
 
 function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
@@ -189,7 +190,7 @@ export function createExtractor(env) {
     const started = Date.now();
     const update = (ev) => {
       const elapsed = Math.max((Date.now() - started) / 1000, 0.001);
-      const rate = (ev.bytes_out / elapsed / 1e6).toFixed(1);
+      const rate = (ev.bytes_out / elapsed / MB).toFixed(1);
       const total = ev.files_total ?? null;
       if (total) {
         const f = Math.min(ev.files_done / total, 1);

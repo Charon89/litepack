@@ -117,6 +117,16 @@ pub fn parse(
     let (flag, inline) = match first.to_str().and_then(|t| t.strip_prefix("--open=")) {
         Some("") => return Err("--open needs an archive".into()),
         Some(p) => ("--open", Some(OsString::from(p))),
+        // The same switch-safe form for one `--create` input (E5-5's driver test).
+        // A non-UTF-8 argument is refused as `--open=`'s is (an unknown option).
+        None if first
+            .to_str()
+            .and_then(|t| t.strip_prefix("--create="))
+            .is_some_and(|p| !p.is_empty()) =>
+        {
+            let p = first.to_str().and_then(|t| t.strip_prefix("--create="));
+            ("--create", p.map(OsString::from))
+        }
         None if VERBS.contains(&text.as_str()) => (
             VERBS[VERBS.iter().position(|v| *v == text).unwrap_or(0)],
             None,
@@ -342,6 +352,39 @@ mod tests {
             verb(&["--create", "x", "y"]),
             Verb::Create {
                 inputs: paths(&["x", "y"]),
+                name: None
+            }
+        );
+        // A non-UTF-8 `--create=` argument is refused like `--open=`'s.
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let bad = OsString::from_wide(&[
+                u16::from(b'-'),
+                u16::from(b'-'),
+                u16::from(b'c'),
+                u16::from(b'r'),
+                u16::from(b'e'),
+                u16::from(b'a'),
+                u16::from(b't'),
+                u16::from(b'e'),
+                u16::from(b'='),
+                0xD800,
+            ]);
+            assert!(parse([bad], None).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let mut v = b"--create=".to_vec();
+            v.push(0xFF);
+            assert!(parse([OsString::from_vec(v)], None).is_err());
+        }
+        // The switch-safe inline form (the driver tests pass it).
+        assert_eq!(
+            verb(&["--create=x"]),
+            Verb::Create {
+                inputs: paths(&["x"]),
                 name: None
             }
         );
