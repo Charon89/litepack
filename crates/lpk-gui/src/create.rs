@@ -199,6 +199,11 @@ pub fn scaled_size(total: u64, sample_out: u64, sample_in: u64, recovery: u8) ->
     (data * u128::from(100 + u32::from(recovery)) / 100) as u64
 }
 
+/// The size estimate `bytes` (without recovery records) with `recovery` percent added.
+pub fn scale_estimate(bytes: u64, recovery: u8) -> u64 {
+    scaled_size(bytes, 1, 1, recovery)
+}
+
 /// Quote `s` for a command line when it needs it, by the Windows rule: inside the quotes a run
 /// of backslashes before a quote (an embedded one, or the closing one) is doubled, so that
 /// a path ending in a backslash gets it doubled before the closing quote.
@@ -318,14 +323,14 @@ impl App {
     }
 
     /// Time and size of `tier` on `inputs`, from a calibration on this machine over at most
-    /// [`SAMPLE_BYTES`], scaled to the inputs' totals (the size also by the `recovery` percent
-    /// the wizard shows: recovery records are that share of the data). Ends `Cancelled` when `cancel` is set
+    /// [`SAMPLE_BYTES`], scaled to the inputs' totals (the size without recovery records:
+    /// [`scale_estimate`] adds them for the percent the wizard shows, so a change of that field
+    /// needs no new sample). Ends `Cancelled` when `cancel` is set
     /// (a newer input set supersedes it).
     pub fn calibrate(
         &self,
         inputs: &[Grant],
         tier: TierChoice,
-        recovery: u8,
         cancel: &CancelToken,
     ) -> Result<Estimate, GuiError> {
         let sources = self.sources_of(inputs)?;
@@ -352,7 +357,7 @@ impl App {
             total,
             seconds: (per_second > 0.0).then(|| total as f64 / per_second),
             bytes: (rate.bytes_in > 0)
-                .then(|| scaled_size(total, rate.bytes_out, rate.bytes_in, recovery)),
+                .then(|| scaled_size(total, rate.bytes_out, rate.bytes_in, 0)),
         })
     }
 
@@ -529,5 +534,7 @@ mod tests {
         assert_eq!(scaled_size(1000, 50, 100, 5), 525);
         assert_eq!(scaled_size(1000, 50, 100, 20), 600);
         assert_eq!(scaled_size(1000, 0, 0, 5), 0);
+        assert_eq!(scale_estimate(500, 0), 500);
+        assert_eq!(scale_estimate(500, 5), 525);
     }
 }

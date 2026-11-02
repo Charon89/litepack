@@ -210,7 +210,7 @@ export function createCreator(env) {
         } else if (e.seconds === null || e.bytes === null) {
           out.textContent = t("create.estimate.none");
         } else {
-          out.textContent = t("create.estimate", { time: span(e.seconds), size: size(e.bytes) });
+          out.textContent = t("create.estimate", { time: span(e.seconds), size: size(e.shown ?? e.bytes) });
         }
       }
     }
@@ -263,6 +263,15 @@ export function createCreator(env) {
       });
     }
 
+    // The size shown includes the recovery records: Rust adds them to the sampled size, so a
+    // change of the recovery field samples nothing again.
+    async function rescale(tier) {
+      const e = s.estimates[tier];
+      if (e && e.bytes !== null && e.bytes !== undefined) {
+        e.shown = await core.invoke("create_scale", { bytes: e.bytes, recovery: validRecovery() ? s.recovery : 0 });
+      }
+    }
+
     // One calibration at a time on Rust's blocking thread: the selected tier first, then the
     // others; a change of inputs cancels the running one and starts over.
     async function calibrate() {
@@ -288,11 +297,15 @@ export function createCreator(env) {
         const op = nextOp();
         calibrating = op;
         try {
-          const e = await core.invoke("create_calibrate", { inputs: grants, tier, recovery: validRecovery() ? s.recovery : 0, op });
+          const e = await core.invoke("create_calibrate", { inputs: grants, tier, op });
           if (mine !== generation) {
             return;
           }
           s.estimates[tier] = e;
+          await rescale(tier);
+          if (mine !== generation) {
+            return;
+          }
         } catch (e) {
           if (mine !== generation) {
             return;
@@ -425,10 +438,12 @@ export function createCreator(env) {
         s.recovery = recovery.value === "" ? Number.NaN : Number(recovery.value);
         refreshCreate();
       });
-      // The size estimates include the recovery records: a settled change estimates again.
+      // The size estimates include the recovery records: a settled change rescales them.
       recovery.addEventListener("change", () => {
         if (validRecovery()) {
-          calibrate().catch(showError);
+          Promise.all(TIERS.map(rescale))
+            .then(renderTiers)
+            .catch(showError);
         }
       });
       testBox.addEventListener("change", () => {

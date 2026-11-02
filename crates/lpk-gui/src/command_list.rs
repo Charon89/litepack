@@ -21,6 +21,7 @@ pub const COMMANDS: &[&str] = &[
     "create_plan",
     "create_name",
     "create_calibrate",
+    "create_scale",
     "create_password",
     "create_run",
     "cancel",

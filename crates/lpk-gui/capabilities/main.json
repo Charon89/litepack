@@ -22,6 +22,7 @@
     "allow-create-plan",
     "allow-create-name",
     "allow-create-calibrate",
+    "allow-create-scale",
     "allow-create-password",
     "allow-create-run",
     "allow-cancel",

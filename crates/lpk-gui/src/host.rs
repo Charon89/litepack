@@ -482,13 +482,18 @@ async fn create_calibrate(
     host: State<'_, Host>,
     inputs: Vec<Grant>,
     tier: TierChoice,
-    recovery: u8,
     op: u64,
 ) -> Result<Estimate, GuiError> {
     let app = host.app.clone();
     // Registered before the hop, so that a `cancel` that arrives early finds it.
     let g = app.ops.begin(op, false)?;
-    blocking(move || app.calibrate(&inputs, tier, recovery, &g.token)).await
+    blocking(move || app.calibrate(&inputs, tier, &g.token)).await
+}
+
+/// A size estimate with the recovery records of `recovery` percent added (no sampling).
+#[tauri::command]
+async fn create_scale(bytes: u64, recovery: u8) -> Result<u64, GuiError> {
+    Ok(lpk_gui::create::scale_estimate(bytes, recovery))
 }
 
 /// Ask for the new archive's password twice (`set`) or forget it; whether one is set. The
@@ -692,6 +697,7 @@ pub fn run() -> i32 {
             create_plan,
             create_name,
             create_calibrate,
+            create_scale,
             create_password,
             create_run,
             cancel,

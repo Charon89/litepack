@@ -312,7 +312,7 @@ fn a_calibration_gives_scaled_estimates_and_a_superseded_one_is_cancelled() {
     for tier in [TierChoice::Fast, TierChoice::Balanced, TierChoice::Store] {
         let e = f
             .app
-            .calibrate(&f.inputs, tier, 0, &CancelToken::new())
+            .calibrate(&f.inputs, tier, &CancelToken::new())
             .unwrap();
         assert_eq!(e.tier, tier);
         assert!(e.total > 0 && e.sample > 0 && e.sample <= e.total);
@@ -323,7 +323,7 @@ fn a_calibration_gives_scaled_estimates_and_a_superseded_one_is_cancelled() {
     assert!(f.app.ops.cancel(1));
     let e = f
         .app
-        .calibrate(&f.inputs, TierChoice::Balanced, 5, &token.token)
+        .calibrate(&f.inputs, TierChoice::Balanced, &token.token)
         .unwrap_err();
     assert!(e.is(Class::Cancelled), "{e}");
     // Mid-run: cancelled while the sample compresses.
@@ -334,7 +334,7 @@ fn a_calibration_gives_scaled_estimates_and_a_superseded_one_is_cancelled() {
         let inputs = big.inputs.clone();
         move || {
             big.app
-                .calibrate(&inputs, TierChoice::Balanced, 5, &t2)
+                .calibrate(&inputs, TierChoice::Balanced, &t2)
                 .map(|_| ())
         }
     });
@@ -347,7 +347,7 @@ fn a_calibration_gives_scaled_estimates_and_a_superseded_one_is_cancelled() {
     let e = f.app.grants.mint(GrantKind::Input, empty.path());
     let est = f
         .app
-        .calibrate(&[e.grant], TierChoice::Fast, 0, &CancelToken::new())
+        .calibrate(&[e.grant], TierChoice::Fast, &CancelToken::new())
         .unwrap();
     assert!(est.seconds.is_none() && est.bytes.is_none());
 }
@@ -467,15 +467,47 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Whether `t` is a float or exponent literal (`0.35`, `1.2e8`, `1e6`).
+/// Whether `t` is, whole, a float or exponent literal: `0.35`, `.35`, `1.2e8`, `1e6`, `1e+8`,
+/// `2.5f64` (digits and `_`, an optional fraction, an optional exponent with a sign; at least
+/// the fraction or the exponent).
 fn is_float(t: &str) -> bool {
-    let t = t.trim_end_matches('.');
-    if !t.starts_with(|c: char| c.is_ascii_digit()) || t.starts_with("0x") {
-        return false;
+    let t = t.trim_end_matches("f64").trim_end_matches("f32");
+    let mut it = t.chars().peekable();
+    let digits = |it: &mut std::iter::Peekable<std::str::Chars<'_>>| {
+        let mut n = 0;
+        while it.peek().is_some_and(|c| c.is_ascii_digit() || *c == '_') {
+            n += usize::from(it.next() != Some('_'));
+        }
+        n
+    };
+    let int = digits(&mut it);
+    let mut frac = 0;
+    let mut dot = false;
+    if it.peek() == Some(&'.') {
+        it.next();
+        dot = true;
+        frac = digits(&mut it);
     }
-    let digit_first =
-        |f: Option<&str>| f.is_some_and(|f| f.starts_with(|c: char| c.is_ascii_digit()));
-    digit_first(t.split('.').nth(1)) || digit_first(t.to_ascii_lowercase().split('e').nth(1))
+    let mut exp = false;
+    if matches!(it.peek(), Some('e' | 'E')) {
+        it.next();
+        if matches!(it.peek(), Some('+' | '-')) {
+            it.next();
+        }
+        if digits(&mut it) == 0 {
+            return false;
+        }
+        exp = true;
+    }
+    it.next().is_none() && (int + frac) > 0 && ((dot && frac > 0) || exp)
+}
+
+/// Whether some prefix (`after`) or suffix of `run` is a float literal.
+fn has_float(run: &str, after: bool) -> bool {
+    let n = run.len();
+    (0..=n)
+        .filter(|i| run.is_char_boundary(*i))
+        .any(|i| is_float(if after { &run[..i] } else { &run[i..] }))
 }
 
 /// A float or exponent literal right after or right before a `*` or `/`.
@@ -491,7 +523,7 @@ fn float_operand(line: &str) -> bool {
         }
     }
     let line = plain.as_str();
-    let word = |c: &char| c.is_ascii_alphanumeric() || *c == '_' || *c == '.';
+    let word = |c: &char| c.is_ascii_alphanumeric() || matches!(*c, '_' | '.' | '+' | '-');
     for (i, c) in line.char_indices() {
         if c != '*' && c != '/' {
             continue;
@@ -509,7 +541,7 @@ fn float_operand(line: &str) -> bool {
             .collect();
         before.reverse();
         let before: String = before.into_iter().collect();
-        if is_float(&after) || is_float(&before) {
+        if has_float(&after, true) || has_float(&before, false) {
             return true;
         }
     }
@@ -613,6 +645,9 @@ fn the_rate_pattern_finds_a_literal_and_ignores_sizes() {
         "const mbs = ev.bytes_in / elapsed / 1e6;",
         "let t = total as f64 * 0.35;",
         "x = 2.5 * y",
+        "const s = bytes / 1e+8;",
+        "const t = total * .35;",
+        "let u = n / 2.5e-3;",
     ] {
         assert!(
             matches_rate_pattern(bad, 0) || matches_rate_pattern(bad, 1) || float_operand(bad),
@@ -629,6 +664,8 @@ fn the_rate_pattern_finds_a_literal_and_ignores_sizes() {
         "Math.round((a / b) * 100)",
         "(data * 105 / 100) as u64",
         "seconds < 1.5 && x.toFixed(1)",
+        "a / 3 - 1.5",
+        "n * 2 + x.y",
     ] {
         assert!(
             !matches_rate_pattern(ok, 0) && !matches_rate_pattern(ok, 1) && !float_operand(ok),

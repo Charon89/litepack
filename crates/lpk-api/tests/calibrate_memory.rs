@@ -56,15 +56,44 @@ fn a_huge_file_is_sampled_inside_the_file_and_never_buffered() {
             "{tier:?}: the heap grew by {growth} bytes for a {FILE}-byte file, {floor} for the sample"
         );
     }
-    // The scratch copy is gone.
-    let left = std::fs::read_dir(std::env::temp_dir())
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with(&format!("lpk-calibrate-{}-", std::process::id()))
-        })
-        .count();
-    assert_eq!(left, 0);
+    // Nothing is written anywhere: the same calibrations in a child process whose temporary
+    // folder is empty (TEMP, TMP and TMPDIR) leave it empty.
+    let scratch = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "child_calibrates",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("LPK_CALIBRATE_CHILD", &src)
+        .env("TEMP", scratch.path())
+        .env("TMP", scratch.path())
+        .env("TMPDIR", scratch.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+/// The child of the test above: calibrates the folder `LPK_CALIBRATE_CHILD` names, per tier.
+#[test]
+fn child_calibrates() {
+    let Some(src) = std::env::var_os("LPK_CALIBRATE_CHILD") else {
+        return;
+    };
+    let sources = Sources::contents_of(std::path::Path::new(&src));
+    for tier in [Tier::Fast, Tier::Balanced, Tier::Store] {
+        let s = CreateSettings {
+            tier,
+            ..CreateSettings::default()
+        };
+        let rate = lpk_api::calibrate(&sources, &s, SAMPLE, &Monitor::default()).unwrap();
+        assert_eq!(rate.bytes_in, SAMPLE, "{tier:?}");
+    }
 }

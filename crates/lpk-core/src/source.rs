@@ -60,7 +60,9 @@ impl Source {
                 return Err(changed());
             }
         }
-        Ok(Box::new(file.take(input.len.saturating_add(1))))
+        // A capped input (a sample of a larger file) is read to its cap and no further.
+        let probe = u64::from(!input.capped);
+        Ok(Box::new(file.take(input.len.saturating_add(probe))))
     }
 }
 
@@ -103,6 +105,23 @@ mod tests {
         }
         assert!(checked >= 12);
         clear_readonly(&dir.path().join("ro.txt"));
+    }
+
+    /// A capped input (a sample of a larger or since-grown file) reads exactly its cap.
+    #[test]
+    fn a_capped_input_reads_exactly_its_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), vec![1u8; 100]).unwrap();
+        let mut inputs = walk(dir.path(), &IngestOptions::default()).unwrap();
+        inputs[0].len = 10;
+        inputs[0].capped = true;
+        let mut got = Vec::new();
+        Source::new()
+            .open(&inputs[0])
+            .unwrap()
+            .read_to_end(&mut got)
+            .unwrap();
+        assert_eq!(got.len(), 10);
     }
 
     #[test]
