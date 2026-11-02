@@ -82,6 +82,9 @@ pub struct App {
     /// A test seam: the memory budget (bytes) of every extraction that names none.
     memory: Option<u64>,
     pub(crate) gate: crate::preview::Gate,
+    /// The password the create wizard set (E5-5): in wiped memory, never sent to the page,
+    /// used by the next create and dropped by it (or by the wizard's clear).
+    pub(crate) new_password: Mutex<Option<zeroize::Zeroizing<String>>>,
 }
 
 /// The recent lists as the page receives them: labels and opaque grants minted when listed.
@@ -113,6 +116,7 @@ impl App {
             free: None,
             memory: None,
             gate: crate::preview::Gate::default(),
+            new_password: Mutex::new(None),
         }
     }
 
@@ -470,6 +474,36 @@ impl App {
         Ok(())
     }
 
+    /// The engine's sources for the input grants (a lone folder's contents, else each input
+    /// under its name); `Usage` for none.
+    pub(crate) fn sources_of(&self, inputs: &[Grant]) -> Result<Sources, GuiError> {
+        let paths: Vec<PathBuf> = inputs
+            .iter()
+            .map(|g| self.grants.resolve(g, GrantKind::Input))
+            .collect::<Result<_, _>>()?;
+        if paths.is_empty() {
+            return Err(GuiError::usage("no inputs"));
+        }
+        if paths.len() == 1 && paths[0].is_dir() {
+            Ok(Sources {
+                roots: vec![Root::contents(&paths[0])],
+                exclude: Globs::all(),
+            })
+        } else {
+            let core = |e| GuiError::from(lpk_api::Error::core(e, None));
+            let roots = paths
+                .iter()
+                .map(|p| Root::named(p).map_err(core))
+                .collect::<Result<Vec<_>, _>>()?;
+            Sources::new(roots, Globs::all()).map_err(core)
+        }
+    }
+
+    /// Remember `folder` as a recent destination (a finished create's output folder).
+    pub(crate) fn record_destination(&self, folder: &Path) {
+        self.recents.record_destination(folder);
+    }
+
     /// Create the archive `name` (a plain file name) in the folder of `folder` from the inputs
     /// of `inputs` (a lone folder's contents, else each input under its name).
     pub fn create(
@@ -480,30 +514,11 @@ impl App {
         settings: &CreateSettings,
         monitor: &Monitor,
     ) -> Result<RunSummary, GuiError> {
-        let paths: Vec<PathBuf> = inputs
-            .iter()
-            .map(|g| self.grants.resolve(g, GrantKind::Input))
-            .collect::<Result<_, _>>()?;
-        if paths.is_empty() {
-            return Err(GuiError::usage("no inputs"));
-        }
+        let sources = self.sources_of(inputs)?;
         let out = self
             .grants
             .resolve(folder, GrantKind::Folder)?
             .join(write::archive_name(name)?);
-        let sources = if paths.len() == 1 && paths[0].is_dir() {
-            Sources {
-                roots: vec![Root::contents(&paths[0])],
-                exclude: Globs::all(),
-            }
-        } else {
-            let core = |e| GuiError::from(lpk_api::Error::core(e, None));
-            let roots = paths
-                .iter()
-                .map(|p| Root::named(p).map_err(core))
-                .collect::<Result<Vec<_>, _>>()?;
-            Sources::new(roots, Globs::all()).map_err(core)?
-        };
         write::create_archive(&sources, &out, settings, monitor, self.journal.as_ref())
     }
 

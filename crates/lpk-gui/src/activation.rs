@@ -6,10 +6,10 @@
 //! The handlers, and the task that completes each (the page's `apps/gui/main.js` holds them):
 //! - [`Handler::Open`]: opens the archive in the browser (done).
 //! - [`Handler::CreateNamed`]: `Add to "<name>.lpk"`, created at once with the defaults through
-//!   `create_archive` into the first input's folder (done; E5-5 adds its progress dialog).
+//!   `create_run` into the first input's folder, through the wizard's progress dialog (done, E5-5).
 //! - [`Handler::ExtractHere`], [`Handler::ExtractTo`]: extract each archive beside itself with no
 //!   question, Smart or into `<name>` (done, E5-4: `extract_archive`).
-//! - [`Handler::CreateWizard`]: E5-5 (the create wizard).
+//! - [`Handler::CreateWizard`]: the create wizard with these inputs (done, E5-5: `create_plan`).
 //! - [`Handler::Test`]: E5-8 (the test dialog).
 //! - [`Handler::Convert`]: E4's broker path into E5-1's `create` (re-creating a foreign archive).
 
@@ -28,7 +28,7 @@ pub enum Handler {
     ExtractHere,
     /// Extract each archive into `<name>\` beside it (`--extract-to`; E5-4).
     ExtractTo,
-    /// The create wizard with these inputs (`--create`); E5-5 completes it.
+    /// The create wizard with these inputs (`--create`; E5-5).
     CreateWizard,
     /// Create `<name>.lpk` at once with the defaults (`--create … --name`).
     CreateNamed,
@@ -44,7 +44,11 @@ impl Handler {
     pub fn implemented(self) -> bool {
         matches!(
             self,
-            Handler::Open | Handler::CreateNamed | Handler::ExtractHere | Handler::ExtractTo
+            Handler::Open
+                | Handler::CreateWizard
+                | Handler::CreateNamed
+                | Handler::ExtractHere
+                | Handler::ExtractTo
         )
     }
 }

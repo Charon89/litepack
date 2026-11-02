@@ -5,6 +5,7 @@
 // goes in through textContent.
 import { VirtualList } from "./list.js";
 import { createExtractor } from "./extract.js";
+import { createCreator } from "./create.js";
 import { createPreview } from "./preview.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
@@ -207,54 +208,16 @@ async function openPicked() {
   }
 }
 
-// A new archive from files or from a folder (`what`), then where it goes; one cancel ends it.
-// Named after the first input, written by Rust through a `.partial` that never replaces a file.
-async function createPicked(what) {
-  const inputs = await pick(what);
-  if (inputs.length === 0) {
-    return;
-  }
-  const [folder] = await pick("destination");
-  if (!folder) {
-    return;
-  }
-  const first = inputs[0].name;
-  const name = (what === "files" ? first.replace(/\.[^.]*$/, "") : first) || "archive";
-  setStatus(t("create.running", { name: `${name}.lpk` }));
-  const progress = new core.Channel();
-  progress.onmessage = () => {};
-  await core.invoke("create_archive", {
-    inputs: inputs.map((i) => i.grant),
-    folder: folder.grant,
-    name,
-    tier: "balanced",
-    op: nextOp++,
-    progress,
-  });
-  setStatus(t("create.done", { name: `${name}.lpk` }));
-}
-
-// `Add to "<name>.lpk"` (E5-7, `--create … --name`): created at once with the defaults into the
-// first input's folder, a grant Rust derived from the verb's paths. E5-5 adds its progress dialog.
-async function createNamed(a) {
-  if (!a.folder) {
-    showNotices([{ kind: "text", text: t("verb.create") }]);
-    return;
-  }
-  const name = a.name;
-  setStatus(t("create.running", { name }));
-  const progress = new core.Channel();
-  progress.onmessage = () => {};
-  await core.invoke("create_archive", {
-    inputs: a.items.map((i) => i.grant),
-    folder: a.folder.grant,
-    name: a.name,
-    tier: "balanced",
-    op: nextOp++,
-    progress,
-  });
-  setStatus(t("create.done", { name }));
-}
+// The create wizard (create.js): from the bar's button and Ctrl+N, from `--create <paths>`, and
+// `Add to "<name>.lpk"` (`--create ... --name`), which creates at once through the wizard's
+// progress dialog and summary.
+const creator = createCreator({
+  core,
+  t,
+  nextOp: () => nextOp++,
+  showError: (e) => showError(e),
+  openArchive: (g) => openArchive(g),
+});
 
 // The extract wizard (extract.js) and the verbs' queue.
 const extractor = createExtractor({
@@ -278,9 +241,9 @@ function extractTo(a) {
 
 // The handlers of the verbs whose action a later task brings; each says so in a notice until then.
 
-// E5-5 completes createWizard (the create wizard, with these inputs).
-function createWizard() {
-  showNotices([{ kind: "text", text: t("verb.create") }]);
+// `--create <paths>`: the create wizard with these inputs.
+function createWizard(a) {
+  return creator.open(a.items);
 }
 
 // E5-8 completes testArchives (the test dialog).
@@ -300,7 +263,7 @@ async function runActivation(a) {
     case "open":
       return openArchive(a.items[0]);
     case "create-named":
-      return createNamed(a);
+      return creator.runNamed(a);
     case "extract-here":
       return extractHere(a);
     case "extract-to":
@@ -455,6 +418,10 @@ function wireControls() {
       e.preventDefault();
       extractor.openDialog().catch(showError);
     }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n" && !document.querySelector("dialog[open]")) {
+      e.preventDefault();
+      creator.open([]).catch(showError);
+    }
   });
   $("recents-clear").addEventListener("click", () => {
     core
@@ -463,8 +430,7 @@ function wireControls() {
       .catch(showError);
   });
   $("action-open").addEventListener("click", () => openPicked().catch(showError));
-  $("action-files").addEventListener("click", () => createPicked("files").catch(showError));
-  $("action-folder").addEventListener("click", () => createPicked("folder").catch(showError));
+  $("action-new").addEventListener("click", () => creator.open([]).catch(showError));
   $("mode-flat").addEventListener("click", () => {
     Object.assign(state, { mode: "flat", dir: null });
     applyView().catch(showError);

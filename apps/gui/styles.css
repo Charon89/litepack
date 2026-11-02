@@ -425,3 +425,63 @@ main {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
+
+/* The create wizard (E5-5). */
+.wizard.create {
+  max-width: 44rem;
+}
+.wizard.create .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0;
+}
+.wizard.create .inputs {
+  list-style: none;
+  margin: 0.25rem 0;
+  padding: 0;
+  max-height: 8rem;
+  overflow: auto;
+}
+.wizard.create .inputs li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+.wizard.create .tiers {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+.wizard.create .tiers legend {
+  grid-column: 1 / -1;
+}
+.wizard.create .card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  border: 1px solid currentColor;
+  border-radius: 0.4rem;
+  padding: 0.5rem;
+}
+.wizard.create .card:has(input:checked) {
+  outline: 2px solid Highlight;
+}
+.wizard.create .tier-name {
+  font-weight: 600;
+}
+.wizard.create .estimate {
+  font-style: italic;
+}
+.wizard.create .note:empty {
+  display: none;
+}
+.wizard.create .command {
+  width: 100%;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.wizard.create .check.bad {
+  font-weight: 600;
+}

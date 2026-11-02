@@ -208,6 +208,12 @@ pub trait Prompter: Send + Sync {
     /// Ask for the password of `archive`; `wrong` when the last one was refused.
     fn password(&self, archive: &str, wrong: bool) -> Option<Zeroizing<String>>;
 
+    /// Ask for a new archive's password, twice (E5-5); `name` titles the dialog. `None`:
+    /// cancelled, or no user to ask.
+    fn new_password(&self, _name: &str) -> Option<Zeroizing<String>> {
+        None
+    }
+
     /// Whether a user can answer (false: a missing password stays the error it is).
     fn interactive(&self) -> bool {
         true

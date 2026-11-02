@@ -18,11 +18,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use lpk_api::{Class, CreateSettings, Event, Monitor, Tier};
+use lpk_api::{Class, Event, Monitor};
 use lpk_gui::activation::{activate, Activation};
 use lpk_gui::app::RecentLists;
 use lpk_gui::app::{App, Opened};
 use lpk_gui::browse::{SelectAction, Status, ViewInfo, ViewRequest};
+use lpk_gui::create::{CreatePlan, CreateRequest, CreateResult, Estimate, NameCheck, TierChoice};
 use lpk_gui::extract::{
     Dest, ExtractResult, Plan, Prompter, Request as ExtractRequest, Scope, Verb as ExtractVerb,
 };
@@ -148,8 +149,9 @@ struct NativePrompter {
     token: lpk_api::CancelToken,
 }
 
-impl Prompter for NativePrompter {
-    fn password(&self, archive: &str, wrong: bool) -> Option<Zeroizing<String>> {
+impl NativePrompter {
+    /// Show the dialog with `texts` on the main thread and wait for its answer.
+    fn ask(&self, texts: lpk_gui_sys::PasswordTexts) -> Option<Zeroizing<String>> {
         let (tx, rx) = std::sync::mpsc::channel();
         let owner = owner(&self.handle);
         let dark = self
@@ -157,11 +159,6 @@ impl Prompter for NativePrompter {
             .get_webview_window(MAIN_WINDOW)
             .and_then(|w| w.theme().ok())
             .is_some_and(|t| t == tauri::Theme::Dark);
-        let mut texts = strings::password_texts(false);
-        texts.title = format!("{} - {archive}", texts.title);
-        if wrong {
-            texts.prompt = format!("{}\n{}", strings::get("password.wrong"), texts.prompt);
-        }
         let token = self.token.clone();
         self.handle
             .run_on_main_thread(move || {
@@ -175,6 +172,28 @@ impl Prompter for NativePrompter {
         lpk_gui::extract::wait_for_answer(&rx, &self.token)?
             .ok()
             .flatten()
+    }
+}
+
+impl Prompter for NativePrompter {
+    fn password(&self, archive: &str, wrong: bool) -> Option<Zeroizing<String>> {
+        let mut texts = strings::password_texts(false);
+        texts.title = format!("{} - {archive}", texts.title);
+        if wrong {
+            texts.prompt = format!(
+                "{}
+{}",
+                strings::get("password.wrong"),
+                texts.prompt
+            );
+        }
+        self.ask(texts)
+    }
+
+    fn new_password(&self, _name: &str) -> Option<Zeroizing<String>> {
+        let mut texts = strings::password_texts(true);
+        texts.prompt = strings::get("create.password.prompt").to_string();
+        self.ask(texts)
     }
 }
 
@@ -443,33 +462,76 @@ async fn close_archive(host: State<'_, Host>, session: u64) -> Result<(), GuiErr
     blocking(move || app.close(session)).await
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The create wizard's defaults and totals for the inputs the page holds grants for.
 #[tauri::command]
-async fn create_archive(
+async fn create_plan(host: State<'_, Host>, inputs: Vec<Grant>) -> Result<CreatePlan, GuiError> {
+    let app = host.app.clone();
+    blocking(move || app.create_plan(&inputs)).await
+}
+
+/// Validate a typed archive name and say whether it exists in the folder.
+#[tauri::command]
+async fn create_name(
     host: State<'_, Host>,
-    inputs: Vec<Grant>,
     folder: Grant,
     name: String,
-    tier: String,
+) -> Result<NameCheck, GuiError> {
+    let app = host.app.clone();
+    blocking(move || app.create_name(&folder, &name)).await
+}
+
+/// A tier's time and size estimate from a calibration on this machine (cancellable: a newer
+/// input set supersedes it).
+#[tauri::command]
+async fn create_calibrate(
+    host: State<'_, Host>,
+    inputs: Vec<Grant>,
+    tier: TierChoice,
+    op: u64,
+) -> Result<Estimate, GuiError> {
+    let app = host.app.clone();
+    // Registered before the hop, so that a `cancel` that arrives early finds it.
+    let g = app.ops.begin(op, false)?;
+    blocking(move || app.calibrate(&inputs, tier, &g.token)).await
+}
+
+/// Ask for the new archive's password twice (`set`) or forget it; whether one is set. The
+/// page never sees the password.
+#[tauri::command]
+async fn create_password(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    set: bool,
+    op: u64,
+) -> Result<bool, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        if !set {
+            app.clear_password();
+            return Ok(false);
+        }
+        let g = app.ops.begin(op, false)?;
+        Ok(app.set_password(&NativePrompter {
+            handle,
+            token: g.token.clone(),
+        }))
+    })
+    .await
+}
+
+/// Create an archive, then test it when asked (a heavy operation: queued behind any other).
+#[tauri::command]
+async fn create_run(
+    host: State<'_, Host>,
+    request: CreateRequest,
     op: u64,
     progress: Channel<ProgressDto>,
-) -> Result<(), GuiError> {
-    let tier = match tier.as_str() {
-        "fast" => Tier::Fast,
-        "balanced" => Tier::Balanced,
-        "store" => Tier::Store,
-        other => return Err(GuiError::usage(format!("tier {other:?}"))),
-    };
+) -> Result<CreateResult, GuiError> {
     let app = host.app.clone();
     blocking(move || {
         let g = app.ops.begin(op, true)?;
         let monitor = monitor_of(progress, g.token.clone());
-        let settings = CreateSettings {
-            tier,
-            ..CreateSettings::default()
-        };
-        app.create(&inputs, &folder, &name, &settings, &monitor)
-            .map(|_| ())
+        app.create_run(&request, &monitor)
     })
     .await
 }
@@ -631,7 +693,11 @@ pub fn run() -> i32 {
             recents,
             clear_recents,
             close_archive,
-            create_archive,
+            create_plan,
+            create_name,
+            create_calibrate,
+            create_password,
+            create_run,
             cancel,
             subscribe,
             listing_shown,

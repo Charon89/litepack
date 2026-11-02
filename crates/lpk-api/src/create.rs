@@ -115,6 +115,7 @@ impl CreateSettings {
     /// the recovery percent and `monitor`.
     pub fn pipeline(&self, monitor: &Monitor) -> Pipeline {
         let tier = self.tier;
+        let mut balanced_block = None;
         let mut pipeline = if tier == Tier::Store {
             Pipeline::store(StoreOptions {
                 threads: self.threads,
@@ -137,6 +138,7 @@ impl CreateSettings {
             if let Some(b) = self.bwt {
                 o.bwt = b;
             }
+            balanced_block = Some(o.block_size);
             Pipeline::balanced(o)
         } else {
             let mut o = FastOptions {
@@ -188,6 +190,15 @@ impl CreateSettings {
             });
         }
         pipeline.seal.writer.recovery.percent = self.recovery;
+        // A block and its frame's overhead must fit in one recovery group (the writer refuses
+        // the options otherwise): the Balanced tier's 256 MiB block is larger than the default
+        // group of 2048 shards, so its group grows to hold one (E5-5: the wizard proposes
+        // recovery with Balanced, and `lpk a --balanced --recovery` met this refusal).
+        if let (Some(block), true) = (balanced_block, self.recovery > 0) {
+            let r = &mut pipeline.seal.writer.recovery;
+            let need = block.saturating_add(4096).div_ceil(u64::from(r.shard_len));
+            r.group_shards = r.group_shards.max(u32::try_from(need).unwrap_or(u32::MAX));
+        }
         pipeline.monitor = monitor.clone();
         pipeline
     }
@@ -308,6 +319,25 @@ impl Rate {
     }
 }
 
+/// What `inputs` hold: the files a create would write and their bytes (a walk with the create's
+/// own rules; symlinks and directories are not files).
+///
+/// # Errors
+/// An input that cannot be walked.
+pub fn measure(inputs: &Sources) -> Result<(u64, u64), Error> {
+    let walked = lpk_core::walk_sources(inputs, &lpk_core::IngestOptions::default())
+        .map_err(|e| Error::core(e, None))?;
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    for i in walked {
+        if i.kind == lpk_format::EntryKind::File {
+            files += 1;
+            bytes = bytes.saturating_add(i.len);
+        }
+    }
+    Ok((files, bytes))
+}
+
 /// Run the pipeline of `s` in memory over a bounded sample of `inputs`: the first files in
 /// walk order (distinct names) until `sample` bytes, timed (no archive written; the seal and
 /// the recovery records are left out).
@@ -361,6 +391,34 @@ pub fn calibrate(
 mod tests {
     use super::{CreateSettings, Tier};
     use lpk_core::FileOrder;
+
+    /// E5-5: the Balanced tier's block is larger than the default recovery group, so its group
+    /// grows (the writer refused the options before); every tier makes an archive with records.
+    #[test]
+    fn every_tier_takes_recovery_records_and_measure_counts_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("d")).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha".repeat(100)).unwrap();
+        std::fs::write(src.join("d/b.txt"), b"bravo").unwrap();
+        let sources = crate::Sources::contents_of(&src);
+        assert_eq!(super::measure(&sources).unwrap(), (2, 505));
+        for tier in [Tier::Fast, Tier::Balanced, Tier::Store] {
+            let out = dir.path().join(format!("{}.lpk", tier.name()));
+            let s = CreateSettings {
+                tier,
+                recovery: 5,
+                ..CreateSettings::default()
+            };
+            super::create(&sources, &out, &s, &crate::Monitor::default()).unwrap();
+            let session = crate::Session::open(&out, &crate::OpenOptions::default()).unwrap();
+            session.test(&crate::Monitor::default()).unwrap();
+            assert!(
+                session.check(&crate::Monitor::default()).is_ok(),
+                "{tier:?}"
+            );
+        }
+    }
 
     /// E2-26 (D-104): the Balanced tier orders versions unless told otherwise; the other tiers
     /// and `lpk-core`'s own default keep path order.
