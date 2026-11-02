@@ -602,6 +602,7 @@ impl App {
         require_latest_lpk(&session, "roll back")?;
         let path = session.path().to_path_buf();
         let latest = session.info().latest_generation;
+        let shown_length = session.info().length;
         if generation >= latest {
             return Err(GuiError::usage(format!(
                 "generation {generation}: nothing is newer to remove (the archive ends at {latest})"
@@ -638,8 +639,10 @@ impl App {
             .open(&path)
             .map_err(|e| lpk_api::Error::new(Class::Io, "Io", e.to_string(), Some(&path)))
             .and_then(|mut file| {
-                let now = lpk_api::committed_generation_of(&mut file, &path)?;
-                if now != latest {
+                let (now, end) = lpk_api::committed_end_of(&mut file, &path)?;
+                // The number alone is not enough: the archive may have been rolled back and
+                // appended again under the same number.
+                if now != latest || end != shown_length {
                     return Err(lpk_api::Error::new(
                         Class::Usage,
                         "ArchiveChanged",

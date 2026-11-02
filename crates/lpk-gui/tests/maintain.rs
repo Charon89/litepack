@@ -83,6 +83,24 @@ fn cancel_on(n: usize) -> (Monitor, Arc<AtomicUsize>) {
     (m, seen)
 }
 
+/// A monitor that cancels on the first `Encode` event with more than `floor` bytes out, that
+/// is once the run has written into the archive (the walk's events come first).
+fn cancel_when_writing(floor: u64) -> (Monitor, Arc<AtomicUsize>) {
+    let token = CancelToken::new();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let (t, s) = (token.clone(), seen.clone());
+    let m = Monitor::new(
+        Arc::new(move |e: &lpk_api::Event| {
+            if e.stage == lpk_api::Stage::Encode && e.bytes_out > floor {
+                s.fetch_add(1, Ordering::SeqCst);
+                t.cancel();
+            }
+        }),
+        token,
+    );
+    (m, seen)
+}
+
 /// Bytes that do not compress, so that a run spans several blocks.
 fn noise(len: usize, seed: u32) -> Vec<u8> {
     let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
@@ -399,7 +417,17 @@ fn a_repair_cancelled_mid_run_leaves_no_copy_and_no_partial() {
 fn a_damaged_zip_fails_its_test_with_no_offer_to_repair() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("broken.zip");
-    std::fs::write(&p, noise(4000, 7)).unwrap();
+    // A stored ZIP of one file whose central directory was cut off.
+    let data = b"hello zip";
+    let mut zip = vec![0x50, 0x4B, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0];
+    zip.extend_from_slice(&0u32.to_le_bytes());
+    zip.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&5u16.to_le_bytes());
+    zip.extend_from_slice(&[0, 0]);
+    zip.extend_from_slice(b"a.txt");
+    zip.extend_from_slice(data);
+    std::fs::write(&p, zip).unwrap();
     let app = App::new(None);
     let r = test_vector(&app, &p, false, &NoPrompt);
     assert_eq!(r.state, TestState::Failed);
@@ -432,6 +460,22 @@ fn rollback_refuses_an_archive_that_changed_behind_the_session() {
     assert_eq!(r.lost, 0);
     // The archive reopened at what it is now.
     assert_eq!(r.opened.unwrap().latest_generation, 3);
+
+    // Rolled back behind the session and appended again under the same number, with other
+    // content: the number matches, the length does not.
+    let q = copy_vector(d.path(), "journal-3gen.lpk", "gen2.lpk");
+    let o = open(&app, &q);
+    lpk_api::rollback(&q, 1).unwrap();
+    let other = folder_with(d.path(), "other", &[("y.txt", b"a different generation 2")]);
+    lpk_api::append(&q, &other, &s, None, &Monitor::default()).unwrap();
+    assert_eq!(lpk_api::committed_generation(&q).unwrap(), 2);
+    let after = std::fs::read(&q).unwrap();
+    let r = app
+        .rollback_run(o.session, 1, &yes, &NoPrompt, &CancelToken::new())
+        .unwrap();
+    assert_eq!(r.state, RunState::Failed);
+    assert_eq!(r.error.unwrap().kind, "ArchiveChanged");
+    assert_eq!(std::fs::read(&q).unwrap(), after);
 }
 
 #[test]
@@ -588,11 +632,14 @@ fn append_mirrors_the_folder_tests_it_and_cancel_leaves_the_archive_alone() {
 
     // A cancelled append leaves the archive as it was; the archive reopens.
     let before = std::fs::read(&p).unwrap();
-    let (cancelled, seen) = cancel_on(2);
+    let (cancelled, seen) = cancel_when_writing(0);
     let r = app
         .append_run(o.session, &request(&app, &second), &NoPrompt, &cancelled)
         .unwrap();
-    assert!(seen.load(Ordering::SeqCst) >= 2, "cancelled mid-run");
+    assert!(
+        seen.load(Ordering::SeqCst) >= 1,
+        "cancelled on an Encode event with bytes written"
+    );
     assert_eq!(r.state, RunState::Cancelled);
     assert_eq!(
         std::fs::read(&p).unwrap(),
