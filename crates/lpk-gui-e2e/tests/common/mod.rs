@@ -145,6 +145,16 @@ pub(crate) fn start_driver(work: &Path, port: u16) -> Driver {
 }
 
 pub(crate) async fn connect(driver: &mut Driver, work: &Path, archive: &Path, port: u16) -> Client {
+    connect_with(driver, work, format!("--open={}", archive.display()), port).await
+}
+
+/// [`connect`] with the one command-line argument `arg` (`--create=<folder>` for the wizard).
+pub(crate) async fn connect_with(
+    driver: &mut Driver,
+    work: &Path,
+    arg: String,
+    port: u16,
+) -> Client {
     let gui = gui_exe();
     assert!(gui.is_file(), "no GUI at {}", gui.display());
     let mut caps = serde_json::Map::new();
@@ -156,7 +166,7 @@ pub(crate) async fn connect(driver: &mut Driver, work: &Path, archive: &Path, po
             "binary": gui,
             // The Edge WebDriver turns each argument into a Chromium switch (a bare path becomes
             // `--d:\...`, lower-cased), so the archive goes as `--open=<path>`, whose value it keeps.
-            "args": [format!("--open={}", archive.display())],
+            "args": [arg],
             "excludeSwitches": EXCLUDED_SWITCHES,
         }),
     );

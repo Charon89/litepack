@@ -117,6 +117,10 @@ pub fn parse(
     let (flag, inline) = match first.to_str().and_then(|t| t.strip_prefix("--open=")) {
         Some("") => return Err("--open needs an archive".into()),
         Some(p) => ("--open", Some(OsString::from(p))),
+        // The same switch-safe form for one `--create` input (E5-5's driver test).
+        None if text.starts_with("--create=") && text.len() > "--create=".len() => {
+            ("--create", Some(OsString::from(&text["--create=".len()..])))
+        }
         None if VERBS.contains(&text.as_str()) => (
             VERBS[VERBS.iter().position(|v| *v == text).unwrap_or(0)],
             None,
@@ -342,6 +346,14 @@ mod tests {
             verb(&["--create", "x", "y"]),
             Verb::Create {
                 inputs: paths(&["x", "y"]),
+                name: None
+            }
+        );
+        // The switch-safe inline form (the driver tests pass it).
+        assert_eq!(
+            verb(&["--create=x"]),
+            Verb::Create {
+                inputs: paths(&["x"]),
                 name: None
             }
         );

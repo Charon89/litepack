@@ -70,10 +70,32 @@ Open an archive; the pane is on the right of the list, shown at every start. Foc
 | 6.13 | Tab through the window | Focus reaches the text or hex block and leaves it again with Tab; no keyboard trap | |
 | 6.14 | A ZIP or 7z archive | Its entries preview like any other (or the pane gives the engine's message where reading them is not supported yet) | |
 
-## E5-5 and E5-8
+## E5-5 Create wizard
 
-Append the create wizard (E5-5), the verbs and shell integration (E5-7) and
-the maintenance dialogs (E5-8) here.
+Press `New archive...` or Ctrl+N, or start `lpk-gui.exe --create <paths>`. Esc cancels, Enter creates when
+the form is valid, focus returns to where it was when the dialog closes.
+
+| # | Item | Expected result | Result |
+|---|---|---|---|
+| 5.1 | Open the wizard from the bar's button and from Ctrl+N | One dialog, empty inputs, Create disabled | |
+| 5.2 | Open it with `--create <folder> <file>` | Both inputs listed, totals shown, folder and name proposed from the first input | |
+| 5.3 | Add files, add a folder, Remove one | The list and the totals follow; estimates start again | |
+| 5.4 | Type an empty name, `a/b`, `con`, then a free name | Each bad name is refused in the dialog and Create is disabled; the free name enables it | |
+| 5.5 | Choose... a folder; pick a recent folder | The folder line changes; a chosen folder joins the recent list after a create | |
+| 5.6 | Each tier card (Fast, Balanced, Store) | Balanced is selected; each card says "estimating..." and then an estimate ("about N s, about N MB") | |
+| 5.7 | Set password...: matching entries, then a mismatch | The native dialog asks twice; a mismatch is refused there; the page says only that a password is set | |
+| 5.8 | With a password: "Encrypt file names" on (default) and off | On: the archive does not list without the password; off: it lists | |
+| 5.9 | Recovery 5 (proposed) and 0; 21 | 5 and 0 create; 21 disables Create | |
+| 5.10 | "Test when done" on and off | On: the summary says it passed (or names the failure); off: "Not tested." | |
+| 5.11 | Create a large input and press Cancel | The run stops; neither the archive nor a `.partial` file remains | |
+| 5.12 | The summary and Open | Counts, ratio, time, recovery, encryption and path are shown; Open shows the archive in the browser | |
+| 5.13 | Copy as command | A read-only field holds an `lpk a` line with the tier, recovery and inputs, and the note that the password is not included | |
+| 5.14 | Create over an existing `<name>.lpk` | The dialog names it and Create stays disabled; nothing is overwritten | |
+| 5.15 | `--create <paths> --name x.lpk` | Created at once with the defaults, through the progress dialog and summary | |
+
+## E5-8
+
+Append the maintenance dialogs (E5-8) here (the verbs and shell integration are E5-7's section above).
 
 ## Notes
 
