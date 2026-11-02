@@ -12,6 +12,7 @@
 // then a summary with Open, Close and "Copy as command".
 
 const KIB = 2 ** 10;
+const MB = 1000 * 1000;
 const MIB = 2 ** 20;
 const GIB = 2 ** 30;
 const TIERS = ["fast", "balanced", "store"];
@@ -177,6 +178,7 @@ export function createCreator(env) {
     const namesLabel = el("label", { class: "choice" }, namesBox, el("span", { text: t("create.password.names") }));
     let createButton = null;
 
+    const validRecovery = () => Number.isInteger(s.recovery) && s.recovery >= 0 && s.recovery <= s.maxRecovery;
     const valid = () => s.inputs.length > 0 && s.folder !== null && s.nameOk && Number.isInteger(s.recovery) && s.recovery >= 0 && s.recovery <= s.maxRecovery;
     const refreshCreate = () => {
       if (createButton) {
@@ -286,7 +288,7 @@ export function createCreator(env) {
         const op = nextOp();
         calibrating = op;
         try {
-          const e = await core.invoke("create_calibrate", { inputs: grants, tier, op });
+          const e = await core.invoke("create_calibrate", { inputs: grants, tier, recovery: validRecovery() ? s.recovery : 0, op });
           if (mine !== generation) {
             return;
           }
@@ -423,6 +425,12 @@ export function createCreator(env) {
         s.recovery = recovery.value === "" ? Number.NaN : Number(recovery.value);
         refreshCreate();
       });
+      // The size estimates include the recovery records: a settled change estimates again.
+      recovery.addEventListener("change", () => {
+        if (validRecovery()) {
+          calibrate().catch(showError);
+        }
+      });
       testBox.addEventListener("change", () => {
         s.test = testBox.checked;
       });
@@ -508,7 +516,7 @@ export function createCreator(env) {
           line.textContent = t("create.testing", { name });
           return;
         }
-        const mbs = (ev.bytes_in / elapsed / 1e6).toFixed(1);
+        const mbs = (ev.bytes_in / elapsed / MB).toFixed(1);
         const total = s.totals.bytes;
         const f = total > 0 ? Math.min(ev.bytes_in / total, 1) : 0;
         bar.value = Math.round(f * 100);
@@ -643,7 +651,7 @@ export function createCreator(env) {
       }
       const f = plan.bytes > 0 ? Math.min(ev.bytes_in / plan.bytes, 1) : 0;
       bar.value = Math.round(f * 100);
-      line.textContent = t("create.progress", { files: count(ev.files_done), bytes: count(ev.bytes_in), rate: (ev.bytes_in / elapsed / 1e6).toFixed(1), eta: "" });
+      line.textContent = t("create.progress", { files: count(ev.files_done), bytes: count(ev.bytes_in), rate: (ev.bytes_in / elapsed / MB).toFixed(1), eta: "" });
     };
     phase(t("create.title"), [bar, line], [
       [

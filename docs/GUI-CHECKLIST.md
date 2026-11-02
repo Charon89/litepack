@@ -91,7 +91,7 @@ the form is valid, focus returns to where it was when the dialog closes.
 | 5.12 | The summary and Open | Counts, ratio, time, recovery, encryption and path are shown; Open shows the archive in the browser | |
 | 5.13 | Copy as command | A read-only field holds an `lpk a` line with the tier, recovery and inputs, and the note that the password is not included | |
 | 5.14 | Create over an existing `<name>.lpk` | The dialog names it and Create stays disabled; nothing is overwritten | |
-| 5.15 | `--create <paths> --name x.lpk` | Created at once with the defaults, through the progress dialog and summary | |
+| 5.15 | `--create <paths> --name x.lpk` | Created at once with the wizard's defaults (Balanced, recovery 5, test when done), through the progress dialog and summary | |
 
 ## E5-8
 

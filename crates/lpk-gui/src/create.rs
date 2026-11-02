@@ -192,16 +192,43 @@ pub struct CreateResult {
     pub command: String,
 }
 
-/// Quote `s` for a command line when it needs it.
-fn quoted(s: &str) -> String {
-    if s.is_empty()
+/// The estimated archive size: `total` input bytes at the sample's out-to-in proportion, plus the
+/// recovery records (`recovery` percent of the data).
+pub fn scaled_size(total: u64, sample_out: u64, sample_in: u64, recovery: u8) -> u64 {
+    let data = u128::from(total) * u128::from(sample_out) / u128::from(sample_in.max(1));
+    (data * u128::from(100 + u32::from(recovery)) / 100) as u64
+}
+
+/// Quote `s` for a command line when it needs it, by the Windows rule: inside the quotes a run
+/// of backslashes before a quote (an embedded one, or the closing one) is doubled, so that
+/// a path ending in a backslash gets it doubled before the closing quote.
+pub fn quoted(s: &str) -> String {
+    if !(s.is_empty()
         || s.chars()
-            .any(|c| c.is_whitespace() || "&()^;'\"".contains(c))
+            .any(|c| c.is_whitespace() || "&()^;'\"".contains(c)))
     {
-        format!("\"{}\"", s.replace('"', "\\\""))
-    } else {
-        s.to_string()
+        return s.to_string();
     }
+    let mut out = String::from("\"");
+    let mut slashes = 0usize;
+    for c in s.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(slashes));
+                out.push(c);
+                slashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(slashes * 2));
+    out.push('"');
+    out
 }
 
 /// The `lpk a` command line that makes the same archive (the password is never part of it:
@@ -291,12 +318,14 @@ impl App {
     }
 
     /// Time and size of `tier` on `inputs`, from a calibration on this machine over at most
-    /// [`SAMPLE_BYTES`], scaled to the inputs' totals. Ends `Cancelled` when `cancel` is set
+    /// [`SAMPLE_BYTES`], scaled to the inputs' totals (the size also by the `recovery` percent
+    /// the wizard shows: recovery records are that share of the data). Ends `Cancelled` when `cancel` is set
     /// (a newer input set supersedes it).
     pub fn calibrate(
         &self,
         inputs: &[Grant],
         tier: TierChoice,
+        recovery: u8,
         cancel: &CancelToken,
     ) -> Result<Estimate, GuiError> {
         let sources = self.sources_of(inputs)?;
@@ -322,9 +351,8 @@ impl App {
             sample: rate.bytes_in,
             total,
             seconds: (per_second > 0.0).then(|| total as f64 / per_second),
-            bytes: (rate.bytes_in > 0).then(|| {
-                (u128::from(total) * u128::from(rate.bytes_out) / u128::from(rate.bytes_in)) as u64
-            }),
+            bytes: (rate.bytes_in > 0)
+                .then(|| scaled_size(total, rate.bytes_out, rate.bytes_in, recovery)),
         })
     }
 
@@ -477,5 +505,29 @@ fn test_archive(out: &Path, credentials: Option<&Credentials>, monitor: &Monitor
         },
         Err(e) if e.class == Class::Cancelled => TestOutcome::Cancelled,
         Err(e) => failed(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoting_follows_the_windows_rule() {
+        assert_eq!(quoted("plain"), "plain");
+        assert_eq!(quoted("a b"), "\"a b\"");
+        assert_eq!(quoted("D:\\a b\\"), "\"D:\\a b\\\\\"");
+        assert_eq!(quoted("a \"b\" c"), "\"a \\\"b\\\" c\"");
+        assert_eq!(quoted("a b\\\"c"), "\"a b\\\\\\\"c\"");
+        assert_eq!(quoted(""), "\"\"");
+    }
+
+    #[test]
+    fn the_size_estimate_includes_the_recovery_records() {
+        // Out is half of in; recovery adds its percent of the data.
+        assert_eq!(scaled_size(1000, 50, 100, 0), 500);
+        assert_eq!(scaled_size(1000, 50, 100, 5), 525);
+        assert_eq!(scaled_size(1000, 50, 100, 20), 600);
+        assert_eq!(scaled_size(1000, 0, 0, 5), 0);
     }
 }

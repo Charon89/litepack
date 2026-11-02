@@ -138,3 +138,26 @@ fn the_response_file_note_is_documented() {
             .unwrap();
     assert!(api.contains("`@file` response files"));
 }
+
+/// `--create … --name` ("Add to <name>.lpk") uses the wizard's defaults, which the page reads
+/// from the plan: Balanced, recovery 5, test when done (one set for every GUI entry point;
+/// `docs/API.md`'s row says so).
+#[test]
+fn the_named_create_uses_the_wizards_defaults() {
+    let dir = std::env::temp_dir().join(format!("lpk-verbs-named-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("x.txt"), b"x").unwrap();
+    let app = lpk_gui::app::App::new(None);
+    let g = app
+        .grants
+        .mint(lpk_gui::grants::GrantKind::Input, &dir.join("x.txt"));
+    let plan = app.create_plan(&[g.grant]).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(plan.tier, lpk_gui::create::TierChoice::Balanced);
+    assert_eq!(plan.recovery, 5);
+    assert!(plan.test);
+    let api =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/API.md"))
+            .unwrap();
+    assert!(api.contains("the wizard's defaults (Balanced, recovery 5, test when done"));
+}

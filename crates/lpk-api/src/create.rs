@@ -196,7 +196,9 @@ impl CreateSettings {
         // recovery with Balanced, and `lpk a --balanced --recovery` met this refusal).
         if let (Some(block), true) = (balanced_block, self.recovery > 0) {
             let r = &mut pipeline.seal.writer.recovery;
-            let need = block.saturating_add(4096).div_ceil(u64::from(r.shard_len));
+            let need = block
+                .saturating_add(lpk_format::writer::GROUP_FRAME_ALLOWANCE)
+                .div_ceil(u64::from(r.shard_len));
             r.group_shards = r.group_shards.max(u32::try_from(need).unwrap_or(u32::MAX));
         }
         pipeline.monitor = monitor.clone();
@@ -338,20 +340,81 @@ pub fn measure(inputs: &Sources) -> Result<(u64, u64), Error> {
     Ok((files, bytes))
 }
 
+/// A scratch folder for the truncated copy of the file that crosses the sample budget; removed
+/// when dropped.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> std::io::Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir =
+            std::env::temp_dir().join(format!("lpk-calibrate-{}-{nanos}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        Ok(Scratch(dir))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Counts the bytes written and keeps none.
+#[derive(Default)]
+struct CountingSink(u64);
+
+impl std::io::Write for CountingSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The first `keep` bytes of `from`, copied to a file of the same name in a fresh folder of
+/// `scratch` (the calibration's length-capped input; at most `keep` bytes are read).
+fn truncated_copy(
+    scratch: &Scratch,
+    index: usize,
+    from: &Path,
+    keep: u64,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Read;
+    let dir = scratch.0.join(index.to_string());
+    std::fs::create_dir_all(&dir)?;
+    let to = dir.join(from.file_name().unwrap_or_default());
+    let mut src = std::fs::File::open(from)?.take(keep);
+    let mut dst = std::fs::File::create(&to)?;
+    std::io::copy(&mut src, &mut dst)?;
+    Ok(to)
+}
+
 /// Run the pipeline of `s` in memory over a bounded sample of `inputs`: the first files in
-/// walk order (distinct names) until `sample` bytes, timed (no archive written; the seal and
-/// the recovery records are left out).
+/// walk order (distinct names) until `sample` bytes, the file that crosses the budget cut to
+/// the bytes that remain (a truncated copy in a scratch folder, so that at most `sample` bytes
+/// are ever read), timed. No archive is kept: the output is counted, not stored, and the seal
+/// and the recovery records are left out. [`Rate::bytes_in`] is the sample's size.
 pub fn calibrate(
     inputs: &Sources,
     s: &CreateSettings,
     sample: u64,
     m: &Monitor,
 ) -> Result<Rate, Error> {
+    let io = |e: std::io::Error| Error::new(crate::Class::Io, "Io", e.to_string(), None);
     let walked = lpk_core::walk_sources(inputs, &lpk_core::IngestOptions::default())
         .map_err(|e| Error::core(e, None))?;
     let mut roots = Vec::new();
     let mut names = std::collections::HashSet::new();
     let mut bytes = 0u64;
+    let mut scratch: Option<Scratch> = None;
     for i in walked {
         if bytes >= sample {
             break;
@@ -363,8 +426,20 @@ pub fn calibrate(
         if !names.insert(name) {
             continue;
         }
-        bytes += i.len;
-        roots.push(lpk_core::Root::named(&i.source).map_err(|e| Error::core(e, None))?);
+        let remaining = sample - bytes;
+        let path = if i.len > remaining {
+            if scratch.is_none() {
+                scratch = Some(Scratch::new().map_err(io)?);
+            }
+            let sc = scratch.as_ref().ok_or_else(Error::cancelled)?;
+            let copy = truncated_copy(sc, roots.len(), &i.source, remaining).map_err(io)?;
+            bytes += remaining;
+            copy
+        } else {
+            bytes += i.len;
+            i.source.clone()
+        };
+        roots.push(lpk_core::Root::named(&path).map_err(|e| Error::core(e, None))?);
     }
     if roots.is_empty() {
         return Ok(Rate::default());
@@ -374,15 +449,16 @@ pub fn calibrate(
     let mut settings = s.clone();
     settings.seal = None;
     settings.recovery = 0;
-    let mut out = Vec::new();
+    let mut out = CountingSink::default();
     let t = Instant::now();
     settings
         .pipeline(m)
         .run_sources(&sources, &mut out)
         .map_err(|e| Error::core(e, None))?;
+    drop(scratch);
     Ok(Rate {
         bytes_in: bytes,
-        bytes_out: out.len() as u64,
+        bytes_out: out.0,
         seconds: t.elapsed().as_secs_f64(),
     })
 }
@@ -403,6 +479,27 @@ mod tests {
         std::fs::write(src.join("d/b.txt"), b"bravo").unwrap();
         let sources = crate::Sources::contents_of(&src);
         assert_eq!(super::measure(&sources).unwrap(), (2, 505));
+        // The recovery group: Balanced at 5 grows to hold a 256 MiB block and its frame
+        // allowance (4097 shards of 64 KiB); at 0 and for Fast and Store it is the format's
+        // default (so those archives are byte-identical to before).
+        let group = |tier, recovery| {
+            CreateSettings {
+                tier,
+                recovery,
+                ..CreateSettings::default()
+            }
+            .pipeline(&crate::Monitor::default())
+            .seal
+            .writer
+            .recovery
+            .group_shards
+        };
+        let default = lpk_format::recovery::DEFAULT_GROUP_SHARDS;
+        assert_eq!(default, 2048);
+        assert_eq!(group(Tier::Balanced, 5), 4097);
+        assert_eq!(group(Tier::Balanced, 0), default);
+        assert_eq!(group(Tier::Fast, 5), default);
+        assert_eq!(group(Tier::Store, 5), default);
         for tier in [Tier::Fast, Tier::Balanced, Tier::Store] {
             let out = dir.path().join(format!("{}.lpk", tier.name()));
             let s = CreateSettings {

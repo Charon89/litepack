@@ -312,7 +312,7 @@ fn a_calibration_gives_scaled_estimates_and_a_superseded_one_is_cancelled() {
     for tier in [TierChoice::Fast, TierChoice::Balanced, TierChoice::Store] {
         let e = f
             .app
-            .calibrate(&f.inputs, tier, &CancelToken::new())
+            .calibrate(&f.inputs, tier, 0, &CancelToken::new())
             .unwrap();
         assert_eq!(e.tier, tier);
         assert!(e.total > 0 && e.sample > 0 && e.sample <= e.total);
@@ -323,7 +323,7 @@ fn a_calibration_gives_scaled_estimates_and_a_superseded_one_is_cancelled() {
     assert!(f.app.ops.cancel(1));
     let e = f
         .app
-        .calibrate(&f.inputs, TierChoice::Balanced, &token.token)
+        .calibrate(&f.inputs, TierChoice::Balanced, 5, &token.token)
         .unwrap_err();
     assert!(e.is(Class::Cancelled), "{e}");
     // Mid-run: cancelled while the sample compresses.
@@ -334,7 +334,7 @@ fn a_calibration_gives_scaled_estimates_and_a_superseded_one_is_cancelled() {
         let inputs = big.inputs.clone();
         move || {
             big.app
-                .calibrate(&inputs, TierChoice::Balanced, &t2)
+                .calibrate(&inputs, TierChoice::Balanced, 5, &t2)
                 .map(|_| ())
         }
     });
@@ -347,7 +347,7 @@ fn a_calibration_gives_scaled_estimates_and_a_superseded_one_is_cancelled() {
     let e = f.app.grants.mint(GrantKind::Input, empty.path());
     let est = f
         .app
-        .calibrate(&[e.grant], TierChoice::Fast, &CancelToken::new())
+        .calibrate(&[e.grant], TierChoice::Fast, 0, &CancelToken::new())
         .unwrap();
     assert!(est.seconds.is_none() && est.bytes.is_none());
 }
@@ -421,38 +421,99 @@ fn test_when_done_names_the_failure_of_a_damaged_archive() {
     assert_eq!(r.test, TestOutcome::Skipped);
 }
 
-/// The estimate code holds no literal rate. The pattern forbidden in `crates/lpk-gui/src` and
-/// `apps/gui` (outside the tests directory, which holds this file): a name containing `rate`,
-/// `ratio`, `speed`, `throughput`, `mbps`, `bytes_per_s` or `per_second`, or a tier's name,
-/// followed by `:` or `=` and a numeric literal, and a numeric literal multiplying or dividing
-/// by a tier's name. A size unit such as `16 << 20` is not a rate and is not matched.
+/// The estimate code holds no literal rate. Forbidden in `crates/lpk-gui/src` and `apps/gui`
+/// (every subfolder; not the tests directory, which holds this file): a name containing
+/// `rate`, `ratio`, `speed`, `throughput`, `mbps`, `bytes_per_s` or `per_second`, or a tier's
+/// name, followed by `:` or `=` and a numeric literal; a numeric literal multiplying or
+/// dividing such a name; and any float or exponent literal (`0.35`, `1.2e8`, `1e6`) next to a
+/// `*` or `/` (a conversion constant is spelled as a product of integers, such as
+/// `1000 * 1000`). A size unit such as `16 << 20` or the `100` of a percent is not a rate.
 #[test]
 fn the_estimate_code_holds_no_literal_rate() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut seen = 0;
+    let mut files = Vec::new();
     for dir in [root.join("src"), root.join("../../apps/gui")] {
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let p = entry.unwrap().path();
-            if !matches!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("rs" | "js" | "html")
-            ) {
-                continue;
-            }
-            seen += 1;
-            let text = std::fs::read_to_string(&p).unwrap();
-            for (n, line) in text.lines().enumerate() {
-                let code = line.split("//").next().unwrap_or("");
-                assert!(
-                    !matches_rate_pattern(code, 0) && !matches_rate_pattern(code, 1),
-                    "{}:{}: a literal rate: {line}",
-                    p.display(),
-                    n + 1
-                );
-            }
+        collect(&dir, &mut files);
+    }
+    assert!(files.len() > 20, "the scan found the sources");
+    for p in files {
+        let text = std::fs::read_to_string(&p).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            assert!(
+                !matches_rate_pattern(code, 0)
+                    && !matches_rate_pattern(code, 1)
+                    && !float_operand(code),
+                "{}:{}: a literal rate: {line}",
+                p.display(),
+                n + 1
+            );
         }
     }
-    assert!(seen > 20, "the scan found the sources");
+}
+
+/// The `.rs`, `.js` and `.html` files under `dir`, subfolders included.
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let p = entry.unwrap().path();
+        if p.is_dir() {
+            collect(&p, out);
+        } else if matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some("rs" | "js" | "html")
+        ) {
+            out.push(p);
+        }
+    }
+}
+
+/// Whether `t` is a float or exponent literal (`0.35`, `1.2e8`, `1e6`).
+fn is_float(t: &str) -> bool {
+    let t = t.trim_end_matches('.');
+    if !t.starts_with(|c: char| c.is_ascii_digit()) || t.starts_with("0x") {
+        return false;
+    }
+    let digit_first =
+        |f: Option<&str>| f.is_some_and(|f| f.starts_with(|c: char| c.is_ascii_digit()));
+    digit_first(t.split('.').nth(1)) || digit_first(t.to_ascii_lowercase().split('e').nth(1))
+}
+
+/// A float or exponent literal right after or right before a `*` or `/`.
+fn float_operand(line: &str) -> bool {
+    // Text inside double quotes (a protocol line, a message) is not arithmetic.
+    let mut plain = String::new();
+    let mut quoted = false;
+    for c in line.chars() {
+        if c == '"' {
+            quoted = !quoted;
+        } else if !quoted {
+            plain.push(c);
+        }
+    }
+    let line = plain.as_str();
+    let word = |c: &char| c.is_ascii_alphanumeric() || *c == '_' || *c == '.';
+    for (i, c) in line.char_indices() {
+        if c != '*' && c != '/' {
+            continue;
+        }
+        let after: String = line[i + 1..]
+            .trim_start()
+            .chars()
+            .take_while(word)
+            .collect();
+        let mut before: Vec<char> = line[..i]
+            .trim_end()
+            .chars()
+            .rev()
+            .take_while(word)
+            .collect();
+        before.reverse();
+        let before: String = before.into_iter().collect();
+        if is_float(&after) || is_float(&before) {
+            return true;
+        }
+    }
+    false
 }
 
 const NAMES: [&str; 11] = [
@@ -548,9 +609,13 @@ fn the_rate_pattern_finds_a_literal_and_ignores_sizes() {
         "seconds = bytes / fast * 2",
         "ratio = 0.4",
         "bytes_per_second: 100",
+        "const s = bytes / 1.2e8;",
+        "const mbs = ev.bytes_in / elapsed / 1e6;",
+        "let t = total as f64 * 0.35;",
+        "x = 2.5 * y",
     ] {
         assert!(
-            matches_rate_pattern(bad, 0) || matches_rate_pattern(bad, 1),
+            matches_rate_pattern(bad, 0) || matches_rate_pattern(bad, 1) || float_operand(bad),
             "{bad}"
         );
     }
@@ -560,9 +625,13 @@ fn the_rate_pattern_finds_a_literal_and_ignores_sizes() {
         "if (x == fast) { run(); }",
         "total as f64 / per_second",
         "recovery: PROPOSED_RECOVERY,",
+        "const MB = 1000 * 1000;",
+        "Math.round((a / b) * 100)",
+        "(data * 105 / 100) as u64",
+        "seconds < 1.5 && x.toFixed(1)",
     ] {
         assert!(
-            !matches_rate_pattern(ok, 0) && !matches_rate_pattern(ok, 1),
+            !matches_rate_pattern(ok, 0) && !matches_rate_pattern(ok, 1) && !float_operand(ok),
             "{ok}"
         );
     }

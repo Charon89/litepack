@@ -118,8 +118,14 @@ pub fn parse(
         Some("") => return Err("--open needs an archive".into()),
         Some(p) => ("--open", Some(OsString::from(p))),
         // The same switch-safe form for one `--create` input (E5-5's driver test).
-        None if text.starts_with("--create=") && text.len() > "--create=".len() => {
-            ("--create", Some(OsString::from(&text["--create=".len()..])))
+        // A non-UTF-8 argument is refused as `--open=`'s is (an unknown option).
+        None if first
+            .to_str()
+            .and_then(|t| t.strip_prefix("--create="))
+            .is_some_and(|p| !p.is_empty()) =>
+        {
+            let p = first.to_str().and_then(|t| t.strip_prefix("--create="));
+            ("--create", p.map(OsString::from))
         }
         None if VERBS.contains(&text.as_str()) => (
             VERBS[VERBS.iter().position(|v| *v == text).unwrap_or(0)],
@@ -349,6 +355,31 @@ mod tests {
                 name: None
             }
         );
+        // A non-UTF-8 `--create=` argument is refused like `--open=`'s.
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let bad = OsString::from_wide(&[
+                u16::from(b'-'),
+                u16::from(b'-'),
+                u16::from(b'c'),
+                u16::from(b'r'),
+                u16::from(b'e'),
+                u16::from(b'a'),
+                u16::from(b't'),
+                u16::from(b'e'),
+                u16::from(b'='),
+                0xD800,
+            ]);
+            assert!(parse([bad], None).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let mut v = b"--create=".to_vec();
+            v.push(0xFF);
+            assert!(parse([OsString::from_vec(v)], None).is_err());
+        }
         // The switch-safe inline form (the driver tests pass it).
         assert_eq!(
             verb(&["--create=x"]),

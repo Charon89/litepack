@@ -180,12 +180,7 @@ impl Prompter for NativePrompter {
         let mut texts = strings::password_texts(false);
         texts.title = format!("{} - {archive}", texts.title);
         if wrong {
-            texts.prompt = format!(
-                "{}
-{}",
-                strings::get("password.wrong"),
-                texts.prompt
-            );
+            texts.prompt = format!("{}\n{}", strings::get("password.wrong"), texts.prompt);
         }
         self.ask(texts)
     }
@@ -487,12 +482,13 @@ async fn create_calibrate(
     host: State<'_, Host>,
     inputs: Vec<Grant>,
     tier: TierChoice,
+    recovery: u8,
     op: u64,
 ) -> Result<Estimate, GuiError> {
     let app = host.app.clone();
     // Registered before the hop, so that a `cancel` that arrives early finds it.
     let g = app.ops.begin(op, false)?;
-    blocking(move || app.calibrate(&inputs, tier, &g.token)).await
+    blocking(move || app.calibrate(&inputs, tier, recovery, &g.token)).await
 }
 
 /// Ask for the new archive's password twice (`set`) or forget it; whether one is set. The
