@@ -32,6 +32,7 @@ pub mod extract;
 pub mod forward;
 pub mod grants;
 pub mod journal;
+pub mod maintain;
 pub mod open;
 pub mod ops;
 pub mod outbox;

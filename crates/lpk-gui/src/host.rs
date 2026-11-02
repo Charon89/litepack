@@ -30,6 +30,10 @@ use lpk_gui::extract::{
 use lpk_gui::forward::Forwarder;
 use lpk_gui::grants::{Grant, GrantKind, Granted};
 use lpk_gui::journal::{startup_report, Notice as StartupNotice};
+use lpk_gui::maintain::{
+    AppendPlan, AppendRequest, AppendResult, CheckResult, Confirm, History, RepairResult,
+    RollbackResult, TestResult,
+};
 use lpk_gui::open::Opening;
 use lpk_gui::outbox::Outbox;
 use lpk_gui::pick::{NativePicker, Purpose};
@@ -537,6 +541,200 @@ async fn create_run(
     .await
 }
 
+/// The native Yes/No box (E5-8's rollback confirmation) on the main thread, owned by the main
+/// window; the blocking task waits on a channel. A cancel or the exit counts as No.
+struct NativeConfirm {
+    handle: AppHandle,
+    token: lpk_api::CancelToken,
+}
+
+impl Confirm for NativeConfirm {
+    fn confirm(&self, title: &str, text: &str) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let owner = owner(&self.handle);
+        let (title, text) = (title.to_string(), text.to_string());
+        let token = self.token.clone();
+        let sent = self.handle.run_on_main_thread(move || {
+            if token.is_cancelled() {
+                let _ = tx.send(false);
+                return;
+            }
+            let _ = tx.send(lpk_gui_sys::confirm(owner, &title, &text).unwrap_or(false));
+        });
+        sent.is_ok() && lpk_gui::extract::wait_for_answer(&rx, &self.token).unwrap_or(false)
+    }
+}
+
+/// Test an open archive; `unlock` asks for the password first (a heavy operation).
+#[tauri::command]
+async fn test_run(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    session: u64,
+    unlock: bool,
+    op: u64,
+    progress: Channel<ProgressDto>,
+) -> Result<TestResult, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, true)?;
+        let monitor = monitor_of(progress, g.token.clone());
+        let prompter = NativePrompter {
+            handle,
+            token: g.token.clone(),
+        };
+        app.test_run(session, unlock, &prompter, &monitor)
+    })
+    .await
+}
+
+/// The verb `--test` for one archive: open, test, close (a heavy operation).
+#[tauri::command]
+async fn test_archive(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    grant: Grant,
+    unlock: bool,
+    op: u64,
+    progress: Channel<ProgressDto>,
+) -> Result<TestResult, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, true)?;
+        let monitor = monitor_of(progress, g.token.clone());
+        let prompter = NativePrompter {
+            handle,
+            token: g.token.clone(),
+        };
+        app.test_archive(&grant, unlock, &prompter, &monitor)
+    })
+    .await
+}
+
+/// Check the recovery records of an open archive (a heavy operation).
+#[tauri::command]
+async fn check_run(
+    host: State<'_, Host>,
+    session: u64,
+    op: u64,
+    progress: Channel<ProgressDto>,
+) -> Result<CheckResult, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, true)?;
+        let monitor = monitor_of(progress, g.token.clone());
+        app.check_run(session, &monitor)
+    })
+    .await
+}
+
+/// Write a repaired copy of an open archive into `folder` (a folder grant; the archive's own
+/// folder when none), then test it (a heavy operation).
+#[tauri::command]
+async fn repair_run(
+    host: State<'_, Host>,
+    session: u64,
+    folder: Option<Grant>,
+    op: u64,
+    progress: Channel<ProgressDto>,
+) -> Result<RepairResult, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, true)?;
+        let monitor = monitor_of(progress, g.token.clone());
+        app.repair_run(session, folder.as_ref(), &monitor)
+    })
+    .await
+}
+
+/// The generations of an open archive.
+#[tauri::command]
+async fn history(host: State<'_, Host>, session: u64, op: u64) -> Result<History, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, false)?;
+        app.history(session, &g.token)
+    })
+    .await
+}
+
+/// Open an earlier generation read-only as a new session.
+#[tauri::command]
+async fn history_browse(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    session: u64,
+    generation: u64,
+    op: u64,
+) -> Result<Opened, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, false)?;
+        let prompter = NativePrompter {
+            handle,
+            token: g.token.clone(),
+        };
+        app.history_browse(session, generation, &g.token, &prompter)
+    })
+    .await
+}
+
+/// Roll an archive back to `generation` after the native confirmation (a heavy operation: it
+/// waits behind a running one, and asks only once it may start).
+#[tauri::command]
+async fn rollback_run(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    session: u64,
+    generation: u64,
+    op: u64,
+) -> Result<RollbackResult, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, true)?;
+        let confirm = NativeConfirm {
+            handle: handle.clone(),
+            token: g.token.clone(),
+        };
+        let prompter = NativePrompter {
+            handle,
+            token: g.token.clone(),
+        };
+        app.rollback_run(session, generation, &confirm, &prompter, &g.token)
+    })
+    .await
+}
+
+/// What the Update from folder dialog starts with.
+#[tauri::command]
+async fn append_plan(host: State<'_, Host>, session: u64) -> Result<AppendPlan, GuiError> {
+    let app = host.app.clone();
+    blocking(move || app.append_plan(session)).await
+}
+
+/// Append a folder to an open archive as a new generation (a heavy operation).
+#[tauri::command]
+async fn append_run(
+    handle: AppHandle,
+    host: State<'_, Host>,
+    session: u64,
+    request: AppendRequest,
+    op: u64,
+    progress: Channel<ProgressDto>,
+) -> Result<AppendResult, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        let g = app.ops.begin(op, true)?;
+        let monitor = monitor_of(progress, g.token.clone());
+        let prompter = NativePrompter {
+            handle,
+            token: g.token.clone(),
+        };
+        app.append_run(session, &request, &prompter, &monitor)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn cancel(host: State<'_, Host>, op: u64) -> Result<bool, GuiError> {
     Ok(host.app.ops.cancel(op))
@@ -703,6 +901,15 @@ pub fn run() -> i32 {
             cancel,
             subscribe,
             listing_shown,
+            test_run,
+            test_archive,
+            check_run,
+            repair_run,
+            history,
+            history_browse,
+            rollback_run,
+            append_plan,
+            append_run,
         ])
         .setup(move |a| {
             let app = setup_app;
