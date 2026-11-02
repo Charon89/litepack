@@ -218,5 +218,35 @@ pub(crate) async fn page_state(c: &Client) -> String {
             status.text().await.unwrap_or_default()
         ));
     }
+    // The open dialog's state: its title, its body text and its buttons.
+    match c.find(Locator::Css("dialog[open]")).await {
+        Ok(d) => {
+            let text = |css: &'static str| {
+                let d = d.clone();
+                async move {
+                    match d.find(Locator::Css(css)).await {
+                        Ok(e) => e.text().await.unwrap_or_default(),
+                        Err(_) => String::new(),
+                    }
+                }
+            };
+            let buttons = match d.find_all(Locator::Css("button")).await {
+                Ok(bs) => {
+                    let mut names = Vec::new();
+                    for b in bs {
+                        names.push(b.text().await.unwrap_or_default());
+                    }
+                    names
+                }
+                Err(_) => Vec::new(),
+            };
+            out.push(format!(
+                "dialog title={:?}, body={:?}, buttons={buttons:?}",
+                text("h2").await,
+                text(".wizard-body").await
+            ));
+        }
+        Err(_) => out.push("no open dialog".to_string()),
+    }
     out.join(", ")
 }

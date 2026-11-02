@@ -160,7 +160,7 @@ const PUBLISH_BACKOFF_MS: [u64; 8] = [10, 20, 40, 80, 160, 320, 500, 870];
 
 /// [`publish_no_replace`], retried with a bounded backoff on a sharing violation or access
 /// denied (transient on Windows while another process has the new file open).
-fn publish(partial: &Path, out: &Path) -> std::io::Result<()> {
+pub(crate) fn publish(partial: &Path, out: &Path) -> std::io::Result<()> {
     let mut waits = PUBLISH_BACKOFF_MS.iter();
     loop {
         match publish_no_replace(partial, out) {

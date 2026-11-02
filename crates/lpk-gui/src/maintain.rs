@@ -340,7 +340,9 @@ pub fn repaired_name(dir: &Path, archive: &Path) -> PathBuf {
             format!("{stem} (repaired {n}).lpk")
         };
         let out = dir.join(file);
-        if !out.exists() || n == u32::MAX {
+        let mut partial = out.clone().into_os_string();
+        partial.push(".partial");
+        if (!out.exists() && !Path::new(&partial).exists()) || n == u32::MAX {
             return out;
         }
         n += 1;
@@ -407,14 +409,10 @@ impl App {
                 return Ok(TestResult::stopped(&name, "", TestState::Cancelled, None))
             }
             Err(e) => {
-                let format = if e.class == Class::NotFound {
-                    ""
-                } else {
-                    "lpk"
-                };
+                // No session opened, so nothing to repair: no format, no offer.
                 return Ok(TestResult::stopped(
                     &name,
-                    format,
+                    "",
                     TestState::Failed,
                     Some(e.into()),
                 ));
@@ -473,6 +471,11 @@ impl App {
             },
         };
         let out = repaired_name(&dir, &path);
+        // Written as `<name>.partial` and published without replacing anything when complete:
+        // a process dying mid-repair leaves a visibly named partial, never a short `.lpk`.
+        let mut partial_name = out.clone().into_os_string();
+        partial_name.push(".partial");
+        let partial = PathBuf::from(partial_name);
         let mut r = RepairResult {
             archive: slot.name.clone(),
             state: RunState::Done,
@@ -485,7 +488,7 @@ impl App {
             unrepairable: None,
             test: None,
         };
-        let (report, unrepairable) = match session.repair(&out, monitor) {
+        let (report, unrepairable) = match session.repair(&partial, monitor) {
             Ok(x) => x,
             Err(e) if e.class == Class::Cancelled => {
                 r.state = RunState::Cancelled;
@@ -493,6 +496,10 @@ impl App {
             }
             Err(e) => return Err(e.into()),
         };
+        if let Err(e) = crate::write::publish(&partial, &out) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(crate::io_error(e, &out));
+        }
         r.frames = report.frames;
         r.frames_unusable = report.frames_unusable;
         r.shards_damaged = report.shards_damaged;
@@ -622,7 +629,28 @@ impl App {
         }
         // D-110 (2): the session's reads end before the file shrinks.
         self.close(id)?;
-        let ran = lpk_api::rollback(&path, generation);
+        // The file may have changed since the session opened (another process appended): read
+        // its committed generation on the handle that truncates, and touch nothing unless it
+        // is the one the confirmation named.
+        let ran = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| lpk_api::Error::new(Class::Io, "Io", e.to_string(), Some(&path)))
+            .and_then(|mut file| {
+                let now = lpk_api::committed_generation_of(&mut file, &path)?;
+                if now != latest {
+                    return Err(lpk_api::Error::new(
+                        Class::Usage,
+                        "ArchiveChanged",
+                        format!(
+                            "the archive changed since it was opened (generation {latest}, now {now}); open it again"
+                        ),
+                        Some(&path),
+                    ));
+                }
+                lpk_api::rollback_file(&mut file, &path, generation)
+            });
         let (opened, reopen_error) = match self.open_path(&path, None, cancel, prompter) {
             Ok(o) => (Some(o), None),
             Err(e) => (None, Some(e)),

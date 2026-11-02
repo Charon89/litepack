@@ -222,8 +222,13 @@ const creator = createCreator({
   openArchive: (g) => openArchive(g),
 });
 
+// One chain for every verb's dialog (extract.js, maintain.js): two verbs arriving together
+// show their dialogs one after the other, never stacked.
+const verbs = { chain: Promise.resolve() };
+
 // The extract wizard (extract.js) and the verbs' queue.
 const extractor = createExtractor({
+  verbs,
   core,
   t,
   nextOp: () => nextOp++,
@@ -238,6 +243,7 @@ const extractor = createExtractor({
 // generation, the archive after a rollback or an update; `previous` is the session it replaces,
 // which Rust may have closed already).
 const maintainer = createMaintainer({
+  verbs,
   core,
   t,
   nextOp: () => nextOp++,
@@ -506,7 +512,12 @@ function wireControls() {
         await core.invoke("close_archive", { session: previous }).catch(() => {});
         await showOpened(opened);
       })
-      .catch(showError);
+      .catch((e) => {
+        // A cancelled password prompt is the user's answer, not a failure.
+        if (!(e && e.class === "Cancelled")) {
+          showError(e);
+        }
+      });
   });
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e" && session !== null && !document.querySelector("dialog[open]")) {

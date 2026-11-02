@@ -21,13 +21,13 @@ function el(tag, attrs = {}, ...children) {
 }
 
 export function createMaintainer(env) {
-  const { core, t, nextOp, session, archive, showError, adopt } = env;
+  const { core, t, nextOp, session, archive, showError, adopt, verbs } = env;
   const count = (n) => Number(n).toLocaleString();
   let dialog = null;
   let opener = null;
   let onEscape = () => {};
-  // One dialog at a time: the verb's archives queue behind one another and behind an open one.
-  let chain = Promise.resolve();
+  // One dialog at a time: the verb's archives queue on the chain `main.js` shares with the
+  // extract verbs, behind an open dialog.
 
   function ensureDialog() {
     if (dialog) {
@@ -260,9 +260,13 @@ export function createMaintainer(env) {
       closeDialog();
       await adopt({ grant: r.grant.grant, name: r.grant.name });
     };
+    const suspect = Boolean(r.unrepairable) || !r.test || r.test.state !== "passed";
+    if (suspect) {
+      nodes.push(el("p", { text: t("repair.suspect") }));
+    }
     phase(title, nodes, [
-      [t("repair.open"), open, "primary"],
-      [t("maintain.close"), closeDialog, "cancel"],
+      [t("repair.open"), open, suspect ? "" : "primary"],
+      [t("maintain.close"), closeDialog, suspect ? "primary cancel" : "cancel"],
     ]);
   }
 
@@ -322,7 +326,16 @@ export function createMaintainer(env) {
   }
 
   async function browse(sid, generation) {
-    const opened = await core.invoke("history_browse", { session: sid, generation, op: nextOp() });
+    let opened;
+    try {
+      opened = await core.invoke("history_browse", { session: sid, generation, op: nextOp() });
+    } catch (e) {
+      // A cancelled password prompt is the user's answer: nothing to say. Others stay here.
+      if (!(e && e.class === "Cancelled")) {
+        phase(t("history.title", { name: archive().name }), failure(archive().name, e), [[t("maintain.close"), closeDialog, "primary cancel"]]);
+      }
+      return;
+    }
     closeDialog();
     await adopt(null, opened, sid);
   }
@@ -453,8 +466,8 @@ export function createMaintainer(env) {
   // ---- The verb --test ----
 
   function runVerb(items) {
-    chain = chain.then(() => queue(items)).catch(showError);
-    return chain;
+    verbs.chain = verbs.chain.then(() => queue(items)).catch(showError);
+    return verbs.chain;
   }
 
   // Each archive tested in order through the heavy queue, one result each, "k of n" while it
@@ -498,7 +511,7 @@ export function createMaintainer(env) {
           const b = el("button", { type: "button", text: t("test.unlock") });
           b.addEventListener("click", () => {
             b.disabled = true;
-            chain = chain
+            verbs.chain = verbs.chain
               .then(async () => {
                 stopped = false;
                 li.replaceWith(await attempt(item, index, true));

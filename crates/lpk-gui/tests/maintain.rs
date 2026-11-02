@@ -67,6 +67,35 @@ impl Confirm for Yes {
     }
 }
 
+/// A monitor that cancels on its `n`th progress event: the run is cancelled mid-write.
+fn cancel_on(n: usize) -> (Monitor, Arc<AtomicUsize>) {
+    let token = CancelToken::new();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let (t, s) = (token.clone(), seen.clone());
+    let m = Monitor::new(
+        Arc::new(move |_: &lpk_api::Event| {
+            if s.fetch_add(1, Ordering::SeqCst) + 1 >= n {
+                t.cancel();
+            }
+        }),
+        token,
+    );
+    (m, seen)
+}
+
+/// Bytes that do not compress, so that a run spans several blocks.
+fn noise(len: usize, seed: u32) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 11) as u8
+        })
+        .collect()
+}
+
 fn grant(app: &App, p: &Path) -> Grant {
     app.grants.mint(GrantKind::Archive, p).grant
 }
@@ -333,15 +362,76 @@ fn check_says_so_when_there_are_no_recovery_records_and_a_repair_cancels_clean()
     let o = open(&app, &p);
     let c = app.check_run(o.session, &Monitor::default()).unwrap();
     assert!(!c.has_recovery && !c.damaged && c.frames == 0);
-    // A cancelled repair leaves no copy.
+    // Nothing to emit without recovery frames: a token cancelled up front.
     let token = CancelToken::new();
     token.cancel();
     let m = Monitor::new(Arc::new(|_: &lpk_api::Event| {}), token);
-    let r = app.repair_run(o.session, None, &m).unwrap();
-    assert_eq!(r.state, RunState::Cancelled);
-    assert!(!d.path().join("plain (repaired).lpk").exists());
     let c = app.check_run(o.session, &m).unwrap();
     assert_eq!(c.state, RunState::Cancelled);
+}
+
+#[test]
+fn a_repair_cancelled_mid_run_leaves_no_copy_and_no_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let p = copy_vector(d.path(), "malformed-recovery-damaged.lpk", "bad.lpk");
+    let before = std::fs::read(&p).unwrap();
+    let app = App::new(None);
+    let o = open(&app, &p);
+    let (m, seen) = cancel_on(1);
+    let r = app.repair_run(o.session, None, &m).unwrap();
+    assert!(seen.load(Ordering::SeqCst) >= 1, "the run emitted events");
+    assert_eq!(r.state, RunState::Cancelled);
+    let left: Vec<String> = std::fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["bad.lpk"], "no copy and no partial");
+    assert_eq!(std::fs::read(&p).unwrap(), before);
+    // The next repair still gets the first name.
+    let r = app
+        .repair_run(o.session, None, &Monitor::default())
+        .unwrap();
+    assert_eq!(r.copy.as_deref(), Some("bad (repaired).lpk"));
+    assert!(!d.path().join("bad (repaired).lpk.partial").exists());
+}
+
+#[test]
+fn a_damaged_zip_fails_its_test_with_no_offer_to_repair() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("broken.zip");
+    std::fs::write(&p, noise(4000, 7)).unwrap();
+    let app = App::new(None);
+    let r = test_vector(&app, &p, false, &NoPrompt);
+    assert_eq!(r.state, TestState::Failed);
+    assert!(!r.offer_repair && !r.offer_unlock, "{r:?}");
+}
+
+#[test]
+fn rollback_refuses_an_archive_that_changed_behind_the_session() {
+    let d = tempfile::tempdir().unwrap();
+    let p = copy_vector(d.path(), "journal-3gen.lpk", "gen.lpk");
+    let app = App::new(None);
+    let o = open(&app, &p);
+    assert_eq!(o.latest_generation, 2);
+    // Another process appends generation 3 while the session shows generation 2.
+    let extra = folder_with(d.path(), "extra", &[("x.txt", b"more")]);
+    let s = CreateSettings {
+        tier: Tier::Store,
+        ..CreateSettings::default()
+    };
+    lpk_api::append(&p, &extra, &s, None, &Monitor::default()).unwrap();
+    let after = std::fs::read(&p).unwrap();
+    let yes = Yes(true, Mutex::new(Vec::new()));
+    let r = app
+        .rollback_run(o.session, 1, &yes, &NoPrompt, &CancelToken::new())
+        .unwrap();
+    assert_eq!(r.state, RunState::Failed);
+    let e = r.error.unwrap();
+    assert_eq!(e.kind, "ArchiveChanged", "{e}");
+    assert_eq!(std::fs::read(&p).unwrap(), after, "nothing was truncated");
+    assert_eq!(r.lost, 0);
+    // The archive reopened at what it is now.
+    assert_eq!(r.opened.unwrap().latest_generation, 3);
 }
 
 #[test]
@@ -476,6 +566,10 @@ fn append_mirrors_the_folder_tests_it_and_cancel_leaves_the_archive_alone() {
         "two",
         &[("keep.txt", b"keep me"), ("new.txt", b"brand new")],
     );
+    // Several blocks of data that do not compress, so that a cancel lands mid-write.
+    for i in 0..3u32 {
+        std::fs::write(second.join(format!("big{i}.bin")), noise(3 << 20, i)).unwrap();
+    }
     let p = d.path().join("a.lpk");
     create_from(&first, &p, None);
     let app = App::new(Some(&d.path().join("journal")));
@@ -494,14 +588,21 @@ fn append_mirrors_the_folder_tests_it_and_cancel_leaves_the_archive_alone() {
 
     // A cancelled append leaves the archive as it was; the archive reopens.
     let before = std::fs::read(&p).unwrap();
-    let token = CancelToken::new();
-    token.cancel();
-    let cancelled = Monitor::new(Arc::new(|_: &lpk_api::Event| {}), token);
+    let (cancelled, seen) = cancel_on(2);
     let r = app
         .append_run(o.session, &request(&app, &second), &NoPrompt, &cancelled)
         .unwrap();
+    assert!(seen.load(Ordering::SeqCst) >= 2, "cancelled mid-run");
     assert_eq!(r.state, RunState::Cancelled);
-    assert_eq!(std::fs::read(&p).unwrap(), before);
+    assert_eq!(
+        std::fs::read(&p).unwrap(),
+        before,
+        "the archive is as it was"
+    );
+    assert!(
+        app.recover().is_empty(),
+        "no record of the cancelled append is left"
+    );
     let o = r.opened.expect("reopened after a cancel");
     assert_eq!(o.generation, 0);
 
