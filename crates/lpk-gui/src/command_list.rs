@@ -10,6 +10,7 @@ pub const COMMANDS: &[&str] = &[
     "view",
     "select",
     "open_entry",
+    "preview",
     "pick",
     "extract_plan",
     "extract_run",

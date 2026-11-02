@@ -11,6 +11,7 @@
     "allow-view",
     "allow-select",
     "allow-open-entry",
+    "allow-preview",
     "allow-pick",
     "allow-extract-plan",
     "allow-extract-run",

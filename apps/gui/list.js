@@ -42,6 +42,7 @@ export class VirtualList {
     this.focus = 0;
     this.pool = [];
     this.scheduled = false;
+    this.focusSeen = "";
     this.viewport.addEventListener("scroll", () => this.schedule());
     new ResizeObserver(() => this.schedule()).observe(this.viewport);
     this.layer.addEventListener("click", (e) => this.onClick(e));
@@ -61,6 +62,7 @@ export class VirtualList {
     this.total = info.total;
     this.level = info.mode === "tree" ? info.crumbs.length : 1;
     this.batch = null;
+    this.focusSeen = "";
     this.grid.setAttribute("aria-rowcount", String(this.total + 1));
     this.spacer.style.height = `${Math.min(this.total * ROW_PX, MAX_SCROLL_PX)}px`;
     if (!keep) {
@@ -212,6 +214,13 @@ export class VirtualList {
       for (let c = 0; c < 3; c++) {
         el.children[c].textContent = texts[c];
       }
+    }
+    // The focused row changed (or its view did): the pane previews it.
+    const seen = `${b.generation}:${this.focus}`;
+    const fr = this.rowAt(this.focus);
+    if (this.total > 0 && fr && seen !== this.focusSeen) {
+      this.focusSeen = seen;
+      this.onFocus?.(this.focus, fr, b.generation);
     }
     // The layer sits where its first row belongs on screen.
     const y = this.viewport.scrollTop - (topFloat - from) * ROW_PX;

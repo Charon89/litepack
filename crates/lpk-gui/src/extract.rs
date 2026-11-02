@@ -267,6 +267,30 @@ pub(crate) fn open_unlocked(
     }
 }
 
+/// Put the unlocked `fresh` session in `cell` in place of `read`, the session that met the
+/// password, only when the cell still holds `read` (closing it cancels its reads in flight);
+/// when another reader swapped first, `fresh` is dropped and the cell's session is kept.
+/// Returns the session the cell holds now.
+pub fn swap_unlocked(
+    cell: &Mutex<Arc<Session>>,
+    read: &Arc<Session>,
+    fresh: Session,
+) -> Arc<Session> {
+    let mut g = cell.lock().unwrap_or_else(|p| p.into_inner());
+    if Arc::ptr_eq(&g, read) {
+        let old = std::mem::replace(&mut *g, Arc::new(fresh));
+        let now = g.clone();
+        drop(g);
+        let _ = old.close();
+        now
+    } else {
+        let now = g.clone();
+        drop(g);
+        let _ = fresh.close();
+        now
+    }
+}
+
 /// Refuse-first: the bytes to write against the free space (`free` overrides what the
 /// preflight measured; tests inject it). Both figures are named.
 pub fn check_space(pf: &Preflight, free: Option<u64>) -> Result<(), GuiError> {
@@ -517,11 +541,7 @@ fn run_inner(
             Err(e) if e.is(Class::PasswordRequired) || e.is(Class::WrongPassword) => {
                 let wrong = e.is(Class::WrongPassword);
                 let fresh = open_unlocked(session.path(), job.motw_off, prompter, Some(wrong))?;
-                let old = std::mem::replace(
-                    &mut *cell.lock().unwrap_or_else(|p| p.into_inner()),
-                    Arc::new(fresh),
-                );
-                let _ = old.close();
+                swap_unlocked(cell, &session, fresh);
             }
             other => return other,
         }

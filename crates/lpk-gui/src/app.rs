@@ -81,6 +81,7 @@ pub struct App {
     free: Option<u64>,
     /// A test seam: the memory budget (bytes) of every extraction that names none.
     memory: Option<u64>,
+    pub(crate) gate: crate::preview::Gate,
 }
 
 /// The recent lists as the page receives them: labels and opaque grants minted when listed.
@@ -92,7 +93,7 @@ pub struct RecentLists {
     pub destinations: Vec<Granted>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
@@ -111,6 +112,7 @@ impl App {
             recents: Recents::open(None),
             free: None,
             memory: None,
+            gate: crate::preview::Gate::default(),
         }
     }
 
