@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{connect_args, lpk_exe, page_state, start_driver, Driver, ROWS_WITHIN};
+use common::{connect_args, lpk_exe, page_state, start_driver, Driver, FLAGS, ROWS_WITHIN};
 use fantoccini::{Client, Locator};
 
 /// The Edge WebDriver's port for this test (the others use 4444 to 4450 and 4452).
@@ -128,20 +128,6 @@ async fn click(c: &Client, css: &str) -> Result<(), String> {
         .map_err(|e| format!("click {css}: {e}"))
 }
 
-async fn close_dialog(c: &Client) -> Result<(), String> {
-    let active = c.active_element().await.map_err(|e| e.to_string())?;
-    active
-        .send_keys("\u{E00C}")
-        .await
-        .map_err(|e| e.to_string())?;
-    wait_script(
-        c,
-        "the dialog to close",
-        "return !document.querySelector('dialog[open]');",
-    )
-    .await
-}
-
 async fn click_row(c: &Client, name: &str) -> Result<(), String> {
     let deadline = Instant::now() + ROWS_WITHIN;
     loop {
@@ -163,10 +149,33 @@ async fn click_row(c: &Client, name: &str) -> Result<(), String> {
     }
 }
 
+/// The page's flags must be clean (no script error, rejection, CSP violation or failure).
+async fn flags_clean(c: &Client, at: &str) -> Result<(), String> {
+    let html = c
+        .find(Locator::Css("html"))
+        .await
+        .map_err(|e| format!("{at}: no <html>: {e}"))?;
+    for name in FLAGS {
+        let v = html
+            .attr(name)
+            .await
+            .map_err(|e| format!("{at}: reading {name}: {e}"))?;
+        if v.as_deref() != Some("0") {
+            return Err(format!(
+                "{at}: page flag {name} is {v:?}; page: {}",
+                page_state(c).await
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Inject axe-core (once per session) and run it over the page as it stands; any `critical`
-/// violation is an error, the `serious` ones are printed.
+/// violation is an error, the `serious` ones are printed. The page's flags are clean before the
+/// injection and after the run.
 async fn axe(c: &Client, source: &str, at: &str) -> Result<(), String> {
     tokio::time::sleep(SETTLE).await;
+    flags_clean(c, &format!("{at} (before axe)")).await?;
     let loaded = c
         .execute("return typeof window.axe === 'object';", vec![])
         .await
@@ -174,7 +183,7 @@ async fn axe(c: &Client, source: &str, at: &str) -> Result<(), String> {
     if loaded.as_bool() != Some(true) {
         c.execute(source, vec![])
             .await
-            .map_err(|e| format!("injecting axe-core: {e}"))?;
+            .map_err(|e| format!("{at}: injecting axe-core: {e}"))?;
     }
     let script = format!(
         "const done = arguments[arguments.length - 1]; \
@@ -187,13 +196,20 @@ async fn axe(c: &Client, source: &str, at: &str) -> Result<(), String> {
         .execute_async(&script, vec![])
         .await
         .map_err(|e| format!("{at}: axe.run: {e}"))?;
-    let text = out.as_str().unwrap_or("[]").to_string();
-    let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let text = out
+        .as_str()
+        .ok_or_else(|| format!("{at}: axe.run returned a non-string: {out}"))?
+        .to_string();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{at}: axe result: {e}"))?;
     if parsed.get("error").is_some() {
         return Err(format!("{at}: axe-core failed: {text}"));
     }
+    let violations = parsed
+        .as_array()
+        .ok_or_else(|| format!("{at}: axe result is not a list: {text}"))?;
     let mut critical = Vec::new();
-    for v in parsed.as_array().cloned().unwrap_or_default() {
+    for v in violations {
         let impact = v["impact"].as_str().unwrap_or("");
         let line = format!(
             "{at}: [{impact}] {}: {} {}",
@@ -208,6 +224,7 @@ async fn axe(c: &Client, source: &str, at: &str) -> Result<(), String> {
         }
     }
     eprintln!("{at}: axe-core done, {} critical", critical.len());
+    flags_clean(c, &format!("{at} (after axe)")).await?;
     if critical.is_empty() {
         Ok(())
     } else {
@@ -219,6 +236,42 @@ async fn session(driver: &mut Driver, work: &Path, args: Vec<String>) -> Client 
     // The previous window is gone before the next starts (one instance at a time).
     tokio::time::sleep(Duration::from_secs(3)).await;
     connect_args(driver, work, args, DRIVER_PORT).await
+}
+
+/// Each state's outcome: every state is attempted, whatever the others did, and the test fails
+/// at the end if any failed or was not reached.
+#[derive(Default)]
+struct Report {
+    states: Vec<(String, Result<(), String>)>,
+}
+
+impl Report {
+    fn record(&mut self, state: &str, r: Result<(), String>) {
+        match &r {
+            Ok(()) => eprintln!("STATE ok: {state}"),
+            Err(e) => eprintln!("STATE FAILED: {state}: {e}"),
+        }
+        self.states.push((state.to_string(), r));
+    }
+}
+
+/// Close whatever dialog is open (Esc, a few times), so that the next state starts clean.
+async fn recover(c: &Client) {
+    for _ in 0..4 {
+        let open = c
+            .execute("return !!document.querySelector('dialog[open]');", vec![])
+            .await
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !open {
+            return;
+        }
+        if let Ok(active) = c.active_element().await {
+            let _ = active.send_keys("\u{E00C}").await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 #[test]
@@ -250,7 +303,7 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let mut failures = Vec::new();
+    let mut report = Report::default();
     rt.block_on(async {
         // The archive: browser, preview, extract, maintenance dialogs, a generation's view.
         let c = session(
@@ -259,9 +312,7 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
             vec![format!("--open={}", archive.display())],
         )
         .await;
-        if let Err(e) = browse(&c, &source).await {
-            failures.push(e);
-        }
+        browse(&c, &source, &mut report).await;
         let _ = c.close().await;
         // The verb queue's result.
         let c = session(
@@ -276,9 +327,7 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
             axe(&c, &source, "the verb queue's result (--test)").await
         }
         .await;
-        if let Err(e) = r {
-            failures.push(e);
-        }
+        report.record("the verb queue's result (--test)", r);
         let _ = c.close().await;
         // The create wizard and its summary.
         let c = session(
@@ -287,9 +336,7 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
             vec![format!("--create={}", create.display())],
         )
         .await;
-        if let Err(e) = wizard(&c, &source).await {
-            failures.push(e);
-        }
+        wizard(&c, &source, &mut report).await;
         let _ = c.close().await;
         // The empty window, with the recents the first session left.
         let c = session(&mut driver, &work, vec![]).await;
@@ -303,139 +350,230 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
             axe(&c, &source, "the empty window with recents").await
         }
         .await;
-        if let Err(e) = r {
-            failures.push(e);
-        }
+        report.record("the empty window with recents", r);
         let _ = c.close().await;
     });
+    eprintln!("states checked ({}):", report.states.len());
+    for (name, r) in &report.states {
+        eprintln!("  {}: {name}", if r.is_ok() { "ok" } else { "FAILED" });
+    }
+    let failed: Vec<String> = report
+        .states
+        .iter()
+        .filter_map(|(n, r)| r.as_ref().err().map(|e| format!("{n}: {e}")))
+        .collect();
     assert!(
-        failures.is_empty(),
+        report.states.len() >= EXPECTED_STATES,
+        "only {} of {EXPECTED_STATES} states were reached or recorded",
+        report.states.len()
+    );
+    assert!(
+        failed.is_empty(),
         "critical accessibility issues or harness failures:\n{}",
-        failures.join("\n")
+        failed.join("\n")
     );
 }
 
-async fn browse(c: &Client, source: &str) -> Result<(), String> {
-    wait_for(c, "#rows [role=row]", "a row").await?;
-    let mut problems = Vec::new();
-    let mut check = |r: Result<(), String>| {
-        if let Err(e) = r {
-            problems.push(e);
-        }
-    };
-    check(axe(c, source, "the browser, flat view").await);
-    click(c, "#mode-tree").await?;
-    wait_script(
-        c,
-        "the tree view",
-        "return document.getElementById('mode-tree').getAttribute('aria-checked') === 'true';",
-    )
-    .await?;
-    check(axe(c, source, "the browser, tree view").await);
+/// The states the test records: browser 2, previews 3, extract 3, test, check, update, history,
+/// generation view, the verb queue, the wizard 2, the empty window.
+const EXPECTED_STATES: usize = 17;
+
+/// Open the Extract dialog on the whole archive (the clicked row would otherwise make the scope
+/// "Selected"), "This folder" as the destination.
+async fn extract_here(c: &Client) -> Result<(), String> {
+    click(c, "#action-extract:not([disabled])").await?;
+    dialog_settled(c).await?;
+    click(c, "dialog.wizard input[name=scope][value=all]").await?;
+    click(c, "dialog.wizard input[name=dest][value=here]").await
+}
+
+async fn browse(c: &Client, source: &str, rep: &mut Report) {
+    if let Err(e) = wait_for(c, "#rows [role=row]", "a row").await {
+        rep.record("the browser (rows)", Err(e));
+        return;
+    }
+    let r = axe(c, source, "the browser, flat view").await;
+    rep.record("the browser, flat view", r);
+
+    let r = async {
+        click(c, "#mode-tree").await?;
+        wait_script(
+            c,
+            "the tree view",
+            "return document.getElementById('mode-tree').getAttribute('aria-checked') === 'true';",
+        )
+        .await?;
+        axe(c, source, "the browser, tree view").await
+    }
+    .await;
+    rep.record("the browser, tree view", r);
+
     // The preview pane: text, an image, hex.
     for (name, css, at) in [
         (
             "note.txt",
             "#preview-body pre.preview-text",
-            "preview of text",
+            "the preview of text",
         ),
-        ("pic.png", "#preview-body img", "preview of an image"),
-        ("data.bin", "#preview-body .hex", "preview of hex"),
+        ("pic.png", "#preview-body img", "the preview of an image"),
+        ("data.bin", "#preview-body .hex", "the preview of hex"),
     ] {
-        click_row(c, name).await?;
-        wait_for(c, css, at).await?;
-        check(axe(c, source, &format!("the {at}")).await);
+        let r = async {
+            click_row(c, name).await?;
+            wait_for(c, css, at).await?;
+            axe(c, source, at).await
+        }
+        .await;
+        rep.record(at, r);
     }
+
     // The extract wizard: its form, the question, the result.
-    click(c, "#action-extract:not([disabled])").await?;
-    dialog_settled(c).await?;
-    check(axe(c, source, "the extract dialog (choose)").await);
-    click(c, "dialog.wizard input[name=dest][value=here]").await?;
-    click(c, "dialog.wizard button.primary").await?;
-    wait_for(
-        c,
-        "dialog.wizard .wizard-buttons button:nth-child(4)",
-        "the question",
-    )
-    .await?;
-    dialog_settled(c).await?;
-    check(axe(c, source, "the extract dialog (conflict question)").await);
-    click(c, "dialog.wizard button.primary").await?;
-    wait_for(c, "dialog.wizard .check", "the extract result").await?;
-    dialog_settled(c).await?;
-    check(axe(c, source, "the extract dialog (result)").await);
-    close_dialog(c).await?;
-    // The maintenance dialogs.
-    click(c, "#action-test").await?;
-    wait_for(c, "dialog.wizard .check", "the test result").await?;
-    dialog_settled(c).await?;
-    check(axe(c, source, "the test dialog (result)").await);
-    close_dialog(c).await?;
-    click(c, "#action-check").await?;
-    dialog_settled(c).await?;
-    wait_for(c, "dialog.wizard .wizard-body p", "the check result").await?;
-    check(axe(c, source, "the check dialog (result)").await);
-    close_dialog(c).await?;
-    click(c, "#action-update").await?;
-    wait_for(c, "dialog.wizard details", "the update dialog").await?;
-    dialog_settled(c).await?;
-    check(axe(c, source, "the update-from-folder dialog").await);
-    close_dialog(c).await?;
-    click(c, "#action-history").await?;
-    wait_for(
-        c,
-        "dialog.wizard input[name=generation]",
-        "the history list",
-    )
-    .await?;
-    dialog_settled(c).await?;
-    check(axe(c, source, "the history dialog (list)").await);
-    // Browse an earlier generation: the read-only view with its banner.
-    c.execute(
-        "const r = [...document.querySelectorAll('dialog input[name=generation]')].find((x) => !x.checked); r.click(); return true;",
-        vec![],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    click(c, "dialog.wizard button.primary").await?;
-    wait_script(
-        c,
-        "the generation's view",
-        "return !document.querySelector('dialog[open]') && !document.getElementById('banner').hidden;",
-    )
-    .await?;
-    wait_for(c, "#rows [role=row]", "a row").await?;
-    check(axe(c, source, "the read-only generation view").await);
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems.join("\n"))
+    let r = async {
+        click(c, "#action-extract:not([disabled])").await?;
+        dialog_settled(c).await?;
+        axe(c, source, "the extract dialog (choose)").await
     }
+    .await;
+    rep.record("the extract dialog (choose)", r);
+    recover(c).await;
+
+    let r = async {
+        extract_here(c).await?;
+        click(c, "dialog.wizard button.primary").await?;
+        wait_for(
+            c,
+            "dialog.wizard .wizard-buttons button:nth-child(4)",
+            "the conflict question",
+        )
+        .await?;
+        dialog_settled(c).await?;
+        axe(c, source, "the extract dialog (conflict question)").await
+    }
+    .await;
+    rep.record("the extract dialog (conflict question)", r);
+    recover(c).await;
+
+    let r = async {
+        extract_here(c).await?;
+        click(c, "dialog.wizard button.primary").await?;
+        wait_for(
+            c,
+            "dialog.wizard .wizard-buttons button:nth-child(4)",
+            "the conflict question",
+        )
+        .await?;
+        // Skip (the primary button): the rest is written and the result shown.
+        click(c, "dialog.wizard button.primary").await?;
+        wait_for(c, "dialog.wizard .check", "the extract result").await?;
+        dialog_settled(c).await?;
+        axe(c, source, "the extract dialog (result)").await
+    }
+    .await;
+    rep.record("the extract dialog (result)", r);
+    recover(c).await;
+
+    // The maintenance dialogs.
+    let r = async {
+        click(c, "#action-test").await?;
+        wait_for(c, "dialog.wizard .check", "the test result").await?;
+        dialog_settled(c).await?;
+        axe(c, source, "the test dialog (result)").await
+    }
+    .await;
+    rep.record("the test dialog (result)", r);
+    recover(c).await;
+
+    let r = async {
+        click(c, "#action-check").await?;
+        dialog_settled(c).await?;
+        wait_for(c, "dialog.wizard .wizard-body p", "the check result").await?;
+        axe(c, source, "the check dialog (result)").await
+    }
+    .await;
+    rep.record("the check dialog (result)", r);
+    recover(c).await;
+
+    let r = async {
+        click(c, "#action-update").await?;
+        wait_for(c, "dialog.wizard details", "the update dialog").await?;
+        dialog_settled(c).await?;
+        axe(c, source, "the update-from-folder dialog").await
+    }
+    .await;
+    rep.record("the update-from-folder dialog", r);
+    recover(c).await;
+
+    let r = async {
+        click(c, "#action-history").await?;
+        wait_for(
+            c,
+            "dialog.wizard input[name=generation]",
+            "the history list",
+        )
+        .await?;
+        dialog_settled(c).await?;
+        axe(c, source, "the history dialog (list)").await
+    }
+    .await;
+    rep.record("the history dialog (list)", r);
+
+    // Browse an earlier generation: the read-only view with its banner (the history dialog is
+    // still open if its state passed or not; the flow opens it again when it is not).
+    let r = async {
+        let open = c
+            .execute(
+                "return !!document.querySelector('dialog[open] input[name=generation]');",
+                vec![],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if open.as_bool() != Some(true) {
+            recover(c).await;
+            click(c, "#action-history").await?;
+            wait_for(c, "dialog.wizard input[name=generation]", "the history list").await?;
+        }
+        c.execute(
+            "const r = [...document.querySelectorAll('dialog input[name=generation]')].find((x) => !x.checked); r.click(); return true;",
+            vec![],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        click(c, "dialog.wizard button.primary").await?;
+        wait_script(
+            c,
+            "the generation's view",
+            "return !document.querySelector('dialog[open]') && !document.getElementById('banner').hidden;",
+        )
+        .await?;
+        wait_for(c, "#rows [role=row]", "a row").await?;
+        axe(c, source, "the read-only generation view").await
+    }
+    .await;
+    rep.record("the read-only generation view", r);
 }
 
-async fn wizard(c: &Client, source: &str) -> Result<(), String> {
-    wait_for(c, "dialog.create[open] .inputs li", "a listed input").await?;
-    // Every tier card shows its estimate once Rust's calibration has run.
-    wait_script(
-        c,
-        "the estimates",
-        "const cards = document.querySelectorAll('dialog.create .card .estimate'); \
-         return cards.length === 3 && [...cards].every((e) => e.textContent.includes('about') || e.textContent.includes('No estimate'));",
-    )
-    .await?;
-    let mut problems = Vec::new();
-    if let Err(e) = axe(c, source, "the create wizard (with estimates)").await {
-        problems.push(e);
+async fn wizard(c: &Client, source: &str, rep: &mut Report) {
+    let r = async {
+        wait_for(c, "dialog.create[open] .inputs li", "a listed input").await?;
+        // Every tier card shows its estimate once Rust's calibration has run.
+        wait_script(
+            c,
+            "the estimates",
+            "const cards = document.querySelectorAll('dialog.create .card .estimate'); \
+             return cards.length === 3 && [...cards].every((e) => e.textContent.includes('about') || e.textContent.includes('No estimate'));",
+        )
+        .await?;
+        axe(c, source, "the create wizard (with estimates)").await
     }
-    click(c, "dialog.create[open] button.primary:not([disabled])").await?;
-    wait_for(c, "dialog.create .check", "the summary").await?;
-    dialog_settled(c).await?;
-    if let Err(e) = axe(c, source, "the create summary").await {
-        problems.push(e);
+    .await;
+    rep.record("the create wizard (with estimates)", r);
+
+    let r = async {
+        click(c, "dialog.create[open] button.primary:not([disabled])").await?;
+        wait_for(c, "dialog.create .check", "the summary").await?;
+        dialog_settled(c).await?;
+        axe(c, source, "the create summary").await
     }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems.join("\n"))
-    }
+    .await;
+    rep.record("the create summary", r);
 }

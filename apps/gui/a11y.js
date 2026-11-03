@@ -105,3 +105,14 @@ export function wireRadios(group) {
 export function keyLabel(shortcuts) {
   return shortcuts.replaceAll("Control", "Ctrl");
 }
+
+/** Say the first line of the dialog's body through its live region (cleared first, so that the
+ *  same words said again are announced again). */
+export function announce(dialog, live) {
+  const first = dialog.querySelector(".wizard-body p");
+  const text = first ? first.textContent : "";
+  live.textContent = "";
+  queueMicrotask(() => {
+    live.textContent = text;
+  });
+}

@@ -329,7 +329,7 @@ export function createPreview({ core, t, nextOp, session, showError }) {
 
   toggle.addEventListener("click", () => setShown(!shown));
   document.addEventListener("keydown", (e) => {
-    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "p") {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyP") {
       e.preventDefault();
       setShown(!shown);
     }

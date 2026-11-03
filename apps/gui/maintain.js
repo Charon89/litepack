@@ -5,7 +5,7 @@
 // a native box Rust shows (the page cannot answer it). DOM built with createElement and
 // textContent only (Trusted Types); every string is in strings/en.json.
 
-import { trapTab } from "./a11y.js";
+import { announce, trapTab } from "./a11y.js";
 
 function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
@@ -26,6 +26,9 @@ export function createMaintainer(env) {
   const { core, t, nextOp, session, archive, showError, adopt, verbs } = env;
   const count = (n) => Number(n).toLocaleString();
   let dialog = null;
+  // One live region for the dialog: phase() appends it again after each render and sets it to
+  // the phase's first line, so a result is announced (the phase's own nodes are replaced).
+  let live = null;
   let opener = null;
   let onEscape = () => {};
   // One dialog at a time: the verb's archives queue on the chain `main.js` shares with the
@@ -37,6 +40,7 @@ export function createMaintainer(env) {
     }
     dialog = el("dialog", { class: "wizard", "aria-labelledby": "maintain-title", "aria-describedby": "maintain-body" });
     trapTab(dialog);
+    live = el("p", { role: "status", class: "sr-only" });
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       onEscape();
@@ -79,7 +83,8 @@ export function createMaintainer(env) {
         first = b;
       }
     }
-    d.replaceChildren(el("h2", { id: "maintain-title", text: title }), el("div", { class: "wizard-body", id: "maintain-body" }, ...body), footer);
+    d.replaceChildren(el("h2", { id: "maintain-title", text: title }), el("div", { class: "wizard-body", id: "maintain-body" }, ...body), footer, live);
+    announce(d, live);
     if (!d.open) {
       opener = document.activeElement;
       d.showModal();
@@ -95,12 +100,15 @@ export function createMaintainer(env) {
   // What the user sees of a failure.
   function failure(name, e) {
     if (e && e.class === "Cancelled") {
-      return [el("p", { text: t("maintain.cancelled", { name }) })];
+      return [el("p", { role: "alert", text: t("maintain.cancelled", { name }) })];
     }
     const message = e && typeof e === "object" ? `${e.message ?? ""} ${e.detail ?? ""}`.trim() : String(e);
     const nodes = [el("p", { text: t("maintain.error", { name, message }) })];
     for (const x of (e && e.entries) || []) {
       nodes.push(el("p", { text: t("maintain.entry", { path: x.path }) }));
+    }
+    for (const n of nodes) {
+      n.setAttribute("role", "alert");
     }
     return nodes;
   }

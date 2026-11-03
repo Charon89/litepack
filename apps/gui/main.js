@@ -469,7 +469,20 @@ function showError(e) {
     return;
   }
   problem("lpkFailure", `failure: ${describe(e)}`);
-  setStatus(`${t("error.title")}: ${describe(e)}`);
+  // Behind an open modal dialog the status line is inert: the error shows in the dialog's own alert.
+  const open = document.querySelector("dialog[open]");
+  if (open) {
+    let alert = open.querySelector(".dialog-error");
+    if (!alert) {
+      alert = document.createElement("p");
+      alert.className = "dialog-error";
+      alert.setAttribute("role", "alert");
+      open.querySelector(".wizard-body")?.append(alert);
+    }
+    alert.textContent = `${t("error.title")}: ${describe(e)}`;
+  } else {
+    setStatus(`${t("error.title")}: ${describe(e)}`);
+  }
   if (!reported) {
     reported = true;
     core.invoke("listing_shown", { session: null, rendered: 0, total: 0, first: "", problems }).catch(() => {});
@@ -526,15 +539,23 @@ function wireControls() {
   // The command keys: each button with aria-keyshortcuts (Alt+P belongs to the preview pane);
   // a disabled command, an open dialog or a running picker takes none.
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || document.querySelector("dialog[open]")) {
+    if (e.key === "Control" || e.key === "Shift" || e.key === "Alt") {
       return;
     }
     const mods = (e.ctrlKey || e.metaKey ? "Control+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "");
-    const chord = `${mods}${e.key.toUpperCase()}`;
-    if (chord === "Control+F" && !$("bar").hidden) {
+    // The physical key (e.code), so that another keyboard layout (Cyrillic, say) keeps the keys.
+    const letter = /^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : e.key.toUpperCase();
+    const chord = `${mods}${letter}`;
+    // Ctrl+F is the app's always (never the webview's find bar): the filter, or nothing.
+    if (chord === "Control+F") {
       e.preventDefault();
-      $("filter").focus();
-      $("filter").select();
+      if (!$("bar").hidden && !document.querySelector("dialog[open]")) {
+        $("filter").focus();
+        $("filter").select();
+      }
+      return;
+    }
+    if (document.querySelector("dialog[open]")) {
       return;
     }
     for (const b of document.querySelectorAll("button[aria-keyshortcuts]")) {

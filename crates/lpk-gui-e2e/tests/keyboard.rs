@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{connect, lpk_exe, page_state, start_driver, ROWS_WITHIN};
+use common::{connect, connect_with, lpk_exe, page_state, start_driver, ROWS_WITHIN};
 use fantoccini::{Client, Locator};
 
 /// The Edge WebDriver's port for this test (the others use 4444 to 4451).
@@ -110,6 +110,7 @@ fn f6_cycles_the_panes_and_dialogs_keep_the_focus_and_answer_the_keys() {
     let temp = tempfile::tempdir().expect("scratch dir");
     let work = temp.path().to_path_buf();
     let archive = make_archive(&work);
+    let create = work.join("in");
     let mut driver = start_driver(&work, DRIVER_PORT);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -118,6 +119,24 @@ fn f6_cycles_the_panes_and_dialogs_keep_the_focus_and_answer_the_keys() {
     rt.block_on(async {
         let c = connect(&mut driver, &work, &archive, DRIVER_PORT).await;
         let outcome = run(&c).await;
+        let _ = c.close().await;
+        if let Err(e) = outcome {
+            panic!("{e}");
+        }
+        // The create wizard (through --create, no native picker): the trap holds there too.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let c = connect_with(
+            &mut driver,
+            &work,
+            format!("--create={}", create.display()),
+            DRIVER_PORT,
+        )
+        .await;
+        let outcome = async {
+            wait_for(&c, "dialog.create[open] .inputs li", "the create wizard").await?;
+            trap(&c, "the create wizard").await
+        }
+        .await;
         let _ = c.close().await;
         if let Err(e) = outcome {
             panic!("{e}");
@@ -155,23 +174,22 @@ async fn run(c: &Client) -> Result<(), String> {
         "the extract dialog (Ctrl+E)",
     )
     .await?;
-    for i in 0..14 {
-        press(c, TAB).await?;
-        let at = where_is_focus(c).await?;
-        if at != "dialog" {
-            return Err(format!("Tab #{i} left the dialog: {at}"));
-        }
-    }
-    for i in 0..14 {
-        press(c, &format!("{SHIFT}{TAB}{RELEASE}")).await?;
-        let at = where_is_focus(c).await?;
-        if at != "dialog" {
-            return Err(format!("Shift+Tab #{i} left the dialog: {at}"));
-        }
-    }
+    trap(c, "the extract dialog").await?;
     press(c, ESCAPE).await?;
     wait_closed(c).await?;
     expect_pane(c, "list", "Esc closing the dialog").await?;
+
+    // A maintenance dialog by its command key: the trap holds there too, Esc closes it.
+    press(c, &format!("{CONTROL}{SHIFT}h{RELEASE}")).await?;
+    wait_for(
+        c,
+        "dialog.wizard[open] input[name=generation]",
+        "the history dialog (Ctrl+Shift+H)",
+    )
+    .await?;
+    trap(c, "the history dialog").await?;
+    press(c, ESCAPE).await?;
+    wait_closed(c).await?;
 
     // From the button: Enter opens, Esc closes, the focus is the button again.
     let button = c
@@ -232,4 +250,24 @@ async fn wait_closed(c: &Client) -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Tab and Shift+Tab around the open dialog: the focus never leaves it (more presses than it
+/// has stops, so that it wraps both ways).
+async fn trap(c: &Client, what: &str) -> Result<(), String> {
+    for i in 0..30 {
+        press(c, TAB).await?;
+        let at = where_is_focus(c).await?;
+        if at != "dialog" {
+            return Err(format!("{what}: Tab #{i} left the dialog: {at}"));
+        }
+    }
+    for i in 0..30 {
+        press(c, &format!("{SHIFT}{TAB}{RELEASE}")).await?;
+        let at = where_is_focus(c).await?;
+        if at != "dialog" {
+            return Err(format!("{what}: Shift+Tab #{i} left the dialog: {at}"));
+        }
+    }
+    Ok(())
 }
