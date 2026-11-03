@@ -27,6 +27,15 @@
     "allow-create-run",
     "allow-cancel",
     "allow-subscribe",
-    "allow-listing-shown"
+    "allow-listing-shown",
+    "allow-test-run",
+    "allow-test-archive",
+    "allow-check-run",
+    "allow-repair-run",
+    "allow-history",
+    "allow-history-browse",
+    "allow-rollback-run",
+    "allow-append-plan",
+    "allow-append-run"
   ]
 }

@@ -247,6 +247,17 @@ pub(crate) fn open_unlocked(
     prompter: &dyn Prompter,
     ask_first: Option<bool>,
 ) -> Result<Session, Error> {
+    open_unlocked_at(path, None, motw_off, prompter, ask_first)
+}
+
+/// [`open_unlocked`] on `generation` (an earlier one is a read-only view; `None` the latest).
+pub(crate) fn open_unlocked_at(
+    path: &Path,
+    generation: Option<u64>,
+    motw_off: bool,
+    prompter: &dyn Prompter,
+    ask_first: Option<bool>,
+) -> Result<Session, Error> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -263,6 +274,7 @@ pub(crate) fn open_unlocked(
         let options = OpenOptions {
             credentials: creds.as_ref(),
             motw_off,
+            generation,
             ..OpenOptions::default()
         };
         match Session::open(path, &options) {

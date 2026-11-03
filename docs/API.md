@@ -98,7 +98,7 @@ the binary's parser with this table.
 | `--extract-to` | `<archive>...` | Extract to "&lt;name&gt;\" | Into `<name>\` beside each, `<name> (k)` if taken (E5-4); same queue, prompts and results as `--extract-here`. |
 | `--create` | `<path>...` | Add to archive… | Opens the create wizard with these inputs. `--create=<path>` (one input) is the same (the form the Edge WebDriver can pass, E5-5). |
 | `--create … --name` | `<path>... --name <file>.lpk` | Add to "&lt;name&gt;.lpk" | Creates at once with the wizard's defaults (Balanced, recovery 5, test when done: one set of GUI defaults for every GUI entry point), through the wizard's progress dialog and summary. |
-| `--test` | `<archive>...` | Test | Tests each archive. |
+| `--test` | `<archive>...` | Test | Tests each archive. `--test=<archive>` (one archive) is the same (the form the Edge WebDriver can pass, E5-8). |
 | `--convert` | `<archive>` | Convert to… | Re-creates a foreign archive as `.lpk` (E4 §6). |
 
 `@file` response files carry longer argument lists: UTF-8 text (an optional byte-order mark), one argument

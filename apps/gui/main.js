@@ -7,6 +7,7 @@ import { VirtualList } from "./list.js";
 import { createExtractor } from "./extract.js";
 import { createCreator } from "./create.js";
 import { createPreview } from "./preview.js";
+import { createMaintainer } from "./maintain.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
@@ -35,6 +36,8 @@ let nextOp = 1;
 // The open archive's session, closed before another is opened (a drop).
 let session = null;
 let sessionName = "";
+// What the open session is: the maintenance buttons' and dialogs' facts (E5-8).
+let current = { name: "", format: "", generation: 0, latest: 0, encrypted: false };
 // Selected rows of the current view (the status bar's count: what an extraction takes).
 let pickedCount = 0;
 let reported = false;
@@ -219,8 +222,13 @@ const creator = createCreator({
   openArchive: (g) => openArchive(g),
 });
 
+// One chain for every verb's dialog (extract.js, maintain.js): two verbs arriving together
+// show their dialogs one after the other, never stacked.
+const verbs = { chain: Promise.resolve() };
+
 // The extract wizard (extract.js) and the verbs' queue.
 const extractor = createExtractor({
+  verbs,
   core,
   t,
   nextOp: () => nextOp++,
@@ -229,6 +237,76 @@ const extractor = createExtractor({
   archiveName: () => sessionName,
   showError: (e) => showError(e),
 });
+
+// The maintenance dialogs (maintain.js) and the verb --test's queue. `adopt` shows what they
+// opened: a granted archive (a repaired copy), or a session Rust already opened (a browsed
+// generation, the archive after a rollback or an update; `previous` is the session it replaces,
+// which Rust may have closed already).
+const maintainer = createMaintainer({
+  verbs,
+  core,
+  t,
+  nextOp: () => nextOp++,
+  session: () => session,
+  archive: () => current,
+  showError: (e) => showError(e),
+  adopt: async (granted, opened, previous) => {
+    if (granted) {
+      await openArchive(granted);
+      return;
+    }
+    if (previous !== undefined && previous !== null && previous !== opened?.session) {
+      await core.invoke("close_archive", { session: previous }).catch(() => {});
+    }
+    if (opened) {
+      await showOpened(opened);
+    } else {
+      clearSession();
+    }
+  },
+});
+
+// Which maintenance actions the open archive offers, and why not: Test works on whatever
+// Session::test supports (a foreign archive too); the others are .lpk only; the ones that write
+// need the latest generation (an earlier one is a read-only view).
+function updateMaintenance() {
+  const none = session === null;
+  const foreign = !none && current.format !== "lpk";
+  const view = !none && current.generation !== current.latest;
+  const set = (id, off, why) => {
+    const b = $(id);
+    b.disabled = off;
+    if (off) {
+      b.setAttribute("title", why);
+    } else {
+      b.removeAttribute("title");
+    }
+  };
+  set("action-test", none, t("maintain.why.none"));
+  set("action-check", none || foreign, none ? t("maintain.why.none") : t("maintain.why.foreign"));
+  set("action-history", none || foreign, none ? t("maintain.why.none") : t("maintain.why.foreign"));
+  set("action-update", none || foreign || view, none ? t("maintain.why.none") : foreign ? t("maintain.why.foreign") : t("maintain.why.view"));
+  const banner = $("banner");
+  banner.hidden = none || !view;
+  if (!banner.hidden) {
+    $("banner-text").textContent = t("banner.generation", { generation: current.generation, latest: current.latest });
+  }
+}
+
+// The session is gone (a failed reopen): back to the empty window.
+function clearSession() {
+  session = null;
+  sessionName = "";
+  current = { name: "", format: "", generation: 0, latest: 0, encrypted: false };
+  $("action-extract").disabled = true;
+  $("bar").hidden = true;
+  $("split").hidden = true;
+  $("list").hidden = true;
+  $("hint").hidden = false;
+  preview.clear();
+  updateMaintenance();
+  renderRecents().catch(showError);
+}
 
 // `--extract-here` (Smart) and `--extract-to` (a new folder) beside each archive, no question.
 function extractHere(a) {
@@ -246,9 +324,9 @@ function createWizard(a) {
   return creator.open(a.items);
 }
 
-// E5-8 completes testArchives (the test dialog).
-function testArchives() {
-  showNotices([{ kind: "text", text: t("verb.test") }]);
+// `--test <archives>`: each archive tested through the queue, one result each.
+function testArchives(a) {
+  return maintainer.runVerb(a.items);
 }
 
 // E4's broker path into create completes convertArchive (a foreign archive re-created as .lpk).
@@ -349,9 +427,16 @@ async function openArchive(granted) {
     await core.invoke("close_archive", { session: previous });
   }
   const opened = await core.invoke("open_archive", { grant: granted.grant, op: nextOp++ });
+  await showOpened(opened);
+}
+
+// Show a session Rust opened (a new archive, a generation's view, the archive after a rollback).
+async function showOpened(opened) {
   session = opened.session;
   sessionName = opened.name;
+  current = { name: opened.name, format: opened.format, generation: opened.generation, latest: opened.latest_generation, encrypted: opened.encrypted };
   $("action-extract").disabled = false;
+  updateMaintenance();
   Object.assign(state, { mode: "flat", dir: null, key: "path", descending: false });
   info = opened.view;
   $("hint").hidden = true;
@@ -413,6 +498,27 @@ async function renderRecents() {
 function wireControls() {
   $("action-extract").disabled = true;
   $("action-extract").addEventListener("click", () => extractor.openDialog().catch(showError));
+  updateMaintenance();
+  $("action-test").addEventListener("click", () => maintainer.testDialog().catch(showError));
+  $("action-check").addEventListener("click", () => maintainer.checkDialog().catch(showError));
+  $("action-history").addEventListener("click", () => maintainer.historyDialog().catch(showError));
+  $("action-update").addEventListener("click", () => maintainer.updateDialog().catch(showError));
+  // Back from a generation's view to the latest one.
+  $("banner-latest").addEventListener("click", () => {
+    const previous = session;
+    core
+      .invoke("history_browse", { session: previous, generation: current.latest, op: nextOp++ })
+      .then(async (opened) => {
+        await core.invoke("close_archive", { session: previous }).catch(() => {});
+        await showOpened(opened);
+      })
+      .catch((e) => {
+        // A cancelled password prompt is the user's answer, not a failure.
+        if (!(e && e.class === "Cancelled")) {
+          showError(e);
+        }
+      });
+  });
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e" && session !== null && !document.querySelector("dialog[open]")) {
       e.preventDefault();

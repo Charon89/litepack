@@ -10,7 +10,7 @@
 //! - [`Handler::ExtractHere`], [`Handler::ExtractTo`]: extract each archive beside itself with no
 //!   question, Smart or into `<name>` (done, E5-4: `extract_archive`).
 //! - [`Handler::CreateWizard`]: the create wizard with these inputs (done, E5-5: `create_plan`).
-//! - [`Handler::Test`]: E5-8 (the test dialog).
+//! - [`Handler::Test`]: test each archive through the verb queue, one result each (done, E5-8: `test_archive`).
 //! - [`Handler::Convert`]: E4's broker path into E5-1's `create` (re-creating a foreign archive).
 
 use serde::Serialize;
@@ -32,7 +32,7 @@ pub enum Handler {
     CreateWizard,
     /// Create `<name>.lpk` at once with the defaults (`--create … --name`).
     CreateNamed,
-    /// Test each archive (`--test`); E5-8 completes it.
+    /// Test each archive (`--test`; E5-8).
     Test,
     /// Re-create a foreign archive as `.lpk` (`--convert`); E4's broker path completes it.
     Convert,
@@ -49,6 +49,7 @@ impl Handler {
                 | Handler::CreateNamed
                 | Handler::ExtractHere
                 | Handler::ExtractTo
+                | Handler::Test
         )
     }
 }

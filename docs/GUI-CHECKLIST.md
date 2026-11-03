@@ -93,9 +93,43 @@ the form is valid, focus returns to where it was when the dialog closes.
 | 5.14 | Create over an existing `<name>.lpk` | The dialog names it and Create stays disabled; nothing is overwritten | |
 | 5.15 | `--create <paths> --name x.lpk` | Created at once with the wizard's defaults (Balanced, recovery 5, test when done), through the progress dialog and summary | |
 
-## E5-8
+## E5-8 Maintenance: test, check and repair, history, update
 
-Append the maintenance dialogs (E5-8) here (the verbs and shell integration are E5-7's section above).
+The command bar's Maintenance group (Test, Check and repair..., History..., Update from folder...) works on
+the open archive; `lpk-gui.exe --test <archives>` runs Test for each. Esc cancels, Enter takes the primary
+button, focus returns to the button that opened the dialog. Use a copy of an archive made with recovery
+records (`lpk a --recovery 20`) and a copy with a byte flipped in the middle of its data.
+
+| # | Item | Expected result | Result |
+|---|---|---|---|
+| 8.1 | Open an archive; look at the Maintenance group before and after | All four are disabled with no archive (the tooltip says why); with an `.lpk` all four are enabled | |
+| 8.2 | Open a ZIP or 7z | Test is enabled; Check, History and Update are disabled and the tooltip says only `.lpk` has them | |
+| 8.3 | Test an undamaged archive | Progress with Cancel, then "passed" with entries, chunks and blocks and the line "Every chunk was decoded and matched its hash" | |
+| 8.4 | Test with Cancel pressed mid-run (a large archive) | "The test was cancelled"; nothing else changed; the window stays usable | |
+| 8.5 | Test a damaged archive | "The test found a problem", the message names the block and the entry; "Check and repair..." is offered | |
+| 8.6 | Test an encrypted archive with names in the clear (keyless) | "passed" with the line that only frame hashes and recovery records were checked; "Unlock..." is offered and there was no password prompt by itself | |
+| 8.7 | Press Unlock, type a wrong password, then the right one | The native prompt asks again after the wrong one; the result then says every chunk was decoded; a second Test needs no password | |
+| 8.8 | Press Unlock and Cancel the prompt | "The test was cancelled"; the archive is still open | |
+| 8.9 | Check an archive without recovery records | "has no recovery records, so it cannot be repaired"; no repair button | |
+| 8.10 | Check an undamaged archive with recovery records | Frame counts, "No damage found" | |
+| 8.11 | Check the damaged copy | Counts show damaged shards; "Repair to a copy..." is offered | |
+| 8.12 | Repair to a copy beside the archive | `<name> (repaired).lpk` appears beside it; the result says the original was not changed and the copy passed its test; Open the copy opens it | |
+| 8.13 | Repair again, and again | `<name> (repaired 2).lpk`, then `(repaired 3)`; nothing is overwritten | |
+| 8.14 | Repair, press Choose folder... and pick another folder | The copy goes into that folder | |
+| 8.15 | Cancel a repair mid-run | "Cancelled. No copy was kept"; no `(repaired)` file is left | |
+| 8.16 | History of an archive with several generations | Generations newest first with sizes, the latest and the one shown marked | |
+| 8.17 | Select an earlier generation, press Browse | The window shows that generation with the banner "Generation N of M, shown read-only"; Update from folder is disabled (tooltip says why); Extract works and restores its files | |
+| 8.18 | In the view, press "Back to the latest" | The latest generation opens and the banner goes | |
+| 8.19 | Select an earlier generation, press Roll back | A native box names the generations removed and says it cannot be undone; No leaves the archive and returns to History | |
+| 8.20 | Roll back and answer Yes | The archive ends at that generation (History lists no later one, the file is shorter); it reopens; the result states the generations removed | |
+| 8.21 | Start a rollback while another operation runs | It waits for it, then asks | |
+| 8.22 | Update from folder: choose a folder in which one earlier file is deleted and one is new | The dialog says the generation mirrors the folder; the result names the new generation and the test passes; the deleted path is gone from the listing, the new one is there; History shows the old generation still holds the deleted file | |
+| 8.23 | Update from folder on an encrypted archive | The password is asked for before anything is written; Cancel at the prompt leaves the archive as it was; the right password appends and the archive reopens without a second prompt | |
+| 8.24 | Cancel an update mid-run | "The archive is as it was"; the file is byte-identical to before; the archive reopens | |
+| 8.25 | Update with Test when done off, with the Store tier and with recovery 0 | The run uses them (no test line; a larger archive without recovery records) | |
+| 8.26 | `lpk-gui.exe --test a.lpk b.lpk c.lpk` | "Archive 1 of 3", "2 of 3", "3 of 3", one result each, one at a time; Close ends | |
+| 8.27 | `--test` on a mix that includes a damaged archive and a sealed one | The damaged one fails with its message, the sealed one offers Unlock beside its result and Unlock re-runs only that archive | |
+| 8.28 | Cancel the `--test` queue | The running archive ends cancelled and the rest do not run | |
 
 ## Notes
 

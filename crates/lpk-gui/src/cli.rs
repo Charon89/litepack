@@ -127,6 +127,15 @@ pub fn parse(
             let p = first.to_str().and_then(|t| t.strip_prefix("--create="));
             ("--create", p.map(OsString::from))
         }
+        // And for one `--test` archive (E5-8's driver test).
+        None if first
+            .to_str()
+            .and_then(|t| t.strip_prefix("--test="))
+            .is_some_and(|p| !p.is_empty()) =>
+        {
+            let p = first.to_str().and_then(|t| t.strip_prefix("--test="));
+            ("--test", p.map(OsString::from))
+        }
         None if VERBS.contains(&text.as_str()) => (
             VERBS[VERBS.iter().position(|v| *v == text).unwrap_or(0)],
             None,
@@ -379,6 +388,16 @@ mod tests {
             let mut v = b"--create=".to_vec();
             v.push(0xFF);
             assert!(parse([OsString::from_vec(v)], None).is_err());
+        }
+        // `--test=` is the same form for one archive; an empty or non-UTF-8 one is refused.
+        assert_eq!(verb(&["--test=a.lpk"]), Verb::Test(paths(&["a.lpk"])));
+        assert!(parse([OsString::from("--test=")], None).is_err());
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let mut w: Vec<u16> = "--test=".encode_utf16().collect();
+            w.push(0xD800);
+            assert!(parse([OsString::from_wide(&w)], None).is_err());
         }
         // The switch-safe inline form (the driver tests pass it).
         assert_eq!(

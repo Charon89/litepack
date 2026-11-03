@@ -287,6 +287,20 @@ pub fn committed_generation_of(file: &mut std::fs::File, path: &Path) -> Result<
         .map_err(|e| Error::format(e, Some(path)))
 }
 
+/// The latest committed generation and the bytes it spans (its trailer's end), through a
+/// handle the caller holds: what a rollback confirmed against the open session's length must
+/// still find in the file. Nothing is written. `path` names it in errors.
+pub fn committed_end_of(file: &mut std::fs::File, path: &Path) -> Result<(u64, u64), Error> {
+    let (chain, latest) =
+        lpk_format::committed_chain(file).map_err(|e| Error::format(e, Some(path)))?;
+    let end = chain
+        .iter()
+        .find(|g| g.generation == latest)
+        .map(lpk_format::Generation::end)
+        .ok_or_else(|| Error::usage("the trailer chain does not hold its latest generation"))?;
+    Ok((latest, end))
+}
+
 /// The latest committed generation of the archive at `path`, from its trailer chain (the
 /// chain [`rollback`] reads; a torn append's tail is skipped), opened read-only and without
 /// credentials; nothing is written. Any error (the file held or unreadable, a damaged chain,

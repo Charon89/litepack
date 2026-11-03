@@ -29,14 +29,14 @@ function el(tag, attrs = {}, ...children) {
 }
 
 export function createExtractor(env) {
-  const { core, t, nextOp, session, picked, showError } = env;
+  const { core, t, nextOp, session, picked, showError, verbs } = env;
   const count = (n) => Number(n).toLocaleString();
   const size = (n) => (n >= GIB ? `${(n / GIB).toFixed(1)} GiB` : `${Math.ceil(n / MIB).toLocaleString()} MiB`);
   let dialog = null;
   let opener = null;
   let onEscape = () => {};
-  // One dialog at a time: verbs queue behind one another and behind an open dialog.
-  let chain = Promise.resolve();
+  // One dialog at a time: verbs queue behind one another (`verbs.chain`, shared with the test
+  // verb's queue) and behind an open dialog.
 
   function ensureDialog() {
     if (dialog) {
@@ -321,8 +321,8 @@ export function createExtractor(env) {
   // The verbs: each archive extracted beside itself (`kind` "here": Smart; "to": a new folder),
   // in order, one result each, "k of n" while it runs.
   function runVerb(kind, items) {
-    chain = chain.then(() => queue(kind, items)).catch(showError);
-    return chain;
+    verbs.chain = verbs.chain.then(() => queue(kind, items)).catch(showError);
+    return verbs.chain;
   }
 
   // The queue's states, each with a way out:
@@ -378,7 +378,7 @@ export function createExtractor(env) {
           allow.addEventListener("click", () => {
             allow.disabled = true;
             // Inside the chain, so that a later verb queues behind it; ends in `done`.
-            chain = chain
+            verbs.chain = verbs.chain
               .then(async () => {
                 stopped = false;
                 const again = await attempt(item, index, f.allow);

@@ -27,4 +27,13 @@ pub const COMMANDS: &[&str] = &[
     "cancel",
     "subscribe",
     "listing_shown",
+    "test_run",
+    "test_archive",
+    "check_run",
+    "repair_run",
+    "history",
+    "history_browse",
+    "rollback_run",
+    "append_plan",
+    "append_run",
 ];

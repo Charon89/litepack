@@ -13,9 +13,16 @@
     <button type="button" id="action-open" data-string="action.open"></button>
     <button type="button" id="action-new" data-string="action.new" aria-keyshortcuts="Control+N"></button>
     <button type="button" id="action-extract" data-string="action.extract" aria-keyshortcuts="Control+E"></button>
+    <span class="group" role="group" data-label="maintain.group">
+      <button type="button" id="action-test" data-string="maintain.test"></button>
+      <button type="button" id="action-check" data-string="maintain.check"></button>
+      <button type="button" id="action-history" data-string="maintain.history"></button>
+      <button type="button" id="action-update" data-string="maintain.update"></button>
+    </span>
     <label class="setting"><input id="update-check" type="checkbox"><span data-string="settings.updates"></span></label>
   </div>
   <ul id="notices" class="notices" role="list" data-label="notices.label" hidden></ul>
+  <p id="banner" class="banner" role="status" hidden><span id="banner-text"></span> <button type="button" id="banner-latest" data-string="banner.latest"></button></p>
   <header class="bar" role="toolbar" data-label="bar.label" hidden id="bar">
     <div class="modes" role="radiogroup" data-label="mode.label">
       <button type="button" id="mode-tree" role="radio" aria-checked="false" data-string="mode.tree"></button>

@@ -15,7 +15,7 @@ use lpk_api::{
 use serde::Serialize;
 
 use crate::browse::{Browser, SelectAction, Status, ViewInfo, ViewRequest};
-use crate::extract::{open_unlocked, NoPrompt, Prompter, Scope};
+use crate::extract::{NoPrompt, Prompter, Scope};
 use crate::grants::{Grant, GrantKind, Granted, Grants};
 use crate::journal::{Journal, Recovered};
 use crate::open::{OpenFolders, Opening};
@@ -37,6 +37,9 @@ pub struct Opened {
     pub format: String,
     /// The generation open.
     pub generation: u64,
+    /// The latest generation of the file: above `generation`, the session is a read-only
+    /// view of an earlier one (E5-8's History, Browse).
+    pub latest_generation: u64,
     /// Encrypted.
     pub encrypted: bool,
     /// Opened without the key.
@@ -298,11 +301,30 @@ impl App {
         prompter: &dyn Prompter,
     ) -> Result<Opened, GuiError> {
         let path = self.grants.resolve(grant, GrantKind::Archive)?;
+        self.open_path(&path, None, cancel, prompter)
+    }
+
+    /// Open the archive at `path`, on `generation` when given (a read-only view of an earlier
+    /// one), asking `prompter` for the password as [`App::open_with`] does.
+    pub(crate) fn open_path(
+        &self,
+        path: &Path,
+        generation: Option<u64>,
+        cancel: &CancelToken,
+        prompter: &dyn Prompter,
+    ) -> Result<Opened, GuiError> {
+        let path = path.to_path_buf();
         // An archive with encrypted names opens keyless and refuses its listing: ask for the
         // password (again when wrong) and reopen with it.
         let mut ask = None;
         let (session, model) = loop {
-            let s = Arc::new(open_unlocked(&path, self.motw_off, prompter, ask)?);
+            let s = Arc::new(crate::extract::open_unlocked_at(
+                &path,
+                generation,
+                self.motw_off,
+                prompter,
+                ask,
+            )?);
             match s.model(cancel) {
                 Ok(m) => break (s, m),
                 Err(e)
@@ -342,6 +364,7 @@ impl App {
             name,
             format: info.format,
             generation: info.generation,
+            latest_generation: info.latest_generation,
             encrypted: info.encrypted,
             keyless: info.keyless,
             total,
