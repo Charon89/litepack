@@ -114,6 +114,7 @@ export function createPreview({ core, t, nextOp, session, showError }) {
     const pre = document.createElement("pre");
     pre.className = "preview-text";
     pre.tabIndex = 0;
+    pre.setAttribute("role", "region");
     pre.setAttribute("aria-label", t("preview.text.label"));
     body.append(pre);
     let at = 0;

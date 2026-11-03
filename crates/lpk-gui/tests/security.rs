@@ -307,6 +307,59 @@ fn every_string_is_in_the_table_and_every_key_is_used() {
     );
 }
 
+/// E5-9: text that a screen reader or a tooltip shows (`aria-label`, `title`, `placeholder`, the
+/// accessible description) comes from the table too, in the markup and in the scripts: a quoted
+/// literal after those names fails, as body text does. A value that is not a literal (`t(...)`,
+/// a variable, `null`) passes.
+#[test]
+fn no_literal_accessible_text_in_markup_or_scripts() {
+    let literal = |rest: &str| {
+        let rest = rest.trim_start();
+        rest.starts_with('"') && !rest.starts_with("\"\"") && rest[1..].contains('"')
+    };
+    for f in gui_files() {
+        let ext = f.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if ext != "html" && ext != "js" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&f).unwrap();
+        let shown = [
+            "aria-label",
+            "aria-description",
+            "title",
+            "placeholder",
+            "alt",
+        ];
+        for name in shown {
+            // Markup: aria-label="text"; scripts: "aria-label": "text", setAttribute("title", "text"),
+            // .title = "text", .placeholder = "text", { alt: "text" }.
+            let forms: [(String, bool); 5] = [
+                (format!(" {name}=\""), true),
+                (format!("\"{name}\": "), false),
+                (format!("setAttribute(\"{name}\", "), false),
+                (format!(".{name} = "), false),
+                (format!("{{ {name}: "), false),
+            ];
+            for (prefix, in_markup) in forms {
+                for (i, _) in text.match_indices(&prefix) {
+                    let rest = &text[i + prefix.len()..];
+                    let is_literal = if in_markup {
+                        !rest.starts_with('"')
+                    } else {
+                        literal(rest)
+                    };
+                    assert!(
+                        !is_literal,
+                        "{}: literal {name} text: {}",
+                        f.display(),
+                        rest.chars().take(40).collect::<String>()
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The recovery's notices stay on the page until dismissed (R125). A text search: the
 /// WebDriver harness (`crates/lpk-gui-e2e`) starts the exe with the runner's own state folder,
 /// and a seeded journal record there would need the harness to redirect `%LOCALAPPDATA%` for

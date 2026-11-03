@@ -9,6 +9,8 @@
 // what would be written, what exists and the free space (extract_plan); existing items are
 // asked about once (Skip, Keep both, Replace, Cancel). Then progress with Cancel, and a result.
 
+import { trapTab } from "./a11y.js";
+
 const GIB = 2 ** 30;
 const MIB = 2 ** 20;
 const MB = 1000 * 1000;
@@ -42,7 +44,8 @@ export function createExtractor(env) {
     if (dialog) {
       return dialog;
     }
-    dialog = el("dialog", { class: "wizard", "aria-labelledby": "wizard-title" });
+    dialog = el("dialog", { class: "wizard", "aria-labelledby": "wizard-title", "aria-describedby": "wizard-body" });
+    trapTab(dialog);
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       onEscape();
@@ -87,7 +90,7 @@ export function createExtractor(env) {
         first = b;
       }
     }
-    d.replaceChildren(el("h2", { id: "wizard-title", text: title }), el("div", { class: "wizard-body" }, ...body), footer);
+    d.replaceChildren(el("h2", { id: "wizard-title", text: title }), el("div", { class: "wizard-body", id: "wizard-body" }, ...body), footer);
     if (!d.open) {
       opener = document.activeElement;
       d.showModal();
@@ -185,7 +188,7 @@ export function createExtractor(env) {
 
   // A progress area and its updater; `planned` (bytes) gives an ETA when the total is known.
   function progressArea(planned) {
-    const bar = el("progress", { max: 100, value: 0 });
+    const bar = el("progress", { max: 100, value: 0, "aria-label": t("progress.label") });
     const line = el("p", { role: "status", "aria-live": "polite" });
     const started = Date.now();
     const update = (ev) => {

@@ -5,6 +5,8 @@
 // a native box Rust shows (the page cannot answer it). DOM built with createElement and
 // textContent only (Trusted Types); every string is in strings/en.json.
 
+import { trapTab } from "./a11y.js";
+
 function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -33,7 +35,8 @@ export function createMaintainer(env) {
     if (dialog) {
       return dialog;
     }
-    dialog = el("dialog", { class: "wizard", "aria-labelledby": "maintain-title" });
+    dialog = el("dialog", { class: "wizard", "aria-labelledby": "maintain-title", "aria-describedby": "maintain-body" });
+    trapTab(dialog);
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       onEscape();
@@ -76,7 +79,7 @@ export function createMaintainer(env) {
         first = b;
       }
     }
-    d.replaceChildren(el("h2", { id: "maintain-title", text: title }), el("div", { class: "wizard-body" }, ...body), footer);
+    d.replaceChildren(el("h2", { id: "maintain-title", text: title }), el("div", { class: "wizard-body", id: "maintain-body" }, ...body), footer);
     if (!d.open) {
       opener = document.activeElement;
       d.showModal();
@@ -104,7 +107,7 @@ export function createMaintainer(env) {
 
   // A progress area: a bar when the engine knows the total, else a count.
   function progressArea() {
-    const bar = el("progress", { max: 100, value: 0 });
+    const bar = el("progress", { max: 100, value: 0, "aria-label": t("progress.label") });
     const line = el("p", { role: "status", "aria-live": "polite" });
     const update = (ev) => {
       const total = ev.files_total ?? null;

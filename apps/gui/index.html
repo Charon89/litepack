@@ -9,39 +9,39 @@
   <script type="module" src="main.js"></script>
 </head>
 <body>
-  <div class="actions" role="toolbar" data-label="actions.label">
-    <button type="button" id="action-open" data-string="action.open"></button>
+  <div class="actions" role="toolbar" data-label="actions.label" data-pane data-pane-focus="button">
+    <button type="button" id="action-open" aria-keyshortcuts="Control+O" data-string="action.open"></button>
     <button type="button" id="action-new" data-string="action.new" aria-keyshortcuts="Control+N"></button>
     <button type="button" id="action-extract" data-string="action.extract" aria-keyshortcuts="Control+E"></button>
     <span class="group" role="group" data-label="maintain.group">
-      <button type="button" id="action-test" data-string="maintain.test"></button>
-      <button type="button" id="action-check" data-string="maintain.check"></button>
-      <button type="button" id="action-history" data-string="maintain.history"></button>
-      <button type="button" id="action-update" data-string="maintain.update"></button>
+      <button type="button" id="action-test" aria-keyshortcuts="Control+Shift+T" data-string="maintain.test"></button>
+      <button type="button" id="action-check" aria-keyshortcuts="Control+Shift+K" data-string="maintain.check"></button>
+      <button type="button" id="action-history" aria-keyshortcuts="Control+Shift+H" data-string="maintain.history"></button>
+      <button type="button" id="action-update" aria-keyshortcuts="Control+Shift+U" data-string="maintain.update"></button>
     </span>
     <label class="setting"><input id="update-check" type="checkbox"><span data-string="settings.updates"></span></label>
   </div>
-  <ul id="notices" class="notices" role="list" data-label="notices.label" hidden></ul>
+  <ul id="notices" class="notices" role="list" aria-live="polite" data-label="notices.label"></ul>
   <p id="banner" class="banner" role="status" hidden><span id="banner-text"></span> <button type="button" id="banner-latest" data-string="banner.latest"></button></p>
-  <header class="bar" role="toolbar" data-label="bar.label" hidden id="bar">
+  <header class="bar" role="toolbar" data-label="bar.label" data-pane data-pane-focus="#filter" hidden id="bar">
     <div class="modes" role="radiogroup" data-label="mode.label">
       <button type="button" id="mode-tree" role="radio" aria-checked="false" data-string="mode.tree"></button>
       <button type="button" id="mode-flat" role="radio" aria-checked="true" data-string="mode.flat"></button>
     </div>
     <nav id="crumbs" class="crumbs" data-label="crumbs.label"></nav>
-    <input id="filter" class="filter" type="search" autocomplete="off" spellcheck="false" data-label="filter.label">
+    <input id="filter" class="filter" type="search" autocomplete="off" spellcheck="false" aria-keyshortcuts="Control+F" data-label="filter.label">
     <label class="glob"><input id="glob" type="checkbox"><span data-string="filter.glob"></span></label>
     <button type="button" id="preview-toggle" aria-pressed="true" aria-keyshortcuts="Alt+P" data-string="preview.toggle"></button>
   </header>
   <main>
     <p id="hint" class="hint" data-string="drop.hint"></p>
-    <section id="recents" class="recents" hidden>
+    <section id="recents" class="recents" data-pane data-pane-focus="button" hidden>
       <h2 data-string="recents.label"></h2>
       <ul id="recent-list"></ul>
       <button type="button" id="recents-clear" data-string="recents.clear"></button>
     </section>
     <div id="split" class="split" hidden>
-      <div id="list" class="list" role="treegrid" aria-rowcount="0" aria-multiselectable="true" tabindex="0" data-label="list.label" hidden>
+      <div id="list" class="list" role="treegrid" aria-rowcount="0" aria-multiselectable="true" tabindex="0" data-label="list.label" data-pane hidden>
         <div class="row head" role="row" aria-rowindex="1">
           <span role="columnheader" aria-sort="none" data-key="name"><button type="button" id="col-name" data-string="list.name"></button></span>
           <span role="columnheader" aria-sort="none" data-key="size" class="num"><button type="button" data-string="list.size"></button></span>
@@ -52,7 +52,7 @@
           <div id="rows" class="layer" role="rowgroup"></div>
         </div>
       </div>
-      <aside id="preview" class="preview" data-label="preview.label">
+      <aside id="preview" class="preview" tabindex="-1" data-label="preview.label" data-pane>
         <header class="preview-head">
           <h2 id="preview-title" class="preview-title"></h2>
           <p id="preview-meta" class="preview-meta"></p>
