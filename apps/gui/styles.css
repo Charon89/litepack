@@ -529,6 +529,9 @@ main {
     outline: 1px dotted CanvasText;
     outline-offset: -3px;
   }
+  .row[aria-selected="true"].focused {
+    outline-color: HighlightText;
+  }
   .list:focus-visible .row.focused {
     outline: 2px solid CanvasText;
   }

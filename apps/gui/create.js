@@ -11,7 +11,7 @@
 // names", recovery (proposed by Rust), "Test when done". Create runs with progress and Cancel,
 // then a summary with Open, Close and "Copy as command".
 
-import { announce, trapTab } from "./a11y.js";
+import { announce, setPhase, trapTab } from "./a11y.js";
 
 const KIB = 2 ** 10;
 const MB = 1000 * 1000;
@@ -66,8 +66,8 @@ export function createCreator(env) {
     return t("create.time.hours", { n: (s / 3600).toFixed(1) });
   };
   let dialog = null;
-  // One live region for the dialog: phase() appends it again after each render and sets it to
-  // the phase's first line, so a result is announced (the phase's own nodes are replaced).
+  // One live region for the dialog: it stays in the dialog for good (phase() replaces the other
+  // children) and is set, a moment after each render, to the phase's first line, so a result is announced (the phase's own nodes are replaced).
   let live = null;
   let opener = null;
   let onEscape = () => {};
@@ -80,6 +80,8 @@ export function createCreator(env) {
     dialog = el("dialog", { class: "wizard create", "aria-labelledby": "create-title", "aria-describedby": "create-body" });
     trapTab(dialog);
     live = el("p", { role: "status", class: "sr-only" });
+    // Never detached: phase() replaces the other children around it.
+    dialog.append(live);
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       onEscape();
@@ -126,7 +128,7 @@ export function createCreator(env) {
         first = b;
       }
     }
-    d.replaceChildren(el("h2", { id: "create-title", text: title }), el("div", { class: "wizard-body", id: "create-body" }, ...body), footer, live);
+    setPhase(d, live, el("h2", { id: "create-title", text: title }), el("div", { class: "wizard-body", id: "create-body" }, ...body), footer);
     announce(d, live);
     if (!d.open) {
       opener = document.activeElement;

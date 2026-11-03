@@ -8,7 +8,7 @@ import { createExtractor } from "./extract.js";
 import { createCreator } from "./create.js";
 import { createPreview } from "./preview.js";
 import { createMaintainer } from "./maintain.js";
-import { keyLabel, syncRadios, wirePanes, wireRadios } from "./a11y.js";
+import { keyLabel, keyLetter, syncRadios, wirePanes, wireRadios } from "./a11y.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
@@ -543,8 +543,8 @@ function wireControls() {
       return;
     }
     const mods = (e.ctrlKey || e.metaKey ? "Control+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "");
-    // The physical key (e.code), so that another keyboard layout (Cyrillic, say) keeps the keys.
-    const letter = /^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : e.key.toUpperCase();
+    // The Latin letter typed, else the physical key's: Dvorak and Cyrillic layouts both keep the keys.
+    const letter = keyLetter(e);
     const chord = `${mods}${letter}`;
     // Ctrl+F is the app's always (never the webview's find bar): the filter, or nothing.
     if (chord === "Control+F") {

@@ -219,6 +219,13 @@ async fn run(c: &Client) -> Result<(), String> {
         "the destination choices",
     )
     .await?;
+    // Mark the dialog's status node: it must be the same node after every phase.
+    c.execute(
+        "document.querySelector('dialog.wizard [role=status].sr-only').dataset.marker = 'kept'; return true;",
+        vec![],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     c.find(Locator::Css("dialog.wizard input[name=dest]:checked"))
         .await
         .map_err(|e| e.to_string())?
@@ -226,6 +233,28 @@ async fn run(c: &Client) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     wait_for(c, "dialog.wizard .check", "the result after Enter").await?;
+    // The same status node survived the phases (never detached) and now holds the result's
+    // first line (set a moment after the render).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let v = c
+            .execute(
+                "const s = document.querySelector('dialog.wizard [role=status].sr-only');                  const p = document.querySelector('dialog.wizard .wizard-body p');                  return !!s && s.isConnected && s.dataset.marker === 'kept' && !!p                      && s.textContent !== '' && s.textContent === p.textContent;",
+                vec![],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if v.as_bool() == Some(true) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the status node was replaced or does not hold the result's first line; page: {}",
+                page_state(c).await
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     // Enter takes the primary action of the result (Close) from the dialog itself.
     press(c, ENTER).await?;
     wait_closed(c).await?;

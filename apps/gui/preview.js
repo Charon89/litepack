@@ -5,6 +5,8 @@
 // an image through a Blob of Rust's MIME type, and everything else as a virtualized hex view.
 // Archive content is never rendered as markup: there is no HTML sink on this page.
 
+import { keyLetter } from "./a11y.js";
+
 const MAGIC = 0x564b504c; // "LPKV" read as a little-endian u32
 const TEXT = 0;
 const IMAGE = 1;
@@ -329,7 +331,7 @@ export function createPreview({ core, t, nextOp, session, showError }) {
 
   toggle.addEventListener("click", () => setShown(!shown));
   document.addEventListener("keydown", (e) => {
-    if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyP") {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && keyLetter(e) === "P") {
       e.preventDefault();
       setShown(!shown);
     }

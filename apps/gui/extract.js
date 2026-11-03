@@ -9,7 +9,7 @@
 // what would be written, what exists and the free space (extract_plan); existing items are
 // asked about once (Skip, Keep both, Replace, Cancel). Then progress with Cancel, and a result.
 
-import { announce, trapTab } from "./a11y.js";
+import { announce, setPhase, trapTab } from "./a11y.js";
 
 const GIB = 2 ** 30;
 const MIB = 2 ** 20;
@@ -35,8 +35,8 @@ export function createExtractor(env) {
   const count = (n) => Number(n).toLocaleString();
   const size = (n) => (n >= GIB ? `${(n / GIB).toFixed(1)} GiB` : `${Math.ceil(n / MIB).toLocaleString()} MiB`);
   let dialog = null;
-  // One live region for the dialog: phase() appends it again after each render and sets it to
-  // the phase's first line, so a result is announced (the phase's own nodes are replaced).
+  // One live region for the dialog: it stays in the dialog for good (phase() replaces the other
+  // children) and is set, a moment after each render, to the phase's first line, so a result is announced (the phase's own nodes are replaced).
   let live = null;
   let opener = null;
   let onEscape = () => {};
@@ -50,6 +50,8 @@ export function createExtractor(env) {
     dialog = el("dialog", { class: "wizard", "aria-labelledby": "wizard-title", "aria-describedby": "wizard-body" });
     trapTab(dialog);
     live = el("p", { role: "status", class: "sr-only" });
+    // Never detached: phase() replaces the other children around it.
+    dialog.append(live);
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       onEscape();
@@ -94,7 +96,7 @@ export function createExtractor(env) {
         first = b;
       }
     }
-    d.replaceChildren(el("h2", { id: "wizard-title", text: title }), el("div", { class: "wizard-body", id: "wizard-body" }, ...body), footer, live);
+    setPhase(d, live, el("h2", { id: "wizard-title", text: title }), el("div", { class: "wizard-body", id: "wizard-body" }, ...body), footer);
     announce(d, live);
     if (!d.open) {
       opener = document.activeElement;
@@ -142,11 +144,8 @@ export function createExtractor(env) {
       }
       nodes.push(ul);
     }
-    for (const n of nodes) {
-      if (n.tagName === "P") {
-        n.setAttribute("role", "alert");
-      }
-    }
+    // One alert per failure: its summary line.
+    nodes[0].setAttribute("role", "alert");
     return { nodes, allow };
   }
 

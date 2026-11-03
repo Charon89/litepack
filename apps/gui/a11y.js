@@ -106,13 +106,44 @@ export function keyLabel(shortcuts) {
   return shortcuts.replaceAll("Control", "Ctrl");
 }
 
-/** Say the first line of the dialog's body through its live region (cleared first, so that the
- *  same words said again are announced again). */
+/** Show a phase: every child of the dialog but the live region is replaced by `nodes`, which
+ *  go before it, so the live region is never detached (a region that leaves the tree and comes
+ *  back is a new one and announces nothing). */
+export function setPhase(dialog, live, ...nodes) {
+  for (const child of [...dialog.children]) {
+    if (child !== live) {
+      child.remove();
+    }
+  }
+  for (const node of nodes) {
+    dialog.insertBefore(node, live);
+  }
+}
+
+/** Say the first line of the dialog's body through its live region: cleared now, set in a later
+ *  task (an update to a region already in the tree is what is announced). A body that starts
+ *  with an alert says itself, so it is not said twice. */
 export function announce(dialog, live) {
-  const first = dialog.querySelector(".wizard-body p");
-  const text = first ? first.textContent : "";
+  const body = dialog.querySelector(".wizard-body");
+  const first = body ? body.firstElementChild : null;
   live.textContent = "";
-  queueMicrotask(() => {
+  if (!first || first.getAttribute("role") === "alert") {
+    return;
+  }
+  const text = first.tagName === "P" ? first.textContent : (body.querySelector("p")?.textContent ?? "");
+  setTimeout(() => {
     live.textContent = text;
-  });
+  }, 80);
+}
+
+/** The letter a key stands for: the character when it is a Latin letter (Dvorak, Colemak), else
+ *  the physical key's (a Cyrillic layout), upper case; otherwise the key itself. */
+export function keyLetter(e) {
+  if (/^[a-zA-Z]$/.test(e.key)) {
+    return e.key.toUpperCase();
+  }
+  if (/^Key[A-Z]$/.test(e.code)) {
+    return e.code.slice(3);
+  }
+  return e.key.toUpperCase();
 }
