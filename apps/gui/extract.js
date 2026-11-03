@@ -103,8 +103,9 @@ export function createExtractor(env) {
     dialog?.close();
   }
 
-  function radios(name, items, current, onChange) {
+  function radios(name, items, current, onChange, legend) {
     const box = el("fieldset");
+    box.append(el("legend", { text: legend }));
     for (const item of items) {
       const input = el("input", { type: "radio", name, value: item.id, checked: item.id === current, disabled: Boolean(item.disabled) });
       input.addEventListener("change", () => onChange(item));
@@ -250,15 +251,25 @@ export function createExtractor(env) {
         }
       });
       const body = [
-        el("legend", { text: t("extract.dest.legend") }),
-        radios("dest", dests, state.dest.id, (item) => {
-          state.dest = item;
-        }),
+        radios(
+          "dest",
+          dests,
+          state.dest.id,
+          (item) => {
+            state.dest = item;
+          },
+          t("extract.dest.legend"),
+        ),
         choose,
-        el("legend", { text: t("extract.scope.legend") }),
-        radios("scope", scopes, state.scope, (item) => {
-          state.scope = item.id;
-        }),
+        radios(
+          "scope",
+          scopes,
+          state.scope,
+          (item) => {
+            state.scope = item.id;
+          },
+          t("extract.scope.legend"),
+        ),
       ];
       if (note) {
         body.push(...note);

@@ -550,6 +550,7 @@ function wireControls() {
   });
   wirePanes();
   wireRadios($("mode-tree").parentElement);
+  syncRadios($("mode-tree").parentElement);
   $("recents-clear").addEventListener("click", () => {
     core
       .invoke("clear_recents")

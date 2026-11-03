@@ -2,7 +2,7 @@
 // F6 between the panes, Tab wrapping inside a modal dialog, and a roving tab stop for a radio
 // group made of buttons. No strings here: the page's text lives in strings/en.json.
 
-const FOCUSABLE = 'a[href], button, input, select, textarea, [tabindex]';
+const FOCUSABLE = 'a[href], button, input, select, textarea, summary, [tabindex]';
 
 function shown(e) {
   return !e.hidden && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
