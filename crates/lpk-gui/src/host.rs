@@ -865,6 +865,12 @@ fn may_exit(handle: &AppHandle, host: &Host) -> bool {
 
 /// Run the GUI; the process's exit code.
 pub fn run() -> i32 {
+    // E6-4: `--register-shell` and `--unregister-shell` first of all: no window, no webview, no
+    // single-instance plugin (never forwarded to a running instance); they exit with a code.
+    let literal: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(code) = lpk_gui::register::handle(&literal) {
+        return code;
+    }
     let cwd = std::env::current_dir().ok();
     let (parsed, startup_files) =
         cli::parse_with_files(std::env::args_os().skip(1), cwd.as_deref());
