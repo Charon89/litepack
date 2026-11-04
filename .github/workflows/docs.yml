@@ -37,6 +37,12 @@ jobs:
         run: bash scripts/check-book-footer.sh
       - name: Build the book
         run: mdbook build book
+      # The site publishes no font files (docs/LICENSING.md: Source Code Pro is OFL-1.1, not on the allow-list);
+      # book/theme/fonts/fonts.css keeps mdBook's bundled fonts out, and an mdBook upgrade must not bring them back.
+      - name: No font or third-party licence file in the site
+        run: |
+          found=$(find book/book \( -iname '*.woff' -o -iname '*.woff2' -o -iname '*.ttf' -o -iname '*.otf' -o -iname '*LICENSE*' \) -print)
+          if [ -n "$found" ]; then echo "the site would publish: $found"; exit 1; fi
       - uses: actions/upload-pages-artifact@v5
         with:
           path: book/book
