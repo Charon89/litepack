@@ -104,4 +104,20 @@ the binary's parser with this table.
 `@file` response files carry longer argument lists: UTF-8 text (an optional byte-order mark), one argument
 per line, blank lines skipped, not recursive (a line starting with `@` is a path), at most 16 MiB across a
 command line's files. They are for users and scripts; E6's menus pass their paths in the binary `.verbs` files
-of `docs/notes/e6-design.md` ("Invoke: the contract with the GUI"), whose reader E6-2 adds.
+of `docs/notes/e6-design.md` ("Invoke: the contract with the GUI"), read by `lpk-gui`'s `shellfile` (E6-2).
+
+**The menu's response file (format v1).** `lpk_shell.dll` writes `shell-<32 lowercase hex>.verbs` (create-new)
+into `%LOCALAPPDATA%\org.litepack.gui\Verbs` (the installed GUI's local state, whatever a portable copy's own
+folder) and starts `"<GuiPath>" @<file>` (the `@` argument quoted when the path holds a space), `GuiPath` being
+the string value `HKCU\Software\LitePack\GuiPath`; with none, or not an existing file, it starts nothing and
+writes nothing. Little-endian: the 8 ASCII bytes `LPKVERBS`; a `u16` version (1); the verb as a `u16` count of
+UTF-16 code units and the units (`--open`, `--create`, `--extract-here`, `--extract-to`, `--test` or `--convert`);
+the `--name` value as a `u32` count and the units (count 0 when the verb has none); a `u32` path count; per path a
+`u32` count of UTF-16LE code units and the units, unpaired surrogates kept; nothing follows the last path. The GUI
+reads such a file only when it is in that folder and so named (any other `@file` is the text format above), accepts
+version 1, refuses a wrong magic or version, a truncated file or one with trailing bytes, more than 16 MiB, more than
+1,048,576 paths, a path over 32,767 units or an empty one, rebuilds each path losslessly (`OsString::from_wide`),
+and deletes that file, never another `@file`, once the instance that acts on the verb has it (a second instance
+forwards the argument and leaves the file to the first); at start-up it removes such files older than 24 hours.
+`crates/lpk-gui/tests/data/shell-v1.verbs` is the one test vector: the writer's test produces exactly its bytes and
+the reader's test parses it.

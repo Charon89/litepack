@@ -42,6 +42,7 @@ pub mod preview;
 pub mod recents;
 pub mod security;
 pub mod settings;
+pub mod shellfile;
 pub mod strings;
 pub mod update;
 pub mod write;
