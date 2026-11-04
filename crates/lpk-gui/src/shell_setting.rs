@@ -14,7 +14,7 @@
 //! host builds the real one (`ShellSetting::system`), tests inject an in-memory registry.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use lpk_api::Class;
@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::paths::PORTABLE_MARKER;
 use crate::register::{
-    self, encode_value, normalize_path, open_with_extensions, RegValue, Registry, ShellVerb,
+    self, encode_value, normalize_path, open_with_extensions, RegValue, RegisterError, Registry,
     CLASSES, LITEPACK, RECORD,
 };
 use crate::GuiError;
@@ -64,7 +64,13 @@ impl std::fmt::Debug for ShellSetting {
     }
 }
 
+/// Whether two paths name the same file: when both exist, their canonical forms (so an 8.3 name
+/// and the long one match, and the file system decides the case); otherwise a comparison of the
+/// text as a Windows path, case-insensitive.
 fn same_path(a: &str, b: &str) -> bool {
+    if let (Ok(ca), Ok(cb)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        return ca == cb;
+    }
     let norm = |p: &str| {
         normalize_path(p)
             .replace('/', "\\")
@@ -166,20 +172,20 @@ impl ShellSetting {
             ));
         }
         let mut reg = (self.registry)();
-        match register::run_verb(
-            ShellVerb::Register { open_with: on },
-            Path::new(&self.exe),
-            &mut *reg,
-        ) {
-            register::exit::DONE => {}
-            register::exit::REFUSED => {
-                return Err(GuiError::usage("the registration was refused"));
+        match register::register_for(&self.exe, on, &mut *reg) {
+            Ok(()) => {}
+            Err(RegisterError::Refused(why)) => {
+                return Err(GuiError::usage(format!(
+                    "the registration was refused: {why}"
+                )));
             }
-            _ => {
+            // The cause goes to the page in the detail (a release build has no console); the
+            // record names what was written, so `--unregister-shell` or a reinstall repairs it.
+            Err(RegisterError::Failed(e)) => {
                 return Err(lpk_api::Error::new(
                     Class::Internal,
-                    "ShellSetting",
-                    "the registration failed; the Open with entries may be incomplete".to_string(),
+                    "RegisterFailed",
+                    e.to_string(),
                     None,
                 )
                 .into());

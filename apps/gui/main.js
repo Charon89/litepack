@@ -377,9 +377,17 @@ async function wireSettings() {
 // E6-4: the "Open with" switch and the "Default apps…" button. Rust says whether this copy is the
 // registered one (the installer's, named by the registration record); if not, they stay hidden.
 // The switch re-registers in process; a failure shows in this area's own alert.
+// The alert lies outside the group: a failed re-registration can leave this copy unregistered,
+// which hides the group, and the error must stay.
 function shellAlert(e) {
   const alert = $("shell-alert");
-  alert.textContent = e ? `${t("error.title")}: ${describe(e)}` : "";
+  if (!e) {
+    alert.textContent = "";
+  } else if (e.kind === "RegisterFailed") {
+    alert.textContent = t("settings.shell.failed", { cause: e.detail });
+  } else {
+    alert.textContent = `${t("error.title")}: ${describe(e)}`;
+  }
   alert.hidden = !e;
 }
 
@@ -399,9 +407,17 @@ async function wireShell() {
   const box = $("open-with");
   const status = await core.invoke("shell_status").catch(() => ({ registered: false }));
   showShell(status);
+  let working = false;
   box.addEventListener("change", async () => {
+    // Not `disabled` (that may drop the keyboard focus to the body): the focus stays, and a
+    // second change during the call is undone and ignored.
+    if (working) {
+      box.checked = !box.checked;
+      return;
+    }
+    working = true;
+    box.setAttribute("aria-disabled", "true");
     shellAlert(null);
-    box.disabled = true;
     try {
       showShell(await core.invoke("set_open_with", { on: box.checked }));
     } catch (e) {
@@ -409,7 +425,8 @@ async function wireShell() {
       // The record is consistent whatever happened: show what it says now.
       showShell(await core.invoke("shell_status").catch(() => ({ registered: false })));
     } finally {
-      box.disabled = false;
+      working = false;
+      box.removeAttribute("aria-disabled");
     }
   });
   $("default-apps").addEventListener("click", () => {

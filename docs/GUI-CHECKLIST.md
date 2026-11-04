@@ -59,12 +59,12 @@ development build, which must show neither control.
 |---|---|---|---|
 | 10.1 | A portable copy, a development build and a copy that is not the registered one | Neither the "Offer LitePack in "Open with"..." box nor "Default apps..." is on the page (absent, not greyed) | |
 | 10.2 | The installed copy, installed without the opt-in | Both show; the box is unticked and names the formats (for example ".zip, .7z, ..."); Tab reaches the box then the button with a visible ring | |
-| 10.3 | Tick the box | A moment later it stays ticked; right-click a `.zip` > Open with lists LitePack (as an option, never the default); the other copy's `.lpk` association is untouched | |
+| 10.3 | Tick the box | A moment later it stays ticked; right-click a `.zip` > Open with lists LitePack (as an option, never the default); a `.zip` default someone else chose (for example 7-Zip's) is untouched | |
 | 10.4 | Untick the box | The Open with entry for `.zip` is gone again; `.lpk` still opens in LitePack | |
 | 10.5 | Tick it, close and reopen the window | The box is still ticked (the page reads the record) | |
 | 10.6 | "Default apps..." on Windows 11 | Settings opens on LitePack's own default-apps page (the `registeredAppUser=LitePack` address) | |
 | 10.7 | "Default apps..." on Windows 10 22H2 | Settings opens; it may ignore the parameter and show the general Default apps page. Record which in the Result column (E6-7) | |
-| 10.8 | Windows high contrast, Narrator | The box and button are named, the ring and the box state are visible; a failure (make the registry key read-only) is read as an alert | |
+| 10.8 | Windows high contrast, Narrator | The box and button are named, the ring and the box state are visible; a failure (in regedit, deny your user "Set Value" on `HKCU\Software\Classes\.zip\OpenWithProgids`, then tick the box) shows the alert "LitePack's Explorer integration may be incomplete ... Reinstall LitePack, or run lpk-gui.exe --register-shell, to repair it." under the command bar, it stays even if the controls vanish, and Narrator reads it; restore the permission and repair afterwards | |
 
 ## E5-6 Preview pane
 

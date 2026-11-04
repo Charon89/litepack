@@ -242,6 +242,73 @@ fn a_failure_mid_way_is_an_error_and_the_record_stays_undoable() {
 }
 
 #[test]
+fn a_failure_before_guipath_is_rewritten_returns_the_cause_and_unregisters_the_copy() {
+    let r = rig(false);
+    r.install(true);
+    // The writes the undo makes: the first failing write after them is the registration's own.
+    let undo_writes = {
+        let mut probe = r.reg.with(|f| f.clone());
+        let before = probe.writes;
+        unregister(&mut probe).unwrap();
+        probe.writes - before
+    };
+    r.reg.with(|f| f.fail_at = Some(f.writes + undo_writes));
+    let e = r.setting.set_open_with(false).unwrap_err();
+    assert!(e.is(Class::Internal), "{e:?}");
+    assert_eq!(e.kind, "RegisterFailed");
+    assert!(e.detail.contains("injected"), "the cause is carried: {e:?}");
+    r.reg.with(|f| f.fail_at = None);
+    // GuiPath is gone with the undo, so the status now hides the controls: the page must show
+    // the error somewhere that hiding them cannot hide.
+    let s = r.setting.status();
+    assert!(!s.registered, "{s:?}");
+    assert!(r
+        .reg
+        .with(|f| f.value("Software\\LitePack", "GuiPath"))
+        .is_none());
+}
+
+#[test]
+fn a_refusal_names_why() {
+    let r = rig(false);
+    r.install(false);
+    std::fs::remove_file(r.dir.path().join("lpk_shell.dll")).unwrap();
+    let e = r.setting.set_open_with(true).unwrap_err();
+    assert!(e.is(Class::Usage), "{e:?}");
+    assert!(e.detail.contains("lpk_shell.dll"), "{e:?}");
+}
+
+#[test]
+fn paths_are_compared_exactly_not_loosely() {
+    let r = rig(false);
+    let exe = r.exe_str();
+    let dir = normalize_path(r.dir.path().to_str().unwrap());
+    // Not the same file: a suffix, a sibling folder, the parent folder.
+    assert!(!same_path(&format!("{exe}.bak"), &exe));
+    assert!(!same_path(&format!("{dir}-other\\lpk-gui.exe"), &exe));
+    assert!(!same_path(&dir, &exe));
+    // Nothing exists there: the textual comparison, case-insensitive, `/` is `\`.
+    assert!(same_path(
+        "C:\\Apps\\LitePack\\LPK-GUI.EXE",
+        "c:/apps/litepack/lpk-gui.exe"
+    ));
+    assert!(!same_path(
+        "C:\\Apps\\LitePack\\lpk-gui.exe",
+        "C:\\Apps\\LitePack\\lpk-gui.exe.bak"
+    ));
+    assert!(!same_path(
+        "C:\\Apps\\LitePack\\lpk-gui.exe",
+        "C:\\Apps\\LitePack"
+    ));
+    // Both exist: the canonical form decides (a `.` or `..` detour is the same file).
+    std::fs::create_dir(r.dir.path().join("sub")).unwrap();
+    let detour = r.dir.path().join("sub").join("..").join("lpk-gui.exe");
+    assert!(same_path(detour.to_str().unwrap(), &exe));
+    // Another existing file in the same folder is not.
+    assert!(!same_path(&r.dll_str(), &exe));
+}
+
+#[test]
 fn the_default_apps_button_opens_the_fixed_page_only_for_the_registered_copy() {
     let r = rig(false);
     r.install(true);

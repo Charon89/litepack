@@ -378,6 +378,52 @@ pub fn parse_shell_verb(args: &[OsString]) -> Option<Result<ShellVerb, String>> 
     Some(Ok(verb))
 }
 
+/// Why [`register_for`] did not register.
+#[derive(Debug)]
+pub enum RegisterError {
+    /// Refused before anything was written (the reason).
+    Refused(&'static str),
+    /// Failed part-way: what was written is in the record, `--unregister-shell` undoes it.
+    Failed(io::Error),
+}
+
+/// `--register-shell [--open-with]` for the executable at `exe`, returning the cause instead of
+/// printing it: the checks of [`run_verb`] (no folder, a portable copy, `lpk_shell.dll` missing,
+/// a path that is not Unicode or holds `%`), then [`register`].
+pub fn register_for<R: Registry + ?Sized>(
+    exe: &Path,
+    open_with: bool,
+    reg: &mut R,
+) -> Result<(), RegisterError> {
+    let Some(dir) = exe.parent() else {
+        return Err(RegisterError::Refused("the executable has no folder"));
+    };
+    if dir.join(PORTABLE_MARKER).is_file() {
+        return Err(RegisterError::Refused(
+            "a portable copy does not register itself with the shell",
+        ));
+    }
+    let dll = dir.join(SHELL_DLL);
+    if !dll.is_file() {
+        return Err(RegisterError::Refused(
+            "lpk_shell.dll is missing beside the executable",
+        ));
+    }
+    let (Some(gui), Some(dll)) = (exe.to_str(), dll.to_str()) else {
+        return Err(RegisterError::Refused(
+            "the installation path is not valid Unicode",
+        ));
+    };
+    let (gui, dll) = (normalize_path(gui), normalize_path(dll));
+    // Explorer substitutes `%1`, `%L`, `%D` and the like in a verb's command line.
+    if gui.contains('%') {
+        return Err(RegisterError::Refused(
+            "the installation path contains '%'; it cannot be registered",
+        ));
+    }
+    register(reg, &gui, &dll, open_with).map_err(RegisterError::Failed)
+}
+
 /// Run `verb` for the executable at `exe` over `reg`; the exit code. A portable copy (the
 /// `portable` marker beside the exe) never registers, and `lpk_shell.dll` must lie beside the exe:
 /// both are checked before anything is written. Notifies Explorer through `reg`.
@@ -390,38 +436,17 @@ pub fn run_verb<R: Registry + ?Sized>(verb: ShellVerb, exe: &Path, reg: &mut R) 
                 exit::FAILED
             }
         },
-        ShellVerb::Register { open_with } => {
-            let Some(dir) = exe.parent() else {
-                eprintln!("lpk-gui: the executable has no folder");
-                return exit::REFUSED;
-            };
-            if dir.join(PORTABLE_MARKER).is_file() {
-                eprintln!("lpk-gui: a portable copy does not register itself with the shell");
-                return exit::REFUSED;
+        ShellVerb::Register { open_with } => match register_for(exe, open_with, reg) {
+            Ok(()) => exit::DONE,
+            Err(RegisterError::Refused(why)) => {
+                eprintln!("lpk-gui: {why}");
+                exit::REFUSED
             }
-            let dll = dir.join(SHELL_DLL);
-            if !dll.is_file() {
-                eprintln!("lpk-gui: {SHELL_DLL} is missing beside the executable");
-                return exit::REFUSED;
+            Err(RegisterError::Failed(e)) => {
+                eprintln!("lpk-gui: --register-shell failed: {e}");
+                exit::FAILED
             }
-            let (Some(gui), Some(dll)) = (exe.to_str(), dll.to_str()) else {
-                eprintln!("lpk-gui: the installation path is not valid Unicode");
-                return exit::REFUSED;
-            };
-            let (gui, dll) = (normalize_path(gui), normalize_path(dll));
-            // Explorer substitutes `%1`, `%L`, `%D` and the like in a verb's command line.
-            if gui.contains('%') {
-                eprintln!("lpk-gui: the installation path contains '%'; it cannot be registered");
-                return exit::REFUSED;
-            }
-            match register(reg, &gui, &dll, open_with) {
-                Ok(()) => exit::DONE,
-                Err(e) => {
-                    eprintln!("lpk-gui: --register-shell failed: {e}");
-                    exit::FAILED
-                }
-            }
-        }
+        },
     }
 }
 
