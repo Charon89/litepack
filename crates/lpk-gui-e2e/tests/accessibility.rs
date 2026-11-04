@@ -517,28 +517,48 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
     .await;
     rep.record("the history dialog (list)", r);
 
-    // Browse an earlier generation: the read-only view with its banner (the history dialog is
-    // still open if its state passed or not; the flow opens it again when it is not).
+    // Browse an earlier generation, as a user does: open History, pick a generation other than
+    // the open one, wait until Browse is enabled, press it from the keyboard. (The dialog of the
+    // state above is closed first: the selectors name `dialog[open]`, never a closed dialog's
+    // leftover content.)
+    recover(c).await;
     let r = async {
-        let open = c
+        click(c, "#action-history").await?;
+        wait_for(
+            c,
+            "dialog.wizard[open] input[name=generation]",
+            "the history list",
+        )
+        .await?;
+        dialog_settled(c).await?;
+        let picked = c
             .execute(
-                "return !!document.querySelector('dialog[open] input[name=generation]');",
+                "const r = [...document.querySelectorAll('dialog[open] input[name=generation]')].find((x) => !x.checked); \
+                 if (!r) return false; r.click(); return true;",
                 vec![],
             )
             .await
             .map_err(|e| e.to_string())?;
-        if open.as_bool() != Some(true) {
-            recover(c).await;
-            click(c, "#action-history").await?;
-            wait_for(c, "dialog.wizard input[name=generation]", "the history list").await?;
+        if picked.as_bool() != Some(true) {
+            return Err("no other generation to pick".to_string());
         }
+        wait_script(
+            c,
+            "Browse enabled",
+            "const b = document.querySelector('dialog[open] .wizard-buttons button.primary'); return !!b && !b.disabled;",
+        )
+        .await?;
         c.execute(
-            "const r = [...document.querySelectorAll('dialog input[name=generation]')].find((x) => !x.checked); r.click(); return true;",
+            "document.querySelector('dialog[open] .wizard-buttons button.primary').focus(); return true;",
             vec![],
         )
         .await
         .map_err(|e| e.to_string())?;
-        click(c, "dialog.wizard button.primary").await?;
+        let browse = c.active_element().await.map_err(|e| e.to_string())?;
+        browse
+            .send_keys("\u{E007}")
+            .await
+            .map_err(|e| format!("Enter on Browse: {e}"))?;
         wait_script(
             c,
             "the generation's view",

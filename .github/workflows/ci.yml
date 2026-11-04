@@ -222,7 +222,7 @@ jobs:
       # E5-9: axe-core, the accessibility checker the WebDriver tests inject into every view and
       # dialog. Deque's axe-core is MPL-2.0 (docs/LICENSING.md): used unmodified, test-only, fetched
       # here and verified by hash, never in the repository and never shipped. The version, URL and
-      # both hashes of the npm tarball are pinned in this step and nowhere else.
+      # both hashes of the registry tarball are pinned in this step and nowhere else.
       - name: axe-core 4.14.0 (test-only, hash-verified)
         shell: pwsh
         env:
@@ -250,7 +250,7 @@ jobs:
         env:
           LPK_GUI_E2E: "1"
           LPK_E2E_WORK: ${{ runner.temp }}/gui-e2e
-        run: cargo test --locked -p lpk-gui-e2e -- --nocapture
+        run: cargo test --locked --no-fail-fast -p lpk-gui-e2e -- --nocapture
       - name: After a failure, the processes and DevToolsActivePort files
         if: failure()
         shell: pwsh
