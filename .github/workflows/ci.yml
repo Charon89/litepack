@@ -131,7 +131,9 @@ jobs:
         shell: pwsh
         run: |
           cargo build --locked --release -p lpk-shell
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -File scripts/e6-registry-diff.ps1 target/release/lpk-gui.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       # Risk 2 of the E5 design: the MPL-2.0 crate option-ext is used only by dirs-sys on Unix; no symbol of it
       # may reach the Windows exe (webview2_com is the control: present).
       - name: No option-ext symbol in the PDB

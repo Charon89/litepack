@@ -135,7 +135,8 @@ literal command line (not from an `@file`, not mixed with the verbs above or wit
 
 Exit codes: 0 done; 1 failed (what was written is in the record, `--unregister-shell` undoes it); 2 refused, with
 nothing written: a portable copy (the `portable` marker beside the exe) never registers, unknown or extra
-arguments, or `lpk_shell.dll` missing beside the exe. Both verbs end with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
+arguments (also one that is not valid Unicode), `lpk_shell.dll` missing beside the exe, or an install path
+containing `%` (Explorer would substitute it in the open command). Both verbs end with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
 
 What `--register-shell` writes, all under `HKEY_CURRENT_USER`, values `REG_SZ` unless noted:
 

@@ -289,8 +289,28 @@ fn registration_writes_exactly_these_keys_and_values() {
         assert!(got.contains(w), "missing {w:?}");
     }
     assert_eq!(got.len(), want.len());
-    // Nothing near the user's choice.
-    for (k, _, _) in &got {
+    // The keys too, empty ones included: every ancestor of a key holding a value, and nothing else
+    // (the record's own key apart).
+    let mut want_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (k, _, _) in &want {
+        let mut prefix = String::new();
+        for part in k.split('\\') {
+            if !prefix.is_empty() {
+                prefix.push('\\');
+            }
+            prefix.push_str(part);
+            want_keys.insert(prefix.clone());
+        }
+    }
+    let got_keys: std::collections::BTreeSet<String> = reg
+        .keys
+        .keys()
+        .filter(|k| !k.starts_with("software\\litepack\\registration"))
+        .cloned()
+        .collect();
+    assert_eq!(got_keys, want_keys);
+    // Nothing near the user's choice: no such key exists at all.
+    for k in reg.keys.keys() {
         assert!(!k.contains("fileexts") && !k.contains("userchoice"), "{k}");
     }
     // The three shell keys carry no `.lpk`-style default and no extension default but `.lpk`'s.
@@ -384,14 +404,9 @@ fn a_failure_while_unregistering_can_be_retried() {
         assert!(unregister(&mut r).is_err());
         r.fail_at = None;
         unregister(&mut r).unwrap();
-        let mut want = before.snapshot();
-        if n == steps - 1 {
-            // The one window the record cannot cover: it is already gone when the last key
-            // (`Software\LitePack`, empty) fails to delete. Nothing else is left behind.
-            want.push(("software\\litepack".to_string(), Vec::new()));
-            want.sort();
-        }
-        assert_eq!(r.snapshot(), want, "failed after {n} writes");
+        // Also when the last key (`Software\LitePack`, empty) failed to delete: the retry finds no
+        // record and clears that residue.
+        assert_eq!(r.snapshot(), before.snapshot(), "failed after {n} writes");
     }
 }
 
@@ -466,6 +481,51 @@ fn the_shell_verbs_are_read_from_the_literal_command_line_only() {
             "{bad:?}"
         );
     }
+}
+
+#[test]
+fn an_argument_that_is_not_unicode_is_refused() {
+    #[cfg(windows)]
+    let odd = {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[0xD800, 0x61])
+    };
+    #[cfg(unix)]
+    let odd = {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![0xff, 0x61])
+    };
+    let a = vec![OsString::from("--register-shell"), odd];
+    assert!(matches!(parse_shell_verb(&a), Some(Err(_))));
+}
+
+#[test]
+fn a_percent_sign_in_the_install_path_is_refused_before_any_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("100%done");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join(SHELL_DLL), b"").unwrap();
+    let exe = sub.join("lpk-gui.exe");
+    std::fs::write(&exe, b"").unwrap();
+    let mut reg = Fake::default();
+    let verb = ShellVerb::Register { open_with: false };
+    assert_eq!(run_verb(verb, &exe, &mut reg), exit::REFUSED);
+    assert_eq!(reg.writes, 0);
+    assert_eq!(reg.notifies, 0);
+}
+
+#[test]
+fn verbatim_prefixes_are_normalized() {
+    assert_eq!(normalize_path("C:\\a\\b.exe"), "C:\\a\\b.exe");
+    assert_eq!(normalize_path("\\\\?\\C:\\a\\b.exe"), "C:\\a\\b.exe");
+    assert_eq!(
+        normalize_path("\\\\?\\UNC\\srv\\share\\b.exe"),
+        "\\\\srv\\share\\b.exe"
+    );
+    assert_eq!(
+        normalize_path("\\\\srv\\share\\b.exe"),
+        "\\\\srv\\share\\b.exe"
+    );
 }
 
 fn install(portable: bool, dll: bool) -> (tempfile::TempDir, std::path::PathBuf) {

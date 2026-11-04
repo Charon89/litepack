@@ -275,7 +275,6 @@ fn apply<R: Registry>(reg: &mut R, gui: &str, dll: &str, open_with: bool) -> io:
 }
 
 fn undo<R: Registry>(reg: &mut R) -> io::Result<()> {
-    let had_record = reg.key_exists(RECORD)?;
     let mut entries = reg.list_values(RECORD)?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let mut values = Vec::new();
@@ -308,9 +307,10 @@ fn undo<R: Registry>(reg: &mut R) -> io::Result<()> {
     for key in &keys {
         reg.delete_key_if_empty(key)?;
     }
-    if had_record && entries.is_empty() {
-        // A run that failed between creating the record and its first entry: `Software\LitePack`
-        // held nothing but the empty record, which is gone now.
+    if entries.is_empty() {
+        // No record, or one with nothing in it (a run that failed between creating the record and
+        // its first entry, or a retry after the record's last key failed to delete): LitePack's
+        // own key, if empty, is residue.
         reg.delete_key_if_empty(LITEPACK)?;
     }
     Ok(())
@@ -346,7 +346,13 @@ pub fn parse_shell_verb(args: &[OsString]) -> Option<Result<ShellVerb, String>> 
     if !args.iter().any(is_verb) {
         return None;
     }
-    let strs: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
+    let Some(strs) = args
+        .iter()
+        .map(|a| a.to_str())
+        .collect::<Option<Vec<&str>>>()
+    else {
+        return Some(Err("an argument is not valid Unicode".to_string()));
+    };
     let verb =
         match strs.as_slice() {
             ["--register-shell"] => ShellVerb::Register { open_with: false },
@@ -392,8 +398,13 @@ pub fn run_verb<R: Registry>(verb: ShellVerb, exe: &Path, reg: &mut R) -> i32 {
                 eprintln!("lpk-gui: the installation path is not valid Unicode");
                 return exit::REFUSED;
             };
-            let (gui, dll) = (strip_verbatim(gui), strip_verbatim(dll));
-            match register(reg, gui, dll, open_with) {
+            let (gui, dll) = (normalize_path(gui), normalize_path(dll));
+            // Explorer substitutes `%1`, `%L`, `%D` and the like in a verb's command line.
+            if gui.contains('%') {
+                eprintln!("lpk-gui: the installation path contains '%'; it cannot be registered");
+                return exit::REFUSED;
+            }
+            match register(reg, &gui, &dll, open_with) {
                 Ok(()) => exit::DONE,
                 Err(e) => {
                     eprintln!("lpk-gui: --register-shell failed: {e}");
@@ -404,8 +415,14 @@ pub fn run_verb<R: Registry>(verb: ShellVerb, exe: &Path, reg: &mut R) -> i32 {
     }
 }
 
-fn strip_verbatim(p: &str) -> &str {
-    p.strip_prefix("\\\\?\\").unwrap_or(p)
+/// A path as a registry value should hold it: without the verbatim prefix, and a verbatim UNC
+/// path (`\\?\UNC\srv\share`) as `\\srv\share`.
+fn normalize_path(p: &str) -> String {
+    if let Some(unc) = p.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{unc}")
+    } else {
+        p.strip_prefix("\\\\?\\").unwrap_or(p).to_string()
+    }
 }
 
 /// The two entry points of the real registry, called first in `host::run()` (before the Tauri

@@ -8,7 +8,6 @@ param([Parameter(Mandatory = $true)][string]$Gui)
 $ErrorActionPreference = 'Stop'
 if ($env:CI -ne 'true') { throw 'e6-registry-diff.ps1 writes the registry of the user running it: it runs on CI only (CI=true)' }
 $Gui = (Resolve-Path -LiteralPath $Gui).Path
-$clsid = '{01E42821-7D51-4B9B-AD9F-FFCA769A6025}'
 $exts = 'lpk', 'zip', '7z', 'rar', 'tar', 'tgz'
 $classes = 'HKCU\Software\Classes'
 $explorer = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts'
@@ -16,8 +15,10 @@ $explorer = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts'
 # Every key the registration touches, and each extension's UserChoice.
 $keys = @()
 foreach ($e in $exts) { $keys += "$classes\.$e"; $keys += "$classes\LitePack.$e" }
-foreach ($t in '*', 'Directory', 'Directory\Background') { $keys += "$classes\$t\shell\LitePack" }
-$keys += "$classes\CLSID\$clsid", 'HKCU\Software\LitePack', 'HKCU\Software\RegisteredApplications'
+# Whole subtrees, so that a parent registration created (`*\shell`, `Directory\Background\shell`, `CLSID`) and left
+# empty shows too; `Directory` covers `Directory\Background`.
+foreach ($t in '*', 'Directory', 'CLSID') { $keys += "$classes\$t" }
+$keys += 'HKCU\Software\LitePack', 'HKCU\Software\RegisteredApplications'
 $choices = $exts | ForEach-Object { "$explorer\.$_\UserChoice" }
 
 # `reg export` of each key (its whole subtree) as text; an absent key is the text ABSENT.
