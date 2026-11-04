@@ -13,6 +13,9 @@
 #[cfg(windows)]
 pub mod com;
 pub mod model;
+pub mod protocol;
+#[cfg(test)]
+mod selection_tests;
 
 #[cfg(test)]
 mod tests {
