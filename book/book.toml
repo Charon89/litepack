@@ -1,0 +1,12 @@
+[book]
+title = "LitePack"
+src = "src"
+language = "en"
+
+[output.html]
+git-repository-url = "https://github.com/Charon89/litepack"
+site-url = "/litepack/"
+
+[output.html.search]
+# The index covers this book only (mdBook indexes nothing else).
+enable = true
