@@ -50,9 +50,30 @@ function Compare-Snapshots($Before, $After, [string]$What) {
 }
 
 function Invoke-Gui([string[]]$Arguments) {
-    # A GUI-subsystem exe: only Start-Process -Wait waits for it.
-    $p = Start-Process -FilePath $Gui -ArgumentList $Arguments -Wait -PassThru
+    # A GUI-subsystem exe: only Start-Process -Wait waits for it. Its stderr goes to a file, shown when not empty.
+    $err = Join-Path $env:RUNNER_TEMP ("e6-gui-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $p = Start-Process -FilePath $Gui -ArgumentList $Arguments -Wait -PassThru -RedirectStandardError $err
+    $text = Get-Content -LiteralPath $err -Raw -ErrorAction SilentlyContinue
+    if ($text) { Write-Host "lpk-gui $($Arguments -join ' ') stderr: $text" }
+    Remove-Item -LiteralPath $err -Force -ErrorAction SilentlyContinue
     return $p.ExitCode
+}
+
+# On a failed check: the association chain as the per-user and merged views hold it, what AssocQueryStringW gives for
+# the command and the executable, and the session's UAC setting and integrity level.
+function Show-Chain {
+    foreach ($k in "$classes\.lpk", "$classes\LitePack.lpk", 'HKCR\.lpk', 'HKCR\LitePack.lpk', 'HKCU\Software\LitePack') {
+        Write-Host "--- reg query $k /s"
+        cmd /c "reg query `"$k`" /s 2>&1"
+    }
+    foreach ($s in 1, 2) {
+        $b = New-Object System.Text.StringBuilder 1024
+        [uint32]$l = 1024
+        $r = [LpkAssoc]::AssocQueryStringW(0, $s, '.lpk', $null, $b, [ref]$l)
+        Write-Host ('AssocQueryStringW(.lpk, ASSOCSTR {0}) = 0x{1:X8} "{2}"' -f $s, $r, $b.ToString())
+    }
+    cmd /c 'reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA 2>&1'
+    whoami /groups | Select-String 'Mandatory Label'
 }
 
 Add-Type -TypeDefinition @'
@@ -69,12 +90,23 @@ $before = Get-Snapshot ($keys + $choices)
 $code = Invoke-Gui @('--register-shell', '--open-with')
 if ($code -ne 0) { throw "--register-shell --open-with exited $code" }
 
-# `.lpk` opens in LitePack: AssocQueryStringW(ASSOCSTR_EXECUTABLE) names the exe.
-$sb = New-Object System.Text.StringBuilder 1024
+# `.lpk` opens in LitePack. First the chain as the merged view holds it, which is what Windows reads: `.lpk` names
+# LitePack.lpk, whose open command starts the exe.
+$progid = (Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\.lpk').'(default)'
+if ($progid -ne 'LitePack.lpk') { Show-Chain; throw "HKCR\.lpk names '$progid', not LitePack.lpk" }
+$command = (Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\LitePack.lpk\shell\open\command').'(default)'
+$want = '"{0}" --open "%1"' -f $Gui
+if ($command -ne $want) { Show-Chain; throw "HKCR\LitePack.lpk's open command is '$command', not '$want'" }
+
+# AssocQueryStringW(ASSOCSTR_EXECUTABLE), as Explorer resolves a double-click, cannot be asked here: this runner's
+# session runs at high integrity and its account has no limited token (a `RunLevel Limited` scheduled task and
+# `runas /trustlevel:0x20000` both ran at High Mandatory Level), and the shell gives an elevated caller no per-user
+# association, so it answers 0x80070483 although HKCR holds the chain. CI checks the chain Windows reads (above); the
+# double-click in Explorer, at medium integrity, is E6-7's hand check. The elevated answer is printed for the record.
+$elevated = New-Object System.Text.StringBuilder 1024
 [uint32]$len = 1024
-$hr = [LpkAssoc]::AssocQueryStringW(0, 2, '.lpk', $null, $sb, [ref]$len)
-if ($hr -ne 0) { throw "AssocQueryStringW(.lpk) failed: $hr" }
-if ($sb.ToString() -ne $Gui) { throw "AssocQueryStringW(.lpk) gave '$($sb.ToString())', expected '$Gui'" }
+$hr = [LpkAssoc]::AssocQueryStringW(0, 2, '.lpk', $null, $elevated, [ref]$len)
+Write-Host ('elevated AssocQueryStringW(.lpk) = 0x{0:X8} "{1}" (for the record; not the check)' -f $hr, $elevated.ToString())
 
 # Each opted-in extension lists its ProgID in OpenWithProgids.
 $assoc = Get-Item 'HKCU:\Software\LitePack\Capabilities\FileAssociations'
