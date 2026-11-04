@@ -4,6 +4,7 @@
 // and selection live in Rust; a batch of an older view generation, or an older request, is
 // dropped. The spacer is capped at MAX_SCROLL_PX and scrolling is scaled beyond it;
 // aria-rowcount and aria-rowindex give the true size.
+import { keyLetter } from "./a11y.js";
 import { decodeBatch } from "./batch.js";
 
 // The same values as crates/lpk-gui/src/browse.rs (MARGIN_ROWS, MAX_SCROLL_PX).
@@ -337,7 +338,7 @@ export class VirtualList {
         this.select("none", null, this.heldGeneration()).catch((err) => this.onError(err));
         return;
       default:
-        if ((e.key === "a" || e.key === "A") && e.ctrlKey) {
+        if (keyLetter(e) === "A" && e.ctrlKey) {
           e.preventDefault();
           this.select("all", null, this.heldGeneration()).catch((err) => this.onError(err));
         }

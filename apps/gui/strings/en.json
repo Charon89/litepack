@@ -258,5 +258,7 @@
   "update.cancelled": "{name}: cancelled. The archive is as it was.",
   "update.failed": "{name}: the update failed. The archive is as it was.",
   "update.done": "{name}: now at generation {generation}. {entries} entries, {chunks} new chunks, {blocks} blocks; {size} bytes in all.",
-  "repair.suspect": "The copy did not pass its test cleanly, so it is not offered first; open it only to look."
+  "repair.suspect": "The copy did not pass its test cleanly, so it is not offered first; open it only to look.",
+  "shortcut.tooltip": "{label} ({keys})",
+  "progress.label": "Progress"
 }

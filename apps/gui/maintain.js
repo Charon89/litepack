@@ -5,6 +5,8 @@
 // a native box Rust shows (the page cannot answer it). DOM built with createElement and
 // textContent only (Trusted Types); every string is in strings/en.json.
 
+import { announce, setPhase, trapTab } from "./a11y.js";
+
 function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -24,6 +26,9 @@ export function createMaintainer(env) {
   const { core, t, nextOp, session, archive, showError, adopt, verbs } = env;
   const count = (n) => Number(n).toLocaleString();
   let dialog = null;
+  // One live region for the dialog: it stays in the dialog for good (phase() replaces the other
+  // children) and is set, a moment after each render, to the phase's first line, so a result is announced (the phase's own nodes are replaced).
+  let live = null;
   let opener = null;
   let onEscape = () => {};
   // One dialog at a time: the verb's archives queue on the chain `main.js` shares with the
@@ -33,7 +38,11 @@ export function createMaintainer(env) {
     if (dialog) {
       return dialog;
     }
-    dialog = el("dialog", { class: "wizard", "aria-labelledby": "maintain-title" });
+    dialog = el("dialog", { class: "wizard", "aria-labelledby": "maintain-title", "aria-describedby": "maintain-body" });
+    trapTab(dialog);
+    live = el("p", { role: "status", class: "sr-only" });
+    // Never detached: phase() replaces the other children around it.
+    dialog.append(live);
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       onEscape();
@@ -76,7 +85,8 @@ export function createMaintainer(env) {
         first = b;
       }
     }
-    d.replaceChildren(el("h2", { id: "maintain-title", text: title }), el("div", { class: "wizard-body" }, ...body), footer);
+    setPhase(d, live, el("h2", { id: "maintain-title", text: title }), el("div", { class: "wizard-body", id: "maintain-body" }, ...body), footer);
+    announce(d, live);
     if (!d.open) {
       opener = document.activeElement;
       d.showModal();
@@ -92,19 +102,21 @@ export function createMaintainer(env) {
   // What the user sees of a failure.
   function failure(name, e) {
     if (e && e.class === "Cancelled") {
-      return [el("p", { text: t("maintain.cancelled", { name }) })];
+      return [el("p", { role: "alert", text: t("maintain.cancelled", { name }) })];
     }
     const message = e && typeof e === "object" ? `${e.message ?? ""} ${e.detail ?? ""}`.trim() : String(e);
     const nodes = [el("p", { text: t("maintain.error", { name, message }) })];
     for (const x of (e && e.entries) || []) {
       nodes.push(el("p", { text: t("maintain.entry", { path: x.path }) }));
     }
+    // One alert per failure: its summary line.
+    nodes[0].setAttribute("role", "alert");
     return nodes;
   }
 
   // A progress area: a bar when the engine knows the total, else a count.
   function progressArea() {
-    const bar = el("progress", { max: 100, value: 0 });
+    const bar = el("progress", { max: 100, value: 0, "aria-label": t("progress.label") });
     const line = el("p", { role: "status", "aria-live": "polite" });
     const update = (ev) => {
       const total = ev.files_total ?? null;
