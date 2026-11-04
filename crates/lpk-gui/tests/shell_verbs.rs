@@ -2,6 +2,13 @@
 //! (`lpk_gui::cli::parse_in`) and the reader's deletion rule; the bytes are the committed test
 //! vector that `lpk-shell`'s writer test produces exactly.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 

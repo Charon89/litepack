@@ -735,3 +735,21 @@ fn the_name_of_the_gui_state_folder_is_the_guis() {
     );
     assert_eq!(Verb::ALL.len(), 7);
 }
+
+#[test]
+fn the_manifest_fragment_names_this_class_for_the_three_item_types() {
+    let xml = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("manifest/file-explorer-context-menus.xml"),
+    )
+    .expect("the manifest fragment");
+    assert!(xml.contains("Category=\"windows.fileExplorerContextMenus\""));
+    for item in ["*", "Directory", "Directory\\Background"] {
+        assert!(xml.contains(&format!("ItemType Type=\"{item}\"")), "{item}");
+    }
+    let clsid = format!("{:?}", CLSID_LPK_SHELL).to_uppercase();
+    assert_eq!(
+        xml.matches(&format!("Clsid=\"{clsid}\"")).count(),
+        3,
+        "{clsid}"
+    );
+}

@@ -98,8 +98,10 @@ impl Reader<'_> {
     fn units(&mut self, count: usize) -> Result<Vec<u16>, String> {
         let bytes = self.take(count.checked_mul(2).ok_or("truncated")?)?;
         Ok(bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([*c.first().unwrap_or(&0), *c.get(1).unwrap_or(&0)]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect())
     }
 }
