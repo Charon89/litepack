@@ -98,60 +98,15 @@ $command = (Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\LitePack.
 $want = '"{0}" --open "%1"' -f $Gui
 if ($command -ne $want) { Show-Chain; throw "HKCR\LitePack.lpk's open command is '$command', not '$want'" }
 
-# Then AssocQueryStringW(ASSOCSTR_EXECUTABLE), as Explorer resolves a double-click. Asked from this session, which runs
-# at high integrity, it answers 0x80070483 (no association) although HKCR holds the chain: the shell gives an elevated
-# caller no per-user association. Explorer runs at medium integrity, so the question is asked from a child with this
-# user's limited token at medium integrity, as Explorer has it: a one-off scheduled task (S4U, `RunLevel Limited`;
-# `runas /trustlevel:0x20000` kept high integrity here), which writes its answer and its integrity level to a file.
+# AssocQueryStringW(ASSOCSTR_EXECUTABLE), as Explorer resolves a double-click, cannot be asked here: this runner's
+# session runs at high integrity and its account has no limited token (a `RunLevel Limited` scheduled task and
+# `runas /trustlevel:0x20000` both ran at High Mandatory Level), and the shell gives an elevated caller no per-user
+# association, so it answers 0x80070483 although HKCR holds the chain. CI checks the chain Windows reads (above); the
+# double-click in Explorer, at medium integrity, is E6-7's hand check. The elevated answer is printed for the record.
 $elevated = New-Object System.Text.StringBuilder 1024
 [uint32]$len = 1024
 $hr = [LpkAssoc]::AssocQueryStringW(0, 2, '.lpk', $null, $elevated, [ref]$len)
 Write-Host ('elevated AssocQueryStringW(.lpk) = 0x{0:X8} "{1}" (for the record; not the check)' -f $hr, $elevated.ToString())
-$childPs1 = Join-Path $env:RUNNER_TEMP 'e6-assoc-child.ps1'
-$childOut = Join-Path $env:RUNNER_TEMP 'e6-assoc-child.txt'
-$winps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-foreach ($p in $childPs1, $childOut, $winps) {
-    if ($p.Contains(' ')) { throw "the task's arguments are not quoted: '$p' holds a space" }
-}
-Set-Content -LiteralPath $childPs1 -Encoding ascii -Value @'
-param([string]$Out)
-Add-Type -TypeDefinition @"
-using System.Text;
-using System.Runtime.InteropServices;
-public static class LpkAssocChild {
-    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
-    public static extern int AssocQueryStringW(uint flags, int str, string assoc, string extra, StringBuilder buf, ref uint len);
-}
-"@
-$sb = New-Object System.Text.StringBuilder 1024
-[uint32]$len = 1024
-$hr = [LpkAssocChild]::AssocQueryStringW(0, 2, '.lpk', $null, $sb, [ref]$len)
-$label = (whoami /groups | Select-String 'Mandatory Label' | Out-String).Trim()
-Set-Content -LiteralPath "$Out.part" -Value ('{0:X8}|{1}|{2}' -f $hr, $sb.ToString(), $label)
-Move-Item -LiteralPath "$Out.part" -Destination $Out -Force
-'@
-Remove-Item -LiteralPath $childOut -Force -ErrorAction SilentlyContinue
-$task = 'lpk-e6-assoc-' + [guid]::NewGuid().ToString('N')
-$action = New-ScheduledTaskAction -Execute $winps -Argument "-NoProfile -ExecutionPolicy Bypass -File $childPs1 -Out $childOut"
-$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$principal = New-ScheduledTaskPrincipal -UserId $me -LogonType S4U -RunLevel Limited
-Register-ScheduledTask -TaskName $task -Action $action -Principal $principal | Out-Null
-try {
-    Start-ScheduledTask -TaskName $task
-    $deadline = (Get-Date).AddSeconds(90)
-    while (-not (Test-Path -LiteralPath $childOut) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-} finally {
-    $info = Get-ScheduledTaskInfo -TaskName $task -ErrorAction SilentlyContinue
-    if ($info) { Write-Host "task $task last result: $($info.LastTaskResult)" }
-    Unregister-ScheduledTask -TaskName $task -Confirm:$false
-}
-if (-not (Test-Path -LiteralPath $childOut)) { Show-Chain; throw 'the limited-token child (a scheduled task) wrote no answer within 90 s' }
-$answer = (Get-Content -LiteralPath $childOut -Raw).Trim()
-Write-Host "medium-integrity AssocQueryStringW(.lpk): $answer"
-$childHr, $childExe, $childLabel = $answer -split '\|', 3
-if ($childLabel -notmatch 'Medium Mandatory Level') { Show-Chain; throw "the child did not run at medium integrity: $childLabel" }
-if ($childHr -ne '00000000') { Show-Chain; throw "AssocQueryStringW(.lpk) at medium integrity failed: 0x$childHr" }
-if ($childExe -ne $Gui) { Show-Chain; throw "AssocQueryStringW(.lpk) at medium integrity gave '$childExe', expected '$Gui'" }
 
 # Each opted-in extension lists its ProgID in OpenWithProgids.
 $assoc = Get-Item 'HKCU:\Software\LitePack\Capabilities\FileAssociations'
