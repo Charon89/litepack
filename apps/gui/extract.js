@@ -9,6 +9,8 @@
 // what would be written, what exists and the free space (extract_plan); existing items are
 // asked about once (Skip, Keep both, Replace, Cancel). Then progress with Cancel, and a result.
 
+import { announce, setPhase, trapTab } from "./a11y.js";
+
 const GIB = 2 ** 30;
 const MIB = 2 ** 20;
 const MB = 1000 * 1000;
@@ -33,6 +35,9 @@ export function createExtractor(env) {
   const count = (n) => Number(n).toLocaleString();
   const size = (n) => (n >= GIB ? `${(n / GIB).toFixed(1)} GiB` : `${Math.ceil(n / MIB).toLocaleString()} MiB`);
   let dialog = null;
+  // One live region for the dialog: it stays in the dialog for good (phase() replaces the other
+  // children) and is set, a moment after each render, to the phase's first line, so a result is announced (the phase's own nodes are replaced).
+  let live = null;
   let opener = null;
   let onEscape = () => {};
   // One dialog at a time: verbs queue behind one another (`verbs.chain`, shared with the test
@@ -42,7 +47,11 @@ export function createExtractor(env) {
     if (dialog) {
       return dialog;
     }
-    dialog = el("dialog", { class: "wizard", "aria-labelledby": "wizard-title" });
+    dialog = el("dialog", { class: "wizard", "aria-labelledby": "wizard-title", "aria-describedby": "wizard-body" });
+    trapTab(dialog);
+    live = el("p", { role: "status", class: "sr-only" });
+    // Never detached: phase() replaces the other children around it.
+    dialog.append(live);
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       onEscape();
@@ -87,7 +96,8 @@ export function createExtractor(env) {
         first = b;
       }
     }
-    d.replaceChildren(el("h2", { id: "wizard-title", text: title }), el("div", { class: "wizard-body" }, ...body), footer);
+    setPhase(d, live, el("h2", { id: "wizard-title", text: title }), el("div", { class: "wizard-body", id: "wizard-body" }, ...body), footer);
+    announce(d, live);
     if (!d.open) {
       opener = document.activeElement;
       d.showModal();
@@ -100,8 +110,9 @@ export function createExtractor(env) {
     dialog?.close();
   }
 
-  function radios(name, items, current, onChange) {
+  function radios(name, items, current, onChange, legend) {
     const box = el("fieldset");
+    box.append(el("legend", { text: legend }));
     for (const item of items) {
       const input = el("input", { type: "radio", name, value: item.id, checked: item.id === current, disabled: Boolean(item.disabled) });
       input.addEventListener("change", () => onChange(item));
@@ -133,6 +144,8 @@ export function createExtractor(env) {
       }
       nodes.push(ul);
     }
+    // One alert per failure: its summary line.
+    nodes[0].setAttribute("role", "alert");
     return { nodes, allow };
   }
 
@@ -185,7 +198,7 @@ export function createExtractor(env) {
 
   // A progress area and its updater; `planned` (bytes) gives an ETA when the total is known.
   function progressArea(planned) {
-    const bar = el("progress", { max: 100, value: 0 });
+    const bar = el("progress", { max: 100, value: 0, "aria-label": t("progress.label") });
     const line = el("p", { role: "status", "aria-live": "polite" });
     const started = Date.now();
     const update = (ev) => {
@@ -247,15 +260,25 @@ export function createExtractor(env) {
         }
       });
       const body = [
-        el("legend", { text: t("extract.dest.legend") }),
-        radios("dest", dests, state.dest.id, (item) => {
-          state.dest = item;
-        }),
+        radios(
+          "dest",
+          dests,
+          state.dest.id,
+          (item) => {
+            state.dest = item;
+          },
+          t("extract.dest.legend"),
+        ),
         choose,
-        el("legend", { text: t("extract.scope.legend") }),
-        radios("scope", scopes, state.scope, (item) => {
-          state.scope = item.id;
-        }),
+        radios(
+          "scope",
+          scopes,
+          state.scope,
+          (item) => {
+            state.scope = item.id;
+          },
+          t("extract.scope.legend"),
+        ),
       ];
       if (note) {
         body.push(...note);

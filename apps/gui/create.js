@@ -11,6 +11,8 @@
 // names", recovery (proposed by Rust), "Test when done". Create runs with progress and Cancel,
 // then a summary with Open, Close and "Copy as command".
 
+import { announce, setPhase, trapTab } from "./a11y.js";
+
 const KIB = 2 ** 10;
 const MB = 1000 * 1000;
 const MIB = 2 ** 20;
@@ -64,6 +66,9 @@ export function createCreator(env) {
     return t("create.time.hours", { n: (s / 3600).toFixed(1) });
   };
   let dialog = null;
+  // One live region for the dialog: it stays in the dialog for good (phase() replaces the other
+  // children) and is set, a moment after each render, to the phase's first line, so a result is announced (the phase's own nodes are replaced).
+  let live = null;
   let opener = null;
   let onEscape = () => {};
   let chain = Promise.resolve();
@@ -72,7 +77,11 @@ export function createCreator(env) {
     if (dialog) {
       return dialog;
     }
-    dialog = el("dialog", { class: "wizard create", "aria-labelledby": "create-title" });
+    dialog = el("dialog", { class: "wizard create", "aria-labelledby": "create-title", "aria-describedby": "create-body" });
+    trapTab(dialog);
+    live = el("p", { role: "status", class: "sr-only" });
+    // Never detached: phase() replaces the other children around it.
+    dialog.append(live);
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       onEscape();
@@ -119,7 +128,8 @@ export function createCreator(env) {
         first = b;
       }
     }
-    d.replaceChildren(el("h2", { id: "create-title", text: title }), el("div", { class: "wizard-body" }, ...body), footer);
+    setPhase(d, live, el("h2", { id: "create-title", text: title }), el("div", { class: "wizard-body", id: "create-body" }, ...body), footer);
+    announce(d, live);
     if (!d.open) {
       opener = document.activeElement;
       d.showModal();
@@ -518,7 +528,7 @@ export function createCreator(env) {
       }
       const op = nextOp();
       const name = `${s.name.trim().replace(/\.lpk$/i, "")}.lpk`;
-      const bar = el("progress", { max: 100, value: 0 });
+      const bar = el("progress", { max: 100, value: 0, "aria-label": t("progress.label") });
       const line = el("p", { role: "status", "aria-live": "polite", text: t("create.running", { name }) });
       const started = Date.now();
       const channel = new core.Channel();
@@ -654,7 +664,7 @@ export function createCreator(env) {
     const name = a.name;
     const plan = await core.invoke("create_plan", { inputs: a.items.map((i) => i.grant) });
     const op = nextOp();
-    const bar = el("progress", { max: 100, value: 0 });
+    const bar = el("progress", { max: 100, value: 0, "aria-label": t("progress.label") });
     const line = el("p", { role: "status", "aria-live": "polite", text: t("create.running", { name }) });
     const started = Date.now();
     const channel = new core.Channel();

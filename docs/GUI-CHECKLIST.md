@@ -131,6 +131,25 @@ records (`lpk a --recovery 20`) and a copy with a byte flipped in the middle of 
 | 8.27 | `--test` on a mix that includes a damaged archive and a sealed one | The damaged one fails with its message, the sealed one offers Unlock beside its result and Unlock re-runs only that archive | |
 | 8.28 | Cancel the `--test` queue | The running archive ends cancelled and the rest do not run | |
 
+## E5-9 Keyboard, names, high contrast
+
+The automated pass (axe-core over every view and dialog the WebDriver reaches, and the keyboard test) is in CI's
+`gui-e2e` job; these items are the manual ones, with Narrator, and the states the checker cannot reach.
+
+| # | Step | Expect | Result |
+|---|---|---|---|
+| 9.1 | Empty window: Tab through it, then F6 and Shift+F6 | Every control takes focus once in a sensible order, with a visible ring; F6 goes command bar, recent archives and back | |
+| 9.2 | Open an archive: F6 and Shift+F6 | The focus visits the command bar, the path bar and filter, the list and the preview pane (when shown) in that order and wraps | |
+| 9.3 | In the list: arrows, Home, End, PageUp, PageDown, Shift+arrows, Ctrl+arrows with Space, Ctrl+A, Esc, Enter on a folder, Backspace and Alt+Up | Each does what a mouse does; the list is one Tab stop; the focused row has a visible ring | |
+| 9.4 | Ctrl+O, Ctrl+N, Ctrl+E, Alt+P, Ctrl+F, Ctrl+Shift+T, Ctrl+Shift+K, Ctrl+Shift+H, Ctrl+Shift+U | Open, New, Extract, the preview toggle, the filter, Test, Check, History and Update; each button's tooltip names its key | |
+| 9.5 | "Folders" and "All files": Tab to the group, then the arrow keys | One Tab stop for the group; the arrows switch the view | |
+| 9.6 | Each dialog (extract, create, test, check, history, update): Tab and Shift+Tab around | The focus stays inside and wraps; Esc closes or cancels; Enter takes the primary action when allowed; the focus returns to the button that opened it | |
+| 9.7 | Narrator on the window and on each dialog | The list is read as a table with its row and column counts, selection and level; every control has a name; each dialog is announced with its title and text | |
+| 9.8 | Narrator: open an archive, extract, create, run Test | The status line, a result and an error are read once, not on every focus move | |
+| 9.9 | The states the checker cannot reach: the password prompt, the rollback confirmation, the envelope refusal, a running progress view (extract, create, test) | Narrator reads each prompt and its buttons; a progress bar is named and its value changes are read | |
+| 9.10 | Windows high contrast (Aquatic, Desert, Dusk, Night sky) with every view and dialog | Text, borders, the focus ring, the selected row, the checked "Folders"/"All files" button, disabled buttons and the dialogs' edges are all visible | |
+| 9.11 | Light and dark themes, 100 % and 200 % scaling | Text is readable and the focus ring visible in each | |
+
 ## Notes
 
 - Envelope refusal of a foreign archive (E4 follow-up): the GUI offers no "Allow X" for a ZIP or 7z memory limit yet, because that limit comes from the session's open options, not from the extraction's; such an error shows its message only.

@@ -8,6 +8,7 @@ import { createExtractor } from "./extract.js";
 import { createCreator } from "./create.js";
 import { createPreview } from "./preview.js";
 import { createMaintainer } from "./maintain.js";
+import { keyLabel, keyLetter, syncRadios, wirePanes, wireRadios } from "./a11y.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
@@ -66,6 +67,10 @@ function applyStrings() {
     el.setAttribute("aria-label", t(el.dataset.label));
   }
   $("filter").placeholder = t("filter.placeholder");
+  // The key of each command in its tooltip (and in aria-keyshortcuts, in the markup).
+  for (const el of document.querySelectorAll("button[aria-keyshortcuts]")) {
+    el.title = t("shortcut.tooltip", { label: el.textContent, keys: keyLabel(el.getAttribute("aria-keyshortcuts")) });
+  }
 }
 
 function setStatus(text) {
@@ -151,6 +156,7 @@ function renderHeader() {
   for (const m of ["flat", "tree"]) {
     $(`mode-${m}`).setAttribute("aria-checked", String(state.mode === m));
   }
+  syncRadios($("mode-tree").parentElement);
 }
 
 async function applyView(keep = false) {
@@ -279,7 +285,7 @@ function updateMaintenance() {
     if (off) {
       b.setAttribute("title", why);
     } else {
-      b.removeAttribute("title");
+      b.title = t("shortcut.tooltip", { label: b.textContent, keys: keyLabel(b.getAttribute("aria-keyshortcuts")) });
     }
   };
   set("action-test", none, t("maintain.why.none"));
@@ -402,12 +408,10 @@ function showNotices(notices) {
     dismiss.textContent = t("notice.dismiss");
     dismiss.addEventListener("click", () => {
       item.remove();
-      list.hidden = list.children.length === 0;
     });
     item.append(text, dismiss);
     list.append(item);
   }
-  list.hidden = list.children.length === 0;
 }
 
 async function report(total, first) {
@@ -465,7 +469,20 @@ function showError(e) {
     return;
   }
   problem("lpkFailure", `failure: ${describe(e)}`);
-  setStatus(`${t("error.title")}: ${describe(e)}`);
+  // Behind an open modal dialog the status line is inert: the error shows in the dialog's own alert.
+  const open = document.querySelector("dialog[open]");
+  if (open) {
+    let alert = open.querySelector(".dialog-error");
+    if (!alert) {
+      alert = document.createElement("p");
+      alert.className = "dialog-error";
+      alert.setAttribute("role", "alert");
+      open.querySelector(".wizard-body")?.append(alert);
+    }
+    alert.textContent = `${t("error.title")}: ${describe(e)}`;
+  } else {
+    setStatus(`${t("error.title")}: ${describe(e)}`);
+  }
   if (!reported) {
     reported = true;
     core.invoke("listing_shown", { session: null, rendered: 0, total: 0, first: "", problems }).catch(() => {});
@@ -519,16 +536,42 @@ function wireControls() {
         }
       });
   });
+  // The command keys: each button with aria-keyshortcuts (Alt+P belongs to the preview pane);
+  // a disabled command, an open dialog or a running picker takes none.
   document.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e" && session !== null && !document.querySelector("dialog[open]")) {
-      e.preventDefault();
-      extractor.openDialog().catch(showError);
+    if (e.key === "Control" || e.key === "Shift" || e.key === "Alt") {
+      return;
     }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n" && !document.querySelector("dialog[open]")) {
+    const mods = (e.ctrlKey || e.metaKey ? "Control+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "");
+    // The Latin letter typed, else the physical key's: Dvorak and Cyrillic layouts both keep the keys.
+    const letter = keyLetter(e);
+    const chord = `${mods}${letter}`;
+    // Ctrl+F is the app's always (never the webview's find bar): the filter, or nothing.
+    if (chord === "Control+F") {
       e.preventDefault();
-      creator.open([]).catch(showError);
+      if (!$("bar").hidden && !document.querySelector("dialog[open]")) {
+        $("filter").focus();
+        $("filter").select();
+      }
+      return;
+    }
+    if (document.querySelector("dialog[open]")) {
+      return;
+    }
+    for (const b of document.querySelectorAll("button[aria-keyshortcuts]")) {
+      const keys = b.getAttribute("aria-keyshortcuts");
+      if (b.id !== "preview-toggle" && keys.toUpperCase() === chord.toUpperCase()) {
+        e.preventDefault();
+        if (!b.disabled) {
+          b.click();
+        }
+        return;
+      }
     }
   });
+  wirePanes();
+  wireRadios($("mode-tree").parentElement);
+  syncRadios($("mode-tree").parentElement);
   $("recents-clear").addEventListener("click", () => {
     core
       .invoke("clear_recents")

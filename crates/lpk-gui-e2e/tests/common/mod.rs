@@ -155,6 +155,16 @@ pub(crate) async fn connect_with(
     arg: String,
     port: u16,
 ) -> Client {
+    connect_args(driver, work, vec![arg], port).await
+}
+
+/// [`connect`] with these command-line arguments (none: the empty window).
+pub(crate) async fn connect_args(
+    driver: &mut Driver,
+    work: &Path,
+    args: Vec<String>,
+    port: u16,
+) -> Client {
     let gui = gui_exe();
     assert!(gui.is_file(), "no GUI at {}", gui.display());
     let mut caps = serde_json::Map::new();
@@ -166,7 +176,7 @@ pub(crate) async fn connect_with(
             "binary": gui,
             // The Edge WebDriver turns each argument into a Chromium switch (a bare path becomes
             // `--d:\...`, lower-cased), so the archive goes as `--open=<path>`, whose value it keeps.
-            "args": [arg],
+            "args": args,
             "excludeSwitches": EXCLUDED_SWITCHES,
         }),
     );

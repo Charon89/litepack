@@ -219,11 +219,38 @@ jobs:
             if ([regex]::Match("$line", '\d+\.\d+\.\d+\.\d+').Value -ne $runtime) { throw "the fetched driver is not $runtime" }
           }
           "LPK_E2E_NATIVE_DRIVER=$native" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      # E5-9: axe-core, the accessibility checker the WebDriver tests inject into every view and
+      # dialog. Deque's axe-core is MPL-2.0 (docs/LICENSING.md): used unmodified, test-only, fetched
+      # here and verified by hash, never in the repository and never shipped. The version, URL and
+      # both hashes of the registry tarball are pinned in this step and nowhere else.
+      - name: axe-core 4.14.0 (test-only, hash-verified)
+        shell: pwsh
+        env:
+          AXE_URL: https://registry.npmjs.org/axe-core/-/axe-core-4.14.0.tgz
+          AXE_INTEGRITY: sha512-9WTZxEjsZ7b13TH8JPmbV2z8CHbl80/2hm3XPEG4JgNdQLK81IBRXmSxHfMAOkSqQeRxT/0dwNDz2GOm3zzpcQ==
+          AXE_SHA1: a9819d3932a8198fbe935d8cbd8afcdfecbcf31d
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'axe-core'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $tgz = Join-Path $dir 'axe-core-4.14.0.tgz'
+          Invoke-WebRequest -Uri $env:AXE_URL -OutFile $tgz
+          $bytes = [IO.File]::ReadAllBytes($tgz)
+          $sha512 = 'sha512-' + [Convert]::ToBase64String([Security.Cryptography.SHA512]::HashData($bytes))
+          $sha1 = [Convert]::ToHexString([Security.Cryptography.SHA1]::HashData($bytes)).ToLowerInvariant()
+          Write-Output "integrity: $sha512"
+          Write-Output "sha1: $sha1"
+          if ($sha512 -cne $env:AXE_INTEGRITY) { throw "axe-core's integrity is $sha512, not the pinned one" }
+          if ($sha1 -cne $env:AXE_SHA1) { throw "axe-core's SHA-1 is $sha1, not the pinned one" }
+          tar -xzf $tgz -C $dir package/axe.min.js
+          if ($LASTEXITCODE -ne 0) { throw "tar failed" }
+          $js = Join-Path $dir 'package/axe.min.js'
+          if (-not (Test-Path -LiteralPath $js -PathType Leaf)) { throw "no axe.min.js in the tarball" }
+          "LPK_AXE_JS=$js" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: The driver harness
         env:
           LPK_GUI_E2E: "1"
           LPK_E2E_WORK: ${{ runner.temp }}/gui-e2e
-        run: cargo test --locked -p lpk-gui-e2e -- --nocapture
+        run: cargo test --locked --no-fail-fast -p lpk-gui-e2e -- --nocapture
       - name: After a failure, the processes and DevToolsActivePort files
         if: failure()
         shell: pwsh

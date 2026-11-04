@@ -307,6 +307,128 @@ fn every_string_is_in_the_table_and_every_key_is_used() {
     );
 }
 
+/// The accessible-text attributes and properties whose value must come from the table.
+const ACCESSIBLE_TEXT: [&str; 6] = [
+    "aria-label",
+    "ariaLabel",
+    "aria-description",
+    "title",
+    "placeholder",
+    "alt",
+];
+
+/// Every place where `text` gives one of [`ACCESSIBLE_TEXT`] a literal value: markup
+/// (`aria-label="x"`), an object key quoted or not, first or not (`{ type: "text", placeholder:
+/// "x" }`, `"aria-label": "x"`), a property assignment (`el.title = "x"`) and
+/// `setAttribute("title", "x")`; double or single quotes or a template literal. An empty literal
+/// and a value that is an expression (`t("...")`, a variable) pass.
+fn literal_accessible_text(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let quote = |c: char| matches!(c, '"' | '\'' | '`');
+    let mut found = Vec::new();
+    for name in ACCESSIBLE_TEXT {
+        let n: Vec<char> = name.chars().collect();
+        let mut i = 0;
+        while i + n.len() <= chars.len() {
+            if chars[i..i + n.len()] != n[..] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            i += n.len();
+            let before = start.checked_sub(1).map(|j| chars[j]);
+            let after = chars.get(i).copied();
+            let quoted = before.is_some_and(quote) && after == before;
+            // A whole word: not `data-title`, `alternative`, `titleCase`.
+            let prev_word = if quoted {
+                start.checked_sub(2).map(|j| chars[j])
+            } else {
+                before
+            };
+            if prev_word.is_some_and(ident) {
+                continue;
+            }
+            let mut j = i;
+            if quoted {
+                j += 1;
+            } else if after.is_some_and(ident) {
+                continue;
+            }
+            while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                j += 1;
+            }
+            let sep = chars.get(j).copied();
+            let ok = match sep {
+                Some(':') => true,
+                Some(',') => quoted,
+                Some('=') => !matches!(chars.get(j + 1), Some('=' | '>')),
+                _ => false,
+            };
+            if !ok {
+                continue;
+            }
+            j += 1;
+            while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                j += 1;
+            }
+            if let Some(&q) = chars.get(j).filter(|c| quote(**c)) {
+                if chars.get(j + 1) != Some(&q) {
+                    found.push(chars[start..(j + 24).min(chars.len())].iter().collect());
+                }
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn the_literal_text_finder_finds_what_it_should() {
+    for bad in [
+        r#"<input aria-label="Name">"#,
+        r#"el("input", { type: "text", placeholder: "Name" })"#,
+        r#"el("input", { "aria-label": "Name" })"#,
+        r#"el("input", { title: 'Name' })"#,
+        r#"x.title = "Name";"#,
+        r#"x.placeholder = `Name`;"#,
+        r#"x.ariaLabel = "Name";"#,
+        r#"b.setAttribute("title", "Name");"#,
+        r#"b.setAttribute('aria-label', 'Name');"#,
+        r#"img.alt = "Name";"#,
+    ] {
+        assert_eq!(literal_accessible_text(bad).len(), 1, "{bad}");
+    }
+    for good in [
+        r#"<input aria-label="">"#,
+        r#"el("input", { type: "text", placeholder: t("filter.placeholder") })"#,
+        r#"x.title = t("a");"#,
+        r#"b.setAttribute("title", why);"#,
+        r#"if (a.title == "x") {}"#,
+        r#"const f = (title) => title;"#,
+        r#"phase(title, [], buttons);"#,
+        r#"<div data-title="x">"#,
+        r#"if (e.altKey) {}"#,
+        r#"el("p", { class: "note", role: "alert" })"#,
+    ] {
+        assert!(literal_accessible_text(good).is_empty(), "{good}");
+    }
+}
+
+/// E5-9: text that a screen reader or a tooltip shows comes from the table too, in the markup and
+/// in the scripts.
+#[test]
+fn no_literal_accessible_text_in_markup_or_scripts() {
+    for f in gui_files() {
+        let ext = f.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if ext != "html" && ext != "js" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&f).unwrap();
+        let found = literal_accessible_text(&text);
+        assert!(found.is_empty(), "{}: literal text: {found:?}", f.display());
+    }
+}
+
 /// The recovery's notices stay on the page until dismissed (R125). A text search: the
 /// WebDriver harness (`crates/lpk-gui-e2e`) starts the exe with the runner's own state folder,
 /// and a seeded journal record there would need the harness to redirect `%LOCALAPPDATA%` for
