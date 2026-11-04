@@ -40,6 +40,7 @@ pub mod paths;
 pub mod pick;
 pub mod preview;
 pub mod recents;
+pub mod register;
 pub mod security;
 pub mod settings;
 pub mod shellfile;

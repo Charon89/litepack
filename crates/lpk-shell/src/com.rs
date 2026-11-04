@@ -53,8 +53,15 @@ use crate::model::{classify, leaf, request, title, visible, Entry, Selection, Ve
 use crate::protocol;
 
 /// The class ID of LitePack's Explorer command, `{39B4D969-AE7A-4965-84DB-2DAF0C5B0308}`.
-/// E6-3's package manifest and E6-4's route C (under a second class ID) register it.
+/// E6-3's package manifest registers it.
 pub const CLSID_LPK_SHELL: GUID = GUID::from_u128(0x39b4d969_ae7a_4965_84db_2daf0c5b0308);
+
+/// The class ID of the same command under route C, the classic registration that
+/// `lpk-gui.exe --register-shell` writes under `HKCU\Software\Classes` (E6-4):
+/// `{01E42821-7D51-4B9B-AD9F-FFCA769A6025}`, distinct from [`CLSID_LPK_SHELL`] so that the package
+/// and the classic route never share a class. `lpk-gui`'s `register::CLASSIC_CLSID` holds its text
+/// (a test compares them); the DLL serves both with the same root.
+pub const CLSID_LPK_SHELL_CLASSIC: GUID = GUID::from_u128(0x01e42821_7d51_4b9b_ad9f_ffca769a6025);
 
 /// The GUI's local-state folder name (`lpk-gui`'s `paths::IDENTIFIER`, whose test compares it with
 /// Tauri's identifier) and the folder of response files under it.
@@ -666,8 +673,8 @@ impl IClassFactory_Impl for ClassFactory_Impl {
     }
 }
 
-/// The DLL's class-object entry point: the class factory of [`CLSID_LPK_SHELL`], or
-/// `CLASS_E_CLASSNOTAVAILABLE` for any other class.
+/// The DLL's class-object entry point: the class factory of [`CLSID_LPK_SHELL`] or of
+/// [`CLSID_LPK_SHELL_CLASSIC`] (the same root), or `CLASS_E_CLASSNOTAVAILABLE` for any other class.
 ///
 /// # Safety
 ///
@@ -692,7 +699,7 @@ pub unsafe extern "system" fn DllGetClassObject(
         }
         // SAFETY: `rclsid` is non-null and points to a GUID by this function's contract.
         let clsid = unsafe { *rclsid };
-        if clsid != CLSID_LPK_SHELL {
+        if clsid != CLSID_LPK_SHELL && clsid != CLSID_LPK_SHELL_CLASSIC {
             return Err(CLASS_E_CLASSNOTAVAILABLE.into());
         }
         let factory: windows_core::IUnknown = ClassFactory { _live: Live::new() }.into();

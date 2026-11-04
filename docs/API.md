@@ -121,3 +121,37 @@ and deletes that file, never another `@file`, once the instance that acts on the
 forwards the argument and leaves the file to the first); at start-up it removes such files older than 24 hours.
 `crates/lpk-gui/tests/data/shell-v1.verbs` is the one test vector: the writer's test produces exactly its bytes and
 the reader's test parses it.
+
+## Shell registration verbs (E6-4)
+
+`lpk-gui.exe` registers itself with Explorer for the current user, and removes that again, from the command line
+alone (the installer, the uninstaller and the settings page run them). They are handled before the window, the
+webview and the single-instance plugin start: no window, never forwarded to a running instance, and only from the
+literal command line (not from an `@file`, not mixed with the verbs above or with any other argument).
+
+- `--register-shell`: undoes the previous registration, then writes the keys below.
+- `--register-shell --open-with`: the same, and also lists the foreign archive formats in "Open with".
+- `--unregister-shell`: removes what the record names, and the record.
+
+Exit codes: 0 done; 1 failed (what was written is in the record, `--unregister-shell` undoes it); 2 refused, with
+nothing written: a portable copy (the `portable` marker beside the exe) never registers, unknown or extra
+arguments, or `lpk_shell.dll` missing beside the exe. Both verbs end with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
+
+What `--register-shell` writes, all under `HKEY_CURRENT_USER`, values `REG_SZ` unless noted:
+
+- `Software\LitePack\GuiPath`: the path of the running `lpk-gui.exe` (what `lpk_shell.dll` starts).
+- Route C, Explorer's classic menu: `Software\Classes\CLSID\{01E42821-7D51-4B9B-AD9F-FFCA769A6025}` (default
+  `LitePack`; `InProcServer32` default = `lpk_shell.dll` beside the exe, `ThreadingModel` = `Apartment`), and under
+  each of `*`, `Directory` and `Directory\Background` the key `Software\Classes\<type>\shell\LitePack` with
+  `ExplorerCommandHandler` = that class ID and `MultiSelectModel` = `Player`.
+- `.lpk`: the ProgID `LitePack.lpk` (`shell\open\command` = `"<exe>" --open "%1"`, `DefaultIcon`), `.lpk`'s default
+  value set to it and `PerceivedType` = `compressed` only when absent, and `.lpk\OpenWithProgids` listing it (a
+  `REG_NONE` value without data).
+- With `--open-with`: a `LitePack.<ext>` ProgID of the same shape for each of `zip`, `7z`, `tar` and `tgz` (`rar`
+  once the engine reads it), listed in that extension's `OpenWithProgids`, never as its default.
+- Default Programs: `Software\LitePack\Capabilities` and `Software\RegisteredApplications\LitePack`.
+- `Software\LitePack\Registration`: the record of every key created and every value written, written ahead of each
+  change. Unregistering deletes each recorded value whose data is still the recorded one, then each recorded key
+  that is empty, deepest first, then the record; a value someone else changed since stays.
+
+`UserChoice` and everything under `FileExts` are never written: the user's default handlers do not change.

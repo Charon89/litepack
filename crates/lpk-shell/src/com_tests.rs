@@ -88,9 +88,14 @@ fn text(p: PWSTR) -> String {
 
 /// The root through the class factory, as Explorer creates it.
 fn root_from_factory() -> (IClassFactory, IExplorerCommand) {
+    root_from_factory_of(&CLSID_LPK_SHELL)
+}
+
+/// The root of one of the two classes the DLL serves.
+fn root_from_factory_of(clsid: &GUID) -> (IClassFactory, IExplorerCommand) {
     let mut raw = std::ptr::null_mut();
     // SAFETY: valid GUIDs and out pointer.
-    let hr = unsafe { DllGetClassObject(&CLSID_LPK_SHELL, &IClassFactory::IID, &mut raw) };
+    let hr = unsafe { DllGetClassObject(clsid, &IClassFactory::IID, &mut raw) };
     assert_eq!(hr, S_OK);
     // SAFETY: on success `raw` is an AddRef'd IClassFactory.
     let factory = unsafe { IClassFactory::from_raw(raw) };
@@ -143,6 +148,20 @@ fn title_of(command: &IExplorerCommand, items: &IShellItemArray) -> String {
 
 const HIDDEN: u32 = 2;
 const ENABLED: u32 = 0;
+
+#[test]
+fn both_class_ids_are_served_with_the_same_root() {
+    let _g = serial();
+    init_com();
+    assert_ne!(CLSID_LPK_SHELL, CLSID_LPK_SHELL_CLASSIC);
+    let (_f1, package) = root_from_factory_of(&CLSID_LPK_SHELL);
+    let (_f2, classic) = root_from_factory_of(&CLSID_LPK_SHELL_CLASSIC);
+    assert_eq!(verbs_of(&package).len(), 7);
+    assert_eq!(verbs_of(&classic).len(), 7);
+    // SAFETY: COM calls on live interfaces.
+    let (a, b) = unsafe { (package.GetFlags(), classic.GetFlags()) };
+    assert_eq!(a.expect("flags"), b.expect("flags"));
+}
 
 #[test]
 fn the_factory_and_the_object_counts() {

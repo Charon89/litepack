@@ -14,7 +14,9 @@
 //!   chosen paths go to Rust only, which mints grants for them. Windows only.
 //! - [`process_alive`]: whether a process still runs (the start-up sweep of opened entries).
 //!
-//! `unsafe` lives in `src/windows_impl.rs` alone (docs/UNSAFE.md).
+//! - `registry` (Windows): the registry and `SHChangeNotify` calls of `--register-shell` (E6-4).
+//!
+//! `unsafe` lives in `src/windows_impl.rs` and `src/registry.rs` alone (docs/UNSAFE.md).
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
@@ -24,6 +26,8 @@ use std::path::{Path, PathBuf};
 
 pub use zeroize::Zeroizing;
 
+#[cfg(windows)]
+pub mod registry;
 #[cfg(windows)]
 mod windows_impl;
 
