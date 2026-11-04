@@ -35,11 +35,11 @@ pub const SHELL_DLL: &str = "lpk_shell.dll";
 /// the formats the engine opens today (a test in `lpk-api` keeps the file equal to them).
 pub const OPEN_WITH_EXTENSIONS: &str = include_str!("open_with_extensions.txt");
 
-const LITEPACK: &str = "Software\\LitePack";
-const RECORD: &str = "Software\\LitePack\\Registration";
+pub(crate) const LITEPACK: &str = "Software\\LitePack";
+pub(crate) const RECORD: &str = "Software\\LitePack\\Registration";
 const CAPABILITIES: &str = "Software\\LitePack\\Capabilities";
 const REGISTERED_APPS: &str = "Software\\RegisteredApplications";
-const CLASSES: &str = "Software\\Classes";
+pub(crate) const CLASSES: &str = "Software\\Classes";
 const PROGID_LPK: &str = "LitePack.lpk";
 
 /// A registry value, as registration sees one.
@@ -92,12 +92,12 @@ enum Policy {
     WhenAbsent,
 }
 
-struct Writer<'a, R: Registry> {
+struct Writer<'a, R: Registry + ?Sized> {
     reg: &'a mut R,
     seq: u32,
 }
 
-impl<R: Registry> Writer<'_, R> {
+impl<R: Registry + ?Sized> Writer<'_, R> {
     fn record(&mut self, entry: &str) -> io::Result<()> {
         self.seq += 1;
         let name = format!("e{:06}", self.seq);
@@ -157,7 +157,7 @@ impl<R: Registry> Writer<'_, R> {
     }
 }
 
-fn encode_value(key: &str, name: &str, value: &RegValue) -> String {
+pub(crate) fn encode_value(key: &str, name: &str, value: &RegValue) -> String {
     match value {
         RegValue::Sz(d) => format!("V\tS\t{key}\t{name}\t{d}"),
         _ => format!("V\tN\t{key}\t{name}\t"),
@@ -182,20 +182,30 @@ fn decode_value(rest: &str) -> Option<(String, String, RegValue)> {
 /// module's header for the executable at `gui` and the shell DLL at `dll` (absolute paths), with
 /// the "Open with" entries for [`open_with_extensions`] when `open_with`. Ends with the
 /// association-changed notification, also after a failure (what was written is in the record).
-pub fn register<R: Registry>(reg: &mut R, gui: &str, dll: &str, open_with: bool) -> io::Result<()> {
+pub fn register<R: Registry + ?Sized>(
+    reg: &mut R,
+    gui: &str,
+    dll: &str,
+    open_with: bool,
+) -> io::Result<()> {
     let result = undo(reg).and_then(|()| apply(reg, gui, dll, open_with));
     reg.notify_assoc_changed();
     result
 }
 
 /// Undo the recorded registration, then notify.
-pub fn unregister<R: Registry>(reg: &mut R) -> io::Result<()> {
+pub fn unregister<R: Registry + ?Sized>(reg: &mut R) -> io::Result<()> {
     let result = undo(reg);
     reg.notify_assoc_changed();
     result
 }
 
-fn apply<R: Registry>(reg: &mut R, gui: &str, dll: &str, open_with: bool) -> io::Result<()> {
+fn apply<R: Registry + ?Sized>(
+    reg: &mut R,
+    gui: &str,
+    dll: &str,
+    open_with: bool,
+) -> io::Result<()> {
     // The record cannot note, before it exists, the keys it needs: the missing ones of
     // `Software\LitePack` are noted in it as soon as it does.
     let mut missing = Vec::new();
@@ -274,7 +284,7 @@ fn apply<R: Registry>(reg: &mut R, gui: &str, dll: &str, open_with: bool) -> io:
     w.sz(REGISTERED_APPS, "LitePack", CAPABILITIES)
 }
 
-fn undo<R: Registry>(reg: &mut R) -> io::Result<()> {
+fn undo<R: Registry + ?Sized>(reg: &mut R) -> io::Result<()> {
     let mut entries = reg.list_values(RECORD)?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let mut values = Vec::new();
@@ -371,7 +381,7 @@ pub fn parse_shell_verb(args: &[OsString]) -> Option<Result<ShellVerb, String>> 
 /// Run `verb` for the executable at `exe` over `reg`; the exit code. A portable copy (the
 /// `portable` marker beside the exe) never registers, and `lpk_shell.dll` must lie beside the exe:
 /// both are checked before anything is written. Notifies Explorer through `reg`.
-pub fn run_verb<R: Registry>(verb: ShellVerb, exe: &Path, reg: &mut R) -> i32 {
+pub fn run_verb<R: Registry + ?Sized>(verb: ShellVerb, exe: &Path, reg: &mut R) -> i32 {
     match verb {
         ShellVerb::Unregister => match unregister(reg) {
             Ok(()) => exit::DONE,
@@ -417,7 +427,7 @@ pub fn run_verb<R: Registry>(verb: ShellVerb, exe: &Path, reg: &mut R) -> i32 {
 
 /// A path as a registry value should hold it: without the verbatim prefix, and a verbatim UNC
 /// path (`\\?\UNC\srv\share`) as `\\srv\share`.
-fn normalize_path(p: &str) -> String {
+pub(crate) fn normalize_path(p: &str) -> String {
     if let Some(unc) = p.strip_prefix("\\\\?\\UNC\\") {
         format!("\\\\{unc}")
     } else {
@@ -443,6 +453,13 @@ pub fn handle(args: &[OsString]) -> Option<i32> {
     };
     let mut reg = WinRegistry(lpk_gui_sys::registry::RegBase::current_user());
     Some(run_verb(verb, &exe, &mut reg))
+}
+
+/// The real `HKEY_CURRENT_USER`, for the settings area's commands (`shell_setting`), which call
+/// this only after the registered-copy check of the record.
+#[cfg(windows)]
+pub fn real_registry() -> Box<dyn Registry> {
+    Box::new(WinRegistry(lpk_gui_sys::registry::RegBase::current_user()))
 }
 
 /// The real registry through `lpk-gui-sys`.

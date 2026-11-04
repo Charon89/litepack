@@ -123,6 +123,17 @@ pub(crate) fn shell_open(owner: Option<isize>, path: &Path) -> io::Result<()> {
         .map_err(|_| io::Error::other("the shell-open thread panicked"))?
 }
 
+/// Open a URI the caller has checked (`open_settings_uri`) the way [`shell_open`] opens a file.
+pub(crate) fn open_uri(uri: &str) -> io::Result<()> {
+    let target = wide(OsStr::new(uri));
+    let shown = uri.to_string();
+    std::thread::Builder::new()
+        .name("lpk-open-uri".into())
+        .spawn(move || shell_open_on_this_thread(None, &target, &shown))?
+        .join()
+        .map_err(|_| io::Error::other("the open-URI thread panicked"))?
+}
+
 fn shell_open_on_this_thread(owner: Option<isize>, file: &[u16], shown: &str) -> io::Result<()> {
     use windows::Win32::System::Com::{
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,

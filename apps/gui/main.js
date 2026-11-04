@@ -374,6 +374,50 @@ async function wireSettings() {
   });
 }
 
+// E6-4: the "Open with" switch and the "Default apps…" button. Rust says whether this copy is the
+// registered one (the installer's, named by the registration record); if not, they stay hidden.
+// The switch re-registers in process; a failure shows in this area's own alert.
+function shellAlert(e) {
+  const alert = $("shell-alert");
+  alert.textContent = e ? `${t("error.title")}: ${describe(e)}` : "";
+  alert.hidden = !e;
+}
+
+function showShell(status) {
+  const group = $("shell-setting");
+  group.hidden = !status.registered;
+  if (!status.registered) {
+    return;
+  }
+  $("open-with").checked = status.open_with;
+  $("open-with-text").textContent = t("settings.openwith", {
+    formats: status.formats.map((f) => `.${f}`).join(", "),
+  });
+}
+
+async function wireShell() {
+  const box = $("open-with");
+  const status = await core.invoke("shell_status").catch(() => ({ registered: false }));
+  showShell(status);
+  box.addEventListener("change", async () => {
+    shellAlert(null);
+    box.disabled = true;
+    try {
+      showShell(await core.invoke("set_open_with", { on: box.checked }));
+    } catch (e) {
+      shellAlert(e);
+      // The record is consistent whatever happened: show what it says now.
+      showShell(await core.invoke("shell_status").catch(() => ({ registered: false })));
+    } finally {
+      box.disabled = false;
+    }
+  });
+  $("default-apps").addEventListener("click", () => {
+    shellAlert(null);
+    core.invoke("open_default_apps").catch(shellAlert);
+  });
+}
+
 // The recovery's notices (D-117) and the others (a second instance's refused command line, the
 // settings file's warning, an update, a verb not in this version): each stays in its own list
 // item, which the status line never replaces, until the user dismisses it.
@@ -625,6 +669,7 @@ async function main() {
     showNotices([{ kind: "settings", error: startup.settings_warning }]);
   }
   await wireSettings();
+  await wireShell();
   // A command line that did not parse is shown, and the window still takes later verbs.
   if (startup.error) {
     showError({ message: startup.error });
