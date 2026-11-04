@@ -760,6 +760,16 @@ fn push(host: &Host, notice: Notice) {
     host.outbox.push(notice, overflow, send);
 }
 
+/// Delete the Explorer menu's response files a parse read (E6-2): only files the shell names,
+/// in its folder.
+fn delete_shell_files(files: &[std::path::PathBuf]) {
+    if let Some(dir) = lpk_gui::shellfile::verbs_dir() {
+        for f in files {
+            lpk_gui::shellfile::delete(f, &dir);
+        }
+    }
+}
+
 /// The forwarding worker's step: parse a second instance's command line (`argv` with the
 /// program name first, relative to `cwd`), mint its grants and push it to the page.
 fn forwarded(handle: &AppHandle, argv: Vec<String>, cwd: String) {
@@ -767,7 +777,9 @@ fn forwarded(handle: &AppHandle, argv: Vec<String>, cwd: String) {
         return;
     };
     let args = argv.into_iter().skip(1).map(std::ffi::OsString::from);
-    match cli::parse(args, Some(std::path::Path::new(&cwd))) {
+    let (parsed, files) = cli::parse_with_files(args, Some(std::path::Path::new(&cwd)));
+    delete_shell_files(&files);
+    match parsed {
         Ok(s) => {
             if let Some(verb) = s.verb {
                 let activation = activate(&verb, &host.app.grants);
@@ -854,14 +866,15 @@ fn may_exit(handle: &AppHandle, host: &Host) -> bool {
 /// Run the GUI; the process's exit code.
 pub fn run() -> i32 {
     let cwd = std::env::current_dir().ok();
-    let (startup_verb, startup_error) =
-        match cli::parse(std::env::args_os().skip(1), cwd.as_deref()) {
-            Ok(s) => (s.verb, None),
-            Err(e) => {
-                eprintln!("lpk-gui: {e}");
-                (None, Some(e))
-            }
-        };
+    let (parsed, startup_files) =
+        cli::parse_with_files(std::env::args_os().skip(1), cwd.as_deref());
+    let (startup_verb, startup_error) = match parsed {
+        Ok(s) => (s.verb, None),
+        Err(e) => {
+            eprintln!("lpk-gui: {e}");
+            (None, Some(e))
+        }
+    };
     let app = Arc::new(
         App::new(paths::journal_dir().as_deref())
             .with_open_dir(paths::open_dir())
@@ -917,6 +930,11 @@ pub fn run() -> i32 {
             // instance); and the folders of entries an earlier run opened, if its process ended.
             let report = startup_report(&app.recover());
             app.sweep_open();
+            // This instance is the one that acts on a menu verb: its response files are spent
+            // (a second instance exits before here, leaving its file to the first); the others
+            // older than a day are swept.
+            delete_shell_files(&startup_files);
+            lpk_gui::shellfile::sweep();
             let (settings, settings_warning) = Store::open(paths::settings_file());
             if let Some(w) = &settings_warning {
                 eprintln!("lpk-gui: {w}");

@@ -81,6 +81,10 @@ impl Verb {
 pub struct Startup {
     /// The verb, if any (none: the empty window).
     pub verb: Option<Verb>,
+    /// The Explorer menu's response files the command line named and `parse` read
+    /// (`crate::shellfile`): the instance that goes on to act on the verb deletes them with
+    /// [`crate::shellfile::delete`]; a second instance only forwards the argument and leaves them.
+    pub shell_files: Vec<PathBuf>,
 }
 
 impl Startup {
@@ -99,7 +103,39 @@ pub fn parse(
     args: impl IntoIterator<Item = OsString>,
     cwd: Option<&Path>,
 ) -> Result<Startup, String> {
-    let args = expand(args, cwd)?;
+    parse_in(args, cwd, crate::shellfile::verbs_dir().as_deref())
+}
+
+/// [`parse`] with the folder of the Explorer menu's response files named (`None`: there is no
+/// such folder, every `@file` is E5-7's text format).
+pub fn parse_in(
+    args: impl IntoIterator<Item = OsString>,
+    cwd: Option<&Path>,
+    verbs: Option<&Path>,
+) -> Result<Startup, String> {
+    parse_collect(args, cwd, verbs, &mut Vec::new())
+}
+
+/// [`parse`] that also returns the Explorer menu's response files it opened, refusal or not
+/// (the instance that acts deletes them whatever the outcome).
+pub fn parse_with_files(
+    args: impl IntoIterator<Item = OsString>,
+    cwd: Option<&Path>,
+) -> (Result<Startup, String>, Vec<PathBuf>) {
+    let mut files = Vec::new();
+    let verbs = crate::shellfile::verbs_dir();
+    let r = parse_collect(args, cwd, verbs.as_deref(), &mut files);
+    (r, files)
+}
+
+/// [`parse_in`] filling `shell_files` with every response file opened, even when parsing fails.
+pub fn parse_collect(
+    args: impl IntoIterator<Item = OsString>,
+    cwd: Option<&Path>,
+    verbs: Option<&Path>,
+    shell_files: &mut Vec<PathBuf>,
+) -> Result<Startup, String> {
+    let args = expand_within(args, cwd, MAX_RESPONSE_FILE, MAX_ARGS, verbs, shell_files)?;
     let mut it = args.into_iter().peekable();
     let resolve = |p: OsString| -> PathBuf {
         let p = PathBuf::from(p);
@@ -203,7 +239,10 @@ pub fn parse(
             name,
         },
     };
-    Ok(Startup { verb: Some(verb) })
+    Ok(Startup {
+        verb: Some(verb),
+        shell_files: shell_files.clone(),
+    })
 }
 
 /// `--name`'s value: a file name ending in `.lpk`, with no folder in it.
@@ -223,21 +262,17 @@ fn archive_name(n: &OsString) -> Result<String, String> {
 
 /// Replace each `@file` argument before a `--` by the file's lines, one argument per line
 /// (UTF-8, an optional byte-order mark, CRLF or LF, blank lines skipped). Not recursive: a line
-/// that starts with `@` is a path.
-fn expand(
-    args: impl IntoIterator<Item = OsString>,
-    cwd: Option<&Path>,
-) -> Result<Vec<OsString>, String> {
-    expand_within(args, cwd, MAX_RESPONSE_FILE, MAX_ARGS)
-}
-
-/// [`expand`] with its bounds: `max_bytes` read across every response file, `max_args`
+/// that starts with `@` is a path. A file in the `verbs` folder named as the Explorer menu names
+/// its files (`crate::shellfile`) is its binary format instead, and is listed in `shell_files`.
+/// `max_bytes` read across every response file, `max_args`
 /// arguments after the expansion.
 fn expand_within(
     args: impl IntoIterator<Item = OsString>,
     cwd: Option<&Path>,
     max_bytes: u64,
     max_args: usize,
+    verbs: Option<&Path>,
+    shell_files: &mut Vec<PathBuf>,
 ) -> Result<Vec<OsString>, String> {
     let mut out = Vec::new();
     let mut literal = false;
@@ -253,7 +288,14 @@ fn expand_within(
                 if let (Some(c), true) = (cwd, path.is_relative()) {
                     path = c.join(path);
                 }
-                read_response_file(&path, &mut budget, max_bytes, &mut out, max_args)?;
+                if verbs.is_some_and(|d| crate::shellfile::is_shell_file(&path, d)) {
+                    // Listed before the read: a file that is refused is deleted too.
+                    shell_files.push(path.clone());
+                    let request = crate::shellfile::read(&path)?;
+                    out.extend(crate::shellfile::arguments(&request));
+                } else {
+                    read_response_file(&path, &mut budget, max_bytes, &mut out, max_args)?;
+                }
             }
             _ => {
                 literal |= a == "--";
@@ -545,21 +587,28 @@ mod tests {
         std::fs::write(dir.path().join("one.txt"), "a1\nb1\n").unwrap();
         std::fs::write(dir.path().join("two.txt"), "a2\nb2\n").unwrap();
         let args = || ["--test", "@one.txt", "@two.txt"].map(OsString::from);
-        let ok = expand_within(args(), Some(dir.path()), 12, 5).unwrap();
+        let ok = expand_within(args(), Some(dir.path()), 12, 5, None, &mut Vec::new()).unwrap();
         assert_eq!(ok.len(), 5);
         // The bytes across both files, not per file: 11 refuses the second.
-        let e = expand_within(args(), Some(dir.path()), 11, 5).unwrap_err();
+        let e = expand_within(args(), Some(dir.path()), 11, 5, None, &mut Vec::new()).unwrap_err();
         assert!(e.contains("more than 11 bytes"), "{e}");
         // The arguments after the expansion: 4 refuses the fifth.
-        let e = expand_within(args(), Some(dir.path()), 12, 4).unwrap_err();
+        let e = expand_within(args(), Some(dir.path()), 12, 4, None, &mut Vec::new()).unwrap_err();
         assert!(e.contains("more than 4 arguments"), "{e}");
         // One file with more lines than the allowance is refused while it is collected.
         std::fs::write(dir.path().join("many.txt"), "a\nb\nc\nd\ne\nf\n").unwrap();
-        let e = expand_within(["@many.txt"].map(OsString::from), Some(dir.path()), 1000, 5)
-            .unwrap_err();
+        let e = expand_within(
+            ["@many.txt"].map(OsString::from),
+            Some(dir.path()),
+            1000,
+            5,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         assert!(e.contains("more than 5 arguments"), "{e}");
         // Without response files too.
         let many = (0..6).map(|i| OsString::from(format!("p{i}")));
-        assert!(expand_within(many, None, 12, 5).is_err());
+        assert!(expand_within(many, None, 12, 5, None, &mut Vec::new()).is_err());
     }
 }
