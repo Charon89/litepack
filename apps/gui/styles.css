@@ -54,6 +54,39 @@
   white-space: nowrap;
 }
 
+/* E6-4: the registered copy's "Open with" switch and "Default apps…" button, before the update
+   switch (which then no longer pushes itself to the right: the group does). */
+.setting-group {
+  margin-left: auto;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.setting-group[hidden] {
+  display: none;
+}
+
+.setting-group:not([hidden]) + .setting {
+  margin-left: 0.5rem;
+}
+
+.setting-group .setting {
+  margin-left: 0;
+}
+
+.shell-alert {
+  margin: 0;
+  padding: 0.375rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+
+.shell-alert[hidden] {
+  display: none;
+}
+
 .notices {
   margin: 0;
   padding: 0;

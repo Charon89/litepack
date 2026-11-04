@@ -41,8 +41,11 @@ pub mod pick;
 pub mod preview;
 pub mod recents;
 pub mod register;
+#[cfg(test)]
+mod register_fake;
 pub mod security;
 pub mod settings;
+pub mod shell_setting;
 pub mod shellfile;
 pub mod strings;
 pub mod update;

@@ -139,6 +139,36 @@ pub fn shell_open(owner: Option<isize>, path: &Path) -> io::Result<()> {
     }
 }
 
+/// Open a Settings page: `uri` must start with `ms-settings:` (any case) and hold no control
+/// character, or this refuses with `InvalidInput` before the shell is called. Same call as
+/// [`shell_open`] (`ShellExecuteExW`'s `open` verb on a thread of its own), no owner. The GUI
+/// passes one fixed string, never anything from the page.
+pub fn open_settings_uri(uri: &str) -> io::Result<()> {
+    if !is_settings_uri(uri) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only ms-settings: URIs may be opened here",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        windows_impl::open_uri(uri)
+    }
+    #[cfg(not(windows))]
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Whether `uri` is one `open_settings_uri` accepts.
+fn is_settings_uri(uri: &str) -> bool {
+    const SCHEME: &str = "ms-settings:";
+    uri.len() > SCHEME.len()
+        && uri.is_char_boundary(SCHEME.len())
+        && uri[..SCHEME.len()].eq_ignore_ascii_case(SCHEME)
+        && !uri.chars().any(char::is_control)
+}
+
 /// The shell's Open dialog (`IFileOpenDialog`) owned by `owner`, titled `title`: the files the
 /// user chose (several when `multi`), empty when cancelled. File-system items only. Runs on a
 /// thread of its own with COM initialised, and blocks until the dialog closes.
@@ -204,6 +234,31 @@ pub fn confirm(owner: Option<isize>, title: &str, text: &str) -> io::Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_settings_uris_are_opened() {
+        assert!(is_settings_uri(
+            "ms-settings:defaultapps?registeredAppUser=LitePack"
+        ));
+        assert!(is_settings_uri("MS-Settings:defaultapps"));
+        for bad in [
+            "",
+            "ms-settings:",
+            "https://example.com",
+            "file:///C:/Windows/notepad.exe",
+            "C:\\Windows\\notepad.exe",
+            "cmd.exe",
+            " ms-settings:defaultapps",
+            "ms-settings:x\0y",
+            "ms-settings:x\ny",
+            "xms-settings:defaultapps",
+            "ms-setting\u{e9}:x",
+        ] {
+            assert!(!is_settings_uri(bad), "{bad:?}");
+            let e = open_settings_uri(bad).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
 
     #[test]
     fn publish_refuses_an_existing_name_and_keeps_both_files() {
