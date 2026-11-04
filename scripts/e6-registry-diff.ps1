@@ -50,9 +50,30 @@ function Compare-Snapshots($Before, $After, [string]$What) {
 }
 
 function Invoke-Gui([string[]]$Arguments) {
-    # A GUI-subsystem exe: only Start-Process -Wait waits for it.
-    $p = Start-Process -FilePath $Gui -ArgumentList $Arguments -Wait -PassThru
+    # A GUI-subsystem exe: only Start-Process -Wait waits for it. Its stderr goes to a file, shown when not empty.
+    $err = Join-Path $env:RUNNER_TEMP ("e6-gui-" + [guid]::NewGuid().ToString('N') + '.txt')
+    $p = Start-Process -FilePath $Gui -ArgumentList $Arguments -Wait -PassThru -RedirectStandardError $err
+    $text = Get-Content -LiteralPath $err -Raw -ErrorAction SilentlyContinue
+    if ($text) { Write-Host "lpk-gui $($Arguments -join ' ') stderr: $text" }
+    Remove-Item -LiteralPath $err -Force -ErrorAction SilentlyContinue
     return $p.ExitCode
+}
+
+# On a failed check: the association chain as the per-user and merged views hold it, what AssocQueryStringW gives for
+# the command and the executable, and the session's UAC setting and integrity level.
+function Show-Chain {
+    foreach ($k in "$classes\.lpk", "$classes\LitePack.lpk", 'HKCR\.lpk', 'HKCR\LitePack.lpk', 'HKCU\Software\LitePack') {
+        Write-Host "--- reg query $k /s"
+        cmd /c "reg query `"$k`" /s 2>&1"
+    }
+    foreach ($s in 1, 2) {
+        $b = New-Object System.Text.StringBuilder 1024
+        [uint32]$l = 1024
+        $r = [LpkAssoc]::AssocQueryStringW(0, $s, '.lpk', $null, $b, [ref]$l)
+        Write-Host ('AssocQueryStringW(.lpk, ASSOCSTR {0}) = 0x{1:X8} "{2}"' -f $s, $r, $b.ToString())
+    }
+    cmd /c 'reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA 2>&1'
+    whoami /groups | Select-String 'Mandatory Label'
 }
 
 Add-Type -TypeDefinition @'
@@ -73,8 +94,8 @@ if ($code -ne 0) { throw "--register-shell --open-with exited $code" }
 $sb = New-Object System.Text.StringBuilder 1024
 [uint32]$len = 1024
 $hr = [LpkAssoc]::AssocQueryStringW(0, 2, '.lpk', $null, $sb, [ref]$len)
-if ($hr -ne 0) { throw "AssocQueryStringW(.lpk) failed: $hr" }
-if ($sb.ToString() -ne $Gui) { throw "AssocQueryStringW(.lpk) gave '$($sb.ToString())', expected '$Gui'" }
+if ($hr -ne 0) { Show-Chain; throw ('AssocQueryStringW(.lpk) failed: 0x{0:X8}' -f $hr) }
+if ($sb.ToString() -ne $Gui) { Show-Chain; throw "AssocQueryStringW(.lpk) gave '$($sb.ToString())', expected '$Gui'" }
 
 # Each opted-in extension lists its ProgID in OpenWithProgids.
 $assoc = Get-Item 'HKCU:\Software\LitePack\Capabilities\FileAssociations'
