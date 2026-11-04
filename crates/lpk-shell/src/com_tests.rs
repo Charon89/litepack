@@ -632,7 +632,15 @@ fn invoke_starts_nothing_and_writes_nothing_without_a_usable_gui_path() {
     let f = s.file("a.txt");
     let verbs_dir = s.0.join("Verbs");
     let array = array_of(&names(&[&f]));
-    for gui in [None, Some(s.0.join("missing.exe")), Some(s.dir("a-folder"))] {
+    // A relative GuiPath is refused even when a file of that name exists from here.
+    let relative = PathBuf::from("Cargo.toml");
+    assert!(relative.is_file() && relative.is_relative());
+    for gui in [
+        None,
+        Some(s.0.join("missing.exe")),
+        Some(s.dir("a-folder")),
+        Some(relative),
+    ] {
         let host = Rc::new(TestHost {
             gui,
             dir: verbs_dir.clone(),
@@ -699,7 +707,15 @@ fn the_command_line_quotes_the_file_only_when_it_has_a_space() {
 fn a_verb_without_items_or_with_garbage_arguments_does_not_crash() {
     let _g = serial();
     init_com();
-    let (_factory, root) = root_from_factory();
+    // Through a test host: no test reaches the real registry read or the process start.
+    let host = Rc::new(TestHost {
+        gui: None,
+        dir: std::env::temp_dir().join(format!("lpk-shell-none-{}", protocol::random_hex())),
+        folder: None,
+        fail_launch: false,
+        launched: Mutex::new(Vec::new()),
+    });
+    let root: IExplorerCommand = ExplorerCommand::with_host(host).into();
     for v in verbs_of(&root) {
         // SAFETY: COM calls on a live interface with null optional arguments.
         unsafe {
@@ -752,4 +768,19 @@ fn the_manifest_fragment_names_this_class_for_the_three_item_types() {
         3,
         "{clsid}"
     );
+}
+
+#[test]
+fn no_object_is_agile() {
+    use windows::Win32::System::Com::IAgileObject;
+    let _g = serial();
+    init_com();
+    let (factory, root) = root_from_factory();
+    assert!(root.cast::<IAgileObject>().is_err(), "the root");
+    assert!(factory.cast::<IAgileObject>().is_err(), "the factory");
+    let verbs = verbs_of(&root);
+    assert!(verbs[0].cast::<IAgileObject>().is_err(), "a verb");
+    // SAFETY: COM calls on live interfaces.
+    let enumerator = unsafe { root.EnumSubCommands() }.expect("enumerator");
+    assert!(enumerator.cast::<IAgileObject>().is_err(), "the enumerator");
 }

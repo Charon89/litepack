@@ -319,6 +319,12 @@ pub fn classify(count: usize, items: impl IntoIterator<Item = Option<Entry>>) ->
     } else {
         leaf(&first.parent).to_owned()
     };
+    // A drive's root (`C:`) has no name of its own.
+    let name = if name.ends_with(':') {
+        String::new()
+    } else {
+        name
+    };
     Some(Selection {
         kind,
         name: file_stem(&name),
@@ -398,6 +404,10 @@ pub fn request(verb: Verb, selection: &Selection) -> Option<Request> {
     }
     let all: Vec<usize> = (0..selection.count).collect();
     let (items, name) = match verb {
+        // On archives (`--create <a>`) one per set, as the other archive verbs send them.
+        Verb::AddToArchive if matches!(selection.kind, Kind::L | Kind::A | Kind::S) => {
+            (selection.archives.clone(), None)
+        }
         Verb::AddToArchive => (all, None),
         Verb::AddToNamed => (all, Some(format!("{}.lpk", selection.name))),
         _ => (selection.archives.clone(), None),

@@ -113,15 +113,29 @@ pub fn parse_in(
     cwd: Option<&Path>,
     verbs: Option<&Path>,
 ) -> Result<Startup, String> {
-    let mut shell_files = Vec::new();
-    let args = expand_within(
-        args,
-        cwd,
-        MAX_RESPONSE_FILE,
-        MAX_ARGS,
-        verbs,
-        &mut shell_files,
-    )?;
+    parse_collect(args, cwd, verbs, &mut Vec::new())
+}
+
+/// [`parse`] that also returns the Explorer menu's response files it opened, refusal or not
+/// (the instance that acts deletes them whatever the outcome).
+pub fn parse_with_files(
+    args: impl IntoIterator<Item = OsString>,
+    cwd: Option<&Path>,
+) -> (Result<Startup, String>, Vec<PathBuf>) {
+    let mut files = Vec::new();
+    let verbs = crate::shellfile::verbs_dir();
+    let r = parse_collect(args, cwd, verbs.as_deref(), &mut files);
+    (r, files)
+}
+
+/// [`parse_in`] filling `shell_files` with every response file opened, even when parsing fails.
+pub fn parse_collect(
+    args: impl IntoIterator<Item = OsString>,
+    cwd: Option<&Path>,
+    verbs: Option<&Path>,
+    shell_files: &mut Vec<PathBuf>,
+) -> Result<Startup, String> {
+    let args = expand_within(args, cwd, MAX_RESPONSE_FILE, MAX_ARGS, verbs, shell_files)?;
     let mut it = args.into_iter().peekable();
     let resolve = |p: OsString| -> PathBuf {
         let p = PathBuf::from(p);
@@ -227,7 +241,7 @@ pub fn parse_in(
     };
     Ok(Startup {
         verb: Some(verb),
-        shell_files,
+        shell_files: shell_files.clone(),
     })
 }
 
@@ -275,9 +289,10 @@ fn expand_within(
                     path = c.join(path);
                 }
                 if verbs.is_some_and(|d| crate::shellfile::is_shell_file(&path, d)) {
+                    // Listed before the read: a file that is refused is deleted too.
+                    shell_files.push(path.clone());
                     let request = crate::shellfile::read(&path)?;
                     out.extend(crate::shellfile::arguments(&request));
-                    shell_files.push(path);
                 } else {
                     read_response_file(&path, &mut budget, max_bytes, &mut out, max_args)?;
                 }

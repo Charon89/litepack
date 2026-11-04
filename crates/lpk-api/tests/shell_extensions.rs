@@ -1,28 +1,30 @@
 //! E6-2: the archive extensions Explorer's menu recognises (`crates/lpk-shell/src/
 //! archive_extensions.txt`, one list kept in `lpk-shell`, which depends on no `lpk-*` crate) stay
 //! equal to `.lpk` plus the foreign formats the engine opens today, plus their usual aliases.
-//! There is no `docs/FORMATS.md` yet: E4-4 adds it with RAR, ISO and CAB and updates the list
-//! and this test then.
+//! "Opens today" is `Format::read_by_worker`, so E4-4 making RAR readable fails this test until
+//! `rar` is in the list. There is no `docs/FORMATS.md` yet: E4-4 adds it and updates the list and
+//! this test then.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use lpk_core::foreign::Format;
 
-/// Whether the engine opens the format today; a new `Format` variant fails to compile here until
-/// it is placed.
-fn opened_today(f: Format) -> bool {
+/// The variant's place in [`ALL`]; the exhaustive match makes a new `Format` variant fail to
+/// compile here until it is added, and the test checks `ALL` against it.
+fn index(f: Format) -> usize {
     match f {
-        Format::TestFixture | Format::Rar => false,
-        Format::Zip
-        | Format::SevenZ
-        | Format::Tar
-        | Format::Gzip
-        | Format::Bzip2
-        | Format::Xz
-        | Format::Zstd
-        | Format::Lzip
-        | Format::Lzma => true,
+        Format::TestFixture => 0,
+        Format::Zip => 1,
+        Format::SevenZ => 2,
+        Format::Tar => 3,
+        Format::Gzip => 4,
+        Format::Bzip2 => 5,
+        Format::Xz => 6,
+        Format::Zstd => 7,
+        Format::Lzip => 8,
+        Format::Lzma => 9,
+        Format::Rar => 10,
     }
 }
 
@@ -55,28 +57,30 @@ fn the_menus_archive_extensions_are_lpk_plus_what_the_engine_opens() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../lpk-shell/src/archive_extensions.txt"),
     )
     .expect("lpk-shell's list");
-    let listed: BTreeSet<&str> = text
+    let listed: BTreeSet<String> = text
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
         .collect();
 
+    for (i, f) in ALL.into_iter().enumerate() {
+        assert_eq!(index(f), i, "ALL lists every Format variant, in order");
+    }
+    // What the engine opens today: whatever its worker reads, the test fixture apart.
     let mut want: BTreeSet<String> = BTreeSet::from(["lpk".to_string()]);
-    for f in ALL.into_iter().filter(|f| opened_today(*f)) {
-        assert!(
-            f.read_by_worker(),
-            "{}: opened but not read by the worker",
-            f.name()
-        );
+    for f in ALL
+        .into_iter()
+        .filter(|f| *f != Format::TestFixture && f.read_by_worker())
+    {
         want.insert(f.name().to_string());
     }
-    // `lz` and `tlz` for lzip, `lzma` for LZMA-alone: their names are the extensions.
     for (alias, target) in ALIASES {
         assert!(want.contains(target), "{alias}: {target} is not opened");
         want.insert(alias.to_string());
     }
+    // `lzip`'s short form.
     want.insert("tlz".to_string());
-    let listed: BTreeSet<String> = listed.into_iter().map(String::from).collect();
     assert_eq!(listed, want);
     for e in &listed {
         assert_eq!(*e, e.to_lowercase(), "lower case, no dot");

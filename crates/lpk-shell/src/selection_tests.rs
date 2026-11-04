@@ -122,7 +122,10 @@ fn names_follow_the_design() {
         is_dir: false,
         parent: "C:\\".into(),
     };
-    assert_eq!(sel(vec![Some(root.clone()), Some(root)]).name, "C_");
+    assert_eq!(
+        sel(vec![Some(root.clone()), Some(root)]).name,
+        FALLBACK_NAME
+    );
     assert_eq!(sel(vec![file("we:ird?.txt")]).name, "we_ird_");
     assert_eq!(sel(vec![file("...")]).name, FALLBACK_NAME);
 }
@@ -230,4 +233,17 @@ fn requests_per_verb() {
         request(Verb::AddToArchive, &s).expect("visible").items,
         vec![0, 1]
     );
+}
+
+#[test]
+fn add_to_archive_on_archives_sends_one_per_set() {
+    let s = sel(vec![file("big.7z.001"), file("big.7z.002")]);
+    assert_eq!(
+        request(Verb::AddToArchive, &s).expect("visible").items,
+        vec![0]
+    );
+    let s = sel(vec![file("a.7z"), file("b.lpk"), file("b.lpk.001")]);
+    assert_eq!(s.kind, Kind::S);
+    let items = request(Verb::AddToArchive, &s).expect("visible").items;
+    assert_eq!(items.len(), s.archives.len());
 }

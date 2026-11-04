@@ -777,9 +777,10 @@ fn forwarded(handle: &AppHandle, argv: Vec<String>, cwd: String) {
         return;
     };
     let args = argv.into_iter().skip(1).map(std::ffi::OsString::from);
-    match cli::parse(args, Some(std::path::Path::new(&cwd))) {
+    let (parsed, files) = cli::parse_with_files(args, Some(std::path::Path::new(&cwd)));
+    delete_shell_files(&files);
+    match parsed {
         Ok(s) => {
-            delete_shell_files(&s.shell_files);
             if let Some(verb) = s.verb {
                 let activation = activate(&verb, &host.app.grants);
                 host.app.note_activation(&activation);
@@ -865,18 +866,15 @@ fn may_exit(handle: &AppHandle, host: &Host) -> bool {
 /// Run the GUI; the process's exit code.
 pub fn run() -> i32 {
     let cwd = std::env::current_dir().ok();
-    let mut startup_files = Vec::new();
-    let (startup_verb, startup_error) =
-        match cli::parse(std::env::args_os().skip(1), cwd.as_deref()) {
-            Ok(s) => {
-                startup_files = s.shell_files;
-                (s.verb, None)
-            }
-            Err(e) => {
-                eprintln!("lpk-gui: {e}");
-                (None, Some(e))
-            }
-        };
+    let (parsed, startup_files) =
+        cli::parse_with_files(std::env::args_os().skip(1), cwd.as_deref());
+    let (startup_verb, startup_error) = match parsed {
+        Ok(s) => (s.verb, None),
+        Err(e) => {
+            eprintln!("lpk-gui: {e}");
+            (None, Some(e))
+        }
+    };
     let app = Arc::new(
         App::new(paths::journal_dir().as_deref())
             .with_open_dir(paths::open_dir())

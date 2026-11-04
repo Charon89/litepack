@@ -333,7 +333,7 @@ fn command_line(gui: &Path, file: &Path) -> Vec<u16> {
 fn invoke(host: &dyn Host, site: &Site, verb: Verb, items: Option<&IShellItemArray>) -> Result<()> {
     let gui = host
         .gui_path()
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_absolute() && p.is_file())
         .ok_or_else(|| Error::from(HRESULT::from_win32(2)))?;
     let sel = selection(items).ok_or_else(|| Error::from(E_FAIL))?;
     let req = request(verb, &sel).ok_or_else(|| Error::from(E_FAIL))?;
@@ -370,7 +370,7 @@ fn invoke(host: &dyn Host, site: &Site, verb: Verb, items: Option<&IShellItemArr
 }
 
 /// The "LitePack" command: the root of the submenu, holding the seven verbs.
-#[implement(IExplorerCommand, IObjectWithSite)]
+#[implement(IExplorerCommand, IObjectWithSite, Agile = false)]
 struct ExplorerCommand {
     host: Rc<dyn Host>,
     site: Site,
@@ -402,7 +402,7 @@ impl IExplorerCommand_Impl for ExplorerCommand_Impl {
             let gui = self
                 .host
                 .gui_path()
-                .filter(|p| p.is_file())
+                .filter(|p| p.is_absolute() && p.is_file())
                 .ok_or_else(|| Error::from(E_NOTIMPL))?;
             let mut icon: Vec<u16> = vec![u16::from(b'"')];
             icon.extend(gui.as_os_str().encode_wide());
@@ -473,7 +473,7 @@ impl IObjectWithSite_Impl for ExplorerCommand_Impl {
 }
 
 /// One of the seven verbs, a subcommand of the root.
-#[implement(IExplorerCommand)]
+#[implement(IExplorerCommand, Agile = false)]
 struct VerbCommand {
     verb: Verb,
     host: Rc<dyn Host>,
@@ -526,7 +526,7 @@ impl IExplorerCommand_Impl for VerbCommand_Impl {
 }
 
 /// The enumerator over the seven verbs.
-#[implement(IEnumExplorerCommand)]
+#[implement(IEnumExplorerCommand, Agile = false)]
 struct VerbEnum {
     host: Rc<dyn Host>,
     site: Site,
@@ -613,7 +613,7 @@ impl IEnumExplorerCommand_Impl for VerbEnum_Impl {
 }
 
 /// The class factory of [`CLSID_LPK_SHELL`].
-#[implement(IClassFactory)]
+#[implement(IClassFactory, Agile = false)]
 struct ClassFactory {
     _live: Live,
 }

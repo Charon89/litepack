@@ -109,4 +109,24 @@ fn the_verbs_that_take_no_name_refuse_one() {
     bytes.extend("x".encode_utf16().flat_map(u16::to_le_bytes));
     std::fs::write(&file, bytes).unwrap();
     assert!(parse_in([at(&file)], None, Some(&verbs)).is_err());
+    // The refused verb's file is listed for deletion all the same.
+    let mut files = Vec::new();
+    let r = lpk_gui::cli::parse_collect([at(&file)], None, Some(&verbs), &mut files);
+    assert!(r.is_err());
+    assert_eq!(files, vec![file.clone()]);
+    assert!(shellfile::delete(&files[0], &verbs));
+    assert!(!file.exists());
+}
+
+#[test]
+fn a_file_that_fails_to_read_is_listed_for_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let verbs = verbs_dir(dir.path());
+    let file = verbs.join(format!("shell-{HEX}.verbs"));
+    std::fs::write(&file, b"not a response file").unwrap();
+    let mut files = Vec::new();
+    let r = lpk_gui::cli::parse_collect([at(&file)], None, Some(&verbs), &mut files);
+    assert!(r.is_err());
+    assert_eq!(files, vec![file.clone()]);
+    assert!(shellfile::delete(&files[0], &verbs));
 }
