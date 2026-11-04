@@ -7,8 +7,9 @@ count=0
 while IFS= read -r path; do
   count=$((count + 1))
   if [ ! -f "$src/$path" ]; then echo "missing chapter file: $path"; fail=1; continue; fi
-  if ! grep -q '{{#include footer.md}}' "$src/$path"; then
-    echo "chapter lacks {{#include footer.md}}: $path"; fail=1
+  last="$(grep -v '^[[:space:]]*$' "$src/$path" | tail -n 1 | tr -d '\r')"
+  if ! printf '%s\n' "$last" | grep -Eq '^\{\{#include (\.\./)*footer\.md\}\}$'; then
+    echo "last non-blank line is not the footer include: $path"; fail=1
   fi
 done < <(sed -nE 's/.*\]\(([^)#]+\.md)\).*/\1/p' "$src/SUMMARY.md")
 [ "$count" -gt 0 ] || { echo "no chapters found in SUMMARY.md"; exit 1; }
