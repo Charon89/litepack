@@ -27,9 +27,21 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("lpk-shell-com-{}", protocol::random_hex()));
+        Self::under(&std::env::temp_dir())
+    }
+
+    fn under(base: &Path) -> Self {
+        let dir = base.join(format!("lpk-shell-com-{}", protocol::random_hex()));
         std::fs::create_dir_all(&dir).expect("scratch");
-        Scratch(dir)
+        // Shell items give paths back in long form; a runner's temp folder may be an 8.3 short
+        // name (`RUNNER~1`), so the expected paths are built from the long form.
+        let long = std::fs::canonicalize(&dir).expect("canonical scratch");
+        let text = long.to_string_lossy();
+        let long = match text.strip_prefix("\\\\?\\") {
+            Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+            _ => long,
+        };
+        Scratch(long)
     }
 
     fn file(&self, name: &str) -> PathBuf {
@@ -783,4 +795,36 @@ fn no_object_is_agile() {
     // SAFETY: COM calls on live interfaces.
     let enumerator = unsafe { root.EnumSubCommands() }.expect("enumerator");
     assert!(enumerator.cast::<IAgileObject>().is_err(), "the enumerator");
+}
+
+/// The scratch folder is long-form even when its base is spelled as an 8.3 short name, as on a
+/// runner whose user name is long (`RUNNER~1`); skipped where the volume makes no short names.
+#[test]
+fn the_scratch_folder_is_long_form_under_a_short_base() {
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+    let _g = serial();
+    init_com();
+    let long_base =
+        std::env::temp_dir().join(format!("lpk-shell-long-name-{}", protocol::random_hex()));
+    std::fs::create_dir_all(&long_base).expect("base");
+    let long_w = nul_terminated(&wide(&long_base));
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: `long_w` is NUL-terminated and `buf` is writable for its length.
+    let n = unsafe { GetShortPathNameW(PCWSTR(long_w.as_ptr()), Some(&mut buf)) } as usize;
+    let short = PathBuf::from(OsString::from_wide(buf.get(..n).expect("length")));
+    if n == 0 || short == long_base {
+        eprintln!("skipped: this volume makes no 8.3 names");
+        let _ = std::fs::remove_dir_all(&long_base);
+        return;
+    }
+    assert!(short.to_string_lossy().contains('~'), "{short:?}");
+    let s = Scratch::under(&short);
+    assert!(!s.0.to_string_lossy().contains('~'), "{:?}", s.0);
+    // A shell item over a file there reads back exactly the path the test built.
+    let f = s.file("a.txt");
+    let array = array_of(&names(&[&f]));
+    let item = item_at(&array, 0).expect("item");
+    assert_eq!(item_path(&item), Some(wide(&f)));
+    drop(s);
+    let _ = std::fs::remove_dir_all(&long_base);
 }
