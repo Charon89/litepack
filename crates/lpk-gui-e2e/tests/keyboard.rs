@@ -221,25 +221,25 @@ async fn run(c: &Client) -> Result<(), String> {
     .await?;
     // Mark the dialog's status node: it must be the same node after every phase.
     c.execute(
-        "document.querySelector('dialog.wizard [role=status].sr-only').dataset.marker = 'kept'; return true;",
+        "document.querySelector('dialog.wizard[open] [role=status].sr-only').dataset.marker = 'kept'; return true;",
         vec![],
     )
     .await
     .map_err(|e| e.to_string())?;
-    c.find(Locator::Css("dialog.wizard input[name=dest]:checked"))
+    c.find(Locator::Css("dialog.wizard[open] input[name=dest]:checked"))
         .await
         .map_err(|e| e.to_string())?
         .send_keys(ENTER)
         .await
         .map_err(|e| e.to_string())?;
-    wait_for(c, "dialog.wizard .check", "the result after Enter").await?;
+    wait_for(c, "dialog.wizard[open] .check", "the result after Enter").await?;
     // The same status node survived the phases (never detached) and now holds the result's
     // first line (set a moment after the render).
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let v = c
             .execute(
-                "const s = document.querySelector('dialog.wizard [role=status].sr-only');                  const p = document.querySelector('dialog.wizard .wizard-body p');                  return !!s && s.isConnected && s.dataset.marker === 'kept' && !!p                      && s.textContent !== '' && s.textContent === p.textContent;",
+                "const s = document.querySelector('dialog.wizard[open] [role=status].sr-only');                  const p = document.querySelector('dialog.wizard[open] .wizard-body p');                  return !!s && s.isConnected && s.dataset.marker === 'kept' && !!p                      && s.textContent !== '' && s.textContent === p.textContent;",
                 vec![],
             )
             .await

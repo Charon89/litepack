@@ -90,7 +90,7 @@ async fn run(c: &Client) -> Result<(), String> {
     if !text.contains("passed") {
         return Err(format!("result: {text:?}; page: {}", page_state(c).await));
     }
-    let check = wait_for(c, "dialog.wizard .results .check", "the check line").await?;
+    let check = wait_for(c, "dialog.wizard[open] .results .check", "the check line").await?;
     let text = check.text().await.map_err(|e| e.to_string())?;
     if !text.contains("decoded") {
         return Err(format!("check line: {text:?}"));

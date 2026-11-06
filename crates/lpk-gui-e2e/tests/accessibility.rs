@@ -416,8 +416,8 @@ const EXPECTED_STATES: usize = 20;
 async fn extract_here(c: &Client) -> Result<(), String> {
     click(c, "#action-extract:not([disabled])").await?;
     dialog_settled(c).await?;
-    click(c, "dialog.wizard input[name=scope][value=all]").await?;
-    click(c, "dialog.wizard input[name=dest][value=here]").await
+    click(c, "dialog.wizard[open] input[name=scope][value=all]").await?;
+    click(c, "dialog.wizard[open] input[name=dest][value=here]").await
 }
 
 async fn browse(c: &Client, source: &str, rep: &mut Report) {
@@ -487,10 +487,10 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
 
     let r = async {
         extract_here(c).await?;
-        click(c, "dialog.wizard button.primary").await?;
+        click(c, "dialog.wizard[open] button.primary").await?;
         wait_for(
             c,
-            "dialog.wizard .wizard-buttons button:nth-child(4)",
+            "dialog.wizard[open] .wizard-buttons button:nth-child(4)",
             "the conflict question",
         )
         .await?;
@@ -503,16 +503,16 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
 
     let r = async {
         extract_here(c).await?;
-        click(c, "dialog.wizard button.primary").await?;
+        click(c, "dialog.wizard[open] button.primary").await?;
         wait_for(
             c,
-            "dialog.wizard .wizard-buttons button:nth-child(4)",
+            "dialog.wizard[open] .wizard-buttons button:nth-child(4)",
             "the conflict question",
         )
         .await?;
         // Skip (the primary button): the rest is written and the result shown.
-        click(c, "dialog.wizard button.primary").await?;
-        wait_for(c, "dialog.wizard .check", "the extract result").await?;
+        click(c, "dialog.wizard[open] button.primary").await?;
+        wait_for(c, "dialog.wizard[open] .check", "the extract result").await?;
         dialog_settled(c).await?;
         axe(c, source, "the extract dialog (result)").await
     }
@@ -523,7 +523,7 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
     // The maintenance dialogs.
     let r = async {
         click(c, "#action-test").await?;
-        wait_for(c, "dialog.wizard .check", "the test result").await?;
+        wait_for(c, "dialog.wizard[open] .check", "the test result").await?;
         dialog_settled(c).await?;
         axe(c, source, "the test dialog (result)").await
     }
@@ -534,7 +534,7 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
     let r = async {
         click(c, "#action-check").await?;
         dialog_settled(c).await?;
-        wait_for(c, "dialog.wizard .wizard-body p", "the check result").await?;
+        wait_for(c, "dialog.wizard[open] .wizard-body p", "the check result").await?;
         axe(c, source, "the check dialog (result)").await
     }
     .await;
@@ -543,7 +543,7 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
 
     let r = async {
         click(c, "#action-update").await?;
-        wait_for(c, "dialog.wizard details", "the update dialog").await?;
+        wait_for(c, "dialog.wizard[open] details", "the update dialog").await?;
         dialog_settled(c).await?;
         axe(c, source, "the update-from-folder dialog").await
     }
@@ -555,7 +555,7 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
         click(c, "#action-history").await?;
         wait_for(
             c,
-            "dialog.wizard input[name=generation]",
+            "dialog.wizard[open] input[name=generation]",
             "the history list",
         )
         .await?;

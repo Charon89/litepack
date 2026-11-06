@@ -648,7 +648,8 @@ main {
   list-style: none;
 }
 
-.wizard {
+.wizard,
+.settings {
   min-width: 24rem;
   max-width: min(40rem, 92vw);
   padding: 20px 22px;
@@ -659,22 +660,26 @@ main {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
 }
 
-.wizard::backdrop {
+.wizard::backdrop,
+.settings::backdrop {
   background: rgba(0, 0, 0, 0.4);
 }
 
-.wizard > h2 {
+.wizard > h2,
+.settings > h2 {
   margin: 0 0 12px;
   font: 600 18px/1.25 var(--display);
   font-stretch: 87.5%;
 }
 
-.wizard button {
+.wizard button,
+.settings button {
   min-height: 32px;
   padding: 0 14px;
 }
 
-.wizard button:not(.primary) {
+.wizard button:not(.primary),
+.settings button:not(.primary) {
   border-color: var(--rule);
   color: var(--ink);
 }
@@ -710,14 +715,15 @@ main {
   list-style: disc;
 }
 
-.wizard-buttons {
+.wizard-buttons,
+.settings-buttons {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
 }
 
-.settings .wizard-body {
+.settings-body {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -1021,7 +1027,8 @@ main {
     background: Highlight;
     color: HighlightText;
   }
-  dialog.wizard {
+  dialog.wizard,
+  dialog.settings {
     border: 2px solid CanvasText;
   }
   .wizard.create .card:has(input:checked) {
