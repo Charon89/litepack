@@ -102,14 +102,14 @@ function humanSize(n) {
   if (v < 1024) {
     return t("size.b", { n: v.toLocaleString() });
   }
-  const units = ["size.kb", "size.mb", "size.gb"];
-  let x = v / 1024;
-  let i = 0;
-  while (x >= 1024 && i < units.length - 1) {
-    x /= 1024;
-    i++;
+  const one = (x) => ({ n: x.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
+  if (v < 1024 ** 2) {
+    return t("size.kb", one(v / 1024));
   }
-  return t(units[i], { n: x.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
+  if (v < 1024 ** 3) {
+    return t("size.mb", one(v / 1024 ** 2));
+  }
+  return t("size.gb", one(v / 1024 ** 3));
 }
 
 // A short date (the day), with the time only when it is today.
