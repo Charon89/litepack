@@ -39,6 +39,17 @@
   <p id="shell-alert" class="shell-alert" role="alert" hidden></p>
   <ul id="notices" class="notices" role="list" aria-live="polite" data-label="notices.label"></ul>
   <p id="banner" class="banner" role="status" hidden><span id="banner-text"></span> <button type="button" id="banner-latest" data-string="banner.latest"></button></p>
+  <section id="label" class="label" data-label="band.label" hidden>
+    <h2 id="label-name"></h2>
+    <ul id="label-facts" class="facts">
+      <li id="label-gauge" class="gauge"><span class="track" aria-hidden="true"><span id="label-fill" class="fill"></span></span><span id="label-gauge-text"></span></li>
+      <li id="label-entries"></li>
+      <li id="label-format"></li>
+      <li id="label-generation"></li>
+      <li id="label-encrypted" hidden></li>
+      <li id="label-readonly" hidden></li>
+    </ul>
+  </section>
   <header class="bar" role="toolbar" data-label="bar.label" data-pane data-pane-focus="#filter" hidden id="bar">
     <div class="modes" role="radiogroup" data-label="mode.label">
       <button type="button" id="mode-tree" role="radio" aria-checked="false" data-string="mode.tree"></button>

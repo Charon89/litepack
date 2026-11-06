@@ -346,6 +346,7 @@ function clearSession() {
   $("split").hidden = true;
   $("list").hidden = true;
   $("hint").hidden = false;
+  $("label").hidden = true;
   preview.clear();
   updateMaintenance();
   renderRecents().catch(showError);
@@ -536,6 +537,27 @@ async function openArchive(granted) {
   await showOpened(opened);
 }
 
+// The label band (E5-12): the name, the gauge (the file against its contents; hidden when either
+// is unknown) and the facts.
+function renderLabel(o) {
+  $("label-name").textContent = o.name;
+  const known = o.archive_bytes !== null && o.content_bytes !== null;
+  $("label-gauge").hidden = !known;
+  if (known) {
+    const share = Math.min(1, o.archive_bytes / o.content_bytes);
+    $("label-fill").style.width = `${(share * 100).toFixed(1)}%`;
+    $("label-gauge-text").textContent = t("band.gauge", { content: humanSize(o.content_bytes), archive: humanSize(o.archive_bytes) });
+  }
+  $("label-entries").textContent = t("band.entries", { count: bytes(o.total) });
+  $("label-format").textContent = o.format === "lpk" ? t("band.format.lpk") : t("band.format.other", { format: o.format });
+  $("label-generation").textContent = t("band.generation", { generation: o.generation });
+  $("label-generation").hidden = o.format !== "lpk";
+  $("label-encrypted").textContent = t("band.encrypted");
+  $("label-encrypted").hidden = !o.encrypted;
+  $("label-readonly").textContent = t("band.readonly");
+  $("label-readonly").hidden = o.generation === o.latest_generation;
+}
+
 // Show a session Rust opened (a new archive, a generation's view, the archive after a rollback).
 async function showOpened(opened) {
   session = opened.session;
@@ -546,6 +568,8 @@ async function showOpened(opened) {
   Object.assign(state, { mode: "flat", dir: null, key: "path", descending: false });
   info = opened.view;
   $("hint").hidden = true;
+  renderLabel(opened);
+  $("label").hidden = false;
   $("recents").hidden = true;
   $("bar").hidden = false;
   $("list").hidden = false;

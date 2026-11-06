@@ -44,6 +44,11 @@ pub struct Opened {
     pub encrypted: bool,
     /// Opened without the key.
     pub keyless: bool,
+    /// The archive file's size in bytes (the label band's gauge); `None` when it cannot be read.
+    pub archive_bytes: Option<u64>,
+    /// The sum of the entries' sizes (the gauge's other end); `None` for an archive opened
+    /// without its key and when the sizes are not known (every size zero).
+    pub content_bytes: Option<u64>,
     /// The rows of the flat view.
     pub total: u64,
     /// The first view (flat, in the archive's order).
@@ -97,6 +102,12 @@ pub struct RecentLists {
     pub archives: Vec<Granted>,
     /// Destinations (grants of kind `folder`), newest first.
     pub destinations: Vec<Granted>,
+}
+
+/// The contents' size for the label band's gauge: unknown for an archive opened without its key
+/// and when every size reads zero (a foreign format that does not list sizes).
+fn content_size(keyless: bool, listed_bytes: u64) -> Option<u64> {
+    (!keyless && listed_bytes > 0).then_some(listed_bytes)
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -351,6 +362,10 @@ impl App {
         let info = session.info().clone();
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let total = view.total;
+        // The band's gauge: the file against its contents. The first view is the whole flat
+        // listing, so its status holds the sum of the entries' sizes.
+        let archive_bytes = std::fs::metadata(&path).ok().map(|m| m.len());
+        let content_bytes = content_size(info.keyless, view.status.bytes);
         lock(&self.sessions).insert(
             id,
             Arc::new(Slot {
@@ -367,6 +382,8 @@ impl App {
             latest_generation: info.latest_generation,
             encrypted: info.encrypted,
             keyless: info.keyless,
+            archive_bytes,
+            content_bytes,
             total,
             view,
         })
@@ -564,6 +581,13 @@ impl App {
 mod tests {
     use super::*;
     use lpk_api::Tier;
+
+    #[test]
+    fn the_contents_size_is_unknown_without_the_key_or_without_sizes() {
+        assert_eq!(content_size(false, 17), Some(17));
+        assert_eq!(content_size(true, 17), None);
+        assert_eq!(content_size(false, 0), None);
+    }
 
     fn archive(dir: &Path, files: usize) -> PathBuf {
         let src = dir.join("src");

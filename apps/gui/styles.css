@@ -237,6 +237,7 @@ button.primary:hover:not(:disabled) {
 }
 
 .fill {
+  display: block;
   height: 100%;
   background: var(--tape);
 }

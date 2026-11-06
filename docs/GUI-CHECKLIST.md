@@ -167,6 +167,20 @@ The automated pass (axe-core over every view and dialog the WebDriver reaches, a
 | 9.10 | Windows high contrast (Aquatic, Desert, Dusk, Night sky) with every view and dialog | Text, borders, the focus ring, the selected row, the checked "Folders"/"All files" button, disabled buttons and the dialogs' edges are all visible | |
 | 9.11 | Light and dark themes, 100 % and 200 % scaling | Text is readable and the focus ring visible in each | |
 
+## E5-12: the "archive label" look
+
+The "Open with" box and "Default apps..." (section 10) are now in the settings dialog behind the gear.
+
+| # | Check | Expected | Result |
+|---|---|---|---|
+| 12.1 | Light and dark system themes: empty window, open archive, each dialog | The label band, list, preview and dialogs use the paper, sheet, ink and slate colours and are readable; the tape colour appears only on the gauge and the one primary button | |
+| 12.2 | Windows high contrast themes | The gauge, the selected row and its marker, the primary button, the gear and the drop zone stay visible in system colours | |
+| 12.3 | Windows 10 22H2: the archive name and the gauge text | Bahnschrift is used (semi-condensed); the layout holds with the fallback fonts | |
+| 12.4 | Settings by keyboard: Tab to the gear, Enter, Tab and Shift+Tab around, Esc | The dialog opens; the focus stays inside and wraps; Esc closes it and the focus is on the gear | |
+| 12.5 | Narrator on the gear and the settings dialog | The gear is read as "Settings" (a button opening a dialog); the dialog is announced with its title; each setting is named | |
+| 12.6 | Open an encrypted archive without its key, and a foreign archive | The label band shows the name and facts; the gauge is hidden when a size is unknown | |
+| 12.7 | The empty window: drop an archive; use its two buttons | The drop opens the archive; Open and New archive run the bar's commands | |
+
 ## Notes
 
 - Envelope refusal of a foreign archive (E4 follow-up): the GUI offers no "Allow X" for a ZIP or 7z memory limit yet, because that limit comes from the session's open options, not from the extraction's; such an error shows its message only.
