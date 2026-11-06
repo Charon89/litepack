@@ -14,6 +14,7 @@
   --board-tint: #e3eaf1;
   --tape: #f2b53a;
   --track: #e3e8ee;
+  --dash: #b9c4d0;
   /* Danger: AA on --paper and --sheet in both themes. */
   --danger: #b3261e;
   --display: Bahnschrift, "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
@@ -32,6 +33,7 @@
     --board-tint: #1e2c3a;
     --tape: #f2b53a;
     --track: #24303c;
+    --dash: #3b4a59;
     --danger: #ff8f86;
   }
 }
@@ -256,22 +258,42 @@ button.primary:hover:not(:disabled) {
   display: none;
 }
 
+/* Folders | All files: the active segment is a raised sheet, the other is quiet slate. */
 .modes {
   display: flex;
-  border: 1px solid var(--rule);
-  border-radius: 4px;
-  overflow: hidden;
+  gap: 2px;
 }
 
 .modes button {
-  border-radius: 0;
-  padding: 3px 12px;
+  height: 28px;
+  padding: 0 12px;
+  color: var(--slate);
 }
 
 .modes button[aria-checked="true"] {
+  background: var(--sheet);
+  border-color: var(--rule);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Preview: a hairline-outlined button as tall as the filter; pressed is tinted. */
+#preview-toggle {
+  height: 28px;
+  padding: 0 12px;
+  border-color: var(--rule);
+}
+
+#preview-toggle[aria-pressed="true"] {
   background: var(--board-tint);
   color: var(--board);
-  font-weight: 600;
+}
+
+/* Every button that holds an icon. */
+button:has(> .icon) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .crumbs {
@@ -350,9 +372,15 @@ main {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  border: 1.5px dashed var(--rule);
+  border: 1.5px dashed var(--dash);
   border-radius: 8px;
   color: var(--slate);
+}
+
+/* Something is dragged over the window. */
+.dropzone.dragover {
+  border-color: var(--board);
+  background: var(--board-tint);
 }
 
 .dropzone[hidden] {
@@ -387,6 +415,9 @@ main {
 }
 
 .dropzone-buttons button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   height: 32px;
   padding: 0 14px;
   border-color: var(--rule);
@@ -877,9 +908,6 @@ main {
 .list:focus-visible .row.focused {
   outline-offset: -4px;
 }
-.modes [role="radio"][aria-checked="true"] {
-  text-decoration: underline;
-}
 
 /* High contrast (E5-9, E5-12): system colours only; focus, selection, disabled controls and the
    dialogs' edges stay distinguishable without the theme's colours. */
@@ -952,7 +980,8 @@ main {
   .dropzone {
     border-color: CanvasText;
   }
-  .modes [role="radio"][aria-checked="true"] {
+  .modes [role="radio"][aria-checked="true"],
+  #preview-toggle[aria-pressed="true"] {
     background: Highlight;
     color: HighlightText;
   }

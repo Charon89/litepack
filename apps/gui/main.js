@@ -550,8 +550,10 @@ function renderLabel(o) {
   }
   $("label-entries").textContent = t("band.entries", { count: bytes(o.total) });
   $("label-format").textContent = o.format === "lpk" ? t("band.format.lpk") : t("band.format.other", { format: o.format });
-  $("label-generation").textContent = t("band.generation", { generation: o.generation });
-  $("label-generation").hidden = o.format !== "lpk";
+  const view = o.generation !== o.latest_generation;
+  $("label-generation").textContent = view ? t("band.generation.of", { generation: o.generation, latest: o.latest_generation }) : t("band.generation", { generation: o.generation });
+  // Only an archive with history has generations to speak of.
+  $("label-generation").hidden = o.format !== "lpk" || o.latest_generation === 0;
   $("label-encrypted").textContent = t("band.encrypted");
   $("label-encrypted").hidden = !o.encrypted;
   $("label-readonly").textContent = t("band.readonly");
@@ -710,6 +712,10 @@ function wireControls() {
     }
   });
   wireSettingsDialog();
+  // Something dragged over the window lights the drop zone.
+  for (const [type, on] of [["dragenter", true], ["dragover", true], ["dragleave", false], ["drop", false]]) {
+    document.addEventListener(type, () => $("hint").classList.toggle("dragover", on));
+  }
   wirePanes();
   wireRadios($("mode-tree").parentElement);
   syncRadios($("mode-tree").parentElement);
