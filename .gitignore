@@ -13,3 +13,4 @@ CLAUDE.local.md
 bench/corpus.lock.run
 bench/corpus.lock.tmp
 !/crates/lpk-format/tests/vectors/*.lpk
+/book/book/
