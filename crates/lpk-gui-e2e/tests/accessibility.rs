@@ -375,8 +375,8 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
 }
 
 /// The states the test records: browser 2, previews 3, extract 3, test, check, update, history,
-/// generation view, the verb queue, the wizard 2, the empty window.
-const EXPECTED_STATES: usize = 17;
+/// generation view, the verb queue, the wizard 2, the empty window, the settings dialog.
+const EXPECTED_STATES: usize = 18;
 
 /// Open the Extract dialog on the whole archive (the clicked row would otherwise make the scope
 /// "Selected"), "This folder" as the destination.
@@ -426,6 +426,21 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
         .await;
         rep.record(at, r);
     }
+
+    // The settings dialog (E5-12), opened by the gear.
+    let r = async {
+        click(c, "#settings-open").await?;
+        wait_for(
+            c,
+            "dialog#settings[open] #update-check",
+            "the settings dialog",
+        )
+        .await?;
+        axe(c, source, "the settings dialog").await
+    }
+    .await;
+    rep.record("the settings dialog", r);
+    recover(c).await;
 
     // The extract wizard: its form, the question, the result.
     let r = async {

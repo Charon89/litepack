@@ -1,85 +1,162 @@
-/* LitePack GUI (E5-3, the archive browser). The theme follows the system (prefers-color-scheme),
-   high contrast uses the system colours (forced-colors). Rows have a fixed height in CSS pixels
-   (list.js ROW_PX), which the webview scales with the display's DPI. */
+/* LitePack GUI (E5-12, "archive label"). The open archive is a labelled storage box: one strong
+   label band (its name and the packing-tape gauge), quiet Windows-native chrome around it.
+   The theme follows the system (prefers-color-scheme); high contrast uses the system colours
+   (forced-colors). System fonts only (the CSP allows no other). Rows have a fixed height in CSS
+   pixels (list.js ROW_PX = 30), which the webview scales with the display's DPI. */
 :root {
   color-scheme: light dark;
-  --bg: #ffffff;
-  --fg: #1b1b1b;
-  --muted: #5f5f5f;
-  --line: #e1e1e1;
-  --head: #f3f3f3;
-  --focus: #005fb8;
-  --pick: #cce4f7;
-  font: 0.875rem/1.4 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --paper: #f4f6f8;
+  --sheet: #ffffff;
+  --ink: #17212b;
+  --slate: #56657a;
+  --rule: #d8dee6;
+  --board: #355772;
+  --board-tint: #e3eaf1;
+  --tape: #f2b53a;
+  --track: #e3e8ee;
+  /* Danger: AA on --paper and --sheet in both themes. */
+  --danger: #b3261e;
+  --display: Bahnschrift, "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --text: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font: 13.5px/1.45 var(--text);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #202020;
-    --fg: #f0f0f0;
-    --muted: #b0b0b0;
-    --line: #3a3a3a;
-    --head: #2b2b2b;
-    --focus: #60cdff;
-    --pick: #1f3d57;
+    --paper: #10171e;
+    --sheet: #161f28;
+    --ink: #e7ecf1;
+    --slate: #99a6b4;
+    --rule: #283542;
+    --board: #8db3d2;
+    --board-tint: #1e2c3a;
+    --tape: #f2b53a;
+    --track: #24303c;
+    --danger: #ff8f86;
   }
 }
 
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The icons (index.html's sprite): line drawings on a 16px grid, drawn for LitePack, used as
+   svg > use href="#i-name" (stroked with the text colour). */
+.sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+button, input {
+  font: inherit;
+  color: inherit;
+}
+
+.icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Buttons: transparent, 4px radius, a quiet hover; the tape button is the view's one primary. */
+button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 120ms;
+}
+
+button:hover:not(:disabled) {
+  background: var(--board-tint);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary:not(:disabled) {
+  background: var(--tape);
+  color: #17212b;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--tape);
+  border-color: #17212b;
+}
+
+/* The command bar. */
 .actions {
   display: flex;
-  gap: 0.5rem;
-  padding: 0.375rem 0.5rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--head);
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+.actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.actions .gear {
+  margin-left: auto;
+  padding: 0 8px;
+}
+
+.divider {
+  align-self: stretch;
+  width: 1px;
+  margin: 4px 6px;
+  background: var(--rule);
 }
 
 .group {
   display: flex;
-  gap: 0.25rem;
-  padding-left: 0.5rem;
-  border-left: 1px solid var(--line);
+  gap: 4px;
+  padding-left: 8px;
+  margin-left: 6px;
+  border-left: 1px solid var(--rule);
 }
 
 .banner {
   margin: 0;
-  padding: 0.375rem 0.5rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--head);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sheet);
 }
 
-.setting {
-  margin-left: auto;
-  align-self: center;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-/* E6-4: the registered copy's "Open with" switch and "Default apps…" button, before the update
-   switch (which then no longer pushes itself to the right: the group does). */
-.setting-group {
-  margin-left: auto;
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.setting-group[hidden] {
-  display: none;
-}
-
-.setting-group:not([hidden]) + .setting {
-  margin-left: 0.5rem;
-}
-
-.setting-group .setting {
-  margin-left: 0;
+.banner button {
+  color: var(--board);
+  text-decoration: underline;
 }
 
 .shell-alert {
   margin: 0;
-  padding: 0.375rem 0.5rem;
-  border-bottom: 1px solid var(--line);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--danger);
   font-weight: 600;
 }
 
@@ -95,56 +172,105 @@
 
 .notice {
   display: flex;
-  gap: 0.5rem;
+  gap: 8px;
   align-items: center;
-  padding: 0.375rem 0.5rem;
-  border-bottom: 1px solid var(--line);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sheet);
 }
 
 .notice span {
   flex: 1;
 }
 
-html, body {
-  height: 100%;
-  margin: 0;
-  background: var(--bg);
-  color: var(--fg);
+/* The label band (E5-12): the archive's name, the gauge and the facts. */
+.label {
+  padding: 14px 20px 12px;
+  background: var(--sheet);
+  border-bottom: 1px solid var(--rule);
 }
 
-body {
+.label[hidden] {
+  display: none;
+}
+
+.label h2 {
+  margin: 0 0 8px;
+  font: 600 26px/1.15 var(--display);
+  font-stretch: 87.5%;
+  overflow-wrap: anywhere;
+}
+
+.facts {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 28px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--slate);
+  font-variant-numeric: tabular-nums;
 }
 
-button, input {
-  font: inherit;
-  color: inherit;
+.facts li[hidden] {
+  display: none;
 }
 
+.facts .gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ink);
+  font: 400 15px/1.3 var(--display);
+  font-stretch: 87.5%;
+  font-variant-numeric: tabular-nums;
+}
+
+.track {
+  flex: none;
+  width: 220px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  background: var(--tape);
+}
+
+/* The view bar. */
 .bar {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.375rem 0.75rem;
-  border-bottom: 1px solid var(--line);
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
 }
 
 .bar[hidden] {
   display: none;
 }
 
-.modes button, .crumbs button {
-  background: transparent;
-  border: 1px solid transparent;
+.modes {
+  display: flex;
+  border: 1px solid var(--rule);
   border-radius: 4px;
-  padding: 0.125rem 0.5rem;
-  cursor: pointer;
+  overflow: hidden;
+}
+
+.modes button {
+  border-radius: 0;
+  padding: 3px 12px;
 }
 
 .modes button[aria-checked="true"] {
-  border-color: var(--line);
-  background: var(--head);
+  background: var(--board-tint);
+  color: var(--board);
+  font-weight: 600;
 }
 
 .crumbs {
@@ -154,25 +280,54 @@ button, input {
   overflow: hidden;
 }
 
+.crumbs button {
+  padding: 2px 6px;
+  color: var(--board);
+}
+
 .crumbs button + button::before {
   content: "\203A\00a0";
-  color: var(--muted);
+  color: var(--slate);
 }
 
 .crumbs button[aria-current] {
+  color: var(--ink);
   font-weight: 600;
 }
 
+.search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.search .icon {
+  position: absolute;
+  left: 8px;
+  color: var(--slate);
+  pointer-events: none;
+}
+
 .filter {
-  width: 14rem;
-  padding: 0.125rem 0.375rem;
-  background: var(--bg);
-  border: 1px solid var(--line);
+  width: 15rem;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 2px 8px 2px 29px;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
   border-radius: 4px;
 }
 
-.glob {
-  color: var(--muted);
+.filter::placeholder {
+  color: var(--slate);
+  opacity: 1;
+}
+
+.glob, .setting {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--slate);
   white-space: nowrap;
 }
 
@@ -181,20 +336,112 @@ main {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  justify-content: center;
 }
 
-.hint {
-  margin: 4rem auto;
-  max-width: 30rem;
+/* The empty state: a drop zone, and the recent archives quietly under it. */
+.dropzone {
+  box-sizing: border-box;
+  width: min(32rem, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 28px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
-  color: var(--muted);
+  border: 1.5px dashed var(--rule);
+  border-radius: 8px;
+  color: var(--slate);
 }
 
+.dropzone[hidden] {
+  display: none;
+}
+
+.dropzone .drawing {
+  width: 64px;
+  height: 64px;
+  fill: none;
+  stroke: var(--slate);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dropzone h2 {
+  margin: 12px 0 4px;
+  color: var(--ink);
+  font: 600 22px/1.2 var(--display);
+  font-stretch: 87.5%;
+}
+
+.dropzone p {
+  margin: 0 0 16px;
+}
+
+.dropzone-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.dropzone-buttons button {
+  height: 32px;
+  padding: 0 14px;
+  border-color: var(--rule);
+}
+
+.dropzone-buttons button.primary {
+  border-color: transparent;
+}
+
+.recents {
+  box-sizing: border-box;
+  width: min(32rem, calc(100% - 40px));
+  margin: 16px auto 0;
+}
+
+.recents h2 {
+  margin: 0 0 4px;
+  color: var(--slate);
+  font: 600 12px/1.4 var(--text);
+}
+
+.recents ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recents li button {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  padding: 3px 8px;
+  text-align: left;
+  color: var(--ink);
+}
+
+.recents .recent-folder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--slate);
+}
+
+.recents #recents-clear {
+  margin-top: 6px;
+  padding: 2px 8px;
+  color: var(--board);
+}
+
+/* The list. */
 .list {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background: var(--sheet);
   outline: none;
 }
 
@@ -223,30 +470,69 @@ main {
   will-change: transform;
 }
 
-.row {
+.list .row {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(10rem, 1fr) 8rem 12rem;
-  gap: 0.75rem;
+  grid-template-columns: minmax(10rem, 1fr) 7rem 10rem;
+  gap: 12px;
   box-sizing: border-box;
-  height: 24px;
+  height: 30px;
   align-items: center;
-  padding: 0 0.75rem;
-  border-bottom: 1px solid var(--line);
+  padding: 0 14px;
   white-space: nowrap;
+  transition: background-color 120ms;
 }
 
-.row > span {
+.list .row > span {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.row[data-kind="1"] > span:first-child {
+.list .row > span:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row .icon {
+  color: var(--slate);
+}
+
+.row .prefix {
+  flex: 0 100 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--slate);
+}
+
+.row .leaf {
+  flex: 0 1 auto;
+  min-width: 2ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+
+.row[data-kind="1"] .leaf {
   font-weight: 600;
 }
 
-.row.head {
-  background: var(--head);
-  font-weight: 600;
+.list .row:not(.head):hover {
+  background: var(--board-tint);
+}
+
+.list .row.head {
+  height: 30px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--rule);
+  color: var(--slate);
+  font-size: 12px;
+}
+
+.list .row.head > span:first-child {
+  padding-left: 24px;
 }
 
 .row.head button {
@@ -255,6 +541,7 @@ main {
   padding: 0;
   font-weight: 600;
   cursor: pointer;
+  color: var(--slate);
 }
 
 [aria-sort="ascending"] button::after {
@@ -265,12 +552,22 @@ main {
   content: " \25BE";
 }
 
-.row[aria-selected="true"] {
-  background: var(--pick);
+.list .row[aria-selected="true"] {
+  background: var(--board-tint);
+}
+
+.list .row[aria-selected="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--board);
 }
 
 .list:focus-visible .row.focused {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--board);
   outline-offset: -2px;
 }
 
@@ -282,60 +579,63 @@ main {
 .status {
   display: flex;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.25rem 0.75rem;
-  border-top: 1px solid var(--line);
-  color: var(--muted);
+  gap: 16px;
+  padding: 4px 14px;
+  border-top: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--slate);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
   min-height: 1.4em;
 }
 
-@media (forced-colors: active) {
-  .list:focus-visible .row.focused {
-    outline-color: Highlight;
-  }
-  .row[aria-selected="true"] {
-    background: Highlight;
-    color: HighlightText;
-  }
-  .row, .status, .bar {
-    border-color: CanvasText;
-  }
-}
-
-/* The extract wizard (E5-4) and the recent archives. */
-.recents {
-  margin: 0 auto;
-  max-width: 30rem;
-}
-
-.recents ul {
+/* Dialogs (the extract, create and maintenance wizards, settings): --sheet, 8px radius, one soft
+   shadow, the title in display type, the primary button tape, the others outlined. */
+.recents ul, .wizard .results, .wizard .entries {
   list-style: none;
-  padding: 0;
 }
 
 .wizard {
   min-width: 24rem;
   max-width: min(40rem, 92vw);
-  color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 0.5rem;
+  padding: 20px 22px;
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
 }
 
 .wizard::backdrop {
   background: rgba(0, 0, 0, 0.4);
 }
 
+.wizard > h2 {
+  margin: 0 0 12px;
+  font: 600 18px/1.25 var(--display);
+  font-stretch: 87.5%;
+}
+
+.wizard button {
+  min-height: 32px;
+  padding: 0 14px;
+}
+
+.wizard button:not(.primary) {
+  border-color: var(--rule);
+  color: var(--ink);
+}
+
 .wizard fieldset {
   border: 0;
   padding: 0;
-  margin: 0 0 0.75rem;
+  margin: 0 0 12px;
 }
 
 .wizard .choice {
   display: flex;
-  gap: 0.5rem;
-  padding: 0.125rem 0;
+  gap: 8px;
+  padding: 2px 0;
 }
 
 .wizard progress {
@@ -343,27 +643,55 @@ main {
 }
 
 .wizard .check {
-  color: var(--muted);
+  color: var(--slate);
+}
+
+.wizard .check.bad,
+.dialog-error {
+  color: var(--danger);
 }
 
 .wizard .results,
 .wizard .entries {
-  padding-left: 1.25rem;
+  padding-left: 20px;
+  list-style: disc;
 }
 
 .wizard-buttons {
   display: flex;
   justify-content: flex-end;
-  gap: 0.5rem;
-  margin-top: 1rem;
+  gap: 8px;
+  margin-top: 16px;
 }
 
-.wizard button:focus-visible,
-.wizard input:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+.settings .wizard-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
 }
 
+.settings .setting {
+  color: var(--ink);
+}
+
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.setting-group[hidden],
+.dialog-error[hidden] {
+  display: none;
+}
+
+.settings #default-apps {
+  border-color: var(--rule);
+}
+
+/* The preview pane. */
 .split {
   flex: 1;
   min-height: 0;
@@ -380,7 +708,8 @@ main {
   min-width: 14rem;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--line);
+  border-left: 1px solid var(--rule);
+  background: var(--sheet);
   min-height: 0;
 }
 
@@ -389,21 +718,22 @@ main {
 }
 
 .preview-head {
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--head);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
 }
 
 .preview-title {
   margin: 0;
-  font-size: 1rem;
+  font: 600 17px/1.25 var(--display);
+  font-stretch: 87.5%;
   overflow-wrap: anywhere;
 }
 
 .preview-meta {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.85rem;
+  color: var(--slate);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .preview-body {
@@ -415,20 +745,20 @@ main {
 }
 
 .preview-note {
-  margin: 1rem;
-  color: var(--muted);
+  margin: 14px;
+  color: var(--slate);
   overflow-wrap: anywhere;
 }
 
 .preview-text {
   flex: 1;
   margin: 0;
-  padding: 0.5rem 0.6rem;
+  padding: 8px 14px;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.85rem;
+  font-size: 12px;
 }
 
 .preview-image {
@@ -437,7 +767,7 @@ main {
   object-fit: contain;
   margin: auto;
   /* A transparent image shows on both themes. */
-  background: repeating-conic-gradient(var(--head) 0% 25%, var(--bg) 0% 50%) 0 0 / 16px 16px;
+  background: repeating-conic-gradient(var(--paper) 0% 25%, var(--sheet) 0% 50%) 0 0 / 16px 16px;
 }
 
 .hex {
@@ -447,7 +777,7 @@ main {
   overflow-x: auto;
   contain: strict;
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.8rem;
+  font-size: 12px;
 }
 
 .hex-spacer {
@@ -464,12 +794,12 @@ main {
   height: 18px;
   line-height: 18px;
   white-space: pre;
-  padding: 0 0.5rem;
+  padding: 0 8px;
 }
 
 .preview-text:focus-visible,
 .hex:focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--board);
   outline-offset: -2px;
 }
 
@@ -481,12 +811,12 @@ main {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  margin: 0.25rem 0;
+  gap: 8px;
+  margin: 4px 0;
 }
 .wizard.create .inputs {
   list-style: none;
-  margin: 0.25rem 0;
+  margin: 4px 0;
   padding: 0;
   max-height: 8rem;
   overflow: auto;
@@ -495,12 +825,12 @@ main {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 0.5rem;
+  gap: 8px;
 }
 .wizard.create .tiers {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 0.5rem;
+  gap: 8px;
 }
 .wizard.create .tiers legend {
   grid-column: 1 / -1;
@@ -508,13 +838,15 @@ main {
 .wizard.create .card {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  border: 1px solid currentColor;
-  border-radius: 0.4rem;
-  padding: 0.5rem;
+  gap: 4px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 8px;
 }
 .wizard.create .card:has(input:checked) {
-  outline: 2px solid Highlight;
+  border-color: var(--board);
+  background: var(--board-tint);
+  outline: 1px solid var(--board);
 }
 .wizard.create .tier-name {
   font-weight: 600;
@@ -529,13 +861,10 @@ main {
   width: 100%;
   font-family: ui-monospace, Consolas, monospace;
 }
-.wizard.create .check.bad {
-  font-weight: 600;
-}
 
 /* Keyboard focus (E5-9): every focusable element shows it; the panes F6 reaches do too. */
 :focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--board);
   outline-offset: 2px;
 }
 .preview:focus-visible,
@@ -547,11 +876,10 @@ main {
   outline-offset: -4px;
 }
 .modes [role="radio"][aria-checked="true"] {
-  font-weight: 600;
   text-decoration: underline;
 }
 
-/* High contrast (E5-9): system colours only; focus, selection, disabled controls and the
+/* High contrast (E5-9, E5-12): system colours only; focus, selection, disabled controls and the
    dialogs' edges stay distinguishable without the theme's colours. */
 @media (forced-colors: active) {
   :focus-visible,
@@ -571,10 +899,28 @@ main {
   .list:focus-visible .row[aria-selected="true"].focused {
     outline-color: HighlightText;
   }
-  .row[aria-selected="true"] {
+  .list .row[aria-selected="true"] {
     forced-color-adjust: none;
     background: Highlight;
     color: HighlightText;
+  }
+  .list .row[aria-selected="true"] .prefix,
+  .list .row[aria-selected="true"] .leaf,
+  .list .row[aria-selected="true"] .icon {
+    color: HighlightText;
+  }
+  .list .row[aria-selected="true"]::before {
+    background: HighlightText;
+  }
+  .actions, .bar, .status, .label, .list .row.head, .banner, .notice, .shell-alert {
+    border-color: CanvasText;
+  }
+  .divider, .group {
+    border-color: CanvasText;
+    background: CanvasText;
+  }
+  .group {
+    background: transparent;
   }
   button,
   input,
@@ -586,6 +932,23 @@ main {
   select:disabled {
     color: GrayText;
     border-color: GrayText;
+  }
+  button.primary:not(:disabled) {
+    forced-color-adjust: none;
+    background: ButtonFace;
+    color: ButtonText;
+    border: 2px solid ButtonText;
+  }
+  .track {
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+  .fill {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+  .dropzone {
+    border-color: CanvasText;
   }
   .modes [role="radio"][aria-checked="true"] {
     background: Highlight;
@@ -599,6 +962,12 @@ main {
   }
   progress {
     border: 1px solid ButtonText;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button, .list .row {
+    transition: none;
   }
 }
 

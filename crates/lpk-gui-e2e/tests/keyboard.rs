@@ -258,6 +258,30 @@ async fn run(c: &Client) -> Result<(), String> {
     // Enter takes the primary action of the result (Close) from the dialog itself.
     press(c, ENTER).await?;
     wait_closed(c).await?;
+    settings(c).await
+}
+
+/// The settings dialog (E5-12): the gear opens it from the keyboard, Tab and Shift+Tab stay
+/// inside, Esc closes it and the focus is the gear again.
+async fn settings(c: &Client) -> Result<(), String> {
+    let gear = c
+        .find(Locator::Css("#settings-open"))
+        .await
+        .map_err(|e| e.to_string())?;
+    gear.send_keys(ENTER).await.map_err(|e| e.to_string())?;
+    wait_for(
+        c,
+        "dialog#settings[open] #update-check",
+        "the settings dialog",
+    )
+    .await?;
+    trap(c, "the settings dialog").await?;
+    press(c, ESCAPE).await?;
+    wait_closed(c).await?;
+    let back = focused_id(c).await?;
+    if back != "settings-open" {
+        return Err(format!("the focus did not return to the gear: {back:?}"));
+    }
     Ok(())
 }
 

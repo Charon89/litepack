@@ -8,7 +8,7 @@ import { createExtractor } from "./extract.js";
 import { createCreator } from "./create.js";
 import { createPreview } from "./preview.js";
 import { createMaintainer } from "./maintain.js";
-import { keyLabel, keyLetter, syncRadios, wirePanes, wireRadios } from "./a11y.js";
+import { keyLabel, keyLetter, syncRadios, trapTab, wirePanes, wireRadios } from "./a11y.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
@@ -58,6 +58,11 @@ function describe(e) {
   return String(e);
 }
 
+// A button's words: its icon carries none, so its label is the text of its own `data-string` span.
+function labelOf(button) {
+  return (button.querySelector("[data-string]") ?? button).textContent.trim();
+}
+
 function applyStrings() {
   document.title = t("app.title");
   for (const el of document.querySelectorAll("[data-string]")) {
@@ -67,9 +72,11 @@ function applyStrings() {
     el.setAttribute("aria-label", t(el.dataset.label));
   }
   $("filter").placeholder = t("filter.placeholder");
+  // The gear has no words of its own: its name is its tooltip too.
+  $("settings-open").title = t("settings.open");
   // The key of each command in its tooltip (and in aria-keyshortcuts, in the markup).
   for (const el of document.querySelectorAll("button[aria-keyshortcuts]")) {
-    el.title = t("shortcut.tooltip", { label: el.textContent, keys: keyLabel(el.getAttribute("aria-keyshortcuts")) });
+    el.title = t("shortcut.tooltip", { label: labelOf(el), keys: keyLabel(el.getAttribute("aria-keyshortcuts")) });
   }
 }
 
@@ -85,7 +92,8 @@ function showSelection(s) {
   if (s.picked > 0) {
     parts.push(t("status.picked", { count: bytes(s.picked), bytes: bytes(s.pickedBytes) }));
   }
-  $("selection").textContent = parts.join(" · ");
+  // Separated by spacing (an em space), not by a mark.
+  $("selection").textContent = parts.join(" ");
 }
 
 function cells(r) {
@@ -285,7 +293,7 @@ function updateMaintenance() {
     if (off) {
       b.setAttribute("title", why);
     } else {
-      b.title = t("shortcut.tooltip", { label: b.textContent, keys: keyLabel(b.getAttribute("aria-keyshortcuts")) });
+      b.title = t("shortcut.tooltip", { label: labelOf(b), keys: keyLabel(b.getAttribute("aria-keyshortcuts")) });
     }
   };
   set("action-test", none, t("maintain.why.none"));
@@ -389,6 +397,10 @@ function shellAlert(e) {
     alert.textContent = `${t("error.title")}: ${describe(e)}`;
   }
   alert.hidden = !e;
+  // Behind the open settings dialog the page is inert: the dialog says it too.
+  const inDialog = $("settings-alert");
+  inDialog.textContent = $("settings").open ? alert.textContent : "";
+  inDialog.hidden = !$("settings").open || !e;
 }
 
 function showShell(status) {
@@ -573,6 +585,20 @@ async function renderRecents() {
   box.hidden = lists.archives.length === 0;
 }
 
+// The settings dialog (E5-12): opened by the gear; Tab stays inside, Esc or Close shuts it, and
+// the focus goes back to the gear.
+function wireSettingsDialog() {
+  const dialog = $("settings");
+  const gear = $("settings-open");
+  trapTab(dialog);
+  gear.addEventListener("click", () => {
+    $("settings-alert").hidden = true;
+    dialog.showModal();
+  });
+  $("settings-close").addEventListener("click", () => dialog.close());
+  dialog.addEventListener("close", () => gear.focus());
+}
+
 function wireControls() {
   $("action-extract").disabled = true;
   $("action-extract").addEventListener("click", () => extractor.openDialog().catch(showError));
@@ -630,6 +656,7 @@ function wireControls() {
       }
     }
   });
+  wireSettingsDialog();
   wirePanes();
   wireRadios($("mode-tree").parentElement);
   syncRadios($("mode-tree").parentElement);
