@@ -13,7 +13,8 @@ export const MAX_SCROLL_PX = 8000000;
 // A row's height in CSS pixels (styles.css: .list .row height).
 export const ROW_PX = 30;
 
-const SVG_NS = "http://www.w3.org/2000/svg";
+// The SVG namespace, read from the page's own sprite (the page's scripts hold no URL).
+const SVG_NS = document.querySelector(".sprite").namespaceURI;
 const MARK_PICKED = 1;
 const KIND_FOLDER = 1;
 
