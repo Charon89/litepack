@@ -96,10 +96,36 @@ function showSelection(s) {
   $("selection").textContent = parts.join(" ");
 }
 
+// A size for people: B, KB, MB or GB, one decimal (units from the table); `n` may be a BigInt.
+function humanSize(n) {
+  const v = Number(n);
+  if (v < 1024) {
+    return t("size.b", { n: v.toLocaleString() });
+  }
+  const units = ["size.kb", "size.mb", "size.gb"];
+  let x = v / 1024;
+  let i = 0;
+  while (x >= 1024 && i < units.length - 1) {
+    x /= 1024;
+    i++;
+  }
+  return t(units[i], { n: x.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
+}
+
+// A short date (the day), with the time only when it is today.
+const dayFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const todayFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+function shortDate(ms) {
+  const d = new Date(ms);
+  return (d.toDateString() === new Date().toDateString() ? todayFormat : dayFormat).format(d);
+}
+
 function cells(r) {
-  const when = r.mtimeNs === -(2n ** 63n) ? "" : new Date(Number(r.mtimeNs / 1000000n)).toLocaleString();
-  const size = r.kind === 1 ? "" : r.size.toLocaleString();
-  return [r.name, size, when];
+  const when = r.mtimeNs === -(2n ** 63n) ? "" : shortDate(Number(r.mtimeNs / 1000000n));
+  const size = r.kind === 1 ? "" : humanSize(r.size);
+  // The exact byte count in the size cell's tooltip.
+  const exact = r.kind === 1 ? "" : t("preview.size", { bytes: Number(r.size).toLocaleString() });
+  return [r.name, size, when, exact];
 }
 
 const preview = createPreview({

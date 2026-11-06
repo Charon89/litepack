@@ -489,30 +489,30 @@ main {
   text-overflow: ellipsis;
 }
 
-.list .row > span:first-child {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
+/* The name cell stays inline text (an icon, the folder part, the last segment) so that its
+   rendered text is the whole path, as the window's tests and a screen reader read it. */
 .row .icon {
+  display: inline-block;
+  vertical-align: -3px;
+  margin-right: 8px;
   color: var(--slate);
 }
 
 .row .prefix {
-  flex: 0 100 auto;
-  min-width: 0;
+  display: inline-block;
+  max-width: 55%;
   overflow: hidden;
   text-overflow: ellipsis;
+  vertical-align: bottom;
   color: var(--slate);
 }
 
 .row .leaf {
-  flex: 0 1 auto;
-  min-width: 2ch;
+  display: inline-block;
+  max-width: calc(100% - 28px);
   overflow: hidden;
   text-overflow: ellipsis;
+  vertical-align: bottom;
   color: var(--ink);
 }
 

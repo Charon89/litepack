@@ -10,9 +10,10 @@ import { decodeBatch } from "./batch.js";
 // The same values as crates/lpk-gui/src/browse.rs (MARGIN_ROWS, MAX_SCROLL_PX).
 export const MARGIN_ROWS = 64;
 export const MAX_SCROLL_PX = 8000000;
-// A row's height in CSS pixels (styles.css: .row height).
-export const ROW_PX = 24;
+// A row's height in CSS pixels (styles.css: .list .row height).
+export const ROW_PX = 30;
 
+const SVG_NS = "http://www.w3.org/2000/svg";
 const MARK_PICKED = 1;
 const KIND_FOLDER = 1;
 
@@ -24,7 +25,7 @@ export class VirtualList {
    * @param {HTMLElement} o.spacer sized to the (capped) height of every row
    * @param {HTMLElement} o.layer holds the row elements
    * @param {(first: number, count: number) => Promise<ArrayBuffer>} o.fetch a batch
-   * @param {(row: object, index: number) => Array<string>} o.cells a row's cell texts
+   * @param {(row: object, index: number) => Array<string>} o.cells a row's cell texts (path, size, modified, the size's tooltip)
    * @param {(index: number, row: object, generation: number, folderOnly?: boolean) => void} o.activate
    *   Enter or a double-click, with the generation of the batch the row came from
    * @param {(action: string, index: number|null, generation: number) => Promise<void>} o.select a
@@ -188,6 +189,20 @@ export class VirtualList {
         if (c === 1) {
           cell.className = "num";
         }
+        if (c === 0) {
+          // An icon (a folder's or a file's), the folder part of the path, the last segment.
+          const svg = document.createElementNS(SVG_NS, "svg");
+          svg.setAttribute("class", "icon");
+          svg.setAttribute("viewBox", "0 0 16 16");
+          svg.setAttribute("aria-hidden", "true");
+          const use = document.createElementNS(SVG_NS, "use");
+          svg.append(use);
+          const prefix = document.createElement("span");
+          prefix.className = "prefix";
+          const leaf = document.createElement("span");
+          leaf.className = "leaf";
+          cell.append(svg, prefix, leaf);
+        }
         row.append(cell);
       }
       this.layer.append(row);
@@ -212,9 +227,18 @@ export class VirtualList {
       }
       el.classList.toggle("focused", index === this.focus);
       const texts = this.cells(r, index);
-      for (let c = 0; c < 3; c++) {
-        el.children[c].textContent = texts[c];
-      }
+      // The first cell keeps the whole path as its text, shown in two spans: the folder part
+      // (slate) and the last segment (ink).
+      const [icon, prefix, leaf] = el.children[0].children;
+      const path = texts[0];
+      const cut = path.replace(/\/+$/, "").lastIndexOf("/") + 1;
+      prefix.textContent = path.slice(0, cut);
+      leaf.textContent = path.slice(cut);
+      icon.firstElementChild.setAttribute("href", r.kind === KIND_FOLDER ? "#i-folder" : "#i-file");
+      el.children[1].textContent = texts[1];
+      // The exact size in the cell's tooltip.
+      el.children[1].title = texts[3] ?? "";
+      el.children[2].textContent = texts[2];
     }
     // The focused row changed (or its view did): the pane previews it.
     const seen = `${b.generation}:${this.focus}`;

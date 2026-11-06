@@ -1,5 +1,9 @@
 {
   "app.title": "LitePack",
+  "size.b": "{n} B",
+  "size.kb": "{n} KB",
+  "size.mb": "{n} MB",
+  "size.gb": "{n} GB",
   "hint.headline": "Drop an archive here",
   "drop.hint": "Dropping an archive on this window opens it. You can also open one yourself or start a new archive.",
   "bar.label": "Archive view",
