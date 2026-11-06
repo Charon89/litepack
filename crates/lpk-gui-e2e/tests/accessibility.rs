@@ -351,6 +351,28 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
         }
         .await;
         report.record("the empty window with recents", r);
+        // The same window with the dark theme set: axe checks the dark contrast too.
+        let r = async {
+            set_dark(&c).await?;
+            axe(&c, &source, "the empty window, dark").await
+        }
+        .await;
+        report.record("the empty window, dark", r);
+        let _ = c.close().await;
+        // The browser, flat view, dark.
+        let c = session(
+            &mut driver,
+            &work,
+            vec![format!("--open={}", archive.display())],
+        )
+        .await;
+        let r = async {
+            wait_for(&c, "#rows [role=row]", "a row").await?;
+            set_dark(&c).await?;
+            axe(&c, &source, "the browser, dark").await
+        }
+        .await;
+        report.record("the browser, dark", r);
         let _ = c.close().await;
     });
     eprintln!("states checked ({}):", report.states.len());
@@ -374,17 +396,28 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
     );
 }
 
+/// Set the dark theme the way the settings dialog does (`data-theme` on the root).
+async fn set_dark(c: &Client) -> Result<(), String> {
+    c.execute(
+        "document.documentElement.dataset.theme = 'dark'; return true;",
+        vec![],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// The states the test records: browser 2, previews 3, extract 3, test, check, update, history,
-/// generation view, the verb queue, the wizard 2, the empty window.
-const EXPECTED_STATES: usize = 17;
+/// generation view, the verb queue, the wizard 2, the empty window, the settings dialog, the empty window and the browser in dark.
+const EXPECTED_STATES: usize = 20;
 
 /// Open the Extract dialog on the whole archive (the clicked row would otherwise make the scope
 /// "Selected"), "This folder" as the destination.
 async fn extract_here(c: &Client) -> Result<(), String> {
     click(c, "#action-extract:not([disabled])").await?;
     dialog_settled(c).await?;
-    click(c, "dialog.wizard input[name=scope][value=all]").await?;
-    click(c, "dialog.wizard input[name=dest][value=here]").await
+    click(c, "dialog.wizard[open] input[name=scope][value=all]").await?;
+    click(c, "dialog.wizard[open] input[name=dest][value=here]").await
 }
 
 async fn browse(c: &Client, source: &str, rep: &mut Report) {
@@ -427,6 +460,21 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
         rep.record(at, r);
     }
 
+    // The settings dialog (E5-12), opened by the gear.
+    let r = async {
+        click(c, "#settings-open").await?;
+        wait_for(
+            c,
+            "dialog#settings[open] #update-check",
+            "the settings dialog",
+        )
+        .await?;
+        axe(c, source, "the settings dialog").await
+    }
+    .await;
+    rep.record("the settings dialog", r);
+    recover(c).await;
+
     // The extract wizard: its form, the question, the result.
     let r = async {
         click(c, "#action-extract:not([disabled])").await?;
@@ -439,10 +487,10 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
 
     let r = async {
         extract_here(c).await?;
-        click(c, "dialog.wizard button.primary").await?;
+        click(c, "dialog.wizard[open] button.primary").await?;
         wait_for(
             c,
-            "dialog.wizard .wizard-buttons button:nth-child(4)",
+            "dialog.wizard[open] .wizard-buttons button:nth-child(4)",
             "the conflict question",
         )
         .await?;
@@ -455,16 +503,16 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
 
     let r = async {
         extract_here(c).await?;
-        click(c, "dialog.wizard button.primary").await?;
+        click(c, "dialog.wizard[open] button.primary").await?;
         wait_for(
             c,
-            "dialog.wizard .wizard-buttons button:nth-child(4)",
+            "dialog.wizard[open] .wizard-buttons button:nth-child(4)",
             "the conflict question",
         )
         .await?;
         // Skip (the primary button): the rest is written and the result shown.
-        click(c, "dialog.wizard button.primary").await?;
-        wait_for(c, "dialog.wizard .check", "the extract result").await?;
+        click(c, "dialog.wizard[open] button.primary").await?;
+        wait_for(c, "dialog.wizard[open] .check", "the extract result").await?;
         dialog_settled(c).await?;
         axe(c, source, "the extract dialog (result)").await
     }
@@ -475,7 +523,7 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
     // The maintenance dialogs.
     let r = async {
         click(c, "#action-test").await?;
-        wait_for(c, "dialog.wizard .check", "the test result").await?;
+        wait_for(c, "dialog.wizard[open] .check", "the test result").await?;
         dialog_settled(c).await?;
         axe(c, source, "the test dialog (result)").await
     }
@@ -486,7 +534,7 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
     let r = async {
         click(c, "#action-check").await?;
         dialog_settled(c).await?;
-        wait_for(c, "dialog.wizard .wizard-body p", "the check result").await?;
+        wait_for(c, "dialog.wizard[open] .wizard-body p", "the check result").await?;
         axe(c, source, "the check dialog (result)").await
     }
     .await;
@@ -495,7 +543,7 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
 
     let r = async {
         click(c, "#action-update").await?;
-        wait_for(c, "dialog.wizard details", "the update dialog").await?;
+        wait_for(c, "dialog.wizard[open] details", "the update dialog").await?;
         dialog_settled(c).await?;
         axe(c, source, "the update-from-folder dialog").await
     }
@@ -507,7 +555,7 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
         click(c, "#action-history").await?;
         wait_for(
             c,
-            "dialog.wizard input[name=generation]",
+            "dialog.wizard[open] input[name=generation]",
             "the history list",
         )
         .await?;

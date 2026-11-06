@@ -8,7 +8,7 @@ import { createExtractor } from "./extract.js";
 import { createCreator } from "./create.js";
 import { createPreview } from "./preview.js";
 import { createMaintainer } from "./maintain.js";
-import { keyLabel, keyLetter, syncRadios, wirePanes, wireRadios } from "./a11y.js";
+import { keyLabel, keyLetter, syncRadios, trapTab, wirePanes, wireRadios } from "./a11y.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
 // any) and shown in the status bar.
@@ -58,6 +58,11 @@ function describe(e) {
   return String(e);
 }
 
+// A button's words: its icon carries none, so its label is the text of its own `data-string` span.
+function labelOf(button) {
+  return (button.querySelector("[data-string]") ?? button).textContent.trim();
+}
+
 function applyStrings() {
   document.title = t("app.title");
   for (const el of document.querySelectorAll("[data-string]")) {
@@ -67,9 +72,11 @@ function applyStrings() {
     el.setAttribute("aria-label", t(el.dataset.label));
   }
   $("filter").placeholder = t("filter.placeholder");
+  // The gear has no words of its own: its name is its tooltip too.
+  $("settings-open").title = t("settings.open");
   // The key of each command in its tooltip (and in aria-keyshortcuts, in the markup).
   for (const el of document.querySelectorAll("button[aria-keyshortcuts]")) {
-    el.title = t("shortcut.tooltip", { label: el.textContent, keys: keyLabel(el.getAttribute("aria-keyshortcuts")) });
+    el.title = t("shortcut.tooltip", { label: labelOf(el), keys: keyLabel(el.getAttribute("aria-keyshortcuts")) });
   }
 }
 
@@ -85,13 +92,40 @@ function showSelection(s) {
   if (s.picked > 0) {
     parts.push(t("status.picked", { count: bytes(s.picked), bytes: bytes(s.pickedBytes) }));
   }
-  $("selection").textContent = parts.join(" · ");
+  // Separated by spacing (an em space), not by a mark.
+  $("selection").textContent = parts.join(" ");
+}
+
+// A size for people: B, KB, MB or GB, one decimal (units from the table); `n` may be a BigInt.
+function humanSize(n) {
+  const v = Number(n);
+  if (v < 1024) {
+    return t("size.b", { n: v.toLocaleString() });
+  }
+  const one = (x) => ({ n: x.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
+  if (v < 1024 ** 2) {
+    return t("size.kb", one(v / 1024));
+  }
+  if (v < 1024 ** 3) {
+    return t("size.mb", one(v / 1024 ** 2));
+  }
+  return t("size.gb", one(v / 1024 ** 3));
+}
+
+// A short date (the day), with the time only when it is today.
+const dayFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const todayFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+function shortDate(ms) {
+  const d = new Date(ms);
+  return (d.toDateString() === new Date().toDateString() ? todayFormat : dayFormat).format(d);
 }
 
 function cells(r) {
-  const when = r.mtimeNs === -(2n ** 63n) ? "" : new Date(Number(r.mtimeNs / 1000000n)).toLocaleString();
-  const size = r.kind === 1 ? "" : r.size.toLocaleString();
-  return [r.name, size, when];
+  const when = r.mtimeNs === -(2n ** 63n) ? "" : shortDate(Number(r.mtimeNs / 1000000n));
+  const size = r.kind === 1 ? "" : humanSize(r.size);
+  // The exact byte count in the size cell's tooltip.
+  const exact = r.kind === 1 ? "" : t("preview.size", { bytes: Number(r.size).toLocaleString() });
+  return [r.name, size, when, exact];
 }
 
 const preview = createPreview({
@@ -197,7 +231,7 @@ async function activate(index, row, generation, folderOnly) {
 // A native picker in Rust: the page names what to pick and receives grants (never a path).
 // One picker at a time (Rust refuses a second one too): the buttons are disabled meanwhile.
 async function pick(purpose) {
-  const buttons = document.querySelectorAll(".actions button");
+  const buttons = document.querySelectorAll(".actions button, .dropzone button");
   for (const b of buttons) {
     b.disabled = true;
   }
@@ -207,6 +241,9 @@ async function pick(purpose) {
     for (const b of buttons) {
       b.disabled = false;
     }
+    // The buttons that need an open archive go back to what the session allows.
+    $("action-extract").disabled = session === null;
+    updateMaintenance();
   }
 }
 
@@ -285,7 +322,7 @@ function updateMaintenance() {
     if (off) {
       b.setAttribute("title", why);
     } else {
-      b.title = t("shortcut.tooltip", { label: b.textContent, keys: keyLabel(b.getAttribute("aria-keyshortcuts")) });
+      b.title = t("shortcut.tooltip", { label: labelOf(b), keys: keyLabel(b.getAttribute("aria-keyshortcuts")) });
     }
   };
   set("action-test", none, t("maintain.why.none"));
@@ -309,6 +346,7 @@ function clearSession() {
   $("split").hidden = true;
   $("list").hidden = true;
   $("hint").hidden = false;
+  $("label").hidden = true;
   preview.clear();
   updateMaintenance();
   renderRecents().catch(showError);
@@ -362,16 +400,46 @@ async function runActivation(a) {
 }
 
 // The update check's switch (E5-7): Rust saves it; off means no request at all.
-async function wireSettings() {
+// The saved settings, kept whole: every change sends all of them (Rust replaces the lot).
+let saved = { update_check: true, theme: "system" };
+
+// The appearance: the system's, or `data-theme` on the root (styles.css).
+function applyTheme(theme) {
+  if (theme === "light" || theme === "dark") {
+    document.documentElement.dataset.theme = theme;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+async function saveSettings(next, undo) {
+  try {
+    await core.invoke("set_settings", { settings: next });
+    saved = next;
+    $("settings-alert").hidden = true;
+  } catch (e) {
+    undo();
+    showError(e);
+  }
+}
+
+function wireSettings() {
   const box = $("update-check");
-  const settings = await core.invoke("settings");
-  box.checked = settings.update_check;
-  box.addEventListener("change", () => {
-    core.invoke("set_settings", { settings: { update_check: box.checked } }).catch((e) => {
-      box.checked = !box.checked;
-      showError(e);
+  box.checked = saved.update_check;
+  box.addEventListener("change", () => saveSettings({ ...saved, update_check: box.checked }, () => (box.checked = !box.checked)));
+  for (const radio of document.querySelectorAll("input[name=theme]")) {
+    radio.checked = radio.value === saved.theme;
+    radio.addEventListener("change", () => {
+      const before = saved.theme;
+      applyTheme(radio.value);
+      saveSettings({ ...saved, theme: radio.value }, () => {
+        applyTheme(before);
+        for (const r of document.querySelectorAll("input[name=theme]")) {
+          r.checked = r.value === before;
+        }
+      });
     });
-  });
+  }
 }
 
 // E6-4: the "Open with" switch and the "Default apps…" button. Rust says whether this copy is the
@@ -389,6 +457,10 @@ function shellAlert(e) {
     alert.textContent = `${t("error.title")}: ${describe(e)}`;
   }
   alert.hidden = !e;
+  // Behind the open settings dialog the page is inert: the dialog says it too.
+  const inDialog = $("settings-alert");
+  inDialog.textContent = $("settings").open ? alert.textContent : "";
+  inDialog.hidden = !$("settings").open || !e;
 }
 
 function showShell(status) {
@@ -495,6 +567,29 @@ async function openArchive(granted) {
   await showOpened(opened);
 }
 
+// The label band (E5-12): the name, the gauge (the file against its contents; hidden when either
+// is unknown) and the facts.
+function renderLabel(o) {
+  $("label-name").textContent = o.name;
+  const known = o.archive_bytes !== null && o.content_bytes !== null;
+  $("label-gauge").hidden = !known;
+  if (known) {
+    const share = Math.min(1, o.archive_bytes / o.content_bytes);
+    $("label-fill").style.width = `${(share * 100).toFixed(1)}%`;
+    $("label-gauge-text").textContent = t("band.gauge", { content: humanSize(o.content_bytes), archive: humanSize(o.archive_bytes) });
+  }
+  $("label-entries").textContent = t("band.entries", { count: bytes(o.total) });
+  $("label-format").textContent = o.format === "lpk" ? t("band.format.lpk") : t("band.format.other", { format: o.format });
+  const view = o.generation !== o.latest_generation;
+  $("label-generation").textContent = view ? t("band.generation.of", { generation: o.generation, latest: o.latest_generation }) : t("band.generation", { generation: o.generation });
+  // Only an archive with history has generations to speak of.
+  $("label-generation").hidden = o.format !== "lpk" || o.latest_generation === 0;
+  $("label-encrypted").textContent = t("band.encrypted");
+  $("label-encrypted").hidden = !o.encrypted;
+  $("label-readonly").textContent = t("band.readonly");
+  $("label-readonly").hidden = o.generation === o.latest_generation;
+}
+
 // Show a session Rust opened (a new archive, a generation's view, the archive after a rollback).
 async function showOpened(opened) {
   session = opened.session;
@@ -505,6 +600,8 @@ async function showOpened(opened) {
   Object.assign(state, { mode: "flat", dir: null, key: "path", descending: false });
   info = opened.view;
   $("hint").hidden = true;
+  renderLabel(opened);
+  $("label").hidden = false;
   $("recents").hidden = true;
   $("bar").hidden = false;
   $("list").hidden = false;
@@ -541,6 +638,8 @@ function showError(e) {
       open.querySelector(".wizard-body")?.append(alert);
     }
     alert.textContent = `${t("error.title")}: ${describe(e)}`;
+    // The settings dialog's own alert starts hidden: show it.
+    alert.hidden = false;
   } else {
     setStatus(`${t("error.title")}: ${describe(e)}`);
   }
@@ -571,6 +670,24 @@ async function renderRecents() {
     ul.append(li);
   }
   box.hidden = lists.archives.length === 0;
+}
+
+// The settings dialog (E5-12): opened by the gear; Tab stays inside, Esc or Close shuts it, and
+// the focus goes back to the gear.
+function wireSettingsDialog() {
+  const dialog = $("settings");
+  const gear = $("settings-open");
+  trapTab(dialog);
+  gear.addEventListener("click", () => {
+    $("settings-alert").hidden = true;
+    dialog.showModal();
+  });
+  $("settings-close").addEventListener("click", () => dialog.close());
+  dialog.addEventListener("close", () => {
+    $("settings-alert").hidden = true;
+    $("settings-alert").textContent = "";
+    gear.focus();
+  });
 }
 
 function wireControls() {
@@ -630,6 +747,11 @@ function wireControls() {
       }
     }
   });
+  wireSettingsDialog();
+  // Something dragged over the window lights the drop zone.
+  for (const [type, on] of [["dragenter", true], ["dragover", true], ["dragleave", false], ["drop", false]]) {
+    document.addEventListener(type, () => $("hint").classList.toggle("dragover", on));
+  }
   wirePanes();
   wireRadios($("mode-tree").parentElement);
   syncRadios($("mode-tree").parentElement);
@@ -641,6 +763,8 @@ function wireControls() {
   });
   $("action-open").addEventListener("click", () => openPicked().catch(showError));
   $("action-new").addEventListener("click", () => creator.open([]).catch(showError));
+  $("hint-open").addEventListener("click", () => openPicked().catch(showError));
+  $("hint-new").addEventListener("click", () => creator.open([]).catch(showError));
   $("mode-flat").addEventListener("click", () => {
     Object.assign(state, { mode: "flat", dir: null });
     applyView().catch(showError);
@@ -676,6 +800,9 @@ function wireControls() {
 async function main() {
   const startup = await core.invoke("startup");
   strings = startup.strings;
+  // The saved appearance, before anything is shown.
+  saved = await core.invoke("settings");
+  applyTheme(saved.theme);
   applyStrings();
   wireControls();
   if (startup.recovered > 0) {
@@ -685,7 +812,7 @@ async function main() {
   if (startup.settings_warning) {
     showNotices([{ kind: "settings", error: startup.settings_warning }]);
   }
-  await wireSettings();
+  wireSettings();
   await wireShell();
   // A command line that did not parse is shown, and the window still takes later verbs.
   if (startup.error) {

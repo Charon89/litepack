@@ -9,38 +9,67 @@
   <script type="module" src="main.js"></script>
 </head>
 <body>
+  <svg class="sprite" aria-hidden="true" focusable="false" width="0" height="0">
+    <symbol id="i-open" viewBox="0 0 16 16"><path d="M1.5 13V3.5h4l1.5 1.5h6.5v2.5M1.5 13l2-5.5h12.5l-2 5.5z"></path></symbol>
+    <symbol id="i-new" viewBox="0 0 16 16"><path d="M3 1.5h6.5L13 5v9.5H3zM9.5 1.5V5H13M8 8v4M6 10h4"></path></symbol>
+    <symbol id="i-extract" viewBox="0 0 16 16"><path d="M2 9v5h12V9M8 2v8M5 7l3 3 3-3"></path></symbol>
+    <symbol id="i-test" viewBox="0 0 16 16"><path d="M8 1.5l5.5 2v4c0 3.5-2.5 5.5-5.5 7-3-1.5-5.5-3.5-5.5-7v-4zM5.5 8l2 2 3-3.5"></path></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="M10.5 2a3.5 3.5 0 0 0-3 5L2 12.5 3.5 14 9 8.5a3.5 3.5 0 0 0 5-3l-2 2-2-.5-.5-2 2-2z"></path></symbol>
+    <symbol id="i-history" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM8 4.5V8l2.5 1.5"></path></symbol>
+    <symbol id="i-update" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3h-3"></path></symbol>
+    <symbol id="i-gear" viewBox="0 0 16 16"><path d="M6.7 3.4L7 1.5L9 1.5L9.3 3.4L10.3 3.8L11.9 2.7L13.3 4.1L12.2 5.7L12.6 6.7L14.5 7L14.5 9L12.6 9.3L12.2 10.3L13.3 11.9L11.9 13.3L10.3 12.2L9.3 12.6L9 14.5L7 14.5L6.7 12.6L5.7 12.2L4.1 13.3L2.7 11.9L3.8 10.3L3.4 9.3L1.5 9L1.5 7L3.4 6.7L3.8 5.7L2.7 4.1L4.1 2.7L5.7 3.8zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"></path></symbol>
+    <symbol id="i-search" viewBox="0 0 16 16"><path d="M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM10.5 10.5L14 14"></path></symbol>
+    <symbol id="i-file" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9zM9.5 1.5v3h3"></path></symbol>
+    <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.5 3.5h4.2l1.4 1.5h7.4v8.5h-13z"></path></symbol>
+  </svg>
   <h1 class="sr-only" data-string="app.title"></h1>
   <div class="actions" role="toolbar" data-label="actions.label" data-pane data-pane-focus="button">
-    <button type="button" id="action-open" aria-keyshortcuts="Control+O" data-string="action.open"></button>
-    <button type="button" id="action-new" data-string="action.new" aria-keyshortcuts="Control+N"></button>
-    <button type="button" id="action-extract" data-string="action.extract" aria-keyshortcuts="Control+E"></button>
+    <button type="button" id="action-open" aria-keyshortcuts="Control+O"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-open"></use></svg><span data-string="action.open"></span></button>
+    <button type="button" id="action-new" aria-keyshortcuts="Control+N"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-new"></use></svg><span data-string="action.new"></span></button>
+    <span class="divider" aria-hidden="true"></span>
+    <button type="button" id="action-extract" class="primary" aria-keyshortcuts="Control+E"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-extract"></use></svg><span data-string="action.extract"></span></button>
     <span class="group" role="group" data-label="maintain.group">
-      <button type="button" id="action-test" aria-keyshortcuts="Control+Shift+T" data-string="maintain.test"></button>
-      <button type="button" id="action-check" aria-keyshortcuts="Control+Shift+K" data-string="maintain.check"></button>
-      <button type="button" id="action-history" aria-keyshortcuts="Control+Shift+H" data-string="maintain.history"></button>
-      <button type="button" id="action-update" aria-keyshortcuts="Control+Shift+U" data-string="maintain.update"></button>
+      <button type="button" id="action-test" aria-keyshortcuts="Control+Shift+T"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-test"></use></svg><span data-string="maintain.test"></span></button>
+      <button type="button" id="action-check" aria-keyshortcuts="Control+Shift+K"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-check"></use></svg><span data-string="maintain.check"></span></button>
+      <button type="button" id="action-history" aria-keyshortcuts="Control+Shift+H"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-history"></use></svg><span data-string="maintain.history"></span></button>
+      <button type="button" id="action-update" aria-keyshortcuts="Control+Shift+U"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-update"></use></svg><span data-string="maintain.update"></span></button>
     </span>
-    <span id="shell-setting" class="setting-group" role="group" data-label="settings.shell.group" hidden>
-      <label class="setting"><input id="open-with" type="checkbox"><span id="open-with-text" data-string="settings.openwith"></span></label>
-      <button type="button" id="default-apps" data-string="settings.defaultapps"></button>
-    </span>
-    <label class="setting"><input id="update-check" type="checkbox"><span data-string="settings.updates"></span></label>
+    <button type="button" id="settings-open" class="gear" aria-haspopup="dialog" data-label="settings.open"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-gear"></use></svg></button>
   </div>
   <p id="shell-alert" class="shell-alert" role="alert" hidden></p>
   <ul id="notices" class="notices" role="list" aria-live="polite" data-label="notices.label"></ul>
   <p id="banner" class="banner" role="status" hidden><span id="banner-text"></span> <button type="button" id="banner-latest" data-string="banner.latest"></button></p>
+  <section id="label" class="label" data-label="band.label" hidden>
+    <h2 id="label-name"></h2>
+    <ul id="label-facts" class="facts">
+      <li id="label-gauge" class="gauge"><span class="track" aria-hidden="true"><span id="label-fill" class="fill"></span></span><span id="label-gauge-text"></span></li>
+      <li id="label-entries"></li>
+      <li id="label-format"></li>
+      <li id="label-generation"></li>
+      <li id="label-encrypted" hidden></li>
+      <li id="label-readonly" hidden></li>
+    </ul>
+  </section>
   <header class="bar" role="toolbar" data-label="bar.label" data-pane data-pane-focus="#filter" hidden id="bar">
     <div class="modes" role="radiogroup" data-label="mode.label">
       <button type="button" id="mode-tree" role="radio" aria-checked="false" data-string="mode.tree"></button>
       <button type="button" id="mode-flat" role="radio" aria-checked="true" data-string="mode.flat"></button>
     </div>
     <nav id="crumbs" class="crumbs" data-label="crumbs.label"></nav>
-    <input id="filter" class="filter" type="search" autocomplete="off" spellcheck="false" aria-keyshortcuts="Control+F" data-label="filter.label">
+    <span class="search"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-search"></use></svg><input id="filter" class="filter" type="search" autocomplete="off" spellcheck="false" aria-keyshortcuts="Control+F" data-label="filter.label"></span>
     <label class="glob"><input id="glob" type="checkbox"><span data-string="filter.glob"></span></label>
     <button type="button" id="preview-toggle" aria-pressed="true" aria-keyshortcuts="Alt+P" data-string="preview.toggle"></button>
   </header>
   <main>
-    <p id="hint" class="hint" data-string="drop.hint"></p>
+    <section id="hint" class="dropzone">
+      <svg class="drawing" viewBox="0 0 64 64" aria-hidden="true"><path d="M8 26l9-14h30l9 14M8 26h48v26a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2zM8 26l11 8h26l11-8M26 6v8M38 6v8M32 3v11"></path></svg>
+      <h2 data-string="hint.headline"></h2>
+      <p data-string="drop.hint"></p>
+      <div class="dropzone-buttons">
+        <button type="button" id="hint-open" class="primary"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-open"></use></svg><span data-string="action.open"></span></button>
+        <button type="button" id="hint-new"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-new"></use></svg><span data-string="action.new"></span></button>
+      </div>
+    </section>
     <section id="recents" class="recents" data-pane data-pane-focus="button" hidden>
       <h2 data-string="recents.label"></h2>
       <ul id="recent-list"></ul>
@@ -71,5 +100,23 @@
     <span id="status" role="status" aria-live="polite"></span>
     <span id="selection" class="selection"></span>
   </footer>
+  <dialog id="settings" class="settings" aria-labelledby="settings-title">
+    <h2 id="settings-title" data-string="settings.title"></h2>
+    <div class="settings-body">
+      <label class="setting"><input id="update-check" type="checkbox"><span data-string="settings.updates"></span></label>
+      <fieldset class="appearance" id="appearance">
+        <legend data-string="settings.theme"></legend>
+        <label class="setting"><input id="theme-system" type="radio" name="theme" value="system"><span data-string="settings.theme.system"></span></label>
+        <label class="setting"><input id="theme-light" type="radio" name="theme" value="light"><span data-string="settings.theme.light"></span></label>
+        <label class="setting"><input id="theme-dark" type="radio" name="theme" value="dark"><span data-string="settings.theme.dark"></span></label>
+      </fieldset>
+      <span id="shell-setting" class="setting-group" role="group" data-label="settings.shell.group" hidden>
+        <label class="setting"><input id="open-with" type="checkbox"><span id="open-with-text" data-string="settings.openwith"></span></label>
+        <button type="button" id="default-apps" data-string="settings.defaultapps"></button>
+      </span>
+      <p id="settings-alert" class="dialog-error" role="alert" hidden></p>
+    </div>
+    <div class="settings-buttons"><button type="button" id="settings-close" class="primary" data-string="settings.close"></button></div>
+  </dialog>
 </body>
 </html>

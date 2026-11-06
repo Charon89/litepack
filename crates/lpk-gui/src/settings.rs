@@ -18,17 +18,38 @@ use crate::GuiError;
 /// The file format's version.
 pub const VERSION: u32 = 1;
 
+/// The appearance setting (`data-theme` on the page's root).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Light.
+    Light,
+    /// Dark.
+    Dark,
+    /// Follow the system (also what a value this version does not know reads as).
+    #[default]
+    #[serde(other)]
+    System,
+}
+
 /// What the user sets (and all the page may read or write).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     /// The update check, the GUI's one network request (decision (d): on by default).
     pub update_check: bool,
+    /// The appearance: the system's (the default), light or dark. A value this version does not
+    /// know reads as the system's.
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { update_check: true }
+        Settings {
+            update_check: true,
+            theme: Theme::System,
+        }
     }
 }
 
@@ -171,6 +192,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("sub").join("settings.json");
         let off = Settings {
+            theme: Theme::Dark,
             update_check: false,
         };
         save(&p, &off).unwrap();
@@ -210,11 +232,35 @@ mod tests {
         assert!(std::fs::read_to_string(&p).unwrap().contains("future"));
         store
             .set(Settings {
+                theme: Theme::Light,
                 update_check: false,
             })
             .unwrap();
         assert!(!load(&p).settings.update_check);
         assert!(!store.get().update_check);
+    }
+
+    #[test]
+    fn the_theme_is_kept_and_an_unknown_value_reads_as_the_system() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        save(
+            &p,
+            &Settings {
+                theme: Theme::Dark,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(load(&p).settings.theme, Theme::Dark);
+        // A file from before the theme existed, and one with a value this version lacks.
+        std::fs::write(&p, r#"{"version":1,"update_check":false}"#).unwrap();
+        assert_eq!(load(&p).settings.theme, Theme::System);
+        std::fs::write(&p, r#"{"version":1,"update_check":true,"theme":"sepia"}"#).unwrap();
+        let l = load(&p);
+        assert_eq!((l.settings.theme, l.warning), (Theme::System, None));
+        let v = serde_json::to_value(Theme::Light).unwrap();
+        assert_eq!(v, "light");
     }
 
     #[test]

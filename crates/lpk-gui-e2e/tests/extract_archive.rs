@@ -105,7 +105,7 @@ async fn run(c: &Client) -> Result<(), String> {
     .await?;
     go.click().await.map_err(|e| e.to_string())?;
     // The result carries the check line.
-    let check = wait_for(c, "dialog.wizard .check", "result's check line").await?;
+    let check = wait_for(c, "dialog.wizard[open] .check", "result's check line").await?;
     let text = check.text().await.map_err(|e| e.to_string())?;
     if !text.contains("BLAKE3") {
         return Err(format!("check line: {text:?}"));
