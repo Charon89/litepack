@@ -142,8 +142,24 @@ async fn settings(host: State<'_, Host>) -> Result<Settings, GuiError> {
 
 /// Change the settings; a field the page may not write (a path) fails to deserialize.
 #[tauri::command]
-async fn set_settings(host: State<'_, Host>, settings: Settings) -> Result<(), GuiError> {
-    host.settings.set(settings)
+async fn set_settings(
+    host: State<'_, Host>,
+    window: tauri::WebviewWindow,
+    settings: Settings,
+) -> Result<(), GuiError> {
+    host.settings.set(settings)?;
+    // The title bar follows the Appearance setting too (a failure leaves it as it was).
+    let _ = window.set_theme(window_theme(settings.theme));
+    Ok(())
+}
+
+/// The window's theme for an Appearance setting: `None` follows Windows.
+fn window_theme(theme: lpk_gui::settings::Theme) -> Option<tauri::Theme> {
+    match theme {
+        lpk_gui::settings::Theme::Dark => Some(tauri::Theme::Dark),
+        lpk_gui::settings::Theme::Light => Some(tauri::Theme::Light),
+        lpk_gui::settings::Theme::System => None,
+    }
 }
 
 /// The "Open with" setting's state (E6-4): the controls show only when `registered` (this copy
@@ -992,6 +1008,7 @@ pub fn run() -> i32 {
                 eprintln!("lpk-gui: {w}");
             }
             let check = settings.get().update_check;
+            let theme = settings.get().theme;
             let activation = startup_verb.as_ref().map(|v| activate(v, &app.grants));
             if let Some(a) = &activation {
                 app.note_activation(a);
@@ -1035,7 +1052,8 @@ pub fn run() -> i32 {
             )
             .title(strings::get("app.title"))
             .inner_size(960.0, 640.0)
-            .min_inner_size(480.0, 320.0);
+            .min_inner_size(480.0, 320.0)
+            .theme(window_theme(theme));
             if let Some(d) = paths::webview_dir() {
                 b = b.data_directory(d);
             }
@@ -1117,4 +1135,17 @@ pub fn run() -> i32 {
         }
         _ => {}
     })
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::window_theme;
+    use lpk_gui::settings::Theme;
+
+    #[test]
+    fn the_appearance_setting_maps_to_the_windows_theme() {
+        assert_eq!(window_theme(Theme::Dark), Some(tauri::Theme::Dark));
+        assert_eq!(window_theme(Theme::Light), Some(tauri::Theme::Light));
+        assert_eq!(window_theme(Theme::System), None);
+    }
 }

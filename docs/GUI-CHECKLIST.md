@@ -179,6 +179,8 @@ The "Open with" box and "Default apps..." (section 10) are now in the settings d
 | 12.4 | Settings by keyboard: Tab to the gear, Enter, Tab and Shift+Tab around, Esc | The dialog opens; the focus stays inside and wraps; Esc closes it and the focus is on the gear | |
 | 12.5 | Narrator on the gear and the settings dialog | The gear is read as "Settings" (a button opening a dialog); the dialog is announced with its title; each setting is named | |
 | 12.6 | Open an encrypted archive without its key, and a foreign archive | The label band shows the name and facts; the gauge is hidden when a size is unknown | |
+| 12.8 | Open a ZIP | The label band shows the ZIP's sizes and the gauge (the foreign-format case the tests cannot reach: `lpk-worker` is resolved beside the running executable) | |
+| 12.9 | Choose Dark on a light Windows, then Light, then System | The title bar follows each choice | |
 | 12.7 | The empty window: drop an archive; use its two buttons | The drop opens the archive; Open and New archive run the bar's commands | |
 
 ## Notes
