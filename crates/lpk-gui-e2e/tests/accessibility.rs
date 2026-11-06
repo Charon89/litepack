@@ -351,6 +351,28 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
         }
         .await;
         report.record("the empty window with recents", r);
+        // The same window with the dark theme set: axe checks the dark contrast too.
+        let r = async {
+            set_dark(&c).await?;
+            axe(&c, &source, "the empty window, dark").await
+        }
+        .await;
+        report.record("the empty window, dark", r);
+        let _ = c.close().await;
+        // The browser, flat view, dark.
+        let c = session(
+            &mut driver,
+            &work,
+            vec![format!("--open={}", archive.display())],
+        )
+        .await;
+        let r = async {
+            wait_for(&c, "#rows [role=row]", "a row").await?;
+            set_dark(&c).await?;
+            axe(&c, &source, "the browser, dark").await
+        }
+        .await;
+        report.record("the browser, dark", r);
         let _ = c.close().await;
     });
     eprintln!("states checked ({}):", report.states.len());
@@ -374,9 +396,20 @@ fn no_view_or_dialog_has_a_critical_accessibility_issue() {
     );
 }
 
+/// Set the dark theme the way the settings dialog does (`data-theme` on the root).
+async fn set_dark(c: &Client) -> Result<(), String> {
+    c.execute(
+        "document.documentElement.dataset.theme = 'dark'; return true;",
+        vec![],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// The states the test records: browser 2, previews 3, extract 3, test, check, update, history,
-/// generation view, the verb queue, the wizard 2, the empty window, the settings dialog.
-const EXPECTED_STATES: usize = 18;
+/// generation view, the verb queue, the wizard 2, the empty window, the settings dialog, the empty window and the browser in dark.
+const EXPECTED_STATES: usize = 20;
 
 /// Open the Extract dialog on the whole archive (the clicked row would otherwise make the scope
 /// "Selected"), "This folder" as the destination.

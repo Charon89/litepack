@@ -400,16 +400,45 @@ async function runActivation(a) {
 }
 
 // The update check's switch (E5-7): Rust saves it; off means no request at all.
-async function wireSettings() {
+// The saved settings, kept whole: every change sends all of them (Rust replaces the lot).
+let saved = { update_check: true, theme: "system" };
+
+// The appearance: the system's, or `data-theme` on the root (styles.css).
+function applyTheme(theme) {
+  if (theme === "light" || theme === "dark") {
+    document.documentElement.dataset.theme = theme;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+async function saveSettings(next, undo) {
+  try {
+    await core.invoke("set_settings", { settings: next });
+    saved = next;
+  } catch (e) {
+    undo();
+    showError(e);
+  }
+}
+
+function wireSettings() {
   const box = $("update-check");
-  const settings = await core.invoke("settings");
-  box.checked = settings.update_check;
-  box.addEventListener("change", () => {
-    core.invoke("set_settings", { settings: { update_check: box.checked } }).catch((e) => {
-      box.checked = !box.checked;
-      showError(e);
+  box.checked = saved.update_check;
+  box.addEventListener("change", () => saveSettings({ ...saved, update_check: box.checked }, () => (box.checked = !box.checked)));
+  for (const radio of document.querySelectorAll("input[name=theme]")) {
+    radio.checked = radio.value === saved.theme;
+    radio.addEventListener("change", () => {
+      const before = saved.theme;
+      applyTheme(radio.value);
+      saveSettings({ ...saved, theme: radio.value }, () => {
+        applyTheme(before);
+        for (const r of document.querySelectorAll("input[name=theme]")) {
+          r.checked = r.value === before;
+        }
+      });
     });
-  });
+  }
 }
 
 // E6-4: the "Open with" switch and the "Default apps…" button. Rust says whether this copy is the
@@ -764,6 +793,9 @@ function wireControls() {
 async function main() {
   const startup = await core.invoke("startup");
   strings = startup.strings;
+  // The saved appearance, before anything is shown.
+  saved = await core.invoke("settings");
+  applyTheme(saved.theme);
   applyStrings();
   wireControls();
   if (startup.recovered > 0) {
@@ -773,7 +805,7 @@ async function main() {
   if (startup.settings_warning) {
     showNotices([{ kind: "settings", error: startup.settings_warning }]);
   }
-  await wireSettings();
+  wireSettings();
   await wireShell();
   // A command line that did not parse is shown, and the window still takes later verbs.
   if (startup.error) {

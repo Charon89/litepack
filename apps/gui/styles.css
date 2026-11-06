@@ -22,8 +22,28 @@
   font: 13.5px/1.45 var(--text);
 }
 
+/* Dark: the system's choice, unless the settings dialog sets a theme (data-theme on the root). */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #10171e;
+  --sheet: #161f28;
+  --ink: #e7ecf1;
+  --slate: #99a6b4;
+  --rule: #283542;
+  --board: #8db3d2;
+  --board-tint: #1e2c3a;
+  --tape: #f2b53a;
+  --track: #24303c;
+  --dash: #3b4a59;
+  --danger: #ff8f86;
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --paper: #10171e;
     --sheet: #161f28;
     --ink: #e7ecf1;
@@ -706,6 +726,22 @@ main {
 
 .settings .setting {
   color: var(--ink);
+}
+
+.appearance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.appearance legend {
+  padding: 0;
+  margin-bottom: 4px;
+  color: var(--slate);
+  font-size: 12px;
 }
 
 .setting-group {
