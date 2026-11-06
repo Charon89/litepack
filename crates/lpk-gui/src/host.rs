@@ -39,6 +39,7 @@ use lpk_gui::outbox::Outbox;
 use lpk_gui::pick::{NativePicker, Purpose};
 use lpk_gui::security::{MAIN_WINDOW, SMOKE_REPORT_ENV};
 use lpk_gui::settings::{Settings, Store};
+use lpk_gui::shell_setting::{ShellSetting, ShellStatus};
 use lpk_gui::{cli, paths, strings, GuiError};
 use serde::Serialize;
 use tauri::ipc::{Channel, Response};
@@ -58,6 +59,8 @@ struct Host {
     notices: Vec<StartupNotice>,
     settings: Store,
     settings_warning: Option<String>,
+    /// The registry and Settings seam (E6-4); `None` when the executable is unknown.
+    shell: Option<Arc<ShellSetting>>,
     smoke: Option<PathBuf>,
     /// The page's channels, and the notices pushed before it subscribed (a second instance's
     /// verbs at start-up).
@@ -141,6 +144,46 @@ async fn settings(host: State<'_, Host>) -> Result<Settings, GuiError> {
 #[tauri::command]
 async fn set_settings(host: State<'_, Host>, settings: Settings) -> Result<(), GuiError> {
     host.settings.set(settings)
+}
+
+/// The "Open with" setting's state (E6-4): the controls show only when `registered` (this copy
+/// is the one the record names). Reads the registry on a blocking thread.
+#[tauri::command]
+async fn shell_status(host: State<'_, Host>) -> Result<ShellStatus, GuiError> {
+    let shell = host.shell.clone();
+    blocking(move || {
+        Ok(shell.map_or_else(
+            || ShellStatus {
+                registered: false,
+                open_with: false,
+                formats: Vec::new(),
+            },
+            |s| s.status(),
+        ))
+    })
+    .await
+}
+
+/// Switch the opt-in "Open with" entries on or off by re-registering in process (refused unless
+/// this copy is the registered one); the new status.
+#[tauri::command]
+async fn set_open_with(host: State<'_, Host>, on: bool) -> Result<ShellStatus, GuiError> {
+    let shell = host
+        .shell
+        .clone()
+        .ok_or_else(|| GuiError::usage("this copy of LitePack is not the registered one"))?;
+    blocking(move || shell.set_open_with(on)).await
+}
+
+/// Open Settings' default-apps page for LitePack (a fixed address; refused unless this copy is
+/// the registered one).
+#[tauri::command]
+async fn open_default_apps(host: State<'_, Host>) -> Result<(), GuiError> {
+    let shell = host
+        .shell
+        .clone()
+        .ok_or_else(|| GuiError::usage("this copy of LitePack is not the registered one"))?;
+    blocking(move || shell.open_default_apps()).await
 }
 
 /// The native password dialog (E5-4), run on the main thread while the blocking task waits on a
@@ -865,6 +908,12 @@ fn may_exit(handle: &AppHandle, host: &Host) -> bool {
 
 /// Run the GUI; the process's exit code.
 pub fn run() -> i32 {
+    // E6-4: `--register-shell` and `--unregister-shell` first of all: no window, no webview, no
+    // single-instance plugin (never forwarded to a running instance); they exit with a code.
+    let literal: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(code) = lpk_gui::register::handle(&literal) {
+        return code;
+    }
     let cwd = std::env::current_dir().ok();
     let (parsed, startup_files) =
         cli::parse_with_files(std::env::args_os().skip(1), cwd.as_deref());
@@ -892,6 +941,9 @@ pub fn run() -> i32 {
             startup,
             settings,
             set_settings,
+            shell_status,
+            set_open_with,
+            open_default_apps,
             open_archive,
             rows,
             view,
@@ -956,6 +1008,7 @@ pub fn run() -> i32 {
                 notices: report.notices,
                 settings,
                 settings_warning,
+                shell: ShellSetting::system().map(Arc::new),
                 smoke: std::env::var_os(SMOKE_REPORT_ENV).map(PathBuf::from),
                 outbox: Outbox::new(),
                 forwarder,

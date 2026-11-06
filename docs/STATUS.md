@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-11-03, about 03:05 on 2026-11-04 UTC (22:05, 11-03 local). **Session of 2026-10-30 to 2026-11-03.** E6-2 is done (D-144, #150, `8900703`): Explorer's "LitePack" submenu in `lpk-shell`, starting the GUI through the menu's response files; nothing is registered until E6-3 (the sparse package) or E6-4 (the classic menu). Every E5 build task is merged (E5-1 to E5-9; D-136 to D-143 this session); E5-11 is ticked (`main`'s own `gui-e2e` green on E5-9's merge), and E5-10 is the owner's checklist (`docs/GUI-CHECKLIST.md`, run on Windows 10 22H2 and 11). **In flight:** E6-4's part 1 (per-user registration through `lpk-gui.exe --register-shell` and `--unregister-shell`: the classic menu under a second class ID, the `.lpk` association, opt-in "Open with", Default Programs) is PR #151, reviewed and fixed. Its CI registry diff found that the shell gives an elevated caller no per-user association (the runner's session is elevated): the check now reads the merged `HKCR` chain and asks `AssocQueryStringW` from a limited-token child, a one-off scheduled task on the runner; if that child cannot run at medium integrity, the check keeps the `HKCR` chain alone and D-145 records why. Part 2 (the GUI's setting and "Default apps…" button) is on `task/e6-4b`, reviewed and fixed; once #151 lands it is merged up to `main` (part 1's head first) and gets its own PR. The merge and docs scripts (`merge-151.sh`, `merge-main-e6-4b.sh`, `merge-e6-4b.sh`, `docs_d145.py`, `docs_d146.py`) are in the hand-off folder. E4-6 is ticked (seven consecutive green fuzz nights on `main`, 2026-10-28 to 2026-11-03) and E8-1 counts its thirty nights from 2026-10-28 (the thirtieth would be 2026-11-26). **Next:** E8-3, E8-6, E8-8 and E9; E6-3 after E7-1 and E7-3; zpaqfranz's rows (`measure-2026-10-30-night.sh zpaq`, launched through WMI on an idle machine; several hours) change only G2's reference lines. E7 waits for the owner's answers (below). Briefs, reports, review verdicts, the ledgers and the merge scripts are in `target/acceptance/handoff-2026-10-30/` on Megatron.
+Last updated: 2026-11-03, about 04:45 on 2026-11-04 UTC (23:45, 11-03 local). **Session of 2026-10-30 to 2026-11-03.** E6-4 is done (D-145, D-146; #151 and #153, `cbf8e62`): per-user registration of the classic menu, the `.lpk` association, opt-in "Open with" and Default Programs through `lpk-gui.exe --register-shell` and `--unregister-shell`, with CI's registry diff, and the GUI's setting and "Default apps…" button for the registered copy. E6-2 is done (D-144). Of E6, E6-3 waits for E7-1 and E7-3 and E6-7 is the hand test (route C's cascade without `SubCommands` among its checks, D-145). Every E5 build task is merged, E5-11 is ticked, and E5-10 is the owner's checklist (`docs/GUI-CHECKLIST.md`, run on Windows 10 22H2 and 11). **In flight:** E9-1 (the docs site's skeleton: mdBook 0.5.4 in `book/`, the licence footer and its check, `.github/workflows/docs.yml` deploying to Pages from `main`, no font file published) is PR #152, reviewed, with its fix round and the controller's font fix (`95654bb`) on `task/e9-1`; Pages is enabled (`https://charon89.github.io/litepack/`). To finish: merge `main` into `task/e9-1`, let CI pass, re-read the round, squash-merge, then `curl -I` the URL after the first deploy and run `docs_d147.py`. Work stopped at 23:59 local on 2026-11-03, as the owner asked. E4-6 is ticked (seven consecutive green fuzz nights on `main`, 2026-10-28 to 2026-11-03) and E8-1 counts its thirty nights from 2026-10-28 (the thirtieth would be 2026-11-26). **Next:** E8-3, E8-6, E8-8 and E9; zpaqfranz's rows (`measure-2026-10-30-night.sh zpaq`, launched through WMI on an idle machine; several hours) change only G2's reference lines. E7 waits for the owner's answers (below). Briefs, reports, review verdicts, the ledgers and the merge scripts are in `target/acceptance/handoff-2026-10-30/` on Megatron.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -92,13 +92,13 @@ E3-8 is done (D-75, PR #77).
   estimates `node-v2` appended at 12.2 MB with patches against 16.8 MB without, and `node-v3` at 0.41 MB
   against 2.65 MB (estimates, not measured archives). Say whether to build the delta writer for `lpk append`
   only (E2-9's tasks B–D: revision 1.5, the writer, the reader and `lpk-check`), an incremental-backup feature.
-- **Download libarchive's source release (E4-4, new on 2026-10-26).** E4-4 vendors libarchive (two-clause BSD,
-  chosen in D-89 (a)) under `vendor/` and builds it with `cc`. The file: `libarchive-3.8.9.tar.gz`, 9,118,107 bytes,
-  from https://github.com/libarchive/libarchive/releases/download/v3.8.9/libarchive-3.8.9.tar.gz, with its PGP
-  signature `libarchive-3.8.9.tar.gz.asc` (833 bytes) on the same release page; libarchive 3.8.10, a later patch
-  release, is also out and would be the better pick. Say yes (and which version) or no. To be clear about what
-  happened: before the controller's correction reached it, the E4-4 agent downloaded the 3.8.9 archive and its
-  signature into the session's scratchpad, then deleted both unused; nothing from them was committed.
+- **libarchive's source release (E4-4): approved by the owner on 2026-11-03** ("Can do all"). The latest patch
+  release that night was 3.8.11 (2026-10-30, after the 3.8.10 recommended here on 2026-10-26):
+  `libarchive-3.8.11.tar.gz`, 9,341,028 bytes, and its PGP signature `libarchive-3.8.11.tar.gz.asc`, 833 bytes, from
+  https://github.com/libarchive/libarchive/releases/tag/v3.8.11; the next session takes it unless the owner names
+  3.8.10 (verify the signature, record the SHA-256 in the D-entry). Not started that night: `task/e4-4` is 86 commits behind
+  `main`, and making RAR readable must also add `rar` to `lpk-shell`'s archive list and `lpk-gui`'s opt-in "Open
+  with" list, whose tests fail until then (D-144, D-145).
 - **Re-pin a changed corpus source (E8-9, new on 2026-10-26).** Project Gutenberg changed `1497-0.txt`, so a clean machine's `corpus build --profile small` no longer matches `corpus.lock` (this PC builds from its download cache). Re-pinning changes the `text-prose` class; the alternative is keeping the old file from a stable mirror. A corpus change is yours.
 - **The size gate's sensitivity (E8-2, new on 2026-10-26).** The 1% limit per row is PLAN's; on the red run, lowering the Balanced preset from 9e to 1 moved only 3 of 12 Balanced rows past 1%. Say whether to keep it or to add a per-class or tighter limit (a gate change is yours).
 - **E7's questions (new on 2026-10-28; `docs/notes/e7-design.md` §10, each with sources, costs and a
@@ -113,6 +113,16 @@ E3-8 is done (D-75, PR #77).
 - **US 9,798,731** (`docs/LICENSING.md`): E2-9's deltas pair a file's versions by path and name, with no
   similarity sketch, so as far as this session can read it the claimed method is not practised; counsel's
   reading is still the owner's to get if sketch-based clustering (E2-8, D-55) is ever wanted back.
+- **zpaqfranz's rows: approved by the owner on 2026-11-03** (`measure-2026-10-30-night.sh zpaq`, through WMI, several
+  hours on an idle machine); not started that night, since work had to stop at 23:59 local.
+- **E8-3's weekly speed run: approved by the owner on 2026-11-03** (a weekly scheduled task on this measuring
+  machine). Not started: a design draft (unreviewed) is in the hand-off folder, `e8-3-design-draft.md`: two
+  harness gaps first (`run --compare` across `lpk` builds and catalogue changes), then the weekly script and task;
+  its questions for the owner: the weekday and hour the PC is on and idle (and waking it), the acceptance's reading,
+  the power plan, the antivirus, committing to `main` or by PR, re-measuring a red week.
+- **E9-1's site: approved by the owner on 2026-11-03** (GitHub Pages and the publication). The controller enabled
+  Pages that night (build type GitHub Actions, `https://charon89.github.io/litepack/`, HTTPS enforced); the book
+  is published once E9-1's workflow deploys from `main`.
 - **Idle time for the measurements:** E0-1's rebuild and re-measurement (about three hours), E3-9, and every
   re-measurement after an engine change need the machine to itself; say when it can sit idle, or they run
   detached overnight as before, announced in this file.
@@ -130,7 +140,8 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e4-4` (23c7c93, no PR): libarchive vendoring waits for the owner's approval to download its source (below); the crates, routing, fixtures and gated tests are on the branch and build a stub.
+- `task/e9-1` (95654bb, PR #152, draft): E9-1's book skeleton and Pages workflow, reviewed, its fix round and the controller's font fix read (R192); merge `main` into it, let CI pass, squash, `curl -I` the site, `docs_d147.py`.
+- `task/e4-4` (23c7c93, no PR): libarchive vendoring: the owner approved the download on 2026-11-03 (3.8.11, below); merge `main` first (86 commits behind), and add `rar` to `lpk-shell`'s and `lpk-gui`'s extension lists with the RAR change; the crates, routing, fixtures and gated tests are on the branch and build a stub.
 - Follow-ups noted in the D-entries, for the tasks named: E7 — the WebView2 loader's licence text before any GUI binary ships (`docs/LICENSING.md`); E6-5 — `export --force` removes before it creates, and a foreign archive is reopened by path for the broker; `docs/SECURITY.md` — the vulnerability contact is the owner's to fill.
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are; old merged `task/e2-10-*`, `task/e2-15-probe`, `task/e2-20-*` and `task/e2-22-lpk-rows` branches remain on `origin`.
 

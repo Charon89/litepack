@@ -49,6 +49,23 @@ returns to where it was when the dialog closes.
 | 7.2 | The "Check for updates" switch | Off stays off after a restart; on stays on | |
 | 7.3 | A portable copy (an empty `portable` file beside the executable) | Settings, recent lists and WebView data are kept in `data` beside the executable, nothing under the user profile | |
 
+## E6-4 "Open with" setting and Default apps button
+
+Both controls sit in the command bar, left of "Check for updates", and exist only in the copy the installer registered
+(the registration record names this exe). Do these on a machine you may change, with the installed copy; never on a
+development build, which must show neither control.
+
+| # | Item | Expected result | Result |
+|---|---|---|---|
+| 10.1 | A portable copy, a development build and a copy that is not the registered one | Neither the "Offer LitePack in "Open with"..." box nor "Default apps..." is on the page (absent, not greyed) | |
+| 10.2 | The installed copy, installed without the opt-in | Both show; the box is unticked and names the formats (for example ".zip, .7z, ..."); Tab reaches the box then the button with a visible ring | |
+| 10.3 | Tick the box | A moment later it stays ticked; right-click a `.zip` > Open with lists LitePack (as an option, never the default); a `.zip` default someone else chose (for example 7-Zip's) is untouched | |
+| 10.4 | Untick the box | The Open with entry for `.zip` is gone again; `.lpk` still opens in LitePack | |
+| 10.5 | Tick it, close and reopen the window | The box is still ticked (the page reads the record) | |
+| 10.6 | "Default apps..." on Windows 11 | Settings opens on LitePack's own default-apps page (the `registeredAppUser=LitePack` address) | |
+| 10.7 | "Default apps..." on Windows 10 22H2 | Settings opens; it may ignore the parameter and show the general Default apps page. Record which in the Result column (E6-7) | |
+| 10.8 | Windows high contrast, Narrator | The box and button are named, the ring and the box state are visible; a failure (in regedit, deny your user "Set Value" on `HKCU\Software\Classes\.zip\OpenWithProgids`, then tick the box) shows the alert "LitePack's Explorer integration may be incomplete ... Reinstall LitePack, or run lpk-gui.exe --register-shell, to repair it." under the command bar, it stays even if the controls vanish, and Narrator reads it; restore the permission and repair afterwards | |
+
 ## E5-6 Preview pane
 
 Open an archive; the pane is on the right of the list, shown at every start. Focus a file row (arrow keys or a click) and wait a moment: the pane previews it.
