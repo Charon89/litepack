@@ -205,7 +205,7 @@ async function activate(index, row, generation, folderOnly) {
 // A native picker in Rust: the page names what to pick and receives grants (never a path).
 // One picker at a time (Rust refuses a second one too): the buttons are disabled meanwhile.
 async function pick(purpose) {
-  const buttons = document.querySelectorAll(".actions button");
+  const buttons = document.querySelectorAll(".actions button, .dropzone button");
   for (const b of buttons) {
     b.disabled = true;
   }
@@ -215,6 +215,9 @@ async function pick(purpose) {
     for (const b of buttons) {
       b.disabled = false;
     }
+    // The buttons that need an open archive go back to what the session allows.
+    $("action-extract").disabled = session === null;
+    updateMaintenance();
   }
 }
 
@@ -668,6 +671,8 @@ function wireControls() {
   });
   $("action-open").addEventListener("click", () => openPicked().catch(showError));
   $("action-new").addEventListener("click", () => creator.open([]).catch(showError));
+  $("hint-open").addEventListener("click", () => openPicked().catch(showError));
+  $("hint-new").addEventListener("click", () => creator.open([]).catch(showError));
   $("mode-flat").addEventListener("click", () => {
     Object.assign(state, { mode: "flat", dir: null });
     applyView().catch(showError);

@@ -376,6 +376,7 @@ main {
 }
 
 .dropzone p {
+  max-width: 24rem;
   margin: 0 0 16px;
 }
 

@@ -50,7 +50,15 @@
     <button type="button" id="preview-toggle" aria-pressed="true" aria-keyshortcuts="Alt+P" data-string="preview.toggle"></button>
   </header>
   <main>
-    <p id="hint" class="hint" data-string="drop.hint"></p>
+    <section id="hint" class="dropzone">
+      <svg class="drawing" viewBox="0 0 64 64" aria-hidden="true"><path d="M8 26l9-14h30l9 14M8 26h48v26a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2zM8 26l11 8h26l11-8M26 6v8M38 6v8M32 3v11"></path></svg>
+      <h2 data-string="hint.headline"></h2>
+      <p data-string="drop.hint"></p>
+      <div class="dropzone-buttons">
+        <button type="button" id="hint-open" class="primary"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-open"></use></svg><span data-string="action.open"></span></button>
+        <button type="button" id="hint-new"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-new"></use></svg><span data-string="action.new"></span></button>
+      </div>
+    </section>
     <section id="recents" class="recents" data-pane data-pane-focus="button" hidden>
       <h2 data-string="recents.label"></h2>
       <ul id="recent-list"></ul>

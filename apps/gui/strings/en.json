@@ -1,6 +1,7 @@
 {
   "app.title": "LitePack",
-  "drop.hint": "Drop an archive here, or open one with LitePack.",
+  "hint.headline": "Drop an archive here",
+  "drop.hint": "Dropping an archive on this window opens it. You can also open one yourself or start a new archive.",
   "bar.label": "Archive view",
   "mode.label": "View",
   "mode.tree": "Folders",
