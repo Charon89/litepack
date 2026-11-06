@@ -416,6 +416,7 @@ async function saveSettings(next, undo) {
   try {
     await core.invoke("set_settings", { settings: next });
     saved = next;
+    $("settings-alert").hidden = true;
   } catch (e) {
     undo();
     showError(e);
@@ -637,6 +638,8 @@ function showError(e) {
       open.querySelector(".wizard-body")?.append(alert);
     }
     alert.textContent = `${t("error.title")}: ${describe(e)}`;
+    // The settings dialog's own alert starts hidden: show it.
+    alert.hidden = false;
   } else {
     setStatus(`${t("error.title")}: ${describe(e)}`);
   }
@@ -680,7 +683,11 @@ function wireSettingsDialog() {
     dialog.showModal();
   });
   $("settings-close").addEventListener("click", () => dialog.close());
-  dialog.addEventListener("close", () => gear.focus());
+  dialog.addEventListener("close", () => {
+    $("settings-alert").hidden = true;
+    $("settings-alert").textContent = "";
+    gear.focus();
+  });
 }
 
 function wireControls() {

@@ -549,7 +549,7 @@ impl ListModel {
             match r.kind {
                 0 => {
                     t.files += 1;
-                    t.bytes += r.size;
+                    t.bytes = t.bytes.saturating_add(r.size);
                 }
                 1 => t.directories += 1,
                 _ => {}
@@ -557,7 +557,7 @@ impl ListModel {
             if picks.is_some_and(|p| p.contains(id)) {
                 t.picked += 1;
                 if r.kind == 0 {
-                    t.picked_bytes += r.size;
+                    t.picked_bytes = t.picked_bytes.saturating_add(r.size);
                 }
             }
         }
@@ -594,6 +594,21 @@ mod tests {
             b.push(e).unwrap();
         }
         b.finish(&CancelToken::new()).unwrap()
+    }
+
+    #[test]
+    fn totals_saturate_instead_of_overflowing() {
+        use EntryKind::File;
+        let m = model(&[entry("a", File, u64::MAX), entry("b", File, 7)]);
+        let c = CancelToken::new();
+        let v = m
+            .view(Scope::All, Order::default(), &Filter::None, &c)
+            .unwrap();
+        let mut picks = m.new_selection();
+        picks.insert(0);
+        picks.insert(1);
+        let t = m.totals(&v, Some(&picks));
+        assert_eq!((t.bytes, t.picked_bytes), (u64::MAX, u64::MAX));
     }
 
     #[test]

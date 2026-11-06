@@ -105,7 +105,8 @@ pub struct RecentLists {
 }
 
 /// The contents' size for the label band's gauge: unknown for an archive opened without its key
-/// and when every size reads zero (a foreign format that does not list sizes).
+/// and when every size reads zero (a foreign format that does not list sizes, or a `.lpk` whose files
+/// are all empty): the gauge is hidden then.
 fn content_size(keyless: bool, listed_bytes: u64) -> Option<u64> {
     (!keyless && listed_bytes > 0).then_some(listed_bytes)
 }
@@ -364,6 +365,8 @@ impl App {
         let total = view.total;
         // The band's gauge: the file against its contents. The first view is the whole flat
         // listing, so its status holds the sum of the entries' sizes.
+        // From the path: `lpk-api` does not expose the open file's length (`SessionInfo::length` is
+        // the open generation's span, not the file). A file replaced since is a stale band at worst.
         let archive_bytes = std::fs::metadata(&path).ok().map(|m| m.len());
         let content_bytes = content_size(info.keyless, view.status.bytes);
         lock(&self.sessions).insert(
