@@ -15,6 +15,16 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# The C code (libarchive, zlib, liblzma, libzstd, via the `cc` crate) is built by clang with AddressSanitizer and
+# libFuzzer's coverage instrumentation, only for this build; CI's build job sets the same variables
+# (.github/workflows/fuzz.yml). Without them the C code would be neither covered nor checked.
+# LPK_FUZZ_PLAIN_C=1 turns this off (a machine without clang).
+if [ -z "${LPK_FUZZ_PLAIN_C:-}" ]; then
+  export CC=clang CXX=clang++
+  export CFLAGS="-fsanitize=address,fuzzer-no-link -g -O1"
+  export CXXFLAGS="$CFLAGS"
+fi
+
 secs=60
 minimise=0
 while [ $# -gt 0 ]; do
@@ -28,7 +38,7 @@ done
 all="frame_read header_read varint_read entry_table chunk_table records_table index_parse \
 trailer_read_tail block_header_and_decode zstd_decode lzma_decode recovery_frame key_slot \
 archive_open archive_mutate deflate_walk deflate_recreate bwt_decode bwt_roundtrip delta_patch_decode png_filter_decode worker_proto \
-foreign_zip foreign_7z foreign_tar jpeg_reconstruct jpeg_peel deflate_analyse png_filter_undo"
+foreign_zip foreign_7z foreign_tar foreign_libarchive jpeg_reconstruct jpeg_peel deflate_analyse png_filter_undo"
 if [ "${1:-}" = "--list" ]; then
   echo "$all" | tr -s ' ' '\n'
   exit 0
@@ -68,7 +78,10 @@ for t in $targets; do
   if [ -d "seeds/$t" ]; then extra+=("seeds/$t"); fi
   # archive_mutate reads the vectors itself; its input is a mutation list, not an archive.
   if [ "$t" != "archive_mutate" ]; then extra+=("$vectors"); fi
-  case "$t" in foreign_*) extra+=("$foreign_fixtures") ;; esac
+  case "$t" in
+    foreign_libarchive) extra+=("../crates/lpk-worker-libarchive/tests/fixtures") ;;
+    foreign_*) extra+=("$foreign_fixtures") ;;
+  esac
   echo "== $t (${secs}s)"
   if run "$t" "${flags[@]}" "corpus/$t" "${extra[@]}" >"artifacts/logs/$t.log" 2>&1; then
     grep -E "stat::number_of_executed_units|Done [0-9]+ runs" "artifacts/logs/$t.log" | tail -n 2

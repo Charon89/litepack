@@ -53,6 +53,10 @@ jobs:
         run: |
           bash scripts/check-unsafe.sh --self-test
           bash scripts/check-unsafe.sh
+      # E4-4: every libarchive fixture is named in its README, and manifest.b3 is well formed.
+      - name: libarchive fixtures documented
+        shell: bash
+        run: bash scripts/check-libarchive-fixtures.sh
       # E6-6: the extraction test hooks stay out of the release lpk (D-99 (8)).
       - name: No test hooks in the release build
         shell: bash

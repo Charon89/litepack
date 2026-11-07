@@ -3107,6 +3107,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpk-libarchive-sys"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "liblzma-sys",
+ "libz-sys",
+ "tempfile",
+ "zstd-sys",
+]
+
+[[package]]
 name = "lpk-procstat-sys"
 version = "0.0.1"
 dependencies = [
@@ -3148,6 +3159,19 @@ dependencies = [
  "lpk-proto",
  "lpk-sandbox-sys",
  "tempfile",
+]
+
+[[package]]
+name = "lpk-worker-libarchive"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "lpk-core",
+ "lpk-libarchive-sys",
+ "lpk-proto",
+ "lpk-sandbox-sys",
+ "tempfile",
+ "zstd",
 ]
 
 [[package]]

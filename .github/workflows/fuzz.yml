@@ -87,9 +87,20 @@ jobs:
           key: ${{ env.LPK_FUZZ_TOOLCHAIN }}
       - name: cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: clang is on the runner image
+        run: |
+          clang --version | head -n 1
       - name: Build every target
         working-directory: fuzz
         # --no-cfg-fuzzing: the targets run the code we ship (fuzz/run.sh, fuzz/README.md).
+        # CC/CFLAGS: the C code (libarchive, zlib, liblzma, libzstd) is compiled by clang with AddressSanitizer
+        # and libFuzzer's coverage counters (as fuzz/run.sh does locally); the log of this step shows
+        # the counters in the fuzz jobs' "INFO: Loaded ... inline 8-bit counters" line.
+        env:
+          CC: clang
+          CXX: clang++
+          CFLAGS: -fsanitize=address,fuzzer-no-link -g -O1
+          CXXFLAGS: -fsanitize=address,fuzzer-no-link -g -O1
         run: cargo "+$LPK_FUZZ_TOOLCHAIN" fuzz build --no-cfg-fuzzing
       - name: Collect the binaries
         run: |
@@ -149,6 +160,19 @@ jobs:
           echo "corpus before: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
           bash fuzz/run.sh -t "$FUZZ_SECONDS" "${m[@]}" "$TARGET"
           echo "corpus after: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
+      - name: Instrumentation evidence (libFuzzer's counters and last coverage line)
+        if: always()
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          # The C code's coverage shows up as inline 8-bit counters in the "INFO: Loaded" lines (one per
+          # instrumented module) and in the last "cov:" line, without the artifact.
+          log="fuzz/artifacts/logs/$TARGET.log"
+          if [ -f "$log" ]; then
+            echo "== $TARGET"
+            grep -E '^INFO: (Loaded|Instrumented)' "$log" || echo "(no INFO: Loaded line)"
+            grep -E '^#[0-9]+.* cov:' "$log" | tail -n 1 || true
+          fi
       - name: Known open finding?
         if: always() && steps.fuzz.outcome == 'failure'
         env:

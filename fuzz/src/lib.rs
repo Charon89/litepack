@@ -64,6 +64,18 @@ pub fn exercise(data: &[u8], creds: Option<&Credentials>) {
 /// `lpk-foreign`, every listing page read and the first 256 file members streamed to a counting
 /// sink. Errors are expected; a panic is the finding.
 pub fn foreign(data: &[u8], format: &str) {
+    foreign_with(data, format, &|f, args| lpk_foreign::open(f, args));
+}
+
+/// [`foreign`] with any opener (E4-4's `foreign_libarchive` passes the libarchive reader's).
+pub fn foreign_with(
+    data: &[u8],
+    format: &str,
+    opener: &dyn Fn(
+        std::fs::File,
+        &lpk_proto::OpenArgs<'_>,
+    ) -> Result<Box<dyn lpk_proto::ForeignReader>, lpk_proto::ReaderError>,
+) {
     use lpk_proto::{OpenArgs, RecordKind};
     let Ok(mut f) = tempfile::tempfile() else {
         return;
@@ -76,7 +88,7 @@ pub fn foreign(data: &[u8], format: &str) {
         name: b"fuzz",
         password: Some(b"LitePack"),
     };
-    let Ok(mut r) = lpk_foreign::open(f, &args) else {
+    let Ok(mut r) = opener(f, &args) else {
         return;
     };
     let mut records = Vec::new();

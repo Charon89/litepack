@@ -124,7 +124,7 @@ fn registration_writes_exactly_these_keys_and_values() {
         add(k, "MultiSelectModel", sz("Player"));
     }
     let mut ids = vec![("lpk", "LitePack archive".to_string())];
-    for e in ["zip", "7z", "tar", "tgz"] {
+    for e in ["zip", "7z", "tar", "tgz", "rar"] {
         ids.push((e, format!("{} archive (LitePack)", e.to_uppercase())));
     }
     for (e, friendly) in &ids {
@@ -152,7 +152,7 @@ fn registration_writes_exactly_these_keys_and_values() {
         ".lpk",
         sz("LitePack.lpk"),
     );
-    for e in ["zip", "7z", "tar", "tgz"] {
+    for e in ["zip", "7z", "tar", "tgz", "rar"] {
         add(
             format!("{cap}\\fileassociations"),
             &format!(".{e}"),
@@ -199,7 +199,7 @@ fn registration_writes_exactly_these_keys_and_values() {
         assert!(!k.contains("fileexts") && !k.contains("userchoice"), "{k}");
     }
     // The three shell keys carry no `.lpk`-style default and no extension default but `.lpk`'s.
-    for e in ["zip", "7z", "tar", "tgz"] {
+    for e in ["zip", "7z", "tar", "tgz", "rar"] {
         assert_eq!(reg.value(&format!("{c}\\.{e}"), ""), None);
     }
 }

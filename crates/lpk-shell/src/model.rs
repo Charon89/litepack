@@ -137,6 +137,19 @@ pub fn archive_stem(name: &str) -> Option<String> {
     Some(drop_tar(before).to_owned())
 }
 
+/// The stem of a RAR 4 old-style volume file name (`x.r00` to `x.r99`), else `None`.
+fn old_style_volume_stem(e: &Entry) -> Option<String> {
+    if e.is_dir {
+        return None;
+    }
+    let (stem, ext) = split_ext(&e.name);
+    let old_style = matches!(
+        ext.as_bytes(),
+        [r, d1, d2] if r.eq_ignore_ascii_case(&b'r') && d1.is_ascii_digit() && d2.is_ascii_digit()
+    );
+    (old_style && !stem.is_empty()).then(|| stem.to_owned())
+}
+
 fn drop_tar(stem: &str) -> &str {
     match strip_suffix_ci(stem, ".tar") {
         Some(s) if !s.is_empty() => s,
@@ -253,7 +266,7 @@ pub fn classify(count: usize, items: impl IntoIterator<Item = Option<Entry>>) ->
         });
     }
     // Per entry: the archive stem (never for a real folder).
-    let stems: Vec<Option<String>> = entries
+    let mut stems: Vec<Option<String>> = entries
         .iter()
         .map(|e| {
             if e.is_dir {
@@ -263,6 +276,22 @@ pub fn classify(count: usize, items: impl IntoIterator<Item = Option<Entry>>) ->
             }
         })
         .collect();
+    // RAR 4's old-style volumes (`x.rar`, `x.r00`, `x.r01`...): a `.rNN` file belongs to the set
+    // of the `x.rar` beside it in the selection (the host reads the set from its first volume,
+    // `volume_set`); with no `.rar` in the selection it is no archive.
+    for (i, e) in entries.iter().enumerate() {
+        let Some(stem) = old_style_volume_stem(e) else {
+            continue;
+        };
+        let has_first = entries.iter().any(|f| {
+            !f.is_dir
+                && f.parent.eq_ignore_ascii_case(&e.parent)
+                && strip_suffix_ci(&f.name, ".rar").is_some_and(|s| s.eq_ignore_ascii_case(&stem))
+        });
+        if let Some(slot) = stems.get_mut(i) {
+            *slot = has_first.then_some(stem);
+        }
+    }
     let n_archives = stems.iter().flatten().count();
     let n_dirs = entries.iter().filter(|e| e.is_dir).count();
     // One representative per set (same folder, same stem): the first name in order.
@@ -272,9 +301,9 @@ pub fn classify(count: usize, items: impl IntoIterator<Item = Option<Entry>>) ->
         let key = (e.parent.to_lowercase(), stem.to_lowercase());
         match sets.iter_mut().find(|s| (&s.0, &s.1) == (&key.0, &key.1)) {
             Some(set) => {
-                let better = entries
-                    .get(set.2)
-                    .is_none_or(|cur| e.name.to_lowercase() < cur.name.to_lowercase());
+                // The first volume stands for the set: an old-style `.rNN` never does.
+                let rank = |x: &Entry| (old_style_volume_stem(x).is_some(), x.name.to_lowercase());
+                let better = entries.get(set.2).is_none_or(|cur| rank(e) < rank(cur));
                 if better {
                     set.2 = i;
                 }
@@ -423,10 +452,45 @@ pub fn request(verb: Verb, selection: &Selection) -> Option<Request> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
     use std::path::Path;
+
+    fn files(names: &[&str]) -> Vec<Option<Entry>> {
+        names
+            .iter()
+            .map(|n| {
+                Some(Entry {
+                    name: (*n).to_owned(),
+                    is_dir: false,
+                    parent: "C:\\d".to_owned(),
+                })
+            })
+            .collect()
+    }
+
+    /// E4-4: a RAR set counts as one archive, its first volume standing for it.
+    #[test]
+    fn rar_volume_sets_are_one_archive() {
+        for (names, rep) in [
+            (
+                &["x.part2.rar", "x.part1.rar", "x.part3.rar"][..],
+                "x.part1.rar",
+            ),
+            (&["x.r00", "x.rar", "x.r01"][..], "x.rar"),
+            (&["X.R00", "X.RAR"][..], "X.RAR"),
+        ] {
+            let s = classify(names.len(), files(names)).expect("selection");
+            assert_eq!(s.kind, Kind::A, "{names:?}");
+            assert_eq!(s.archives.len(), 1, "{names:?}");
+            assert_eq!(names[s.archives[0]], rep, "{names:?}");
+        }
+        // A lone `.r00` is no archive; two sets are two archives.
+        assert_eq!(classify(1, files(&["x.r00"])).expect("sel").kind, Kind::F);
+        let two = classify(4, files(&["a.rar", "a.r00", "b.rar", "b.r00"])).expect("sel");
+        assert_eq!((two.kind, two.archives.len()), (Kind::S, 2));
+    }
 
     /// Every verb's text and flag appear together in a row of `docs/API.md`'s table, so the
     /// menu and the GUI's parser cannot drift apart silently.

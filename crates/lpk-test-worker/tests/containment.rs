@@ -115,6 +115,7 @@ impl Staged {
     fn options(&self, mode: Sandbox, worker: &Path, args: Vec<String>, limits: Limits) -> Options {
         Options {
             worker: Some(worker.to_path_buf()),
+            worker_libarchive: None,
             sandbox: mode,
             appcontainer: Some(self.profile.clone()),
             limits,

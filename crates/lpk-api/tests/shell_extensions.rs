@@ -2,8 +2,8 @@
 //! archive_extensions.txt`, one list kept in `lpk-shell`, which depends on no `lpk-*` crate) stay
 //! equal to `.lpk` plus the foreign formats the engine opens today, plus their usual aliases.
 //! "Opens today" is `Format::read_by_worker`, so E4-4 making RAR readable fails this test until
-//! `rar` is in the list. There is no `docs/FORMATS.md` yet: E4-4 adds it and updates the list and
-//! this test then.
+//! `rar` is in the list. E4-4 made every format of `docs/FORMATS.md`'s libarchive rows readable and
+//! added them (and `lha`, `deb`) here.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -25,10 +25,18 @@ fn index(f: Format) -> usize {
         Format::Lzip => 8,
         Format::Lzma => 9,
         Format::Rar => 10,
+        Format::Iso => 11,
+        Format::Cab => 12,
+        Format::Lha => 13,
+        Format::Ar => 14,
+        Format::Cpio => 15,
+        Format::Rpm => 16,
+        Format::Compress => 17,
+        Format::Uue => 18,
     }
 }
 
-const ALL: [Format; 11] = [
+const ALL: [Format; 19] = [
     Format::TestFixture,
     Format::Zip,
     Format::SevenZ,
@@ -40,15 +48,25 @@ const ALL: [Format; 11] = [
     Format::Lzip,
     Format::Lzma,
     Format::Rar,
+    Format::Iso,
+    Format::Cab,
+    Format::Lha,
+    Format::Ar,
+    Format::Cpio,
+    Format::Rpm,
+    Format::Compress,
+    Format::Uue,
 ];
 
 /// Short names of a format that mean the same archive: `(alias, format's extension)`.
-const ALIASES: [(&str, &str); 5] = [
+const ALIASES: [(&str, &str); 7] = [
     ("tgz", "gz"),
     ("tbz", "bz2"),
     ("tbz2", "bz2"),
     ("txz", "xz"),
     ("tzst", "zst"),
+    ("lha", "lzh"),
+    ("deb", "ar"),
 ];
 
 #[test]

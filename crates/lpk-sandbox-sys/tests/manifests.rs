@@ -11,6 +11,7 @@ const ALLOWED: &[&str] = &[
     "lpk-gui-sys",
     "lpk-procstat-sys",
     "lpk-sandbox-sys",
+    "lpk-libarchive-sys",
     // E6-1's exception (docs/UNSAFE.md): the Explorer handler's COM boundary module,
     // `crates/lpk-shell/src/com.rs`, is the only place of the crate allowed `unsafe`.
     "lpk-shell",

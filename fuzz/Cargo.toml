@@ -24,6 +24,8 @@ preflate-rs = "=0.7.6"
 # a file handle, so each input goes through a temporary file.
 lpk-foreign = { version = "0.0.1", path = "../workers/lpk-foreign" }
 lpk-proto = { version = "0.0.1", path = "../crates/lpk-proto" }
+# The libarchive reader of the sandboxed libarchive worker (E4-4), for `foreign_libarchive`.
+lpk-worker-libarchive = { version = "0.0.1", path = "../crates/lpk-worker-libarchive" }
 tempfile = "3.27.0"
 
 # An empty table detaches this crate from the root workspace.
@@ -211,6 +213,13 @@ bench = false
 [[bin]]
 name = "foreign_tar"
 path = "fuzz_targets/foreign_tar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "foreign_libarchive"
+path = "fuzz_targets/foreign_libarchive.rs"
 test = false
 doc = false
 bench = false

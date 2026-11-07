@@ -148,8 +148,8 @@ What `--register-shell` writes, all under `HKEY_CURRENT_USER`, values `REG_SZ` u
 - `.lpk`: the ProgID `LitePack.lpk` (`shell\open\command` = `"<exe>" --open "%1"`, `DefaultIcon`), `.lpk`'s default
   value set to it and `PerceivedType` = `compressed` only when absent, and `.lpk\OpenWithProgids` listing it (a
   `REG_NONE` value without data).
-- With `--open-with`: a `LitePack.<ext>` ProgID of the same shape for each of `zip`, `7z`, `tar` and `tgz` (`rar`
-  once the engine reads it), listed in that extension's `OpenWithProgids`, never as its default.
+- With `--open-with`: a `LitePack.<ext>` ProgID of the same shape for each of `zip`, `7z`, `tar`, `tgz` and `rar`
+  (E4-4), listed in that extension's `OpenWithProgids`, never as its default.
 - Default Programs: `Software\LitePack\Capabilities` and `Software\RegisteredApplications\LitePack`.
 - `Software\LitePack\Registration`: the record of every key created and every value written, written ahead of each
   change. Unregistering deletes each recorded value whose data is still the recorded one, then each recorded key

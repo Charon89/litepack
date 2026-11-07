@@ -17,6 +17,8 @@ members = [
   "crates/lpk-proto",
   "crates/lpk-test-worker",
   "crates/lpk-sandbox-sys",
+  "crates/lpk-libarchive-sys",
+  "crates/lpk-worker-libarchive",
   "crates/lpk-shell",
 ]
 # cargo-fuzz crate: built with nightly on Linux only (fuzz/README.md).
