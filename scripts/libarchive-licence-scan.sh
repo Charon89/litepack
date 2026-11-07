@@ -6,7 +6,8 @@
 # The classes: bsd2 (libarchive's two-clause BSD text), regents (University of California, with clause 3 dropped),
 # openbsd-isc (arc4random's ISC notice), postgresql (the PostgreSQL / UC Regents 1994 notice), cc0-openssl-apache
 # (BLAKE2's triple licence), public-domain (Igor Pavlov's PPMd). A file with none of them is "unclassified" and
-# fails --check, so a new notice cannot enter unseen. docs/LICENSING.md names each class with its files, and
+# fails --check, so a new notice cannot enter unseen; each line also counts the copyright lines and the licence or
+# permission blocks of the file, so a second notice inside a classified file changes the table. docs/LICENSING.md names each class with its files, and
 # THIRD-PARTY-NOTICES reproduces each text.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,7 +24,10 @@ scan() {
     grep -q 'CC0 1.0 Universal' "$f" && classes+=(cc0-openssl-apache)
     grep -qi 'public domain' "$f" && classes+=(public-domain)
     if [[ ${#classes[@]} -eq 0 ]]; then classes+=(unclassified); fi
-    echo "$(basename "$f") ${classes[*]}"
+    # Counts too, so a second notice in a file already classed (say bsd2) changes the table and fails --check.
+    copyrights="$(grep -ciE 'copyright( \(c\)|)[ ]+[0-9]|copyright \(c\)|copyright by' "$f" || true)"
+    licences="$(grep -ciE 'redistribution and use|permission to use|permission is hereby|spdx-license-identifier|cc0 1\.0|public domain' "$f" || true)"
+    echo "$(basename "$f") ${classes[*]} copyright=$copyrights licence=$licences"
   done
 }
 

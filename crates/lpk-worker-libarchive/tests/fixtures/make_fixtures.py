@@ -609,6 +609,9 @@ def make_names(out, scratch):
                 f.write(b"\\0" * max(0, 128 * 1024 - size))
         TREE = dict(NAMES)
         make_lzh(os.path.join(out, "names.lzh"), 0)
+        TREE = {k: v for k, v in NAMES.items() if k.startswith("sub/")}
+        make_cpio(os.path.join(out, "names.cpio"))
+        make_rpm(os.path.join(out, "names.rpm"))
     finally:
         TREE = saved
 

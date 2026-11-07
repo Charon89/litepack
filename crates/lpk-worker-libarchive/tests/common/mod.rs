@@ -38,6 +38,8 @@ pub const CASES: &[(&str, &[&str])] = &[
     ("names-rr.iso", NAMES_ONE),
     ("names-joliet.iso", NAMES_ONE),
     ("names.lzh", NAMES_BOTH),
+    ("names.cpio", NAMES_ONE),
+    ("names.rpm", NAMES_ONE),
     ("level0.lzh", TREE),
     ("level1.lzh", TREE),
     ("fixture.rpm", TREE),

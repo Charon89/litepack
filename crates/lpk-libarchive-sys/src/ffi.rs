@@ -143,3 +143,12 @@ extern "C" {
 extern "C" {
     pub fn archive_read_set_options(a: *mut archive, options: *const c_char) -> c_int;
 }
+
+extern "C" {
+    pub fn archive_read_set_format_option(
+        a: *mut archive,
+        module: *const c_char,
+        option: *const c_char,
+        value: *const c_char,
+    ) -> c_int;
+}

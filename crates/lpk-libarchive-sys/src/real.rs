@@ -289,13 +289,33 @@ impl Archive {
             // SAFETY: `p` is live; libarchive copies the string.
             this.check(unsafe { ffi::archive_read_add_passphrase(p, c.as_ptr()) })?;
         }
-        // Names the format does not declare (tar's ustar, CAB, LHA and RAR 4 without Unicode) are read as
-        // UTF-8, through the reader's own explicit conversion, instead of the default conversion that
-        // depends on the machine's code pages (`archive_string_default_conversion_for_read`). The
-        // readers without the option (ar, ISO, raw) ignore it; the return code only says whether some
-        // reader took it, so it is not checked. A name that is not UTF-8 then fails to convert (R204).
-        // SAFETY: `p` is live; the string is a NUL-terminated literal that libarchive parses at once.
-        let _ = unsafe { ffi::archive_read_set_options(p, c"hdrcharset=UTF-8".as_ptr()) };
+        // Names the format does not declare are read as UTF-8 through the reader's own explicit conversion,
+        // instead of the default conversion that depends on the machine's code pages
+        // (`archive_string_default_conversion_for_read`). Only the readers whose undeclared names would
+        // otherwise be converted get the option, each by its module name: tar, cab, lha and rar
+        // (RAR 4; RAR 5 is always UTF-8). cpio (and so an RPM's payload), ar, ISO and raw streams must NOT
+        // get it: the cpio reader takes `hdrcharset` too (archive_read_support_format_cpio.c:331) and then
+        // stores the converted form, which the Windows "C" locale reads back mangled. A name that is not
+        // UTF-8 fails to convert and is refused (R204).
+        for (format, module) in [
+            (ReadFormat::Tar, c"tar"),
+            (ReadFormat::Cab, c"cab"),
+            (ReadFormat::Lha, c"lha"),
+            (ReadFormat::Rar, c"rar"),
+        ] {
+            if spec.formats.contains(&format) {
+                // SAFETY: `p` is live; the strings are NUL-terminated literals libarchive parses at once.
+                let rc = unsafe {
+                    ffi::archive_read_set_format_option(
+                        p,
+                        module.as_ptr(),
+                        c"hdrcharset".as_ptr(),
+                        c"UTF-8".as_ptr(),
+                    )
+                };
+                this.check(rc)?;
+            }
+        }
         // SAFETY: `p` is live and fully configured.
         this.check(unsafe { ffi::archive_read_open1(p) })?;
         Ok(this)
@@ -364,9 +384,11 @@ impl Archive {
                 message: "libarchive returned no entry".into(),
             });
         }
-        let raw_names = if self.raw_names
-            || (self.format_name().starts_with("ISO9660") && !self.format_name().contains("Joliet"))
-        {
+        // ISO 9660 names a volume only "ISO9660" or "ISO9660 with Rockridge extensions"
+        // (archive_read_support_format_iso9660.c:1221,1238), never Joliet: Rock Ridge names are the stored
+        // bytes; every other ISO name (plain, or Joliet's UTF-16BE) is decoded by libarchive.
+        let format = self.format_name();
+        let raw_names = if self.raw_names || format.contains("Rockridge") {
             Names::Bytes
         } else {
             Names::Utf8
@@ -481,7 +503,7 @@ impl Archive {
 /// machine's code page and locale for this format.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Names {
-    /// `archive_entry_pathname`: the stored bytes (ar, cpio, a raw stream, ISO 9660 with Rock Ridge only:
+    /// `archive_entry_pathname`: the stored bytes (ar, cpio, a raw stream, ISO 9660 with Rock Ridge:
     /// no charset is declared, and libarchive keeps the bytes as the multibyte string).
     Bytes,
     /// `archive_entry_pathname_utf8`: names libarchive decoded from a declared charset (RAR 5 and RAR 4

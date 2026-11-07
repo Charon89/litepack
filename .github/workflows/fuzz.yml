@@ -160,6 +160,19 @@ jobs:
           echo "corpus before: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
           bash fuzz/run.sh -t "$FUZZ_SECONDS" "${m[@]}" "$TARGET"
           echo "corpus after: $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs"
+      - name: Instrumentation evidence (libFuzzer's counters and last coverage line)
+        if: always()
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          # The C code's coverage shows up as inline 8-bit counters in the "INFO: Loaded" lines (one per
+          # instrumented module) and in the last "cov:" line, without the artifact.
+          log="fuzz/artifacts/logs/$TARGET.log"
+          if [ -f "$log" ]; then
+            echo "== $TARGET"
+            grep -E '^INFO: (Loaded|Instrumented)' "$log" || echo "(no INFO: Loaded line)"
+            grep -E '^#[0-9]+.* cov:' "$log" | tail -n 1 || true
+          fi
       - name: Known open finding?
         if: always() && steps.fuzz.outcome == 'failure'
         env:

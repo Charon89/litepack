@@ -11,7 +11,11 @@ const EXIT_NO_BOOTSTRAP: i32 = 3;
 #[cfg(any(windows, target_os = "linux"))]
 fn main() {
     // First thing, single-threaded: libarchive converts declared charsets into UTF-8 (R204).
-    let _ = lpk_libarchive_sys::use_utf8_locale();
+    if !lpk_libarchive_sys::use_utf8_locale() {
+        eprintln!(
+            "lpk-worker-libarchive: no UTF-8 locale (C.UTF-8, en_US.UTF-8): names declared in UTF-16 or UTF-8 may be refused"
+        );
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let handles = match lpk_sandbox_sys::child::take_handles() {
         Ok(h) => h,

@@ -64,3 +64,13 @@ through the ANSI code page).
 
 **Untested.** LZH has fixtures for stored (`-lh0-`) members with level 0 and level 1 headers only: `-lh5-`, `-lh6-`, `-lh7-` decompression and level 2 headers are not exercised by a fixture. The RPM fixture is a minimal one (lead, empty signature and header, gzip'd cpio payload). CAB checksums are not claimed verified
 (a stored CFDATA checksum of 0 means none).
+
+**No UTF-8 locale on Linux.** The worker asks for `C.UTF-8`, then `en_US.UTF-8` at start and writes one line to stderr if
+neither exists. Names the format declares in UTF-16 or UTF-8 (Joliet, RAR 5 and RAR 4 Unicode, CAB's UTF-8 attribute, LHA's
+UTF-16, pax) and tar, CAB, LHA and RAR 4 names read with `hdrcharset=UTF-8` need libarchive's conversion to the locale's
+charset; without a UTF-8 locale those with non-ASCII characters are refused with the named error, never guessed. Stored-byte
+formats (cpio, ar, ISO Rock Ridge) are unaffected. On Windows nothing is set.
+
+**LZH names in a code page.** An LZH header that declares a code page (`EXT_CODEPAGE`, for example CP932) decodes on Windows,
+where libarchive uses the system's tables, and is refused with the named error on Linux (no iconv is linked). Accepted
+(R211): no iconv and no encoding crate for one rare header.
