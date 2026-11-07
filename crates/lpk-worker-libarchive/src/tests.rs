@@ -208,3 +208,80 @@ fn the_messages_the_mapping_relies_on_occur_verbatim_in_the_vendored_source() {
         );
     }
 }
+
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut c = !0u32;
+    for &b in data {
+        c ^= u32::from(b);
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
+        }
+    }
+    !c
+}
+
+/// A RAR 4 signature and a valid main header (HEAD_CRC over type, flags, size and the 6 reserved bytes).
+fn rar4_prefix() -> Vec<u8> {
+    let mut v = b"Rar!\x1a\x07\x00".to_vec();
+    let mut body = vec![0x73u8, 0, 0, 13, 0];
+    body.extend_from_slice(&[0u8; 6]);
+    let crc = (crc32_ieee(&body) & 0xFFFF) as u16;
+    v.extend_from_slice(&crc.to_le_bytes());
+    v.extend_from_slice(&body);
+    v
+}
+
+fn gap_of(bytes: &[u8]) -> Option<String> {
+    let mut t = tempfile::tempfile().unwrap();
+    std::io::Write::write_all(&mut t, bytes).unwrap();
+    rar::named_gap(&mut t).unwrap()
+}
+
+/// B6 (R209): a HIGH_PACK_SIZE near 2^64 does not overflow the walker; the file goes on to libarchive.
+#[test]
+fn a_pack_size_near_2_pow_64_does_not_overflow() {
+    let mut v = rar4_prefix();
+    // A file header (type 0x74) with the large-size flag: PACK_SIZE 0xFFFFFFFF, and 0xFFFFFFFF at 32.
+    let mut h = vec![0u8; 40];
+    h[2] = 0x74;
+    h[3..5].copy_from_slice(&0x8100u16.to_le_bytes());
+    h[5..7].copy_from_slice(&40u16.to_le_bytes());
+    h[7..11].copy_from_slice(&u32::MAX.to_le_bytes());
+    h[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+    h[24] = 29;
+    h[25] = 0x33;
+    v.extend_from_slice(&h);
+    assert_eq!(gap_of(&v), None);
+}
+
+/// B5 (R208): one window for the host and the worker, the header CRC checked.
+#[test]
+fn the_sfx_window_is_libarchives_and_a_bare_signature_is_no_archive() {
+    let rar = rar4_prefix();
+    let stub = |at: usize, bare_at: Option<usize>| {
+        let mut v = vec![0u8; at];
+        v[0] = b'M';
+        v[1] = b'Z';
+        if let Some(b) = bare_at {
+            v[b..b + 8].copy_from_slice(b"Rar!\x1a\x07\x00\x00");
+        }
+        v.extend_from_slice(&rar);
+        v
+    };
+    // Aligned inside the window: libarchive reads it, no gap.
+    assert_eq!(gap_of(&stub(0x10000, None)), None);
+    // Unaligned, and beyond 512 KiB: a named gap, not a generic corruption.
+    for at in [0x10008usize, 0x90000, 0x80010] {
+        let g = gap_of(&stub(at, None)).unwrap_or_default();
+        assert!(
+            g.contains("beyond libarchive's search window"),
+            "{at:#x}: {g}"
+        );
+    }
+    // A bare signature (bad CRC) earlier in the stub is skipped: no false gap.
+    assert_eq!(gap_of(&stub(0x10000, Some(0x2000))), None);
+}

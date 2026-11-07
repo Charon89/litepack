@@ -231,66 +231,16 @@ pub fn sevenz_at(buf: &[u8], at: usize) -> bool {
         && u32::from_le_bytes([h[8], h[9], h[10], h[11]]) == crc32(&h[12..32])
 }
 
-/// A RAR 4 or RAR 5 signature at `at` in `buf`.
-fn rar_at(buf: &[u8], at: usize) -> bool {
-    match buf.get(at..at.saturating_add(8)) {
-        Some(h) => h[..6] == RAR_MAGIC && (h[6] == 0 || (h[6] == 1 && h[7] == 0)),
-        None => false,
-    }
+/// A RAR signature at `at` in `buf` followed by a main archive header whose CRC holds (so the
+/// bare signature bytes inside a PE file do not match); the one definition is shared with the
+/// libarchive worker (`lpk_proto::rar_sfx`).
+pub fn rar_valid_at(buf: &[u8], at: usize) -> bool {
+    lpk_proto::rar_sfx::rar_valid_at(buf, at)
 }
 
-/// A RAR signature at `at` in `buf` followed by a main archive header whose CRC holds (so the
-/// bare signature bytes inside a PE file do not match): RAR 5's header CRC-32 over the header
-/// size and the header; RAR 4's MAIN_HEAD (type 0x73) whose 16-bit CRC is the low half of the
-/// CRC-32 from its type byte to its end.
-pub fn rar_valid_at(buf: &[u8], at: usize) -> bool {
-    if !rar_at(buf, at) {
-        return false;
-    }
-    let Some(rest) = buf.get(at..) else {
-        return false;
-    };
-    if rest[6] == 1 {
-        // RAR 5: CRC32 (4), then the header size as a vint (at most 3 bytes here), then that
-        // many header bytes.
-        let Some(h) = rest.get(8..) else {
-            return false;
-        };
-        let Some(crc) = h.get(..4) else {
-            return false;
-        };
-        let (mut size, mut n) = (0usize, 0usize);
-        loop {
-            let Some(&b) = h.get(4 + n) else {
-                return false;
-            };
-            size |= usize::from(b & 0x7F) << (7 * n);
-            n += 1;
-            if b & 0x80 == 0 {
-                break;
-            }
-            if n == 3 {
-                return false;
-            }
-        }
-        let Some(body) = h.get(4..4 + n + size) else {
-            return false;
-        };
-        size > 0 && u32::from_le_bytes([crc[0], crc[1], crc[2], crc[3]]) == crc32(body)
-    } else {
-        // RAR 4: HEAD_CRC (2), HEAD_TYPE (1), HEAD_FLAGS (2), HEAD_SIZE (2), ...
-        let Some(h) = rest.get(7..14) else {
-            return false;
-        };
-        let size = usize::from(u16::from_le_bytes([h[5], h[6]]));
-        if h[2] != 0x73 || size < 7 {
-            return false;
-        }
-        let Some(body) = rest.get(9..7 + size) else {
-            return false;
-        };
-        u16::from_le_bytes([h[0], h[1]]) == (crc32(body) & 0xFFFF) as u16
-    }
+/// A RAR 4 or RAR 5 signature at `at` in `buf`.
+fn rar_at(buf: &[u8], at: usize) -> bool {
+    lpk_proto::rar_sfx::rar_at(buf, at)
 }
 
 /// A tar header in the first 512 bytes: `ustar` at 257, or a v7 header whose checksum (the

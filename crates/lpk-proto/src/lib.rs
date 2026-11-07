@@ -20,6 +20,7 @@
 
 pub mod fixture;
 pub mod frame;
+pub mod rar_sfx;
 pub mod reader;
 pub mod worker;
 

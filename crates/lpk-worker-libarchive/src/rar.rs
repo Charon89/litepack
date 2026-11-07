@@ -26,8 +26,6 @@ const RAR5_MAX_HEADER: u64 = 2 << 20;
 /// The largest RAR5 dictionary libarchive 3.8.11 decodes.
 pub const RAR5_MAX_DICT: u64 = 64 << 20;
 
-const MAGIC: [u8; 6] = *b"Rar!\x1a\x07";
-
 fn gap(what: &str) -> Option<String> {
     Some(format!(
         "rar: {what} (named gap: libarchive 3.8.11 does not read it; see docs/FORMATS.md)"
@@ -48,23 +46,21 @@ fn read_at(f: &mut File, at: u64, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(n)
 }
 
-/// Where the signature starts and whether it is RAR 5.
+/// Where the first signature whose main header's CRC holds starts, and whether it is RAR 5 (the same
+/// validation as the host's detection, `lpk_proto::rar_sfx`, so what the host routes here is what this
+/// finds; a bare signature inside a stub is skipped).
 fn find_signature(f: &mut File, len: u64) -> std::io::Result<Option<(u64, bool)>> {
     const WINDOW: usize = 1 << 20;
-    let mut buf = vec![0u8; WINDOW + 16];
+    // Overlap: the header validated after a signature at the end of a window must fit in the buffer.
+    let mut buf = vec![0u8; WINDOW + 4096];
     let mut at = 0u64;
     while at < SFX_SCAN.min(len) {
         let n = read_at(f, at, &mut buf)?;
         let w = &buf[..n];
         let limit = if n < buf.len() { n } else { WINDOW };
         for i in 0..limit {
-            if w[i] != b'R' || !w[i..].starts_with(&MAGIC) {
-                continue;
-            }
-            match w.get(i + 6..i + 8) {
-                Some([0x00, _]) => return Ok(Some((at + i as u64, false))),
-                Some([0x01, 0x00]) => return Ok(Some((at + i as u64, true))),
-                _ => {}
+            if w[i] == b'R' && lpk_proto::rar_sfx::rar_valid_at(w, i) {
+                return Ok(Some((at + i as u64, w[i + 6] == 1)));
             }
         }
         if n < buf.len() {
@@ -82,6 +78,11 @@ pub fn named_gap(f: &mut File) -> std::io::Result<Option<String>> {
     let Some((sig, v5)) = find_signature(f, len)? else {
         return Ok(None);
     };
+    if !lpk_proto::rar_sfx::libarchive_finds(sig) {
+        return Ok(gap(
+            "RAR self-extracting archive beyond libarchive's search window",
+        ));
+    }
     if v5 {
         rar5(f, sig + 8, len)
     } else {
