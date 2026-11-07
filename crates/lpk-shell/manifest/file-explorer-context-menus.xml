@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The `windows.fileExplorerContextMenus` extension fragment of the package manifest (E6-2;
+  docs/notes/e6-design.md sections 2 and 3, route P): the class of `lpk_shell.dll`
+  (crates/lpk-shell, `CLSID_LPK_SHELL`) registered for files, folders and the folder background.
+
+  E6-2 registers nothing. E6-3 puts this fragment, with the `windows.comServer` extension for the
+  same class (`com:SurrogateServer`, `ThreadingModel="STA"`), into the sparse package it
+  registers; E7-4 validates it against the full MSIX manifest. It sits inside the manifest's
+  `<Applications><Application><Extensions>`, with these namespaces declared on `<Package>` and
+  listed in `IgnorableNamespaces`:
+    xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+    xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+
+  The class ID is the one in crates/lpk-shell/src/com.rs; a test there compares the two.
+-->
+<desktop4:Extension Category="windows.fileExplorerContextMenus"
+    xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4">
+  <desktop4:FileExplorerContextMenus>
+    <desktop4:ItemType Type="*">
+      <desktop4:Verb Id="LitePack" Clsid="39B4D969-AE7A-4965-84DB-2DAF0C5B0308" />
+    </desktop4:ItemType>
+    <desktop4:ItemType Type="Directory">
+      <desktop4:Verb Id="LitePack" Clsid="39B4D969-AE7A-4965-84DB-2DAF0C5B0308" />
+    </desktop4:ItemType>
+    <desktop4:ItemType Type="Directory\Background">
+      <desktop4:Verb Id="LitePack" Clsid="39B4D969-AE7A-4965-84DB-2DAF0C5B0308" />
+    </desktop4:ItemType>
+  </desktop4:FileExplorerContextMenus>
+</desktop4:Extension>

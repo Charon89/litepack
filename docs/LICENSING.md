@@ -15,6 +15,8 @@ Engine, CLI, format spec, benchmark harness: **Apache-2.0 OR MIT** (dual, like m
 - Registry copies of `zstd-sys` and `liblzma-sys` carry their upstream licence files, including GPL texts for parts we do not use (libzstd's dual licence, XZ Utils' GPL-licensed tools); nothing in them is compiled or redistributed under the GPL. This matters only if the dependency tree is ever vendored into the repository, which the GPL-text check of PLAN P0-6 (over `crates/` and `vendor/`) would then catch.
 - Never: `jpegxl-rs` / `jpegxl-sys` (GPL-3.0-or-later). libjxl itself is BSD-3-Clause; if ever needed, use `jxl-sys` (MIT OR Apache-2.0) or build bindings in-house.
 - A crate that offers a choice (`A OR B`) is used under the allowed alternative; a crate that combines licences (`A AND B`) needs every one of them on the list, and the notices of each are reproduced.
+- **axe-core 4.14.0** (Deque Systems; MPL-2.0; E5-9). The accessibility checker the GUI's WebDriver test (`crates/lpk-gui-e2e/tests/accessibility.rs`) injects into every view and dialog. A test-only tool, not a Cargo dependency: CI's `gui-e2e` job fetches `https://registry.npmjs.org/axe-core/-/axe-core-4.14.0.tgz`, refuses it unless the npm integrity (SHA-512, `sha512-9WTZxEjs…zzpcQ==`, pinned in `.github/workflows/ci.yml`) and the SHA-1 (`a9819d3932a8198fbe935d8cbd8afcdfecbcf31d`) both match, and extracts `package/axe.min.js` to a temporary path the test reads (`LPK_AXE_JS`). It is used unmodified (MPL-2.0's file-level copyleft is not engaged: we change no axe-core file), never distributed (no installer, archive, release asset or the GUI itself contains it) and no axe-core file is in the repository. Nothing is downloaded on a developer machine.
+- **mdBook 0.5.4 and the files its build puts in the docs site** (E9-1). mdBook is a build tool installed by `cargo install mdbook --version 0.5.4 --locked` in the `docs` workflow, not a Cargo dependency of the workspace. `mdbook build book` writes into the published site (and nowhere in git) its theme JS/CSS (MPL-2.0, unmodified: no file-level copyleft is engaged, and the files are published only on the docs site), highlight.js (BSD-3-Clause), elasticlunr, mark.js and clipboard.js (MIT), all on the allow-list. **No font files are published**: mdBook's bundled fonts would include Source Code Pro under OFL-1.1, which is not on the allow-list, and 0.5.4 has no `copy-fonts` option; the book's own `book/theme/fonts/fonts.css` (system fonts, our file) makes mdBook copy none of its fonts, and the `docs` workflow fails if a font or licence file appears in the built site. Our own pages carry the Apache-2.0 OR MIT footer from `book/src/footer.md`.
 
 ## Components planned for Phase 1
 How a component is used:
@@ -58,7 +60,7 @@ How a component is used:
 | ort 2.0.0-rc.13 with ONNX Runtime 1.30.0 | crate: MIT OR Apache-2.0 (release candidates only, no stable release); ONNX Runtime: MIT | depend, research track only, not Phase 1 (D-04) | https://crates.io/crates/ort · https://github.com/microsoft/onnxruntime |
 | wasmtime 49 | Apache-2.0 WITH LLVM-exception | depend (app-side plugins only, never inside archives, D-03) | https://crates.io/crates/wasmtime |
 | tauri 2.12 | Apache-2.0 OR MIT | depend (GUI) | https://crates.io/crates/tauri |
-| libarchive 3.8.9 | BSD-2-Clause for most files; some files BSD-3-Clause, public domain, or CC0-1.0/OpenSSL/Apache-2.0 (BLAKE2 sources). No LGPL code | link, sandbox | https://github.com/libarchive/libarchive |
+| libarchive 3.8.11 | BSD-2-Clause for most files; some files BSD-3-Clause, public domain, or CC0-1.0/OpenSSL/Apache-2.0 (BLAKE2 sources). No LGPL code | link, sandbox | https://github.com/libarchive/libarchive |
 | LZMA SDK 26.03 | public domain | link, sandbox | https://www.7-zip.org/sdk.html |
 | 7-Zip 26.03 source (beyond the LZMA SDK) | LGPL-2.1-or-later for most files; BSD-3-Clause and BSD-2-Clause parts; plus the unRAR restriction | link, sandbox, via a separately published `-sys` crate with its own named `deny.toml` exception (never vendored here), only if the LZMA SDK is not enough; RAR *reading* only. The unRAR code may not be used to re-create the RAR compression algorithm; if modified unRAR sources are distributed, the documentation and source comments must state that the code may not be used to develop a RAR (WinRAR) compatible archiver | https://www.7-zip.org/license.txt |
 | libFLAC 1.5.0 and WavPack 5.9.0 (designs studied for our own audio predictors) | libFLAC: BSD-3-Clause (the `flac` tools are GPL and the documentation GFDL); WavPack: BSD-3-Clause | reference-only | https://github.com/xiph/flac · https://github.com/dbry/WavPack |
@@ -92,7 +94,7 @@ bundled C libraries are clarified there: liblzma (0BSD) in `liblzma-sys`, zlib (
 (`lpk-codecs-vp8`'s Microsoft header, the WebM banner and lepton_jpeg's `NOTICE.txt`). The E7 packaging task ships
 the file in every artefact.
 
-**libarchive 3.8.9 (E4-4).** Linked statically into `lpk-worker-libarchive` only (never into `lpk`, `lpk-worker`
+**libarchive 3.8.11 (E4-4).** Linked statically into `lpk-worker-libarchive` only (never into `lpk`, `lpk-worker`
 or `workers/`), through `crates/lpk-libarchive-sys`, from sources vendored unmodified in `vendor/libarchive-3.8.9/`
 with the release's `COPYING`. Its terms as `COPYING` states them: every C source under the two-clause BSD licence
 (copyright notices kept in each file), except the files taken from the University of California Regents (BSD
@@ -104,6 +106,15 @@ PPMd. No unRAR code and no 7-Zip handler code is used anywhere. The worker links
 land (they wait for the owner's approval to fetch the release tarball): `COPYING` reproduced in the static section of
 `THIRD-PARTY-NOTICES`, `lpk-worker-libarchive` added to the shipped packages `scripts/third-party-notices.sh`
 walks, and CI's GPL-family scan over `vendor/libarchive-3.8.9/`.
+
+**Open item (E5-2, due before any GUI binary is distributed, E7): the WebView2 loader's licence text.**
+`lpk-gui.exe` links Microsoft's `WebView2LoaderStatic.lib`, vendored by `webview2-com-sys` 0.39.1 (which declares
+itself MIT), whose licence requires its notice. `THIRD-PARTY-NOTICES` (`about-gui.hbs`) carries the copyright line
+and the licence URL only; before E7 distributes a GUI binary it must reproduce verbatim the `LICENSE.txt` of the
+Microsoft.Web.WebView2 NuGet package the vendored loader came from. The crate does not state that package's
+version: 0.39.0's changelog says only "update windows and WebView2 SDK versions" (0.38.2 named 1.0.3650.58), and
+the E5 design's reference, 1.0.4314.35, is unverified against the vendored files. The text is copied from the
+package, never written from memory.
 
 ## Patents to review (counsel, not engineers, decide)
 This is a watch-list, not a legal opinion: engineers record what each patent is about and when counsel

@@ -345,6 +345,51 @@ impl Pipeline {
         .map_err(|e| rep.map_cancelled(e))
     }
 
+    /// [`run_sources`](Self::run_sources) over a sample: the files in walk order until `budget`
+    /// bytes, the one that crosses it cut to what remains and every later file left out. Every
+    /// file's read is capped at its walk-time length (or the remainder), so at most `budget`
+    /// bytes are read whatever the files do meanwhile, and nothing is written but `out`. Also
+    /// returns the bytes sampled.
+    pub fn run_sources_capped(
+        self,
+        sources: &Sources,
+        budget: u64,
+        out: impl Write,
+    ) -> Result<(RunSummary, u64), CoreError> {
+        let prepared = self.prepare()?;
+        let monitor = self.monitor.clone();
+        let rep = monitor.reporter();
+        let t = Instant::now();
+        let mut inputs = walk_sources_with(sources, &self.classify.ingest, &rep)?;
+        let mut left = budget;
+        inputs.retain_mut(|i| {
+            if i.kind != EntryKind::File {
+                return true;
+            }
+            if left == 0 {
+                return false;
+            }
+            i.len = i.len.min(left);
+            i.capped = true;
+            left -= i.len;
+            true
+        });
+        let sampled = budget - left;
+        let summary = self
+            .run_inputs(
+                inputs,
+                RootSpec::of_sources(sources),
+                out,
+                None,
+                prepared,
+                t.elapsed(),
+                new_archive(),
+                &rep,
+            )
+            .map_err(|e| rep.map_cancelled(e))?;
+        Ok((summary, sampled))
+    }
+
     /// Walk `root` and append its entries as the next generation of `existing` (spec section
     /// 15): `out` is the same archive opened for writing and positioned at its end
     /// ([`Writer::append`]'s contract; the caller syncs). A path that exists is replaced. The

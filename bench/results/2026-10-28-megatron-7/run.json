@@ -1,0 +1,102 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "69155e679d828a757c7018767979ed6c9822ebf623e3ad22fd631a45cef29454",
+  "classes": [
+    "office-pdf",
+    "source-git",
+    "small-files"
+  ],
+  "combinations": [
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "zip-deflate",
+      "tool": "lpk-foreign"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "7z-lzma2",
+      "tool": "lpk-foreign"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "zip-deflate",
+      "tool": "7z-foreign"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "7z-lzma2",
+      "tool": "7z-foreign"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "zip-deflate",
+      "tool": "lpk-foreign"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "7z-lzma2",
+      "tool": "lpk-foreign"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "zip-deflate",
+      "tool": "7z-foreign"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "7z-lzma2",
+      "tool": "7z-foreign"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "zip-deflate",
+      "tool": "lpk-foreign"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "7z-lzma2",
+      "tool": "lpk-foreign"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "zip-deflate",
+      "tool": "7z-foreign"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "7z-lzma2",
+      "tool": "7z-foreign"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}

@@ -1,0 +1,60 @@
+[package]
+name = "lpk-gui"
+description = "LitePack's Windows GUI (E5): a Tauri 2 host over lpk-api, with a command layer tested without a webview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Not published; also how cargo-about (about.toml `private.ignore`) leaves our own crates out of THIRD-PARTY-NOTICES.
+publish = false
+# No `lpk-*` dependency but lpk-api and lpk-gui-sys: crates/lpk-api/tests/gui_seam.rs (the closed-build seam, D-110).
+
+[[bin]]
+name = "lpk-gui"
+path = "src/main.rs"
+
+[features]
+# E5-11's WebDriver switch (`LPK_GUI_WEBDRIVER`, src/security.rs): CI's `gui-e2e` job only, never a
+# shipped build (the `gui` job checks that the release exe does not hold the string).
+webdriver = []
+
+[dependencies]
+lpk-api = { path = "../lpk-api", version = "0.0.1" }
+lpk-gui-sys = { path = "../lpk-gui-sys", version = "0.0.1" }
+# Grant tokens: random, so that one window cannot guess another's.
+getrandom = "0.3.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# E5-4: a password the native prompt returns lives in wiped memory (the same crate as lpk-gui-sys).
+zeroize = "1.9.0"
+
+# Tauri is a Windows-only dependency (docs/notes/e5-design.md section 1): on Linux the crate
+# builds the command layer and a stub `main`. Its tree is checked by `cargo deny` for the shipped
+# Windows triples only (crates/lpk-gui/deny.toml: `cargo deny --manifest-path crates/lpk-gui/Cargo.toml check`);
+# the main check excludes this crate (deny.toml).
+[target.'cfg(windows)'.dependencies]
+tauri = { version = "=2.12.5", default-features = false, features = ["wry", "compression", "common-controls-v6"] }
+# E5-7: a second instance hands its verbs to the first (registered first, docs/notes/e5-design.md section 5).
+tauri-plugin-single-instance = { version = "=2.5.5", default-features = false }
+# E5-7: the update check, the GUI's one network request, called from Rust alone (no plugin permission in any
+# capability; e5-design section 4, e7-design section 6). Windows' own TLS (schannel through native-tls); no zip (the
+# update is the NSIS installer), no system proxy probing.
+tauri-plugin-updater = { version = "=2.14.1", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(windows)'.build-dependencies]
+tauri-build = { version = "=2.7.4", default-features = false , features = [] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# E5-7: the update check's tests (src/updates.rs) run the plugin in Tauri's mock runtime.
+tauri = { version = "=2.12.5", default-features = false, features = ["wry", "compression", "common-controls-v6", "test"] }
+
+[dev-dependencies]
+# E5-3's backend bound (tests/browse_memory.rs): E3-1's archive and the counting allocator.
+lpk-api = { path = "../lpk-api", version = "0.0.1", features = ["test-support"] }
+tempfile = "3.27.0"
+# tests/deny_configs.rs compares crates/lpk-gui/deny.toml with deny.toml.
+toml = "1.1.6"
+
+[lints]
+workspace = true

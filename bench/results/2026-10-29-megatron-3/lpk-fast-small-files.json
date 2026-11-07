@@ -1,0 +1,153 @@
+{
+  "class": "small-files",
+  "corpus": {
+    "class_blake3": "6cd302919095a5677d6d726972ac36e0850889a1961b7eaeea5d75bc87738910",
+    "class_bytes": 50016512,
+    "class_files": 20000,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 7009567,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.359375,
+      "peak_job_memory_bytes": 155299840,
+      "peak_memory_bytes": 89657344,
+      "peak_process_commit_bytes": 155299840,
+      "timed_out": false,
+      "user_cpu_seconds": 0.296875,
+      "wall_seconds": 1.5741025
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.875,
+      "peak_job_memory_bytes": 166215680,
+      "peak_memory_bytes": 117817344,
+      "peak_process_commit_bytes": 166215680,
+      "timed_out": false,
+      "user_cpu_seconds": 0.25,
+      "wall_seconds": 1.0379492
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 7009567,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.359375,
+        "peak_job_memory_bytes": 155299840,
+        "peak_memory_bytes": 89653248,
+        "peak_process_commit_bytes": 155299840,
+        "timed_out": false,
+        "user_cpu_seconds": 0.296875,
+        "wall_seconds": 1.5741025
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.828125,
+        "peak_job_memory_bytes": 166760448,
+        "peak_memory_bytes": 118362112,
+        "peak_process_commit_bytes": 166760448,
+        "timed_out": false,
+        "user_cpu_seconds": 0.21875,
+        "wall_seconds": 1.0757965
+      }
+    },
+    {
+      "archive_bytes": 7009567,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.359375,
+        "peak_job_memory_bytes": 155107328,
+        "peak_memory_bytes": 89657344,
+        "peak_process_commit_bytes": 155107328,
+        "timed_out": false,
+        "user_cpu_seconds": 0.234375,
+        "wall_seconds": 1.5983504
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.984375,
+        "peak_job_memory_bytes": 166174720,
+        "peak_memory_bytes": 117817344,
+        "peak_process_commit_bytes": 166174720,
+        "timed_out": false,
+        "user_cpu_seconds": 0.25,
+        "wall_seconds": 1.0379492
+      }
+    },
+    {
+      "archive_bytes": 7009567,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.203125,
+        "peak_job_memory_bytes": 155987968,
+        "peak_memory_bytes": 90247168,
+        "peak_process_commit_bytes": 155987968,
+        "timed_out": false,
+        "user_cpu_seconds": 0.375,
+        "wall_seconds": 1.5592348999999999
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.875,
+        "peak_job_memory_bytes": 166215680,
+        "peak_memory_bytes": 117817344,
+        "peak_process_commit_bytes": 166215680,
+        "timed_out": false,
+        "user_cpu_seconds": 0.265625,
+        "wall_seconds": 0.9732968
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 2,
+  "setting": {
+    "compress_args": [
+      "a",
+      "../../tmp/run30844/c5/a.lpk",
+      "small-files",
+      "--fast",
+      "--threads",
+      "24"
+    ],
+    "extract_args": [
+      "x",
+      "a.lpk",
+      "x",
+      "--threads",
+      "24"
+    ],
+    "id": "fast"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+ed573b15447b"
+  },
+  "verification": {
+    "files_checked": 20000,
+    "files_ok": 20000,
+    "verified": true
+  }
+}

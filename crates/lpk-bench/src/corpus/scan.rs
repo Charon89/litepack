@@ -31,7 +31,7 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use super::classify::{classify, HEAD_LEN};
-use super::manifest::{now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped};
+use super::manifest::{now_rfc3339, BuildInfo, Manifest, ManifestFile, Skipped, Summary};
 use super::ScanArgs;
 
 /// Value of `profile`, `source` and `licence` in a private manifest.
@@ -277,7 +277,9 @@ pub fn scan(root: &Path, out: &Path) -> Result<ScanReport> {
             profile: PRIVATE.to_string(),
             skipped: skipped.clone(),
             accounting: Vec::new(),
-            summary: Default::default(),
+            // Files, bytes and the class digest per class (E8-10), so result rows over this
+            // private manifest carry a `class_blake3` that can be checked against it.
+            summary: Summary::of(&manifest),
             tools: Default::default(),
             unavailable: Vec::new(),
         },

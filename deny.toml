@@ -1,6 +1,11 @@
 # cargo-deny policy — see docs/LICENSING.md. Run: cargo deny check
 [graph]
 all-features = true
+# lpk-gui's tree is checked by crates/lpk-gui/deny.toml for the shipped Windows triples only (E5-2;
+# `cargo deny --manifest-path crates/lpk-gui/Cargo.toml check`): with every
+# target in play, the Linux build dependencies of Tauri's GTK crates (never compiled for a target we
+# ship) would bring licences outside this allow-list into the check. Both checks run in CI.
+exclude = ["lpk-gui"]
 
 [advisories]
 yanked = "deny"

@@ -1,0 +1,2 @@
+# Seeds are fuzzer inputs: byte for byte, never normalised.
+* -text

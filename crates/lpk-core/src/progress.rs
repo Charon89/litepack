@@ -119,9 +119,18 @@ impl<F: Fn(&Event) + Send + Sync> Progress for F {
     }
 }
 
-/// A flag the engine polls: cloneable, thread-safe, set once by [`cancel`](Self::cancel).
+/// A flag the engine polls: cloneable, thread-safe, set once by [`cancel`](Self::cancel). A
+/// [`child`](Self::child) token is cancelled by its own `cancel` or by its parent's; its
+/// `cancel` leaves the parent alone (E5-1: a front end's read is cancelled by its caller's
+/// token or by the session, without the session cancelling the caller's token).
 #[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken(Arc<TokenInner>);
+
+#[derive(Debug, Default)]
+struct TokenInner {
+    flag: AtomicBool,
+    parent: Option<CancelToken>,
+}
 
 impl CancelToken {
     /// A token that is not cancelled.
@@ -129,14 +138,29 @@ impl CancelToken {
         Self::default()
     }
 
-    /// Cancel: every clone sees it; the engine stops at its next poll.
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+    /// A token cancelled when this one is (or when it is cancelled itself); cancelling it
+    /// does not cancel this one.
+    pub fn child(&self) -> CancelToken {
+        CancelToken(Arc::new(TokenInner {
+            flag: AtomicBool::new(false),
+            parent: Some(self.clone()),
+        }))
     }
 
-    /// Whether [`cancel`](Self::cancel) was called.
+    /// Cancel: every clone (and every child) sees it; the engine stops at its next poll. A
+    /// parent is not cancelled.
+    pub fn cancel(&self) {
+        self.0.flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether [`cancel`](Self::cancel) was called on this token or an ancestor.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.flag.load(Ordering::SeqCst)
+            || self
+                .0
+                .parent
+                .as_ref()
+                .is_some_and(CancelToken::is_cancelled)
     }
 
     /// [`CoreError::Cancelled`] when cancelled, else `Ok`.
@@ -390,6 +414,21 @@ impl Read for Watched {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_parent_cancel_reaches_the_child_and_a_child_cancel_stays_in_it() {
+        let parent = super::CancelToken::new();
+        let child = parent.child();
+        let grandchild = child.child();
+        child.cancel();
+        assert!(child.is_cancelled() && grandchild.is_cancelled());
+        assert!(!parent.is_cancelled(), "a child's cancel leaves the parent");
+        let other = parent.child();
+        assert!(!other.is_cancelled());
+        parent.cancel();
+        assert!(other.is_cancelled() && other.check().is_err());
+        assert!(other.clone().is_cancelled(), "clones share the state");
+    }
+
     use super::*;
 
     /// Collects every event.

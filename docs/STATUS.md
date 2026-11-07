@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-10-26, about 01:05 UTC (21:05 local). **The 2026-10-25 measurement round is done** (stages A–D committed: D-101 E2-16, D-102 E2-9's pre-gate, D-103 E3-9 done with G3 125.8% in the same run, D-104 E2-9 closed with G2 measured at 110.40% of 7-Zip Ultra, a FAIL). **Stage E**, every incumbent on `full` under the current manifest (about eight hours; it gives G1, G4 and E2-25's route), was held for the night so agents can build: `target/acceptance/measure-2026-10-26-incumbents.sh` is relaunched detached before 06:00 local on 2026-10-26, once every agent has stopped; if the PC stays on it ends in the afternoon, and the next session pools it with stages C and D (`--results` C, D, E; no supersedes needed). **Agents running overnight:** E4-3, E5-1, E8-5/E8-7/E8-9 with the cited-results check, and E6-0 (branches `task/e4-3`, `task/e5-1`, `task/e8-ci`, `fix/symlink-targets`; briefs and reports in the session scratchpad, copies in `target/acceptance/handoff-2026-10-22/`). Merged on 2026-10-25: LIC-2, E2-9 A/E, E2-25's code, E4-1, E2-16, E4-2, the E4, E5 and E6 design notes (E6's review added E6-0 and E8-10). The owner's open items are below.
+Last updated: 2026-11-05, about 04:37 on 2026-11-06 UTC (23:37, 11-05 local). **Session of 2026-11-05.** E5-12 is done (D-148, #154, `34c37ad`): the visual redesign the owner asked for, "archive label" (a label band with the archive's name and a size gauge, an icon command bar, settings with an Appearance choice, light and dark). E9-1 is done (D-147): the docs site at `https://charon89.github.io/litepack/`. E6-4 is done (D-145, D-146). E4-6 is ticked and E8-1 counts its thirty fuzz nights from 2026-10-28 (the thirtieth would be 2026-11-26). **Next:** E4-4 (RAR, ISO and CAB through libarchive; the owner approved the download, 3.8.11, below), then E8-3 (the weekly speed run: a design draft and the owner's schedule questions in the hand-off folder), E8-6, E8-8 and E9-2 to E9-8; E6-3 after E7-1 and E7-3; E6-7 and E5-10 by hand. E7 waits for the owner's answers (below). Briefs, reports, review verdicts, the ledgers and the merge scripts are in `target/acceptance/handoff-2026-11-05/` (this session) and `handoff-2026-10-30/` on Megatron.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -92,12 +92,37 @@ E3-8 is done (D-75, PR #77).
   estimates `node-v2` appended at 12.2 MB with patches against 16.8 MB without, and `node-v3` at 0.41 MB
   against 2.65 MB (estimates, not measured archives). Say whether to build the delta writer for `lpk append`
   only (E2-9's tasks B–D: revision 1.5, the writer, the reader and `lpk-check`), an incremental-backup feature.
+- **libarchive's source release (E4-4): approved by the owner on 2026-11-03** ("Can do all"). The latest patch
+  release that night was 3.8.11 (2026-10-30, after the 3.8.10 recommended here on 2026-10-26):
+  `libarchive-3.8.11.tar.gz`, 9,341,028 bytes, and its PGP signature `libarchive-3.8.11.tar.gz.asc`, 833 bytes, from
+  https://github.com/libarchive/libarchive/releases/tag/v3.8.11; the next session takes it unless the owner names
+  3.8.10 (verify the signature, record the SHA-256 in the D-entry). Not started that night: `task/e4-4` is 86 commits behind
+  `main`, and making RAR readable must also add `rar` to `lpk-shell`'s archive list and `lpk-gui`'s opt-in "Open
+  with" list, whose tests fail until then (D-144, D-145).
+- **Re-pin a changed corpus source (E8-9, new on 2026-10-26).** Project Gutenberg changed `1497-0.txt`, so a clean machine's `corpus build --profile small` no longer matches `corpus.lock` (this PC builds from its download cache). Re-pinning changes the `text-prose` class; the alternative is keeping the old file from a stable mirror. A corpus change is yours.
+- **The size gate's sensitivity (E8-2, new on 2026-10-26).** The 1% limit per row is PLAN's; on the red run, lowering the Balanced preset from 9e to 1 moved only 3 of 12 Balanced rows past 1%. Say whether to keep it or to add a per-class or tighter limit (a gate change is yours).
+- **E7's questions (new on 2026-10-28; `docs/notes/e7-design.md` §10, each with sources, costs and a
+  recommendation):** the publisher's legal name and product name (a company first if the Pro edition is to be
+  sold, Store policy 10.14), the certificate route (Artifact Signing, available to individuals in the US or Canada,
+  or OV), the update default, paid accounts, CPL-1.0 for the NSIS stub (proposed: no), where the updater key
+  signs (proposed: offline on removable media), the GitHub and Entra settings to apply, and optionally the
+  settings folder. Starting the identity validation early shortens E7-1.
 - **The publisher's legal name and the product name** for the code-signing certificate (E7-1: a certificate
   in the publisher's name, Azure Artifact Signing or an OV certificate, since a later version may be closed,
   D-89 (6)). Identity validation takes weeks; the earlier the better.
 - **US 9,798,731** (`docs/LICENSING.md`): E2-9's deltas pair a file's versions by path and name, with no
   similarity sketch, so as far as this session can read it the claimed method is not practised; counsel's
   reading is still the owner's to get if sketch-based clustering (E2-8, D-55) is ever wanted back.
+- **zpaqfranz's rows: approved by the owner on 2026-11-03** (`measure-2026-10-30-night.sh zpaq`, through WMI, several
+  hours on an idle machine); not started that night, since work had to stop at 23:59 local.
+- **E8-3's weekly speed run: approved by the owner on 2026-11-03** (a weekly scheduled task on this measuring
+  machine). Not started: a design draft (unreviewed) is in the hand-off folder, `e8-3-design-draft.md`: two
+  harness gaps first (`run --compare` across `lpk` builds and catalogue changes), then the weekly script and task;
+  its questions for the owner: the weekday and hour the PC is on and idle (and waking it), the acceptance's reading,
+  the power plan, the antivirus, committing to `main` or by PR, re-measuring a red week.
+- **E9-1's site: approved by the owner on 2026-11-03** (GitHub Pages and the publication). The controller enabled
+  Pages that night (build type GitHub Actions, `https://charon89.github.io/litepack/`, HTTPS enforced); the book
+  is published once E9-1's workflow deploys from `main`.
 - **Idle time for the measurements:** E0-1's rebuild and re-measurement (about three hours), E3-9, and every
   re-measurement after an engine change need the machine to itself; say when it can sit idle, or they run
   detached overnight as before, announced in this file.
@@ -115,9 +140,9 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e2-23` (names, the harness's own tar) and `task/e2-24` (the store path round): implementers in flight,
-  2026-10-22; nothing else of this session's (PR #94 and both design notes merged).
-- Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are.
+- `task/e4-4` (23c7c93, no PR): libarchive vendoring: the owner approved the download on 2026-11-03 (3.8.11, below); merge `main` first (86 commits behind), and add `rar` to `lpk-shell`'s and `lpk-gui`'s extension lists with the RAR change; the crates, routing, fixtures and gated tests are on the branch and build a stub.
+- Follow-ups noted in the D-entries, for the tasks named: E7 — the WebView2 loader's licence text before any GUI binary ships (`docs/LICENSING.md`); E6-5 — `export --force` removes before it creates, and a foreign archive is reopened by path for the broker; `docs/SECURITY.md` — the vulnerability contact is the owner's to fill.
+- Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are; old merged `task/e2-10-*`, `task/e2-15-probe`, `task/e2-20-*` and `task/e2-22-lpk-rows` branches remain on `origin`.
 
 ## How to resume
 
@@ -152,9 +177,12 @@ The manual workflow `corpus-smoke.yml` has an input `run_smoke` (default on): af
 - A measured benchmark run needs the machine to itself; plan other work around it.
 - A command run in the background from a Claude session is killed after two hours whatever timeout it was
   given, and its child processes die with it (that ended a first attempt at the acceptance pair after 155 of
-  238 combinations). Launch anything longer as a detached process (on Windows: PowerShell `Start-Process`
-  on a script with a hidden window and redirected output; the git-ignored `target/acceptance/pair2.sh` and
-  `full.sh` are the ones in use) and follow it through a status file.
+  238 combinations). Launch anything longer as a detached process and follow it through a status file. On Windows that means
+  WMI `Win32_Process.Create` (`Invoke-CimMethod -ClassName Win32_Process -MethodName Create` on Git's `bash.exe`
+  with the script), whose child runs under `WmiPrvSE.exe`: a `Start-Process` from inside the Claude app stays in
+  the app's process tree and dies when the app closes, which killed stage E at 06:48 local on 2026-10-26. Split a
+  long run into class batches (`--classes`) that each write a complete results directory, so an interruption
+  costs one batch.
 - A probe or baseline run made in a worktree names its directory `<date>-<host>[-n]` from what that worktree's `bench/results` holds; if another branch already holds a directory of that name, rename before committing (one build per directory) or use `--into` a directory prepared for it.
 - Subagent worktrees start from `main`: before dispatching, make sure `main` is an ancestor of the task branch (merge `main` in), and give the implementer the expected head hash; their sandbox refuses `git reset --hard`.
 - Implementers and reviewers run out of turns on large tasks: ask for a commit after each step, then resume them. Agents from an earlier session cannot be resumed; start a fresh one with the context it needs.

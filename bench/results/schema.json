@@ -127,7 +127,8 @@
       "properties": {
         "id": { "$ref": "#/$defs/id", "description": "Setting id within the tool." },
         "compress_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the compress command as executed, thread argument filled in, paths shown relative to the working directory (the parent of the class directory)." },
-        "extract_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the extract command as executed, same conventions." }
+        "extract_args": { "type": "array", "items": { "$ref": "#/$defs/arg" }, "description": "Arguments of the extract command as executed, same conventions." },
+        "zone": { "type": "integer", "minimum": 0, "maximum": 4, "description": "E6-5: the ZoneId the runner wrote as the archive's Zone.Identifier stream between compression and extraction (untimed; Windows only); absent when none was written." }
       }
     },
     "corpus_ref": {
@@ -139,7 +140,8 @@
         "profile": { "$ref": "#/$defs/id", "description": "Corpus profile (small, full or private)." },
         "manifest_blake3": { "$ref": "#/$defs/blake3", "description": "BLAKE3 hash of manifest.json (64 lowercase hex digits)." },
         "class_files": { "$ref": "#/$defs/count", "description": "Number of files in this class, a count." },
-        "class_bytes": { "$ref": "#/$defs/count", "description": "Total size of this class's files in bytes." }
+        "class_bytes": { "$ref": "#/$defs/count", "description": "Total size of this class's files in bytes." },
+        "class_blake3": { "$ref": "#/$defs/blake3", "description": "Class digest (E8-10): BLAKE3 over the class's manifest entries in the manifest's order, each serialised as path NUL size-in-decimal NUL content-BLAKE3-hex NUL (64 lowercase hex digits). Required from result schema version 2; absent in version 1." }
       }
     },
     "tar_info": {
@@ -173,7 +175,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "tool", "setting", "class", "corpus", "threads"],
       "properties": {
-        "schema_version": { "const": 1, "description": "Result format version." },
+        "schema_version": { "enum": [1, 2], "description": "Result format version: 2 since E8-10 (corpus.class_blake3 required), 1 before (no class_blake3)." },
         "tool": { "$ref": "#/$defs/tool_ref", "description": "The tool." },
         "setting": { "$ref": "#/$defs/setting_ref", "description": "The setting." },
         "class": { "$ref": "#/$defs/id", "description": "Corpus class name." },
@@ -187,7 +189,8 @@
         "median": { "$ref": "#/$defs/sample", "description": "Median of every field over the repeats (the validator recomputes it)." },
         "verification": { "$ref": "#/$defs/verification", "description": "Round-trip verification." },
         "skipped": { "$ref": "#/$defs/text", "description": "Why the combination was skipped; then there are no measurements." },
-        "failed": { "$ref": "#/$defs/failure", "description": "Present when the combination ran and failed (non-zero exit, missing or empty archive, timeout, killed descendants, or a verification finding). The repeats completed before the failure may be recorded; there is no median and verification.verified is false." }
+        "failed": { "$ref": "#/$defs/failure", "description": "Present when the combination ran and failed (non-zero exit, missing or empty archive, timeout, killed descendants, or a verification finding). The repeats completed before the failure may be recorded; there is no median and verification.verified is false." },
+        "information": { "$ref": "#/$defs/information", "description": "E4-8: present on an information row, which the report shows apart and never puts in a gate; absent on every other row (optional in version 2, so rows written before it still validate)." }
       },
       "allOf": [
         {
@@ -211,8 +214,24 @@
         {
           "if": { "not": { "anyOf": [{ "required": ["skipped"] }, { "required": ["failed"] }] } },
           "then": { "required": ["repeats", "median", "verification", "measurement"] }
+        },
+        {
+          "if": { "properties": { "schema_version": { "const": 1 } } },
+          "then": { "properties": { "corpus": { "not": { "required": ["class_blake3"] } } } },
+          "else": { "properties": { "corpus": { "required": ["class_blake3"] } } }
         }
       ]
+    },
+    "information": {
+      "type": "object",
+      "description": "What kind of information row this is (E4-8).",
+      "additionalProperties": false,
+      "required": ["kind", "maker"],
+      "properties": {
+        "kind": { "enum": ["foreign-extract"], "description": "foreign-extract: the row's tool extracts a foreign archive (ZIP, 7z) that its maker wrote once per class and setting, outside every timed step, and that every tool of the class with the same maker, maker arguments and extension extracts; setting.compress_args are the maker's arguments as executed, and each repeat's compress is that one make step's measurement (the same in every repeat), never a compression by the row's tool." },
+        "maker": { "$ref": "#/$defs/id", "description": "The maker's tool id in the catalogue (7z)." },
+        "maker_version": { "$ref": "#/$defs/text", "description": "The maker's version as discovered; absent when the row was skipped before the make step." }
+      }
     },
     "failure": {
       "type": "object",

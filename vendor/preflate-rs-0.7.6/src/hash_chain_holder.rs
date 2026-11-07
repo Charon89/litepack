@@ -258,6 +258,14 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
         if max_len < len {
             return err_exit_code(ExitCode::RecompressFailed, "not enough data left to match");
         }
+        // LitePack change 16 (LITEPACK-CHANGES.md): a Deflate match is at least 3 bytes long; a
+        // crafted length below 3 failed `prefix_cmp_odd_size`'s assertion (a panic in every build).
+        if len < 3 {
+            return err_exit_code(
+                ExitCode::RecompressFailed,
+                format!("match length {len} below 3"),
+            );
+        }
 
         let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
         let mut current_hop = 0;

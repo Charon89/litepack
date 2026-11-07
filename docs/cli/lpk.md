@@ -85,9 +85,7 @@ Create an archive. With one directory as the input, its contents are archived (n
 * `--dict-size <BYTES>` — The Balanced tier's LZMA dictionary in bytes (default 64 MiB)
 * `--no-dictionaries` — Use no dictionaries (what the Fast tier does today: none is bundled)
 * `--no-dedup` — Do not deduplicate chunks (the Fast and Balanced tiers cut files with content-defined chunking and store each distinct chunk once by default, across files and within a file). This also returns to the fixed 1 MiB cut
-* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (the default: path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Ignored with --no-dedup and --store
-
-  Default value: `none`
+* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Default: `versions` with --balanced, `none` with --fast; `--ordering none` restores path order. With `append`, the order applies within the new generation only. Ignored with --no-dedup and --store
 
   Possible values: `none`, `extension`, `versions`
 
@@ -173,14 +171,20 @@ Extract an archive into a directory, created if missing. Without a pattern every
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
-* `--memory <SIZE>` — The memory budget of the extraction, for example 512M or 2G or plain bytes; also the reader's decode memory limit (an archive whose envelope needs more is refused before anything is written). Default: half of the physical memory, at most the ceiling of the tier the archive's envelope shows: 1 GiB (stored blocks only), 2 GiB (Fast-sized blocks and windows) or 4 GiB (larger); the reader is then limited to half of the physical memory, at most 4 GiB. The decoders in flight are derived from the budget (shown with -v); a budget below what one block in flight needs is refused with that figure
+* `--memory <SIZE>` — The memory budget of the extraction, for example 512M or 2G or plain bytes; also the reader's decode memory limit (an archive whose envelope needs more is refused before anything is written). Default: half of the physical memory, at most the ceiling of the tier the archive's envelope shows: 1 GiB (stored blocks only), 2 GiB (Fast-sized blocks and windows) or 4 GiB (larger); raised, up to 4 GiB and half of the physical memory, for an archive whose largest declared record need cuts the decoders below the thread budget's and below what the block terms alone allow (to every decoder's block terms plus twice that need; -v says which); the reader is then limited to half of the physical memory, at most 4 GiB. The decoders in flight are derived from the budget (shown with -v); a budget below what one block in flight needs is refused with that figure
 * `--overwrite <MODE>` — What an existing file at a target gets. refuse: the extraction is refused before any output (the default). skip: the file is left as it is and counted (`skipped <n> existing entries` on stderr; with --json one `{"summary":{...}}` line). rename: the entry is written beside it as `<stem> (<k>)<.ext>` with the smallest free k, and counted. replace: the file is replaced (a link at the target is removed as a link, never followed). A directory where a file goes, or a file where a directory goes, is refused in every mode but skip, which skips it (and everything below a skipped directory). Directories are created or reused whatever the mode
 
   Default value: `refuse`
 
   Possible values: `refuse`, `skip`, `rename`, `replace`
 
-* `--symlinks` — Create symlink entries with the target the archive holds. Without this flag every symlink entry is skipped with a warning on stderr (with --json one `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). A link that cannot be created (for example without the privilege on Windows) fails the extraction
+* `--symlinks` — Create symlink entries with the target the archive holds. Without this flag every symlink entry is skipped with a warning on stderr (with --json one `{"warning":{"kind":"SymlinkSkipped","path":...}}` line). Even with it, a link whose target is absolute, a UNC path, a device path (`\\?\`, `\\.\`), drive-relative (`C:x`), rooted (`\x` or `/x`), names a Windows device, has a colon or a component ending in a dot or a space, has `..` after a name (`a/../x`), has more leading `..` than the link is deep below the output directory, or (outside Windows, where `\` is not a separator) contains a backslash is not created: it is skipped with a warning naming the entry and the reason (with --json one `{"warning":{"kind":"SymlinkTargetRefused","path":...,"reason":...}}` line) and counted in symlinks_skipped; such a target is never read or opened. On Windows a link is a directory link when its target names a directory of the archive, else a file link; so a link whose target goes through another link (`l -> s/sub`, `s` a link) is a file link unless the archive itself names that target as a directory. On Windows links are created only when the process token holds SeCreateSymbolicLinkPrivilege (an elevated administrator; Developer Mode alone does not count); without it every link is skipped with a warning (with --json one `{"warning":{"kind":"SymlinkNoPrivilege","path":...}}` line) and counted in symlinks_skipped, and the extraction goes on. A link that cannot be created for any other reason fails the extraction
+* `--motw <on|off>` — Mark of the Web (Windows): with `on` (the default), when the archive's `Zone.Identifier` stream gives zone 3 (Internet) or 4 (Restricted), or cannot be parsed (read as 3), every extracted file gets a `Zone.Identifier` stream with that `ZoneId` only (no `HostUrl` or `ReferrerUrl`), written before its first byte; zones 0-2 and archives without the stream: nothing. A stream that exists and cannot be read (access denied, a sharing violation) is read as 3 with one warning (with --json one `{"warning":{"kind":"MotwZoneUnreadable"}}` line). A destination whose volume has no named streams cannot hold the mark: the extraction goes on and prints one warning (with --json one `{"warning":{"kind":"MotwUnmarked","zone":N}}` line). `off` writes no stream
+
+  Default value: `on`
+
+  Possible values: `on`, `off`
+
 * `-v`, `--verbose` — Print the plan's counts, the memory budget and its terms, and the pool size to stderr
 * `--max-entries <N|off>` — Foreign archives: the most entries a listing may have (default 10000000; the archive's length over the format's smallest header always caps it)
 * `--max-expansion <FACTOR|off>` — Foreign archives: the most bytes an extraction writes, as a multiple of the archive's length (default 10000); refused from the declared sizes before anything is written
@@ -205,7 +209,7 @@ Test an archive: frame hashes, chunk hashes, Merkle root, records, recovery shar
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
-* `--memory <SIZE>` — The decode memory limit, as for `x`: an archive whose envelope needs more is refused
+* `--memory <SIZE>` — The decode memory limit, as for `x`: an archive whose envelope needs more is refused. Default: half of the physical memory, at most 4 GiB (the reader's limit of `x`, which also bounds `x`'s default budget when it is raised for a large declared record need)
 
 
 
@@ -245,6 +249,12 @@ Write a copy of an archive with its damaged shards rebuilt from the recovery fra
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
+* `--motw <on|off>` — Mark of the Web (Windows), as for `x`: with `on` (the default) the repaired copy gets the zone of an archive zoned 3 or 4 before its first byte; `off` writes no stream
+
+  Default value: `on`
+
+  Possible values: `on`, `off`
+
 
 
 
@@ -281,9 +291,7 @@ Append the contents of a directory to an archive as its next generation: a snaps
 * `--dict-size <BYTES>` — The Balanced tier's LZMA dictionary in bytes (default 64 MiB)
 * `--no-dictionaries` — Use no dictionaries (what the Fast tier does today: none is bundled)
 * `--no-dedup` — Do not deduplicate chunks (the Fast and Balanced tiers cut files with content-defined chunking and store each distinct chunk once by default, across files and within a file). This also returns to the fixed 1 MiB cut
-* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (the default: path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Ignored with --no-dedup and --store
-
-  Default value: `none`
+* `--ordering <ORDER>` — How files are ordered inside a cluster before they are written: `none` (path order, which keeps directory locality), `extension` (by extension, then name, the order 7-Zip uses for solid archives) or `versions` (sibling folders that share at least half of the smaller one's files are versions: a file's versions are written next to each other, in the natural order of the folder names; without such folders, path order). Default: `versions` with --balanced, `none` with --fast; `--ordering none` restores path order. With `append`, the order applies within the new generation only. Ignored with --no-dedup and --store
 
   Possible values: `none`, `extension`, `versions`
 
@@ -385,13 +393,19 @@ Names are written as the archive stores them: the format's reader already refuse
 
 * `--encrypt` — Encrypt every entry with the archive's password (AES-256: ZIP's AE-2, 7z's with the header encrypted). Needs a credential with a password; a keyfile alone is refused
 * `--force` — Replace an existing output file
+* `--motw <on|off>` — Mark of the Web (Windows), as for `x`: with `on` (the default) the output file gets the zone of an archive zoned 3 or 4 before its first byte; `off` writes no stream
+
+  Default value: `on`
+
+  Possible values: `on`, `off`
+
 * `--threads <N>` — The thread budget: 1 decodes on the calling thread; from 2 on, N - 1 threads decode blocks ahead of the writer (capped by the memory budget), as for `x`
 * `--prior <FILE>` — A prior file (for example a zstd dictionary) the archive needs; may be repeated
 * `--password <STR>` — The password. Visible in the process list and the shell history; prefer --password-file or --password-prompt
 * `--password-file <PATH>` — A file holding the password; one trailing newline is not part of it
 * `--password-prompt` — Ask for the password on the terminal, typed without echo (twice for `a`). Needs stdin and stderr to be terminals, else refused (exit 1). Without this flag the password is asked for only when the archive needs one that was not given and stdin and stderr are terminals; through a pipe the command fails with PasswordRequired instead
 * `--keyfile <PATH>` — A keyfile as a second factor (alone: the password is empty). Refused on an archive whose key slot takes none
-* `--memory <SIZE>` — The memory budget, as for `x`: the decoded blocks held at once (cached or in flight) are derived from it; the writer's own memory (its compressor) is outside the count
+* `--memory <SIZE>` — The memory budget, as for `x`, but the default is never raised for a large declared record need: the ceiling of the tier the archive's envelope shows, at most half of the physical memory. The decoded blocks held at once (cached or in flight) are derived from it; the writer's own memory (its compressor) is outside the count
 * `-v`, `--verbose` — Print the plan's counts, the cache schedule's outcome and the memory terms to stderr
 
 

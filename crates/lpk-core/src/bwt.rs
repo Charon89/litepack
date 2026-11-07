@@ -133,6 +133,11 @@ impl PrimitiveDecoder for BwtDecoder {
         limits: &Resources,
         ctx: &mut dyn DecodeContext,
     ) -> Result<Vec<u8>, FormatError> {
+        // Check 1, then the term is reserved from the extraction's gate (R115): it waits for
+        // room, runs alone or is refused there; returned on every path out.
+        let b = block_size(params);
+        Self::check_term(expected_len, b, limits)?;
+        let _reserved = lpk_format::reserve(&*ctx, memory_term(expected_len, b))?;
         Self::run(params, input, expected_len, last, limits, ctx.block())
     }
 

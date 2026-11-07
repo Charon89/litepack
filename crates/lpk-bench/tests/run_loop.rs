@@ -1598,3 +1598,99 @@ fn a_private_corpus_runs_with_lpk_through_its_list_template() {
     assert!(r["median"]["archive_bytes"].as_u64().unwrap() > 0, "{r}");
     assert_tmp_clean(&e);
 }
+
+/// Two foreign-extraction tools (E4-8) over the fake archiver as their maker.
+const FOREIGN: &str = r#"
+[[tool]]
+id = "fa-foreign"
+name = "fake foreign extractor A"
+version = { args = ["version"], pattern = 'fake-archiver (\d+\.\d+)' }
+extension = ".fk"
+mode = "directory"
+foreign = "fake"
+extract = ["extract", "{archive}", "{outdir}"]
+licence = "test"
+[[tool.setting]]
+id = "made"
+extension = ".fz"
+[[tool.setting]]
+id = "unmade"
+compress = ["--mode=exit1"]
+
+[[tool]]
+id = "fb-foreign"
+name = "fake foreign extractor B"
+version = { args = ["version"], pattern = 'fake-archiver (\d+\.\d+)' }
+extension = ".fk"
+mode = "directory"
+foreign = "fake"
+extract = ["extract", "{archive}", "{outdir}"]
+licence = "test"
+[[tool.setting]]
+id = "made"
+extension = ".fz"
+[[tool.setting]]
+id = "unmade"
+compress = ["--mode=exit1"]
+"#;
+
+#[test]
+fn foreign_rows_extract_one_made_archive_and_a_failed_make_fails_them() {
+    let e = env_with(&["fake", "fa-foreign", "fb-foreign"]);
+    std::fs::write(&e.catalogue, format!("{CATALOGUE}{FOREIGN}")).unwrap();
+    let out = measure(
+        &e,
+        &[
+            "--tools",
+            "fa-foreign,fb-foreign",
+            "--repeats",
+            "2",
+            "--classes",
+            "text",
+        ],
+    );
+    let log = text(&out);
+    assert!(log.contains("0 validation problem(s)"), "{log}");
+    assert!(
+        !out.status.success(),
+        "the failed make must fail the run: {log}"
+    );
+    // Made once per setting, for both tools.
+    assert_eq!(log.matches("making the .fz archive").count(), 1, "{log}");
+    assert_eq!(log.matches("making the .fk archive").count(), 1, "{log}");
+    let dir = results_dir(&e);
+    let (a, b) = (
+        result(&dir, "fa-foreign-made-text.json"),
+        result(&dir, "fb-foreign-made-text.json"),
+    );
+    for r in [&a, &b] {
+        assert_eq!(r["verification"]["verified"], true, "{r}");
+        assert_eq!(r["information"]["kind"], "foreign-extract");
+        assert_eq!(r["information"]["maker"], "fake");
+        assert!(r["information"]["maker_version"].is_string(), "{r}");
+        assert_eq!(r["setting"]["compress_args"][0], "create");
+        assert_eq!(r["setting"]["extract_args"][1], "a.fz");
+    }
+    // The same file: the same size, and the one make step's measurement in every repeat of both.
+    assert_eq!(a["median"]["archive_bytes"], b["median"]["archive_bytes"]);
+    let make = &a["repeats"][0]["compress"];
+    for r in [&a, &b] {
+        for rep in r["repeats"].as_array().unwrap() {
+            assert_eq!(&rep["compress"], make);
+        }
+    }
+    for t in ["fa", "fb"] {
+        let r = result(&dir, &format!("{t}-foreign-unmade-text.json"));
+        assert_eq!(r["failed"]["step"], "compress", "{r}");
+        assert!(
+            r["failed"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("make (fake)"),
+            "{r}"
+        );
+        assert_eq!(r["information"]["maker"], "fake");
+        assert!(r.get("median").is_none());
+    }
+    assert_tmp_clean(&e);
+}

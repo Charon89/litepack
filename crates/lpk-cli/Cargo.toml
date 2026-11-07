@@ -17,19 +17,17 @@ path = "src/main.rs"
 clap = { version = "4.6.7", features = ["derive"] }
 # Ctrl-C (E3-3): the handler cancels the engine's token (MIT OR Apache-2.0).
 ctrlc = "3.5.2"
+lpk-api = { path = "../lpk-api", version = "0.0.1" }
 lpk-core = { path = "../lpk-core", version = "0.0.1" }
 lpk-format = { path = "../lpk-format", version = "0.0.1" }
 rpassword = "7.5.4"
 serde_json = "1.0.151"
 zeroize = "1.9.0"
-# `lpk export`: 7z through sevenz-rust2 (Apache-2.0; already in the tree for lpk-bench's
-# corpus extraction): LZMA2, Deflate and store, AES-256 with the archive's password.
-sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["compress", "deflate", "aes256"] }
-# `lpk export`: ZIP through the zip crate (MIT; lpk-core's Deflate peel already reads with it):
-# Deflate (flate2 with the zlib-rs backend), zstd (method 93), store; AES-256 (AE-2).
-zip = { version = "9.0.4", default-features = false, features = ["deflate", "zstd", "aes-crypto"] }
 
 [dev-dependencies]
+# The export tests read the ZIP and 7z files back (the writers moved to lpk-api with E5-1).
+sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["compress", "deflate", "aes256"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate", "zstd", "aes-crypto"] }
 blake3 = "1.8.7"
 # The names test (E2-23) reads the archive back with the independent decoder.
 lpk-check = { path = "../lpk-check", version = "0.0.1" }

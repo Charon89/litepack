@@ -1,0 +1,22 @@
+{
+  "class": "audio",
+  "corpus": {
+    "class_bytes": 157896311,
+    "class_files": 21,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "schema_version": 1,
+  "setting": {
+    "compress_args": [],
+    "extract_args": [],
+    "id": "default"
+  },
+  "skipped": "not installed",
+  "threads": 24,
+  "tool": {
+    "id": "tsaur",
+    "mode": "directory",
+    "ratio_depends_on_threads": false
+  }
+}

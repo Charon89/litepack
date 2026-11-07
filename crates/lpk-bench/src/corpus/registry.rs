@@ -11,7 +11,8 @@ use serde::Deserialize;
 
 use super::extract::check_portable_component;
 
-/// Corpus profile. `small` is for iteration and CI, `full` is for the Phase 0 report.
+/// Corpus profile. `small` is for iteration, `full` is for the Phase 0 report, `ci` is the
+/// generated fixture set of the size-regression gate (no sources; see [`super::fixtures`]).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, clap::ValueEnum,
 )]
@@ -19,6 +20,7 @@ use super::extract::check_portable_component;
 pub enum Profile {
     Small,
     Full,
+    Ci,
 }
 
 impl Profile {
@@ -27,6 +29,7 @@ impl Profile {
         match self {
             Profile::Small => "small",
             Profile::Full => "full",
+            Profile::Ci => "ci",
         }
     }
 }

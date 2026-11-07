@@ -72,6 +72,12 @@ pub struct Input {
     /// runs; file identities on ReFS and on network file systems may not be unique or stable
     /// (the caveat of the `same-file` crate).
     pub identity: Option<u64>,
+    /// `len` is a cap, not the file's length: a read stops at `len` bytes (no one-past probe),
+    /// whatever the file holds (a calibration's sample, [`Pipeline::run_sources_capped`]).
+    /// Always false from the walk.
+    ///
+    /// [`Pipeline::run_sources_capped`]: crate::Pipeline::run_sources_capped
+    pub capped: bool,
 }
 
 /// Check that an input's archive path is one the format accepts.
@@ -364,6 +370,7 @@ pub(crate) fn walk_sources_with(
                 source: path.to_path_buf(),
                 symlink_target: None,
                 identity: None,
+                capped: false,
             });
             w.descend(path, &md, &root.name, reporter)?;
         } else if md.is_file() {
@@ -382,6 +389,7 @@ pub(crate) fn walk_sources_with(
                 mtime_ns: mtime_ns(&md),
                 flags,
                 identity: Some(walked_identity(&source, &md)?),
+                capped: false,
                 source,
                 symlink_target: None,
             });
@@ -535,6 +543,7 @@ impl Walker<'_> {
                         source: c.path.clone(),
                         symlink_target: None,
                         identity: None,
+                        capped: false,
                     });
                     stack.push((c.path, path));
                     Ok(())
@@ -550,6 +559,7 @@ impl Walker<'_> {
                         mtime_ns: mtime_ns(&m),
                         flags,
                         identity: Some(walked_identity(&source, &m)?),
+                        capped: false,
                         source,
                         symlink_target: None,
                     });
@@ -565,6 +575,7 @@ impl Walker<'_> {
                 mtime_ns: mtime_ns(&c.md),
                 flags,
                 identity: Some(walked_identity(&c.path, &c.md)?),
+                capped: false,
                 source: c.path,
                 symlink_target: None,
             });
@@ -594,6 +605,7 @@ impl Walker<'_> {
             source: c.path.clone(),
             symlink_target: Some(target),
             identity: None,
+            capped: false,
         });
         Ok(())
     }
@@ -609,6 +621,7 @@ fn dir_input(path: String, c: &Child, flags: EntryFlags) -> Input {
         source: c.path.clone(),
         symlink_target: None,
         identity: None,
+        capped: false,
     }
 }
 
@@ -849,6 +862,7 @@ pub(crate) mod tests {
             source: PathBuf::new(),
             symlink_target: None,
             identity: None,
+            capped: false,
         }
     }
 

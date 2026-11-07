@@ -344,11 +344,14 @@ impl TokenPredictor {
             CodecCorrection::BlockTypeCorrection,
             self.predict_block_type(),
         );
+        // LitePack change 15: a failed read of the corrections is refused before the value is used.
+        codec.litepack_check()?;
 
         match bt {
             BT_STORED => {
                 let uncompressed_len = codec
                     .decode_correction_diff(CodecCorrection::UncompressBlockLenCorrection, 65535);
+                codec.litepack_check()?; // LitePack change 15
 
                 if uncompressed_len > 65535 || uncompressed_len > input.remaining() {
                     return err_exit_code(ExitCode::InvalidDeflate, "Invalid stored block len");
@@ -364,6 +367,7 @@ impl TokenPredictor {
 
                 let last =
                     codec.decode_correction_bool(CodecCorrection::Last, input.remaining() == 0);
+                codec.litepack_check()?; // LitePack change 15
 
                 return Ok(DeflateTokenBlock {
                     block_type: DeflateTokenBlockType::Stored { uncompressed },
@@ -379,6 +383,7 @@ impl TokenPredictor {
         }
 
         let mut blocksize = codec.decode_correction(CodecCorrection::TokenCount);
+        codec.litepack_check()?; // LitePack change 15
         if blocksize == 0 {
             blocksize = self.max_token_count;
         } else {
@@ -399,6 +404,7 @@ impl TokenPredictor {
         codec.decode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
         while input.remaining() != 0 && tokens.len() < blocksize as usize {
+            codec.litepack_check()?; // LitePack change 15 (the previous token's corrections)
             codec.decode_verify_state(
                 "token",
                 if VERIFY {
@@ -446,6 +452,7 @@ impl TokenPredictor {
 
             if new_len != predicted_ref.len() {
                 let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection);
+                codec.litepack_check()?; // LitePack change 15
                 // LitePack change 6 (LITEPACK-CHANGES.md): the limited recreation refuses more
                 // hops than the parameters' max_chain (checked before the + 1, which could wrap).
                 self.check_hops(u64::from(hops) + 1)?;
@@ -459,6 +466,7 @@ impl TokenPredictor {
                 );
             } else {
                 let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection);
+                codec.litepack_check()?; // LitePack change 15
                 if hops != 0 {
                     // LitePack change 6
                     self.check_hops(u64::from(hops))?;
@@ -484,6 +492,7 @@ impl TokenPredictor {
         };
 
         let last = codec.decode_correction_bool(CodecCorrection::Last, input.remaining() == 0);
+        codec.litepack_check()?; // LitePack change 15
 
         let b = DeflateTokenBlock {
             last,

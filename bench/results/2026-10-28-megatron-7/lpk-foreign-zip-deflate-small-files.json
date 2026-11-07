@@ -1,0 +1,159 @@
+{
+  "class": "small-files",
+  "corpus": {
+    "class_blake3": "6cd302919095a5677d6d726972ac36e0850889a1961b7eaeea5d75bc87738910",
+    "class_bytes": 50016512,
+    "class_files": 20000,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "information": {
+    "kind": "foreign-extract",
+    "maker": "7z",
+    "maker_version": "26.03"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 12449380,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.546875,
+      "peak_job_memory_bytes": 1696481280,
+      "peak_memory_bytes": 145645568,
+      "peak_process_commit_bytes": 1696481280,
+      "timed_out": false,
+      "user_cpu_seconds": 1.375,
+      "wall_seconds": 0.7163468
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.921875,
+      "peak_job_memory_bytes": 36605952,
+      "peak_memory_bytes": 28340224,
+      "peak_process_commit_bytes": 22663168,
+      "timed_out": false,
+      "user_cpu_seconds": 0.40625,
+      "wall_seconds": 1.9114787
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 12449380,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.546875,
+        "peak_job_memory_bytes": 1696481280,
+        "peak_memory_bytes": 145645568,
+        "peak_process_commit_bytes": 1696481280,
+        "timed_out": false,
+        "user_cpu_seconds": 1.375,
+        "wall_seconds": 0.7163468
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.953125,
+        "peak_job_memory_bytes": 36605952,
+        "peak_memory_bytes": 28286976,
+        "peak_process_commit_bytes": 22474752,
+        "timed_out": false,
+        "user_cpu_seconds": 0.40625,
+        "wall_seconds": 2.1025846
+      }
+    },
+    {
+      "archive_bytes": 12449380,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.546875,
+        "peak_job_memory_bytes": 1696481280,
+        "peak_memory_bytes": 145645568,
+        "peak_process_commit_bytes": 1696481280,
+        "timed_out": false,
+        "user_cpu_seconds": 1.375,
+        "wall_seconds": 0.7163468
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.765625,
+        "peak_job_memory_bytes": 35860480,
+        "peak_memory_bytes": 28491776,
+        "peak_process_commit_bytes": 22691840,
+        "timed_out": false,
+        "user_cpu_seconds": 0.609375,
+        "wall_seconds": 1.9114787
+      }
+    },
+    {
+      "archive_bytes": 12449380,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.546875,
+        "peak_job_memory_bytes": 1696481280,
+        "peak_memory_bytes": 145645568,
+        "peak_process_commit_bytes": 1696481280,
+        "timed_out": false,
+        "user_cpu_seconds": 1.375,
+        "wall_seconds": 0.7163468
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.921875,
+        "peak_job_memory_bytes": 36790272,
+        "peak_memory_bytes": 28340224,
+        "peak_process_commit_bytes": 22663168,
+        "timed_out": false,
+        "user_cpu_seconds": 0.3125,
+        "wall_seconds": 1.9062014999999999
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 2,
+  "setting": {
+    "compress_args": [
+      "a",
+      "-bd",
+      "-y",
+      "-tzip",
+      "-mm=Deflate",
+      "-mx5",
+      "-mmt=24",
+      "../../tmp/run10284/made-small-files/m0/a.zip",
+      "small-files"
+    ],
+    "extract_args": [
+      "x",
+      "a.zip",
+      "x"
+    ],
+    "id": "zip-deflate"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "lpk-foreign",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "0.0.1+52f6220d11cc"
+  },
+  "verification": {
+    "files_checked": 20000,
+    "files_ok": 20000,
+    "verified": true
+  }
+}

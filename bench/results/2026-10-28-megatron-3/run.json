@@ -1,0 +1,755 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "b04615025a99114983ee44563ebe3d8b4e152e6589669b19e98d6ed41c3ba86e",
+  "classes": [
+    "photo-jpeg-edited",
+    "photo-raw-png",
+    "small-files",
+    "software-installed",
+    "source-git",
+    "text-prose",
+    "video",
+    "vm-image"
+  ],
+  "combinations": [
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "photo-jpeg-edited",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "photo-raw-png",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "small-files",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "small-files",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "small-files",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "small-files",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "software-installed",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "source-git",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "source-git",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "source-git",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "source-git",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "source-git",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "video",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "video",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "video",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "video",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "video",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "vm-image",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}

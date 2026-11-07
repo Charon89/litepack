@@ -250,15 +250,13 @@ fn check_bound(name: &str, s: &ExtractSummary, peak: u64) {
         s.workers + 2 <= room,
         "{name}: the bound must bind with blocks to spare"
     );
+    // The record decoders' needs beyond the floor come from the gate's pool (R115).
+    let counted = m.total_in_flight(s.workers, s.in_flight) + m.pool;
     assert!(
-        peak <= m.total_in_flight(s.workers, s.in_flight),
-        "{name}: measured {peak} above counted {}",
-        m.total_in_flight(s.workers, s.in_flight)
+        peak <= counted,
+        "{name}: measured {peak} above counted {counted}"
     );
-    assert!(
-        m.total_in_flight(s.workers, s.in_flight) <= m.budget.bytes,
-        "{name}: counted above budget"
-    );
+    assert!(counted <= m.budget.bytes, "{name}: counted above budget");
     assert!(
         (s.workers..=s.workers * lpk_core::extract::HELD_PER_WORKER).contains(&s.in_flight),
         "{name}: permits {} for {} workers",
@@ -487,9 +485,11 @@ fn a_small_budget_binds_for_a_peeled_archive() {
     let want = hashes(src.path());
     let (wide, _) = measure(&arch, &work.path().join("o0"), THREADS, Some(u64::MAX / 2));
     assert!(wide.memory.nested > 0, "{:?}", wide.memory);
-    let budget = wide.memory.total(3);
+    // Three blocks at the floor plus one declared term beyond it: a lone decode's room for the
+    // declared term binds the workers at about three (R115, R117).
+    let m = wide.memory;
+    let budget = m.total(3) + m.declared.saturating_sub(m.decoder);
     let (s, peak) = measure(&arch, &work.path().join("o1"), THREADS, Some(budget));
-    assert_eq!(s.workers, 3);
     check_bound("peeled", &s, peak);
     let (one, peak) = measure(&arch, &work.path().join("o2"), 1, Some(budget));
     check_one("peeled", &one, peak);

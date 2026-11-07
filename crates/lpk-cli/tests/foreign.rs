@@ -116,6 +116,49 @@ fn x_and_l_route_a_foreign_archive_to_the_worker() {
     assert_eq!(code, 2, "{err}");
 }
 
+/// E6-5: a zoned foreign archive gives every file the host writes its zone (the host writes
+/// the stream, never the worker); `--motw off` and an unzoned archive: none.
+#[cfg(windows)]
+#[test]
+fn a_zoned_foreign_archive_marks_every_file_the_host_writes() {
+    let st = stage();
+    let a = st.fixture(&[
+        Member::dir("d"),
+        Member::file("d/a.txt", b"hello"),
+        Member::file("b.bin", &[1, 2, 3]),
+    ]);
+    let zone = |p: &Path| {
+        let mut n = p.as_os_str().to_owned();
+        n.push(":Zone.Identifier");
+        std::fs::read(n).ok()
+    };
+    let unzoned = st.dir.path().join("plain");
+    let (code, _, err) = st.lpk(None, &["x", s(&a), s(&unzoned)]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(zone(&unzoned.join("b.bin")), None);
+    let mut n = a.as_os_str().to_owned();
+    n.push(":Zone.Identifier");
+    std::fs::write(
+        n,
+        "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.invalid/\r\n",
+    )
+    .unwrap();
+    let dest = st.dir.path().join("zoned");
+    let (code, _, err) = st.lpk(None, &["x", s(&a), s(&dest)]);
+    assert_eq!(code, 0, "{err}");
+    for f in ["d/a.txt", "b.bin"] {
+        assert_eq!(
+            zone(&dest.join(f)).as_deref(),
+            Some(&b"[ZoneTransfer]\r\nZoneId=3\r\n"[..]),
+            "{f}"
+        );
+    }
+    let off = st.dir.path().join("off");
+    let (code, _, err) = st.lpk(None, &["x", s(&a), s(&off), "--motw", "off"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(zone(&off.join("b.bin")), None);
+}
+
 #[test]
 fn worker_failures_are_named_errors_with_exit_2() {
     let st = stage();

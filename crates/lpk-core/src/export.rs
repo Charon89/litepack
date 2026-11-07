@@ -68,7 +68,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use lpk_format::{Archive, Credentials, Entry, EntryKind, FormatError, MemoryPriors};
 
 use crate::extract::{
-    keep, pool_size, ExtractMemory, ExtractOptions, Held, Outcome, Permits, Shape, DECODER_STOPPED,
+    alone_memory_for, keep, pool_size, AloneGate, ExtractMemory, ExtractOptions, GateTerms, Held,
+    Outcome, Permits, Shape, DECODER_STOPPED,
 };
 use crate::memory::{Budget, BudgetSource};
 use crate::progress::{Monitor, Reporter, Stage};
@@ -395,6 +396,9 @@ fn decode_error(
     block: usize,
     source: FormatError,
 ) -> CoreError {
+    if crate::extract::is_cancelled_decode(&source) {
+        return CoreError::Cancelled;
+    }
     CoreError::Decode {
         block,
         path: first_entry
@@ -695,9 +699,13 @@ where
         placements: places.len() as u64,
         name_bytes,
         max_writers: 1,
+        raise_default: false,
     };
     let pool = pool_size(archive, opts, &shape);
-    let m = pool.memory;
+    // The export counts every block it holds at the declared decoder term; its gate reserves
+    // record needs beyond the floor from what that leaves (R115).
+    let floor = pool.memory.decoder;
+    let m = pool.memory.with_declared();
     if m.budget.source == BudgetSource::Given && m.budget.bytes < m.total(1) {
         return Err(CoreError::InvalidOption(format!(
             "--memory {} is below what one block in flight needs: {} bytes ({} per block, {} fixed)",
@@ -734,6 +742,31 @@ where
     let frame_len: Vec<u64> = archive.index().blocks.iter().map(|b| b.frame_len).collect();
     let token = rep.token();
     let permits = Permits::new(held);
+    // Decodes that need more than the archive declares run alone (extract.rs, `AloneGate`).
+    let permits_n = u64::try_from(held).unwrap_or(u64::MAX);
+    let lone = alone_memory_for(&memory, workers, held);
+    let gate =
+        AloneGate::with_terms(
+            &pool,
+            GateTerms {
+                shared: memory
+                    .budget
+                    .bytes
+                    .saturating_sub(memory.fixed)
+                    .saturating_sub(permits_n.saturating_mul(
+                        m.per_block.saturating_sub(m.declared.saturating_sub(floor)),
+                    )),
+                floor,
+                lone: if m.budget.source == BudgetSource::Given {
+                    lone
+                } else {
+                    lone.max(m.declared)
+                },
+                declared: m.declared,
+            },
+        );
+    archive.set_decode_gate(Some(gate.clone()));
+    permits.attach_gate(gate);
     let decoded = AtomicU64::new(0);
     let reads = AtomicU64::new(0);
     let bytes_in = AtomicU64::new(0);
@@ -803,11 +836,15 @@ where
                                 };
                                 let r = catch_unwind(AssertUnwindSafe(|| {
                                     let _token = budget.hold();
-                                    fork.decode_block_checked(b)
+                                    permits.decode(|| fork.decode_block_checked(b))
                                 }));
                                 decoded.fetch_add(1, Ordering::Relaxed);
                                 match r {
-                                    Ok(r) => {
+                                    Ok(None) => {
+                                        permits.release();
+                                        break;
+                                    }
+                                    Ok(Some(r)) => {
                                         if tx.send((k, r)).is_err() {
                                             break;
                                         }

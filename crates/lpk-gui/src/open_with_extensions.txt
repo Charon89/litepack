@@ -1,0 +1,8 @@
+# The foreign formats registration may list in "Open with" (--open-with); never an extension's default.
+# One extension per line, lower case, no dot. crates/lpk-api/tests/open_with_extensions.rs keeps this equal to
+# what the engine opens today (zip, 7z, tar, tgz, and rar since E4-4 made Format::Rar readable; ISO, CAB and the rest stay out).
+zip
+7z
+tar
+tgz
+rar

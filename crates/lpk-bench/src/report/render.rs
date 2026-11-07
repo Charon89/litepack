@@ -1,7 +1,7 @@
 //! The Markdown of the report. Every number in sections 2 to 6 is printed through
 //! [`Traced::show`], so it carries its source bracket.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::model::{
     blend, class_bytes, est_kind, gates, marked_verdict, settings, unclean_reasons, Baseline,
@@ -172,6 +172,56 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
                 d.settle_ms,
                 d.antivirus_changed,
                 brackets(&BTreeSet::from([d.run_src]))
+            ));
+        }
+        if b.pooled.iter().any(|d| d.manifest != b.pooled[0].manifest) {
+            // E8-10: the directories measured different manifests; rows pooled class by class.
+            s.push_str(
+                "- corpus manifests differ between the directories (rows pool class by class: \
+                 same manifest, or equal class digests, E8-10):\n",
+            );
+            for d in &b.pooled {
+                s.push_str(&format!(
+                    "  - `{}`: manifest BLAKE3 `{}`\n",
+                    d.label, d.manifest
+                ));
+            }
+            // Which files each class was measured on: the manifest(s) its pooled rows name.
+            let mut by_class: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for (r, _) in &b.results {
+                by_class
+                    .entry(r.class.as_str())
+                    .or_default()
+                    .insert(r.corpus.manifest_blake3.as_str());
+            }
+            for (class, manifests) in &by_class {
+                let list: Vec<String> = manifests.iter().map(|m| format!("`{m}`")).collect();
+                s.push_str(&format!(
+                    "  - class `{class}` measured on manifest {}\n",
+                    list.join(" and ")
+                ));
+            }
+            let classes = super::classes_pooled_by_digest(b);
+            s.push_str(&format!(
+                "  - classes whose rows come from more than one manifest, pooled by equal class \
+                 digest: {}\n",
+                if classes.is_empty() {
+                    "none".to_string()
+                } else {
+                    classes
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ));
+        }
+        for (probe, (manifest, classes)) in &inputs.probes.refused {
+            let list: Vec<String> = classes.iter().map(|c| format!("`{c}`")).collect();
+            s.push_str(&format!(
+                "- probe {probe} was taken on manifest `{manifest}`, which no pooled row of these \
+                 classes names, so it does not count for them (E8-10): {}\n",
+                list.join(", ")
             ));
         }
         if !b.superseded.is_empty() {
@@ -386,6 +436,61 @@ fn baseline_per_class(s: &mut String, m: &Model, inputs: &Inputs) {
         ));
         s.push('\n');
     }
+    information_table(s, inputs);
+}
+
+/// E4-8's information rows: a foreign archive made once by its maker, extracted by each tool.
+/// Printed only when present; no claim, never in an estimate or a gate.
+fn information_table(s: &mut String, inputs: &Inputs) {
+    let rows = super::model::information_rows(&inputs.baseline);
+    if rows.is_empty() {
+        return;
+    }
+    s.push_str(
+        "### Information rows (no claim; never in a gate)\n\nEach archive was made once per \
+         class and setting by its maker, outside the timing; the tools extract that same file, \
+         each extraction verified against the manifest. Archive size is the made archive's.\n\n",
+    );
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| match &r.state {
+            RowState::Measured(x) => vec![
+                r.label(),
+                r.class.clone(),
+                x.size_pct.show(pct1),
+                x.extract_mbps.show(mbps_s),
+                x.repeats.show(count_s),
+            ],
+            RowState::Failed { step, reason, src } => vec![
+                r.label(),
+                r.class.clone(),
+                format!(
+                    "FAILED ({step}): {reason} {}",
+                    brackets(&BTreeSet::from([*src]))
+                ),
+                "-".into(),
+                "-".into(),
+            ],
+            RowState::Skipped { reason, src } => vec![
+                r.label(),
+                r.class.clone(),
+                format!("skipped: {reason} {}", brackets(&BTreeSet::from([*src]))),
+                "-".into(),
+                "-".into(),
+            ],
+        })
+        .collect();
+    s.push_str(&md_table(
+        &[
+            "tool/setting",
+            "class",
+            "archive size (% of class bytes)",
+            "extract MB/s",
+            "repeats used",
+        ],
+        &table,
+    ));
+    s.push('\n');
 }
 
 fn baseline_blended(s: &mut String, m: &Model, inputs: &Inputs) {

@@ -1,0 +1,255 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "3e0d4411fa4fdf5ff76ac849211c1763c6b3614f6b93845928e4438c07607666",
+  "classes": [
+    "csv-json",
+    "dups",
+    "jpeg",
+    "logs",
+    "office",
+    "pdf",
+    "png",
+    "random",
+    "small-files",
+    "text-bwt",
+    "text-prose",
+    "versions"
+  ],
+  "combinations": [
+    {
+      "class": "csv-json",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "csv-json",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "csv-json",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "dups",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "dups",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "dups",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "jpeg",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "jpeg",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "jpeg",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "logs",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "logs",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "logs",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "office",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "office",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "office",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "pdf",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "pdf",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "pdf",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "png",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "png",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "png",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "random",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "random",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "random",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "small-files",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-bwt",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-bwt",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-bwt",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "text-prose",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    },
+    {
+      "class": "versions",
+      "outcome": "measured",
+      "setting": "fast",
+      "tool": "lpk"
+    },
+    {
+      "class": "versions",
+      "outcome": "measured",
+      "setting": "balanced",
+      "tool": "lpk"
+    },
+    {
+      "class": "versions",
+      "outcome": "measured",
+      "setting": "store",
+      "tool": "lpk"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 1,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 2
+}

@@ -18,6 +18,7 @@ pub mod error;
 pub mod frame;
 pub mod graph;
 pub mod header;
+pub mod hook;
 pub mod index;
 pub mod lzma;
 pub mod magic;
@@ -37,7 +38,8 @@ pub mod writer;
 pub mod zstd;
 
 pub use archive::{
-    generation_rules_table, read_key_slot, rollback, Archive, Diagnosis, Generation,
+    committed_chain, generation_rules_table, read_key_slot, rollback, Archive, Diagnosis,
+    Generation,
 };
 pub use chunk::{
     chunk_record_table, verify_file, verify_range, ChunkIndex, ChunkIter, ChunkLookup, ChunkPlace,
@@ -56,7 +58,8 @@ pub use crypto::{
     Argon2Params, Credentials, KeySlot, Sealer, Suite, INDEX_SEQUENCE, KEY_SLOT_LEN,
 };
 pub use decode::{
-    decode_block, decode_block_in, DecodeContext, NoContext, PrimitiveDecoder, Registry,
+    cancelled, decode_block, decode_block_in, reserve, DecodeContext, DecodeGate, Denied, Grant,
+    NoContext, PrimitiveDecoder, Registry, Reservation,
 };
 pub use entry::{
     entry_byte_table, entry_flag_table, entry_kind_table, entry_payload_table, validate_path,
@@ -75,6 +78,7 @@ pub use graph::{
     block_header_table, graph_layout_table, BlockHeader, Graph, Step, MAX_PARAMS, MAX_STEPS,
 };
 pub use header::{header_byte_table, header_flag_table, FormatVersion, Header, HeaderFlags};
+pub use hook::{no_hook, BlockHook, BlockStep};
 pub use lzma::LzmaDecoder;
 pub use magic::MAGIC;
 pub use primitive::{primitive_table, GraphResources, PrimitiveId};

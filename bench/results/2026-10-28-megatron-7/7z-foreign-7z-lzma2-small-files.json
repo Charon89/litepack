@@ -1,0 +1,162 @@
+{
+  "class": "small-files",
+  "corpus": {
+    "class_blake3": "6cd302919095a5677d6d726972ac36e0850889a1961b7eaeea5d75bc87738910",
+    "class_bytes": 50016512,
+    "class_files": 20000,
+    "manifest_blake3": "a52af02774b9134362467adc7b6bf273f6f89592085ce71fe51f05e10574e12d",
+    "profile": "full"
+  },
+  "information": {
+    "kind": "foreign-extract",
+    "maker": "7z",
+    "maker_version": "26.03"
+  },
+  "measurement": {
+    "env_stripped": [
+      "XZ_OPT",
+      "XZ_DEFAULTS",
+      "ZSTD_CLEVEL",
+      "ZSTD_NBTHREADS",
+      "GZIP",
+      "RAR",
+      "TAR_OPTIONS",
+      "TAR_READER_OPTIONS",
+      "TAR_WRITER_OPTIONS",
+      "TAPE"
+    ],
+    "every_repeat_verified": true,
+    "peak_memory_kind": "peak-working-set",
+    "wall_cpu_method": "wall: monotonic clock around the process (lpk-procstat-sys); cpu: user and kernel time of the whole process tree from OS accounting"
+  },
+  "median": {
+    "archive_bytes": 4407200,
+    "compress": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 0.859375,
+      "peak_job_memory_bytes": 408981504,
+      "peak_memory_bytes": 412971008,
+      "peak_process_commit_bytes": 408981504,
+      "timed_out": false,
+      "user_cpu_seconds": 7.21875,
+      "wall_seconds": 6.681699
+    },
+    "extract": {
+      "descendants_killed": false,
+      "kernel_cpu_seconds": 1.84375,
+      "peak_job_memory_bytes": 58781696,
+      "peak_memory_bytes": 64815104,
+      "peak_process_commit_bytes": 58781696,
+      "timed_out": false,
+      "user_cpu_seconds": 0.328125,
+      "wall_seconds": 2.4567034
+    }
+  },
+  "repeats": [
+    {
+      "archive_bytes": 4407200,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.859375,
+        "peak_job_memory_bytes": 408981504,
+        "peak_memory_bytes": 412971008,
+        "peak_process_commit_bytes": 408981504,
+        "timed_out": false,
+        "user_cpu_seconds": 7.21875,
+        "wall_seconds": 6.681699
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.78125,
+        "peak_job_memory_bytes": 58773504,
+        "peak_memory_bytes": 64811008,
+        "peak_process_commit_bytes": 58773504,
+        "timed_out": false,
+        "user_cpu_seconds": 0.359375,
+        "wall_seconds": 2.4535276
+      }
+    },
+    {
+      "archive_bytes": 4407200,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.859375,
+        "peak_job_memory_bytes": 408981504,
+        "peak_memory_bytes": 412971008,
+        "peak_process_commit_bytes": 408981504,
+        "timed_out": false,
+        "user_cpu_seconds": 7.21875,
+        "wall_seconds": 6.681699
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.84375,
+        "peak_job_memory_bytes": 58793984,
+        "peak_memory_bytes": 64823296,
+        "peak_process_commit_bytes": 58793984,
+        "timed_out": false,
+        "user_cpu_seconds": 0.328125,
+        "wall_seconds": 2.4567034
+      }
+    },
+    {
+      "archive_bytes": 4407200,
+      "compress": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 0.859375,
+        "peak_job_memory_bytes": 408981504,
+        "peak_memory_bytes": 412971008,
+        "peak_process_commit_bytes": 408981504,
+        "timed_out": false,
+        "user_cpu_seconds": 7.21875,
+        "wall_seconds": 6.681699
+      },
+      "extract": {
+        "descendants_killed": false,
+        "kernel_cpu_seconds": 1.9375,
+        "peak_job_memory_bytes": 58781696,
+        "peak_memory_bytes": 64815104,
+        "peak_process_commit_bytes": 58781696,
+        "timed_out": false,
+        "user_cpu_seconds": 0.203125,
+        "wall_seconds": 2.4668463
+      }
+    }
+  ],
+  "repeats_requested": 3,
+  "schema_version": 2,
+  "setting": {
+    "compress_args": [
+      "a",
+      "-bd",
+      "-y",
+      "-t7z",
+      "-m0=LZMA2",
+      "-mx5",
+      "-mmt=24",
+      "../../tmp/run10284/made-small-files/m1/a.7z",
+      "small-files"
+    ],
+    "extract_args": [
+      "x",
+      "-bd",
+      "-y",
+      "-mmt=24",
+      "-ox",
+      "a.7z"
+    ],
+    "id": "7z-lzma2"
+  },
+  "threads": 24,
+  "tool": {
+    "id": "7z-foreign",
+    "mode": "directory",
+    "ratio_depends_on_threads": false,
+    "version": "26.03"
+  },
+  "verification": {
+    "files_checked": 20000,
+    "files_ok": 20000,
+    "verified": true
+  }
+}

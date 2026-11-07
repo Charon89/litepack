@@ -51,6 +51,16 @@
 #   dedup           true when the tool deduplicates across files (default false; D-43). Gate G2
 #                   is compared against the best tool without this flag; flagged tools' best
 #                   rows are printed as reference only. Recorded in `tools.json`.
+#   zone            per setting, optional (E6-5): a ZoneId 0-4 the runner writes as the archive's
+#                   Zone.Identifier stream between compression and extraction (untimed), so the
+#                   extraction runs from a zoned archive. Windows only (elsewhere the row fails
+#                   with the reason); recorded in the row's `setting.zone`.
+#   foreign         optional (E4-8): a foreign-extraction tool. The id of the tool (the maker)
+#                   whose `create` template writes the archive once per class and setting,
+#                   untimed, with the setting's `compress` as the maker's `{settings}`; this tool
+#                   has no create template and only extracts it. Its rows carry `information`
+#                   (never in a gate) and it is left out of `--tools all`. Per setting,
+#                   `extension` names that archive's extension.
 #
 # Working-directory rules. CREATE (every directory-mode tool and the tar step of tar-stream
 # tools): the runner executes the tool with its working directory set to the parent of the class
@@ -256,6 +266,24 @@ note = "This repository's own build (target/release, found relative to the curre
 id = "fast"
 compress = ["--fast"]
 extract = []
+# Mark of the Web's cost (E6-5, docs/notes/e6-design.md section 4): the runner writes a
+# Zone.Identifier stream with ZoneId=3 onto the archive before extraction (Windows only), so
+# `fast-zoned` extracts with propagation (every file gets the stream) and `fast-zoned-no-motw`
+# the same zoned archive with the opt-out; both against `fast` on `small-files`. Outside
+# Windows both rows are recorded as skipped ("zone streams need Windows"). They exist for that
+# one comparison: a full run that should leave them out names its settings with `--settings`
+# (for example `--settings fast,balanced,...`), and E6-5's row picks them the same way:
+# `--tools lpk --settings fast,fast-zoned,fast-zoned-no-motw --classes small-files`.
+[[tool.setting]]
+id = "fast-zoned"
+compress = ["--fast"]
+extract = []
+zone = 3
+[[tool.setting]]
+id = "fast-zoned-no-motw"
+compress = ["--fast"]
+extract = ["--motw", "off"]
+zone = 3
 # The JPEG peel's A/B on the Fast tier (E2-25, route (a)): `fast` carries the peel; this row
 # stores JPEGs as they are, so their extraction is a copy.
 [[tool.setting]]
@@ -270,10 +298,17 @@ extract = []
 id = "balanced-extension"
 compress = ["--balanced", "--ordering", "extension"]
 extract = []
-# The version ordering's A/B (E2-9 task E): a file's versions adjacent inside the window.
+# The version ordering's A/B (E2-9 task E): a file's versions adjacent inside the window. Since
+# E2-26 the `balanced` default orders so too; this row stays for the comparison.
 [[tool.setting]]
 id = "balanced-versions"
 compress = ["--balanced", "--ordering", "versions"]
+extract = []
+# The old order (E2-26, D-104): `balanced` carries the version ordering by default since E2-26;
+# this row restores path order so the ordering stays measurable.
+[[tool.setting]]
+id = "balanced-no-versions"
+compress = ["--balanced", "--ordering", "none"]
 extract = []
 # The Deflate peel's A/B (E2-10): `balanced` carries the peel by default; this row turns it off.
 [[tool.setting]]
@@ -358,3 +393,59 @@ install = { url = "https://www.powerarchiver.com/" }
 manual = true
 verified = false
 note = "Strongest-setting flags and archive format not verified. The owner supplies command lines (and the extension) in bench/tools.local.toml (docs/BASELINES.md)."
+
+# Foreign-format extraction, information rows only (E4-8; never in a gate, no claim). `7z` makes
+# each setting's archive once per class (ZIP Deflate, 7z LZMA2; the setting's `compress` are 7z's
+# arguments), outside every timed step; `lpk x` and `7z x` then extract that same file, each
+# verified against the manifest. Left out of `--tools all`; asked for by name:
+# `lpk-bench run --tools lpk-foreign,7z-foreign --classes office-pdf,source-git,small-files`.
+# The rows need a release `lpk` (`target/release/lpk`, found by the hint) with the release worker
+# beside it: `cargo build --release -p lpk-cli`, `cargo build --release` in `workers/`, then copy
+# `workers/target/release/lpk-worker(.exe)` into `target/release/` (lpk starts the worker from its
+# own directory).
+[[tool]]
+id = "lpk-foreign"
+name = "LitePack, extracting foreign archives"
+exe = { windows = ["lpk"], linux = ["lpk"], macos = ["lpk"] }
+hints_first = true
+hints = { windows = ["target/release/lpk.exe"], linux = ["target/release/lpk"], macos = ["target/release/lpk"] }
+version = { args = ["--version"], pattern = 'lpk (\S+)' }
+extension = ".zip"
+mode = "directory"
+layout = "nested"
+foreign = "7z"
+extract = ["x", "{archive}", "{outdir}", "{settings}"]
+licence = "Apache-2.0 OR MIT (this repository)"
+install = { url = "built from this repository: cargo build --release -p lpk-cli, and lpk-worker in workers/" }
+note = "Extracts through the sandboxed lpk-worker, which must sit beside lpk."
+[[tool.setting]]
+id = "zip-deflate"
+compress = ["-tzip", "-mm=Deflate", "-mx5"]
+extension = ".zip"
+[[tool.setting]]
+id = "7z-lzma2"
+compress = ["-t7z", "-m0=LZMA2", "-mx5"]
+extension = ".7z"
+
+[[tool]]
+id = "7z-foreign"
+name = "7-Zip, extracting the same foreign archives"
+exe = { windows = ["7z"], linux = ["7zz", "7z"], macos = ["7zz"] }
+hints = { windows = ["%ProgramFiles%/7-Zip/7z.exe", "%ProgramFiles(x86)%/7-Zip/7z.exe", "%LOCALAPPDATA%/Programs/7-Zip/7z.exe"] }
+version = { args = [], pattern = '7-Zip[^\d\r\n]*(\d+(?:\.\d+)+)' }
+extension = ".zip"
+mode = "directory"
+layout = "nested"
+foreign = "7z"
+extract = ["x", "-bd", "-y", "{threads}", "-o{outdir}", "{archive}"]
+threads = ["-mmt={n}"]
+licence = "LGPL-2.1-or-later with unRAR restriction; used as an external program only"
+install = { winget = "7zip.7zip", apt = "7zip", url = "https://www.7-zip.org/" }
+[[tool.setting]]
+id = "zip-deflate"
+compress = ["-tzip", "-mm=Deflate", "-mx5"]
+extension = ".zip"
+[[tool.setting]]
+id = "7z-lzma2"
+compress = ["-t7z", "-m0=LZMA2", "-mx5"]
+extension = ".7z"

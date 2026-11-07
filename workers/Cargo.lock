@@ -430,6 +430,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpk-procstat-sys"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "windows",
+]
+
+[[package]]
 name = "lpk-proto"
 version = "0.0.1"
 dependencies = [
@@ -449,7 +457,10 @@ name = "lpk-worker"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "crc32fast",
+ "flate2",
  "lpk-foreign",
+ "lpk-procstat-sys",
  "lpk-proto",
  "lpk-sandbox-sys",
  "tempfile",

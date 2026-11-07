@@ -298,6 +298,7 @@ mod tests {
             source: PathBuf::from(path),
             symlink_target: None,
             identity: None,
+            capped: false,
         }
     }
 

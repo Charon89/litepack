@@ -414,6 +414,28 @@ impl HuffmanOriginalEncoding {
 
     /// writes dynamic huffman table to the output buffer using the bitwriter
     pub fn write(&self, bitwriter: &mut BitWriter, output_buffer: &mut Vec<u8>) -> Result<()> {
+        // LitePack change 13: counts outside what the header's fields can hold (HLIT, HDIST,
+        // HCLEN) are refused instead of overflowing the subtractions below.
+        if !(257..=288).contains(&self.num_literals)
+            || !(1..=32).contains(&self.num_dist)
+            || !(4..=19).contains(&self.num_code_lengths)
+        {
+            return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed");
+        }
+        // LitePack change 14: every value must fit the field it is written to (code-length codes
+        // in 3 bits, repeat counts in their 2, 3 or 7 bits); a wider one would spill into the
+        // next field (a debug assertion of `BitWriter::write`).
+        if self.code_lengths.iter().any(|&l| l > 7)
+            || self.lengths.iter().any(|&(tree_code, length)| match tree_code {
+                TreeCodeType::Code => length > 15,
+                _ => {
+                    let (sub, bits) = Self::get_tree_code_adjustment(tree_code);
+                    length < sub || u32::from(length - sub) >= 1 << bits
+                }
+            })
+        {
+            return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed");
+        }
         bitwriter.write(self.num_literals as u32 - 257, 5, output_buffer);
         bitwriter.write(self.num_dist as u32 - 1, 5, output_buffer);
         bitwriter.write(self.num_code_lengths as u32 - 4, 4, output_buffer);

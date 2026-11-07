@@ -1,0 +1,209 @@
+{
+  "antivirus_changed": false,
+  "antivirus_end": [
+    {
+      "name": "Windows Defender",
+      "product_state": "0x60100",
+      "scanner": "off"
+    },
+    {
+      "name": "Avast Antivirus",
+      "product_state": "0x42000",
+      "scanner": "snoozed"
+    }
+  ],
+  "antivirus_end_source": "queried",
+  "catalogue_blake3": "b04615025a99114983ee44563ebe3d8b4e152e6589669b19e98d6ed41c3ba86e",
+  "classes": [
+    "office-pdf",
+    "photo-jpeg"
+  ],
+  "combinations": [
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "office-pdf",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "mx5",
+      "tool": "7z"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "ultra",
+      "tool": "7z"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "m3",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "best",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "best-solid",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "best-rr3",
+      "tool": "rar"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "3",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "19",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "ultra22-long27",
+      "tool": "zstd"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "6",
+      "tool": "xz"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "measured",
+      "setting": "9",
+      "tool": "xz"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "skipped",
+      "setting": "m1",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "skipped",
+      "setting": "m5",
+      "tool": "zpaqfranz"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "skipped",
+      "setting": "default",
+      "tool": "tsaur"
+    },
+    {
+      "class": "photo-jpeg",
+      "outcome": "skipped",
+      "setting": "max",
+      "tool": "tsaur"
+    }
+  ],
+  "complete": true,
+  "long_run_s": 120,
+  "repeats_requested": 3,
+  "schema_version": 1,
+  "settle_ms_per_1000_files": 500,
+  "threads": 24
+}

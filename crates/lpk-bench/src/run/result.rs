@@ -11,7 +11,12 @@ use serde::{Deserialize, Serialize};
 use super::catalogue::Mode;
 use super::discover::{Discovered, Status};
 
+/// Version of `host.json`, `tools.json` and `run.json`.
 pub const SCHEMA_VERSION: u32 = 1;
+/// Version of a result row (`<tool>-<setting>-<class>.json`). 2 (E8-10) adds
+/// `corpus.class_blake3`, required from this version on; rows of version 1 have none and stay
+/// valid.
+pub const RESULT_SCHEMA_VERSION: u32 = 2;
 
 /// Pretty JSON with a trailing newline (object keys come out sorted).
 pub fn render<T: Serialize>(value: &T) -> String {
@@ -42,6 +47,10 @@ pub struct SettingRef {
     pub id: String,
     pub compress_args: Vec<String>,
     pub extract_args: Vec<String>,
+    /// The `ZoneId` the runner wrote onto the archive before extraction (E6-5's catalogue key
+    /// `zone`); absent when none was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +62,10 @@ pub struct CorpusRef {
     pub class_files: u64,
     /// Bytes in this class.
     pub class_bytes: u64,
+    /// The class digest (`ClassEntry::digest`, E8-10): equal digests mean the class held the same
+    /// files, whatever the rest of the manifest held. Absent in rows of schema version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_blake3: Option<String>,
 }
 
 /// Time of one step of a tar-stream pipeline.
@@ -248,7 +261,31 @@ pub struct ToolResult {
     /// The combination ran and failed; then there is no median.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed: Option<Failure>,
+    /// Present on an information row (E4-8), which the report shows apart and never puts in a
+    /// gate; absent on every other row (optional in result schema version 2, so older rows
+    /// still validate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub information: Option<Information>,
 }
+
+/// What kind of information row a row is, and where its archive came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Information {
+    /// [`FOREIGN_EXTRACT`]: the tool extracts a foreign archive its maker wrote once per class
+    /// and setting, outside every timed step; `setting.compress_args` are the maker's
+    /// arguments, and each repeat's `compress` is that one make step's measurement (the same in
+    /// every repeat), never a compression by the row's tool.
+    pub kind: String,
+    /// The maker's tool id (`7z`).
+    pub maker: String,
+    /// The maker's version as discovered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker_version: Option<String>,
+}
+
+/// [`Information::kind`] of a foreign-extraction row.
+pub const FOREIGN_EXTRACT: &str = "foreign-extract";
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -554,7 +591,7 @@ pub mod samples {
     pub fn measured() -> ToolResult {
         let repeats = vec![sample(1.0), sample(1.5), sample(2.0)];
         ToolResult {
-            schema_version: SCHEMA_VERSION,
+            schema_version: RESULT_SCHEMA_VERSION,
             tool: ToolRef {
                 id: "7z".into(),
                 version: Some("26.03".into()),
@@ -571,6 +608,7 @@ pub mod samples {
                     "text".into(),
                 ],
                 extract_args: vec!["x".into(), "-oout/x".into(), "out/a.7z".into()],
+                zone: None,
             },
             class: "text".into(),
             corpus: CorpusRef {
@@ -578,6 +616,7 @@ pub mod samples {
                 manifest_blake3: "ab".repeat(32),
                 class_files: 10,
                 class_bytes: 5000,
+                class_blake3: Some("cd".repeat(32)),
             },
             threads: 4,
             private: true,
@@ -594,7 +633,23 @@ pub mod samples {
             }),
             skipped: None,
             failed: None,
+            information: None,
         }
+    }
+
+    /// An information row (E4-8): `lpk` extracting a ZIP that 7-Zip made once.
+    pub fn foreign() -> ToolResult {
+        let mut r = measured();
+        r.private = false;
+        r.tool.id = "lpk-foreign".into();
+        r.tool.ratio_depends_on_threads = false;
+        r.setting.id = "zip-deflate".into();
+        r.information = Some(Information {
+            kind: FOREIGN_EXTRACT.into(),
+            maker: "7z".into(),
+            maker_version: Some("26.03".into()),
+        });
+        r
     }
 
     /// A combination that failed in the second repeat's extract step: one completed repeat, no

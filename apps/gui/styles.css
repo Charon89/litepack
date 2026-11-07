@@ -1,0 +1,1059 @@
+/* LitePack GUI (E5-12, "archive label"). The open archive is a labelled storage box: one strong
+   label band (its name and the packing-tape gauge), quiet Windows-native chrome around it.
+   The theme follows the system (prefers-color-scheme); high contrast uses the system colours
+   (forced-colors). System fonts only (the CSP allows no other). Rows have a fixed height in CSS
+   pixels (list.js ROW_PX = 30), which the webview scales with the display's DPI. */
+:root {
+  color-scheme: light dark;
+  --paper: #f4f6f8;
+  --sheet: #ffffff;
+  --ink: #17212b;
+  --slate: #56657a;
+  --rule: #d8dee6;
+  --board: #355772;
+  --board-tint: #e3eaf1;
+  --tape: #f2b53a;
+  --track: #e3e8ee;
+  --dash: #b9c4d0;
+  /* Danger: AA on --paper and --sheet in both themes. */
+  --danger: #b3261e;
+  --display: Bahnschrift, "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --text: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font: 13.5px/1.45 var(--text);
+}
+
+/* Dark: the system's choice, unless the settings dialog sets a theme (data-theme on the root). */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #10171e;
+  --sheet: #161f28;
+  --ink: #e7ecf1;
+  --slate: #99a6b4;
+  --rule: #283542;
+  --board: #8db3d2;
+  --board-tint: #1e2c3a;
+  --tape: #f2b53a;
+  --track: #24303c;
+  --dash: #3b4a59;
+  --danger: #ff8f86;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #10171e;
+    --sheet: #161f28;
+    --ink: #e7ecf1;
+    --slate: #99a6b4;
+    --rule: #283542;
+    --board: #8db3d2;
+    --board-tint: #1e2c3a;
+    --tape: #f2b53a;
+    --track: #24303c;
+    --dash: #3b4a59;
+    --danger: #ff8f86;
+  }
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The icons (index.html's sprite): line drawings on a 16px grid, drawn for LitePack, used as
+   svg > use href="#i-name" (stroked with the text colour). */
+.sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+button, input {
+  font: inherit;
+  color: inherit;
+}
+
+.icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Buttons: transparent, 4px radius, a quiet hover; the tape button is the view's one primary. */
+button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 120ms;
+}
+
+button:hover:not(:disabled) {
+  background: var(--board-tint);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary:not(:disabled) {
+  background: var(--tape);
+  color: #17212b;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--tape);
+  border-color: #17212b;
+}
+
+/* The command bar. */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+.actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.actions .gear {
+  margin-left: auto;
+  padding: 0 8px;
+}
+
+.divider {
+  align-self: stretch;
+  width: 1px;
+  margin: 4px 6px;
+  background: var(--rule);
+}
+
+.group {
+  display: flex;
+  gap: 4px;
+  padding-left: 8px;
+  margin-left: 6px;
+  border-left: 1px solid var(--rule);
+}
+
+.banner {
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sheet);
+}
+
+.banner button {
+  color: var(--board);
+  text-decoration: underline;
+}
+
+.shell-alert {
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.shell-alert[hidden] {
+  display: none;
+}
+
+.notices {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notice {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--sheet);
+}
+
+.notice span {
+  flex: 1;
+}
+
+/* The label band (E5-12): the archive's name, the gauge and the facts. */
+.label {
+  padding: 14px 20px 12px;
+  background: var(--sheet);
+  border-bottom: 1px solid var(--rule);
+}
+
+.label[hidden] {
+  display: none;
+}
+
+.label h2 {
+  margin: 0 0 8px;
+  font: 600 26px/1.15 var(--display);
+  font-stretch: 87.5%;
+  overflow-wrap: anywhere;
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 28px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--slate);
+  font-variant-numeric: tabular-nums;
+}
+
+.facts li[hidden] {
+  display: none;
+}
+
+.facts .gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ink);
+  font: 400 15px/1.3 var(--display);
+  font-stretch: 87.5%;
+  font-variant-numeric: tabular-nums;
+}
+
+.track {
+  flex: none;
+  width: 220px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.fill {
+  display: block;
+  height: 100%;
+  background: var(--tape);
+}
+
+/* The view bar. */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+.bar[hidden] {
+  display: none;
+}
+
+/* Folders | All files: the active segment is a raised sheet, the other is quiet slate. */
+.modes {
+  display: flex;
+  gap: 2px;
+}
+
+.modes button {
+  height: 28px;
+  padding: 0 12px;
+  color: var(--slate);
+}
+
+.modes button[aria-checked="true"] {
+  background: var(--sheet);
+  border-color: var(--rule);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Preview: a hairline-outlined button as tall as the filter; pressed is tinted. */
+#preview-toggle {
+  height: 28px;
+  padding: 0 12px;
+  border-color: var(--rule);
+}
+
+#preview-toggle[aria-pressed="true"] {
+  background: var(--board-tint);
+  color: var(--board);
+}
+
+/* Every button that holds an icon. */
+button:has(> .icon) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.crumbs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.crumbs button {
+  padding: 2px 6px;
+  color: var(--board);
+}
+
+.crumbs button + button::before {
+  content: "\203A\00a0";
+  color: var(--slate);
+}
+
+.crumbs button[aria-current] {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.search .icon {
+  position: absolute;
+  left: 8px;
+  color: var(--slate);
+  pointer-events: none;
+}
+
+.filter {
+  width: 15rem;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 2px 8px 2px 29px;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+.filter::placeholder {
+  color: var(--slate);
+  opacity: 1;
+}
+
+.glob, .setting {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--slate);
+  white-space: nowrap;
+}
+
+main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* The empty state: a drop zone, and the recent archives quietly under it. */
+.dropzone {
+  box-sizing: border-box;
+  width: min(32rem, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 28px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  border: 1.5px dashed var(--dash);
+  border-radius: 8px;
+  color: var(--slate);
+}
+
+/* Something is dragged over the window. */
+.dropzone.dragover {
+  border-color: var(--board);
+  background: var(--board-tint);
+}
+
+.dropzone[hidden] {
+  display: none;
+}
+
+.dropzone .drawing {
+  width: 64px;
+  height: 64px;
+  fill: none;
+  stroke: var(--slate);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dropzone h2 {
+  margin: 12px 0 4px;
+  color: var(--ink);
+  font: 600 22px/1.2 var(--display);
+  font-stretch: 87.5%;
+}
+
+.dropzone p {
+  max-width: 24rem;
+  margin: 0 0 16px;
+}
+
+.dropzone-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.dropzone-buttons button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-color: var(--rule);
+}
+
+.dropzone-buttons button.primary {
+  border-color: transparent;
+}
+
+.recents {
+  box-sizing: border-box;
+  width: min(32rem, calc(100% - 40px));
+  margin: 16px auto 0;
+}
+
+.recents h2 {
+  margin: 0 0 4px;
+  color: var(--slate);
+  font: 600 12px/1.4 var(--text);
+}
+
+.recents ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recents li button {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  padding: 3px 8px;
+  text-align: left;
+  color: var(--ink);
+}
+
+.recents .recent-folder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--slate);
+}
+
+.recents #recents-clear {
+  margin-top: 6px;
+  padding: 2px 8px;
+  color: var(--board);
+}
+
+/* The list. */
+.list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--sheet);
+  outline: none;
+}
+
+.list[hidden] {
+  display: none;
+}
+
+.viewport {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  contain: strict;
+}
+
+.spacer {
+  width: 1px;
+}
+
+.layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  will-change: transform;
+}
+
+.list .row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) 7rem 10rem;
+  gap: 12px;
+  box-sizing: border-box;
+  height: 30px;
+  align-items: center;
+  padding: 0 14px;
+  white-space: nowrap;
+  transition: background-color 120ms;
+}
+
+.list .row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The name cell stays inline text (an icon, the folder part, the last segment) so that its
+   rendered text is the whole path, as the window's tests and a screen reader read it. */
+.row .icon {
+  display: inline-block;
+  vertical-align: -3px;
+  margin-right: 8px;
+  color: var(--slate);
+}
+
+.row .prefix {
+  display: inline-block;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  color: var(--slate);
+}
+
+.row .leaf {
+  display: inline-block;
+  max-width: calc(100% - 28px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  color: var(--ink);
+}
+
+.row[data-kind="1"] .leaf {
+  font-weight: 600;
+}
+
+.list .row:not(.head):hover {
+  background: var(--board-tint);
+}
+
+.list .row.head {
+  height: 30px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--rule);
+  color: var(--slate);
+  font-size: 12px;
+}
+
+.list .row.head > span:first-child {
+  padding-left: 24px;
+}
+
+.row.head button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--slate);
+}
+
+[aria-sort="ascending"] button::after {
+  content: " \25B4";
+}
+
+[aria-sort="descending"] button::after {
+  content: " \25BE";
+}
+
+.list .row[aria-selected="true"] {
+  background: var(--board-tint);
+}
+
+.list .row[aria-selected="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--board);
+}
+
+.list:focus-visible .row.focused {
+  outline: 2px solid var(--board);
+  outline-offset: -2px;
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.status {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 14px;
+  border-top: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--slate);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-height: 1.4em;
+}
+
+/* Dialogs (the extract, create and maintenance wizards, settings): --sheet, 8px radius, one soft
+   shadow, the title in display type, the primary button tape, the others outlined. */
+.recents ul, .wizard .results, .wizard .entries {
+  list-style: none;
+}
+
+.wizard,
+.settings {
+  min-width: 24rem;
+  max-width: min(40rem, 92vw);
+  padding: 20px 22px;
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+}
+
+.wizard::backdrop,
+.settings::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.wizard > h2,
+.settings > h2 {
+  margin: 0 0 12px;
+  font: 600 18px/1.25 var(--display);
+  font-stretch: 87.5%;
+}
+
+.wizard button,
+.settings button {
+  min-height: 32px;
+  padding: 0 14px;
+}
+
+.wizard button:not(.primary),
+.settings button:not(.primary) {
+  border-color: var(--rule);
+  color: var(--ink);
+}
+
+.wizard fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+.wizard .choice {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.wizard progress {
+  width: 100%;
+}
+
+.wizard .check {
+  color: var(--slate);
+}
+
+.wizard .check.bad,
+.dialog-error {
+  color: var(--danger);
+}
+
+.wizard .results,
+.wizard .entries {
+  padding-left: 20px;
+  list-style: disc;
+}
+
+.wizard-buttons,
+.settings-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.settings .setting {
+  color: var(--ink);
+}
+
+.appearance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.appearance legend {
+  padding: 0;
+  margin-bottom: 4px;
+  color: var(--slate);
+  font-size: 12px;
+}
+
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.setting-group[hidden],
+.dialog-error[hidden] {
+  display: none;
+}
+
+.settings #default-apps {
+  border-color: var(--rule);
+}
+
+/* The preview pane. */
+.split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+}
+
+.split[hidden] {
+  display: none;
+}
+
+.preview {
+  flex: 0 0 38%;
+  min-width: 14rem;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--rule);
+  background: var(--sheet);
+  min-height: 0;
+}
+
+.preview[hidden] {
+  display: none;
+}
+
+.preview-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.preview-title {
+  margin: 0;
+  font: 600 17px/1.25 var(--display);
+  font-stretch: 87.5%;
+  overflow-wrap: anywhere;
+}
+
+.preview-meta {
+  margin: 0;
+  color: var(--slate);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.preview-note {
+  margin: 14px;
+  color: var(--slate);
+  overflow-wrap: anywhere;
+}
+
+.preview-text {
+  flex: 1;
+  margin: 0;
+  padding: 8px 14px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+
+.preview-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  margin: auto;
+  /* A transparent image shows on both themes. */
+  background: repeating-conic-gradient(var(--paper) 0% 25%, var(--sheet) 0% 50%) 0 0 / 16px 16px;
+}
+
+.hex {
+  flex: 1;
+  position: relative;
+  overflow-y: auto;
+  overflow-x: auto;
+  contain: strict;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+
+.hex-spacer {
+  width: 1px;
+}
+
+.hex-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.hex-line {
+  height: 18px;
+  line-height: 18px;
+  white-space: pre;
+  padding: 0 8px;
+}
+
+.preview-text:focus-visible,
+.hex:focus-visible {
+  outline: 2px solid var(--board);
+  outline-offset: -2px;
+}
+
+/* The create wizard (E5-5). */
+.wizard.create {
+  max-width: 44rem;
+}
+.wizard.create .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+.wizard.create .inputs {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  max-height: 8rem;
+  overflow: auto;
+}
+.wizard.create .inputs li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.wizard.create .tiers {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.wizard.create .tiers legend {
+  grid-column: 1 / -1;
+}
+.wizard.create .card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 8px;
+}
+.wizard.create .card:has(input:checked) {
+  border-color: var(--board);
+  background: var(--board-tint);
+  outline: 1px solid var(--board);
+}
+.wizard.create .tier-name {
+  font-weight: 600;
+}
+.wizard.create .estimate {
+  font-style: italic;
+}
+.wizard.create .note:empty {
+  display: none;
+}
+.wizard.create .command {
+  width: 100%;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+/* Keyboard focus (E5-9): every focusable element shows it; the panes F6 reaches do too. */
+:focus-visible {
+  outline: 2px solid var(--board);
+  outline-offset: 2px;
+}
+.preview:focus-visible,
+.recents:focus-visible,
+.list:focus-visible {
+  outline-offset: -2px;
+}
+.list:focus-visible .row.focused {
+  outline-offset: -4px;
+}
+
+/* High contrast (E5-9, E5-12): system colours only; focus, selection, disabled controls and the
+   dialogs' edges stay distinguishable without the theme's colours. */
+@media (forced-colors: active) {
+  :focus-visible,
+  .list:focus-visible {
+    outline: 2px solid Highlight;
+  }
+  .row.focused {
+    outline: 1px dotted CanvasText;
+    outline-offset: -3px;
+  }
+  .row[aria-selected="true"].focused {
+    outline-color: HighlightText;
+  }
+  .list:focus-visible .row.focused {
+    outline: 2px solid CanvasText;
+  }
+  .list:focus-visible .row[aria-selected="true"].focused {
+    outline-color: HighlightText;
+  }
+  .list .row[aria-selected="true"] {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
+  }
+  .list .row[aria-selected="true"] .prefix,
+  .list .row[aria-selected="true"] .leaf,
+  .list .row[aria-selected="true"] .icon {
+    color: HighlightText;
+  }
+  .list .row[aria-selected="true"]::before {
+    background: HighlightText;
+  }
+  .actions, .bar, .status, .label, .list .row.head, .banner, .notice, .shell-alert {
+    border-color: CanvasText;
+  }
+  .divider, .group {
+    border-color: CanvasText;
+    background: CanvasText;
+  }
+  .group {
+    background: transparent;
+  }
+  button,
+  input,
+  select {
+    border: 1px solid ButtonText;
+  }
+  button:disabled,
+  input:disabled,
+  select:disabled {
+    color: GrayText;
+    border-color: GrayText;
+  }
+  button.primary:not(:disabled) {
+    forced-color-adjust: none;
+    background: ButtonFace;
+    color: ButtonText;
+    border: 2px solid ButtonText;
+  }
+  .track {
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+  .fill {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+  .dropzone {
+    border-color: CanvasText;
+  }
+  .modes [role="radio"][aria-checked="true"],
+  #preview-toggle[aria-pressed="true"] {
+    background: Highlight;
+    color: HighlightText;
+  }
+  dialog.wizard,
+  dialog.settings {
+    border: 2px solid CanvasText;
+  }
+  .wizard.create .card:has(input:checked) {
+    outline: 3px solid Highlight;
+  }
+  progress {
+    border: 1px solid ButtonText;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button, .list .row {
+    transition: none;
+  }
+}
+
+/* Text for screen readers only: the dialogs' live regions. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

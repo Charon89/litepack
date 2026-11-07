@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/lpk-api",
   "crates/lpk-bench",
   "crates/lpk-check",
   "crates/lpk-codecs-bwt",
@@ -8,12 +9,17 @@ members = [
   "crates/lpk-cli",
   "crates/lpk-core",
   "crates/lpk-format",
+  "crates/lpk-fs-sys",
+  "crates/lpk-gui",
+  "crates/lpk-gui-e2e",
+  "crates/lpk-gui-sys",
   "crates/lpk-procstat-sys",
   "crates/lpk-proto",
   "crates/lpk-test-worker",
   "crates/lpk-sandbox-sys",
   "crates/lpk-libarchive-sys",
   "crates/lpk-worker-libarchive",
+  "crates/lpk-shell",
 ]
 # cargo-fuzz crate: built with nightly on Linux only (fuzz/README.md).
 # vendor/: patched third-party crates (below), built as dependencies, never as members.

@@ -1,0 +1,32 @@
+# The extensions Explorer's "LitePack" menu treats as archives (E6-2), one per line, lower case,
+# no dot: `.lpk` plus the foreign formats the engine opens today (crates/lpk-core/src/foreign/
+# detect.rs, `Format::read_by_worker`) and their usual short aliases. A test in lpk-api
+# (tests/shell_extensions.rs) keeps this list equal to that set (E4-4: rar, iso, cab, lzh, ar, cpio,
+# rpm, z, uue and the aliases lha and deb).
+lpk
+zip
+7z
+tar
+gz
+tgz
+bz2
+tbz
+tbz2
+xz
+txz
+zst
+tzst
+lz
+tlz
+lzma
+rar
+iso
+cab
+lzh
+lha
+ar
+deb
+cpio
+rpm
+z
+uue

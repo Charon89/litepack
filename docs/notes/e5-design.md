@@ -28,7 +28,7 @@ returns [WM-ES], so the `Exit` handler cancels and joins first.
 
 **Interrupted writes.** A GUI `create` writes `<name>.lpk.partial` and publishes it with `MoveFileExW` without
 `MOVEFILE_REPLACE_EXISTING` [MFX] (`std::fs::rename` would replace an existing file [RSRN]). Partial files, with
-their identity (volume serial and file ID [FIDI]), and running appends are recorded under `%LOCALAPPDATA%\LitePack`;
+their identity (volume serial and file ID [FIDI]), and running appends are recorded under `%LOCALAPPDATA%\org.litepack.gui` (Tauri's `app_local_data_dir`, since E5-7);
 the next start deletes a leftover partial, or rolls an interrupted `append` back to its last complete generation
 (D-59; `crates/lpk-format/src/archive.rs:997–1015`), only if the identity matches; a test covers both. Residual:
 without `WM_QUERYENDSESSION`, a forced log-off can still kill a run mid-write, for the next start to recover.
@@ -155,7 +155,7 @@ none, it shares the renderer it would guard, and its docs are silent on binary p
 
 **Opening an entry (E5-3).** A double-click extracts that entry alone (no sibling or same-named folder) under
 E3-2's policy, which refuses a trailing dot or space (`crates/lpk-core/src/policy.rs:356–357`), into a fresh folder
-under `%LOCALAPPDATA%\LitePack\Open\`, zoned like the archive (Internet for a zoneless foreign one; only zones 3 and 4 are written, and the MoTW opt-out never
+under `%LOCALAPPDATA%\org.litepack.gui\Open\`, zoned like the archive (Internet for a zoneless foreign one; only zones 3 and 4 are written, and the MoTW opt-out never
 applies to opened entries — `docs/notes/e6-design.md` section 4). The shell opens
 only allow-listed types (document, image, media, text) by the real last extension, the rest goes to the preview:
 `doc.pdf .cmd` (CVE-2023-38831's class [WRAR]) counts as `.cmd`. Cleaned at exit; no write-back.
@@ -184,7 +184,7 @@ to…, then E4 §6).
 
 **Settings.** `%APPDATA%\LitePack\settings.json` (`config_dir`, not `app_config_dir` [T-PATH]), versioned, written
 temp-then-rename, beside the executable when portable; WebView2's data folder [T-WVB] is
-`%LOCALAPPDATA%\LitePack\WebView2`.
+`%LOCALAPPDATA%\org.litepack.gui\WebView2` (the local state in `app_local_data_dir`, E5-7; `<exe folder>\data` when portable).
 
 **Accessibility (E5-9).** F6 between panes, a key for every pointer action, one tab stop per composite, visible
 focus [MS-KB]; named controls and an ARIA `treegrid` list [ARIA]. Checker: **axe-core**

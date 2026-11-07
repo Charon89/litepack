@@ -32,7 +32,7 @@ returning `E_UNEXPECTED`, the release profile keeps unwinding (`Cargo.toml:40–
 are denied.
 
 **Invoke: the contract with the GUI.**
-- The paths travel in a binary response file, `%LOCALAPPDATA%\LitePack\Verbs\shell-<32 hex>.verbs`, created
+- The paths travel in a binary response file, `%LOCALAPPDATA%\org.litepack.gui\Verbs\shell-<32 hex>.verbs` (the GUI's local state, E5-7), created
   create-new: a magic, a protocol version and the verb, then per path a `u32` count of UTF-16LE code units and the
   units, unpaired surrogates kept; the GUI rebuilds each path with `OsString::from_wide`, which is lossless [FROMW],
   so D-89 (4)'s names round-trip. The command line is `"<GuiPath>" @<file>`.
@@ -82,6 +82,27 @@ items their parent's. Titles double `&`, which marks a menu access key [MENU], e
 characters [TR36] and shorten names past 40 characters in the middle; the verb gets the full name. Archive verbs
 first, no separators; past 16,384 items only `Add to archive…` remains, bounding the UI-thread scan. Root icon:
 `lpk-gui.exe,0`.
+
+**The verb table E6-2 tests (E6-1, 2026-10-26).** The texts are E5-1's (`docs/API.md`, "Activation verbs"), which
+`crates/lpk-shell/src/model.rs` holds and a unit test keeps equal to that table; "(proposed)" marks what neither
+E5-1 nor E5-7 settles, §2's proposal until E6-2's `D-NN`. The command line is the argument list `lpk-gui.exe`
+receives: `Invoke` passes it as `"<GuiPath>" @<file>`, the response file (§1) carrying the verb and the paths in
+selection order. `<p>` is each selected path, `<a>` each selected archive, `<dir>` the background's folder; `<name>` as
+above (the shown title shortened and escaped, the argument in full). A blank cell is `ECS_HIDDEN`.
+
+| Selection kind | Verb texts, in menu order | Command line of each verb |
+|---|---|---|
+| **F** file(s), none an archive (a ZIP counts as a file) | `Add to archive…`; `Add to "<name>.lpk"` | `--create <p>...`; `--create <p>... --name <name>.lpk` |
+| **D** folder(s) | `Add to archive…`; `Add to "<name>.lpk"` | `--create <p>...`; `--create <p>... --name <name>.lpk` |
+| **B** folder background | `Add to archive…` | `--create <dir>` (the wizard, the destination visible) |
+| **L** one `.lpk` | `Add to archive…`; `Extract here`; `Extract to "<name>\"`; `Open`; `Test` | `--create <a>`; `--extract-here <a>`; `--extract-to <a>`; `--open <a>`; `--test <a>` |
+| **A** one foreign archive (one multi-volume set included) | `Add to archive…`; `Extract here`; `Extract to "<name>\"`; `Open`; `Test`; `Convert to…` | `--create <a>`; `--extract-here <a>`; `--extract-to <a>`; `--open <a>`; `--test <a>`; `--convert <a>` |
+| **S** several archives (`.lpk` or foreign) | `Add to archive…`; `Extract here`; `Extract to "*\"` (proposed); `Test` | `--create <a>...`; `--extract-here <a>...`; `--extract-to <a>...`; `--test <a>...` |
+| **M** mixed selection (archives with other items, or files with folders) | `Add to archive…`; `Add to "<name>.lpk"` | `--create <p>...`; `--create <p>... --name <name>.lpk` |
+| more than 16,384 items, any kind | `Add to archive…` | `--create <p>...` |
+| an item without a file-system path | (the menu is hidden) | none |
+
+The root's text is `LitePack` (proposed; `model::ROOT_TITLE`), the one title E6-1's skeleton returns.
 
 **The site.** Explorer gives the root its site (`IObjectWithSite::SetSite`); `EnumSubCommands` hands each subcommand a
 reference to the root, so `Invoke` takes the background folder from the item array or, when empty, the root's site
