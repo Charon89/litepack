@@ -51,6 +51,24 @@ The command-line reference (`src/cli/`) is made the same way, from `docs/cli/`, 
   each `.md` (spec and CLI) and for the first three words of the man page's first `.TH` line; it fails when a source has
   no such heading or `.TH` line to look for.
 
+The benchmark pages (`src/bench/results.md` and `src/bench/corpus.md`, E9-6) are generated files, not includes. Never
+edit them by hand; regenerate them with `cargo run -p lpk-bench -- book` from the repository root.
+
+- The inputs are named in `bench/site.toml`: the results directories of the published run (the ones of the latest
+  full-profile report in `bench/reports/`, in the report's order), the mixes file, and the corpus files. Publishing
+  another run means editing that file and regenerating.
+- The results page holds the report's header, the per-class tables, the per-mix tables, its sources and its caveats,
+  with each number followed by the index of the result file it was read from. It holds no gate verdict, no host name
+  and no antivirus detail: a results directory `<date>-<host>[-<n>]` appears as `<date> run <n>`. The corpus page
+  holds each class's description (from the class table of `docs/CORPUS.md`), the lock's downloads and bytes per class
+  and per source (from `bench/corpus.lock` and `bench/corpus-sources.toml`), and the built corpus's totals from the
+  published run. Every figure is read from a committed file.
+- `cargo run -p lpk-bench -- book --check` regenerates the pages in memory and fails, naming the first differing line,
+  when the committed pages differ. The test `crates/lpk-bench/tests/book.rs`, which CI's nextest runs on Windows and
+  Linux, asserts that two generations are identical and equal to the committed pages (`LPK_BENCH_BOOK_WRITE=1`
+  rewrites them), and that the pages hold no host name, no scanner product name, no `antivirus`, no `NO-GO` or `GO
+  proposal`, no heading with `Gates` and no table row of gates G1 to G4.
+
 The licensing and notices pages (E9-8) are includes too, so nothing is copied:
 
 - `src/licensing.md` includes only the `published` anchor of `docs/LICENSING.md` (the sections "Our licence" and

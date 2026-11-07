@@ -115,20 +115,80 @@ pub fn render(inputs: &Inputs) -> String {
         },
         baseline_date(b)
     ));
-    header(&mut s, inputs, &model);
-    baseline_per_class(&mut s, &model, inputs);
-    baseline_blended(&mut s, &model, inputs);
+    header(&mut s, inputs, &model, None);
+    baseline_per_class(&mut s, &model, inputs, false);
+    baseline_blended(&mut s, &model, inputs, false);
     probes(&mut s, inputs);
     estimates(&mut s, &model, inputs);
     gate_section(&mut s, &model, inputs);
     sources(&mut s, inputs);
-    caveats(&mut s, &model, inputs);
+    caveats(&mut s, &model, inputs, false);
     s
 }
 
-fn header(s: &mut String, inputs: &Inputs, m: &Model) {
+/// The sections of the site's results page (E9-6): the header, the per-class and per-mix tables
+/// and the caveats, in the site's wording. `lab` maps a source or directory label to its site form.
+pub fn site_sections(
+    inputs: &Inputs,
+    lab: &dyn Fn(&str) -> String,
+) -> (String, String, String, String) {
+    let model = Model::build(inputs);
+    let (mut h, mut c, mut b, mut v) = (String::new(), String::new(), String::new(), String::new());
+    header(&mut h, inputs, &model, Some(lab));
+    baseline_per_class(&mut c, &model, inputs, true);
+    baseline_blended(&mut b, &model, inputs, true);
+    caveats(&mut v, &model, inputs, true);
+    (h, c, b, v)
+}
+
+/// What the header's corpus line totals: profile, manifest, files and bytes (traced), the number
+/// of classes and the source of the corpus line.
+pub struct CorpusTotals {
+    pub profile: String,
+    pub manifest: String,
+    pub files: Option<Traced>,
+    pub bytes: Option<Traced>,
+    pub classes: usize,
+    pub src: usize,
+}
+
+pub fn corpus_totals(inputs: &Inputs) -> Option<CorpusTotals> {
+    let model = Model::build(inputs);
+    let (r, src) = inputs.baseline.results.first()?;
+    let cb = class_bytes(&model.rows);
+    let mut seen = BTreeSet::new();
+    let files: Vec<Traced> = model
+        .rows
+        .iter()
+        .filter(|r| seen.insert(r.class.clone()))
+        .map(|r| Traced {
+            value: r.class_files as f64,
+            sources: r.class_bytes.sources.clone(),
+        })
+        .collect();
+    Some(CorpusTotals {
+        profile: r.corpus.profile.clone(),
+        manifest: r.corpus.manifest_blake3.clone(),
+        files: Traced::sum(&files),
+        bytes: Traced::sum(cb.values()),
+        classes: cb.len(),
+        src: *src,
+    })
+}
+
+pub fn count_text(v: f64) -> String {
+    count_s(v)
+}
+
+fn header(s: &mut String, inputs: &Inputs, m: &Model, site: Option<&dyn Fn(&str) -> String>) {
     let b = &inputs.baseline;
-    s.push_str("## 1. Header\n\n");
+    let ident = |l: &str| l.to_string();
+    let lab: &dyn Fn(&str) -> String = site.unwrap_or(&ident);
+    s.push_str(if site.is_some() {
+        "## Header\n\n"
+    } else {
+        "## 1. Header\n\n"
+    });
     if let Some((r, src)) = b.results.first() {
         let cb = class_bytes(&m.rows);
         let files: Vec<Traced> = {
@@ -161,16 +221,22 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
         for d in &b.pooled {
             s.push_str(&format!(
                 "  - `{}`, build `{}`: catalogue BLAKE3 `{}`, {} repeats, long-run limit {} s, {} \
-                 threads, settle pause {} ms per 1000 files, antivirus state changed during the \
-                 run: {} {}\n",
-                d.label,
+                 threads, settle pause {} ms per 1000 files{} {}\n",
+                lab(&d.label),
                 d.build,
                 d.catalogue_blake3,
                 d.repeats,
                 d.long_run_s,
                 d.threads,
                 d.settle_ms,
-                d.antivirus_changed,
+                if site.is_some() {
+                    String::new()
+                } else {
+                    format!(
+                        ", antivirus state changed during the run: {}",
+                        d.antivirus_changed
+                    )
+                },
                 brackets(&BTreeSet::from([d.run_src]))
             ));
         }
@@ -183,7 +249,8 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
             for d in &b.pooled {
                 s.push_str(&format!(
                     "  - `{}`: manifest BLAKE3 `{}`\n",
-                    d.label, d.manifest
+                    lab(&d.label),
+                    d.manifest
                 ));
             }
             // Which files each class was measured on: the manifest(s) its pooled rows name.
@@ -234,9 +301,9 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
                 s.push_str(&format!(
                     "  - `{}`: from `{}` {}, by `{}` {}: {}\n",
                     e.combination(),
-                    e.from,
+                    lab(&e.from),
                     brackets(&BTreeSet::from([e.from_src])),
-                    e.by,
+                    lab(&e.by),
                     brackets(&BTreeSet::from([e.by_src])),
                     e.reason
                 ));
@@ -244,7 +311,7 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
             let supplied: Vec<String> = b
                 .pooled
                 .iter()
-                .map(|d| format!("`{}` {}", d.label, d.rows.len()))
+                .map(|d| format!("`{}` {}", lab(&d.label), d.rows.len()))
                 .collect();
             s.push_str(&format!(
                 "  - rows each directory supplies after the replacements: {}\n",
@@ -257,16 +324,28 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
         );
     }
     let h = &b.host;
-    s.push_str(&format!(
-        "- host `{}`: {}, {} logical cores, {} bytes RAM, {} {} {}\n",
-        h.host,
-        h.cpu_model,
-        h.logical_cores,
-        h.ram_bytes,
-        h.os,
-        h.os_version,
-        brackets(&BTreeSet::from([b.host_src]))
-    ));
+    if site.is_some() {
+        s.push_str(&format!(
+            "- machine: {}, {} logical cores, {} bytes RAM, {} {} {}\n",
+            h.cpu_model,
+            h.logical_cores,
+            h.ram_bytes,
+            h.os,
+            h.os_version,
+            brackets(&BTreeSet::from([b.host_src]))
+        ));
+    } else {
+        s.push_str(&format!(
+            "- host `{}`: {}, {} logical cores, {} bytes RAM, {} {} {}\n",
+            h.host,
+            h.cpu_model,
+            h.logical_cores,
+            h.ram_bytes,
+            h.os,
+            h.os_version,
+            brackets(&BTreeSet::from([b.host_src]))
+        ));
+    }
     s.push_str(&format!(
         "- baseline build: lpk-bench {} at commit `{}`, {}, run dated {} {}\n",
         h.lpk_bench_version,
@@ -339,16 +418,18 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
     }
     let rb = brackets(&BTreeSet::from([b.run_src]));
     if b.pooled.len() <= 1 {
-        s.push_str(&format!(
-        "- antivirus at the start of the baseline run: {} (Windows Defender real-time: {}) {}; at \
-         the end: {} {}; changed during the run: {}\n",
-        av_list(&h.antivirus),
-        h.defender_realtime,
-        brackets(&BTreeSet::from([b.host_src])),
-        av_list(&b.run.antivirus_end),
-        rb,
-        if b.run.antivirus_changed { "yes" } else { "no" }
-    ));
+        if site.is_none() {
+            s.push_str(&format!(
+                "- antivirus at the start of the baseline run: {} (Windows Defender real-time: {}) {}; at \
+                 the end: {} {}; changed during the run: {}\n",
+                av_list(&h.antivirus),
+                h.defender_realtime,
+                brackets(&BTreeSet::from([b.host_src])),
+                av_list(&b.run.antivirus_end),
+                rb,
+                if b.run.antivirus_changed { "yes" } else { "no" }
+            ));
+        }
         s.push_str(&format!(
             "- catalogue BLAKE3 `{}`; run settings: {} repeats requested, long-run limit {} s, \
          settle pause {} ms per 1000 files, {} threads {}\n\n",
@@ -364,8 +445,12 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model) {
     }
 }
 
-fn baseline_per_class(s: &mut String, m: &Model, inputs: &Inputs) {
-    s.push_str("## 2. Baseline, per class\n\n");
+fn baseline_per_class(s: &mut String, m: &Model, inputs: &Inputs, site: bool) {
+    s.push_str(if site {
+        "## Per class\n\n"
+    } else {
+        "## 2. Baseline, per class\n\n"
+    });
     s.push_str(
         "Archive size is a percentage of the class's bytes. MB/s = class bytes / median wall \
          seconds (MB = 10^6 bytes). Peak memory is the larger of the compress and extract \
@@ -493,8 +578,12 @@ fn information_table(s: &mut String, inputs: &Inputs) {
     s.push('\n');
 }
 
-fn baseline_blended(s: &mut String, m: &Model, inputs: &Inputs) {
-    s.push_str("## 3. Baseline, blended\n\n");
+fn baseline_blended(s: &mut String, m: &Model, inputs: &Inputs, site: bool) {
+    s.push_str(if site {
+        "## Blended per mix\n\n"
+    } else {
+        "## 3. Baseline, blended\n\n"
+    });
     s.push_str(&format!(
         "The disk mixes come from `{}` [{}], printed here in full:\n\n```toml\n{}{}```\n\n",
         inputs
@@ -783,9 +872,13 @@ fn sources(s: &mut String, inputs: &Inputs) {
     s.push('\n');
 }
 
-fn caveats(s: &mut String, m: &Model, inputs: &Inputs) {
+fn caveats(s: &mut String, m: &Model, inputs: &Inputs, site: bool) {
     let b = &inputs.baseline;
-    s.push_str("## 8. Caveats\n\n");
+    s.push_str(if site {
+        "## Caveats\n\n"
+    } else {
+        "## 8. Caveats\n\n"
+    });
     let skipped: Vec<String> = b
         .tools
         .tools
@@ -843,36 +936,38 @@ fn caveats(s: &mut String, m: &Model, inputs: &Inputs) {
             own_tar.join("; ")
         }
     ));
-    let missing = inputs.probes.missing();
-    s.push_str(&format!(
-        "- probes not available: {}\n",
-        if missing.is_empty() {
-            "none".to_string()
-        } else {
-            missing.join(", ")
-        }
-    ));
-    let unruled: Vec<&str> = b
-        .run
-        .classes
-        .iter()
-        .map(String::as_str)
-        .filter(|c| !RULED.contains(c))
-        .collect();
-    s.push_str(&format!(
-        "- classes without an estimate rule (the best measured incumbent is used, no gain claimed): {}\n",
-        if unruled.is_empty() { "none".to_string() } else { unruled.join(", ") }
-    ));
-    s.push_str(&format!(
-        "- antivirus: {}; scanner state at the start of the baseline run: {}; at the end: {}\n",
-        if b.run.antivirus_changed {
-            "the scanner state changed during the run"
-        } else {
-            "the scanner state did not change during the run"
-        },
-        av_list(&b.host.antivirus),
-        av_list(&b.run.antivirus_end)
-    ));
+    if !site {
+        let missing = inputs.probes.missing();
+        s.push_str(&format!(
+            "- probes not available: {}\n",
+            if missing.is_empty() {
+                "none".to_string()
+            } else {
+                missing.join(", ")
+            }
+        ));
+        let unruled: Vec<&str> = b
+            .run
+            .classes
+            .iter()
+            .map(String::as_str)
+            .filter(|c| !RULED.contains(c))
+            .collect();
+        s.push_str(&format!(
+            "- classes without an estimate rule (the best measured incumbent is used, no gain claimed): {}\n",
+            if unruled.is_empty() { "none".to_string() } else { unruled.join(", ") }
+        ));
+        s.push_str(&format!(
+            "- antivirus: {}; scanner state at the start of the baseline run: {}; at the end: {}\n",
+            if b.run.antivirus_changed {
+                "the scanner state changed during the run"
+            } else {
+                "the scanner state did not change during the run"
+            },
+            av_list(&b.host.antivirus),
+            av_list(&b.run.antivirus_end)
+        ));
+    }
     let unclean = unclean_reasons(inputs);
     s.push_str(&format!(
         "- unclean inputs (dirty, unknown or unoptimised builds, no settle pause, directories \
@@ -887,6 +982,9 @@ fn caveats(s: &mut String, m: &Model, inputs: &Inputs) {
         "- the baseline's build profile is not recorded in its host file, so whether it was a \
          release build cannot be checked from the result files\n",
     );
+    if site {
+        return;
+    }
     s.push_str(
         "- the `small-files` text estimate compresses a tar stream of the class, so tar header \
          bytes are included in it; the baseline sizes are of each tool's own archive\n",

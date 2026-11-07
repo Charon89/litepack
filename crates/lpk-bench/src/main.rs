@@ -6,6 +6,7 @@
 //!   probe    component probes: jpeg | deflate | dedup | text | weights | entropy-gate | bwt |
 //!            png-filter | text-encodings | delta
 //!   report   generate bench/reports/phase0-<date>.md from bench/results
+//!   book     generate the docs book's benchmark and corpus pages from committed files (E9-6)
 //!
 //! Every number LitePack ever quotes must come from this tool's committed JSON output.
 
@@ -13,6 +14,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod book;
 mod corpus;
 mod probe;
 mod report;
@@ -35,6 +37,8 @@ enum Command {
     Probe(probe::ProbeArgs),
     /// Generate the Phase 0 report from bench/results (PLAN P0-5)
     Report(report::ReportArgs),
+    /// Generate the docs book's benchmark and corpus pages from committed files (PLAN E9-6)
+    Book(book::BookArgs),
     /// The runner's own tar stream as a child process (E2-23; used by `run` itself)
     #[command(hide = true)]
     Tar(run::TarArgs),
@@ -47,6 +51,7 @@ fn main() -> ExitCode {
         Command::Probe(args) => probe::command(&args),
         Command::Corpus(args) => corpus::run(args),
         Command::Report(args) => report::command(&args),
+        Command::Book(args) => book::command(&args),
     }
 }
 

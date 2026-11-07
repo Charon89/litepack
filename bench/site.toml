@@ -1,0 +1,27 @@
+# The inputs of the docs book's benchmark and corpus pages (PLAN E9-6; `lpk-bench book`).
+# Committed. The published run is the one of bench/reports/phase1-2026-10-30-full.md: `lpk-bench
+# report` with exactly these results directories (in this order) and this mixes file regenerates that
+# report byte for byte. To publish another run, edit this file and run `lpk-bench book`.
+# Paths are relative to the repository root.
+
+results = [
+  "bench/results/2026-10-30-megatron",
+  "bench/results/2026-10-30-megatron-2",
+  "bench/results/2026-10-30-megatron-3",
+  "bench/results/2026-10-30-megatron-4",
+  "bench/results/2026-10-30-megatron-5",
+  "bench/results/2026-10-28-megatron",
+  "bench/results/2026-10-28-megatron-2",
+  "bench/results/2026-10-28-megatron-3",
+]
+probes = []
+mixes = "bench/report-mixes.toml"
+
+[corpus]
+spec = "docs/CORPUS.md"
+lock = "bench/corpus.lock"
+sources = "bench/corpus-sources.toml"
+
+# A class that docs/CORPUS.md names only as a derived variant, under another spelling.
+[corpus.derived]
+backup-versions = "backup-v1/v2/v3"
