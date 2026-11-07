@@ -102,10 +102,12 @@ licence), `archive_parse_date.c` (public domain; not compiled here) and the BLAK
 (`archive_blake2*`, used by the RAR5 reader, under CC0-1.0). The RAR readers carry two-clause BSD headers (Tim
 Kientzle and Andres Mejia for RAR 4, Grzegorz Antoniak for RAR 5); `archive_ppmd7.c` is Igor Pavlov's public-domain
 PPMd. No unRAR code and no 7-Zip handler code is used anywhere. The worker links zlib (`libz-sys`, Zlib), liblzma
-(`liblzma-sys`, 0BSD) and libzstd (`zstd-sys`, BSD-3-Clause), all already in the notices. Owed when the sources
-land (they wait for the owner's approval to fetch the release tarball): `COPYING` reproduced in the static section of
-`THIRD-PARTY-NOTICES`, `lpk-worker-libarchive` added to the shipped packages `scripts/third-party-notices.sh`
-walks, and CI's GPL-family scan over `vendor/libarchive-3.8.11/`.
+(`liblzma-sys`, 0BSD) and libzstd (`zstd-sys`, BSD-3-Clause), all already in the notices. Done in E4-4: `COPYING` is reproduced verbatim in the static section of `THIRD-PARTY-NOTICES` (`about.hbs`),
+`lpk-worker-libarchive` is walked by `scripts/third-party-notices.sh` (`about-libarchive.hbs`: zlib, liblzma and
+libzstd with their licences), and the script's GPL-family scan covers `vendor/` (so `vendor/libarchive-3.8.11/`).
+The vendored files are byte-identical to the release tarball (SHA-256 `900fe9fc7237c2b04f090f3c3648de8fe597525771f5035016537ce2d667d12b`,
+`vendor/libarchive-3.8.11/FILES.txt`); the per-target `config.h` files are LitePack's own (made from libarchive's CMake and
+template; their headers say how).
 
 **Open item (E5-2, due before any GUI binary is distributed, E7): the WebView2 loader's licence text.**
 `lpk-gui.exe` links Microsoft's `WebView2LoaderStatic.lib`, vendored by `webview2-com-sys` 0.39.1 (which declares

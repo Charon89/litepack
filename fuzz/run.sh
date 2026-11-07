@@ -68,7 +68,10 @@ for t in $targets; do
   if [ -d "seeds/$t" ]; then extra+=("seeds/$t"); fi
   # archive_mutate reads the vectors itself; its input is a mutation list, not an archive.
   if [ "$t" != "archive_mutate" ]; then extra+=("$vectors"); fi
-  case "$t" in foreign_*) extra+=("$foreign_fixtures") ;; esac
+  case "$t" in
+    foreign_libarchive) extra+=("../crates/lpk-worker-libarchive/tests/fixtures") ;;
+    foreign_*) extra+=("$foreign_fixtures") ;;
+  esac
   echo "== $t (${secs}s)"
   if run "$t" "${flags[@]}" "corpus/$t" "${extra[@]}" >"artifacts/logs/$t.log" 2>&1; then
     grep -E "stat::number_of_executed_units|Done [0-9]+ runs" "artifacts/logs/$t.log" | tail -n 2

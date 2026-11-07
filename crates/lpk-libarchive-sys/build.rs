@@ -7,8 +7,8 @@
 //! external-program filter (so no fallback to a program can link), `bzip2`, `lrzip`, `lz4`,
 //! `lzop`, `grzip`, `mtree`, `zip`, `7zip`, `xar` and `warc`.
 //!
-//! When the vendored sources are absent (they wait for the owner's approval to fetch the release
-//! tarball), the crate builds a stub whose every open fails with a named error, and this script
+//! When the vendored sources are absent (a partial checkout), the crate builds a stub whose every
+//! open fails with a named error, and this script
 //! says so with a cargo warning; the `lpk_libarchive` cfg marks a real build.
 
 use std::path::{Path, PathBuf};

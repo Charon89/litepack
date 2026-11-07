@@ -28,9 +28,7 @@ are untouched. `cargo-fuzz` is Unix-only: use Linux, or WSL on Windows.
 | `jpeg_peel` | the JPEG peel's compress side (`JpegPeel::peel`: marker scan, memory gate, Lepton encode, verifying decode, secondary images); a plan covers the file exactly; a counting allocator bounds the allocations by the peel's memory limit; seeds: the JPEG fixtures with a flag byte |
 | `deflate_analyse` | the Deflate peel's analysis (`lpk_core::peel::deflate::examine`: walker, preflate analysis, bounded recreation) with a 1 MiB plain-text limit; every candidate counted once, no caught panic, spans inside the file; seeds: `crates/lpk-core/tests/fixtures/deflate` with an extension byte (as `deflate_walk`'s) |
 | `png_filter_undo` | revision 1.4's PNG filter undo on the compress side (`png_candidate` of the Deflate peel: IHDR, layout, filter bytes, the Up transcode checked by re-filtering); `png_filter_decode` covers the decoder's side only; a counting allocator bounds the allocations by five times the text; seeds: the inflated IDAT text of the PNG fixtures with their headers |
-
-`foreign_libarchive` (E4-4's libarchive reader) is not here yet: `crates/lpk-libarchive-sys` is not on `main`;
-it lands with E4-4, built with clang and `-fsanitize=fuzzer-no-link,address` (`docs/notes/e4-design.md`, section 5).
+| `foreign_libarchive` | E4-4's libarchive reader (`lpk_worker_libarchive::open`, vendored libarchive 3.8.11 built by `cc` with the fuzzer's flags): the first byte picks one of the worker's wire formats, then open, every listing page, the first 256 file members to a sink; seeds: `crates/lpk-worker-libarchive/tests/fixtures` (read by `run.sh`) |
 
 A target added here is added to `Cargo.toml`'s `[[bin]]` set and to `run.sh`'s list `all` too;
 `bash fuzz/check-targets.sh` (run by the workflow) fails when the three differ.
