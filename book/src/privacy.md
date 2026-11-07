@@ -7,7 +7,20 @@ the code does today; it describes nothing that is planned.
 
 Files stay on your computer. Archives are read and written locally, and nothing is uploaded.
 
-The GUI keeps some things on the computer: the lists of recent archives and destinations, which hold their paths (the button **Clear recent lists** empties them); the journal of interrupted writes; the data folder of WebView2 (see below); and, for an entry you open from an archive, a copy in a folder of its own, which the program removes when it exits and, after an earlier run that did not exit cleanly, when it next starts. All of it stays on the computer and is sent nowhere.
+The GUI keeps some things on the computer:
+
+- your settings file;
+- the lists of recent archives and destinations, which hold their paths (the button **Clear recent lists** empties
+  them);
+- the journal of interrupted writes;
+- the data folder of WebView2 (see below);
+- for an entry you open from an archive, a copy in a folder of its own, which the program tries to remove when it
+  exits (it cannot while another program still holds the copy open) and, after an earlier run that did not exit
+  cleanly, removes when it next starts;
+- short-lived files that Explorer's menu writes for the GUI to read, which hold the paths you selected; the GUI
+  deletes each one after use, and deletes any left over after 24 hours.
+
+All of it stays on the computer and is sent nowhere.
 
 ## Network requests
 
@@ -39,8 +52,8 @@ address.
 
 The website is hosted on GitHub Pages, and GitHub's privacy statement covers that hosting. The site sets no
 cookies and loads no script, style or font from a third party. Its search runs in your browser. Its page template
-(mdBook) stores your choice of theme and whether the sidebar is open in the browser's local and session storage, on your
-computer; the site does not send it anywhere.
+(mdBook) keeps your choice of theme and the sidebar's state in the browser's local storage, and the sidebar's scroll
+position in its session storage, both on your computer; the site sends neither anywhere.
 
 ## Questions
 
