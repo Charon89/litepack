@@ -1622,6 +1622,18 @@ fn probe_files_load_through_the_validator_and_must_match_host_and_corpus() {
         "the probe's own table is embedded"
     );
     assert!(text.contains("probes not available: jpeg, deflate, dedup, text, entropy-gate"));
+    // E9-6: the site's header leaves the probe lines out, so the probe's host (and its label)
+    // never reaches the site.
+    assert!(
+        text.contains(&format!("on `{machine}`")),
+        "the report names the probe's host"
+    );
+    let (site_header, _, _, _) = super::render::site_sections(&loaded, &|l| l.to_string());
+    assert!(
+        !site_header.contains(&format!("on `{machine}`")),
+        "{site_header}"
+    );
+    assert!(!site_header.contains("- probe `") && !site_header.contains("libraries"));
     // A debug build of the probe is refused without the flag.
     let err = format!("{:#}", load(&args(good, false)).expect_err("debug refused"));
     assert!(err.contains("--allow-unclean"), "{err}");
@@ -2422,6 +2434,31 @@ fn remeasured_mx5() -> Vec<ToolResult> {
     let mut r = samples::measured();
     r.class = "audio".into();
     vec![r]
+}
+
+#[test]
+fn the_site_shows_a_replaced_rows_reason_as_re_measured_only() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let b = dir_under(tmp.path(), "b", &remeasured_mx5());
+    write_supersedes(&b, &[("7z", "mx5", "audio", "2026-10-01-testbox")]);
+    let file = b.join("supersedes.toml");
+    let text = std::fs::read_to_string(&file).expect("read");
+    std::fs::write(
+        &file,
+        text.replace(
+            "re-measured on the idle machine",
+            "measured while builds ran on the machine",
+        ),
+    )
+    .expect("write");
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
+    let repo = report_text(&inputs);
+    assert!(repo.contains("measured while builds ran on the machine"));
+    let (site, _, _, _) = super::render::site_sections(&inputs, &|l| l.to_string());
+    assert!(site.contains("- Superseded rows"), "{site}");
+    assert!(site.contains(": re-measured\n"), "{site}");
+    assert!(!site.contains("builds ran"), "{site}");
 }
 
 #[test]

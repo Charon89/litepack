@@ -6,8 +6,7 @@ and Deflate streams inside PDF, Office, PNG and APK files), by deduplicating and
 files, and by using a modern container with recovery records, authenticated encryption, Merkle
 integrity, random access and journaling.
 
-LitePack is in development and Phase 1 is under way. These pages grow as the work lands; they state
-no compression or speed figure, because every figure in the project comes from a committed benchmark
-run.
+LitePack is in development and Phase 1 is under way. These pages grow as the work lands; figures
+appear only on the Benchmarks pages, generated from committed result files.
 
 {{#include footer.md}}

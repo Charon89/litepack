@@ -8,6 +8,11 @@
 - [The lpk command](cli/lpk.md)
 - [The lpk(1) man page](cli/lpk-1.md)
 
+# Benchmarks
+
+- [Results](bench/results.md)
+- [The benchmark corpus](bench/corpus.md)
+
 # Format specification
 
 - [The .lpk v1 format](spec/lpk-v1.md)
