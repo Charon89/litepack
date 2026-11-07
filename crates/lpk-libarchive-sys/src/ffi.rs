@@ -139,3 +139,7 @@ extern "C" {
     /// The C runtime's `setlocale` (`LC_CTYPE` is 0 on glibc and 2 on the Microsoft runtime).
     pub fn setlocale(category: c_int, locale: *const c_char) -> *const c_char;
 }
+
+extern "C" {
+    pub fn archive_read_set_options(a: *mut archive, options: *const c_char) -> c_int;
+}

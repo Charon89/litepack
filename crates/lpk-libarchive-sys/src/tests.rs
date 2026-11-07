@@ -207,3 +207,52 @@ fn utf8_names_are_exact_and_other_bytes_are_left_for_the_host_to_refuse() {
         "{latin1:?}"
     );
 }
+
+/// A ustar archive of one empty regular file named `name` (raw bytes).
+fn ustar(name: &[u8]) -> Vec<u8> {
+    let mut h = vec![0u8; 512];
+    h[..name.len()].copy_from_slice(name);
+    h[100..107].copy_from_slice(b"0000644");
+    h[108..115].copy_from_slice(b"0000000");
+    h[116..123].copy_from_slice(b"0000000");
+    h[124..135].copy_from_slice(b"00000000000");
+    h[136..147].copy_from_slice(b"14000000000");
+    h[156] = b'0';
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
+    h[148..156].fill(b' ');
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    h[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
+    h[155] = b' ';
+    h.extend(vec![0u8; 1024]);
+    h
+}
+
+/// R204 on a reader with an undeclared charset: UTF-8 bytes are the name; Latin-1 bytes are refused,
+/// never converted through a code page.
+#[test]
+fn tar_names_are_utf8_or_refused() {
+    if skip_loudly("tar_names_are_utf8_or_refused") {
+        return;
+    }
+    let cafe = "caf\u{e9}\u{65e5}.txt";
+    assert_eq!(
+        first_name(&ustar(cafe.as_bytes()), ReadFormat::Tar).as_deref(),
+        Some(cafe.as_bytes())
+    );
+    let latin1 = {
+        let _ = use_utf8_locale();
+        let mut a = Archive::open(OpenSpec {
+            volumes: vec![temp_with(&ustar(b"caf\xe9.txt"))],
+            formats: &[ReadFormat::Tar],
+            filters: &[],
+            passphrase: None,
+        })
+        .unwrap();
+        a.next_entry().map(|e| e.and_then(|e| e.path))
+    };
+    assert!(
+        matches!(&latin1, Ok(None) | Err(_)),
+        "a Latin-1 name must not come back as a name: {latin1:?}"
+    );
+}

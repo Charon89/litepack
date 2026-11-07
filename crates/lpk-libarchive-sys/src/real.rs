@@ -289,6 +289,13 @@ impl Archive {
             // SAFETY: `p` is live; libarchive copies the string.
             this.check(unsafe { ffi::archive_read_add_passphrase(p, c.as_ptr()) })?;
         }
+        // Names the format does not declare (tar's ustar, CAB, LHA and RAR 4 without Unicode) are read as
+        // UTF-8, through the reader's own explicit conversion, instead of the default conversion that
+        // depends on the machine's code pages (`archive_string_default_conversion_for_read`). The
+        // readers without the option (ar, ISO, raw) ignore it; the return code only says whether some
+        // reader took it, so it is not checked. A name that is not UTF-8 then fails to convert (R204).
+        // SAFETY: `p` is live; the string is a NUL-terminated literal that libarchive parses at once.
+        let _ = unsafe { ffi::archive_read_set_options(p, c"hdrcharset=UTF-8".as_ptr()) };
         // SAFETY: `p` is live and fully configured.
         this.check(unsafe { ffi::archive_read_open1(p) })?;
         Ok(this)
@@ -357,7 +364,13 @@ impl Archive {
                 message: "libarchive returned no entry".into(),
             });
         }
-        let raw_names = self.raw_names;
+        let raw_names = if self.raw_names
+            || (self.format_name().starts_with("ISO9660") && !self.format_name().contains("Joliet"))
+        {
+            Names::Bytes
+        } else {
+            Names::Utf8
+        };
         // SAFETY: `e` is the entry libarchive just returned, valid until
         // the next header call; strings are copied at once.
         let path = unsafe {
@@ -464,33 +477,28 @@ impl Archive {
     }
 }
 
-/// Chooses between libarchive's two renderings of an entry name, `raw` (`archive_entry_pathname`: the
-/// bytes of the multibyte string) and `utf8` (`archive_entry_pathname_utf8`: converted from the locale's
-/// charset), without trusting the process's code page or locale (R204):
-///
-/// * undeclared names (cpio, ar, tar, ISO Rock Ridge, RAR 4 without Unicode, CAB without the UTF-8
-///   attribute) are kept as raw bytes (`archive_string_default_conversion_for_read` returns NULL in the C
-///   locale, `archive_read_support_format_*.c`'s `*_l` calls with a NULL conversion), so raw bytes that are
-///   valid non-ASCII UTF-8 are the name;
-/// * declared names (RAR 5 and RAR 4 Unicode, Joliet, CAB with the UTF-8 attribute, LHA's UTF-16, pax) are
-///   decoded by libarchive from the declared charset: on Linux into the UTF-8 locale [`use_utf8_locale`]
-///   sets, so `raw` is already UTF-8; on Windows into a wide string, which only `utf8` renders faithfully
-///   (`raw` is then ASCII with `?` or a byte string of the ANSI page);
-/// * otherwise `utf8`, and when there is none, `raw` (the host refuses a name that is not UTF-8).
-fn pick_name(raw_only: bool, raw: Option<Vec<u8>>, utf8: Option<Vec<u8>>) -> Option<Vec<u8>> {
-    if raw_only {
-        return raw;
-    }
-    if let Some(r) = &raw {
-        if !r.is_ascii() && std::str::from_utf8(r).is_ok() {
-            return raw;
-        }
-    }
-    match (raw, utf8) {
-        (Some(r), Some(u)) if r.is_ascii() && u.is_ascii() => Some(r),
-        (_, Some(u)) => Some(u),
-        (r, None) => r,
-    }
+/// How an entry's names are read (R204): the accessor that is faithful and independent of the
+/// machine's code page and locale for this format.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Names {
+    /// `archive_entry_pathname`: the stored bytes (ar, cpio, a raw stream, ISO 9660 with Rock Ridge only:
+    /// no charset is declared, and libarchive keeps the bytes as the multibyte string).
+    Bytes,
+    /// `archive_entry_pathname_utf8`: names libarchive decoded from a declared charset (RAR 5 and RAR 4
+    /// Unicode, Joliet's UTF-16BE, CAB's UTF-8 attribute, LHA's UTF-16, pax) or, with `hdrcharset=UTF-8`
+    /// set, from UTF-8 (tar, CAB, LHA, RAR 4 without Unicode). On Windows they are stored as wide strings,
+    /// so the rendering does not touch the ANSI or OEM code page.
+    Utf8,
+}
+
+/// The chosen rendering of a name, accepted only when it is valid UTF-8 (rule 4 of R204: otherwise the
+/// caller refuses the name; nothing is ever guessed).
+fn pick_name(mode: Names, raw: Option<Vec<u8>>, utf8: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    let v = match mode {
+        Names::Bytes => raw,
+        Names::Utf8 => utf8,
+    };
+    v.filter(|n| std::str::from_utf8(n).is_ok())
 }
 
 /// Makes the C runtime's `LC_CTYPE` a UTF-8 locale where one exists (Linux: `C.UTF-8`, then
