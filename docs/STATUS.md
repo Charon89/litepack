@@ -3,7 +3,7 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-11-05, about 04:37 on 2026-11-06 UTC (23:37, 11-05 local). **Session of 2026-11-05.** E5-12 is done (D-148, #154, `34c37ad`): the visual redesign the owner asked for, "archive label" (a label band with the archive's name and a size gauge, an icon command bar, settings with an Appearance choice, light and dark). E9-1 is done (D-147): the docs site at `https://charon89.github.io/litepack/`. E6-4 is done (D-145, D-146). E4-6 is ticked and E8-1 counts its thirty fuzz nights from 2026-10-28 (the thirtieth would be 2026-11-26). **Next:** E4-4 (RAR, ISO and CAB through libarchive; the owner approved the download, 3.8.11, below), then E8-3 (the weekly speed run: a design draft and the owner's schedule questions in the hand-off folder), E8-6, E8-8 and E9-2 to E9-8; E6-3 after E7-1 and E7-3; E6-7 and E5-10 by hand. E7 waits for the owner's answers (below). Briefs, reports, review verdicts, the ledgers and the merge scripts are in `target/acceptance/handoff-2026-11-05/` (this session) and `handoff-2026-10-30/` on Megatron.
+Last updated: 2026-11-06, about 01:55 on 2026-11-07 UTC (20:55, 11-06 local). **Session of 2026-11-05.** E5-12 is done (D-148, #154, `34c37ad`): the visual redesign the owner asked for, "archive label" (a label band with the archive's name and a size gauge, an icon command bar, settings with an Appearance choice, light and dark). E9-1 is done (D-147): the docs site at `https://charon89.github.io/litepack/`. E6-4 is done (D-145, D-146). E4-6 is ticked and E8-1 counts its thirty fuzz nights from 2026-10-28 (the thirtieth would be 2026-11-26). **In flight:** E4-4 (RAR, ISO and CAB through libarchive 3.8.11, downloaded and verified on 2026-11-06) on `task/e4-4`. **Next:** E8-3 (the weekly speed run: a design draft and the owner's schedule questions in the hand-off folder), E8-6, E8-8 and E9-2 to E9-8; E6-3 after E7-1 and E7-3; E6-7 and E5-10 by hand. E7 waits for the owner's answers (below). Briefs, reports, review verdicts, the ledgers and the merge scripts are in `target/acceptance/handoff-2026-11-05/` (this session) and `handoff-2026-10-30/` on Megatron.
 The owner asked on 2026-10-16 for the work to continue; this file is kept current as each task lands.
 
 **Where Phase 1 stands.** Epic E1 is complete (the format frozen at v1, revision 1.1 added for the JPEG peel; on
@@ -92,13 +92,11 @@ E3-8 is done (D-75, PR #77).
   estimates `node-v2` appended at 12.2 MB with patches against 16.8 MB without, and `node-v3` at 0.41 MB
   against 2.65 MB (estimates, not measured archives). Say whether to build the delta writer for `lpk append`
   only (E2-9's tasks B–D: revision 1.5, the writer, the reader and `lpk-check`), an incremental-backup feature.
-- **libarchive's source release (E4-4): approved by the owner on 2026-11-03** ("Can do all"). The latest patch
-  release that night was 3.8.11 (2026-10-30, after the 3.8.10 recommended here on 2026-10-26):
-  `libarchive-3.8.11.tar.gz`, 9,341,028 bytes, and its PGP signature `libarchive-3.8.11.tar.gz.asc`, 833 bytes, from
-  https://github.com/libarchive/libarchive/releases/tag/v3.8.11; the next session takes it unless the owner names
-  3.8.10 (verify the signature, record the SHA-256 in the D-entry). Not started that night: `task/e4-4` is 86 commits behind
-  `main`, and making RAR readable must also add `rar` to `lpk-shell`'s archive list and `lpk-gui`'s opt-in "Open
-  with" list, whose tests fail until then (D-144, D-145).
+- **libarchive's source release (E4-4): approved by the owner on 2026-11-03, downloaded and verified on 2026-11-06**:
+  `libarchive-3.8.11.tar.gz` (9,341,028 bytes, SHA-256
+  `900fe9fc7237c2b04f090f3c3648de8fe597525771f5035016537ce2d667d12b`, equal to the digest GitHub publishes for the
+  release asset), with a good PGP signature by Martin Matuska <mm@FreeBSD.org>, key
+  `659C84C0E23EA1FA97E0B58CC040B508D63D2B36`; E4-4 resumed on `task/e4-4`.
 - **Re-pin a changed corpus source (E8-9, new on 2026-10-26).** Project Gutenberg changed `1497-0.txt`, so a clean machine's `corpus build --profile small` no longer matches `corpus.lock` (this PC builds from its download cache). Re-pinning changes the `text-prose` class; the alternative is keeping the old file from a stable mirror. A corpus change is yours.
 - **The size gate's sensitivity (E8-2, new on 2026-10-26).** The 1% limit per row is PLAN's; on the red run, lowering the Balanced preset from 9e to 1 moved only 3 of 12 Balanced rows past 1%. Say whether to keep it or to add a per-class or tighter limit (a gate change is yours).
 - **E7's questions (new on 2026-10-28; `docs/notes/e7-design.md` §10, each with sources, costs and a
@@ -140,7 +138,7 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
-- `task/e4-4` (23c7c93, no PR): libarchive vendoring: the owner approved the download on 2026-11-03 (3.8.11, below); merge `main` first (86 commits behind), and add `rar` to `lpk-shell`'s and `lpk-gui`'s extension lists with the RAR change; the crates, routing, fixtures and gated tests are on the branch and build a stub.
+- `task/e4-4` (resumed 2026-11-06): libarchive 3.8.11 downloaded and verified; the implementer merges `main`, vendors the source and builds it for real, makes the RAR, ISO and CAB fixtures pass under LPAC, and updates the Explorer and "Open with" lists, the fuzz matrix, `docs/FORMATS.md`, the licences and the notices; then a review and the PR.
 - Follow-ups noted in the D-entries, for the tasks named: E7 — the WebView2 loader's licence text before any GUI binary ships (`docs/LICENSING.md`); E6-5 — `export --force` removes before it creates, and a foreign archive is reopened by path for the broker; `docs/SECURITY.md` — the vulnerability contact is the owner's to fill.
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are; old merged `task/e2-10-*`, `task/e2-15-probe`, `task/e2-20-*` and `task/e2-22-lpk-rows` branches remain on `origin`.
 
