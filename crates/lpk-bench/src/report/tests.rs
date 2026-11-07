@@ -2437,6 +2437,31 @@ fn remeasured_mx5() -> Vec<ToolResult> {
 }
 
 #[test]
+fn the_site_shows_a_replaced_rows_reason_as_re_measured_only() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let a = dir_under(tmp.path(), "a", &real_class_results());
+    let b = dir_under(tmp.path(), "b", &remeasured_mx5());
+    write_supersedes(&b, &[("7z", "mx5", "audio", "2026-10-01-testbox")]);
+    let file = b.join("supersedes.toml");
+    let text = std::fs::read_to_string(&file).expect("read");
+    std::fs::write(
+        &file,
+        text.replace(
+            "re-measured on the idle machine",
+            "measured while builds ran on the machine",
+        ),
+    )
+    .expect("write");
+    let inputs = load(&pooled_args(tmp.path(), vec![a, b])).expect("pooled");
+    let repo = report_text(&inputs);
+    assert!(repo.contains("measured while builds ran on the machine"));
+    let (site, _, _, _) = super::render::site_sections(&inputs, &|l| l.to_string());
+    assert!(site.contains("- Superseded rows"), "{site}");
+    assert!(site.contains(": re-measured\n"), "{site}");
+    assert!(!site.contains("builds ran"), "{site}");
+}
+
+#[test]
 fn a_listed_row_of_a_later_directory_replaces_the_earlier_one_and_the_report_says_so() {
     let tmp = tempfile::tempdir().expect("tmp");
     let a = dir_under(tmp.path(), "a", &real_class_results());

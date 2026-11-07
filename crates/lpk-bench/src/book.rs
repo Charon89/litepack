@@ -168,13 +168,13 @@ fn cited_outside_fences(text: &str) -> BTreeSet<usize> {
 }
 
 fn sources_section(
-    inputs: &report::model::Inputs,
+    sources: &[String],
     ids: &BTreeSet<usize>,
     lab: &dyn Fn(&str) -> String,
 ) -> Result<String> {
     let mut s = String::from("## Sources\n\n");
     for id in ids {
-        let Some(label) = id.checked_sub(1).and_then(|i| inputs.sources.get(i)) else {
+        let Some(label) = id.checked_sub(1).and_then(|i| sources.get(i)) else {
             bail!("the page cites source [{id}], which the report has no such source for");
         };
         s.push_str(&format!("{id}. `{}`\n", lab(label)));
@@ -213,7 +213,7 @@ fn results_page(inputs: &report::model::Inputs, lab: &dyn Fn(&str) -> String) ->
          hand.\n\n",
     );
     s.push_str(&body);
-    s.push_str(&sources_section(inputs, &cites, lab)?);
+    s.push_str(&sources_section(&inputs.sources, &cites, lab)?);
     s.push_str(tail);
     Ok(s)
 }
@@ -459,7 +459,7 @@ fn corpus_page(
         ids.extend(t.sources.iter().copied());
     }
     let mut s = body;
-    s.push_str(&sources_section(inputs, &ids, lab)?);
+    s.push_str(&sources_section(&inputs.sources, &ids, lab)?);
     Ok(s)
 }
 
@@ -615,6 +615,23 @@ mod tests {
     fn a_figure_in_a_description_is_refused() {
         assert!(check_no_figures("a", "up to 200 MB of data").is_err());
         assert!(check_no_figures("a", "fp16 and H.264 and node-v1").is_ok());
+    }
+
+    #[test]
+    fn fenced_brackets_are_not_citations_and_unknown_indices_fail() {
+        let text = "a [3]\n```toml\nx = [99]\n```\nb [1,2]\n";
+        assert_eq!(
+            cited_outside_fences(text).into_iter().collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        let sources = vec!["one".to_string()];
+        let lab = |l: &str| l.to_string();
+        for bad in [999usize, 0] {
+            let err = sources_section(&sources, &BTreeSet::from([bad]), &lab)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("[{bad}]")), "{err}");
+        }
     }
 
     #[test]
