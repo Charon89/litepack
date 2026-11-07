@@ -57,6 +57,10 @@ jobs:
       - name: libarchive fixtures documented
         shell: bash
         run: bash scripts/check-libarchive-fixtures.sh
+      # E8-3: the weekly speed script's verdicts on canned compare output, its measurement week and MISSED lines.
+      - name: weekly speed script tests
+        shell: bash
+        run: bash scripts/e8-3-weekly-test.sh
       # E6-6: the extraction test hooks stay out of the release lpk (D-99 (8)).
       - name: No test hooks in the release build
         shell: bash

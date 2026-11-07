@@ -19,6 +19,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 
+use super::discover::WORKSPACE_TOOL;
 use super::host::{av_equivalent, av_summary};
 use super::result::{AvProduct, HostFile, RunFile, ToolResult, ToolsFile};
 
@@ -193,7 +194,10 @@ fn antivirus_notes(a: &Loaded, b: &Loaded, notes: &mut Vec<String>) {
     }
 }
 
-pub fn compare(a: &Path, b: &Path, max_diff_pct: f64) -> Result<Report> {
+/// Compare two results directories. With `across_builds`, a different version of
+/// [`WORKSPACE_TOOL`] (a different build of this workspace) is a note instead of a problem;
+/// every other difference that makes two runs incomparable stays a problem.
+pub fn compare(a: &Path, b: &Path, max_diff_pct: f64, across_builds: bool) -> Result<Report> {
     let (la, lb) = (load(a)?, load(b)?);
     let mut rep = Report::default();
     for (dir, l) in [(a, &la), (b, &lb)] {
@@ -275,6 +279,14 @@ pub fn compare(a: &Path, b: &Path, max_diff_pct: f64) -> Result<Report> {
     for (id, va) in &la.versions {
         if let Some(vb) = lb.versions.get(id) {
             if va.is_some() && vb.is_some() && va != vb {
+                if across_builds && id == WORKSPACE_TOOL {
+                    rep.notes.push(format!(
+                        "tool `{id}` is a different build (--across-builds): {} against {}",
+                        va.as_deref().unwrap_or("?"),
+                        vb.as_deref().unwrap_or("?")
+                    ));
+                    continue;
+                }
                 rep.problems.push(format!(
                     "tool `{id}` has different versions: {} against {}",
                     va.as_deref().unwrap_or("?"),
@@ -390,8 +402,13 @@ pub fn table(rep: &Report, max_diff_pct: f64) -> String {
     s
 }
 
-pub fn compare_command(a: &Path, b: &Path, max_diff_pct: f64) -> Result<ExitCode> {
-    let rep = compare(a, b, max_diff_pct)?;
+pub fn compare_command(
+    a: &Path,
+    b: &Path,
+    max_diff_pct: f64,
+    across_builds: bool,
+) -> Result<ExitCode> {
+    let rep = compare(a, b, max_diff_pct, across_builds)?;
     print!("{}", table(&rep, max_diff_pct));
     for n in &rep.notes {
         println!("note: {n}");
@@ -457,7 +474,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let a = write(tmp.path(), "a", &two_classes(1.0), &samples::tools());
         let b = write(tmp.path(), "b", &two_classes(1.0), &samples::tools());
-        let rep = compare(&a, &b, 3.0).expect("compare");
+        let rep = compare(&a, &b, 3.0, false).expect("compare");
         assert!(rep.problems.is_empty(), "{:?}", rep.problems);
         assert_eq!(rep.rows.len(), 1);
         let row = &rep.rows[0];
@@ -474,10 +491,10 @@ mod tests {
         let a = write(tmp.path(), "a", &two_classes(1.0), &samples::tools());
         let within = write(tmp.path(), "w", &two_classes(1.02), &samples::tools());
         let beyond = write(tmp.path(), "x", &two_classes(1.05), &samples::tools());
-        let ok = compare(&a, &within, 3.0).expect("compare");
+        let ok = compare(&a, &within, 3.0, false).expect("compare");
         assert!(ok.problems.is_empty(), "{:?}", ok.problems);
         assert!((ok.rows[0].compress_pct - 2.0).abs() < 1e-6);
-        let bad = compare(&a, &beyond, 3.0).expect("compare");
+        let bad = compare(&a, &beyond, 3.0, false).expect("compare");
         assert!(
             bad.problems
                 .iter()
@@ -491,9 +508,9 @@ mod tests {
             .any(|p| p.contains("extract time differs")));
         assert!(table(&bad, 3.0).contains("over the limit"));
         // Faster counts too, and the threshold is a parameter.
-        let faster = compare(&beyond, &a, 3.0).expect("compare");
+        let faster = compare(&beyond, &a, 3.0, false).expect("compare");
         assert!(!faster.problems.is_empty());
-        assert!(compare(&a, &beyond, 6.0)
+        assert!(compare(&a, &beyond, 6.0, false)
             .expect("compare")
             .problems
             .is_empty());
@@ -507,7 +524,7 @@ mod tests {
         let mut other_corpus = two_classes(1.0);
         other_corpus[0].corpus.manifest_blake3 = "cd".repeat(32);
         let b = write(tmp.path(), "b", &other_corpus, &samples::tools());
-        let rep = compare(&a, &b, 3.0).expect("compare");
+        let rep = compare(&a, &b, 3.0, false).expect("compare");
         assert!(
             rep.problems.iter().any(|p| p.contains("different corpora")),
             "{:?}",
@@ -519,7 +536,7 @@ mod tests {
             r.threads = 8;
         }
         let c = write(tmp.path(), "c", &threads, &samples::tools());
-        let rep = compare(&a, &c, 3.0).expect("compare");
+        let rep = compare(&a, &c, 3.0, false).expect("compare");
         assert!(
             rep.problems.iter().any(|p| p.contains("thread counts")),
             "{:?}",
@@ -529,11 +546,105 @@ mod tests {
         let mut tools = samples::tools();
         tools.tools[0].version = Some("26.04".into());
         let d = write(tmp.path(), "d", &two_classes(1.0), &tools);
-        let rep = compare(&a, &d, 3.0).expect("compare");
+        let rep = compare(&a, &d, 3.0, false).expect("compare");
         assert!(
             rep.problems
                 .iter()
                 .any(|p| p.contains("`7z` has different versions")),
+            "{:?}",
+            rep.problems
+        );
+    }
+
+    /// The catalogue of the samples plus an `lpk` row of the given version.
+    fn tools_with_lpk(lpk: &str, seven_zip: &str) -> ToolsFile {
+        let mut tools = samples::tools();
+        tools.tools[0].version = Some(seven_zip.into());
+        let mut row = tools.tools[0].clone();
+        row.id = WORKSPACE_TOOL.into();
+        row.name = "LitePack".into();
+        row.version = Some(lpk.into());
+        tools.tools.push(row);
+        tools
+    }
+
+    #[test]
+    fn across_builds_turns_only_a_different_lpk_build_into_a_note() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let a = write(
+            tmp.path(),
+            "a",
+            &two_classes(1.0),
+            &tools_with_lpk("0.1.0+aaaaaaaaaaaa", "26.03"),
+        );
+        let b = write(
+            tmp.path(),
+            "b",
+            &two_classes(1.0),
+            &tools_with_lpk("0.1.0+bbbbbbbbbbbb", "26.03"),
+        );
+
+        // `lpk` differs, with the flag: a note naming both versions and no problem.
+        let rep = compare(&a, &b, 3.0, true).expect("compare");
+        assert!(rep.problems.is_empty(), "{:?}", rep.problems);
+        assert!(
+            rep.notes.iter().any(|n| n.contains("`lpk`")
+                && n.contains("0.1.0+aaaaaaaaaaaa")
+                && n.contains("0.1.0+bbbbbbbbbbbb")),
+            "{:?}",
+            rep.notes
+        );
+
+        // `lpk` differs, without the flag: a problem, as before.
+        let rep = compare(&a, &b, 3.0, false).expect("compare");
+        assert!(
+            rep.problems
+                .iter()
+                .any(|p| p.contains("`lpk` has different versions")),
+            "{:?}",
+            rep.problems
+        );
+        assert!(
+            rep.notes.iter().all(|n| !n.contains("`lpk`")),
+            "{:?}",
+            rep.notes
+        );
+
+        // `7z` differs, with the flag: still a problem (the control must be the same binary).
+        let c = write(
+            tmp.path(),
+            "c",
+            &two_classes(1.0),
+            &tools_with_lpk("0.1.0+bbbbbbbbbbbb", "26.04"),
+        );
+        let rep = compare(&a, &c, 3.0, true).expect("compare");
+        assert!(
+            rep.problems
+                .iter()
+                .any(|p| p.contains("`7z` has different versions")),
+            "{:?}",
+            rep.problems
+        );
+        assert!(
+            rep.problems.iter().all(|p| !p.contains("`lpk`")),
+            "{:?}",
+            rep.problems
+        );
+
+        // Every other refusal stays with the flag: a different thread count, for one.
+        let mut threads = two_classes(1.0);
+        for r in &mut threads {
+            r.threads = 8;
+        }
+        let d = write(
+            tmp.path(),
+            "d",
+            &threads,
+            &tools_with_lpk("0.1.0+bbbbbbbbbbbb", "26.03"),
+        );
+        let rep = compare(&a, &d, 3.0, true).expect("compare");
+        assert!(
+            rep.problems.iter().any(|p| p.contains("thread counts")),
             "{:?}",
             rep.problems
         );
@@ -554,7 +665,7 @@ mod tests {
         let mut host = samples::host();
         host.host = "otherbox".into();
         std::fs::write(b.join("host.json"), render(&host)).expect("w");
-        let rep = compare(&a, &b, 3.0).expect("compare");
+        let rep = compare(&a, &b, 3.0, false).expect("compare");
         for what in [
             "different --settle-ms-per-1000-files",
             "different hosts",
@@ -570,7 +681,7 @@ mod tests {
         }
         let f1 = write(tmp.path(), "f1", &[samples::failed()], &samples::tools());
         let f2 = write(tmp.path(), "f2", &[samples::failed()], &samples::tools());
-        let rep = compare(&f1, &f2, 3.0).expect("compare");
+        let rep = compare(&f1, &f2, 3.0, false).expect("compare");
         assert!(
             rep.problems
                 .iter()
@@ -580,7 +691,7 @@ mod tests {
         );
         // No run.json: an error, not a comparison.
         std::fs::remove_file(f2.join("run.json")).expect("rm");
-        assert!(compare(&f1, &f2, 3.0).is_err());
+        assert!(compare(&f1, &f2, 3.0, false).is_err());
     }
 
     #[test]
@@ -589,14 +700,14 @@ mod tests {
         let results = two_classes(1.0);
         let same_a = write(tmp.path(), "a", &results, &samples::tools());
         let same_b = write(tmp.path(), "b", &results, &samples::tools());
-        let rep = compare(&same_a, &same_b, 3.0).expect("compare");
+        let rep = compare(&same_a, &same_b, 3.0, false).expect("compare");
         assert!(rep.notes.is_empty(), "{:?}", rep.notes);
 
         // The raw state's low byte changing is not a difference.
         let mut raw = samples::host();
         raw.antivirus[0].product_state = "0x60110".into();
         std::fs::write(same_b.join("host.json"), render(&raw)).expect("w");
-        assert!(compare(&same_a, &same_b, 3.0)
+        assert!(compare(&same_a, &same_b, 3.0, false)
             .expect("compare")
             .notes
             .is_empty());
@@ -608,7 +719,7 @@ mod tests {
         let mut run = samples::run_file(&results);
         run.antivirus_end[0].scanner = "snoozed".into();
         std::fs::write(same_b.join("run.json"), render(&run)).expect("w");
-        let rep = compare(&same_a, &same_b, 3.0).expect("compare");
+        let rep = compare(&same_a, &same_b, 3.0, false).expect("compare");
         let joined = rep.notes.join("\n");
         assert!(
             joined.contains("differs between the directories at the start"),
@@ -636,7 +747,7 @@ mod tests {
             render(&samples::run_file(&results)),
         )
         .expect("w");
-        let rep = compare(&same_a, &same_b, 3.0).expect("compare");
+        let rep = compare(&same_a, &same_b, 3.0, false).expect("compare");
         assert!(
             rep.notes.iter().any(|n| n.contains("changed within run A")),
             "{:?}",
@@ -656,7 +767,7 @@ mod tests {
         trimmed[0].repeats_short = Some("measured once: long run".into());
         let a = write(tmp.path(), "a", &full, &samples::tools());
         let b = write(tmp.path(), "b", &trimmed, &samples::tools());
-        let rep = compare(&a, &b, 100000.0).expect("compare");
+        let rep = compare(&a, &b, 100000.0, false).expect("compare");
         assert_eq!(rep.notes.len(), 1, "{:?}", rep.notes);
         assert!(
             rep.notes[0].contains("7z/mx5/text") && rep.notes[0].contains("B was measured once")
@@ -667,14 +778,17 @@ mod tests {
             rep.problems
         );
         // Reversed: A is the short one.
-        let rep = compare(&b, &a, 100000.0).expect("compare");
+        let rep = compare(&b, &a, 100000.0, false).expect("compare");
         assert!(
             rep.notes[0].contains("A was measured once"),
             "{:?}",
             rep.notes
         );
         // Same on both sides: no note.
-        assert!(compare(&a, &a, 3.0).expect("compare").notes.is_empty());
+        assert!(compare(&a, &a, 3.0, false)
+            .expect("compare")
+            .notes
+            .is_empty());
     }
 
     #[test]
@@ -682,7 +796,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let a = write(tmp.path(), "a", &[samples::measured()], &samples::tools());
         let failed = write(tmp.path(), "f", &[samples::failed()], &samples::tools());
-        let rep = compare(&a, &failed, 3.0).expect("compare");
+        let rep = compare(&a, &failed, 3.0, false).expect("compare");
         assert!(
             rep.problems
                 .iter()
@@ -692,7 +806,7 @@ mod tests {
         );
         assert!(rep.problems.iter().any(|p| p.contains("no tool x setting")));
         let fewer = write(tmp.path(), "g", &two_classes(1.0), &samples::tools());
-        let rep = compare(&a, &fewer, 3.0).expect("compare");
+        let rep = compare(&a, &fewer, 3.0, false).expect("compare");
         assert!(
             rep.problems.iter().any(|p| p.contains("different classes")),
             "{:?}",

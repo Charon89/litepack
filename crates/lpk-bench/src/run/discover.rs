@@ -12,6 +12,11 @@ use super::catalogue::{Catalogue, Local, Tool};
 pub const SKIP_NOT_INSTALLED: &str = "not installed";
 pub const SKIP_MANUAL: &str = "manual (see docs/BASELINES.md)";
 
+/// The catalogue id of the tool this workspace builds: `bench/tools.toml`'s `lpk` row, found
+/// through its relative hint `target/release/lpk[.exe]`, whose version carries the build hash
+/// (`lpk 0.x.y+<commit>`). `run --compare --across-builds` lets only this tool's version differ.
+pub const WORKSPACE_TOOL: &str = "lpk";
+
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,7 +460,7 @@ mod tests {
         let real = include_str!("../../../../bench/tools.toml");
         let cat = Catalogue::parse(&real.replace("\"target/release/", "\"../../target/release/"))
             .expect("catalogue");
-        let tool = cat.get("lpk").expect("lpk row");
+        let tool = cat.get(WORKSPACE_TOOL).expect("lpk row");
         let env = fake_env(crate::run::catalogue::current_os(), Vec::new(), Vec::new());
         let Some(path) = find_executable(tool, &env) else {
             eprintln!(
