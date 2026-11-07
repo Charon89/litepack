@@ -35,6 +35,8 @@ if [[ "${1:-}" == "--check" ]]; then
     echo "crates/ or vendor/ contains a GPL-family licence text" >&2
     exit 1
   fi
+  # E4-4 (R207): every vendored libarchive file carries a notice the notices reproduce.
+  bash scripts/libarchive-licence-scan.sh --check
   echo "THIRD-PARTY-NOTICES is current; no GPL-family licence text"
 else
   render

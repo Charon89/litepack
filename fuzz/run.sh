@@ -15,6 +15,16 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# The C code (libarchive, zlib, liblzma, libzstd, via the `cc` crate) is built by clang with AddressSanitizer and
+# libFuzzer's coverage instrumentation, only for this build; CI's build job sets the same variables
+# (.github/workflows/fuzz.yml). Without them the C code would be neither covered nor checked.
+# LPK_FUZZ_PLAIN_C=1 turns this off (a machine without clang).
+if [ -z "${LPK_FUZZ_PLAIN_C:-}" ]; then
+  export CC=clang CXX=clang++
+  export CFLAGS="-fsanitize=address,fuzzer-no-link -g -O1"
+  export CXXFLAGS="$CFLAGS"
+fi
+
 secs=60
 minimise=0
 while [ $# -gt 0 ]; do

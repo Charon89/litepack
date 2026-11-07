@@ -87,9 +87,20 @@ jobs:
           key: ${{ env.LPK_FUZZ_TOOLCHAIN }}
       - name: cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: clang is on the runner image
+        run: |
+          clang --version | head -n 1
       - name: Build every target
         working-directory: fuzz
         # --no-cfg-fuzzing: the targets run the code we ship (fuzz/run.sh, fuzz/README.md).
+        # CC/CFLAGS: the C code (libarchive, zlib, liblzma, libzstd) is compiled by clang with AddressSanitizer
+        # and libFuzzer's coverage counters (as fuzz/run.sh does locally); the log of this step shows
+        # the counters in the fuzz jobs' "INFO: Loaded ... inline 8-bit counters" line.
+        env:
+          CC: clang
+          CXX: clang++
+          CFLAGS: -fsanitize=address,fuzzer-no-link -g -O1
+          CXXFLAGS: -fsanitize=address,fuzzer-no-link -g -O1
         run: cargo "+$LPK_FUZZ_TOOLCHAIN" fuzz build --no-cfg-fuzzing
       - name: Collect the binaries
         run: |
