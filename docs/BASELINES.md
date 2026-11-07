@@ -26,7 +26,7 @@ cargo run -p lpk-bench -- run --validate bench/results/<date>-<host>
 ```text
 cargo run -p lpk-bench -- run --tools all --profile small [--corpus DIR] [--classes a,b]
     [--repeats 3] [--threads N] [--timeout-s N] [--long-run-s 120] [--results DIR] [--tmp DIR] [--allow-dirty-build] [--keep-failed on|off]
-cargo run -p lpk-bench -- run --compare <dirA> <dirB> [--max-diff-pct 3]
+cargo run -p lpk-bench -- run --compare <dirA> <dirB> [--max-diff-pct 3] [--across-builds]
 ```
 
 The defaults are the corpus `bench/corpus/<profile>`, three repeats, the machine's logical cores as
@@ -126,6 +126,11 @@ directories differ in corpus, host, tool versions, thread count, requested repea
 `--long-run-s` or catalogue file, or measured different classes, or a combination was measured in
 only one of them or failed in both. This is the check behind the acceptance clause
 "a second run differs by < 3% in time".
+With `--across-builds` (E8-3's weekly run, `docs/notes/e8-3-design.md`), a different version of
+`lpk`, the tool this workspace builds (its version carries the build hash), is printed as a
+`note:` naming both versions instead of failing the comparison; every other difference above still
+fails it, including a different version of any other tool, so the `7z` control must be the same
+binary in both runs.
 
 ## Real-time scanners
 
