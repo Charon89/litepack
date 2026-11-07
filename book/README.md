@@ -12,8 +12,9 @@ own files work in the book. Never copy the text. What the checks cover:
 
 - The structural guard is the include allow-list (h) with (f). (h): in every file under `src/`, a `{{#...}}` directive
   is only an `{{#include}}` that resolves inside `src/` (such as the footer), or the exact wrapper include in
-  `src/spec/<name>.md`; `rustdoc_include`, `playground` and the rest fail. (f): there is no `{{#` inside `docs/spec/`.
-  So nothing outside `src/` and `docs/spec/` can reach the site by inclusion. Both mirror mdBook 0.5.4's directive
+  `src/spec/<name>.md`, `src/cli/<name>.md` or `src/cli/<name>-<N>.md`; `rustdoc_include`, `playground` and the rest
+  fail. (f): there is no `{{#` inside `docs/spec/` or `docs/cli/`.
+  So nothing outside `src/`, `docs/spec/` and `docs/cli/` can reach the site by inclusion. Both mirror mdBook 0.5.4's directive
   pattern (whitespace and line breaks inside a directive count; a file that is not UTF-8 fails); an mdBook upgrade
   must re-check it.
 - The other structural guards: (i) and (j) are allow-lists of exact line shapes, because mdBook's Markdown and TOML
@@ -32,3 +33,20 @@ own files work in the book. Never copy the text. What the checks cover:
   file names the method document. Those names and a content fingerprint (g) of the method document (its heading and
   every long line) are a second line of defence; the fingerprint is a sample that a reworded copy can evade.
 - `--self-test` proves each check fails, with its tag, on a crafted tree.
+
+The command-line reference (`src/cli/`) is made the same way, from `docs/cli/`, which `crates/lpk-cli/tests/docs.rs`
+(E3-7) keeps equal to the text generated from `lpk`'s command line. Never edit those files by hand; regenerate them with
+`LPK_CLI_DOCS_WRITE=1 cargo test -p lpk-cli --test docs`.
+
+- A source `docs/cli/NAME.md` has the page `src/cli/NAME.md`: its include (`{{#include ../../../docs/cli/NAME.md}}`)
+  and the footer include.
+- A man page `docs/cli/NAME.N` (N one digit, 1 to 9) has the page `src/cli/NAME-N.md` (the SUMMARY allow-list admits no
+  dot in a path component): a heading, one sentence, the include inside a fence of four backticks (`text`), and the
+  footer include. The script's `man_wrapper` holds the expected text; no text is copied.
+- (a) each page under `src/cli/` equals the wrapper of an existing source; (b) `docs/cli/` holds only `NAME.md` and
+  `NAME.N` files directly in it, each with its page; (c), (f) and (k) also cover `docs/cli/`; (h) admits the two wrapper
+  includes, each only in its own page; (l) no line of a man page begins, after spaces or tabs, with four or more
+  backticks (that is the only text that could close the fence); (l) splits lines at LF, CRLF and a lone CR, as
+  CommonMark does, and reports FILE:LINE counted that way. The built check (d) looks for the first `# ` heading of
+  each `.md` (spec and CLI) and for the first three words of the man page's first `.TH` line; it fails when a source has
+  no such heading or `.TH` line to look for.

@@ -35,13 +35,13 @@ jobs:
         run: cargo install mdbook --version "$MDBOOK_VERSION" --locked
       - name: Footer check
         run: bash scripts/check-book-footer.sh
-      - name: Book sources check (spec pages are includes, the method document is not published)
+      - name: Book sources check (spec and CLI pages are includes, the method document is not published)
         run: |
           bash scripts/check-book-sources.sh --self-test
           bash scripts/check-book-sources.sh
       - name: Build the book
         run: mdbook build book
-      - name: Built book check (spec pages rendered from the committed files)
+      - name: Built book check (spec and CLI pages rendered from the committed files)
         run: bash scripts/check-book-sources.sh --built book/book
       # The site publishes no font files (docs/LICENSING.md: Source Code Pro is OFL-1.1, not on the allow-list);
       # book/theme/fonts/fonts.css keeps mdBook's bundled fonts out, and an mdBook upgrade must not bring them back.
