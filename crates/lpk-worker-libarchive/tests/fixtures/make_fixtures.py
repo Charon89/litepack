@@ -488,6 +488,87 @@ def make_tar(src_names):
     return buf.getvalue()
 
 
+# --- LZH (stored, -lh0-, level 0 and level 1 headers) and RPM ------------------------------------
+def crc16_arc(data):
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+def lha_dos_time():
+    import time as _t
+
+    g = _t.gmtime(MTIME)
+    date = ((g.tm_year - 1980) << 9) | (g.tm_mon << 5) | g.tm_mday
+    tm = (g.tm_hour << 11) | (g.tm_min << 5) | (g.tm_sec // 2)
+    return (date << 16) | tm
+
+
+def lha_member(name, data, level):
+    nb = name.encode()
+    crc = crc16_arc(data)
+    if level == 0:
+        body = (
+            b"-lh0-"
+            + struct.pack("<II", len(data), len(data))
+            + struct.pack("<I", lha_dos_time())
+            + bytes([0x20, 0, len(nb)])
+            + nb
+            + struct.pack("<H", crc)
+        )
+        return bytes([len(body), sum(body) & 0xFF]) + body + data
+    # Level 1: the base header ends with the OS id and the "next extended header size" (zero: none), and
+    # its size byte counts both (libarchive: archive_read_support_format_lha.c, lha_read_file_header_1).
+    body = (
+        b"-lh0-"
+        + struct.pack("<II", len(data), len(data))
+        + struct.pack("<I", lha_dos_time())
+        + bytes([0x20, 1, len(nb)])
+        + nb
+        + struct.pack("<H", crc)
+        + b"U"
+        + struct.pack("<H", 0)
+    )
+    return bytes([len(body), sum(body) & 0xFF]) + body + data
+
+
+def make_lzh(path, level):
+    out = b""
+    for rel in sorted(TREE):
+        out += lha_member(rel, TREE[rel], level)
+    with open(path, "wb") as f:
+        f.write(out + b"\0")
+
+
+def make_rpm(path):
+    import gzip
+
+    def cpio_entry(ino, name, data):
+        nb = name.encode() + b"\0"
+        fields = [ino, 0o100644, 0, 0, 1, MTIME, len(data), 0, 0, 0, 0, len(nb), 0]
+        h = b"070701" + b"".join(b"%08X" % v for v in fields) + nb
+        h += b"\0" * (-len(h) % 4)
+        return h + data + b"\0" * (-len(data) % 4)
+
+    payload = b""
+    for i, rel in enumerate(sorted(TREE)):
+        payload += cpio_entry(1 + i, rel, TREE[rel])
+    payload += cpio_entry(0, "TRAILER!!!", b"")
+    lead = bytearray(96)
+    lead[0:4] = b"\xed\xab\xee\xdb"
+    lead[4:6] = bytes([3, 0])
+    lead[10:20] = b"litepack-1"
+    struct.pack_into(">HH", lead, 6, 0, 1)  # type binary, arch
+    struct.pack_into(">HH", lead, 76, 1, 5)  # os, signature type: header-style
+    hdr_magic = b"\x8e\xad\xe8\x01\0\0\0\0" + struct.pack(">II", 0, 0)  # no entries, no data
+    sig = hdr_magic  # 16 bytes, already a multiple of 8
+    with open(path, "wb") as f:
+        f.write(bytes(lead) + sig + hdr_magic + gzip.compress(payload, mtime=0))
+
+
 def main():
     out, scratch = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     os.makedirs(out, exist_ok=True)
@@ -501,6 +582,9 @@ def main():
     make_iso(os.path.join(out, "iso-joliet.iso"), joliet=True)
     make_ar(os.path.join(out, "fixture.a"))
     make_cpio(os.path.join(out, "fixture.cpio"))
+    make_lzh(os.path.join(out, "level0.lzh"), 0)
+    make_lzh(os.path.join(out, "level1.lzh"), 1)
+    make_rpm(os.path.join(out, "fixture.rpm"))
     make_uue(os.path.join(out, "hello.txt.uue"), "hello.txt", TREE["hello.txt"])
     with open(os.path.join(out, "hello.txt.Z"), "wb") as f:
         f.write(lzw_compress(TREE["hello.txt"]))

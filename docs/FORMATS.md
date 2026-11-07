@@ -60,6 +60,5 @@ undeclared names that would justify a table (rule 3 of R204 does not apply: `arc
 is the machine's OEM page, which is exactly what the ruling forbids). Proven by tests for cpio, ar and ustar (UTF-8 exact,
 Latin-1 refused); ISO, RAR 5, CAB and LZH non-ASCII fixtures were not made.
 
-**Untested.** LZH `-lh5-`, `-lh6-`, `-lh7-` decompression and level 1 and 2 headers have no fixture; an RPM has no fixture;
-the LZH and RPM readers are exercised only by the malformed-input and garbage tests. CAB checksums are not claimed verified
+**Untested.** LZH has fixtures for stored (`-lh0-`) members with level 0 and level 1 headers only: `-lh5-`, `-lh6-`, `-lh7-` decompression and level 2 headers are not exercised by a fixture. The RPM fixture is a minimal one (lead, empty signature and header, gzip'd cpio payload). CAB checksums are not claimed verified
 (a stored CFDATA checksum of 0 means none).

@@ -17,6 +17,8 @@ pseudo-random bytes; mtime 2024-01-02 03:04:05 UTC). `manifest.b3` holds the BLA
 | `cab-stored.cab`, `cab-mszip.cab`, `cab-lzx.cab` | Windows `makecab` (Windows 11 Pro 10.0.26200), a `.ddf` per file | `LZX` with `CompressionMemory=21` |
 | `iso-rockridge.iso`, `iso-joliet.iso` | the generator's ISO 9660 writer (one with Rock Ridge `SP`/`RR`/`NM`/`PX` entries, one with a Joliet tree) | no ISO tool on the machine |
 | `fixture.a`, `fixture.cpio` (newc) | the generator | |
+| `level0.lzh`, `level1.lzh` | the generator: stored `-lh0-` members, level 0 and level 1 headers (CRC-16/ARC, header sum) | `-lh5-`/`-lh6-`/`-lh7-` and level 2 are not covered |
+| `fixture.rpm` | the generator: lead, empty signature and header, gzip of a newc cpio payload | minimal |
 | `hello.txt.uue` | the generator (`binascii.b2a_uu`) | |
 | `hello.txt.Z`, `small.tar.Z` | the generator's `compress` (9-bit codes only) | checked with `gzip -dc` |
 
