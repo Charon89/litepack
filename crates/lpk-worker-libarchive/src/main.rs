@@ -13,7 +13,7 @@ fn main() {
     // First thing, single-threaded: libarchive converts declared charsets into UTF-8 (R204).
     if !lpk_libarchive_sys::use_utf8_locale() {
         eprintln!(
-            "lpk-worker-libarchive: no UTF-8 locale (C.UTF-8, en_US.UTF-8): names declared in UTF-16 or UTF-8 may be refused"
+            "lpk-worker-libarchive: no UTF-8 locale (C.UTF-8, en_US.UTF-8): tar, CAB, LHA and RAR 4 archives will not open, and names that need converting may be refused"
         );
     }
     let args: Vec<String> = std::env::args().skip(1).collect();

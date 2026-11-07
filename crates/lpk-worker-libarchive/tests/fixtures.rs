@@ -40,6 +40,20 @@ fn skipped(what: &str) -> bool {
     false
 }
 
+/// What the worker's `main` does first (R204), once per process. libarchive is built without iconv
+/// and converts names into the locale's charset: in the "C" locale a Linux test process starts in,
+/// the tar, CAB, LHA and RAR 4 readers refuse `hdrcharset=UTF-8`, so none of those archives would
+/// open. On Windows nothing is set.
+fn utf8_locale() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        assert!(
+            lpk_worker_libarchive::use_utf8_locale(),
+            "no UTF-8 locale (C.UTF-8, en_US.UTF-8)"
+        );
+    });
+}
+
 #[test]
 fn the_manifest_covers_every_expected_file() {
     let m = common::manifest();
@@ -55,6 +69,7 @@ fn every_fixture_lists_and_reads_back_blake3_equal() {
     if skipped("every_fixture_lists_and_reads_back_blake3_equal") {
         return;
     }
+    utf8_locale();
     let m = common::manifest();
     for (archive, expected) in common::CASES {
         let args = OpenArgs {
@@ -93,6 +108,7 @@ fn malformed_inputs_are_named_errors() {
     if skipped("malformed_inputs_are_named_errors") {
         return;
     }
+    utf8_locale();
     for (archive, _) in common::CASES {
         let bytes = std::fs::read(fixture(archive)).unwrap();
         for cut in [bytes.len() / 2, bytes.len() * 9 / 10] {

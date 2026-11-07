@@ -111,6 +111,9 @@ fn garbage_is_an_error_not_a_crash() {
     if skip_loudly("garbage_is_an_error_not_a_crash") {
         return;
     }
+    // As the worker does first: in the "C" locale on Linux the RAR 4, CAB and LHA readers refuse
+    // `hdrcharset=UTF-8` and every open would fail before any of them saw the bytes.
+    let _ = use_utf8_locale();
     let all = [
         ReadFormat::Rar,
         ReadFormat::Rar5,

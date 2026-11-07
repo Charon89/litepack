@@ -403,7 +403,10 @@ impl Archive {
             )
         };
         // SAFETY: as above.
-        let ft = u32::from(unsafe { ffi::archive_entry_filetype(e) }) & ffi::AE_IFMT;
+        let mode = unsafe { ffi::archive_entry_filetype(e) };
+        // `la_mode_t` is `u16` on Windows and already `u32` on Linux, where the conversion is a no-op.
+        #[allow(clippy::useless_conversion)]
+        let ft = u32::from(mode) & ffi::AE_IFMT;
         let kind = match ft {
             ffi::AE_IFREG => EntryKind::File,
             ffi::AE_IFDIR => EntryKind::Directory,
@@ -422,7 +425,10 @@ impl Archive {
             // SAFETY: as above.
             let s = unsafe { ffi::archive_entry_mtime(e) };
             // SAFETY: as above.
-            let ns = i64::from(unsafe { ffi::archive_entry_mtime_nsec(e) });
+            let nsec = unsafe { ffi::archive_entry_mtime_nsec(e) };
+            // C's `long` is 32 bits on Windows and already `i64` on Linux, where the conversion is a no-op.
+            #[allow(clippy::useless_conversion)]
+            let ns = i64::from(nsec);
             Some((s, ns))
         } else {
             None

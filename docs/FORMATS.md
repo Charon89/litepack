@@ -66,10 +66,11 @@ through the ANSI code page).
 (a stored CFDATA checksum of 0 means none).
 
 **No UTF-8 locale on Linux.** The worker asks for `C.UTF-8`, then `en_US.UTF-8` at start and writes one line to stderr if
-neither exists. Names the format declares in UTF-16 or UTF-8 (Joliet, RAR 5 and RAR 4 Unicode, CAB's UTF-8 attribute, LHA's
-UTF-16, pax) and tar, CAB, LHA and RAR 4 names read with `hdrcharset=UTF-8` need libarchive's conversion to the locale's
-charset; without a UTF-8 locale those with non-ASCII characters are refused with the named error, never guessed. Stored-byte
-formats (cpio, ar, ISO Rock Ridge) are unaffected. On Windows nothing is set.
+neither exists. libarchive is built without iconv, so it converts names into the locale's charset, and the "C" locale has no
+conversion from UTF-8. Without a UTF-8 locale, tar (inside `.Z`), CAB, LHA and RAR 4 archives therefore do not open at all:
+their readers refuse `hdrcharset=UTF-8`, and the error carries libarchive's message. Other names that need converting
+(Joliet's UTF-16, for example) are refused with the named error when they hold non-ASCII characters, never guessed.
+Stored-byte formats (cpio, ar, ISO Rock Ridge) are unaffected. On Windows nothing is set.
 
 **LZH names in a code page.** An LZH header that declares a code page (`EXT_CODEPAGE`, for example CP932) decodes on Windows,
 where libarchive uses the system's tables, and is refused with the named error on Linux (no iconv is linked). Accepted
