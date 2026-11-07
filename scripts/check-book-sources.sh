@@ -12,6 +12,15 @@
 # (l) no line of a man page opens, after spaces or tabs, with four or more backticks (it could close the fence).
 # Built (d) also covers cli/NAME.html (the first `# ` heading) and cli/NAME-N.html (the first three words of the
 # `.TH ` line).
+# E9-8 adds the licensing and notices pages: book/src/licensing.md includes the `published` anchor of
+# docs/LICENSING.md, book/src/notices.md shows THIRD-PARTY-NOTICES in a four-backtick fence (licensing_wrapper and
+# notices_wrapper have the exact texts). (a) both pages are exactly those texts; (h) admits those two includes, each in
+# its own page, so the whole-file include of docs/LICENSING.md fails; (c), (f), (k) also cover docs/LICENSING.md and
+# THIRD-PARTY-NOTICES, (l) the latter; (j) admits [output.html.search.chapter] with only the line
+# `"notices.md" = { enable = false }`; (m) docs/LICENSING.md has the anchors `published` (start, then end), no other
+# ANCHOR marker, and between them exactly the headings `## Our licence` and `## Dependency policy (...)`, so an edit
+# cannot widen what the book publishes without failing. Built: licensing.html has both headings and none of the
+# unpublished ones; the code text of notices.html, unescaped, equals THIRD-PARTY-NOTICES (the CI step of E9-8).
 # Source checks:
 #   (a) each page under book/src/spec/ is exactly its include line plus the footer include;
 #   (b) each docs/spec/*.md has a page of the same name there;
@@ -63,7 +72,9 @@ nonblank() { grep -q '[^[:space:]]' <<<"$1"; }
 #     resolves inside DIR (an `:anchor` or `:start:end` suffix allowed), or, in spec/NAME.md, exactly the
 #     wrapper include of docs/spec/NAME.md (likewise cli/NAME.md and cli/NAME-N.md, see check (h));
 #     anything else (rustdoc_include, playground...) is a finding.
-#   MODE f (DIR is docs/spec or docs/cli): any `{{` + optional whitespace + `#`, escaped or not, is a finding.
+#     Also exactly: ../../docs/LICENSING.md:published in licensing.md, ../../THIRD-PARTY-NOTICES in notices.md.
+#   MODE f (DIR is docs/spec or docs/cli, or one file: docs/LICENSING.md, THIRD-PARTY-NOTICES):
+#     any `{{` + optional whitespace + `#`, escaped or not, is a finding.
 scan_directives() {
   find "$2" -type f -print0 | perl -0ne '
     use Encode qw(decode FB_CROAK);
@@ -92,6 +103,8 @@ scan_directives() {
         if ($rel =~ m{^spec/([^/]+)$} && $t eq "../../../docs/spec/$1") { $ok = 1; }
         elsif ($rel =~ m{^cli/([A-Za-z0-9_-]+)\.md$} && $t eq "../../../docs/cli/$1.md") { $ok = 1; }
         elsif ($rel =~ m{^cli/([A-Za-z0-9_-]+)-([1-9])\.md$} && $t eq "../../../docs/cli/$1.$2") { $ok = 1; }
+        elsif ($rel eq "licensing.md" && $t eq "../../docs/LICENSING.md:published") { $ok = 1; }
+        elsif ($rel eq "notices.md" && $t eq "../../THIRD-PARTY-NOTICES") { $ok = 1; }
         else {
           $path =~ s/:.*//;
           my @st = @dir; my $in = $path !~ m{^/} && length $path;
@@ -113,9 +126,10 @@ scan_directives() {
 # same thing (entities, reference links, balanced parentheses, dotted keys, spaced headers).
 #   summary: blank; `# T`; `---`; `[T](P)`; `<indent>- [T](P)` (indent: groups of 2 or 4 spaces, no tabs);
 #            T is [A-Za-z0-9 .,()'-]+; P is empty or [A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.md.
-#   toml:    blank; `#` comment; the headers [book], [output.html], [output.html.search]; `key = value` with
-#            a key from the table's list and a value that is a double-quoted string without backslash, true,
-#            false or an integer (the [book] src must equal "src").
+#   toml:    blank; `#` comment; the headers [book], [output.html], [output.html.search],
+#            [output.html.search.chapter]; `key = value` with a key from the table's list and a value that is a
+#            double-quoted string without backslash, true, false or an integer (the [book] src must equal "src");
+#            under the chapter header only the exact line `"notices.md" = { enable = false }`.
 allow_scan() {
   perl -e '
     my ($mode, $file) = @ARGV;
@@ -124,7 +138,9 @@ allow_scan() {
       "[book]" => [qw(title authors description language src)],
       "[output.html]" => [qw(git-repository-url site-url default-theme preferred-dark-theme)],
       "[output.html.search]" => [qw(enable limit-results use-boolean-and expand heading-split-level)],
+      "[output.html.search.chapter]" => [],
     );
+    my $chapter_line = q{"notices.md" = { enable = false }};
     my $T = q{[A-Za-z0-9 .,()\x27-]+};
     my $P = q{[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\.md};
     my ($n, $sec) = (0, "");
@@ -137,6 +153,7 @@ allow_scan() {
       } else {
         if ($l =~ /\A\s*\z/ || $l =~ /\A\s*#/) { $ok = 1; }
         elsif (exists $keys{$l}) { $sec = $l; $ok = 1; }
+        elsif ($sec eq "[output.html.search.chapter]") { $ok = 1 if $l eq $chapter_line; }
         elsif ($l =~ /\A([a-z-]+) = ("[^"\\]*"|true|false|-?[0-9]+)\z/ && $sec ne "" && grep { $_ eq $1 } @{ $keys{$sec} }) {
           $ok = 1;
           $ok = 0 if $sec eq "[book]" && $1 eq "src" && $2 ne "\"src\"";
@@ -195,6 +212,22 @@ check_sources() {
       fi
     done < <(find "$cpages" -mindepth 1 -print0)
   fi
+  # (a) for the licensing and notices pages: exactly their wrappers, and their sources exist
+  if [ -d "$root/book/src" ]; then
+    local lp cgot cwant
+    for lp in licensing notices; do
+      page="$root/book/src/$lp.md"
+      if [ ! -f "$page" ]; then echo "(a) no book page book/src/$lp.md"; fail=1; continue; fi
+      cgot="$(grep -v '^[[:space:]]*$' "$page" | tr -d '\r')"
+      cwant="$("${lp}_wrapper" | grep -v '^[[:space:]]*$')"
+      if [ "$cgot" != "$cwant" ]; then
+        echo "(a) not the exact wrapper text (a copy, or a changed include?): book/src/$lp.md"; fail=1
+      fi
+    done
+    for f in docs/LICENSING.md THIRD-PARTY-NOTICES; do
+      if [ ! -f "$root/$f" ]; then echo "(a) the source of a book page is missing: $f"; fail=1; fi
+    done
+  fi
   # (b) for docs/cli: only NAME.md and NAME.N (N 1-9) files directly in it, each with its page, no two to one page
   if [ -d "$cli" ]; then
     local seen=" " pg
@@ -211,11 +244,16 @@ check_sources() {
       if [ ! -f "$cpages/$pg" ]; then echo "(b) no book page for docs/cli/$name (book/src/cli/$pg)"; fail=1; fi
     done < <(find "$cli" -mindepth 1 -print0)
   fi
-  # (c) The build output book/book is pruned; (e) and (g) cover it. docs/spec and docs/cli are covered too.
+  # (c) The build output book/book is pruned; (e) and (g) cover it. docs/spec, docs/cli, docs/LICENSING.md and
+  # THIRD-PARTY-NOTICES are covered too.
   if [ -d "$root/book" ]; then
     local hits d
     hits="$(cd "$root" && find book -path book/book -prune -o -type f -print0 | xargs -0 -r grep -Iil -e "$needle" || true)"
     hits="$hits"$'\n'"$(cd "$root" && find book -path book/book -prune -o -iname '*litepack-method*' -print || true)"
+    for d in docs/LICENSING.md THIRD-PARTY-NOTICES; do
+      [ -f "$root/$d" ] || continue
+      hits="$hits"$'\n'"$(cd "$root" && grep -Iil -e "$needle" "$d" || true)"
+    done
     for d in docs/spec docs/cli; do
       [ -d "$root/$d" ] || continue
       hits="$hits"$'\n'"$(cd "$root" && find "$d" -type f -print0 | xargs -0 -r grep -Iil -e "$needle" || true)"
@@ -229,22 +267,31 @@ check_sources() {
   if [ -d "$spec" ]; then
     local inc
     inc="$(scan_directives f "$spec" || true)"
-    if nonblank "$inc"; then printf '(f) an include inside docs/spec: %s\n' "$inc"; fail=1; fi
+    if nonblank "$inc"; then printf '(f) an include, or an unreadable file, inside docs/spec: %s\n' "$inc"; fail=1; fi
   fi
   if [ -d "$cli" ]; then
     local cinc
     cinc="$(scan_directives f "$cli" || true)"
-    if nonblank "$cinc"; then printf '(f) an include inside docs/cli: %s\n' "$cinc"; fail=1; fi
-    # (l) no man-page line may open with four or more backticks (it could close the wrapper's fence)
-    local fence
-    # Lines end at LF, CRLF or a lone CR, as in CommonMark.
-    fence="$(for f in "$cli"/*.[1-9]; do [ -f "$f" ] && perl -e '
+    if nonblank "$cinc"; then printf '(f) an include, or an unreadable file, inside docs/cli: %s\n' "$cinc"; fail=1; fi
+  fi
+  for f in docs/LICENSING.md THIRD-PARTY-NOTICES; do
+    [ -e "$root/$f" ] || continue
+    local sinc
+    sinc="$(scan_directives f "$root/$f" || true)"
+    if nonblank "$sinc"; then printf '(f) an include, or an unreadable file, inside %s: %s\n' "$f" "$sinc"; fail=1; fi
+  done
+  # (l) no line of a man page or of THIRD-PARTY-NOTICES may open with four or more backticks (it could close the
+  # four-backtick fence of its page). Lines end at LF, CRLF or a lone CR, as in CommonMark.
+  local fence="" lf
+  for lf in "$cli"/*.[1-9] "$root/THIRD-PARTY-NOTICES"; do
+    [ -f "$lf" ] || continue
+    fence="$fence"$'\n'"$(perl -e '
         open my $h, "<:raw", $ARGV[0] or do { print "$ARGV[0]:0: cannot be read: $!\n"; exit };
         local $/; my $s = <$h>; my $n = 0;
         for my $l (split /\r\n|\r|\n/, $s, -1) { $n++; print "$ARGV[0]:$n:$l\n" if $l =~ /^[ \t]*`{4,}/ }
-      ' "$f"; done || true)"
-    if nonblank "$fence"; then printf '(l) a man-page line of four or more backticks (FILE:LINE:text): %s\n' "$fence"; fail=1; fi
-  fi
+      ' "$lf" || true)"
+  done
+  if nonblank "$fence"; then printf '(l) a line of four or more backticks (FILE:LINE:text): %s\n' "$fence"; fail=1; fi
   # (i) SUMMARY.md and (j) book.toml: allow-lists of exact line shapes (see allow_scan)
   if [ -f "$root/book/src/SUMMARY.md" ]; then
     local bad_i
@@ -258,10 +305,20 @@ check_sources() {
       printf '(j) a book.toml line outside the allow-list (widen it only after checking that the key cannot bring a file from outside book/src into the site): %s\n' "$bad_j"; fail=1
     fi
   fi
-  # (k) no symlink under book/ (the build output aside), docs/spec/ or docs/cli/: mdBook follows them, find -type f skips them
+  # (k) no symlink under book/ (the build output aside), docs/spec/ or docs/cli/, and neither docs/LICENSING.md nor
+  # THIRD-PARTY-NOTICES is one: mdBook follows symlinks, find -type f skips them
   local links
-  links="$( { [ -d "$root/book" ] && (cd "$root" && find book -path book/book -prune -o -type l -print); [ -d "$spec" ] && (cd "$root" && find docs/spec -type l -print); [ -d "$cli" ] && (cd "$root" && find docs/cli -type l -print); } || true)"
+  links="$( { [ -d "$root/book" ] && (cd "$root" && find book -path book/book -prune -o -type l -print)
+    [ -d "$spec" ] && (cd "$root" && find docs/spec -type l -print)
+    [ -d "$cli" ] && (cd "$root" && find docs/cli -type l -print)
+    for f in docs/LICENSING.md THIRD-PARTY-NOTICES; do [ -L "$root/$f" ] && echo "$f"; done; } || true)"
   if nonblank "$links"; then printf '(k) a symlink: %s\n' "$links"; fail=1; fi
+  # (m) the anchors of docs/LICENSING.md and the headings between them (what licensing.md publishes)
+  if [ -d "$root/book/src" ]; then
+    local anchors
+    anchors="$(check_anchors "$root/docs/LICENSING.md" || true)"
+    if nonblank "$anchors"; then printf '(m) the published region of docs/LICENSING.md: %s\n' "$anchors"; fail=1; fi
+  fi
   # (h)
   if [ -d "$root/book/src" ]; then
     local bad
@@ -276,6 +333,61 @@ man_wrapper() {
   printf '# The %s(%s) man page\n\n' "$1" "$2"
   printf 'The committed `docs/cli/%s.%s` in its roff source, generated from `%s`'"'"'s command line; a test keeps the file equal to the generated page. In a checkout, `man ./docs/cli/%s.%s` shows it formatted.\n\n' "$1" "$2" "$1" "$1" "$2"
   printf '````text\n{{#include ../../../docs/cli/%s.%s}}\n````\n\n{{#include ../footer.md}}\n' "$1" "$2"
+}
+
+# licensing_wrapper and notices_wrapper: book/src/licensing.md and book/src/notices.md, exactly (blank lines are
+# not compared).
+licensing_wrapper() {
+  cat <<'EOF'
+# Licensing
+
+{{#include ../../docs/LICENSING.md:published}}
+
+{{#include footer.md}}
+EOF
+}
+
+notices_wrapper() {
+  cat <<'EOF'
+# Third-party notices
+
+The notices and licence texts of the third-party software in LitePack's shipped programs, exactly as shipped in `THIRD-PARTY-NOTICES`. They belong to their authors and stay under their own terms; the documentation licence below covers only this page's own text. The file is generated by `scripts/third-party-notices.sh`.
+
+````text
+{{#include ../../THIRD-PARTY-NOTICES}}
+````
+
+{{#include footer.md}}
+EOF
+}
+
+# check_anchors FILE (check (m)): prints a finding per problem in docs/LICENSING.md. mdBook takes the text between the
+# lines holding `ANCHOR: published` and `ANCHOR_END: published`; this pins both markers (exact lines, in that order,
+# no other ANCHOR text) and the headings between them, so an edit cannot widen what is published without failing.
+# A heading is an ATX heading (up to three spaces, then `#`) or a setext underline (`===` or two or more `-`).
+check_anchors() {
+  perl -e '
+    my $p = $ARGV[0];
+    open my $h, "<:raw", $p or do { print "$p: cannot be read: $!\n"; exit };
+    local $/; my $s = <$h>; close $h;
+    my @lines = split /\r\n|\r|\n/, $s, -1;
+    my (@marks, @heads, $in);
+    my ($start, $end) = ("<!-- ANCHOR: published -->", "<!-- ANCHOR_END: published -->");
+    for my $i (0 .. $#lines) {
+      my $l = $lines[$i];
+      if ($l =~ /ANCHOR/) { push @marks, [$i + 1, $l]; }
+      if (@marks == 1 && $marks[0][1] eq $start) { $in = 1 }
+      if (@marks >= 2) { $in = 0 }
+      if ($in && $l !~ /ANCHOR/ && ($l =~ /^ {0,3}\#/ || $l =~ /^ {0,3}(?:=+|-{2,})[ \t]*$/)) { push @heads, $l }
+    }
+    if (@marks != 2) { print "$p: ", scalar(@marks), " lines with ANCHOR, not 2\n"; }
+    if (@marks >= 1 && $marks[0][1] ne $start) { print "$p:$marks[0][0]: the first ANCHOR line is not exactly $start\n"; }
+    if (@marks >= 2 && $marks[1][1] ne $end) { print "$p:$marks[1][0]: the second ANCHOR line is not exactly $end\n"; }
+    my @want = ("## Our licence", "## Dependency policy (enforced by `cargo deny check`)");
+    if (join("\n", @heads) ne join("\n", @want)) {
+      print "$p: the headings between the anchors are [", join(" | ", @heads), "], not [", join(" | ", @want), "]\n";
+    }
+  ' "$1"
 }
 
 # First `# ` heading of a source file, as it reads rendered: backticks dropped, HTML-escaped.
@@ -315,6 +427,69 @@ scan_fingerprint() {
     $c =~ s/<[^>]*>//g; $c =~ s/&[#A-Za-z0-9]+;//g; $c =~ s/[^A-Za-z0-9]//g;
     for my $e (@fp) { my ($n, $s) = split /:/, $e, 2; if (index($c, $s) >= 0) { print "$p: method document line $n\n"; last; } }
   ' "$1"
+}
+
+# html_unescape is the perl routine shared by the two built checks below (named and numeric entities; an entity it
+# does not know is a finding, not a silent pass).
+html_unescape_perl='
+  sub html_unescape {
+    my ($t, $bad) = @_;
+    my %n = (amp => "&", lt => "<", gt => ">", quot => "\"", apos => "\x27", nbsp => "\x{a0}");
+    $t =~ s{&(?:\#([0-9]+)|\#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]*));}{
+      defined $1 ? chr($1) : defined $2 ? chr(hex($2)) : exists $n{$3} ? $n{$3} : do { push @$bad, $3; "" }
+    }ge;
+    return $t;
+  }
+'
+
+# built_licensing FILE: prints a finding per problem in the built licensing page.
+built_licensing() {
+  perl -e "$html_unescape_perl"'
+    my $p = $ARGV[0];
+    open my $h, "<:raw", $p or do { print "not built ($p): $!\n"; exit };
+    local $/; my $s = <$h>; close $h;
+    utf8::decode($s);
+    my @bad;
+    my @heads;
+    while ($s =~ m{<h[1-6][^>]*>(.*?)</h[1-6]>}sg) { (my $t = $1) =~ s/<[^>]*>//g; push @heads, html_unescape($t, \@bad); }
+    (my $plain = $s) =~ s/<[^>]*>//g;
+    $plain = html_unescape($plain, \@bad);
+    for my $w ("Our licence", "Dependency policy (enforced by cargo deny check)") {
+      print "no heading \"$w\"\n" unless grep { $_ eq $w } @heads;
+    }
+    for my $w ("Components planned for Phase 1", "Patents to review", "Other compliance",
+               "Dictionaries and third-party notices") {
+      print "holds the unpublished text \"$w\"\n" if index($plain, $w) >= 0;
+    }
+  ' "$1"
+}
+
+# built_notices PAGE SOURCE: prints a finding unless the text of the <code> in the only <pre> of the built page,
+# unescaped, equals the source byte for byte. The one allowed difference is a single trailing newline on the page's
+# side (see the comment at the comparison) and nothing else.
+built_notices() {
+  perl -e "$html_unescape_perl"'
+    my ($page, $src) = @ARGV;
+    open my $h, "<:raw", $page or do { print "not built ($page): $!\n"; exit };
+    local $/; my $s = <$h>; close $h;
+    open my $f, "<:raw", $src or do { print "cannot read $src: $!\n"; exit };
+    my $want = <$f>; close $f;
+    my $pres = () = $s =~ /<pre[\s>]/g;
+    if ($pres != 1) { print "$pres <pre> elements, not 1\n"; exit }
+    if ($s !~ m{<pre[^>]*><code[^>]*>(.*?)</code></pre>}s) { print "the <pre> holds no <code> element\n"; exit }
+    my $code = $1;
+    utf8::decode($code);
+    my @bad;
+    my $got = html_unescape($code, \@bad);
+    print "unknown entities: @bad\n" if @bad;
+    utf8::encode($got);
+    # mdBook 0.5.4 gives an exact match (the page keeps the source'"'"'s four final newlines). The allowance of one "\n"
+    # is for a future mdBook: the PAGE side may lack it ($got . "\n") or carry one more ($want . "\n").
+    if ($got eq $want || $got . "\n" eq $want || $got eq $want . "\n") { exit }
+    my $i = 0; my $n = length($got) < length($want) ? length($got) : length($want);
+    $i++ while $i < $n && substr($got, $i, 1) eq substr($want, $i, 1);
+    print "differs from THIRD-PARTY-NOTICES at byte $i (page ", length($got), " bytes, file ", length($want), ")\n";
+  ' "$1" "$2"
 }
 
 check_built() {
@@ -360,6 +535,13 @@ check_built() {
       echo "(d) ${html#"$built"/} lacks the text of docs/cli/$name: $text"; fail=1
     fi
   done
+  # licensing.html: both published headings, none of the unpublished sections of docs/LICENSING.md
+  local lic
+  lic="$(built_licensing "$built/licensing.html" || true)"
+  if nonblank "$lic"; then printf '(d) licensing.html: %s\n' "$lic"; fail=1; fi
+  # notices.html: the code text of its only <pre>, unescaped, is THIRD-PARTY-NOTICES (the CI step of E9-8)
+  lic="$(built_notices "$built/notices.html" "$root/THIRD-PARTY-NOTICES" || true)"
+  if nonblank "$lic"; then printf '(d) notices.html: %s\n' "$lic"; fail=1; fi
   local hits
   hits="$(grep -rIil -e "$needle" "$built" 2>/dev/null || true)"
   hits="$hits"$'\n'"$(find "$built" -iname '*litepack-method*' -print || true)"
@@ -396,6 +578,13 @@ make_tree() {
   printf '<html><h1>Tool help</h1></html>\n' > "$r/site/cli/tool.html"
   printf '<html><pre><code>.TH tool 1  "tool 0.1"</code></pre></html>\n' > "$r/site/cli/tool-1.html"
   printf '# Summary\n\n- [A](spec/a.md)\n' > "$r/book/src/SUMMARY.md"
+  # E9-8: the licensing source with its anchors, the notices file, their pages and built pages
+  printf '# Licensing\n\nintro\n\n<!-- ANCHOR: published -->\n## Our licence\ntext\n\n## Dependency policy (enforced by `cargo deny check`)\ntext\n\n<!-- ANCHOR_END: published -->\n## Components planned for Phase 1\nmore\n' > "$r/docs/LICENSING.md"
+  printf "LitePack: notices <a> & 'b' \"c\"\n\ntext line\n" > "$r/THIRD-PARTY-NOTICES"
+  licensing_wrapper > "$r/book/src/licensing.md"
+  notices_wrapper > "$r/book/src/notices.md"
+  printf '<html><h2 id="a"><a class="header" href="#a">Our licence</a></h2>\n<h2 id="d"><a class="header" href="#d">Dependency policy (enforced by <code>cargo deny check</code>)</a></h2></html>\n' > "$r/site/licensing.html"
+  printf '<html><pre><code class="language-text">LitePack: notices &lt;a&gt; &amp; &#39;b&#39; &quot;c&quot;\n\ntext line\n</code></pre></html>\n' > "$r/site/notices.html"
   {
     printf '# The Secret Method Plan\n\n'
     for n in one two three four; do
@@ -601,6 +790,83 @@ self_test() {
     chmod 644 "$t/ur/docs/cli/tool.md"
   else
     echo "SKIPPED (f) unreadable-file self-test: chmod 000 does not make a file unreadable here"
+  fi
+  # E9-8: the licensing and notices pages
+  make_tree "$t/la"; printf 'extra\n' >> "$t/la/book/src/licensing.md"
+  expect_fail a "a licensing wrapper with an extra line" check_sources "$t/la"
+  make_tree "$t/la2"; printf 'extra\n' >> "$t/la2/book/src/notices.md"
+  expect_fail a "a notices wrapper with an extra line" check_sources "$t/la2"
+  make_tree "$t/lh"; printf '# Licensing\n\n{{#include ../../docs/LICENSING.md}}\n\n{{#include footer.md}}\n' > "$t/lh/book/src/licensing.md"
+  expect_fail h "licensing.md including the whole docs/LICENSING.md" check_sources "$t/lh"
+  make_tree "$t/lh2"; printf 'About.\n\n{{#include ../../THIRD-PARTY-NOTICES}}\n' > "$t/lh2/book/src/about.md"
+  expect_fail h "about.md including THIRD-PARTY-NOTICES" check_sources "$t/lh2"
+  make_tree "$t/lh3"; printf 'About.\n\n{{#include ../../docs/LICENSING.md:published}}\n' > "$t/lh3/book/src/about.md"
+  expect_fail h "about.md including the published anchor" check_sources "$t/lh3"
+  make_tree "$t/lf"; printf '{{#include ../x.md}}\n' >> "$t/lf/docs/LICENSING.md"
+  expect_fail f "a directive in docs/LICENSING.md" check_sources "$t/lf"
+  make_tree "$t/lf2"; printf '{{ #include ../x.md}}\n' >> "$t/lf2/THIRD-PARTY-NOTICES"
+  expect_fail f "a directive in THIRD-PARTY-NOTICES" check_sources "$t/lf2"
+  make_tree "$t/lc"; printf 'see LitePack-Method-v2\n' >> "$t/lc/docs/LICENSING.md"
+  expect_fail c "the method document's name in docs/LICENSING.md" check_sources "$t/lc"
+  make_tree "$t/lc2"; printf 'see LitePack-Method-v2\n' >> "$t/lc2/THIRD-PARTY-NOTICES"
+  expect_fail c "the method document's name in THIRD-PARTY-NOTICES" check_sources "$t/lc2"
+  make_tree "$t/ll"; printf '````\n' >> "$t/ll/THIRD-PARTY-NOTICES"
+  expect_fail l "a four-backtick line in THIRD-PARTY-NOTICES" check_sources "$t/ll"
+  make_tree "$t/ll2"; printf '```\n' >> "$t/ll2/THIRD-PARTY-NOTICES"
+  expect_pass "a three-backtick line in THIRD-PARTY-NOTICES" check_sources "$t/ll2"
+  make_tree "$t/m1"; perl -ni -e 'print unless /ANCHOR_END/' "$t/m1/docs/LICENSING.md"
+  expect_fail m "no end anchor" check_sources "$t/m1"
+  make_tree "$t/m2"; printf '<!-- ANCHOR: published -->\n' >> "$t/m2/docs/LICENSING.md"
+  expect_fail m "a second start anchor" check_sources "$t/m2"
+  make_tree "$t/m3"; perl -pi -e 's/^text$/text\n### Extra heading/ if $. == 7' "$t/m3/docs/LICENSING.md"
+  expect_fail m "a third heading inside the region" check_sources "$t/m3"
+  make_tree "$t/m4"; perl -pi -e 's/^<!-- ANCHOR: published -->$//' "$t/m4/docs/LICENSING.md"
+  expect_fail m "no start anchor" check_sources "$t/m4"
+  make_tree "$t/m5"; perl -pi -e 's/^<!-- ANCHOR_END: published -->$/<!-- ANCHOR_END: other -->/' "$t/m5/docs/LICENSING.md"
+  expect_fail m "an end anchor of another name" check_sources "$t/m5"
+  make_tree "$t/m6"; perl -pi -e 's/^## Our licence$/## Our licences/' "$t/m6/docs/LICENSING.md"
+  expect_fail m "a renamed published heading" check_sources "$t/m6"
+  make_tree "$t/m7"; perl -pi -e 's/^(<!-- ANCHOR: published -->)$/<!-- ANCHOR_END: published -->\n$1/' "$t/m7/docs/LICENSING.md"
+  expect_fail m "the end anchor before the start anchor" check_sources "$t/m7"
+  make_tree "$t/j8"; printf '[book]\nsrc = "src"\n[output.html.search.chapter]\n"notices.md" = { enable = false }\n' > "$t/j8/book/book.toml"
+  expect_pass "the search-chapter exclusion of notices.md" check_sources "$t/j8"
+  make_tree "$t/j9"
+  printf '[book]\nsrc = "src"\n[output.html.search.chapter]\n"notices.md" = { enable = false }\n"x.md" = { enable = false }\n' > "$t/j9/book/book.toml"
+  expect_fail j "a second key under the search-chapter header" check_sources "$t/j9"
+  make_tree "$t/j10"; printf '[book]\nsrc = "src"\n[output.html.search.chapter]\n"../x.md" = { enable = false }\n' > "$t/j10/book/book.toml"
+  expect_fail j "another path in the search-chapter line" check_sources "$t/j10"
+  make_tree "$t/j11"; printf '[book]\nsrc = "src"\n[output.html.search.chapter]\n"notices.md" = { enable = true }\n' > "$t/j11/book/book.toml"
+  expect_fail j "another value in the search-chapter line" check_sources "$t/j11"
+  make_tree "$t/bl"; printf '<html><h2>Our licence</h2></html>\n' > "$t/bl/site/licensing.html"
+  expect_fail d "a licensing page without the second heading" check_built "$t/bl" "$t/bl/site"
+  make_tree "$t/bl2"; printf '<html><h2>x</h2></html>\n' > "$t/bl2/site/licensing.html"
+  expect_fail d "a licensing page without a heading" check_built "$t/bl2" "$t/bl2/site"
+  make_tree "$t/bl3"; printf '<h2>Patents to review (counsel)</h2>\n' >> "$t/bl3/site/licensing.html"
+  expect_fail d "a licensing page holding Patents to review" check_built "$t/bl3" "$t/bl3/site"
+  make_tree "$t/bl4"; printf '<p>Other compliance</p>\n' >> "$t/bl4/site/licensing.html"
+  expect_fail d "a licensing page holding Other compliance" check_built "$t/bl4" "$t/bl4/site"
+  make_tree "$t/bn"
+  printf '<html><pre><code class="language-text">LitePack: notices &lt;a&gt; &amp; &#39;b&#39; &quot;c&quot;\n\ntext linE\n</code></pre></html>\n' > "$t/bn/site/notices.html"
+  expect_fail d "a notices page that differs by one byte" check_built "$t/bn" "$t/bn/site"
+  make_tree "$t/bn2"
+  printf '<html><pre><code class="language-text">{{#include ../../THIRD-PARTY-NOTICES}}\n</code></pre></html>\n' > "$t/bn2/site/notices.html"
+  expect_fail d "a notices page that still holds the include text" check_built "$t/bn2" "$t/bn2/site"
+  make_tree "$t/bn3"; printf '<pre></pre>\n' >> "$t/bn3/site/notices.html"
+  expect_fail d "a notices page with a second pre" check_built "$t/bn3" "$t/bn3/site"
+  make_tree "$t/bn4"
+  printf '<html><pre><code>LitePack: notices &lt;a&gt; &amp; &#x27;b&#39; &quot;c&quot; &bogus;\n\ntext line\n</code></pre></html>\n' > "$t/bn4/site/notices.html"
+  expect_fail d "a notices page with an unknown entity" check_built "$t/bn4" "$t/bn4/site"
+  make_tree "$t/bn5"
+  printf '<html><pre><code>LitePack: notices &lt;a&gt; &amp; &#x27;b&#39; &quot;c&quot;\n\ntext line</code></pre></html>\n' > "$t/bn5/site/notices.html"
+  expect_pass "a notices page with numeric entities and one trailing newline less" check_built "$t/bn5" "$t/bn5/site"
+  make_tree "$t/bn6"; printf '\n' >> "$t/bn6/THIRD-PARTY-NOTICES"; printf '\n' >> "$t/bn6/THIRD-PARTY-NOTICES"
+  expect_fail d "a notices page two trailing newlines short" check_built "$t/bn6" "$t/bn6/site"
+  make_tree "$t/bk"
+  rm "$t/bk/THIRD-PARTY-NOTICES"; printf 'x\n' > "$t/bk/real-notices"
+  if ln -s "real-notices" "$t/bk/THIRD-PARTY-NOTICES" 2>/dev/null && [ -L "$t/bk/THIRD-PARTY-NOTICES" ]; then
+    expect_fail k "a symlinked THIRD-PARTY-NOTICES" check_sources "$t/bk"
+  else
+    echo "SKIPPED (k) THIRD-PARTY-NOTICES self-test: cannot create a symlink here"
   fi
   echo "self-test: all checks proved"
 }
