@@ -8,7 +8,18 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// What the worker's `main` does first (R204), once per process: libarchive is built without iconv,
+/// and in the "C" locale a Linux test process starts in it refuses `hdrcharset=UTF-8`, which every
+/// plan with a tar, CAB, LHA or RAR 4 reader sets (`uue` and `z` include tar). On Windows nothing is set.
+fn utf8_locale() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        assert!(use_utf8_locale(), "no UTF-8 locale (C.UTF-8, en_US.UTF-8)");
+    });
+}
+
 fn open_fixture(name: &str, wire: &str) -> Result<Box<dyn ForeignReader>, ReaderError> {
+    utf8_locale();
     let f = File::open(fixture(name)).unwrap();
     open(
         f,
@@ -343,5 +354,6 @@ fn lpk_worker_libarchive_open(
     f: std::fs::File,
     args: &lpk_proto::OpenArgs<'_>,
 ) -> Result<Box<dyn lpk_proto::reader::ForeignReader>, lpk_proto::reader::ReaderError> {
+    utf8_locale();
     crate::open(f, &[], args)
 }
