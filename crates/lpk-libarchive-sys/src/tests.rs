@@ -4,9 +4,11 @@ use std::io::{Seek, SeekFrom, Write};
 /// A one-member Unix `ar` archive written by hand.
 fn ar_archive(name: &str, data: &[u8]) -> Vec<u8> {
     let mut v = b"!<arch>\n".to_vec();
+    let mut field = format!("{name}/").into_bytes();
+    field.resize(16, b' ');
     let header = format!(
-        "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
-        format!("{name}/"),
+        "{}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+        String::from_utf8(field).unwrap(),
         1_700_000_000u64,
         0,
         0,
@@ -132,4 +134,76 @@ fn garbage_is_an_error_not_a_crash() {
             while let Ok(Some(_)) = a.next_entry() {}
         }
     }
+}
+
+/// A newc cpio archive of one empty file named `name` (raw bytes).
+fn newc_cpio(name: &[u8]) -> Vec<u8> {
+    fn pad4(v: &mut Vec<u8>) {
+        while !v.len().is_multiple_of(4) {
+            v.push(0);
+        }
+    }
+    let mut v = Vec::new();
+    for (nm, mode) in [(name, 0o100644u32), (b"TRAILER!!!".as_slice(), 0)] {
+        let fields = [
+            1,
+            mode,
+            0,
+            0,
+            1,
+            1_700_000_000u32,
+            0,
+            0,
+            0,
+            0,
+            0,
+            u32::try_from(nm.len() + 1).unwrap(),
+            0,
+        ];
+        v.extend_from_slice(b"070701");
+        for f in fields {
+            v.extend_from_slice(format!("{f:08X}").as_bytes());
+        }
+        v.extend_from_slice(nm);
+        v.push(0);
+        pad4(&mut v);
+    }
+    v
+}
+
+fn first_name(bytes: &[u8], format: ReadFormat) -> Option<Vec<u8>> {
+    let _ = use_utf8_locale();
+    let mut a = Archive::open(OpenSpec {
+        volumes: vec![temp_with(bytes)],
+        formats: &[format],
+        filters: &[],
+        passphrase: None,
+    })
+    .unwrap();
+    a.next_entry().unwrap().unwrap().path
+}
+
+/// R204: a name's bytes do not depend on the code page or the locale.
+#[test]
+fn utf8_names_are_exact_and_other_bytes_are_left_for_the_host_to_refuse() {
+    if skip_loudly("utf8_names_are_exact") {
+        return;
+    }
+    let cafe = "caf\u{e9}-\u{65e5}\u{672c}.txt";
+    assert_eq!(
+        first_name(&newc_cpio(cafe.as_bytes()), ReadFormat::Cpio).as_deref(),
+        Some(cafe.as_bytes())
+    );
+    assert_eq!(
+        first_name(&ar_archive(cafe, b"x"), ReadFormat::Ar).as_deref(),
+        Some(cafe.as_bytes())
+    );
+    // A Latin-1 0xE9: whatever comes back is not valid UTF-8 (the host refuses it), never a silent guess.
+    let latin1 = first_name(&newc_cpio(b"caf\xe9.txt"), ReadFormat::Cpio);
+    assert!(
+        latin1
+            .as_deref()
+            .is_none_or(|n| std::str::from_utf8(n).is_err()),
+        "{latin1:?}"
+    );
 }

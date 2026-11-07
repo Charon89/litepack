@@ -164,3 +164,47 @@ fn libarchive_messages_map_to_named_codes() {
         ErrorCode::Corrupt
     );
 }
+
+/// R205: the two RAR 4 gaps libarchive reports only through its messages are named Unsupported errors.
+#[test]
+fn rar4_filter_messages_are_named_gaps() {
+    let e = |m: &str| lpk_libarchive_sys::Error {
+        kind: LaErrorKind::Fatal,
+        errno: 0,
+        message: m.into(),
+    };
+    let ppmd = map_err("rar", e(crate::RAR4_PPMD_FILTER));
+    assert_eq!(ppmd.code, ErrorCode::Unsupported);
+    assert!(
+        ppmd.message.contains("RAR 4 filters inside PPMd"),
+        "{}",
+        ppmd.message
+    );
+    let vm = map_err("rar", e(crate::RAR4_VM_FILTER));
+    assert_eq!(vm.code, ErrorCode::Unsupported);
+    assert!(
+        vm.message.contains("RAR 4 VM program filter"),
+        "{}",
+        vm.message
+    );
+}
+
+/// A libarchive update that rewords a message the mapping relies on fails here.
+#[test]
+fn the_messages_the_mapping_relies_on_occur_verbatim_in_the_vendored_source() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vendor/libarchive-3.8.11/libarchive");
+    let mut all = String::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().is_some_and(|x| x == "c") {
+            all.push_str(&String::from_utf8_lossy(&std::fs::read(&p).unwrap()));
+        }
+    }
+    for m in [crate::RAR4_PPMD_FILTER, crate::RAR4_VM_FILTER] {
+        assert!(
+            all.contains(&format!("\"{m}\"")),
+            "{m} is not in the vendored libarchive"
+        );
+    }
+}

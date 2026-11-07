@@ -31,3 +31,8 @@ impl Archive {
         match self.never {}
     }
 }
+
+/// The stub reads no names: nothing to set.
+pub fn use_utf8_locale() -> bool {
+    true
+}

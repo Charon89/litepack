@@ -120,6 +120,9 @@ extern "C" {
     pub fn archive_filter_count(a: *mut archive) -> c_int;
     pub fn archive_filter_name(a: *mut archive, n: c_int) -> *const c_char;
 
+    pub fn archive_entry_pathname(e: *mut archive_entry) -> *const c_char;
+    pub fn archive_entry_symlink(e: *mut archive_entry) -> *const c_char;
+    pub fn archive_entry_hardlink(e: *mut archive_entry) -> *const c_char;
     pub fn archive_entry_pathname_utf8(e: *mut archive_entry) -> *const c_char;
     pub fn archive_entry_symlink_utf8(e: *mut archive_entry) -> *const c_char;
     pub fn archive_entry_hardlink_utf8(e: *mut archive_entry) -> *const c_char;
@@ -130,4 +133,9 @@ extern "C" {
     pub fn archive_entry_mtime_is_set(e: *mut archive_entry) -> c_int;
     pub fn archive_entry_filetype(e: *mut archive_entry) -> la_mode_t;
     pub fn archive_entry_is_encrypted(e: *mut archive_entry) -> c_int;
+}
+
+extern "C" {
+    /// The C runtime's `setlocale` (`LC_CTYPE` is 0 on glibc and 2 on the Microsoft runtime).
+    pub fn setlocale(category: c_int, locale: *const c_char) -> *const c_char;
 }

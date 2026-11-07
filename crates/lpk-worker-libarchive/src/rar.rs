@@ -103,7 +103,7 @@ fn rar4(f: &mut File, mut at: u64, len: u64) -> std::io::Result<Option<String>> 
     // HOST_OS, FILE_CRC, FTIME, UNP_VER, METHOD.
     let mut h = [0u8; 32];
     for _ in 0..MAX_BLOCKS {
-        if at + 7 > len {
+        if at >= len || at.checked_add(7).is_none_or(|e| e > len) {
             return Ok(None);
         }
         let n = read_at(f, at, &mut h)?;
@@ -145,7 +145,7 @@ fn rar4(f: &mut File, mut at: u64, len: u64) -> std::io::Result<Option<String>> 
                 if flags & 0x0100 != 0 {
                     // HIGH_PACK_SIZE after NAME_SIZE and ATTR.
                     let mut hi = [0u8; 4];
-                    if read_at(f, at + 32, &mut hi)? == 4 {
+                    if read_at(f, at.saturating_add(32), &mut hi)? == 4 {
                         add += u64::from(u32::from_le_bytes(hi)) << 32;
                     }
                 }
@@ -184,11 +184,14 @@ fn rar5(f: &mut File, mut at: u64, len: u64) -> std::io::Result<Option<String>> 
         let Some(hsize) = vint(&pre[..n], &mut p) else {
             return Ok(None);
         };
-        if hsize == 0 || hsize > RAR5_MAX_HEADER || at + p as u64 + hsize > len {
+        if hsize == 0
+            || hsize > RAR5_MAX_HEADER
+            || at.checked_add(p as u64 + hsize).is_none_or(|e| e > len)
+        {
             return Ok(None);
         }
         let mut h = vec![0u8; hsize as usize];
-        if read_at(f, at + p as u64, &mut h)? != h.len() {
+        if read_at(f, at.saturating_add(p as u64), &mut h)? != h.len() {
             return Ok(None);
         }
         let mut q = 0usize;

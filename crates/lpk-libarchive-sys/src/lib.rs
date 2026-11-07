@@ -27,12 +27,12 @@ pub mod ffi;
 #[cfg(lpk_libarchive)]
 mod real;
 #[cfg(lpk_libarchive)]
-pub use real::Archive;
+pub use real::{use_utf8_locale, Archive};
 
 #[cfg(not(lpk_libarchive))]
 mod stub;
 #[cfg(not(lpk_libarchive))]
-pub use stub::Archive;
+pub use stub::{use_utf8_locale, Archive};
 
 /// Whether libarchive is compiled into this build (false: the stub).
 pub const BUILT: bool = cfg!(lpk_libarchive);

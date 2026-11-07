@@ -29,6 +29,9 @@ pub struct Archive {
     a: NonNull<ffi::archive>,
     /// From `Box::into_raw`; freed in `Drop` after the archive.
     volumes: Vec<*mut Volume>,
+    /// Only formats whose names are never declared in a charset are registered (cpio, ar, a raw
+    /// stream): the entry's bytes are the name, whatever the locale.
+    raw_names: bool,
 }
 
 impl std::fmt::Debug for Archive {
@@ -230,6 +233,11 @@ impl Archive {
         let mut this = Archive {
             a,
             volumes: Vec::with_capacity(spec.volumes.len()),
+            raw_names: !spec.formats.is_empty()
+                && spec
+                    .formats
+                    .iter()
+                    .all(|f| matches!(f, ReadFormat::Ar | ReadFormat::Cpio | ReadFormat::Raw)),
         };
         for file in spec.volumes {
             this.volumes.push(Box::into_raw(Box::new(Volume {
@@ -349,9 +357,16 @@ impl Archive {
                 message: "libarchive returned no entry".into(),
             });
         }
+        let raw_names = self.raw_names;
         // SAFETY: `e` is the entry libarchive just returned, valid until
         // the next header call; strings are copied at once.
-        let path = unsafe { copy_cstr(ffi::archive_entry_pathname_utf8(e)) };
+        let path = unsafe {
+            pick_name(
+                raw_names,
+                copy_cstr(ffi::archive_entry_pathname(e)),
+                copy_cstr(ffi::archive_entry_pathname_utf8(e)),
+            )
+        };
         // SAFETY: as above.
         let ft = u32::from(unsafe { ffi::archive_entry_filetype(e) }) & ffi::AE_IFMT;
         let kind = match ft {
@@ -378,9 +393,21 @@ impl Archive {
             None
         };
         // SAFETY: as above.
-        let symlink = unsafe { copy_cstr(ffi::archive_entry_symlink_utf8(e)) };
+        let symlink = unsafe {
+            pick_name(
+                raw_names,
+                copy_cstr(ffi::archive_entry_symlink(e)),
+                copy_cstr(ffi::archive_entry_symlink_utf8(e)),
+            )
+        };
         // SAFETY: as above.
-        let hardlink = unsafe { copy_cstr(ffi::archive_entry_hardlink_utf8(e)) };
+        let hardlink = unsafe {
+            pick_name(
+                raw_names,
+                copy_cstr(ffi::archive_entry_hardlink(e)),
+                copy_cstr(ffi::archive_entry_hardlink_utf8(e)),
+            )
+        };
         // SAFETY: as above.
         let encrypted = unsafe { ffi::archive_entry_is_encrypted(e) } != 0;
         // SAFETY: `p` is live.
@@ -435,4 +462,53 @@ impl Archive {
         }
         out
     }
+}
+
+/// Chooses between libarchive's two renderings of an entry name, `raw` (`archive_entry_pathname`: the
+/// bytes of the multibyte string) and `utf8` (`archive_entry_pathname_utf8`: converted from the locale's
+/// charset), without trusting the process's code page or locale (R204):
+///
+/// * undeclared names (cpio, ar, tar, ISO Rock Ridge, RAR 4 without Unicode, CAB without the UTF-8
+///   attribute) are kept as raw bytes (`archive_string_default_conversion_for_read` returns NULL in the C
+///   locale, `archive_read_support_format_*.c`'s `*_l` calls with a NULL conversion), so raw bytes that are
+///   valid non-ASCII UTF-8 are the name;
+/// * declared names (RAR 5 and RAR 4 Unicode, Joliet, CAB with the UTF-8 attribute, LHA's UTF-16, pax) are
+///   decoded by libarchive from the declared charset: on Linux into the UTF-8 locale [`use_utf8_locale`]
+///   sets, so `raw` is already UTF-8; on Windows into a wide string, which only `utf8` renders faithfully
+///   (`raw` is then ASCII with `?` or a byte string of the ANSI page);
+/// * otherwise `utf8`, and when there is none, `raw` (the host refuses a name that is not UTF-8).
+fn pick_name(raw_only: bool, raw: Option<Vec<u8>>, utf8: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    if raw_only {
+        return raw;
+    }
+    if let Some(r) = &raw {
+        if !r.is_ascii() && std::str::from_utf8(r).is_ok() {
+            return raw;
+        }
+    }
+    match (raw, utf8) {
+        (Some(r), Some(u)) if r.is_ascii() && u.is_ascii() => Some(r),
+        (_, Some(u)) => Some(u),
+        (r, None) => r,
+    }
+}
+
+/// Makes the C runtime's `LC_CTYPE` a UTF-8 locale where one exists (Linux: `C.UTF-8`, then
+/// `en_US.UTF-8`), so libarchive converts declared charsets into UTF-8 rather than the environment's
+/// charset. Safe in the worker: it runs once, first thing in `main`, before any thread exists, and the
+/// worker's Rust code never reads the locale; libarchive's C code calls `mbrtowc`/`wcrtomb` only for the
+/// conversions this setting directs. On Windows nothing is set: libarchive stores declared names as wide
+/// strings there, and undeclared bytes stay raw only in the "C" locale. Returns whether UTF-8 is active.
+pub fn use_utf8_locale() -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    for name in [c"C.UTF-8", c"en_US.UTF-8"] {
+        // SAFETY: `name` is a NUL-terminated static string; `setlocale` copies it.
+        let r = unsafe { ffi::setlocale(0, name.as_ptr()) };
+        if !r.is_null() {
+            return true;
+        }
+    }
+    false
 }

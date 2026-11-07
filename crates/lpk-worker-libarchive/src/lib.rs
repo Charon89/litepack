@@ -109,6 +109,12 @@ pub fn split_volumes(handles: Vec<(u32, File)>) -> (Vec<(u32, File)>, Vec<File>)
     (base, more.into_iter().map(|(_, f)| f).collect())
 }
 
+/// libarchive 3.8.11's message for a RAR 4 filter inside PPMd data
+/// (`archive_read_support_format_rar.c`, `parse_filter`); a test checks it occurs verbatim in the vendored source.
+pub const RAR4_PPMD_FILTER: &str = "Parsing filters is unsupported";
+/// libarchive 3.8.11's message for a RAR 4 VM program filter (same file, `execute_filter`).
+pub const RAR4_VM_FILTER: &str = "No support for RAR VM program filter";
+
 /// Map a libarchive error to the protocol's codes, naming the gap where it is one.
 fn map_err(wire: &str, e: lpk_libarchive_sys::Error) -> ReaderError {
     let lower = e.message.to_ascii_lowercase();
@@ -122,10 +128,17 @@ fn map_err(wire: &str, e: lpk_libarchive_sys::Error) -> ReaderError {
                 e.message
             ),
         ),
-        _ if lower.contains("ppmd") && lower.contains("filter") => ReaderError::new(
+        _ if e.message.contains(RAR4_PPMD_FILTER) => ReaderError::new(
             ErrorCode::Unsupported,
             format!(
-                "{wire}: a filter inside PPMd data (named gap): {}",
+                "{wire}: RAR 4 filters inside PPMd (named gap: libarchive 3.8.11 does not parse them): {}",
+                e.message
+            ),
+        ),
+        _ if e.message.contains(RAR4_VM_FILTER) => ReaderError::new(
+            ErrorCode::Unsupported,
+            format!(
+                "{wire}: RAR 4 VM program filter (named gap: libarchive 3.8.11 has no RAR VM): {}",
                 e.message
             ),
         ),
