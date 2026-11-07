@@ -13,6 +13,13 @@ pub const TREE: &[&str] = &[
     "data.bin",
 ];
 
+/// The non-ASCII names fixtures hold (R204's proof; contents in `make_fixtures.py`'s `NAMES`).
+pub const NAMES_ONE: &[&str] = &["sub/caf\u{e9} \u{fc} \u{65e5}\u{672c}.txt"];
+pub const NAMES_BOTH: &[&str] = &[
+    "sub/caf\u{e9} \u{fc} \u{65e5}\u{672c}.txt",
+    "na\u{ef}ve/\u{fc}.txt",
+];
+
 /// (archive, wire format, files it must yield).
 pub const CASES: &[(&str, &[&str])] = &[
     ("rar5.rar", TREE),
@@ -27,6 +34,10 @@ pub const CASES: &[(&str, &[&str])] = &[
     ("iso-joliet.iso", TREE),
     ("fixture.a", &["hello.txt", "data.bin"]),
     ("fixture.cpio", TREE),
+    ("names-rar5.rar", NAMES_BOTH),
+    ("names-rr.iso", NAMES_ONE),
+    ("names-joliet.iso", NAMES_ONE),
+    ("names.lzh", NAMES_BOTH),
     ("level0.lzh", TREE),
     ("level1.lzh", TREE),
     ("fixture.rpm", TREE),

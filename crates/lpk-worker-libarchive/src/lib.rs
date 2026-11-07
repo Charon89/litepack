@@ -40,6 +40,8 @@ use lpk_proto::{ErrorCode, ForeignReader, OpenArgs, ReaderError};
 pub mod rar;
 
 /// The wire names this worker reads (the host's `Format::name` of each libarchive format).
+pub use lpk_libarchive_sys::use_utf8_locale;
+
 pub const FORMATS: &[&str] = &["rar", "iso", "cab", "lzh", "ar", "cpio", "rpm", "z", "uue"];
 
 /// The most volumes one worker takes (the bootstrap page holds 16 handles, three of them pipes).

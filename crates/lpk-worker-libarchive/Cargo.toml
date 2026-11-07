@@ -28,6 +28,8 @@ lpk-sandbox-sys = { path = "../lpk-sandbox-sys", version = "0.0.1" }
 [dev-dependencies]
 tempfile = "3.27.0"
 blake3 = "1.8.7"
+# E4-4: a zstd frame of zeros for the single-stream expansion cap test.
+zstd = { version = "0.14.0", default-features = false }
 # The host side of the end-to-end tests (tests/host.rs).
 lpk-core = { path = "../lpk-core", version = "0.0.1" }
 

@@ -265,10 +265,10 @@ def rr_entries(name, mode, links, root=False):
 
 def short_name(rel_name, is_dir):
     stem, dot, ext = rel_name.upper().partition(".")
-    stem = "".join(c if c.isalnum() else "_" for c in stem)[:8]
+    stem = "".join(c if c.isascii() and c.isalnum() else "_" for c in stem)[:8]
     if is_dir:
         return stem.encode()
-    ext = "".join(c if c.isalnum() else "_" for c in ext)[:3]
+    ext = "".join(c if c.isascii() and c.isalnum() else "_" for c in ext)[:3]
     return f"{stem}.{ext};1".encode()
 
 
@@ -569,6 +569,50 @@ def make_rpm(path):
         f.write(bytes(lead) + sig + hdr_magic + gzip.compress(payload, mtime=0))
 
 
+# --- Non-ASCII names (R204's proof) ----------------------------------------------------------------
+NAMES = {
+    "sub/caf\u00e9 \u00fc \u65e5\u672c.txt": b"names fixture one\n",
+    "na\u00efve/\u00fc.txt": b"names fixture two\n",
+}
+
+
+def write_names_tree(root):
+    for rel, data in NAMES.items():
+        p = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(data)
+        os.utime(p, (MTIME, MTIME))
+
+
+def make_names(out, scratch):
+    global TREE
+    root = os.path.join(scratch, "names-src")
+    if os.path.exists(root):
+        shutil.rmtree(root)
+    write_names_tree(root)
+    rar = tool("rar", "RAR")
+    target = os.path.join(out, "names-rar5.rar")
+    if os.path.exists(target):
+        os.remove(target)
+    run([rar, "a", "-idq", "-r", "-m3", "-ep1", "-ma5", target, "*"], root)  # "*": rar enumerates the names itself
+    saved = TREE
+    try:
+        TREE = {k: v for k, v in NAMES.items() if k.startswith("sub/")}
+        make_iso(os.path.join(out, "names-rr.iso"), joliet=False)
+        make_iso(os.path.join(out, "names-joliet.iso"), joliet=True)
+        # libarchive's bidder reads ahead past the volume descriptors and wants a larger image than a
+        # one-file tree makes: pad with zeros to 128 KiB (trailing space beyond the volume size).
+        for n in ("names-rr.iso", "names-joliet.iso"):
+            with open(os.path.join(out, n), "ab") as f:
+                size = f.tell()
+                f.write(b"\\0" * max(0, 128 * 1024 - size))
+        TREE = dict(NAMES)
+        make_lzh(os.path.join(out, "names.lzh"), 0)
+    finally:
+        TREE = saved
+
+
 def main():
     out, scratch = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     os.makedirs(out, exist_ok=True)
@@ -582,6 +626,7 @@ def main():
     make_iso(os.path.join(out, "iso-joliet.iso"), joliet=True)
     make_ar(os.path.join(out, "fixture.a"))
     make_cpio(os.path.join(out, "fixture.cpio"))
+    make_names(out, scratch)
     make_lzh(os.path.join(out, "level0.lzh"), 0)
     make_lzh(os.path.join(out, "level1.lzh"), 1)
     make_rpm(os.path.join(out, "fixture.rpm"))

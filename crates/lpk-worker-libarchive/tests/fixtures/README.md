@@ -18,6 +18,10 @@ pseudo-random bytes; mtime 2024-01-02 03:04:05 UTC). `manifest.b3` holds the BLA
 | `iso-rockridge.iso`, `iso-joliet.iso` | the generator's ISO 9660 writer (one with Rock Ridge `SP`/`RR`/`NM`/`PX` entries, one with a Joliet tree) | no ISO tool on the machine |
 | `fixture.a`, `fixture.cpio` (newc) | the generator | |
 | `level0.lzh`, `level1.lzh` | the generator: stored `-lh0-` members, level 0 and level 1 headers (CRC-16/ARC, header sum) | `-lh5-`/`-lh6-`/`-lh7-` and level 2 are not covered |
+| `names-rar5.rar` | WinRAR `rar` 7.00 (`-ma5`, `*` run in a tree holding `sub/café ü 日本.txt` and `naïve/ü.txt`) | R204: non-ASCII file and folder names, UTF-8 declared by RAR 5 |
+| `names-rr.iso`, `names-joliet.iso` | the generator, one file `sub/café ü 日本.txt` (Rock Ridge `NM` in UTF-8; Joliet UTF-16BE), padded to 128 KiB because libarchive's bidder wants a larger image | R204; ISO folder names stay ASCII (`sub`) |
+| `names.lzh` | the generator, both files above as UTF-8 bytes (LHA declares no charset) | R204 |
+| CAB | not made | `makecab` reads its directive file through the ANSI code page, so 日本 cannot be written, and an ANSI-page name would be machine-dependent without CAB's UTF-8 attribute |
 | `fixture.rpm` | the generator: lead, empty signature and header, gzip of a newc cpio payload | minimal |
 | `hello.txt.uue` | the generator (`binascii.b2a_uu`) | |
 | `hello.txt.Z`, `small.tar.Z` | the generator's `compress` (9-bit codes only) | checked with `gzip -dc` |

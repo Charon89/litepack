@@ -141,7 +141,7 @@ fn write_manifest() {
     let mut out = String::from(
         "# BLAKE3 (hex), size, path of the files the fixtures hold (tests/fixtures/make_fixtures.py's tree)\n",
     );
-    for rel in common::TREE {
+    for rel in common::TREE.iter().chain(common::NAMES_BOTH) {
         let data = std::fs::read(src.join(rel)).unwrap();
         out.push_str(&format!(
             "{}  {}  {}\n",

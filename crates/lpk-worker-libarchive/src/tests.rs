@@ -285,3 +285,63 @@ fn the_sfx_window_is_libarchives_and_a_bare_signature_is_no_archive() {
     // A bare signature (bad CRC) earlier in the stub is skipped: no false gap.
     assert_eq!(gap_of(&stub(0x10000, Some(0x2000))), None);
 }
+
+/// uuencode `data` as a file named `name`.
+fn uuencode(name: &str, data: &[u8]) -> Vec<u8> {
+    let enc = |v: u8| if v == 0 { b'`' } else { v + 32 };
+    let mut out = format!("begin 644 {name}\n").into_bytes();
+    for chunk in data.chunks(45) {
+        out.push(enc(chunk.len() as u8));
+        for g in chunk.chunks(3) {
+            let b = [g[0], *g.get(1).unwrap_or(&0), *g.get(2).unwrap_or(&0)];
+            out.push(enc(b[0] >> 2));
+            out.push(enc(((b[0] & 3) << 4) | (b[1] >> 4)));
+            out.push(enc(((b[1] & 15) << 2) | (b[2] >> 6)));
+            out.push(enc(b[2] & 63));
+        }
+        out.push(b'\n');
+    }
+    out.extend_from_slice(b"`\nend\n");
+    out
+}
+
+/// B7.1: a single stream that expands past 10,000 times its input is a named limit, quickly.
+#[test]
+fn a_single_stream_bomb_is_a_named_limit() {
+    if !lpk_libarchive_sys::BUILT {
+        eprintln!("SKIPPED a_single_stream_bomb_is_a_named_limit: libarchive is not built");
+        return;
+    }
+    // Not zeros: libarchive would read 512 zero bytes as the end of a tar archive.
+    let zeros = vec![b'A'; 16 << 20];
+    let frame = zstd::encode_all(&zeros[..], 3).unwrap();
+    let uu = uuencode("zeros.zst", &frame);
+    assert!(
+        zeros.len() as u64 > 10_000 * uu.len() as u64,
+        "{} {}",
+        zeros.len(),
+        uu.len()
+    );
+    let mut f = tempfile::tempfile().unwrap();
+    std::io::Write::write_all(&mut f, &uu).unwrap();
+    let args = lpk_proto::OpenArgs {
+        format: "uue",
+        name: b"zeros.zst.uue",
+        password: None,
+    };
+    let started = std::time::Instant::now();
+    let err = match lpk_worker_libarchive_open(f, &args) {
+        Err(e) => e,
+        Ok(mut r) => r.entries(0, 16).expect_err("the listing must be refused"),
+    };
+    assert_eq!(err.code, ErrorCode::Unsupported, "{}", err.message);
+    assert!(err.message.contains("named limit"), "{}", err.message);
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+fn lpk_worker_libarchive_open(
+    f: std::fs::File,
+    args: &lpk_proto::OpenArgs<'_>,
+) -> Result<Box<dyn lpk_proto::reader::ForeignReader>, lpk_proto::reader::ReaderError> {
+    crate::open(f, &[], args)
+}

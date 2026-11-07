@@ -58,7 +58,9 @@ Undeclared names are read as UTF-8 (`hdrcharset=UTF-8` for tar, CAB, LHA and RAR
 Rock Ridge); a name that is not valid UTF-8 is dropped and the host refuses the entry. No reader names a charset for its
 undeclared names that would justify a table (rule 3 of R204 does not apply: `archive_string_default_conversion_for_read`
 is the machine's OEM page, which is exactly what the ruling forbids). Proven by tests for cpio, ar and ustar (UTF-8 exact,
-Latin-1 refused); ISO, RAR 5, CAB and LZH non-ASCII fixtures were not made.
+Latin-1 refused) and by fixtures with `café ü 日本.txt` in RAR 5 (also `naïve/`), ISO Rock Ridge, ISO Joliet and LZH, listed
+and extracted with the exact names through the host; a CAB fixture could not be made (`makecab` reads its directive file
+through the ANSI code page).
 
 **Untested.** LZH has fixtures for stored (`-lh0-`) members with level 0 and level 1 headers only: `-lh5-`, `-lh6-`, `-lh7-` decompression and level 2 headers are not exercised by a fixture. The RPM fixture is a minimal one (lead, empty signature and header, gzip'd cpio payload). CAB checksums are not claimed verified
 (a stored CFDATA checksum of 0 means none).

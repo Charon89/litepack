@@ -54,8 +54,9 @@ jobs:
             exit 1
           fi
           mkdir "$RUNNER_TEMP/la-src"
-          # --force-local: on Windows the path starts with "D:", which GNU tar would otherwise read as a remote host.
-          tar --force-local -xzf "$RUNNER_TEMP/$LIBARCHIVE_FILE" -C "$RUNNER_TEMP/la-src" --strip-components=1
+          # No path reaches tar: on Windows "D:\a\_temp" is read as a remote host (and --force-local
+          # then mangles the backslashes), so tar reads stdin and runs inside the target directory.
+          (cd "$RUNNER_TEMP/la-src" && tar -xz --strip-components=1) < "$RUNNER_TEMP/$LIBARCHIVE_FILE"
       - name: Generate config.h with libarchive's CMake
         run: |
           set -euo pipefail

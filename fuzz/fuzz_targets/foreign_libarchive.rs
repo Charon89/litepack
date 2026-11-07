@@ -7,7 +7,13 @@
 //! exercises the RAR pre-check and the stub.
 use libfuzzer_sys::fuzz_target;
 
+static LOCALE: std::sync::Once = std::sync::Once::new();
+
 fuzz_target!(|data: &[u8]| {
+    // As the worker does at start (once): the production name path.
+    LOCALE.call_once(|| {
+        let _ = lpk_worker_libarchive::use_utf8_locale();
+    });
     let formats = lpk_worker_libarchive::FORMATS;
     let Some((&pick, rest)) = data.split_first() else {
         return;
