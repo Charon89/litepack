@@ -4,7 +4,8 @@
 
 .DESCRIPTION
   The scheduled task \LitePack\E8-3 weekly speed (scripts/e8-3-task.ps1) runs this launcher as
-    pwsh.exe -NoProfile -NonInteractive -WindowStyle Hidden -File <main checkout>\scripts\e8-3-launch.ps1
+    conhost.exe "<pwsh.exe>" -NoProfile -NonInteractive -WindowStyle Hidden -File <main checkout>\scripts\e8-3-launch.ps1
+  (conhost.exe started directly, so that Windows Terminal never takes the console; see the task script).
   It replaces the task's idle condition, which cannot work after an unattended wake (Windows goes
   back to sleep after its unattended-sleep timeout, long before 15 idle minutes). In order:
     1. finds the main checkout from this script's own location;

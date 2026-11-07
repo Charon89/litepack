@@ -12,9 +12,11 @@
       (the launcher checks the time since the last input itself) and no catch-up start at logon;
       it is visible under \LitePack\ in Task Scheduler;
     * runs PowerShell 7 (pwsh.exe, found with Get-Command at registration time) on the main
-      checkout's scripts/e8-3-launch.ps1:
-        pwsh.exe -NoProfile -NonInteractive -WindowStyle Hidden -File <main>\scripts\e8-3-launch.ps1
-      (no -ExecutionPolicy: PowerShell 7's default allows local scripts).
+      checkout's scripts/e8-3-launch.ps1, through the classic console host started directly:
+        conhost.exe "<pwsh.exe>" -NoProfile -NonInteractive -WindowStyle Hidden -File <main>\scripts\e8-3-launch.ps1
+      so that Windows Terminal, the default terminal on Windows 11, never takes the console and
+      -WindowStyle Hidden hides the real window after a moment's flash (no -ExecutionPolicy:
+      PowerShell 7's default allows local scripts).
   -Remove unregisters exactly that task and prints, without running it, the command that removes
   the weekly worktree.
   The script changes nothing else: no power plan, antivirus or other system setting.
@@ -94,8 +96,18 @@ $pwsh = $pwshCommand.Source
 $time = [datetime]::ParseExact($At, 'HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-$launchArgs = "-NoProfile -NonInteractive -WindowStyle Hidden -File `"$Launcher`""
-$action = New-ScheduledTaskAction -Execute $pwsh -Argument $launchArgs -WorkingDirectory $MainRoot
+# conhost.exe started directly hosts the console itself, so Windows Terminal (the default terminal
+# on Windows 11, "Let Windows decide") never takes it over, and pwsh's -WindowStyle Hidden hides the
+# real window after a moment's flash. Through Windows Terminal, -WindowStyle Hidden would hide only
+# the pseudo-console and leave the terminal window open for the whole run, and closing that window
+# would stop the run (review finding N1; tested on 2026-11-07: no Windows Terminal process, no
+# visible window after four seconds).
+$conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+if (-not (Test-Path -LiteralPath $conhost -PathType Leaf)) {
+    throw "$conhost does not exist"
+}
+$launchArgs = "`"$pwsh`" -NoProfile -NonInteractive -WindowStyle Hidden -File `"$Launcher`""
+$action = New-ScheduledTaskAction -Execute $conhost -Argument $launchArgs -WorkingDirectory $MainRoot
 $triggers = @(
     (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Day -At $time),
     (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $FallbackDay -At $time)
@@ -118,4 +130,4 @@ Register-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -Action $action -
 
 Write-Output "Registered $TaskPath$TaskName for $user"
 Write-Output "  triggers: weekly on $Day and on $FallbackDay at $At (local time)"
-Write-Output "  action:   `"$pwsh`" $launchArgs"
+Write-Output "  action:   `"$conhost`" $launchArgs"

@@ -49,10 +49,15 @@ Waking works only where the power plan's "Allow wake timers" is on; no script ch
 ### The launcher
 
 The task's action is
-`pwsh.exe -NoProfile -NonInteractive -WindowStyle Hidden -File <main>\scripts\e8-3-launch.ps1`
+`conhost.exe "<pwsh.exe>" -NoProfile -NonInteractive -WindowStyle Hidden -File <main>\scripts\e8-3-launch.ps1`
 (`pwsh.exe` found with `Get-Command pwsh` when the task is registered; no `-ExecutionPolicy`,
-since PowerShell 7's default allows local scripts). A console window may flash for a moment when
-it starts; after that the run has no window. The launcher replaces the task's idle condition:
+since PowerShell 7's default allows local scripts). `conhost.exe` is started directly so that it
+hosts the console itself. On Windows 11, where Windows Terminal is the default terminal ("Let
+Windows decide"), a console program started any other way is handed to Windows Terminal, and
+`-WindowStyle Hidden` would hide only its pseudo-console: the terminal window would stay open for
+the whole run, and closing it would stop the run. Through `conhost.exe` a console window flashes
+for a moment and then the run has no window. Tested on Megatron on 2026-11-07: no Windows Terminal
+process started, and no window was visible after four seconds. The launcher replaces the task's idle condition:
 after an unattended wake Windows goes back to sleep after its unattended-sleep timeout (about two
 minutes), so a task waiting for 15 idle minutes would never start. In order, it:
 
@@ -70,6 +75,10 @@ minutes), so a task waiting for 15 idle minutes would never start. In order, it:
 
 `-DryRun` passes `--dry-run` through and prints the launcher's own refusals instead of logging
 them.
+
+When the status log has no line for a trigger, the run never reached the launcher's logging. The
+causes are `pwsh.exe` missing or moved, an execution policy set by group policy, or the launcher or
+git missing. Task Scheduler's "Last Run Result" for `\LitePack\E8-3 weekly speed` gives the reason.
 
 **At most one complete run per measurement week.** The measurement week is the ISO week of the
 day before the run (`week_key_at`: the run's time minus one day, `+%G-W%V`), so the Monday fallback
@@ -191,7 +200,9 @@ The script gives no RED or NOISE verdict; it only sorts the compare's outcome by
   environment or the run's configuration changed: a different version of a tool not built here
   (the 7z control), thread count, host, corpus (a re-pin) or catalogue file
   (`bench/tools-weekly.toml` edited), requested repeats, `--long-run-s` or the settle value. Every
-  reason goes on the line. The next week compares with this directory.
+  reason goes on the line. The next week compares with this directory. A week that starts a new
+  baseline compares nothing, so an `lpk` regression introduced in that same week goes unseen. That
+  happens when 7-Zip is upgraded, for example.
 - `FAILED`: a step failed; the step goes on the line. This includes a compare refused for any other
   reason (different classes, an unreadable directory, a different `lpk` version, an unrecognised
   message), which waits for a session; a FAILED reason wins over BASELINE reasons beside it.
