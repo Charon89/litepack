@@ -150,19 +150,37 @@ fn cited(text: &str) -> BTreeSet<usize> {
     out
 }
 
-fn sources_section(
-    inputs: &report::model::Inputs,
-    body: &str,
-    lab: &dyn Fn(&str) -> String,
-) -> String {
-    let mut s = String::from("## Sources\n\n");
-    for id in cited(body) {
-        if let Some(label) = inputs.sources.get(id - 1) {
-            s.push_str(&format!("{id}. `{}`\n", lab(label)));
+/// `cited` over the lines outside code fences: the renderer prints its own citations in prose and
+/// tables, while a fence holds a file printed verbatim (the mixes TOML), whose brackets are not
+/// citations. The renderer's output is made of strings, so this scan reads the bracket lists the
+/// renderer itself emits (`Traced::tag`), not the model's values.
+fn cited_outside_fences(text: &str) -> BTreeSet<usize> {
+    let mut fenced = false;
+    let mut out = BTreeSet::new();
+    for line in text.lines() {
+        if line.starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced {
+            out.extend(cited(line));
         }
     }
+    out
+}
+
+fn sources_section(
+    inputs: &report::model::Inputs,
+    ids: &BTreeSet<usize>,
+    lab: &dyn Fn(&str) -> String,
+) -> Result<String> {
+    let mut s = String::from("## Sources\n\n");
+    for id in ids {
+        let Some(label) = id.checked_sub(1).and_then(|i| inputs.sources.get(i)) else {
+            bail!("the page cites source [{id}], which the report has no such source for");
+        };
+        s.push_str(&format!("{id}. `{}`\n", lab(label)));
+    }
     s.push('\n');
-    s
+    Ok(s)
 }
 
 fn load_inputs(root: &Path, site: &Site) -> Result<report::model::Inputs> {
@@ -176,14 +194,14 @@ fn load_inputs(root: &Path, site: &Site) -> Result<report::model::Inputs> {
     report::load(&args)
 }
 
-fn results_page(inputs: &report::model::Inputs, lab: &dyn Fn(&str) -> String) -> String {
+fn results_page(inputs: &report::model::Inputs, lab: &dyn Fn(&str) -> String) -> Result<String> {
     let (header, classes, blended, caveats) = render::site_sections(inputs, lab);
     let mut body = String::new();
     body.push_str(&header);
     body.push_str(&classes);
     body.push_str(&blended);
     let tail: &str = &caveats;
-    let cites = format!("{body}{tail}");
+    let cites = cited_outside_fences(&body);
     let mut s = String::from("# Results\n\n");
     s.push_str(
         "This page shows the measured results of LitePack and of the other archivers on the \
@@ -195,9 +213,9 @@ fn results_page(inputs: &report::model::Inputs, lab: &dyn Fn(&str) -> String) ->
          hand.\n\n",
     );
     s.push_str(&body);
-    s.push_str(&sources_section(inputs, &cites, lab));
+    s.push_str(&sources_section(inputs, &cites, lab)?);
     s.push_str(tail);
-    s
+    Ok(s)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -279,7 +297,10 @@ fn parse_spec(text: &str) -> Result<Descriptions> {
     Ok(Descriptions { rows, derived })
 }
 
-/// No token of a description may be a figure: a token with a digit and no letter.
+/// No token of a description may be a figure: a token with a digit and no letter. Number words
+/// ("Three working-tree snapshots") stay allowed (R251): the descriptions are the spec's prose, a
+/// number word there says how the class is built, not what was measured, and digits stay banned,
+/// so no count or size from the prose reaches the page.
 fn check_no_figures(class: &str, text: &str) -> Result<()> {
     for token in text.split_whitespace() {
         let t = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
@@ -337,17 +358,23 @@ fn corpus_page(
         sources.source.iter().map(|s| (s.id.as_str(), s)).collect();
     let totals = render::corpus_totals(inputs).context("the published run has no rows")?;
 
+    // Every class of the sources file needs a description, whether or not a lock profile holds it.
+    for s in &sources.source {
+        desc.describe(&s.class, c.derived.get(&s.class))?;
+    }
+    let profile_names: Vec<String> = lock.profiles.keys().map(|p| format!("`{p}`")).collect();
     let mut body = String::from("# The benchmark corpus\n\n");
-    body.push_str(
+    body.push_str(&format!(
         "The benchmark corpus is built from public sources, each pinned by address and BLAKE3 in \
          `bench/corpus.lock`; the sources, their classes and licences are in \
          `bench/corpus-sources.toml`, and the specification is `docs/CORPUS.md`. The lock lists \
          downloads (archives, files and git commits), not the files of the built corpus: one \
-         download can yield many files, and some corpus files are derived locally. The built \
-         corpus has two profiles, `small` for quick runs and `full` for the published results. A \
-         bracketed number is the index of a result file of the published run, listed under \
-         Sources.\n\n",
-    );
+         download can yield many files, and some corpus files are derived locally. The lock has \
+         the profiles {}; the published results are of the profile `{}`. A bracketed number is \
+         the index of a result file of the published run, listed under Sources.\n\n",
+        profile_names.join(", "),
+        totals.profile
+    ));
     body.push_str("## The built corpus of the published run\n\n");
     body.push_str(&format!(
         "- profile `{}`, manifest BLAKE3 `{}`: {} files, {} bytes, {} classes {}\n\n",
@@ -426,8 +453,13 @@ fn corpus_page(
         }
         body.push('\n');
     }
-    let mut s = body.clone();
-    s.push_str(&sources_section(inputs, &body, lab));
+    // The citations are those of the totals line, read from its traced values.
+    let mut ids: BTreeSet<usize> = BTreeSet::from([totals.src]);
+    for t in [&totals.files, &totals.bytes].into_iter().flatten() {
+        ids.extend(t.sources.iter().copied());
+    }
+    let mut s = body;
+    s.push_str(&sources_section(inputs, &ids, lab)?);
     Ok(s)
 }
 
@@ -452,7 +484,7 @@ pub fn generate(root: &Path) -> Result<Pages> {
         site_label(&d.label, &host)?;
     }
     let lab = |l: &str| site_label(l, &host).unwrap_or_else(|_| l.to_string());
-    let results = finish(results_page(&inputs, &lab));
+    let results = finish(results_page(&inputs, &lab)?);
     let corpus = finish(corpus_page(root, &site, &inputs, &lab)?);
     Ok(Pages { results, corpus })
 }

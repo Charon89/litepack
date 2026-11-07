@@ -1622,6 +1622,18 @@ fn probe_files_load_through_the_validator_and_must_match_host_and_corpus() {
         "the probe's own table is embedded"
     );
     assert!(text.contains("probes not available: jpeg, deflate, dedup, text, entropy-gate"));
+    // E9-6: the site's header leaves the probe lines out, so the probe's host (and its label)
+    // never reaches the site.
+    assert!(
+        text.contains(&format!("on `{machine}`")),
+        "the report names the probe's host"
+    );
+    let (site_header, _, _, _) = super::render::site_sections(&loaded, &|l| l.to_string());
+    assert!(
+        !site_header.contains(&format!("on `{machine}`")),
+        "{site_header}"
+    );
+    assert!(!site_header.contains("- probe `") && !site_header.contains("libraries"));
     // A debug build of the probe is refused without the flag.
     let err = format!("{:#}", load(&args(good, false)).expect_err("debug refused"));
     assert!(err.contains("--allow-unclean"), "{err}");

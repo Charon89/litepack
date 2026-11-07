@@ -62,7 +62,9 @@ edit them by hand; regenerate them with `cargo run -p lpk-bench -- book` from th
   and no antivirus detail: a results directory `<date>-<host>[-<n>]` appears as `<date> run <n>`. The corpus page
   holds each class's description (from the class table of `docs/CORPUS.md`), the lock's downloads and bytes per class
   and per source (from `bench/corpus.lock` and `bench/corpus-sources.toml`), and the built corpus's totals from the
-  published run. Every figure is read from a committed file.
+  published run. Every figure is read from a committed file. A class description may hold a number word from the
+  spec's prose ("Three working-tree snapshots"), which says how the class is built, never a measurement; a digit in
+  a description fails the generator, so no count or size from the prose reaches the page.
 - `cargo run -p lpk-bench -- book --check` regenerates the pages in memory and fails, naming the first differing line,
   when the committed pages differ. The test `crates/lpk-bench/tests/book.rs`, which CI's nextest runs on Windows and
   Linux, asserts that two generations are identical and equal to the committed pages (`LPK_BENCH_BOOK_WRITE=1`

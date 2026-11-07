@@ -305,7 +305,11 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model, site: Option<&dyn Fn(&str)
                     brackets(&BTreeSet::from([e.from_src])),
                     lab(&e.by),
                     brackets(&BTreeSet::from([e.by_src])),
-                    e.reason
+                    if site.is_some() {
+                        "re-measured"
+                    } else {
+                        e.reason.as_str()
+                    }
                 ));
             }
             let supplied: Vec<String> = b
@@ -354,7 +358,12 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model, site: Option<&dyn Fn(&str)
         baseline_date(b),
         brackets(&BTreeSet::from([b.host_src]))
     ));
-    for p in inputs.probes.present() {
+    for p in inputs
+        .probes
+        .present()
+        .into_iter()
+        .filter(|_| site.is_none())
+    {
         s.push_str(&format!(
             "- probe `{}` build: `{}`{}, taken {} on `{}` [{}]\n",
             p.name,
@@ -402,7 +411,12 @@ fn header(s: &mut String, inputs: &Inputs, m: &Model, site: Option<&dyn Fn(&str)
         ));
     }
     let mut libs: Vec<String> = Vec::new();
-    for p in inputs.probes.present() {
+    for p in inputs
+        .probes
+        .present()
+        .into_iter()
+        .filter(|_| site.is_none())
+    {
         for (k, v) in &p.libraries {
             let l = format!("{k} {v} [{}]", p.src);
             if !libs.contains(&l) {

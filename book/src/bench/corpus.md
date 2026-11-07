@@ -1,6 +1,6 @@
 # The benchmark corpus
 
-The benchmark corpus is built from public sources, each pinned by address and BLAKE3 in `bench/corpus.lock`; the sources, their classes and licences are in `bench/corpus-sources.toml`, and the specification is `docs/CORPUS.md`. The lock lists downloads (archives, files and git commits), not the files of the built corpus: one download can yield many files, and some corpus files are derived locally. The built corpus has two profiles, `small` for quick runs and `full` for the published results. A bracketed number is the index of a result file of the published run, listed under Sources.
+The benchmark corpus is built from public sources, each pinned by address and BLAKE3 in `bench/corpus.lock`; the sources, their classes and licences are in `bench/corpus-sources.toml`, and the specification is `docs/CORPUS.md`. The lock lists downloads (archives, files and git commits), not the files of the built corpus: one download can yield many files, and some corpus files are derived locally. The lock has the profiles `full`, `small`; the published results are of the profile `full`. A bracketed number is the index of a result file of the published run, listed under Sources.
 
 ## The built corpus of the published run
 

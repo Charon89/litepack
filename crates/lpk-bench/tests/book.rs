@@ -48,10 +48,10 @@ fn recorded_machine_details() -> (BTreeSet<String>, BTreeSet<String>) {
     let site: toml::Table =
         toml::from_str(&std::fs::read_to_string(root().join("bench/site.toml")).unwrap())
             .expect("bench/site.toml");
-    let dirs: Vec<String> = site["results"]
-        .as_array()
-        .expect("results")
+    let dirs: Vec<String> = ["results", "probes"]
         .iter()
+        .filter_map(|k| site.get(*k))
+        .flat_map(|v| v.as_array().expect("array").iter())
         .map(|v| v.as_str().expect("path").to_string())
         .collect();
     let (mut hosts, mut products) = (BTreeSet::new(), BTreeSet::new());
@@ -62,7 +62,12 @@ fn recorded_machine_details() -> (BTreeSet<String>, BTreeSet<String>) {
         };
         let host = json("host.json");
         hosts.insert(host["host"].as_str().expect("host").to_string());
-        let run = json("run.json");
+        // A probe directory has no run.json.
+        let run = if root().join(d).join("run.json").is_file() {
+            json("run.json")
+        } else {
+            serde_json::Value::Null
+        };
         for list in [&host["antivirus"], &run["antivirus_end"]] {
             for p in list.as_array().into_iter().flatten() {
                 products.insert(p["name"].as_str().expect("name").to_string());
@@ -135,6 +140,29 @@ fn pages_hold_no_verdict_and_no_machine_detail() {
                 !lower.contains(&p.to_lowercase()),
                 "{name} names scanner `{p}`"
             );
+        }
+        for p in &products {
+            // "Windows" is the OS name, which the site shows; the product's other words are banned
+            // through "defender" below.
+            if let Some(first) = p
+                .split_whitespace()
+                .next()
+                .filter(|w| !w.eq_ignore_ascii_case("windows"))
+            {
+                assert!(
+                    !lower.contains(&first.to_lowercase()),
+                    "{name} holds the first word `{first}` of scanner `{p}`"
+                );
+            }
+        }
+        for word in [
+            "avast",
+            "defender",
+            "builds ran",
+            "background",
+            "while builds",
+        ] {
+            assert!(!lower.contains(word), "{name} holds `{word}`");
         }
         for banned in ["NO-GO", "GO proposal"] {
             assert!(!text.contains(banned), "{name} holds `{banned}`");
