@@ -41,7 +41,11 @@ jobs:
           bash scripts/check-book-sources.sh
       - name: Build the book
         run: mdbook build book
-      - name: Built book check (spec and CLI pages rendered from the committed files)
+      - name: Link check (offline; external links listed, not fetched)
+        run: |
+          bash scripts/check-book-links.sh --self-test
+          bash scripts/check-book-links.sh book/book
+      - name: Built book check (spec, CLI and licensing pages rendered from the committed files; notices page equal to THIRD-PARTY-NOTICES)
         run: bash scripts/check-book-sources.sh --built book/book
       # The site publishes no font files (docs/LICENSING.md: Source Code Pro is OFL-1.1, not on the allow-list);
       # book/theme/fonts/fonts.css keeps mdBook's bundled fonts out, and an mdBook upgrade must not bring them back.
