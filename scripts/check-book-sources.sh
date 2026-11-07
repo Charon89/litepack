@@ -248,15 +248,15 @@ check_sources() {
   # THIRD-PARTY-NOTICES are covered too.
   if [ -d "$root/book" ]; then
     local hits d
-    hits="$(cd "$root" && find book -path book/book -prune -o -type f -print0 | xargs -0 -r grep -Iil -e "$needle" || true)"
+    hits="$(cd "$root" && find book -path book/book -prune -o -type f -print0 | xargs -0 -r grep -il -e "$needle" || true)"
     hits="$hits"$'\n'"$(cd "$root" && find book -path book/book -prune -o -iname '*litepack-method*' -print || true)"
     for d in docs/LICENSING.md THIRD-PARTY-NOTICES; do
       [ -f "$root/$d" ] || continue
-      hits="$hits"$'\n'"$(cd "$root" && grep -Iil -e "$needle" "$d" || true)"
+      hits="$hits"$'\n'"$(cd "$root" && grep -il -e "$needle" "$d" || true)"
     done
     for d in docs/spec docs/cli; do
       [ -d "$root/$d" ] || continue
-      hits="$hits"$'\n'"$(cd "$root" && find "$d" -type f -print0 | xargs -0 -r grep -Iil -e "$needle" || true)"
+      hits="$hits"$'\n'"$(cd "$root" && find "$d" -type f -print0 | xargs -0 -r grep -il -e "$needle" || true)"
       hits="$hits"$'\n'"$(cd "$root" && find "$d" -iname '*litepack-method*' -print || true)"
     done
     if nonblank "$hits"; then
@@ -364,7 +364,8 @@ EOF
 # check_anchors FILE (check (m)): prints a finding per problem in docs/LICENSING.md. mdBook takes the text between the
 # lines holding `ANCHOR: published` and `ANCHOR_END: published`; this pins both markers (exact lines, in that order,
 # no other ANCHOR text) and the headings between them, so an edit cannot widen what is published without failing.
-# A heading is an ATX heading (up to three spaces, then `#`) or a setext underline (`===` or two or more `-`).
+# A heading is an ATX heading (`#` to `######`, after any blockquote or list-item markers), a setext underline (a
+# line of only `=` or only `-`, which also catches a thematic break), or a raw <h1> to <h6> tag in any letter case.
 check_anchors() {
   perl -e '
     my $p = $ARGV[0];
@@ -378,7 +379,11 @@ check_anchors() {
       if ($l =~ /ANCHOR/) { push @marks, [$i + 1, $l]; }
       if (@marks == 1 && $marks[0][1] eq $start) { $in = 1 }
       if (@marks >= 2) { $in = 0 }
-      if ($in && $l !~ /ANCHOR/ && ($l =~ /^ {0,3}\#/ || $l =~ /^ {0,3}(?:=+|-{2,})[ \t]*$/)) { push @heads, $l }
+      if ($in && $l !~ /ANCHOR/) {
+        my $s = $l;
+        1 while $s =~ s/^\s{0,3}(?:>[ \t]?|[-*+][ \t]+|[0-9]+[.)][ \t]+)//;
+        push @heads, $l if $s =~ /^\s*\#{1,6}/ || $s =~ /^\s*(?:=+|-+)\s*$/ || $l =~ /<h[1-6]\b/i;
+      }
     }
     if (@marks != 2) { print "$p: ", scalar(@marks), " lines with ANCHOR, not 2\n"; }
     if (@marks >= 1 && $marks[0][1] ne $start) { print "$p:$marks[0][0]: the first ANCHOR line is not exactly $start\n"; }
@@ -543,7 +548,7 @@ check_built() {
   lic="$(built_notices "$built/notices.html" "$root/THIRD-PARTY-NOTICES" || true)"
   if nonblank "$lic"; then printf '(d) notices.html: %s\n' "$lic"; fail=1; fi
   local hits
-  hits="$(grep -rIil -e "$needle" "$built" 2>/dev/null || true)"
+  hits="$(grep -ril -e "$needle" "$built" 2>/dev/null || true)"
   hits="$hits"$'\n'"$(find "$built" -iname '*litepack-method*' -print || true)"
   if nonblank "$hits"; then printf '(e) built files name the method document: %s\n' "$hits"; fail=1; fi
   # (g)
@@ -868,6 +873,21 @@ self_test() {
   else
     echo "SKIPPED (k) THIRD-PARTY-NOTICES self-test: cannot create a symlink here"
   fi
+  # E9-8 fix round 1
+  make_tree "$t/m8"; perl -pi -e 's/^text$/text\n-/ if $. == 7' "$t/m8/docs/LICENSING.md"
+  expect_fail m "a single-dash setext underline in the region" check_sources "$t/m8"
+  make_tree "$t/m9"; perl -pi -e 's/^text$/text\n> ## X/ if $. == 7' "$t/m9/docs/LICENSING.md"
+  expect_fail m "a heading inside a blockquote in the region" check_sources "$t/m9"
+  make_tree "$t/m10"; perl -pi -e 's/^text$/text\n- ## X/ if $. == 7' "$t/m10/docs/LICENSING.md"
+  expect_fail m "a heading inside a list item in the region" check_sources "$t/m10"
+  make_tree "$t/m11"; perl -pi -e 's/^text$/text\n<H2>X<\/H2>/ if $. == 7' "$t/m11/docs/LICENSING.md"
+  expect_fail m "a raw upper-case h2 tag in the region" check_sources "$t/m11"
+  make_tree "$t/m12"; perl -pi -e 's/^text$/text\n1) # X/ if $. == 7' "$t/m12/docs/LICENSING.md"
+  expect_fail m "a heading inside a numbered list item in the region" check_sources "$t/m12"
+  make_tree "$t/nc"; printf 'x\0LitePack-Method\n' >> "$t/nc/THIRD-PARTY-NOTICES"
+  expect_fail c "the method document's name after a NUL byte in THIRD-PARTY-NOTICES" check_sources "$t/nc"
+  make_tree "$t/ne"; printf 'x\0LitePack-Method\n' > "$t/ne/site/n.html"
+  expect_fail e "a built file with a NUL byte and the method document's name" check_built "$t/ne" "$t/ne/site"
   echo "self-test: all checks proved"
 }
 

@@ -81,3 +81,12 @@ not). `https:` and `mailto:` links are counted and their hosts listed, never fet
 other scheme, `//host` links and root-relative links outside `/litepack/` fail; `data:` passes in `src` only. A relative
 link resolves against the page (or the site root when the page has a `<base href>`, which must be the `site-url`); the
 file must exist, a path may not climb above the site root, and a `#fragment` must be an `id` or `name` in the target.
+On a page with a `<base href>`, an empty path (`href=""`, `#x`, `?q`) resolves to the site root's `index.html`, as a browser
+does, not to the page itself. mdBook's own 404 page has that base, so `src/404.md` replaces its default text (mdBook 0.5.4
+reads it without expanding includes, so it carries the licence line as plain text instead of the footer include) and has no
+Markdown heading, which would give the page a `#...` self-anchor that dead-ends online. Any `srcset` attribute fails (the
+check does not parse it), and so does an `&` in an `href` or `src` that does not start a complete entity.
+
+(m) counts every heading form inside the published region: ATX headings (also after blockquote and list markers),
+setext underlines (a line of only `=` or only `-`, which includes a thematic break) and raw `<h1>` to `<h6>` tags; only
+the two allowed headings may appear. The method-document name checks (c, e) search every file, binary or not.

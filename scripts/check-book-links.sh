@@ -61,7 +61,8 @@ check_site() {
         my ($tag, $as) = (lc $1, $2);
         while ($as =~ /([^\s"\x27<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|\x27([^\x27]*)\x27|([^\s"\x27=<>`]+)))?/g) {
           my $v = defined $2 ? $2 : defined $3 ? $3 : defined $4 ? $4 : "";
-          push @out, [$tag, lc $1, decode_entities($v)];
+          my $nm = lc $1;
+          push @out, [$tag, $nm, decode_entities($v), $v];
         }
       }
       return @out;
@@ -94,11 +95,15 @@ check_site() {
       my @pdir = split m{/}, $page; pop @pdir;
       my @basedir = defined $base && $base eq $siteurl ? () : @pdir;
       for my $a (@attr) {
-        my ($tag, $name, $v) = @$a;
+        my ($tag, $name, $v, $raw) = @$a;
+        if ($name eq "srcset") { push @bad, "$page: <$tag srcset> is not parsed by this check, so it is not allowed"; next }
         next unless $name eq "href" || $name eq "src";
         next if $tag eq "base" && $name eq "href";
         $checked++;
         my $where = "$page: <$tag $name=\"$v\">";
+        if ($raw =~ /&(?!(?:\#[0-9]+|\#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);)/) {
+          push @bad, "$where: an & that does not start a complete entity"; next;
+        }
         (my $u = $v) =~ s/\A[ \t\r\n\f]+|[ \t\r\n\f]+\z//g;
         if ($u =~ /[\x00-\x1f\x7f]/) { push @bad, "$where: a control character"; next }
         if ($u =~ /\A([A-Za-z][A-Za-z0-9+.-]*):/) {
@@ -119,7 +124,7 @@ check_site() {
         $path =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
         if (defined $frag) { $frag =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge; }
         my $target;
-        if ($path eq "") { $target = $page }
+        if ($path eq "") { $target = defined $base && $base eq $siteurl ? "index.html" : $page }
         else {
           my @st;
           if ($path =~ m{\A/}) {
@@ -220,7 +225,13 @@ self_test() {
   expect_bad https-no-host "no host" '<a href="https:page.html">x</a>'
   expect_bad src-missing "no such file" '<img src="img/none.png">'
   expect_bad percent-missing "no such file" '<a href="a%20c.html">x</a>'
+  expect_bad based-own-fragment "no id or name" '<base href="/litepack/"><h2 id="x">y</h2><a href="#x">x</a>'
+  expect_bad srcset "srcset" '<img src="js/a.js" srcset="js/a.js 2x">'
+  expect_bad bare-ampersand "complete entity" '<a href="a&ampb.html">x</a>'
+  expect_bad bare-ampersand-query "complete entity" '<a href="page.html?a=1&b=2">x</a>'
   rm -rf "$t/base-ok"; make_site "$t/base-ok"
+  printf '<base href="/litepack/"><a href="#own">i</a> <a href="">e</a> <a href="?q=1">q</a> <a href="a&amp;b.html">x</a>\n' > "$t/base-ok/based.html"
+  printf '<html>amp</html>\n' > "$t/base-ok/a&b.html"
   printf '<base href="/litepack/"><a href="cli/index.html">x</a>\n' > "$t/base-ok/sub.html"
   mkdir -p "$t/base-ok/d"; printf '<base href="/litepack/"><a href="page.html#sec">x</a> <a href="/litepack/">r</a>\n' > "$t/base-ok/d/p.html"
   if ! out="$(check_site "$t/base-ok" 2>&1)"; then echo "self-test FAILED: a page with the site-url base does not pass: $out"; exit 1; fi
