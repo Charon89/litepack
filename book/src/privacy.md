@@ -7,6 +7,8 @@ the code does today; it describes nothing that is planned.
 
 Files stay on your computer. Archives are read and written locally, and nothing is uploaded.
 
+The GUI keeps some things on the computer: the lists of recent archives and destinations, which hold their paths (the button **Clear recent lists** empties them); the journal of interrupted writes; the data folder of WebView2 (see below); and, for an entry you open from an archive, a copy in a folder of its own, which the program removes when it exits and, after an earlier run that did not exit cleanly, when it next starts. All of it stays on the computer and is sent nowhere.
+
 ## Network requests
 
 - The command line (`lpk`), the shell extension and the sandboxed worker make no network requests. They contain no
@@ -20,11 +22,9 @@ Files stay on your computer. Archives are read and written locally, and nothing 
   is the address set in the GUI's configuration. The program makes it in the background when it starts, and it
   gives up after 30 seconds.
 - It sends nothing beyond what any HTTPS request carries. GitHub, which serves the file, sees your IP address and
-  the request headers: an `Accept` header and the User-Agent `tauri-plugin-updater/` with that library's version.
-  The address carries no LitePack version, no system and no identifier.
-- It can be turned off: in the GUI's **Settings**, clear the box **Check for updates**. With it cleared, the program
-  makes no request at all. The setting is saved on your computer.
-- The check also makes no request unless the program holds the release signing key for updates. No release exists
+  the request headers, such as `Host`, `Accept` and the User-Agent `tauri-plugin-updater/` with that library's version. GitHub redirects the request to a second GitHub host, so GitHub's servers answer it. The address carries no LitePack version, no system and no identifier.
+- It is on by default. It can be turned off: in the GUI's **Settings**, clear the box **Check for updates**. The setting is saved on your computer and read when the program starts, so clearing it takes effect from the next start; with it cleared, the program makes no request at all.
+- The check also makes no request unless the program holds the public key that verifies releases. No release exists
   yet, so no build holds one, and no build makes the request today.
 - A failed check is written to the program's error output only. It is sent nowhere.
 
@@ -39,7 +39,7 @@ address.
 
 The website is hosted on GitHub Pages, and GitHub's privacy statement covers that hosting. The site sets no
 cookies and loads no script, style or font from a third party. Its search runs in your browser. Its page template
-(mdBook) stores your choice of theme and whether the sidebar is open in the browser's local storage, on your
+(mdBook) stores your choice of theme and whether the sidebar is open in the browser's local and session storage, on your
 computer; the site does not send it anywhere.
 
 ## Questions

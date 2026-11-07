@@ -13,3 +13,7 @@ enable = true
 
 [output.html.search.chapter]
 "notices.md" = { enable = false }
+
+[output.html.playground]
+# No runnable Rust block: mdBook would contact play.rust-lang.org from a page that has one.
+runnable = false

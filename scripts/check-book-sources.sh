@@ -128,8 +128,8 @@ scan_directives() {
 #   summary: blank; `# T`; `---`; `[T](P)`; `<indent>- [T](P)` (indent: groups of 2 or 4 spaces, no tabs);
 #            T is [A-Za-z0-9 .,()'-]+; P is empty or [A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.md.
 #   toml:    blank; `#` comment; the headers [book], [output.html], [output.html.search],
-#            [output.html.search.chapter]; `key = value` with a key from the table's list and a value that is a
-#            double-quoted string without backslash, true, false or an integer (the [book] src must equal "src");
+#            [output.html.search.chapter], [output.html.playground]; `key = value` with a key from the table's list and a value that is a
+#            double-quoted string without backslash, true, false or an integer (the [book] src must equal "src", the playground runnable must be false);
 #            under the chapter header only the exact line `"notices.md" = { enable = false }`.
 allow_scan() {
   perl -e '
@@ -139,6 +139,7 @@ allow_scan() {
       "[book]" => [qw(title authors description language src)],
       "[output.html]" => [qw(git-repository-url site-url default-theme preferred-dark-theme)],
       "[output.html.search]" => [qw(enable limit-results use-boolean-and expand heading-split-level)],
+      "[output.html.playground]" => [qw(runnable)],
       "[output.html.search.chapter]" => [],
     );
     my $chapter_line = q{"notices.md" = { enable = false }};
@@ -158,6 +159,7 @@ allow_scan() {
         elsif ($l =~ /\A([a-z-]+) = ("[^"\\]*"|true|false|-?[0-9]+)\z/ && $sec ne "" && grep { $_ eq $1 } @{ $keys{$sec} }) {
           $ok = 1;
           $ok = 0 if $sec eq "[book]" && $1 eq "src" && $2 ne "\"src\"";
+          $ok = 0 if $sec eq "[output.html.playground]" && $2 ne "false";
         }
       }
       print "$file:$n: $l\n" unless $ok;
@@ -307,7 +309,7 @@ check_sources() {
     fi
   fi
   # (k) no symlink under book/ (the build output aside), docs/spec/ or docs/cli/, and neither docs/LICENSING.md nor
-  # THIRD-PARTY-NOTICES is one: mdBook follows symlinks, find -type f skips them
+  # THIRD-PARTY-NOTICES nor docs/SECURITY.md is one: mdBook follows symlinks, find -type f skips them
   local links
   links="$( { [ -d "$root/book" ] && (cd "$root" && find book -path book/book -prune -o -type l -print)
     [ -d "$spec" ] && (cd "$root" && find docs/spec -type l -print)
@@ -867,6 +869,25 @@ self_test() {
   expect_fail j "another path in the search-chapter line" check_sources "$t/j10"
   make_tree "$t/j11"; printf '[book]\nsrc = "src"\n[output.html.search.chapter]\n"notices.md" = { enable = true }\n' > "$t/j11/book/book.toml"
   expect_fail j "another value in the search-chapter line" check_sources "$t/j11"
+  make_tree "$t/j12"; printf '[book]
+src = "src"
+[output.html.playground]
+runnable = false
+' > "$t/j12/book/book.toml"
+  expect_pass "the playground header with runnable = false" check_sources "$t/j12"
+  make_tree "$t/j13"; printf '[book]
+src = "src"
+[output.html.playground]
+runnable = true
+' > "$t/j13/book/book.toml"
+  expect_fail j "runnable = true under the playground header" check_sources "$t/j13"
+  make_tree "$t/j14"; printf '[book]
+src = "src"
+[output.html.playground]
+runnable = false
+editable = false
+' > "$t/j14/book/book.toml"
+  expect_fail j "another key under the playground header" check_sources "$t/j14"
   make_tree "$t/bl"; printf '<html><h2>Our licence</h2></html>\n' > "$t/bl/site/licensing.html"
   expect_fail d "a licensing page without the second heading" check_built "$t/bl" "$t/bl/site"
   make_tree "$t/bl2"; printf '<html><h2>x</h2></html>\n' > "$t/bl2/site/licensing.html"
@@ -890,8 +911,12 @@ self_test() {
   expect_fail f "a directive in docs/SECURITY.md" check_sources "$t/sf"
   make_tree "$t/sc"; printf 'see LitePack-Method-v2\n' >> "$t/sc/docs/SECURITY.md"
   expect_fail c "the method document's name in docs/SECURITY.md" check_sources "$t/sc"
-  make_tree "$t/sk"; mv "$t/sk/docs/SECURITY.md" "$t/sk/real.md"; ln -s ../real.md "$t/sk/docs/SECURITY.md"
-  expect_fail k "docs/SECURITY.md as a symlink" check_sources "$t/sk"
+  make_tree "$t/sk"; mv "$t/sk/docs/SECURITY.md" "$t/sk/real.md"
+  if ln -s ../real.md "$t/sk/docs/SECURITY.md" 2>/dev/null && [ -L "$t/sk/docs/SECURITY.md" ]; then
+    expect_fail k "docs/SECURITY.md as a symlink" check_sources "$t/sk"
+  else
+    echo "SKIPPED (k) docs/SECURITY.md self-test: cannot create a symlink here"
+  fi
   make_tree "$t/sb"; printf '<html><h1>Other</h1></html>\n' > "$t/sb/site/security.html"
   expect_fail d "a security page without the heading of docs/SECURITY.md" check_built "$t/sb" "$t/sb/site"
   make_tree "$t/bn3"; printf '<pre></pre>\n' >> "$t/bn3/site/notices.html"

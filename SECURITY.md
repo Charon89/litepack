@@ -25,6 +25,7 @@ report one: no email address.
 
 Every report is read and acted on as soon as possible. LitePack is maintained by one person, so no deadline is
 promised, for an answer or for a fix.
+
 ## Disclosure
 
 Disclosure is coordinated: please keep the report private until a fix is available, or until we have agreed on a
