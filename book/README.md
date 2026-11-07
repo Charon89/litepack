@@ -83,8 +83,8 @@ link resolves against the page (or the site root when the page has a `<base href
 file must exist, a path may not climb above the site root, and a `#fragment` must be an `id` or `name` in the target.
 On a page with a `<base href>`, an empty path (`href=""`, `#x`, `?q`) resolves to the site root's `index.html`, as a browser
 does, not to the page itself. mdBook's own 404 page has that base, so `src/404.md` replaces its default text (mdBook 0.5.4
-reads it without expanding includes, so it carries the licence line as plain text instead of the footer include) and has no
-Markdown heading, which would give the page a `#...` self-anchor that dead-ends online. Any `srcset` attribute fails (the
+reads it without expanding includes, and it is not a chapter, so the 404 page has no footer, as mdBook's default has none)
+and has no Markdown heading, which would give the page a `#...` self-anchor that dead-ends online. Any `srcset` attribute fails (the
 check does not parse it), and so does an `&` in an `href` or `src` that does not start a complete entity.
 
 (m) counts every heading form inside the published region: ATX headings (also after blockquote and list markers),
