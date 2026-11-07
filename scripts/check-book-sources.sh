@@ -21,9 +21,12 @@
 #       digits (HTML: tags and entities removed first), so markup differences do not matter. A sample: a
 #       reworded or heavily reformatted copy can evade it.
 # Structural guards (they close the routes by which a file outside the book could be published):
-#   (f) and (h) below; (i) every link target in book/src/SUMMARY.md is free of `..`, a leading `/`, a
-#       backslash and a scheme (`:`); (j) book/book.toml has `[book] src = "src"`, no `[preprocessor` table and
-#       no additional-css, additional-js or theme key; (k) no symlink under book/ (the build output aside) or
+#   (f) and (h) below; (i) every line of book/src/SUMMARY.md is one of the exact shapes the book uses and
+#       every chapter path is a plain relative path of [A-Za-z0-9_-] components ending in .md; (j) every line
+#       of book/book.toml is a blank, a comment, one of three table headers, or a listed key with a plain value
+#       (`[book] src` must be "src"). (i) and (j) are allow-lists, not deny-lists, because mdBook's Markdown and
+#       TOML parsers accept many spellings of the same thing (entities, reference links, dotted keys, spaced
+#       headers); see allow_scan for the exact shapes. (k) no symlink under book/ (the build output aside) or
 #       docs/spec/ (mdBook follows symlinks, find -type f does not). (h) also rejects a backslash in an include
 #       target, which a Windows build would resolve outside src/.
 # The second line of defence is (c) and (e), by name, and (g), by a content sample. Residual risk: text reworded
@@ -93,6 +96,45 @@ scan_directives() {
 }
 
 
+# allow_scan summary|toml FILE. Prints "FILE:LINE: text" for each line that is not one of the exact shapes the
+# book uses; the guard is an allow-list because mdBook's Markdown and TOML parsers accept many spellings of the
+# same thing (entities, reference links, balanced parentheses, dotted keys, spaced headers).
+#   summary: blank; `# T`; `---`; `[T](P)`; `<indent>- [T](P)` (indent: groups of 2 or 4 spaces, no tabs);
+#            T is [A-Za-z0-9 .,()'-]+; P is empty or [A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.md.
+#   toml:    blank; `#` comment; the headers [book], [output.html], [output.html.search]; `key = value` with
+#            a key from the table's list and a value that is a double-quoted string without backslash, true,
+#            false or an integer (the [book] src must equal "src").
+allow_scan() {
+  perl -e '
+    my ($mode, $file) = @ARGV;
+    open my $fh, "<:raw", $file or die "$file: $!";
+    my %keys = (
+      "[book]" => [qw(title authors description language src)],
+      "[output.html]" => [qw(git-repository-url site-url default-theme preferred-dark-theme)],
+      "[output.html.search]" => [qw(enable limit-results use-boolean-and expand heading-split-level)],
+    );
+    my $T = q{[A-Za-z0-9 .,()\x27-]+};
+    my $P = q{[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\.md};
+    my ($n, $sec) = (0, "");
+    while (my $l = <$fh>) {
+      $n++; $l =~ s/\r?\n\z//;
+      my $ok = 0;
+      if ($mode eq "summary") {
+        $ok = 1 if $l =~ /\A\z/ || $l =~ /\A# $T\z/ || $l eq "---"
+          || $l =~ /\A\[$T\]\((?:$P)?\)\z/ || $l =~ /\A(?:  |    )*- \[$T\]\((?:$P)?\)\z/;
+      } else {
+        if ($l =~ /\A\s*\z/ || $l =~ /\A\s*#/) { $ok = 1; }
+        elsif (exists $keys{$l}) { $sec = $l; $ok = 1; }
+        elsif ($l =~ /\A([a-z-]+) = ("[^"\\]*"|true|false|-?[0-9]+)\z/ && $sec ne "" && grep { $_ eq $1 } @{ $keys{$sec} }) {
+          $ok = 1;
+          $ok = 0 if $sec eq "[book]" && $1 eq "src" && $2 ne "\"src\"";
+        }
+      }
+      print "$file:$n: $l\n" unless $ok;
+    }
+  ' "$1" "$2"
+}
+
 check_sources() {
   local root="$1" fail=0 f name page
   local spec="$root/docs/spec" pages="$root/book/src/spec"
@@ -132,24 +174,18 @@ check_sources() {
     inc="$(scan_directives f "$spec" || true)"
     if nonblank "$inc"; then printf '(f) an include inside docs/spec: %s\n' "$inc"; fail=1; fi
   fi
-  # (i) every link target of SUMMARY.md stays inside book/src (same extraction base as check-book-footer.sh)
+  # (i) SUMMARY.md and (j) book.toml: allow-lists of exact line shapes (see allow_scan)
   if [ -f "$root/book/src/SUMMARY.md" ]; then
     local bad_i
-    bad_i="$(grep -noE '\]\([^)]*\)' "$root/book/src/SUMMARY.md" | tr -d '\r' | awk -F: '
-      { n = $1; t = substr($0, length(n) + 2); sub(/^\]\(/, "", t); sub(/\)$/, "", t)
-        if (t ~ /\.\./ || t ~ /^\// || t ~ /\\/ || t ~ /:/) print "SUMMARY.md:" n ": " t }' || true)"
-    if nonblank "$bad_i"; then printf '(i) a SUMMARY entry that may leave book/src: %s\n' "$bad_i"; fail=1; fi
+    bad_i="$(allow_scan summary "$root/book/src/SUMMARY.md" || true)"
+    if nonblank "$bad_i"; then printf '(i) a SUMMARY.md line outside the allow-list: %s\n' "$bad_i"; fail=1; fi
   fi
-  # (j) book.toml: src is "src"; no preprocessor, extra css/js or theme key
   if [ -f "$root/book/book.toml" ]; then
     local bad_j
-    bad_j="$(tr -d '\r' < "$root/book/book.toml" | awk '
-      /^[[:space:]]*\[/ { sec = $0; gsub(/[[:space:]]/, "", sec) }
-      sec == "[book]" && /^[[:space:]]*src[[:space:]]*=/ { s = $0; gsub(/[[:space:]]/, "", s); if (s == "src=\"src\"") ok = 1; else print "src is not \"src\": " $0 }
-      /^[[:space:]]*\[preprocessor/ { print "a preprocessor table: " $0 }
-      /^[[:space:]]*(additional-css|additional-js|theme)[[:space:]]*=/ { print "a forbidden key: " $0 }
-      END { if (!ok) print "no [book] src = \"src\"" }')"
-    if nonblank "$bad_j"; then printf '(j) book.toml: %s\n' "$bad_j"; fail=1; fi
+    bad_j="$(allow_scan toml "$root/book/book.toml" || true)"
+    if nonblank "$bad_j"; then
+      printf '(j) a book.toml line outside the allow-list (widen it only after checking that the key cannot bring a file from outside book/src into the site): %s\n' "$bad_j"; fail=1
+    fi
   fi
   # (k) no symlink under book/ (the build output aside) or docs/spec/: mdBook follows them, find -type f skips them
   local links
@@ -344,6 +380,28 @@ self_test() {
   expect_fail j "a preprocessor table" check_sources "$t/j2"
   make_tree "$t/j3"; printf '[book]\nsrc = "src"\n[output.html]\nadditional-js = ["../docs/x.js"]\n' > "$t/j3/book/book.toml"
   expect_fail j "an additional-js key" check_sources "$t/j3"
+  make_tree "$t/i4"; printf -- '- [X](&#46;&#46;&#47;&#46;&#46;&#47;docs/x.md)\n' >> "$t/i4/book/src/SUMMARY.md"
+  expect_fail i "an entity-encoded SUMMARY target" check_sources "$t/i4"
+  make_tree "$t/i5"; printf -- '- [X][r]\n\n[r]: ../../docs/x.md\n' >> "$t/i5/book/src/SUMMARY.md"
+  expect_fail i "a reference-style SUMMARY entry" check_sources "$t/i5"
+  make_tree "$t/i6"; printf -- '- [X](a(b).md)\n' >> "$t/i6/book/src/SUMMARY.md"
+  expect_fail i "a balanced-parentheses SUMMARY destination" check_sources "$t/i6"
+  make_tree "$t/i7"; printf -- '- [X](%%2e%%2e/x.md)\n' >> "$t/i7/book/src/SUMMARY.md"
+  expect_fail i "a percent-encoded SUMMARY target" check_sources "$t/i7"
+  make_tree "$t/i8"; printf -- '\t- [X](x.md)\n' >> "$t/i8/book/src/SUMMARY.md"
+  expect_fail i "a tab-indented SUMMARY entry" check_sources "$t/i8"
+  make_tree "$t/i9"; printf -- '<!-- x -->\n' >> "$t/i9/book/src/SUMMARY.md"
+  expect_fail i "an HTML comment in SUMMARY" check_sources "$t/i9"
+  make_tree "$t/i10"; printf -- '- [A](spec/a.md)\n    - [B](spec/b.md)\n' >> "$t/i10/book/src/SUMMARY.md"
+  expect_pass "a SUMMARY chapter nested at four spaces" check_sources "$t/i10"
+  make_tree "$t/j4"; printf '[book]\nsrc = "src"\n[ preprocessor.x ]\ncommand = "y"\n' > "$t/j4/book/book.toml"
+  expect_fail j "a spaced preprocessor header" check_sources "$t/j4"
+  make_tree "$t/j5"; printf '[book]\nsrc = "src"\noutput.html.additional-js = "x"\n' > "$t/j5/book/book.toml"
+  expect_fail j "a dotted key under [book]" check_sources "$t/j5"
+  make_tree "$t/j6"; printf '[book]\nsrc = "src"\n[output.html.fold]\nenable = true\n' > "$t/j6/book/book.toml"
+  expect_fail j "an unlisted table" check_sources "$t/j6"
+  make_tree "$t/j7"; printf '[book]\nsrc = "src"\nbuild-dir = "x"\n' > "$t/j7/book/book.toml"
+  expect_fail j "a key not on the list" check_sources "$t/j7"
   make_tree "$t/k"
   if ln -s "../../../docs/LitePack-Method-v2.md" "$t/k/book/src/x.md" 2>/dev/null && [ -L "$t/k/book/src/x.md" ]; then
     expect_fail k "a symlink under book/" check_sources "$t/k"
