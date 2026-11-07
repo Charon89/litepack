@@ -10,7 +10,8 @@
 #   (b) each docs/spec/*.md has a page of the same name there;
 #   (c) no file under book/ (the build output book/book aside), by content or by name, names the method
 #       document (case-insensitive);
-#   (f) no file under docs/spec/ holds `{{#` (an include of any kind inside the spec could pull in any file).
+#   (f) no file under docs/spec/ holds `{{`, optional whitespace and `#` (a directive of any kind inside the
+#       spec could pull in any file);
 # Built checks:
 #   (d) each spec page's HTML holds the first `# ` heading text of its source file (mdBook only warns when an
 #       include fails, so this is what turns a missing include into a failure);
@@ -23,48 +24,64 @@
 #   (h) in every file under book/src/ each {{#...}} is an allowed include: {{#include P}} (anchor or range
 #       allowed) with P resolving inside book/src/, or exactly the wrapper include of docs/spec/NAME.md in
 #       book/src/spec/NAME.md; rustdoc_include, playground and the rest fail. With (f), nothing outside
-#       book/src and docs/spec can reach the site by inclusion.
+#       book/src and docs/spec can reach the site by inclusion. (h) and (f) mirror mdBook 0.5.4's directive
+#       pattern (mdbook-driver-0.5.4, src/builtin_preprocessors/links.rs, lines 413-423): whitespace and
+#       newlines inside a directive count. An mdBook upgrade must re-check the pattern (see scan_directives).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 needle='LitePack-Method'
 
 nonblank() { grep -q '[^[:space:]]' <<<"$1"; }
 
-# (h) Prints "FILE:LINE: directive" for each {{#...}} in a file under $1 (book/src) that is not allowed:
-# {{#include P}} (P may carry an anchor or range) resolving inside $1, or, in spec/NAME.md, exactly the
-# wrapper include of docs/spec/NAME.md. Anything else, rustdoc_include and playground included, is listed.
+# scan_directives MODE DIR. Prints "FILE:LINE: ..." for each finding in the files under DIR. Each file is read
+# whole as UTF-8 (one that is not valid UTF-8 is a finding) and matched with mdBook 0.5.4's own directive
+# pattern (mdbook-driver-0.5.4 src/builtin_preprocessors/links.rs, lines 413-423): an escaped `\{{#...}}`
+# is rendered as text and never included; otherwise `{{`, optional whitespace (newlines too), `#TYPE`,
+# whitespace, a target of any non-`}` characters, `}}`. An mdBook upgrade must re-check this pattern.
+#   MODE h (DIR is book/src): every directive must be `include` with the target's first token a path that
+#     resolves inside DIR (an `:anchor` or `:start:end` suffix allowed), or, in spec/NAME.md, exactly the
+#     wrapper include of docs/spec/NAME.md; anything else (rustdoc_include, playground...) is a finding.
+#   MODE f (DIR is docs/spec): any `{{` + optional whitespace + `#`, escaped or not, is a finding.
 scan_directives() {
-  find "$1" -type f -print0 | perl -0ne '
-    BEGIN { $root = shift @ARGV; $/ = "\0"; }
+  find "$2" -type f -print0 | perl -0ne '
+    use Encode qw(decode FB_CROAK);
+    BEGIN { $mode = shift @ARGV; $root = shift @ARGV; }
     chomp; my $p = $_;
     open my $h, "<:raw", $p or next;
+    my $s; { local $/; $s = <$h>; } close $h;
+    my $line = sub { my $o = shift; my $pre = substr($s, 0, $o); 1 + ($pre =~ tr/\n//) };
+    my $u = eval { decode("UTF-8", $s, FB_CROAK) };
+    if (!defined $u) { print "$p:0: not valid UTF-8\n"; next; }
+    $s = $u;
     (my $rel = $p) =~ s{^\Q$root\E/?}{};
     my @dir = split m{/}, $rel; pop @dir;
-    my $n = 0;
-    while (my $l = <$h>) {
-      $n++;
-      $l =~ s/\r?\n\z//;
-      while ($l =~ /\{\{#(.*?)(\}\}|$)/g) {
-        my ($body, $close) = ($1, $2);
-        my $ok = 0;
-        if ($close eq "}}" && $body =~ /^include\s+(\S+)$/) {
-          my $arg = $1;
-          if ($rel =~ m{^spec/([^/]+)$} && $arg eq "../../../docs/spec/$1") { $ok = 1; }
-          else {
-            (my $path = $arg) =~ s/:.*//;
-            my @st = @dir; my $in = $path !~ m{^/} && length $path;
-            for my $c (split m{/}, $path) {
-              next if $c eq "" || $c eq ".";
-              if ($c eq "..") { if (@st) { pop @st } else { $in = 0; last } } else { push @st, $c }
-            }
-            $ok = $in ? 1 : 0;
-          }
-        }
-        print "$p:$n: {{#$body}}\n" unless $ok;
-      }
+    if ($mode eq "f") {
+      while ($s =~ /\{\{\s*\#/g) { print "$p:", $line->($-[0]), ": a directive inside the spec\n"; }
+      next;
     }
-  ' "$1"
+    while ($s =~ /\\\{\{\#.*\}\}|\{\{\s*\#([a-zA-Z0-9_]+)\s+([^}]+)\}\}/g) {
+      next unless defined $1;
+      my ($type, $target, $start) = ($1, $2, $-[0]);
+      my $ok = 0;
+      my ($path) = split " ", $target;
+      if ($type eq "include" && defined $path) {
+        (my $t = $target) =~ s/^\s+|\s+$//g;
+        if ($rel =~ m{^spec/([^/]+)$} && $t eq "../../../docs/spec/$1") { $ok = 1; }
+        else {
+          $path =~ s/:.*//;
+          my @st = @dir; my $in = $path !~ m{^/} && length $path;
+          for my $c (split m{/}, $path) {
+            next if $c eq "" || $c eq ".";
+            if ($c eq "..") { if (@st) { pop @st } else { $in = 0; last } } else { push @st, $c }
+          }
+          $ok = $in ? 1 : 0;
+        }
+      }
+      if (!$ok) { (my $d = $&) =~ tr/\n/ /; print "$p:", $line->($start), ": $d\n"; }
+    }
+  ' "$1" "$2"
 }
+
 
 check_sources() {
   local root="$1" fail=0 f name page
@@ -102,13 +119,13 @@ check_sources() {
   # (f)
   if [ -d "$spec" ]; then
     local inc
-    inc="$(grep -rIl -F -e '{{#' "$spec" || true)"
-    if [ -n "$inc" ]; then printf '(f) an include inside docs/spec: %s\n' "$inc"; fail=1; fi
+    inc="$(scan_directives f "$spec" || true)"
+    if nonblank "$inc"; then printf '(f) an include inside docs/spec: %s\n' "$inc"; fail=1; fi
   fi
   # (h)
   if [ -d "$root/book/src" ]; then
     local bad
-    bad="$(scan_directives "$root/book/src" || true)"
+    bad="$(scan_directives h "$root/book/src" || true)"
     if nonblank "$bad"; then printf '(h) a directive outside the include allow-list: %s\n' "$bad"; fail=1; fi
   fi
   return "$fail"
@@ -266,6 +283,20 @@ self_test() {
   make_tree "$t/g2"
   printf '<html><p>Paragraph four of the secret method plan talks at some length about nothing public at all, so that this line reaches the length that the fingerprint rule demands of it.</p></html>\n' > "$t/g2/site/about.html"
   expect_fail g "an indirect copy in a built page" check_built "$t/g2" "$t/g2/site"
+  make_tree "$t/w1"; printf 'Text.\n\n{{ #include ../../docs/x.md}}\n' > "$t/w1/book/src/p.md"
+  expect_fail h "an include with a space after the braces" check_sources "$t/w1"
+  make_tree "$t/w2"; printf 'Text.\n\n{{\n#include\n../../docs/x.md}}\n' > "$t/w2/book/src/p.md"
+  expect_fail h "a directive split over lines" check_sources "$t/w2"
+  make_tree "$t/w3"; printf 'Text\n{{ #include ../x.md}}\n' >> "$t/w3/docs/spec/B.md"
+  expect_fail f "a spaced directive inside the spec" check_sources "$t/w3"
+  make_tree "$t/w4"; printf 'One.\nTwo.\n{{#include ../../docs/x.md}}\n' > "$t/w4/book/src/p.md"
+  out="$(check_sources "$t/w4" 2>&1 || true)"
+  if ! grep -q 'p.md:3:' <<<"$out"; then echo "self-test FAILED: (h) does not name line 3: $out"; exit 1; fi
+  echo "self-test ok: (h) names the line of a finding (:3:)"
+  make_tree "$t/w5"; printf 'Shown as text: \\{{#include ../../docs/x.md}}\n' > "$t/w5/book/src/p.md"
+  expect_pass "an escaped directive in a page" check_sources "$t/w5"
+  make_tree "$t/w6"; printf 'Text \377\376 bytes.\n' > "$t/w6/book/src/p.md"
+  expect_fail h "a page that is not valid UTF-8" check_sources "$t/w6"
   echo "self-test: all checks proved"
 }
 

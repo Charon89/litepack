@@ -13,7 +13,9 @@ own files work in the book. Never copy the text. What the checks cover:
 - The structural guard is the include allow-list (h) with (f). (h): in every file under `src/`, a `{{#...}}` directive
   is only an `{{#include}}` that resolves inside `src/` (such as the footer), or the exact wrapper include in
   `src/spec/<name>.md`; `rustdoc_include`, `playground` and the rest fail. (f): there is no `{{#` inside `docs/spec/`.
-  So nothing outside `src/` and `docs/spec/` can reach the site by inclusion.
+  So nothing outside `src/` and `docs/spec/` can reach the site by inclusion. Both mirror mdBook 0.5.4's directive
+  pattern (whitespace and line breaks inside a directive count; a file that is not UTF-8 fails); an mdBook upgrade
+  must re-check it.
 - `bash scripts/check-book-sources.sh` (before the build) also checks that the wrappers are pure includes (a page that
   is more than those two lines fails), that every `docs/spec/*.md` has a page, and that no file under `book/` names
   the unpublished method document, by content or by file name, in any letter case.
