@@ -142,5 +142,6 @@ without named streams gives one warning (D-119).
 
 ## 9. Reporting a vulnerability
 
-**PLACEHOLDER: the disclosure address and policy are the owner's to set (E9-7). Until then, do not file security
-reports in public issues.**
+The policy and the way to report are in the root `SECURITY.md`. Report privately, through GitHub's "Report a
+vulnerability" button on the repository's Security tab (private vulnerability reporting), never in a public issue,
+pull request or discussion.

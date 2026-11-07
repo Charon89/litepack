@@ -105,6 +105,7 @@ scan_directives() {
         elsif ($rel =~ m{^cli/([A-Za-z0-9_-]+)-([1-9])\.md$} && $t eq "../../../docs/cli/$1.$2") { $ok = 1; }
         elsif ($rel eq "licensing.md" && $t eq "../../docs/LICENSING.md:published") { $ok = 1; }
         elsif ($rel eq "notices.md" && $t eq "../../THIRD-PARTY-NOTICES") { $ok = 1; }
+        elsif ($rel eq "security.md" && $t eq "../../docs/SECURITY.md") { $ok = 1; }
         else {
           $path =~ s/:.*//;
           my @st = @dir; my $in = $path !~ m{^/} && length $path;
@@ -215,7 +216,7 @@ check_sources() {
   # (a) for the licensing and notices pages: exactly their wrappers, and their sources exist
   if [ -d "$root/book/src" ]; then
     local lp cgot cwant
-    for lp in licensing notices; do
+    for lp in licensing notices security; do
       page="$root/book/src/$lp.md"
       if [ ! -f "$page" ]; then echo "(a) no book page book/src/$lp.md"; fail=1; continue; fi
       cgot="$(grep -v '^[[:space:]]*$' "$page" | tr -d '\r')"
@@ -224,7 +225,7 @@ check_sources() {
         echo "(a) not the exact wrapper text (a copy, or a changed include?): book/src/$lp.md"; fail=1
       fi
     done
-    for f in docs/LICENSING.md THIRD-PARTY-NOTICES; do
+    for f in docs/LICENSING.md THIRD-PARTY-NOTICES docs/SECURITY.md; do
       if [ ! -f "$root/$f" ]; then echo "(a) the source of a book page is missing: $f"; fail=1; fi
     done
   fi
@@ -250,7 +251,7 @@ check_sources() {
     local hits d
     hits="$(cd "$root" && find book -path book/book -prune -o -type f -print0 | xargs -0 -r grep -il -e "$needle" || true)"
     hits="$hits"$'\n'"$(cd "$root" && find book -path book/book -prune -o -iname '*litepack-method*' -print || true)"
-    for d in docs/LICENSING.md THIRD-PARTY-NOTICES; do
+    for d in docs/LICENSING.md THIRD-PARTY-NOTICES docs/SECURITY.md; do
       [ -f "$root/$d" ] || continue
       hits="$hits"$'\n'"$(cd "$root" && grep -il -e "$needle" "$d" || true)"
     done
@@ -274,7 +275,7 @@ check_sources() {
     cinc="$(scan_directives f "$cli" || true)"
     if nonblank "$cinc"; then printf '(f) an include, or an unreadable file, inside docs/cli: %s\n' "$cinc"; fail=1; fi
   fi
-  for f in docs/LICENSING.md THIRD-PARTY-NOTICES; do
+  for f in docs/LICENSING.md THIRD-PARTY-NOTICES docs/SECURITY.md; do
     [ -e "$root/$f" ] || continue
     local sinc
     sinc="$(scan_directives f "$root/$f" || true)"
@@ -311,7 +312,7 @@ check_sources() {
   links="$( { [ -d "$root/book" ] && (cd "$root" && find book -path book/book -prune -o -type l -print)
     [ -d "$spec" ] && (cd "$root" && find docs/spec -type l -print)
     [ -d "$cli" ] && (cd "$root" && find docs/cli -type l -print)
-    for f in docs/LICENSING.md THIRD-PARTY-NOTICES; do [ -L "$root/$f" ] && echo "$f"; done; } || true)"
+    for f in docs/LICENSING.md THIRD-PARTY-NOTICES docs/SECURITY.md; do [ -L "$root/$f" ] && echo "$f"; done; } || true)"
   if nonblank "$links"; then printf '(k) a symlink: %s\n' "$links"; fail=1; fi
   # (m) the anchors of docs/LICENSING.md and the headings between them (what licensing.md publishes)
   if [ -d "$root/book/src" ]; then
@@ -342,6 +343,14 @@ licensing_wrapper() {
 # Licensing
 
 {{#include ../../docs/LICENSING.md:published}}
+
+{{#include footer.md}}
+EOF
+}
+
+security_wrapper() {
+  cat <<'EOF'
+{{#include ../../docs/SECURITY.md}}
 
 {{#include footer.md}}
 EOF
@@ -542,6 +551,19 @@ check_built() {
   done
   # licensing.html: both published headings, none of the unpublished sections of docs/LICENSING.md
   local lic
+  # security.html: the first `# ` heading of docs/SECURITY.md (E9-7)
+  if [ -f "$root/docs/SECURITY.md" ]; then
+    if ! grep -q '^# ' "$root/docs/SECURITY.md" || ! text="$(heading_text "$root/docs/SECURITY.md")" || [ -z "$text" ]; then
+      echo "(d) docs/SECURITY.md has no \`# \` heading to look for"; fail=1
+    elif [ ! -f "$built/security.html" ]; then
+      echo "(d) not built: security.html"; fail=1
+    else
+      plain="$(perl -0pe 's/<[^>]*>//g' "$built/security.html")"
+      if ! grep -qF -e "$text" <<<"$plain"; then
+        echo "(d) security.html lacks the heading of docs/SECURITY.md: $text"; fail=1
+      fi
+    fi
+  fi
   lic="$(built_licensing "$built/licensing.html" || true)"
   if nonblank "$lic"; then printf '(d) licensing.html: %s\n' "$lic"; fail=1; fi
   # notices.html: the code text of its only <pre>, unescaped, is THIRD-PARTY-NOTICES (the CI step of E9-8)
@@ -588,6 +610,9 @@ make_tree() {
   printf "LitePack: notices <a> & 'b' \"c\"\n\ntext line\n" > "$r/THIRD-PARTY-NOTICES"
   licensing_wrapper > "$r/book/src/licensing.md"
   notices_wrapper > "$r/book/src/notices.md"
+  printf '# Security notes: the worker model\n\nbody\n' > "$r/docs/SECURITY.md"
+  security_wrapper > "$r/book/src/security.md"
+  printf '<html><h1 id="s">Security notes: the worker model</h1></html>\n' > "$r/site/security.html"
   printf '<html><h2 id="a"><a class="header" href="#a">Our licence</a></h2>\n<h2 id="d"><a class="header" href="#d">Dependency policy (enforced by <code>cargo deny check</code>)</a></h2></html>\n' > "$r/site/licensing.html"
   printf '<html><pre><code class="language-text">LitePack: notices &lt;a&gt; &amp; &#39;b&#39; &quot;c&quot;\n\ntext line\n</code></pre></html>\n' > "$r/site/notices.html"
   {
@@ -856,6 +881,19 @@ self_test() {
   make_tree "$t/bn2"
   printf '<html><pre><code class="language-text">{{#include ../../THIRD-PARTY-NOTICES}}\n</code></pre></html>\n' > "$t/bn2/site/notices.html"
   expect_fail d "a notices page that still holds the include text" check_built "$t/bn2" "$t/bn2/site"
+  # E9-7: the security page
+  make_tree "$t/sa"; printf 'extra\n' >> "$t/sa/book/src/security.md"
+  expect_fail a "a security wrapper with an extra line" check_sources "$t/sa"
+  make_tree "$t/sh"; printf 'About.\n\n{{#include ../../docs/SECURITY.md}}\n' > "$t/sh/book/src/about.md"
+  expect_fail h "about.md including docs/SECURITY.md" check_sources "$t/sh"
+  make_tree "$t/sf"; printf '{{#include ../x.md}}\n' >> "$t/sf/docs/SECURITY.md"
+  expect_fail f "a directive in docs/SECURITY.md" check_sources "$t/sf"
+  make_tree "$t/sc"; printf 'see LitePack-Method-v2\n' >> "$t/sc/docs/SECURITY.md"
+  expect_fail c "the method document's name in docs/SECURITY.md" check_sources "$t/sc"
+  make_tree "$t/sk"; mv "$t/sk/docs/SECURITY.md" "$t/sk/real.md"; ln -s ../real.md "$t/sk/docs/SECURITY.md"
+  expect_fail k "docs/SECURITY.md as a symlink" check_sources "$t/sk"
+  make_tree "$t/sb"; printf '<html><h1>Other</h1></html>\n' > "$t/sb/site/security.html"
+  expect_fail d "a security page without the heading of docs/SECURITY.md" check_built "$t/sb" "$t/sb/site"
   make_tree "$t/bn3"; printf '<pre></pre>\n' >> "$t/bn3/site/notices.html"
   expect_fail d "a notices page with a second pre" check_built "$t/bn3" "$t/bn3/site"
   make_tree "$t/bn4"

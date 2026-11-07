@@ -93,6 +93,14 @@ The licensing and notices pages (E9-8) are includes too, so nothing is copied:
 - The notices page is out of the search index (`"notices.md" = { enable = false }`): its 1.1 MB of licence text would
   dominate the index, and the built `searchindex` holds none of it while the other pages stay searchable.
 
+The security and privacy pages (E9-7): `src/security.md` includes the whole of `docs/SECURITY.md` (the worker model; its
+section 9 points to the root `SECURITY.md`, the policy and the way to report). `src/privacy.md` is written for the book
+and holds no include except the footer; every statement in it must be true of the code as it stands, so change it with
+the code (the update check, the network use, the settings label). The page's address, `privacy.html`, is the one
+E7-9 gives the Store. (a) `security.md` is exactly the wrapper text held in the script (`security_wrapper`); (h) admits
+`../../docs/SECURITY.md` in `security.md` only; (c), (f) and (k) also cover `docs/SECURITY.md`; built (d) checks that
+`security.html` holds the first `# ` heading of `docs/SECURITY.md`.
+
 The link check (`scripts/check-book-links.sh`, in the `docs` workflow after the build) is offline: it reads the built
 site and fetches nothing. Locally, after `mdbook build book`: `bash scripts/check-book-links.sh book/book`
 (`bash scripts/check-book-links.sh --self-test` proves each rule on a crafted site). It checks every `href` and `src`
