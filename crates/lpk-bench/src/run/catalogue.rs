@@ -712,4 +712,30 @@ compress = ["-ex"]
         let cat = Catalogue::parse(REAL).expect("catalogue");
         assert!(cat.with_local("[[tool]]\nid='nope'\n").is_err());
     }
+
+    /// E8-3's weekly catalogue: exactly `bench/tools.toml`'s `7z` and `lpk` rows, read with the
+    /// runner's own loader (editing it starts a new weekly baseline).
+    #[test]
+    fn weekly_catalogue_has_exactly_lpk_and_7z_copied_from_the_main_catalogue() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/tools-weekly.toml");
+        let weekly = Catalogue::load(&path).expect("weekly catalogue");
+        let mut ids: Vec<&str> = weekly.tools.iter().map(|t| t.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["7z", crate::run::discover::WORKSPACE_TOOL]);
+        let has = |tool: &str, setting: &str| {
+            weekly
+                .get(tool)
+                .is_some_and(|t| t.settings.iter().any(|s| s.id == setting))
+        };
+        for setting in ["fast", "balanced", "store"] {
+            assert!(has("lpk", setting), "lpk/{setting}");
+        }
+        assert!(has("7z", "mx5"));
+        // Copied verbatim: each row equals the main catalogue's.
+        let main = Catalogue::parse(REAL).expect("catalogue");
+        for id in ["7z", "lpk"] {
+            assert_eq!(weekly.get(id), main.get(id), "{id}");
+        }
+    }
 }

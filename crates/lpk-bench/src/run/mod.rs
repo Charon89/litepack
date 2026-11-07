@@ -8,7 +8,7 @@
 //!               [--allow-dirty-build] [--keep-failed on|off] [--tar auto|system|lpk-bench]
 //!               [--settings a,b]
 //!               (the measuring loop, [`exec`])
-//! lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3]   ([`compare`])
+//! lpk-bench run --compare <dirA> <dirB> [--max-diff-pct 3] [--across-builds]   ([`compare`])
 //! lpk-bench run --compare-sizes <golden-dir|bench/ci-golden.toml> <dir> [--max-growth-pct 1]
 //!               (the size-regression gate of E8-2, [`size`])
 //! lpk-bench tar -cf A -C DIR . | -cf A -T LIST | -xf A -C DIR   (hidden; [`harness_tar`])
@@ -127,6 +127,11 @@ pub struct RunArgs {
     /// Largest accepted time difference for --compare, in percent
     #[arg(long, value_name = "PERCENT", default_value_t = compare::DEFAULT_MAX_DIFF_PCT)]
     pub max_diff_pct: f64,
+    /// With --compare: two different builds of this workspace's `lpk` are compared (its version,
+    /// which carries the build hash, may differ and is printed as a note). Every other
+    /// difference still fails the comparison, including any other tool's version (E8-3)
+    #[arg(long, requires = "compare")]
+    pub across_builds: bool,
     /// Size-regression gate (E8-2): compare the median archive bytes of every row of a golden
     /// results directory (or of the directory a pointer file such as bench/ci-golden.toml names)
     /// with a new results directory; fails when an archive grew by more than --max-growth-pct or
@@ -294,7 +299,7 @@ pub fn run(args: RunArgs) -> ExitCode {
     let result = if args.list_tools {
         list_tools(&args).map(|()| ExitCode::SUCCESS)
     } else if let [a, b] = args.compare.as_slice() {
-        compare::compare_command(a, b, args.max_diff_pct)
+        compare::compare_command(a, b, args.max_diff_pct, args.across_builds)
     } else if let [golden, new] = args.compare_sizes.as_slice() {
         size::compare_sizes_command(golden, new, args.max_growth_pct)
     } else {
