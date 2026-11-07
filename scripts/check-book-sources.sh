@@ -15,14 +15,56 @@
 #   (d) each spec page's HTML holds the first `# ` heading text of its source file (mdBook only warns when an
 #       include fails, so this is what turns a missing include into a failure);
 #   (e) no built file, by content or by name, names the method document (case-insensitive);
-#   (g) no built file holds a content fingerprint of the method document, however it got there. The
-#       fingerprint is its first `# ` heading and its first three lines of 120 characters or more that do not
-#       start with `|`, `#` or `<` and hold no `](`; both sides are reduced to letters and digits (HTML: tags and
-#       entities removed first), so markup differences do not matter. It can miss a heavily reformatted or
-#       reworded copy, or a copy of other passages than these four.
+#   (g) no built file holds a content fingerprint of the method document: its first `# ` heading and every
+#       other line that has 60 or more letters and digits and no `](`; both sides are reduced to letters and
+#       digits (HTML: tags and entities removed first), so markup differences do not matter. A sample: a
+#       reworded or heavily reformatted copy can evade it.
+# Source check (h), the structural guard together with (f):
+#   (h) in every file under book/src/ each {{#...}} is an allowed include: {{#include P}} (anchor or range
+#       allowed) with P resolving inside book/src/, or exactly the wrapper include of docs/spec/NAME.md in
+#       book/src/spec/NAME.md; rustdoc_include, playground and the rest fail. With (f), nothing outside
+#       book/src and docs/spec can reach the site by inclusion.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 needle='LitePack-Method'
+
+nonblank() { grep -q '[^[:space:]]' <<<"$1"; }
+
+# (h) Prints "FILE:LINE: directive" for each {{#...}} in a file under $1 (book/src) that is not allowed:
+# {{#include P}} (P may carry an anchor or range) resolving inside $1, or, in spec/NAME.md, exactly the
+# wrapper include of docs/spec/NAME.md. Anything else, rustdoc_include and playground included, is listed.
+scan_directives() {
+  find "$1" -type f -print0 | perl -0ne '
+    BEGIN { $root = shift @ARGV; $/ = "\0"; }
+    chomp; my $p = $_;
+    open my $h, "<:raw", $p or next;
+    (my $rel = $p) =~ s{^\Q$root\E/?}{};
+    my @dir = split m{/}, $rel; pop @dir;
+    my $n = 0;
+    while (my $l = <$h>) {
+      $n++;
+      $l =~ s/\r?\n\z//;
+      while ($l =~ /\{\{#(.*?)(\}\}|$)/g) {
+        my ($body, $close) = ($1, $2);
+        my $ok = 0;
+        if ($close eq "}}" && $body =~ /^include\s+(\S+)$/) {
+          my $arg = $1;
+          if ($rel =~ m{^spec/([^/]+)$} && $arg eq "../../../docs/spec/$1") { $ok = 1; }
+          else {
+            (my $path = $arg) =~ s/:.*//;
+            my @st = @dir; my $in = $path !~ m{^/} && length $path;
+            for my $c (split m{/}, $path) {
+              next if $c eq "" || $c eq ".";
+              if ($c eq "..") { if (@st) { pop @st } else { $in = 0; last } } else { push @st, $c }
+            }
+            $ok = $in ? 1 : 0;
+          }
+        }
+        print "$p:$n: {{#$body}}\n" unless $ok;
+      }
+    }
+  ' "$1"
+}
 
 check_sources() {
   local root="$1" fail=0 f name page
@@ -52,8 +94,8 @@ check_sources() {
   if [ -d "$root/book" ]; then
     local hits
     hits="$(cd "$root" && find book -path book/book -prune -o -type f -print0 | xargs -0 -r grep -Iil -e "$needle" || true)"
-    hits="$hits$(cd "$root" && find book -path book/book -prune -o -iname '*litepack-method*' -print || true)"
-    if [ -n "$hits" ]; then
+    hits="$hits"$'\n'"$(cd "$root" && find book -path book/book -prune -o -iname '*litepack-method*' -print || true)"
+    if nonblank "$hits"; then
       printf '(c) names the method document: %s\n' "$hits"; fail=1
     fi
   fi
@@ -62,6 +104,12 @@ check_sources() {
     local inc
     inc="$(grep -rIl -F -e '{{#' "$spec" || true)"
     if [ -n "$inc" ]; then printf '(f) an include inside docs/spec: %s\n' "$inc"; fail=1; fi
+  fi
+  # (h)
+  if [ -d "$root/book/src" ]; then
+    local bad
+    bad="$(scan_directives "$root/book/src" || true)"
+    if nonblank "$bad"; then printf '(h) a directive outside the include allow-list: %s\n' "$bad"; fail=1; fi
   fi
   return "$fail"
 }
@@ -80,26 +128,28 @@ heading_text() {
 fingerprint() {
   perl -e '
     open my $fh, "<:raw", $ARGV[0] or die "$ARGV[0]: $!";
-    my ($head, @lines);
+    my ($n, $head) = (0, 0);
     while (my $l = <$fh>) {
+      $n++;
       $l =~ s/\r?\n\z//;
-      if (!defined $head && $l =~ /^# /) { $head = $l; next; }
-      next if length($l) < 120 || $l =~ /^[|#<]/ || index($l, "](") >= 0;
-      push @lines, $l;
-      last if @lines == 3 && defined $head;
+      next if index($l, "](") >= 0;
+      my $heading = !$head && $l =~ /^# /;
+      $head = 1 if $heading;
+      (my $s = $l) =~ s/[^A-Za-z0-9]//g;
+      print "$n:$s\n" if length($s) >= ($heading ? 8 : 60);
     }
-    for my $s (grep { defined } $head, @lines[0..2]) { $s =~ s/[^A-Za-z0-9]//g; print "$s\n" if length($s) >= 8; }
   ' "$1"
 }
 
-# Prints each file of the tree $2 whose reduced content holds a line of the fingerprint file $1.
+# Prints "FILE: line N" for each file of the tree $2 whose reduced content holds a line of the fingerprint
+# file $1 (the first such line, by number).
 scan_fingerprint() {
   find "$2" -type f -print0 | perl -0ne '
     BEGIN { open my $f, "<", shift @ARGV or die; $/ = "\n"; chomp(@fp = <$f>); close $f; $/ = "\0"; }
     chomp; my $p = $_;
     open my $h, "<:raw", $p or next; local $/; my $c = <$h>; close $h;
     $c =~ s/<[^>]*>//g; $c =~ s/&[#A-Za-z0-9]+;//g; $c =~ s/[^A-Za-z0-9]//g;
-    for my $s (@fp) { if (index($c, $s) >= 0) { print "$p\n"; last; } }
+    for my $e (@fp) { my ($n, $s) = split /:/, $e, 2; if (index($c, $s) >= 0) { print "$p: method document line $n\n"; last; } }
   ' "$1"
 }
 
@@ -119,8 +169,8 @@ check_built() {
   done
   local hits
   hits="$(grep -rIil -e "$needle" "$built" 2>/dev/null || true)"
-  hits="$hits$(find "$built" -iname '*litepack-method*' -print || true)"
-  if [ -n "$hits" ]; then printf '(e) built files name the method document: %s\n' "$hits"; fail=1; fi
+  hits="$hits"$'\n'"$(find "$built" -iname '*litepack-method*' -print || true)"
+  if nonblank "$hits"; then printf '(e) built files name the method document: %s\n' "$hits"; fail=1; fi
   # (g)
   local method="$root/docs/LitePack-Method-v2.md" fp
   if [ ! -f "$method" ]; then
@@ -203,6 +253,19 @@ self_test() {
   make_tree "$t/g"
   printf '<html><p>Paragraph <em>two</em> of the secret method plan talks at some length about nothing public at all, so that this line reaches the length that the fingerprint rule demands of it.</p></html>\n' > "$t/g/site/spec/x.html"
   expect_fail g "a built page holding the method document's text" check_built "$t/g" "$t/g/site"
+  make_tree "$t/foot"; printf 'Text.\n\n{{#include footer.md}}\n{{#include footer.md:2:3}}\n' > "$t/foot/book/src/page.md"
+  mkdir -p "$t/foot/book/src/sub"; printf '{{#include ../footer.md}}\n' > "$t/foot/book/src/sub/p.md"
+  expect_pass "footer includes in a non-spec page" check_sources "$t/foot"
+  make_tree "$t/h"; printf '{{#include LitePack-Method-v2.md:2:4}}\n' > "$t/h/docs/x.md"
+  printf 'About.\n\n{{#include ../../docs/x.md}}\n' > "$t/h/book/src/about.md"
+  expect_fail h "an indirect include of the method document" check_sources "$t/h"
+  make_tree "$t/h2"; printf 'Other.\n\n{{#include ../../docs/anything.md}}\n' > "$t/h2/book/src/other.md"
+  expect_fail h "a docs include from a non-spec page" check_sources "$t/h2"
+  make_tree "$t/h3"; printf '{{#include ../../../docs/spec/B.md}}\n\n{{#include ../footer.md}}\n' > "$t/h3/book/src/spec/a.md"
+  expect_fail h "the wrapper include in the wrong page" check_sources "$t/h3"
+  make_tree "$t/g2"
+  printf '<html><p>Paragraph four of the secret method plan talks at some length about nothing public at all, so that this line reaches the length that the fingerprint rule demands of it.</p></html>\n' > "$t/g2/site/about.html"
+  expect_fail g "an indirect copy in a built page" check_built "$t/g2" "$t/g2/site"
   echo "self-test: all checks proved"
 }
 
