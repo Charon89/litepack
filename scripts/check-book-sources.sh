@@ -20,6 +20,15 @@
 #       other line that has 60 or more letters and digits and no `](`; both sides are reduced to letters and
 #       digits (HTML: tags and entities removed first), so markup differences do not matter. A sample: a
 #       reworded or heavily reformatted copy can evade it.
+# Structural guards (they close the routes by which a file outside the book could be published):
+#   (f) and (h) below; (i) every link target in book/src/SUMMARY.md is free of `..`, a leading `/`, a
+#       backslash and a scheme (`:`); (j) book/book.toml has `[book] src = "src"`, no `[preprocessor` table and
+#       no additional-css, additional-js or theme key; (k) no symlink under book/ (the build output aside) or
+#       docs/spec/ (mdBook follows symlinks, find -type f does not). (h) also rejects a backslash in an include
+#       target, which a Windows build would resolve outside src/.
+# The second line of defence is (c) and (e), by name, and (g), by a content sample. Residual risk: text reworded
+# by hand into the book's own pages cannot be found mechanically; the guards stop includes, routes and
+# verbatim copies.
 # Source check (h), the structural guard together with (f):
 #   (h) in every file under book/src/ each {{#...}} is an allowed include: {{#include P}} (anchor or range
 #       allowed) with P resolving inside book/src/, or exactly the wrapper include of docs/spec/NAME.md in
@@ -64,7 +73,8 @@ scan_directives() {
       my ($type, $target, $start) = ($1, $2, $-[0]);
       my $ok = 0;
       my ($path) = split " ", $target;
-      if ($type eq "include" && defined $path) {
+      # A backslash would resolve outside src/ in a Windows build, so it is never allowed.
+      if ($type eq "include" && defined $path && index($target, "\\") < 0) {
         (my $t = $target) =~ s/^\s+|\s+$//g;
         if ($rel =~ m{^spec/([^/]+)$} && $t eq "../../../docs/spec/$1") { $ok = 1; }
         else {
@@ -122,6 +132,29 @@ check_sources() {
     inc="$(scan_directives f "$spec" || true)"
     if nonblank "$inc"; then printf '(f) an include inside docs/spec: %s\n' "$inc"; fail=1; fi
   fi
+  # (i) every link target of SUMMARY.md stays inside book/src (same extraction base as check-book-footer.sh)
+  if [ -f "$root/book/src/SUMMARY.md" ]; then
+    local bad_i
+    bad_i="$(grep -noE '\]\([^)]*\)' "$root/book/src/SUMMARY.md" | tr -d '\r' | awk -F: '
+      { n = $1; t = substr($0, length(n) + 2); sub(/^\]\(/, "", t); sub(/\)$/, "", t)
+        if (t ~ /\.\./ || t ~ /^\// || t ~ /\\/ || t ~ /:/) print "SUMMARY.md:" n ": " t }' || true)"
+    if nonblank "$bad_i"; then printf '(i) a SUMMARY entry that may leave book/src: %s\n' "$bad_i"; fail=1; fi
+  fi
+  # (j) book.toml: src is "src"; no preprocessor, extra css/js or theme key
+  if [ -f "$root/book/book.toml" ]; then
+    local bad_j
+    bad_j="$(tr -d '\r' < "$root/book/book.toml" | awk '
+      /^[[:space:]]*\[/ { sec = $0; gsub(/[[:space:]]/, "", sec) }
+      sec == "[book]" && /^[[:space:]]*src[[:space:]]*=/ { s = $0; gsub(/[[:space:]]/, "", s); if (s == "src=\"src\"") ok = 1; else print "src is not \"src\": " $0 }
+      /^[[:space:]]*\[preprocessor/ { print "a preprocessor table: " $0 }
+      /^[[:space:]]*(additional-css|additional-js|theme)[[:space:]]*=/ { print "a forbidden key: " $0 }
+      END { if (!ok) print "no [book] src = \"src\"" }')"
+    if nonblank "$bad_j"; then printf '(j) book.toml: %s\n' "$bad_j"; fail=1; fi
+  fi
+  # (k) no symlink under book/ (the build output aside) or docs/spec/: mdBook follows them, find -type f skips them
+  local links
+  links="$( { [ -d "$root/book" ] && (cd "$root" && find book -path book/book -prune -o -type l -print); [ -d "$spec" ] && (cd "$root" && find docs/spec -type l -print); } || true)"
+  if nonblank "$links"; then printf '(k) a symlink: %s\n' "$links"; fail=1; fi
   # (h)
   if [ -d "$root/book/src" ]; then
     local bad
@@ -293,6 +326,30 @@ self_test() {
   out="$(check_sources "$t/w4" 2>&1 || true)"
   if ! grep -q 'p.md:3:' <<<"$out"; then echo "self-test FAILED: (h) does not name line 3: $out"; exit 1; fi
   echo "self-test ok: (h) names the line of a finding (:3:)"
+  make_tree "$t/bs"; printf 'Text.\n\n{{#include ..\\..\\docs\\x.md}}\n' > "$t/bs/book/src/p.md"
+  expect_fail h "a backslash include target" check_sources "$t/bs"
+  make_tree "$t/i0"; printf -- '- [N](spec/a.md)\n- [S](sub/dir/p.md)\n' >> "$t/i0/book/src/SUMMARY.md"
+  expect_pass "a normal nested SUMMARY entry" check_sources "$t/i0"
+  make_tree "$t/i1"; printf -- '- [X](../../docs/x.md)\n' >> "$t/i1/book/src/SUMMARY.md"
+  expect_fail i "a SUMMARY entry with .." check_sources "$t/i1"
+  make_tree "$t/i2"; printf -- '- [X](/etc/x.md)\n' >> "$t/i2/book/src/SUMMARY.md"
+  expect_fail i "a SUMMARY entry starting with a slash" check_sources "$t/i2"
+  make_tree "$t/i3"; printf -- '- [X](sub\\x.md)\n' >> "$t/i3/book/src/SUMMARY.md"
+  expect_fail i "a SUMMARY entry with a backslash" check_sources "$t/i3"
+  make_tree "$t/j0"; printf '[book]\ntitle = "X"\nsrc = "src"\n\n[output.html]\nsite-url = "/x/"\n' > "$t/j0/book/book.toml"
+  expect_pass "a plain book.toml" check_sources "$t/j0"
+  make_tree "$t/j1"; printf '[book]\nsrc = "../docs"\n' > "$t/j1/book/book.toml"
+  expect_fail j "src outside src" check_sources "$t/j1"
+  make_tree "$t/j2"; printf '[book]\nsrc = "src"\n[preprocessor.x]\ncommand = "y"\n' > "$t/j2/book/book.toml"
+  expect_fail j "a preprocessor table" check_sources "$t/j2"
+  make_tree "$t/j3"; printf '[book]\nsrc = "src"\n[output.html]\nadditional-js = ["../docs/x.js"]\n' > "$t/j3/book/book.toml"
+  expect_fail j "an additional-js key" check_sources "$t/j3"
+  make_tree "$t/k"
+  if ln -s "../../../docs/LitePack-Method-v2.md" "$t/k/book/src/x.md" 2>/dev/null && [ -L "$t/k/book/src/x.md" ]; then
+    expect_fail k "a symlink under book/" check_sources "$t/k"
+  else
+    echo "SKIPPED (k) self-test: cannot create a symlink here"
+  fi
   make_tree "$t/w5"; printf 'Shown as text: \\{{#include ../../docs/x.md}}\n' > "$t/w5/book/src/p.md"
   expect_pass "an escaped directive in a page" check_sources "$t/w5"
   make_tree "$t/w6"; printf 'Text \377\376 bytes.\n' > "$t/w6/book/src/p.md"

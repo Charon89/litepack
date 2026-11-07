@@ -16,6 +16,12 @@ own files work in the book. Never copy the text. What the checks cover:
   So nothing outside `src/` and `docs/spec/` can reach the site by inclusion. Both mirror mdBook 0.5.4's directive
   pattern (whitespace and line breaks inside a directive count; a file that is not UTF-8 fails); an mdBook upgrade
   must re-check it.
+- The other structural guards: (i) every link in `src/SUMMARY.md` stays inside `src/` (no `..`, leading `/`, backslash
+  or scheme); (j) `book.toml` keeps `[book] src = "src"` and has no `[preprocessor` table, `additional-css`,
+  `additional-js` or `theme` key; (k) no symlink under `book/` or `docs/spec/`; (h) also rejects a backslash in an
+  include target. The names (c, e) and the content fingerprint (g) are the second line of defence. Residual risk: text
+  reworded by hand into the book's own pages cannot be detected mechanically; the guards stop includes, routes and
+  verbatim copies.
 - `bash scripts/check-book-sources.sh` (before the build) also checks that the wrappers are pure includes (a page that
   is more than those two lines fails), that every `docs/spec/*.md` has a page, and that no file under `book/` names
   the unpublished method document, by content or by file name, in any letter case.
