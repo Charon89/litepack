@@ -50,3 +50,43 @@ The command-line reference (`src/cli/`) is made the same way, from `docs/cli/`, 
   CommonMark does, and reports FILE:LINE counted that way. The built check (d) looks for the first `# ` heading of
   each `.md` (spec and CLI) and for the first three words of the man page's first `.TH` line; it fails when a source has
   no such heading or `.TH` line to look for.
+
+The licensing and notices pages (E9-8) are includes too, so nothing is copied:
+
+- `src/licensing.md` includes only the `published` anchor of `docs/LICENSING.md` (the sections "Our licence" and
+  "Dependency policy"); the sections on planned components, patents and other compliance stay unpublished.
+  `src/notices.md` shows the shipped `THIRD-PARTY-NOTICES` in a fence of four backticks. (a) both pages are exactly the
+  wrapper texts held in the script (`licensing_wrapper`, `notices_wrapper`); (h) admits the two includes
+  (`../../docs/LICENSING.md:published` and `../../THIRD-PARTY-NOTICES`) each only in its own page, so the whole-file
+  include of `docs/LICENSING.md` fails; (c), (f) and (k) also cover `docs/LICENSING.md` and `THIRD-PARTY-NOTICES`, (l) the
+  latter (a line of four backticks could close the fence); (j) admits `[output.html.search.chapter]` with only the
+  line `"notices.md" = { enable = false }`.
+- (m) `docs/LICENSING.md` holds exactly the lines `<!-- ANCHOR: published -->` and `<!-- ANCHOR_END: published -->`, in
+  that order, no other `ANCHOR` text, and between them exactly the headings `## Our licence` and `## Dependency policy
+  (...)`. Moving the end anchor, adding a heading inside the region or adding a second anchor fails, so no edit can
+  widen what the book publishes without a change to this check.
+- Built (`--built`): `licensing.html` holds both headings and none of the unpublished section titles; the `<code>` text of
+  the only `<pre>` in `notices.html`, with its HTML entities decoded, equals `THIRD-PARTY-NOTICES` byte for byte (one
+  trailing newline of difference is tolerated on the page's side; mdBook 0.5.4 needs none). This is the CI step that
+  fails when the notices page differs from the shipped file. After regenerating the notices with
+  `scripts/third-party-notices.sh`, rebuild the book; nothing else needs updating.
+- The notices page is out of the search index (`"notices.md" = { enable = false }`): its 1.1 MB of licence text would
+  dominate the index, and the built `searchindex` holds none of it while the other pages stay searchable.
+
+The link check (`scripts/check-book-links.sh`, in the `docs` workflow after the build) is offline: it reads the built
+site and fetches nothing. Locally, after `mdbook build book`: `bash scripts/check-book-links.sh book/book`
+(`bash scripts/check-book-links.sh --self-test` proves each rule on a crafted site). It checks every `href` and `src`
+of every `.html` file against a list of the site's files (exact, case-sensitive: GitHub Pages is case-sensitive, NTFS is
+not). `https:` and `mailto:` links are counted and their hosts listed, never fetched; `http:`, `javascript:` and any
+other scheme, `//host` links and root-relative links outside `/litepack/` fail; `data:` passes in `src` only. A relative
+link resolves against the page (or the site root when the page has a `<base href>`, which must be the `site-url`); the
+file must exist, a path may not climb above the site root, and a `#fragment` must be an `id` or `name` in the target.
+On a page with a `<base href>`, an empty path (`href=""`, `#x`, `?q`) resolves to the site root's `index.html`, as a browser
+does, not to the page itself. mdBook's own 404 page has that base, so `src/404.md` replaces its default text (mdBook 0.5.4
+reads it without expanding includes, and it is not a chapter, so the 404 page has no footer, as mdBook's default has none)
+and has no Markdown heading, which would give the page a `#...` self-anchor that dead-ends online. Any `srcset` attribute fails (the
+check does not parse it), and so does an `&` in an `href` or `src` that does not start a complete entity.
+
+(m) counts every heading form inside the published region: ATX headings (also after blockquote and list markers),
+setext underlines (a line of only `=` or only `-`, which includes a thematic break) and raw `<h1>` to `<h6>` tags; only
+the two allowed headings may appear. The method-document name checks (c, e) search every file, binary or not.

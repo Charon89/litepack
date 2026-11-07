@@ -13,3 +13,8 @@
 - [The .lpk v1 format](spec/lpk-v1.md)
 - [Conformance for independent decoders](spec/CONFORMANCE.md)
 - [Changes of the fix round](spec/CHANGES.md)
+
+# Licensing
+
+- [Licences and dependency policy](licensing.md)
+- [Third-party notices](notices.md)

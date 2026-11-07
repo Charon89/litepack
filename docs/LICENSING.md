@@ -5,8 +5,11 @@ Facts in the two tables below were checked on 2026-10-02 against the sources lin
 could not be checked, the row says so. Re-check a row before the component it names is introduced:
 licences and versions change.
 
+<!-- ANCHOR: published -->
 ## Our licence
 Engine, CLI, format spec, benchmark harness: **Apache-2.0 OR MIT** (dual, like most of the Rust ecosystem). GUI Pro/enterprise features may be proprietary (open-core, D-01).
+
+Documentation (the book under `book/` and the text it includes from `docs/`): **Apache-2.0 OR MIT**, like the code (D-147). The third-party notices and licence texts the book reproduces from `THIRD-PARTY-NOTICES` stay under their own terms.
 
 ## Dependency policy (enforced by `cargo deny check`)
 - Allowed — `deny.toml` is the authoritative list: Apache-2.0, MIT, MIT-0 (MIT without the attribution clause; needed by `borrow-or-share`, pulled in by `jsonschema`), BSD-2-Clause, BSD-3-Clause, 0BSD, ISC, Zlib, CC0-1.0, Unicode-3.0, MPL-2.0 (as an unmodified dependency). A crate that offers one of these among alternatives is used under it; the list was cut to what the tree needs on 2026-10-03 (D-25) — `Apache-2.0 WITH LLVM-exception`, `Unicode-DFS-2016` and `BSL-1.0` were allowed but no crate required them. Adding a licence to the list is a decision, not a convenience.
@@ -18,6 +21,7 @@ Engine, CLI, format spec, benchmark harness: **Apache-2.0 OR MIT** (dual, like m
 - **axe-core 4.14.0** (Deque Systems; MPL-2.0; E5-9). The accessibility checker the GUI's WebDriver test (`crates/lpk-gui-e2e/tests/accessibility.rs`) injects into every view and dialog. A test-only tool, not a Cargo dependency: CI's `gui-e2e` job fetches `https://registry.npmjs.org/axe-core/-/axe-core-4.14.0.tgz`, refuses it unless the npm integrity (SHA-512, `sha512-9WTZxEjs…zzpcQ==`, pinned in `.github/workflows/ci.yml`) and the SHA-1 (`a9819d3932a8198fbe935d8cbd8afcdfecbcf31d`) both match, and extracts `package/axe.min.js` to a temporary path the test reads (`LPK_AXE_JS`). It is used unmodified (MPL-2.0's file-level copyleft is not engaged: we change no axe-core file), never distributed (no installer, archive, release asset or the GUI itself contains it) and no axe-core file is in the repository. Nothing is downloaded on a developer machine.
 - **mdBook 0.5.4 and the files its build puts in the docs site** (E9-1). mdBook is a build tool installed by `cargo install mdbook --version 0.5.4 --locked` in the `docs` workflow, not a Cargo dependency of the workspace. `mdbook build book` writes into the published site (and nowhere in git) its theme JS/CSS (MPL-2.0, unmodified: no file-level copyleft is engaged, and the files are published only on the docs site), highlight.js (BSD-3-Clause), elasticlunr, mark.js and clipboard.js (MIT), all on the allow-list. **No font files are published**: mdBook's bundled fonts would include Source Code Pro under OFL-1.1, which is not on the allow-list, and 0.5.4 has no `copy-fonts` option; the book's own `book/theme/fonts/fonts.css` (system fonts, our file) makes mdBook copy none of its fonts, and the `docs` workflow fails if a font or licence file appears in the built site. Our own pages carry the Apache-2.0 OR MIT footer from `book/src/footer.md`.
 
+<!-- ANCHOR_END: published -->
 ## Components planned for Phase 1
 How a component is used:
 **depend** — a Cargo dependency compiled into our binaries; **link** — a C/C++ library reached through FFI;

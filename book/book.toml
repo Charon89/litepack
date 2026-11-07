@@ -10,3 +10,6 @@ site-url = "/litepack/"
 [output.html.search]
 # The index covers this book only (mdBook indexes nothing else).
 enable = true
+
+[output.html.search.chapter]
+"notices.md" = { enable = false }
