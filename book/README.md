@@ -13,7 +13,7 @@ own files work in the book. Never copy the text. What the checks cover:
 - The structural guard is the include allow-list (h) with (f). (h): in every file under `src/`, a `{{#...}}` directive
   is only an `{{#include}}` that resolves inside `src/` (such as the footer), or the exact wrapper include in
   `src/spec/<name>.md`; `rustdoc_include`, `playground` and the rest fail. (f): there is no `{{#` inside `docs/spec/`.
-  So nothing outside `src/` and `docs/spec/` can reach the site by inclusion. Both mirror mdBook 0.5.4's directive
+  So nothing outside `src/`, `docs/spec/` and `docs/cli/` can reach the site by inclusion. Both mirror mdBook 0.5.4's directive
   pattern (whitespace and line breaks inside a directive count; a file that is not UTF-8 fails); an mdBook upgrade
   must re-check it.
 - The other structural guards: (i) and (j) are allow-lists of exact line shapes, because mdBook's Markdown and TOML
@@ -45,5 +45,7 @@ The command-line reference (`src/cli/`) is made the same way, from `docs/cli/`, 
 - (a) each page under `src/cli/` equals the wrapper of an existing source; (b) `docs/cli/` holds only `NAME.md` and
   `NAME.N` files directly in it, each with its page; (c), (f) and (k) also cover `docs/cli/`; (h) admits the two wrapper
   includes, each only in its own page; (l) no line of a man page begins, after spaces or tabs, with four or more
-  backticks (that is the only text that could close the fence). The built check (d) looks for the first `# ` heading of
-  each `.md` and for the first three words of the man page's `.TH` line.
+  backticks (that is the only text that could close the fence); (l) splits lines at LF, CRLF and a lone CR, as
+  CommonMark does, and reports FILE:LINE counted that way. The built check (d) looks for the first `# ` heading of
+  each `.md` (spec and CLI) and for the first three words of the man page's first `.TH` line; it fails when a source has
+  no such heading or `.TH` line to look for.

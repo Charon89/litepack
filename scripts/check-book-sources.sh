@@ -17,8 +17,8 @@
 #   (b) each docs/spec/*.md has a page of the same name there;
 #   (c) no file under book/ (the build output book/book aside), by content or by name, names the method
 #       document (case-insensitive);
-#   (f) no file under docs/spec/ holds `{{`, optional whitespace and `#` (a directive of any kind inside the
-#       spec could pull in any file);
+#   (f) no file under docs/spec/ or docs/cli/ holds `{{`, optional whitespace and `#` (a directive of any kind
+#       inside a source could pull in any file);
 # Built checks:
 #   (d) each spec page's HTML holds the first `# ` heading text of its source file (mdBook only warns when an
 #       include fails, so this is what turns a missing include into a failure);
@@ -34,7 +34,7 @@
 #       (`[book] src` must be "src"). (i) and (j) are allow-lists, not deny-lists, because mdBook's Markdown and
 #       TOML parsers accept many spellings of the same thing (entities, reference links, dotted keys, spaced
 #       headers); see allow_scan for the exact shapes. (k) no symlink under book/ (the build output aside) or
-#       docs/spec/ (mdBook follows symlinks, find -type f does not). (h) also rejects a backslash in an include
+#       docs/spec/ or docs/cli/ (mdBook follows symlinks, find -type f does not). (h) also rejects a backslash in an include
 #       target, which a Windows build would resolve outside src/.
 # The second line of defence is (c) and (e), by name, and (g), by a content sample. Residual risk: text reworded
 # by hand into the book's own pages cannot be found mechanically; the guards stop includes, routes and
@@ -42,8 +42,9 @@
 # Source check (h), the structural guard together with (f):
 #   (h) in every file under book/src/ each {{#...}} is an allowed include: {{#include P}} (anchor or range
 #       allowed) with P resolving inside book/src/, or exactly the wrapper include of docs/spec/NAME.md in
-#       book/src/spec/NAME.md; rustdoc_include, playground and the rest fail. With (f), nothing outside
-#       book/src and docs/spec can reach the site by inclusion. (h) and (f) mirror mdBook 0.5.4's directive
+#       book/src/spec/NAME.md, of docs/cli/NAME.md in book/src/cli/NAME.md, or of docs/cli/NAME.N in
+#       book/src/cli/NAME-N.md; rustdoc_include, playground and the rest fail. With (f), nothing outside
+#       book/src, docs/spec and docs/cli can reach the site by inclusion. (h) and (f) mirror mdBook 0.5.4's directive
 #       pattern (mdbook-driver-0.5.4, src/builtin_preprocessors/links.rs, lines 413-423): whitespace and
 #       newlines inside a directive count. An mdBook upgrade must re-check the pattern (see scan_directives).
 set -euo pipefail
@@ -59,8 +60,9 @@ nonblank() { grep -q '[^[:space:]]' <<<"$1"; }
 # whitespace, a target of any non-`}` characters, `}}`. An mdBook upgrade must re-check this pattern.
 #   MODE h (DIR is book/src): every directive must be `include` with the target's first token a path that
 #     resolves inside DIR (an `:anchor` or `:start:end` suffix allowed), or, in spec/NAME.md, exactly the
-#     wrapper include of docs/spec/NAME.md; anything else (rustdoc_include, playground...) is a finding.
-#   MODE f (DIR is docs/spec): any `{{` + optional whitespace + `#`, escaped or not, is a finding.
+#     wrapper include of docs/spec/NAME.md (likewise cli/NAME.md and cli/NAME-N.md, see check (h));
+#     anything else (rustdoc_include, playground...) is a finding.
+#   MODE f (DIR is docs/spec or docs/cli): any `{{` + optional whitespace + `#`, escaped or not, is a finding.
 scan_directives() {
   find "$2" -type f -print0 | perl -0ne '
     use Encode qw(decode FB_CROAK);
@@ -234,7 +236,11 @@ check_sources() {
     if nonblank "$cinc"; then printf '(f) an include inside docs/cli: %s\n' "$cinc"; fail=1; fi
     # (l) no man-page line may open with four or more backticks (it could close the wrapper's fence)
     local fence
-    fence="$(for f in "$cli"/*.[1-9]; do [ -f "$f" ] && { grep -n -E '^[ 	]*`{4,}' "$f" | sed "s|^|$f:|" || true; }; done || true)"
+    # Lines end at LF, CRLF or a lone CR, as in CommonMark.
+    fence="$(for f in "$cli"/*.[1-9]; do [ -f "$f" ] && perl -e '
+        open my $h, "<:raw", $ARGV[0] or exit; local $/; my $s = <$h>; my $n = 0;
+        for my $l (split /\r\n|\r|\n/, $s, -1) { $n++; print "$ARGV[0]:$n:$l\n" if $l =~ /^[ \t]*`{4,}/ }
+      ' "$f"; done || true)"
     if nonblank "$fence"; then printf '(l) a man-page line of four or more backticks (FILE:LINE:text): %s\n' "$fence"; fail=1; fi
   fi
   # (i) SUMMARY.md and (j) book.toml: allow-lists of exact line shapes (see allow_scan)
@@ -250,7 +256,7 @@ check_sources() {
       printf '(j) a book.toml line outside the allow-list (widen it only after checking that the key cannot bring a file from outside book/src into the site): %s\n' "$bad_j"; fail=1
     fi
   fi
-  # (k) no symlink under book/ (the build output aside) or docs/spec/: mdBook follows them, find -type f skips them
+  # (k) no symlink under book/ (the build output aside), docs/spec/ or docs/cli/: mdBook follows them, find -type f skips them
   local links
   links="$( { [ -d "$root/book" ] && (cd "$root" && find book -path book/book -prune -o -type l -print); [ -d "$spec" ] && (cd "$root" && find docs/spec -type l -print); [ -d "$cli" ] && (cd "$root" && find docs/cli -type l -print); } || true)"
   if nonblank "$links"; then printf '(k) a symlink: %s\n' "$links"; fail=1; fi
@@ -317,7 +323,9 @@ check_built() {
     name="$(basename "$f" .md)"
     html="$built/spec/$name.html"
     if [ ! -f "$html" ]; then echo "(d) not built: spec/$name.html"; fail=1; continue; fi
-    text="$(heading_text "$f")"
+    if ! grep -q '^# ' "$f" || ! text="$(heading_text "$f")" || [ -z "$text" ]; then
+      echo "(d) docs/spec/$name.md has no \`# \` heading to look for"; fail=1; continue
+    fi
     plain="$(perl -0pe 's/<[^>]*>//g' "$html")"
     if ! grep -qF -e "$text" <<<"$plain"; then
       echo "(d) spec/$name.html lacks the heading of docs/spec/$name.md: $text"; fail=1
@@ -327,10 +335,14 @@ check_built() {
     [ -f "$f" ] || continue
     name="$(basename "$f")"
     if [[ "$name" =~ ^([A-Za-z0-9_-]+)\.md$ ]]; then
-      html="$built/cli/${BASH_REMATCH[1]}.html"; text="$(heading_text "$f")"
+      html="$built/cli/${BASH_REMATCH[1]}.html"
+      if ! grep -q '^# ' "$f" || ! text="$(heading_text "$f")" || [ -z "$text" ]; then
+        echo "(d) docs/cli/$name has no \`# \` heading to look for"; fail=1; continue
+      fi
     elif [[ "$name" =~ ^([A-Za-z0-9_-]+)\.([1-9])$ ]]; then
       html="$built/cli/${BASH_REMATCH[1]}-${BASH_REMATCH[2]}.html"
-      text="$(grep -m1 '^\.TH ' "$f" | tr -d '\r' | awk '{print $1" "$2" "$3}')"
+      text="$(tr -d '\r' < "$f" | awk '/^\.TH / && NF >= 3 { print $1" "$2" "$3; exit }')"
+      if [ -z "$text" ]; then echo "(d) docs/cli/$name has no \`.TH\` line to look for"; fail=1; continue; fi
       text="${text//&/&amp;}"; text="${text//</&lt;}"; text="${text//>/&gt;}"
     else continue; fi
     if [ ! -f "$html" ]; then echo "(d) not built: ${html#"$built"/}"; fail=1; continue; fi
@@ -550,6 +562,23 @@ self_test() {
   expect_fail d "a built man page without its .TH words" check_built "$t/cd2" "$t/cd2/site"
   make_tree "$t/cd3"; rm "$t/cd3/site/cli/tool-1.html"
   expect_fail d "a missing built man page" check_built "$t/cd3" "$t/cd3/site"
+  # E9-4 fix round 1
+  make_tree "$t/dv1"; printf 'no heading here\n' > "$t/dv1/docs/spec/a.md"
+  expect_fail d "a spec source without a heading" check_built "$t/dv1" "$t/dv1/site"
+  make_tree "$t/dv2"; printf 'no heading here\n' > "$t/dv2/docs/cli/tool.md"
+  expect_fail d "a CLI source without a heading" check_built "$t/dv2" "$t/dv2/site"
+  make_tree "$t/dv3"; printf '.SH NAME\ntool\n' > "$t/dv3/docs/cli/tool.1"
+  expect_fail d "a man page without a .TH line" check_built "$t/dv3" "$t/dv3/site"
+  make_tree "$t/lc1"; printf 'x\r````\rmore\n' >> "$t/lc1/docs/cli/tool.1"
+  expect_fail l "four backticks after a lone CR" check_sources "$t/lc1"
+  make_tree "$t/lc2"; printf '````\r\n' >> "$t/lc2/docs/cli/tool.1"
+  expect_fail l "four backticks ended by CRLF" check_sources "$t/lc2"
+  make_tree "$t/lc3"; printf '   ````\n' >> "$t/lc3/docs/cli/tool.1"
+  expect_fail l "four backticks indented by three spaces" check_sources "$t/lc3"
+  make_tree "$t/lc4"; printf '`````\n' >> "$t/lc4/docs/cli/tool.1"
+  expect_fail l "five backticks" check_sources "$t/lc4"
+  make_tree "$t/hs"; printf '{{#include ../../../docs/cli/tool.md}}\n\n{{#include ../footer.md}}\n' > "$t/hs/book/src/spec/a.md"
+  expect_fail h "a spec page including a docs/cli source" check_sources "$t/hs"
   echo "self-test: all checks proved"
 }
 
