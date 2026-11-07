@@ -32,3 +32,18 @@ own files work in the book. Never copy the text. What the checks cover:
   file names the method document. Those names and a content fingerprint (g) of the method document (its heading and
   every long line) are a second line of defence; the fingerprint is a sample that a reworded copy can evade.
 - `--self-test` proves each check fails, with its tag, on a crafted tree.
+
+The command-line reference (`src/cli/`) is made the same way, from `docs/cli/`, which `crates/lpk-cli/tests/docs.rs`
+(E3-7) keeps equal to the text generated from `lpk`'s command line. Never edit those files by hand; regenerate them with
+`LPK_CLI_DOCS_WRITE=1 cargo test -p lpk-cli --test docs`.
+
+- A source `docs/cli/NAME.md` has the page `src/cli/NAME.md`: its include (`{{#include ../../../docs/cli/NAME.md}}`)
+  and the footer include.
+- A man page `docs/cli/NAME.N` (N one digit, 1 to 9) has the page `src/cli/NAME-N.md` (the SUMMARY allow-list admits no
+  dot in a path component): a heading, one sentence, the include inside a fence of four backticks (`text`), and the
+  footer include. The script's `man_wrapper` holds the expected text; no text is copied.
+- (a) each page under `src/cli/` equals the wrapper of an existing source; (b) `docs/cli/` holds only `NAME.md` and
+  `NAME.N` files directly in it, each with its page; (c), (f) and (k) also cover `docs/cli/`; (h) admits the two wrapper
+  includes, each only in its own page; (l) no line of a man page begins, after spaces or tabs, with four or more
+  backticks (that is the only text that could close the fence). The built check (d) looks for the first `# ` heading of
+  each `.md` and for the first three words of the man page's `.TH` line.

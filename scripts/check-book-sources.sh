@@ -4,7 +4,14 @@
 #   bash scripts/check-book-sources.sh                 check the sources (before `mdbook build book`)
 #   bash scripts/check-book-sources.sh --built DIR     check the built site (DIR is book/book) as well
 #   bash scripts/check-book-sources.sh --self-test     check that each check fails on a crafted tree
-#   ... --root DIR                                     use another tree (DIR/book, DIR/docs/spec)
+#   ... --root DIR                                     use another tree (DIR/book, DIR/docs/spec, DIR/docs/cli)
+# E9-4 adds the CLI pages: book/src/cli/NAME.md includes docs/cli/NAME.md; book/src/cli/NAME-N.md shows the man
+# page docs/cli/NAME.N in a four-backtick fence (man_wrapper has the exact text). Extra source checks: (a) each CLI
+# page is the wrapper of an existing source; (b) docs/cli holds only NAME.md / NAME.N files, each with its page;
+# (c), (f), (k) also cover docs/cli (and (c) docs/spec); (h) admits the two wrapper includes, each in its own page;
+# (l) no line of a man page opens, after spaces or tabs, with four or more backticks (it could close the fence).
+# Built (d) also covers cli/NAME.html (the first `# ` heading) and cli/NAME-N.html (the first three words of the
+# `.TH ` line).
 # Source checks:
 #   (a) each page under book/src/spec/ is exactly its include line plus the footer include;
 #   (b) each docs/spec/*.md has a page of the same name there;
@@ -68,7 +75,7 @@ scan_directives() {
     (my $rel = $p) =~ s{^\Q$root\E/?}{};
     my @dir = split m{/}, $rel; pop @dir;
     if ($mode eq "f") {
-      while ($s =~ /\{\{\s*\#/g) { print "$p:", $line->($-[0]), ": a directive inside the spec\n"; }
+      while ($s =~ /\{\{\s*\#/g) { print "$p:", $line->($-[0]), ": a directive inside the source file\n"; }
       next;
     }
     while ($s =~ /\\\{\{\#.*\}\}|\{\{\s*\#([a-zA-Z0-9_]+)\s+([^}]+)\}\}/g) {
@@ -80,6 +87,8 @@ scan_directives() {
       if ($type eq "include" && defined $path && index($target, "\\") < 0) {
         (my $t = $target) =~ s/^\s+|\s+$//g;
         if ($rel =~ m{^spec/([^/]+)$} && $t eq "../../../docs/spec/$1") { $ok = 1; }
+        elsif ($rel =~ m{^cli/([A-Za-z0-9_-]+)\.md$} && $t eq "../../../docs/cli/$1.md") { $ok = 1; }
+        elsif ($rel =~ m{^cli/([A-Za-z0-9_-]+)-([1-9])\.md$} && $t eq "../../../docs/cli/$1.$2") { $ok = 1; }
         else {
           $path =~ s/:.*//;
           my @st = @dir; my $in = $path !~ m{^/} && length $path;
@@ -138,6 +147,7 @@ allow_scan() {
 check_sources() {
   local root="$1" fail=0 f name page
   local spec="$root/docs/spec" pages="$root/book/src/spec"
+  local cli="$root/docs/cli" cpages="$root/book/src/cli"
   # (a)
   if [ -d "$pages" ]; then
     for page in "$pages"/*; do
@@ -159,11 +169,55 @@ check_sources() {
       if [ ! -f "$pages/$name" ]; then echo "(b) no book page for docs/spec/$name"; fail=1; fi
     done
   fi
-  # (c) The build output book/book is pruned; (e) and (g) cover it.
+  # (a) for the CLI pages: each page under book/src/cli/ is the wrapper of an existing source in docs/cli/
+  if [ -d "$cpages" ]; then
+    local cgot cwant cok
+    while IFS= read -r -d '' page; do
+      name="$(basename "$page")"
+      if [ ! -f "$page" ] || [ "$(dirname "$page")" != "$cpages" ]; then
+        echo "(a) not a plain page directly in book/src/cli/: ${page#"$root"/}"; fail=1; continue
+      fi
+      cgot="$(grep -v '^[[:space:]]*$' "$page" | tr -d '\r')"
+      cok=0
+      if [[ "$name" =~ ^([A-Za-z0-9_-]+)\.md$ ]] && [ -f "$cli/${BASH_REMATCH[1]}.md" ]; then
+        cwant="$(printf '%s\n%s' "{{#include ../../../docs/cli/${BASH_REMATCH[1]}.md}}" '{{#include ../footer.md}}')"
+        [ "$cgot" = "$cwant" ] && cok=1
+      fi
+      if [ "$cok" = 0 ] && [[ "$name" =~ ^([A-Za-z0-9_-]+)-([1-9])\.md$ ]] && [ -f "$cli/${BASH_REMATCH[1]}.${BASH_REMATCH[2]}" ]; then
+        cwant="$(man_wrapper "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" | grep -v '^[[:space:]]*$')"
+        [ "$cgot" = "$cwant" ] && cok=1
+      fi
+      if [ "$cok" = 0 ]; then
+        echo "(a) not the wrapper of an existing docs/cli source (a copy, or a page with no source?): book/src/cli/$name"; fail=1
+      fi
+    done < <(find "$cpages" -mindepth 1 -print0)
+  fi
+  # (b) for docs/cli: only NAME.md and NAME.N (N 1-9) files directly in it, each with its page, no two to one page
+  if [ -d "$cli" ]; then
+    local seen=" " pg
+    while IFS= read -r -d '' f; do
+      name="${f#"$cli"/}"
+      if [ -L "$f" ] || [ ! -f "$f" ] || [[ "$name" == */* ]]; then
+        echo "(b) docs/cli holds something other than a plain file directly in it: docs/cli/$name"; fail=1; continue
+      fi
+      if [[ "$name" =~ ^([A-Za-z0-9_-]+)\.md$ ]]; then pg="${BASH_REMATCH[1]}.md"
+      elif [[ "$name" =~ ^([A-Za-z0-9_-]+)\.([1-9])$ ]]; then pg="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}.md"
+      else echo "(b) docs/cli/$name is not NAME.md or NAME.N"; fail=1; continue; fi
+      case "$seen" in *" $pg "*) echo "(b) two docs/cli sources map to one page: docs/cli/$name -> book/src/cli/$pg"; fail=1 ;; esac
+      seen="$seen$pg "
+      if [ ! -f "$cpages/$pg" ]; then echo "(b) no book page for docs/cli/$name (book/src/cli/$pg)"; fail=1; fi
+    done < <(find "$cli" -mindepth 1 -print0)
+  fi
+  # (c) The build output book/book is pruned; (e) and (g) cover it. docs/spec and docs/cli are covered too.
   if [ -d "$root/book" ]; then
-    local hits
+    local hits d
     hits="$(cd "$root" && find book -path book/book -prune -o -type f -print0 | xargs -0 -r grep -Iil -e "$needle" || true)"
     hits="$hits"$'\n'"$(cd "$root" && find book -path book/book -prune -o -iname '*litepack-method*' -print || true)"
+    for d in docs/spec docs/cli; do
+      [ -d "$root/$d" ] || continue
+      hits="$hits"$'\n'"$(cd "$root" && find "$d" -type f -print0 | xargs -0 -r grep -Iil -e "$needle" || true)"
+      hits="$hits"$'\n'"$(cd "$root" && find "$d" -iname '*litepack-method*' -print || true)"
+    done
     if nonblank "$hits"; then
       printf '(c) names the method document: %s\n' "$hits"; fail=1
     fi
@@ -173,6 +227,15 @@ check_sources() {
     local inc
     inc="$(scan_directives f "$spec" || true)"
     if nonblank "$inc"; then printf '(f) an include inside docs/spec: %s\n' "$inc"; fail=1; fi
+  fi
+  if [ -d "$cli" ]; then
+    local cinc
+    cinc="$(scan_directives f "$cli" || true)"
+    if nonblank "$cinc"; then printf '(f) an include inside docs/cli: %s\n' "$cinc"; fail=1; fi
+    # (l) no man-page line may open with four or more backticks (it could close the wrapper's fence)
+    local fence
+    fence="$(for f in "$cli"/*.[1-9]; do [ -f "$f" ] && { grep -n -E '^[ 	]*`{4,}' "$f" | sed "s|^|$f:|" || true; }; done || true)"
+    if nonblank "$fence"; then printf '(l) a man-page line of four or more backticks (FILE:LINE:text): %s\n' "$fence"; fail=1; fi
   fi
   # (i) SUMMARY.md and (j) book.toml: allow-lists of exact line shapes (see allow_scan)
   if [ -f "$root/book/src/SUMMARY.md" ]; then
@@ -189,7 +252,7 @@ check_sources() {
   fi
   # (k) no symlink under book/ (the build output aside) or docs/spec/: mdBook follows them, find -type f skips them
   local links
-  links="$( { [ -d "$root/book" ] && (cd "$root" && find book -path book/book -prune -o -type l -print); [ -d "$spec" ] && (cd "$root" && find docs/spec -type l -print); } || true)"
+  links="$( { [ -d "$root/book" ] && (cd "$root" && find book -path book/book -prune -o -type l -print); [ -d "$spec" ] && (cd "$root" && find docs/spec -type l -print); [ -d "$cli" ] && (cd "$root" && find docs/cli -type l -print); } || true)"
   if nonblank "$links"; then printf '(k) a symlink: %s\n' "$links"; fail=1; fi
   # (h)
   if [ -d "$root/book/src" ]; then
@@ -198,6 +261,13 @@ check_sources() {
     if nonblank "$bad"; then printf '(h) a directive outside the include allow-list: %s\n' "$bad"; fail=1; fi
   fi
   return "$fail"
+}
+
+# man_wrapper NAME N: the book page of the man page docs/cli/NAME.N, exactly (blank lines are not compared).
+man_wrapper() {
+  printf '# The %s(%s) man page\n\n' "$1" "$2"
+  printf 'The committed `docs/cli/%s.%s` in its roff source, generated from `%s`'"'"'s command line; a test keeps the file equal to the generated page. In a checkout, `man ./docs/cli/%s.%s` shows it formatted.\n\n' "$1" "$2" "$1" "$1" "$2"
+  printf '````text\n{{#include ../../../docs/cli/%s.%s}}\n````\n\n{{#include ../footer.md}}\n' "$1" "$2"
 }
 
 # First `# ` heading of a source file, as it reads rendered: backticks dropped, HTML-escaped.
@@ -253,6 +323,22 @@ check_built() {
       echo "(d) spec/$name.html lacks the heading of docs/spec/$name.md: $text"; fail=1
     fi
   done
+  for f in "$root"/docs/cli/*; do
+    [ -f "$f" ] || continue
+    name="$(basename "$f")"
+    if [[ "$name" =~ ^([A-Za-z0-9_-]+)\.md$ ]]; then
+      html="$built/cli/${BASH_REMATCH[1]}.html"; text="$(heading_text "$f")"
+    elif [[ "$name" =~ ^([A-Za-z0-9_-]+)\.([1-9])$ ]]; then
+      html="$built/cli/${BASH_REMATCH[1]}-${BASH_REMATCH[2]}.html"
+      text="$(grep -m1 '^\.TH ' "$f" | tr -d '\r' | awk '{print $1" "$2" "$3}')"
+      text="${text//&/&amp;}"; text="${text//</&lt;}"; text="${text//>/&gt;}"
+    else continue; fi
+    if [ ! -f "$html" ]; then echo "(d) not built: ${html#"$built"/}"; fail=1; continue; fi
+    plain="$(perl -0pe 's/<[^>]*>//g' "$html")"
+    if ! grep -qF -e "$text" <<<"$plain"; then
+      echo "(d) ${html#"$built"/} lacks the text of docs/cli/$name: $text"; fail=1
+    fi
+  done
   local hits
   hits="$(grep -rIil -e "$needle" "$built" 2>/dev/null || true)"
   hits="$hits"$'\n'"$(find "$built" -iname '*litepack-method*' -print || true)"
@@ -281,6 +367,13 @@ make_tree() {
     printf '{{#include ../../../docs/spec/%s.md}}\n\n{{#include ../footer.md}}\n' "$n" > "$r/book/src/spec/$n.md"
     printf '<html><h1 id="x">Spec <code>%s</code> title</h1></html>\n' "$n" > "$r/site/spec/$n.html"
   done
+  mkdir -p "$r/docs/cli" "$r/book/src/cli" "$r/site/cli"
+  printf '# Tool help\n\nbody\n' > "$r/docs/cli/tool.md"
+  printf '.TH tool 1  "tool 0.1" \n.SH NAME\ntool \\- a tool\n' > "$r/docs/cli/tool.1"
+  printf '{{#include ../../../docs/cli/tool.md}}\n\n{{#include ../footer.md}}\n' > "$r/book/src/cli/tool.md"
+  man_wrapper tool 1 > "$r/book/src/cli/tool-1.md"
+  printf '<html><h1>Tool help</h1></html>\n' > "$r/site/cli/tool.html"
+  printf '<html><pre><code>.TH tool 1  "tool 0.1"</code></pre></html>\n' > "$r/site/cli/tool-1.html"
   printf '# Summary\n\n- [A](spec/a.md)\n' > "$r/book/src/SUMMARY.md"
   {
     printf '# The Secret Method Plan\n\n'
@@ -412,6 +505,51 @@ self_test() {
   expect_pass "an escaped directive in a page" check_sources "$t/w5"
   make_tree "$t/w6"; printf 'Text \377\376 bytes.\n' > "$t/w6/book/src/p.md"
   expect_fail h "a page that is not valid UTF-8" check_sources "$t/w6"
+  # E9-4: the CLI pages
+  make_tree "$t/ca"; printf 'copied text\n' >> "$t/ca/book/src/cli/tool.md"
+  expect_fail a "a CLI wrapper with an extra line" check_sources "$t/ca"
+  make_tree "$t/ca2"; printf '{{#include ../footer.md}}\n' > "$t/ca2/book/src/cli/orphan.md"
+  expect_fail a "a CLI page with no source" check_sources "$t/ca2"
+  make_tree "$t/ca3"; printf 'extra\n' >> "$t/ca3/book/src/cli/tool-1.md"
+  expect_fail a "a man-page wrapper with an extra line" check_sources "$t/ca3"
+  make_tree "$t/cb"; printf '# Other\n' > "$t/cb/docs/cli/other.md"
+  expect_fail b "a docs/cli source with no page" check_sources "$t/cb"
+  make_tree "$t/cb2"; printf 'x\n' > "$t/cb2/docs/cli/notes.txt"
+  expect_fail b "a docs/cli file with another name" check_sources "$t/cb2"
+  make_tree "$t/cb3"; mkdir -p "$t/cb3/docs/cli/sub"
+  expect_fail b "a docs/cli subdirectory" check_sources "$t/cb3"
+  make_tree "$t/cb4"; mkdir -p "$t/cb4/docs/cli/sub"; printf '# S\n' > "$t/cb4/docs/cli/sub/s.md"
+  expect_fail b "a file in a docs/cli subdirectory" check_sources "$t/cb4"
+  make_tree "$t/cb5"; printf '.TH tool 1\n' > "$t/cb5/docs/cli/tool-1.md"
+  expect_fail b "two docs/cli sources for one page" check_sources "$t/cb5"
+  make_tree "$t/cc"; printf 'see LitePack-Method-v2\n' >> "$t/cc/docs/cli/tool.md"
+  expect_fail c "the method document's name in a docs/cli file" check_sources "$t/cc"
+  make_tree "$t/cf"; printf '{{#include ../x.md}}\n' >> "$t/cf/docs/cli/tool.md"
+  expect_fail f "a directive in a docs/cli .md" check_sources "$t/cf"
+  make_tree "$t/cf2"; printf '{{ #include ../x.md}}\n' >> "$t/cf2/docs/cli/tool.1"
+  expect_fail f "a directive in a man page" check_sources "$t/cf2"
+  make_tree "$t/ch"; printf '{{#include ../../../docs/cli/tool.1}}\n\n{{#include ../footer.md}}\n' > "$t/ch/book/src/cli/tool.md"
+  expect_fail h "a CLI page including the man page" check_sources "$t/ch"
+  make_tree "$t/ch2"; printf 'About.\n\n{{#include ../../docs/cli/tool.md}}\n' > "$t/ch2/book/src/about.md"
+  expect_fail h "an about page including a docs/cli source" check_sources "$t/ch2"
+  make_tree "$t/ck"
+  if ln -s "tool.md" "$t/ck/docs/cli/link.md" 2>/dev/null && [ -L "$t/ck/docs/cli/link.md" ]; then
+    expect_fail k "a symlink under docs/cli" check_sources "$t/ck"
+  else
+    echo "SKIPPED (k) docs/cli self-test: cannot create a symlink here"
+  fi
+  make_tree "$t/cl"; printf '````\n' >> "$t/cl/docs/cli/tool.1"
+  expect_fail l "a man-page line of four backticks" check_sources "$t/cl"
+  make_tree "$t/cl2"; printf '\t````\n' >> "$t/cl2/docs/cli/tool.1"
+  expect_fail l "a man-page line of four backticks after a tab" check_sources "$t/cl2"
+  make_tree "$t/cl3"; printf '```\n' >> "$t/cl3/docs/cli/tool.1"
+  expect_pass "a man-page line of three backticks" check_sources "$t/cl3"
+  make_tree "$t/cd"; printf '<html>other</html>\n' > "$t/cd/site/cli/tool.html"
+  expect_fail d "a built CLI page without its heading" check_built "$t/cd" "$t/cd/site"
+  make_tree "$t/cd2"; printf '<html>other</html>\n' > "$t/cd2/site/cli/tool-1.html"
+  expect_fail d "a built man page without its .TH words" check_built "$t/cd2" "$t/cd2/site"
+  make_tree "$t/cd3"; rm "$t/cd3/site/cli/tool-1.html"
+  expect_fail d "a missing built man page" check_built "$t/cd3" "$t/cd3/site"
   echo "self-test: all checks proved"
 }
 
