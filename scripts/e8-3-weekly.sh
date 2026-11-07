@@ -3,18 +3,112 @@
 #
 #   bash scripts/e8-3-weekly.sh            refuse or run this week's measurement
 #   bash scripts/e8-3-weekly.sh --dry-run  run every refusal check and print each command it would
-#                                          run, without fetching, building, measuring or writing
-#                                          any state file
+#                                          run, without fetching, building, measuring, deleting or
+#                                          writing any state file
+# Test modes (scripts/e8-3-weekly-test.sh; they touch nothing but the files they are given):
+#   --classify <compare log> <exit code>   print the ledger verdict of a compare's output
+#   --week-key <date>                      print the measurement week of a run started at <date>
+#   --ledger-line <ledger> <date> <text>   append <text> as a run started at <date> would
 #
-# Bash for Git for Windows, started by the scheduled task `\LitePack\E8-3 weekly speed`
-# (scripts/e8-3-task.ps1). Every path derives from `git rev-parse --git-common-dir`, i.e. the main
-# checkout, whatever copy of this script runs:
+# Bash for Git for Windows, started by scripts/e8-3-launch.ps1, which the scheduled task
+# `\LitePack\E8-3 weekly speed` runs (scripts/e8-3-task.ps1). Every path derives from
+# `git rev-parse --git-common-dir`, i.e. the main checkout, whatever copy of this script runs:
 #   <main>/.claude/worktrees/e8-3-weekly   the detached weekly worktree (created on first use)
 #   <main>/bench/corpus/small              the corpus (`--corpus`)
 #   <main>/target/acceptance/              the status log, the per-step logs and the ledger
 # The script never changes a system setting (power plan, antivirus), never commits and never runs
-# `git clean`. The whole body is a function called on the last line, so a checkout that rewrites
-# this file cannot change what bash runs mid-run.
+# `git clean`. Every function is defined before the last line and only the last line runs
+# anything, so a checkout that rewrites this file cannot change what bash runs mid-run.
+
+# The id of the tool this workspace builds (`discover::WORKSPACE_TOOL` in lpk-bench).
+E83_WORKSPACE_TOOL=lpk
+
+# The measurement week of a run started at epoch second $1: the ISO week of the day before, so
+# the Monday fallback counts with the Sunday before it.
+week_key_at() {
+  date -d "@$(($1 - 86400))" +%G-W%V
+}
+
+# The Monday (UTC midnight, epoch seconds) of ISO week `YYYY-Www`.
+week_monday() {
+  local y="${1%-W*}" w="${1#*-W}" jan4 dow
+  jan4="$(date -u -d "$y-01-04" +%s)"
+  dow="$(date -u -d "$y-01-04" +%u)"
+  echo $((jan4 - (dow - 1) * 86400 + (10#$w - 1) * 7 * 86400))
+}
+
+# Append one ledger line for week $2 to ledger $1, after a MISSED line for each ISO week skipped
+# since the ledger's last week.
+ledger_append() {
+  local ledger="$1" week="$2" text="$3" last t end
+  last="$(awk '$1 == "WEEK" { w = $2 } END { print w }' "$ledger" 2> /dev/null)"
+  if [ -n "$last" ] && [ "$last" != "$week" ]; then
+    t=$(($(week_monday "$last") + 7 * 86400))
+    end="$(week_monday "$week")"
+    while [ "$t" -lt "$end" ]; do
+      echo "WEEK $(date -u -d "@$t" +%G-W%V) - - MISSED" >> "$ledger"
+      t=$((t + 7 * 86400))
+    done
+  fi
+  echo "WEEK $week $text" >> "$ledger"
+}
+
+# The ledger verdict of a compare log $1 whose command exited $2 (R5, R9): `GREEN`, `OVER`,
+# `BASELINE <reasons>` (a changed environment or configuration) or `FAILED compare: <reason>`.
+classify_compare() {
+  local log="$1" rc="$2" line p base="" bad="" over=0
+  if [ "$rc" = 0 ]; then
+    echo GREEN
+    return
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    case "$line" in
+      "error: "*) p="${line#error: }" ;;
+      *) continue ;;
+    esac
+    case "$p" in
+      *" time differs by "*"% (limit "*) over=1 ;;
+      "the two directories were measured on different corpora"* | \
+        "different hosts: "* | \
+        "different thread counts: "* | \
+        "different requested repeats: "* | \
+        "different --long-run-s: "* | \
+        "different --settle-ms-per-1000-files: "* | \
+        "the two runs used different catalogue files"*)
+        base="${base:+$base; }$p"
+        ;;
+      "tool \`$E83_WORKSPACE_TOOL\` has different versions"*) bad="${bad:-$p}" ;;
+      "tool \`"*"\` has different versions: "*) base="${base:+$base; }$p" ;;
+      *) bad="${bad:-$p}" ;;
+    esac
+  done < "$log"
+  if [ -n "$bad" ]; then
+    echo "FAILED compare: $bad"
+  elif [ -n "$base" ]; then
+    echo "BASELINE $base"
+  elif [ "$over" = 1 ]; then
+    echo OVER
+  else
+    echo "FAILED compare: exit $rc without a recognised error line"
+  fi
+}
+
+# Is Windows pid $1 a running bash.exe?
+win_bash_alive() {
+  MSYS2_ARG_CONV_EXCL='*' tasklist /FI "PID eq $1" /FI "IMAGENAME eq bash.exe" /FO CSV /NH \
+    2> /dev/null | grep -q "\"$1\""
+}
+
+# Release the lock if this run holds it (globals: the EXIT trap runs after main returns).
+E83_HELD=0
+E83_LOCK=
+release_lock() {
+  if [ "${E83_HELD:-0}" = 1 ] && [ -n "$E83_LOCK" ]; then
+    rm -rf "$E83_LOCK"
+    E83_HELD=0
+  fi
+}
 
 main() {
   set -u
@@ -22,6 +116,21 @@ main() {
   case "${1:-}" in
     "") ;;
     --dry-run) dry=1 ;;
+    --classify)
+      [ $# = 3 ] || { echo "usage: --classify <compare log> <exit code>" >&2; return 2; }
+      classify_compare "$2" "$3"
+      return 0
+      ;;
+    --week-key)
+      [ $# = 2 ] || { echo "usage: --week-key <date>" >&2; return 2; }
+      week_key_at "$(date -d "$2" +%s)"
+      return 0
+      ;;
+    --ledger-line)
+      [ $# = 4 ] || { echo "usage: --ledger-line <ledger> <date> <text>" >&2; return 2; }
+      ledger_append "$2" "$(week_key_at "$(date -d "$3" +%s)")" "$4"
+      return 0
+      ;;
     *)
       echo "usage: bash scripts/e8-3-weekly.sh [--dry-run]" >&2
       return 2
@@ -36,8 +145,13 @@ main() {
   local need_mb=16384
   # CPU limit in percent, averaged over 24 samples 5 s apart (two minutes).
   local cpu_limit=10
+  # A lock older than this is stale whatever its pid (the task stops after 8 hours).
+  local lock_max_s=$((9 * 3600))
+  # Failed-repeat evidence older than this many days is deleted from the weekly worktree.
+  local evidence_days=28
   local busy_images="cargo rustc link cargo-nextest lpk-bench lpk lpk-worker 7z zstd xz rar zpaqfranz"
   local settings=fast,balanced,store,mx5
+  local timeout_bin=/usr/bin/timeout
 
   # Cargo comes from the user's toolchain when it is not on PATH.
   if ! command -v cargo > /dev/null 2>&1 && [ -n "${USERPROFILE:-}" ]; then
@@ -59,12 +173,12 @@ main() {
   local ledger="$acc/e8-3-weekly-ledger.log"
   E83_LOCK="$acc/e8-3-weekly.lock"
   local lock="$E83_LOCK"
-  local week
-  week="$(date +%G-W%V)"
-  E83_HELD=0
+  local now week
+  now="$(date +%s)"
+  week="$(week_key_at "$now")"
   local build_sha=- dir=-
 
-  # --- helpers --------------------------------------------------------------------------------
+  # --- helpers that use this run's state ------------------------------------------------------
   utc() { date -u +%FT%TZ; }
   say() {
     if [ "$dry" = 1 ]; then
@@ -83,33 +197,7 @@ main() {
     exit 0
   }
   would() { echo "[dry-run] would run: $*"; }
-  release_lock() {
-    if [ "${E83_HELD:-0}" = 1 ]; then
-      rm -rf "$E83_LOCK"
-      E83_HELD=0
-    fi
-  }
-  # The Monday (UTC midnight, epoch seconds) of ISO week `YYYY-Www`.
-  week_monday() {
-    local y="${1%-W*}" w="${1#*-W}" jan4 dow
-    jan4="$(date -u -d "$y-01-04" +%s)"
-    dow="$(date -u -d "$y-01-04" +%u)"
-    echo $((jan4 - (dow - 1) * 86400 + (10#$w - 1) * 7 * 86400))
-  }
-  # One ledger line, after a MISSED line for each ISO week skipped since the ledger's last week.
-  ledger_line() {
-    local last t end
-    last="$(awk '$1 == "WEEK" { w = $2 } END { print w }' "$ledger" 2> /dev/null)"
-    if [ -n "$last" ] && [ "$last" != "$week" ]; then
-      t=$(($(week_monday "$last") + 7 * 86400))
-      end="$(week_monday "$week")"
-      while [ "$t" -lt "$end" ]; do
-        echo "WEEK $(date -u -d "@$t" +%G-W%V) - - MISSED" >> "$ledger"
-        t=$((t + 7 * 86400))
-      done
-    fi
-    echo "WEEK $week $*" >> "$ledger"
-  }
+  ledger_line() { ledger_append "$ledger" "$week" "$*"; }
   # Rename the step logs written so far from their stem `e8-3-current-` to `e8-3-<name>-`.
   name_logs() {
     local f
@@ -127,10 +215,6 @@ main() {
     release_lock
     exit 1
   }
-  # Is a Windows process with this pid running?
-  win_pid_alive() {
-    MSYS2_ARG_CONV_EXCL='*' tasklist /FI "PID eq $1" /FO CSV /NH 2> /dev/null | grep -q "\"$1\""
-  }
 
   # --- refusals ---------------------------------------------------------------------------------
   [ "$dry" = 1 ] || mkdir -p "$acc" || return 2
@@ -139,33 +223,40 @@ main() {
     echo "[dry-run] weekly worktree: $wt"
     echo "[dry-run] corpus: $corpus"
     echo "[dry-run] state: $acc"
-    echo "[dry-run] ISO week: $week"
+    echo "[dry-run] measurement week (ISO week of the day before): $week"
   fi
 
-  # 1. A lock held by a live run. A lock whose run is gone is taken over.
+  # 1. A lock held by a live run. The lock holds this run's Windows pid (MSYS's $$ is not one)
+  #    and its start time; it is stale when that pid is not a running bash.exe or when it is
+  #    older than the task's time limit allows.
   local mypid
-  mypid="$(cat /proc/$$/winpid 2> /dev/null || echo $$)"
+  mypid="$(cat "/proc/$$/winpid" 2> /dev/null)"
+  [ -n "$mypid" ] || refuse "cannot read this bash's Windows pid from /proc/$$/winpid"
   if [ -d "$lock" ]; then
-    local other
-    other="$(cat "$lock/pid" 2> /dev/null || true)"
-    if [ -n "$other" ] && win_pid_alive "$other"; then
-      refuse "another weekly run holds $lock (pid $other)"
+    local other started age
+    other="$(sed -n 1p "$lock/pid" 2> /dev/null)"
+    started="$(sed -n 1p "$lock/started" 2> /dev/null)"
+    case "$started" in '' | *[!0-9]*) started=0 ;; esac
+    age=$((now - started))
+    if [ -n "$other" ] && [ "$age" -lt "$lock_max_s" ] && win_bash_alive "$other"; then
+      refuse "another weekly run holds $lock (Windows pid $other, started $((age / 60)) min ago)"
     fi
-    say "stale lock of pid ${other:-unknown} (not running): taken over"
+    say "stale lock taken over (Windows pid ${other:-unknown}, age $((age / 60)) min)"
     if [ "$dry" = 0 ]; then
-      echo "$mypid" > "$lock/pid" || return 2
+      echo "$mypid" > "$lock/pid" && echo "$now" > "$lock/started" || return 2
       E83_HELD=1
     fi
   elif [ "$dry" = 0 ]; then
     mkdir "$lock" 2> /dev/null || refuse "another weekly run took $lock"
     E83_HELD=1
     echo "$mypid" > "$lock/pid"
+    echo "$now" > "$lock/started"
   fi
   trap release_lock EXIT
 
-  # 2. This ISO week already has a complete run.
+  # 2. This measurement week already has a complete run.
   if [ -f "$ledger" ] && grep -Eq "^WEEK $week [^ ]+ [^ ]+ (GREEN|OVER|BASELINE)( |$)" "$ledger"; then
-    refuse "ISO week $week already has a complete run in $ledger"
+    refuse "week $week already has a complete run in $ledger"
   fi
 
   # 3. A build, test or measured tool running.
@@ -199,13 +290,37 @@ main() {
   fi
   [ "$dry" = 1 ] && echo "[dry-run] free space $free_mb MiB (needs $need_mb MiB)"
 
-  # 6. Tracked changes in the weekly worktree.
+  # 6. The weekly worktree: a valid worktree of its own, without tracked changes. (A folder that
+  #    is not a worktree would otherwise resolve to the main checkout around it.)
   if [ -e "$wt" ]; then
+    local top want
+    top="$(git -C "$wt" rev-parse --is-inside-work-tree --show-toplevel 2> /dev/null | sed -n 2p)"
+    want="$(cd "$wt" && pwd -W 2> /dev/null || pwd)"
+    if [ -z "$top" ] || [ "$(echo "$top" | tr 'A-Z\\' 'a-z/')" != "$(echo "$want" | tr 'A-Z\\' 'a-z/')" ]; then
+      refuse "$wt exists but is not a valid git worktree: remove the folder and run \`git -C $root worktree prune\`; the next run recreates it"
+    fi
     if [ -n "$(git -C "$wt" status --porcelain --untracked-files=no 2>&1)" ]; then
       refuse "the weekly worktree $wt has tracked changes"
     fi
   fi
   [ -d "$corpus" ] || refuse "no corpus at $corpus"
+
+  # 7. The fetch's timeout must be coreutils' (Windows has a timeout.exe that only waits).
+  "$timeout_bin" --version 2> /dev/null | grep -q coreutils ||
+    refuse "$timeout_bin is not coreutils' timeout"
+
+  # --- housekeeping: old failed-repeat evidence (R15) -------------------------------------------
+  local old
+  if [ -d "$wt/bench/tmp/failed" ]; then
+    while IFS= read -r old; do
+      [ -n "$old" ] || continue
+      if [ "$dry" = 1 ]; then
+        would rm -rf "$old"
+      else
+        rm -rf "$old" && say "removed failed-repeat evidence older than $evidence_days days: $old"
+      fi
+    done < <(find "$wt/bench/tmp/failed" -mindepth 1 -maxdepth 1 -mtime +"$evidence_days" 2> /dev/null)
+  fi
 
   # --- the steps --------------------------------------------------------------------------------
   local threads="${NUMBER_OF_PROCESSORS:-$(nproc)}"
@@ -219,7 +334,7 @@ main() {
     END { print d }' "$ledger" 2> /dev/null)"
 
   if [ "$dry" = 1 ]; then
-    would git -C "$root" fetch origin
+    would GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never "$timeout_bin" 600 git -C "$root" fetch origin
     if [ -e "$wt" ]; then
       would git -C "$wt" checkout --detach --force origin/main
     else
@@ -240,13 +355,16 @@ main() {
     return 0
   fi
 
-  say "start commit $(git -C "$root" rev-parse --short=12 HEAD 2> /dev/null || echo unknown) pid $mypid week $week"
+  say "start commit $(git -C "$root" rev-parse --short=12 HEAD 2> /dev/null || echo unknown) Windows pid $mypid week $week"
   rm -f "$acc"/e8-3-current-*.log
 
-  git -C "$root" fetch origin > "$acc/e8-3-current-fetch.log" 2>&1
+  # Never wait for a credential prompt; give up after ten minutes.
+  GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never "$timeout_bin" 600 git -C "$root" fetch origin \
+    > "$acc/e8-3-current-fetch.log" 2>&1 < /dev/null
   local rc=$?
   say "fetch exit $rc"
-  [ "$rc" = 0 ] || fail fetch
+  if [ "$rc" = 124 ]; then fail fetch "timed out after 600 s"; fi
+  [ "$rc" = 0 ] || fail fetch "exit $rc"
 
   if [ -e "$wt" ]; then
     git -C "$wt" checkout --detach --force origin/main > "$acc/e8-3-current-checkout.log" 2>&1
@@ -310,26 +428,14 @@ main() {
   rc=$?
   say "compare exit $rc ($prev against $dir)"
   name_logs "$dir"
-  local clog="$acc/e8-3-$dir-compare.log"
-  if [ "$rc" = 0 ]; then
-    ledger_line "$dir $build_sha GREEN against $prev"
-  else
-    # The verdict comes from the compare's own `error:` lines.
-    local problems base other
-    problems="$(grep '^error: ' "$clog" | sed 's/^error: //')"
-    base="$(printf '%s\n' "$problems" | grep -E 'different corpora|different hosts|different catalogue files' | head -1)"
-    other="$(printf '%s\n' "$problems" | grep -v -E 'time differs by|different corpora|different hosts|different catalogue files' | grep -v '^$' | head -1)"
-    if [ -n "$base" ]; then
-      ledger_line "$dir $build_sha BASELINE $base"
-    elif [ -n "$other" ]; then
-      fail compare "$other"
-    elif printf '%s\n' "$problems" | grep -q 'time differs by'; then
-      ledger_line "$dir $build_sha OVER against $prev"
-    else
-      fail compare "exit $rc"
-    fi
-  fi
-  say "DONE"
+  local verdict
+  verdict="$(classify_compare "$acc/e8-3-$dir-compare.log" "$rc")"
+  case "$verdict" in
+    GREEN | OVER) ledger_line "$dir $build_sha $verdict against $prev" ;;
+    BASELINE*) ledger_line "$dir $build_sha $verdict" ;;
+    *) fail compare "${verdict#FAILED compare: }" ;;
+  esac
+  say "DONE ($verdict)"
   return 0
 }
 
