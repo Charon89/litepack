@@ -18,7 +18,9 @@ pub const SFX_END: u64 = 512 * 1024;
 /// Whether libarchive would find a signature at `offset` of a file: at 0, or inside the scan window and aligned.
 pub fn libarchive_finds(offset: u64) -> bool {
     offset == 0
-        || (offset >= SFX_START && offset % SFX_ALIGN == 0 && offset.saturating_add(8) <= SFX_END)
+        || (offset >= SFX_START
+            && offset.is_multiple_of(SFX_ALIGN)
+            && offset.saturating_add(8) <= SFX_END)
 }
 
 /// CRC-32 (IEEE), bitwise: only header-sized inputs are ever checked here.

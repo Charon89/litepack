@@ -473,20 +473,18 @@ mod tests {
     /// E4-4: a RAR set counts as one archive, its first volume standing for it.
     #[test]
     fn rar_volume_sets_are_one_archive() {
-        for names in [
-            &["x.part2.rar", "x.part1.rar", "x.part3.rar"][..],
-            &["x.r00", "x.rar", "x.r01"][..],
-            &["X.R00", "X.RAR"][..],
+        for (names, rep) in [
+            (
+                &["x.part2.rar", "x.part1.rar", "x.part3.rar"][..],
+                "x.part1.rar",
+            ),
+            (&["x.r00", "x.rar", "x.r01"][..], "x.rar"),
+            (&["X.R00", "X.RAR"][..], "X.RAR"),
         ] {
             let s = classify(names.len(), files(names)).expect("selection");
             assert_eq!(s.kind, Kind::A, "{names:?}");
             assert_eq!(s.archives.len(), 1, "{names:?}");
-            let rep = &names[s.archives[0]];
-            assert!(
-                rep.to_lowercase().ends_with("part1.rar") || rep.to_lowercase().ends_with(".rar"),
-                "{rep}"
-            );
-            assert!(!rep.to_lowercase().contains(".r0"), "{rep}");
+            assert_eq!(names[s.archives[0]], rep, "{names:?}");
         }
         // A lone `.r00` is no archive; two sets are two archives.
         assert_eq!(classify(1, files(&["x.r00"])).expect("sel").kind, Kind::F);

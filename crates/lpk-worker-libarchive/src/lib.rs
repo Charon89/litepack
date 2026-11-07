@@ -8,7 +8,7 @@
 //! |---|---|---|---|
 //! | `rar` | `rar`, `rar5` | — | yes (CRC-32, BLAKE2sp) |
 //! | `iso` | `iso9660` | — | no |
-//! | `cab` | `cab` | — | yes (CFDATA checksum) |
+//! | `cab` | `cab` | — | only when stored (a CFDATA checksum of 0 means none; not claimed) |
 //! | `lzh` | `lha` | — | yes (CRC-16) |
 //! | `ar` | `ar` | — | no |
 //! | `cpio` | `cpio` | — | no |
@@ -108,6 +108,10 @@ pub fn split_volumes(handles: Vec<(u32, File)>) -> (Vec<(u32, File)>, Vec<File>)
     more.sort_by_key(|(r, _)| *r);
     (base, more.into_iter().map(|(_, f)| f).collect())
 }
+
+/// The host's default `--max-expansion` (`lpk_core::foreign::DEFAULT_MAX_EXPANSION`): the most a single stream may
+/// expand while its size is counted for the listing.
+const STREAM_MAX_EXPANSION: u64 = 10_000;
 
 /// libarchive 3.8.11's message for a RAR 4 filter inside PPMd data
 /// (`archive_read_support_format_rar.c`, `parse_filter`); a test checks it occurs verbatim in the vendored source.
@@ -333,6 +337,17 @@ impl LaReader {
                             break;
                         }
                         n += k as u64;
+                        // The host refuses output past `max_expansion` (default 10,000) times the
+                        // input; the worker stops counting at the default so a bomb cannot spin here.
+                        if n > self.total_len.saturating_mul(STREAM_MAX_EXPANSION) {
+                            return Err(ReaderError::new(
+                                ErrorCode::Unsupported,
+                                format!(
+                                    "{}: a single stream expands past {STREAM_MAX_EXPANSION} times its input (named limit)",
+                                    self.wire
+                                ),
+                            ));
+                        }
                     }
                     n
                 }

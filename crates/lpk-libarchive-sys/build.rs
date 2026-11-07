@@ -107,6 +107,8 @@ fn main() {
         .define("HAVE_CONFIG_H", None)
         .define("LIBARCHIVE_STATIC", None)
         .define("LZMA_API_STATIC", None)
+        // warnings(false): third-party C compiled as shipped; its warnings are not ours to fix, and a
+        // newer compiler's new warning must not fail the build (the Rust side is under clippy -D warnings).
         .warnings(false);
     for dep in ["Z", "LZMA", "ZSTD"] {
         if let Ok(inc) = std::env::var(format!("DEP_{dep}_INCLUDE")) {
@@ -118,6 +120,15 @@ fn main() {
         }
     }
     let windows = target.contains("windows");
+    if !windows {
+        // Linux hardening: a stack protector, and fortified libc calls when optimizing. On MSVC the
+        // defaults stay (`/GS` is on), so nothing is added there.
+        build.flag_if_supported("-fstack-protector-strong");
+        if std::env::var("OPT_LEVEL").is_ok_and(|o| o != "0") {
+            build.flag_if_supported("-U_FORTIFY_SOURCE");
+            build.define("_FORTIFY_SOURCE", "2");
+        }
+    }
     let files = SOURCES
         .iter()
         .chain(if windows { SOURCES_WINDOWS } else { &[] }.iter());

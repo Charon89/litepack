@@ -41,3 +41,25 @@ owner may later allow unRAR for these (out of scope for E4-4).
 
 Fixtures: `crates/lpk-worker-libarchive/tests/fixtures/README.md` (which tool made each one), E4-3's under
 `workers/lpk-foreign/tests/fixtures/`.
+
+**Split archives (`x.7z.001`, `x.zip.001`, `x.001`).** Only RAR volume sets are joined (`volume_set`: `partN.rar`, and
+`.rar` with `.r00`). A `.001` file is read alone as whatever its first bytes say (a 7z or ZIP prefix), so a listing or
+extraction stops with that reader's named truncation error; joining raw splits is not implemented (a gap, not a
+route).
+
+**RAR self-extracting archives.** libarchive finds the signature only from offset 0x10000, every 16 bytes, within 512 KiB
+(`archive_read_support_format_rar.c:806-826`, `archive_read_support_format_rar5.c:166`). The host recognises a CRC-valid RAR
+anywhere in the first 4 MiB of a PE file; one beyond libarchive's window is the named gap "RAR self-extracting archive
+beyond libarchive's search window" (`lpk_proto::rar_sfx` holds the one window definition, used by the host and the worker).
+
+**Entry names (R204).** The same archive gives the same names on every machine; no code page or locale decides them. Names the
+format declares are decoded as declared (RAR 5 UTF-8, RAR 4 Unicode, Joliet UTF-16BE, CAB's UTF-8 attribute, LHA's UTF-16, pax).
+Undeclared names are read as UTF-8 (`hdrcharset=UTF-8` for tar, CAB, LHA and RAR 4; the stored bytes for ar, cpio and ISO
+Rock Ridge); a name that is not valid UTF-8 is dropped and the host refuses the entry. No reader names a charset for its
+undeclared names that would justify a table (rule 3 of R204 does not apply: `archive_string_default_conversion_for_read`
+is the machine's OEM page, which is exactly what the ruling forbids). Proven by tests for cpio, ar and ustar (UTF-8 exact,
+Latin-1 refused); ISO, RAR 5, CAB and LZH non-ASCII fixtures were not made.
+
+**Untested.** LZH `-lh5-`, `-lh6-`, `-lh7-` decompression and level 1 and 2 headers have no fixture; an RPM has no fixture;
+the LZH and RPM readers are exercised only by the malformed-input and garbage tests. CAB checksums are not claimed verified
+(a stored CFDATA checksum of 0 means none).
