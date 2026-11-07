@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/$LIBARCHIVE_FILE" "$LIBARCHIVE_URL"
-          actual="$(sha256sum "$RUNNER_TEMP/$LIBARCHIVE_FILE" | cut -d' ' -f1)"
+          actual="$(sha256sum < "$RUNNER_TEMP/$LIBARCHIVE_FILE" | cut -d' ' -f1)"
           if [ "$actual" != "$LIBARCHIVE_SHA256" ]; then
             echo "::error::$LIBARCHIVE_FILE has SHA-256 $actual, the pin says $LIBARCHIVE_SHA256"
             exit 1
