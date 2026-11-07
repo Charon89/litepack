@@ -75,9 +75,9 @@ def make_rar(out, src):
             if f.startswith(stem + ".") or f == name:
                 os.remove(os.path.join(out, f))
         run([rar] + base + opts + [os.path.join(out, name)] + sorted(os.listdir(src)), src)
-    # A self-extracting layout without WinRAR's SFX module (not redistributable): a minimal PE
+    # A self-extracting layout without WinRAR's SFX module (not redistributable): a minimal PE (64 KiB: libarchive looks for the signature from offset 0x10000 on, 16-byte aligned)
     # stub of our own followed by the RAR 5 archive.
-    stub = bytearray(4096)
+    stub = bytearray(0x10000)
     stub[0:2] = b"MZ"
     struct.pack_into("<I", stub, 0x3C, 0x80)
     stub[0x80:0x84] = b"PE\0\0"

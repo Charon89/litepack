@@ -1,4 +1,4 @@
-//! The [`ForeignReader`] over libarchive 3.8.9 (E4-4; design `docs/notes/e4-design.md` §3),
+//! The [`ForeignReader`] over libarchive 3.8.11 (E4-4; design `docs/notes/e4-design.md` §3),
 //! run only inside the sandboxed `lpk-worker-libarchive`.
 //!
 //! The host detects the format by magic and sends its wire name in `Open`; [`open`] registers
@@ -118,7 +118,7 @@ fn map_err(wire: &str, e: lpk_libarchive_sys::Error) -> ReaderError {
         _ if lower.contains("encrypt") || lower.contains("passphrase") => ReaderError::new(
             ErrorCode::Unsupported,
             format!(
-                "{wire}: encrypted archive (named gap: libarchive 3.8.9 does not decrypt it): {}",
+                "{wire}: encrypted archive (named gap: libarchive 3.8.11 does not decrypt it): {}",
                 e.message
             ),
         ),
@@ -268,7 +268,7 @@ impl LaReader {
                 return Err(ReaderError::new(
                     ErrorCode::Unsupported,
                     format!(
-                        "{}: encrypted members (named gap: libarchive 3.8.9 does not decrypt them)",
+                        "{}: encrypted members (named gap: libarchive 3.8.11 does not decrypt them)",
                         self.wire
                     ),
                 ));
@@ -290,6 +290,11 @@ impl LaReader {
                         *b = b'/';
                     }
                 }
+            }
+            // The root directory of an ISO 9660 image (Rock Ridge) or a cpio/ar stream is named
+            // ".": it is no member of the tree.
+            if e.kind == EntryKind::Directory && matches!(name.as_slice(), b"." | b"./") {
+                continue;
             }
             let (kind, target) = if let Some(h) = e.hardlink.clone().filter(|h| !h.is_empty()) {
                 (RecordKind::HardLink, h)

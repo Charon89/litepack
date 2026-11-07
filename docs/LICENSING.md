@@ -95,7 +95,7 @@ bundled C libraries are clarified there: liblzma (0BSD) in `liblzma-sys`, zlib (
 the file in every artefact.
 
 **libarchive 3.8.11 (E4-4).** Linked statically into `lpk-worker-libarchive` only (never into `lpk`, `lpk-worker`
-or `workers/`), through `crates/lpk-libarchive-sys`, from sources vendored unmodified in `vendor/libarchive-3.8.9/`
+or `workers/`), through `crates/lpk-libarchive-sys`, from sources vendored unmodified in `vendor/libarchive-3.8.11/`
 with the release's `COPYING`. Its terms as `COPYING` states them: every C source under the two-clause BSD licence
 (copyright notices kept in each file), except the files taken from the University of California Regents (BSD
 licence), `archive_parse_date.c` (public domain; not compiled here) and the BLAKE2 reference sources
@@ -105,7 +105,7 @@ PPMd. No unRAR code and no 7-Zip handler code is used anywhere. The worker links
 (`liblzma-sys`, 0BSD) and libzstd (`zstd-sys`, BSD-3-Clause), all already in the notices. Owed when the sources
 land (they wait for the owner's approval to fetch the release tarball): `COPYING` reproduced in the static section of
 `THIRD-PARTY-NOTICES`, `lpk-worker-libarchive` added to the shipped packages `scripts/third-party-notices.sh`
-walks, and CI's GPL-family scan over `vendor/libarchive-3.8.9/`.
+walks, and CI's GPL-family scan over `vendor/libarchive-3.8.11/`.
 
 **Open item (E5-2, due before any GUI binary is distributed, E7): the WebView2 loader's licence text.**
 `lpk-gui.exe` links Microsoft's `WebView2LoaderStatic.lib`, vendored by `webview2-com-sys` 0.39.1 (which declares

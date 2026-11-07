@@ -54,7 +54,7 @@ fn the_stub_or_the_library_answers_an_open() {
     } else {
         let e = r.unwrap_err();
         assert_eq!(e.kind, ErrorKind::NotBuilt);
-        assert!(e.message.contains("vendor/libarchive-3.8.9"), "{e}");
+        assert!(e.message.contains("vendor/libarchive-3.8.11"), "{e}");
     }
 }
 

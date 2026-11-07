@@ -3,7 +3,7 @@
 The archive formats WinRAR and 7-Zip document as readable (WinRAR's help page "Supported archive formats";
 7-Zip 26.05's "Supported formats" list), each with the route LitePack reads it by, or a named gap with the
 reason. Every foreign reader runs in a sandboxed worker (D-97): the pure-Rust readers of E4-3 in `lpk-worker`
-(LPAC by default, the restricted token as an opt-in), libarchive 3.8.9 in `lpk-worker-libarchive` (E4-4; LPAC
+(LPAC by default, the restricted token as an opt-in), libarchive 3.8.11 in `lpk-worker-libarchive` (E4-4; LPAC
 only — the host refuses the restricted token for it). The host routes by magic (`lpk_core::foreign::detect_file`),
 never by extension. Source of the design: `docs/notes/e4-design.md` §3; the decisions: D-97, D-99, D-106.
 
@@ -26,8 +26,8 @@ never by extension. Source of the design: `docs/notes/e4-design.md` §3; the dec
 | UUE (uuencode, base64) | yes | — | libarchive worker (a single file, or a tar inside) | — |
 | XZ inside RPM/UUE, gzip inside UUE | — | — | libarchive worker (its filters) | bzip2 inside them |
 | XAR | — | yes | — | not built: libarchive's XAR reader needs an XML parser (not linked) |
-| WIM, CHM, MSI (Compound), NSIS, IHEX | — | yes | — | not built: no reader in libarchive 3.8.9; 7-Zip handlers excluded (D-89 (a)) |
-| 7-Zip's disk images and file systems (APFS, DMG, FAT, GPT, HFS, MBR, NTFS, QCOW2, SquashFS, VDI, VHD, VHDX, VMDK, ext, CramFS, UEFI, …) | — | yes | — | not built: no reader in libarchive 3.8.9 for these; 7-Zip handlers excluded (D-89 (a)) |
+| WIM, CHM, MSI (Compound), NSIS, IHEX | — | yes | — | not built: no reader in libarchive 3.8.11; 7-Zip handlers excluded (D-89 (a)) |
+| 7-Zip's disk images and file systems (APFS, DMG, FAT, GPT, HFS, MBR, NTFS, QCOW2, SquashFS, VDI, VHD, VHDX, VMDK, ext, CramFS, UEFI, …) | — | yes | — | not built: no reader in libarchive 3.8.11 for these; 7-Zip handlers excluded (D-89 (a)) |
 | ZIPX (WinZip's extended methods) | yes | partly | pure Rust for the methods `zip` reads | the methods above |
 
 Limits that are not gaps of a format: a volume set holds at most 13 volumes (the worker's bootstrap page carries

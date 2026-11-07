@@ -1,4 +1,4 @@
-//! libarchive 3.8.9's read side for LitePack's sandboxed `lpk-worker-libarchive` (E4-4; design
+//! libarchive 3.8.11's read side for LitePack's sandboxed `lpk-worker-libarchive` (E4-4; design
 //! `docs/notes/e4-design.md` §3): hand-written bindings ([`ffi`], a real build only) and a small
 //! safe wrapper, [`Archive`], over one archive given as one or more volume files.
 //!
@@ -6,11 +6,20 @@
 //! [`ReadFilter`]), never libarchive's `…_all`. It runs only inside the sandboxed worker: the
 //! host never links this crate.
 //!
-//! When `vendor/libarchive-3.8.9/` is absent the crate is a stub (see `build.rs`): [`BUILT`] is
+//! When `vendor/libarchive-3.8.11/` is absent the crate is a stub (see `build.rs`): [`BUILT`] is
 //! false and [`Archive::open`] fails with [`ErrorKind::NotBuilt`].
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use std::fs::File;
+
+// The C codecs libarchive's filters call are linked through these crates (they build zlib, liblzma
+// and libzstd statically); nothing here calls them from Rust.
+#[cfg(lpk_libarchive)]
+extern crate liblzma_sys;
+#[cfg(lpk_libarchive)]
+extern crate libz_sys;
+#[cfg(lpk_libarchive)]
+extern crate zstd_sys;
 
 #[cfg(lpk_libarchive)]
 pub mod ffi;
@@ -29,7 +38,7 @@ pub use stub::Archive;
 pub const BUILT: bool = cfg!(lpk_libarchive);
 
 /// The vendored libarchive release.
-pub const VERSION: &str = "3.8.9";
+pub const VERSION: &str = "3.8.11";
 
 /// A libarchive format reader, registered by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

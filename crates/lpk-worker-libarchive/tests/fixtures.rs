@@ -34,7 +34,7 @@ fn more_volumes(name: &str) -> Vec<File> {
 
 fn skipped(what: &str) -> bool {
     if !lpk_libarchive_sys::BUILT {
-        eprintln!("SKIPPED {what}: libarchive is not built (vendor/libarchive-3.8.9 absent)");
+        eprintln!("SKIPPED {what}: libarchive is not built (vendor/libarchive-3.8.11 absent)");
         return true;
     }
     false

@@ -1,4 +1,4 @@
-//! The stub used while `vendor/libarchive-3.8.9/` is absent: every open fails with
+//! The stub used while `vendor/libarchive-3.8.11/` is absent: every open fails with
 //! [`ErrorKind::NotBuilt`](crate::ErrorKind::NotBuilt), and no other method can be reached.
 
 use crate::{Entry, Error, OpenSpec};

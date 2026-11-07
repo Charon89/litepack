@@ -9,7 +9,7 @@
 //!   header's encrypted flag and its `UNP_VER` (below 29: RAR 1.5/2.x compression, which
 //!   libarchive does not decode) unless the member is stored.
 //! * RAR 5: an archive encryption header; each file header's encryption extra record and its
-//!   dictionary size (above 64 MiB is beyond libarchive 3.8.9's RAR5 reader).
+//!   dictionary size (above 64 MiB is beyond libarchive 3.8.11's RAR5 reader).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -23,14 +23,14 @@ const MAX_BLOCKS: usize = 1 << 20;
 /// RAR 5's largest header (2 MiB, by its format description).
 const RAR5_MAX_HEADER: u64 = 2 << 20;
 
-/// The largest RAR5 dictionary libarchive 3.8.9 decodes.
+/// The largest RAR5 dictionary libarchive 3.8.11 decodes.
 pub const RAR5_MAX_DICT: u64 = 64 << 20;
 
 const MAGIC: [u8; 6] = *b"Rar!\x1a\x07";
 
 fn gap(what: &str) -> Option<String> {
     Some(format!(
-        "rar: {what} (named gap: libarchive 3.8.9 does not read it; see docs/FORMATS.md)"
+        "rar: {what} (named gap: libarchive 3.8.11 does not read it; see docs/FORMATS.md)"
     ))
 }
 

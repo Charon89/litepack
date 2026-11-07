@@ -3,7 +3,7 @@
 //! `LitePack.Test.La.<pid>.<n>`, deleted at the end) and unsandboxed on Linux (decision (d)).
 //! The restricted token is refused for these formats before any worker starts.
 //!
-//! The listing and extraction checks need libarchive; while `vendor/libarchive-3.8.9/` is
+//! The listing and extraction checks need libarchive; while `vendor/libarchive-3.8.11/` is
 //! absent they are skipped with a message (the named-gap and refusal checks run regardless,
 //! since the RAR pre-check runs in the worker before libarchive).
 #![cfg(any(windows, target_os = "linux"))]
@@ -133,7 +133,7 @@ fn fixtures_extract_with_blake3_equality_through_the_host() {
     if !lpk_libarchive_sys::BUILT {
         eprintln!(
             "SKIPPED fixtures_extract_with_blake3_equality_through_the_host: libarchive is not \
-             built (vendor/libarchive-3.8.9 absent)"
+             built (vendor/libarchive-3.8.11 absent)"
         );
         return;
     }

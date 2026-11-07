@@ -11,7 +11,7 @@ pseudo-random bytes; mtime 2024-01-02 03:04:05 UTC). `manifest.b3` holds the BLA
 | `rar5-vol.part1.rar` … `part3.rar` | `rar` 7.00 (`-ma5 -v20k`) | a three-volume set |
 | `gap-rar5-encrypted.rar` | `rar` 7.00 (`-ma5 -pLitePack`) | named gap: encrypted data |
 | `gap-rar5-encrypted-headers.rar` | `rar` 7.00 (`-ma5 -hpLitePack`) | named gap: encrypted headers |
-| `rar5-sfx.sfx` | the generator: a 4 KiB stub of our own (`MZ`, `PE\0\0`) + `rar5.rar` | WinRAR's SFX module is not redistributable, so it is not used |
+| `rar5-sfx.sfx` | the generator: a 64 KiB stub (libarchive scans for the signature only from 0x10000 on, 16-byte aligned, within 512 KiB) of our own (`MZ`, `PE\0\0`) + `rar5.rar` | WinRAR's SFX module is not redistributable, so it is not used |
 | `rar4.rar`, `rar4-vol.rar`/`.r00`/`.r01` | the generator, stored members, from RARLAB's RAR 4.x format description | RAR 7.00 no longer writes RAR 4 (`-ma4` exits 7) |
 | `gap-rar4-solid.rar`, `gap-rar4-encrypted.rar`, `gap-rar4-encrypted-headers.rar`, `gap-rar20.rar` | the generator (the flag or version byte of each gap) | named gaps |
 | `cab-stored.cab`, `cab-mszip.cab`, `cab-lzx.cab` | Windows `makecab` (Windows 11 Pro 10.0.26200), a `.ddf` per file | `LZX` with `CompressionMemory=21` |

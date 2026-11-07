@@ -1,6 +1,6 @@
 [package]
 name = "lpk-libarchive-sys"
-description = "libarchive 3.8.9's read side (vendored, built with cc against a committed config.h) behind hand-written bindings and a small safe wrapper, for the sandboxed lpk-worker-libarchive only"
+description = "libarchive 3.8.11's read side (vendored, built with cc against a committed config.h) behind hand-written bindings and a small safe wrapper, for the sandboxed lpk-worker-libarchive only"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

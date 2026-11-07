@@ -1,4 +1,4 @@
-//! Builds libarchive 3.8.9's read side from `vendor/libarchive-3.8.9/` with `cc` against the
+//! Builds libarchive 3.8.11's read side from `vendor/libarchive-3.8.11/` with `cc` against the
 //! committed `config.h` of the target (design `docs/notes/e4-design.md` §3).
 //!
 //! Only the files in [`SOURCES`] are compiled: the read core, the readers `rar`, `rar5`,
@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 /// The vendored release, relative to the workspace root.
-const VENDOR: &str = "vendor/libarchive-3.8.9";
+const VENDOR: &str = "vendor/libarchive-3.8.11";
 
 /// The C files compiled, relative to `VENDOR/libarchive/`. To be checked against the vendored
 /// tree when it lands (a file missing from the tree fails the build, never silently).
@@ -22,12 +22,14 @@ const SOURCES: &[&str] = &[
     // The read core and what it needs.
     "archive_acl.c",
     "archive_check_magic.c",
+    "archive_crc32.c",
     "archive_entry.c",
     "archive_entry_sparse.c",
     "archive_entry_stat.c",
     "archive_entry_strmode.c",
     "archive_entry_xattr.c",
     "archive_options.c",
+    "archive_random.c",
     "archive_read.c",
     "archive_read_add_passphrase.c",
     "archive_read_set_options.c",
@@ -104,6 +106,7 @@ fn main() {
         .include(&lib)
         .define("HAVE_CONFIG_H", None)
         .define("LIBARCHIVE_STATIC", None)
+        .define("LZMA_API_STATIC", None)
         .warnings(false);
     for dep in ["Z", "LZMA", "ZSTD"] {
         if let Ok(inc) = std::env::var(format!("DEP_{dep}_INCLUDE")) {
@@ -124,5 +127,9 @@ fn main() {
         build.file(p);
     }
     build.compile("archive");
+    if windows {
+        // archive_random.c (reached from archive_util.c) calls BCryptGenRandom; never run by a reader.
+        println!("cargo::rustc-link-lib=bcrypt");
+    }
     println!("cargo::rustc-cfg=lpk_libarchive");
 }
