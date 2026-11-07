@@ -35,16 +35,13 @@ case "$target" in
     arch=x64
     [[ "$target" == aarch64-* ]] && arch=ARM64
     if [[ -n "${LPK_CMAKE_GENERATOR:-}" ]]; then
-      gen="$LPK_CMAKE_GENERATOR"
+      gen_args=(-G "$LPK_CMAKE_GENERATOR" -A "$arch")
     else
-      # Newest Visual Studio generator this CMake knows, preferring 17 2022.
-      gen="Visual Studio 17 2022"
-      if ! "$cmake" --help | grep -q "$gen"; then
-        gen="$("$cmake" --help | grep -o 'Visual Studio [0-9]* [0-9]*' | sort -u | sort -k3 -n | tail -n 1)"
-      fi
+      # CMake's default generator: the newest Visual Studio that is installed. A generator CMake merely knows may have
+      # no instance (windows-2025 in 2026-11 lists "Visual Studio 17 2022" but has only Visual Studio 2026).
+      gen_args=(-A "$arch")
     fi
-    echo "libarchive-config: generator '$gen', platform $arch" >&2
-    gen_args=(-G "$gen" -A "$arch")
+    echo "libarchive-config: generator '${LPK_CMAKE_GENERATOR:-CMake default}', platform $arch" >&2
     ;;
   *)
     echo "unknown target $target" >&2
@@ -69,6 +66,7 @@ build="$(mktemp -d)"
 trap 'rm -rf "$build"' EXIT
 "$cmake" -S "$src" -B "$build" "${gen_args[@]}" "${options[@]}" >&2
 [[ -f "$build/config.h" ]] || { echo "CMake wrote no config.h" >&2; exit 1; }
+grep -E '^CMAKE_GENERATOR(_PLATFORM)?:' "$build/CMakeCache.txt" >&2 || true
 
 {
   cat <<EOF
