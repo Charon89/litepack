@@ -12,7 +12,8 @@ own files work in the book. Never copy the text. What the checks cover:
 
 - The structural guard is the include allow-list (h) with (f). (h): in every file under `src/`, a `{{#...}}` directive
   is only an `{{#include}}` that resolves inside `src/` (such as the footer), or the exact wrapper include in
-  `src/spec/<name>.md`; `rustdoc_include`, `playground` and the rest fail. (f): there is no `{{#` inside `docs/spec/`.
+  `src/spec/<name>.md`, `src/cli/<name>.md` or `src/cli/<name>-<N>.md`; `rustdoc_include`, `playground` and the rest
+  fail. (f): there is no `{{#` inside `docs/spec/` or `docs/cli/`.
   So nothing outside `src/`, `docs/spec/` and `docs/cli/` can reach the site by inclusion. Both mirror mdBook 0.5.4's directive
   pattern (whitespace and line breaks inside a directive count; a file that is not UTF-8 fails); an mdBook upgrade
   must re-check it.

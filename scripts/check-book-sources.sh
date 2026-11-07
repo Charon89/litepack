@@ -34,7 +34,8 @@
 #       (`[book] src` must be "src"). (i) and (j) are allow-lists, not deny-lists, because mdBook's Markdown and
 #       TOML parsers accept many spellings of the same thing (entities, reference links, dotted keys, spaced
 #       headers); see allow_scan for the exact shapes. (k) no symlink under book/ (the build output aside) or
-#       docs/spec/ or docs/cli/ (mdBook follows symlinks, find -type f does not). (h) also rejects a backslash in an include
+#       docs/spec/ or docs/cli/ (mdBook follows symlinks, find -type f does not). (h) also rejects a backslash
+#       in an include
 #       target, which a Windows build would resolve outside src/.
 # The second line of defence is (c) and (e), by name, and (g), by a content sample. Residual risk: text reworded
 # by hand into the book's own pages cannot be found mechanically; the guards stop includes, routes and
@@ -68,7 +69,7 @@ scan_directives() {
     use Encode qw(decode FB_CROAK);
     BEGIN { $mode = shift @ARGV; $root = shift @ARGV; }
     chomp; my $p = $_;
-    open my $h, "<:raw", $p or next;
+    open my $h, "<:raw", $p or do { print "$p:0: cannot be read: $!\n"; next };
     my $s; { local $/; $s = <$h>; } close $h;
     my $line = sub { my $o = shift; my $pre = substr($s, 0, $o); 1 + ($pre =~ tr/\n//) };
     my $u = eval { decode("UTF-8", $s, FB_CROAK) };
@@ -238,7 +239,8 @@ check_sources() {
     local fence
     # Lines end at LF, CRLF or a lone CR, as in CommonMark.
     fence="$(for f in "$cli"/*.[1-9]; do [ -f "$f" ] && perl -e '
-        open my $h, "<:raw", $ARGV[0] or exit; local $/; my $s = <$h>; my $n = 0;
+        open my $h, "<:raw", $ARGV[0] or do { print "$ARGV[0]:0: cannot be read: $!\n"; exit };
+        local $/; my $s = <$h>; my $n = 0;
         for my $l (split /\r\n|\r|\n/, $s, -1) { $n++; print "$ARGV[0]:$n:$l\n" if $l =~ /^[ \t]*`{4,}/ }
       ' "$f"; done || true)"
     if nonblank "$fence"; then printf '(l) a man-page line of four or more backticks (FILE:LINE:text): %s\n' "$fence"; fail=1; fi
@@ -309,7 +311,7 @@ scan_fingerprint() {
   find "$2" -type f -print0 | perl -0ne '
     BEGIN { open my $f, "<", shift @ARGV or die; $/ = "\n"; chomp(@fp = <$f>); close $f; $/ = "\0"; }
     chomp; my $p = $_;
-    open my $h, "<:raw", $p or next; local $/; my $c = <$h>; close $h;
+    open my $h, "<:raw", $p or do { print "$p: cannot be read: $!\n"; next }; local $/; my $c = <$h>; close $h;
     $c =~ s/<[^>]*>//g; $c =~ s/&[#A-Za-z0-9]+;//g; $c =~ s/[^A-Za-z0-9]//g;
     for my $e (@fp) { my ($n, $s) = split /:/, $e, 2; if (index($c, $s) >= 0) { print "$p: method document line $n\n"; last; } }
   ' "$1"
@@ -341,7 +343,14 @@ check_built() {
       fi
     elif [[ "$name" =~ ^([A-Za-z0-9_-]+)\.([1-9])$ ]]; then
       html="$built/cli/${BASH_REMATCH[1]}-${BASH_REMATCH[2]}.html"
-      text="$(tr -d '\r' < "$f" | awk '/^\.TH / && NF >= 3 { print $1" "$2" "$3; exit }')"
+      # perl reads the whole file, so no writer is left to die of SIGPIPE on a large page
+      text="$(perl -e '
+        open my $h, "<:raw", $ARGV[0] or exit; local $/; my $s = <$h>;
+        for my $l (split /\r\n|\r|\n/, $s) {
+          my @w = split " ", $l;
+          if ($l =~ /^\.TH / && @w >= 3) { print "$w[0] $w[1] $w[2]"; last }
+        }
+      ' "$f")"
       if [ -z "$text" ]; then echo "(d) docs/cli/$name has no \`.TH\` line to look for"; fail=1; continue; fi
       text="${text//&/&amp;}"; text="${text//</&lt;}"; text="${text//>/&gt;}"
     else continue; fi
@@ -579,6 +588,20 @@ self_test() {
   expect_fail l "five backticks" check_sources "$t/lc4"
   make_tree "$t/hs"; printf '{{#include ../../../docs/cli/tool.md}}\n\n{{#include ../footer.md}}\n' > "$t/hs/book/src/spec/a.md"
   expect_fail h "a spec page including a docs/cli source" check_sources "$t/hs"
+  # E9-4 fix round 2
+  make_tree "$t/big"
+  perl -e 'print ".TH tool 1  \"tool 0.1\"\n"; print "filler line of man page text without anything special\n" x 50000;' \
+    > "$t/big/docs/cli/tool.1"
+  if [ "$(wc -c < "$t/big/docs/cli/tool.1")" -le 2000000 ]; then echo "self-test FAILED: the big man page is under 2 MB"; exit 1; fi
+  expect_pass "a man page over 2 MB, sources" check_sources "$t/big"
+  expect_pass "a man page over 2 MB, built" check_built "$t/big" "$t/big/site"
+  make_tree "$t/ur"; chmod 000 "$t/ur/docs/cli/tool.md" 2>/dev/null || true
+  if [ ! -r "$t/ur/docs/cli/tool.md" ]; then
+    expect_fail f "an unreadable docs/cli file" check_sources "$t/ur"
+    chmod 644 "$t/ur/docs/cli/tool.md"
+  else
+    echo "SKIPPED (f) unreadable-file self-test: chmod 000 does not make a file unreadable here"
+  fi
   echo "self-test: all checks proved"
 }
 
