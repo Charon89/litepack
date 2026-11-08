@@ -205,6 +205,16 @@ button.primary:hover:not(:disabled) {
   flex: 1;
 }
 
+/* E7-7: an update notice, its notes under its text. */
+.notice .update-body {
+  flex: 1;
+}
+
+.notice .update-notes {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
+
 /* The label band (E5-12): the archive's name, the gauge and the facts. */
 .label {
   padding: 14px 20px 12px;

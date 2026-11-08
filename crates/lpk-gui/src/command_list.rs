@@ -39,4 +39,7 @@ pub const COMMANDS: &[&str] = &[
     "rollback_run",
     "append_plan",
     "append_run",
+    "update_install",
+    "update_skip",
+    "open_release_page",
 ];

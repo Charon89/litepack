@@ -423,8 +423,10 @@ async function saveSettings(next, undo) {
   }
 }
 
-function wireSettings() {
+function wireSettings(updater) {
   const box = $("update-check");
+  // A build without the updater (the Store's, E7-4) offers no update setting.
+  box.closest("label").hidden = !updater;
   box.checked = saved.update_check;
   box.addEventListener("change", () => saveSettings({ ...saved, update_check: box.checked }, () => (box.checked = !box.checked)));
   for (const radio of document.querySelectorAll("input[name=theme]")) {
@@ -529,6 +531,52 @@ function noticeText(n) {
   }
 }
 
+// E7-7: a newer version, with its notes. The installed copy offers "Install and restart" (the
+// only way anything installs), "Later" (dismiss) and "Skip this version"; a portable copy only
+// links to the release page, since the installer would turn it into an installed copy.
+function updateNotice(item, text, dismiss, n) {
+  item.classList.add("update-notice");
+  const body = document.createElement("div");
+  body.className = "update-body";
+  body.append(text);
+  if (n.notes) {
+    const notes = document.createElement("p");
+    notes.className = "update-notes";
+    notes.textContent = n.notes;
+    body.append(notes);
+  }
+  const button = (label, action) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", action);
+    return b;
+  };
+  if (n.portable) {
+    text.textContent = t("notice.update.portable", { version: n.version });
+    const page = button(t("update.page"), () => core.invoke("open_release_page").catch(showError));
+    item.append(body, page, dismiss);
+    return;
+  }
+  dismiss.textContent = t("update.later");
+  const install = button(t("update.install"), async () => {
+    install.disabled = true;
+    try {
+      setStatus(t("update.downloading", { version: n.version }));
+      // On success the process ends; `false` means the user kept an operation running.
+      await core.invoke("update_install");
+    } catch (e) {
+      showError(e);
+    } finally {
+      install.disabled = false;
+    }
+  });
+  const skip = button(t("update.skip"), () =>
+    core.invoke("update_skip", { version: n.version }).then(() => item.remove(), showError),
+  );
+  item.append(body, install, dismiss, skip);
+}
+
 function showNotices(notices) {
   const list = $("notices");
   for (const n of notices) {
@@ -542,7 +590,11 @@ function showNotices(notices) {
     dismiss.addEventListener("click", () => {
       item.remove();
     });
-    item.append(text, dismiss);
+    if (n.kind === "update") {
+      updateNotice(item, text, dismiss, n);
+    } else {
+      item.append(text, dismiss);
+    }
     list.append(item);
   }
 }
@@ -812,7 +864,7 @@ async function main() {
   if (startup.settings_warning) {
     showNotices([{ kind: "settings", error: startup.settings_warning }]);
   }
-  wireSettings();
+  wireSettings(startup.updater);
   await wireShell();
   // A command line that did not parse is shown, and the window still takes later verbs.
   if (startup.error) {
@@ -836,7 +888,7 @@ async function main() {
     } else if (notice.type === "refused") {
       showNotices([{ kind: "refused", error: notice.error }]);
     } else if (notice.type === "update") {
-      showNotices([{ kind: "update", version: notice.version }]);
+      showNotices([{ kind: "update", version: notice.version, notes: notice.notes, portable: notice.portable }]);
     }
   };
   await core.invoke("subscribe", { channel });

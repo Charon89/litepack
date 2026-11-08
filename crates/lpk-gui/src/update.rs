@@ -8,8 +8,133 @@
 //! no install, never an unverified one. With the check off in the settings, nothing is
 //! requested at all.
 
-/// The key `tauri.conf.json` carries until E7-7 puts the owner's in.
+/// The key `tauri.conf.json` carries until E7-1 supplies the owner's (E7-7 runs on test keys).
 pub const PLACEHOLDER_KEY: &str = "E7-7 replaces this with the release signing public key";
+
+/// The one place the repository is named: every release URL below is built from it.
+macro_rules! repository {
+    () => {
+        "Charon89/litepack"
+    };
+}
+
+/// The GitHub repository the releases come from.
+pub const REPOSITORY: &str = repository!();
+
+/// The prefix every download URL must start with (E7-7, `docs/notes/e7-design.md` section 6):
+/// the plugin refuses a non-HTTPS endpoint but only warns about a download URL, so the GUI
+/// refuses a `url` outside the repository's release assets before anything is downloaded.
+pub const RELEASE_DOWNLOAD_PREFIX: &str =
+    concat!("https://github.com/", repository!(), "/releases/download/");
+
+/// The release page a portable copy links to (it never downloads, section 6).
+pub const RELEASES_PAGE: &str = concat!("https://github.com/", repository!(), "/releases/latest");
+
+/// Whether `url` (as the plugin parsed it, so `..` segments are already resolved) is one of the
+/// release assets under `prefix` ([`RELEASE_DOWNLOAD_PREFIX`] in the shipped GUI; a local
+/// server's in the tests). Compared byte for byte: the path is case-sensitive, so no case
+/// folding; and something must follow the prefix, with no backslash, query, fragment or control
+/// character.
+pub fn download_allowed(url: &str, prefix: &str) -> bool {
+    let Some(rest) = url.strip_prefix(prefix) else {
+        return false;
+    };
+    prefix.ends_with('/')
+        && !rest.is_empty()
+        && !rest.starts_with('/')
+        && !rest
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\\' | '?' | '#'))
+}
+
+/// What a copy does with a newer version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The installed copy: notes with "Install and restart", "Later" and "Skip this version".
+    Install,
+    /// A portable copy: a notice with a link to the release page, never a download (the
+    /// installer would turn the portable copy into an installed one).
+    NotifyOnly,
+}
+
+/// The mode for a copy that is `portable` or not.
+pub fn mode(portable: bool) -> Mode {
+    if portable {
+        Mode::NotifyOnly
+    } else {
+        Mode::Install
+    }
+}
+
+/// How often the check runs at most.
+pub const SECONDS_PER_DAY: u64 = 86_400;
+
+/// The updater's local state (`update.json` in the state folder, never the page's to write): the
+/// day of the last check and the version the user skipped.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct State {
+    /// The last check's day, in days since the Unix epoch (UTC).
+    #[serde(default)]
+    pub last_check_day: Option<u64>,
+    /// The version "Skip this version" was pressed for.
+    #[serde(default)]
+    pub skipped: Option<String>,
+}
+
+impl State {
+    /// Read `path`; a missing or unreadable file is the empty state (a check is then due).
+    pub fn load(path: &std::path::Path) -> State {
+        std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    /// Write to `path`, temp-then-rename.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(self).map_err(std::io::Error::other)?,
+        )?;
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Whether a check is due on `today` (days since the epoch): at most once a day.
+    pub fn due(&self, today: u64) -> bool {
+        self.last_check_day != Some(today)
+    }
+
+    /// Whether `version` is offered: not the skipped one, nor older than it (a newer one is).
+    pub fn offers(&self, version: &str) -> bool {
+        match &self.skipped {
+            None => true,
+            Some(s) => match (numeric(version), numeric(s)) {
+                (Some(v), Some(s)) => v > s,
+                _ => version.trim_start_matches('v') != s.trim_start_matches('v'),
+            },
+        }
+    }
+}
+
+/// Today in days since the Unix epoch (UTC).
+pub fn today() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / SECONDS_PER_DAY)
+        .unwrap_or(0)
+}
+
+/// `1.2.3` (an optional `v`, no pre-release) as numbers, for the skip comparison.
+fn numeric(v: &str) -> Option<Vec<u64>> {
+    v.trim_start_matches('v')
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect()
+}
 
 /// What the gate decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +256,138 @@ mod tests {
         assert_eq!(gate(true, TEST_KEY), Gate::Check);
         assert_eq!(gate(false, TEST_KEY), Gate::Off);
         assert_eq!(gate(false, PLACEHOLDER_KEY), Gate::Off);
+    }
+
+    #[test]
+    fn the_release_prefix_is_built_from_the_repository() {
+        assert_eq!(
+            RELEASE_DOWNLOAD_PREFIX,
+            format!("https://github.com/{REPOSITORY}/releases/download/")
+        );
+        assert!(RELEASES_PAGE.starts_with(&format!("https://github.com/{REPOSITORY}/")));
+    }
+
+    #[test]
+    fn only_release_assets_may_be_downloaded() {
+        let p = RELEASE_DOWNLOAD_PREFIX;
+        let ok = format!("{p}v0.2.0/LitePack_0.2.0_x64-setup.exe");
+        assert!(download_allowed(&ok, p));
+        for bad in [
+            // Another repository, another host, plain HTTP, another case of the path.
+            "https://github.com/Charon89/other/releases/download/v1/x.exe".to_owned(),
+            "https://github.com/charon89/litepack/releases/download/v1/x.exe".to_owned(),
+            "https://github.com/Charon89/LitePack/releases/download/v1/x.exe".to_owned(),
+            "http://github.com/Charon89/litepack/releases/download/v1/x.exe".to_owned(),
+            "https://github.com.evil.example/Charon89/litepack/releases/download/v1/x.exe"
+                .to_owned(),
+            "https://github.com@evil.example/Charon89/litepack/releases/download/v1/x.exe"
+                .to_owned(),
+            "https://evil.example/https://github.com/Charon89/litepack/releases/download/x"
+                .to_owned(),
+            // The prefix alone, or with something odd after it.
+            p.to_owned(),
+            format!("{p}/x.exe"),
+            format!("{p}v1/x.exe?y=1"),
+            format!("{p}v1/x.exe#y"),
+            format!("{p}v1\\x.exe"),
+            format!("{p}v1/x\nexe"),
+            // Not under `releases/download/`.
+            "https://github.com/Charon89/litepack/archive/v1.zip".to_owned(),
+            String::new(),
+        ] {
+            assert!(!download_allowed(&bad, p), "{bad}");
+        }
+        // A prefix without its closing slash allows nothing.
+        assert!(!download_allowed(&ok, p.trim_end_matches('/')));
+    }
+
+    #[test]
+    fn portable_copies_only_notify() {
+        assert_eq!(mode(true), Mode::NotifyOnly);
+        assert_eq!(mode(false), Mode::Install);
+    }
+
+    #[test]
+    fn the_check_runs_at_most_once_a_day() {
+        let mut s = State::default();
+        assert!(s.due(20_000));
+        s.last_check_day = Some(20_000);
+        assert!(!s.due(20_000));
+        assert!(s.due(20_001));
+        let now = today();
+        assert!(now > 20_000, "{now}");
+    }
+
+    #[test]
+    fn a_skipped_version_is_not_offered_again_but_a_newer_one_is() {
+        let mut s = State::default();
+        assert!(s.offers("0.2.0"));
+        s.skipped = Some("0.2.0".into());
+        assert!(!s.offers("0.2.0"));
+        assert!(!s.offers("v0.2.0"));
+        assert!(!s.offers("0.1.9"));
+        assert!(s.offers("0.2.1"));
+        assert!(s.offers("0.10.0"));
+        s.skipped = Some("0.2.0-beta".into());
+        assert!(!s.offers("0.2.0-beta"));
+        assert!(s.offers("0.2.0"));
+    }
+
+    #[test]
+    fn the_state_survives_a_restart_and_a_bad_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("state").join("update.json");
+        assert_eq!(State::load(&p), State::default());
+        let s = State {
+            last_check_day: Some(20_400),
+            skipped: Some("0.3.0".into()),
+        };
+        s.save(&p).unwrap();
+        assert_eq!(State::load(&p), s);
+        std::fs::write(&p, b"{not json").unwrap();
+        assert_eq!(State::load(&p), State::default());
+    }
+
+    /// Every key anywhere under `v`, lower-cased.
+    fn keys(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, v) in m {
+                    out.push(k.to_lowercase());
+                    keys(v, out);
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|v| keys(v, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn the_shipped_configuration_sets_no_dangerous_option_and_no_http_endpoint() {
+        let conf: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut all = Vec::new();
+        keys(&conf, &mut all);
+        for k in &all {
+            assert!(!k.contains("dangerous"), "{k}");
+        }
+        let u = &conf["plugins"]["updater"];
+        assert_eq!(u["requireSignedVersion"], true);
+        assert_ne!(u["allowDowngrades"], true);
+        assert_eq!(u["windows"]["installMode"], "passive");
+        let (endpoints, _) = config(&conf);
+        assert!(!endpoints.is_empty());
+        for e in &endpoints {
+            assert!(
+                e.starts_with(&format!("https://github.com/{REPOSITORY}/releases/")),
+                "{e}"
+            );
+        }
     }
 
     #[test]

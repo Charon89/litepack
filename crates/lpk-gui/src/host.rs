@@ -46,6 +46,7 @@ use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, DragDropEvent, Manager, RunEvent, State, WebviewUrl, WindowEvent};
 use zeroize::Zeroizing;
 
+#[cfg(feature = "updater")]
 use crate::updates;
 
 /// How long the exit waits for the runs it cancelled.
@@ -68,6 +69,9 @@ struct Host {
     /// Second instances' command lines, handled one at a time in arrival order.
     forwarder: Forwarder<(Vec<String>, String)>,
     exit_confirmed: AtomicBool,
+    /// The newer version the check found, until it is installed (E7-7).
+    #[cfg(feature = "updater")]
+    pending_update: std::sync::Mutex<Option<Box<tauri_plugin_updater::Update>>>,
 }
 
 /// What `startup` tells the page.
@@ -82,6 +86,8 @@ struct StartupInfo {
     notices: Vec<StartupNotice>,
     /// Why the settings file was not used, if it was not (shown once, as a notice).
     settings_warning: Option<String>,
+    /// Whether this build has the updater (off in the Store build: no update setting shown).
+    updater: bool,
 }
 
 /// Pushed to the page's `subscribe` channel.
@@ -94,8 +100,14 @@ enum Notice {
     Activated { activation: Activation },
     /// A second instance's command line that does not parse.
     Refused { error: String },
-    /// The update check found a newer version (E7-7 adds the install).
-    Update { version: String },
+    /// The update check found a newer version: its notes, and whether this copy may install it
+    /// (a portable copy only links to the release page).
+    #[cfg_attr(not(feature = "updater"), allow(dead_code))]
+    Update {
+        version: String,
+        notes: String,
+        portable: bool,
+    },
 }
 
 /// A progress event as the page sees it.
@@ -131,7 +143,68 @@ async fn startup(host: State<'_, Host>) -> Result<StartupInfo, GuiError> {
         recovered: host.recovered,
         notices: host.notices.clone(),
         settings_warning: host.settings_warning.clone(),
+        updater: cfg!(feature = "updater"),
     })
+}
+
+/// "Install and restart" (E7-7; `docs/notes/e7-design.md` section 6): the quit path first (ask
+/// while an operation runs, then cancel), then the download from the release prefix, checked
+/// against the compiled-in key and the signed version; the plugin then closes the sessions
+/// (`on_before_exit`), starts the installer with `/P /UPDATE` and ends the process. `false`
+/// when the user chose to keep the operation running. A portable copy never installs.
+#[tauri::command]
+async fn update_install(handle: AppHandle, host: State<'_, Host>) -> Result<bool, GuiError> {
+    #[cfg(feature = "updater")]
+    {
+        if paths::dirs().portable {
+            return Err(GuiError::usage(
+                "a portable copy does not update itself; download the new version from the release page",
+            ));
+        }
+        let update = host
+            .pending_update
+            .lock()
+            .map_err(internal)?
+            .clone()
+            .ok_or_else(|| GuiError::usage("no update is waiting"))?;
+        let h = handle.clone();
+        let quit = blocking(move || Ok(may_exit(&h, &h.state::<Host>()))).await?;
+        if !quit {
+            return Ok(false);
+        }
+        let bytes = updates::download(&update, lpk_gui::update::RELEASE_DOWNLOAD_PREFIX)
+            .await
+            .map_err(internal)?;
+        blocking(move || update.install(bytes).map_err(internal)).await?;
+        Ok(true)
+    }
+    #[cfg(not(feature = "updater"))]
+    {
+        let _ = (handle, host);
+        Err(GuiError::usage("this build of LitePack has no updater"))
+    }
+}
+
+/// "Skip this version": that version is not offered again (a newer one is).
+#[tauri::command]
+async fn update_skip(host: State<'_, Host>, version: String) -> Result<(), GuiError> {
+    let _ = &host;
+    let file = paths::update_state_file()
+        .ok_or_else(|| GuiError::usage("LitePack has no state folder"))?;
+    blocking(move || {
+        let mut state = lpk_gui::update::State::load(&file);
+        state.skipped = Some(version);
+        state.save(&file).map_err(internal)
+    })
+    .await
+}
+
+/// Open the release page (a portable copy's update notice): one fixed address, never one from
+/// the page.
+#[tauri::command]
+async fn open_release_page() -> Result<(), GuiError> {
+    blocking(|| lpk_gui_sys::open_release_page(lpk_gui::update::RELEASES_PAGE).map_err(internal))
+        .await
 }
 
 /// The settings the page shows (no path among them, `lpk_gui::settings`).
@@ -947,12 +1020,15 @@ pub fn run() -> i32 {
     );
     let setup_app = app.clone();
 
-    let built = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // First: a second instance forwards its verbs here and exits before anything else runs.
         .plugin(tauri_plugin_single_instance::init(|handle, argv, cwd| {
             second_instance(handle, argv, cwd)
-        }))
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        }));
+    // The updater only in a build with the `updater` feature (not the Store's, E7-4).
+    #[cfg(feature = "updater")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let built = builder
         .invoke_handler(tauri::generate_handler![
             startup,
             settings,
@@ -991,6 +1067,9 @@ pub fn run() -> i32 {
             rollback_run,
             append_plan,
             append_run,
+            update_install,
+            update_skip,
+            open_release_page,
         ])
         .setup(move |a| {
             let app = setup_app;
@@ -1030,21 +1109,49 @@ pub fn run() -> i32 {
                 outbox: Outbox::new(),
                 forwarder,
                 exit_confirmed: AtomicBool::new(false),
+                #[cfg(feature = "updater")]
+                pending_update: std::sync::Mutex::new(None),
             });
-            // The update check, once the window is up; off in the settings, or without the
-            // release key (E7-7), it requests nothing.
-            let handle = a.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                match updates::check(&handle, check).await {
-                    updates::Outcome::Available(version) => {
-                        if let Some(host) = handle.try_state::<Host>() {
-                            push(&host, Notice::Update { version });
+            // The update check, once the window is up, at most once a day; off in the
+            // settings, or without the release key (E7-1), it requests nothing.
+            #[cfg(feature = "updater")]
+            {
+                let handle = a.handle().clone();
+                let exiting = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = paths::update_state_file();
+                    let before_exit = move || {
+                        if !exiting.shutdown(EXIT_JOIN) {
+                            eprintln!("lpk-gui: an operation did not stop within {EXIT_JOIN:?}");
                         }
+                    };
+                    let today = lpk_gui::update::today();
+                    match updates::scheduled(&handle, check, state.as_deref(), today, before_exit)
+                        .await
+                    {
+                        updates::Outcome::Available(update) => {
+                            if let Some(host) = handle.try_state::<Host>() {
+                                let notice = Notice::Update {
+                                    version: update.version.clone(),
+                                    notes: update.body.clone().unwrap_or_default(),
+                                    portable: lpk_gui::update::mode(paths::dirs().portable)
+                                        == lpk_gui::update::Mode::NotifyOnly,
+                                };
+                                if let Ok(mut p) = host.pending_update.lock() {
+                                    *p = Some(update);
+                                }
+                                push(&host, notice);
+                            }
+                        }
+                        updates::Outcome::Failed(e) => {
+                            eprintln!("lpk-gui: the update check: {e}")
+                        }
+                        _ => {}
                     }
-                    updates::Outcome::Failed(e) => eprintln!("lpk-gui: the update check: {e}"),
-                    _ => {}
-                }
-            });
+                });
+            }
+            #[cfg(not(feature = "updater"))]
+            let _ = check;
             let mut b = tauri::WebviewWindowBuilder::new(
                 a,
                 MAIN_WINDOW,

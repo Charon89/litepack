@@ -35,6 +35,46 @@ The GUI is a Tauri 2 app with no Node toolchain: static files in `apps/gui/`, th
 The icons in `crates/lpk-gui/icons` are a generated placeholder (`icons/make-placeholder.py`, then
 `cargo tauri icon`); the final set is the owner's (PLAN E5 decision (e)).
 
+## The updater (E7-7)
+
+`tauri-plugin-updater` =2.14.1, called from Rust alone (`crates/lpk-gui/src/updates.rs`; the plain-Rust parts in
+`crates/lpk-gui/src/update.rs`). Design: `docs/notes/e7-design.md` section 6.
+
+- **Endpoint and key.** `tauri.conf.json`'s `plugins.updater`: one HTTPS endpoint,
+  `https://github.com/Charon89/litepack/releases/latest/download/latest.json`, `requireSignedVersion: true`,
+  `windows.installMode: passive`, no `allowDowngrades` and no `dangerous*` option (a config test asserts all of
+  this). The `pubkey` stays a placeholder until E7-1 supplies the owner's minisign public key; until then the gate
+  makes no request at all.
+- **Flow.** With **Check for updates** on, the check runs once the window is up, at most once a day: the day is
+  recorded in `update.json` in the local state folder before the request, so a failed check waits for tomorrow.
+  A newer version shows its notes with **Install and restart**, **Later** (dismiss) and **Skip this version** (stored
+  in `update.json`; that version is not offered again, a newer one is). Nothing installs without the first. It runs
+  the quit path (asks while an operation runs, then cancels), downloads, and the plugin's `on_before_exit` closes the
+  sessions before `install` starts the NSIS installer with `/P /UPDATE` and the process exits. Per user, no UAC.
+  With the setting off, nothing is requested and `update.json` is not written.
+- **The release prefix.** Before any download, a `url` outside `https://github.com/Charon89/litepack/releases/download/`
+  is refused (`lpk_gui::update::RELEASE_DOWNLOAD_PREFIX`, built from the one `REPOSITORY` constant). The comparison is
+  byte for byte on the parsed URL: no case folding of the path, and nothing but a path may follow the prefix.
+- **Verification.** The plugin checks the downloaded installer's minisign signature against the compiled-in key, and
+  with `requireSignedVersion` that the signature's trusted comment names the announced version (CVE-2026-95625).
+- **Timeouts.** The check: 30 s (`CHECK_TIMEOUT`). The download: 10 minutes for the whole installer
+  (`DOWNLOAD_TIMEOUT`).
+- **Portable copies** (the `portable` marker) only notify: the notice links to
+  `https://github.com/Charon89/litepack/releases/latest`; they never download or install, since the installer would
+  turn the portable copy into an installed one.
+- **The Store build** (E7-4) turns the `updater` cargo feature off (`--no-default-features`): its tree has no
+  `tauri-plugin-updater` (`crates/lpk-gui/tests/updater_feature.rs` runs `cargo tree`), and the GUI shows no update
+  setting. The Store updates it.
+- **Test keys.** The tests (`updates.rs`) generate a minisign key pair at test time with the `minisign` dev-dependency
+  (MIT), sign their manifests and payloads in memory, and serve them from a local server on `127.0.0.1` with plain
+  HTTP allowed by the test configuration alone. No key, public or secret, of the tests is committed, so E7-1's
+  `git log --all -S` for the secret-key header finds nothing. The tests cover: a correctly signed newer release
+  verifies; a bad signature in the manifest, a tampered payload, and a validly signed older release announced as a
+  newer version are each refused; a `url` off the release prefix is refused before any download (the server sees
+  only `latest.json`); with the check off, the server sees no request; and the check runs once a day and does not
+  offer a skipped version.
+- **Signing `latest.json`.** The owner's offline step (`scripts/updater-sign.sh`) belongs to E7-2.
+
 ## Licence checks of the GUI
 
 `cargo deny check` excludes `lpk-gui`, whose tree `crates/lpk-gui/deny.toml` checks for the Windows triples

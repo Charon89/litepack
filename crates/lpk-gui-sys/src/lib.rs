@@ -160,6 +160,35 @@ pub fn open_settings_uri(uri: &str) -> io::Result<()> {
     }
 }
 
+/// Open a GitHub release page in the default browser (E7-7: a portable copy's update notice):
+/// `url` must start with `https://github.com/` and hold no whitespace or control character, or
+/// this refuses with `InvalidInput` before the shell is called. Same call as
+/// [`open_settings_uri`]. The GUI passes one fixed string, never anything from the page.
+pub fn open_release_page(url: &str) -> io::Result<()> {
+    if !is_release_page(url) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only https://github.com/ pages may be opened here",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        windows_impl::open_uri(url)
+    }
+    #[cfg(not(windows))]
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Whether `url` is one `open_release_page` accepts.
+fn is_release_page(url: &str) -> bool {
+    const PREFIX: &str = "https://github.com/";
+    url.len() > PREFIX.len()
+        && url.starts_with(PREFIX)
+        && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 /// Whether `uri` is one `open_settings_uri` accepts.
 fn is_settings_uri(uri: &str) -> bool {
     const SCHEME: &str = "ms-settings:";
@@ -234,6 +263,29 @@ pub fn confirm(owner: Option<isize>, title: &str, text: &str) -> io::Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_github_pages_are_opened_as_release_pages() {
+        assert!(is_release_page(
+            "https://github.com/Charon89/litepack/releases/latest"
+        ));
+        for bad in [
+            "",
+            "https://github.com/",
+            "http://github.com/Charon89/litepack/releases/latest",
+            "https://github.com.evil.example/x",
+            "https://github.com@evil.example/x",
+            "ms-settings:defaultapps",
+            "file:///C:/Windows/notepad.exe",
+            "https://github.com/x y",
+            "https://github.com/x\ny",
+            "C:\\Windows\\notepad.exe",
+        ] {
+            assert!(!is_release_page(bad), "{bad:?}");
+            let e = open_release_page(bad).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
 
     #[test]
     fn only_settings_uris_are_opened() {

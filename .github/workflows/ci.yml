@@ -156,6 +156,16 @@ jobs:
       - name: The exe opens an archive from the command line
         shell: bash
         run: bash crates/lpk-gui/smoke.sh target/debug/lpk.exe target/release/lpk-gui.exe "$RUNNER_TEMP/gui-smoke"
+      # E7-7 (R320): the Store build (E7-4) turns the `updater` feature off; it builds and lints clean without it, and
+      # its tree holds no tauri-plugin-updater (also crates/lpk-gui/tests/updater_feature.rs).
+      - name: The Store build compiles without the updater
+        shell: bash
+        run: |
+          cargo clippy --locked -p lpk-gui --all-targets --no-default-features -- -D warnings
+          if cargo tree --locked -p lpk-gui --no-default-features -e normal --prefix none | grep -q '^tauri-plugin-updater '; then
+            echo "tauri-plugin-updater in the Store build's tree" >&2
+            exit 1
+          fi
       # E6-4: --register-shell --open-with and --unregister-shell on this runner's own registry (HKCU) leave it as
       # found, `.lpk` opens in LitePack and no UserChoice changes (the script refuses to run unless CI=true).
       - name: Shell registration leaves the registry as found
