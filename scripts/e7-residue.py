@@ -1,8 +1,14 @@
 """E7-6's residue check (R291; docs/notes/e7-design.md sections 3 and 5; E7-5 extends it).
 
-    python -I scripts/e7-residue.py snapshot <out.json>
-    python -I scripts/e7-residue.py diff <before.json> <after.json> [--allow-worker-profile]
+    python -I scripts/e7-residue.py snapshot <out.json> [--on-ci]
+    python -I scripts/e7-residue.py diff <before.json> <after.json>
+        [--allow-worker-profile | --require-worker-profile]
     python -I scripts/e7-residue.py --self-test
+
+`snapshot` refuses unless GITHUB_ACTIONS=true or --on-ci is given: use it only on a disposable
+machine. Every path it cannot read is printed and recorded; `diff` reports such a path as
+residue (`?`) even when both snapshots record it alike. --require-worker-profile allows the
+profile and fails unless both its folder and its Mappings key were added.
 
 `snapshot` records every file and folder under %APPDATA% and %LOCALAPPDATA% (path, size and
 modification time; a folder by its path alone, a link or junction by its path, never followed)
@@ -21,27 +27,48 @@ is 1 if any entry is not allowed.
 import argparse
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 # The worker's AppContainer profile (crates/lpk-sandbox-sys: APPCONTAINER_NAME).
 WORKER_MONIKER = "LitePack.Worker"
 
+REPARSE_POINT = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
 FILE_ROOTS = ("APPDATA", "LOCALAPPDATA")
-REG_ROOTS = (r"HKCU\Software", r"HKCU\Environment")
-APPCONTAINER = (r"HKCU\Software\Classes\Local Settings\Software\Microsoft\Windows"
-                r"\CurrentVersion\AppContainer")
+# HKCU\Software\Classes is the user's classes hive (UsrClass.dat) linked into HKCU\Software: it is
+# exported on its own as well, and `snapshot` refuses unless its `Local Settings` key (where the
+# AppContainer profiles are mapped) is in the result.
+REG_ROOTS = (r"HKCU\Software", r"HKCU\Software\Classes", r"HKCU\Environment")
+LOCAL_SETTINGS = r"HKCU\Software\Classes\Local Settings"
+APPCONTAINER = LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppContainer"
 MAPPINGS = APPCONTAINER + r"\Mappings"
+STORAGE = APPCONTAINER + r"\Storage"
+
+# Windows' own AppContainer bookkeeping (R301): after `DeleteAppContainerProfile`, Windows may keep
+# these parent keys; Windows decides their lifetime, not LitePack. Allowed only when empty in the
+# later snapshot (no value, no subkey); any value or subkey left under one is residue.
+APPCONTAINER_REASON = ("Windows' own AppContainer bookkeeping: an empty parent key whose lifetime "
+                       "DeleteAppContainerProfile decides (R301)")
 
 # Windows' own bookkeeping, which running any program changes. One entry per folder (`file`: the
-# folder or file and everything under it), key (`key`: the key and everything under it) or value
-# (`value`: a key and one value name). Nothing LitePack writes may be listed here: that is fixed
-# instead. Each entry's reason is printed beside every entry it allows.
+# folder or file and everything under it), key (`key`: the key and everything under it), value
+# (`value`: a key and one value name) or empty key (`empty-key`: that key alone, added and holding
+# nothing). Nothing LitePack writes may be listed here: that is fixed instead. Each entry's reason
+# is printed beside every entry it allows.
 ALLOW = [
+    {"kind": "empty-key", "path": APPCONTAINER, "reason": APPCONTAINER_REASON},
+    {"kind": "empty-key", "path": MAPPINGS, "reason": APPCONTAINER_REASON},
+    {"kind": "empty-key", "path": STORAGE, "reason": APPCONTAINER_REASON},
 ]
+
+# The environment variable that marks a disposable CI runner (GitHub Actions sets it).
+CI_ENV = "GITHUB_ACTIONS"
 
 
 def norm(s):
@@ -58,30 +85,51 @@ def under(path, root):
 # --- snapshot --------------------------------------------------------------------------------
 
 
+def long_path(p):
+    """`p` with the `\\\\?\\` prefix, so that no path length limit applies to the walk."""
+    p = os.path.abspath(p)
+    if p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + p[2:]
+    return "\\\\?\\" + p
+
+
+def record(path):
+    """What the walk records for `path`, never following it: (record, descend)."""
+    st = os.lstat(path)
+    if getattr(st, "st_file_attributes", 0) & REPARSE_POINT or stat.S_ISLNK(st.st_mode):
+        # A junction or a symbolic link (any reparse point): recorded, never followed.
+        return {"kind": "reparse", "mtime": st.st_mtime_ns}, False
+    if stat.S_ISDIR(st.st_mode):
+        return {"kind": "dir"}, True
+    return {"kind": "file", "size": st.st_size, "mtime": st.st_mtime_ns}, False
+
+
 def walk(root_dir, token, out):
-    """Record `root_dir`'s tree in `out` under names that start with %token%."""
-    stack = [(Path(root_dir), f"%{token}%")]
+    """Record `root_dir`'s tree in `out` under names that start with %token%; every path that
+    cannot be read is recorded as `unreadable` and printed."""
+    stack = [(long_path(root_dir), f"%{token}%")]
     while stack:
         d, name = stack.pop()
         try:
-            entries = list(os.scandir(d))
+            names = sorted(os.listdir(d))
         except OSError as e:
             out[name] = {"kind": "unreadable", "error": e.__class__.__name__}
+            print(f"unreadable: {name} ({e.__class__.__name__})")
             continue
-        for e in entries:
-            n = name + "\\" + e.name
+        for child in names:
+            n = name + "\\" + child
+            p = d + "\\" + child
             try:
-                is_junction = getattr(e, "is_junction", lambda: False)()
-                if e.is_symlink() or is_junction:
-                    out[n] = {"kind": "link"}
-                elif e.is_dir(follow_symlinks=False):
-                    out[n] = {"kind": "dir"}
-                    stack.append((Path(e.path), n))
-                else:
-                    st = e.stat(follow_symlinks=False)
-                    out[n] = {"kind": "file", "size": st.st_size, "mtime": st.st_mtime_ns}
+                rec, descend = record(p)
             except OSError as err:
                 out[n] = {"kind": "unreadable", "error": err.__class__.__name__}
+                print(f"unreadable: {n} ({err.__class__.__name__})")
+                continue
+            out[n] = rec
+            if descend:
+                stack.append((p, n))
 
 
 def parse_reg(text):
@@ -149,9 +197,12 @@ def read_reg_file(path):
     return parse_reg(data.decode(enc))
 
 
-def snapshot(out):
+def snapshot(out, on_ci):
     if os.name != "nt":
         raise SystemExit("e7-residue: snapshot runs on Windows only")
+    if not on_ci and os.environ.get(CI_ENV) != "true":
+        raise SystemExit(f"e7-residue: snapshot records this profile's registry; it runs only on a "
+                         f"disposable machine ({CI_ENV}=true, or --on-ci)")
     out = Path(out)
     files = {}
     for token in FILE_ROOTS:
@@ -166,23 +217,28 @@ def snapshot(out):
             subprocess.run(["reg.exe", "export", root, str(reg), "/y"], check=True,
                            stdout=subprocess.DEVNULL)
             registry.update(read_reg_file(reg))
+    if not any(under(k, LOCAL_SETTINGS) for k in registry):
+        raise SystemExit(f"e7-residue: the export holds no key under {LOCAL_SETTINGS}")
     out.write_text(json.dumps({"files": files, "registry": registry}, sort_keys=True),
                    encoding="utf-8")
-    print(f"snapshot {out}: {len(files)} files and folders, {len(registry)} keys")
+    unreadable = sum(1 for r in files.values() if r["kind"] == "unreadable")
+    print(f"snapshot {out}: {len(files)} files and folders ({unreadable} unreadable), "
+          f"{len(registry)} keys")
 
 
 # --- diff ------------------------------------------------------------------------------------
 
 
 def entries(snap):
-    """A snapshot as {(kind, path, value name): what it records}."""
+    """A snapshot as {(kind, path, value name) compared case-insensitively: (the path and name as
+    recorded, what it records)}."""
     e = {}
     for path, rec in snap["files"].items():
-        e[("file", path, None)] = rec
+        e[("file", norm(path), None)] = (path, None, rec)
     for key, values in snap["registry"].items():
-        e[("key", key, None)] = True
+        e[("key", norm(key), None)] = (key, None, True)
         for name, data in values.items():
-            e[("value", key, name)] = data
+            e[("value", norm(key), norm(name))] = (key, name, data)
     return e
 
 
@@ -192,16 +248,17 @@ def profile_sids(*snaps):
     for s in snaps:
         for key, values in s["registry"].items():
             parent, _, sid = key.rpartition("\\")
-            if norm(parent) == norm(MAPPINGS) and \
-                    norm(values.get("Moniker", "")) == norm(f'"{WORKER_MONIKER}"'):
+            if norm(parent) != norm(MAPPINGS):
+                continue
+            moniker = [v for n, v in values.items() if norm(n) == "moniker"]
+            if any(norm(v) == norm(f'"{WORKER_MONIKER}"') for v in moniker):
                 sids.add(norm(sid))
     return sids
 
 
-def is_profile(entry, sids):
-    """Whether `entry` belongs to the worker's profile: a path component is its moniker (its
+def is_profile(kind, path, sids):
+    """Whether an entry belongs to the worker's profile: a path component is its moniker (its
     folder under %LOCALAPPDATA%\\Packages, its AppContainer Storage key) or its SID."""
-    kind, path, _ = entry
     parts = [norm(p) for p in path.split("\\")]
     if kind == "file":
         return under(path, f"%LOCALAPPDATA%\\Packages\\{WORKER_MONIKER}") or \
@@ -209,9 +266,26 @@ def is_profile(entry, sids):
     return norm(WORKER_MONIKER) in parts or any(p in sids for p in parts)
 
 
-def allowed(entry):
-    """The allow-list's reason for `entry`, or None."""
-    kind, path, name = entry
+def empty_key(snap, key):
+    """Whether `key` is in `snap` holding nothing: no value, and no subkey but the R301 parents,
+    each holding nothing in turn."""
+    parents = {norm(a["path"]) for a in ALLOW if a["kind"] == "empty-key"}
+    k = norm(key)
+    found = False
+    for path, values in snap["registry"].items():
+        p = norm(path)
+        if p == k:
+            found = True
+            if values:
+                return False
+        elif p.startswith(k + "\\"):
+            if p not in parents or "\\" in p[len(k) + 1:] or not empty_key(snap, path):
+                return False
+    return found
+
+
+def allowed(kind, path, name, sign, after):
+    """The allow-list's reason for an entry, or None."""
     for a in ALLOW:
         if a["kind"] == "file" and kind == "file" and under(path, a["path"]):
             return a["reason"]
@@ -220,50 +294,73 @@ def allowed(entry):
         if a["kind"] == "value" and kind == "value" and norm(path) == norm(a["path"]) and \
                 norm(name) == norm(a["name"]):
             return a["reason"]
+        if a["kind"] == "empty-key" and kind == "key" and sign == "+" and \
+                norm(path) == norm(a["path"]) and empty_key(after, path):
+            return a["reason"]
     return None
 
 
-def show(entry, rec):
-    kind, path, name = entry
+def show(kind, path, name, rec):
     if kind == "value":
         return f"value {path} [{name or '@'}] = {rec}"
     if kind == "key":
         return f"key {path}"
     if rec.get("kind") == "file":
         return f"file {path} ({rec['size']} bytes, mtime {rec['mtime']})"
+    if rec.get("kind") == "unreadable":
+        return f"unreadable {path} ({rec.get('error')})"
     return f"{rec.get('kind')} {path}"
 
 
 def diff(before, after, allow_profile):
-    """The diff's lines and the number of entries not allowed."""
+    """The diff's lines and the number of entries not allowed. A path unreadable in either
+    snapshot is listed (and counted unless allowed) even when both record it alike: what lies
+    inside it was not seen."""
     b, a = entries(before), entries(after)
     sids = profile_sids(before, after)
     changes = []
-    for k in sorted(set(b) | set(a), key=lambda k: (k[0], norm(k[1]), k[2] or "")):
+    for k in sorted(set(b) | set(a), key=lambda k: (k[0], k[1], k[2] or "")):
         if k not in b:
-            changes.append(("+", k, a[k]))
+            changes.append(("+",) + a[k] + (k[0],))
         elif k not in a:
-            changes.append(("-", k, b[k]))
-        elif a[k] != b[k]:
-            changes.append(("~", k, a[k]))
+            changes.append(("-",) + b[k] + (k[0],))
+        elif a[k][2] != b[k][2]:
+            changes.append(("~",) + a[k] + (k[0],))
+        elif k[0] == "file" and a[k][2].get("kind") == "unreadable":
+            changes.append(("?",) + a[k] + (k[0],))
     # Keys that exist only as the profile's ancestors (created for it, holding no value of their
     # own that changed) belong to it too.
-    profile_keys = [k[1] for _, k, _ in changes if k[0] != "file" and is_profile(k, sids)]
+    profile_keys = [c[1] for c in changes if c[4] != "file" and is_profile(c[4], c[1], sids)]
+    valued = {norm(c[1]) for c in changes if c[4] == "value"}
     lines, bad = [], 0
-    for sign, k, rec in changes:
-        text = f"{sign} {show(k, rec)}"
-        reason = allowed(k)
-        ancestor = k[0] == "key" and sign == "+" and \
-            any(under(p, k[1]) and norm(p) != norm(k[1]) for p in profile_keys) and \
-            not any(c[1][0] == "value" and norm(c[1][1]) == norm(k[1]) for c in changes)
+    for sign, path, name, rec, kind in changes:
+        text = f"{sign} {show(kind, path, name, rec)}"
+        reason = allowed(kind, path, name, sign, after)
+        ancestor = kind == "key" and sign in "+-" and norm(path) not in valued and \
+            any(under(p, path) and norm(p) != norm(path) for p in profile_keys)
         if reason:
             lines.append(f"allowed: {text}  -- {reason}")
-        elif allow_profile and (is_profile(k, sids) or ancestor):
+        elif allow_profile and (is_profile(kind, path, sids) or ancestor) and \
+                not (kind == "file" and rec.get("kind") == "unreadable"):
             lines.append(f"profile: {text}")
         else:
             lines.append(f"RESIDUE: {text}")
             bad += 1
     return lines, bad
+
+
+def profile_present(lines):
+    """What the worker's profile lacks in a diff's lines: both its folder under
+    %LOCALAPPDATA%\\Packages and its Mappings key must be added. Empty when both are."""
+    folder = norm(f"profile: + dir %LOCALAPPDATA%\\Packages\\{WORKER_MONIKER}")
+    mapping = norm(f"profile: + key {MAPPINGS}\\S-1-15-2-")
+    missing = []
+    if not any(norm(line) == folder for line in lines):
+        missing.append(f"no added folder %LOCALAPPDATA%\\Packages\\{WORKER_MONIKER}")
+    if not any(norm(line).startswith(mapping) and "\\" not in line[len(mapping):]
+               for line in lines):
+        missing.append(f"no added key {MAPPINGS}\\S-1-15-2-...")
+    return missing
 
 
 def main(argv):
@@ -274,21 +371,29 @@ def main(argv):
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("snapshot")
     s.add_argument("out")
+    s.add_argument("--on-ci", action="store_true",
+                   help="this is a disposable machine (implied by GITHUB_ACTIONS=true)")
     d = sub.add_parser("diff")
     d.add_argument("before")
     d.add_argument("after")
     d.add_argument("--allow-worker-profile", action="store_true")
+    d.add_argument("--require-worker-profile", action="store_true",
+                   help="allow the profile, and fail unless its folder and Mappings key were added")
     a = ap.parse_args(argv)
     if a.cmd == "snapshot":
-        snapshot(a.out)
+        snapshot(a.out, a.on_ci)
         return 0
     load = lambda p: json.loads(Path(p).read_text(encoding="utf-8"))  # noqa: E731
-    lines, bad = diff(load(a.before), load(a.after), a.allow_worker_profile)
+    allow = a.allow_worker_profile or a.require_worker_profile
+    lines, bad = diff(load(a.before), load(a.after), allow)
     for line in lines:
         print(line)
-    flag = " (worker profile allowed)" if a.allow_worker_profile else ""
+    flag = " (worker profile allowed)" if allow else ""
     print(f"{len(lines)} differences{flag}, {bad} not allowed")
-    return 1 if bad else 0
+    missing = profile_present(lines) if a.require_worker_profile else []
+    for m in missing:
+        print(f"PROFILE MISSING: {m}")
+    return 1 if bad or missing else 0
 
 
 # --- tests (synthetic snapshots only, R294) --------------------------------------------------
@@ -313,7 +418,9 @@ def with_profile(s):
     reg[MAPPINGS + "\\" + SID] = {"DisplayName": '"LitePack.Worker"',
                                    "Moniker": '"LitePack.Worker"'}
     reg[MAPPINGS + "\\" + SID + r"\Children"] = {}
-    reg[APPCONTAINER + r"\Storage\litepack.worker"] = {"x": "dword:00000001"}
+    # A parent created for the profile alone, with no value of its own.
+    reg[STORAGE] = {}
+    reg[STORAGE + r"\litepack.worker"] = {"x": "dword:00000001"}
     return snap(files, reg)
 
 
@@ -355,10 +462,11 @@ class Tests(unittest.TestCase):
         try:
             after = snap(dict(self.base["files"], **{r"%LOCALAPPDATA%\cache\c\d": f()}),
                          {r"HKCU\Software\x": {"v": '"2"'}, MAPPINGS: {}})
-            # The key's own name differs in case only: the same key.
-            before = snap(self.base["files"], {r"HKCU\Software\x": {"v": '"1"'}, MAPPINGS: {}})
+            # The key's and the value's names differ in case only: the same key and value.
+            before = snap(self.base["files"], {r"HKCU\Software\X": {"V": '"1"'}, MAPPINGS: {}})
             lines, bad = diff(before, after, False)
             self.assertEqual(bad, 0, lines)
+            self.assertEqual(len(lines), 2, lines)
             self.assertIn("-- a test's reason", lines[1])
             self.assertIn("-- cache", lines[0])
             # A sibling of the allowed folder is not allowed.
@@ -371,10 +479,106 @@ class Tests(unittest.TestCase):
         after = with_profile(self.base)
         lines, bad = diff(self.base, after, False)
         self.assertEqual(bad, len(lines))
-        self.assertEqual(bad, 8)
+        self.assertEqual(bad, 9)
         lines, bad = diff(self.base, after, True)
         self.assertEqual(bad, 0, lines)
         self.assertTrue(all(line.startswith("profile: ") for line in lines))
+        self.assertEqual(profile_present(lines), [])
+
+    def test_a_parent_key_made_for_the_profile_needs_the_flag(self):
+        after = with_profile(self.base)
+        parent = f"+ key {STORAGE}"
+        self.assertIn(f"RESIDUE: {parent}", diff(self.base, after, False)[0])
+        self.assertIn(f"profile: {parent}", diff(self.base, after, True)[0])
+
+    def test_a_parent_key_with_a_value_of_its_own_is_residue(self):
+        after = with_profile(self.base)
+        after["registry"][STORAGE] = {"own": '"x"'}
+        lines, bad = diff(self.base, after, True)
+        self.assertEqual(bad, 2, lines)
+        self.assertIn(f"RESIDUE: + key {STORAGE}", lines)
+        self.assertIn(f'RESIDUE: + value {STORAGE} [own] = "x"', lines)
+
+    def test_empty_appcontainer_parents_left_by_windows_are_allowed(self):
+        # R301: after --remove-profile, the parents alone, empty.
+        after = snap(self.base["files"], dict(self.base["registry"], **{APPCONTAINER: {},
+                                                                        STORAGE: {}}))
+        lines, bad = diff(self.base, after, False)
+        self.assertEqual(bad, 0, lines)
+        self.assertTrue(all(line.startswith("allowed: + key ") for line in lines), lines)
+        # Anything left under one is residue, and the parent is no longer empty.
+        after["registry"][STORAGE + r"\litepack.worker"] = {}
+        lines, bad = diff(self.base, after, False)
+        self.assertIn(f"RESIDUE: + key {STORAGE}", lines)
+        self.assertIn(f"RESIDUE: + key {STORAGE}\\litepack.worker", lines)
+        # Its parent AppContainer holds it, so it is not empty either.
+        self.assertEqual(bad, 3, lines)
+        # A value in the parent itself too.
+        after = snap(self.base["files"], dict(self.base["registry"], **{STORAGE: {"v": '"1"'}}))
+        self.assertEqual(diff(self.base, after, False)[1], 2)
+
+    def test_the_profile_requirement_needs_its_folder_and_its_mapping(self):
+        after = with_profile(self.base)
+        del after["registry"][MAPPINGS + "\\" + SID]
+        del after["registry"][MAPPINGS + "\\" + SID + r"\Children"]
+        missing = profile_present(diff(self.base, after, True)[0])
+        self.assertEqual(len(missing), 1, missing)
+        self.assertIn("Mappings", missing[0])
+        files_gone = with_profile(self.base)
+        files_gone["files"] = dict(self.base["files"])
+        missing = profile_present(diff(self.base, files_gone, True)[0])
+        self.assertEqual(len(missing), 1, missing)
+        self.assertIn("Packages", missing[0])
+
+    def test_the_moniker_value_is_matched_without_case(self):
+        after = with_profile(self.base)
+        after["registry"][MAPPINGS + "\\" + SID] = {"moniker": '"litepack.WORKER"'}
+        lines, bad = diff(self.base, after, True)
+        self.assertEqual(bad, 0, lines)
+
+    def test_an_unreadable_path_is_reported_even_unchanged(self):
+        s = snap(dict(self.base["files"], **{r"%LOCALAPPDATA%\locked": {
+            "kind": "unreadable", "error": "PermissionError"}}), self.base["registry"])
+        lines, bad = diff(s, s, False)
+        self.assertEqual(lines, [r"RESIDUE: ? unreadable %LOCALAPPDATA%\locked (PermissionError)"])
+        self.assertEqual(bad, 1)
+        # Inside the profile's folder too, with the flag.
+        s["files"] = {r"%LOCALAPPDATA%\Packages\litepack.worker\x": {"kind": "unreadable",
+                                                                    "error": "OSError"}}
+        self.assertEqual(diff(snap(registry=s["registry"]), s, True)[1], 1)
+
+    def test_paths_get_the_long_path_prefix(self):
+        if os.name != "nt":
+            self.skipTest("Windows paths")
+        self.assertEqual(long_path("C:\\a\\b"), "\\\\?\\C:\\a\\b")
+        self.assertEqual(long_path("\\\\?\\C:\\a"), "\\\\?\\C:\\a")
+        self.assertEqual(long_path("\\\\srv\\share\\a"), "\\\\?\\UNC\\srv\\share\\a")
+
+    def test_a_reparse_point_is_recorded_and_not_followed(self):
+        if os.name != "nt":
+            self.skipTest("Windows reparse points")
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "target"
+            target.mkdir()
+            (target / "inside").write_bytes(b"x")
+            link = Path(d) / "link"
+            try:
+                os.symlink(target, link, target_is_directory=True)
+            except OSError:
+                self.skipTest("no symlink privilege")
+            out = {}
+            walk(d, "T", out)
+        self.assertEqual(out["%T%\\link"]["kind"], "reparse")
+        self.assertNotIn("%T%\\link\\inside", out)
+        self.assertEqual(out["%T%\\target\\inside"]["kind"], "file")
+
+    def test_snapshot_refuses_off_ci(self):
+        env = {k: v for k, v in os.environ.items() if k != CI_ENV}
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(SystemExit):
+                snapshot(Path(d) / "s.json", on_ci=False)
+            self.assertEqual(list(Path(d).iterdir()), [])
 
     def test_the_removed_profile_is_matched_too(self):
         lines, bad = diff(with_profile(self.base), self.base, True)

@@ -323,6 +323,10 @@ jobs:
         run: |
           echo "SNAP=$(cygpath -m "$RUNNER_TEMP")/residue" >> "$GITHUB_ENV"
           echo "ZIPS=$(cygpath -m "$RUNNER_TEMP")/zips" >> "$GITHUB_ENV"
+      # One exact Python build: the zips' bytes depend on its zlib and its zipfile.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.7"
       - name: Rust toolchain from rust-toolchain.toml
         run: |
           rustup toolchain install --no-self-update
@@ -385,6 +389,20 @@ jobs:
             grep -qE '"rendered":[1-9]' <<<"$report"
           done
           ls -la "$RUNNER_TEMP/portable-run/LitePack" "$RUNNER_TEMP/portable-run/LitePack/data"
+      # The diff steps record their verdicts and go on, so that one run prints every diff; the last
+      # step fails the job if any was not clean. Each foreign-archive run must create the profile
+      # (its folder and its Mappings key), and --remove-profile must take all of it away.
+      - name: Residue after the GUI (the worker profile required)
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
+            --require-worker-profile || echo "after the GUI: residue, or no worker profile" >> "$SNAP/verdicts"
+      - name: Residue after --remove-profile (nothing allowed)
+        run: |
+          "$RUNNER_TEMP/portable-run/LitePack/lpk-worker.exe" --remove-profile
+          python -I scripts/e7-residue.py snapshot "$SNAP/3-after-remove.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-remove.json" \
+            || echo "after the GUI's --remove-profile: residue" >> "$SNAP/verdicts"
       - name: The CLI zip's lpk.exe lists and extracts the .zip
         run: |
           w="$RUNNER_TEMP/portable-work"
@@ -392,23 +410,17 @@ jobs:
           "$lpk" l "$w/small.zip"
           "$lpk" x "$w/small.zip" "$w/out-cli"
           cmp "$w/in/sub/f2.txt" "$w/out-cli/sub/f2.txt"
-      # Steps 7 to 9 record their verdicts and go on, so that one run prints every diff; the last
-      # step fails the job if any was not clean.
-      - name: Residue after the runs (the worker profile allowed)
+      - name: Residue after the CLI (the worker profile required)
         run: |
-          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-runs.json"
-          rc=0
-          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-runs.json" \
-            --allow-worker-profile > "$SNAP/diff-2.txt" || rc=$?
-          cat "$SNAP/diff-2.txt"
-          test "$rc" -eq 0 || echo "after the runs: residue" >> "$SNAP/verdicts"
-          grep -q '^profile: + ' "$SNAP/diff-2.txt" || echo "after the runs: no worker profile" >> "$SNAP/verdicts"
-      - name: Residue after lpk-worker.exe --remove-profile (nothing allowed)
+          python -I scripts/e7-residue.py snapshot "$SNAP/4-after-cli.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-cli.json" \
+            --require-worker-profile || echo "after the CLI: residue, or no worker profile" >> "$SNAP/verdicts"
+      - name: Residue after the CLI zip's --remove-profile (nothing allowed)
         run: |
-          "$RUNNER_TEMP/portable-run/LitePack/lpk-worker.exe" --remove-profile
-          python -I scripts/e7-residue.py snapshot "$SNAP/3-after-remove.json"
-          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-remove.json" \
-            || echo "after --remove-profile: residue" >> "$SNAP/verdicts"
+          "$RUNNER_TEMP/cli-run/LitePack/lpk-worker.exe" --remove-profile
+          python -I scripts/e7-residue.py snapshot "$SNAP/5-after-remove.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/5-after-remove.json" \
+            || echo "after the CLI's --remove-profile: residue" >> "$SNAP/verdicts"
       - name: An unusable data folder is refused with nothing written
         run: |
           p="$RUNNER_TEMP/portable-run/LitePack"
@@ -421,13 +433,13 @@ jobs:
           test "$rc" -ne 0 -a "$rc" -ne 124 || echo "data file: exit code $rc" >> "$SNAP/verdicts"
           grep -q '"portable_data_error"' "$report" || echo "data file: no error in the report" >> "$SNAP/verdicts"
           test -f "$p/data" || echo "data file: replaced" >> "$SNAP/verdicts"
-          python -I scripts/e7-residue.py snapshot "$SNAP/4-after-data.json"
-          python -I scripts/e7-residue.py diff "$SNAP/3-after-remove.json" "$SNAP/4-after-data.json" \
+          python -I scripts/e7-residue.py snapshot "$SNAP/6-after-data.json"
+          python -I scripts/e7-residue.py diff "$SNAP/5-after-remove.json" "$SNAP/6-after-data.json" \
             || echo "data file: residue" >> "$SNAP/verdicts"
       - name: Residue verdict
         run: |
           if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
-          echo "no residue: the worker profile alone after the runs, nothing after --remove-profile or the data case"
+          echo "no residue: the worker profile alone after each foreign archive, nothing after --remove-profile or the data case"
       - uses: actions/upload-artifact@v7
         with:
           name: zips-windows-x64

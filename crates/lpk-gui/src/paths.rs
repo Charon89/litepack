@@ -115,8 +115,13 @@ pub fn open_dir() -> Option<PathBuf> {
 /// The probe file [`check_writable`] writes and removes.
 const PROBE: &str = ".litepack-write-check";
 
+/// The probe's size: a few KiB, so that a full disk fails the check (an empty file can fit in
+/// the folder's own record).
+const PROBE_SIZE: usize = 4096;
+
 /// A portable copy's rule (`docs/notes/e7-design.md` section 5): its `data` folder must exist
-/// or be creatable, and be writable. Creates the folder, writes and removes a probe file in it;
+/// or be creatable, and be writable. Creates the folder, writes and removes a 4 KiB probe file in
+/// it (a `data` junction is followed: where it points is the user's choice);
 /// the error names the folder. The caller exits on an error, never falling back to the
 /// profile's folders.
 pub fn check_writable(data: &Path) -> Result<(), String> {
@@ -126,7 +131,7 @@ pub fn check_writable(data: &Path) -> Result<(), String> {
         return Err(format!("{} is not a folder", data.display()));
     }
     let probe = data.join(PROBE);
-    std::fs::write(&probe, b"").map_err(|e| fail("cannot write in", e))?;
+    std::fs::write(&probe, [0u8; PROBE_SIZE]).map_err(|e| fail("cannot write in", e))?;
     std::fs::remove_file(&probe).map_err(|e| fail("cannot write in", e))?;
     Ok(())
 }

@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path
 
@@ -50,7 +51,8 @@ shared folder, your desktop. Nothing is installed.
 - Everything the window keeps (its settings, its recent archives, the browser engine's files and
   the record of interrupted writes) goes into the folder data\\ beside lpk-gui.exe. The file named
   "portable" is what tells {PRODUCT} to do that; delete it and this copy behaves like an installed
-  one. If data\\ cannot be created or written, {PRODUCT} says so and does not start.
+  one. If data\\ cannot be created or written, {PRODUCT} says so and does not start. If data\\
+  is a junction or a link to another folder, {PRODUCT} follows it and keeps everything there.
 - This copy registers nothing in Explorer: no context menu, no file types, no "Open with" entry.
   The installer does that.
 - The update check only tells you that a newer release exists; it never installs anything.
@@ -131,8 +133,7 @@ def zip_time(timestamp):
 
 
 def write_zip(path, files, timestamp):
-    """Write `files` under the top folder PRODUCT, deterministically, through a temporary name."""
-    path = Path(path)
+    """Write `files` under the top folder PRODUCT to `path`, deterministically."""
     when = zip_time(timestamp)
 
     def info(name, attr):
@@ -142,24 +143,53 @@ def write_zip(path, files, timestamp):
         i.compress_type = zipfile.ZIP_DEFLATED
         return i
 
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    with zipfile.ZipFile(path, "w", compresslevel=9) as z:
+        top = info(PRODUCT + "/", DIR_ATTR)
+        top.compress_type = zipfile.ZIP_STORED
+        z.writestr(top, b"")
+        for name in sorted(files):
+            z.writestr(info(f"{PRODUCT}/{name}", FILE_ATTR), files[name])
+
+
+def temp_beside(path, suffix):
+    """A fresh temporary name in `path`'s folder."""
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=suffix, dir=path.parent)
     os.close(fd)
+    return Path(tmp)
+
+
+def publish(pairs):
+    """Rename each (temporary, target) pair into place as one set: the old targets are moved
+    aside first and put back if any rename fails, so the folder holds either the old pair or the
+    new one, never one of each."""
+    backups = []
+    placed = []
     try:
-        with zipfile.ZipFile(tmp, "w", compresslevel=9) as z:
-            top = info(PRODUCT + "/", DIR_ATTR)
-            top.compress_type = zipfile.ZIP_STORED
-            z.writestr(top, b"")
-            for name in sorted(files):
-                z.writestr(info(f"{PRODUCT}/{name}", FILE_ATTR), files[name])
-        os.replace(tmp, path)
+        for _, target in pairs:
+            if target.exists():
+                b = temp_beside(target, ".old")
+                try:
+                    os.replace(target, b)
+                except BaseException:
+                    b.unlink(missing_ok=True)
+                    raise
+                backups.append((b, target))
+        for tmp, target in pairs:
+            os.replace(tmp, target)
+            placed.append(target)
     except BaseException:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        for target in placed:
+            target.unlink(missing_ok=True)
+        for b, target in backups:
+            os.replace(b, target)
         raise
+    for b, _ in backups:
+        b.unlink(missing_ok=True)
 
 
 def make(bin_dir, arch, version, timestamp, out, repo):
-    """Write both zips into `out`; their paths."""
+    """Write both zips into `out`; their paths. Both are written to temporary names first, then
+    renamed together."""
     if arch not in ARCHES:
         raise InputError(f"unknown architecture {arch!r} (one of {', '.join(ARCHES)})")
     if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]*", version):
@@ -167,17 +197,18 @@ def make(bin_dir, arch, version, timestamp, out, repo):
     portable, cli = contents(bin_dir, repo)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    p_name, c_name = zip_names(version, arch)
-    written = []
+    targets = [out / n for n in zip_names(version, arch)]
+    temps = []
     try:
-        for name, files in ((p_name, portable), (c_name, cli)):
-            write_zip(out / name, files, timestamp)
-            written.append(out / name)
-    except BaseException:
-        for p in written:
-            p.unlink(missing_ok=True)
-        raise
-    return written
+        for target, files in zip(targets, (portable, cli)):
+            tmp = temp_beside(target, ".tmp")
+            temps.append(tmp)
+            write_zip(tmp, files, timestamp)
+        publish(list(zip(temps, targets)))
+    finally:
+        for tmp in temps:
+            tmp.unlink(missing_ok=True)
+    return targets
 
 
 def main(argv):
@@ -283,14 +314,44 @@ class Tests(unittest.TestCase):
         self.assertIn("LICENSE-MIT", str(e.exception))
         self.assertEqual(list(out.iterdir()) if out.exists() else [], [])
 
-    def test_a_failed_second_zip_leaves_no_first(self):
+    def test_a_failed_rename_keeps_the_old_pair(self):
+        old = [p.read_bytes() for p in self.build("o", ts=1_000_000_000)]
+        real = os.replace
+        calls = []
+
+        def flaky(src, dst):
+            calls.append((src, dst))
+            # The fourth rename puts the second new zip in place (two backups, then two zips).
+            if len(calls) == 4:
+                raise OSError("simulated")
+            return real(src, dst)
+
+        with unittest.mock.patch.object(os, "replace", flaky):
+            with self.assertRaises(OSError):
+                self.build("o")
         out = Path(self.tmp.name) / "o"
-        out.mkdir()
-        # The CLI zip's name taken by a folder: its rename fails after the portable zip was written.
-        (out / zip_names("0.1.0", "x64")[1]).mkdir()
-        with self.assertRaises(OSError):
-            self.build("o")
-        self.assertEqual(sorted(p.name for p in out.iterdir()), [zip_names("0.1.0", "x64")[1]])
+        names = zip_names("0.1.0", "x64")
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(names))
+        self.assertEqual([(out / n).read_bytes() for n in names], old)
+
+    def test_a_failed_second_write_keeps_the_old_pair(self):
+        old = [p.read_bytes() for p in self.build("o", ts=1_000_000_000)]
+        real = write_zip
+        calls = []
+
+        def flaky(path, files, ts):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError("disk full")
+            return real(path, files, ts)
+
+        with unittest.mock.patch(f"{__name__}.write_zip", flaky):
+            with self.assertRaises(OSError):
+                self.build("o")
+        out = Path(self.tmp.name) / "o"
+        names = zip_names("0.1.0", "x64")
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(names))
+        self.assertEqual([(out / n).read_bytes() for n in names], old)
 
     def test_bad_arch_and_version_are_refused(self):
         with self.assertRaises(InputError):
