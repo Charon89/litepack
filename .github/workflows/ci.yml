@@ -573,7 +573,7 @@ jobs:
           done
           python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
-            --require-worker-profile --allow-settings > "$SNAP/2.txt" || true
+            --require-worker-profile --allow-settings --run-folder "$INST" > "$SNAP/2.txt" || true
           cat "$SNAP/2.txt"
           grep -q "PROFILE MISSING" "$SNAP/2.txt" && echo "no worker profile after the installed GUI" >> "$SNAP/verdicts" || true
       - name: bin\lpk.exe on the .zip
@@ -599,7 +599,7 @@ jobs:
           ls -la "$INST" 2>/dev/null || echo "install folder gone"
           python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
-            --allow-settings || echo "after the uninstall: residue" >> "$SNAP/verdicts"
+            --allow-settings --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall: residue" >> "$SNAP/verdicts"
       - name: Install and uninstall with /DELETEAPPDATA (the box), the settings gone
         run: |
           "$SETUP/N-setup.exe" /S
@@ -609,7 +609,7 @@ jobs:
           test ! -e "$APPDATA/LitePack" || echo "the box: %APPDATA%\\LitePack left" >> "$SNAP/verdicts"
           python -I scripts/e7-residue.py snapshot "$SNAP/4-after-box.json"
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-box.json" \
-            || echo "after the uninstall with the box: residue" >> "$SNAP/verdicts"
+            --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall with the box: residue" >> "$SNAP/verdicts"
       - name: Residue verdict
         run: |
           if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi

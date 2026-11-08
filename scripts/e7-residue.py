@@ -29,6 +29,7 @@ is 1 if any entry is not allowed.
 """
 
 import argparse
+import codecs
 import json
 import os
 import re
@@ -88,6 +89,7 @@ USERASSIST_COUNT = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Us
 WAM = ("written while the GUI starts, by Windows' account broker (WAM, "
        "Microsoft.AAD.BrokerPlugin), most likely for the WebView2 runtime (R315)")
 MUI = "Windows' shell cache of a program's display strings (MuiCache), filled when a program runs"
+START = "Windows' Start menu and search bookkeeping, updated when a shortcut is added or removed"
 WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for every WebView2 app "
             "(R313); LitePack's WebView2 data stays in data\\")
 
@@ -133,6 +135,48 @@ ALLOW = [
     {"kind": "key",
      "path": r"HKCU\Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
      "reason": WEBVIEW2 + ": the runtime's update state under its own GUID"},
+    # E7-5's first installer diff (CI run 42486016300): what Windows' shell and Start menu record
+    # when an installer adds and its uninstaller removes a Start menu and a desktop shortcut, and
+    # what Windows records when the installed GUI runs. The jump list Windows keeps for LitePack's
+    # AppUserModelID is LitePack's and is removed by the uninstaller instead (installer.nsh).
+    {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\Windows\Caches",
+     "name": r"\{3DA71D5A-20CC-432F-A115-DFE92379E91F\}\.3\.ver0x[0-9a-f]{16}\.db",
+     "reason": START + ": the shell's cache of the installed programs, one file per version"},
+    {"kind": "file-pattern",
+     "path": r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\LocalState\Search",
+     "name": r"AppsIndex\.db(-wal|-shm)?", "reason": START + ": Windows Search's index of the apps"},
+    {"kind": "file-pattern",
+     "path": r"%LOCALAPPDATA%\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState",
+     "name": r"start2\.bin", "reason": START + ": the Start menu's layout state"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows\CurrentVersion\Start", "name": "Config",
+     "reason": START + ": the Start menu's configuration"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows\CurrentVersion\Search",
+     "name": "InstalledWin32AppsRevision",
+     "reason": START + ": Windows Search's revision of the installed desktop programs"},
+    {"kind": "value-pattern",
+     "path": (r"HKCU\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
+              r"\$de${56dd80ad-4875-4425-bc6f-80ae66daaf21}$$windows.data.unifiedtile"
+              r".localstarttilepropertiesmap\Current"),
+     "name": "Data", "reason": START + ": the Start menu's tile properties (CloudStore)"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows\Shell\Bags\1\Desktop",
+     "name": "IconLayouts",
+     "reason": "Explorer's desktop icon positions, rewritten when a desktop shortcut comes and goes"},
+    {"kind": "file", "path": r"%LOCALAPPDATA%\Microsoft\Windows\WebCache",
+     "reason": "WinINet's shared cache database (ESE), updated by any program that uses WinINet or "
+               "urlmon (Windows' own, shared by every user program)"},
+    {"kind": "value-pattern", "path": LOCAL_SETTINGS + r"\MuiCache\1a4\52C64B7E",
+     "name": r"@%SystemRoot%\\System32\\urlmon\.dll,-[0-9]+",
+     "reason": MUI + ": the strings of Windows' urlmon.dll"},
+    {"kind": "value-pattern", "path": SHELL_MUICACHE,
+     "name": r"C:\\Windows\\System32\\conhost\.exe\.(ApplicationCompany|FriendlyAppName)",
+     "reason": MUI + ": Windows' Console Window Host (conhost.exe)"},
+    {"kind": "value-pattern", "path": USERASSIST_COUNT, "name": r"{run13}\\ycx-thv\.rkr",
+     "reason": "Explorer's usage record (UserAssist) of lpk-gui.exe, keyed by its path in the run "
+               "folder (ROT13, as Explorer stores it)"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon",
+     "name": "ParseAutoexec",
+     "reason": "Windows' logon setting (Winlogon), set by Windows itself; neither LitePack nor NSIS "
+               "writes under Winlogon"},
     # R301.
     {"kind": "empty-key", "path": APPCONTAINER, "reason": APPCONTAINER_REASON},
     {"kind": "empty-key", "path": MAPPINGS, "reason": APPCONTAINER_REASON},
@@ -360,6 +404,32 @@ def empty_key(snap, key):
     return found
 
 
+def rot13(text):
+    """Explorer's UserAssist value names: ROT13 over the ASCII letters."""
+    return codecs.encode(str(text), "rot13")
+
+
+def uninstaller_copy(path, after):
+    """R312: NSIS's uninstaller self-copy, exactly %LOCALAPPDATA%\\Temp\\~nsu*.tmp holding one
+    Un.exe or Un_<letter>.exe and nothing else (in `after`): the folder or that file."""
+    def is_dir(p):
+        folder, _, leaf = p.rpartition("\\")
+        return norm(folder) == norm(r"%LOCALAPPDATA%\Temp") and \
+            re.fullmatch(r"~nsu[0-9a-z]*\.tmp", leaf, re.IGNORECASE)
+    folder = path if is_dir(path) else path.rpartition("\\")[0]
+    if not is_dir(folder):
+        return False
+    inside = [p for p in after["files"] if under(p, folder) and norm(p) != norm(folder)]
+    return len(inside) == 1 and re.fullmatch(r"Un(_[A-Z])?\.exe", inside[0].rpartition("\\")[2],
+                                              re.IGNORECASE) is not None and \
+        after["files"][inside[0]].get("kind") == "file"
+
+
+UNINSTALLER_REASON = ("R312: NSIS's uninstaller copy; NSIS runs the uninstaller from a copy so that it "
+                      "can remove the install folder, and only a reboot could delete that copy, which "
+                      "a per-user uninstaller cannot schedule")
+
+
 def run_pattern(run):
     """The escaped run folder for the `{run}` placeholder; None when no run folder is known."""
     if not run:
@@ -382,11 +452,15 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
             return a["reason"]
         if a["kind"] == "value-pattern" and kind == "value" and norm(path) == norm(a["path"]):
             pattern = a["name"]
-            if "{run}" in pattern:
-                folder = run_pattern(run)
-                if folder is None:
-                    continue
-                pattern = pattern.replace("{run}", folder)
+            for token, folder in (("{run}", run), ("{run13}", rot13(run) if run else None)):
+                if token in pattern:
+                    escaped = run_pattern(folder)
+                    if escaped is None:
+                        pattern = None
+                        break
+                    pattern = pattern.replace(token, escaped)
+            if pattern is None:
+                continue
             if re.fullmatch(pattern, name, re.IGNORECASE | re.DOTALL):
                 return a["reason"]
         if a["kind"] == "key-only" and kind == "key" and norm(path) == norm(a["path"]):
@@ -419,7 +493,7 @@ def settings_only(after):
     return all(norm(p) == norm(SETTINGS_FILE) for p in inside)
 
 
-def diff(before, after, allow_profile, run=None, allow_settings=False):
+def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uninstaller=False):
     """The diff's lines and the number of entries not allowed. A path unreadable in either
     snapshot is listed (and counted unless allowed) even when both record it alike: what lies
     inside it was not seen."""
@@ -451,6 +525,9 @@ def diff(before, after, allow_profile, run=None, allow_settings=False):
         if not reason and allow_settings and not unread and kind == "file" and sign == "+" and \
                 norm(path) in (norm(SETTINGS_DIR), norm(SETTINGS_FILE)) and settings_only(after):
             reason = SETTINGS_REASON
+        if not reason and allow_uninstaller and not unread and kind == "file" and sign == "+" and \
+                uninstaller_copy(path, after):
+            reason = UNINSTALLER_REASON
         if reason:
             lines.append(f"allowed: {text}  -- {reason}")
         elif allow_profile and (is_profile(kind, path, sids) or ancestor) and \
@@ -497,6 +574,8 @@ def main(argv):
                    help="allow the profile, and fail unless its folder and Mappings key were added")
     d.add_argument("--allow-settings", action="store_true",
                    help=r"allow %%APPDATA%%\LitePack\settings.json alone (an uninstall without the box)")
+    d.add_argument("--allow-uninstaller-copy", action="store_true",
+                   help=r"R312: allow %%LOCALAPPDATA%%\Temp\~nsu*.tmp holding one Un.exe alone")
     a = ap.parse_args(argv)
     if a.cmd == "snapshot":
         snapshot(a.out, a.on_ci)
@@ -506,7 +585,8 @@ def main(argv):
     run = a.run_folder
     if run is None and os.environ.get("RUNNER_TEMP"):
         run = os.path.join(os.environ["RUNNER_TEMP"], "portable-run", "LitePack")
-    lines, bad = diff(load(a.before), load(a.after), allow, run, a.allow_settings)
+    lines, bad = diff(load(a.before), load(a.after), allow, run, a.allow_settings,
+                      a.allow_uninstaller_copy)
     for line in lines:
         print(line)
     flag = " (worker profile allowed)" if allow else ""
@@ -574,6 +654,43 @@ class Tests(unittest.TestCase):
         before = snap(files, self.base["registry"])
         changed = snap(dict(files, **{SETTINGS_FILE: f(size=2)}), self.base["registry"])
         self.assertEqual(diff(before, changed, False, allow_settings=True)[1], 1)
+
+    def test_a_profile_path_unreadable_before_is_never_excused(self):
+        # R317: a change inside the profile whose earlier side was unreadable is residue, even
+        # with the profile allowed, since what lay inside it was not seen.
+        ac = r"%LOCALAPPDATA%\Packages\litepack.worker\AC"
+        before = with_profile(self.base)
+        before["files"][ac] = {"kind": "unreadable", "error": "PermissionError"}
+        after = with_profile(self.base)
+        after["files"][ac] = {"kind": "dir"}
+        lines, bad = diff(before, after, True)
+        self.assertEqual(bad, 1, lines)
+        self.assertIn("RESIDUE: ~ dir " + ac, lines)
+
+    def test_the_uninstaller_copy_alone_is_allowed_with_the_flag(self):
+        folder = r"%LOCALAPPDATA%\Temp\~nsu1.tmp"
+        files = dict(self.base["files"], **{folder: {"kind": "dir"}, folder + r"\Un.exe": f()})
+        after = snap(files, self.base["registry"])
+        lines, bad = diff(self.base, after, False, allow_uninstaller=True)
+        self.assertEqual(bad, 0, lines)
+        self.assertEqual(diff(self.base, after, False)[1], 2)
+        # Another file beside it, or another name, is residue.
+        more = snap(dict(files, **{folder + r"\x.dll": f()}), self.base["registry"])
+        self.assertEqual(diff(self.base, more, False, allow_uninstaller=True)[1], 3)
+        other = snap(dict(self.base["files"], **{r"%LOCALAPPDATA%\Temp\other.tmp": {"kind": "dir"},
+                                                 r"%LOCALAPPDATA%\Temp\other.tmp\Un.exe": f()}),
+                     self.base["registry"])
+        self.assertEqual(diff(self.base, other, False, allow_uninstaller=True)[1], 2)
+
+    def test_userassist_of_the_run_folder_is_matched_in_rot13(self):
+        run = r"C:\Users\u\AppData\Local\LitePack"
+        name = rot13(run) + r"\ycx-thv.rkr"
+        before = snap(self.base["files"], dict(self.base["registry"], **{USERASSIST_COUNT: {}}))
+        after = snap(self.base["files"],
+                     dict(self.base["registry"], **{USERASSIST_COUNT: {name: "hex:00"}}))
+        self.assertEqual(diff(before, after, False, run)[1], 0)
+        self.assertEqual(diff(before, after, False)[1], 1)
+        self.assertEqual(diff(before, after, False, r"C:\elsewhere")[1], 1)
 
     def test_a_desktop_shortcut_is_residue(self):
         before = snap(dict(self.base["files"], **{"%DESKTOP%": {"kind": "absent"}}),

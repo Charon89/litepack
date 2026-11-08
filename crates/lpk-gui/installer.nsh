@@ -89,6 +89,12 @@
     DeleteRegValue HKCU "${MANUPRODUCTKEY}" "Installer Language"
     DeleteRegKey HKCU "${MANUPRODUCTKEY}"
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
+    ; The jump list Windows keeps for LitePack's AppUserModelID (the identifier): its file is named by the CRC-64
+    ; of the upper-cased UTF-16 ID (a233dcd0c3d36a7d for ORG.LITEPACK.GUI; a test in register_tests.rs checks this
+    ; against tauri.conf.json), and Windows Search's record of it (CI run 42486016300's diff).
+    Delete "$APPDATA\Microsoft\Windows\Recent\AutomaticDestinations\a233dcd0c3d36a7d.automaticDestinations-ms"
+    Delete "$APPDATA\Microsoft\Windows\Recent\CustomDestinations\a233dcd0c3d36a7d.customDestinations-ms"
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Search\JumplistData" "${BUNDLEID}"
     ; A shell DLL Explorer still holds: removed at the next logon.
     ${If} ${FileExists} "$INSTDIR\shell\*"
       WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "LitePack uninstall" \

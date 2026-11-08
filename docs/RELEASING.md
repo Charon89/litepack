@@ -163,4 +163,17 @@ Uninstall key, `Path` and route C (`scripts/e7-installer-check.py`, read-only), 
 installed GUI (the profile required), runs `bin\lpk.exe` on the `.zip`, installs N+1 with `/S` while `bin\lpk.exe`
 runs (the outcome is printed), checks N+1's registration and a single `Path` entry, uninstalls with `/S`, and diffs
 against the first snapshot with `--allow-settings` and the profile not allowed. A second install and uninstall with
-`/DELETEAPPDATA` requires `%APPDATA%\LitePack` gone and nothing left at all.
+`/DELETEAPPDATA` requires `%APPDATA%\LitePack` gone and nothing left but Windows' entries and the copy below.
+`--run-folder` names the install folder, so the entries keyed by `lpk-gui.exe`'s path (MuiCache, and Explorer's
+UserAssist record, ROT13 as Explorer stores it) match only there.
+
+The uninstaller also removes the jump list Windows keeps for LitePack's AppUserModelID (`org.litepack.gui`):
+`%APPDATA%\Microsoft\Windows\Recent\AutomaticDestinations\a233dcd0c3d36a7d.automaticDestinations-ms` (the name is the
+CRC-64 of the upper-cased ID; a test checks it against `tauri.conf.json`), its `CustomDestinations` twin, and the
+`org.litepack.gui` value of `HKCU\...\CurrentVersion\Search\JumplistData`.
+
+**Known limitation (R312).** A silent uninstall leaves `%LOCALAPPDATA%\Temp\~nsu<n>.tmp\Un.exe`: NSIS runs the
+uninstaller from that copy so that it can remove the install folder, and only a reboot can delete the copy, which a
+per-user uninstaller cannot schedule (it would need `MoveFileEx` with `MOVEFILE_DELAY_UNTIL_REBOOT`, an administrator's
+right). The residue check allows exactly that (`--allow-uninstaller-copy`: a `~nsu*.tmp` folder holding one `Un.exe`
+or `Un_<letter>.exe` and nothing else); Windows' own temporary-folder cleanup removes it later.

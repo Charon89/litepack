@@ -145,8 +145,9 @@ else
   tar -xzf "$work/source.tar.gz" -C "$work/src" --wildcards '*Cargo.lock' '*Cargo.toml'
   lock="$(find "$work/src" -name Cargo.lock | sort | head -1)"
   if [[ -z "$lock" ]]; then
-    echo "[nsis_tauri_utils] no Cargo.lock in the source at $tag" >&2
-    status=1
+    # The tag holds no Cargo.lock (CI run 42486016300): the direct dependencies of its manifests are checked instead.
+    echo "[nsis_tauri_utils] no Cargo.lock in the source at $tag: checking its manifests' direct dependencies"
+    python3 -I scripts/nsis-lock-check.py --manifests-only "$work/src" THIRD-PARTY-NOTICES || status=1
   else
     python3 -I scripts/nsis-lock-check.py "$lock" THIRD-PARTY-NOTICES --manifests "$work/src" || status=1
   fi

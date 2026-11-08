@@ -157,12 +157,92 @@ def self_test():
     assert "semver 1.0.28: Apache License 2.0; MIT License" in out, out
     out, missing = check(lock2, notices)
     assert missing == ["cc 1.0.0", "syn 2.0.0"], missing
+    # Manifests only: workspace = true resolved, target tables read, path dependencies skipped.
+    ws = [
+        '[workspace]\nmembers = ["a", "m"]\n[workspace.dependencies]\nsemver = "1"\nsyn = "2"\n',
+        '[package]\nname = "a"\n[dependencies]\nsemver = { workspace = true }\nm = { path = "../m" }\n'
+        '[target."cfg(windows)".dependencies]\nwindows-sys = "0.59"\n[build-dependencies]\ncc = "1"\n',
+        '[package]\nname = "m"\n[lib]\nproc-macro = true\n[dependencies]\nsyn = { workspace = true }\n',
+    ]
+    lines, missing = check_direct(ws, notices)
+    assert missing == [], (missing, lines)
+    assert "syn 2 (m's [dependencies]): not shipped (m: proc-macro = true)" in lines, lines
+    assert "cc 1 (a's [build-dependencies]): not shipped ([build-dependencies])" in lines, lines
+    assert any(x.startswith("windows-sys 0.59 (a's [target.cfg(windows).dependencies]): in the notices as 0.61.2")
+               for x in lines), lines
+    lines, missing = check_direct(ws[:2] + [ws[2].replace("proc-macro = true", "")], notices)
+    assert missing == ["syn"], missing
     print("nsis-lock-check self-test: ok")
+
+
+def direct_dependencies(manifest_texts):
+    """Without a lock (the plugin's tag has none, CI run 42486016300): each workspace crate's direct registry
+    dependencies from its manifests, [target.*] tables and `workspace = true` included. Returns
+    (crate -> proc_macro), [(crate, table, dependency, requirement)]; path dependencies are the workspace's own."""
+    parsed = [tomllib.loads(t) for t in manifest_texts]
+    ws = {}
+    for m in parsed:
+        ws.update(m.get("workspace", {}).get("dependencies", {}))
+    crates, out = {}, []
+    for m in parsed:
+        pkg = m.get("package", {}).get("name")
+        if not pkg:
+            continue
+        crates[pkg] = bool(m.get("lib", {}).get("proc-macro"))
+        tables = [(t, m.get(t, {})) for t in ("dependencies", "build-dependencies", "dev-dependencies")]
+        for target, sub in m.get("target", {}).items():
+            tables += [(f"target.{target}.{t}", sub.get(t, {}))
+                       for t in ("dependencies", "build-dependencies", "dev-dependencies")]
+        for table, deps in tables:
+            for name, spec in deps.items():
+                if isinstance(spec, dict) and spec.get("workspace"):
+                    spec = ws.get(name, spec)
+                if isinstance(spec, dict) and "path" in spec:
+                    continue
+                req = spec if isinstance(spec, str) else spec.get("version", "?")
+                out.append((pkg, table, spec.get("package", name) if isinstance(spec, dict) else name, req))
+    return crates, out
+
+
+def check_direct(manifest_texts, notices_text):
+    """(lines, missing) for the manifests-only check: a dependency of a proc-macro crate or in a build or dev table
+    does not ship (the manifest says so); every other must be in the notices under some version."""
+    crates, deps = direct_dependencies(manifest_texts)
+    versions = {}
+    for (name, version), titles in notice_licences(notices_text).items():
+        versions.setdefault(name, {})[version] = titles
+    lines, missing = [], []
+    for pkg, table, name, req in sorted(set(deps)):
+        where = f"{name} {req} ({pkg}'s [{table}])"
+        if crates.get(pkg):
+            lines.append(f"{where}: not shipped ({pkg}: proc-macro = true)")
+        elif "build-dependencies" in table or "dev-dependencies" in table:
+            lines.append(f"{where}: not shipped ([{table.rsplit('.', 1)[-1]}])")
+        elif name in versions:
+            listed = "; ".join(f"{v}: {', '.join(sorted(t))}" for v, t in sorted(versions[name].items()))
+            lines.append(f"{where}: in the notices as {listed}")
+        else:
+            lines.append(f"{where}: NOT IN THE NOTICES")
+            missing.append(name)
+    lines.append("no Cargo.lock at the tag: the exact versions and the transitive crates are not checked")
+    return lines, sorted(set(missing))
 
 
 def main(argv):
     if argv == ["--self-test"]:
         self_test()
+        return 0
+    if len(argv) == 3 and argv[0] == "--manifests-only":
+        import pathlib
+        texts = [p.read_text(encoding="utf-8") for p in sorted(pathlib.Path(argv[1]).rglob("Cargo.toml"))]
+        with open(argv[2], encoding="utf-8") as f:
+            lines, missing = check_direct(texts, f.read())
+        for line in lines:
+            print(line)
+        if missing:
+            print(f"not in the notices: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        print("nsis_tauri_utils' manifests: every direct dependency that ships is in the notices")
         return 0
     manifest_texts = []
     if len(argv) == 4 and argv[2] == "--manifests":

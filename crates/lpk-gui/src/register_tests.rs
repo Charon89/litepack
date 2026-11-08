@@ -649,6 +649,41 @@ fn the_app_version_is_the_tauri_config_version() {
 }
 
 #[test]
+fn the_uninstaller_removes_the_jump_list_of_this_identifier() {
+    // Windows names an app's jump list files by the CRC-64 (polynomial 0x92C64265D32139A4,
+    // reflected, initial value all ones) of its AppUserModelID, upper-cased, in UTF-16LE.
+    fn crc64(data: &[u8]) -> u64 {
+        let mut c = u64::MAX;
+        for &b in data {
+            c ^= u64::from(b);
+            for _ in 0..8 {
+                c = if c & 1 == 1 {
+                    (c >> 1) ^ 0x92C6_4265_D321_39A4
+                } else {
+                    c >> 1
+                };
+            }
+        }
+        c
+    }
+    let explorer: Vec<u8> = "MICROSOFT.WINDOWS.EXPLORER"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(format!("{:016x}", crc64(&explorer)), "f01b4d95cf55d32a");
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let id: Vec<u8> = conf["identifier"]
+        .as_str()
+        .unwrap()
+        .to_uppercase()
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let file = format!("{:016x}.automaticDestinations-ms", crc64(&id));
+    assert!(include_str!("../installer.nsh").contains(&file), "{file}");
+}
+
+#[test]
 fn the_installer_overlay_places_the_dll_in_this_versions_shell_folder() {
     let overlay: serde_json::Value =
         serde_json::from_str(include_str!("../tauri.nsis.conf.json")).unwrap();
