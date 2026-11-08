@@ -110,6 +110,9 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
           rustc --version
+      - name: The two pin scripts bound every download the same way
+        shell: bash
+        run: bash scripts/notice-curl-test.sh
       - name: NSIS archive and plugin match notices/nsis
         shell: bash
         run: scripts/nsis-notice.sh --check
