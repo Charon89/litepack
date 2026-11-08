@@ -644,29 +644,45 @@ impl Session {
         // may read it but not write, delete, rename or replace it, and the handles are held
         // until the session is dropped. The zone is read through the first volume's pinned
         // handle, and every later open by path (the broker's for the worker, `detect_file`,
-        // `volume_set`) therefore gets the same file: none can be swapped in between to lend
-        // or withhold a zone. Renaming the parent directory was refused too on NTFS (Windows
-        // 11, the test `renaming_the_parent_directory_of_a_held_zip_is_refused`); see
-        // `docs/SECURITY.md` item 7. Other platforms have no pin (and no zone to protect).
-        let first = pin(path)?;
-        let zone = lpk_core::motw::read_zone_of(&first);
-        // Detected again through the pinned file, so the format is the pinned file's.
-        let format = match lpk_core::foreign::detect_file(path) {
-            Ok(Some(f)) => f,
-            _ => format,
-        };
-        let mut pins = vec![first];
-        if let Ok(Ok(set)) = lpk_core::foreign::volume_set(path, format) {
-            // A later volume that cannot be pinned fails the open: either the whole set is
-            // pinned or no session opens (a volume another program is still writing is
-            // incomplete anyway).
-            for v in set.iter().skip(1) {
-                pins.push(pin(v)?);
+        // `volume_set`) therefore gets the same file for every volume pinned here: none can be
+        // swapped in between to lend or withhold a zone. The pins cover the volumes that exist
+        // when the archive is opened; the broker lists the set again by path, so a volume
+        // added afterwards is read unpinned, its files marked with the first volume's zone.
+        // Renaming the parent directory was refused too on NTFS (Windows 11, the test
+        // `renaming_the_parent_directory_of_a_held_zip_is_refused`); see `docs/SECURITY.md`
+        // item 7. Other platforms have no pin (and no zone to protect) and open as before.
+        #[cfg(windows)]
+        let (format, zone, pins) = {
+            let first = pin(path)?;
+            let zone = lpk_core::motw::read_zone_of(&first);
+            // Detected again through the pinned file, so the format is the pinned file's.
+            let format = match lpk_core::foreign::detect_file(path) {
+                Ok(Some(f)) => f,
+                _ => format,
+            };
+            let mut pins = vec![first];
+            if let Ok(Ok(set)) = lpk_core::foreign::volume_set(path, format) {
+                // A later volume that cannot be pinned fails the open: either the whole set
+                // is pinned or no session opens (a volume another program is still writing
+                // is incomplete anyway).
+                for v in set.iter().skip(1) {
+                    pins.push(pin(v)?);
+                }
             }
-        }
-        if !cfg!(windows) {
-            pins.clear();
-        }
+            (format, zone, pins)
+        };
+        #[cfg(not(windows))]
+        let (format, zone, pins) = (
+            format,
+            File::open(path).map_or(
+                lpk_core::motw::ZoneRead {
+                    zone: None,
+                    unreadable: false,
+                },
+                |f| lpk_core::motw::read_zone_of(&f),
+            ),
+            Vec::<File>::new(),
+        );
         Ok(Session {
             path: path.to_path_buf(),
             info: Info {
@@ -1484,14 +1500,22 @@ impl Session {
         let r = lpk_core::export_archive_with(&mut a, || self.reopen(), writer.as_mut(), &opts, m);
         // Only a file this export created is removed on failure; an existing output a refusal
         // left untouched stays as it was, and under `force` the old output is never touched.
-        // (The trailer opens the file when no entry did, so its failure always removes.) The
-        // writer is closed (finished or dropped) before any removal or rename.
-        let created = writer.created();
-        let r = match r {
-            Ok(s) => writer.finish().map(|()| s).map_err(|e| (e, true)),
+        // When no entry opened the file, it is opened before the trailer, so a failing opener
+        // (`create_new` meeting another process's file) removes nothing; any failure after the
+        // open is one of the file this export created. The writer is closed (finished or
+        // dropped) before any removal or rename.
+        let r = match r.map_err(|e| (e, writer.created())) {
+            Ok(s) => match writer.open() {
+                Ok(()) => writer.finish().map(|()| s).map_err(|e| (e, true)),
+                Err(e) => {
+                    let created = writer.created();
+                    drop(writer);
+                    Err((e, created))
+                }
+            },
             Err(e) => {
                 drop(writer);
-                Err((e, created))
+                Err(e)
             }
         };
         let r = r.and_then(|s| {
@@ -1705,22 +1729,19 @@ pub fn check_export_target(archive: &Path, out: &Path, force: bool) -> Result<()
     Ok(())
 }
 
-/// Open `path` for a foreign session: on Windows with `FILE_SHARE_READ` only, the pin (others
-/// may read; no one may write, delete, rename or replace the file while the handle is open);
-/// elsewhere a plain read open. A sharing violation (another program has the file open for
+/// Open `path` for a foreign session (Windows) with `FILE_SHARE_READ` only, the pin (others
+/// may read; no one may write, delete, rename or replace the file while the handle is open).
+/// A sharing violation (another program has the file open for
 /// writing, or with a share mode that refuses the pin) is a clear `AccessDenied`.
+#[cfg(windows)]
 fn pin(path: &Path) -> Result<File, Error> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
     let mut o = std::fs::OpenOptions::new();
-    o.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ: u32 = 0x1;
-        o.share_mode(FILE_SHARE_READ);
-    }
+    o.read(true).share_mode(FILE_SHARE_READ);
     o.open(path).map_err(|e| {
         // ERROR_SHARING_VIOLATION
-        if cfg!(windows) && e.raw_os_error() == Some(32) {
+        if e.raw_os_error() == Some(32) {
             Error::new(
                 Class::AccessDenied,
                 "Io",

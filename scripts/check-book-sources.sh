@@ -965,6 +965,10 @@ editable = false
   expect_pass "a plain 404 page" check_sources "$t/n0"
   make_tree "$t/n1"; printf '**Document not found (404).**\n\n{{#include footer.md}}\n' > "$t/n1/book/src/404.md"
   expect_fail n "a directive in the 404 page" check_sources "$t/n1"
+  make_tree "$t/n2"; printf 'Not found.\n\n{{ #include x }}\n' > "$t/n2/book/src/404.md"
+  expect_fail n "a spaced directive in the 404 page" check_sources "$t/n2"
+  make_tree "$t/n3"; printf 'Not found.\n\n\\{{#x}}\n' > "$t/n3/book/src/404.md"
+  expect_fail n "an escaped directive in the 404 page" check_sources "$t/n3"
   echo "self-test: all checks proved"
 }
 

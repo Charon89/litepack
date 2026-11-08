@@ -1,6 +1,7 @@
 //! A foreign archive is pinned while a session holds it (Windows): the session opens it with
 //! `FILE_SHARE_READ` only, so it cannot be replaced, deleted or renamed between the zone read
-//! and the worker's open by path. Renaming the parent directory is reported, not prevented.
+//! and the worker's open by path. On NTFS (Windows 11) renaming the parent directory is refused
+//! as well while the archive is held.
 #![cfg(windows)]
 #![allow(clippy::unwrap_used)]
 
