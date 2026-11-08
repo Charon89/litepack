@@ -90,7 +90,10 @@ trap 'rm -rf "$work"' EXIT
 status=0
 
 curl -fsSL --retry 3 -o "$work/nsis.zip" "$(pin_value nsis url)"
-check_hashes "$work/nsis.zip" nsis || status=1
+# The archive's hashes first: nothing is unpacked from an archive that is not the pinned one.
+if ! check_hashes "$work/nsis.zip" nsis; then
+  exit 1
+fi
 unzip -p "$work/nsis.zip" "$(pin_value nsis licence)" | tr -d '\r' > "$work/COPYING"
 if ! cmp "$work/COPYING" notices/nsis/COPYING; then
   echo "notices/nsis/COPYING differs from $(pin_value nsis licence) in the NSIS $(pin_value nsis version) archive" >&2
@@ -98,6 +101,8 @@ if ! cmp "$work/COPYING" notices/nsis/COPYING; then
 fi
 
 curl -fsSL --retry 3 -o "$work/nsis_tauri_utils.dll" "$(pin_value nsis_tauri_utils url)"
+# The plugin DLL and its LICENSE_MIT are only hashed and compared, never unpacked or run, so their checks collect
+# into status and report together.
 check_hashes "$work/nsis_tauri_utils.dll" nsis_tauri_utils || status=1
 tag="nsis_tauri_utils-v$(pin_value nsis_tauri_utils version)"
 curl -fsSL --retry 3 -o "$work/LICENSE_MIT" \
