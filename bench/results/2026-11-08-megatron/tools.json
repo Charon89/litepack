@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "7z",
+      "local_override": false,
+      "manual": false,
+      "name": "7-Zip",
+      "status": "found",
+      "version": "26.03"
+    },
+    {
+      "catalogue_verified": true,
+      "dedup": false,
+      "id": "lpk",
+      "local_override": false,
+      "manual": false,
+      "name": "LitePack",
+      "status": "found",
+      "version": "0.0.1+6068c6ebf46b"
+    }
+  ]
+}
