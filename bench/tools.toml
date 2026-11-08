@@ -400,9 +400,9 @@ note = "Strongest-setting flags and archive format not verified. The owner suppl
 # verified against the manifest. Left out of `--tools all`; asked for by name:
 # `lpk-bench run --tools lpk-foreign,7z-foreign --classes office-pdf,source-git,small-files`.
 # The rows need a release `lpk` (`target/release/lpk`, found by the hint) with the release worker
-# beside it: `cargo build --release -p lpk-cli`, `cargo build --release` in `workers/`, then copy
-# `workers/target/release/lpk-worker(.exe)` into `target/release/` (lpk starts the worker from its
-# own directory).
+# beside it: `cargo build --release -p lpk-cli`, then `cargo build --release` in `workers/`, whose
+# `.cargo/config.toml` builds into the same `target/`, so `lpk-worker(.exe)` lands beside `lpk`
+# (lpk starts the worker from its own directory).
 [[tool]]
 id = "lpk-foreign"
 name = "LitePack, extracting foreign archives"
