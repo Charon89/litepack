@@ -507,10 +507,10 @@ jobs:
           for k, v in list(r.items()):
               if v.startswith('shell/'):
                   r[k] = 'shell/0.0.2/lpk_shell.dll'
-          json.dump(c, open('$RUNNER_TEMP/next.conf.json', 'w'), indent=2)
+          json.dump(c, open('$SETUP/next.conf.json', 'w'), indent=2)
           "
           rm -rf ../../target/release/bundle/nsis
-          cargo tauri build --ci --config "$RUNNER_TEMP/next.conf.json" -- --locked
+          cargo tauri build --ci --config "$SETUP/next.conf.json" -- --locked
           cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N1-setup.exe"
           ls -la "$SETUP"
       # For the ARM64 refusal job below, before any step that could fail.
