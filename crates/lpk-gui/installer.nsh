@@ -1,6 +1,12 @@
 ; E7-5: the hooks of LitePack's per-user NSIS installer (docs/notes/e7-design.md section 3), included by
 ; tauri-bundler 2.10.4's installer.nsi through tauri.nsis.conf.json's installerHooks. Part 1: route C, no sparse
-; package (R304). The template already includes x64.nsh, LogicLib (through MUI2) and FileFunc.
+; package (R304). The template already includes x64.nsh, LogicLib (through MUI2), FileFunc, utils.nsh (its
+; CheckIfAppIsRunning) and the Restart Manager macros before this file.
+;
+; This file is included before the template defines its own symbols (PRODUCTNAME, MAINBINARYNAME, ARCH, ...), its
+; pages and its sections. Code outside the four NSIS_HOOK_* macros therefore names LitePack's values directly; a test
+; (crates/lpk-gui/src/register_tests.rs) keeps them equal to tauri.conf.json, and PREINSTALL fails the build when the
+; template's ${ARCH} is not LPK_INSTALLER_ARCH.
 ;
 ; The template's installer.nsi sets no ManifestSupportedOS, so NSIS 3.13's default ("all": Vista to Windows 10/11)
 ; is in the manifest, and ${AtLeastBuild} sees the real build number instead of Windows 8's (E7-5's finding;
@@ -8,14 +14,78 @@
 
 !include WinVer.nsh
 
+!define LPK_INSTALLER_ARCH "x64"
+!define LPK_PRODUCT "LitePack"
+!define LPK_MAIN_EXE "lpk-gui.exe"
+!define LPK_RUNONCE "Software\Microsoft\Windows\CurrentVersion\RunOnce"
+
 ; HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG: tell running programs that HKCU\Environment changed
 ; (R306), with NSIS's own SendMessage and a 5-second timeout.
 !macro LPK_BROADCAST_ENVIRONMENT
   SendMessage 0xFFFF 0x001A 0 "STR:Environment" /TIMEOUT=5000
 !macroend
 
-; The shell\<version> folders other than this version's: removed when Explorer holds none of their files;
-; one still held is removed at the next logon by a per-user RunOnce command.
+; The refusals: below build 19045, and the x64 installer on an ARM64 PC (an x64 lpk_shell.dll cannot load into ARM64
+; Explorer). Each exits with error level 1; `remove` names a folder to remove when empty (never recursively).
+!macro LPK_REFUSE remove
+  ${IfNot} ${AtLeastBuild} 19045
+    MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} needs Windows 10 version 22H2 (build 19045) or Windows 11." /SD IDOK
+    SetErrorLevel 1
+    RMDir "${remove}"
+    Quit
+  ${EndIf}
+  !if "${LPK_INSTALLER_ARCH}" == "x64"
+    ${If} ${IsNativeARM64}
+      MessageBox MB_ICONSTOP|MB_OK "This is the x64 build of ${LPK_PRODUCT}. On this ARM64 PC, install the ARM64 build: its Explorer menu needs an ARM64 shell extension." /SD IDOK
+      SetErrorLevel 1
+      RMDir "${remove}"
+      Quit
+    ${EndIf}
+  !endif
+!macroend
+
+; Interactive installs: the refusals before the first page, so before the reinstall page can run an old uninstaller
+; (PageLeaveReinstall). The template defines no GUI-init function of its own.
+!define MUI_CUSTOMFUNCTION_GUIINIT LpkGuiInit
+Function LpkGuiInit
+  !insertmacro LPK_REFUSE ""
+FunctionEnd
+
+; Silent installs (no GUI init): the first section. NSIS runs sections in the order they are defined, and this file
+; comes before the template's sections, so this runs before the WebView2 section (which may download Microsoft's
+; bootstrapper) and before Section Install's SetOutPath creates $INSTDIR.
+Section "-LitePack preflight"
+  !insertmacro LPK_REFUSE ""
+SectionEnd
+
+; A LitePack RunOnce command left by an earlier uninstall or upgrade (a shell DLL Explorer held): a reinstall
+; before the next logon cancels them, so none can remove the new installation's files.
+!macro LPK_CANCEL_PENDING_RUNONCE
+  DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack uninstall"
+  StrCpy $R5 0
+  ${Do}
+    EnumRegValue $R6 HKCU "${LPK_RUNONCE}" $R5
+    ${If} $R6 == ""
+      ${Break}
+    ${EndIf}
+    StrCpy $R7 $R6 15
+    ${If} $R7 == "LitePack shell "
+      DeleteRegValue HKCU "${LPK_RUNONCE}" $R6
+    ${Else}
+      IntOp $R5 $R5 + 1
+    ${EndIf}
+  ${Loop}
+!macroend
+
+; The next-logon removal of one shell\<version> folder Explorer still holds, under the RunOnce value `name`: the DLL,
+; then the empty folders up to $INSTDIR, each non-recursively (no `rmdir /s`: nothing else is ever deleted).
+!macro LPK_RUNONCE_REMOVE_SHELL name version
+  WriteRegStr HKCU "${LPK_RUNONCE}" "${name}" \
+    '"$SYSDIR\cmd.exe" /d /c del /f /q "$INSTDIR\shell\${version}\lpk_shell.dll" & rmdir "$INSTDIR\shell\${version}" & rmdir "$INSTDIR\shell" & rmdir "$INSTDIR"'
+!macroend
+
+; The shell\<version> folders other than this version's: removed when Explorer holds none of their files; one still
+; held is removed at the next logon.
 !macro LPK_REMOVE_OLD_SHELL_FOLDERS
   FindFirst $0 $1 "$INSTDIR\shell\*"
   ${DoWhile} $1 != ""
@@ -24,8 +94,7 @@
     ${AndIf} $1 != "${VERSION}"
       RMDir /r "$INSTDIR\shell\$1"
       ${If} ${FileExists} "$INSTDIR\shell\$1\*"
-        WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "LitePack shell $1" \
-          '"$SYSDIR\cmd.exe" /d /c rmdir /s /q "$INSTDIR\shell\$1"'
+        !insertmacro LPK_RUNONCE_REMOVE_SHELL "LitePack shell $1" "$1"
       ${EndIf}
     ${EndIf}
     FindNext $0 $1
@@ -33,32 +102,22 @@
   FindClose $0
 !macroend
 
-!macro LPK_REFUSE_OLD_WINDOWS
-  ${IfNot} ${AtLeastBuild} 19045
-    MessageBox MB_ICONSTOP|MB_OK "LitePack needs Windows 10 version 22H2 (build 19045) or Windows 11." /SD IDOK
-    SetErrorLevel 1
-    Quit
-  ${EndIf}
-!macroend
-
-; The first section of the installer: this file is included before installer.nsi defines its sections, and NSIS runs
-; sections in the order they are defined, so the version check runs before the template's WebView2 section (which
-; may download and run Microsoft's bootstrapper) and before any file is written. ${ARCH} is defined only after this
-; include, so the ARM64 check stays in PREINSTALL (Windows 11 on ARM64 ships the WebView2 runtime, so that section
-; writes nothing there).
-Section "-LitePack preflight"
-  !insertmacro LPK_REFUSE_OLD_WINDOWS
-SectionEnd
+; The uninstaller's "close LitePack" check, before PREUNINSTALL changes anything: a cancelled prompt aborts with
+; LitePack still installed and registered. The template runs the same check again after this hook.
+Function un.LpkCheckRunning
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${LPK_MAIN_EXE}" "${LPK_PRODUCT}"
+FunctionEnd
 
 !macro NSIS_HOOK_PREINSTALL
-  !insertmacro LPK_REFUSE_OLD_WINDOWS
-  !if "${ARCH}" == "x64"
-    ${If} ${IsNativeARM64}
-      MessageBox MB_ICONSTOP|MB_OK "This is the x64 build of LitePack. On this ARM64 PC, install the ARM64 build: its Explorer menu needs an ARM64 shell extension." /SD IDOK
-      SetErrorLevel 1
-      Quit
-    ${EndIf}
+  !if "${ARCH}" != "${LPK_INSTALLER_ARCH}"
+    !error "installer.nsh refuses by LPK_INSTALLER_ARCH (${LPK_INSTALLER_ARCH}), but this build is ${ARCH}"
   !endif
+  !if "${MAINBINARYNAME}.exe" != "${LPK_MAIN_EXE}"
+    !error "installer.nsh names ${LPK_MAIN_EXE}, the build's main binary is ${MAINBINARYNAME}.exe"
+  !endif
+  ; Section Install has run SetOutPath $INSTDIR: a refusal removes that folder again when it is empty.
+  !insertmacro LPK_REFUSE "$INSTDIR"
+  !insertmacro LPK_CANCEL_PENDING_RUNONCE
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
@@ -74,6 +133,7 @@ SectionEnd
 
 !macro NSIS_HOOK_PREUNINSTALL
   ${If} $UpdateMode <> 1
+    Call un.LpkCheckRunning
     ; LitePack's own switch: /DELETEAPPDATA ticks the "delete the application data" box for a silent uninstall.
     ${GetOptions} $CMDLINE "/DELETEAPPDATA" $0
     ${IfNot} ${Errors}
@@ -108,10 +168,10 @@ SectionEnd
     Delete "$APPDATA\Microsoft\Windows\Recent\AutomaticDestinations\a233dcd0c3d36a7d.automaticDestinations-ms"
     Delete "$APPDATA\Microsoft\Windows\Recent\CustomDestinations\a233dcd0c3d36a7d.customDestinations-ms"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Search\JumplistData" "${BUNDLEID}"
-    ; A shell DLL Explorer still holds: removed at the next logon.
-    ${If} ${FileExists} "$INSTDIR\shell\*"
-      WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "LitePack uninstall" \
-        '"$SYSDIR\cmd.exe" /d /c rmdir /s /q "$INSTDIR"'
+    ; A shell DLL Explorer still holds (this version's, after the template removed the rest): removed at the next
+    ; logon, with the then-empty folders, never recursively.
+    ${If} ${FileExists} "$INSTDIR\shell\${VERSION}\lpk_shell.dll"
+      !insertmacro LPK_RUNONCE_REMOVE_SHELL "LitePack uninstall" "${VERSION}"
     ${EndIf}
   ${EndIf}
 !macroend
