@@ -138,20 +138,31 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
 `THIRD-PARTY-NOTICES`, `LICENSE-APACHE`, `LICENSE-MIT`.
 
 **Hooks** (`crates/lpk-gui/installer.nsh`):
-- PREINSTALL: below build 19045, a message naming Windows 10 22H2 and an exit before any file is written (checked
-  first in a hidden section the hooks file defines ahead of the template's, so before the WebView2 section, which
-  could download Microsoft's bootstrapper; and again in the hook); the x64 installer on an ARM64 PC names the ARM64
-  build and exits (in the hook, after the WebView2 section, which finds the runtime Windows 11 on ARM64 ships). The template sets no `ManifestSupportedOS`, so NSIS's
-  default (every version up to Windows 10/11) is in the manifest and `${AtLeastBuild}` sees the real build. CI has no
-  Windows 10 runner: the refusal is checked by hand on a Windows 10 VM in E7-10.
-- POSTINSTALL: `lpk-gui.exe --register-shell` (route C, the `.lpk` association, `GuiPath`, `bin\` on `Path`; docs/API.md),
-  a `WM_SETTINGCHANGE` broadcast for `Environment` (NSIS's `SendMessage` with a 5-second timeout), and the removal of
-  other versions' `shell\` folders; one Explorer still holds is removed at the next logon by a per-user `RunOnce`.
-- PREUNINSTALL, skipped under `/UPDATE`: `--unregister-shell`, the broadcast, `bin\lpk-worker.exe --remove-profile`.
+- The refusals: below build 19045, a message naming Windows 10 22H2; the x64 installer on an ARM64 PC, a message
+  naming the ARM64 build. Both exit with error level 1 before any file is written and before an old version is
+  touched: in the GUI-init function (`MUI_CUSTOMFUNCTION_GUIINIT`, before the first page, so before the reinstall
+  page can run the old uninstaller) and, for silent installs, in a hidden section the hooks file defines ahead of the
+  template's, so before the WebView2 section (which could download Microsoft's bootstrapper) and before `SetOutPath`
+  creates the install folder. PREINSTALL repeats them and then removes the install folder only when it is empty. The
+  template sets no `ManifestSupportedOS`, so NSIS's default (every version up to Windows 10/11) is in the manifest and
+  `${AtLeastBuild}` sees the real build. CI has no Windows 10 runner: the version refusal is checked by hand on a
+  Windows 10 VM in E7-10; the ARM64 refusal runs on `windows-11-arm`.
+- PREINSTALL also cancels any LitePack `RunOnce` command still pending from an earlier uninstall or upgrade, so none
+  can touch a reinstall made before the next logon.
+- POSTINSTALL: `lpk-gui.exe --register-shell` (route C, the `.lpk` association, `GuiPath`, `bin\` on `Path`; docs/API.md;
+  an install path containing `%` or `;` is refused), a `WM_SETTINGCHANGE` broadcast for `Environment` (NSIS's
+  `SendMessage` with a 5-second timeout), and the removal of other versions' `shell\` folders.
+- PREUNINSTALL, skipped under `/UPDATE`: the "close LitePack" check first (a cancelled prompt leaves LitePack installed
+  and registered), then `--unregister-shell`, the broadcast, `bin\lpk-worker.exe --remove-profile`.
 - POSTUNINSTALL, skipped under `/UPDATE`: `%LOCALAPPDATA%\org.litepack.gui` always; `%APPDATA%\LitePack` only with the
   box; Tauri's bookkeeping (`HKCU\Software\litepack\LitePack`, its `Installer Language`) always. The registry compares
   names without case, so that key is `Software\LitePack\LitePack`, under LitePack's own `Software\LitePack`: it is
-  deleted, then `Software\LitePack` only when empty. A `shell\` DLL still held: a `RunOnce` removes the folder.
+  deleted, then `Software\LitePack` only when empty.
+- A shell DLL Explorer still holds (an old version's at an upgrade, this version's at an uninstall) is removed at the
+  next logon by a per-user `RunOnce` command that deletes `shell\<version>\lpk_shell.dll` and then removes
+  `shell\<version>`, `shell` and the install folder only if each is empty: never recursively, so nothing else in a
+  `/D=` folder can go. CI holds the DLL open during an uninstall, checks the command, runs it, and checks that a
+  reinstall cancels it.
 
 **Switches.** Tauri's: `/S` silent (installer and uninstaller), `/P` passive (a progress bar), `/NS` no shortcuts,
 `/D=<dir>` (last and unquoted), `/R` relaunch after a silent or passive install; `/UPDATE` and `/ARGS` are the

@@ -136,7 +136,8 @@ literal command line (not from an `@file`, not mixed with the verbs above or wit
 Exit codes: 0 done; 1 failed (what was written is in the record, `--unregister-shell` undoes it); 2 refused, with
 nothing written: a portable copy (the `portable` marker beside the exe) never registers, unknown or extra
 arguments (also one that is not valid Unicode), `lpk_shell.dll` missing (both in `shell\<version>\`, the installed
-layout, and beside the exe), or an install path containing `%` (Explorer would substitute it in the open command).
+layout, and beside the exe), or an install path containing `%` (Explorer would substitute it in the open command) or `;` (it separates `Path`'s
+entries).
 Both verbs end with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
 
 In the installed layout (E7-5: `bin\lpk.exe` beside `lpk-gui.exe`), `--register-shell` also appends `<install>\bin` to

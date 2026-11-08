@@ -581,6 +581,13 @@ pub fn register_for<R: Registry + ?Sized>(
             "the installation path contains '%'; it cannot be registered",
         ));
     }
+    // `;` separates `Path`'s entries: `bin` would land as fragments that no unregistering could
+    // find again (R329).
+    if gui.contains(';') {
+        return Err(RegisterError::Refused(
+            "the installation path contains ';'; it cannot be registered",
+        ));
+    }
     register_with_path(reg, &gui, &dll, bin.as_deref(), open_with).map_err(RegisterError::Failed)
 }
 

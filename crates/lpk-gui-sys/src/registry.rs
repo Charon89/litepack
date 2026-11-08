@@ -304,27 +304,29 @@ impl Key {
     }
 }
 
+/// The text of a `REG_SZ` or `REG_EXPAND_SZ` value, strictly (R329): `None` unless the data is
+/// whole UTF-16 units, ends with exactly one NUL terminator, holds no other NUL and is valid
+/// UTF-16, so that what is read is what [`RegBase::set_value`] would write back byte for byte.
+fn strict_text(data: &[u8]) -> Option<String> {
+    let (units, rest) = data.as_chunks::<2>();
+    if !rest.is_empty() {
+        return None;
+    }
+    let units: Vec<u16> = units.iter().map(|c| u16::from_le_bytes(*c)).collect();
+    let (&last, text) = units.split_last()?;
+    if last != 0 || text.contains(&0) {
+        return None;
+    }
+    String::from_utf16(text).ok()
+}
+
 fn decode(ty: u32, data: &[u8]) -> RegValue {
-    if ty == REG_SZ.0 {
-        let units: Vec<u16> = data
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| u16::from_le_bytes(*c))
-            .collect();
-        let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
-        RegValue::Sz(String::from_utf16_lossy(&units[..end]))
-    } else if ty == REG_EXPAND_SZ.0 {
-        // Strict (E7-5, `Path`): a value that would not be written back byte for byte (an odd
-        // length, a NUL before the terminator, text that is not UTF-16) is `Other`, never edited.
-        let (units, rest) = data.as_chunks::<2>();
-        let mut units: Vec<u16> = units.iter().map(|c| u16::from_le_bytes(*c)).collect();
-        if units.last() == Some(&0) {
-            units.pop();
-        }
-        match String::from_utf16(&units) {
-            Ok(s) if rest.is_empty() && !units.contains(&0) => RegValue::ExpandSz(s),
-            _ => RegValue::Other(ty),
+    if ty == REG_SZ.0 || ty == REG_EXPAND_SZ.0 {
+        // Anything else is `Other`: never equal to ours, never edited.
+        match strict_text(data) {
+            Some(s) if ty == REG_SZ.0 => RegValue::Sz(s),
+            Some(s) => RegValue::ExpandSz(s),
+            None => RegValue::Other(ty),
         }
     } else if ty == REG_NONE.0 && data.is_empty() {
         RegValue::None
@@ -413,9 +415,28 @@ mod tests {
             decode(REG_EXPAND_SZ.0, &[0x41, 0, 0, 0, 0x42, 0]) == RegValue::Other(REG_EXPAND_SZ.0)
         );
         assert!(decode(REG_EXPAND_SZ.0, &[0x41, 0, 0x42]) == RegValue::Other(REG_EXPAND_SZ.0));
+        // Strict (R329): terminated, one NUL, whole units, valid UTF-16; else `Other`.
+        assert_eq!(
+            decode(REG_EXPAND_SZ.0, &[0x41, 0, 0, 0]),
+            RegValue::ExpandSz("A".into())
+        );
+        assert_eq!(decode(REG_SZ.0, &[0x41, 0, 0, 0]), RegValue::Sz("A".into()));
+        assert_eq!(decode(REG_SZ.0, &[0, 0]), RegValue::Sz(String::new()));
+        // An unterminated REG_EXPAND_SZ, a REG_SZ with an embedded NUL, an unterminated or empty
+        // REG_SZ, a lone surrogate.
         assert_eq!(
             decode(REG_EXPAND_SZ.0, &[0x41, 0]),
-            RegValue::ExpandSz("A".into())
+            RegValue::Other(REG_EXPAND_SZ.0)
+        );
+        assert_eq!(
+            decode(REG_SZ.0, &[0x41, 0, 0, 0, 0x42, 0, 0, 0]),
+            RegValue::Other(REG_SZ.0)
+        );
+        assert_eq!(decode(REG_SZ.0, &[0x41, 0]), RegValue::Other(REG_SZ.0));
+        assert_eq!(decode(REG_SZ.0, &[]), RegValue::Other(REG_SZ.0));
+        assert_eq!(
+            decode(REG_SZ.0, &[0x00, 0xD8, 0, 0]),
+            RegValue::Other(REG_SZ.0)
         );
         assert_eq!(listed[1], ("n".to_string(), RegValue::None));
         let long = "z".repeat(5000);

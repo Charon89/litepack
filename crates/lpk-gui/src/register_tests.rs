@@ -400,6 +400,22 @@ fn a_percent_sign_in_the_install_path_is_refused_before_any_write() {
 }
 
 #[test]
+fn a_semicolon_in_the_install_path_is_refused_before_any_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("a;b").join("LitePack");
+    std::fs::create_dir_all(sub.join(BIN_DIR)).unwrap();
+    std::fs::write(sub.join(SHELL_DLL), b"").unwrap();
+    std::fs::write(sub.join(BIN_DIR).join(BIN_TOOL), b"").unwrap();
+    let exe = sub.join("lpk-gui.exe");
+    std::fs::write(&exe, b"").unwrap();
+    let mut reg = Fake::default();
+    let verb = ShellVerb::Register { open_with: false };
+    assert_eq!(run_verb(verb, &exe, &mut reg), exit::REFUSED);
+    assert_eq!(reg.writes, 0);
+    assert_eq!(reg.notifies, 0);
+}
+
+#[test]
 fn verbatim_prefixes_are_normalized() {
     assert_eq!(normalize_path("C:\\a\\b.exe"), "C:\\a\\b.exe");
     assert_eq!(normalize_path("\\\\?\\C:\\a\\b.exe"), "C:\\a\\b.exe");
@@ -681,6 +697,28 @@ fn the_uninstaller_removes_the_jump_list_of_this_identifier() {
         .collect();
     let file = format!("{:016x}.automaticDestinations-ms", crc64(&id));
     assert!(include_str!("../installer.nsh").contains(&file), "{file}");
+}
+
+#[test]
+fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
+    let nsh = include_str!("../installer.nsh");
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let product = conf["productName"].as_str().unwrap();
+    let exe = format!("{}.exe", conf["mainBinaryName"].as_str().unwrap());
+    assert!(nsh.contains(&format!("!define LPK_PRODUCT \"{product}\"")));
+    assert!(nsh.contains(&format!("!define LPK_MAIN_EXE \"{exe}\"")));
+    // R329: every RunOnce command deletes the shell DLL and then empty folders only.
+    let commands: Vec<&str> = nsh.lines().filter(|l| l.contains("cmd.exe")).collect();
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    let cmd = commands[0].to_lowercase();
+    assert!(!cmd.contains("/s"), "{cmd}");
+    assert!(
+        cmd.contains(r#"del /f /q "$instdir\shell\${version}\lpk_shell.dll""#),
+        "{cmd}"
+    );
+    for part in cmd.split(" & ").skip(1) {
+        assert!(part.trim().starts_with("rmdir \"$instdir"), "{part}");
+    }
 }
 
 #[test]
