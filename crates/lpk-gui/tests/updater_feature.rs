@@ -5,12 +5,14 @@
 #![allow(clippy::unwrap_used)]
 
 use std::path::Path;
-use std::process::Command;
 
-/// The packages in `lpk-gui`'s normal dependency tree for every target, with `features`.
+/// The packages in `lpk-gui`'s normal dependency tree on this host, with `features`. Windows
+/// alone: Tauri is a Windows-only dependency, and another target's crates need not be in the
+/// local cache (`--offline`).
+#[cfg(windows)]
 fn tree(features: &[&str]) -> String {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let out = Command::new(env!("CARGO"))
+    let out = std::process::Command::new(env!("CARGO"))
         .args(["tree", "--manifest-path"])
         .arg(&manifest)
         .args([
@@ -18,8 +20,6 @@ fn tree(features: &[&str]) -> String {
             "lpk-gui",
             "-e",
             "normal",
-            "--target",
-            "all",
             "--locked",
             "--offline",
             "--prefix",
@@ -38,10 +38,12 @@ fn tree(features: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+#[cfg(windows)]
 fn has_updater(tree: &str) -> bool {
     tree.lines().any(|l| l.starts_with("tauri-plugin-updater "))
 }
 
+#[cfg(windows)]
 #[test]
 fn the_store_build_has_no_updater_in_its_tree() {
     assert!(
@@ -74,4 +76,5 @@ fn the_page_hides_the_update_setting_without_the_updater() {
         page.contains("startup.updater"),
         "main.js reads no updater flag"
     );
+    assert!(page.contains("box.closest(\"label\").hidden = !updater"));
 }
