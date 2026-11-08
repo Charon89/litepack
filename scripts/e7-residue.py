@@ -96,7 +96,8 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # Kinds: `file` (the folder or file and everything under it), `file-pattern` (files directly in
 # one folder whose names match one shape), `key` (the key and everything under it), `key-only`
 # (that one key's existence, not its values or subkeys), `value` (one key and one value name),
-# `value-pattern` (one key, value names of one shape), `empty-key` (that key alone, added and
+# `value-pattern` (one key, value names of one shape), `key-pattern-value` (one value name in keys
+# of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
 # holding nothing).
 ALLOW = [
     # E7-6's first full diff (CI run 42483731626), ruling R313.
@@ -153,11 +154,17 @@ ALLOW = [
     {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows\CurrentVersion\Search",
      "name": "InstalledWin32AppsRevision",
      "reason": START + ": Windows Search's revision of the installed desktop programs"},
-    {"kind": "value-pattern",
-     "path": (r"HKCU\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
-              r"\$de${56dd80ad-4875-4425-bc6f-80ae66daaf21}$$windows.data.unifiedtile"
-              r".localstarttilepropertiesmap\Current"),
+    # The GUID in this key's name differs between runners (56dd80ad-... in run 42486016300,
+    # e7cbac1d-... in run 42489790951): the key is matched by its shape, the value by its name.
+    {"kind": "key-pattern-value",
+     "path": (r"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\Cache"
+              r"\\DefaultAccount\\\$de\$\{[0-9a-f-]{36}\}\$\$windows\.data\.unifiedtile"
+              r"\.localstarttilepropertiesmap\\Current"),
      "name": "Data", "reason": START + ": the Start menu's tile properties (CloudStore)"},
+    {"kind": "file-pattern",
+     "path": r"%LOCALAPPDATA%\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\TempState",
+     "name": r"prep_Activatable Class_Hermes_perf\.cache",
+     "reason": START + ": a performance cache of the Start menu's host (run 42489790951)"},
     {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows\Shell\Bags\1\Desktop",
      "name": "IconLayouts",
      "reason": "Explorer's desktop icon positions, rewritten when a desktop shortcut comes and goes"},
@@ -464,6 +471,9 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
                 continue
             if re.fullmatch(pattern, name, re.IGNORECASE | re.DOTALL):
                 return a["reason"]
+        if a["kind"] == "key-pattern-value" and kind == "value" and \
+                re.fullmatch(a["path"], path, re.IGNORECASE) and norm(name) == norm(a["name"]):
+            return a["reason"]
         if a["kind"] == "key-only" and kind == "key" and norm(path) == norm(a["path"]):
             return a["reason"]
         if a["kind"] == "file-pattern" and kind == "file":
@@ -692,6 +702,20 @@ class Tests(unittest.TestCase):
         self.assertEqual(diff(before, after, False, run)[1], 0)
         self.assertEqual(diff(before, after, False)[1], 1)
         self.assertEqual(diff(before, after, False, r"C:\elsewhere")[1], 1)
+
+    def test_the_start_tile_cache_is_matched_by_its_shape(self):
+        key = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
+               r"\$de${e7cbac1d-30b4-408f-a41d-5714e42e257a}$$windows.data.unifiedtile"
+               r".localstarttilepropertiesmap\Current")
+        before = snap(self.base["files"], dict(self.base["registry"], **{key: {"Data": "hex:01"}}))
+        after = snap(self.base["files"], dict(self.base["registry"], **{key: {"Data": "hex:02"}}))
+        self.assertEqual(diff(before, after, False)[1], 0)
+        other = snap(self.base["files"], dict(self.base["registry"], **{key: {"Data": "hex:01", "X": "1"}}))
+        self.assertEqual(diff(before, other, False)[1], 1)
+        bent = key.replace("unifiedtile", "unifiedtileX")
+        moved = snap(self.base["files"], dict(self.base["registry"], **{bent: {"Data": "hex:02"}}))
+        self.assertEqual(diff(snap(self.base["files"], dict(self.base["registry"], **{bent: {"Data": "1"}})),
+                              moved, False)[1], 1)
 
     def test_a_desktop_shortcut_is_residue(self):
         before = snap(dict(self.base["files"], **{"%DESKTOP%": {"kind": "absent"}}),
