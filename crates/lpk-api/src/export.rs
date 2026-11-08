@@ -572,6 +572,10 @@ mod tests {
     /// The opener-failure path: an opener that fails (another process created the output
     /// between the target check and the open, so `create_new` refused) leaves the writer
     /// not `created`, so the export removes nothing; one that succeeds makes it `created`.
+    /// This proves the writer's side only: no session-level test drives the export's failure
+    /// path through a failing opener (no seam places a colliding file, and the `.partial`
+    /// name carries the pid and a counter), so `Session::export`'s use of `created()` rests
+    /// on review.
     #[test]
     fn a_failed_opener_is_not_created_and_a_successful_one_is() {
         let d = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
