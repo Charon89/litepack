@@ -35,6 +35,8 @@
   "error.title": "Error",
   "exit.busy.title": "LitePack is working",
   "exit.busy.text": "An operation is still running. Stop it and close LitePack?",
+  "portable.data.title": "LitePack cannot start",
+  "portable.data.text": "This portable copy keeps its settings in the data folder beside it, and that folder cannot be used: {error}. Move the copy to a folder you can write to.",
   "password.title": "Password",
   "password.prompt": "Enter the archive's password:",
   "password.confirm": "Enter it again:",
