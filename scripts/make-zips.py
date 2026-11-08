@@ -66,6 +66,11 @@ profile, run this in this folder:
 
 To remove {PRODUCT} completely, run that command, then delete this folder.
 
+Windows and the WebView2 runtime (the browser engine the window is drawn with, part of Windows)
+keep a few records of their own, as they do for any program you run: for example the program's
+name in Windows' display cache, and the runtime's own settings. {PRODUCT}'s own data stays in
+data\\.
+
 The licences are in LICENSE-APACHE and LICENSE-MIT; the licences of the third-party code inside
 are in THIRD-PARTY-NOTICES.
 """

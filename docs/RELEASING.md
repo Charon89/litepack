@@ -88,6 +88,19 @@ one folder, key or value at a time with the reason beside each. That includes th
 `--require-worker-profile`, the profile is allowed, and the diff fails unless both its folder under
 `%LOCALAPPDATA%\Packages` and its `Mappings` key were added. Key and value names are compared without case.
 
+Windows and the WebView2 runtime keep a few records of their own, as they do for any app; LitePack's own data stays
+in `data\`. The allow-list names them one at a time (R313, from the first full diff, CI run 42483731626):
+- Windows' account broker (WAM), which refreshes the runner account's tokens in the background: its token cache
+  (`%LOCALAPPDATA%\Microsoft\TokenBroker\Cache`, files of the shape `<40 hex>.tbres` directly in it), its credential
+  file (`%LOCALAPPDATA%\Microsoft\Credentials`, names of 32 hex digits directly in it), the broker app's `PCT` and
+  `PTT` values and the `AuthCookies\Live\Default\DIDC` `Data` value.
+- The shell's display-string cache (MuiCache): `elscore.dll`'s strings, and the `Shell\MuiCache` key with
+  `lpk-gui.exe`'s `ApplicationCompany` and `FriendlyAppName` (keyed by its path) and `LangID`.
+- Explorer's UserAssist session counter and its Windows Terminal entry, which change on the runner on their own.
+- The WebView2 runtime's per-user records: the subtrees `HKCU\Software\Microsoft\EdgeWebView` and
+  `HKCU\Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` (the runtime's GUID), and
+  nothing wider.
+
 CI's `portable` job builds the binaries and both zips and takes a snapshot. It unzips both zips into fresh folders
 under the runner's temp folder and makes a small `.lpk` and a `.zip` with the portable `lpk.exe`. It opens each in the
 portable GUI (the smoke report, with `LOCALAPPDATA` and `APPDATA` left as they are), then requires the profile and

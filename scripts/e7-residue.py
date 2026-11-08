@@ -27,6 +27,7 @@ is 1 if any entry is not allowed.
 import argparse
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -61,7 +62,54 @@ APPCONTAINER_REASON = ("Windows' own AppContainer bookkeeping: an empty parent k
 # (`value`: a key and one value name) or empty key (`empty-key`: that key alone, added and holding
 # nothing). Nothing LitePack writes may be listed here: that is fixed instead. Each entry's reason
 # is printed beside every entry it allows.
+AAD_LU = (LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData"
+          r"\Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy\HAM\AUI\App\V1\LU")
+SHELL_MUICACHE = LOCAL_SETTINGS + r"\Software\Microsoft\Windows\Shell\MuiCache"
+USERASSIST_COUNT = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"
+                    r"\{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}\Count")
+WAM = ("Windows' account broker (WAM, Microsoft.AAD.BrokerPlugin), which refreshes the runner "
+       "account's tokens in the background whatever runs")
+MUI = "Windows' shell cache of a program's display strings (MuiCache), filled when a program runs"
+WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for every WebView2 app "
+            "(R313); LitePack's WebView2 data stays in data\\")
+
+# Kinds: `file` (the folder or file and everything under it), `file-pattern` (files directly in
+# one folder whose names match one shape), `key` (the key and everything under it), `key-only`
+# (that one key's existence, not its values or subkeys), `value` (one key and one value name),
+# `value-pattern` (one key, value names of one shape), `empty-key` (that key alone, added and
+# holding nothing).
 ALLOW = [
+    # E7-6's first full diff (CI run 42483731626), ruling R313.
+    {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\TokenBroker\Cache",
+     "name": r"[0-9a-f]{40}\.tbres", "reason": WAM + ": its token cache, one file per token"},
+    {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\Credentials",
+     "name": r"[0-9A-F]{32}", "reason": WAM + ": the credential it stores through DPAPI"},
+    {"kind": "value", "path": AAD_LU, "name": "PCT",
+     "reason": WAM + ": the broker app's last-use time"},
+    {"kind": "value", "path": AAD_LU, "name": "PTT",
+     "reason": WAM + ": the broker app's last-use time"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\AuthCookies\Live\Default\DIDC",
+     "name": "Data", "reason": WAM + ": the Microsoft account device cookie"},
+    {"kind": "value-pattern", "path": LOCAL_SETTINGS + r"\MuiCache\1a4\52C64B7E",
+     "name": r"C:\\Windows\\system32,@elscore\.dll,-[0-9]+",
+     "reason": MUI + ": the strings of Windows' elscore.dll (Extended Linguistic Services)"},
+    {"kind": "key-only", "path": SHELL_MUICACHE, "reason": MUI + ": the cache's own key"},
+    {"kind": "value-pattern", "path": SHELL_MUICACHE,
+     "name": r".*\\lpk-gui\.exe\.(ApplicationCompany|FriendlyAppName)",
+     "reason": MUI + ": lpk-gui.exe's company and friendly name, keyed by its path"},
+    {"kind": "value", "path": SHELL_MUICACHE, "name": "LangID",
+     "reason": MUI + ": the cache's language"},
+    {"kind": "value", "path": USERASSIST_COUNT, "name": "HRZR_PGYFRFFVBA",
+     "reason": "Explorer's usage record (UserAssist): its session counter, UEME_CTLSESSION"},
+    {"kind": "value", "path": USERASSIST_COUNT,
+     "name": "Zvpebfbsg.JvaqbjfGrezvany_8jrxlo3q8oojr!Ncc",
+     "reason": "Explorer's usage record (UserAssist) of Windows Terminal "
+               "(Microsoft.WindowsTerminal_8wekyb3d8bbwe!App), not a LitePack program"},
+    {"kind": "key", "path": r"HKCU\Software\Microsoft\EdgeWebView", "reason": WEBVIEW2},
+    {"kind": "key",
+     "path": r"HKCU\Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+     "reason": WEBVIEW2 + ": the runtime's update state under its own GUID"},
+    # R301.
     {"kind": "empty-key", "path": APPCONTAINER, "reason": APPCONTAINER_REASON},
     {"kind": "empty-key", "path": MAPPINGS, "reason": APPCONTAINER_REASON},
     {"kind": "empty-key", "path": STORAGE, "reason": APPCONTAINER_REASON},
@@ -294,6 +342,16 @@ def allowed(kind, path, name, sign, after):
         if a["kind"] == "value" and kind == "value" and norm(path) == norm(a["path"]) and \
                 norm(name) == norm(a["name"]):
             return a["reason"]
+        if a["kind"] == "value-pattern" and kind == "value" and \
+                norm(path) == norm(a["path"]) and \
+                re.fullmatch(a["name"], name, re.IGNORECASE | re.DOTALL):
+            return a["reason"]
+        if a["kind"] == "key-only" and kind == "key" and norm(path) == norm(a["path"]):
+            return a["reason"]
+        if a["kind"] == "file-pattern" and kind == "file":
+            folder, _, leaf = path.rpartition("\\")
+            if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE):
+                return a["reason"]
         if a["kind"] == "empty-key" and kind == "key" and sign == "+" and \
                 norm(path) == norm(a["path"]) and empty_key(after, path):
             return a["reason"]
@@ -474,6 +532,37 @@ class Tests(unittest.TestCase):
             self.assertEqual(diff(before, after, False)[1], 1)
         finally:
             ALLOW = saved
+
+    def added_keys(self, keys):
+        after = snap(self.base["files"], dict(self.base["registry"], **{k: v for k, v in keys}))
+        return diff(self.base, after, False)
+
+    def test_a_webview2_key_below_its_root_is_allowed_and_a_sibling_is_not(self):
+        root = r"HKCU\Software\Microsoft\EdgeWebView"
+        lines, bad = self.added_keys([(root + r"\BLBeacon", {"version": '"1"'})])
+        self.assertEqual(bad, 0, lines)
+        for sibling in (r"HKCU\Software\Microsoft\EdgeWebViewX", r"HKCU\Software\Microsoft\Edge",
+                        r"HKCU\Software\Microsoft\EdgeUpdate\ClientState\{0000}"):
+            lines, bad = self.added_keys([(sibling, {"v": '"1"'})])
+            self.assertEqual(bad, 2, lines)
+
+    def test_file_patterns_hold_to_their_folder_and_shape(self):
+        cache = r"%LOCALAPPDATA%\Microsoft\TokenBroker\Cache"
+        ok = cache + "\\" + "a" * 40 + ".tbres"
+        after = snap(dict(self.base["files"], **{ok: f()}), self.base["registry"])
+        self.assertEqual(diff(self.base, after, False)[1], 0)
+        for bad_path in (cache + r"\settings.json", cache + "\\sub\\" + "a" * 40 + ".tbres",
+                         r"%LOCALAPPDATA%\Microsoft\Credentials\litepack"):
+            after = snap(dict(self.base["files"], **{bad_path: f()}), self.base["registry"])
+            self.assertEqual(diff(self.base, after, False)[1], 1, bad_path)
+
+    def test_the_muicache_allows_lpk_gui_names_only(self):
+        mui = SHELL_MUICACHE
+        lines, bad = self.added_keys([(mui, {r"D:\x\LitePack\lpk-gui.exe.FriendlyAppName": '"L"',
+                                             "LangID": "hex:09,04"})])
+        self.assertEqual(bad, 0, lines)
+        lines, bad = self.added_keys([(mui, {r"D:\x\other.exe.FriendlyAppName": '"O"'})])
+        self.assertEqual(bad, 1, lines)
 
     def test_the_profile_needs_the_flag(self):
         after = with_profile(self.base)
