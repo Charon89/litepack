@@ -15,7 +15,7 @@ set -euo pipefail
 # An explicit tauri.conf.json is taken relative to the caller's directory, before the cd below.
 conf_arg=""
 if [[ "${1:-}" == "--compression" && -n "${2:-}" ]]; then
-  conf_arg="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+  conf_arg="$(cd -- "$(dirname -- "$2")" && pwd)/$(basename -- "$2")"
 fi
 cd "$(dirname "$0")/.."
 
@@ -26,15 +26,27 @@ if [[ -z "$required_compression" ]]; then
   exit 1
 fi
 
-# Fails, with one line, unless the installer's compression in tauri.conf.json is the pinned one (zlib).
+# Fails, with one line, unless the installer's compression in tauri.conf.json is the pinned one (zlib). An
+# unreadable file, invalid JSON or a level that is not an object reads as "(unreadable: ...)" or "(absent)"; a value
+# that is not a plain word is printed as JSON, so it can never compare equal by accident.
 check_compression() {
   local conf="$1" found
   found="$(python3 -I -c '
 import json, sys
-with open(sys.argv[1], encoding="utf-8") as f:
-    conf = json.load(f)
-value = conf.get("bundle", {}).get("windows", {}).get("nsis", {}).get("compression")
-print("(absent)" if value is None else json.dumps(value) if not isinstance(value, str) else value)
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        value = json.load(f)
+except (OSError, ValueError) as e:
+    print("(unreadable: %s)" % type(e).__name__)
+    sys.exit(0)
+for key in ("bundle", "windows", "nsis", "compression"):
+    value = value.get(key) if isinstance(value, dict) else None
+if value is None:
+    print("(absent)")
+elif isinstance(value, str) and value.isalnum() and value.isascii():
+    print(value)
+else:
+    print(json.dumps(value))
 ' "$conf")"
   if [[ "$found" != "$required_compression" ]]; then
     echo "$conf: bundle.windows.nsis.compression is $found, $required_compression is required ($pin)" >&2
