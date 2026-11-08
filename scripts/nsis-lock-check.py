@@ -11,6 +11,8 @@ crates of the plugin's own workspace (no `source`) are the plugin, whose licence
 section. Prints one line per crate; exits 1 listing the crates the notices do not cover.
 """
 
+import json
+import re
 import sys
 import tomllib
 
@@ -172,6 +174,29 @@ def self_test():
                for x in lines), lines
     lines, missing = check_direct(ws[:2] + [ws[2].replace("proc-macro = true", "")], notices)
     assert missing == ["syn"], missing
+    # cargo metadata: normal edges only, never through a proc-macro; the licence must match a title.
+    def pkg(i, name, lic, source="registry+x", macro=False):
+        kind = ["proc-macro"] if macro else ["lib"]
+        return {"id": i, "name": name, "version": "1.0.0", "license": lic, "source": source,
+                "targets": [{"kind": kind}]}
+
+    def edge(i, *kinds):
+        return {"pkg": i, "dep_kinds": [{"kind": k} for k in kinds]}
+    meta = {
+        "packages": [pkg("r", "plugin", "MIT OR Apache-2.0", None), pkg("s", "semver", "MIT OR Apache-2.0"),
+                     pkg("m", "derive", "MIT", macro=True), pkg("q", "quote", "MIT"),
+                     pkg("c", "cc", "MIT"), pkg("g", "gpl-thing", "GPL-3.0")],
+        "resolve": {"nodes": [
+            {"id": "r", "deps": [edge("s", None), edge("m", None), edge("c", "build"), edge("g", None)]},
+            {"id": "m", "deps": [edge("q", None)]},
+        ]},
+    }
+    notices_meta = notices.replace("Apache License 2.0", "Apache License 2.0 (Apache-2.0)").replace(
+        "MIT License", "MIT License (MIT)") + "\n- gpl-thing 1.0.0 <https://example>\n"
+    lines, missing = check_metadata(meta, notices_meta, "plugin")
+    assert missing == ["gpl-thing 1.0.0"], (missing, lines)
+    assert any(x.startswith("semver 1.0.0 (MIT OR Apache-2.0): in the notices under") for x in lines), lines
+    assert not any(x.startswith(("quote", "derive", "cc ")) for x in lines), lines
     print("nsis-lock-check self-test: ok")
 
 
@@ -228,9 +253,66 @@ def check_direct(manifest_texts, notices_text):
     return lines, sorted(set(missing))
 
 
+def check_metadata(meta, notices_text, root):
+    """R325: (lines, missing) over `cargo metadata --filter-platform <the DLL's target>` of the plugin's
+    workspace: the crates `root` links, through normal dependencies only (no build or dev dependency) and never
+    through a proc-macro crate (which runs in the compiler, not in the DLL). Each registry crate must be listed in
+    the notices under a licence whose SPDX id is in the crate's own `license` expression."""
+    pkgs = {p["id"]: p for p in meta["packages"]}
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    is_macro = lambda p: any("proc-macro" in t.get("kind", []) for t in p.get("targets", []))  # noqa: E731
+    same = lambda a, b: a.replace("-", "_") == b.replace("-", "_")  # noqa: E731
+    start = [i for i, p in pkgs.items() if same(p["name"], root) and p.get("source") is None]
+    if len(start) != 1:
+        return [f"no workspace crate named {root}"], [root]
+    seen, stack = set(), list(start)
+    while stack:
+        i = stack.pop()
+        if i in seen:
+            continue
+        seen.add(i)
+        for d in nodes.get(i, {}).get("deps", []):
+            normal = any(k.get("kind") is None for k in d.get("dep_kinds", []))
+            if normal and not is_macro(pkgs[d["pkg"]]):
+                stack.append(d["pkg"])
+    titles = {}
+    for (name, _version), ts in notice_licences(notices_text).items():
+        titles.setdefault(name, set()).update(ts)
+    lines, missing = [], []
+    for i in sorted(seen, key=lambda i: (pkgs[i]["name"], pkgs[i]["version"])):
+        p = pkgs[i]
+        name, version, lic = p["name"], p["version"], p.get("license") or "(none)"
+        if p.get("source") is None:
+            lines.append(f"{name} {version}: the plugin's own workspace ({lic})")
+            continue
+        ids = set(re.findall(r"[A-Za-z0-9.+-]+", lic)) - {"OR", "AND", "WITH"}
+        match = sorted(t for t in titles.get(name, ()) if any(t.endswith(f"({x})") for x in ids))
+        if match:
+            lines.append(f"{name} {version} ({lic}): in the notices under {'; '.join(match)}")
+        else:
+            listed = "; ".join(sorted(titles.get(name, ()))) or "not listed"
+            lines.append(f"{name} {version} ({lic}): NOT COVERED (notices: {listed})")
+            missing.append(f"{name} {version}")
+    lines.append("resolved today from the tag's manifests (no Cargo.lock is published): these are today's "
+                 "versions, not necessarily the ones the DLL was built with")
+    return lines, missing
+
+
 def main(argv):
     if argv == ["--self-test"]:
         self_test()
+        return 0
+    if len(argv) == 4 and argv[0] == "--metadata":
+        with open(argv[1], encoding="utf-8") as f:
+            meta = json.load(f)
+        with open(argv[2], encoding="utf-8") as f:
+            lines, missing = check_metadata(meta, f.read(), argv[3])
+        for line in lines:
+            print(line)
+        if missing:
+            print(f"not covered by the notices: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        print(f"{argv[3]}: every registry crate it links is in the notices under its licence")
         return 0
     if len(argv) == 3 and argv[0] == "--manifests-only":
         import pathlib

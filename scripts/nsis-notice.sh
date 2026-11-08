@@ -130,8 +130,8 @@ if ! cmp "$work/LICENSE_MIT" notices/nsis/nsis_tauri_utils-LICENSE_MIT; then
 fi
 
 # R272 (E7-5): the plugin's source archive at its tag (GitHub's tarball), hashed first. Its member list is printed
-# always; only when the hash is the pinned one are its Cargo.lock and Cargo.toml files unpacked (text, read by
-# scripts/nsis-lock-check.py, never built or run) and every crate of the lock looked up in THIRD-PARTY-NOTICES.
+# always; only when the hash is the pinned one is it unpacked (never built or run; read by cargo metadata and
+# scripts/nsis-lock-check.py), and every crate the DLL links looked up in THIRD-PARTY-NOTICES.
 fetch -o "$work/source.tar.gz" "$(pin_value nsis_tauri_utils archive)"
 got="$(sha256sum "$work/source.tar.gz" | cut -d' ' -f1)"
 echo "[nsis_tauri_utils] source archive at $tag: SHA-256 $got"
@@ -142,12 +142,25 @@ if [[ "$got" != "$(pin_value nsis_tauri_utils archive_sha256)" ]]; then
   status=1
 else
   mkdir "$work/src"
-  tar -xzf "$work/source.tar.gz" -C "$work/src" --wildcards '*Cargo.lock' '*Cargo.toml'
+  tar -xzf "$work/source.tar.gz" -C "$work/src"
   lock="$(find "$work/src" -name Cargo.lock | sort | head -1)"
   if [[ -z "$lock" ]]; then
-    # The tag holds no Cargo.lock (CI run 42486016300): the direct dependencies of its manifests are checked instead.
-    echo "[nsis_tauri_utils] no Cargo.lock in the source at $tag: checking its manifests' direct dependencies"
-    python3 -I scripts/nsis-lock-check.py --manifests-only "$work/src" THIRD-PARTY-NOTICES || status=1
+    # R325: the tag publishes no Cargo.lock (CI run 42486016300). Cargo resolves the workspace's graph for the
+    # DLL's target (the NSIS x86-unicode plugin: i686-pc-windows-msvc) from its manifests and crates.io's index;
+    # `cargo metadata` builds and runs nothing (no build script, no proc-macro). It runs from the repository root,
+    # so this repository's rust-toolchain.toml applies, never one from the archive. Today's versions, not
+    # necessarily the DLL's: names and licences are what is checked.
+    root="$(find "$work/src" -mindepth 1 -maxdepth 1 -type d | head -1)"
+    echo "[nsis_tauri_utils] no Cargo.lock at $tag: resolving its workspace with cargo metadata (today's versions)"
+    if cargo metadata --format-version 1 --filter-platform i686-pc-windows-msvc \
+        --manifest-path "$root/Cargo.toml" > "$work/metadata.json"; then
+      python3 -I scripts/nsis-lock-check.py --metadata "$work/metadata.json" THIRD-PARTY-NOTICES \
+        nsis_tauri_utils || status=1
+    else
+      echo "[nsis_tauri_utils] cargo metadata failed; the manifests' direct dependencies instead" >&2
+      python3 -I scripts/nsis-lock-check.py --manifests-only "$work/src" THIRD-PARTY-NOTICES || status=1
+      status=1
+    fi
   else
     python3 -I scripts/nsis-lock-check.py "$lock" THIRD-PARTY-NOTICES --manifests "$work/src" || status=1
   fi

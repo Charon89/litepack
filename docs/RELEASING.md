@@ -174,6 +174,13 @@ The uninstaller also removes the jump list Windows keeps for LitePack's AppUserM
 CRC-64 of the upper-cased ID; a test checks it against `tauri.conf.json`), its `CustomDestinations` twin, and the
 `org.litepack.gui` value of `HKCU\...\CurrentVersion\Search\JumplistData`.
 
+**The plugin's crates (R272, R325).** CI's `notices pins` job checks that the crates compiled into Tauri's NSIS
+plugin `nsis_tauri_utils.dll` are in `THIRD-PARTY-NOTICES` under their licences. The plugin's release tag publishes no
+`Cargo.lock`, so the job takes the tag's source archive (SHA-256 pinned in `notices/nsis/pin.toml`) and resolves its
+workspace with `cargo metadata --filter-platform i686-pc-windows-msvc` (nothing is built or run), following the
+normal dependencies of `nsis_tauri_utils` and never a proc-macro crate. This resolves **today's** versions from
+crates.io, not necessarily the ones the DLL was built with: crate names and licences rarely change, versions may.
+
 **Known limitation (R312).** A silent uninstall leaves `%LOCALAPPDATA%\Temp\~nsu<n>.tmp\Un.exe`: NSIS runs the
 uninstaller from that copy so that it can remove the install folder, and only a reboot can delete the copy, which a
 per-user uninstaller cannot schedule (it would need `MoveFileEx` with `MOVEFILE_DELAY_UNTIL_REBOOT`, an administrator's

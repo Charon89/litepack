@@ -175,8 +175,9 @@ ALLOW = [
                "folder (ROT13, as Explorer stores it)"},
     {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon",
      "name": "ParseAutoexec",
-     "reason": "Windows' logon setting (Winlogon), set by Windows itself; neither LitePack nor NSIS "
-               "writes under Winlogon"},
+     "reason": "R324: Windows' own legacy logon setting (Winlogon), most likely rewritten when "
+               "Windows rebuilds the environment after the Path broadcast; nothing in LitePack's "
+               "repository names Winlogon but this entry (grep, 2026-11-08)"},
     # R301.
     {"kind": "empty-key", "path": APPCONTAINER, "reason": APPCONTAINER_REASON},
     {"kind": "empty-key", "path": MAPPINGS, "reason": APPCONTAINER_REASON},
