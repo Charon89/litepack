@@ -34,7 +34,7 @@ for s in scripts/nsis-notice.sh scripts/webview2-notice.sh; do
     fail=1
   fi
   # No other curl call may bypass the limits.
-  if grep -E '^[^#]*\bcurl ' "$s" | grep -v 'curl_limits' | grep -q .; then
+  if [ -n "$(grep -E '^[^#]*\bcurl ' "$s" | grep -v 'curl_limits')" ]; then
     echo "FAIL: $s runs curl without curl_limits" >&2
     fail=1
   fi

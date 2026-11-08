@@ -86,13 +86,19 @@ uploads `fuzz/artifacts` (the input and the log) as `fuzz-artifacts-<target>`.
 The `build` job then runs `check-instrumented.sh` (R213): a build step that ignored `CFLAGS` would leave
 libarchive, zlib, liblzma, libzstd or libsais (libsais for the bwt targets) uninstrumented, and libFuzzer would fuzz C code it
 cannot see. First `--self-test` compiles a tiny C sample with and without `-fsanitize=address,fuzzer-no-link` and
-asserts that the check passes the first and fails the second. Then the check reads every binary itself (not the
-workflow's flags): `nm` finds which probe functions of each library the binary defines, `objdump -d` must show
-`__asan_` or `__sanitizer_cov` references inside them. Reading its log, one line per binary and library:
-`OK   <bin>: <lib> instrumented (...)` with the reference count per probe; `FAIL <bin>: <lib> is NOT instrumented`
-fails the job and names both; `--   <bin>: <lib> not linked` is not a pass, only "nothing to check here", and
-`--each-library-somewhere` fails the job when a library is linked into none of the binaries (a stale probe list).
-Locally: `bash fuzz/check-instrumented.sh fuzz/target/x86_64-unknown-linux-gnu/release/<target>`; a build made
+asserts that the check passes the first and fails the second, a bare tail-call function included. Then the check
+reads every binary itself (not the workflow's flags): `nm -S` finds every defined function of each library's name
+family (`archive_*`, `lzma_*`, `ZSTD_*`/`HUF_*`/`FSE_*`, `libsais*`, and zlib's own spellings such as `inflateInit2_`),
+`objdump -d` disassembles them, and a function counts as instrumented when it references `__asan_*`,
+`__sanitizer_cov*` or libFuzzer's inline 8-bit counters (the `__sancov_cntrs` section). Reading its log, one line
+per binary and library: `OK   <bin>: <lib> instrumented: k/n functions (P%) ...` lists the share of the family that
+is instrumented and a few functions without references (assembly, normally); `FAIL <bin>: <lib> is NOT instrumented:
+0/n` or `only partly instrumented` (under 50%) fails the job and names both; `--   <bin>: <lib> not linked` is not a
+pass, only "nothing to check here", and `--each-library-somewhere` fails the job when a library is linked into none
+of the binaries (a stale family).
+Options: `--self-test`; `--each-library-somewhere`; `--verbose` (every judged function with its reference count);
+`--family LIB=ERE` (replace the built-in families, repeatable). Locally:
+`bash fuzz/check-instrumented.sh fuzz/target/x86_64-unknown-linux-gnu/release/<target>`; a build made
 with `LPK_FUZZ_PLAIN_C=1` fails it on purpose. Needs `nm`, `objdump` (binutils) and, for `--self-test`, clang.
 
 Open findings that fail a target until their fix lands are listed in `KNOWN.md` with their SUMMARY kind and signature; the workflow labels a failing job known only when `classify-failure.sh` matches both, else new.
