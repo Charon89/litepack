@@ -17,7 +17,8 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW,
     RegQueryInfoKeyW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
-    KEY_SET_VALUE, KEY_WRITE, REG_NONE, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
+    KEY_SET_VALUE, KEY_WRITE, REG_EXPAND_SZ, REG_NONE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    REG_VALUE_TYPE,
 };
 use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
 
@@ -27,6 +28,8 @@ use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST
 pub enum RegValue {
     /// `REG_SZ`.
     Sz(String),
+    /// `REG_EXPAND_SZ` (`HKCU\Environment`'s `Path`, E7-5): kept as found, never expanded.
+    ExpandSz(String),
     /// `REG_NONE` with no data.
     None,
     /// Any other type, by its number.
@@ -126,6 +129,10 @@ impl RegBase {
         let (ty, data): (REG_VALUE_TYPE, Vec<u8>) = match value {
             RegValue::Sz(s) => (
                 REG_SZ,
+                wide(s).into_iter().flat_map(u16::to_le_bytes).collect(),
+            ),
+            RegValue::ExpandSz(s) => (
+                REG_EXPAND_SZ,
                 wide(s).into_iter().flat_map(u16::to_le_bytes).collect(),
             ),
             RegValue::None => (REG_NONE, Vec::new()),
@@ -307,6 +314,18 @@ fn decode(ty: u32, data: &[u8]) -> RegValue {
             .collect();
         let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
         RegValue::Sz(String::from_utf16_lossy(&units[..end]))
+    } else if ty == REG_EXPAND_SZ.0 {
+        // Strict (E7-5, `Path`): a value that would not be written back byte for byte (an odd
+        // length, a NUL before the terminator, text that is not UTF-16) is `Other`, never edited.
+        let (units, rest) = data.as_chunks::<2>();
+        let mut units: Vec<u16> = units.iter().map(|c| u16::from_le_bytes(*c)).collect();
+        if units.last() == Some(&0) {
+            units.pop();
+        }
+        match String::from_utf16(&units) {
+            Ok(s) if rest.is_empty() && !units.contains(&0) => RegValue::ExpandSz(s),
+            _ => RegValue::Other(ty),
+        }
     } else if ty == REG_NONE.0 && data.is_empty() {
         RegValue::None
     } else {
@@ -390,6 +409,14 @@ mod tests {
         let mut listed = b.list_values("A\\B").unwrap();
         listed.sort_by(|a, c| a.0.cmp(&c.0));
         assert_eq!(listed.len(), 3);
+        assert!(
+            decode(REG_EXPAND_SZ.0, &[0x41, 0, 0, 0, 0x42, 0]) == RegValue::Other(REG_EXPAND_SZ.0)
+        );
+        assert!(decode(REG_EXPAND_SZ.0, &[0x41, 0, 0x42]) == RegValue::Other(REG_EXPAND_SZ.0));
+        assert_eq!(
+            decode(REG_EXPAND_SZ.0, &[0x41, 0]),
+            RegValue::ExpandSz("A".into())
+        );
         assert_eq!(listed[1], ("n".to_string(), RegValue::None));
         let long = "z".repeat(5000);
         b.set_value("A\\B", "long", &RegValue::Sz(long.clone()))
@@ -398,6 +425,10 @@ mod tests {
             b.get_value("A\\B", "long").unwrap(),
             Some(RegValue::Sz(long))
         );
+        let path = RegValue::ExpandSz("%USERPROFILE%\\x;C:\\y".into());
+        b.set_value("A\\B", "e", &path).unwrap();
+        assert_eq!(b.get_value("A\\B", "e").unwrap(), Some(path));
+        b.delete_value("A\\B", "e").unwrap();
         b.delete_value("A\\B", "x").unwrap();
         b.delete_value("A\\B", "x").unwrap();
         b.delete_value("Nope", "x").unwrap();

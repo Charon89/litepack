@@ -497,3 +497,153 @@ fn the_open_with_list_is_parsed() {
         .iter()
         .all(|e| !e.is_empty() && !e.contains('.') && *e == e.to_lowercase()));
 }
+
+#[test]
+fn path_entries_are_appended_once_and_removed_by_value() {
+    let bin = "C:\\Users\\u\\AppData\\Local\\LitePack\\bin";
+    // A separator only when one is needed; a duplicate (any case, a trailing backslash) is not
+    // added.
+    assert_eq!(path_with_entry("", bin), Some((bin.to_string(), false)));
+    assert_eq!(
+        path_with_entry("A;B", bin),
+        Some((format!("A;B;{bin}"), true))
+    );
+    assert_eq!(
+        path_with_entry("A;", bin),
+        Some((format!("A;{bin}"), false))
+    );
+    let upper = format!("A;{}\\;B", bin.to_uppercase());
+    assert_eq!(path_with_entry(&upper, bin), None);
+    // Removed exactly, the rest byte for byte.
+    for before in ["", "A;B", "A;", "%X%\\y;;Z", ";"] {
+        let (with, sep) = path_with_entry(before, bin).unwrap();
+        assert_eq!(path_without_entry(&with, bin, sep).as_deref(), Some(before));
+    }
+    // Something appended after ours by someone else stays.
+    let (with, sep) = path_with_entry("A", bin).unwrap();
+    assert_eq!(
+        path_without_entry(&format!("{with};C"), bin, sep).as_deref(),
+        Some("A;C")
+    );
+    assert_eq!(path_without_entry("A;B", bin, true), None);
+}
+
+#[test]
+fn register_puts_bin_on_path_keeping_its_type_and_unregister_restores_it() {
+    let bin = "C:\\Apps\\LitePack\\bin";
+    let found = [
+        RegValue::ExpandSz("%USERPROFILE%\\.cargo\\bin;C:\\Tools".to_string()),
+        sz("C:\\Tools;"),
+    ];
+    for value in found {
+        let before = foreign().with(ENVIRONMENT, PATH_VALUE, value.clone());
+        let mut reg = before.clone();
+        register_with_path(&mut reg, GUI, DLL, Some(bin), false).unwrap();
+        let after = reg.value(ENVIRONMENT, PATH_VALUE).unwrap();
+        match (&value, &after) {
+            (RegValue::ExpandSz(a), RegValue::ExpandSz(b)) | (RegValue::Sz(a), RegValue::Sz(b)) => {
+                assert!(b.starts_with(a.as_str()) && b.ends_with(bin), "{b}");
+            }
+            _ => panic!("type changed: {after:?}"),
+        }
+        // Registering again (an upgrade, the settings toggle) leaves one entry.
+        register_with_path(&mut reg, GUI, DLL, Some(bin), true).unwrap();
+        assert_eq!(reg.value(ENVIRONMENT, PATH_VALUE), Some(after));
+        unregister(&mut reg).unwrap();
+        assert_eq!(reg.snapshot(), before.snapshot());
+    }
+    // An entry already there (the user's) is neither added nor removed.
+    let mine = foreign().with(ENVIRONMENT, PATH_VALUE, sz("C:\\apps\\litepack\\BIN\\"));
+    let mut reg = mine.clone();
+    register_with_path(&mut reg, GUI, DLL, Some(bin), false).unwrap();
+    assert_eq!(
+        reg.value(ENVIRONMENT, PATH_VALUE),
+        Some(sz("C:\\apps\\litepack\\BIN\\"))
+    );
+    unregister(&mut reg).unwrap();
+    assert_eq!(reg.snapshot(), mine.snapshot());
+    // No `Path` and no `Environment`: created, then removed with the key.
+    let mut reg = Fake::default();
+    register_with_path(&mut reg, GUI, DLL, Some(bin), false).unwrap();
+    assert_eq!(
+        reg.value(ENVIRONMENT, PATH_VALUE),
+        Some(RegValue::ExpandSz(bin.to_string()))
+    );
+    unregister(&mut reg).unwrap();
+    assert_eq!(reg.snapshot(), Fake::default().snapshot());
+    // A `Path` that is not a string is left as found.
+    let odd = foreign().with(ENVIRONMENT, PATH_VALUE, RegValue::Other(3));
+    let mut reg = odd.clone();
+    register_with_path(&mut reg, GUI, DLL, Some(bin), false).unwrap();
+    assert_eq!(reg.value(ENVIRONMENT, PATH_VALUE), Some(RegValue::Other(3)));
+    unregister(&mut reg).unwrap();
+    assert_eq!(reg.snapshot(), odd.snapshot());
+}
+
+#[test]
+fn a_failure_while_adding_to_path_is_undone_by_unregister() {
+    let before = foreign().with(ENVIRONMENT, PATH_VALUE, sz("A"));
+    let mut n = 0;
+    loop {
+        let mut reg = before.clone();
+        reg.fail_at = Some(n);
+        let failed = register_with_path(&mut reg, GUI, DLL, Some("C:\\L\\bin"), true).is_err();
+        reg.fail_at = None;
+        unregister(&mut reg).unwrap();
+        assert_eq!(reg.snapshot(), before.snapshot(), "failure after write {n}");
+        if !failed {
+            break;
+        }
+        n += 1;
+    }
+    assert!(n > 10, "{n}");
+}
+
+#[test]
+fn the_installed_layout_registers_its_versioned_dll_and_bin() {
+    let (dir, exe) = install(false, true);
+    // Development layout: the DLL beside the exe, no `bin`.
+    assert_eq!(shell_dll_path(dir.path()), dir.path().join(SHELL_DLL));
+    assert_eq!(installed_bin(dir.path()), None);
+    // A folder of another version is not ours.
+    let other = dir.path().join(SHELL_DIR).join("0.0.0-other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join(SHELL_DLL), b"").unwrap();
+    assert_eq!(shell_dll_path(dir.path()), dir.path().join(SHELL_DLL));
+    // Installed layout: `shell\<version>\lpk_shell.dll` and `bin\lpk.exe`.
+    let versioned = dir.path().join(SHELL_DIR).join(APP_VERSION);
+    std::fs::create_dir_all(&versioned).unwrap();
+    std::fs::write(versioned.join(SHELL_DLL), b"").unwrap();
+    let bin = dir.path().join(BIN_DIR);
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join(BIN_TOOL), b"").unwrap();
+    std::fs::remove_file(dir.path().join(SHELL_DLL)).unwrap();
+    assert_eq!(shell_dll_path(dir.path()), versioned.join(SHELL_DLL));
+    assert_eq!(installed_bin(dir.path()), Some(bin.clone()));
+    let mut reg = Fake::default();
+    register_for(&exe, false, &mut reg).unwrap();
+    let inproc = format!("{CLASSES}\\CLSID\\{CLASSIC_CLSID}\\InProcServer32");
+    assert_eq!(
+        reg.value(&inproc, ""),
+        Some(sz(versioned.join(SHELL_DLL).to_str().unwrap()))
+    );
+    assert_eq!(
+        reg.value(ENVIRONMENT, PATH_VALUE),
+        Some(RegValue::ExpandSz(bin.to_str().unwrap().to_string()))
+    );
+    unregister(&mut reg).unwrap();
+    assert_eq!(reg.snapshot(), Fake::default().snapshot());
+    // A portable copy of the installed layout still refuses.
+    std::fs::write(dir.path().join(PORTABLE_MARKER), b"").unwrap();
+    assert!(matches!(
+        register_for(&exe, false, &mut reg),
+        Err(RegisterError::Refused(_))
+    ));
+}
+
+#[test]
+fn the_app_version_is_the_tauri_config_version() {
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    // Built without an overlay (cargo test sets no TAURI_CONFIG).
+    assert_eq!(conf["version"].as_str(), Some(APP_VERSION));
+}

@@ -19,7 +19,7 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::paths::PORTABLE_MARKER;
 
@@ -28,8 +28,29 @@ use crate::paths::PORTABLE_MARKER;
 /// compares with this text).
 pub const CLASSIC_CLSID: &str = "{01E42821-7D51-4B9B-AD9F-FFCA769A6025}";
 
-/// The DLL beside `lpk-gui.exe` that registration points the classic class at.
+/// The DLL that registration points the classic class at: `shell\<version>\` in the installed
+/// layout, otherwise beside `lpk-gui.exe` ([`shell_dll_path`]).
 pub const SHELL_DLL: &str = "lpk_shell.dll";
+
+/// The installed layout's folder of versioned shell DLLs (E7-5, `docs/notes/e7-design.md` section
+/// 3): a DLL Explorer has loaded cannot be replaced, so each version gets its own folder.
+pub const SHELL_DIR: &str = "shell";
+
+/// The installed layout's folder of the command-line tools and the workers, the one folder that
+/// goes on the user's `Path` (R306).
+pub const BIN_DIR: &str = "bin";
+
+/// The command-line tool whose presence in [`BIN_DIR`] marks the installed layout for `Path`.
+pub const BIN_TOOL: &str = "lpk.exe";
+
+/// The application's version, `version` of `tauri.conf.json` with any `--config` overlay merged
+/// (build.rs reads `TAURI_CONFIG`, which tauri-cli sets): the installer's `${VERSION}`, so the
+/// name of the `shell\<version>` folder it installs.
+pub const APP_VERSION: &str = env!("LPK_APP_VERSION");
+
+/// `HKCU\Environment`, whose `Path` registration appends the installed `bin\` to.
+pub(crate) const ENVIRONMENT: &str = "Environment";
+pub(crate) const PATH_VALUE: &str = "Path";
 
 /// The foreign extensions registration may list in "Open with" (`--open-with`), one per line:
 /// the formats the engine opens today (a test in `lpk-api` keeps the file equal to them).
@@ -47,6 +68,8 @@ const PROGID_LPK: &str = "LitePack.lpk";
 pub enum RegValue {
     /// `REG_SZ`.
     Sz(String),
+    /// `REG_EXPAND_SZ` (`HKCU\Environment`'s `Path`), kept as found.
+    ExpandSz(String),
     /// `REG_NONE`, no data (what `OpenWithProgids` entries are).
     None,
     /// Any other type; never written, never equal to ours.
@@ -160,8 +183,87 @@ impl<R: Registry + ?Sized> Writer<'_, R> {
 pub(crate) fn encode_value(key: &str, name: &str, value: &RegValue) -> String {
     match value {
         RegValue::Sz(d) => format!("V\tS\t{key}\t{name}\t{d}"),
+        RegValue::ExpandSz(d) => format!("V\tE\t{key}\t{name}\t{d}"),
         _ => format!("V\tN\t{key}\t{name}\t"),
     }
+}
+
+/// Whether two `Path` entries name the same folder: compared case-insensitively, ignoring
+/// trailing backslashes (R306).
+pub(crate) fn same_path_entry(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.trim_end_matches('\\').to_lowercase();
+    norm(a) == norm(b)
+}
+
+/// The record entry of a `Path` addition: `P`, whether the value was created (`1`) or found
+/// (`0`), whether a `;` was put before the entry (`1`) or not (`0`), and the entry.
+fn encode_path(created: bool, separator: bool, entry: &str) -> String {
+    format!("P\t{}\t{}\t{entry}", u8::from(created), u8::from(separator))
+}
+
+fn decode_path(rest: &str) -> Option<(bool, bool, String)> {
+    let mut it = rest.splitn(3, '\t');
+    let created = it.next()? == "1";
+    let separator = it.next()? == "1";
+    Some((created, separator, it.next()?.to_string()))
+}
+
+/// `text` with `entry` appended as its own `Path` entry, unless an entry already names the same
+/// folder: `None` then. Otherwise the new text and whether a `;` was put before the entry.
+pub(crate) fn path_with_entry(text: &str, entry: &str) -> Option<(String, bool)> {
+    if text.split(';').any(|e| same_path_entry(e, entry)) {
+        return None;
+    }
+    let separator = !text.is_empty() && !text.ends_with(';');
+    let sep = if separator { ";" } else { "" };
+    Some((format!("{text}{sep}{entry}"), separator))
+}
+
+/// `text` without the last entry equal to `entry` (by value, exactly), and the separator that
+/// came with it: the one put before it when `separator`, otherwise the one after it, if any.
+/// Everything else stays byte for byte. `None` when no entry is `entry`.
+pub(crate) fn path_without_entry(text: &str, entry: &str, separator: bool) -> Option<String> {
+    let parts: Vec<&str> = text.split(';').collect();
+    let i = parts.iter().rposition(|p| *p == entry)?;
+    let start: usize = parts[..i].iter().map(|p| p.len() + 1).sum();
+    let end = start + entry.len();
+    let range = if separator && i > 0 {
+        start - 1..end
+    } else if i + 1 < parts.len() {
+        start..end + 1
+    } else {
+        start..end
+    };
+    let mut out = text.to_string();
+    out.replace_range(range, "");
+    Some(out)
+}
+
+/// Remove a recorded `Path` addition; a `Path` that no longer holds the entry, or is no longer a
+/// string, is left alone. The value goes when registration created it and nothing else is in it.
+fn remove_path_entry<R: Registry + ?Sized>(
+    reg: &mut R,
+    created: bool,
+    separator: bool,
+    entry: &str,
+) -> io::Result<()> {
+    let (text, expand) = match reg.get_value(ENVIRONMENT, PATH_VALUE)? {
+        Some(RegValue::Sz(s)) => (s, false),
+        Some(RegValue::ExpandSz(s)) => (s, true),
+        _ => return Ok(()),
+    };
+    let Some(out) = path_without_entry(&text, entry, separator) else {
+        return Ok(());
+    };
+    if out.is_empty() && created {
+        return reg.delete_value(ENVIRONMENT, PATH_VALUE);
+    }
+    let value = if expand {
+        RegValue::ExpandSz(out)
+    } else {
+        RegValue::Sz(out)
+    };
+    reg.set_value(ENVIRONMENT, PATH_VALUE, &value)
 }
 
 fn decode_value(rest: &str) -> Option<(String, String, RegValue)> {
@@ -172,6 +274,7 @@ fn decode_value(rest: &str) -> Option<(String, String, RegValue)> {
     let data = it.next()?;
     let value = match kind {
         "S" => RegValue::Sz(data.to_string()),
+        "E" => RegValue::ExpandSz(data.to_string()),
         "N" => RegValue::None,
         _ => return None,
     };
@@ -188,7 +291,21 @@ pub fn register<R: Registry + ?Sized>(
     dll: &str,
     open_with: bool,
 ) -> io::Result<()> {
-    let result = undo(reg).and_then(|()| apply(reg, gui, dll, open_with));
+    register_with_path(reg, gui, dll, None, open_with)
+}
+
+/// [`register`], and `bin` (the installed layout's `bin\` folder) appended to
+/// `HKCU\Environment`'s `Path` when it is `Some` (R306): the value keeps its type, nothing is
+/// added when an entry already names the folder, and the addition is in the record, so
+/// unregistering removes exactly that entry. The `WM_SETTINGCHANGE` broadcast is the installer's.
+pub fn register_with_path<R: Registry + ?Sized>(
+    reg: &mut R,
+    gui: &str,
+    dll: &str,
+    bin: Option<&str>,
+    open_with: bool,
+) -> io::Result<()> {
+    let result = undo(reg).and_then(|()| apply(reg, gui, dll, bin, open_with));
     reg.notify_assoc_changed();
     result
 }
@@ -204,6 +321,7 @@ fn apply<R: Registry + ?Sized>(
     reg: &mut R,
     gui: &str,
     dll: &str,
+    bin: Option<&str>,
     open_with: bool,
 ) -> io::Result<()> {
     // The record cannot note, before it exists, the keys it needs: the missing ones of
@@ -281,7 +399,29 @@ fn apply<R: Registry + ?Sized>(
     for ext in &exts {
         w.sz(&assoc, &format!(".{ext}"), &format!("LitePack.{ext}"))?;
     }
-    w.sz(REGISTERED_APPS, "LitePack", CAPABILITIES)
+    w.sz(REGISTERED_APPS, "LitePack", CAPABILITIES)?;
+
+    // The installed layout's `bin\` on the user's `Path`, last (R306).
+    let Some(bin) = bin else { return Ok(()) };
+    let found = w.reg.get_value(ENVIRONMENT, PATH_VALUE)?;
+    let (text, created) = match &found {
+        None => (String::new(), true),
+        Some(RegValue::Sz(s) | RegValue::ExpandSz(s)) => (s.clone(), false),
+        Some(_) => {
+            eprintln!("lpk-gui: HKCU\\Environment's Path is not a string; it is left as found");
+            return Ok(());
+        }
+    };
+    let Some((text, separator)) = path_with_entry(&text, bin) else {
+        return Ok(());
+    };
+    let value = match found {
+        Some(RegValue::Sz(_)) => RegValue::Sz(text),
+        _ => RegValue::ExpandSz(text),
+    };
+    w.ensure_key(ENVIRONMENT)?;
+    w.record(&encode_path(created, separator, bin))?;
+    w.reg.set_value(ENVIRONMENT, PATH_VALUE, &value)
 }
 
 fn undo<R: Registry + ?Sized>(reg: &mut R) -> io::Result<()> {
@@ -289,13 +429,20 @@ fn undo<R: Registry + ?Sized>(reg: &mut R) -> io::Result<()> {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let mut values = Vec::new();
     let mut keys = Vec::new();
+    let mut path_entries = Vec::new();
     for (_, v) in &entries {
         let RegValue::Sz(text) = v else { continue };
         if let Some(paths) = text.strip_prefix("K\t") {
             keys.extend(paths.split('\t').map(String::from));
         } else if let Some(rest) = text.strip_prefix("V\t") {
             values.extend(decode_value(rest));
+        } else if let Some(rest) = text.strip_prefix("P\t") {
+            path_entries.extend(decode_path(rest));
         }
+    }
+    // The `Path` entry first: it was written last.
+    for (created, separator, entry) in path_entries.iter().rev() {
+        remove_path_entry(reg, *created, *separator, entry)?;
     }
     // Our values first (newest first), only where the data is still ours.
     for (key, name, value) in values.iter().rev() {
@@ -403,25 +550,57 @@ pub fn register_for<R: Registry + ?Sized>(
             "a portable copy does not register itself with the shell",
         ));
     }
-    let dll = dir.join(SHELL_DLL);
+    let dll = shell_dll_path(dir);
     if !dll.is_file() {
         return Err(RegisterError::Refused(
-            "lpk_shell.dll is missing beside the executable",
+            "lpk_shell.dll is missing, in shell\\<version>\\ and beside the executable",
         ));
     }
+    let bin = installed_bin(dir);
     let (Some(gui), Some(dll)) = (exe.to_str(), dll.to_str()) else {
         return Err(RegisterError::Refused(
             "the installation path is not valid Unicode",
         ));
     };
+    let bin = match &bin {
+        None => None,
+        Some(b) => match b.to_str() {
+            Some(b) => Some(normalize_path(b)),
+            None => {
+                return Err(RegisterError::Refused(
+                    "the installation path is not valid Unicode",
+                ))
+            }
+        },
+    };
     let (gui, dll) = (normalize_path(gui), normalize_path(dll));
-    // Explorer substitutes `%1`, `%L`, `%D` and the like in a verb's command line.
+    // Explorer substitutes `%1`, `%L`, `%D` and the like in a verb's command line (and `bin`,
+    // under the same folder, would be expanded in `Path`).
     if gui.contains('%') {
         return Err(RegisterError::Refused(
             "the installation path contains '%'; it cannot be registered",
         ));
     }
-    register(reg, &gui, &dll, open_with).map_err(RegisterError::Failed)
+    register_with_path(reg, &gui, &dll, bin.as_deref(), open_with).map_err(RegisterError::Failed)
+}
+
+/// The shell DLL registration points at for an executable in `dir` (R308): the installed
+/// layout's `shell\<APP_VERSION>\lpk_shell.dll` when that file exists, otherwise
+/// `lpk_shell.dll` beside the executable.
+pub fn shell_dll_path(dir: &Path) -> PathBuf {
+    let versioned = dir.join(SHELL_DIR).join(APP_VERSION).join(SHELL_DLL);
+    if versioned.is_file() {
+        versioned
+    } else {
+        dir.join(SHELL_DLL)
+    }
+}
+
+/// The installed layout's `bin\` beside the executable in `dir`, when it holds `lpk.exe`: the
+/// folder registration puts on `Path` (R306). `None` for a development or portable layout.
+pub fn installed_bin(dir: &Path) -> Option<PathBuf> {
+    let bin = dir.join(BIN_DIR);
+    bin.join(BIN_TOOL).is_file().then_some(bin)
 }
 
 /// Run `verb` for the executable at `exe` over `reg`; the exit code. A portable copy (the
@@ -501,6 +680,7 @@ mod win {
     fn to_sys(v: &RegValue) -> Sys {
         match v {
             RegValue::Sz(s) => Sys::Sz(s.clone()),
+            RegValue::ExpandSz(s) => Sys::ExpandSz(s.clone()),
             RegValue::None => Sys::None,
             RegValue::Other(t) => Sys::Other(*t),
         }
@@ -509,6 +689,7 @@ mod win {
     fn from_sys(v: Sys) -> RegValue {
         match v {
             Sys::Sz(s) => RegValue::Sz(s),
+            Sys::ExpandSz(s) => RegValue::ExpandSz(s),
             Sys::None => RegValue::None,
             Sys::Other(t) => RegValue::Other(t),
         }
