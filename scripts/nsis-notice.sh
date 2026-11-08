@@ -101,7 +101,12 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 status=0
 
-curl -fsSL --retry 3 -o "$work/nsis.zip" "$(pin_value nsis url)"
+# GitHub's release downloads can answer 504 for minutes at a time (three of four CI runs on 2026-11-08 failed on
+# nsis.zip after curl's default --retry 3 backoff of about 7 s). Retry each download for up to three minutes, 20 s
+# apart; the job's 15-minute timeout covers all three downloads at their worst.
+fetch() { curl -fsSL --connect-timeout 30 --retry 6 --retry-delay 20 --retry-max-time 180 "$@"; }
+
+fetch -o "$work/nsis.zip" "$(pin_value nsis url)"
 # The archive's hashes first: nothing is unpacked from an archive that is not the pinned one.
 if ! check_hashes "$work/nsis.zip" nsis; then
   exit 1
@@ -112,12 +117,12 @@ if ! cmp "$work/COPYING" notices/nsis/COPYING; then
   status=1
 fi
 
-curl -fsSL --retry 3 -o "$work/nsis_tauri_utils.dll" "$(pin_value nsis_tauri_utils url)"
+fetch -o "$work/nsis_tauri_utils.dll" "$(pin_value nsis_tauri_utils url)"
 # The plugin DLL and its LICENSE_MIT are only hashed and compared, never unpacked or run, so their checks collect
 # into status and report together.
 check_hashes "$work/nsis_tauri_utils.dll" nsis_tauri_utils || status=1
 tag="nsis_tauri_utils-v$(pin_value nsis_tauri_utils version)"
-curl -fsSL --retry 3 -o "$work/LICENSE_MIT" \
+fetch -o "$work/LICENSE_MIT" \
   "https://raw.githubusercontent.com/tauri-apps/nsis-tauri-utils/$tag/$(pin_value nsis_tauri_utils licence)"
 if ! cmp "$work/LICENSE_MIT" notices/nsis/nsis_tauri_utils-LICENSE_MIT; then
   echo "notices/nsis/nsis_tauri_utils-LICENSE_MIT differs from LICENSE_MIT at $tag" >&2

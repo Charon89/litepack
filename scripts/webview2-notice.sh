@@ -48,10 +48,12 @@ crate_dir() {
   printf '%s' "$dir"
 }
 
-# Downloads one package version to $work/<version>.nupkg.
+# Downloads one package version to $work/<version>.nupkg. Retries for up to three minutes, 20 s apart, as
+# nsis-notice.sh does: a 504 from the server lasting longer than curl's default backoff is not a failure of the pin.
 download() {
   local version="$1"
-  curl -fsSL --retry 3 -o "$work/$version.nupkg" "$nuget/$version/microsoft.web.webview2.$version.nupkg"
+  curl -fsSL --connect-timeout 30 --retry 6 --retry-delay 20 --retry-max-time 180 \
+    -o "$work/$version.nupkg" "$nuget/$version/microsoft.web.webview2.$version.nupkg"
 }
 
 # Unpacks a downloaded package into $work/<version>/.
