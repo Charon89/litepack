@@ -83,4 +83,16 @@ Actions cache (`fuzz-corpus-<target>-<run>`, restored by prefix; unused entries 
 minimised (`run.sh -m`, libFuzzer's `-merge=1`) by the scheduled Monday run. A crash fails the job and
 uploads `fuzz/artifacts` (the input and the log) as `fuzz-artifacts-<target>`.
 
+The `build` job then runs `check-instrumented.sh` (R213): a build step that ignored `CFLAGS` would leave
+libarchive, zlib, liblzma, libzstd or libsais (libsais for the bwt targets) uninstrumented, and libFuzzer would fuzz C code it
+cannot see. First `--self-test` compiles a tiny C sample with and without `-fsanitize=address,fuzzer-no-link` and
+asserts that the check passes the first and fails the second. Then the check reads every binary itself (not the
+workflow's flags): `nm` finds which probe functions of each library the binary defines, `objdump -d` must show
+`__asan_` or `__sanitizer_cov` references inside them. Reading its log, one line per binary and library:
+`OK   <bin>: <lib> instrumented (...)` with the reference count per probe; `FAIL <bin>: <lib> is NOT instrumented`
+fails the job and names both; `--   <bin>: <lib> not linked` is not a pass, only "nothing to check here", and
+`--each-library-somewhere` fails the job when a library is linked into none of the binaries (a stale probe list).
+Locally: `bash fuzz/check-instrumented.sh fuzz/target/x86_64-unknown-linux-gnu/release/<target>`; a build made
+with `LPK_FUZZ_PLAIN_C=1` fails it on purpose. Needs `nm`, `objdump` (binutils) and, for `--self-test`, clang.
+
 Open findings that fail a target until their fix lands are listed in `KNOWN.md` with their SUMMARY kind and signature; the workflow labels a failing job known only when `classify-failure.sh` matches both, else new.
