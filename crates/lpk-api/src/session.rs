@@ -333,6 +333,10 @@ pub struct Session {
     /// ([`lpk_core::motw::read_zone_of`]); `unreadable` when it was taken as the Internet zone
     /// because the stream could not be read.
     zone: lpk_core::motw::ZoneRead,
+    /// A foreign archive's pins (Windows): a handle on each of its volumes that lets others
+    /// read but not write, delete, rename or replace the file, held for the session's
+    /// lifetime ([`pin`]). Empty for an `.lpk` and on other platforms.
+    _pins: Vec<File>,
 }
 
 /// What a re-open (`unlock`, after `append`) needs again.
@@ -535,7 +539,7 @@ impl Session {
     /// ```
     pub fn open(path: &Path, o: &OpenOptions<'_>) -> Result<Session, Error> {
         if let Ok(Some(format)) = lpk_core::foreign::detect_file(path) {
-            return Ok(Session::foreign(path, format, o));
+            return Session::foreign(path, format, o);
         }
         let file = File::open(path).map_err(|e| {
             Error::core(
@@ -608,6 +612,7 @@ impl Session {
             gate: Arc::new(Gate::default()),
             model: Mutex::new(None),
             zone,
+            _pins: Vec::new(),
         })
     }
 
@@ -630,8 +635,39 @@ impl Session {
         Ok(a)
     }
 
-    fn foreign(path: &Path, format: lpk_core::foreign::Format, o: &OpenOptions<'_>) -> Session {
-        Session {
+    fn foreign(
+        path: &Path,
+        format: lpk_core::foreign::Format,
+        o: &OpenOptions<'_>,
+    ) -> Result<Session, Error> {
+        // The pin (Windows): the archive, and every volume of its set, is opened so that others
+        // may read it but not write, delete, rename or replace it, and the handles are held
+        // until the session is dropped. The zone is read through the first volume's pinned
+        // handle, and every later open by path (the broker's for the worker, `detect_file`,
+        // `volume_set`) therefore gets the same file: none can be swapped in between to lend
+        // or withhold a zone. Renaming the parent directory was refused too on NTFS (Windows
+        // 11, the test `renaming_the_parent_directory_of_a_held_zip_is_refused`); see
+        // `docs/SECURITY.md` item 7. Other platforms have no pin (and no zone to protect).
+        let first = pin(path)?;
+        let zone = lpk_core::motw::read_zone_of(&first);
+        // Detected again through the pinned file, so the format is the pinned file's.
+        let format = match lpk_core::foreign::detect_file(path) {
+            Ok(Some(f)) => f,
+            _ => format,
+        };
+        let mut pins = vec![first];
+        if let Ok(Ok(set)) = lpk_core::foreign::volume_set(path, format) {
+            // A later volume that cannot be pinned fails the open: either the whole set is
+            // pinned or no session opens (a volume another program is still writing is
+            // incomplete anyway).
+            for v in set.iter().skip(1) {
+                pins.push(pin(v)?);
+            }
+        }
+        if !cfg!(windows) {
+            pins.clear();
+        }
+        Ok(Session {
             path: path.to_path_buf(),
             info: Info {
                 path: path.to_path_buf(),
@@ -642,7 +678,11 @@ impl Session {
                 encrypted: false,
                 listable: true,
                 keyless: false,
-                length: std::fs::metadata(path).map_or(0, |m| m.len()),
+                length: pins
+                    .first()
+                    .and_then(|f| f.metadata().ok())
+                    .or_else(|| std::fs::metadata(path).ok())
+                    .map_or(0, |m| m.len()),
             },
             kind: Kind::Foreign(ForeignState {
                 format,
@@ -658,18 +698,9 @@ impl Session {
             },
             gate: Arc::new(Gate::default()),
             model: Mutex::new(None),
-            // A foreign archive is opened by path here (the broker opens it by path again
-            // for the worker): the zone is read through this handle, so a file swapped in
-            // between the two opens could differ from the one extracted (a window E4's broker
-            // shares; it does not open the archive through one handle either).
-            zone: File::open(path).map_or(
-                lpk_core::motw::ZoneRead {
-                    zone: None,
-                    unreadable: false,
-                },
-                |f| lpk_core::motw::read_zone_of(&f),
-            ),
-        }
+            zone,
+            _pins: pins,
+        })
     }
 
     /// The archive's propagating zone (Mark of the Web, E6-5): `Some` when its
@@ -1672,6 +1703,44 @@ pub fn check_export_target(archive: &Path, out: &Path, force: bool) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Open `path` for a foreign session: on Windows with `FILE_SHARE_READ` only, the pin (others
+/// may read; no one may write, delete, rename or replace the file while the handle is open);
+/// elsewhere a plain read open. A sharing violation (another program has the file open for
+/// writing, or with a share mode that refuses the pin) is a clear `AccessDenied`.
+fn pin(path: &Path) -> Result<File, Error> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        o.share_mode(FILE_SHARE_READ);
+    }
+    o.open(path).map_err(|e| {
+        // ERROR_SHARING_VIOLATION
+        if cfg!(windows) && e.raw_os_error() == Some(32) {
+            Error::new(
+                Class::AccessDenied,
+                "Io",
+                format!(
+                    "{}: another program is using the file (writing it, or holding it open \
+                     so it cannot be protected while it is read); close it and try again",
+                    path.display()
+                ),
+                Some(path),
+            )
+        } else {
+            Error::core(
+                CoreError::Io {
+                    path: path.to_path_buf(),
+                    source: e,
+                },
+                Some(path),
+            )
+        }
+    })
 }
 
 /// The temporary file an `export --force` writes before it renames it over `out`: in the
