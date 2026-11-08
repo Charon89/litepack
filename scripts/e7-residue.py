@@ -2,15 +2,19 @@
 
     python -I scripts/e7-residue.py snapshot <out.json> [--on-ci]
     python -I scripts/e7-residue.py diff <before.json> <after.json>
-        [--allow-worker-profile | --require-worker-profile]
+        [--allow-worker-profile | --require-worker-profile] [--allow-settings]
     python -I scripts/e7-residue.py --self-test
 
 `snapshot` refuses unless GITHUB_ACTIONS=true or --on-ci is given: use it only on a disposable
 machine. Every path it cannot read is printed and recorded; `diff` reports such a path as
 residue (`?`) even when both snapshots record it alike. --require-worker-profile allows the
-profile and fails unless both its folder and its Mappings key were added.
+profile and fails unless both its folder and its Mappings key were added. --allow-settings
+(E7-5, after an uninstall without the "delete the application data" box, as
+docs/notes/e7-design.md section 3 allows) allows %APPDATA%\\LitePack\\settings.json and its folder
+when that folder holds nothing else, and nothing more.
 
-`snapshot` records every file and folder under %APPDATA% and %LOCALAPPDATA% (path, size and
+`snapshot` records every file and folder under %APPDATA% (the Start menu included),
+%LOCALAPPDATA% and the desktop, %USERPROFILE%\\Desktop (E7-5: shortcuts; recorded as `%DESKTOP%`) (path, size and
 modification time; a folder by its path alone, a link or junction by its path, never followed)
 and the keys and values of HKCU\\Software (with Classes) and HKCU\\Environment, through
 `reg.exe export` into the output's folder, parsed from UTF-16. Windows only; it holds the
@@ -40,7 +44,21 @@ WORKER_MONIKER = "LitePack.Worker"
 
 REPARSE_POINT = stat.FILE_ATTRIBUTE_REPARSE_POINT
 
-FILE_ROOTS = ("APPDATA", "LOCALAPPDATA")
+FILE_ROOTS = ("APPDATA", "LOCALAPPDATA", "DESKTOP")
+
+# --allow-settings: the one file an uninstall without the box leaves (e7-design section 3).
+SETTINGS_DIR = r"%APPDATA%\LitePack"
+SETTINGS_FILE = SETTINGS_DIR + r"\settings.json"
+SETTINGS_REASON = ("the GUI's settings, kept by an uninstall without the \"delete the application "
+                   "data\" box (docs/notes/e7-design.md section 3)")
+
+
+def root_dir(token):
+    """The folder a file root's token names; DESKTOP is %USERPROFILE%\\Desktop."""
+    if token == "DESKTOP":
+        profile = os.environ.get("USERPROFILE")
+        return os.path.join(profile, "Desktop") if profile else None
+    return os.environ.get(token)
 # HKCU\Software\Classes is the user's classes hive (UsrClass.dat) linked into HKCU\Software: it is
 # exported on its own as well, and `snapshot` refuses unless its `Local Settings` key (where the
 # AppContainer profiles are mapped) is in the result.
@@ -206,9 +224,13 @@ def snapshot(out, on_ci):
     out = Path(out)
     files = {}
     for token in FILE_ROOTS:
-        root = os.environ.get(token)
+        root = root_dir(token)
         if not root:
-            raise SystemExit(f"e7-residue: %{token}% is not set")
+            raise SystemExit(f"e7-residue: the folder of %{token}% is not set")
+        if not os.path.isdir(root):
+            # Recorded, so that a root created later shows up as a change.
+            files[f"%{token}%"] = {"kind": "absent"}
+            continue
         walk(root, token, files)
     registry = {}
     with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
@@ -312,7 +334,13 @@ def show(kind, path, name, rec):
     return f"{rec.get('kind')} {path}"
 
 
-def diff(before, after, allow_profile):
+def settings_only(after):
+    """Whether %APPDATA%\\LitePack holds nothing but settings.json in `after`."""
+    inside = [p for p in after["files"] if under(p, SETTINGS_DIR) and norm(p) != norm(SETTINGS_DIR)]
+    return all(norm(p) == norm(SETTINGS_FILE) for p in inside)
+
+
+def diff(before, after, allow_profile, allow_settings=False):
     """The diff's lines and the number of entries not allowed. A path unreadable in either
     snapshot is listed (and counted unless allowed) even when both record it alike: what lies
     inside it was not seen."""
@@ -338,6 +366,9 @@ def diff(before, after, allow_profile):
         reason = allowed(kind, path, name, sign, after)
         ancestor = kind == "key" and sign in "+-" and norm(path) not in valued and \
             any(under(p, path) and norm(p) != norm(path) for p in profile_keys)
+        if not reason and allow_settings and kind == "file" and sign == "+" and \
+                norm(path) in (norm(SETTINGS_DIR), norm(SETTINGS_FILE)) and settings_only(after):
+            reason = SETTINGS_REASON
         if reason:
             lines.append(f"allowed: {text}  -- {reason}")
         elif allow_profile and (is_profile(kind, path, sids) or ancestor) and \
@@ -379,13 +410,15 @@ def main(argv):
     d.add_argument("--allow-worker-profile", action="store_true")
     d.add_argument("--require-worker-profile", action="store_true",
                    help="allow the profile, and fail unless its folder and Mappings key were added")
+    d.add_argument("--allow-settings", action="store_true",
+                   help=r"allow %%APPDATA%%\LitePack\settings.json alone (an uninstall without the box)")
     a = ap.parse_args(argv)
     if a.cmd == "snapshot":
         snapshot(a.out, a.on_ci)
         return 0
     load = lambda p: json.loads(Path(p).read_text(encoding="utf-8"))  # noqa: E731
     allow = a.allow_worker_profile or a.require_worker_profile
-    lines, bad = diff(load(a.before), load(a.after), allow)
+    lines, bad = diff(load(a.before), load(a.after), allow, a.allow_settings)
     for line in lines:
         print(line)
     flag = " (worker profile allowed)" if allow else ""
@@ -437,6 +470,30 @@ class Tests(unittest.TestCase):
         self.assertEqual(bad, 1)
         self.assertEqual(lines, [r"RESIDUE: + file %APPDATA%\LitePack\settings.json "
                                  "(1 bytes, mtime 1)"])
+
+    def test_the_settings_file_alone_is_allowed_with_the_flag(self):
+        files = dict(self.base["files"], **{SETTINGS_DIR: {"kind": "dir"}, SETTINGS_FILE: f()})
+        after = snap(files, self.base["registry"])
+        lines, bad = diff(self.base, after, False, True)
+        self.assertEqual(bad, 0, lines)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all(line.startswith("allowed: + ") for line in lines), lines)
+        self.assertEqual(diff(self.base, after, False)[1], 2)
+        # Anything else in the folder, and the folder then, is residue; so is a changed file.
+        more = dict(files, **{SETTINGS_DIR + r"\recent.json": f()})
+        lines, bad = diff(self.base, snap(more, self.base["registry"]), False, True)
+        self.assertEqual(bad, 3, lines)
+        before = snap(files, self.base["registry"])
+        changed = snap(dict(files, **{SETTINGS_FILE: f(size=2)}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False, True)[1], 1)
+
+    def test_a_desktop_shortcut_is_residue(self):
+        before = snap(dict(self.base["files"], **{"%DESKTOP%": {"kind": "absent"}}),
+                      self.base["registry"])
+        after = snap(dict(self.base["files"], **{r"%DESKTOP%\LitePack.lnk": f()}),
+                     self.base["registry"])
+        lines, bad = diff(before, after, True, True)
+        self.assertEqual(bad, 2, lines)
 
     def test_a_removed_and_a_changed_file(self):
         after = snap({r"%LOCALAPPDATA%\b": f()}, self.base["registry"])

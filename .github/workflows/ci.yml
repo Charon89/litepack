@@ -449,6 +449,142 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  # E7-5 part 1: the per-user NSIS installer (route C, no sparse package; R303 to R308), built only here through the
+  # overlay crates/lpk-gui/tauri.nsis.conf.json (the default build stays unbundled), at the workspace's version N and
+  # at N+1 (0.0.2); installed, smoke-run, upgraded while bin\lpk.exe runs, uninstalled, with the residue diffs.
+  installer:
+    name: installer (windows-2025)
+    timeout-minutes: 75
+    runs-on: windows-2025
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Work folders
+        run: |
+          echo "SNAP=$(cygpath -m "$RUNNER_TEMP")/residue" >> "$GITHUB_ENV"
+          echo "SETUP=$(cygpath -m "$RUNNER_TEMP")/setup" >> "$GITHUB_ENV"
+          echo "W=$(cygpath -m "$RUNNER_TEMP")/work" >> "$GITHUB_ENV"
+          echo "INST=$(cygpath -m "$LOCALAPPDATA")/LitePack" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.7"
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: installer
+          workspaces: |
+            . -> target
+            workers -> ../target
+      - name: The residue script's own tests
+        run: python -I scripts/e7-residue.py --self-test
+      - name: tauri-cli through cargo (pinned)
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: Build the release binaries
+        run: |
+          cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive -p lpk-shell
+          (cd workers && cargo build --release --locked)
+          ls -la target/release/*.exe target/release/*.dll
+      - name: Build the installers N and N+1 through the overlay
+        working-directory: crates/lpk-gui
+        run: |
+          mkdir -p "$SETUP"
+          cargo tauri build --ci --config tauri.nsis.conf.json -- --locked
+          cp target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe" 2>/dev/null \
+            || cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe"
+          python -I -c "
+          import json
+          c = json.load(open('tauri.nsis.conf.json'))
+          c['version'] = '0.0.2'
+          r = c['bundle']['resources']
+          for k, v in list(r.items()):
+              if v.startswith('shell/'):
+                  r[k] = 'shell/0.0.2/lpk_shell.dll'
+          json.dump(c, open('$RUNNER_TEMP/next.conf.json', 'w'), indent=2)
+          "
+          rm -rf ../../target/release/bundle/nsis
+          cargo tauri build --ci --config "$RUNNER_TEMP/next.conf.json" -- --locked
+          cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N1-setup.exe"
+          ls -la "$SETUP"
+      - name: Snapshot before
+        run: |
+          mkdir -p "$SNAP" "$W/in/sub"
+          python -I scripts/e7-residue.py snapshot "$SNAP/1-before.json"
+      - name: Install N silently and check the layout, the notices, the Uninstall key, Path and route C
+        run: |
+          "$SETUP/N-setup.exe" /S
+          ls -laR "$INST"
+          for f in lpk-gui.exe uninstall.exe THIRD-PARTY-NOTICES LICENSE-APACHE LICENSE-MIT bin/lpk.exe \
+            bin/lpk-check.exe bin/lpk-worker.exe bin/lpk-worker-libarchive.exe shell/0.0.1/lpk_shell.dll; do
+            test -f "$INST/$f" || { echo "missing: $f"; exit 1; }
+          done
+          cmp THIRD-PARTY-NOTICES "$INST/THIRD-PARTY-NOTICES"
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.1
+      - name: The installed GUI opens a .lpk and a .zip (the worker from bin\ makes the profile)
+        run: |
+          for i in 1 2 3; do echo "file $i" > "$W/in/sub/f$i.txt"; done
+          "$INST/bin/lpk.exe" a "$W/small.lpk" "$W/in"
+          "$INST/bin/lpk.exe" export "$W/small.lpk" "$W/small.zip"
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$W/report-$a.json" timeout 180 "$INST/lpk-gui.exe" "$W/$a"
+            report="$(cat "$W/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
+            --require-worker-profile --allow-settings > "$SNAP/2.txt" || true
+          cat "$SNAP/2.txt"
+          grep -q "PROFILE MISSING" "$SNAP/2.txt" && echo "no worker profile after the installed GUI" >> "$SNAP/verdicts" || true
+      - name: bin\lpk.exe on the .zip
+        run: |
+          "$INST/bin/lpk.exe" l "$W/small.zip"
+          "$INST/bin/lpk.exe" x "$W/small.zip" "$W/out-cli"
+          cmp "$W/in/sub/f2.txt" "$W/out-cli/sub/f2.txt"
+      - name: Upgrade to N+1 silently while bin\lpk.exe runs
+        run: |
+          python -I -c "import os; open(r'$W/big.bin','wb').write(os.urandom(400*1024*1024))"
+          "$INST/bin/lpk.exe" a "$W/big.lpk" "$W/big.bin" > "$W/running.log" 2>&1 &
+          pid=$!
+          sleep 3
+          rc=0; "$SETUP/N1-setup.exe" /S || rc=$?
+          echo "upgrade while lpk.exe ran: installer exit code $rc"
+          wait "$pid"; echo "the running lpk.exe exited with $?"; cat "$W/running.log"
+          ls -laR "$INST"
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.2
+      - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
+        run: |
+          "$INST/uninstall.exe" /S
+          for i in $(seq 1 120); do test -e "$INST/uninstall.exe" || break; sleep 1; done
+          sleep 5
+          ls -la "$INST" 2>/dev/null || echo "install folder gone"
+          python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
+            --allow-settings || echo "after the uninstall: residue" >> "$SNAP/verdicts"
+      - name: Install and uninstall with /DELETEAPPDATA (the box), the settings gone
+        run: |
+          "$SETUP/N-setup.exe" /S
+          mkdir -p "$APPDATA/LitePack"; echo '{}' > "$APPDATA/LitePack/settings.json"
+          "$INST/uninstall.exe" /S /DELETEAPPDATA
+          for i in $(seq 1 120); do test -e "$INST/uninstall.exe" || break; sleep 1; done
+          sleep 5
+          test ! -e "$APPDATA/LitePack" || echo "the box: %APPDATA%\\LitePack left" >> "$SNAP/verdicts"
+          python -I scripts/e7-residue.py snapshot "$SNAP/4-after-box.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-box.json" \
+            || echo "after the uninstall with the box: residue" >> "$SNAP/verdicts"
+      - name: Residue verdict
+        run: |
+          if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
+          echo "installer: installed, upgraded and uninstalled with nothing left but the allowed entries"
+
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:
     name: cited results exist (ubuntu-24.04)
