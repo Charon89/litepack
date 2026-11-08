@@ -19,6 +19,11 @@
 - [Conformance for independent decoders](spec/CONFORMANCE.md)
 - [Changes of the fix round](spec/CHANGES.md)
 
+# Security and privacy
+
+- [Security model](security.md)
+- [Privacy](privacy.md)
+
 # Licensing
 
 - [Licences and dependency policy](licensing.md)
