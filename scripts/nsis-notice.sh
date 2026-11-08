@@ -4,11 +4,49 @@
 #   scripts/nsis-notice.sh --check   download the pinned NSIS archive and nsis_tauri_utils.dll, check their SHA-1
 #                                    (the bundler's pins) and SHA-256, compare the archive's COPYING with
 #                                    notices/nsis/COPYING (line ends normalised to LF) and the plugin's LICENSE_MIT
-#                                    at its release tag with notices/nsis/nsis_tauri_utils-LICENSE_MIT
+#                                    at its release tag with notices/nsis/nsis_tauri_utils-LICENSE_MIT; first, the
+#                                    compression check below
+#   scripts/nsis-notice.sh --compression [<tauri.conf.json>]
+#                                    offline: fail unless bundle.windows.nsis.compression is exactly "zlib"
+#                                    (default crates/lpk-gui/tauri.conf.json). Without the key tauri-bundler uses
+#                                    LZMA (CPL-1.0), and THIRD-PARTY-NOTICES says LZMA is not used.
 set -euo pipefail
+
+# An explicit tauri.conf.json is taken relative to the caller's directory, before the cd below.
+conf_arg=""
+if [[ "${1:-}" == "--compression" && -n "${2:-}" ]]; then
+  conf_arg="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+fi
 cd "$(dirname "$0")/.."
 
 pin=notices/nsis/pin.toml
+required_compression="$(awk '$1 == "compression" && $2 == "=" { v = $3; gsub(/"/, "", v); print v; exit }' "$pin")"
+if [[ -z "$required_compression" ]]; then
+  echo "$pin: no compression" >&2
+  exit 1
+fi
+
+# Fails, with one line, unless the installer's compression in tauri.conf.json is the pinned one (zlib).
+check_compression() {
+  local conf="$1" found
+  found="$(python3 -I -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    conf = json.load(f)
+value = conf.get("bundle", {}).get("windows", {}).get("nsis", {}).get("compression")
+print("(absent)" if value is None else json.dumps(value) if not isinstance(value, str) else value)
+' "$conf")"
+  if [[ "$found" != "$required_compression" ]]; then
+    echo "$conf: bundle.windows.nsis.compression is $found, $required_compression is required ($pin)" >&2
+    exit 1
+  fi
+  echo "$conf: bundle.windows.nsis.compression is $required_compression"
+}
+
+if [[ "${1:-}" == "--compression" ]]; then
+  check_compression "${conf_arg:-crates/lpk-gui/tauri.conf.json}"
+  exit 0
+fi
 
 # The value of `key = "value"` in section [$1] of the pin file.
 pin_value() {
@@ -44,6 +82,8 @@ if [[ "${1:-}" != "--check" ]]; then
   echo "usage: $0 --check" >&2
   exit 2
 fi
+
+check_compression crates/lpk-gui/tauri.conf.json
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

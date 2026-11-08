@@ -9,11 +9,36 @@ cd "$(dirname "$0")/.."
 # E7-8: the line of about-gui.hbs that stands for the WebView2 SDK's LICENSE.txt (notices/webview2.toml's pin).
 webview2_marker='@@WEBVIEW2_LICENSE_TXT@@'
 
-# Replaces the marker line with notices/webview2/LICENSE.txt, verbatim (line ends LF, like the rest of the file).
+# The value of `key = "value"` in notices/webview2.toml; fails when it is missing or empty.
+webview2_pin() {
+  local value
+  value="$(sed -n "s/^$1 = \"\\([^\"]*\\)\"\$/\\1/p" notices/webview2.toml)"
+  if [[ -z "$value" ]]; then
+    echo "notices/webview2.toml: no value for $1" >&2
+    exit 1
+  fi
+  printf '%s' "$value"
+}
+webview2_com_sys_version="$(webview2_pin crate_version)"
+webview2_version="$(webview2_pin version)"
+
+# Replaces the marker line with notices/webview2/LICENSE.txt, verbatim (line ends LF, like the rest of the file),
+# and the version markers with the pin's values (index/substr, not gsub, so no character of a value is special);
+# fails if a marker is left.
 with_webview2_licence() {
-  awk -v marker="$webview2_marker" -v file="notices/webview2/LICENSE.txt" '
+  awk -v marker="$webview2_marker" -v file="notices/webview2/LICENSE.txt" \
+    -v crate="$webview2_com_sys_version" -v package="$webview2_version" '
+    function put(s, m, v,   i) {
+      while ((i = index(s, m)) > 0) s = substr(s, 1, i - 1) v substr(s, i + length(m))
+      return s
+    }
     $0 == marker { while ((getline line < file) > 0) print line; close(file); next }
-    { print }
+    {
+      line = put(put($0, "@@WEBVIEW2_COM_SYS_VERSION@@", crate), "@@WEBVIEW2_VERSION@@", package)
+      if (line ~ /@@WEBVIEW2_[A-Z0-9_]*@@/) { print "about-gui.hbs: marker left unreplaced: " line > "/dev/stderr"; failed = 1 }
+      print line
+    }
+    END { exit failed }
   '
 }
 

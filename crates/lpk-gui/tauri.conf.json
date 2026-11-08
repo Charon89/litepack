@@ -36,6 +36,9 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "compression": "zlib"
       }
     }
   }

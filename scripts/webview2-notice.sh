@@ -48,10 +48,15 @@ crate_dir() {
   printf '%s' "$dir"
 }
 
-# Downloads one package version into $work/<version>/ and unpacks it.
-fetch() {
+# Downloads one package version to $work/<version>.nupkg.
+download() {
   local version="$1"
   curl -fsSL --retry 3 -o "$work/$version.nupkg" "$nuget/$version/microsoft.web.webview2.$version.nupkg"
+}
+
+# Unpacks a downloaded package into $work/<version>/.
+unpack() {
+  local version="$1"
   mkdir -p "$work/$version"
   unzip -q "$work/$version.nupkg" -d "$work/$version"
 }
@@ -64,7 +69,9 @@ case "${1:-}" in
     want_arm64="$(sha256 "$dir/arm64/WebView2LoaderStatic.lib")"
     echo "webview2-com-sys $(crate_version): x64 $want_x64 arm64 $want_arm64"
     for version in "$@"; do
-      fetch "$version"
+      # Unpinned candidates: no hash to check before unpacking; each is unpacked only into the temporary $work.
+      download "$version"
+      unpack "$version"
       (cd "$work/$version" && find . -name 'WebView2LoaderStatic.lib' -o -iname 'license*')
       x64="$(sha256 "$work/$version/build/native/x64/WebView2LoaderStatic.lib")"
       arm64="$(sha256 "$work/$version/build/native/arm64/WebView2LoaderStatic.lib")"
@@ -78,13 +85,15 @@ case "${1:-}" in
     ;;
   --check)
     version="$(pin_value version)"
-    fetch "$version"
-    status=0
+    download "$version"
+    # The package's hash first: nothing is unpacked from a package that is not the pinned one.
     package="$(sha256 "$work/$version.nupkg")"
     if [[ "$package" != "$(pin_value package_sha256)" ]]; then
       echo "Microsoft.Web.WebView2 $version: package SHA-256 $package differs from $pin" >&2
-      status=1
+      exit 1
     fi
+    unpack "$version"
+    status=0
     if [[ "$(sha256 "$committed")" != "$(pin_value licence_sha256)" ]]; then
       echo "$committed: SHA-256 $(sha256 "$committed") differs from $pin" >&2
       status=1
