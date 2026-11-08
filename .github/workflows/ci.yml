@@ -118,24 +118,6 @@ jobs:
       - name: WebView2 licence text and loader libraries match notices/webview2.toml
         shell: bash
         run: scripts/webview2-notice.sh --check
-      - name: TEMPORARY E7-8 evidence - each check fails on a one-byte change (scratch copies)
-        shell: bash
-        run: |
-          for f in notices/nsis/COPYING notices/nsis/nsis_tauri_utils-LICENSE_MIT notices/webview2/LICENSE.txt; do
-            copy="$RUNNER_TEMP/tamper-$(basename "$f")"
-            rm -rf "$copy"; mkdir -p "$copy"
-            cp -r scripts notices Cargo.lock "$copy/"
-            printf 'X' | dd of="$copy/$f" bs=1 seek=10 count=1 conv=notrunc status=none
-            case "$f" in
-              notices/webview2/*) check=scripts/webview2-notice.sh ;;
-              *) check=scripts/nsis-notice.sh ;;
-            esac
-            if (cd "$copy" && bash "$check" --check); then
-              echo "TAMPER NOT DETECTED: $f" >&2; exit 1
-            else
-              echo "TAMPER DETECTED: $f (exit $?)"
-            fi
-          done
 
   # E5-2: the Tauri GUI built with `cargo tauri build` (tauri-cli through cargo, no Node) and run against a
   # generated archive given on its command line: the page reports the rows it put in the window's DOM through
