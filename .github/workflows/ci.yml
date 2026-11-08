@@ -563,8 +563,7 @@ jobs:
       - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
         run: |
           "$INST/uninstall.exe" /S
-          for i in $(seq 1 120); do test -e "$INST/uninstall.exe" || break; sleep 1; done
-          sleep 5
+          scripts/e7-wait-uninstaller.sh "$INST"
           ls -la "$INST" 2>/dev/null || echo "install folder gone"
           python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
@@ -574,8 +573,7 @@ jobs:
           "$SETUP/N-setup.exe" /S
           mkdir -p "$APPDATA/LitePack"; echo '{}' > "$APPDATA/LitePack/settings.json"
           "$INST/uninstall.exe" /S /DELETEAPPDATA
-          for i in $(seq 1 120); do test -e "$INST/uninstall.exe" || break; sleep 1; done
-          sleep 5
+          scripts/e7-wait-uninstaller.sh "$INST"
           test ! -e "$APPDATA/LitePack" || echo "the box: %APPDATA%\\LitePack left" >> "$SNAP/verdicts"
           python -I scripts/e7-residue.py snapshot "$SNAP/4-after-box.json"
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-box.json" \

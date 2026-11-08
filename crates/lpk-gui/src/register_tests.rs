@@ -647,3 +647,31 @@ fn the_app_version_is_the_tauri_config_version() {
     // Built without an overlay (cargo test sets no TAURI_CONFIG).
     assert_eq!(conf["version"].as_str(), Some(APP_VERSION));
 }
+
+#[test]
+fn the_installer_overlay_places_the_dll_in_this_versions_shell_folder() {
+    let overlay: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.nsis.conf.json")).unwrap();
+    let resources = overlay["bundle"]["resources"].as_object().unwrap();
+    let shell: Vec<&str> = resources
+        .values()
+        .filter_map(|v| v.as_str())
+        .filter(|v| v.starts_with("shell/"))
+        .collect();
+    assert_eq!(shell, [format!("shell/{APP_VERSION}/{SHELL_DLL}")]);
+    // The overlay sets no version of its own: the installer is the workspace's version.
+    assert!(overlay.get("version").is_none());
+    for tool in [
+        "lpk.exe",
+        "lpk-check.exe",
+        "lpk-worker.exe",
+        "lpk-worker-libarchive.exe",
+    ] {
+        assert!(
+            resources
+                .values()
+                .any(|v| v.as_str() == Some(&format!("bin/{tool}"))),
+            "{tool}"
+        );
+    }
+}

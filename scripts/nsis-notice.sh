@@ -129,17 +129,28 @@ if ! cmp "$work/LICENSE_MIT" notices/nsis/nsis_tauri_utils-LICENSE_MIT; then
   status=1
 fi
 
-# R272 (E7-5): the plugin's Cargo.lock at its tag, hashed first, then every crate in it looked up in
-# THIRD-PARTY-NOTICES (scripts/nsis-lock-check.py reads files only).
-fetch -o "$work/Cargo.lock" \
-  "https://raw.githubusercontent.com/tauri-apps/nsis-tauri-utils/$tag/$(pin_value nsis_tauri_utils lock)"
-got="$(sha256sum "$work/Cargo.lock" | cut -d' ' -f1)"
-if [[ "$got" != "$(pin_value nsis_tauri_utils lock_sha256)" ]]; then
-  echo "[nsis_tauri_utils] Cargo.lock at $tag: SHA-256 $got differs from lock_sha256 in $pin" >&2
+# R272 (E7-5): the plugin's source archive at its tag (GitHub's tarball), hashed first. Its member list is printed
+# always; only when the hash is the pinned one are its Cargo.lock and Cargo.toml files unpacked (text, read by
+# scripts/nsis-lock-check.py, never built or run) and every crate of the lock looked up in THIRD-PARTY-NOTICES.
+fetch -o "$work/source.tar.gz" "$(pin_value nsis_tauri_utils archive)"
+got="$(sha256sum "$work/source.tar.gz" | cut -d' ' -f1)"
+echo "[nsis_tauri_utils] source archive at $tag: SHA-256 $got"
+echo "[nsis_tauri_utils] its Cargo manifests and locks:"
+tar -tzf "$work/source.tar.gz" | grep -E '(^|/)Cargo\.(lock|toml)$' || echo "  (none)"
+if [[ "$got" != "$(pin_value nsis_tauri_utils archive_sha256)" ]]; then
+  echo "[nsis_tauri_utils] source archive SHA-256 $got differs from archive_sha256 in $pin; nothing unpacked" >&2
   status=1
+else
+  mkdir "$work/src"
+  tar -xzf "$work/source.tar.gz" -C "$work/src" --wildcards '*Cargo.lock' '*Cargo.toml'
+  lock="$(find "$work/src" -name Cargo.lock | sort | head -1)"
+  if [[ -z "$lock" ]]; then
+    echo "[nsis_tauri_utils] no Cargo.lock in the source at $tag" >&2
+    status=1
+  else
+    python3 -I scripts/nsis-lock-check.py "$lock" THIRD-PARTY-NOTICES --manifests "$work/src" || status=1
+  fi
 fi
-# Run even when the hash differs, so that one run shows both; the hash alone decides that the lock is the pinned one.
-python3 -I scripts/nsis-lock-check.py "$work/Cargo.lock" THIRD-PARTY-NOTICES || status=1
 
 if [[ "$status" -ne 0 ]]; then
   exit "$status"

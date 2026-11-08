@@ -82,7 +82,10 @@
     ${If} $DeleteAppDataCheckboxState = 1
       RMDir /r "$APPDATA\${PRODUCTNAME}"
     ${EndIf}
-    ; Tauri's bookkeeping, which it keeps without the box.
+    ; Tauri's bookkeeping, which it keeps without the box: MANUPRODUCTKEY is Software\litepack\LitePack (the publisher
+    ; from the identifier), which the registry, comparing names without case, makes Software\LitePack\LitePack, under
+    ; LitePack's own Software\LitePack. --unregister-shell left that parent while this key was in it; it goes here,
+    ; only when empty.
     DeleteRegValue HKCU "${MANUPRODUCTKEY}" "Installer Language"
     DeleteRegKey HKCU "${MANUPRODUCTKEY}"
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
