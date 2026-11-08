@@ -96,6 +96,29 @@ jobs:
         shell: bash
         run: scripts/third-party-notices.sh --check
 
+  # E7-8: the licence texts THIRD-PARTY-NOTICES copies from outside the cargo graph, checked against the archives
+  # they come from (downloads, so Linux only): NSIS's COPYING and the nsis_tauri_utils plugin (notices/nsis/pin.toml),
+  # and the WebView2 SDK's LICENSE.txt with the loader libraries webview2-com-sys vendors (notices/webview2.toml).
+  notices-pins:
+    name: notices pins (NSIS, WebView2)
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust toolchain from rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - name: NSIS archive and plugin match notices/nsis
+        shell: bash
+        run: scripts/nsis-notice.sh --check
+      - name: Fetch the locked crates (webview2-com-sys's vendored loader)
+        run: cargo fetch --locked
+      - name: WebView2 licence text and loader libraries match notices/webview2.toml
+        shell: bash
+        run: scripts/webview2-notice.sh --check
+
   # E5-2: the Tauri GUI built with `cargo tauri build` (tauri-cli through cargo, no Node) and run against a
   # generated archive given on its command line: the page reports the rows it put in the window's DOM through
   # the `listing_shown` command and the host writes that report (LPK_GUI_SMOKE_REPORT), which

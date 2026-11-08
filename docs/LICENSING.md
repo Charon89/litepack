@@ -113,14 +113,35 @@ The vendored files are byte-identical to the release tarball (SHA-256 `900fe9fc7
 `vendor/libarchive-3.8.11/FILES.txt`); the per-target `config.h` files are LitePack's own (made from libarchive's CMake and
 template; their headers say how).
 
-**Open item (E5-2, due before any GUI binary is distributed, E7): the WebView2 loader's licence text.**
-`lpk-gui.exe` links Microsoft's `WebView2LoaderStatic.lib`, vendored by `webview2-com-sys` 0.39.1 (which declares
-itself MIT), whose licence requires its notice. `THIRD-PARTY-NOTICES` (`about-gui.hbs`) carries the copyright line
-and the licence URL only; before E7 distributes a GUI binary it must reproduce verbatim the `LICENSE.txt` of the
-Microsoft.Web.WebView2 NuGet package the vendored loader came from. The crate does not state that package's
-version: 0.39.0's changelog says only "update windows and WebView2 SDK versions" (0.38.2 named 1.0.3650.58), and
-the E5 design's reference, 1.0.4314.35, is unverified against the vendored files. The text is copied from the
-package, never written from memory.
+**Every shipped binary (E7-8).** `scripts/third-party-notices.sh` walks each program that ships: `lpk`
+(`lpk-cli`), `lpk-check`, `lpk-worker-libarchive`, `lpk-worker` (the `workers/` workspace and its own
+`workers/Cargo.lock`; `lpk-foreign` is a library linked into it, `about-worker.hbs`), `lpk-gui` and `lpk_shell.dll`
+(`crates/lpk-shell`, for the Windows triples of `about-gui.toml`, `about-shell.hbs`), then appends the installer's
+static section. `--check` regenerates the file from both lockfiles, so a change to `Cargo.lock` or to
+`workers/Cargo.lock` without a regenerated file fails CI; its GPL-family scan also covers `notices/`.
+
+**The installer's own code (E7-8).** `cargo tauri build` (tauri-cli 2.12.4, which locks tauri-bundler 2.10.4)
+fetches NSIS 3.13 and Tauri's plugin `nsis_tauri_utils` 0.5.3 (the URLs and SHA-1 values are the bundler's pins in
+its `src/bundle/windows/nsis/mod.rs`). The setup program carries NSIS's stub with the zlib compressor (LZMA is not
+used) and the NSIS plugins the bundler's template calls: System, nsDialogs, StartMenu and NSISdl, all under NSIS's
+`COPYING` (zlib/libpng). `nsis_tauri_utils` is MIT OR Apache-2.0 (taken under MIT); its crates `windows-sys` and
+`semver` are already in the notices. `notices/nsis/` holds `COPYING`, the plugin's `LICENSE_MIT` at its release
+tag, and `pin.toml` (URL, version, SHA-1 and SHA-256 of each download); the notices reproduce both texts verbatim.
+CI's `notices pins` job (`scripts/nsis-notice.sh --check`) downloads both, checks both hashes, and compares the
+archive's `COPYING` (line ends normalised to LF) and the tag's `LICENSE_MIT` with the committed copies. When the
+bundler moves to another NSIS or plugin release, the pin and the texts move with it.
+
+**The WebView2 loader's licence text (E5-2's open item, closed in E7-8).** `lpk-gui.exe` links Microsoft's
+`WebView2LoaderStatic.lib`, vendored by `webview2-com-sys` 0.39.1 (which declares itself MIT and names no SDK
+version). Its `x64` and `arm64` libraries are byte-identical to those of the Microsoft.Web.WebView2 NuGet package
+1.0.3800.47, the only match among the releases after 1.0.3650.58; `notices/webview2.toml` pins that version, the
+package's SHA-256 and both library hashes. `notices/webview2/LICENSE.txt` is that package's `LICENSE.txt`, byte for
+byte (a BSD-style licence whose binary redistributions reproduce its notice, conditions and disclaimer), and the
+GUI section of `THIRD-PARTY-NOTICES` renders it verbatim (`about-gui.hbs`). CI's `notices pins` job
+(`scripts/webview2-notice.sh --check`, after `cargo fetch --locked`) downloads that package from nuget.org, checks
+its hash, compares its `LICENSE.txt` with the committed copy, and checks both library hashes against the pin and
+against the `webview2-com-sys` that `Cargo.lock` resolves, so a bump with other libraries fails until the pin moves
+(`--find <version>...` lists candidates' hashes for that move).
 
 ## Patents to review (counsel, not engineers, decide)
 This is a watch-list, not a legal opinion: engineers record what each patent is about and when counsel
