@@ -15,6 +15,95 @@ pub const MAIN_WINDOW: &str = "main";
 /// check of the built exe (`.github/workflows/ci.yml`, job `gui`). Unset, nothing is written.
 pub const SMOKE_REPORT_ENV: &str = "LPK_GUI_SMOKE_REPORT";
 
+/// E7-7's update test hook (test 6, N updates to N+1; R327): compiled only with the cargo feature
+/// `update-e2e`, which only CI's end-to-end update job turns on, together with the config overlay
+/// `tauri.update-e2e.conf.json` (a localhost endpoint and the run's test key). No shipped build
+/// has either: the `gui` job checks that the release exe holds neither [`update_e2e::UPDATE_E2E_ENV`]
+/// nor the overlay's endpoint.
+#[cfg(feature = "update-e2e")]
+pub mod update_e2e {
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    /// Set to a file path, the host presses "Install and restart" itself as soon as the check
+    /// finds a newer version, and writes each step to that file (the job cannot read a windowed
+    /// exe's stderr).
+    pub const UPDATE_E2E_ENV: &str = "LPK_GUI_UPDATE_E2E";
+
+    /// The local server the job runs in GitHub's place (the overlay's endpoint is under it).
+    pub const LOCAL_SERVER: &str = "http://127.0.0.1:8737";
+
+    /// The download prefix of this build: the release prefix's shape on [`LOCAL_SERVER`].
+    pub const LOCAL_PREFIX: &str = "http://127.0.0.1:8737/Charon89/litepack/releases/download/";
+
+    /// The log file the hook writes to, if the variable is set to a non-empty value.
+    pub fn armed(var: Option<&OsStr>) -> Option<PathBuf> {
+        var.filter(|v| !v.is_empty()).map(PathBuf::from)
+    }
+
+    /// Append `line` to the hook's log.
+    pub fn log(file: &std::path::Path, line: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_overlay_points_at_the_local_server_alone() {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let conf: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(dir.join("tauri.update-e2e.conf.json")).unwrap(),
+            )
+            .unwrap();
+            let u = &conf["plugins"]["updater"];
+            assert_eq!(
+                u["endpoints"],
+                serde_json::json!([format!(
+                    "{LOCAL_SERVER}/releases/latest/download/latest.json"
+                )])
+            );
+            assert_eq!(u["dangerousInsecureTransportProtocol"], true);
+            assert_eq!(u["requireSignedVersion"], true);
+            assert!(LOCAL_PREFIX.starts_with(LOCAL_SERVER));
+            assert!(LOCAL_PREFIX.ends_with(lpk_gui_prefix_tail()));
+        }
+
+        /// The shipped prefix's path, which the local one repeats.
+        fn lpk_gui_prefix_tail() -> &'static str {
+            crate::update::RELEASE_DOWNLOAD_PREFIX
+                .strip_prefix("https://github.com")
+                .unwrap()
+        }
+
+        #[test]
+        fn the_hook_is_armed_only_by_a_non_empty_path() {
+            assert_eq!(armed(None), None);
+            assert_eq!(armed(Some(OsStr::new(""))), None);
+            assert_eq!(
+                armed(Some(OsStr::new("C:\\t\\update.log"))),
+                Some(PathBuf::from("C:\\t\\update.log"))
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("update.log");
+            log(&f, "found 9.9.9");
+            log(&f, "installing");
+            assert_eq!(
+                std::fs::read_to_string(&f).unwrap(),
+                "found 9.9.9\ninstalling\n"
+            );
+        }
+    }
+}
+
 /// E5-11's WebDriver switch (`docs/notes/e5-design.md` section 7, R111): compiled only with the
 /// cargo feature `webdriver`, which CI's `gui-e2e` job turns on and no shipped build does (the
 /// `gui` job checks that the release exe does not hold the string `LPK_GUI_WEBDRIVER`).

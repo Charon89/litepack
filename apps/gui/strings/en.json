@@ -94,6 +94,7 @@
   "notice.update": "LitePack {version} is available.",
   "notice.update.portable": "LitePack {version} is available. This portable copy does not update itself: download the new version from the release page.",
   "update.install": "Install and restart",
+  "update.install.close": "Install and close",
   "update.later": "Later",
   "update.skip": "Skip this version",
   "update.page": "Release page",

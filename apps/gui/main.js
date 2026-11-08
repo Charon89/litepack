@@ -559,7 +559,9 @@ function updateNotice(item, text, dismiss, n) {
     return;
   }
   dismiss.textContent = t("update.later");
-  const install = button(t("update.install"), async () => {
+  // The installer restarts LitePack only after a launch without arguments (R323, R326).
+  const label = n.restart ? t("update.install") : t("update.install.close");
+  const install = button(label, async () => {
     install.disabled = true;
     try {
       setStatus(t("update.downloading", { version: n.version }));
@@ -891,7 +893,7 @@ async function main() {
     } else if (notice.type === "refused") {
       showNotices([{ kind: "refused", error: notice.error }]);
     } else if (notice.type === "update") {
-      showNotices([{ kind: "update", version: notice.version, notes: notice.notes, portable: notice.portable }]);
+      showNotices([{ kind: "update", version: notice.version, notes: notice.notes, portable: notice.portable, restart: notice.restart }]);
     }
   };
   await core.invoke("subscribe", { channel });

@@ -23,6 +23,10 @@ updater = ["dep:tauri-plugin-updater"]
 # E5-11's WebDriver switch (`LPK_GUI_WEBDRIVER`, src/security.rs): CI's `gui-e2e` job only, never a
 # shipped build (the `gui` job checks that the release exe does not hold the string).
 webdriver = []
+# E7-7 test 6 (R327): the hook that presses "Install and restart" (`LPK_GUI_UPDATE_E2E`,
+# src/security.rs), for CI's end-to-end update job alone, with the overlay tauri.update-e2e.conf.json;
+# never a shipped build (the `gui` job checks that the release exe holds neither).
+update-e2e = ["updater"]
 
 [dependencies]
 lpk-api = { path = "../lpk-api", version = "0.0.1" }

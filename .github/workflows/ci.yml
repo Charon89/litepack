@@ -162,6 +162,9 @@ jobs:
         shell: bash
         run: |
           cargo clippy --locked -p lpk-gui --all-targets --no-default-features -- -D warnings
+          # R327: the test build's hook lints clean and its unit tests pass (they exist only with the feature).
+          cargo clippy --locked -p lpk-gui --all-targets --features update-e2e -- -D warnings
+          cargo test --locked -p lpk-gui --features update-e2e --lib security::update_e2e
           if cargo tree --locked -p lpk-gui --no-default-features -e normal --prefix none | grep -q '^tauri-plugin-updater '; then
             echo "tauri-plugin-updater in the Store build's tree" >&2
             exit 1
@@ -195,6 +198,26 @@ jobs:
           test "$(grep -a -c 'LPK_GUI_SMOKE_REPORT' "$exe")" -gt 0
           if grep -a -qF 'LPK_GUI_WEBDRIVER' "$exe"; then
             echo "the WebDriver switch reached the shipped lpk-gui.exe" >&2
+            exit 1
+          fi
+      # E7-7 (R327): the update test hook (lpk-gui's cargo feature `update-e2e`) and its overlay
+      # (tauri.update-e2e.conf.json: the localhost endpoint) are not in the shipped exe; the release endpoint is the
+      # control (present), and the shipped tauri.conf.json keeps the placeholder key and its one HTTPS endpoint.
+      - name: No update test hook in the exe
+        shell: bash
+        run: |
+          exe=target/release/lpk-gui.exe
+          test "$(grep -a -c 'releases/latest/download/latest.json' "$exe")" -gt 0
+          for marker in 'LPK_GUI_UPDATE_E2E' '127.0.0.1:8737' 'CI writes the run'; do
+            if grep -a -qF "$marker" "$exe"; then
+              echo "the update test hook or overlay reached the shipped lpk-gui.exe: $marker" >&2
+              exit 1
+            fi
+          done
+          grep -qF '"pubkey": "E7-7 replaces this with the release signing public key"' crates/lpk-gui/tauri.conf.json
+          grep -qF '"endpoints": ["https://github.com/Charon89/litepack/releases/latest/download/latest.json"]' crates/lpk-gui/tauri.conf.json
+          if grep -q 'update-e2e\|127.0.0.1' crates/lpk-gui/tauri.conf.json; then
+            echo "the shipped tauri.conf.json names the test build" >&2
             exit 1
           fi
 

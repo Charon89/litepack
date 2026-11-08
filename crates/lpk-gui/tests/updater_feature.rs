@@ -78,3 +78,25 @@ fn the_page_hides_the_update_setting_without_the_updater() {
     );
     assert!(page.contains("box.closest(\"label\").hidden = !updater"));
 }
+
+/// R326: the button promises a restart only when the installer will restart LitePack (the host's
+/// `restart`, `lpk_gui::update::restart_after_install`); otherwise it reads "Install and close".
+#[test]
+fn the_install_button_promises_a_restart_only_when_there_is_one() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let host = std::fs::read_to_string(dir.join("src").join("host.rs")).unwrap();
+    assert!(host.contains("let restart = lpk_gui::update::restart_after_install(&args);"));
+    let page = std::fs::read_to_string(dir.join("../../apps/gui/main.js")).unwrap();
+    assert!(page.contains(
+        "const label = n.restart ? t(\"update.install\") : t(\"update.install.close\");"
+    ));
+    assert!(page.contains("restart: notice.restart"));
+    let table = lpk_gui::strings::table();
+    assert_eq!(table["update.install"], "Install and restart");
+    assert_eq!(table["update.install.close"], "Install and close");
+    assert!(!lpk_gui::update::restart_after_install(&[
+        "lpk-gui.exe",
+        "--extract-here",
+        "C:\\x.lpk"
+    ]));
+}

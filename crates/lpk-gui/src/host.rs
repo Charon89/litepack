@@ -107,6 +107,9 @@ enum Notice {
         version: String,
         notes: String,
         portable: bool,
+        /// Whether the installer starts LitePack again (a launch without arguments); the
+        /// button then reads "Install and restart", else "Install and close".
+        restart: bool,
     },
 }
 
@@ -159,6 +162,36 @@ async fn startup(host: State<'_, Host>) -> Result<StartupInfo, GuiError> {
 async fn update_install(handle: AppHandle, host: State<'_, Host>) -> Result<bool, GuiError> {
     #[cfg(feature = "updater")]
     {
+        let _ = host;
+        install_pending(&handle).await
+    }
+    #[cfg(not(feature = "updater"))]
+    {
+        let _ = (handle, host);
+        Err(GuiError::usage("this build of LitePack has no updater"))
+    }
+}
+
+/// The prefix downloads must start with: the repository's release assets; in the `update-e2e`
+/// test build alone, the local server's (R327).
+#[cfg(feature = "updater")]
+fn download_prefix() -> &'static str {
+    #[cfg(feature = "update-e2e")]
+    {
+        lpk_gui::security::update_e2e::LOCAL_PREFIX
+    }
+    #[cfg(not(feature = "update-e2e"))]
+    {
+        lpk_gui::update::RELEASE_DOWNLOAD_PREFIX
+    }
+}
+
+/// "Install and restart" on the update the check found (the command, and the `update-e2e`
+/// hook).
+#[cfg(feature = "updater")]
+async fn install_pending(handle: &AppHandle) -> Result<bool, GuiError> {
+    let host = handle.state::<Host>();
+    {
         let update = host
             .pending_update
             .lock()
@@ -183,7 +216,7 @@ async fn update_install(handle: AppHandle, host: State<'_, Host>) -> Result<bool
         };
         let flow = updates::install_flow(
             &update,
-            lpk_gui::update::RELEASE_DOWNLOAD_PREFIX,
+            download_prefix(),
             paths::dirs().portable,
             quit,
             install,
@@ -194,17 +227,12 @@ async fn update_install(handle: AppHandle, host: State<'_, Host>) -> Result<bool
             Err(e @ updates::FlowError::Install(_)) => {
                 // The quit path ran (operations cancelled, perhaps the sessions closed): exit.
                 let text = strings::get("update.failed").replace("{error}", &e.to_string());
-                let _ = lpk_gui_sys::alert(owner(&handle), strings::get("app.title"), &text);
+                let _ = lpk_gui_sys::alert(owner(handle), strings::get("app.title"), &text);
                 handle.exit(1);
                 Err(internal(e))
             }
             Err(e) => Err(GuiError::usage(e.to_string())),
         }
-    }
-    #[cfg(not(feature = "updater"))]
-    {
-        let _ = (handle, host);
-        Err(GuiError::usage("this build of LitePack has no updater"))
     }
 }
 
@@ -1207,15 +1235,33 @@ pub fn run() -> i32 {
                                     notes: update.body.clone().unwrap_or_default(),
                                     portable: lpk_gui::update::mode(paths::dirs().portable)
                                         == lpk_gui::update::Mode::NotifyOnly,
+                                    restart,
                                 };
+                                #[cfg(feature = "update-e2e")]
+                                let found = update.version.clone();
                                 if let Ok(mut p) = host.pending_update.lock() {
                                     *p = Some(update);
                                 }
                                 push(&host, notice);
+                                // The test build's hook presses "Install and restart" (R327).
+                                #[cfg(feature = "update-e2e")]
+                                {
+                                    use lpk_gui::security::update_e2e;
+                                    let var = std::env::var_os(update_e2e::UPDATE_E2E_ENV);
+                                    if let Some(log) = update_e2e::armed(var.as_deref()) {
+                                        update_e2e::log(&log, &format!("found {found}"));
+                                        update_e2e::log(&log, "installing");
+                                        let out = install_pending(&handle).await;
+                                        update_e2e::log(&log, &format!("outcome {out:?}"));
+                                    }
+                                }
                             }
                         }
                         updates::Outcome::Failed(e) => {
                             eprintln!("lpk-gui: the update check: {e}")
+                        }
+                        updates::Outcome::Unrecorded(e) => {
+                            eprintln!("lpk-gui: the update check was skipped, its day could not be recorded: {e}")
                         }
                         _ => {}
                     }

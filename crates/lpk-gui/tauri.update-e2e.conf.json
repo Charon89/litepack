@@ -1,0 +1,10 @@
+{
+  "plugins": {
+    "updater": {
+      "pubkey": "CI writes the run's test public key here",
+      "endpoints": ["http://127.0.0.1:8737/releases/latest/download/latest.json"],
+      "requireSignedVersion": true,
+      "dangerousInsecureTransportProtocol": true
+    }
+  }
+}
