@@ -1397,7 +1397,9 @@ impl Session {
 
     /// Export the selected entries into a ZIP or 7z file at `out` (E3-6): the target is
     /// refused when it is the archive or exists without `force` ([`check_export_target`]),
-    /// created at the first entry and removed on failure.
+    /// created at the first entry and removed on failure. Under `force` the export writes a
+    /// `.partial` file beside `out` and renames it over `out` only when it is complete, so a
+    /// failed export leaves an existing `out` as it was.
     pub fn export(
         &self,
         s: &Selection,
@@ -1423,25 +1425,25 @@ impl Session {
             method: o.method,
             password: o.password,
         };
-        let out_path = out.to_path_buf();
         let zone = self.out_zone();
-        // The output is always a new file: an existing one (`force`) is removed first, so the
-        // replacement inherits none of its streams (an unrelated `Zone.Identifier`, E6-5).
-        // Mark of the Web: the zone goes onto the output before its first byte, relative to
+        // The output is always a new file. Under `force` the export writes a temporary file
+        // beside the output and renames it over the output only once it is complete and
+        // closed: a failed export leaves the old file untouched, and the replacement inherits
+        // none of the old file's streams (an unrelated `Zone.Identifier`, E6-5), which go with
+        // the old file. Without `force` the output itself is created (`create_new`).
+        // Mark of the Web: the zone goes onto the new file before its first byte, relative to
         // the file's handle (a volume that cannot hold it leaves the output unmarked).
-        let force = o.force;
+        let write_path = if o.force {
+            partial_path(out)
+        } else {
+            out.to_path_buf()
+        };
+        let open_path = write_path.clone();
         let opener = move || {
-            if force {
-                match std::fs::remove_file(&out_path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
-            }
             let f = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&out_path)?;
+                .open(&open_path)?;
             if let Some(z) = zone {
                 lpk_core::motw::mark(&f, z);
             }
@@ -1449,18 +1451,38 @@ impl Session {
         };
         let mut writer = crate::export::open(o.container, Box::new(opener), out, settings);
         let r = lpk_core::export_archive_with(&mut a, || self.reopen(), writer.as_mut(), &opts, m);
-        // Only an output this export created (or truncated under `force`) is removed on
-        // failure; an existing one a refusal left untouched stays as it was. (The trailer
-        // opens the output when no entry did, so its failure always removes.)
+        // Only a file this export created is removed on failure; an existing output a refusal
+        // left untouched stays as it was, and under `force` the old output is never touched.
+        // (The trailer opens the file when no entry did, so its failure always removes.) The
+        // writer is closed (finished or dropped) before any removal or rename.
         let created = writer.created();
-        let r = r
-            .map_err(|e| (e, created))
-            .and_then(|s| writer.finish().map(|()| s).map_err(|e| (e, true)));
+        let r = match r {
+            Ok(s) => writer.finish().map(|()| s).map_err(|e| (e, true)),
+            Err(e) => {
+                drop(writer);
+                Err((e, created))
+            }
+        };
+        let r = r.and_then(|s| {
+            if !o.force {
+                return Ok(s);
+            }
+            std::fs::rename(&write_path, out).map(|()| s).map_err(|e| {
+                (
+                    CoreError::Export {
+                        path: out.to_path_buf(),
+                        entry: String::new(),
+                        message: format!("cannot replace the existing file: {e}"),
+                    },
+                    true,
+                )
+            })
+        });
         match r {
             Ok(s) => Ok(s),
             Err((e, created)) => {
                 if created {
-                    let _ = std::fs::remove_file(out);
+                    let _ = std::fs::remove_file(&write_path);
                 }
                 Err(Error::core(e, Some(&self.path)))
             }
@@ -1650,6 +1672,20 @@ pub fn check_export_target(archive: &Path, out: &Path, force: bool) -> Result<()
         }
     }
     Ok(())
+}
+
+/// The temporary file an `export --force` writes before it renames it over `out`: in the
+/// output's directory, named after the output and unique per process and attempt
+/// (`<name>.<pid>-<n>.partial`), so `create_new` never meets another export's file.
+fn partial_path(out: &Path) -> PathBuf {
+    static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = out
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".{}-{n}.partial", std::process::id()));
+    out.with_file_name(name)
 }
 
 /// The sink of `read_entry`: the one file's bytes, refused past the cap.
