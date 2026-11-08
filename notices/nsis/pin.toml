@@ -1,0 +1,35 @@
+# E7-8: the NSIS toolchain that `cargo tauri build` (tauri-cli 2.12.4, which locks tauri-bundler 2.10.4) fetches for
+# the installer, and where the licence texts beside this file come from. The URLs and SHA-1 values are the bundler's
+# own pins (tauri-bundler-2.10.4/src/bundle/windows/nsis/mod.rs, NSIS_URL, NSIS_SHA1, NSIS_TAURI_UTILS_URL,
+# NSIS_TAURI_UTILS_SHA1); the SHA-256 values are GitHub's asset digests of the same files. CI (job "notices pins")
+# downloads both, checks both hashes, and compares the archive's COPYING with COPYING here (line ends normalised to
+# LF, as in THIRD-PARTY-NOTICES). When the bundler moves to another NSIS or plugin release, this file, the texts and
+# docs/LICENSING.md move with it.
+
+tauri-cli = "2.12.4"
+tauri-bundler = "2.10.4"
+
+[nsis]
+version = "3.13"
+url = "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip"
+sha1 = "db14f8af2ea346b786c6ae19343f61aaf5e09b8e"
+sha256 = "ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8"
+# The archive's member compared with COPYING here.
+licence = "nsis-3.13/COPYING"
+# The NSIS plugins that tauri-bundler 2.10.4's installer.nsi and utils.nsh call, all part of the NSIS distribution
+# (Contrib/ of NSIS 3.13) and under its COPYING: System (System::Call), nsDialogs (nsDialogs::Create), StartMenu
+# (MUI_PAGE_STARTMENU), NSISdl (NSISdl::download, used in the downloadBootstrapper WebView2 mode only).
+plugins = ["System", "nsDialogs", "StartMenu", "NSISdl"]
+# The compressor LitePack's installer uses (design note e7-design.md section 3): the zlib module, under COPYING's
+# zlib/libpng licence. LZMA is not used.
+compression = "zlib"
+
+[nsis_tauri_utils]
+version = "0.5.3"
+url = "https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll"
+sha1 = "75197fee3c6a814fe035788d1c34ead39349b860"
+sha256 = "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709"
+# Licensed MIT OR Apache-2.0; LitePack takes MIT. nsis_tauri_utils-LICENSE_MIT here is the repository's LICENSE_MIT
+# at the release tag.
+source = "https://github.com/tauri-apps/nsis-tauri-utils/tree/nsis_tauri_utils-v0.5.3"
+licence = "LICENSE_MIT"
