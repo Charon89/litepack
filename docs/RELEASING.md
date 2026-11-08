@@ -46,11 +46,19 @@ The icons in `crates/lpk-gui/icons` are a generated placeholder (`icons/make-pla
   this). The `pubkey` stays a placeholder until E7-1 supplies the owner's minisign public key; until then the gate
   makes no request at all.
 - **Flow.** With **Check for updates** on, the check runs once the window is up, at most once a day: the day is
-  recorded in `update.json` in the local state folder before the request, so a failed check waits for tomorrow.
-  A newer version shows its notes with **Install and restart**, **Later** (dismiss) and **Skip this version** (stored
-  in `update.json`; that version is not offered again, a newer one is). Nothing installs without the first. It runs
-  the quit path (asks while an operation runs, then cancels), downloads, and the plugin's `on_before_exit` closes the
-  sessions before `install` starts the NSIS installer with `/P /UPDATE` and the process exits. Per user, no UAC.
+  recorded in `update.json` in the local state folder before the request, so a failed check waits for tomorrow;
+  when the day cannot be recorded (no state folder, a failed write) no check is made. The day is the UTC day of the
+  system clock, so a clock set back (or forward) to another day can check again that day.
+  A newer version shows its notes with **Install and restart**, **Later** (dismiss) and **Skip this version** (the
+  version the check found, never one the page names, is stored in `update.json`; it is not offered again, a newer one
+  is). Nothing installs without the first, which runs in this order (`updates::install_flow`, R323): the download
+  and its verification first, so a failed or timed-out download leaves the GUI as it was; then the quit path (asks
+  while an operation runs, then cancels; if the user keeps the operation, nothing installs and nothing is
+  cancelled); then the plugin's `on_before_exit` closes the sessions and `install` starts the NSIS installer with
+  `/P /UPDATE`, plus `/R` (restart) only when LitePack was started without arguments, since `/R` passes the launch's
+  arguments on (`/ARGS`) and would replay a verb such as `--extract-here`; after a launch with arguments the user
+  starts LitePack again. Then the process exits. If the installer does not start once the quit path has run, the GUI
+  says so and exits rather than stay half-closed. Per user, no UAC.
   With the setting off, nothing is requested and `update.json` is not written.
 - **The release prefix.** Before any download, a `url` outside `https://github.com/Charon89/litepack/releases/download/`
   is refused (`lpk_gui::update::RELEASE_DOWNLOAD_PREFIX`, built from the one `REPOSITORY` constant). The comparison is

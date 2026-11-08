@@ -36,6 +36,8 @@ pub enum Outcome {
     NoKey,
     /// Already checked today: nothing was requested.
     NotDue,
+    /// The day could not be recorded, so nothing was requested (at most once a day stays true).
+    Unrecorded(String),
     /// The endpoint knows no newer version.
     UpToDate,
     /// A newer version, but the one the user skipped (or older than it).
@@ -52,6 +54,7 @@ impl std::fmt::Debug for Outcome {
             Outcome::Off => f.write_str("Off"),
             Outcome::NoKey => f.write_str("NoKey"),
             Outcome::NotDue => f.write_str("NotDue"),
+            Outcome::Unrecorded(e) => write!(f, "Unrecorded({e})"),
             Outcome::UpToDate => f.write_str("UpToDate"),
             Outcome::Skipped(v) => write!(f, "Skipped({v})"),
             Outcome::Available(u) => write!(f, "Available({})", u.version),
@@ -91,10 +94,13 @@ fn pubkey<R: Runtime>(app: &AppHandle<R>) -> String {
 }
 
 /// Check for an update, if the settings (`enabled`) and the key allow it. `before_exit` runs
-/// just before the installer starts (the GUI's quit path closes the sessions there).
+/// just before the installer starts (the GUI's quit path closes the sessions there). `restart`:
+/// whether the installer starts LitePack again (`/R`), which replays the launch's arguments, so
+/// the GUI passes `lpk_gui::update::restart_after_install` of its command line.
 pub async fn check<R: Runtime>(
     app: &AppHandle<R>,
     enabled: bool,
+    restart: bool,
     before_exit: impl Fn() + Send + Sync + 'static,
 ) -> Outcome {
     match gate(enabled, &pubkey(app)) {
@@ -105,6 +111,7 @@ pub async fn check<R: Runtime>(
     let updater = match app
         .updater_builder()
         .timeout(CHECK_TIMEOUT)
+        .restart_after_install(restart)
         .on_before_exit(before_exit)
         .build()
     {
@@ -118,35 +125,92 @@ pub async fn check<R: Runtime>(
     }
 }
 
-/// The check as the GUI runs it after the window opens: at most once a day (the day is recorded
-/// in `state_file` before the request, so a failed check is not retried until tomorrow), and a
-/// skipped version is not offered again. With the check off nothing is requested or written.
+/// The check as the GUI runs it after the window opens: at most once a day. The day is recorded
+/// in `state_file` before the request (so a failed check is not retried until tomorrow), and
+/// when it cannot be recorded (no state folder, a failed write) no request is made. A skipped
+/// version is not offered again. With the check off nothing is requested or written.
 pub async fn scheduled<R: Runtime>(
     app: &AppHandle<R>,
     enabled: bool,
     state_file: Option<&Path>,
     today: u64,
+    restart: bool,
     before_exit: impl Fn() + Send + Sync + 'static,
 ) -> Outcome {
     if !enabled {
         return Outcome::Off;
     }
-    let mut state = state_file.map(State::load).unwrap_or_default();
+    let Some(file) = state_file else {
+        return Outcome::Unrecorded("LitePack has no state folder".into());
+    };
+    let mut state = State::load(file);
     if !state.due(today) {
         return Outcome::NotDue;
     }
     if gate(enabled, &pubkey(app)) == Gate::Check {
         state.last_check_day = Some(today);
-        if let Some(p) = state_file {
-            if let Err(e) = state.save(p) {
-                eprintln!("lpk-gui: the updater's state: {e}");
-            }
+        if let Err(e) = state.save(file) {
+            return Outcome::Unrecorded(format!("{}: {e}", file.display()));
         }
     }
-    match check(app, enabled, before_exit).await {
+    match check(app, enabled, restart, before_exit).await {
         Outcome::Available(u) if !state.offers(&u.version) => Outcome::Skipped(u.version.clone()),
         other => other,
     }
+}
+
+/// Why "Install and restart" installed nothing.
+#[derive(Debug)]
+pub enum FlowError {
+    /// A portable copy never downloads or installs: nothing was requested.
+    Portable,
+    /// The download was refused or failed verification: the quit path did not run.
+    Download(DownloadError),
+    /// The installer did not start, after the quit path ran (the GUI then exits).
+    Install(String),
+}
+
+impl std::fmt::Display for FlowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FlowError::Portable => f.write_str(
+                "a portable copy does not update itself; download the new version from the release page",
+            ),
+            FlowError::Download(e) => e.fmt(f),
+            FlowError::Install(e) => write!(f, "the installer did not start: {e}"),
+        }
+    }
+}
+
+/// "Install and restart", in its order (R323): a portable copy stops at once; otherwise the
+/// download and its verification first, and only then `quit` (the quit path: ask while an
+/// operation runs, then cancel), so a failed download leaves the GUI as it was; then `install`.
+/// `Ok(false)` when `quit` declined (the user kept an operation running): nothing installs and
+/// nothing was cancelled.
+pub async fn install_flow<Q, QF, I, IF>(
+    update: &Update,
+    prefix: &str,
+    portable: bool,
+    quit: Q,
+    install: I,
+) -> Result<bool, FlowError>
+where
+    Q: FnOnce() -> QF,
+    QF: std::future::Future<Output = bool>,
+    I: FnOnce(Vec<u8>) -> IF,
+    IF: std::future::Future<Output = Result<(), String>>,
+{
+    if portable {
+        return Err(FlowError::Portable);
+    }
+    let bytes = download(update, prefix)
+        .await
+        .map_err(FlowError::Download)?;
+    if !quit().await {
+        return Ok(false);
+    }
+    install(bytes).await.map_err(FlowError::Install)?;
+    Ok(true)
 }
 
 /// Download `update`'s installer, refusing a `url` outside `prefix`
@@ -356,7 +420,7 @@ mod tests {
         key: &str,
     ) -> (Result<Vec<u8>, DownloadError>, Vec<String>) {
         let a = app(&server.endpoint(), key);
-        let out = tauri::async_runtime::block_on(check(a.handle(), true, || {}));
+        let out = tauri::async_runtime::block_on(check(a.handle(), true, true, || {}));
         let Outcome::Available(update) = out else {
             panic!("no update: {out:?}");
         };
@@ -497,7 +561,7 @@ mod tests {
         let (l, url) = quiet_server();
         let key = TestKey::new();
         let a = app(&url, &key.public());
-        let out = tauri::async_runtime::block_on(check(a.handle(), false, || {}));
+        let out = tauri::async_runtime::block_on(check(a.handle(), false, true, || {}));
         assert!(matches!(out, Outcome::Off), "{out:?}");
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("update.json");
@@ -506,6 +570,7 @@ mod tests {
             false,
             Some(&state),
             20_000,
+            true,
             || {},
         ));
         assert!(matches!(out, Outcome::Off), "{out:?}");
@@ -514,11 +579,126 @@ mod tests {
     }
 
     #[test]
+    fn without_a_recorded_day_the_server_sees_nothing() {
+        let (l, url) = quiet_server();
+        let key = TestKey::new();
+        let a = app(&url, &key.public());
+        // No state folder.
+        let out =
+            tauri::async_runtime::block_on(scheduled(a.handle(), true, None, 20_000, true, || {}));
+        assert!(matches!(out, Outcome::Unrecorded(_)), "{out:?}");
+        // A state file that cannot be written: its folder is a file.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("state");
+        std::fs::write(&blocker, b"a file, not a folder").unwrap();
+        let file = blocker.join("update.json");
+        let out = tauri::async_runtime::block_on(scheduled(
+            a.handle(),
+            true,
+            Some(&file),
+            20_000,
+            true,
+            || {},
+        ));
+        assert!(matches!(out, Outcome::Unrecorded(_)), "{out:?}");
+        assert!(!connected(&l), "a request was made without a recorded day");
+    }
+
+    /// The check's update from a server holding `payload` signed (for 9.9.9) as `signature`.
+    fn found(
+        server: &mut Server,
+        key: &TestKey,
+        signature: &str,
+        payload: &[u8],
+    ) -> (tauri::App<tauri::test::MockRuntime>, Box<Update>) {
+        release(server, "9.9.9", ASSET, signature, payload);
+        let a = app(&server.endpoint(), &key.public());
+        let out = tauri::async_runtime::block_on(check(a.handle(), true, true, || {}));
+        let Outcome::Available(update) = out else {
+            panic!("no update: {out:?}");
+        };
+        (a, update)
+    }
+
+    /// Run the install flow, recording whether the quit path and the install ran.
+    fn flow(
+        server: &Server,
+        update: &Update,
+        portable: bool,
+        quit_answer: bool,
+    ) -> (Result<bool, FlowError>, bool, Option<Vec<u8>>) {
+        let quit_ran = Arc::new(Mutex::new(false));
+        let installed = Arc::new(Mutex::new(None));
+        let (q, i) = (quit_ran.clone(), installed.clone());
+        let out = tauri::async_runtime::block_on(install_flow(
+            update,
+            &server.prefix(),
+            portable,
+            move || async move {
+                *q.lock().unwrap() = true;
+                quit_answer
+            },
+            move |bytes| async move {
+                *i.lock().unwrap() = Some(bytes);
+                Ok(())
+            },
+        ));
+        let quit = *quit_ran.lock().unwrap();
+        let bytes = installed.lock().unwrap().clone();
+        (out, quit, bytes)
+    }
+
+    #[test]
+    fn a_portable_copy_never_downloads_or_quits() {
+        let key = TestKey::new();
+        let payload = b"the installer of 9.9.9".to_vec();
+        let mut s = Server::new();
+        let (_a, update) = found(&mut s, &key, &key.sign(&payload, "9.9.9"), &payload);
+        let (out, quit, installed) = flow(&s, &update, true, true);
+        assert!(matches!(out, Err(FlowError::Portable)), "{out:?}");
+        assert!(!quit && installed.is_none());
+        assert_eq!(s.seen(), ["/releases/latest/download/latest.json"]);
+    }
+
+    #[test]
+    fn a_failed_download_leaves_the_quit_path_unrun() {
+        let key = TestKey::new();
+        let payload = b"the installer of 9.9.9".to_vec();
+        let mut s = Server::new();
+        let sig = key.sign(&payload, "9.9.9");
+        let (_a, update) = found(&mut s, &key, &sig, b"tampered");
+        let (out, quit, installed) = flow(&s, &update, false, true);
+        assert!(matches!(out, Err(FlowError::Download(_))), "{out:?}");
+        assert!(
+            !quit,
+            "the quit path ran (and cancelled) before a verified download"
+        );
+        assert!(installed.is_none());
+    }
+
+    #[test]
+    fn the_download_is_verified_before_the_quit_path_and_a_kept_operation_installs_nothing() {
+        let key = TestKey::new();
+        let payload = b"the installer of 9.9.9".to_vec();
+        let mut s = Server::new();
+        let (_a, update) = found(&mut s, &key, &key.sign(&payload, "9.9.9"), &payload);
+        // The user keeps the operation running: nothing installs.
+        let (out, quit, installed) = flow(&s, &update, false, false);
+        assert!(matches!(out, Ok(false)), "{out:?}");
+        assert!(quit && installed.is_none());
+        // The user lets it go: the verified bytes are installed.
+        let (out, quit, installed) = flow(&s, &update, false, true);
+        assert!(matches!(out, Ok(true)), "{out:?}");
+        assert!(quit);
+        assert_eq!(installed.as_deref(), Some(&payload[..]));
+    }
+
+    #[test]
     fn without_a_usable_key_the_server_sees_nothing() {
         let (l, url) = quiet_server();
         for key in [lpk_gui::update::PLACEHOLDER_KEY, ""] {
             let a = app(&url, key);
-            let out = tauri::async_runtime::block_on(check(a.handle(), true, || {}));
+            let out = tauri::async_runtime::block_on(check(a.handle(), true, true, || {}));
             assert!(matches!(out, Outcome::NoKey), "{out:?}");
         }
         assert!(!connected(&l), "a request was made without a key");
@@ -540,7 +720,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("update.json");
         let run = |day| {
-            tauri::async_runtime::block_on(scheduled(a.handle(), true, Some(&file), day, || {}))
+            tauri::async_runtime::block_on(scheduled(
+                a.handle(),
+                true,
+                Some(&file),
+                day,
+                true,
+                || {},
+            ))
         };
         assert!(matches!(run(20_000), Outcome::Available(_)));
         // The same day: no request.
@@ -572,7 +759,7 @@ mod tests {
             String::from_utf8(req).unwrap()
         });
         let a = app(&url, RANDOM_KEY);
-        let out = tauri::async_runtime::block_on(check(a.handle(), true, || {}));
+        let out = tauri::async_runtime::block_on(check(a.handle(), true, true, || {}));
         assert!(matches!(out, Outcome::UpToDate), "{out:?}");
         let req = serve.join().unwrap();
         let mut lines = req.split("\r\n").filter(|l| !l.is_empty());

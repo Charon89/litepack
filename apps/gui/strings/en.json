@@ -98,6 +98,7 @@
   "update.skip": "Skip this version",
   "update.page": "Release page",
   "update.downloading": "Downloading LitePack {version}…",
+  "update.failed": "The update's installer did not start ({error}). LitePack will now close; start it again and retry the update.",
   "verb.convert": "Converting an archive to .lpk is not in this version yet.",
   "notice.gaveup": "{name} was left as it is: an interrupted write could not be finished after {tries} tries. Check it with lpk test.",
   "password.wrong": "That password was not right.",

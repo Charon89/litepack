@@ -564,15 +564,18 @@ function updateNotice(item, text, dismiss, n) {
     try {
       setStatus(t("update.downloading", { version: n.version }));
       // On success the process ends; `false` means the user kept an operation running.
-      await core.invoke("update_install");
+      if (!(await core.invoke("update_install"))) {
+        setStatus("");
+      }
     } catch (e) {
+      setStatus("");
       showError(e);
     } finally {
       install.disabled = false;
     }
   });
   const skip = button(t("update.skip"), () =>
-    core.invoke("update_skip", { version: n.version }).then(() => item.remove(), showError),
+    core.invoke("update_skip").then(() => item.remove(), showError),
   );
   item.append(body, install, dismiss, skip);
 }

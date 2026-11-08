@@ -147,36 +147,59 @@ async fn startup(host: State<'_, Host>) -> Result<StartupInfo, GuiError> {
     })
 }
 
-/// "Install and restart" (E7-7; `docs/notes/e7-design.md` section 6): the quit path first (ask
-/// while an operation runs, then cancel), then the download from the release prefix, checked
-/// against the compiled-in key and the signed version; the plugin then closes the sessions
-/// (`on_before_exit`), starts the installer with `/P /UPDATE` and ends the process. `false`
-/// when the user chose to keep the operation running. A portable copy never installs.
+/// "Install and restart" (E7-7; `docs/notes/e7-design.md` section 6, R323), in
+/// `updates::install_flow`'s order: the download from the release prefix, checked against the
+/// compiled-in key and the signed version; only then the quit path (ask while an operation
+/// runs, then cancel); then the plugin closes the sessions (`on_before_exit`), starts the
+/// installer with `/P /UPDATE` (and `/R` only for a launch without arguments) and ends the
+/// process. `false` when the user kept an operation running: nothing installs, nothing was
+/// cancelled. A portable copy never downloads. If the installer does not start after the quit
+/// path ran, the GUI says so and exits (it is not left half-closed).
 #[tauri::command]
 async fn update_install(handle: AppHandle, host: State<'_, Host>) -> Result<bool, GuiError> {
     #[cfg(feature = "updater")]
     {
-        if paths::dirs().portable {
-            return Err(GuiError::usage(
-                "a portable copy does not update itself; download the new version from the release page",
-            ));
-        }
         let update = host
             .pending_update
             .lock()
             .map_err(internal)?
             .clone()
             .ok_or_else(|| GuiError::usage("no update is waiting"))?;
-        let h = handle.clone();
-        let quit = blocking(move || Ok(may_exit(&h, &h.state::<Host>()))).await?;
-        if !quit {
-            return Ok(false);
+        let quit_handle = handle.clone();
+        let quit = || async move {
+            let h = quit_handle.clone();
+            blocking(move || Ok(may_exit(&h, &h.state::<Host>())))
+                .await
+                .unwrap_or(false)
+        };
+        let install = |bytes: Vec<u8>| {
+            let update = update.clone();
+            async move {
+                tauri::async_runtime::spawn_blocking(move || update.install(bytes))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())
+            }
+        };
+        let flow = updates::install_flow(
+            &update,
+            lpk_gui::update::RELEASE_DOWNLOAD_PREFIX,
+            paths::dirs().portable,
+            quit,
+            install,
+        )
+        .await;
+        match flow {
+            Ok(installed) => Ok(installed),
+            Err(e @ updates::FlowError::Install(_)) => {
+                // The quit path ran (operations cancelled, perhaps the sessions closed): exit.
+                let text = strings::get("update.failed").replace("{error}", &e.to_string());
+                let _ = lpk_gui_sys::alert(owner(&handle), strings::get("app.title"), &text);
+                handle.exit(1);
+                Err(internal(e))
+            }
+            Err(e) => Err(GuiError::usage(e.to_string())),
         }
-        let bytes = updates::download(&update, lpk_gui::update::RELEASE_DOWNLOAD_PREFIX)
-            .await
-            .map_err(internal)?;
-        blocking(move || update.install(bytes).map_err(internal)).await?;
-        Ok(true)
     }
     #[cfg(not(feature = "updater"))]
     {
@@ -185,18 +208,33 @@ async fn update_install(handle: AppHandle, host: State<'_, Host>) -> Result<bool
     }
 }
 
-/// "Skip this version": that version is not offered again (a newer one is).
+/// "Skip this version": the version the check found (never one from the page) is not offered
+/// again; a newer one is.
 #[tauri::command]
-async fn update_skip(host: State<'_, Host>, version: String) -> Result<(), GuiError> {
-    let _ = &host;
-    let file = paths::update_state_file()
-        .ok_or_else(|| GuiError::usage("LitePack has no state folder"))?;
-    blocking(move || {
-        let mut state = lpk_gui::update::State::load(&file);
-        state.skipped = Some(version);
-        state.save(&file).map_err(internal)
-    })
-    .await
+async fn update_skip(host: State<'_, Host>) -> Result<(), GuiError> {
+    #[cfg(feature = "updater")]
+    {
+        let version = host
+            .pending_update
+            .lock()
+            .map_err(internal)?
+            .as_ref()
+            .map(|u| u.version.clone())
+            .ok_or_else(|| GuiError::usage("no update is waiting"))?;
+        let file = paths::update_state_file()
+            .ok_or_else(|| GuiError::usage("LitePack has no state folder"))?;
+        blocking(move || {
+            let mut state = lpk_gui::update::State::load(&file);
+            state.skipped = Some(version);
+            state.save(&file).map_err(internal)
+        })
+        .await
+    }
+    #[cfg(not(feature = "updater"))]
+    {
+        let _ = host;
+        Err(GuiError::usage("this build of LitePack has no updater"))
+    }
 }
 
 /// Open the release page (a portable copy's update notice): one fixed address, never one from
@@ -1149,8 +1187,18 @@ pub fn run() -> i32 {
                         }
                     };
                     let today = lpk_gui::update::today();
-                    match updates::scheduled(&handle, check, state.as_deref(), today, before_exit)
-                        .await
+                    // `/R` replays the launch's arguments: no restart after a launch with a verb.
+                    let args: Vec<_> = std::env::args_os().collect();
+                    let restart = lpk_gui::update::restart_after_install(&args);
+                    match updates::scheduled(
+                        &handle,
+                        check,
+                        state.as_deref(),
+                        today,
+                        restart,
+                        before_exit,
+                    )
+                    .await
                     {
                         updates::Outcome::Available(update) => {
                             if let Some(host) = handle.try_state::<Host>() {

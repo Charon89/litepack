@@ -47,6 +47,15 @@ pub fn download_allowed(url: &str, prefix: &str) -> bool {
             .any(|c| c.is_control() || matches!(c, '\\' | '?' | '#'))
 }
 
+/// Whether the installer may start LitePack again after an update (R323). Its `/R` restart
+/// replays the launch's arguments (`/ARGS`), so a GUI started with a verb (`--extract-here
+/// C:\x.lpk`) would run it again: the installer restarts LitePack only when it was started with
+/// no argument (`args` is the whole command line, the executable first). Otherwise the update
+/// installs and the user starts LitePack again.
+pub fn restart_after_install<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> bool {
+    args.len() <= 1
+}
+
 /// What a copy does with a newer version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -299,6 +308,20 @@ mod tests {
         }
         // A prefix without its closing slash allows nothing.
         assert!(!download_allowed(&ok, p.trim_end_matches('/')));
+    }
+
+    #[test]
+    fn the_restart_never_replays_a_launch_verb() {
+        assert!(restart_after_install(&["lpk-gui.exe"]));
+        assert!(restart_after_install::<&str>(&[]));
+        for args in [
+            &["lpk-gui.exe", "--extract-here", "C:\\x.lpk"][..],
+            &["lpk-gui.exe", "--test", "C:\\x.lpk"][..],
+            &["lpk-gui.exe", "C:\\x.lpk"][..],
+            &["lpk-gui.exe", "--shell-file", "C:\\t\\a.json"][..],
+        ] {
+            assert!(!restart_after_install(args), "{args:?}");
+        }
     }
 
     #[test]
