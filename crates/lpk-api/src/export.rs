@@ -104,8 +104,13 @@ impl Method {
 pub trait Writer: Sink {
     /// Write the container's trailer and close it.
     fn finish(self: Box<Self>) -> Result<(), CoreError>;
-    /// True once the output file was created (or truncated): the writer opens it at the
-    /// first entry, so a refusal before that leaves whatever was at the path untouched.
+    /// Open the output now if no entry did (the trailer-only case); a no-op once open. A
+    /// caller that opens before [`Writer::finish`] knows that any later failure is one of a
+    /// file this writer created.
+    fn open(&mut self) -> Result<(), CoreError>;
+    /// True once the opener returned the output file: the writer opens it at the first
+    /// entry (or at [`Writer::open`]), so a refusal before that, or an opener that failed,
+    /// leaves whatever was at the path untouched.
     fn created(&self) -> bool;
 }
 
@@ -285,6 +290,8 @@ enum Output<W> {
 
 struct ZipSink<'k> {
     w: Output<ZipWriter<File>>,
+    /// The opener returned the file (see [`Writer::created`]).
+    opened: bool,
     path: PathBuf,
     settings: Settings<'k>,
 }
@@ -293,6 +300,7 @@ impl<'k> ZipSink<'k> {
     fn new(opener: Opener, path: &Path, settings: Settings<'k>) -> Self {
         ZipSink {
             w: Output::Unopened(Some(opener)),
+            opened: false,
             path: path.to_path_buf(),
             settings,
         }
@@ -304,6 +312,7 @@ impl<'k> ZipSink<'k> {
                 .take()
                 .ok_or_else(|| export_error(&self.path, "", "the writer is closed"))?;
             let file = opener().map_err(|e| export_error(&self.path, "", e))?;
+            self.opened = true;
             self.w = Output::Open(ZipWriter::new(file));
         }
         match &mut self.w {
@@ -398,13 +407,19 @@ impl Writer for ZipSink<'_> {
         file.sync_all().map_err(|e| export_error(&self.path, "", e))
     }
 
+    fn open(&mut self) -> Result<(), CoreError> {
+        self.writer().map(|_| ())
+    }
+
     fn created(&self) -> bool {
-        !matches!(self.w, Output::Unopened(_))
+        self.opened
     }
 }
 
 struct SevenZSink {
     w: Output<sevenz_rust2::ArchiveWriter<File>>,
+    /// The opener returned the file (see [`Writer::created`]).
+    opened: bool,
     path: PathBuf,
     methods: Vec<sevenz_rust2::EncoderConfiguration>,
     /// A password that is not UTF-8: refused at the first entry (7z takes a string).
@@ -435,6 +450,7 @@ impl SevenZSink {
         methods.push(EncoderConfiguration::new(method));
         SevenZSink {
             w: Output::Unopened(Some(opener)),
+            opened: false,
             path: path.to_path_buf(),
             methods,
             bad_password,
@@ -454,6 +470,7 @@ impl SevenZSink {
                 .take()
                 .ok_or_else(|| export_error(&self.path, "", "the writer is closed"))?;
             let file = opener().map_err(|e| export_error(&self.path, "", e))?;
+            self.opened = true;
             let mut w = sevenz_rust2::ArchiveWriter::new(file)
                 .map_err(|e| export_error(&self.path, "", e))?;
             w.set_content_methods(std::mem::take(&mut self.methods));
@@ -539,14 +556,64 @@ impl Writer for SevenZSink {
         file.sync_all().map_err(|e| export_error(&self.path, "", e))
     }
 
+    fn open(&mut self) -> Result<(), CoreError> {
+        self.writer().map(|_| ())
+    }
+
     fn created(&self) -> bool {
-        !matches!(self.w, Output::Unopened(_))
+        self.opened
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The opener-failure path: an opener that fails (another process created the output
+    /// between the target check and the open, so `create_new` refused) leaves the writer
+    /// not `created`, so the export removes nothing; one that succeeds makes it `created`.
+    /// This proves the writer's side only: no session-level test drives the export's failure
+    /// path through a failing opener (no seam places a colliding file, and the `.partial`
+    /// name carries the pid and a counter), so `Session::export`'s use of `created()` rests
+    /// on review.
+    #[test]
+    fn a_failed_opener_is_not_created_and_a_successful_one_is() {
+        let d = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let out = d.path().join("o.zip");
+        let settings = Settings {
+            method: Method::Store,
+            password: None,
+        };
+        for container in [Container::Zip, Container::SevenZ] {
+            let refused: Opener = Box::new(|| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "someone else's file",
+                ))
+            });
+            let mut w = open(container, refused, &out, settings);
+            assert!(w.open().is_err());
+            assert!(
+                !w.created(),
+                "{container:?}: a failed opener created nothing"
+            );
+            assert!(w.finish().is_err());
+            let p = out.clone();
+            let fine: Opener = Box::new(move || {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&p)
+            });
+            let mut w = open(container, fine, &out, settings);
+            assert!(!w.created());
+            w.open().unwrap_or_else(|e| panic!("{e}"));
+            assert!(w.created());
+            w.open().unwrap_or_else(|e| panic!("{e}"));
+            w.finish().unwrap_or_else(|e| panic!("{e}"));
+            std::fs::remove_file(&out).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
 
     #[test]
     fn civil_dates_match_known_instants() {

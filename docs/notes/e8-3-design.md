@@ -146,7 +146,7 @@ without touching anything else:
 4. The CPU averaged above 10% over two minutes
    (`typeperf "\Processor(_Total)\% Processor Time" -si 5 -sc 24`, the mean of its CSV samples).
 5. Free space on the volume below 16,384 MiB. Derivation: the weekly worktree's release build
-   (`target/` and `workers/target/`; the main checkout's `target/release` alone held 5,699 MiB on
+   (`target/`, the worker's included; the main checkout's `target/release` alone held 5,699 MiB on
    2026-11-07), so about 8 GiB; the run's scratch under `bench/tmp`, one class at a time (an
    archive and an extracted tree; the largest class of `small`, `photo-jpeg`, is 313 MiB of a
    1,789 MiB profile), and at worst the failed-repeat evidence it keeps under `bench/tmp/failed`
@@ -170,8 +170,12 @@ Then the steps, each exit code checked and logged:
 2. In the weekly worktree, `git checkout --detach --force origin/main` (on first use,
    `git worktree add --detach`). Never `git clean`.
 3. A release build as the measurement nights do: `cargo build --release --locked -p lpk-cli
-   -p lpk-bench`, the `workers/` workspace (`cargo build --release --locked`), and
-   `lpk-worker.exe` copied beside `lpk.exe`.
+   -p lpk-bench`, then the `workers/` workspace (`cargo build --release --locked`). Its
+   `.cargo/config.toml` builds into the same `target/`, so `lpk-worker.exe` lands beside
+   `lpk.exe`, which starts it from its own directory. Nothing is copied: a missing
+   `target/release/lpk-worker.exe` fails the step. The first run, on 2026-11-08, failed because
+   it tried to copy the worker from `workers/target/release/`, which this config leaves empty.
+   `scripts/e8-3-weekly-test.sh` checks the config's `target-dir`.
 4. A five-minute pause.
 5. `lpk-bench run --catalogue bench/tools-weekly.toml --tools lpk,7z --settings
    fast,balanced,store,mx5 --profile small --repeats 3 --threads <logical cores, written out>

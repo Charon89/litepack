@@ -84,8 +84,15 @@ Stated by the decisions that built the sandbox; none is closed by this note.
 6. Overlapping-range checks are advisory against a lying worker; the expansion cap and the free-space checks are
    what bound the output (D-99 (4)). A slow-drip worker can live up to the read credit (three times the archive
    length) (D-106).
-7. A foreign archive is reopened by path for the worker after its zone was read from the held handle: a window
-   the code documents (D-119 (1)).
+7. A foreign archive is reopened by path for the worker after its zone was read (D-119 (1)). The session pins it:
+   the archive and the volumes of its set that exist when it is opened are opened with `FILE_SHARE_READ` only and
+   held until the session is closed, and the zone is read through the first volume's pinned handle. Windows then
+   refuses to write, delete, rename or replace a pinned file, so the opens by path get the same file; an open
+   foreign archive cannot be moved or deleted until it is closed. The worker's open lists the set again by path,
+   so a volume added after the open is read unpinned, its files marked with the first volume's zone. Renaming its
+   parent directory was refused as well on NTFS (Windows 11); other file systems and an ancestor further up were not
+   tested. A file another program is writing is refused at open.
+   Other platforms have no pin (and no zone).
 8. The tests run on Windows 11 and `windows-2025` CI; the run on Windows 10 22H2 is by hand on E5-10's machine and
    has not happened yet (D-97, D-105).
 

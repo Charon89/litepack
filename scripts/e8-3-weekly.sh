@@ -138,7 +138,7 @@ main() {
   esac
 
   # Free space the run needs on the corpus's volume, in MiB (docs/notes/e8-3-design.md, "Free
-  # space"): the release build of the weekly worktree (target/ and workers/target/, about 8 GiB),
+  # space"): the release build of the weekly worktree (target/, the worker's included, about 8 GiB),
   # the run's scratch for one class at a time plus failed-repeat evidence kept under bench/tmp/failed
   # (at worst an archive and an extracted tree of every class of `small`: 2 x 1.8 GiB), rounded up
   # with a margin.
@@ -342,7 +342,7 @@ main() {
     fi
     would "(cd $wt && cargo build --release --locked -p lpk-cli -p lpk-bench)"
     would "(cd $wt/workers && cargo build --release --locked)"
-    would cp "$wt/workers/target/release/lpk-worker.exe" "$wt/target/release/"
+    would test -f "$wt/target/release/lpk-worker.exe"
     would sleep 300
     would "(cd $wt && $bench ${run_args[*]})"
     would "(cd $wt && $bench run --validate bench/results/<new dir> --corpus $corpus)"
@@ -378,15 +378,17 @@ main() {
   build_sha="$(git -C "$wt" rev-parse --short=7 HEAD)" || fail checkout "no HEAD"
   cd "$wt" || fail checkout "cannot enter $wt"
 
+  # workers/.cargo/config.toml builds the worker into this same target/, so lpk-worker.exe lands
+  # beside lpk.exe, which starts it from its own directory; nothing is copied.
   {
     cargo build --release --locked -p lpk-cli -p lpk-bench &&
-      (cd workers && cargo build --release --locked) &&
-      cp workers/target/release/lpk-worker.exe target/release/
+      (cd workers && cargo build --release --locked)
   } > "$acc/e8-3-current-build.log" 2>&1
   rc=$?
   say "build exit $rc (build $build_sha)"
   [ "$rc" = 0 ] || fail build
   [ -x "$bench" ] || fail build "no $bench"
+  [ -f ./target/release/lpk-worker.exe ] || fail build "no ./target/release/lpk-worker.exe beside lpk.exe"
 
   say "pause 300 s"
   sleep 300

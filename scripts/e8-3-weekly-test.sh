@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests of scripts/e8-3-weekly.sh's pure parts (E8-3): the compare verdicts on canned compare
-# output (R5, R9), the measurement week (R10) and the MISSED lines across a year end.
+# output (R5, R9), the measurement week (R10), the MISSED lines across a year end, and where the
+# build step finds the worker.
 #   bash scripts/e8-3-weekly-test.sh
 # Writes only to a temporary directory it removes; never fetches, builds or measures.
 set -euo pipefail
@@ -112,6 +113,14 @@ bash "$weekly" --ledger-line "$ledger" '2026-11-16 03:00' 'd2 bbbbbbb OVER again
 check "a Monday fallback the next week misses nothing" \
   "WEEK 2026-W45 d1 aaaaaaa BASELINE no previous weekly directory
 WEEK 2026-W46 d2 bbbbbbb OVER against d1" "$(cat "$ledger")"
+
+# The build step takes lpk-worker.exe from the shared target/release, beside lpk.exe, because
+# workers/.cargo/config.toml builds the worker workspace there. The first weekly run (2026-11-08)
+# failed copying it from workers/target/release, which that config leaves empty.
+check "the worker workspace builds into the shared target/" 'target-dir = "../target"' \
+  "$(grep -E '^[[:space:]]*target-dir[[:space:]]*=' "$here/../workers/.cargo/config.toml" || true)"
+check "the weekly script takes nothing from workers/target/" "0" \
+  "$(grep -c 'workers/target' "$weekly" || true)"
 
 echo "$((n - fails)) of $n passed"
 [ "$fails" = 0 ]
