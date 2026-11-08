@@ -524,7 +524,8 @@ jobs:
         working-directory: crates/lpk-gui
         run: |
           mkdir -p "$SETUP"
-          cargo tauri build --ci --config tauri.nsis.conf.json -- --locked
+          # -v: tauri-bundler runs makensis with -V4 and shows its output, so its warnings can be checked (R330).
+          cargo tauri build --ci -v --config tauri.nsis.conf.json -- --locked 2>&1 | tee "$SETUP/build-N.log"
           cp target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe" 2>/dev/null \
             || cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe"
           python -I -c "
@@ -544,7 +545,13 @@ jobs:
           (cd ../.. && cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive -p lpk-shell \
             && (cd workers && cargo build --release --locked))
           rm -rf ../../target/release/bundle/nsis
-          cargo tauri build --ci --config "$SETUP/next.conf.json" -- --locked
+          cargo tauri build --ci -v --config "$SETUP/next.conf.json" -- --locked 2>&1 | tee "$SETUP/build-N1.log"
+          # R330: any makensis warning 6000 (an unknown variable, such as one declared after the hooks' include) fails
+          # the job; the logs must hold makensis's own output, so the grep cannot pass by seeing none.
+          for log in "$SETUP/build-N.log" "$SETUP/build-N1.log"; do
+            grep -q "Processing script file" "$log" || { echo "$log holds no makensis output"; exit 1; }
+            if grep -nE "warning 6000" "$log"; then echo "makensis warning 6000 in $log"; exit 1; fi
+          done
           cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N1-setup.exe"
           (cd ../../target/release && sha256sum lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe \
             lpk-gui.exe > "$SETUP/N1.sha256")
@@ -619,6 +626,10 @@ jobs:
           print(f'PendingFileRenameOperations: {len(ops)} entries, {len(hits)} under the install folder', hits)
           " "$INST"
           echo "N's bin\\ before the upgrade:"; cat "$W/N.sha256"
+          # R330: N's lpk.exe must differ from N+1's, so the overwrite check below cannot pass vacuously.
+          n_lpk="$(grep " lpk.exe$" "$W/N.sha256" | cut -d' ' -f1)"
+          n1_lpk="$(grep " lpk.exe$" "$SETUP/N1.sha256" | cut -d' ' -f1)"
+          test -n "$n_lpk" -a "$n_lpk" != "$n1_lpk" || { echo "N's and N+1's lpk.exe are the same ($n_lpk)"; exit 1; }
           echo "bin\\ after the upgrade, against N+1's inputs:"
           bad=0
           while read -r sum name; do
@@ -690,6 +701,12 @@ jobs:
               scripts/e7-wait-uninstaller.sh "$INST"
             fi
           done
+      # R330: the held-DLL step's installs and uninstalls are compared with the first snapshot too.
+      - name: Residue after the held-DLL step, against the first snapshot (same allowances as the final diff)
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/5-after-held.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/5-after-held.json" \
+            --allow-uninstaller-copy --run-folder "$INST" || echo "after the held-DLL step: residue" >> "$SNAP/verdicts"
       - name: Residue verdict
         run: |
           if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi

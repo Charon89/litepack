@@ -31,14 +31,18 @@
   ${IfNot} ${AtLeastBuild} 19045
     MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} needs Windows 10 version 22H2 (build 19045) or Windows 11." /SD IDOK
     SetErrorLevel 1
-    RMDir "${remove}"
+    !if "${remove}" != ""
+      RMDir "${remove}"
+    !endif
     Quit
   ${EndIf}
   !if "${LPK_INSTALLER_ARCH}" == "x64"
     ${If} ${IsNativeARM64}
       MessageBox MB_ICONSTOP|MB_OK "This is the x64 build of ${LPK_PRODUCT}. On this ARM64 PC, install the ARM64 build: its Explorer menu needs an ARM64 shell extension." /SD IDOK
       SetErrorLevel 1
-      RMDir "${remove}"
+      !if "${remove}" != ""
+        RMDir "${remove}"
+      !endif
       Quit
     ${EndIf}
   !endif
@@ -103,9 +107,33 @@ SectionEnd
 !macroend
 
 ; The uninstaller's "close LitePack" check, before PREUNINSTALL changes anything: a cancelled prompt aborts with
-; LitePack still installed and registered. The template runs the same check again after this hook.
+; LitePack still installed and registered. The template runs its own check (utils.nsh's CheckIfAppIsRunning) again
+; after this hook. That macro cannot be used here: it reads $PassiveMode, which installer.nsi declares only after this
+; file (R330), so this is the same Restart Manager check with the passive flag passed in $R9 by PREUNINSTALL, where
+; $PassiveMode is declared. Silent and passive uninstalls close LitePack without asking, as the template's does.
 Function un.LpkCheckRunning
-  !insertmacro CheckIfAppIsRunning "$INSTDIR\${LPK_MAIN_EXE}" "${LPK_PRODUCT}"
+  !insertmacro RestartManager_StartSession $R0
+  ${If} $R0 != ""
+    !insertmacro RestartManager_RegisterFile $R0 "$INSTDIR\${LPK_MAIN_EXE}"
+    ${If} $0 = 0
+      System::Call 'RSTRTMGR::RmGetList(p R0, *i .r1, *i .r2, p 0, *i .r3) i .r0'
+      ${If} $0 = ${ERROR_MORE_DATA}
+        ${IfNot} ${Silent}
+        ${AndIf} $R9 <> 1
+          MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "${LPK_PRODUCT} is running. Select OK to close it and uninstall." IDOK lpk_close
+          !insertmacro RestartManager_EndSession $R0
+          Abort "${LPK_PRODUCT} is still running; nothing was removed."
+        ${EndIf}
+        lpk_close:
+        System::Call 'RSTRTMGR::RmShutdown(p R0, i ${RmForceShutdown}, p 0) i .r0'
+        ${If} $0 <> 0
+          !insertmacro RestartManager_EndSession $R0
+          Abort "${LPK_PRODUCT} could not be closed; nothing was removed."
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+    !insertmacro RestartManager_EndSession $R0
+  ${EndIf}
 FunctionEnd
 
 !macro NSIS_HOOK_PREINSTALL
@@ -133,6 +161,7 @@ FunctionEnd
 
 !macro NSIS_HOOK_PREUNINSTALL
   ${If} $UpdateMode <> 1
+    StrCpy $R9 $PassiveMode
     Call un.LpkCheckRunning
     ; LitePack's own switch: /DELETEAPPDATA ticks the "delete the application data" box for a silent uninstall.
     ${GetOptions} $CMDLINE "/DELETEAPPDATA" $0
