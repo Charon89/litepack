@@ -420,3 +420,95 @@ fn export_of_an_id_selection_exports_exactly_the_picked_entries() {
     names.sort();
     assert_eq!(names, ["sub/f3.txt", "sub/f7.txt", "top.txt"]);
 }
+
+fn force_options() -> lpk_api::ExportOptions<'static> {
+    lpk_api::ExportOptions {
+        container: lpk_api::Container::Zip,
+        method: lpk_api::Method::Store,
+        password: None,
+        force: true,
+        threads: Some(1),
+        memory: None,
+    }
+}
+
+/// The names in `dir` that end in `.partial`.
+fn partials(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".partial"))
+        .collect()
+}
+
+#[test]
+fn a_failed_forced_export_keeps_the_old_file_and_leaves_no_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = archive(dir.path(), 0);
+    let outdir = dir.path().join("out");
+    std::fs::create_dir(&outdir).unwrap();
+    let out = outdir.join("o.zip");
+    std::fs::write(&out, b"the old file").unwrap();
+    let s = Session::open(&a, &Default::default()).unwrap();
+    // Cancel once the temporary file exists, so the failure comes after it was created.
+    let token = CancelToken::new();
+    let seen = Arc::new(std::sync::Mutex::new(None::<String>));
+    let m = {
+        let (t, seen, outdir) = (token.clone(), Arc::clone(&seen), outdir.clone());
+        Monitor::new(
+            Arc::new(move |_: &lpk_api::Event| {
+                let mut seen = seen.lock().unwrap();
+                if seen.is_none() {
+                    if let Some(n) = partials(&outdir).pop() {
+                        *seen = Some(n);
+                        t.cancel();
+                    }
+                }
+            }),
+            token,
+        )
+    };
+    let r = s.export(&Selection::All, &out, &force_options(), &m);
+    assert_eq!(r.map(|_| ()).map_err(|e| e.class), Err(Class::Cancelled));
+    let name = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a .partial file existed");
+    let pid = std::process::id().to_string();
+    assert!(
+        name.starts_with(&format!("o.zip.{pid}-")),
+        "named after the output and the process: {name}"
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), b"the old file");
+    assert_eq!(partials(&outdir), Vec::<String>::new());
+}
+
+#[test]
+fn a_forced_export_replaces_the_content_and_leaves_no_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = archive(dir.path(), 0);
+    let outdir = dir.path().join("out");
+    std::fs::create_dir(&outdir).unwrap();
+    let out = outdir.join("o.zip");
+    std::fs::write(&out, b"the old file").unwrap();
+    let s = Session::open(&a, &Default::default()).unwrap();
+    let sum = s
+        .export(&Selection::All, &out, &force_options(), &Monitor::default())
+        .unwrap();
+    assert_eq!(sum.files, 21);
+    let z = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+    assert_eq!(z.len(), 22, "21 files and the directory sub");
+    assert_eq!(partials(&outdir), Vec::<String>::new());
+    // A forced export to a path that does not exist yet creates it the same way.
+    let fresh = outdir.join("fresh.zip");
+    s.export(
+        &Selection::All,
+        &fresh,
+        &force_options(),
+        &Monitor::default(),
+    )
+    .unwrap();
+    assert!(fresh.is_file());
+    assert_eq!(partials(&outdir), Vec::<String>::new());
+}

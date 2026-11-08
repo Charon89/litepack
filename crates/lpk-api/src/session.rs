@@ -333,6 +333,10 @@ pub struct Session {
     /// ([`lpk_core::motw::read_zone_of`]); `unreadable` when it was taken as the Internet zone
     /// because the stream could not be read.
     zone: lpk_core::motw::ZoneRead,
+    /// A foreign archive's pins (Windows): a handle on each of its volumes that lets others
+    /// read but not write, delete, rename or replace the file, held for the session's
+    /// lifetime ([`pin`]). Empty for an `.lpk` and on other platforms.
+    _pins: Vec<File>,
 }
 
 /// What a re-open (`unlock`, after `append`) needs again.
@@ -535,7 +539,7 @@ impl Session {
     /// ```
     pub fn open(path: &Path, o: &OpenOptions<'_>) -> Result<Session, Error> {
         if let Ok(Some(format)) = lpk_core::foreign::detect_file(path) {
-            return Ok(Session::foreign(path, format, o));
+            return Session::foreign(path, format, o);
         }
         let file = File::open(path).map_err(|e| {
             Error::core(
@@ -608,6 +612,7 @@ impl Session {
             gate: Arc::new(Gate::default()),
             model: Mutex::new(None),
             zone,
+            _pins: Vec::new(),
         })
     }
 
@@ -630,8 +635,55 @@ impl Session {
         Ok(a)
     }
 
-    fn foreign(path: &Path, format: lpk_core::foreign::Format, o: &OpenOptions<'_>) -> Session {
-        Session {
+    fn foreign(
+        path: &Path,
+        format: lpk_core::foreign::Format,
+        o: &OpenOptions<'_>,
+    ) -> Result<Session, Error> {
+        // The pin (Windows): the archive, and every volume of its set, is opened so that others
+        // may read it but not write, delete, rename or replace it, and the handles are held
+        // until the session is dropped. The zone is read through the first volume's pinned
+        // handle, and every later open by path (the broker's for the worker, `detect_file`,
+        // `volume_set`) therefore gets the same file for every volume pinned here: none can be
+        // swapped in between to lend or withhold a zone. The pins cover the volumes that exist
+        // when the archive is opened; the broker lists the set again by path, so a volume
+        // added afterwards is read unpinned, its files marked with the first volume's zone.
+        // Renaming the parent directory was refused too on NTFS (Windows 11, the test
+        // `renaming_the_parent_directory_of_a_held_zip_is_refused`); see `docs/SECURITY.md`
+        // item 7. Other platforms have no pin (and no zone to protect) and open as before.
+        #[cfg(windows)]
+        let (format, zone, pins) = {
+            let first = pin(path)?;
+            let zone = lpk_core::motw::read_zone_of(&first);
+            // Detected again through the pinned file, so the format is the pinned file's.
+            let format = match lpk_core::foreign::detect_file(path) {
+                Ok(Some(f)) => f,
+                _ => format,
+            };
+            let mut pins = vec![first];
+            if let Ok(Ok(set)) = lpk_core::foreign::volume_set(path, format) {
+                // A later volume that cannot be pinned fails the open: either the whole set
+                // is pinned or no session opens (a volume another program is still writing
+                // is incomplete anyway).
+                for v in set.iter().skip(1) {
+                    pins.push(pin(v)?);
+                }
+            }
+            (format, zone, pins)
+        };
+        #[cfg(not(windows))]
+        let (format, zone, pins) = (
+            format,
+            File::open(path).map_or(
+                lpk_core::motw::ZoneRead {
+                    zone: None,
+                    unreadable: false,
+                },
+                |f| lpk_core::motw::read_zone_of(&f),
+            ),
+            Vec::<File>::new(),
+        );
+        Ok(Session {
             path: path.to_path_buf(),
             info: Info {
                 path: path.to_path_buf(),
@@ -642,7 +694,11 @@ impl Session {
                 encrypted: false,
                 listable: true,
                 keyless: false,
-                length: std::fs::metadata(path).map_or(0, |m| m.len()),
+                length: pins
+                    .first()
+                    .and_then(|f| f.metadata().ok())
+                    .or_else(|| std::fs::metadata(path).ok())
+                    .map_or(0, |m| m.len()),
             },
             kind: Kind::Foreign(ForeignState {
                 format,
@@ -658,18 +714,9 @@ impl Session {
             },
             gate: Arc::new(Gate::default()),
             model: Mutex::new(None),
-            // A foreign archive is opened by path here (the broker opens it by path again
-            // for the worker): the zone is read through this handle, so a file swapped in
-            // between the two opens could differ from the one extracted (a window E4's broker
-            // shares; it does not open the archive through one handle either).
-            zone: File::open(path).map_or(
-                lpk_core::motw::ZoneRead {
-                    zone: None,
-                    unreadable: false,
-                },
-                |f| lpk_core::motw::read_zone_of(&f),
-            ),
-        }
+            zone,
+            _pins: pins,
+        })
     }
 
     /// The archive's propagating zone (Mark of the Web, E6-5): `Some` when its
@@ -1397,7 +1444,9 @@ impl Session {
 
     /// Export the selected entries into a ZIP or 7z file at `out` (E3-6): the target is
     /// refused when it is the archive or exists without `force` ([`check_export_target`]),
-    /// created at the first entry and removed on failure.
+    /// created at the first entry and removed on failure. Under `force` the export writes a
+    /// `.partial` file beside `out` and renames it over `out` only when it is complete, so a
+    /// failed export leaves an existing `out` as it was.
     pub fn export(
         &self,
         s: &Selection,
@@ -1423,25 +1472,25 @@ impl Session {
             method: o.method,
             password: o.password,
         };
-        let out_path = out.to_path_buf();
         let zone = self.out_zone();
-        // The output is always a new file: an existing one (`force`) is removed first, so the
-        // replacement inherits none of its streams (an unrelated `Zone.Identifier`, E6-5).
-        // Mark of the Web: the zone goes onto the output before its first byte, relative to
+        // The output is always a new file. Under `force` the export writes a temporary file
+        // beside the output and renames it over the output only once it is complete and
+        // closed: a failed export leaves the old file untouched, and the replacement inherits
+        // none of the old file's streams (an unrelated `Zone.Identifier`, E6-5), which go with
+        // the old file. Without `force` the output itself is created (`create_new`).
+        // Mark of the Web: the zone goes onto the new file before its first byte, relative to
         // the file's handle (a volume that cannot hold it leaves the output unmarked).
-        let force = o.force;
+        let write_path = if o.force {
+            partial_path(out)
+        } else {
+            out.to_path_buf()
+        };
+        let open_path = write_path.clone();
         let opener = move || {
-            if force {
-                match std::fs::remove_file(&out_path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
-            }
             let f = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&out_path)?;
+                .open(&open_path)?;
             if let Some(z) = zone {
                 lpk_core::motw::mark(&f, z);
             }
@@ -1449,18 +1498,46 @@ impl Session {
         };
         let mut writer = crate::export::open(o.container, Box::new(opener), out, settings);
         let r = lpk_core::export_archive_with(&mut a, || self.reopen(), writer.as_mut(), &opts, m);
-        // Only an output this export created (or truncated under `force`) is removed on
-        // failure; an existing one a refusal left untouched stays as it was. (The trailer
-        // opens the output when no entry did, so its failure always removes.)
-        let created = writer.created();
-        let r = r
-            .map_err(|e| (e, created))
-            .and_then(|s| writer.finish().map(|()| s).map_err(|e| (e, true)));
+        // Only a file this export created is removed on failure; an existing output a refusal
+        // left untouched stays as it was, and under `force` the old output is never touched.
+        // When no entry opened the file, it is opened before the trailer, so a failing opener
+        // (`create_new` meeting another process's file) removes nothing; any failure after the
+        // open is one of the file this export created. The writer is closed (finished or
+        // dropped) before any removal or rename.
+        let r = match r.map_err(|e| (e, writer.created())) {
+            Ok(s) => match writer.open() {
+                Ok(()) => writer.finish().map(|()| s).map_err(|e| (e, true)),
+                Err(e) => {
+                    let created = writer.created();
+                    drop(writer);
+                    Err((e, created))
+                }
+            },
+            Err(e) => {
+                drop(writer);
+                Err(e)
+            }
+        };
+        let r = r.and_then(|s| {
+            if !o.force {
+                return Ok(s);
+            }
+            std::fs::rename(&write_path, out).map(|()| s).map_err(|e| {
+                (
+                    CoreError::Export {
+                        path: out.to_path_buf(),
+                        entry: String::new(),
+                        message: format!("cannot replace the existing file: {e}"),
+                    },
+                    true,
+                )
+            })
+        });
         match r {
             Ok(s) => Ok(s),
             Err((e, created)) => {
                 if created {
-                    let _ = std::fs::remove_file(out);
+                    let _ = std::fs::remove_file(&write_path);
                 }
                 Err(Error::core(e, Some(&self.path)))
             }
@@ -1650,6 +1727,55 @@ pub fn check_export_target(archive: &Path, out: &Path, force: bool) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Open `path` for a foreign session (Windows) with `FILE_SHARE_READ` only, the pin (others
+/// may read; no one may write, delete, rename or replace the file while the handle is open).
+/// A sharing violation (another program has the file open for
+/// writing, or with a share mode that refuses the pin) is a clear `AccessDenied`.
+#[cfg(windows)]
+fn pin(path: &Path) -> Result<File, Error> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true).share_mode(FILE_SHARE_READ);
+    o.open(path).map_err(|e| {
+        // ERROR_SHARING_VIOLATION
+        if e.raw_os_error() == Some(32) {
+            Error::new(
+                Class::AccessDenied,
+                "Io",
+                format!(
+                    "{}: another program is using the file (writing it, or holding it open \
+                     so it cannot be protected while it is read); close it and try again",
+                    path.display()
+                ),
+                Some(path),
+            )
+        } else {
+            Error::core(
+                CoreError::Io {
+                    path: path.to_path_buf(),
+                    source: e,
+                },
+                Some(path),
+            )
+        }
+    })
+}
+
+/// The temporary file an `export --force` writes before it renames it over `out`: in the
+/// output's directory, named after the output and unique per process and attempt
+/// (`<name>.<pid>-<n>.partial`), so `create_new` never meets another export's file.
+fn partial_path(out: &Path) -> PathBuf {
+    static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = out
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".{}-{n}.partial", std::process::id()));
+    out.with_file_name(name)
 }
 
 /// The sink of `read_entry`: the one file's bytes, refused past the cap.

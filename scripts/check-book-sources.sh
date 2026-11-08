@@ -21,6 +21,9 @@
 # ANCHOR marker, and between them exactly the headings `## Our licence` and `## Dependency policy (...)`, so an edit
 # cannot widen what the book publishes without failing. Built: licensing.html has both headings and none of the
 # unpublished ones; the code text of notices.html, unescaped, equals THIRD-PARTY-NOTICES (the CI step of E9-8).
+# (n) book/src/404.md, when it exists, holds no `{{`, optional whitespace and `#`, escaped or not: mdBook renders it
+# raw (it is not a chapter and no preprocessor runs on it, D-153), so a directive there would be published as text.
+# It is read as (f) reads its sources; an unreadable or non-UTF-8 file is a finding.
 # Source checks:
 #   (a) each page under book/src/spec/ is exactly its include line plus the footer include;
 #   (b) each docs/spec/*.md has a page of the same name there;
@@ -321,6 +324,12 @@ check_sources() {
     local anchors
     anchors="$(check_anchors "$root/docs/LICENSING.md" || true)"
     if nonblank "$anchors"; then printf '(m) the published region of docs/LICENSING.md: %s\n' "$anchors"; fail=1; fi
+  fi
+  # (n) book/src/404.md is rendered raw (no preprocessor runs on it), so any directive in it is a finding
+  if [ -e "$root/book/src/404.md" ]; then
+    local nf
+    nf="$(scan_directives f "$root/book/src/404.md" || true)"
+    if nonblank "$nf"; then printf '(n) a directive, or an unreadable file, in book/src/404.md (it is rendered raw): %s\n' "$nf"; fail=1; fi
   fi
   # (h)
   if [ -d "$root/book/src" ]; then
@@ -951,6 +960,15 @@ editable = false
   expect_fail c "the method document's name after a NUL byte in THIRD-PARTY-NOTICES" check_sources "$t/nc"
   make_tree "$t/ne"; printf 'x\0LitePack-Method\n' > "$t/ne/site/n.html"
   expect_fail e "a built file with a NUL byte and the method document's name" check_built "$t/ne" "$t/ne/site"
+  # The 404 page (n)
+  make_tree "$t/n0"; printf '**Document not found (404).** Text.\n' > "$t/n0/book/src/404.md"
+  expect_pass "a plain 404 page" check_sources "$t/n0"
+  make_tree "$t/n1"; printf '**Document not found (404).**\n\n{{#include footer.md}}\n' > "$t/n1/book/src/404.md"
+  expect_fail n "a directive in the 404 page" check_sources "$t/n1"
+  make_tree "$t/n2"; printf 'Not found.\n\n{{ #include x }}\n' > "$t/n2/book/src/404.md"
+  expect_fail n "a spaced directive in the 404 page" check_sources "$t/n2"
+  make_tree "$t/n3"; printf 'Not found.\n\n\\{{#x}}\n' > "$t/n3/book/src/404.md"
+  expect_fail n "an escaped directive in the 404 page" check_sources "$t/n3"
   echo "self-test: all checks proved"
 }
 

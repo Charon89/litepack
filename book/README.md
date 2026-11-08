@@ -85,6 +85,8 @@ The licensing and notices pages (E9-8) are includes too, so nothing is copied:
   that order, no other `ANCHOR` text, and between them exactly the headings `## Our licence` and `## Dependency policy
   (...)`. Moving the end anchor, adding a heading inside the region or adding a second anchor fails, so no edit can
   widen what the book publishes without a change to this check.
+- (n) `book/src/404.md`, when it exists, holds no directive (`{{`, optional whitespace, `#`, escaped or not; an
+  unreadable file fails too): mdBook renders the 404 page raw, so a directive there would be published as text.
 - Built (`--built`): `licensing.html` holds both headings and none of the unpublished section titles; the `<code>` text of
   the only `<pre>` in `notices.html`, with its HTML entities decoded, equals `THIRD-PARTY-NOTICES` byte for byte (one
   trailing newline of difference is tolerated on the page's side; mdBook 0.5.4 needs none). This is the CI step that

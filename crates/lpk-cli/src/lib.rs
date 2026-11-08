@@ -174,8 +174,10 @@ Names are written as the archive stores them: the format's reader already refuse
 paths and `..`; a colon, a device name or a trailing dot or space goes through as-is for the \
 consumer's extractor to sanitise. Both writers run in process. The archive, its key slot and \
 the plan are checked before the output exists; the output is refused when it is the archive \
-itself, and when it exists unless --force replaces it (touched only once the export writes). \
-A failed export removes the output; a panic leaves it in place. Outside the memory budget: \
+itself, and when it exists unless --force replaces it. Under --force the export writes a \
+`.partial` file beside the output and renames it over the existing file only when the export \
+succeeds; an interrupted export can leave that `.partial` file. A failed export removes the \
+file it wrote; a panic leaves it in place. Outside the memory budget: \
 the writer's directory, kept until the end (ZIP's central directory about 200 bytes plus the \
 name per entry, 7z's entry table about 100 plus the name), and its compressor (Deflate under \
 1 MiB, zstd a few MiB, LZMA2 about eleven times its 16 MiB dictionary); -v prints the figures.";
@@ -1215,6 +1217,8 @@ struct ExportArgs {
     /// The archive.
     archive: PathBuf,
     /// The file to write: `.zip` or `.7z` by its extension; must not exist unless --force.
+    /// Under --force an existing file is replaced only when the export succeeds; an
+    /// interrupted export can leave a `.partial` file beside it.
     out: PathBuf,
     /// Globs over entry paths selecting what to export, as for `x`; none exports everything.
     #[arg(value_name = "PATTERN")]
@@ -1227,7 +1231,9 @@ struct ExportArgs {
     /// header encrypted). Needs a credential with a password; a keyfile alone is refused.
     #[arg(long, requires = "credential")]
     encrypt: bool,
-    /// Replace an existing output file.
+    /// Replace an existing output file, only when the export succeeds: the export writes a
+    /// `.partial` file beside it and renames it over the old file at the end (an interrupted
+    /// export can leave the `.partial` file behind).
     #[arg(long)]
     force: bool,
     /// Mark of the Web (Windows), as for `x`: with `on` (the default) the output file gets the
@@ -1859,8 +1865,9 @@ fn extract(
 /// `lpk export`: the container by the output's extension, the method by the container, the
 /// archive opened with the credentials (its key slot, then the plan and the pool, every
 /// refusal before the output exists), the output refused when it is the archive or when it
-/// exists without `--force`, then created at the first entry and removed on failure (an
-/// existing output replaced under `--force` is touched only once the export writes).
+/// exists without `--force`, then created at the first entry and removed on failure (under
+/// `--force` a `.partial` file beside the output is written and renamed over it on success,
+/// so a failed export leaves an existing output as it was).
 fn export(
     x: &ExportArgs,
     credentials: Option<&Credentials>,
