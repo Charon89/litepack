@@ -304,6 +304,174 @@ jobs:
           }
           Get-ChildItem -Path "$env:RUNNER_TEMP\gui-e2e" -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 60 FullName
 
+  # E7-6: the portable zip and the CLI zip (scripts/make-zips.py), and the residue check
+  # (scripts/e7-residue.py, R291): a portable copy run from a temp folder leaves nothing under
+  # %APPDATA%, %LOCALAPPDATA% or HKCU but the LitePack.Worker AppContainer profile once a foreign
+  # archive is opened, and that goes with `lpk-worker.exe --remove-profile`. The diffs printed here
+  # are the evidence. LOCALAPPDATA and APPDATA are never redirected in this job.
+  portable:
+    name: portable (windows-2025)
+    timeout-minutes: 60
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      # The runner context is not available to a job's env: the folders are set here.
+      - name: Work folders
+        run: |
+          echo "SNAP=$(cygpath -m "$RUNNER_TEMP")/residue" >> "$GITHUB_ENV"
+          echo "ZIPS=$(cygpath -m "$RUNNER_TEMP")/zips" >> "$GITHUB_ENV"
+          echo "RUNF=$(cygpath -m "$RUNNER_TEMP")/portable-run/LitePack" >> "$GITHUB_ENV"
+      # One exact Python build: the zips' bytes depend on its zlib and its zipfile.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.7"
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: portable
+          workspaces: |
+            . -> target
+            workers -> ../target
+      - name: The zip and residue scripts' own tests
+        run: |
+          python -I scripts/make-zips.py --self-test
+          python -I scripts/e7-residue.py --self-test
+      - name: tauri-cli through cargo (pinned)
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: Build the release binaries
+        run: |
+          cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive
+          (cd workers && cargo build --release --locked)
+      - name: cargo tauri build
+        working-directory: crates/lpk-gui
+        run: cargo tauri build --ci -- --locked
+      - name: Make both zips
+        run: |
+          version="$(python -I -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          python -I scripts/make-zips.py --bin target/release --arch x64 --version "$version" \
+            --timestamp "$(git log -1 --format=%ct)" --out "$ZIPS"
+          for z in "$ZIPS"/*.zip; do python -I -m zipfile -l "$z"; done
+      # Everything the steps below run comes from the two unzipped copies; the work files live in
+      # RUNNER_TEMP, outside the profile.
+      - name: Snapshot before
+        run: |
+          mkdir -p "$SNAP"
+          python -I scripts/e7-residue.py snapshot "$SNAP/1-before.json"
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-1-before.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-1-before.txt"; then
+            echo "1-before: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+      - name: Unzip both copies into fresh folders
+        run: |
+          python -I -m zipfile -e "$ZIPS"/*-portable.zip "$RUNNER_TEMP/portable-run"
+          python -I -m zipfile -e "$ZIPS"/*-cli.zip "$RUNNER_TEMP/cli-run"
+          ls -la "$RUNNER_TEMP/portable-run/LitePack" "$RUNNER_TEMP/cli-run/LitePack"
+      - name: A small .lpk and a small .zip with the portable lpk.exe
+        run: |
+          w="$RUNNER_TEMP/portable-work"
+          mkdir -p "$w/in/sub"
+          for i in 1 2 3; do echo "file $i" > "$w/in/sub/f$i.txt"; done
+          lpk="$RUNNER_TEMP/portable-run/LitePack/lpk.exe"
+          "$lpk" a "$w/small.lpk" "$w/in"
+          "$lpk" export "$w/small.lpk" "$w/small.zip"
+          ls -la "$w"
+      - name: The portable GUI opens the .lpk, then the .zip (a foreign archive)
+        run: |
+          w="$RUNNER_TEMP/portable-work"
+          gui="$RUNNER_TEMP/portable-run/LitePack/lpk-gui.exe"
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$w/report-$a.json" timeout 180 "$gui" "$w/$a"
+            report="$(cat "$w/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q "\"archive\":\"$a\"" <<<"$report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          ls -la "$RUNNER_TEMP/portable-run/LitePack" "$RUNNER_TEMP/portable-run/LitePack/data"
+      # The diff steps record their verdicts and go on, so that one run prints every diff; the last
+      # step fails the job if any was not clean. Each foreign-archive run must create the profile
+      # (its folder and its Mappings key), and --remove-profile must take all of it away.
+      - name: Residue after the GUI (the worker profile required)
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-2-after-gui.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-2-after-gui.txt"; then
+            echo "2-after-gui: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
+            --require-worker-profile || echo "after the GUI: residue, or no worker profile" >> "$SNAP/verdicts"
+      - name: Residue after --remove-profile (nothing allowed)
+        run: |
+          "$RUNNER_TEMP/portable-run/LitePack/lpk-worker.exe" --remove-profile
+          python -I scripts/e7-residue.py snapshot "$SNAP/3-after-remove.json"
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-3-after-remove.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-3-after-remove.txt"; then
+            echo "3-after-remove: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/1-before.json" "$SNAP/3-after-remove.json" \
+            || echo "after the GUI's --remove-profile: residue" >> "$SNAP/verdicts"
+      - name: The CLI zip's lpk.exe lists and extracts the .zip
+        run: |
+          w="$RUNNER_TEMP/portable-work"
+          lpk="$RUNNER_TEMP/cli-run/LitePack/lpk.exe"
+          "$lpk" l "$w/small.zip"
+          "$lpk" x "$w/small.zip" "$w/out-cli"
+          cmp "$w/in/sub/f2.txt" "$w/out-cli/sub/f2.txt"
+      - name: Residue after the CLI (the worker profile required)
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/4-after-cli.json"
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-4-after-cli.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-4-after-cli.txt"; then
+            echo "4-after-cli: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/1-before.json" "$SNAP/4-after-cli.json" \
+            --require-worker-profile || echo "after the CLI: residue, or no worker profile" >> "$SNAP/verdicts"
+      - name: Residue after the CLI zip's --remove-profile (nothing allowed)
+        run: |
+          "$RUNNER_TEMP/cli-run/LitePack/lpk-worker.exe" --remove-profile
+          python -I scripts/e7-residue.py snapshot "$SNAP/5-after-remove.json"
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-5-after-remove.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-5-after-remove.txt"; then
+            echo "5-after-remove: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/1-before.json" "$SNAP/5-after-remove.json" \
+            || echo "after the CLI's --remove-profile: residue" >> "$SNAP/verdicts"
+      - name: An unusable data folder is refused with nothing written
+        run: |
+          p="$RUNNER_TEMP/portable-run/LitePack"
+          rm -rf "$p/data"
+          echo "not a folder" > "$p/data"
+          report="$RUNNER_TEMP/portable-work/report-data.json"
+          rc=0
+          LPK_GUI_SMOKE_REPORT="$report" timeout 60 "$p/lpk-gui.exe" "$RUNNER_TEMP/portable-work/small.lpk" || rc=$?
+          echo "exit code: $rc; report: $(cat "$report" 2>/dev/null || echo none)"
+          test "$rc" -ne 0 -a "$rc" -ne 124 || echo "data file: exit code $rc" >> "$SNAP/verdicts"
+          grep -q '"portable_data_error"' "$report" || echo "data file: no error in the report" >> "$SNAP/verdicts"
+          test -f "$p/data" || echo "data file: replaced" >> "$SNAP/verdicts"
+          python -I scripts/e7-residue.py snapshot "$SNAP/6-after-data.json"
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-6-after-data.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-6-after-data.txt"; then
+            echo "6-after-data: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/5-after-remove.json" "$SNAP/6-after-data.json" \
+            || echo "data file: residue" >> "$SNAP/verdicts"
+      - name: Residue verdict
+        run: |
+          if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
+          echo "no residue: the worker profile alone after each foreign archive, nothing after --remove-profile or the data case"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zips-windows-x64
+          path: ${{ env.ZIPS }}/*.zip
+          retention-days: 3
+          if-no-files-found: error
+
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:
     name: cited results exist (ubuntu-24.04)
