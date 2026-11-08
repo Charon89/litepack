@@ -8,8 +8,10 @@
 #  1. `nm -S` lists the sized functions the binary defines. A library is in the binary when a defined function
 #     name matches its family (below); the family IS the set of functions judged, there is no probe list to go
 #     stale: every defined function of the family is judged.
-#  2. `objdump -d` disassembles them (by name, but each result is attributed by ADDRESS, so same-named static
-#     functions of other translation units neither merge nor hide). A function counts as instrumented when its
+#  2. One full `objdump -d` of the binary; each instruction is attributed to a family function by the ADDRESS on
+#     its header line (nm's address), so same-named static functions neither merge nor hide. A family function
+#     with no instruction found is "uninspected" and makes its library FAIL ("cannot inspect N functions");
+#     there is no exception. (`--disassemble=NAME` was tried first and lost a function in run 3.) A function counts as instrumented when its
 #     body references the sanitizer runtime (__asan_report_*, __asan_stack_*, __sanitizer_cov_trace_*: checked
 #     loads and stores, comparisons) or libFuzzer's inline 8-bit counters. The counters are plain increments of
 #     bytes in the section __sancov_cntrs, not calls, so the script reads that section's address range from
@@ -84,7 +86,7 @@ EOF
   if out="$(bash "$0" --verbose --family 'sample=^aaa_' "$tmp/good" 2>&1)"; then
     echo "$out"
     case "$out" in
-      *"OK"*"sample instrumented: 2/2"*) ;;
+      *"OK"*"sample instrumented: 2/2"*"; 0 uninspected"*) ;;
       *) echo "self-test FAILED: the instrumented sample passed without a 2/2 'instrumented' verdict" >&2; rc=1 ;;
     esac
     if ! grep -Eq 'aaa_wrapper refs=[1-9]' <<<"$out"; then
@@ -104,7 +106,7 @@ EOF
   else
     echo "$out"
     case "$out" in
-      *"FAIL"*"sample is NOT instrumented: 0/2"*) ;;
+      *"FAIL"*"sample is NOT instrumented: 0/2"*"; 0 uninspected"*) ;;
       *) echo "self-test FAILED: the uninstrumented sample failed for another reason" >&2; rc=1 ;;
     esac
     if ! grep -Eq 'aaa_wrapper refs=0' <<<"$out"; then
@@ -143,8 +145,11 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Awk, run over the disassembly: lo/hi are the address range of the counters section (decimal; 0 0 when none).
-# Input 1: lines "address name" of the family; input 2 (stdin): the disassembly. Output: "name seen refs" per address.
+# Awk, run over ONE full disassembly of the binary (never --disassemble=NAME: its selection of symbols differed
+# from nm's in run 3, which silently shrank n). lo/hi are the address range of the counters section (decimal; 0 0
+# when none). Input 1: lines "lib address name" of every family function; input 2 (stdin): the disassembly.
+# Functions are attributed by the address on objdump's header line (the address nm gives), so same-named
+# static functions do not merge. Output: "lib name instructions references" per address.
 cat >"$work/judge.awk" <<'EOF'
 function hexv(s,   i, c, v) {
   v = 0
@@ -156,16 +161,17 @@ function hexv(s,   i, c, v) {
   }
   return v
 }
-FNR == NR { if (!($1 in nm)) { nm[$1] = $2; order[++cnt] = $1 } next }
-/^[0-9a-f]+ <.*>:$/ { cur = $1; if (cur in nm) { seen[cur] = 1 } else { cur = "" } next }
-cur != "" {
+FNR == NR { if (!($2 in nm)) { nm[$2] = $3; lb[$2] = $1; order[++cnt] = $2 } next }
+/^[0-9a-f]+ <.*>:$/ { cur = $1; if (!(cur in nm)) cur = ""; next }
+cur != "" && /^ *[0-9a-f]+:/ {
+  ni[cur]++
   if ($0 ~ re) { r[cur]++; next }
   if (hi > lo && match($0, /# [0-9a-f]+ </)) {
     v = hexv(substr($0, RSTART + 2, RLENGTH - 4))
     if (v >= lo && v < hi) r[cur]++
   }
 }
-END { for (i = 1; i <= cnt; i++) { a = order[i]; print nm[a], ((a in seen) ? 1 : 0), r[a] + 0 } }
+END { for (i = 1; i <= cnt; i++) { a = order[i]; print lb[a], nm[a], ni[a] + 0, r[a] + 0 } }
 EOF
 
 failed=0
@@ -194,26 +200,34 @@ for bin in "${bins[@]}"; do
     function hexv(s,   i, c, v) { v = 0; s = tolower(s); for (i = 1; i <= length(s); i++) { c = index("0123456789abcdef", substr(s, i, 1)) - 1; v = v * 16 + c } return v }
     $2 == "__sancov_cntrs" { printf "%.0f %.0f\n", hexv($4), hexv($4) + hexv($3); found = 1 }
     END { if (!found) print "0 0" }')
+  # Every defined, sized function of every family: "lib address name". A symbol of size 0 has no range to judge
+  # (assembly labels, aliases); the count is printed, not hidden.
+  : >"$work/fam.txt"
   for p in "${families[@]}"; do
     lib="${p%%=*}"
-    # Sized, defined functions of the family: "address name".
-    awk -v re="${family[$lib]}" 'NF == 4 && $3 ~ /^[TtWwi]$/ && $4 ~ re { print $1, $4 }' <<<"$syms" >"$work/fam.txt"
-    if [ ! -s "$work/fam.txt" ]; then
-      echo "--   $name: $lib not linked (no defined function matches ${family[$lib]})"
-      continue
-    fi
-    mapfile -t names < <(awk '{ print $2 }' "$work/fam.txt" | sort -u)
-    args=("${names[@]/#/--disassemble=}")
-    objdump -d --no-show-raw-insn -w "${args[@]}" "$bin" 2>/dev/null \
+    awk -v lib="$lib" -v re="${family[$lib]}" 'NF == 4 && $3 ~ /^[TtWwi]$/ && $4 ~ re && $2 !~ /^0+$/ { print lib, $1, $4 }' <<<"$syms" >>"$work/fam.txt"
+    zsz="$(awk -v re="${family[$lib]}" 'NF == 4 && $3 ~ /^[TtWwi]$/ && $4 ~ re && $2 ~ /^0+$/ { c++ } END { print c + 0 }' <<<"$syms")"
+    if [ "$zsz" != 0 ]; then echo "     $name: $lib: $zsz zero-size symbols not judged (no address range)"; fi
+  done
+  : >"$work/res.txt"
+  if [ -s "$work/fam.txt" ]; then
+    # One disassembly of the whole binary, one pass: the awk keeps only the family.
+    objdump -d --no-show-raw-insn -w "$bin" 2>/dev/null \
       | awk -v re="$ref_re" -v lo="$lo" -v hi="$hi" -f "$work/judge.awk" "$work/fam.txt" - >"$work/res.txt"
-    judged=0 k=0 unseen=0 zero=0 zero_list="" all_list=""
-    while read -r fn sn rf; do
-      [ -n "$fn" ] || continue
-      if [ "$sn" != 1 ]; then unseen=$((unseen + 1)); continue; fi
+  fi
+  for p in "${families[@]}"; do
+    lib="${p%%=*}"
+    judged=0 k=0 unins=0 unins_list="" zero=0 zero_list="" all_list=""
+    while read -r l fn ni rf; do
+      [ "$l" = "$lib" ] || continue
       judged=$((judged + 1))
       all_list="$all_list $fn"
       if [ "$verbose" = 1 ]; then echo "       $fn refs=$rf"; fi
-      if [ "$rf" -gt 0 ]; then
+      if [ "$ni" = 0 ]; then
+        # No instructions in the function's address range: it was not inspected. Never silent, never a pass.
+        unins=$((unins + 1))
+        if [ "$unins" -le 5 ]; then unins_list="$unins_list $fn"; fi
+      elif [ "$rf" -gt 0 ]; then
         k=$((k + 1))
       else
         zero=$((zero + 1))
@@ -221,14 +235,17 @@ for bin in "${bins[@]}"; do
       fi
     done <"$work/res.txt"
     if [ "$judged" = 0 ]; then
-      echo "FAIL $name: $lib has $unseen defined functions but objdump disassembled none of them"
-      failed=1
+      echo "--   $name: $lib not linked (no defined sized function matches ${family[$lib]})"
       continue
     fi
     seen_lib["$lib"]=$((${seen_lib["$lib"]} + 1))
+    if [ "$unins" != 0 ]; then
+      echo "FAIL $name: $lib: cannot inspect $unins of $judged functions (no instructions found in their address range):$unins_list"
+      failed=1
+      continue
+    fi
     pct=$((k * 100 / judged))
-    note=""
-    [ "$unseen" = 0 ] || note=" ($unseen not disassembled)"
+    note="; $unins uninspected"
     [ "$zero" = 0 ] || note="$note; without references:$zero_list"
     [ "$judged" -gt 12 ] || note="$note; functions:$all_list"
     if [ "$k" = 0 ]; then
