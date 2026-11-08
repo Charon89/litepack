@@ -33,12 +33,25 @@
   FindClose $0
 !macroend
 
-!macro NSIS_HOOK_PREINSTALL
+!macro LPK_REFUSE_OLD_WINDOWS
   ${IfNot} ${AtLeastBuild} 19045
     MessageBox MB_ICONSTOP|MB_OK "LitePack needs Windows 10 version 22H2 (build 19045) or Windows 11." /SD IDOK
     SetErrorLevel 1
     Quit
   ${EndIf}
+!macroend
+
+; The first section of the installer: this file is included before installer.nsi defines its sections, and NSIS runs
+; sections in the order they are defined, so the version check runs before the template's WebView2 section (which
+; may download and run Microsoft's bootstrapper) and before any file is written. ${ARCH} is defined only after this
+; include, so the ARM64 check stays in PREINSTALL (Windows 11 on ARM64 ships the WebView2 runtime, so that section
+; writes nothing there).
+Section "-LitePack preflight"
+  !insertmacro LPK_REFUSE_OLD_WINDOWS
+SectionEnd
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro LPK_REFUSE_OLD_WINDOWS
   !if "${ARCH}" == "x64"
     ${If} ${IsNativeARM64}
       MessageBox MB_ICONSTOP|MB_OK "This is the x64 build of LitePack. On this ARM64 PC, install the ARM64 build: its Explorer menu needs an ARM64 shell extension." /SD IDOK

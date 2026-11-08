@@ -138,8 +138,10 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
 `THIRD-PARTY-NOTICES`, `LICENSE-APACHE`, `LICENSE-MIT`.
 
 **Hooks** (`crates/lpk-gui/installer.nsh`):
-- PREINSTALL: below build 19045, a message naming Windows 10 22H2 and an exit before any file is written; the x64
-  installer on an ARM64 PC names the ARM64 build and exits. The template sets no `ManifestSupportedOS`, so NSIS's
+- PREINSTALL: below build 19045, a message naming Windows 10 22H2 and an exit before any file is written (checked
+  first in a hidden section the hooks file defines ahead of the template's, so before the WebView2 section, which
+  could download Microsoft's bootstrapper; and again in the hook); the x64 installer on an ARM64 PC names the ARM64
+  build and exits (in the hook, after the WebView2 section, which finds the runtime Windows 11 on ARM64 ships). The template sets no `ManifestSupportedOS`, so NSIS's
   default (every version up to Windows 10/11) is in the manifest and `${AtLeastBuild}` sees the real build. CI has no
   Windows 10 runner: the refusal is checked by hand on a Windows 10 VM in E7-10.
 - POSTINSTALL: `lpk-gui.exe --register-shell` (route C, the `.lpk` association, `GuiPath`, `bin\` on `Path`; docs/API.md),

@@ -623,6 +623,11 @@ jobs:
     if: ${{ !cancelled() }}
     timeout-minutes: 15
     runs-on: windows-11-arm
+    # Without these, Git's bash turns `/S` into a path (S:/), and the installer runs with its UI and waits
+    # (the job's first run hung until its timeout).
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
     defaults:
       run:
         shell: bash
@@ -635,7 +640,8 @@ jobs:
         run: |
           inst="$(cygpath -m "$LOCALAPPDATA")/LitePack"
           test ! -e "$inst" || { echo "already present: $inst"; exit 1; }
-          rc=0; ./setup/N-setup.exe /S || rc=$?
+          rc=0; timeout 300 ./setup/N-setup.exe /S || rc=$?
+          test "$rc" -ne 124 || { echo "the installer did not exit in five minutes"; tasklist; exit 1; }
           echo "x64 installer on ARM64: exit code $rc"
           ls -la "$inst" 2>/dev/null && { echo "files were written to $inst"; exit 1; }
           test "$rc" -ne 0
