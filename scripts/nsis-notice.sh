@@ -129,6 +129,18 @@ if ! cmp "$work/LICENSE_MIT" notices/nsis/nsis_tauri_utils-LICENSE_MIT; then
   status=1
 fi
 
+# R272 (E7-5): the plugin's Cargo.lock at its tag, hashed first, then every crate in it looked up in
+# THIRD-PARTY-NOTICES (scripts/nsis-lock-check.py reads files only).
+fetch -o "$work/Cargo.lock" \
+  "https://raw.githubusercontent.com/tauri-apps/nsis-tauri-utils/$tag/$(pin_value nsis_tauri_utils lock)"
+got="$(sha256sum "$work/Cargo.lock" | cut -d' ' -f1)"
+if [[ "$got" != "$(pin_value nsis_tauri_utils lock_sha256)" ]]; then
+  echo "[nsis_tauri_utils] Cargo.lock at $tag: SHA-256 $got differs from lock_sha256 in $pin" >&2
+  status=1
+fi
+# Run even when the hash differs, so that one run shows both; the hash alone decides that the lock is the pinned one.
+python3 -I scripts/nsis-lock-check.py "$work/Cargo.lock" THIRD-PARTY-NOTICES || status=1
+
 if [[ "$status" -ne 0 ]]; then
   exit "$status"
 fi

@@ -110,9 +110,11 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
           rustc --version
-      - name: NSIS archive and plugin match notices/nsis
+      - name: NSIS archive and plugin match notices/nsis; the plugin's Cargo.lock is covered by the notices
         shell: bash
-        run: scripts/nsis-notice.sh --check
+        run: |
+          python3 -I scripts/nsis-lock-check.py --self-test
+          scripts/nsis-notice.sh --check
       - name: Fetch the locked crates (webview2-com-sys's vendored loader)
         run: cargo fetch --locked
       - name: WebView2 licence text and loader libraries match notices/webview2.toml

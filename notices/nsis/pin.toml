@@ -33,3 +33,8 @@ sha256 = "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709"
 # at the release tag.
 source = "https://github.com/tauri-apps/nsis-tauri-utils/tree/nsis_tauri_utils-v0.5.3"
 licence = "LICENSE_MIT"
+# R272 (E7-5): the plugin's own Cargo.lock at the release tag, checked by scripts/nsis-lock-check.py against
+# THIRD-PARTY-NOTICES. lock_sha256 is the SHA-256 of that file as CI's first download of it printed (2026-11-08);
+# nothing else is pinned for it, so a moved tag fails here.
+lock = "Cargo.lock"
+lock_sha256 = "unpinned"
