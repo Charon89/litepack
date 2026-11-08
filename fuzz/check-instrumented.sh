@@ -38,7 +38,7 @@ set -uo pipefail
 # log names the ones found.
 families=(
   "libarchive=^(__)?archive_"
-  "zlib=^(zlibVersion|zError|inflateInit_|inflateInit2_|deflateInit_|deflateInit2_|inflateEnd|deflateEnd|adler32_z|crc32_z)$"
+  "zlib=^(zlibVersion|zError|inflateInit_|inflateInit2_|deflateInit_|deflateInit2_|inflateEnd|deflateEnd|adler32_z|crc32_z|inflate|deflate|inflate_table|inflate_fast|_tr_[a-z_]+)$"
   "liblzma=^lzma_"
   "libzstd=^(ZSTD_|HUF_|FSE_)"
   "libsais=^libsais"
@@ -161,9 +161,17 @@ function hexv(s,   i, c, v) {
   }
   return v
 }
-FNR == NR { if (!($2 in nm)) { nm[$2] = $3; lb[$2] = $1; order[++cnt] = $2 } next }
+FNR == NR {
+  if (!($2 in nm)) { nm[$2] = $3; lb[$2] = $1; en[$2] = hexv($2) + hexv($4); order[++cnt] = $2 }
+  next
+}
 /^[0-9a-f]+ <.*>:$/ { cur = $1; if (!(cur in nm)) cur = ""; next }
 cur != "" && /^ *[0-9a-f]+:/ {
+  # Bound the function to [address, address + nm size): code after that and before the next header (padding,
+  # a symbol-less tail) belongs to nothing and is not counted for it.
+  t = $1
+  sub(/:.*/, "", t)
+  if (hexv(t) >= en[cur]) next
   ni[cur]++
   if ($0 ~ re) { r[cur]++; next }
   if (hi > lo && match($0, /# [0-9a-f]+ </)) {
@@ -205,7 +213,7 @@ for bin in "${bins[@]}"; do
   : >"$work/fam.txt"
   for p in "${families[@]}"; do
     lib="${p%%=*}"
-    awk -v lib="$lib" -v re="${family[$lib]}" 'NF == 4 && $3 ~ /^[TtWwi]$/ && $4 ~ re && $2 !~ /^0+$/ { print lib, $1, $4 }' <<<"$syms" >>"$work/fam.txt"
+    awk -v lib="$lib" -v re="${family[$lib]}" 'NF == 4 && $3 ~ /^[TtWwi]$/ && $4 ~ re && $2 !~ /^0+$/ { print lib, $1, $4, $2 }' <<<"$syms" >>"$work/fam.txt"
     zsz="$(awk -v re="${family[$lib]}" 'NF == 4 && $3 ~ /^[TtWwi]$/ && $4 ~ re && $2 ~ /^0+$/ { c++ } END { print c + 0 }' <<<"$syms")"
     if [ "$zsz" != 0 ]; then echo "     $name: $lib: $zsz zero-size symbols not judged (no address range)"; fi
   done
