@@ -260,6 +260,21 @@ pub fn confirm(owner: Option<isize>, title: &str, text: &str) -> io::Result<bool
     }
 }
 
+/// A native error box with one OK button, owned by `owner`: a portable copy's unusable `data`
+/// folder (`docs/notes/e7-design.md` section 5), shown before any window exists.
+pub fn alert(owner: Option<isize>, title: &str, text: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows_impl::alert(owner, title, text);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, title, text);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

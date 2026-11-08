@@ -117,9 +117,87 @@ pub fn open_dir() -> Option<PathBuf> {
     state_dir().map(|d| d.join("Open"))
 }
 
+/// The probe file [`check_writable`] writes and removes.
+const PROBE: &str = ".litepack-write-check";
+
+/// The probe's size: a few KiB, so that a full disk fails the check (an empty file can fit in
+/// the folder's own record).
+const PROBE_SIZE: usize = 4096;
+
+/// A portable copy's rule (`docs/notes/e7-design.md` section 5): its `data` folder must exist
+/// or be creatable, and be writable. Creates the folder, writes and removes a 4 KiB probe file in
+/// it (a `data` junction is followed: where it points is the user's choice);
+/// the error names the folder. The caller exits on an error, never falling back to the
+/// profile's folders.
+pub fn check_writable(data: &Path) -> Result<(), String> {
+    let fail = |what: &str, e: std::io::Error| format!("{what} {}: {e}", data.display());
+    std::fs::create_dir_all(data).map_err(|e| fail("cannot create", e))?;
+    if !data.is_dir() {
+        return Err(format!("{} is not a folder", data.display()));
+    }
+    let probe = data.join(PROBE);
+    std::fs::write(&probe, [0u8; PROBE_SIZE]).map_err(|e| fail("cannot write in", e))?;
+    std::fs::remove_file(&probe).map_err(|e| fail("cannot write in", e))?;
+    Ok(())
+}
+
+/// A portable copy's `data` folder when it cannot be used (the error to show); `None` for an
+/// installed copy or a usable folder.
+pub fn portable_data_error(dirs: &Dirs) -> Option<String> {
+    if !dirs.portable {
+        return None;
+    }
+    let data = dirs.state.as_deref()?;
+    check_writable(data).err()
+}
+
+/// What a portable copy whose `data` folder is unusable writes to the smoke report
+/// (`LPK_GUI_SMOKE_REPORT`) instead of showing its box, so that CI never waits on a dialog.
+pub fn data_error_report(text: &str) -> String {
+    serde_json::json!({ "portable_data_error": text }).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_usable_data_folder_is_created_and_left_empty() {
+        let exe = tempfile::tempdir().unwrap();
+        std::fs::write(exe.path().join(PORTABLE_MARKER), b"").unwrap();
+        let d = locate(Some(exe.path()), env(&[]));
+        assert_eq!(portable_data_error(&d), None);
+        let data = exe.path().join(PORTABLE_DATA);
+        assert!(data.is_dir());
+        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_data_file_in_place_of_the_folder_is_refused() {
+        let exe = tempfile::tempdir().unwrap();
+        std::fs::write(exe.path().join(PORTABLE_MARKER), b"").unwrap();
+        std::fs::write(exe.path().join(PORTABLE_DATA), b"not a folder").unwrap();
+        let d = locate(Some(exe.path()), env(&[]));
+        let e = portable_data_error(&d).expect("refused");
+        assert!(e.contains(PORTABLE_DATA), "{e}");
+        // Nothing replaced the file, and nothing else was made.
+        assert!(exe.path().join(PORTABLE_DATA).is_file());
+        assert_eq!(std::fs::read_dir(exe.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn the_report_carries_the_error() {
+        let r: serde_json::Value = serde_json::from_str(&data_error_report("x \"y\"")).unwrap();
+        assert_eq!(r["portable_data_error"], "x \"y\"");
+    }
+
+    #[test]
+    fn an_installed_copy_is_never_checked() {
+        let exe = tempfile::tempdir().unwrap();
+        let d = locate(Some(exe.path()), env(&[("LOCALAPPDATA", "L")]));
+        assert_eq!(portable_data_error(&d), None);
+        assert_eq!(std::fs::read_dir(exe.path()).unwrap().count(), 0);
+    }
 
     fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
         move |k| {
