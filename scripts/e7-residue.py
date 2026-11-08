@@ -67,8 +67,8 @@ AAD_LU = (LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel
 SHELL_MUICACHE = LOCAL_SETTINGS + r"\Software\Microsoft\Windows\Shell\MuiCache"
 USERASSIST_COUNT = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"
                     r"\{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}\Count")
-WAM = ("Windows' account broker (WAM, Microsoft.AAD.BrokerPlugin), which refreshes the runner "
-       "account's tokens in the background whatever runs")
+WAM = ("written while the GUI starts, by Windows' account broker (WAM, "
+       "Microsoft.AAD.BrokerPlugin), most likely for the WebView2 runtime (R315)")
 MUI = "Windows' shell cache of a program's display strings (MuiCache), filled when a program runs"
 WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for every WebView2 app "
             "(R313); LitePack's WebView2 data stays in data\\")
@@ -82,6 +82,9 @@ ALLOW = [
     # E7-6's first full diff (CI run 42483731626), ruling R313.
     {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\TokenBroker\Cache",
      "name": r"[0-9a-f]{40}\.tbres", "reason": WAM + ": its token cache, one file per token"},
+    # Any credential LitePack ever stores must use a target named after LitePack: the CI job's
+    # `cmdkey /list` check after each run fails on a target containing "LitePack" or "lpk", so a
+    # LitePack credential cannot hide behind this entry.
     {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\Credentials",
      "name": r"[0-9A-F]{32}", "reason": WAM + ": the credential it stores through DPAPI"},
     {"kind": "value", "path": AAD_LU, "name": "PCT",
@@ -95,8 +98,11 @@ ALLOW = [
      "reason": MUI + ": the strings of Windows' elscore.dll (Extended Linguistic Services)"},
     {"kind": "key-only", "path": SHELL_MUICACHE, "reason": MUI + ": the cache's own key"},
     {"kind": "value-pattern", "path": SHELL_MUICACHE,
-     "name": r".*\\lpk-gui\.exe\.(ApplicationCompany|FriendlyAppName)",
-     "reason": MUI + ": lpk-gui.exe's company and friendly name, keyed by its path"},
+     # {run} is the escaped run folder (--run-folder, or RUNNER_TEMP\portable-run\LitePack); with
+     # none known, the entry matches nothing.
+     "name": r"{run}\\lpk-gui\.exe\.(ApplicationCompany|FriendlyAppName)",
+     "reason": MUI + ": lpk-gui.exe's company and friendly name, keyed by its path in the run "
+                     "folder"},
     {"kind": "value", "path": SHELL_MUICACHE, "name": "LangID",
      "reason": MUI + ": the cache's language"},
     {"kind": "value", "path": USERASSIST_COUNT, "name": "HRZR_PGYFRFFVBA",
@@ -332,8 +338,18 @@ def empty_key(snap, key):
     return found
 
 
-def allowed(kind, path, name, sign, after):
-    """The allow-list's reason for an entry, or None."""
+def run_pattern(run):
+    """The escaped run folder for the `{run}` placeholder; None when no run folder is known."""
+    if not run:
+        return None
+    return re.escape(str(run).replace("/", "\\").rstrip("\\"))
+
+
+def allowed(kind, path, name, sign, after, run=None, unreadable=False):
+    """The allow-list's reason for an entry, or None. Nothing excuses a path that either snapshot
+    could not read."""
+    if unreadable:
+        return None
     for a in ALLOW:
         if a["kind"] == "file" and kind == "file" and under(path, a["path"]):
             return a["reason"]
@@ -342,10 +358,15 @@ def allowed(kind, path, name, sign, after):
         if a["kind"] == "value" and kind == "value" and norm(path) == norm(a["path"]) and \
                 norm(name) == norm(a["name"]):
             return a["reason"]
-        if a["kind"] == "value-pattern" and kind == "value" and \
-                norm(path) == norm(a["path"]) and \
-                re.fullmatch(a["name"], name, re.IGNORECASE | re.DOTALL):
-            return a["reason"]
+        if a["kind"] == "value-pattern" and kind == "value" and norm(path) == norm(a["path"]):
+            pattern = a["name"]
+            if "{run}" in pattern:
+                folder = run_pattern(run)
+                if folder is None:
+                    continue
+                pattern = pattern.replace("{run}", folder)
+            if re.fullmatch(pattern, name, re.IGNORECASE | re.DOTALL):
+                return a["reason"]
         if a["kind"] == "key-only" and kind == "key" and norm(path) == norm(a["path"]):
             return a["reason"]
         if a["kind"] == "file-pattern" and kind == "file":
@@ -370,7 +391,7 @@ def show(kind, path, name, rec):
     return f"{rec.get('kind')} {path}"
 
 
-def diff(before, after, allow_profile):
+def diff(before, after, allow_profile, run=None):
     """The diff's lines and the number of entries not allowed. A path unreadable in either
     snapshot is listed (and counted unless allowed) even when both record it alike: what lies
     inside it was not seen."""
@@ -390,10 +411,13 @@ def diff(before, after, allow_profile):
     # own that changed) belong to it too.
     profile_keys = [c[1] for c in changes if c[4] != "file" and is_profile(c[4], c[1], sids)]
     valued = {norm(c[1]) for c in changes if c[4] == "value"}
+    unreadable = {norm(p) for s in (before, after) for p, r in s["files"].items()
+                  if r.get("kind") == "unreadable"}
     lines, bad = [], 0
     for sign, path, name, rec, kind in changes:
         text = f"{sign} {show(kind, path, name, rec)}"
-        reason = allowed(kind, path, name, sign, after)
+        reason = allowed(kind, path, name, sign, after, run,
+                         kind == "file" and norm(path) in unreadable)
         ancestor = kind == "key" and sign in "+-" and norm(path) not in valued and \
             any(under(p, path) and norm(p) != norm(path) for p in profile_keys)
         if reason:
@@ -435,6 +459,9 @@ def main(argv):
     d.add_argument("before")
     d.add_argument("after")
     d.add_argument("--allow-worker-profile", action="store_true")
+    d.add_argument("--run-folder",
+                   help="the folder the run's lpk-gui.exe lies in (default: "
+                        "RUNNER_TEMP\\portable-run\\LitePack when RUNNER_TEMP is set)")
     d.add_argument("--require-worker-profile", action="store_true",
                    help="allow the profile, and fail unless its folder and Mappings key were added")
     a = ap.parse_args(argv)
@@ -443,7 +470,10 @@ def main(argv):
         return 0
     load = lambda p: json.loads(Path(p).read_text(encoding="utf-8"))  # noqa: E731
     allow = a.allow_worker_profile or a.require_worker_profile
-    lines, bad = diff(load(a.before), load(a.after), allow)
+    run = a.run_folder
+    if run is None and os.environ.get("RUNNER_TEMP"):
+        run = os.path.join(os.environ["RUNNER_TEMP"], "portable-run", "LitePack")
+    lines, bad = diff(load(a.before), load(a.after), allow, run)
     for line in lines:
         print(line)
     flag = " (worker profile allowed)" if allow else ""
@@ -533,9 +563,9 @@ class Tests(unittest.TestCase):
         finally:
             ALLOW = saved
 
-    def added_keys(self, keys):
+    def added_keys(self, keys, run=None):
         after = snap(self.base["files"], dict(self.base["registry"], **{k: v for k, v in keys}))
-        return diff(self.base, after, False)
+        return diff(self.base, after, False, run)
 
     def test_a_webview2_key_below_its_root_is_allowed_and_a_sibling_is_not(self):
         root = r"HKCU\Software\Microsoft\EdgeWebView"
@@ -556,13 +586,34 @@ class Tests(unittest.TestCase):
             after = snap(dict(self.base["files"], **{bad_path: f()}), self.base["registry"])
             self.assertEqual(diff(self.base, after, False)[1], 1, bad_path)
 
-    def test_the_muicache_allows_lpk_gui_names_only(self):
+    def test_the_muicache_allows_lpk_gui_names_in_the_run_folder_only(self):
         mui = SHELL_MUICACHE
-        lines, bad = self.added_keys([(mui, {r"D:\x\LitePack\lpk-gui.exe.FriendlyAppName": '"L"',
-                                             "LangID": "hex:09,04"})])
+        run = "D:/a/_temp/portable-run/LitePack"
+        names = {r"D:\a\_temp\portable-run\LitePack\lpk-gui.exe.FriendlyAppName": '"L"',
+                 r"D:\a\_temp\portable-run\LitePack\lpk-gui.exe.ApplicationCompany": '"C"',
+                 "LangID": "hex:09,04"}
+        lines, bad = self.added_keys([(mui, names)], run)
         self.assertEqual(bad, 0, lines)
-        lines, bad = self.added_keys([(mui, {r"D:\x\other.exe.FriendlyAppName": '"O"'})])
+        # Without a run folder, or under another folder, the same names are residue.
+        self.assertEqual(self.added_keys([(mui, names)])[1], 2)
+        for other in (r"D:\x\LitePack", r"D:\a\_temp\portable-run\LitePack\sub",
+                      r"D:\a\_temp\portable-run\LitePackX"):
+            lines, bad = self.added_keys([(mui, {other + r"\lpk-gui.exe.FriendlyAppName": '"L"'})],
+                                         run)
+            self.assertEqual(bad, 1, lines)
+        lines, bad = self.added_keys([(mui, {r"D:\x\other.exe.FriendlyAppName": '"O"'})], run)
         self.assertEqual(bad, 1, lines)
+
+    def test_no_allow_list_entry_excuses_an_unreadable_path(self):
+        cache = r"%LOCALAPPDATA%\Microsoft\TokenBroker\Cache"
+        locked = {cache + "\\" + "a" * 40 + ".tbres": {"kind": "unreadable", "error": "OSError"}}
+        after = snap(dict(self.base["files"], **locked), self.base["registry"])
+        lines, bad = diff(self.base, after, False)
+        self.assertEqual(bad, 1, lines)
+        self.assertTrue(lines[0].startswith("RESIDUE: + unreadable "), lines)
+        # Readable before, unreadable after: still residue.
+        before = snap(dict(self.base["files"], **{p: f() for p in locked}), self.base["registry"])
+        self.assertEqual(diff(before, after, False)[1], 1)
 
     def test_the_profile_needs_the_flag(self):
         after = with_profile(self.base)

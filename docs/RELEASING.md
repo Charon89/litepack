@@ -90,12 +90,16 @@ one folder, key or value at a time with the reason beside each. That includes th
 
 Windows and the WebView2 runtime keep a few records of their own, as they do for any app; LitePack's own data stays
 in `data\`. The allow-list names them one at a time (R313, from the first full diff, CI run 42483731626):
-- Windows' account broker (WAM), which refreshes the runner account's tokens in the background: its token cache
+- Records written while the GUI starts, by Windows' account broker (WAM), most likely for the WebView2 runtime (R315;
+  their times fall inside the GUI step, and the CLI runs add none): its token cache
   (`%LOCALAPPDATA%\Microsoft\TokenBroker\Cache`, files of the shape `<40 hex>.tbres` directly in it), its credential
   file (`%LOCALAPPDATA%\Microsoft\Credentials`, names of 32 hex digits directly in it), the broker app's `PCT` and
-  `PTT` values and the `AuthCookies\Live\Default\DIDC` `Data` value.
+  `PTT` values and the `AuthCookies\Live\Default\DIDC` `Data` value. So that the credential pattern cannot hide one
+  of LitePack's own, the job fails if `cmdkey /list` shows a target containing `LitePack` or `lpk` after any run;
+  any credential LitePack ever stores must use a target named after LitePack.
 - The shell's display-string cache (MuiCache): `elscore.dll`'s strings, and the `Shell\MuiCache` key with
-  `lpk-gui.exe`'s `ApplicationCompany` and `FriendlyAppName` (keyed by its path) and `LangID`.
+  `lpk-gui.exe`'s `ApplicationCompany` and `FriendlyAppName`, only under the run folder's path (`diff --run-folder`,
+  which the job passes; by default `RUNNER_TEMP\portable-run\LitePack`), and `LangID`.
 - Explorer's UserAssist session counter and its Windows Terminal entry, which change on the runner on their own.
 - The WebView2 runtime's per-user records: the subtrees `HKCU\Software\Microsoft\EdgeWebView` and
   `HKCU\Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` (the runtime's GUID), and

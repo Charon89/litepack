@@ -323,6 +323,7 @@ jobs:
         run: |
           echo "SNAP=$(cygpath -m "$RUNNER_TEMP")/residue" >> "$GITHUB_ENV"
           echo "ZIPS=$(cygpath -m "$RUNNER_TEMP")/zips" >> "$GITHUB_ENV"
+          echo "RUNF=$(cygpath -m "$RUNNER_TEMP")/portable-run/LitePack" >> "$GITHUB_ENV"
       # One exact Python build: the zips' bytes depend on its zlib and its zipfile.
       - uses: actions/setup-python@v6
         with:
@@ -362,6 +363,10 @@ jobs:
         run: |
           mkdir -p "$SNAP"
           python -I scripts/e7-residue.py snapshot "$SNAP/1-before.json"
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-1-before.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-1-before.txt"; then
+            echo "1-before: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
       - name: Unzip both copies into fresh folders
         run: |
           python -I -m zipfile -e "$ZIPS"/*-portable.zip "$RUNNER_TEMP/portable-run"
@@ -395,13 +400,21 @@ jobs:
       - name: Residue after the GUI (the worker profile required)
         run: |
           python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
-          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-2-after-gui.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-2-after-gui.txt"; then
+            echo "2-after-gui: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
             --require-worker-profile || echo "after the GUI: residue, or no worker profile" >> "$SNAP/verdicts"
       - name: Residue after --remove-profile (nothing allowed)
         run: |
           "$RUNNER_TEMP/portable-run/LitePack/lpk-worker.exe" --remove-profile
           python -I scripts/e7-residue.py snapshot "$SNAP/3-after-remove.json"
-          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-remove.json" \
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-3-after-remove.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-3-after-remove.txt"; then
+            echo "3-after-remove: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/1-before.json" "$SNAP/3-after-remove.json" \
             || echo "after the GUI's --remove-profile: residue" >> "$SNAP/verdicts"
       - name: The CLI zip's lpk.exe lists and extracts the .zip
         run: |
@@ -413,13 +426,21 @@ jobs:
       - name: Residue after the CLI (the worker profile required)
         run: |
           python -I scripts/e7-residue.py snapshot "$SNAP/4-after-cli.json"
-          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-cli.json" \
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-4-after-cli.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-4-after-cli.txt"; then
+            echo "4-after-cli: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/1-before.json" "$SNAP/4-after-cli.json" \
             --require-worker-profile || echo "after the CLI: residue, or no worker profile" >> "$SNAP/verdicts"
       - name: Residue after the CLI zip's --remove-profile (nothing allowed)
         run: |
           "$RUNNER_TEMP/cli-run/LitePack/lpk-worker.exe" --remove-profile
           python -I scripts/e7-residue.py snapshot "$SNAP/5-after-remove.json"
-          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/5-after-remove.json" \
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-5-after-remove.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-5-after-remove.txt"; then
+            echo "5-after-remove: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/1-before.json" "$SNAP/5-after-remove.json" \
             || echo "after the CLI's --remove-profile: residue" >> "$SNAP/verdicts"
       - name: An unusable data folder is refused with nothing written
         run: |
@@ -434,7 +455,11 @@ jobs:
           grep -q '"portable_data_error"' "$report" || echo "data file: no error in the report" >> "$SNAP/verdicts"
           test -f "$p/data" || echo "data file: replaced" >> "$SNAP/verdicts"
           python -I scripts/e7-residue.py snapshot "$SNAP/6-after-data.json"
-          python -I scripts/e7-residue.py diff "$SNAP/5-after-remove.json" "$SNAP/6-after-data.json" \
+          MSYS_NO_PATHCONV=1 cmdkey /list > "$SNAP/cmdkey-6-after-data.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-6-after-data.txt"; then
+            echo "6-after-data: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/5-after-remove.json" "$SNAP/6-after-data.json" \
             || echo "data file: residue" >> "$SNAP/verdicts"
       - name: Residue verdict
         run: |
