@@ -103,8 +103,24 @@ status=0
 
 # GitHub's release downloads can answer 504 for minutes at a time (three of four CI runs on 2026-11-08 failed on
 # nsis.zip after curl's default --retry 3 backoff of about 7 s). Retry each download for up to three minutes, 20 s
-# apart; the job's 15-minute timeout covers all three downloads at their worst.
-fetch() { curl -fsSL --connect-timeout 30 --retry 6 --retry-delay 20 --retry-max-time 180 "$@"; }
+# apart (the limits below bound each attempt).
+#
+# One bound for every attempt of every download, identical in nsis-notice.sh and webview2-notice.sh
+# (scripts/notice-curl-test.sh compares the two `curl_limits=` blocks, so edit both together).
+# Sizes of the files (2026-11-08): nsis-3.13.zip 2,363,925 bytes, nsis_tauri_utils.dll 34,304, LICENSE_MIT 1,110,
+# the WebView2 package 8,973,762. Assumed rate of a normal download: 100 kB/s or better (GitHub and nuget.org
+# answer a runner in MB/s); the largest file then takes about 90 s, inside --max-time 240
+# (even at 50 kB/s it finishes in about 180 s).
+#   --speed-limit 10240 --speed-time 30   abort a transfer that stays under 10 kB/s for 30 s (a stall)
+#   --max-time 240                        abort any single attempt after 240 s, however it is going
+# curl counts a timeout as transient and retries it, so --retry-max-time 180 only stops NEW attempts; with the
+# per-attempt bound a download ends within 180 s + 240 s = 420 s at worst.
+# Worst case of the job: its four downloads (nsis-notice.sh: 3, webview2-notice.sh: 1) at 420 s each is 28 min,
+# more than the "notices pins" job's 15-minute timeout (.github/workflows/ci.yml): the 15-minute timeout still
+# decides, and the job fails closed there when downloads fail slowly one after the other.
+curl_limits=(--connect-timeout 30 --speed-limit 10240 --speed-time 30 --max-time 240
+  --retry 6 --retry-delay 20 --retry-max-time 180)
+fetch() { curl -fsSL "${curl_limits[@]}" "$@"; }
 
 fetch -o "$work/nsis.zip" "$(pin_value nsis url)"
 # The archive's hashes first: nothing is unpacked from an archive that is not the pinned one.

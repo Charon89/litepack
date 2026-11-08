@@ -110,7 +110,10 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
           rustc --version
-      - name: NSIS archive and plugin match notices/nsis; the plugin's Cargo.lock is covered by the notices
+      - name: The two pin scripts bound every download the same way
+        shell: bash
+        run: bash scripts/notice-curl-test.sh
+      - name: NSIS archive and plugin match notices/nsis; the plugin's crates are covered by the notices
         shell: bash
         run: |
           python3 -I scripts/nsis-lock-check.py --self-test
