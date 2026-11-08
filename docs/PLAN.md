@@ -1,7 +1,7 @@
 # LitePack — Implementation Plan
 
 Status legend: `[ ]` not started · `[~]` in progress · `[x]` done (add one line of evidence under the task).
-Owner column suggests which subagent/model to use (see `README.md` → "Working with Claude Code").
+Owner column suggests which subagent/model to use (see `docs/CLAUDE-CODE.md`).
 
 Gates are decided in `docs/DECISIONS.md` (D-07). Phase 1 does **not** start until the Phase 0 report says GO.
 

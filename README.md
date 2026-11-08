@@ -1,81 +1,86 @@
 # LitePack
 
-Open-core, Windows-first archiver. `.lpk` beats 7-Zip/WinRAR/WinZip on real user data by recompressing
-already-compressed files bit-exactly (JPEG, Deflate inside PDF/Office/PNG/APK), deduplicating across files,
-and sealing everything in a modern container (recovery records, authenticated encryption, verifiable
-integrity, random access, incremental updates) — with zstd-class extraction speed.
+LitePack is a Windows-first archiver with its own format, `.lpk`. It aims to make smaller archives than 7-Zip,
+WinRAR and WinZip on real user data, in three ways:
 
-Status: **Phase 0 — measure before building.** See `docs/PLAN.md`. Method, evidence and competitor
-analysis: `docs/LitePack-Method-v2.md`. Decisions: `docs/DECISIONS.md`.
+- It recompresses files that are already compressed, bit for bit: JPEG photos, and the Deflate streams inside PDF,
+  Office, PNG and APK files.
+- It finds duplicate and near-duplicate data across files.
+- It keeps everything in a modern container, with recovery records, authenticated encryption, integrity checks on
+  every chunk, random access, and new generations appended to an existing archive.
 
-Licence: Apache-2.0 OR MIT (engine, CLI, format, benchmark harness).
+It also opens ZIP, 7z, RAR, tar, ISO and other formats in a sandboxed worker process, and exports to ZIP and 7z. It
+has a command line, `lpk`, and a Windows GUI with an Explorer context menu.
 
----
+**Status: in development. There is no release yet.** The results measured so far are on the
+[benchmark page](https://charon89.github.io/litepack/bench/results.html).
 
-## Working with Claude Code (the intended workflow)
+## Documentation
 
-### Setting up a machine (Windows) — the same steps on every computer you work from
-1. Install Git for Windows (gives Claude Code a Bash tool) with `winget install Git.Git`, then
-   `git clone https://github.com/Charon89/litepack` and `cd litepack`.
-2. Run `powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1`. It is idempotent and installs whatever is
-   missing: GitHub CLI, Visual Studio 2022 Build Tools (C++ workload; one UAC prompt), rustup with the toolchain from
-   `rust-toolchain.toml`, `cargo-nextest` and `cargo-deny`. Re-run it whenever local and CI disagree.
-3. `gh auth login` once per machine (needed to push).
-4. Install Claude Code: native installer from https://code.claude.com/docs/en/setup (or `winget install Anthropic.ClaudeCode`). It also runs inside the Claude desktop app and the VS Code / JetBrains extensions.
-5. Run `claude` in the repo. It reads `CLAUDE.md` automatically.
+The documentation site is <https://charon89.github.io/litepack/>. It has:
 
-Building on Linux (CI, WSL) additionally needs OpenSSL headers: `sudo apt-get install -y --no-install-recommends libssl-dev pkg-config` (the corpus downloader uses native TLS; Windows needs nothing extra).
+- the [`lpk` command reference](https://charon89.github.io/litepack/cli/lpk.html);
+- the [benchmark results](https://charon89.github.io/litepack/bench/results.html), and the
+  [corpus](https://charon89.github.io/litepack/bench/corpus.html) they were measured on;
+- the [`.lpk` v1 format specification](https://charon89.github.io/litepack/spec/lpk-v1.html), with
+  [conformance notes for independent decoders](https://charon89.github.io/litepack/spec/CONFORMANCE.html);
+- the [security model](https://charon89.github.io/litepack/security.html) and the
+  [privacy policy](https://charon89.github.io/litepack/privacy.html);
+- the [licences and dependency policy](https://charon89.github.io/litepack/licensing.html), and the
+  [third-party notices](https://charon89.github.io/litepack/notices.html).
 
-Switching computers: `git pull --ff-only` before you start, `git push` when you stop. Everything Claude needs (rules,
-plan, decisions, agents, skills) is in the repo; the benchmark corpus is rebuilt locally from `corpus.lock` (D-13).
+## Building from source
 
-### The loop
-- `/next-task` — picks the next unchecked task in `docs/PLAN.md`, implements it with the **implementer** subagent (fresh context, own git worktree), reviews it with the **reviewer** subagent, ticks the box with evidence. Run it again for the next task.
-- `/bench run --tools all --profile small` — long measurement runs go through the **bench-runner** subagent; only summary tables come back into your conversation.
-- `/review P0-3` — independent read-only review of a task's changes.
-- For design questions, press `Shift+Tab` to enter plan mode first (reads, no edits), approve the plan, then `/next-task`.
+LitePack targets Windows 10 22H2 and later, on x64 and ARM64. The engine and the command line also build on Linux,
+where CI tests them.
 
-### Which model for what (speed + token efficiency)
-| Role | Model (alias) | Why |
-|---|---|---|
-| Main session (you talking to Claude Code) | `opus` for planning sessions; `sonnet` for routine task loops | The orchestrator holds judgment, not bulk work. Start it with `claude --model sonnet` on routine days and `claude --model opus` when designing or deciding. If your plan includes `fable`, use it for the Phase 0 verdict and the format spec (E1). |
-| implementer subagent | `sonnet`, effort medium | Bulk coding of well-specified tasks; fast and far cheaper than opus. Runs in an isolated worktree so several can work in parallel. |
-| reviewer subagent | `opus`, effort high, read-only | Catches what sonnet misses; cheap because it reads diffs, never writes. |
-| bench-runner subagent | `haiku`, read-only | Mechanical: runs commands, returns tables. |
-| researcher subagent | `sonnet` with web tools | One question, cited answer, 300 words. |
+You need two things:
+- **Rust:** run `rustup toolchain install` in the repository to get the version pinned in `rust-toolchain.toml`.
+- **On Windows:** Visual Studio 2022 Build Tools, with the C++ workload.
 
-Change a role's model by editing `model:` in `.claude/agents/<name>.md` (aliases: `haiku`, `sonnet`, `opus`, `fable`, `inherit`). Check what your subscription offers with `claude --model <alias>`; heavy subagent use is much more comfortable on a Max plan than Pro.
+`scripts/setup-windows.ps1` installs both. Then:
 
-### Token-efficiency rules (already encoded in CLAUDE.md and the agents)
-- Subagents keep the main context small: they return summaries, never file dumps or JSON.
-- One task per `/next-task`; `/clear` between unrelated tasks; `/compact focus on open questions and next task` when a session gets long; `/context` shows what is loaded.
-- `CLAUDE.md` stays under 200 lines; long material lives in `docs/` and is read on demand.
-- Agents use `Grep`/`Glob` rather than reading whole files, and never read `bench/results/*.json`.
-- `maxTurns` caps on every agent stop runaway loops; `effort` is medium for implementation, high only for review.
-- Parallelism: P0-4's four probes are independent — ask for "run P0-4 probes jpeg, deflate, dedup and text as four parallel implementer subagents"; each gets its own worktree. Or open parallel terminals with `claude --worktree probe-jpeg` etc.
-- Use `claude -p "..."` (headless) in CI or scripts for repeatable chores (e.g., regenerate the report).
-
-### Repository layout
 ```
-CLAUDE.md                 project rules Claude Code reads every session
-docs/PLAN.md              ordered tasks + acceptance criteria (the backlog)
-docs/DECISIONS.md         append-only decision log
-docs/CORPUS.md            benchmark corpus spec
-docs/LICENSING.md         licence policy + patent/FTO list
-docs/LitePack-Method-v2.md research & architecture
-.claude/agents/           implementer · reviewer · bench-runner · researcher
-.claude/skills/           /next-task · /bench · /review
-crates/lpk-bench/         Phase 0 tool (corpus, run, probe, report)
-bench/results/            committed JSON measurements (source of truth for every number)
-bench/reports/            generated Markdown reports
-deny.toml                 cargo-deny licence policy
-scripts/setup-windows.ps1 one-shot machine setup (build tools, Rust toolchain, cargo tools)
-.github/workflows/ci.yml  fmt · clippy · nextest · deny on Ubuntu + Windows
-.github/workflows/corpus-smoke.yml  manual Linux build of the small corpus, built twice and compared
+cargo build --release --workspace
+cargo build --release --manifest-path workers/Cargo.toml
 ```
 
-### First session script (copy-paste)
-```
-claude --model opus
-> Read CLAUDE.md, docs/PLAN.md and docs/DECISIONS.md. Summarise Phase 0 in 10 lines, then run /next-task P0-1.
-```
+The first command builds `lpk.exe` and the libarchive worker in `target/release/`. The second builds the Rust worker,
+`workers/target/release/lpk-worker.exe`. `lpk` looks for its workers beside itself, so to open other formats, copy
+`lpk-worker.exe` into `target/release/`. `.lpk` archives need no worker.
+
+The GUI is built with the Tauri CLI. Install it with `cargo install tauri-cli --version 2.12.4 --locked`, then run
+`cargo tauri build --ci -- --locked` in `crates/lpk-gui`.
+
+## Repository layout
+
+| Path | What it holds |
+|---|---|
+| `crates/` | The Rust workspace: the format (`lpk-format`), the engine (`lpk-core`, `lpk-api`), the command line (`lpk-cli`), the GUI host (`lpk-gui`), the Explorer menu handler (`lpk-shell`), the libarchive worker, an independent decoder (`lpk-check`) and the benchmark harness (`lpk-bench`) |
+| `workers/` | The sandboxed Rust worker and its format readers, in a workspace of their own |
+| `apps/gui/` | The GUI's HTML, CSS and JavaScript |
+| `book/` | The documentation site (mdBook) |
+| `docs/` | The plan, the decisions, the status, the format specification, the CLI reference, the security model and the licensing policy |
+| `bench/` | The corpus lock file, the committed measurements (`bench/results/`) and the reports |
+| `fuzz/` | The fuzz targets |
+| `scripts/` | Machine setup, and the checks CI runs |
+
+## How it is developed
+
+- **The plan:** the work follows the ordered task list in [`docs/PLAN.md`](docs/PLAN.md).
+- **The decisions:** each one is recorded in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+- **The status:** [`docs/STATUS.md`](docs/STATUS.md) says where the work stands.
+- **The method:** its sources and the competitor analysis are in
+  [`docs/LitePack-Method-v2.md`](docs/LitePack-Method-v2.md).
+- **The tools:** LitePack is developed with Claude Code; the working notes are in
+  [`docs/CLAUDE-CODE.md`](docs/CLAUDE-CODE.md).
+
+## Security
+
+Please report vulnerabilities privately, as [`SECURITY.md`](SECURITY.md) describes, and never in a public issue.
+
+## Licence
+
+LitePack is licensed under either the Apache License 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE)) or the MIT licence
+([`LICENSE-MIT`](LICENSE-MIT)), at your option. The licences of the code it is built from are in
+[`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES).
