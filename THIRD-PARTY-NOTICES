@@ -12939,13 +12939,36 @@ The GUI (lpk-gui.exe, Windows)
 
 lpk-gui.exe links Microsoft's WebView2 loader (WebView2LoaderStatic.lib, from the
 Microsoft.Web.WebView2 SDK, through the crate webview2-com-sys 0.39.1). Its licence requires
-this notice:
+this notice. The loader is the one of the Microsoft.Web.WebView2 package 1.0.3800.47 (its x64 and arm64
+libraries are byte-identical to the vendored ones, notices/webview2.toml), whose LICENSE.txt follows verbatim:
 
 Copyright (C) Microsoft Corporation. All rights reserved.
 
-The licence of the Microsoft.Web.WebView2 SDK applies to the loader:
-https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.4314.35/License
-Before any GUI binary is distributed (E7), this section reproduces verbatim the LICENSE.txt of the Microsoft.Web.WebView2 package the loader came from (docs/LICENSING.md).
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * The name of Microsoft Corporation, or the names of its contributors 
+may not be used to endorse or promote products derived from this
+software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
 Licences of the crates in lpk-gui (Windows)

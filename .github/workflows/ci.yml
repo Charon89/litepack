@@ -117,7 +117,7 @@ jobs:
         run: cargo fetch --locked
       - name: WebView2 licence text and loader libraries match notices/webview2.toml
         shell: bash
-        run: scripts/webview2-notice.sh --find 1.0.3719.77 1.0.3800.47 1.0.3856.49 1.0.3912.50 1.0.3967.48 1.0.4022.49 1.0.4078.44 1.0.4129.50 1.0.4191.47 1.0.4258.31 1.0.4314.35
+        run: scripts/webview2-notice.sh --check
 
   # E5-2: the Tauri GUI built with `cargo tauri build` (tauri-cli through cargo, no Node) and run against a
   # generated archive given on its command line: the page reports the rows it put in the window's DOM through

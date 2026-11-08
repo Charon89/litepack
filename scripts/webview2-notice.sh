@@ -8,6 +8,8 @@
 #                                                 hashes against the pin and against the webview2-com-sys that
 #                                                 Cargo.lock resolves (run `cargo fetch --locked` first)
 #   scripts/webview2-notice.sh --find <version>... print each candidate's library hashes and say which matches
+#                                                 (for moving the pin after a webview2-com-sys bump; no CI step
+#                                                 runs it)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -81,6 +83,10 @@ case "${1:-}" in
     package="$(sha256 "$work/$version.nupkg")"
     if [[ "$package" != "$(pin_value package_sha256)" ]]; then
       echo "Microsoft.Web.WebView2 $version: package SHA-256 $package differs from $pin" >&2
+      status=1
+    fi
+    if [[ "$(sha256 "$committed")" != "$(pin_value licence_sha256)" ]]; then
+      echo "$committed: SHA-256 $(sha256 "$committed") differs from $pin" >&2
       status=1
     fi
     if ! cmp "$work/$version/LICENSE.txt" "$committed"; then

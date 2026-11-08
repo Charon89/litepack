@@ -1,0 +1,17 @@
+# E7-8 (docs/notes/e7-design.md section 7): the Microsoft.Web.WebView2 NuGet package whose x64 and arm64
+# build/native/<arch>/WebView2LoaderStatic.lib equal, byte for byte, the files vendored by the webview2-com-sys
+# that Cargo.lock resolves (and lpk-gui.exe links). Found by CI over every release after 1.0.3650.58 (the version
+# webview2-com-sys 0.38.2's changelog names); 1.0.3800.47 was the only match. notices/webview2/LICENSE.txt is that
+# package's LICENSE.txt, byte for byte; scripts/third-party-notices.sh renders it in the GUI section.
+# scripts/webview2-notice.sh --check (CI job "notices pins") downloads the package from nuget.org and checks every
+# value here, so a webview2-com-sys bump with other libraries fails until this pin moves.
+
+crate = "webview2-com-sys"
+crate_version = "0.39.1"
+package = "Microsoft.Web.WebView2"
+version = "1.0.3800.47"
+url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg"
+package_sha256 = "56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db"
+x64_sha256 = "89c6b872783b8f6c3cedbff618adb42082d455c615453ae10cfc753f1e8f25d8"
+arm64_sha256 = "4a1ca4b518337c508aa0d778b220c6e59558fce21f4fd0d79a6ea944dd9d5208"
+licence_sha256 = "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55"
