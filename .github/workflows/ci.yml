@@ -513,6 +513,13 @@ jobs:
           cargo tauri build --ci --config "$RUNNER_TEMP/next.conf.json" -- --locked
           cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N1-setup.exe"
           ls -la "$SETUP"
+      # For the ARM64 refusal job below, before any step that could fail.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-x64
+          path: ${{ env.SETUP }}/N-setup.exe
+          retention-days: 3
+          if-no-files-found: error
       - name: Snapshot before
         run: |
           mkdir -p "$SNAP" "$W/in/sub"
@@ -582,6 +589,32 @@ jobs:
         run: |
           if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
           echo "installer: installed, upgraded and uninstalled with nothing left but the allowed entries"
+
+  # E7-5: the x64 installer on an ARM64 PC names the ARM64 build and exits before writing a file (PREINSTALL,
+  # ${IsNativeARM64}). Silent, so the message box takes its /SD default.
+  installer-arm64-refusal:
+    name: installer refuses on ARM64 (windows-11-arm)
+    needs: installer
+    if: ${{ !cancelled() }}
+    timeout-minutes: 15
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: installer-x64
+          path: setup
+      - name: The x64 installer exits with an error and installs nothing
+        run: |
+          inst="$(cygpath -m "$LOCALAPPDATA")/LitePack"
+          test ! -e "$inst" || { echo "already present: $inst"; exit 1; }
+          rc=0; ./setup/N-setup.exe /S || rc=$?
+          echo "x64 installer on ARM64: exit code $rc"
+          ls -la "$inst" 2>/dev/null && { echo "files were written to $inst"; exit 1; }
+          test "$rc" -ne 0
+          echo "refused on ARM64 with nothing installed"
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:
