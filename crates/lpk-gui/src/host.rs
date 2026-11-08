@@ -922,6 +922,24 @@ fn may_exit(handle: &AppHandle, host: &Host) -> bool {
     yes
 }
 
+/// The exit code of a portable copy whose `data` folder is unusable.
+const PORTABLE_DATA_UNUSABLE: i32 = 1;
+
+/// Tell the user that the portable `data` folder is unusable (the smoke report under CI, a
+/// native box otherwise) and give the exit code; never falls back to the profile's folders.
+fn refuse_portable(error: &str) -> i32 {
+    let text = strings::get("portable.data.text").replace("{error}", error);
+    eprintln!("lpk-gui: {text}");
+    if let Some(report) = std::env::var_os(SMOKE_REPORT_ENV) {
+        if let Err(e) = std::fs::write(&report, paths::data_error_report(&text)) {
+            eprintln!("lpk-gui: the smoke report: {e}");
+        }
+    } else {
+        let _ = lpk_gui_sys::alert(None, strings::get("portable.data.title"), &text);
+    }
+    PORTABLE_DATA_UNUSABLE
+}
+
 /// Run the GUI; the process's exit code.
 pub fn run() -> i32 {
     // E6-4: `--register-shell` and `--unregister-shell` first of all: no window, no webview, no
@@ -929,6 +947,11 @@ pub fn run() -> i32 {
     let literal: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if let Some(code) = lpk_gui::register::handle(&literal) {
         return code;
+    }
+    // E7-6: a portable copy whose `data` folder cannot be created or written says so and exits,
+    // before anything (Tauri, WebView2, the journal) could write elsewhere.
+    if let Some(e) = paths::portable_data_error(&paths::dirs()) {
+        return refuse_portable(&e);
     }
     let cwd = std::env::current_dir().ok();
     let (parsed, startup_files) =

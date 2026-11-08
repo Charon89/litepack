@@ -35,11 +35,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsDialogMessageW, LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassExW, SendMessageW,
     SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT,
     ES_AUTOHSCROLL, ES_PASSWORD, GWLP_USERDATA, HMENU, IDCANCEL, IDC_ARROW, IDOK, IDYES,
-    MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MSG, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
-    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_ERASEBKGND, WM_NCCREATE, WM_SETFONT, WNDCLASSEXW, WS_CAPTION, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE,
+    MB_DEFBUTTON2, MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_YESNO, MESSAGEBOX_RESULT,
+    MESSAGEBOX_STYLE, MSG, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+    WM_ERASEBKGND, WM_NCCREATE, WM_SETFONT, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
+    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::{FileIdentity, PasswordTexts, Zeroizing};
@@ -288,19 +288,36 @@ pub(crate) fn process_alive(pid: u32) -> bool {
 }
 
 pub(crate) fn confirm(owner: Option<isize>, title: &str, text: &str) -> bool {
+    message_box(
+        owner,
+        title,
+        text,
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+    ) == IDYES
+}
+
+pub(crate) fn alert(owner: Option<isize>, title: &str, text: &str) {
+    message_box(owner, title, text, MB_OK | MB_ICONERROR);
+}
+
+fn message_box(
+    owner: Option<isize>,
+    title: &str,
+    text: &str,
+    style: MESSAGEBOX_STYLE,
+) -> MESSAGEBOX_RESULT {
     let t = wide(OsStr::new(title));
     let x = wide(OsStr::new(text));
     // SAFETY: the strings are NUL-terminated and alive for the call; the owner, if any, is a
     // window handle the caller passed (an invalid one makes the box unowned, not unsafe).
-    let r = unsafe {
+    unsafe {
         MessageBoxW(
             owner.map(hwnd),
             PCWSTR(x.as_ptr()),
             PCWSTR(t.as_ptr()),
-            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+            style,
         )
-    };
-    r == IDYES
+    }
 }
 
 const CLASS_NAME: &str = "LitePackPasswordDialog";
