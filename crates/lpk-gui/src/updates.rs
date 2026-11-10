@@ -193,6 +193,7 @@ pub async fn install_flow<Q, QF, I, IF>(
     portable: bool,
     quit: Q,
     install: I,
+    mut step: impl FnMut(&str),
 ) -> Result<bool, FlowError>
 where
     Q: FnOnce() -> QF,
@@ -203,12 +204,17 @@ where
     if portable {
         return Err(FlowError::Portable);
     }
+    step("download");
     let bytes = download(update, prefix)
         .await
         .map_err(FlowError::Download)?;
+    step("verified");
+    step("quit");
     if !quit().await {
+        step("kept");
         return Ok(false);
     }
+    step("install");
     install(bytes).await.map_err(FlowError::Install)?;
     Ok(true)
 }
@@ -630,6 +636,7 @@ mod tests {
         let quit_ran = Arc::new(Mutex::new(false));
         let installed = Arc::new(Mutex::new(None));
         let (q, i) = (quit_ran.clone(), installed.clone());
+        let mut steps: Vec<String> = Vec::new();
         let out = tauri::async_runtime::block_on(install_flow(
             update,
             &server.prefix(),
@@ -642,9 +649,18 @@ mod tests {
                 *i.lock().unwrap() = Some(bytes);
                 Ok(())
             },
+            |s| steps.push(s.to_owned()),
         ));
         let quit = *quit_ran.lock().unwrap();
         let bytes = installed.lock().unwrap().clone();
+        // The order the end-to-end job checks in its log too.
+        let want: &[&str] = match (&out, quit_answer) {
+            (Err(FlowError::Portable), _) => &[],
+            (Err(FlowError::Download(_)), _) => &["download"],
+            (_, false) => &["download", "verified", "quit", "kept"],
+            (_, true) => &["download", "verified", "quit", "install"],
+        };
+        assert_eq!(steps, want);
         (out, quit, bytes)
     }
 

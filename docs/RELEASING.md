@@ -81,6 +81,14 @@ The icons in `crates/lpk-gui/icons` are a generated placeholder (`icons/make-pla
   newer version are each refused; a `url` off the release prefix is refused before any download (the server sees
   only `latest.json`); with the check off, the server sees no request; and the check runs once a day and does not
   offer a skipped version.
+- **End to end (test 6, CI job `updater-e2e`).** Two test installers, N (0.0.1) and N+1 (0.0.2), built with the
+  `update-e2e` feature and `tauri.update-e2e.conf.json` chained after `tauri.nsis.conf.json` (tauri-cli 2.12.4 takes
+  `--config` more than once), hold a key pair the job generates with `tauri signer generate` and deletes at its end.
+  N+1 is signed with `tauri signer sign --app-version 0.0.2` and served with `latest.json` from a Python server on
+  `127.0.0.1:8737`. A payload with one byte flipped is refused first (nothing installs); then the hook
+  (`LPK_GUI_UPDATE_E2E`) presses Install, and the job requires the steps check, download, verified, quit, install in
+  that order, N+1's binaries, the registration and `Path`, the settings kept, and no residue after the uninstall.
+  No shipped build holds the hook or the overlay: the `gui` job greps the release exe.
 - **Signing `latest.json`.** The owner's offline step (`scripts/updater-sign.sh`) belongs to E7-2.
 
 ## Licence checks of the GUI

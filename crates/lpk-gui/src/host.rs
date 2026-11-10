@@ -186,6 +186,22 @@ fn download_prefix() -> &'static str {
     }
 }
 
+/// A step of the install flow: written to the hook's log in the `update-e2e` test build alone
+/// (the end-to-end job checks their order); nothing in any other build.
+#[cfg(feature = "updater")]
+fn e2e_step(step: &str) {
+    #[cfg(feature = "update-e2e")]
+    {
+        use lpk_gui::security::update_e2e;
+        let var = std::env::var_os(update_e2e::UPDATE_E2E_ENV);
+        if let Some(log) = update_e2e::armed(var.as_deref()) {
+            update_e2e::log(&log, &format!("step {step}"));
+        }
+    }
+    #[cfg(not(feature = "update-e2e"))]
+    let _ = step;
+}
+
 /// "Install and restart" on the update the check found (the command, and the `update-e2e`
 /// hook).
 #[cfg(feature = "updater")]
@@ -220,6 +236,7 @@ async fn install_pending(handle: &AppHandle) -> Result<bool, GuiError> {
             paths::dirs().portable,
             quit,
             install,
+            e2e_step,
         )
         .await;
         match flow {
@@ -1249,8 +1266,7 @@ pub fn run() -> i32 {
                                     use lpk_gui::security::update_e2e;
                                     let var = std::env::var_os(update_e2e::UPDATE_E2E_ENV);
                                     if let Some(log) = update_e2e::armed(var.as_deref()) {
-                                        update_e2e::log(&log, &format!("found {found}"));
-                                        update_e2e::log(&log, "installing");
+                                        update_e2e::log(&log, &format!("step check found {found}"));
                                         let out = install_pending(&handle).await;
                                         update_e2e::log(&log, &format!("outcome {out:?}"));
                                     }
@@ -1258,6 +1274,7 @@ pub fn run() -> i32 {
                             }
                         }
                         updates::Outcome::Failed(e) => {
+                            e2e_step(&format!("check failed: {e}"));
                             eprintln!("lpk-gui: the update check: {e}")
                         }
                         updates::Outcome::Unrecorded(e) => {
