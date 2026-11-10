@@ -511,8 +511,10 @@ jobs:
           workspaces: |
             . -> target
             workers -> ../target
-      - name: The residue script's own tests
-        run: python -I scripts/e7-residue.py --self-test
+      - name: The residue and version-bump scripts' own tests
+        run: |
+          python -I scripts/e7-residue.py --self-test
+          python -I scripts/e7-bump-version.py --self-test
       - name: tauri-cli through cargo (pinned)
         run: cargo install tauri-cli --version 2.12.4 --locked
       - name: Build the release binaries
