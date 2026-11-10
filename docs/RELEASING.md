@@ -161,3 +161,87 @@ with the CLI zip's `lpk.exe`, requires the profile again, removes it, and requir
 replaced by a file, it expects a non-zero exit, the error in the report and nothing new. The diffs in the job's log are
 the evidence. The two zips are uploaded as the artifact
 `zips-windows-x64`, kept three days.
+
+E7-5 adds the desktop (`%USERPROFILE%\Desktop`, recorded as `%DESKTOP%`, for shortcuts; the Start menu is under
+`%APPDATA%`) and `--allow-settings`: `%APPDATA%\LitePack\settings.json` and its folder, added and holding nothing
+else, which an uninstall without the "delete the application data" box keeps (`docs/notes/e7-design.md` section 3).
+Nothing else is allowed by it.
+
+### The NSIS installer (E7-5)
+
+The per-user installer is built through Tauri, on CI only: `crates/lpk-gui/tauri.nsis.conf.json` is a `--config`
+overlay (a JSON merge patch over `tauri.conf.json`; tauri-cli 2.12.4 also hands it to the build in `TAURI_CONFIG`), so
+the default `cargo tauri build` stays unbundled and never downloads NSIS:
+`cargo tauri build --ci --config tauri.nsis.conf.json -- --locked` in `crates/lpk-gui`, after the release binaries of
+`lpk-cli`, `lpk-check`, `lpk-worker-libarchive`, `lpk-shell` and the `workers/` workspace. It is unsigned until E7-1
+to E7-3 (D-160). Part 2 (E6-3, E7-3) adds the sparse package; part 1 registers the shell through route C.
+
+**Per user, no UAC.** `installMode` `currentUser`: `%LOCALAPPDATA%\LitePack`. The GUI's local state is in
+`%LOCALAPPDATA%\org.litepack.gui`, the settings in `%APPDATA%\LitePack`.
+
+**Layout.** `lpk-gui.exe` and `uninstall.exe` at the root; `bin\` with `lpk.exe`, `lpk-check.exe`, `lpk-worker.exe`
+and `lpk-worker-libarchive.exe` (the GUI starts its workers from `bin\` when `bin\lpk-worker.exe` exists, R307; only
+`bin\` goes on `Path`); `shell\<version>\lpk_shell.dll` (a DLL Explorer has loaded cannot be replaced, so each version
+has its own folder, R308; the overlay's folder name is tested against `tauri.conf.json`'s version);
+`THIRD-PARTY-NOTICES`, `LICENSE-APACHE`, `LICENSE-MIT`.
+
+**Hooks** (`crates/lpk-gui/installer.nsh`):
+- The refusals: below build 19045, a message naming Windows 10 22H2; the x64 installer on an ARM64 PC, a message
+  naming the ARM64 build. Both exit with error level 1 before any file is written and before an old version is
+  touched: in the GUI-init function (`MUI_CUSTOMFUNCTION_GUIINIT`, before the first page, so before the reinstall
+  page can run the old uninstaller) and, for silent installs, in a hidden section the hooks file defines ahead of the
+  template's, so before the WebView2 section (which could download Microsoft's bootstrapper) and before `SetOutPath`
+  creates the install folder. PREINSTALL repeats them and then removes the install folder only when it is empty. The
+  template sets no `ManifestSupportedOS`, so NSIS's default (every version up to Windows 10/11) is in the manifest and
+  `${AtLeastBuild}` sees the real build. CI has no Windows 10 runner: the version refusal is checked by hand on a
+  Windows 10 VM in E7-10; the ARM64 refusal runs on `windows-11-arm`.
+- PREINSTALL also cancels any LitePack `RunOnce` command still pending from an earlier uninstall or upgrade, so none
+  can touch a reinstall made before the next logon.
+- POSTINSTALL: `lpk-gui.exe --register-shell` (route C, the `.lpk` association, `GuiPath`, `bin\` on `Path`; docs/API.md;
+  an install path containing `%` or `;` is refused), a `WM_SETTINGCHANGE` broadcast for `Environment` (NSIS's
+  `SendMessage` with a 5-second timeout), and the removal of other versions' `shell\` folders.
+- PREUNINSTALL, skipped under `/UPDATE`: the "close LitePack" check first (a cancelled prompt leaves LitePack installed
+  and registered), then `--unregister-shell`, the broadcast, `bin\lpk-worker.exe --remove-profile`.
+- POSTUNINSTALL, skipped under `/UPDATE`: `%LOCALAPPDATA%\org.litepack.gui` always; `%APPDATA%\LitePack` only with the
+  box; Tauri's bookkeeping (`HKCU\Software\litepack\LitePack`, its `Installer Language`) always. The registry compares
+  names without case, so that key is `Software\LitePack\LitePack`, under LitePack's own `Software\LitePack`: it is
+  deleted, then `Software\LitePack` only when empty.
+- A shell DLL Explorer still holds (an old version's at an upgrade, this version's at an uninstall) is removed at the
+  next logon by a per-user `RunOnce` command that deletes `shell\<version>\lpk_shell.dll` and then removes
+  `shell\<version>`, `shell` and the install folder only if each is empty: never recursively, so nothing else in a
+  `/D=` folder can go. CI holds the DLL open during an uninstall, checks the command, runs it, and checks that a
+  reinstall cancels it.
+
+**Switches.** Tauri's: `/S` silent (installer and uninstaller), `/P` passive (a progress bar), `/NS` no shortcuts,
+`/D=<dir>` (last and unquoted), `/R` relaunch after a silent or passive install; `/UPDATE` and `/ARGS` are the
+updater's (under `/UPDATE` the old uninstaller does not run, the new files overwrite the old). LitePack's own:
+`/DELETEAPPDATA` on the uninstaller sets what the confirm page's "delete the application data" box sets
+(`$DeleteAppDataCheckboxState`, R309), so a silent uninstall can remove the settings.
+
+**The CI job `installer`** (`windows-2025`) builds the installer at the workspace's version N and at N+1 (an overlay
+with `version` 0.0.2 and `shell/0.0.2`), snapshots, installs N with `/S` and checks the layout, the notices, the
+Uninstall key, `Path` and route C (`scripts/e7-installer-check.py`, read-only), opens a `.lpk` and a `.zip` in the
+installed GUI (the profile required), runs `bin\lpk.exe` on the `.zip`, installs N+1 with `/S` while `bin\lpk.exe`
+runs (the outcome is printed), checks N+1's registration and a single `Path` entry, uninstalls with `/S`, and diffs
+against the first snapshot with `--allow-settings` and the profile not allowed. A second install and uninstall with
+`/DELETEAPPDATA` requires `%APPDATA%\LitePack` gone and nothing left but Windows' entries and the copy below.
+`--run-folder` names the install folder, so the entries keyed by `lpk-gui.exe`'s path (MuiCache, and Explorer's
+UserAssist record, ROT13 as Explorer stores it) match only there.
+
+The uninstaller also removes the jump list Windows keeps for LitePack's AppUserModelID (`org.litepack.gui`):
+`%APPDATA%\Microsoft\Windows\Recent\AutomaticDestinations\a233dcd0c3d36a7d.automaticDestinations-ms` (the name is the
+CRC-64 of the upper-cased ID; a test checks it against `tauri.conf.json`), its `CustomDestinations` twin, and the
+`org.litepack.gui` value of `HKCU\...\CurrentVersion\Search\JumplistData`.
+
+**The plugin's crates (R272, R325).** CI's `notices pins` job checks that the crates compiled into Tauri's NSIS
+plugin `nsis_tauri_utils.dll` are in `THIRD-PARTY-NOTICES` under their licences. The plugin's release tag publishes no
+`Cargo.lock`, so the job takes the tag's source archive (SHA-256 pinned in `notices/nsis/pin.toml`) and resolves its
+workspace with `cargo metadata --filter-platform i686-pc-windows-msvc` (nothing is built or run), following the
+normal dependencies of `nsis_tauri_utils` and never a proc-macro crate. This resolves **today's** versions from
+crates.io, not necessarily the ones the DLL was built with: crate names and licences rarely change, versions may.
+
+**Known limitation (R312).** A silent uninstall leaves `%LOCALAPPDATA%\Temp\~nsu<n>.tmp\Un.exe`: NSIS runs the
+uninstaller from that copy so that it can remove the install folder, and only a reboot can delete the copy, which a
+per-user uninstaller cannot schedule (it would need `MoveFileEx` with `MOVEFILE_DELAY_UNTIL_REBOOT`, an administrator's
+right). The residue check allows exactly that (`--allow-uninstaller-copy`: a `~nsu*.tmp` folder holding one `Un.exe`
+or `Un_<letter>.exe` and nothing else); Windows' own temporary-folder cleanup removes it later.

@@ -33,3 +33,10 @@ sha256 = "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709"
 # at the release tag.
 source = "https://github.com/tauri-apps/nsis-tauri-utils/tree/nsis_tauri_utils-v0.5.3"
 licence = "LICENSE_MIT"
+# R272 (E7-5): the plugin's source at the release tag (GitHub's tarball; raw.githubusercontent.com answered 404 for a
+# Cargo.lock at the repository's root, CI run 42485322281), whose Cargo.lock scripts/nsis-lock-check.py checks against
+# THIRD-PARTY-NOTICES. archive_sha256 is trust on first use: the SHA-256 that CI's first download printed, in run
+# 42486016300 (job 128747998530, 2026-11-08); a moved tag or a regenerated archive fails here. That archive holds no
+# Cargo.lock (only the root's and six crates' Cargo.toml), so the check reads the manifests' direct dependencies.
+archive = "https://github.com/tauri-apps/nsis-tauri-utils/archive/refs/tags/nsis_tauri_utils-v0.5.3.tar.gz"
+archive_sha256 = "34150c4cee737baca022a18d4b0483c5e8f684924249f0580fbef3d6dfe970d4"

@@ -110,6 +110,11 @@ jobs:
             cp "fuzz/target/x86_64-unknown-linux-gnu/release/$t" fuzz-bin/
           done
           du -sh fuzz-bin
+      - name: Self-test of the instrumentation check (instrumented C passes, plain C fails)
+        run: bash fuzz/check-instrumented.sh --self-test
+      - name: Every C library linked into a target is instrumented
+        # Reads the linked binaries (nm + objdump), not the flags above; fails naming binary and library.
+        run: bash fuzz/check-instrumented.sh --each-library-somewhere fuzz-bin/*
       - uses: actions/upload-artifact@v7
         with:
           name: fuzz-bin

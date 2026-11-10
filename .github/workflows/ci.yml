@@ -110,9 +110,14 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
           rustc --version
-      - name: NSIS archive and plugin match notices/nsis
+      - name: The two pin scripts bound every download the same way
         shell: bash
-        run: scripts/nsis-notice.sh --check
+        run: bash scripts/notice-curl-test.sh
+      - name: NSIS archive and plugin match notices/nsis; the plugin's crates are covered by the notices
+        shell: bash
+        run: |
+          python3 -I scripts/nsis-lock-check.py --self-test
+          scripts/nsis-notice.sh --check
       - name: Fetch the locked crates (webview2-com-sys's vendored loader)
         run: cargo fetch --locked
       - name: WebView2 licence text and loader libraries match notices/webview2.toml
@@ -504,6 +509,275 @@ jobs:
           path: ${{ env.ZIPS }}/*.zip
           retention-days: 3
           if-no-files-found: error
+
+  # E7-5 part 1: the per-user NSIS installer (route C, no sparse package; R303 to R308), built only here through the
+  # overlay crates/lpk-gui/tauri.nsis.conf.json (the default build stays unbundled), at the workspace's version N and
+  # at N+1 (0.0.2); installed, smoke-run, upgraded while bin\lpk.exe runs, uninstalled, with the residue diffs.
+  installer:
+    name: installer (windows-2025)
+    timeout-minutes: 120
+    runs-on: windows-2025
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Work folders
+        run: |
+          echo "SNAP=$(cygpath -m "$RUNNER_TEMP")/residue" >> "$GITHUB_ENV"
+          echo "SETUP=$(cygpath -m "$RUNNER_TEMP")/setup" >> "$GITHUB_ENV"
+          echo "W=$(cygpath -m "$RUNNER_TEMP")/work" >> "$GITHUB_ENV"
+          echo "INST=$(cygpath -m "$LOCALAPPDATA")/LitePack" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.7"
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: installer
+          workspaces: |
+            . -> target
+            workers -> ../target
+      - name: The residue and version-bump scripts' own tests
+        run: |
+          python -I scripts/e7-residue.py --self-test
+          python -I scripts/e7-bump-version.py --self-test
+      - name: tauri-cli through cargo (pinned)
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: Build the release binaries
+        run: |
+          cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive -p lpk-shell
+          (cd workers && cargo build --release --locked)
+          ls -la target/release/*.exe target/release/*.dll
+      - name: Build the installers N and N+1 through the overlay
+        working-directory: crates/lpk-gui
+        run: |
+          mkdir -p "$SETUP"
+          # -v: tauri-bundler runs makensis with -V4 and shows its output, so its warnings can be checked (R330).
+          cargo tauri build --ci -v --config tauri.nsis.conf.json -- --locked 2>&1 | tee "$SETUP/build-N.log"
+          cp target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe" 2>/dev/null \
+            || cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe"
+          python -I -c "
+          import json
+          c = json.load(open('tauri.nsis.conf.json'))
+          c['version'] = '0.0.2'
+          r = c['bundle']['resources']
+          for k, v in list(r.items()):
+              if v.startswith('shell/'):
+                  r[k] = 'shell/0.0.2/lpk_shell.dll'
+          json.dump(c, open('$SETUP/next.conf.json', 'w'), indent=2)
+          "
+          # N+1 entirely at 0.0.2 (R329): the workspaces' version too, so every binary differs from N's and the
+          # upgrade's overwrite of a running bin\lpk.exe is visible in the hashes.
+          (cd ../.. && python -I scripts/e7-bump-version.py 0.0.1 0.0.2 \
+            && cargo update --workspace --offline && (cd workers && cargo update --workspace --offline))
+          (cd ../.. && cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive -p lpk-shell \
+            && (cd workers && cargo build --release --locked))
+          rm -rf ../../target/release/bundle/nsis
+          cargo tauri build --ci -v --config "$SETUP/next.conf.json" -- --locked 2>&1 | tee "$SETUP/build-N1.log"
+          # R330: any makensis warning 6000 (an unknown variable, such as one declared after the hooks' include) fails
+          # the job; the logs must hold makensis's own output, so the grep cannot pass by seeing none.
+          for log in "$SETUP/build-N.log" "$SETUP/build-N1.log"; do
+            grep -q "Processing script file" "$log" || { echo "$log holds no makensis output"; exit 1; }
+            if grep -nE "warning 6000" "$log"; then echo "makensis warning 6000 in $log"; exit 1; fi
+          done
+          cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N1-setup.exe"
+          (cd ../../target/release && sha256sum lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe \
+            lpk-gui.exe > "$SETUP/N1.sha256")
+          cat "$SETUP/N1.sha256"
+          ls -la "$SETUP"
+      # For the ARM64 refusal job below, before any step that could fail.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-x64
+          path: ${{ env.SETUP }}/N-setup.exe
+          retention-days: 3
+          if-no-files-found: error
+      - name: Snapshot before
+        run: |
+          mkdir -p "$SNAP" "$W/in/sub"
+          python -I scripts/e7-residue.py snapshot "$SNAP/1-before.json"
+      - name: Install N silently and check the layout, the notices, the Uninstall key, Path and route C
+        run: |
+          "$SETUP/N-setup.exe" /S
+          ls -laR "$INST"
+          for f in lpk-gui.exe uninstall.exe THIRD-PARTY-NOTICES LICENSE-APACHE LICENSE-MIT bin/lpk.exe \
+            bin/lpk-check.exe bin/lpk-worker.exe bin/lpk-worker-libarchive.exe shell/0.0.1/lpk_shell.dll; do
+            test -f "$INST/$f" || { echo "missing: $f"; exit 1; }
+          done
+          cmp THIRD-PARTY-NOTICES "$INST/THIRD-PARTY-NOTICES"
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.1
+      - name: The installed GUI opens a .lpk and a .zip (the worker from bin\ makes the profile)
+        run: |
+          for i in 1 2 3; do echo "file $i" > "$W/in/sub/f$i.txt"; done
+          "$INST/bin/lpk.exe" a "$W/small.lpk" "$W/in"
+          "$INST/bin/lpk.exe" export "$W/small.lpk" "$W/small.zip"
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$W/report-$a.json" timeout 180 "$INST/lpk-gui.exe" "$W/$a"
+            report="$(cat "$W/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
+            --require-worker-profile --allow-settings --run-folder "$INST" > "$SNAP/2.txt" || true
+          cat "$SNAP/2.txt"
+          grep -q "PROFILE MISSING" "$SNAP/2.txt" && echo "no worker profile after the installed GUI" >> "$SNAP/verdicts" || true
+      - name: bin\lpk.exe on the .zip
+        run: |
+          "$INST/bin/lpk.exe" l "$W/small.zip"
+          "$INST/bin/lpk.exe" x "$W/small.zip" "$W/out-cli"
+          cmp "$W/in/sub/f2.txt" "$W/out-cli/sub/f2.txt"
+      - name: Upgrade to N+1 silently while bin\lpk.exe runs
+        run: |
+          python -I -c "import os; open(r'$W/big.bin','wb').write(os.urandom(400*1024*1024))"
+          "$INST/bin/lpk.exe" a "$W/big.lpk" "$W/big.bin" > "$W/running.log" 2>&1 &
+          pid=$!
+          sleep 3
+          kill -0 "$pid" && echo "bin\\lpk.exe is running (pid $pid) when the upgrade starts" \
+            || echo "bin\\lpk.exe had already exited when the upgrade started"
+          (cd "$INST/bin" && sha256sum lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe) > "$W/N.sha256"
+          rc=0; "$SETUP/N1-setup.exe" /S || rc=$?
+          echo "upgrade while lpk.exe ran: installer exit code $rc"
+          lpk_rc=0; wait "$pid" || lpk_rc=$?; echo "the running lpk.exe exited with $lpk_rc"; cat "$W/running.log"
+          ls -laR "$INST"
+          # Pending renames (read only): a file the installer could not replace would be queued here for a reboot.
+          python -I -c "
+          import winreg, sys
+          inst = sys.argv[1].replace('/', chr(92)).lower()
+          try:
+              with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\Session Manager') as k:
+                  ops = winreg.QueryValueEx(k, 'PendingFileRenameOperations')[0]
+          except OSError:
+              ops = []
+          hits = [o for o in ops if inst in o.lower()]
+          print(f'PendingFileRenameOperations: {len(ops)} entries, {len(hits)} under the install folder', hits)
+          " "$INST"
+          echo "N's bin\\ before the upgrade:"; cat "$W/N.sha256"
+          # R330: N's lpk.exe must differ from N+1's, so the overwrite check below cannot pass vacuously.
+          n_lpk="$(grep " lpk.exe$" "$W/N.sha256" | cut -d' ' -f1)"
+          n1_lpk="$(grep " lpk.exe$" "$SETUP/N1.sha256" | cut -d' ' -f1)"
+          test -n "$n_lpk" -a "$n_lpk" != "$n1_lpk" || { echo "N's and N+1's lpk.exe are the same ($n_lpk)"; exit 1; }
+          echo "bin\\ after the upgrade, against N+1's inputs:"
+          bad=0
+          while read -r sum name; do
+            got="$(sha256sum "$INST/bin/$name" 2>/dev/null | cut -d' ' -f1 || true)"
+            [ "$name" = lpk-gui.exe ] && got="$(sha256sum "$INST/lpk-gui.exe" | cut -d' ' -f1)"
+            echo "$name: installed $got, N+1 $sum"
+            [ "$got" = "$sum" ] || bad=1
+          done < "$SETUP/N1.sha256"
+          test "$rc" -eq 0 || { echo "the upgrade's installer failed with $rc"; exit 1; }
+          test "$bad" -eq 0 || { echo "a file of bin\\ or the GUI is not N+1's after the upgrade"; exit 1; }
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.2
+      - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
+        run: |
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST"
+          ls -la "$INST" 2>/dev/null || echo "install folder gone"
+          python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
+            --allow-settings --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall: residue" >> "$SNAP/verdicts"
+      - name: Install and uninstall with /DELETEAPPDATA (the box), the settings gone
+        run: |
+          "$SETUP/N-setup.exe" /S
+          mkdir -p "$APPDATA/LitePack"; echo '{}' > "$APPDATA/LitePack/settings.json"
+          "$INST/uninstall.exe" /S /DELETEAPPDATA
+          scripts/e7-wait-uninstaller.sh "$INST"
+          test ! -e "$APPDATA/LitePack" || echo "the box: %APPDATA%\\LitePack left" >> "$SNAP/verdicts"
+          python -I scripts/e7-residue.py snapshot "$SNAP/4-after-box.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-box.json" \
+            --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall with the box: residue" >> "$SNAP/verdicts"
+      # R329: a shell DLL held at uninstall (simulated: a process holds it open without delete sharing) leaves one
+      # RunOnce command that deletes the DLL and then only empty folders; a reinstall before the next logon cancels it.
+      - name: A held shell DLL at uninstall - the RunOnce command, then a reinstall cancelling it
+        run: |
+          dll="$INST/shell/0.0.1/lpk_shell.dll"
+          runonce() { python -I -c "
+          import winreg
+          try:
+              with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\RunOnce') as k:
+                  print(winreg.QueryValueEx(k, 'LitePack uninstall')[0])
+          except OSError:
+              pass
+          "; }
+          hold() { python -I -c "import sys, time; f = open(sys.argv[1], 'rb'); print('held', flush=True); time.sleep(900)" "$dll" & holder=$!; sleep 2; }
+          for part in logon reinstall; do
+            "$SETUP/N-setup.exe" /S
+            hold
+            "$INST/uninstall.exe" /S
+            scripts/e7-wait-uninstaller.sh "$INST" || true
+            ls -laR "$INST" || true
+            cmd="$(runonce)"
+            echo "RunOnce [LitePack uninstall] ($part): $cmd"
+            test -n "$cmd" || { echo "held DLL: no RunOnce command" >> "$SNAP/verdicts"; kill "$holder"; continue; }
+            case "$cmd" in *"/s"*|*"/S"*) echo "held DLL: the RunOnce command is recursive" >> "$SNAP/verdicts";; esac
+            kill "$holder"; wait "$holder" 2>/dev/null || true
+            if [ "$part" = logon ]; then
+              # What the next logon runs; then Windows deletes the value itself.
+              python -I -c "import subprocess, sys; print('exit', subprocess.run(sys.argv[1]).returncode)" "$cmd"
+              test ! -e "$INST" || { ls -laR "$INST"; echo "held DLL: the RunOnce command left $INST" >> "$SNAP/verdicts"; }
+              python -I -c "
+          import winreg
+          with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\RunOnce', 0, winreg.KEY_SET_VALUE) as k:
+              winreg.DeleteValue(k, 'LitePack uninstall')
+          "
+            else
+              "$SETUP/N-setup.exe" /S
+              test -z "$(runonce)" || echo "held DLL: a reinstall did not cancel the RunOnce command" >> "$SNAP/verdicts"
+              test -f "$INST/lpk-gui.exe" || echo "held DLL: the reinstall is incomplete" >> "$SNAP/verdicts"
+              "$INST/uninstall.exe" /S
+              scripts/e7-wait-uninstaller.sh "$INST"
+            fi
+          done
+      # R330: the held-DLL step's installs and uninstalls are compared with the first snapshot too.
+      - name: Residue after the held-DLL step, against the first snapshot (same allowances as the final diff)
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/5-after-held.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/5-after-held.json" \
+            --allow-uninstaller-copy --run-folder "$INST" || echo "after the held-DLL step: residue" >> "$SNAP/verdicts"
+      - name: Residue verdict
+        run: |
+          if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
+          echo "installer: installed, upgraded and uninstalled with nothing left but the allowed entries"
+
+  # E7-5: the x64 installer on an ARM64 PC names the ARM64 build and exits before writing a file (PREINSTALL,
+  # ${IsNativeARM64}). Silent, so the message box takes its /SD default.
+  installer-arm64-refusal:
+    name: installer refuses on ARM64 (windows-11-arm)
+    needs: installer
+    if: ${{ !cancelled() }}
+    timeout-minutes: 15
+    runs-on: windows-11-arm
+    # Without these, Git's bash turns `/S` into a path (S:/), and the installer runs with its UI and waits
+    # (the job's first run hung until its timeout).
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: installer-x64
+          path: setup
+      - name: The x64 installer exits with an error and installs nothing
+        run: |
+          inst="$(cygpath -m "$LOCALAPPDATA")/LitePack"
+          test ! -e "$inst" || { echo "already present: $inst"; exit 1; }
+          rc=0; timeout 300 ./setup/N-setup.exe /S || rc=$?
+          test "$rc" -ne 124 || { echo "the installer did not exit in five minutes"; tasklist; exit 1; }
+          echo "x64 installer on ARM64: exit code $rc"
+          ls -la "$inst" 2>/dev/null && { echo "files were written to $inst"; exit 1; }
+          test "$rc" -ne 0
+          echo "refused on ARM64 with nothing installed"
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:

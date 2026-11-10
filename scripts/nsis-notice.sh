@@ -103,8 +103,24 @@ status=0
 
 # GitHub's release downloads can answer 504 for minutes at a time (three of four CI runs on 2026-11-08 failed on
 # nsis.zip after curl's default --retry 3 backoff of about 7 s). Retry each download for up to three minutes, 20 s
-# apart; the job's 15-minute timeout covers all three downloads at their worst.
-fetch() { curl -fsSL --connect-timeout 30 --retry 6 --retry-delay 20 --retry-max-time 180 "$@"; }
+# apart (the limits below bound each attempt).
+#
+# One bound for every attempt of every download, identical in nsis-notice.sh and webview2-notice.sh
+# (scripts/notice-curl-test.sh compares the two `curl_limits=` blocks, so edit both together).
+# Sizes of the files (2026-11-08): nsis-3.13.zip 2,363,925 bytes, nsis_tauri_utils.dll 34,304, LICENSE_MIT 1,110,
+# the WebView2 package 8,973,762. Assumed rate of a normal download: 100 kB/s or better (GitHub and nuget.org
+# answer a runner in MB/s); the largest file then takes about 90 s, inside --max-time 240
+# (even at 50 kB/s it finishes in about 180 s).
+#   --speed-limit 10240 --speed-time 30   abort a transfer that stays under 10 kB/s for 30 s (a stall)
+#   --max-time 240                        abort any single attempt after 240 s, however it is going
+# curl counts a timeout as transient and retries it, so --retry-max-time 180 only stops NEW attempts; with the
+# per-attempt bound a download ends within 180 s + 240 s = 420 s at worst.
+# Worst case of the job: its four downloads (nsis-notice.sh: 3, webview2-notice.sh: 1) at 420 s each is 28 min,
+# more than the "notices pins" job's 15-minute timeout (.github/workflows/ci.yml): the 15-minute timeout still
+# decides, and the job fails closed there when downloads fail slowly one after the other.
+curl_limits=(--connect-timeout 30 --speed-limit 10240 --speed-time 30 --max-time 240
+  --retry 6 --retry-delay 20 --retry-max-time 180)
+fetch() { curl -fsSL "${curl_limits[@]}" "$@"; }
 
 fetch -o "$work/nsis.zip" "$(pin_value nsis url)"
 # The archive's hashes first: nothing is unpacked from an archive that is not the pinned one.
@@ -127,6 +143,57 @@ fetch -o "$work/LICENSE_MIT" \
 if ! cmp "$work/LICENSE_MIT" notices/nsis/nsis_tauri_utils-LICENSE_MIT; then
   echo "notices/nsis/nsis_tauri_utils-LICENSE_MIT differs from LICENSE_MIT at $tag" >&2
   status=1
+fi
+
+# R272 (E7-5): the plugin's source archive at its tag (GitHub's tarball). Nothing reads it before its SHA-256 matches
+# the pin. Then only its Cargo.toml files and a Cargo.lock, if any, are unpacked (text: never a source file, never a
+# .cargo/ directory), selected by name from its member list, and every crate the DLL links is looked up in
+# THIRD-PARTY-NOTICES.
+fetch -o "$work/source.tar.gz" "$(pin_value nsis_tauri_utils archive)"
+got="$(sha256sum "$work/source.tar.gz" | cut -d' ' -f1)"
+echo "[nsis_tauri_utils] source archive at $tag: SHA-256 $got"
+if [[ "$got" != "$(pin_value nsis_tauri_utils archive_sha256)" ]]; then
+  echo "[nsis_tauri_utils] source archive SHA-256 $got differs from archive_sha256 in $pin; nothing read" >&2
+  status=1
+else
+  mapfile -t members < <(tar -tzf "$work/source.tar.gz" | grep -E '^[^/]+/([^/]+/)*Cargo\.(toml|lock)$' \
+    | grep -vE '(^|/)\.cargo/|(^|/)\.\.(/|$)' || true)
+  echo "[nsis_tauri_utils] its Cargo manifests and locks (${#members[@]}):"
+  printf '  %s\n' "${members[@]}"
+  if [[ "${#members[@]}" -eq 0 ]]; then
+    echo "[nsis_tauri_utils] no Cargo.toml in the source at $tag" >&2
+    exit 1
+  fi
+  mkdir "$work/src"
+  tar -xzf "$work/source.tar.gz" -C "$work/src" -- "${members[@]}"
+  lock="$(find "$work/src" -name Cargo.lock | sort | head -1)"
+  if [[ -z "$lock" ]]; then
+    # R325: the tag publishes no Cargo.lock (CI run 42486016300). Cargo resolves the workspace's graph for the
+    # DLL's target (the NSIS x86-unicode plugin: i686-pc-windows-msvc) from its manifests and crates.io's index;
+    # `cargo metadata` builds and runs nothing (no build script, no proc-macro). Cargo needs a target file to
+    # discover a library, so an empty src/lib.rs of ours stands beside each manifest (never the archive's code).
+    # It runs from this repository's root with --manifest-path into the extracted tree: cargo reads configuration
+    # from the current directory upwards, so no .cargo/config.toml of the archive (none is unpacked anyway) could
+    # set a rustc wrapper or a registry, and this repository's rust-toolchain.toml applies. Today's versions, not
+    # necessarily the DLL's: names and licences are what is checked.
+    while IFS= read -r manifest; do
+      mkdir -p "$(dirname "$manifest")/src"
+      : > "$(dirname "$manifest")/src/lib.rs"
+    done < <(find "$work/src" -name Cargo.toml)
+    root="$(find "$work/src" -mindepth 1 -maxdepth 1 -type d | head -1)"
+    echo "[nsis_tauri_utils] no Cargo.lock at $tag: resolving its workspace with cargo metadata (today's versions)"
+    if cargo metadata --format-version 1 --filter-platform i686-pc-windows-msvc \
+        --manifest-path "$root/Cargo.toml" > "$work/metadata.json"; then
+      python3 -I scripts/nsis-lock-check.py --metadata "$work/metadata.json" THIRD-PARTY-NOTICES \
+        nsis_tauri_utils || status=1
+    else
+      echo "[nsis_tauri_utils] cargo metadata failed; the manifests' direct dependencies instead" >&2
+      python3 -I scripts/nsis-lock-check.py --manifests-only "$work/src" THIRD-PARTY-NOTICES || status=1
+      status=1
+    fi
+  else
+    python3 -I scripts/nsis-lock-check.py "$lock" THIRD-PARTY-NOTICES --manifests "$work/src" || status=1
+  fi
 fi
 
 if [[ "$status" -ne 0 ]]; then

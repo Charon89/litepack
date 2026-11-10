@@ -135,8 +135,17 @@ literal command line (not from an `@file`, not mixed with the verbs above or wit
 
 Exit codes: 0 done; 1 failed (what was written is in the record, `--unregister-shell` undoes it); 2 refused, with
 nothing written: a portable copy (the `portable` marker beside the exe) never registers, unknown or extra
-arguments (also one that is not valid Unicode), `lpk_shell.dll` missing beside the exe, or an install path
-containing `%` (Explorer would substitute it in the open command). Both verbs end with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
+arguments (also one that is not valid Unicode), `lpk_shell.dll` missing (both in `shell\<version>\`, the installed
+layout, and beside the exe), or an install path containing `%` (Explorer would substitute it in the open command) or `;` (it separates `Path`'s
+entries).
+Both verbs end with `SHChangeNotify(SHCNE_ASSOCCHANGED)`.
+
+In the installed layout (E7-5: `bin\lpk.exe` beside `lpk-gui.exe`), `--register-shell` also appends `<install>\bin` to
+`HKCU\Environment`'s `Path`: the value keeps its type (`REG_EXPAND_SZ` stays so), nothing is added when an entry
+already names that folder (compared without case and without a trailing `\`), and the addition is in the record.
+`--unregister-shell` removes exactly that entry, by value, and leaves the rest of `Path` as it was. The DLL registered
+is `shell\<version>\lpk_shell.dll` when that file exists, otherwise `lpk_shell.dll` beside the exe. The verbs do not
+broadcast `WM_SETTINGCHANGE`; the installer's hooks do.
 
 What `--register-shell` writes, all under `HKEY_CURRENT_USER`, values `REG_SZ` unless noted:
 
