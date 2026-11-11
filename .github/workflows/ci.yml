@@ -954,7 +954,9 @@ jobs:
           $k = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
           New-Item -Path $k -Force | Out-Null
           Set-ItemProperty -Path $k -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -Type DWord
-          auditpol /get /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}","{0CCE922C-69AE-11D9-BED3-505054503030}"
+          auditpol /get /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}"
+          auditpol /get /subcategory:"{0CCE922C-69AE-11D9-BED3-505054503030}"
+          $global:LASTEXITCODE = 0
       - name: N updates to N+1 - the hook presses Install and restart
         run: |
           state() {
