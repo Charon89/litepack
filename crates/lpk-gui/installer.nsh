@@ -25,9 +25,37 @@
   SendMessage 0xFFFF 0x001A 0 "STR:Environment" /TIMEOUT=5000
 !macroend
 
+; $R7 = "%" or "!" when $INSTDIR holds one (cmd would expand it), else "".
+!macro LPK_FIND_CMD_CHAR
+  StrCpy $R5 0
+  StrCpy $R7 ""
+  ${Do}
+    StrCpy $R6 $INSTDIR 1 $R5
+    ${If} $R6 == ""
+      ${Break}
+    ${EndIf}
+    ${If} $R6 == "%"
+    ${OrIf} $R6 == "!"
+      StrCpy $R7 $R6
+      ${Break}
+    ${EndIf}
+    IntOp $R5 $R5 + 1
+  ${Loop}
+!macroend
+
 ; The refusals: below build 19045, and the x64 installer on an ARM64 PC (an x64 lpk_shell.dll cannot load into ARM64
-; Explorer). Each exits with error level 1; `remove` names a folder to remove when empty (never recursively).
+; Explorer), and (R336) an install folder holding `%` or `!`, which the next-logon cleanup's cmd line would expand.
+; Each exits with error level 1; `remove` names a folder to remove when empty (never recursively).
 !macro LPK_REFUSE remove
+  !insertmacro LPK_FIND_CMD_CHAR
+  ${If} $R7 != ""
+    MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} cannot be installed in a folder whose path holds $R7: $INSTDIR" /SD IDOK
+    SetErrorLevel 1
+    !if "${remove}" != ""
+      RMDir "${remove}"
+    !endif
+    Quit
+  ${EndIf}
   ${IfNot} ${AtLeastBuild} 19045
     MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} needs Windows 10 version 22H2 (build 19045) or Windows 11." /SD IDOK
     SetErrorLevel 1
@@ -62,11 +90,11 @@ Section "-LitePack preflight"
   !insertmacro LPK_REFUSE ""
 SectionEnd
 
-; A LitePack RunOnce command left by an earlier uninstall or upgrade (a shell DLL Explorer held): a reinstall
-; before the next logon cancels them, so none can remove the new installation's files.
+; A LitePack RunOnce command left by an earlier uninstall or upgrade (a shell DLL Explorer held, a set-aside
+; executable still running): a reinstall before the next logon cancels them, so none can remove the new
+; installation's files.
 !macro LPK_CANCEL_PENDING_RUNONCE
-  ; Every value named `LitePack *` (R335: `LitePack uninstall <n>`, `LitePack shell <version> <n>`,
-  ; `LitePack bin <n>`).
+  ; Every value named `LitePack *` (`LitePack uninstall`, `LitePack shell <version>`, and any older name).
   StrCpy $R5 0
   ${Do}
     EnumRegValue $R6 HKCU "${LPK_RUNONCE}" $R5
@@ -82,49 +110,56 @@ SectionEnd
   ${Loop}
 !macroend
 
-; R335: Windows runs a Run/RunOnce command line of at most 260 characters, so each next-logon cleanup is one value
-; per action, named `<group> <n>` in the order they must run (values run in the order they were written, which is
-; also their name order). The group's longest command (its `del`) is measured first: over 260 characters (a very long
-; install path), no value of the group is written, and the next install's cleanup removes the leftover instead.
-!define LPK_CMD '"$SYSDIR\cmd.exe" /d /c'
+; R335, R336: Windows runs a Run/RunOnce command line of at most 260 characters, and documents neither the order of
+; the values nor that one finishes before the next starts. So each next-logon cleanup is one value whose single cmd
+; line runs its steps in sequence: it changes to $INSTDIR once (`&&`: nothing runs when that folder is gone), then
+; uses relative paths; deletes first, then non-recursive rmdirs. The design does not depend on the order of values.
+; The whole stored string is measured: over 260 characters (a very long install path), no value is written and what
+; is left stays until the next install's cleanup. `/v:off`: no delayed expansion of `!`; a path holding `%` or `!` is
+; refused before anything is written (LPK_REFUSE), and no value is ever written for one.
+!define LPK_CMD '"$SYSDIR\cmd.exe" /d /v:off /c'
 
-; One shell\<version> folder Explorer still holds: the DLL, then the empty folders up to $INSTDIR, each
-; non-recursively (no `rmdir /s`: nothing else is ever deleted).
-!macro LPK_RUNONCE_REMOVE_SHELL name version
-  StrCpy $R8 '${LPK_CMD} del /f /q "$INSTDIR\shell\${version}\lpk_shell.dll"'
-  StrLen $R7 $R8
-  ${If} $R7 <= 260
-    WriteRegStr HKCU "${LPK_RUNONCE}" "${name} 1" $R8
-    WriteRegStr HKCU "${LPK_RUNONCE}" "${name} 2" '${LPK_CMD} rmdir "$INSTDIR\shell\${version}"'
-    WriteRegStr HKCU "${LPK_RUNONCE}" "${name} 3" '${LPK_CMD} rmdir "$INSTDIR\shell"'
-    WriteRegStr HKCU "${LPK_RUNONCE}" "${name} 4" '${LPK_CMD} rmdir "$INSTDIR"'
+; Writes the RunOnce value `name` = `command` when it is at most 260 characters and $INSTDIR holds no `%` or `!`.
+!macro LPK_RUNONCE_WRITE name command
+  !insertmacro LPK_FIND_CMD_CHAR
+  StrCpy $R8 '${command}'
+  StrLen $R6 $R8
+  ${If} $R6 <= 260
+  ${AndIf} $R7 == ""
+    WriteRegStr HKCU "${LPK_RUNONCE}" "${name}" $R8
   ${Else}
-    DetailPrint "LitePack: the install path is too long for a RunOnce command; shell\${version} stays until the next install"
+    DetailPrint "LitePack: no RunOnce command for this install path; what is left stays until the next install"
   ${EndIf}
 !macroend
 
-; bin\'s set-aside executables (below) that a process still held at uninstall: those files, then bin\ and $INSTDIR
-; when empty, each non-recursively.
-!macro LPK_RUNONCE_REMOVE_SET_ASIDE
-  StrCpy $R8 '${LPK_CMD} del /f /q "$INSTDIR\bin\*.old-*"'
-  StrLen $R7 $R8
-  ${If} $R7 <= 260
-    WriteRegStr HKCU "${LPK_RUNONCE}" "LitePack bin 1" $R8
-    WriteRegStr HKCU "${LPK_RUNONCE}" "LitePack bin 2" '${LPK_CMD} rmdir "$INSTDIR\bin"'
-    WriteRegStr HKCU "${LPK_RUNONCE}" "LitePack bin 3" '${LPK_CMD} rmdir "$INSTDIR"'
-  ${Else}
-    DetailPrint "LitePack: the install path is too long for a RunOnce command; bin\*.old-* stay until the next install"
-  ${EndIf}
+; After an upgrade: an old shell\<version> folder Explorer still holds (the install stays, so only that folder goes).
+!macro LPK_RUNONCE_REMOVE_OLD_SHELL version
+  !insertmacro LPK_RUNONCE_WRITE "LitePack shell ${version}" \
+    '${LPK_CMD} cd /d "$INSTDIR" && (del /f /q shell\${version}\lpk_shell.dll & rmdir shell\${version})'
 !macroend
 
-; R334: an upgrade while a bin\ executable runs (an lpk.exe compressing, the workers it started). Windows refuses to
-; overwrite a running executable's file, and NSIS's File would then skip it in a silent install (its error box's
+; After an uninstall: this version's shell DLL Explorer still holds and bin\'s set-aside executables still running,
+; then the empty folders up to $INSTDIR (named by its last component from its parent), each non-recursively.
+!macro LPK_RUNONCE_REMOVE_INSTALL
+  ${GetFileName} "$INSTDIR" $R4
+  !insertmacro LPK_RUNONCE_WRITE "LitePack uninstall" \
+    '${LPK_CMD} cd /d "$INSTDIR" && (del /f /q shell\${VERSION}\lpk_shell.dll bin\lpk*.exe.old-* & rmdir shell\${VERSION} & rmdir shell & rmdir bin & cd .. & rmdir "$R4")'
+!macroend
+
+; R334, R336: an upgrade while a bin\ executable runs (an lpk.exe compressing, the workers it started). Windows refuses
+; to overwrite a running executable's file, and NSIS's File would then skip it in a silent install (its error box's
 ; silent default is Ignore), leaving a half-updated bin\. Windows does let a running executable's file be renamed, so
-; before any file is written each existing bin\<name> is renamed to <name>.old-<n> (the first free n); the renamed
-; files no process holds are deleted at once, the held ones stay until the next install or the uninstall (or the next
-; logon after that uninstall) removes them. Every rename is done before any delete, so a rename that fails renames the
-; others back and the installer stops with exit code 2 and the installed version untouched.
-!macro LPK_SET_ASIDE name
+; before any file is written each existing bin\<name> is renamed to <name>.old-<n> (the first free n), recorded in
+; its LpkOld* variable. A rename that fails renames the others back and the installer stops with exit code 2 and the
+; installed version untouched. The set-aside copies are deleted only in POSTINSTALL, once every new file exists
+; (LPK_FINISH_SET_ASIDE); held ones stay until the next install or the uninstall removes them.
+Var LpkOld1
+Var LpkOld2
+Var LpkOld3
+Var LpkOld4
+
+!macro LPK_SET_ASIDE name var
+  StrCpy ${var} ""
   ${If} $R1 == ""
   ${AndIf} ${FileExists} "$INSTDIR\bin\${name}"
     StrCpy $R2 1
@@ -136,39 +171,109 @@ SectionEnd
     ${If} ${Errors}
       StrCpy $R1 "${name}"
     ${Else}
-      Push "${name}.old-$R2"
-      Push "${name}"
-      IntOp $R4 $R4 + 1
+      StrCpy ${var} "${name}.old-$R2"
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+; Puts a set-aside copy back as bin\<name>; a rename that fails is named in $R3.
+!macro LPK_PUT_BACK name var
+  ${If} ${var} != ""
+    ClearErrors
+    Rename "$INSTDIR\bin\${var}" "$INSTDIR\bin\${name}"
+    ${If} ${Errors}
+      StrCpy $R3 "$R3 bin\${name} (still bin\${var})"
+    ${Else}
+      StrCpy ${var} ""
     ${EndIf}
   ${EndIf}
 !macroend
 
 !macro LPK_SET_ASIDE_BIN
-  ; Leftovers of an earlier upgrade whose process has exited since.
-  Delete "$INSTDIR\bin\*.old-*"
+  ; Leftovers of an earlier install whose process has exited since.
+  Delete "$INSTDIR\bin\lpk*.exe.old-*"
   StrCpy $R1 ""
-  StrCpy $R4 0
-  !insertmacro LPK_SET_ASIDE "lpk.exe"
-  !insertmacro LPK_SET_ASIDE "lpk-check.exe"
-  !insertmacro LPK_SET_ASIDE "lpk-worker.exe"
-  !insertmacro LPK_SET_ASIDE "lpk-worker-libarchive.exe"
-  ${DoWhile} $R4 > 0
-    Pop $R2
-    Pop $R3
-    ${If} $R1 != ""
-      Rename "$INSTDIR\bin\$R3" "$INSTDIR\bin\$R2"
-    ${Else}
-      Delete "$INSTDIR\bin\$R3"
-      ${If} ${FileExists} "$INSTDIR\bin\$R3"
-        DetailPrint "LitePack: bin\$R2 is in use; set aside as $R3 until it exits"
-      ${EndIf}
-    ${EndIf}
-    IntOp $R4 $R4 - 1
-  ${Loop}
+  StrCpy $R3 ""
+  !insertmacro LPK_SET_ASIDE "lpk.exe" $LpkOld1
+  !insertmacro LPK_SET_ASIDE "lpk-check.exe" $LpkOld2
+  !insertmacro LPK_SET_ASIDE "lpk-worker.exe" $LpkOld3
+  !insertmacro LPK_SET_ASIDE "lpk-worker-libarchive.exe" $LpkOld4
   ${If} $R1 != ""
-    MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not replace bin\$R1. Close the programs using it, then run the installer again." /SD IDOK
+    !insertmacro LPK_PUT_BACK "lpk.exe" $LpkOld1
+    !insertmacro LPK_PUT_BACK "lpk-check.exe" $LpkOld2
+    !insertmacro LPK_PUT_BACK "lpk-worker.exe" $LpkOld3
+    !insertmacro LPK_PUT_BACK "lpk-worker-libarchive.exe" $LpkOld4
+    ${If} $R3 == ""
+      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not replace bin\$R1. Close the programs using it, then run the installer again. Nothing was changed." /SD IDOK
+    ${Else}
+      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not replace bin\$R1, and could not put back:$R3. Rename those files back by hand, or run the installer again." /SD IDOK
+    ${EndIf}
     SetErrorLevel 2
     Quit
+  ${EndIf}
+!macroend
+
+; POSTINSTALL: when every new bin\ executable exists, the set-aside copies are deleted (a held one stays, reported);
+; when one is missing (its File failed), its copy is put back, the others are kept, and the install exits 2 naming it.
+!macro LPK_DROP_SET_ASIDE var
+  ${If} ${var} != ""
+    Delete "$INSTDIR\bin\${var}"
+    ${If} ${FileExists} "$INSTDIR\bin\${var}"
+      DetailPrint "LitePack: bin\${var} is in use; it is removed by the next install or the uninstall"
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+!macro LPK_MISSING name
+  ${IfNot} ${FileExists} "$INSTDIR\bin\${name}"
+    StrCpy $R1 "$R1 bin\${name}"
+  ${EndIf}
+!macroend
+
+!macro LPK_FINISH_SET_ASIDE
+  StrCpy $R1 ""
+  StrCpy $R3 ""
+  !insertmacro LPK_MISSING "lpk.exe"
+  !insertmacro LPK_MISSING "lpk-check.exe"
+  !insertmacro LPK_MISSING "lpk-worker.exe"
+  !insertmacro LPK_MISSING "lpk-worker-libarchive.exe"
+  ${If} $R1 == ""
+    !insertmacro LPK_DROP_SET_ASIDE $LpkOld1
+    !insertmacro LPK_DROP_SET_ASIDE $LpkOld2
+    !insertmacro LPK_DROP_SET_ASIDE $LpkOld3
+    !insertmacro LPK_DROP_SET_ASIDE $LpkOld4
+  ${Else}
+    ${IfNot} ${FileExists} "$INSTDIR\bin\lpk.exe"
+      !insertmacro LPK_PUT_BACK "lpk.exe" $LpkOld1
+    ${EndIf}
+    ${IfNot} ${FileExists} "$INSTDIR\bin\lpk-check.exe"
+      !insertmacro LPK_PUT_BACK "lpk-check.exe" $LpkOld2
+    ${EndIf}
+    ${IfNot} ${FileExists} "$INSTDIR\bin\lpk-worker.exe"
+      !insertmacro LPK_PUT_BACK "lpk-worker.exe" $LpkOld3
+    ${EndIf}
+    ${IfNot} ${FileExists} "$INSTDIR\bin\lpk-worker-libarchive.exe"
+      !insertmacro LPK_PUT_BACK "lpk-worker-libarchive.exe" $LpkOld4
+    ${EndIf}
+    ${If} $R3 == ""
+      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not write$R1; the previous version's copies were put back. Run the installer again." /SD IDOK
+    ${Else}
+      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not write$R1, and could not put back:$R3. Run the installer again." /SD IDOK
+    ${EndIf}
+    SetErrorLevel 2
+  ${EndIf}
+!macroend
+
+; R336: an uninstall while a bin\ executable runs. Each one that cannot be deleted is renamed to <name>.old-<n>, so the
+; template's removal finds nothing to skip and the set-aside copy is removed by the `LitePack uninstall` command.
+!macro LPK_UNINSTALL_SET_ASIDE name
+  Delete "$INSTDIR\bin\${name}"
+  ${If} ${FileExists} "$INSTDIR\bin\${name}"
+    StrCpy $R2 1
+    ${DoWhile} ${FileExists} "$INSTDIR\bin\${name}.old-$R2"
+      IntOp $R2 $R2 + 1
+    ${Loop}
+    Rename "$INSTDIR\bin\${name}" "$INSTDIR\bin\${name}.old-$R2"
   ${EndIf}
 !macroend
 
@@ -182,7 +287,7 @@ SectionEnd
     ${AndIf} $1 != "${VERSION}"
       RMDir /r "$INSTDIR\shell\$1"
       ${If} ${FileExists} "$INSTDIR\shell\$1\*"
-        !insertmacro LPK_RUNONCE_REMOVE_SHELL "LitePack shell $1" "$1"
+        !insertmacro LPK_RUNONCE_REMOVE_OLD_SHELL "$1"
       ${EndIf}
     ${EndIf}
     FindNext $0 $1
@@ -248,6 +353,8 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; R336: the set-aside copies go only now that the new files exist.
+  !insertmacro LPK_FINISH_SET_ASIDE
   ; Route C, the .lpk association, GuiPath and bin\ on Path (R306), all by the Rust code.
   ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --register-shell' $0
   ${If} $0 != 0
@@ -260,7 +367,7 @@ FunctionEnd
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; bin\'s set-aside executables (R334) whose process has exited, before the template removes bin\ when empty.
-  Delete "$INSTDIR\bin\*.old-*"
+  Delete "$INSTDIR\bin\lpk*.exe.old-*"
   ${If} $UpdateMode <> 1
     StrCpy $R9 $PassiveMode
     Call un.LpkCheckRunning
@@ -274,6 +381,11 @@ FunctionEnd
     !insertmacro LPK_BROADCAST_ENVIRONMENT
     ExecWait '"$INSTDIR\bin\lpk-worker.exe" --remove-profile' $0
     DetailPrint "LitePack: lpk-worker --remove-profile exited with $0"
+    ; R336: an executable still running is renamed aside, for the `LitePack uninstall` command.
+    !insertmacro LPK_UNINSTALL_SET_ASIDE "lpk.exe"
+    !insertmacro LPK_UNINSTALL_SET_ASIDE "lpk-check.exe"
+    !insertmacro LPK_UNINSTALL_SET_ASIDE "lpk-worker.exe"
+    !insertmacro LPK_UNINSTALL_SET_ASIDE "lpk-worker-libarchive.exe"
   ${EndIf}
 !macroend
 
@@ -298,14 +410,12 @@ FunctionEnd
     Delete "$APPDATA\Microsoft\Windows\Recent\AutomaticDestinations\a233dcd0c3d36a7d.automaticDestinations-ms"
     Delete "$APPDATA\Microsoft\Windows\Recent\CustomDestinations\a233dcd0c3d36a7d.customDestinations-ms"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Search\JumplistData" "${BUNDLEID}"
-    ; A shell DLL Explorer still holds (this version's, after the template removed the rest): removed at the next
-    ; logon, with the then-empty folders, never recursively.
+    ; A shell DLL Explorer still holds (this version's, after the template removed the rest) and set-aside executables
+    ; still running (R336): removed at the next logon by one command, with the then-empty folders, never recursively.
+    Delete "$INSTDIR\bin\lpk*.exe.old-*"
     ${If} ${FileExists} "$INSTDIR\shell\${VERSION}\lpk_shell.dll"
-      !insertmacro LPK_RUNONCE_REMOVE_SHELL "LitePack uninstall" "${VERSION}"
-    ${EndIf}
-    ; A set-aside executable still running (R334): removed at the next logon, with bin\ and $INSTDIR when empty.
-    ${If} ${FileExists} "$INSTDIR\bin\*.old-*"
-      !insertmacro LPK_RUNONCE_REMOVE_SET_ASIDE
+    ${OrIf} ${FileExists} "$INSTDIR\bin\lpk*.exe.old-*"
+      !insertmacro LPK_RUNONCE_REMOVE_INSTALL
     ${EndIf}
   ${EndIf}
 !macroend

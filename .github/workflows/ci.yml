@@ -611,23 +611,9 @@ jobs:
       # The .sha256 files are read through scripts/e7-sha256.py: Git Bash's sha256sum writes `<hash> *<name>`.
       - name: Upgrade to N+1 silently while bin\lpk.exe runs
         run: |
-          # About 256 MiB of text-like data (words of a fixed random vocabulary, Zipf-weighted, seed 334): no chunk
-          # repeats, so dedup cannot shorten it, and single-threaded LZMA takes minutes on it.
-          python -I -c "
-          import random, sys
-          r = random.Random(334)
-          vocab = [''.join(r.choices('etaoinshrdlucmfwypvbgkjqxz', k=r.randint(2, 10))) for _ in range(20000)]
-          weights = [1 / (i + 1) for i in range(len(vocab))]
-          with open(sys.argv[1], 'wb') as f:
-              n = 0
-              while n < 256 * 1024 * 1024:
-                  words = r.choices(vocab, weights, k=200000)
-                  for i in range(0, len(words), 12):
-                      words[i] += chr(10) if i % 96 == 0 else ','
-                  b = ' '.join(words).encode()
-                  f.write(b)
-                  n += len(b)
-          " "$W/big.txt"
+          # About 256 MiB of text-like data (scripts/e7-gen-text.py): no chunk repeats, so dedup cannot shorten it,
+          # and single-threaded LZMA takes minutes on it.
+          python -I scripts/e7-gen-text.py "$W/big.txt" 256
           ls -la "$W/big.txt"
           start=$SECONDS
           "$INST/bin/lpk.exe" a --balanced --threads 1 "$W/big.lpk" "$W/big.txt" > "$W/running.log" 2>&1 &
@@ -678,12 +664,10 @@ jobs:
           done
           test "$rc" -eq 0 || { echo "the upgrade's installer failed with $rc"; exit 1; }
           test "$bad" -eq 0 || { echo "a file of bin\\ or the GUI is not N+1's after the upgrade"; exit 1; }
-          if [ "$still" = yes ]; then
-            grep -qxF "lpk.exe.old-1" <<<"$set_aside" \
-              || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
-          else
-            echo "note: bin\\lpk.exe exited while the upgrade ran (it was running when the upgrade began)"
-          fi
+          # R336: a pass must prove the set-aside, so lpk.exe must still run when the upgrade ends.
+          test "$still" = yes || { echo "bin\\lpk.exe exited while the upgrade ran; the set-aside is not shown"; exit 1; }
+          grep -qxF "lpk.exe.old-1" <<<"$set_aside" \
+            || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
           test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the upgrade"; exit 1; }
           "$INST/bin/lpk.exe" t "$W/big.lpk" || { echo "the running lpk.exe's archive does not test as valid"; exit 1; }
           echo "the running lpk.exe's archive tests as valid with N+1's lpk.exe"
@@ -709,9 +693,9 @@ jobs:
           python -I scripts/e7-residue.py snapshot "$SNAP/4-after-box.json"
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-box.json" \
             --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall with the box: residue" >> "$SNAP/verdicts"
-      # R329, R335: a shell DLL held at uninstall (simulated: a process holds it open without delete sharing) leaves
-      # one RunOnce value per action (`LitePack uninstall <n>`), each at most 260 characters: the DLL's delete, then
-      # only empty folders; a reinstall before the next logon cancels them. scripts/e7-runonce.py lists them (LF only)
+      # R329, R335, R336: a shell DLL held at uninstall (simulated: a process holds it open without delete sharing)
+      # leaves one RunOnce value, `LitePack uninstall`, of at most 260 characters: one cmd line that deletes the DLL,
+      # then only empty folders; a reinstall before the next logon cancels it. scripts/e7-runonce.py lists them (LF only)
       # and runs them as the next logon would.
       - name: A held shell DLL at uninstall - the RunOnce commands, then a reinstall cancelling them
         run: |
@@ -727,8 +711,8 @@ jobs:
               || echo "held DLL: a RunOnce command over 260 characters ($part)" >> "$SNAP/verdicts"
             echo "RunOnce LitePack values ($part):"; echo "$cmds"
             test -n "$cmds" || { echo "held DLL: no RunOnce command" >> "$SNAP/verdicts"; kill "$holder"; continue; }
-            case "$cmds" in *"/s"*|*"/S"*|*"&"*) echo "held DLL: a RunOnce command is recursive or chained" >> "$SNAP/verdicts";; esac
-            grep -qE "^LitePack uninstall 1[[:space:]]" <<<"$cmds" || echo "held DLL: no 'LitePack uninstall 1' value" >> "$SNAP/verdicts"
+            case "$cmds" in *"/s"*|*"/S"*) echo "held DLL: a RunOnce command is recursive" >> "$SNAP/verdicts";; esac
+            grep -qE "^LitePack uninstall[[:space:]]" <<<"$cmds" || echo "held DLL: no 'LitePack uninstall' value" >> "$SNAP/verdicts"
             kill "$holder"; wait "$holder" 2>/dev/null || true
             if [ "$part" = logon ]; then
               # What the next logon runs, in order; each value is deleted after it ran, as Windows does.
@@ -743,6 +727,36 @@ jobs:
               scripts/e7-wait-uninstaller.sh "$INST"
             fi
           done
+      # R336: an uninstall while bin\lpk.exe runs. The uninstaller renames it aside (bin\lpk.exe.old-1) and leaves one
+      # RunOnce value, `LitePack uninstall`, that removes it and the then-empty folders; run as the next logon would
+      # (scripts/e7-runonce.py, in a seeded random order), nothing of the install is left.
+      - name: Uninstall while bin\lpk.exe runs, then the next logon's RunOnce command
+        run: |
+          "$SETUP/N-setup.exe" /S
+          python -I scripts/e7-gen-text.py "$W/big2.txt" 128
+          "$INST/bin/lpk.exe" a --balanced --threads 1 "$W/big2.lpk" "$W/big2.txt" > "$W/running2.log" 2>&1 &
+          pid=$!
+          sleep 10
+          kill -0 "$pid" 2>/dev/null || {
+            cat "$W/running2.log"
+            echo "lpk.exe exited before the uninstall began; the test cannot show an uninstall while it runs"; exit 1; }
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST" || true
+          kill -0 "$pid" 2>/dev/null || { echo "lpk.exe exited during the uninstall; the set-aside is not shown"; exit 1; }
+          echo "bin\\lpk.exe still running after the uninstall; what is left:"; ls -laR "$INST" || true
+          test -f "$INST/bin/lpk.exe.old-1" || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
+          cmds="$(python -I scripts/e7-runonce.py show)" \
+            || { echo "$cmds"; echo "a RunOnce command over 260 characters"; exit 1; }
+          echo "RunOnce LitePack values:"; echo "$cmds"
+          grep -qE "^LitePack uninstall[[:space:]]" <<<"$cmds" || { echo "no 'LitePack uninstall' value"; exit 1; }
+          lpk_rc=0; wait "$pid" || lpk_rc=$?
+          echo "the running lpk.exe exited with $lpk_rc"; cat "$W/running2.log"
+          test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the uninstall"; exit 1; }
+          python -I scripts/e7-runonce.py run
+          test ! -e "$INST" || { ls -laR "$INST"; echo "the RunOnce command left $INST"; exit 1; }
+          test -z "$(python -I scripts/e7-runonce.py show)" || { echo "RunOnce values left after the run"; exit 1; }
+          rm -f "$W/big2.txt" "$W/big2.lpk"
+          echo "uninstall while lpk.exe ran: nothing of the install left after the next logon's command"
       # R330: the held-DLL step's installs and uninstalls are compared with the first snapshot too.
       - name: Residue after the held-DLL step, against the first snapshot (same allowances as the final diff)
         run: |

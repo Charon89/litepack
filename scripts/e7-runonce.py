@@ -1,17 +1,21 @@
 """E7-5 (CI's `installer` job; Windows only): LitePack's per-user RunOnce values (R335).
 
-The installer writes one value per cleanup action, named `LitePack <group> <n>` (installer.nsh), because Windows
-runs a Run/RunOnce command line of at most 260 characters.
+The installer writes one value per cleanup (`LitePack uninstall`, `LitePack shell <version>`; installer.nsh), each a
+single cmd line of at most 260 characters (Windows' limit for Run/RunOnce) that runs its steps in sequence. Windows
+documents no order between values, so `run` runs them in a seeded random order (E7_RUNONCE_SEED, default 336): CI
+cannot depend on name order.
 
     python -I scripts/e7-runonce.py show    each `LitePack*` value as `<name><TAB><length><TAB><command>`, in name
                                             order; exit 1, naming the value, if any is over 260 characters
-    python -I scripts/e7-runonce.py run     what the next logon does: each value in name order, its command run,
-                                            then the value deleted (writes HKCU: CI only)
+    python -I scripts/e7-runonce.py run     what the next logon does: each value, in a seeded random order, run as
+                                            one command line, then deleted (writes HKCU: CI only)
     python -I scripts/e7-runonce.py --self-test
 
 Output is LF only (bash's `$(...)` keeps a CR).
 """
 
+import os
+import random
 import re
 import subprocess
 import sys
@@ -64,7 +68,9 @@ def show():
 def run():
     import winreg
 
-    for name, data in values():
+    vals = values()
+    random.Random(int(os.environ.get("E7_RUNONCE_SEED", "336"))).shuffle(vals)
+    for name, data in vals:
         rc = subprocess.run(data).returncode
         emit(f"{name}: exit {rc}")
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, KEY, 0, winreg.KEY_SET_VALUE) as k:
