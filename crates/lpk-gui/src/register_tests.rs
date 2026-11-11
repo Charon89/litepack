@@ -720,7 +720,7 @@ fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
     for cmd in &commands {
         assert!(!cmd.contains("/s"), "{cmd}");
         let body = cmd
-            .strip_prefix(r#"cd /d "$instdir" && ("#)
+            .strip_prefix(r#"cd /d "$r3" && ("#)
             .and_then(|b| b.strip_suffix(')'))
             .unwrap_or_else(|| panic!("{cmd}"));
         let mut parts = body.split(" & ");
@@ -751,6 +751,10 @@ fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
     assert!(at("LPK_FIND_CMD_CHAR") < at("WriteRegStr"));
     assert!(at("StrLen $R6 $R8") < at("WriteRegStr"));
     assert!(at("${If} $R6 <= 260") < at("${AndIf} $R7 == \"\""));
+    // R338: the full path first ($R3 = $INSTDIR), then its short form when the full string is over 260.
+    assert!(at("StrCpy $R3 $INSTDIR") < at("${If} $R6 > 260"));
+    assert!(at("${If} $R6 > 260") < at("GetFullPathName /SHORT $R3 $INSTDIR"));
+    assert!(at("GetFullPathName /SHORT $R3 $INSTDIR") < at("${If} $R6 <= 260"));
     assert!(at("${AndIf} $R7 == \"\"") < at("WriteRegStr"));
     assert_eq!(
         nsh.matches("WriteRegStr HKCU \"${LPK_RUNONCE}\"").count(),

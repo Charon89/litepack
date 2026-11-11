@@ -120,10 +120,21 @@ SectionEnd
 !define LPK_CMD '"$SYSDIR\cmd.exe" /d /v:off /c'
 
 ; Writes the RunOnce value `name` = `command` when it is at most 260 characters and $INSTDIR holds no `%` or `!`.
+; `command` names the install folder as $R3: first its full path; over 260 characters (R338: a long profile name, a
+; long version), its short (8.3) form from GetFullPathName /SHORT; when that does not fit either, or the volume keeps
+; no short names, nothing is written.
 !macro LPK_RUNONCE_WRITE name command
   !insertmacro LPK_FIND_CMD_CHAR
+  StrCpy $R3 $INSTDIR
   StrCpy $R8 '${command}'
   StrLen $R6 $R8
+  ${If} $R6 > 260
+    GetFullPathName /SHORT $R3 $INSTDIR
+    ${If} $R3 != ""
+      StrCpy $R8 '${command}'
+      StrLen $R6 $R8
+    ${EndIf}
+  ${EndIf}
   ${If} $R6 <= 260
   ${AndIf} $R7 == ""
     WriteRegStr HKCU "${LPK_RUNONCE}" "${name}" $R8
@@ -135,7 +146,7 @@ SectionEnd
 ; After an upgrade: an old shell\<version> folder Explorer still holds (the install stays, so only that folder goes).
 !macro LPK_RUNONCE_REMOVE_OLD_SHELL version
   !insertmacro LPK_RUNONCE_WRITE "LitePack shell ${version}" \
-    '${LPK_CMD} cd /d "$INSTDIR" && (del /f /q shell\${version}\lpk_shell.dll & rmdir shell\${version})'
+    '${LPK_CMD} cd /d "$R3" && (del /f /q shell\${version}\lpk_shell.dll & rmdir shell\${version})'
 !macroend
 
 ; After an uninstall: this version's shell DLL Explorer still holds and bin\'s set-aside executables still running,
@@ -143,7 +154,7 @@ SectionEnd
 !macro LPK_RUNONCE_REMOVE_INSTALL
   ${GetFileName} "$INSTDIR" $R4
   !insertmacro LPK_RUNONCE_WRITE "LitePack uninstall" \
-    '${LPK_CMD} cd /d "$INSTDIR" && (del /f /q shell\${VERSION}\lpk_shell.dll bin\lpk*.exe.old-* & rmdir shell\${VERSION} & rmdir shell & rmdir bin & cd .. & rmdir "$R4")'
+    '${LPK_CMD} cd /d "$R3" && (del /f /q shell\${VERSION}\lpk_shell.dll bin\lpk*.exe.old-* & rmdir shell\${VERSION} & rmdir shell & rmdir bin & cd .. & rmdir "$R4")'
 !macroend
 
 ; R334, R336: an upgrade while a bin\ executable runs (an lpk.exe compressing, the workers it started). Windows refuses
@@ -256,9 +267,9 @@ Var LpkOld4
       !insertmacro LPK_PUT_BACK "lpk-worker-libarchive.exe" $LpkOld4
     ${EndIf}
     ${If} $R3 == ""
-      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not write$R1; the previous version's copies were put back. Run the installer again." /SD IDOK
+      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not write$R1; the previous version's copies were put back: mixed versions; reinstall to repair." /SD IDOK
     ${Else}
-      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not write$R1, and could not put back:$R3. Run the installer again." /SD IDOK
+      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not write$R1, and could not put back:$R3: mixed versions; reinstall to repair." /SD IDOK
     ${EndIf}
     SetErrorLevel 2
   ${EndIf}
@@ -273,7 +284,11 @@ Var LpkOld4
     ${DoWhile} ${FileExists} "$INSTDIR\bin\${name}.old-$R2"
       IntOp $R2 $R2 + 1
     ${Loop}
+    ClearErrors
     Rename "$INSTDIR\bin\${name}" "$INSTDIR\bin\${name}.old-$R2"
+    ${If} ${Errors}
+      DetailPrint "LitePack: bin\${name} is in use and could not be set aside; it stays in $INSTDIR\bin"
+    ${EndIf}
   ${EndIf}
 !macroend
 
@@ -359,7 +374,11 @@ FunctionEnd
   ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --register-shell' $0
   ${If} $0 != 0
     DetailPrint "LitePack: --register-shell exited with $0"
-    SetErrorLevel 3
+    ; R338: exit 2 (mixed versions after a put-back) is kept; 3 only when nothing worse was reported.
+    GetErrorLevel $R2
+    ${If} $R2 <> 2
+      SetErrorLevel 3
+    ${EndIf}
   ${EndIf}
   !insertmacro LPK_BROADCAST_ENVIRONMENT
   !insertmacro LPK_REMOVE_OLD_SHELL_FOLDERS
