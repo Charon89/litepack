@@ -2,8 +2,8 @@
 //!
 //! After "Install and restart", the installer starts the new GUI about a second after the old one
 //! called `process::exit`, while the old WebView2 browser may still hold the user data folder;
-//! creating the webview can then fail for a moment. [`retry`] gives it a bounded number of
-//! further tries. [`append_crash_note`] keeps a short local record of a panic, a failed
+//! creating the webview can then fail for a moment. [`retry`] gives it bounded further tries
+//! ([`webview_retry`] decides how long). [`append_crash_note`] keeps a short local record of a panic, a failed
 //! start or a failed hand-off to the installer: never sent
 //! anywhere, at most [`CRASH_LOG_MAX`] bytes, in the local state folder the uninstaller removes.
 
@@ -12,8 +12,33 @@ use std::time::Duration;
 
 /// How often the main webview is tried again, and for how long in all (R342).
 pub const WEBVIEW_RETRY_INTERVAL: Duration = Duration::from_millis(500);
-/// The whole window of retries.
+/// The whole window of retries for an error other than "in use".
 pub const WEBVIEW_RETRY_FOR: Duration = Duration::from_secs(10);
+/// The whole window of retries while the user data folder is in use (R358): the old instance's
+/// WebView2 browser process can hold it for more than 10 s after that instance has gone.
+pub const WEBVIEW_IN_USE_RETRY_FOR: Duration = Duration::from_secs(30);
+/// `ERROR_BUSY` as an HRESULT ("The requested resource is in use."): the code is the same in
+/// every language, the text is not.
+pub const IN_USE_HRESULT: &str = "0x800700AA";
+
+/// Whether `error` (a failed try's text) is the user data folder still in use.
+pub fn in_use(error: &str) -> bool {
+    error
+        .to_ascii_uppercase()
+        .contains(&IN_USE_HRESULT.to_ascii_uppercase())
+}
+
+/// Whether the main webview is tried again after a try failed with `error`, `spent` after the
+/// first try (R358): for up to [`WEBVIEW_IN_USE_RETRY_FOR`] while the folder is in use, for up to
+/// [`WEBVIEW_RETRY_FOR`] for any other error.
+pub fn webview_retry(error: &str, spent: Duration) -> bool {
+    let bound = if in_use(error) {
+        WEBVIEW_IN_USE_RETRY_FOR
+    } else {
+        WEBVIEW_RETRY_FOR
+    };
+    spent < bound
+}
 
 /// The crash note's file name in the local state folder.
 pub const CRASH_LOG: &str = "crash.log";
@@ -24,32 +49,29 @@ pub const CRASH_LOG_ENTRIES: usize = 8;
 /// The line that starts each entry.
 const ENTRY_MARK: &str = "=== ";
 
-/// Run `attempt` until it succeeds, or until `total / interval` further tries have failed.
-/// `on_error(n, e)` sees each failure (n from 1); `sleep` waits between tries. Returns the last
-/// error when every try failed.
+/// Run `attempt` until it succeeds, or until `again(e, spent)` says no more (`spent`: the time
+/// waited between tries so far). `on_error(n, e)` sees each failure (n from 1); `sleep` waits
+/// `interval` between tries. Returns the last error when every try failed.
 pub fn retry<T, E>(
     interval: Duration,
-    total: Duration,
     mut attempt: impl FnMut() -> Result<T, E>,
+    mut again: impl FnMut(&E, Duration) -> bool,
     mut on_error: impl FnMut(u32, &E),
     mut sleep: impl FnMut(Duration),
 ) -> Result<T, E> {
-    let retries = if interval.is_zero() {
-        0
-    } else {
-        (total.as_millis() / interval.as_millis()) as u32
-    };
     let mut n = 0;
+    let mut spent = Duration::ZERO;
     loop {
         match attempt() {
             Ok(v) => return Ok(v),
             Err(e) => {
                 n += 1;
                 on_error(n, &e);
-                if n > retries {
+                if interval.is_zero() || !again(&e, spent) {
                     return Err(e);
                 }
                 sleep(interval);
+                spent += interval;
             }
         }
     }
@@ -132,7 +154,6 @@ mod tests {
         let mut slept = Duration::ZERO;
         let out: Result<u32, String> = retry(
             Duration::from_millis(500),
-            Duration::from_secs(10),
             || {
                 tries.set(tries.get() + 1);
                 if tries.get() <= 3 {
@@ -141,6 +162,7 @@ mod tests {
                     Ok(tries.get())
                 }
             },
+            |_, spent| spent < Duration::from_secs(10),
             |n, e| errors.push(format!("{n}: {e}")),
             |d| slept += d,
         );
@@ -155,11 +177,11 @@ mod tests {
         let mut slept = Duration::ZERO;
         let out: Result<(), u32> = retry(
             Duration::from_millis(500),
-            Duration::from_secs(10),
             || {
                 tries.set(tries.get() + 1);
                 Err(tries.get())
             },
+            |_, spent| spent < Duration::from_secs(10),
             |_, _| {},
             |d| slept += d,
         );
@@ -173,13 +195,71 @@ mod tests {
         let mut slept = false;
         let out: Result<u8, ()> = retry(
             WEBVIEW_RETRY_INTERVAL,
-            WEBVIEW_RETRY_FOR,
             || Ok(7),
+            |_: &(), _| panic!("no decision"),
             |_, _| panic!("no error"),
             |_| slept = true,
         );
         assert_eq!(out, Ok(7));
         assert!(!slept);
+    }
+
+    const BUSY: &str = r#"HRESULT(0x800700AA) "The requested resource is in use.""#;
+
+    #[test]
+    fn an_in_use_folder_is_waited_out_longer_than_other_errors() {
+        assert!(in_use(BUSY));
+        assert!(in_use("hresult(0x800700aa)"));
+        assert!(!in_use("HRESULT(0x80070005) Access is denied."));
+        assert!(webview_retry(BUSY, Duration::from_secs(12)));
+        assert!(webview_retry(BUSY, Duration::from_millis(29_500)));
+        assert!(!webview_retry(BUSY, Duration::from_secs(30)));
+        assert!(!webview_retry(BUSY, Duration::from_secs(31)));
+        assert!(webview_retry("another error", Duration::from_millis(9_500)));
+        assert!(!webview_retry("another error", Duration::from_secs(10)));
+        assert!(!webview_retry("another error", Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn retry_waits_out_an_in_use_folder_for_30_s() {
+        let tries = Cell::new(0u32);
+        let mut slept = Duration::ZERO;
+        let out: Result<(), String> = retry(
+            WEBVIEW_RETRY_INTERVAL,
+            || {
+                tries.set(tries.get() + 1);
+                Err(BUSY.to_owned())
+            },
+            |e, spent| webview_retry(e, spent),
+            |_, _| {},
+            |d| slept += d,
+        );
+        // The first try and 60 retries, 500 ms apart.
+        assert_eq!(out.unwrap_err(), BUSY);
+        assert_eq!(tries.get(), 61);
+        assert_eq!(slept, WEBVIEW_IN_USE_RETRY_FOR);
+    }
+
+    #[test]
+    fn retry_stops_at_10_s_when_the_error_changes() {
+        let tries = Cell::new(0u32);
+        let out: Result<(), String> = retry(
+            WEBVIEW_RETRY_INTERVAL,
+            || {
+                tries.set(tries.get() + 1);
+                // In use for 12 s, then another error.
+                if tries.get() <= 25 {
+                    Err(BUSY.to_owned())
+                } else {
+                    Err("another error".to_owned())
+                }
+            },
+            |e, spent| webview_retry(e, spent),
+            |_, _| {},
+            |_| {},
+        );
+        assert_eq!(out.unwrap_err(), "another error");
+        assert_eq!(tries.get(), 26);
     }
 
     #[test]

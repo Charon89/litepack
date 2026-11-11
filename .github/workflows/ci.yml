@@ -1041,6 +1041,23 @@ jobs:
           echo "after ${i}s: lpk-gui.exe $got (N+1 $n1gui)"
           wait "$watch" || true
           echo "--- process watch"; cat "$W/watch.log"
+          # R358: the GUI the installer's /R started is not armed (no hook log): let it settle before the audit
+          # events are taken. Up to 40 s while the newest lpk-gui.exe without arguments runs and crash.log gains
+          # no start note; it must then still run, with no crash note (checked below).
+          notes0=0
+          if [ -f "$STATE/crash.log" ]; then notes0="$(grep -c 'start failed' "$STATE/crash.log" || true)"; fi
+          newest=""
+          if [ "$got" = "$n1gui" ]; then
+            for i in $(seq 1 40); do
+              newest="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='lpk-gui.exe'\" | Where-Object { \$_.CommandLine -notmatch '--' } | Sort-Object CreationDate | Select-Object -Last 1 -ExpandProperty ProcessId)" | tr -d '\r')"
+              notes=0
+              if [ -f "$STATE/crash.log" ]; then notes="$(grep -c 'start failed' "$STATE/crash.log" || true)"; fi
+              [ -n "$newest" ] || { echo "settle: no lpk-gui.exe without arguments after ${i}s"; break; }
+              [ "$notes" = "$notes0" ] || { echo "settle: a new start note after ${i}s (GUI pid $newest)"; break; }
+              sleep 1
+            done
+            echo "settle: newest GUI pid '${newest}' after ${i}s"
+          fi
           pwsh -NoProfile -File scripts/e7-e2e-events.ps1 -Since "$since" > "$W/events.log"
           echo "--- event logs"; cat "$W/events.log"
           echo "--- server"; cat "$SETUP/server.log"
@@ -1086,8 +1103,35 @@ jobs:
             | grep -vE 'Exit Status:[[:space:]]*0x0+([^0-9a-fA-Fx]|$)'; then
             echo "a LitePack GUI exited with a non-zero status after the update"; exit 1
           fi
-          if [ -f "$STATE/crash.log" ] && grep -E 'start failed|update hand-off failed' "$STATE/crash.log"; then
-            echo "the crash note records a failed start or a failed hand-off"; exit 1
+          # R358: the WebView2 processes the old GUI started (its first 4688 here) and when they ended (4689).
+          echo "--- the old GUI's WebView2 processes (4688 and 4689)"
+          python -I -c "
+          import re, sys
+          lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+          def field(line, name):
+              m = re.search(r'(?:^|\| |\d )' + name + r':\s*(0x[0-9a-fA-F]+)', line)
+              return int(m.group(1), 16) if m else None
+          old = next((field(l, 'New Process ID') for l in lines
+                      if ' 4688 ' in l and re.search(r'New Process Name:[^|]*\\\\LitePack\\\\lpk-gui\.exe', l)), None)
+          if old is None:
+              print('no 4688 of the old GUI'); sys.exit(0)
+          ours = {old}
+          for l in lines:
+              if ' 4688 ' in l and 'msedgewebview2.exe' in l and field(l, 'Creator Process ID') in ours:
+                  ours.add(field(l, 'New Process ID')); print(l)
+          ours.discard(old)
+          for l in lines:
+              if ' 4689 ' in l and 'msedgewebview2.exe' in l and field(l, 'Process ID') in ours:
+                  print(l)
+          print('old GUI pid', hex(old), 'webview processes', sorted(hex(p) for p in ours))
+          " "$W/events.log"
+          # One grep that prints nothing (R358: a printing grep repeated the note cat showed above, which read
+          # as two notes for one failed start).
+          if [ -f "$STATE/crash.log" ] && grep -qE 'start failed|update hand-off failed' "$STATE/crash.log"; then
+            echo "the crash note records a failed start or a failed hand-off (crash.log above)"; exit 1
+          fi
+          if [ -n "$newest" ] && ! pwsh -NoProfile -Command "if (Get-Process -Id $newest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"; then
+            echo "the GUI the installer restarted (pid $newest) did not stay up"; exit 1
           fi
           alive="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='lpk-gui.exe'\" | Where-Object { \$_.CommandLine -notmatch '--' }).Count" | tr -d '\r')"
           echo "LitePack GUIs running after the update: $alive"

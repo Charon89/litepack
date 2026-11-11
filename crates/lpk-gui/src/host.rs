@@ -166,6 +166,9 @@ async fn blocking<T: Send + 'static>(
 
 #[tauri::command]
 async fn startup(host: State<'_, Host>) -> Result<StartupInfo, GuiError> {
+    // R358: the page has loaded and asked for its start-up data: the test hook may press now.
+    #[cfg(feature = "update-e2e")]
+    lpk_gui::security::update_e2e::mark_page_ready();
     Ok(StartupInfo {
         strings: strings::table(),
         activation: host.startup.clone(),
@@ -1160,6 +1163,9 @@ fn install_crash_note() {
 /// or the e2e log under CI, a native box otherwise) instead of Tauri's panic.
 fn start_failed(handle: &AppHandle, reason: &str) {
     let text = strings::get("app.start_failed").replace("{reason}", reason);
+    // R358: this instance has no window: stop being the single instance before the alert waits,
+    // so a launch meanwhile starts its own instance instead of being forwarded here to nothing.
+    tauri_plugin_single_instance::destroy(handle);
     report_failure(handle, &format!("start failed: {reason}"), &text);
 }
 
@@ -1419,8 +1425,40 @@ pub fn run() -> i32 {
                                     let var = std::env::var_os(update_e2e::UPDATE_E2E_ENV);
                                     if let Some(log) = update_e2e::armed(var.as_deref()) {
                                         update_e2e::log(&log, &format!("step check found {found}"));
-                                        let out = install_pending(&handle).await;
-                                        update_e2e::log(&log, &format!("outcome {out:?}"));
+                                        // R358: only once a user could press it: the main
+                                        // window up and its page loaded (bounded).
+                                        let probe = handle.clone();
+                                        let waited = tauri::async_runtime::spawn_blocking(move || {
+                                            update_e2e::wait_until(
+                                                update_e2e::PAGE_READY_FOR,
+                                                update_e2e::PAGE_READY_POLL,
+                                                || {
+                                                    probe.get_webview_window(MAIN_WINDOW).is_some()
+                                                        && update_e2e::page_ready()
+                                                },
+                                                std::thread::sleep,
+                                            )
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                        match waited {
+                                            Some(after) => {
+                                                update_e2e::log(
+                                                    &log,
+                                                    &format!("page ready after {} ms", after.as_millis()),
+                                                );
+                                                let out = install_pending(&handle).await;
+                                                update_e2e::log(&log, &format!("outcome {out:?}"));
+                                            }
+                                            None => update_e2e::log(
+                                                &log,
+                                                &format!(
+                                                    "page not ready within {} s: nothing installed",
+                                                    update_e2e::PAGE_READY_FOR.as_secs()
+                                                ),
+                                            ),
+                                        }
                                     }
                                 }
                             }
@@ -1487,10 +1525,12 @@ pub fn run() -> i32 {
             };
             let mut first: Option<String> = None;
             let mut failed = 0u32;
+            // R358: up to 30 s while the old instance's WebView2 still holds the folder
+            // ("in use"), 10 s for any other error.
             let made = lpk_gui::startup::retry(
                 lpk_gui::startup::WEBVIEW_RETRY_INTERVAL,
-                lpk_gui::startup::WEBVIEW_RETRY_FOR,
                 attempt,
+                |e, spent| lpk_gui::startup::webview_retry(&e.to_string(), spent),
                 |n, e| {
                     let line = format!("the main window, try {n}: {e}");
                     eprintln!("lpk-gui: {line}");

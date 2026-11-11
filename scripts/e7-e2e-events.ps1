@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $t0 = [DateTime]::Parse($Since, [Globalization.CultureInfo]::InvariantCulture,
     [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal).ToLocalTime()
-$pattern = 'updater|setup|installer|lpk|Au_|LitePack'
+$pattern = 'updater|setup|installer|lpk|Au_|LitePack|msedgewebview2'
 $keep = 'New Process ID|New Process Name|Process Command Line|Creator Process ID|Creator Process Name|Process ID|Process Name|Exit Status|Token Elevation Type'
 
 "=== Security 4688/4689 since $Since (matching $pattern)"
