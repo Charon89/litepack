@@ -147,6 +147,14 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
   template sets no `ManifestSupportedOS`, so NSIS's default (every version up to Windows 10/11) is in the manifest and
   `${AtLeastBuild}` sees the real build. CI has no Windows 10 runner: the version refusal is checked by hand on a
   Windows 10 VM in E7-10; the ARM64 refusal runs on `windows-11-arm`.
+- PREINSTALL then runs the "close LitePack" check (as the uninstaller does, below), and sets `bin\`'s executables
+  aside (R334): Windows refuses to overwrite a running executable (an `lpk.exe` compressing during an upgrade; NSIS's
+  `File` would then skip it in a silent install, leaving a half-updated `bin\`) but lets it be renamed. Each existing
+  `bin\<name>.exe` is renamed to `<name>.exe.old-<n>` (the first free `n`) before any file is written, and the renamed
+  files no process holds are deleted at once. Every rename comes before any delete: if one fails, the others are
+  renamed back and the installer exits with error level 2, the installed version untouched. A held one stays until
+  the next install or the uninstall deletes it (`bin\*.old-*`); one still held at uninstall is deleted at the next
+  logon by a per-user `RunOnce` value `LitePack bin` (those files, then `bin\` and the install folder only if empty).
 - PREINSTALL also cancels any LitePack `RunOnce` command still pending from an earlier uninstall or upgrade, so none
   can touch a reinstall made before the next logon.
 - POSTINSTALL: `lpk-gui.exe --register-shell` (route C, the `.lpk` association, `GuiPath`, `bin\` on `Path`; docs/API.md;
@@ -174,7 +182,10 @@ updater's (under `/UPDATE` the old uninstaller does not run, the new files overw
 with `version` 0.0.2 and `shell/0.0.2`), snapshots, installs N with `/S` and checks the layout, the notices, the
 Uninstall key, `Path` and route C (`scripts/e7-installer-check.py`, read-only), opens a `.lpk` and a `.zip` in the
 installed GUI (the profile required), runs `bin\lpk.exe` on the `.zip`, installs N+1 with `/S` while `bin\lpk.exe`
-runs (the outcome is printed), checks N+1's registration and a single `Path` entry, uninstalls with `/S`, and diffs
+compresses about 256 MiB of generated text with `--balanced --threads 1` (the step fails if it has exited before the
+upgrade begins; it then requires exit code 0, every installed binary N+1's by hash, the running one set aside as
+`lpk.exe.old-1`, and the running `lpk.exe`'s own exit code 0 and an archive that `lpk t` accepts; the `.sha256` files
+are read by `scripts/e7-sha256.py`, which accepts Git Bash's `*` marker and fails loudly on a missing name), checks N+1's registration and a single `Path` entry, uninstalls with `/S`, and diffs
 against the first snapshot with `--allow-settings` and the profile not allowed. A second install and uninstall with
 `/DELETEAPPDATA` requires `%APPDATA%\LitePack` gone and nothing left but Windows' entries and the copy below.
 `--run-folder` names the install folder, so the entries keyed by `lpk-gui.exe`'s path (MuiCache, and Explorer's

@@ -707,17 +707,86 @@ fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
     let exe = format!("{}.exe", conf["mainBinaryName"].as_str().unwrap());
     assert!(nsh.contains(&format!("!define LPK_PRODUCT \"{product}\"")));
     assert!(nsh.contains(&format!("!define LPK_MAIN_EXE \"{exe}\"")));
-    // R329: every RunOnce command deletes the shell DLL and then empty folders only.
-    let commands: Vec<&str> = nsh.lines().filter(|l| l.contains("cmd.exe")).collect();
-    assert_eq!(commands.len(), 1, "{commands:?}");
-    let cmd = commands[0].to_lowercase();
-    assert!(!cmd.contains("/s"), "{cmd}");
-    assert!(
-        cmd.contains(r#"del /f /q "$instdir\shell\${version}\lpk_shell.dll""#),
-        "{cmd}"
-    );
-    for part in cmd.split(" & ").skip(1) {
-        assert!(part.trim().starts_with("rmdir \"$instdir"), "{part}");
+    // R329, R334: the two RunOnce commands. Each deletes only its own files (the shell DLL; bin\'s set-aside
+    // `*.old-*` executables), then empty folders under $INSTDIR, never recursively.
+    let commands: Vec<String> = nsh
+        .lines()
+        .filter(|l| l.contains("cmd.exe"))
+        .map(str::to_lowercase)
+        .collect();
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    let deletes = [
+        r#""$sysdir\cmd.exe" /d /c del /f /q "$instdir\shell\${version}\lpk_shell.dll""#,
+        r#""$sysdir\cmd.exe" /d /c del /f /q "$instdir\bin\*.old-*""#,
+    ];
+    for (cmd, delete) in commands.iter().zip(deletes) {
+        assert!(!cmd.contains("/s"), "{cmd}");
+        let mut parts = cmd.trim().trim_matches('\'').split(" & ");
+        assert_eq!(parts.next(), Some(delete), "{cmd}");
+        for part in parts {
+            assert!(part.trim().starts_with("rmdir \"$instdir"), "{part}");
+        }
+    }
+    // A reinstall cancels both values before the next logon could remove the new installation's files.
+    let cancel = nsh
+        .split("!macro LPK_CANCEL_PENDING_RUNONCE")
+        .nth(1)
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap();
+    assert!(cancel.contains(r#"DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack uninstall""#));
+    assert!(cancel.contains(r#"DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack bin""#));
+}
+
+#[test]
+fn an_upgrade_sets_every_bin_executable_aside_before_any_file_is_written() {
+    // R334: Windows refuses to overwrite a running executable but allows a rename, so PREINSTALL renames each of
+    // bin\'s executables the overlay installs (tauri.nsis.conf.json) to <name>.old-<n> after the running check and
+    // before the RunOnce values are cancelled; the uninstaller removes the leftovers.
+    let nsh = include_str!("../installer.nsh");
+    let conf: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.nsis.conf.json")).unwrap();
+    let mut bin: Vec<String> = conf["bundle"]["resources"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|v| v.as_str()?.strip_prefix("bin/").map(str::to_owned))
+        .collect();
+    bin.sort();
+    let set_aside = nsh
+        .split("!macro LPK_SET_ASIDE_BIN")
+        .nth(1)
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap();
+    let mut named: Vec<String> = set_aside
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("!insertmacro LPK_SET_ASIDE \""))
+        .map(|s| s.trim_end_matches('"').to_owned())
+        .collect();
+    named.sort();
+    assert_eq!(named, bin);
+    let pre = nsh
+        .split("!macro NSIS_HOOK_PREINSTALL")
+        .nth(1)
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap();
+    let at = |s: &str| {
+        pre.find(s)
+            .unwrap_or_else(|| panic!("{s} not in PREINSTALL"))
+    };
+    assert!(at("Call LpkCheckRunning") < at("LPK_SET_ASIDE_BIN"));
+    assert!(at("LPK_SET_ASIDE_BIN") < at("LPK_CANCEL_PENDING_RUNONCE"));
+    for hook in [
+        "!macro NSIS_HOOK_PREUNINSTALL",
+        "!macro NSIS_HOOK_POSTUNINSTALL",
+    ] {
+        let body = nsh
+            .split(hook)
+            .nth(1)
+            .unwrap()
+            .split("!macroend")
+            .next()
+            .unwrap();
+        assert!(body.contains(r#"$INSTDIR\bin\*.old-*"#), "{hook}");
     }
 }
 

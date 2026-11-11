@@ -66,6 +66,7 @@ SectionEnd
 ; before the next logon cancels them, so none can remove the new installation's files.
 !macro LPK_CANCEL_PENDING_RUNONCE
   DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack uninstall"
+  DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack bin"
   StrCpy $R5 0
   ${Do}
     EnumRegValue $R6 HKCU "${LPK_RUNONCE}" $R5
@@ -86,6 +87,68 @@ SectionEnd
 !macro LPK_RUNONCE_REMOVE_SHELL name version
   WriteRegStr HKCU "${LPK_RUNONCE}" "${name}" \
     '"$SYSDIR\cmd.exe" /d /c del /f /q "$INSTDIR\shell\${version}\lpk_shell.dll" & rmdir "$INSTDIR\shell\${version}" & rmdir "$INSTDIR\shell" & rmdir "$INSTDIR"'
+!macroend
+
+; The next-logon removal of bin\'s set-aside executables (below) that a process still held at uninstall: those files,
+; then bin\ and $INSTDIR when empty, each non-recursively. A value of its own, so the command stays short.
+!macro LPK_RUNONCE_REMOVE_SET_ASIDE
+  WriteRegStr HKCU "${LPK_RUNONCE}" "LitePack bin" \
+    '"$SYSDIR\cmd.exe" /d /c del /f /q "$INSTDIR\bin\*.old-*" & rmdir "$INSTDIR\bin" & rmdir "$INSTDIR"'
+!macroend
+
+; R334: an upgrade while a bin\ executable runs (an lpk.exe compressing, the workers it started). Windows refuses to
+; overwrite a running executable's file, and NSIS's File would then skip it in a silent install (its error box's
+; silent default is Ignore), leaving a half-updated bin\. Windows does let a running executable's file be renamed, so
+; before any file is written each existing bin\<name> is renamed to <name>.old-<n> (the first free n); the renamed
+; files no process holds are deleted at once, the held ones stay until the next install or the uninstall (or the next
+; logon after that uninstall) removes them. Every rename is done before any delete, so a rename that fails renames the
+; others back and the installer stops with exit code 2 and the installed version untouched.
+!macro LPK_SET_ASIDE name
+  ${If} $R1 == ""
+  ${AndIf} ${FileExists} "$INSTDIR\bin\${name}"
+    StrCpy $R2 1
+    ${DoWhile} ${FileExists} "$INSTDIR\bin\${name}.old-$R2"
+      IntOp $R2 $R2 + 1
+    ${Loop}
+    ClearErrors
+    Rename "$INSTDIR\bin\${name}" "$INSTDIR\bin\${name}.old-$R2"
+    ${If} ${Errors}
+      StrCpy $R1 "${name}"
+    ${Else}
+      Push "${name}.old-$R2"
+      Push "${name}"
+      IntOp $R4 $R4 + 1
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+!macro LPK_SET_ASIDE_BIN
+  ; Leftovers of an earlier upgrade whose process has exited since.
+  Delete "$INSTDIR\bin\*.old-*"
+  StrCpy $R1 ""
+  StrCpy $R4 0
+  !insertmacro LPK_SET_ASIDE "lpk.exe"
+  !insertmacro LPK_SET_ASIDE "lpk-check.exe"
+  !insertmacro LPK_SET_ASIDE "lpk-worker.exe"
+  !insertmacro LPK_SET_ASIDE "lpk-worker-libarchive.exe"
+  ${DoWhile} $R4 > 0
+    Pop $R2
+    Pop $R3
+    ${If} $R1 != ""
+      Rename "$INSTDIR\bin\$R3" "$INSTDIR\bin\$R2"
+    ${Else}
+      Delete "$INSTDIR\bin\$R3"
+      ${If} ${FileExists} "$INSTDIR\bin\$R3"
+        DetailPrint "LitePack: bin\$R2 is in use; set aside as $R3 until it exits"
+      ${EndIf}
+    ${EndIf}
+    IntOp $R4 $R4 - 1
+  ${Loop}
+  ${If} $R1 != ""
+    MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} could not replace bin\$R1. Close the programs using it, then run the installer again." /SD IDOK
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
 !macroend
 
 ; The shell\<version> folders other than this version's: removed when Explorer holds none of their files; one still
@@ -111,7 +174,9 @@ SectionEnd
 ; after this hook. That macro cannot be used here: it reads $PassiveMode, which installer.nsi declares only after this
 ; file (R330), so this is the same Restart Manager check with the passive flag passed in $R9 by PREUNINSTALL, where
 ; $PassiveMode is declared. Silent and passive uninstalls close LitePack without asking, as the template's does.
-Function un.LpkCheckRunning
+; The installer runs the same check (LpkCheckRunning) in PREINSTALL, before bin\'s executables are set aside (R334):
+; an interactive cancel then stops the install before anything changed, not between the set-aside and the copy.
+!macro LPK_CHECK_RUNNING action changed
   !insertmacro RestartManager_StartSession $R0
   ${If} $R0 != ""
     !insertmacro RestartManager_RegisterFile $R0 "$INSTDIR\${LPK_MAIN_EXE}"
@@ -120,20 +185,28 @@ Function un.LpkCheckRunning
       ${If} $0 = ${ERROR_MORE_DATA}
         ${IfNot} ${Silent}
         ${AndIf} $R9 <> 1
-          MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "${LPK_PRODUCT} is running. Select OK to close it and uninstall." IDOK lpk_close
+          MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "${LPK_PRODUCT} is running. Select OK to close it and ${action}." IDOK lpk_close
           !insertmacro RestartManager_EndSession $R0
-          Abort "${LPK_PRODUCT} is still running; nothing was removed."
+          Abort "${LPK_PRODUCT} is still running; nothing was ${changed}."
         ${EndIf}
         lpk_close:
         System::Call 'RSTRTMGR::RmShutdown(p R0, i ${RmForceShutdown}, p 0) i .r0'
         ${If} $0 <> 0
           !insertmacro RestartManager_EndSession $R0
-          Abort "${LPK_PRODUCT} could not be closed; nothing was removed."
+          Abort "${LPK_PRODUCT} could not be closed; nothing was ${changed}."
         ${EndIf}
       ${EndIf}
     ${EndIf}
     !insertmacro RestartManager_EndSession $R0
   ${EndIf}
+!macroend
+
+Function LpkCheckRunning
+  !insertmacro LPK_CHECK_RUNNING "install" "changed"
+FunctionEnd
+
+Function un.LpkCheckRunning
+  !insertmacro LPK_CHECK_RUNNING "uninstall" "removed"
 FunctionEnd
 
 !macro NSIS_HOOK_PREINSTALL
@@ -145,6 +218,11 @@ FunctionEnd
   !endif
   ; Section Install has run SetOutPath $INSTDIR: a refusal removes that folder again when it is empty.
   !insertmacro LPK_REFUSE "$INSTDIR"
+  ; Before the RunOnce values are cancelled: an installer stopped here leaves the old installation as it was. The GUI
+  ; is closed (or the install cancelled) first, so the template's own check after this hook finds nothing to close.
+  StrCpy $R9 $PassiveMode
+  Call LpkCheckRunning
+  !insertmacro LPK_SET_ASIDE_BIN
   !insertmacro LPK_CANCEL_PENDING_RUNONCE
 !macroend
 
@@ -160,6 +238,8 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; bin\'s set-aside executables (R334) whose process has exited, before the template removes bin\ when empty.
+  Delete "$INSTDIR\bin\*.old-*"
   ${If} $UpdateMode <> 1
     StrCpy $R9 $PassiveMode
     Call un.LpkCheckRunning
@@ -201,6 +281,10 @@ FunctionEnd
     ; logon, with the then-empty folders, never recursively.
     ${If} ${FileExists} "$INSTDIR\shell\${VERSION}\lpk_shell.dll"
       !insertmacro LPK_RUNONCE_REMOVE_SHELL "LitePack uninstall" "${VERSION}"
+    ${EndIf}
+    ; A set-aside executable still running (R334): removed at the next logon, with bin\ and $INSTDIR when empty.
+    ${If} ${FileExists} "$INSTDIR\bin\*.old-*"
+      !insertmacro LPK_RUNONCE_REMOVE_SET_ASIDE
     ${EndIf}
   ${EndIf}
 !macroend
