@@ -959,7 +959,9 @@ fn directory_times_and_file_flags_are_restored() {
     }
 }
 
-/// A read-only file an earlier extraction made is replaced under `--overwrite replace`.
+/// A read-only file an earlier extraction made, and one the user made, are replaced under
+/// `--overwrite replace` (on Unix `unlink` ignores the mode; on Windows the disposition
+/// ignores the attribute).
 #[test]
 fn a_read_only_file_extracted_earlier_is_replaced() {
     let bytes = flagged_archive();
@@ -968,9 +970,41 @@ fn a_read_only_file_extracted_earlier_is_replaced() {
     extract(&bytes, &out, &threads(2)).unwrap();
     let replace = lpk_core::Policy::new(lpk_core::Overwrite::Replace, lpk_core::Symlinks::Skip);
     extract_with(&bytes, &out, &threads(2), &replace).unwrap();
+    // The user's own read-only file in its place.
+    let ro = out.join("d/ro.txt");
+    std::fs::remove_file(&ro).unwrap();
+    std::fs::write(&ro, b"the user's").unwrap();
+    let mut perm = std::fs::metadata(&ro).unwrap().permissions();
+    perm.set_readonly(true);
+    std::fs::set_permissions(&ro, perm).unwrap();
+    extract_with(&bytes, &out, &threads(2), &replace).unwrap();
     let ro = out.join("d/ro.txt");
     assert_eq!(std::fs::read(&ro).unwrap(), b"read only");
     assert!(std::fs::metadata(&ro).unwrap().permissions().readonly());
     // The tree with its read-only file is removable.
     d.close().unwrap();
+}
+
+/// Directories that exist before the extraction are the user's: their attributes and times
+/// are left as they were, even when the archive's entries for them carry others.
+#[test]
+fn existing_directories_keep_their_attributes_and_times() {
+    let bytes = flagged_archive();
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    std::fs::create_dir_all(out.join("d/sub")).unwrap();
+    let s = extract(&bytes, &out, &threads(2)).unwrap();
+    assert_eq!(s.dirs_unset, 0);
+    let three = UNIX_EPOCH + Duration::from_secs(3);
+    let two = UNIX_EPOCH + Duration::from_secs(2);
+    let meta = |p: &str| std::fs::metadata(out.join(p)).unwrap();
+    assert_ne!(meta("d").modified().unwrap(), three);
+    assert_ne!(meta("d/sub").modified().unwrap(), two);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        assert_eq!(meta("d/sub").file_attributes() & 0x2, 0);
+    }
+    // The files inside still get theirs.
+    assert!(meta("d/ro.txt").permissions().readonly());
 }

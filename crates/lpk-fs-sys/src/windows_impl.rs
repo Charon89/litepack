@@ -313,10 +313,51 @@ pub fn add_attributes(
     Ok(())
 }
 
-/// Delete what `h` is open on (opened with `DELETE`): POSIX semantics where the volume has
-/// them (the name goes at once; a read-only file too, as an extraction may have set that
-/// attribute on a file it later replaces), else the classic disposition (the name goes at the
-/// close).
+/// Clear the read-only attribute of what `h` is open on (with `FILE_WRITE_ATTRIBUTES`).
+fn clear_readonly(h: &OwnedHandle) -> Result<(), FsError> {
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: `info` is a live, correctly sized output buffer for this class; `h` is open.
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(h.as_raw_handle()),
+            FileBasicInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }?;
+    if info.FileAttributes & FILE_ATTRIBUTE_READONLY.0 == 0 {
+        return Ok(());
+    }
+    let mut attrs = info.FileAttributes & !FILE_ATTRIBUTE_READONLY.0;
+    if attrs == 0 {
+        attrs = FILE_ATTRIBUTE_NORMAL.0;
+    }
+    let set = FILE_BASIC_INFO {
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        FileAttributes: attrs,
+    };
+    // SAFETY: `set` is a live, correctly sized input buffer for this class; `h` is open.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(h.as_raw_handle()),
+            FileBasicInfo,
+            (&raw const set).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }?;
+    Ok(())
+}
+
+/// Delete what `h` is open on (opened with `DELETE` and `FILE_WRITE_ATTRIBUTES`), whoever
+/// made it read-only: every caller removes only what the extraction's policy decided to
+/// replace (`Existing::Replace`, an explicit choice) or a file this extraction created, so a
+/// read-only file goes as `unlink` takes one on Unix. POSIX semantics where the volume has
+/// them (the name goes at once; `IGNORE_READONLY_ATTRIBUTE`), else (FAT, exFAT) the
+/// read-only attribute is cleared through the handle and the classic disposition is used
+/// (the name goes at the close).
 fn dispose(h: &OwnedHandle) -> Result<(), FsError> {
     let ex = FILE_DISPOSITION_INFO_EX {
         Flags: FILE_DISPOSITION_INFO_EX_FLAGS(
@@ -337,6 +378,9 @@ fn dispose(h: &OwnedHandle) -> Result<(), FsError> {
     if r.is_ok() {
         return Ok(());
     }
+    // The classic disposition refuses a read-only file: clear the attribute first (best
+    // effort; the disposition reports what still fails).
+    let _ = clear_readonly(h);
     let classic = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: `classic` is a live, correctly sized input buffer for this class; `h` is open.
     unsafe {
@@ -485,7 +529,7 @@ impl Dir {
         let h = nt_create(
             &self.h,
             &w,
-            DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
             FILE_SHARE_ALL,
             FILE_OPEN,
             NTCREATEFILE_CREATE_OPTIONS(0),

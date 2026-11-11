@@ -242,6 +242,9 @@ pub struct ExtractSummary {
     /// Mark of the Web: a file could not carry [`ExtractOptions::zone`] (the destination's
     /// volume has no named streams, or the write failed); the caller prints one warning.
     pub motw_unmarked: bool,
+    /// Directories this extraction created whose time or attributes could not be set (a
+    /// warning for the caller: the extraction itself succeeded).
+    pub dirs_unset: u64,
     /// Most decoded blocks held at once, measured (permits taken and not yet returned): never
     /// above `in_flight`. 1 on the sequential path when a block was decoded, else 0.
     pub peak_in_flight: usize,
@@ -1524,11 +1527,17 @@ fn plan<R: Read + Seek>(
     for (e, p) in pass.entries.iter().zip(std::mem::take(&mut pass.placed)) {
         match p {
             Placed::Skipped => {}
-            Placed::Dir(path) => dir_meta.push(DirMeta {
-                path,
-                mtime_ns: e.mtime_ns,
-                flags: e.flags,
-            }),
+            // Only a directory this extraction creates gets the entry's time and attributes:
+            // one that exists already (reused under every overwrite mode) is the user's.
+            Placed::Dir(path) => {
+                if std::fs::symlink_metadata(&path).is_err() {
+                    dir_meta.push(DirMeta {
+                        path,
+                        mtime_ns: e.mtime_ns,
+                        flags: e.flags,
+                    });
+                }
+            }
             Placed::Link(l) => links.push(l),
             Placed::File { path, replace } => {
                 let file = targets.len();
@@ -2241,7 +2250,8 @@ where
         }
     }
     // Every file is finished: the directories' attributes and times, deepest first.
-    tree.finish_dirs(&dir_meta)?;
+    // A directory whose time or attributes cannot be set is a warning, never an error.
+    let dir_warnings = tree.finish_dirs(&dir_meta);
     // The writers ran behind the dispatch: the last event carries the final counts.
     rep.set(
         Stage::Extract,
@@ -2273,6 +2283,7 @@ where
         symlinks: links.len() as u64,
         symlinks_skipped,
         motw_unmarked: tree.unmarked(),
+        dirs_unset: dir_warnings.len() as u64,
         peak_in_flight: peak.load(Ordering::Relaxed),
         alone_decodes: gate.alone_runs(),
         concurrent_while_alone: gate.concurrent_while_alone(),

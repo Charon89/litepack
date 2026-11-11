@@ -336,33 +336,45 @@ impl Tree {
         }
     }
 
-    /// Set the directory entries' attributes (hidden and system, on Windows) and times, the
-    /// deepest first, once every file is finished. Each directory is opened as itself, never
-    /// through a link: on Windows relative to its held parent with its recorded file ID; on
-    /// Unix it must be a directory (not a link) before the open and the same inode after it.
-    pub(crate) fn finish_dirs(&self, dirs: &[DirMeta]) -> Result<(), CoreError> {
+    /// Set the attributes (hidden and system, on Windows) and times of the directories this
+    /// extraction created, the deepest first, once every file is finished. Each directory is
+    /// opened as itself, never through a link: on Windows relative to its held parent with
+    /// its recorded file ID; on Unix with `O_NOFOLLOW | O_DIRECTORY | O_NONBLOCK`, a directory
+    /// (not a link) before the open and the same inode after it. A directory that cannot be
+    /// set is a warning (returned, one message each), never an error.
+    pub(crate) fn finish_dirs(&self, dirs: &[DirMeta]) -> Vec<String> {
         let mut order: Vec<&DirMeta> = dirs.iter().collect();
         order.sort_by_key(|d| std::cmp::Reverse(d.path.components().count()));
+        let mut warnings = Vec::new();
         for d in order {
-            let time = crate::extract::mtime(d.mtime_ns);
-            let hidden = d.flags.contains(EntryFlags::HIDDEN);
-            let system = d.flags.contains(EntryFlags::SYSTEM);
-            if time.is_none() && !(cfg!(windows) && (hidden || system)) {
-                continue;
+            if let Err(e) = self.finish_dir(d) {
+                warnings.push(format!("its time and attributes were not set: {e}"));
             }
-            let f = self.open_dir_attributes(&d.path)?;
-            #[cfg(windows)]
-            lpk_fs_sys::add_attributes(&f, false, hidden, system)
-                .map_err(|e| win::fs_err(&d.path, e))?;
-            if let Some(m) = time {
-                f.set_modified(m).map_err(|e| io(&d.path, e))?;
-            }
+        }
+        warnings
+    }
+
+    fn finish_dir(&self, d: &DirMeta) -> Result<(), CoreError> {
+        let time = crate::extract::mtime(d.mtime_ns);
+        let hidden = d.flags.contains(EntryFlags::HIDDEN);
+        let system = d.flags.contains(EntryFlags::SYSTEM);
+        if time.is_none() && !(cfg!(windows) && (hidden || system)) {
+            return Ok(());
+        }
+        let f = self.open_dir_attributes(&d.path)?;
+        #[cfg(windows)]
+        lpk_fs_sys::add_attributes(&f, false, hidden, system)
+            .map_err(|e| win::fs_err(&d.path, e))?;
+        if let Some(m) = time {
+            f.set_modified(m).map_err(|e| io(&d.path, e))?;
         }
         Ok(())
     }
 
     fn open_dir_attributes(&self, path: &Path) -> Result<File, CoreError> {
         let rel = self.rel(path)?;
+        #[cfg(test)]
+        seam::before_open_dir(path);
         #[cfg(windows)]
         {
             let id = self.win.dir(&self.root, rel, false)?.id();
@@ -381,10 +393,14 @@ impl Tree {
                     std::io::Error::other("not a directory (a link or a file is in its place)"),
                 ));
             }
-            let f = File::open(path).map_err(|e| io(path, e))?;
             #[cfg(unix)]
             {
-                use std::os::unix::fs::MetadataExt;
+                use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+                let f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_NONBLOCK)
+                    .open(path)
+                    .map_err(|e| io(path, e))?;
                 let after = f.metadata().map_err(|e| io(path, e))?;
                 if (after.dev(), after.ino()) != (before.dev(), before.ino()) {
                     return Err(io(
@@ -392,8 +408,12 @@ impl Tree {
                         std::io::Error::other("the directory changed while it was opened"),
                     ));
                 }
+                Ok(f)
             }
-            Ok(f)
+            #[cfg(not(unix))]
+            {
+                File::open(path).map_err(|e| io(path, e))
+            }
         }
     }
 
