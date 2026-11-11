@@ -22,9 +22,18 @@ const ESCAPE: &str = "\u{E00C}";
 /// The links the box shows, in order: name and address.
 const LINKS: [(&str, &str); 5] = [
     ("docs", "https://charon89.github.io/litepack/"),
-    ("privacy", "https://charon89.github.io/litepack/privacy.html"),
-    ("security", "https://charon89.github.io/litepack/security.html"),
-    ("notices", "https://charon89.github.io/litepack/notices.html"),
+    (
+        "privacy",
+        "https://charon89.github.io/litepack/privacy.html",
+    ),
+    (
+        "security",
+        "https://charon89.github.io/litepack/security.html",
+    ),
+    (
+        "notices",
+        "https://charon89.github.io/litepack/notices.html",
+    ),
     ("repository", "https://github.com/Charon89/litepack"),
 ];
 
@@ -85,7 +94,12 @@ async fn run(c: &Client) -> Result<(), String> {
         .send_keys(ENTER)
         .await
         .map_err(|e| e.to_string())?;
-    wait_for(c, "dialog#settings[open] #about-open", "the settings dialog").await?;
+    wait_for(
+        c,
+        "dialog#settings[open] #about-open",
+        "the settings dialog",
+    )
+    .await?;
     c.find(Locator::Css("#about-open"))
         .await
         .map_err(|e| e.to_string())?

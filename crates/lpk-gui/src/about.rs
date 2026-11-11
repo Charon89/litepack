@@ -275,7 +275,7 @@ mod tests {
     /// The real removal on a `LitePack.Test.*` profile of its own (never `LitePack.Worker`).
     #[cfg(windows)]
     #[test]
-    fn a_test_profile_is_removed_through_the_api() {
+    fn a_missing_test_profile_is_reported_through_the_api() {
         let name = format!("LitePack.Test.{}.about", std::process::id());
         let ops = Ops::new();
         // A name with no profile (lpk-core's tests remove a real one; this crate cannot make one).
