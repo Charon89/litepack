@@ -658,10 +658,21 @@ jobs:
           for name in $names; do
             sum="$(python -I scripts/e7-sha256.py "$SETUP/N1.sha256" "$name")"
             if [ "$name" = lpk-gui.exe ]; then file="$INST/lpk-gui.exe"; else file="$INST/bin/$name"; fi
-            got="missing"; test -f "$file" && got="$(sha256sum "$file" | cut -d' ' -f1)"
+            got="missing"
+            if [ ! -f "$file" ]; then :
+            elif [ "$name" = lpk-gui.exe ]; then
+              # R340: tauri-bundler patches the bundle-type token into the lpk-gui.exe it packs (patch_binary), so
+              # the installed file is compared with the token turned back (scripts/e7-bundled-hash.py, E7-7's).
+              got="$(python -I scripts/e7-bundled-hash.py "$file" | tr -d '\r')" || { echo "$got"; got="unpatched"; }
+            else
+              got="$(sha256sum "$file" | cut -d' ' -f1)"
+            fi
             echo "$name: installed $got, N+1 $sum"
             [ "$got" = "$sum" ] || bad=1
           done
+          # The running lpk.exe's archive is tested whatever the checks below find (R340).
+          t_rc=0; "$INST/bin/lpk.exe" t "$W/big.lpk" || t_rc=$?
+          echo "lpk t on the running lpk.exe's archive (N+1's lpk.exe): exit $t_rc"
           test "$rc" -eq 0 || { echo "the upgrade's installer failed with $rc"; exit 1; }
           test "$bad" -eq 0 || { echo "a file of bin\\ or the GUI is not N+1's after the upgrade"; exit 1; }
           # R336: a pass must prove the set-aside, so lpk.exe must still run when the upgrade ends.
@@ -669,7 +680,7 @@ jobs:
           grep -qxF "lpk.exe.old-1" <<<"$set_aside" \
             || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
           test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the upgrade"; exit 1; }
-          "$INST/bin/lpk.exe" t "$W/big.lpk" || { echo "the running lpk.exe's archive does not test as valid"; exit 1; }
+          test "$t_rc" -eq 0 || { echo "the running lpk.exe's archive does not test as valid"; exit 1; }
           echo "the running lpk.exe's archive tests as valid with N+1's lpk.exe"
           rm -f "$W/big.txt" "$W/big.lpk"
           python -I scripts/e7-installer-check.py installed "$INST" 0.0.2
