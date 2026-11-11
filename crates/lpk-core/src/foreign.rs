@@ -784,26 +784,79 @@ pub fn remove_worker_profile() -> std::io::Result<ProfileRemoval> {
 pub fn remove_profile_named(name: &str) -> std::io::Result<ProfileRemoval> {
     #[cfg(windows)]
     {
-        // ERROR_FILE_NOT_FOUND and ERROR_NOT_FOUND: no such profile.
-        const ABSENT: [i32; 2] = [2, 1168];
         // The profile's folder, `%LOCALAPPDATA%\Packages\<name>`: whether there was one (the
-        // call itself succeeds for a name that has none). Unknown counts as present.
-        let existed = process::appcontainer_temp(name)
-            .and_then(|t| t.parent().and_then(Path::parent).map(Path::to_path_buf))
-            .is_none_or(|p| p.exists());
-        match lpk_sandbox_sys::delete_appcontainer_profile(name) {
-            Ok(()) if existed => Ok(ProfileRemoval::Removed),
-            Ok(()) => Ok(ProfileRemoval::NoneExisted),
-            Err(e) if e.raw_os_error().is_some_and(|c| ABSENT.contains(&c)) => {
-                Ok(ProfileRemoval::NoneExisted)
-            }
-            Err(e) => Err(e),
-        }
+        // call itself succeeds for a name that has none).
+        let folder = process::appcontainer_temp(name)
+            .and_then(|t| t.parent().and_then(Path::parent).map(Path::to_path_buf));
+        let existed = profile_existed(folder.as_deref(), |p| p.try_exists());
+        removal_outcome(existed, lpk_sandbox_sys::delete_appcontainer_profile(name))
     }
     #[cfg(not(windows))]
     {
         let _ = name;
         Ok(ProfileRemoval::NoneExisted)
+    }
+}
+
+/// Whether the profile's `folder` was there before the removal, by `probe`: an unknown folder
+/// or a probe that fails (access denied and the like) counts as present, so that a removal that
+/// worked is never reported as "none existed".
+#[cfg_attr(not(windows), allow(dead_code))]
+fn profile_existed(
+    folder: Option<&Path>,
+    probe: impl FnOnce(&Path) -> std::io::Result<bool>,
+) -> bool {
+    folder.is_none_or(|p| probe(p).unwrap_or(true))
+}
+
+/// The removal's outcome from whether the profile `existed` and the delete's `result`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn removal_outcome(existed: bool, result: std::io::Result<()>) -> std::io::Result<ProfileRemoval> {
+    // ERROR_FILE_NOT_FOUND and ERROR_NOT_FOUND: no such profile.
+    const ABSENT: [i32; 2] = [2, 1168];
+    match result {
+        Ok(()) if existed => Ok(ProfileRemoval::Removed),
+        Ok(()) => Ok(ProfileRemoval::NoneExisted),
+        Err(e) if e.raw_os_error().is_some_and(|c| ABSENT.contains(&c)) => {
+            Ok(ProfileRemoval::NoneExisted)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn a_folder_that_cannot_be_probed_counts_as_present() {
+        let p = Path::new("x");
+        assert!(profile_existed(Some(p), |_| Ok(true)));
+        assert!(!profile_existed(Some(p), |_| Ok(false)));
+        assert!(profile_existed(Some(p), |_| Err(
+            io::ErrorKind::PermissionDenied.into()
+        )));
+        assert!(profile_existed(None, |_| Ok(false)));
+    }
+
+    #[test]
+    fn the_outcome_follows_the_probe_and_the_delete() {
+        assert_eq!(
+            removal_outcome(true, Ok(())).unwrap(),
+            ProfileRemoval::Removed
+        );
+        assert_eq!(
+            removal_outcome(false, Ok(())).unwrap(),
+            ProfileRemoval::NoneExisted
+        );
+        for code in [2, 1168] {
+            assert_eq!(
+                removal_outcome(true, Err(io::Error::from_raw_os_error(code))).unwrap(),
+                ProfileRemoval::NoneExisted
+            );
+        }
+        assert!(removal_outcome(true, Err(io::Error::from_raw_os_error(5))).is_err());
     }
 }
 

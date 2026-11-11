@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use common::{connect, connect_with, lpk_exe, page_state, start_driver, ROWS_WITHIN};
 use fantoccini::{Client, Locator};
 
-/// The Edge WebDriver's port for this test (the others use 4444 to 4451).
+/// The Edge WebDriver's port for this test (the others use 4444 to 4451 and 4453).
 const DRIVER_PORT: u16 = 4452;
 
 const TAB: &str = "\u{E004}";

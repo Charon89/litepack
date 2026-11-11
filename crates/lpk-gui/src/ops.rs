@@ -146,7 +146,9 @@ impl Ops {
 
     /// Hold the process for a task no operation may run beside: `None` while any operation is
     /// registered (running or queued), another task holds it, or the exit has begun; otherwise
-    /// no operation begins until the guard is dropped (`begin` refuses with `Usage`).
+    /// no operation begins until the guard is dropped (`begin` refuses with `Usage`). It covers
+    /// the operations in this window only: another LitePack process (a terminal `lpk x`) may
+    /// have a worker live (`docs/SECURITY.md` section 3, residual 9).
     pub fn exclusive(self: &Arc<Self>) -> Option<Exclusive> {
         let mut g = self.lock();
         if g.closing || g.exclusive || !g.running.is_empty() {

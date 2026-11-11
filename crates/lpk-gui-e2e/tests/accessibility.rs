@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use common::{connect_args, lpk_exe, page_state, start_driver, Driver, FLAGS, ROWS_WITHIN};
 use fantoccini::{Client, Locator};
 
-/// The Edge WebDriver's port for this test (the others use 4444 to 4450 and 4452).
+/// The Edge WebDriver's port for this test (the others use 4444 to 4450, 4452 and 4453).
 const DRIVER_PORT: u16 = 4451;
 const SETTLE: Duration = Duration::from_millis(600);
 
