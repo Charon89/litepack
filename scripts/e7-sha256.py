@@ -9,6 +9,7 @@ so a step never stops on a silent `set -e` abort or compares an empty string.
 """
 
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -51,6 +52,14 @@ def self_test():
             assert lookup(f, "lpk.exe") == a, f
             assert lookup(f, "lpk-check.exe") == b.lower(), f
             assert [n for _, n in entries(f)] == ["lpk.exe", "lpk-check.exe"], f
+            # What bash reads: LF line ends only (a CR would stay in `$(...)` and in `for name in $names`).
+            run = [sys.executable, "-I", __file__]
+            out = subprocess.run(run + [str(f), "lpk.exe"], capture_output=True, check=True).stdout
+            assert out == f"{a}\n".encode(), out
+            out = subprocess.run(run + ["--names", str(f)], capture_output=True, check=True).stdout
+            assert out == b"lpk.exe\nlpk-check.exe\n", out
+            miss = subprocess.run(run + [str(f), "lpk-gui.exe"], capture_output=True)
+            assert miss.returncode == 1 and b"lpk-gui.exe" in miss.stderr, miss
         for f, name in ((bin_mode, "lpk-worker.exe"), (bin_mode, "*lpk.exe"), (bin_mode, "check.exe")):
             try:
                 lookup(f, name)
@@ -74,13 +83,18 @@ def self_test():
     print("e7-sha256 self-test: ok")
 
 
+def emit(text):
+    """`text` and a bare LF: Python's text stdout on Windows writes CRLF, and bash's `$(...)` keeps the CR."""
+    sys.stdout.buffer.write((text + "\n").encode("utf-8"))
+
+
 def main(argv):
     if argv == ["--self-test"]:
         self_test()
     elif len(argv) == 2 and argv[0] == "--names":
-        print("\n".join(n for _, n in entries(argv[1])))
+        emit("\n".join(n for _, n in entries(argv[1])))
     elif len(argv) == 2 and not argv[0].startswith("--"):
-        print(lookup(argv[0], argv[1]))
+        emit(lookup(argv[0], argv[1]))
     else:
         raise SystemExit(__doc__)
 
