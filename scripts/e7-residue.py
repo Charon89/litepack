@@ -100,7 +100,8 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # Kinds: `file` (the folder or file and everything under it), `file-pattern` (files directly in
 # one folder whose names match one shape), `key` (the key and everything under it), `key-only`
 # (that one key's existence, not its values or subkeys), `value` (one key and one value name),
-# `value-pattern` (one key, value names of one shape), `key-pattern-value` (one value name in keys
+# `value-pattern` (one key, or with a `key` regular expression the keys it matches, value names of one
+# shape), `file-changed-pattern` (files of one folder, names of one shape, changed only), `key-pattern-value` (one value name in keys
 # of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
 # holding nothing), `file-changed` (that one file, changed only: never added or removed).
 USRCLASS = ("the storage files of HKCU\\Software\\Classes (its registry hive and transaction logs), which Windows "
@@ -128,9 +129,16 @@ ALLOW = [
     {"kind": "value", "path": SPOTLIGHT_LU, "name": "PTT", "reason": SPOT + ": its last-use time"},
     {"kind": "value", "path": r"HKCU\Software\Microsoft\AuthCookies\Live\Default\DIDC",
      "name": "Data", "reason": WAM + ": the Microsoft account device cookie"},
-    {"kind": "value-pattern", "path": LOCAL_SETTINGS + r"\MuiCache\1a4\52C64B7E",
-     "name": r"C:\\Windows\\system32,@elscore\.dll,-[0-9]+",
-     "reason": MUI + ": the strings of Windows' elscore.dll (Extended Linguistic Services)"},
+    # The hex subkey differs between runs (1a4, 1a7); the names must point at a DLL of Windows' own
+    # system folder (no backslash in the DLL's name), never at the install or run folder (R352).
+    {"kind": "value-pattern", "key": re.escape(LOCAL_SETTINGS) + r"\\MuiCache\\[0-9a-f]+\\52C64B7E",
+     "name": (r"(@%SystemRoot%\\System32\\[\w.-]+\.dll,-[0-9]+"
+              r"|C:\\Windows\\system32,@[\w.-]+\.dll,-[0-9]+)"),
+     "reason": "Windows' cache of the display strings it loads from its own DLLs (MuiCache), "
+               "filled when a program starts"},
+    {"kind": "file-changed-pattern", "path": r"%LOCALAPPDATA%\Microsoft\Windows\Explorer",
+     "name": r"(iconcache|thumbcache)_[\w]+\.db",
+     "reason": "Explorer's own icon and thumbnail caches, which it rewrites when it refreshes icons"},
     {"kind": "key-only", "path": SHELL_MUICACHE, "reason": MUI + ": the cache's own key"},
     {"kind": "value-pattern", "path": SHELL_MUICACHE,
      # {run} is the escaped run folder (--run-folder, or RUNNER_TEMP\portable-run\LitePack); with
@@ -185,9 +193,6 @@ ALLOW = [
     {"kind": "file", "path": r"%LOCALAPPDATA%\Microsoft\Windows\WebCache",
      "reason": "WinINet's shared cache database (ESE), updated by any program that uses WinINet or "
                "urlmon (Windows' own, shared by every user program)"},
-    {"kind": "value-pattern", "path": LOCAL_SETTINGS + r"\MuiCache\1a4\52C64B7E",
-     "name": r"@%SystemRoot%\\System32\\urlmon\.dll,-[0-9]+",
-     "reason": MUI + ": the strings of Windows' urlmon.dll"},
     {"kind": "value-pattern", "path": SHELL_MUICACHE,
      "name": r"C:\\Windows\\System32\\conhost\.exe\.(ApplicationCompany|FriendlyAppName)",
      "reason": MUI + ": Windows' Console Window Host (conhost.exe)"},
@@ -472,7 +477,13 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
         if a["kind"] == "value" and kind == "value" and norm(path) == norm(a["path"]) and \
                 norm(name) == norm(a["name"]):
             return a["reason"]
-        if a["kind"] == "value-pattern" and kind == "value" and norm(path) == norm(a["path"]):
+        if a["kind"] == "file-changed-pattern" and kind == "file" and sign == "~":
+            folder, _, leaf = path.rpartition("\\")
+            if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE):
+                return a["reason"]
+        if a["kind"] == "value-pattern" and kind == "value" and (
+                re.fullmatch(a["key"], path, re.IGNORECASE) if "key" in a
+                else norm(path) == norm(a["path"])):
             pattern = a["name"]
             for token, folder in (("{run}", run), ("{run13}", rot13(run) if run else None)):
                 if token in pattern:
@@ -834,6 +845,37 @@ class Tests(unittest.TestCase):
         sib = win + r"\UsrClass2.dat"
         before = snap(dict(self.base["files"], **{sib: f()}), self.base["registry"])
         changed = snap(dict(self.base["files"], **{sib: f(size=2)}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 1)
+
+    def test_the_muicache_allows_windows_dll_strings_in_any_hex_subkey_only(self):
+        key = LOCAL_SETTINGS + r"\MuiCache\1a7\52C64B7E"
+        before = snap(self.base["files"], dict(self.base["registry"], **{key: {"seed": '"s"'}}))
+
+        def bad_of(k, names):
+            reg = dict(self.base["registry"], **{key: {"seed": '"s"'}})
+            reg[k] = dict(reg.get(k, {}), **names)
+            return diff(before, snap(self.base["files"], reg), False, "D:/a/_temp/portable-run/LitePack")
+        urlmon = {r"@%SystemRoot%\System32\urlmon.dll,-4200": '"Open File - Security Warning"',
+                  r"C:\Windows\system32,@elscore.dll,-7": '"x"'}
+        lines, bad = bad_of(key, urlmon)
+        self.assertEqual(bad, 0, lines)
+        # The same name under an unrelated key, or naming another folder's DLL, is residue.
+        other = LOCAL_SETTINGS + r"\Other\1a7\52C64B7E"
+        self.assertEqual(bad_of(other, urlmon)[1], 2 + 1)
+        for name in (r"@D:\a\_temp\portable-run\LitePack\x.dll,-1", r"C:\Windows\system32\sub,@x.dll,-1",
+                     r"@%SystemRoot%\System32\sub\x.dll,-1", r"C:\a\LitePack,@lpk.dll,-1"):
+            lines, bad = bad_of(key, {name: '"x"'})
+            self.assertEqual(bad, 1, lines)
+
+    def test_explorers_icon_cache_is_allowed_changed_only(self):
+        ex = r"%LOCALAPPDATA%\Microsoft\Windows\Explorer"
+        idx, other = ex + r"\iconcache_idx.db", ex + r"\other.db"
+        before = snap(dict(self.base["files"], **{idx: f(), other: f()}), self.base["registry"])
+        changed = snap(dict(self.base["files"], **{idx: f(size=2), other: f()}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 0)
+        added = snap(dict(before["files"], **{ex + r"\iconcache_99.db": f()}), self.base["registry"])
+        self.assertEqual(diff(before, added, False)[1], 1)
+        changed = snap(dict(self.base["files"], **{idx: f(), other: f(size=2)}), self.base["registry"])
         self.assertEqual(diff(before, changed, False)[1], 1)
 
     def test_the_muicache_allows_lpk_gui_names_in_the_run_folder_only(self):
