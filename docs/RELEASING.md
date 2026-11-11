@@ -97,7 +97,12 @@ in `data\`. The allow-list names them one at a time (R313, from the first full d
   `PTT` values and the `AuthCookies\Live\Default\DIDC` `Data` value. So that the credential pattern cannot hide one
   of LitePack's own, the job fails if `cmdkey /list` shows a target containing `LitePack` or `lpk` after any run;
   any credential LitePack ever stores must use a target named after LitePack.
-- The shell's display-string cache (MuiCache): `elscore.dll`'s strings, and the `Shell\MuiCache` key with
+- Explorer's own icon and thumbnail caches, `%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache_*.db` and
+  `thumbcache_*.db`, changed only (never added), which it rewrites when it refreshes icons.
+- Windows' cache of the display strings it loads from its own DLLs (MuiCache), filled when a program starts: the
+  values of `Local Settings\MuiCache\<hex>\52C64B7E` (any hex subkey) named `@%SystemRoot%\System32\<name>.dll,-<n>`
+  or `C:\Windows\system32,@<name>.dll,-<n>`, never a name pointing anywhere else (`urlmon.dll`, `elscore.dll`).
+- The shell's display-string cache (MuiCache): the `Shell\MuiCache` key with
   `lpk-gui.exe`'s `ApplicationCompany` and `FriendlyAppName`, only under the run folder's path (`diff --run-folder`,
   which the job passes; by default `RUNNER_TEMP\portable-run\LitePack`), and `LangID`.
 - Explorer's UserAssist session counter and its Windows Terminal entry, which change on the runner on their own.
@@ -183,10 +188,10 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
   names, `del` stopped at a missing one and deleted none, CI run 42944220039); only when the names would pass 260
   characters is the set-aside group one `del /f /q bin\lpk*.exe.old-*`. `LitePack shell <version>` (after an upgrade: an old version's DLL Explorer holds): the DLL, then
   `rmdir shell\<version>`. Never recursively, so nothing else in a `/D=` folder can go; nothing runs if the folder is
-  gone. The whole stored string is measured. The budget (R338): `LitePack uninstall` has a fixed part of 184
-  characters at version 0.0.1, counting `cmd.exe`'s path and the install folder's last name `LitePack`, so the
-  install path may be at most 76 characters; the version appears twice, so each character it has beyond `0.0.1`
-  takes two from the path (a version like `1.10.0-beta.1` leaves 60). CI's path (43 characters) gives 227. Over 260,
+  gone. The whole stored string is measured (R338, R343). Its fixed part counts `cmd.exe`'s path, the install
+  folder's last name `LitePack`, the version (written twice) and, in the exact-name form, each set-aside file's
+  name, so a longer version or more executables still running leave less room for the install path; the wildcard
+  form's fixed part does not grow with the number of files. Over 260,
   the value is retried with the install folder's short (8.3) path (`GetFullPathName /SHORT`); an install path long
   enough to push even that past 260, or a volume without short names, gets no value at all, and what is left stays until the next install, whose cleanup deletes `bin\lpk*.exe.old-*` and other
   versions' `shell\` folders (after an uninstall with no later install, it stays). CI holds the DLL open during an
