@@ -1,5 +1,6 @@
 {
   "app.title": "LitePack",
+  "app.start_failed": "LitePack could not start: {reason}",
   "size.b": "{n} B",
   "size.kb": "{n} KB",
   "size.mb": "{n} MB",

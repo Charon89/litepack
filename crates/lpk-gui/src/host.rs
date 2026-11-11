@@ -1078,6 +1078,100 @@ fn may_exit(handle: &AppHandle, host: &Host) -> bool {
     yes
 }
 
+/// A line in the `update-e2e` hook's log, in that test build alone (nothing in any other).
+fn e2e_note(line: &str) {
+    #[cfg(feature = "update-e2e")]
+    {
+        use lpk_gui::security::update_e2e;
+        let var = std::env::var_os(update_e2e::UPDATE_E2E_ENV);
+        if let Some(log) = update_e2e::armed(var.as_deref()) {
+            update_e2e::log(&log, line);
+        }
+    }
+    #[cfg(not(feature = "update-e2e"))]
+    let _ = line;
+}
+
+/// R342: a panic leaves a short local note in the local state folder (`crash.log`; portable:
+/// `data\`), bounded and never sent anywhere; then the previous hook runs as before.
+fn install_crash_note() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let what = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic".to_owned());
+        let entry = format!(
+            "{} lpk-gui {}: {what} at {at}",
+            lpk_gui::update::today(),
+            env!("CARGO_PKG_VERSION")
+        );
+        if let Some(dir) = paths::state_dir() {
+            lpk_gui::startup::append_crash_note(&dir, &entry);
+        }
+        e2e_note(&format!("panic {entry}"));
+        previous(info);
+    }));
+}
+
+/// R342: the window could not be made, or another setup step failed: say so (the smoke report
+/// or the e2e log under CI, a native box otherwise) instead of Tauri's panic.
+fn start_failed(handle: &AppHandle, reason: &str) {
+    let text = strings::get("app.start_failed").replace("{reason}", reason);
+    eprintln!("lpk-gui: {text}");
+    e2e_note(&format!("start failed: {reason}"));
+    if let Some(report) = std::env::var_os(SMOKE_REPORT_ENV) {
+        if let Err(e) = std::fs::write(&report, paths::data_error_report(&text)) {
+            eprintln!("lpk-gui: the smoke report: {e}");
+        }
+    } else if !e2e_armed() {
+        let _ = lpk_gui_sys::alert(owner(handle), strings::get("app.title"), &text);
+    }
+}
+
+/// Whether the `update-e2e` hook's log is set (that test build alone).
+fn e2e_armed() -> bool {
+    #[cfg(feature = "update-e2e")]
+    {
+        use lpk_gui::security::update_e2e;
+        update_e2e::armed(std::env::var_os(update_e2e::UPDATE_E2E_ENV).as_deref()).is_some()
+    }
+    #[cfg(not(feature = "update-e2e"))]
+    false
+}
+
+/// The longest the hand-off to the installer waits for the main window and its WebView2 to go.
+const CLOSE_FOR_INSTALL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// R342: before the installer starts, destroy the main window, so this instance's WebView2
+/// releases the user data folder the new one opens; bounded, it never holds the exit long.
+#[cfg(feature = "updater")]
+fn close_main_window(handle: &AppHandle) {
+    let Some(w) = handle.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    if let Err(e) = w.destroy() {
+        eprintln!("lpk-gui: closing the window for the installer: {e}");
+        return;
+    }
+    let start = std::time::Instant::now();
+    while handle.get_webview_window(MAIN_WINDOW).is_some() && start.elapsed() < CLOSE_FOR_INSTALL {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // The browser process ends after its last webview: the rest of the bound for it.
+    std::thread::sleep(
+        CLOSE_FOR_INSTALL
+            .saturating_sub(start.elapsed())
+            .min(std::time::Duration::from_millis(700)),
+    );
+}
+
 /// The exit code of a portable copy whose `data` folder is unusable.
 const PORTABLE_DATA_UNUSABLE: i32 = 1;
 
@@ -1098,6 +1192,7 @@ fn refuse_portable(error: &str) -> i32 {
 
 /// Run the GUI; the process's exit code.
 pub fn run() -> i32 {
+    install_crash_note();
     // E6-4: `--register-shell` and `--unregister-shell` first of all: no window, no webview, no
     // single-instance plugin (never forwarded to a running instance); they exit with a code.
     let literal: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
@@ -1178,6 +1273,8 @@ pub fn run() -> i32 {
             open_release_page,
         ])
         .setup(move |a| {
+            let handle = a.handle().clone();
+            let result = (move || -> Result<(), Box<dyn std::error::Error>> {
             let app = setup_app;
             // The previous run's interrupted writes, before anything new starts (this is the one
             // instance); and the folders of entries an earlier run opened, if its process ended.
@@ -1226,10 +1323,12 @@ pub fn run() -> i32 {
                 let exiting = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let state = paths::update_state_file();
+                    let closing = handle.clone();
                     let before_exit = move || {
                         if !exiting.shutdown(EXIT_JOIN) {
                             eprintln!("lpk-gui: an operation did not stop within {EXIT_JOIN:?}");
                         }
+                        close_main_window(&closing);
                     };
                     let today = lpk_gui::update::today();
                     // `/R` replays the launch's arguments: no restart after a launch with a verb.
@@ -1286,18 +1385,8 @@ pub fn run() -> i32 {
             }
             #[cfg(not(feature = "updater"))]
             let _ = check;
-            let mut b = tauri::WebviewWindowBuilder::new(
-                a,
-                MAIN_WINDOW,
-                WebviewUrl::App("index.html".into()),
-            )
-            .title(strings::get("app.title"))
-            .inner_size(960.0, 640.0)
-            .min_inner_size(480.0, 320.0)
-            .theme(window_theme(theme));
-            if let Some(d) = paths::webview_dir() {
-                b = b.data_directory(d);
-            }
+            #[allow(unused_mut)]
+            let mut browser_args: Option<String> = None;
             // E5-11: the Edge WebDriver's arguments, only in a `webdriver` build (CI's driver
             // harness; never shipped) and only when the harness asks for them.
             #[cfg(feature = "webdriver")]
@@ -1317,12 +1406,49 @@ pub fn run() -> i32 {
                     let _ = std::fs::write(log, line);
                 }
                 match outcome {
-                    Ok(Some(args)) => b = b.additional_browser_args(&args),
+                    Ok(Some(args)) => browser_args = Some(args.to_string()),
                     Ok(None) => {}
                     Err(e) => return Err(e.into()),
                 }
             }
-            b.build()?;
+            // R342: a fresh builder per try; the old instance's WebView2 may still hold the user
+            // data folder for a moment after "Install and restart".
+            let window_app: &tauri::App = a;
+            let attempt = || {
+                let mut b = tauri::WebviewWindowBuilder::new(
+                    window_app,
+                    MAIN_WINDOW,
+                    WebviewUrl::App("index.html".into()),
+                )
+                .title(strings::get("app.title"))
+                .inner_size(960.0, 640.0)
+                .min_inner_size(480.0, 320.0)
+                .theme(window_theme(theme));
+                if let Some(d) = paths::webview_dir() {
+                    b = b.data_directory(d);
+                }
+                if let Some(args) = &browser_args {
+                    b = b.additional_browser_args(args);
+                }
+                b.build()
+            };
+            lpk_gui::startup::retry(
+                lpk_gui::startup::WEBVIEW_RETRY_INTERVAL,
+                lpk_gui::startup::WEBVIEW_RETRY_FOR,
+                attempt,
+                |n, e| {
+                    let line = format!("the main window, try {n}: {e}");
+                    eprintln!("lpk-gui: {line}");
+                    e2e_note(&line);
+                },
+                std::thread::sleep,
+            )?;
+            Ok(())
+            })();
+            if let Err(e) = result {
+                start_failed(&handle, &e.to_string());
+                handle.exit(1);
+            }
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -1363,9 +1489,10 @@ pub fn run() -> i32 {
             push(&host, Notice::Dropped { items });
         }
         RunEvent::ExitRequested { code, api, .. } => {
-            let host = handle.state::<Host>();
-            if code.is_none() && !may_exit(handle, &host) {
-                api.prevent_exit();
+            if let (None, Some(host)) = (code, handle.try_state::<Host>()) {
+                if !may_exit(handle, &host) {
+                    api.prevent_exit();
+                }
             }
         }
         RunEvent::Exit => {

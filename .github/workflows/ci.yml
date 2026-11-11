@@ -1030,10 +1030,15 @@ jobs:
             || { echo "no audit record of lpk-gui.exe starting the downloaded installer with /P /UPDATE"; exit 1; }
           grep -E ' 4689 .*-updater-[^\\]*\\[^|]*-installer\.exe [|] Exit Status:[[:space:]]*0x0' "$W/events.log" \
             || { echo "no audit record of the downloaded installer exiting with 0"; exit 1; }
-          # Diagnostic only: the GUI the installer's /R started, and N+1's GUI started by hand (stderr kept).
+          # R342: the GUI the installer's /R started is N+1's and stays up (it once panicked in setup, exit 101).
           grep -E ' 4689 .*\\LitePack\\lpk-gui\.exe [|] Exit Status' "$W/events.log" || true
-          rc=0; timeout 20 "$INST/lpk-gui.exe" 2> "$W/relaunch.err" || rc=$?
-          echo "N+1's GUI started by hand: exit $rc (124 = still running after 20 s); stderr:"; cat "$W/relaunch.err"
+          if [ -f "$STATE/crash.log" ]; then echo "--- crash.log"; cat "$STATE/crash.log"; fi
+          if grep -E ' 4689 .*\\LitePack\\lpk-gui\.exe [|] Exit Status:[[:space:]]*0x65' "$W/events.log"; then
+            echo "a LitePack GUI exited with 101 (a panic) after the update"; exit 1
+          fi
+          alive="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='lpk-gui.exe'\" | Where-Object { \$_.CommandLine -notmatch '--' }).Count" | tr -d '\r')"
+          echo "LitePack GUIs running after the update: $alive"
+          test "$alive" -ge 1 || { echo "the GUI the installer restarted is not running"; exit 1; }
           # The installer's /R started N+1's GUI again: stop it (its own check is not due today).
           pwsh -NoProfile -Command 'Get-Process lpk-gui -ErrorAction SilentlyContinue | Format-Table Id, Path; Get-Process lpk-gui -ErrorAction SilentlyContinue | Stop-Process -Force'
           sleep 3

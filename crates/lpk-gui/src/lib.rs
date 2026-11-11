@@ -47,6 +47,7 @@ pub mod security;
 pub mod settings;
 pub mod shell_setting;
 pub mod shellfile;
+pub mod startup;
 pub mod strings;
 pub mod update;
 pub mod write;

@@ -5,7 +5,8 @@ the code does today; it describes nothing that is planned.
 
 ## Your files
 
-Files stay on your computer. Archives are read and written locally, and nothing is uploaded.
+Files stay on your computer. Archives are read and written locally, and nothing is uploaded. If LitePack crashes, it writes a short note (the error and where in the code it happened, the last few at most,
+under 64 KiB) to `crash.log` in its local state folder; it is never sent, and uninstalling LitePack removes it.
 
 The GUI keeps some things on the computer:
 

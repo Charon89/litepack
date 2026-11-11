@@ -89,6 +89,13 @@ The icons in `crates/lpk-gui/icons` are a generated placeholder (`icons/make-pla
   (`LPK_GUI_UPDATE_E2E`) presses Install, and the job requires the steps check, download, verified, quit, install in
   that order, N+1's binaries, the registration and `Path`, the settings kept, and no residue after the uninstall.
   No shipped build holds the hook or the overlay: the `gui` job greps the release exe.
+- **Startup after the update (R342).** tauri-bundler patches the bundle type into the packed `lpk-gui.exe`, so the job
+  compares its hash with the token turned back (`scripts/e7-bundled-hash.py`), and it tracks the installer by process
+  audit (started by `lpk-gui.exe` with `/P /UPDATE`, exit 0). Before the hand-off the GUI destroys its window (bounded,
+  1.5 s), so its WebView2 releases the data folder; the new GUI retries its webview every 500 ms for 10 s, and a
+  setup failure shows "LitePack could not start" and exits 1 instead of Tauri's panic (exit 101). A panic appends a
+  bounded local note to `crash.log` in the local state folder (portable: `data\`); nothing is sent, and the
+  uninstaller removes the folder.
 - **Signing `latest.json`.** The owner's offline step (`scripts/updater-sign.sh`) belongs to E7-2.
 
 ## Licence checks of the GUI
