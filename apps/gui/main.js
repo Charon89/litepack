@@ -8,6 +8,7 @@ import { createExtractor } from "./extract.js";
 import { createCreator } from "./create.js";
 import { createPreview } from "./preview.js";
 import { createMaintainer } from "./maintain.js";
+import { wireAbout } from "./about.js";
 import { keyLabel, keyLetter, syncRadios, trapTab, wirePanes, wireRadios } from "./a11y.js";
 
 // What went wrong on the page; reported with the listing (CI's check of the built exe fails on
@@ -748,6 +749,9 @@ function wireControls() {
     }
   });
   wireSettingsDialog();
+  // The About box, opened from the settings dialog (after it, so that the settings dialog's close
+  // handler runs first).
+  wireAbout(core, t, $("settings-open"), $("settings"));
   // Something dragged over the window lights the drop zone.
   for (const [type, on] of [["dragenter", true], ["dragover", true], ["dragleave", false], ["drop", false]]) {
     document.addEventListener(type, () => $("hint").classList.toggle("dragover", on));

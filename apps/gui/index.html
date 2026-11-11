@@ -116,7 +116,25 @@
       </span>
       <p id="settings-alert" class="dialog-error" role="alert" hidden></p>
     </div>
-    <div class="settings-buttons"><button type="button" id="settings-close" class="primary" data-string="settings.close"></button></div>
+    <div class="settings-buttons"><button type="button" id="about-open" aria-haspopup="dialog" data-string="about.open"></button><button type="button" id="settings-close" class="primary" data-string="settings.close"></button></div>
+  </dialog>
+  <dialog id="about" class="settings about" aria-labelledby="about-title">
+    <h2 id="about-title" data-string="about.title"></h2>
+    <div class="settings-body">
+      <p id="about-version" class="about-version"></p>
+      <p id="about-licence"></p>
+      <p id="about-state"></p>
+      <p id="about-settings" class="about-path" hidden></p>
+      <p id="about-install" class="about-path" hidden></p>
+      <ul id="about-links" class="about-links" data-label="about.links"></ul>
+      <section class="about-profile" aria-labelledby="about-profile-title">
+        <h3 id="about-profile-title" data-string="about.profile.title"></h3>
+        <p id="about-profile-text" data-string="about.profile.text"></p>
+        <button type="button" id="about-remove" aria-describedby="about-profile-text" data-string="about.profile.remove"></button>
+      </section>
+      <p id="about-result" class="about-result" role="status" aria-live="polite"></p>
+    </div>
+    <div class="settings-buttons"><button type="button" id="about-close" class="primary" data-string="about.close"></button></div>
   </dialog>
 </body>
 </html>

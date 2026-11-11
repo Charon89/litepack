@@ -766,6 +766,53 @@ main {
   border-color: var(--rule);
 }
 
+/* The About box (a settings-style dialog): the version in display type, the folders wrapping
+   anywhere, the links as underlined text buttons in the board colour, the profile's part apart. */
+.about p {
+  margin: 0;
+}
+
+.about .about-version {
+  font: 600 15px/1.3 var(--display);
+}
+
+.about .about-path {
+  color: var(--slate);
+  overflow-wrap: anywhere;
+}
+
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.about .about-links button.link {
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--board);
+  text-decoration: underline;
+}
+
+.about-profile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+
+.about-profile h3 {
+  margin: 0;
+  font: 600 14px/1.3 var(--display);
+}
+
 /* The preview pane. */
 .split {
   flex: 1;
