@@ -832,8 +832,10 @@ jobs:
           cargo tauri build --ci --features update-e2e --config "$SETUP/next.conf.json" --config "$KEYS/e2e.conf.json" \
             -- --locked 2>&1 | tee "$SETUP/build-N1.log"
           cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N1-setup.exe"
+          # sha256sum under Git Bash marks binary mode with '*' ("<hash> *lpk.exe"); write the plain
+          # "<hash>  <name>" form, so every reader below sees bare names.
           (cd ../../target/release && sha256sum lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe \
-            lpk-gui.exe > "$SETUP/N1.sha256")
+            lpk-gui.exe | sed 's/ [*]/  /' > "$SETUP/N1.sha256")
           cat "$SETUP/N1.sha256"
           ls -la "$SETUP"
       - name: Sign N+1 (version recorded for requireSignedVersion), a flipped copy, and start the local server
@@ -898,7 +900,8 @@ jobs:
           for i in $(seq 1 180); do kill -0 "$gui" 2>/dev/null || break; sleep 1; done
           echo "--- hook log"; cat "$W/good.log"
           if kill -0 "$gui" 2>/dev/null; then echo "the GUI did not exit for the installer"; kill "$gui"; exit 1; fi
-          n1gui="$(grep " lpk-gui.exe$" "$SETUP/N1.sha256" | cut -d' ' -f1)"
+          n1gui="$(awk '{ sub(/^[*]/, "", $2) } $2 == "lpk-gui.exe" { print $1 }' "$SETUP/N1.sha256")"
+          test -n "$n1gui" || { echo "N1.sha256 has no lpk-gui.exe:"; cat "$SETUP/N1.sha256"; exit 1; }
           count='@(Get-Process | Where-Object { $_.Path -like "*-updater-*" }).Count'
           for i in $(seq 1 600); do
             got="$(sha256sum "$INST/lpk-gui.exe" 2>/dev/null | cut -d' ' -f1 || true)"
@@ -922,6 +925,7 @@ jobs:
         run: |
           bad=0
           while read -r sum name; do
+            name="${name#\*}"
             if [ "$name" = lpk-gui.exe ]; then f="$INST/lpk-gui.exe"; else f="$INST/bin/$name"; fi
             got="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1 || true)"
             echo "$name: installed $got, N+1 $sum"
