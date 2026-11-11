@@ -169,6 +169,37 @@ fn is_settings_uri(uri: &str) -> bool {
         && !uri.chars().any(char::is_control)
 }
 
+/// Open a web page in the default browser: `uri` must start with `https://` and hold no control
+/// character, space, quote, angle bracket or backslash, or this refuses with `InvalidInput`
+/// before the shell is called. Same call as [`open_settings_uri`]. The GUI passes only its
+/// About box's fixed addresses (`lpk_gui::about`), never a string from the page.
+pub fn open_web_uri(uri: &str) -> io::Result<()> {
+    if !is_web_uri(uri) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only https: addresses may be opened here",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        windows_impl::open_uri(uri)
+    }
+    #[cfg(not(windows))]
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Whether `uri` is one `open_web_uri` accepts.
+fn is_web_uri(uri: &str) -> bool {
+    const SCHEME: &str = "https://";
+    uri.len() > SCHEME.len()
+        && uri.starts_with(SCHEME)
+        && !uri
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '"' | '\\' | '<' | '>'))
+}
+
 /// The shell's Open dialog (`IFileOpenDialog`) owned by `owner`, titled `title`: the files the
 /// user chose (several when `multi`), empty when cancelled. File-system items only. Runs on a
 /// thread of its own with COM initialised, and blocks until the dialog closes.
@@ -271,6 +302,30 @@ mod tests {
         ] {
             assert!(!is_settings_uri(bad), "{bad:?}");
             let e = open_settings_uri(bad).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn only_https_addresses_are_opened_on_the_web() {
+        assert!(is_web_uri("https://charon89.github.io/litepack/"));
+        for bad in [
+            "",
+            "https://",
+            "http://example.com",
+            "HTTPS://example.com",
+            "ms-settings:defaultapps",
+            "file:///C:/Windows/notepad.exe",
+            "C:\\Windows\\notepad.exe",
+            " https://example.com",
+            "https://example.com/a b",
+            "https://example.com/\"x",
+            "https://example.com\\x",
+            "https://example.com/\0",
+            "https://example.com/\n",
+        ] {
+            assert!(!is_web_uri(bad), "{bad:?}");
+            let e = open_web_uri(bad).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
         }
     }

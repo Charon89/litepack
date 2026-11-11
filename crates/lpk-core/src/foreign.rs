@@ -759,6 +759,54 @@ pub fn appcontainer_temp(name: Option<&str>) -> Option<PathBuf> {
     process::appcontainer_temp(name.unwrap_or(lpk_sandbox_sys::APPCONTAINER_NAME))
 }
 
+/// What removing the worker's AppContainer profile did ([`remove_worker_profile`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileRemoval {
+    /// The profile existed and is gone.
+    Removed,
+    /// There was no profile to remove.
+    NoneExisted,
+}
+
+/// Remove the LPAC worker's AppContainer profile `LitePack.Worker` (its folders and registry
+/// keys), as `lpk-worker --remove-profile` does: the sandbox crate's
+/// `delete_appcontainer_profile`. Safe at any time no worker runs; the next foreign archive
+/// opened makes it again ([`Options`]' launch creates it). The GUI's About box calls it
+/// (`docs/notes/e7-design.md` section 5). Nothing to remove off Windows.
+#[cfg(any(windows, target_os = "linux"))]
+pub fn remove_worker_profile() -> std::io::Result<ProfileRemoval> {
+    remove_profile_named(lpk_sandbox_sys::APPCONTAINER_NAME)
+}
+
+/// [`remove_worker_profile`] for the profile `name` (tests use `LitePack.Test.*` names).
+#[doc(hidden)]
+#[cfg(any(windows, target_os = "linux"))]
+pub fn remove_profile_named(name: &str) -> std::io::Result<ProfileRemoval> {
+    #[cfg(windows)]
+    {
+        // ERROR_FILE_NOT_FOUND and ERROR_NOT_FOUND: no such profile.
+        const ABSENT: [i32; 2] = [2, 1168];
+        // The profile's folder, `%LOCALAPPDATA%\Packages\<name>`: whether there was one (the
+        // call itself succeeds for a name that has none). Unknown counts as present.
+        let existed = process::appcontainer_temp(name)
+            .and_then(|t| t.parent().and_then(Path::parent).map(Path::to_path_buf))
+            .is_none_or(|p| p.exists());
+        match lpk_sandbox_sys::delete_appcontainer_profile(name) {
+            Ok(()) if existed => Ok(ProfileRemoval::Removed),
+            Ok(()) => Ok(ProfileRemoval::NoneExisted),
+            Err(e) if e.raw_os_error().is_some_and(|c| ABSENT.contains(&c)) => {
+                Ok(ProfileRemoval::NoneExisted)
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        Ok(ProfileRemoval::NoneExisted)
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The conversation.
 

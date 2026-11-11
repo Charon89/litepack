@@ -1014,6 +1014,9 @@ pub fn run() -> i32 {
             rollback_run,
             append_plan,
             append_run,
+            about,
+            about_open,
+            remove_profile,
         ])
         .setup(move |a| {
             let app = setup_app;
@@ -1158,6 +1161,43 @@ pub fn run() -> i32 {
         }
         _ => {}
     })
+}
+
+// The About box (`lpk_gui::about`): its facts, a link opened by name, the worker profile's removal.
+
+/// The About box's facts: the running build's version (the package version the update check
+/// compares), the licence, the portable or installed state and its folders.
+#[tauri::command]
+async fn about(handle: AppHandle) -> Result<lpk_gui::about::AboutInfo, GuiError> {
+    let version = handle.package_info().version.to_string();
+    let exe = std::env::current_exe().ok();
+    Ok(lpk_gui::about::info(
+        &version,
+        &paths::dirs(),
+        exe.as_deref().and_then(std::path::Path::parent),
+    ))
+}
+
+/// Open one of the About box's pages in the default browser. The page sends a link's name
+/// (`lpk_gui::about::Link`, a closed set), never an address.
+#[tauri::command]
+async fn about_open(link: lpk_gui::about::Link) -> Result<(), GuiError> {
+    blocking(move || lpk_gui_sys::open_web_uri(link.url()).map_err(internal)).await
+}
+
+/// Remove the sandboxed worker's AppContainer profile (`LitePack.Worker`), as `lpk-worker
+/// --remove-profile` does; refused while any operation runs, and no operation begins until it
+/// has ended.
+#[tauri::command]
+async fn remove_profile(host: State<'_, Host>) -> Result<lpk_gui::about::Removal, GuiError> {
+    let app = host.app.clone();
+    blocking(move || {
+        Ok(lpk_gui::about::remove_profile(
+            &app.ops,
+            lpk_api::remove_worker_profile,
+        ))
+    })
+    .await
 }
 
 #[cfg(test)]

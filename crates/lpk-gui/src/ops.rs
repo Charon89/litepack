@@ -17,6 +17,22 @@ struct Inner {
     running: HashMap<u64, CancelToken>,
     heavy_busy: bool,
     closing: bool,
+    /// An [`Exclusive`] holds the process: no operation may begin.
+    exclusive: bool,
+}
+
+/// A task that runs only while no operation does, and lets none begin until it is dropped
+/// ([`Ops::exclusive`]; the About box's removal of the worker's profile).
+#[derive(Debug)]
+pub struct Exclusive {
+    ops: Arc<Ops>,
+}
+
+impl Drop for Exclusive {
+    fn drop(&mut self) {
+        self.ops.lock().exclusive = false;
+        self.ops.changed.notify_all();
+    }
 }
 
 /// The process's operations.
@@ -65,6 +81,11 @@ impl Ops {
         let mut g = self.lock();
         if g.closing {
             return Err(lpk_api::Error::cancelled().into());
+        }
+        if g.exclusive {
+            return Err(GuiError::usage(
+                "the sandbox profile is being removed; try again in a moment",
+            ));
         }
         if g.running.contains_key(&id) {
             return Err(GuiError::usage(format!(
@@ -121,6 +142,20 @@ impl Ops {
         }
         drop(g);
         self.changed.notify_all();
+    }
+
+    /// Hold the process for a task no operation may run beside: `None` while any operation is
+    /// registered (running or queued), another task holds it, or the exit has begun; otherwise
+    /// no operation begins until the guard is dropped (`begin` refuses with `Usage`).
+    pub fn exclusive(self: &Arc<Self>) -> Option<Exclusive> {
+        let mut g = self.lock();
+        if g.closing || g.exclusive || !g.running.is_empty() {
+            return None;
+        }
+        g.exclusive = true;
+        Some(Exclusive {
+            ops: Arc::clone(self),
+        })
     }
 
     /// Wait until every operation has ended, at most `timeout`; true when none is left.
@@ -221,6 +256,22 @@ mod tests {
         }
         let e = ops.begin(5, false).unwrap_err();
         assert!(e.is(lpk_api::Class::Cancelled), "{e}");
+    }
+
+    #[test]
+    fn an_exclusive_task_waits_for_no_one_and_holds_new_operations_off() {
+        let ops = Ops::new();
+        let g = ops.begin(1, false).unwrap();
+        assert!(ops.exclusive().is_none(), "an operation runs");
+        drop(g);
+        let x = ops.exclusive().unwrap();
+        assert!(ops.exclusive().is_none(), "one at a time");
+        let e = ops.begin(2, true).unwrap_err();
+        assert!(e.is(lpk_api::Class::Usage), "{e}");
+        drop(x);
+        drop(ops.begin(2, true).unwrap());
+        ops.cancel_all();
+        assert!(ops.exclusive().is_none(), "the exit has begun");
     }
 
     #[test]
