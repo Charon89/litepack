@@ -84,6 +84,10 @@ APPCONTAINER_REASON = ("Windows' own AppContainer bookkeeping: an empty parent k
 AAD_LU = (LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData"
           r"\Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy\HAM\AUI\App\V1\LU")
 SHELL_MUICACHE = LOCAL_SETTINGS + r"\Software\Microsoft\Windows\Shell\MuiCache"
+SPOTLIGHT = r"HKCU\Software\Microsoft\Windows\CurrentVersion\DesktopSpotlight"
+SPOTLIGHT_LU = (LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData"
+                r"\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\HAM\AUI\Global.DesktopSpotlight\V1\LU")
+SPOT = "Windows Spotlight's own state, which Windows updates in the background (CI run 42944220039, R343)"
 USERASSIST_COUNT = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"
                     r"\{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}\Count")
 WAM = ("written while the GUI starts, by Windows' account broker (WAM, "
@@ -98,8 +102,14 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # (that one key's existence, not its values or subkeys), `value` (one key and one value name),
 # `value-pattern` (one key, value names of one shape), `key-pattern-value` (one value name in keys
 # of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
-# holding nothing).
+# holding nothing), `file-changed` (that one file, changed only: never added or removed).
+USRCLASS = ("the storage files of HKCU\\Software\\Classes (its registry hive and transaction logs), which Windows "
+            "rewrites whenever that hive is written; the diff already examines its keys one by one (R339)")
 ALLOW = [
+    # CI run 42933006998's portable job, ruling R339.
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat", "reason": USRCLASS},
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat.LOG1", "reason": USRCLASS},
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat.LOG2", "reason": USRCLASS},
     # E7-6's first full diff (CI run 42483731626), ruling R313.
     {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\TokenBroker\Cache",
      "name": r"[0-9a-f]{40}\.tbres", "reason": WAM + ": its token cache, one file per token"},
@@ -112,6 +122,10 @@ ALLOW = [
      "reason": WAM + ": the broker app's last-use time"},
     {"kind": "value", "path": AAD_LU, "name": "PTT",
      "reason": WAM + ": the broker app's last-use time"},
+    {"kind": "value", "path": SPOTLIGHT, "name": "Maintenance", "reason": SPOT + ": its maintenance record"},
+    {"kind": "value", "path": SPOTLIGHT, "name": "State", "reason": SPOT + ": its state"},
+    {"kind": "value", "path": SPOTLIGHT_LU, "name": "PCT", "reason": SPOT + ": its last-use time"},
+    {"kind": "value", "path": SPOTLIGHT_LU, "name": "PTT", "reason": SPOT + ": its last-use time"},
     {"kind": "value", "path": r"HKCU\Software\Microsoft\AuthCookies\Live\Default\DIDC",
      "name": "Data", "reason": WAM + ": the Microsoft account device cookie"},
     {"kind": "value-pattern", "path": LOCAL_SETTINGS + r"\MuiCache\1a4\52C64B7E",
@@ -480,6 +494,9 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
             folder, _, leaf = path.rpartition("\\")
             if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE):
                 return a["reason"]
+        if a["kind"] == "file-changed" and kind == "file" and sign == "~" and \
+                norm(path) == norm(a["path"]):
+            return a["reason"]
         if a["kind"] == "empty-key" and kind == "key" and sign == "+" and \
                 norm(path) == norm(a["path"]) and empty_key(after, path):
             return a["reason"]
@@ -766,6 +783,26 @@ class Tests(unittest.TestCase):
         after = snap(self.base["files"], dict(self.base["registry"], **{k: v for k, v in keys}))
         return diff(self.base, after, False, run)
 
+    def test_spotlight_allows_its_four_values_only(self):
+        # As on CI: the keys exist; Maintenance is added, State, PCT and PTT change.
+        other_lu = SPOTLIGHT_LU.replace("Global.DesktopSpotlight", "Other")
+        reg = dict(self.base["registry"], **{SPOTLIGHT: {"State": '"s0"'},
+                                             SPOTLIGHT_LU: {"PCT": "hex(b):00", "PTT": "hex(b):00"},
+                                             other_lu: {"PCT": "hex(b):00"}})
+        before = snap(self.base["files"], reg)
+
+        def after(spot, lu, other=None):
+            return snap(self.base["files"], dict(reg, **{SPOTLIGHT: spot, SPOTLIGHT_LU: lu,
+                                                         other_lu: other or {"PCT": "hex(b):00"}}))
+        changed = {"PCT": "hex(b):01", "PTT": "hex(b):02"}
+        lines, bad = diff(before, after({"Maintenance": '"m"', "State": '"s1"'}, changed), False)
+        self.assertEqual(bad, 0, lines)
+        # Another value there, or the same name in another key, is residue.
+        for case in (after({"State": '"s0"', "Other": '"x"'}, {"PCT": "hex(b):00", "PTT": "hex(b):00"}),
+                     after({"State": '"s0"'}, {"PCT": "hex(b):00", "PTT": "hex(b):00"}, {"PCT": "hex(b):01"})):
+            lines, bad = diff(before, case, False)
+            self.assertEqual(bad, 1, lines)
+
     def test_a_webview2_key_below_its_root_is_allowed_and_a_sibling_is_not(self):
         root = r"HKCU\Software\Microsoft\EdgeWebView"
         lines, bad = self.added_keys([(root + r"\BLBeacon", {"version": '"1"'})])
@@ -784,6 +821,20 @@ class Tests(unittest.TestCase):
                          r"%LOCALAPPDATA%\Microsoft\Credentials\litepack"):
             after = snap(dict(self.base["files"], **{bad_path: f()}), self.base["registry"])
             self.assertEqual(diff(self.base, after, False)[1], 1, bad_path)
+
+    def test_the_classes_hive_files_are_allowed_changed_only(self):
+        win = r"%LOCALAPPDATA%\Microsoft\Windows"
+        hive = [win + "\\" + n for n in ("UsrClass.dat", "UsrClass.dat.LOG1", "UsrClass.dat.LOG2")]
+        before = snap(dict(self.base["files"], **{h: f() for h in hive}), self.base["registry"])
+        changed = snap(dict(self.base["files"], **{h: f(size=2) for h in hive}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 0)
+        # Added or removed, they are residue; so is a sibling.
+        self.assertEqual(diff(self.base, before, False)[1], 3)
+        self.assertEqual(diff(before, self.base, False)[1], 3)
+        sib = win + r"\UsrClass2.dat"
+        before = snap(dict(self.base["files"], **{sib: f()}), self.base["registry"])
+        changed = snap(dict(self.base["files"], **{sib: f(size=2)}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 1)
 
     def test_the_muicache_allows_lpk_gui_names_in_the_run_folder_only(self):
         mui = SHELL_MUICACHE

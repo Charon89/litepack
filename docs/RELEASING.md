@@ -219,7 +219,9 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
   rename fails, the others are renamed back (each checked; a failed one is named in the message) and the installer
   exits with error level 2. The set-aside copies are deleted only in POSTINSTALL, once all four new executables
   exist; if one is missing (its `File` failed), its copy is renamed back and the installer exits with error level 2
-  naming it. A held copy stays until the next install or the uninstall deletes it (`bin\lpk*.exe.old-*`, a pattern
+  naming it: the GUI and the Uninstall key are then the new version while that file is the old one (mixed versions;
+  reinstall to repair), and that exit level 2 is kept even if `--register-shell` then fails (it would set 3). An
+  executable the uninstaller cannot rename aside is named in its log. A held copy stays until the next install or the uninstall deletes it (`bin\lpk*.exe.old-*`, a pattern
   no user file of a `/D=` folder's `bin\` is expected to match).
 - PREINSTALL also cancels every `LitePack *` `RunOnce` value still pending from an earlier uninstall or upgrade, so
   none can touch a reinstall made before the next logon.
@@ -239,11 +241,17 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
   line (`cmd /d /v:off /c`) changes to the install folder once and runs its steps in sequence with relative paths;
   the design does not depend on the order of values. `LitePack uninstall` (after an uninstall: this version's shell
   DLL Explorer holds, set-aside executables still running): `cd /d "<install>" && (del /f /q
-  shell\<version>\lpk_shell.dll bin\lpk*.exe.old-* & rmdir shell\<version> & rmdir shell & rmdir bin & cd .. & rmdir
-  "<folder name>")`. `LitePack shell <version>` (after an upgrade: an old version's DLL Explorer holds): the DLL, then
+  shell\<version>\lpk_shell.dll & del /f /q "bin\lpk.exe.old-1" & ... & rmdir shell\<version> & rmdir shell & rmdir
+  bin & cd .. & rmdir "<folder name>")`, one `del` per file that is there, by its exact name (R343: given several
+  names, `del` stopped at a missing one and deleted none, CI run 42944220039); only when the names would pass 260
+  characters is the set-aside group one `del /f /q bin\lpk*.exe.old-*`. `LitePack shell <version>` (after an upgrade: an old version's DLL Explorer holds): the DLL, then
   `rmdir shell\<version>`. Never recursively, so nothing else in a `/D=` folder can go; nothing runs if the folder is
-  gone. The whole stored string is measured: an install path long enough to push it past 260 characters gets no value
-  at all, and what is left stays until the next install, whose cleanup deletes `bin\lpk*.exe.old-*` and other
+  gone. The whole stored string is measured. The budget (R338): `LitePack uninstall` has a fixed part of 184
+  characters at version 0.0.1, counting `cmd.exe`'s path and the install folder's last name `LitePack`, so the
+  install path may be at most 76 characters; the version appears twice, so each character it has beyond `0.0.1`
+  takes two from the path (a version like `1.10.0-beta.1` leaves 60). CI's path (43 characters) gives 227. Over 260,
+  the value is retried with the install folder's short (8.3) path (`GetFullPathName /SHORT`); an install path long
+  enough to push even that past 260, or a volume without short names, gets no value at all, and what is left stays until the next install, whose cleanup deletes `bin\lpk*.exe.old-*` and other
   versions' `shell\` folders (after an uninstall with no later install, it stays). CI holds the DLL open during an
   uninstall and runs an uninstall while `bin\lpk.exe` compresses; it lists the values with `scripts/e7-runonce.py`,
   requires each to be at most 260 characters, runs them as the next logon would (in a seeded random order), requires

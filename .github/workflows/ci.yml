@@ -691,10 +691,21 @@ jobs:
           for name in $names; do
             sum="$(python -I scripts/e7-sha256.py "$SETUP/N1.sha256" "$name")"
             if [ "$name" = lpk-gui.exe ]; then file="$INST/lpk-gui.exe"; else file="$INST/bin/$name"; fi
-            got="missing"; test -f "$file" && got="$(sha256sum "$file" | cut -d' ' -f1)"
+            got="missing"
+            if [ ! -f "$file" ]; then :
+            elif [ "$name" = lpk-gui.exe ]; then
+              # R340: tauri-bundler patches the bundle-type token into the lpk-gui.exe it packs (patch_binary), so
+              # the installed file is compared with the token turned back (scripts/e7-bundled-hash.py, E7-7's).
+              got="$(python -I scripts/e7-bundled-hash.py "$file" | tr -d '\r')" || { echo "$got"; got="unpatched"; }
+            else
+              got="$(sha256sum "$file" | cut -d' ' -f1)"
+            fi
             echo "$name: installed $got, N+1 $sum"
             [ "$got" = "$sum" ] || bad=1
           done
+          # The running lpk.exe's archive is tested whatever the checks below find (R340).
+          t_rc=0; "$INST/bin/lpk.exe" t "$W/big.lpk" || t_rc=$?
+          echo "lpk t on the running lpk.exe's archive (N+1's lpk.exe): exit $t_rc"
           test "$rc" -eq 0 || { echo "the upgrade's installer failed with $rc"; exit 1; }
           test "$bad" -eq 0 || { echo "a file of bin\\ or the GUI is not N+1's after the upgrade"; exit 1; }
           # R336: a pass must prove the set-aside, so lpk.exe must still run when the upgrade ends.
@@ -702,7 +713,7 @@ jobs:
           grep -qxF "lpk.exe.old-1" <<<"$set_aside" \
             || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
           test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the upgrade"; exit 1; }
-          "$INST/bin/lpk.exe" t "$W/big.lpk" || { echo "the running lpk.exe's archive does not test as valid"; exit 1; }
+          test "$t_rc" -eq 0 || { echo "the running lpk.exe's archive does not test as valid"; exit 1; }
           echo "the running lpk.exe's archive tests as valid with N+1's lpk.exe"
           rm -f "$W/big.txt" "$W/big.lpk"
           python -I scripts/e7-installer-check.py installed "$INST" 0.0.2
@@ -785,6 +796,40 @@ jobs:
           lpk_rc=0; wait "$pid" || lpk_rc=$?
           echo "the running lpk.exe exited with $lpk_rc"; cat "$W/running2.log"
           test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the uninstall"; exit 1; }
+          # R343: the next logon comes long after the process ended. Wait (at most 30 s) until every set-aside file
+          # can be opened for writing, which Windows refuses while its image is still mapped.
+          python -I -c "
+          import glob, os, sys, time
+          files = glob.glob(os.path.join(sys.argv[1], 'bin', 'lpk*.exe.old-*'))
+          end = time.time() + 30
+          for f in files:
+              while True:
+                  try:
+                      open(f, 'r+b').close()
+                      print('deletable:', f, flush=True)
+                      break
+                  except OSError as e:
+                      if time.time() > end:
+                          sys.exit(f'still held after 30 s: {f} ({e})')
+                      time.sleep(0.5)
+          " "$INST"
+          # R343's diagnosis of run 42944220039 (the old command left lpk.exe.old-1): its `del`, alone, on a copy of
+          # the folder (no shell\, bin\lpk.exe.old-1), then each name alone; each with its output and exit code.
+          python -I -c "
+          import os, shutil, subprocess, sys
+          src, d = sys.argv[1], sys.argv[2]
+          for args in ([r'shell\0.0.1\lpk_shell.dll', r'bin\lpk*.exe.old-*'], [r'bin\lpk*.exe.old-*'],
+                       [r'bin\lpk.exe.old-1']):
+              shutil.rmtree(d, ignore_errors=True)
+              os.makedirs(os.path.join(d, 'bin'))
+              shutil.copy(os.path.join(src, 'bin', 'lpk.exe.old-1'), os.path.join(d, 'bin', 'lpk.exe.old-1'))
+              cmd = 'del /f /q ' + ' '.join(args)
+              p = subprocess.run(['cmd.exe', '/d', '/v:off', '/c', cmd], cwd=d, capture_output=True, text=True)
+              left = os.path.exists(os.path.join(d, 'bin', 'lpk.exe.old-1'))
+              print(f'diagnosis: {cmd!r}: exit {p.returncode}, output {(p.stdout + p.stderr).strip()!r}, '
+                    f'lpk.exe.old-1 {\"left\" if left else \"deleted\"}')
+          shutil.rmtree(d, ignore_errors=True)
+          " "$INST" "$W/del-diag"
           python -I scripts/e7-runonce.py run
           test ! -e "$INST" || { ls -laR "$INST"; echo "the RunOnce command left $INST"; exit 1; }
           test -z "$(python -I scripts/e7-runonce.py show)" || { echo "RunOnce values left after the run"; exit 1; }

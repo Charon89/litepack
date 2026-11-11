@@ -716,25 +716,41 @@ fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
         .filter_map(|l| l.split("'${LPK_CMD} ").nth(1))
         .map(|a| a.trim_end().trim_end_matches('\'').to_lowercase())
         .collect();
-    assert_eq!(commands.len(), 2, "{commands:?}");
+    assert_eq!(commands.len(), 3, "{commands:?}");
+    // R343: the uninstall command's deletes are built in $R1, one `del` per exact file name (the wildcard only as
+    // the fallback when the names would pass 260 characters).
+    let files = [
+        r"shell\${version}\lpk_shell.dll",
+        r#""bin\$1""#,
+        r"bin\lpk*.exe.old-*",
+    ];
+    let builds: Vec<String> = nsh
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("StrCpy $R1 '"))
+        .map(|b| b.trim_end_matches('\'').to_lowercase())
+        .collect();
+    assert_eq!(builds.len(), 3, "{builds:?}");
+    for b in &builds {
+        let b = b.strip_prefix("$r1").unwrap_or(b);
+        let dels: Vec<&str> = b.split(" & ").filter(|d| !d.is_empty()).collect();
+        assert!(!dels.is_empty(), "{b}");
+        for d in dels {
+            let f = d.strip_prefix("del /f /q ").expect(d);
+            assert!(files.contains(&f), "{f}");
+        }
+    }
     for cmd in &commands {
         assert!(!cmd.contains("/s"), "{cmd}");
         let body = cmd
-            .strip_prefix(r#"cd /d "$instdir" && ("#)
+            .strip_prefix(r#"cd /d "$r3" && ("#)
             .and_then(|b| b.strip_suffix(')'))
             .unwrap_or_else(|| panic!("{cmd}"));
-        let mut parts = body.split(" & ");
-        let del = parts.next().unwrap();
-        let files: Vec<&str> = del
-            .strip_prefix("del /f /q ")
-            .expect(del)
-            .split(' ')
-            .collect();
-        for f in files {
-            assert!(
-                f == r"shell\${version}\lpk_shell.dll" || f == r"bin\lpk*.exe.old-*",
-                "{f}"
-            );
+        let mut parts: Vec<&str> = body.split(" & ").collect();
+        if let Some(rest) = parts[0].strip_prefix("$r1") {
+            parts[0] = rest;
+        } else {
+            let f = parts.remove(0).strip_prefix("del /f /q ").expect(cmd);
+            assert!(files.contains(&f), "{f}");
         }
         for part in parts {
             assert!(part == "cd .." || part.starts_with("rmdir "), "{part}");
@@ -751,6 +767,10 @@ fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
     assert!(at("LPK_FIND_CMD_CHAR") < at("WriteRegStr"));
     assert!(at("StrLen $R6 $R8") < at("WriteRegStr"));
     assert!(at("${If} $R6 <= 260") < at("${AndIf} $R7 == \"\""));
+    // R338: the full path first ($R3 = $INSTDIR), then its short form when the full string is over 260.
+    assert!(at("StrCpy $R3 $INSTDIR") < at("${If} $R6 > 260"));
+    assert!(at("${If} $R6 > 260") < at("GetFullPathName /SHORT $R3 $INSTDIR"));
+    assert!(at("GetFullPathName /SHORT $R3 $INSTDIR") < at("${If} $R6 <= 260"));
     assert!(at("${AndIf} $R7 == \"\"") < at("WriteRegStr"));
     assert_eq!(
         nsh.matches("WriteRegStr HKCU \"${LPK_RUNONCE}\"").count(),
