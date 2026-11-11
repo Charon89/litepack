@@ -15,6 +15,29 @@ has a command line, `lpk`, and a Windows GUI with an Explorer context menu.
 **Status: in development. There is no release yet.** The results measured so far are on the
 [benchmark page](https://charon89.github.io/litepack/bench/results.html).
 
+## Getting LitePack
+
+The first release will come in three forms. CI already builds and tests all three on every change; the release
+itself waits for the code-signing certificate.
+
+- **The installer**, `LitePack_<version>_x64-setup.exe`. It installs for your Windows account only, without
+  administrator rights, in `%LOCALAPPDATA%\LitePack`. It adds the Explorer menu and the `.lpk` file type, and puts
+  `lpk` on your `PATH`. It needs Windows 10 22H2 or later; the x64 installer stops on ARM64 Windows and points to the
+  ARM64 build. Uninstalling removes what it added. Your settings stay unless you tick the box, or pass
+  `/DELETEAPPDATA` to a silent uninstall.
+- **The portable zip**, `litepack-<version>-windows-x64-portable.zip`. Unzip it anywhere and run
+  `LitePack\lpk-gui.exe`. It keeps its settings and state in `data\` beside itself and registers nothing with
+  Windows. Opening a ZIP, 7z, RAR or other non-LitePack archive creates one Windows sandbox profile, which
+  `lpk-worker.exe --remove-profile` removes.
+- **The command-line zip**, `litepack-<version>-windows-x64-cli.zip`: `lpk.exe`, `lpk-check.exe` and the workers.
+
+From the first release on, the installed GUI checks for a new version at most once a day and installs one only when
+you click to install it. You can turn the check off in **Settings**. A portable copy only tells you that a new
+version exists. The [privacy policy](https://charon89.github.io/litepack/privacy.html) says exactly what the check
+sends.
+
+Until releases are signed, Windows SmartScreen warns before it runs them. To build all three yourself, see below.
+
 ## Documentation
 
 The documentation site is <https://charon89.github.io/litepack/>. It has:
@@ -42,15 +65,35 @@ You need two things:
 
 ```
 cargo build --release --workspace
-cargo build --release --manifest-path workers/Cargo.toml
+cd workers
+cargo build --release
+cd ..
 ```
 
-The first command builds `lpk.exe` and the libarchive worker in `target/release/`. The second builds the Rust worker,
-`workers/target/release/lpk-worker.exe`. `lpk` looks for its workers beside itself, so to open other formats, copy
-`lpk-worker.exe` into `target/release/`. `.lpk` archives need no worker.
+The first command builds `lpk.exe`, `lpk-check.exe` and the libarchive worker in `target/release/`. The second
+builds the Rust worker; the `workers/` workspace's own configuration puts it in the same `target/release/`, beside
+`lpk.exe`, which looks for its workers there. `.lpk` archives need no worker.
 
 The GUI is built with the Tauri CLI. Install it with `cargo install tauri-cli --version 2.12.4 --locked`, then run
 `cargo tauri build --ci -- --locked` in `crates/lpk-gui`.
+
+**The zips.** After those builds, from the repository root (the version is the one in `Cargo.toml`):
+
+```
+python scripts/make-zips.py --bin target/release --arch x64 --version 0.0.1 --timestamp $(git log -1 --format=%ct) --out dist
+```
+
+This writes the portable zip and the command-line zip into `dist/`. The timestamp, here the commit's time, is the one
+every entry carries: given the same timestamp and the same Python build, the zips are byte-identical.
+
+**The installer.** After the builds above, in `crates/lpk-gui`:
+
+```
+cargo tauri build --ci --config tauri.nsis.conf.json -- --locked
+```
+
+This writes `LitePack_<version>_x64-setup.exe` to `target/release/bundle/nsis/`. The Tauri CLI downloads NSIS the
+first time. A plain `cargo tauri build` makes no installer.
 
 ## Repository layout
 
@@ -60,10 +103,10 @@ The GUI is built with the Tauri CLI. Install it with `cargo install tauri-cli --
 | `workers/` | The sandboxed Rust worker and its format readers, in a workspace of their own |
 | `apps/gui/` | The GUI's HTML, CSS and JavaScript |
 | `book/` | The documentation site (mdBook) |
-| `docs/` | The plan, the decisions, the status, the format specification, the CLI reference, the security model and the licensing policy |
+| `docs/` | The plan, the decisions, the status, the format specification, the CLI reference, the security model, the licensing policy and the release procedure (`RELEASING.md`) |
 | `bench/` | The corpus lock file, the committed measurements (`bench/results/`) and the reports |
 | `fuzz/` | The fuzz targets |
-| `scripts/` | Machine setup, and the checks CI runs |
+| `scripts/` | Machine setup, packaging (`make-zips.py`), and the checks CI runs |
 
 ## How it is developed
 
