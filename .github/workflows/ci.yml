@@ -945,8 +945,35 @@ jobs:
           test "$(sha256sum "$INST/lpk-gui.exe" | cut -d' ' -f1)" = "$(cat "$W/N-gui.sha256")"
           python -I scripts/e7-installer-check.py installed "$INST" 0.0.1
           echo "refused: nothing installed, N still in place"
+      - name: Diagnostics on - process creation and termination audited, with command lines (this runner only)
+        shell: pwsh
+        run: |
+          # Process Creation and Process Termination (4688, 4689: the exit status), by GUID (locale-proof).
+          auditpol /set /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable
+          auditpol /set /subcategory:"{0CCE922C-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable
+          $k = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
+          New-Item -Path $k -Force | Out-Null
+          Set-ItemProperty -Path $k -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -Type DWord
+          auditpol /get /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}","{0CCE922C-69AE-11D9-BED3-505054503030}"
       - name: N updates to N+1 - the hook presses Install and restart
         run: |
+          state() {
+            echo "=== state: $1"
+            reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LitePack' /v DisplayVersion 2>&1 | grep -i DisplayVersion || echo "no DisplayVersion"
+            (cd "$INST" && sha256sum lpk-gui.exe bin/*.exe 2>&1 || true)
+            ls -la "$TMPW" | grep -iE 'updater|setup|installer|nsis|ns[a-z0-9]{3,}\.tmp' || echo "nothing updater-like in $TMPW"
+            for d in "$TMPW"/*-updater-*; do if [ -d "$d" ]; then ls -la "$d"; fi; done
+          }
+          TMPW="$(pwsh -NoProfile -Command '[IO.Path]::GetTempPath().TrimEnd([char]92)' | tr -d '\r')"
+          TMPW="$(cygpath -m "$TMPW")"
+          echo "temp folder: $TMPW"
+          n1gui="$(awk '{ sub(/^[*]/, "", $2) } $2 == "lpk-gui.exe" { print $1 }' "$SETUP/N1.sha256")"
+          test -n "$n1gui" || { echo "N1.sha256 has no lpk-gui.exe:"; cat "$SETUP/N1.sha256"; exit 1; }
+          state before
+          since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          pwsh -NoProfile -File scripts/e7-e2e-watch.ps1 -Out "$W/watch.log" -Seconds 200 &
+          watch=$!
+          sleep 3
           cp "$W.good.json" "$SRV/releases/latest/download/latest.json"
           rm -f "$STATE/update.json"
           LPK_GUI_UPDATE_E2E="$W/good.log" "$INST/lpk-gui.exe" &
@@ -954,17 +981,45 @@ jobs:
           for i in $(seq 1 180); do kill -0 "$gui" 2>/dev/null || break; sleep 1; done
           echo "--- hook log"; cat "$W/good.log"
           if kill -0 "$gui" 2>/dev/null; then echo "the GUI did not exit for the installer"; kill "$gui"; exit 1; fi
-          n1gui="$(awk '{ sub(/^[*]/, "", $2) } $2 == "lpk-gui.exe" { print $1 }' "$SETUP/N1.sha256")"
-          test -n "$n1gui" || { echo "N1.sha256 has no lpk-gui.exe:"; cat "$SETUP/N1.sha256"; exit 1; }
-          count='@(Get-Process | Where-Object { $_.Path -like "*-updater-*" }).Count'
-          for i in $(seq 1 600); do
+          guirc=0; wait "$gui" || guirc=$?
+          echo "GUI gone by $(date -u +%H:%M:%S), exit code $guirc"
+          # Wait for N+1's lpk-gui.exe; then for every process running from the plugin's download folder
+          # (<temp>/<app>-0.0.2-updater-*/, where it writes the installer) to have ended.
+          for i in $(seq 1 300); do
             got="$(sha256sum "$INST/lpk-gui.exe" 2>/dev/null | cut -d' ' -f1 || true)"
-            running="$(pwsh -NoProfile -Command "$count" | tr -d '\r')"
-            [ "$got" = "$n1gui" ] && [ "$running" = 0 ] && break
+            [ "$got" = "$n1gui" ] && break
             sleep 1
           done
-          echo "after ${i}s: lpk-gui.exe $got (N+1 $n1gui), installer processes $running"
+          echo "after ${i}s: lpk-gui.exe $got (N+1 $n1gui)"
+          wait "$watch" || true
+          echo "--- process watch"; cat "$W/watch.log"
+          echo "--- event logs"; pwsh -NoProfile -File scripts/e7-e2e-events.ps1 -Since "$since"
           echo "--- server"; cat "$SETUP/server.log"
+          state "after the GUI-driven update"
+          if [ "$got" != "$n1gui" ]; then
+            # The control: the same downloaded installer, started by hand with the plugin's switches.
+            f="$(ls "$TMPW"/*-updater-*/*.exe 2>/dev/null | head -n 1 || true)"
+            if [ -n "$f" ]; then
+              cmp "$f" "$SETUP/N1-setup.exe" && echo "the downloaded installer is N+1's: $f"
+              control_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              rc=0; timeout 300 "$f" /P /UPDATE || rc=$?
+              echo "control: $f /P /UPDATE exited with $rc"
+              pwsh -NoProfile -File scripts/e7-e2e-events.ps1 -Since "$control_since"
+              state "after the control run"
+            else
+              echo "control: no downloaded installer under $TMPW/*-updater-*"
+            fi
+            echo "the GUI-driven update did not install N+1"
+            exit 1
+          fi
+          running=1
+          for i in $(seq 1 120); do
+            running="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process | Where-Object { \$_.ExecutablePath -like '*-updater-*' }).Count" | tr -d '\r')"
+            [ "$running" = 0 ] && break
+            sleep 1
+          done
+          echo "installer processes still running from the download folder: $running"
+          test "$running" = 0
           # The installer's /R started N+1's GUI again: stop it (its own check is not due today).
           pwsh -NoProfile -Command 'Get-Process lpk-gui -ErrorAction SilentlyContinue | Format-Table Id, Path; Get-Process lpk-gui -ErrorAction SilentlyContinue | Stop-Process -Force'
           sleep 3
