@@ -98,8 +98,14 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # (that one key's existence, not its values or subkeys), `value` (one key and one value name),
 # `value-pattern` (one key, value names of one shape), `key-pattern-value` (one value name in keys
 # of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
-# holding nothing).
+# holding nothing), `file-changed` (that one file, changed only: never added or removed).
+USRCLASS = ("the storage files of HKCU\\Software\\Classes (its registry hive and transaction logs), which Windows "
+            "rewrites whenever that hive is written; the diff already examines its keys one by one (R339)")
 ALLOW = [
+    # CI run 42933006998's portable job, ruling R339.
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat", "reason": USRCLASS},
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat.LOG1", "reason": USRCLASS},
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat.LOG2", "reason": USRCLASS},
     # E7-6's first full diff (CI run 42483731626), ruling R313.
     {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\TokenBroker\Cache",
      "name": r"[0-9a-f]{40}\.tbres", "reason": WAM + ": its token cache, one file per token"},
@@ -480,6 +486,9 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
             folder, _, leaf = path.rpartition("\\")
             if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE):
                 return a["reason"]
+        if a["kind"] == "file-changed" and kind == "file" and sign == "~" and \
+                norm(path) == norm(a["path"]):
+            return a["reason"]
         if a["kind"] == "empty-key" and kind == "key" and sign == "+" and \
                 norm(path) == norm(a["path"]) and empty_key(after, path):
             return a["reason"]
@@ -784,6 +793,20 @@ class Tests(unittest.TestCase):
                          r"%LOCALAPPDATA%\Microsoft\Credentials\litepack"):
             after = snap(dict(self.base["files"], **{bad_path: f()}), self.base["registry"])
             self.assertEqual(diff(self.base, after, False)[1], 1, bad_path)
+
+    def test_the_classes_hive_files_are_allowed_changed_only(self):
+        win = r"%LOCALAPPDATA%\Microsoft\Windows"
+        hive = [win + "\\" + n for n in ("UsrClass.dat", "UsrClass.dat.LOG1", "UsrClass.dat.LOG2")]
+        before = snap(dict(self.base["files"], **{h: f() for h in hive}), self.base["registry"])
+        changed = snap(dict(self.base["files"], **{h: f(size=2) for h in hive}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 0)
+        # Added or removed, they are residue; so is a sibling.
+        self.assertEqual(diff(self.base, before, False)[1], 3)
+        self.assertEqual(diff(before, self.base, False)[1], 3)
+        sib = win + r"\UsrClass2.dat"
+        before = snap(dict(self.base["files"], **{sib: f()}), self.base["registry"])
+        changed = snap(dict(self.base["files"], **{sib: f(size=2)}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 1)
 
     def test_the_muicache_allows_lpk_gui_names_in_the_run_folder_only(self):
         mui = SHELL_MUICACHE
