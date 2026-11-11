@@ -1126,6 +1126,9 @@ fn start_failed(handle: &AppHandle, reason: &str) {
     let text = strings::get("app.start_failed").replace("{reason}", reason);
     eprintln!("lpk-gui: {text}");
     e2e_note(&format!("start failed: {reason}"));
+    if let Some(dir) = paths::state_dir() {
+        lpk_gui::startup::append_crash_note(&dir, &format!("start failed: {reason}"));
+    }
     if let Some(report) = std::env::var_os(SMOKE_REPORT_ENV) {
         if let Err(e) = std::fs::write(&report, paths::data_error_report(&text)) {
             eprintln!("lpk-gui: the smoke report: {e}");
@@ -1440,6 +1443,11 @@ pub fn run() -> i32 {
                     let line = format!("the main window, try {n}: {e}");
                     eprintln!("lpk-gui: {line}");
                     e2e_note(&line);
+                    // In words where CI and a support request can read it (a windowed exe's stderr
+                    // goes nowhere): the local, bounded crash note.
+                    if let Some(dir) = paths::state_dir() {
+                        lpk_gui::startup::append_crash_note(&dir, &line);
+                    }
                 },
                 std::thread::sleep,
             )?;
