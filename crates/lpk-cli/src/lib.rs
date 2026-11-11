@@ -318,7 +318,8 @@ impl CredentialArgs {
         };
         let keyfile = match &self.keyfile {
             Some(f) => {
-                let bytes = std::fs::read(f).map_err(|e| unreadable(f, e))?;
+                // Wiped if a later step (the keyfile check, the password read) fails.
+                let bytes = Zeroizing::new(std::fs::read(f).map_err(|e| unreadable(f, e))?);
                 if purpose == Use::Open {
                     check_keyfile_needed(archive)?;
                 }
@@ -352,7 +353,7 @@ impl CredentialArgs {
             (None, None) => None,
             (p, keyfile) => Some(Credentials {
                 password: p.map(|mut p| std::mem::take(&mut *p)).unwrap_or_default(),
-                keyfile,
+                keyfile: keyfile.map(|mut k| std::mem::take(&mut *k)),
             }),
         })
     }
