@@ -475,6 +475,22 @@ async fn browse(c: &Client, source: &str, rep: &mut Report) {
     rep.record("the settings dialog", r);
     recover(c).await;
 
+    // The About box, opened from the settings dialog.
+    let r = async {
+        click(c, "#settings-open").await?;
+        click(c, "dialog#settings[open] #about-open").await?;
+        wait_for(
+            c,
+            "dialog#about[open] #about-links button.link",
+            "the About box",
+        )
+        .await?;
+        axe(c, source, "the About box").await
+    }
+    .await;
+    rep.record("the About box", r);
+    recover(c).await;
+
     // The extract wizard: its form, the question, the result.
     let r = async {
         click(c, "#action-extract:not([disabled])").await?;
