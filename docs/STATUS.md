@@ -3,8 +3,8 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-11-08, about 14:46 UTC (09:46 local). **Session of 2026-11-05 (into 2026-11-08).**
-- **In flight (the owner's go, 07:35 local on 2026-11-08):** E7-5 part 1 on `task/e7-5` (PR #168) and E7-7 part 1 on `task/e7-7` (PR #169) (D-160). Merged: E7-6 (D-161, #167, `78cf7e6`) and the follow-ups R213 and R287 (D-162, #166, `a560bd3`).
+Last updated: 2026-11-11, about 02:12 UTC (21:12 local). **Session of 2026-11-05 (into 2026-11-08).**
+- **In flight (the owner's go, 07:35 local on 2026-11-08):** E7-5 part 1 on `task/e7-5` (PR #168) and E7-7 part 1 on `task/e7-7` (PR #169, which contains E7-5) (D-160). Merged: E7-6 (D-161, #167, `78cf7e6`) and the follow-ups R213 and R287 (D-162, #166, `a560bd3`). On 2026-11-11, at the owner's go to finish development: E7-5 got rounds 8 to 11. An upgrade beside a running `bin\lpk.exe` now sets the executables aside (`lpk.exe.old-1`), proven on CI (run 42933006998). The logon cleanup is one ordered RunOnce value per group, within Windows' 260-character limit, and a reviewer approved round 10. Its final run is on `38f188e`. E7-7's end-to-end test showed the update installs N+1 (Tauri's bundler patches `lpk-gui.exe`, so its hash is compared with `scripts/e7-bundled-hash.py`). The GUI the installer restarts exited with a panic (code 101) after 0.27 s, under investigation on `00eaa19`. Ledger: `ledger-2026-11-08-wave2.md` in the hand-off folder.
 
 **The night of 2026-11-07/08 (owner-approved):**
 - **Merged:** the README front page (D-156, #163), three hardening follow-ups (D-157, #164), the weekly script's worker step (D-158, #165) and E7-8 part 1 (D-159, #162).
