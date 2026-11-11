@@ -985,17 +985,19 @@ jobs:
           if kill -0 "$gui" 2>/dev/null; then echo "the GUI did not exit for the installer"; kill "$gui"; exit 1; fi
           guirc=0; wait "$gui" || guirc=$?
           echo "GUI gone by $(date -u +%H:%M:%S), exit code $guirc"
-          # Wait for N+1's lpk-gui.exe; then for every process running from the plugin's download folder
-          # (<temp>/<app>-0.0.2-updater-*/, where it writes the installer) to have ended.
+          # Wait for N+1's lpk-gui.exe (as packed: the bundle-type token turned back, scripts/e7-bundled-hash.py);
+          # then for every process running from the plugin's download folder (<temp>/LitePack-0.0.2-updater-*/,
+          # where it writes the installer) to have ended.
           for i in $(seq 1 300); do
-            got="$(sha256sum "$INST/lpk-gui.exe" 2>/dev/null | cut -d' ' -f1 || true)"
+            got="$(python -I scripts/e7-bundled-hash.py "$INST/lpk-gui.exe" 2>/dev/null || true)"
             [ "$got" = "$n1gui" ] && break
             sleep 1
           done
           echo "after ${i}s: lpk-gui.exe $got (N+1 $n1gui)"
           wait "$watch" || true
           echo "--- process watch"; cat "$W/watch.log"
-          echo "--- event logs"; pwsh -NoProfile -File scripts/e7-e2e-events.ps1 -Since "$since"
+          pwsh -NoProfile -File scripts/e7-e2e-events.ps1 -Since "$since" > "$W/events.log"
+          echo "--- event logs"; cat "$W/events.log"
           echo "--- server"; cat "$SETUP/server.log"
           state "after the GUI-driven update"
           if [ "$got" != "$n1gui" ]; then
@@ -1022,6 +1024,16 @@ jobs:
           done
           echo "installer processes still running from the download folder: $running"
           test "$running" = 0
+          # The installer really ran, started by the GUI with the plugin's switches, and exited with 0 (the
+          # audit's 4688 and 4689 for the file in the download folder).
+          grep -E ' 4688 .*-updater-[^\\]*\\[^|]*-installer\.exe .*Creator Process Name:[[:space:]]*[^|]*\\lpk-gui\.exe .*Process Command Line:.*-installer\.exe" /P /UPDATE( |$)' "$W/events.log" \
+            || { echo "no audit record of lpk-gui.exe starting the downloaded installer with /P /UPDATE"; exit 1; }
+          grep -E ' 4689 .*-updater-[^\\]*\\[^|]*-installer\.exe [|] Exit Status:[[:space:]]*0x0' "$W/events.log" \
+            || { echo "no audit record of the downloaded installer exiting with 0"; exit 1; }
+          # Diagnostic only: the GUI the installer's /R started, and N+1's GUI started by hand (stderr kept).
+          grep -E ' 4689 .*\\LitePack\\lpk-gui\.exe [|] Exit Status' "$W/events.log" || true
+          rc=0; timeout 20 "$INST/lpk-gui.exe" 2> "$W/relaunch.err" || rc=$?
+          echo "N+1's GUI started by hand: exit $rc (124 = still running after 20 s); stderr:"; cat "$W/relaunch.err"
           # The installer's /R started N+1's GUI again: stop it (its own check is not due today).
           pwsh -NoProfile -Command 'Get-Process lpk-gui -ErrorAction SilentlyContinue | Format-Table Id, Path; Get-Process lpk-gui -ErrorAction SilentlyContinue | Stop-Process -Force'
           sleep 3
@@ -1037,8 +1049,12 @@ jobs:
           bad=0
           while read -r sum name; do
             name="${name#\*}"
-            if [ "$name" = lpk-gui.exe ]; then f="$INST/lpk-gui.exe"; else f="$INST/bin/$name"; fi
-            got="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1 || true)"
+            if [ "$name" = lpk-gui.exe ]; then
+              # As packed: tauri-bundler patches the bundle type into the copy it packs (e7-bundled-hash.py).
+              got="$(python -I scripts/e7-bundled-hash.py "$INST/lpk-gui.exe" || true)"
+            else
+              got="$(sha256sum "$INST/bin/$name" 2>/dev/null | cut -d' ' -f1 || true)"
+            fi
             echo "$name: installed $got, N+1 $sum"
             [ "$got" = "$sum" ] || bad=1
           done < "$SETUP/N1.sha256"
